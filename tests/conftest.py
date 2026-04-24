@@ -1,0 +1,101 @@
+"""Pytest fixtures for Shift Agent tests.
+
+Run: cd /opt/shift-agent/working && /opt/shift-agent/venv/bin/python -m pytest tests/
+
+On deployed VPS the venv has pydantic + pyyaml; tests don't mock them.
+"""
+from __future__ import annotations
+import json
+import os
+import sys
+from pathlib import Path
+from datetime import datetime, timezone
+
+import pytest
+
+# Make schemas/safe_io importable from any cwd
+_THIS_DIR = Path(__file__).resolve().parent
+_SRC_DIR = _THIS_DIR.parent / "src"
+if str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
+
+
+@pytest.fixture
+def tmp_state_dir(tmp_path: Path) -> Path:
+    """Isolated state directory per test."""
+    d = tmp_path / "state"
+    d.mkdir()
+    return d
+
+
+@pytest.fixture
+def sample_roster_dict() -> dict:
+    """Phase 0 roster dict (6 employees, Triveni Jacksonville)."""
+    return {
+        "location": {"id": "loc_jax_01", "name": "Triveni", "timezone": "America/New_York"},
+        "employees": [
+            {"id": "e001", "name": "Ravi Kumar", "nickname": "Ravi",
+             "role": "cashier", "phone": "+19045550101",
+             "languages": ["en", "te", "hi"], "can_cover_roles": ["cashier", "floor"]},
+            {"id": "e002", "name": "Priya Reddy", "role": "bakery",
+             "phone": "+19045550102", "languages": ["en", "te"],
+             "can_cover_roles": ["bakery", "sweets"]},
+            {"id": "e003", "name": "Suresh Patel", "role": "meat_counter",
+             "phone": "+19045550103", "languages": ["en", "hi", "gu"],
+             "can_cover_roles": ["meat_counter", "floor"]},
+            {"id": "e004", "name": "Anjali Iyer", "role": "cashier",
+             "phone": "+19045550104", "languages": ["en", "ta"],
+             "can_cover_roles": ["cashier", "bakery", "sweets"]},
+            {"id": "e005", "name": "Vikram Sharma", "role": "floor",
+             "phone": "+19045550105", "languages": ["en", "hi"],
+             "can_cover_roles": ["floor", "cashier", "meat_counter"]},
+            {"id": "e006", "name": "Lakshmi Rao", "role": "sweets",
+             "phone": "+19045550106", "languages": ["en", "te"],
+             "can_cover_roles": ["sweets", "bakery"]},
+        ],
+        "schedule": {
+            "2026-04-25": [
+                {"employee_id": "e001", "shift": "09:00-17:00", "role": "cashier"},
+                {"employee_id": "e002", "shift": "06:00-14:00", "role": "bakery"},
+                {"employee_id": "e003", "shift": "10:00-18:00", "role": "meat_counter"},
+                {"employee_id": "e005", "shift": "12:00-20:00", "role": "floor"},
+                {"employee_id": "e006", "shift": "08:00-16:00", "role": "sweets"},
+            ]
+        },
+    }
+
+
+@pytest.fixture
+def sample_config_dict() -> dict:
+    """Minimum-valid config for tests."""
+    return {
+        "schema_version": 1,
+        "customer": {
+            "name": "Test Customer", "location_id": "loc_test_01",
+            "timezone": "America/New_York", "languages": ["en"],
+        },
+        "owner": {
+            "name": "Test Owner", "phone": "+19045550999", "self_chat_jid": "",
+        },
+        "limits": {
+            "max_outbound_per_day": 2, "max_outbound_per_minute": 30,
+            "pending_proposal_ttl_hours": 4, "per_message_timeout_sec": 120,
+            "send_failure_retry_count": 1,
+        },
+        "alerting": {
+            # Non-empty to pass validator; tests don't actually call Pushover
+            "pushover_user_key": "test-user-key",
+            "pushover_app_token": "test-app-token",
+            "healthchecks_io_url": "", "email": "",
+        },
+        "backup": {
+            "gpg_recipient_email": "test@example.com",
+            "s3_bucket": "", "retention_days": 30,
+        },
+        "operations": {"business_hours_local": "08:00-22:00"},
+    }
+
+
+@pytest.fixture
+def now_aware() -> datetime:
+    return datetime.now(tz=timezone.utc)

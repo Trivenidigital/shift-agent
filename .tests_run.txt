@@ -1,0 +1,101 @@
+=== install pytest in venv ===
+pytest 9.0.3
+
+=== run schema + safe_io tests (no VPS deploy dependencies) ===
+tests/test_schemas.py::test_awaiting_proposal_builds_correctly PASSED    [ 57%]
+tests/test_schemas.py::test_proposal_discriminator_routes_to_sent PASSED [ 58%]
+tests/test_schemas.py::test_proposal_discriminator_rejects_sent_without_sent_ts PASSED [ 60%]
+tests/test_safe_io.py::test_atomic_write_text_on_dotted_suffix PASSED    [ 61%]
+tests/test_safe_io.py::test_atomic_write_text_preserves_mode PASSED      [ 63%]
+tests/test_safe_io.py::test_atomic_write_text_uses_600_by_default PASSED [ 65%]
+tests/test_safe_io.py::test_safe_load_json_missing PASSED                [ 66%]
+tests/test_safe_io.py::test_safe_load_json_empty PASSED                  [ 68%]
+tests/test_safe_io.py::test_safe_load_json_ok PASSED                     [ 69%]
+tests/test_safe_io.py::test_safe_load_json_corrupt_renames_and_returns_default PASSED [ 71%]
+tests/test_safe_io.py::test_ndjson_append_accepts_clean_entry PASSED     [ 73%]
+tests/test_safe_io.py::test_ndjson_append_rejects_embedded_newline PASSED [ 74%]
+tests/test_safe_io.py::test_ndjson_append_rejects_U2028 PASSED           [ 76%]
+tests/test_safe_io.py::test_ndjson_append_rejects_U2029 PASSED           [ 77%]
+tests/test_safe_io.py::test_ndjson_append_rejects_NEL PASSED             [ 79%]
+tests/test_safe_io.py::test_filelock_serializes_concurrent_writers PASSED [ 80%]
+tests/test_safe_io.py::test_filelock_releases_on_exception PASSED        [ 82%]
+tests/test_safe_io.py::test_sweep_orphan_temps_removes_old PASSED        [ 84%]
+tests/test_safe_io.py::test_validate_phone_input_accepts_common_formats[+19045550101] PASSED [ 85%]
+tests/test_safe_io.py::test_validate_phone_input_accepts_common_formats[+1-904-555-0101] PASSED [ 87%]
+tests/test_safe_io.py::test_validate_phone_input_accepts_common_formats[+1 (904) 555-0101] PASSED [ 88%]
+tests/test_safe_io.py::test_validate_phone_input_accepts_common_formats[19045550101@s.whatsapp.net] PASSED [ 90%]
+tests/test_safe_io.py::test_validate_phone_input_accepts_common_formats[19045550101@lid] PASSED [ 92%]
+tests/test_safe_io.py::test_validate_phone_input_rejects_shell_injection[+19045550101; rm -rf /] PASSED [ 93%]
+tests/test_safe_io.py::test_validate_phone_input_rejects_shell_injection[$(whoami)] PASSED [ 95%]
+tests/test_safe_io.py::test_validate_phone_input_rejects_shell_injection[`id`] PASSED [ 96%]
+tests/test_safe_io.py::test_validate_phone_input_rejects_shell_injection[+1|nc attacker.example 443] PASSED [ 98%]
+tests/test_safe_io.py::test_validate_phone_input_rejects_shell_injection[+1904\n5550101] PASSED [100%]
+
+=================================== FAILURES ===================================
+________________ test_cancel_reachable_from_every_non_terminal _________________
+
+    def test_cancel_reachable_from_every_non_terminal():
+        """Owner should be able to CANCEL any in-flight proposal."""
+        non_terminals = ALL_STATUSES - TERMINAL_STATUSES
+        for s in non_terminals:
+>           assert is_legal_transition(s, "cancelled"), (
+                f"CANCEL from {s!r} should be legal; otherwise owner can't revoke"
+            )
+E           AssertionError: CANCEL from 'reconciling' should be legal; otherwise owner can't revoke
+E           assert False
+E            +  where False = is_legal_transition('reconciling', 'cancelled')
+
+tests/test_schemas.py:99: AssertionError
+_________________ test_proposal_code_regex_and_alphabet_agree __________________
+
+    def test_proposal_code_regex_and_alphabet_agree():
+        """Generator alphabet must only contain chars the regex accepts.
+    
+        This catches the drift between schemas.ProposalCode and
+        create-proposal._CODE_ALPHA (if they're ever changed separately).
+        """
+        # This is what create-proposal uses
+        _CODE_ALPHA = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+        _CODE_REGEX = re.compile(r"^#[A-HJ-NPR-Z2-9]{5}$")
+        # Every generator char, when paired into a 5-char code, must match
+        for ch in _CODE_ALPHA:
+>           assert _CODE_REGEX.match(f"#{ch * 5}"), (
+                f"char {ch!r} is in generator alphabet but fails schemas.ProposalCode regex"
+            )
+E           AssertionError: char 'Q' is in generator alphabet but fails schemas.ProposalCode regex
+E           assert None
+E            +  where None = <built-in method match of re.Pattern object at 0x7fcc28d4c9a0>('#QQQQQ')
+E            +    where <built-in method match of re.Pattern object at 0x7fcc28d4c9a0> = re.compile('^#[A-HJ-NPR-Z2-9]{5}$').match
+
+tests/test_schemas.py:119: AssertionError
+=============================== warnings summary ===============================
+../venv/lib/python3.12/site-packages/_pytest/cacheprovider.py:475
+  /opt/shift-agent/venv/lib/python3.12/site-packages/_pytest/cacheprovider.py:475: PytestCacheWarning: could not create cache path /opt/shift-agent/working/.pytest_cache/v/cache/nodeids: [Errno 13] Permission denied: '/opt/shift-agent/working/pytest-cache-files-yxm32ej6'
+    config.cache.set("cache/nodeids", sorted(self.cached_nodeids))
+
+../venv/lib/python3.12/site-packages/_pytest/cacheprovider.py:429
+  /opt/shift-agent/venv/lib/python3.12/site-packages/_pytest/cacheprovider.py:429: PytestCacheWarning: could not create cache path /opt/shift-agent/working/.pytest_cache/v/cache/lastfailed: [Errno 13] Permission denied: '/opt/shift-agent/working/pytest-cache-files-wkyb5vrz'
+    config.cache.set("cache/lastfailed", self.lastfailed)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_schemas.py::test_cancel_reachable_from_every_non_terminal
+FAILED tests/test_schemas.py::test_proposal_code_regex_and_alphabet_agree - A...
+=================== 2 failed, 61 passed, 2 warnings in 0.51s ===================
+
+=== run E2E tests (uses deployed /usr/local/bin scripts) ===
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.0.3, pluggy-1.6.0 -- /opt/shift-agent/venv/bin/python
+cachedir: .pytest_cache
+rootdir: /opt/shift-agent/working
+collecting ... collected 7 items
+
+tests/test_e2e_proposal_lifecycle.py::test_full_proposal_lifecycle PASSED [ 14%]
+tests/test_e2e_proposal_lifecycle.py::test_illegal_transition_rejected PASSED [ 28%]
+tests/test_e2e_proposal_lifecycle.py::test_identify_sender_resolves_phase0_roster PASSED [ 42%]
+tests/test_e2e_proposal_lifecycle.py::test_identify_sender_exit_2_on_garbage PASSED [ 57%]
+tests/test_e2e_proposal_lifecycle.py::test_identify_sender_blocks_shell_injection PASSED [ 71%]
+tests/test_e2e_proposal_lifecycle.py::test_render_template_blocks_path_traversal PASSED [ 85%]
+tests/test_e2e_proposal_lifecycle.py::test_log_decision_rejects_no_type_field PASSED [100%]
+
+============================== 7 passed in 3.07s ===============================

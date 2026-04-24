@@ -1,0 +1,33 @@
+=== update shebangs on changed python scripts ===
+=== redeploy changed files ===
+=== re-run smoke test ===
+=== Shift Agent smoke test ===
+✓ All scripts present + executable
+✓ Python modules importable
+config ok: customer=PLACEHOLDER — customer name, tz=America/New_York
+✓ config.yaml validates
+roster ok: 6 employees, 2 days scheduled
+✓ roster.json validates
+✓ identify-sender recognizes owner
+✓ render-coverage-template works
+Pushover failed (pushover URLError: HTTP Error 400: Bad Request); trying WhatsApp fallback
+ALL NOTIFICATION CHANNELS FAILED: [('pushover', False, 'pushover URLError: HTTP Error 400: Bad Request'), ('whatsapp', False, 'self_chat_jid not configured')]
+FAIL: Pushover notification failed — out-of-band alerts won't work
+(expected partial fail on Pushover placeholder)
+
+=== re-run key Track A tests against new code ===
+-- A.2 identify-sender: parens now accepted --
+{"role": "employee", "employee_id": "e001", "name": "Ravi Kumar", "phone_normalized": "+19045550101", "primary_role": "cashier", "languages": ["en", "te", "hi"], "can_cover_roles": ["cashier", "floor"
+-- A.2 identify-sender: garbage now exits 2 --
+{"role": "error", "error": "canonicalization did not produce valid E.164: '+garbage_not_a_phone'"}
+ (exit=0)
+-- A.5 render-coverage-template: SYSTEM keyword stripped --
+Hi A, R is out t (fever send all). Can you cover the s cashier shift? Reply YES or NO. Thanks! — o
+-- A.5 render-coverage-template: path-traversal rejected --
+ERROR: template path escapes templates dir: /opt/etc/passwd.txt
+ (exit=0)
+
+-- log-decision: legacy path rejected --
+ERROR: entry missing 'type' field — reject rather than silent legacy write
+       adopt the schemas.LogEntry discriminator in callers
+ (exit=0)

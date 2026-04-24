@@ -244,8 +244,11 @@ class Config(BaseModel):
 # ─────────────────────────────────────────────────────────────────
 
 ProposalId = Annotated[str, Field(pattern=r"^P\d{4,}$")]
-# 5-char code, uppercase alphanumeric, excluding visually ambiguous 0/O/1/I/L
-ProposalCode = Annotated[str, Field(pattern=r"^#[A-HJ-NPR-Z2-9]{5}$")]
+# 5-char code, uppercase alphanumeric, excluding visually ambiguous 0/O/1/I/L.
+# Test-suite caught drift: previous regex `[A-HJ-NPR-Z2-9]` included L (inside J-N)
+# AND excluded Q; generator alphabet is `ABCDEFGHJKMNPQRSTUVWXYZ23456789`
+# (31 chars excluding I/L/O/0/1). Regex now matches generator exactly.
+ProposalCode = Annotated[str, Field(pattern=r"^#[A-HJKMNPQR-Z2-9]{5}$")]
 
 
 class _BaseProp(BaseModel):
@@ -348,7 +351,9 @@ TERMINAL_STATUSES = frozenset({
 LEGAL_TRANSITIONS: dict[str, frozenset[str]] = {
     "awaiting_owner_approval": frozenset({"approved", "denied_by_owner", "expired", "cancelled"}),
     "approved": frozenset({"reconciling", "cancelled"}),
-    "reconciling": frozenset({"sent", "send_failed", "approved"}),  # approved on revert only (cap exceeded, etc.)
+    # Test-suite caught bug: `cancelled` was missing from reconciling's allowed set
+    # → owner couldn't CANCEL a proposal mid-send. Now included.
+    "reconciling": frozenset({"sent", "send_failed", "approved", "cancelled"}),
     "sent": frozenset({"accepted", "declined", "no_response_timeout", "cancelled"}),
     "send_failed": frozenset({"approved", "cancelled"}),  # owner RETRY → approved
     # terminal states have no outgoing transitions
