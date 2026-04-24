@@ -1,0 +1,11 @@
+[Unit]
+Description=Shift Agent — run watchdog every 15 minutes
+
+[Timer]
+OnBootSec=300
+OnUnitActiveSec=900
+AccuracySec=10
+Unit=shift-agent-health-watchdog.service
+
+[Install]
+WantedBy=timers.target

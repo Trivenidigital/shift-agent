@@ -1,0 +1,10 @@
+[Unit]
+Description=Shift Agent — nightly GPG-encrypted backup
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+EnvironmentFile=/opt/shift-agent/.env
+ExecStart=/usr/local/bin/shift-agent-backup.sh
+TimeoutStartSec=600

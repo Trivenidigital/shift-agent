@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# log-decision — append a JSON line to the Phase 0 decisions log.
+#
+# This is the skill-facing wrapper (called by Hermes via terminal tool).
+# It delegates to log-decision-direct, which does Pydantic validation.
+# Phase-0 form: log-decision '<json-string>' (taken from SMB-Agents Phase 0).
+#
+# Exit codes match log-decision-direct.
+
+set -euo pipefail
+
+if [ "$#" -ne 1 ]; then
+  echo "usage: log-decision '<json-string>'" >&2
+  exit 2
+fi
+
+# Back-compat for Phase 0 entries that don't include a `type` field:
+# auto-wrap them in a `proposal_action` type if they look like a raw payload.
+# (This preserves compatibility with the Ravi entry from 2026-04-24.)
+INPUT="$1"
+if ! echo "$INPUT" | python3 -c "
+import json, sys
+try:
+    obj = json.loads(sys.stdin.read())
+except Exception:
+    sys.exit(2)
+sys.exit(0 if 'type' in obj else 1)
+" ; then
+  # Missing type → Phase-0-compat mode. Write as raw to a Phase-0 legacy log section.
+  # For v2, recommend callers use the typed helper directly.
+  echo "WARNING: entry missing 'type' field; writing to legacy compatibility path" >&2
+  # Append to separate legacy file for manual review
+  mkdir -p /opt/shift-agent/logs
+  printf '%s\n' "$INPUT" >> /opt/shift-agent/logs/decisions-legacy.log
+  exit 0
+fi
+
+exec /usr/local/bin/log-decision-direct "$INPUT"

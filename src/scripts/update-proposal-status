@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+"""
+update-proposal-status — transition a proposal from one status to another.
+
+Called by handle_owner_command (approve/deny/cancel) and handle_candidate_response
+(accepted/declined).
+
+Usage:
+  update-proposal-status P0042 approved --cause owner_code_match --actor owner --owner-input "#A3F2X"
+  update-proposal-status P0042 denied_by_owner --cause owner_deny --actor owner --owner-input "DENY #A3F2X"
+  update-proposal-status P0042 accepted --cause candidate_reply --actor candidate --response-message "yes"
+
+Enforces:
+  - Legal transitions only (per schemas.LEGAL_TRANSITIONS)
+  - All transitions logged as ProposalStatusChange in decisions.log
+  - status_history updated in pending.json
+
+Exit codes:
+  0 — transitioned
+  2 — bad input / unknown proposal
+  5 — schema error
+  9 — illegal transition
+"""
+
+from __future__ import annotations
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, "/opt/shift-agent")
+from schemas import (  # noqa: E402
+    Config, PendingStore, is_legal_transition, ProposalStatusChange,
+    AwaitingProposal, ApprovedProposal, ReconcilingProposal, SentProposal,
+    SendFailedProposal, AcceptedProposal, DeclinedProposal, DeniedByOwnerProposal,
+    ExpiredProposal, CancelledProposal, NoResponseTimeoutProposal, Proposal,
+)
+from safe_io import (  # noqa: E402
+    FileLock, load_model, dump_model, ndjson_append, customer_now,
+)
+from exit_codes import (  # noqa: E402
+    EXIT_OK, EXIT_INVALID_INPUT, EXIT_SCHEMA_VIOLATION,
+    EXIT_NOT_FOUND, EXIT_ILLEGAL_TRANSITION,
+)
+from pydantic import TypeAdapter
+import yaml
+
+
+CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
+PENDING_PATH = Path("/opt/shift-agent/state/pending.json")
+PENDING_LOCK = Path("/opt/shift-agent/state/pending.json.lock")
+LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+LOG_LOCK = Path("/opt/shift-agent/logs/decisions.log.lock")
+
+
+def _rebuild_proposal(base_dict: dict, new_status: str, now, **status_specific) -> Proposal:
+    """Build a new proposal variant with the target status + required fields."""
+    status_to_cls = {
+        "awaiting_owner_approval": AwaitingProposal,
+        "approved": ApprovedProposal,
+        "reconciling": ReconcilingProposal,
+        "sent": SentProposal,
+        "send_failed": SendFailedProposal,
+        "accepted": AcceptedProposal,
+        "declined": DeclinedProposal,
+        "denied_by_owner": DeniedByOwnerProposal,
+        "expired": ExpiredProposal,
+        "cancelled": CancelledProposal,
+        "no_response_timeout": NoResponseTimeoutProposal,
+    }
+    cls = status_to_cls[new_status]
+    # Strip status-specific fields that the new class doesn't accept
+    base = {k: v for k, v in base_dict.items()
+            if k in cls.model_fields or k == "status"}
+    base["status"] = new_status
+    base["last_updated_ts"] = now
+    base.update(status_specific)
+    return cls.model_validate(base)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("proposal_id")
+    ap.add_argument("new_status")
+    ap.add_argument("--cause", required=True)
+    ap.add_argument("--actor", required=True, choices=[
+        "owner", "agent", "timer", "reconciler", "fsck", "candidate"
+    ])
+    ap.add_argument("--owner-input", default=None)
+    ap.add_argument("--response-message", default=None)
+    ap.add_argument("--last-error", default=None)
+    ap.add_argument("--retry-count", type=int, default=None)
+    ap.add_argument("--cancel-reason", default=None)
+    ap.add_argument("--reconciling-pid", type=int, default=None)
+    ap.add_argument("--outbound-message-id", default=None)
+    args = ap.parse_args()
+
+    try:
+        with CONFIG_PATH.open() as f:
+            cfg = Config.model_validate(yaml.safe_load(f))
+    except Exception as e:
+        print(f"ERROR: config: {e}", file=sys.stderr)
+        return EXIT_SCHEMA_VIOLATION
+
+    now = customer_now(cfg.customer.timezone)
+
+    with FileLock(PENDING_LOCK):
+        store, status = load_model(PENDING_PATH, PendingStore, default=PendingStore())
+        if status not in ("ok", "missing", "empty"):
+            print(f"ERROR: pending.json {status}", file=sys.stderr)
+            return EXIT_SCHEMA_VIOLATION
+
+        if args.proposal_id not in store.proposals:
+            print(f"ERROR: proposal {args.proposal_id} not found", file=sys.stderr)
+            return EXIT_NOT_FOUND
+
+        current = store.proposals[args.proposal_id]
+        from_status = current.status
+
+        if not is_legal_transition(from_status, args.new_status):
+            print(
+                f"ERROR: illegal transition {from_status} → {args.new_status} "
+                f"for {args.proposal_id}",
+                file=sys.stderr,
+            )
+            return EXIT_ILLEGAL_TRANSITION
+
+        # Compose status-specific kwargs
+        specific: dict = {}
+        if args.new_status == "approved":
+            specific["approved_ts"] = now
+            specific["owner_input"] = args.owner_input or ""
+        elif args.new_status == "reconciling":
+            specific["reconciling_started_ts"] = now
+            specific["reconciling_pid"] = args.reconciling_pid or 0
+        elif args.new_status == "sent":
+            specific["sent_ts"] = now
+            specific["outbound_message_id"] = args.outbound_message_id
+        elif args.new_status == "send_failed":
+            specific["failed_ts"] = now
+            specific["last_error"] = args.last_error or "unknown"
+            specific["retry_count"] = args.retry_count if args.retry_count is not None else 0
+        elif args.new_status == "accepted":
+            specific["response_ts"] = now
+            specific["response_message"] = args.response_message or ""
+        elif args.new_status == "declined":
+            specific["response_ts"] = now
+            specific["response_message"] = args.response_message or ""
+        elif args.new_status == "denied_by_owner":
+            specific["denied_ts"] = now
+            specific["owner_input"] = args.owner_input or ""
+        elif args.new_status == "expired":
+            specific["expired_ts"] = now
+        elif args.new_status == "cancelled":
+            specific["cancelled_ts"] = now
+            specific["cancel_reason"] = args.cancel_reason or args.cause
+        elif args.new_status == "no_response_timeout":
+            specific["timeout_ts"] = now
+
+        base_dict = current.model_dump(mode="json")
+        # Append to status_history
+        history = list(base_dict.get("status_history", []))
+        history.append({
+            "from": from_status,
+            "to": args.new_status,
+            "ts": now.isoformat(),
+            "cause": args.cause,
+            "actor": args.actor,
+        })
+        base_dict["status_history"] = history
+
+        try:
+            updated = _rebuild_proposal(base_dict, args.new_status, now, **specific)
+        except Exception as e:
+            print(f"ERROR: validation after transition: {e}", file=sys.stderr)
+            return EXIT_SCHEMA_VIOLATION
+
+        store.proposals[args.proposal_id] = updated
+        dump_model(PENDING_PATH, store)
+
+    # Log the transition
+    entry = ProposalStatusChange(
+        type="proposal_status_change",
+        ts=now,
+        proposal_id=args.proposal_id,
+        from_status=from_status,
+        to_status=args.new_status,
+        cause=args.cause,
+        actor=args.actor,
+    )
+    with FileLock(LOG_LOCK):
+        ndjson_append(LOG_PATH, TypeAdapter(ProposalStatusChange).dump_json(entry).decode())
+
+    print(f"OK: {args.proposal_id}: {from_status} → {args.new_status}")
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

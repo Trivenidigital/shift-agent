@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+"""
+shift-agent-notify-owner — out-of-band owner notification.
+
+Single chokepoint for sending messages to the owner when something needs attention:
+  - dead-man alerts (gateway down)
+  - send_failed notifications
+  - kill-switch confirmations
+  - agent-state-change notifications
+
+Strategy:
+  1. Pushover first (always-available, not dependent on WA bridge). This is the primary.
+  2. If Pushover fails AND bridge is alive, try WhatsApp self-chat as fallback.
+  3. If both fail, write to state/notify-failed.log and exit non-zero.
+
+Usage:
+  shift-agent-notify-owner "Agent offline — handle manually"
+  shift-agent-notify-owner --title "Urgent" --priority high "Bridge disconnected"
+
+Exit codes:
+  0 — delivered via at least one channel
+  6 — all channels failed
+  5 — config invalid
+"""
+
+from __future__ import annotations
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+from datetime import datetime
+
+sys.path.insert(0, "/opt/shift-agent")
+from safe_io import customer_now, FileLock  # noqa: E402
+from schemas import Config  # noqa: E402
+from exit_codes import EXIT_OK, EXIT_DEPENDENCY_DOWN, EXIT_SCHEMA_VIOLATION  # noqa: E402
+import yaml
+
+
+CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
+STATE_DIR = Path("/opt/shift-agent/state")
+NOTIFY_FAILED_LOG = STATE_DIR / "notify-failed.log"
+
+
+def load_config() -> Config:
+    with CONFIG_PATH.open() as f:
+        raw = yaml.safe_load(f)
+    return Config.model_validate(raw)
+
+
+def pushover_send(cfg: Config, message: str, title: str, priority: int) -> tuple[bool, str]:
+    """Send via Pushover. Returns (ok, detail)."""
+    data = {
+        "token": cfg.alerting.pushover_app_token,
+        "user": cfg.alerting.pushover_user_key,
+        "message": message[:1024],  # Pushover caps at 1024
+        "title": title[:250],
+        "priority": str(priority),
+    }
+    # priority 2 requires retry+expire
+    if priority == 2:
+        data["retry"] = "60"
+        data["expire"] = "3600"
+    body = "&".join(f"{k}={urllib.parse.quote(v)}" for k, v in data.items()).encode()
+    req = urllib.request.Request(
+        "https://api.pushover.net/1/messages.json",
+        data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw = resp.read().decode()
+            parsed = json.loads(raw)
+            if parsed.get("status") == 1:
+                return True, "ok"
+            return False, f"pushover status={parsed.get('status')}: {parsed.get('errors')}"
+    except urllib.error.URLError as e:
+        return False, f"pushover URLError: {e}"
+    except Exception as e:
+        return False, f"pushover error: {e}"
+
+
+def whatsapp_fallback(cfg: Config, message: str) -> tuple[bool, str]:
+    """Try WhatsApp self-chat via bridge port 3000. Best-effort only."""
+    self_chat_jid = cfg.owner.self_chat_jid
+    if not self_chat_jid:
+        return False, "self_chat_jid not configured"
+    data = json.dumps({"jid": self_chat_jid, "text": message}).encode()
+    req = urllib.request.Request(
+        "http://127.0.0.1:3000/send",
+        data=data,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status == 200, f"bridge status={resp.status}"
+    except Exception as e:
+        return False, f"bridge error: {e}"
+
+
+def append_notify_failed(message: str, results: list[tuple[str, bool, str]]) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "message": message,
+        "results": [{"channel": c, "ok": ok, "detail": d} for c, ok, d in results],
+    }
+    with FileLock(NOTIFY_FAILED_LOG.with_suffix(".log.lock")):
+        with NOTIFY_FAILED_LOG.open("a") as f:
+            f.write(json.dumps(entry) + "\n")
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Out-of-band owner notification")
+    ap.add_argument("message", help="Message body")
+    ap.add_argument("--title", default="Shift Agent", help="Alert title")
+    ap.add_argument(
+        "--priority",
+        type=int,
+        default=0,
+        choices=[-2, -1, 0, 1, 2],
+        help="Pushover priority: -2 silent, -1 quiet, 0 normal, 1 high, 2 emergency",
+    )
+    args = ap.parse_args()
+
+    try:
+        cfg = load_config()
+    except Exception as e:
+        print(f"FATAL: cannot load config: {e}", file=sys.stderr)
+        # Still try to write to notify-failed log
+        append_notify_failed(args.message, [("config_load", False, str(e))])
+        return EXIT_SCHEMA_VIOLATION
+
+    results: list[tuple[str, bool, str]] = []
+
+    # Primary: Pushover
+    ok, detail = pushover_send(cfg, args.message, args.title, args.priority)
+    results.append(("pushover", ok, detail))
+    if ok:
+        return EXIT_OK
+
+    # Fallback: WhatsApp self-chat
+    print(f"Pushover failed ({detail}); trying WhatsApp fallback", file=sys.stderr)
+    ok, detail = whatsapp_fallback(cfg, f"[{args.title}] {args.message}")
+    results.append(("whatsapp", ok, detail))
+    if ok:
+        return EXIT_OK
+
+    # Both failed — log + exit
+    append_notify_failed(args.message, results)
+    print(f"ALL NOTIFICATION CHANNELS FAILED: {results}", file=sys.stderr)
+    return EXIT_DEPENDENCY_DOWN
+
+
+if __name__ == "__main__":
+    sys.exit(main())

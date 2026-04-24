@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# shift-agent-disable — kill switch.
+# Stops gateway + timers, sets disabled.flag, notifies owner via Pushover.
+#
+# Usage: shift-agent-disable [reason]
+# Exit 0 on success; non-zero if notification fails (so operator sees).
+
+set -euo pipefail
+
+REASON="${1:-manual_kill}"
+
+# Stop services (don't fail if already stopped)
+systemctl stop hermes-gateway || true
+systemctl stop shift-agent-tail-logger.timer || true
+systemctl stop shift-agent-tail-logger.service || true
+systemctl stop shift-agent-health.timer || true
+
+# Set disabled flag
+touch /opt/shift-agent/state/disabled.flag
+
+# Log the state change via log-decision-direct
+TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+/usr/local/bin/log-decision-direct "$(cat <<JSON
+{"type":"agent_state_change","ts":"$TS","to_state":"disabled","reason":"$REASON"}
+JSON
+)"
+
+# Notify owner — fail loudly if notification fails
+if ! /usr/local/bin/shift-agent-notify-owner \
+    --title "Shift Agent DISABLED" \
+    --priority 1 \
+    "Agent offline. Reason: $REASON. Please handle sick-call coverage manually. Run 'shift-agent-enable' to restore."; then
+    echo "ERROR: owner notification failed — agent IS disabled but owner may not know" >&2
+    exit 1
+fi
+
+echo "Agent disabled. Reason: $REASON"

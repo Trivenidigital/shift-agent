@@ -1,0 +1,1 @@
+Hi {candidate_name}, {absent_employee_name} is out {absent_date_human} ({absent_reason_short}). Can you cover the {absent_shift} {absent_role} shift? Reply YES or NO. Thanks! — {owner_name}

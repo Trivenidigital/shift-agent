@@ -1,0 +1,10 @@
+[Unit]
+Description=Shift Agent — run nightly fsck at 03:00 local (after backup)
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+Unit=shift-agent-fsck.service
+
+[Install]
+WantedBy=timers.target

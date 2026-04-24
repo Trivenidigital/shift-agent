@@ -1,0 +1,17 @@
+[Unit]
+Description=Shift Agent — deterministic audit tail-logger
+After=hermes-gateway.service
+ConditionPathExists=/root/.hermes/logs/agent.log
+
+[Service]
+Type=oneshot
+User=shift-agent
+Group=shift-agent
+EnvironmentFile=/opt/shift-agent/.env
+ExecStart=/usr/local/bin/shift-agent-tail-logger.py
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/shift-agent
+ReadOnlyPaths=/root/.hermes/logs
+PrivateTmp=true
+RuntimeDirectory=shift-agent

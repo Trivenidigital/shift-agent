@@ -1,0 +1,401 @@
+#!/usr/bin/env python3
+"""
+send-coverage-message — the hardened outbound gate.
+
+Single argument: the proposal_id. Everything else is re-resolved from state files
+(pending.json + roster.json + config.yaml). The LLM cannot invent a phone number,
+cannot send without an approved proposal, and cannot bypass the daily cap.
+
+Flow (see DESIGN v2 §6.2):
+  1. Assert local disk (flock NFS safety)
+  2. Load config (Pydantic validates)
+  3. Check disabled.flag
+  4. Under flock(pending) + flock(counter):
+       a. Load pending.json, verify proposal.status == "approved"
+       b. Transition proposal → "reconciling" with pid
+       c. Check + reserve send-counter (cap, rate)
+     release locks
+  5. Re-resolve candidate phone from roster.json by candidate_employee_id
+  6. Render template via render-coverage-template (never LLM free-text)
+  7. Append OutboundAttempted to decisions.log BEFORE the POST (idempotency key)
+  8. POST to bridge /send endpoint (retry once)
+  9. On success: transition → sent + OutboundSent
+     On failure: revert counter, transition → send_failed + Pushover alert
+
+Usage:
+  send-coverage-message P0042
+
+Exit codes:
+  0 — sent
+  2 — agent disabled
+  3 — cap exceeded
+  4 — proposal not approved / candidate not found
+  5 — schema / validation error
+  6 — bridge unreachable after retry
+  9 — illegal transition
+"""
+
+from __future__ import annotations
+import argparse
+import json
+import os
+import secrets
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, "/opt/shift-agent")
+from schemas import (  # noqa: E402
+    Config, PendingStore, Roster, SendCounter, E164Phone,
+    ReconcilingProposal, SentProposal, SendFailedProposal, ApprovedProposal,
+    OutboundAttempted, OutboundSent, OutboundSendFailed, OutboundCapExceeded,
+    OutboundRefusedDisabled,
+)
+from safe_io import (  # noqa: E402
+    FileLock, load_model, dump_model, ndjson_append, customer_now,
+    customer_today_str, assert_local_disk,
+)
+from exit_codes import (  # noqa: E402
+    EXIT_OK, EXIT_DISABLED, EXIT_CAP_EXCEEDED, EXIT_NOT_FOUND,
+    EXIT_SCHEMA_VIOLATION, EXIT_DEPENDENCY_DOWN, EXIT_ILLEGAL_TRANSITION,
+)
+from pydantic import TypeAdapter
+import yaml
+
+
+CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
+ROSTER_PATH = Path("/opt/shift-agent/roster.json")
+PENDING_PATH = Path("/opt/shift-agent/state/pending.json")
+PENDING_LOCK = Path("/opt/shift-agent/state/pending.json.lock")
+COUNTER_PATH = Path("/opt/shift-agent/state/send-counter.json")
+COUNTER_LOCK = Path("/opt/shift-agent/state/send-counter.json.lock")
+LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+LOG_LOCK = Path("/opt/shift-agent/logs/decisions.log.lock")
+DISABLED_FLAG = Path("/opt/shift-agent/state/disabled.flag")
+
+BRIDGE_SEND_URL = "http://127.0.0.1:3000/send"
+
+
+def bridge_post(jid: str, text: str, timeout: int = 15) -> tuple[bool, str]:
+    """POST to bridge. Returns (ok, detail)."""
+    data = json.dumps({"jid": jid, "text": text}).encode()
+    req = urllib.request.Request(
+        BRIDGE_SEND_URL, data=data,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode()
+            if 200 <= resp.status < 300:
+                try:
+                    parsed = json.loads(body)
+                    return True, parsed.get("id") or parsed.get("messageId") or ""
+                except Exception:
+                    return True, ""
+            return False, f"status={resp.status} body={body[:200]}"
+    except urllib.error.URLError as e:
+        return False, f"URLError: {e}"
+    except Exception as e:
+        return False, f"exception: {e}"
+
+
+def _run(cmd: list[str], check: bool = True, input_data: str | None = None) -> subprocess.CompletedProcess:
+    """Shell-safe subprocess wrapper. Never shell=True."""
+    return subprocess.run(cmd, check=check, capture_output=True, text=True, input=input_data)
+
+
+def _notify_owner(title: str, message: str, priority: int = 1) -> None:
+    """Best-effort out-of-band alert. Doesn't block the main flow."""
+    try:
+        subprocess.run([
+            "/usr/local/bin/shift-agent-notify-owner",
+            "--title", title, "--priority", str(priority), message,
+        ], check=False, timeout=30)
+    except Exception:
+        pass  # Pushover itself down is a separate concern — logged elsewhere
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("proposal_id")
+    args = ap.parse_args()
+    pid = args.proposal_id
+
+    assert_local_disk(Path("/opt/shift-agent/state"))
+
+    # Load config
+    try:
+        with CONFIG_PATH.open() as f:
+            cfg = Config.model_validate(yaml.safe_load(f))
+    except Exception as e:
+        print(f"ERROR: config: {e}", file=sys.stderr)
+        return EXIT_SCHEMA_VIOLATION
+
+    now = customer_now(cfg.customer.timezone)
+
+    # Check disabled flag
+    if DISABLED_FLAG.exists():
+        _log_entry(OutboundRefusedDisabled(
+            type="outbound_refused_disabled", ts=now, proposal_id=pid,
+        ))
+        print(f"REFUSED: agent disabled ({DISABLED_FLAG})", file=sys.stderr)
+        return EXIT_DISABLED
+
+    # ── Reserve ─────────────────────────────────────────────
+    # Hold both locks for the entire reserve step (atomic check→reconcile→counter)
+    with FileLock(PENDING_LOCK), FileLock(COUNTER_LOCK):
+        store, status = load_model(PENDING_PATH, PendingStore, default=PendingStore())
+        if status not in ("ok", "empty", "missing"):
+            print(f"ERROR: pending {status}", file=sys.stderr)
+            return EXIT_SCHEMA_VIOLATION
+
+        if pid not in store.proposals:
+            print(f"ERROR: proposal {pid} not found", file=sys.stderr)
+            return EXIT_NOT_FOUND
+
+        proposal = store.proposals[pid]
+        if proposal.status != "approved":
+            print(
+                f"ERROR: proposal {pid} status is {proposal.status!r}, not 'approved'",
+                file=sys.stderr,
+            )
+            return EXIT_NOT_FOUND
+
+        # Transition approved → reconciling (holds the lock for concurrent senders)
+        reconciling = ReconcilingProposal(
+            **{k: v for k, v in proposal.model_dump(mode="json").items()
+               if k in ReconcilingProposal.model_fields},
+            status="reconciling",
+            reconciling_started_ts=now,
+            reconciling_pid=os.getpid(),
+        )
+        # Keep status_history
+        reconciling.status_history = list(proposal.status_history) + [{
+            "from": "approved", "to": "reconciling",
+            "ts": now.isoformat(), "cause": "send_start", "actor": "agent",
+        }]
+        reconciling.last_updated_ts = now
+        store.proposals[pid] = reconciling
+        dump_model(PENDING_PATH, store)
+
+        # Counter check + reserve
+        today = customer_today_str(cfg.customer.timezone)
+        counter, c_status = load_model(
+            COUNTER_PATH, SendCounter,
+            default=SendCounter(day=today, count=0),
+        )
+        if counter.day != today:
+            counter = SendCounter(day=today, count=0)
+        if counter.count + 1 > cfg.limits.max_outbound_per_day:
+            # Revert reconciling → approved
+            _revert_to_approved(store, pid, proposal, now, "cap_exceeded")
+            dump_model(PENDING_PATH, store)
+            _log_entry(OutboundCapExceeded(
+                type="outbound_cap_exceeded", ts=now,
+                proposal_id=pid,
+                reason=f"daily cap {cfg.limits.max_outbound_per_day} would be exceeded",
+            ))
+            _notify_owner(
+                "Cap exceeded",
+                f"Proposal {pid} not sent — daily cap ({cfg.limits.max_outbound_per_day}) reached. "
+                f"Approve manually if this is a true emergency.",
+                priority=1,
+            )
+            return EXIT_CAP_EXCEEDED
+
+        # Rate check
+        if counter.last_send_ts is not None:
+            sec_since = (now - counter.last_send_ts).total_seconds()
+            min_interval = 60.0 / max(1, cfg.limits.max_outbound_per_minute)
+            if sec_since < min_interval:
+                time.sleep(min_interval - sec_since)
+
+        # Reserve counter (increment now; refund on failure)
+        counter.count += 1
+        counter.last_send_ts = now
+        dump_model(COUNTER_PATH, counter)
+
+    # ── Render + send (locks released) ─────────────────────
+    # Load roster to re-resolve candidate phone
+    try:
+        roster, status = load_model(ROSTER_PATH, Roster)
+    except Exception as e:
+        _revert_everything(pid, proposal, now, cfg, f"roster_load: {e}")
+        return EXIT_SCHEMA_VIOLATION
+    if status != "ok":
+        _revert_everything(pid, proposal, now, cfg, f"roster_load: {status}")
+        return EXIT_SCHEMA_VIOLATION
+
+    candidate_id = proposal.candidate_employee_id
+    candidate = next((e for e in roster.employees if e.id == candidate_id), None)
+    if candidate is None or candidate.status != "active":
+        _revert_everything(pid, proposal, now, cfg, f"candidate {candidate_id} not in active roster")
+        return EXIT_NOT_FOUND
+
+    # Render template from roster/proposal fields (no LLM free-text)
+    try:
+        absent = next((e for e in roster.employees if e.id == proposal.absent_employee_id), None)
+        fields = {
+            "candidate_name": candidate.name,
+            "absent_employee_name": absent.name if absent else proposal.absent_employee_id,
+            "absent_date_human": proposal.absent_date,
+            "absent_reason_short": proposal.absent_reason,
+            "absent_shift": proposal.absent_shift,
+            "absent_role": proposal.absent_role,
+            "owner_name": cfg.owner.name,
+        }
+        rendered = _run([
+            "/usr/local/bin/render-coverage-template",
+            "coverage_message_to_candidate",
+            "--fields-json", json.dumps(fields),
+        ]).stdout
+    except subprocess.CalledProcessError as e:
+        _revert_everything(pid, proposal, now, cfg, f"template render: {e.stderr}")
+        return EXIT_SCHEMA_VIOLATION
+
+    # Log outbound_attempted BEFORE POST (idempotency key)
+    attempt_id = secrets.token_hex(8)
+    _log_entry(OutboundAttempted(
+        type="outbound_attempted", ts=now, proposal_id=pid,
+        recipient_employee_id=candidate_id, attempt_id=attempt_id,
+    ))
+
+    # Resolve JID for WA send (phone → JID format the bridge expects)
+    candidate_jid = candidate.phone.lstrip("+") + "@s.whatsapp.net"
+
+    # POST, retry once
+    ok, detail = bridge_post(candidate_jid, rendered, timeout=15)
+    if not ok:
+        time.sleep(5)
+        ok, detail = bridge_post(candidate_jid, rendered, timeout=15)
+
+    if not ok:
+        # Failed — transition to send_failed + refund counter + alert
+        _mark_failed(pid, proposal, now, detail)
+        _refund_counter(cfg)
+        _log_entry(OutboundSendFailed(
+            type="outbound_send_failed", ts=customer_now(cfg.customer.timezone),
+            proposal_id=pid, recipient_employee_id=candidate_id,
+            error=detail, retry_count=1,
+        ))
+        _notify_owner(
+            "Send FAILED",
+            f"Coverage message for {pid} could not be sent to {candidate.name}. Error: {detail[:200]}",
+            priority=2,
+        )
+        return EXIT_DEPENDENCY_DOWN
+
+    # Success — transition reconciling → sent + log OutboundSent
+    outbound_msg_id = detail or attempt_id
+    _mark_sent(pid, proposal, now, outbound_msg_id)
+    _log_entry(OutboundSent(
+        type="outbound_sent", ts=customer_now(cfg.customer.timezone),
+        proposal_id=pid, recipient_employee_id=candidate_id,
+        outbound_message_id=outbound_msg_id, rendered=rendered,
+    ))
+    print(f"SENT: {pid} → {candidate.name} ({candidate_jid}); msg_id={outbound_msg_id}")
+    return EXIT_OK
+
+
+def _log_entry(entry):
+    with FileLock(LOG_LOCK):
+        ndjson_append(
+            LOG_PATH,
+            TypeAdapter(type(entry)).dump_json(entry).decode(),
+        )
+
+
+def _revert_to_approved(store, pid, original_proposal, now, cause):
+    """In-memory revert reconciling → approved. Caller must dump_model."""
+    approved = ApprovedProposal(
+        **{k: v for k, v in original_proposal.model_dump(mode="json").items()
+           if k in ApprovedProposal.model_fields},
+        status="approved",
+        approved_ts=getattr(original_proposal, "approved_ts", now),
+        owner_input=getattr(original_proposal, "owner_input", ""),
+    )
+    approved.status_history = list(original_proposal.status_history) + [{
+        "from": "reconciling", "to": "approved",
+        "ts": now.isoformat(), "cause": cause, "actor": "agent",
+    }]
+    approved.last_updated_ts = now
+    store.proposals[pid] = approved
+
+
+def _revert_everything(pid, proposal, now, cfg, reason):
+    """Revert reconciling + counter after a pre-POST failure."""
+    with FileLock(PENDING_LOCK), FileLock(COUNTER_LOCK):
+        store, _ = load_model(PENDING_PATH, PendingStore, default=PendingStore())
+        if pid in store.proposals:
+            _revert_to_approved(store, pid, proposal, now, reason)
+            dump_model(PENDING_PATH, store)
+        counter, _ = load_model(
+            COUNTER_PATH, SendCounter,
+            default=SendCounter(day=customer_today_str(cfg.customer.timezone), count=0),
+        )
+        if counter.count > 0:
+            counter.count -= 1
+            dump_model(COUNTER_PATH, counter)
+
+
+def _refund_counter(cfg):
+    with FileLock(COUNTER_LOCK):
+        counter, _ = load_model(
+            COUNTER_PATH, SendCounter,
+            default=SendCounter(day=customer_today_str(cfg.customer.timezone), count=0),
+        )
+        if counter.count > 0:
+            counter.count -= 1
+            dump_model(COUNTER_PATH, counter)
+
+
+def _mark_failed(pid, original, now, err):
+    with FileLock(PENDING_LOCK):
+        store, _ = load_model(PENDING_PATH, PendingStore, default=PendingStore())
+        if pid not in store.proposals:
+            return
+        current = store.proposals[pid]
+        failed = SendFailedProposal(
+            **{k: v for k, v in current.model_dump(mode="json").items()
+               if k in SendFailedProposal.model_fields},
+            status="send_failed",
+            failed_ts=now,
+            last_error=err[:500],
+            retry_count=1,
+        )
+        failed.status_history = list(current.status_history) + [{
+            "from": "reconciling", "to": "send_failed",
+            "ts": now.isoformat(), "cause": "bridge_post_failed", "actor": "agent",
+        }]
+        failed.last_updated_ts = now
+        store.proposals[pid] = failed
+        dump_model(PENDING_PATH, store)
+
+
+def _mark_sent(pid, original, now, outbound_msg_id):
+    with FileLock(PENDING_LOCK):
+        store, _ = load_model(PENDING_PATH, PendingStore, default=PendingStore())
+        if pid not in store.proposals:
+            return
+        current = store.proposals[pid]
+        sent = SentProposal(
+            **{k: v for k, v in current.model_dump(mode="json").items()
+               if k in SentProposal.model_fields},
+            status="sent",
+            sent_ts=now,
+            outbound_message_id=outbound_msg_id,
+        )
+        sent.status_history = list(current.status_history) + [{
+            "from": "reconciling", "to": "sent",
+            "ts": now.isoformat(), "cause": "bridge_post_ok", "actor": "agent",
+        }]
+        sent.last_updated_ts = now
+        store.proposals[pid] = sent
+        dump_model(PENDING_PATH, store)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

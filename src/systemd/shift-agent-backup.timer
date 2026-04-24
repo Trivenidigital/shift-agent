@@ -1,0 +1,10 @@
+[Unit]
+Description=Shift Agent — run nightly backup at 02:00 local
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+Unit=shift-agent-backup.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Shift Agent — run health check every 5 minutes
+
+[Timer]
+OnBootSec=120
+OnUnitActiveSec=300
+AccuracySec=5
+Unit=shift-agent-health.service
+
+[Install]
+WantedBy=timers.target

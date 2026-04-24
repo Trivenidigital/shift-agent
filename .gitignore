@@ -1,0 +1,44 @@
+# Build scratch / secrets / review intermediates
+.hermes*.txt
+.hermes_*.txt
+.skill_*.txt
+.model_swap.txt
+.provider_truth.txt
+.openrouter_kimi.txt
+.or_slugs.txt
+.verify_*.txt
+.path_fix.txt
+.symlink_fix.txt
+.pair*.txt
+.priya*.txt
+.suresh*.txt
+.bridge_log.txt
+.crash_diag.txt
+.deep_dive.txt
+.live_bridge.txt
+.allowlist*.txt
+.still_no_response.txt
+.no_response_diag.txt
+.wa_path_check.txt
+.creds*.txt
+.new_skill*.md
+.current_skill.md
+.option_c*.txt
+.phase0_close.txt
+.post_*.txt
+.session_trace.txt
+.pair_final_check.txt
+
+# Customer-specific files (populated on deploy, never committed)
+config.yaml
+roster.json
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# OS
+.DS_Store
+Thumbs.db

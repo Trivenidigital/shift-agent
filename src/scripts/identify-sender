@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""
+identify-sender — resolve a WhatsApp phone/JID to a role (employee/owner/unknown).
+
+Usage:
+  identify-sender +19045550101
+  identify-sender 19045550101@s.whatsapp.net
+  identify-sender --json +19045550101
+
+Output (JSON to stdout):
+  {"role": "employee", "employee_id": "e001", "name": "Ravi Kumar", "phone_normalized": "+19045550101"}
+  {"role": "owner", "name": "Sally Patel", "phone_normalized": "+19045550100"}
+  {"role": "unknown", "phone_normalized": "+19045559999"}
+
+Exit codes:
+  0 — resolved (even if unknown; the JSON indicates role)
+  2 — state-file-load-failure (roster/config could not be loaded); caller should trigger dead-man
+  5 — Pydantic schema violation in config/roster
+"""
+
+from __future__ import annotations
+import argparse
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, "/opt/shift-agent")
+from safe_io import load_model, validate_phone_input  # noqa: E402
+from schemas import Config, Roster, E164Phone  # noqa: E402
+from exit_codes import EXIT_OK, EXIT_INVALID_INPUT, EXIT_SCHEMA_VIOLATION  # noqa: E402
+import yaml
+
+
+CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
+ROSTER_PATH = Path("/opt/shift-agent/roster.json")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("input", help="phone or JID")
+    ap.add_argument("--json", action="store_true", default=True, help="JSON output (default)")
+    args = ap.parse_args()
+
+    # Defensive: refuse shell-injection-y input before any subprocess/format ops
+    try:
+        validate_phone_input(args.input)
+    except ValueError as e:
+        print(json.dumps({"role": "error", "error": str(e)}))
+        return EXIT_INVALID_INPUT
+
+    # Normalize
+    try:
+        canonical = E164Phone.from_any(args.input)
+    except Exception as e:
+        print(json.dumps({"role": "error", "error": f"phone parse: {e}"}))
+        return EXIT_INVALID_INPUT
+
+    # Load config
+    try:
+        with CONFIG_PATH.open() as f:
+            raw = yaml.safe_load(f)
+        cfg = Config.model_validate(raw)
+    except Exception as e:
+        print(json.dumps({"role": "error", "error": f"config_load: {e}"}), file=sys.stdout)
+        return EXIT_SCHEMA_VIOLATION
+
+    # Owner check (canonical == owner's phone)
+    if canonical == cfg.owner.phone:
+        print(json.dumps({
+            "role": "owner",
+            "name": cfg.owner.name,
+            "phone_normalized": canonical,
+        }))
+        return EXIT_OK
+
+    # Load roster
+    try:
+        roster, status = load_model(ROSTER_PATH, Roster)
+    except Exception as e:
+        print(json.dumps({"role": "error", "error": f"roster_load: {e}"}))
+        return EXIT_SCHEMA_VIOLATION
+
+    if status != "ok":
+        print(json.dumps({"role": "error", "error": f"roster_load_failed: {status}"}))
+        return EXIT_INVALID_INPUT
+
+    # Employee lookup
+    emp = roster.find_by_phone(canonical)
+    if emp:
+        print(json.dumps({
+            "role": "employee",
+            "employee_id": emp.id,
+            "name": emp.name,
+            "phone_normalized": canonical,
+            "primary_role": emp.role,
+            "languages": emp.languages,
+            "can_cover_roles": sorted(emp.can_cover_roles),
+        }))
+        return EXIT_OK
+
+    # Unknown
+    print(json.dumps({"role": "unknown", "phone_normalized": canonical}))
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

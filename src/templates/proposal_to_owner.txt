@@ -1,0 +1,13 @@
+New sick call:
+
+{absent_employee_name} is out {absent_date_human} ({absent_reason_short}).
+Shift: {absent_shift} {absent_role}
+
+Coverage candidate: {candidate_name}
+Reason: {candidate_reasoning}
+
+Proposed message to {candidate_name}:
+> {rendered_coverage_message}
+
+Reply {code} to approve + send, or "DENY {code}" to reject.
+(Type STATUS for all pending, KILL to stop the agent.)

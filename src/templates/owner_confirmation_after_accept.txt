@@ -1,0 +1,1 @@
+{candidate_name} accepted coverage for {absent_date_human} {absent_shift} {absent_role}. Original absence: {absent_employee_name} ({absent_reason_short}). All set.

@@ -1,0 +1,10 @@
+[Unit]
+Description=Shift Agent — nightly cross-file invariant check
+After=shift-agent-backup.service
+
+[Service]
+Type=oneshot
+User=shift-agent
+Group=shift-agent
+EnvironmentFile=/opt/shift-agent/.env
+ExecStart=/usr/local/bin/shift-agent-fsck.py

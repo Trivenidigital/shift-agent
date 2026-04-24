@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""
+render-coverage-template — render a message template with supplied fields.
+
+The outbound coverage message is NEVER LLM free-text; it's always a template
+rendered from roster.json fields + a constrained `reason_short` summary.
+This prevents prompt injection from reshaping outbound messages.
+
+Usage:
+  render-coverage-template coverage_message_to_candidate --fields-json '{...}'
+  render-coverage-template proposal_to_owner --fields-json '{...}'
+
+Output: rendered text to stdout.
+
+Exit codes:
+  0 — rendered
+  2 — bad input / unknown template
+  5 — fields missing required values
+"""
+
+from __future__ import annotations
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+sys.path.insert(0, "/opt/shift-agent")
+from exit_codes import EXIT_OK, EXIT_INVALID_INPUT, EXIT_SCHEMA_VIOLATION  # noqa: E402
+
+TEMPLATES_DIR = Path("/opt/shift-agent/templates")
+
+# Characters allowed in "reason_short" — strict allowlist to resist injection.
+_REASON_SHORT_RE = re.compile(r"^[\w\s.,!?'()\-/]+$", re.UNICODE)
+_REASON_SHORT_MAX = 60
+
+
+def sanitize_reason_short(raw: str) -> str:
+    """Truncate + validate reason_short. Replaces invalid chars with spaces."""
+    cleaned = re.sub(r"[^\w\s.,!?'()\-/]", " ", raw or "", flags=re.UNICODE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned[:_REASON_SHORT_MAX]
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("template_name", help="name of template file (without .txt)")
+    ap.add_argument("--fields-json", required=True, help="JSON object of fields to interpolate")
+    args = ap.parse_args()
+
+    template_path = TEMPLATES_DIR / f"{args.template_name}.txt"
+    if not template_path.exists():
+        print(f"ERROR: template not found: {template_path}", file=sys.stderr)
+        return EXIT_INVALID_INPUT
+
+    try:
+        fields = json.loads(args.fields_json)
+    except json.JSONDecodeError as e:
+        print(f"ERROR: --fields-json is not valid JSON: {e}", file=sys.stderr)
+        return EXIT_INVALID_INPUT
+
+    # Sanitize any LLM-supplied strings
+    if "reason_short" in fields:
+        fields["reason_short"] = sanitize_reason_short(fields["reason_short"])
+    if "absent_reason_short" in fields:
+        fields["absent_reason_short"] = sanitize_reason_short(fields["absent_reason_short"])
+
+    template = template_path.read_text()
+
+    # Simple {field} interpolation. Missing fields → error (not silent).
+    try:
+        rendered = template.format(**fields)
+    except KeyError as e:
+        print(f"ERROR: template {args.template_name} requires field {e}, not provided", file=sys.stderr)
+        return EXIT_SCHEMA_VIOLATION
+    except Exception as e:
+        print(f"ERROR: template render failure: {e}", file=sys.stderr)
+        return EXIT_SCHEMA_VIOLATION
+
+    # Enforce output size sanity (WhatsApp cap ~65k, we target <=1500)
+    if len(rendered) > 1500:
+        print(f"WARNING: rendered template is {len(rendered)}b, truncating to 1500", file=sys.stderr)
+        rendered = rendered[:1500] + "…"
+
+    sys.stdout.write(rendered)
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

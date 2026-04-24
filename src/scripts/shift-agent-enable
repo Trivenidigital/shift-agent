@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# shift-agent-enable — restore agent after a disable.
+# Usage: shift-agent-enable
+
+set -euo pipefail
+
+# Remove disabled flag
+rm -f /opt/shift-agent/state/disabled.flag
+
+# Start services
+systemctl start hermes-gateway
+systemctl start shift-agent-tail-logger.timer
+systemctl start shift-agent-health.timer
+
+# Log
+TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+/usr/local/bin/log-decision-direct "$(cat <<JSON
+{"type":"agent_state_change","ts":"$TS","to_state":"enabled","reason":"manual_enable"}
+JSON
+)"
+
+# Notify owner
+/usr/local/bin/shift-agent-notify-owner \
+    --title "Shift Agent ENABLED" \
+    --priority 0 \
+    "Agent is back online. Resume normal operations."
+
+echo "Agent enabled."

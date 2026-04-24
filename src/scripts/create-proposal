@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""
+create-proposal — create a new proposal in pending.json + decisions.log.
+
+Called by handle_sick_call skill once it has:
+  - identified the absent employee
+  - determined the covering candidate (or confirmed none)
+  - rendered the proposed message
+
+Usage:
+  create-proposal \
+    --absent-employee-id e001 \
+    --absent-date 2026-04-29 \
+    --absent-shift 09:00-17:00 \
+    --absent-role cashier \
+    --absent-reason "fever" \
+    --input-message "Boss, I'm Ravi, I can't come in tomorrow, fever" \
+    --message-id "whatsapp-3EB0F1A2E9" \
+    --candidate-employee-id e004 \
+    --candidate-name "Anjali Iyer" \
+    --rendered-message "Hi Anjali, Ravi is out tomorrow..."
+
+Outputs the assigned proposal_id and code to stdout as JSON:
+  {"proposal_id": "P0042", "code": "#A3F2X"}
+
+Exit codes:
+  0 — created
+  2 — invalid input
+  5 — schema/validation error
+  8 — lock timeout
+"""
+
+from __future__ import annotations
+import argparse
+import json
+import secrets
+import string
+import sys
+from pathlib import Path
+
+sys.path.insert(0, "/opt/shift-agent")
+from schemas import (  # noqa: E402
+    Config, PendingStore, AwaitingProposal, ProposalCreated,
+)
+from safe_io import (  # noqa: E402
+    FileLock, load_model, dump_model, ndjson_append, customer_now,
+)
+from exit_codes import EXIT_OK, EXIT_INVALID_INPUT, EXIT_SCHEMA_VIOLATION  # noqa: E402
+from pydantic import TypeAdapter
+import yaml
+
+
+CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
+PENDING_PATH = Path("/opt/shift-agent/state/pending.json")
+PENDING_LOCK = Path("/opt/shift-agent/state/pending.json.lock")
+LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+LOG_LOCK = Path("/opt/shift-agent/logs/decisions.log.lock")
+
+# 5-char code alphabet: uppercase alphanumeric excluding visually ambiguous 0/O/1/I/L
+_CODE_ALPHA = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+
+
+def generate_unique_code(store: PendingStore, max_attempts: int = 50) -> str:
+    """Generate a 5-char code not currently used among non-terminal proposals."""
+    active_codes = {
+        p.code for p in store.proposals.values()
+        if p.status not in {
+            "accepted", "declined", "denied_by_owner", "expired",
+            "cancelled", "no_response_timeout",
+        }
+    }
+    for _ in range(max_attempts):
+        candidate = "#" + "".join(secrets.choice(_CODE_ALPHA) for _ in range(5))
+        if candidate not in active_codes:
+            return candidate
+    raise RuntimeError(f"unable to generate unique code after {max_attempts} attempts")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--absent-employee-id", required=True)
+    ap.add_argument("--absent-date", required=True)
+    ap.add_argument("--absent-shift", required=True)
+    ap.add_argument("--absent-role", required=True)
+    ap.add_argument("--absent-reason", required=True)
+    ap.add_argument("--input-message", required=True)
+    ap.add_argument("--message-id", required=True)
+    ap.add_argument("--candidate-employee-id", default=None)
+    ap.add_argument("--candidate-name", default=None)
+    ap.add_argument("--rendered-message", default=None)
+    args = ap.parse_args()
+
+    # Load config for timezone
+    try:
+        with CONFIG_PATH.open() as f:
+            cfg = Config.model_validate(yaml.safe_load(f))
+    except Exception as e:
+        print(f"ERROR: config load: {e}", file=sys.stderr)
+        return EXIT_SCHEMA_VIOLATION
+
+    now = customer_now(cfg.customer.timezone)
+
+    # flock pending.json for the entire read-modify-write
+    with FileLock(PENDING_LOCK):
+        store, status = load_model(PENDING_PATH, PendingStore, default=PendingStore())
+        if status not in ("ok", "missing", "empty"):
+            print(f"ERROR: pending.json {status}", file=sys.stderr)
+            return EXIT_SCHEMA_VIOLATION
+
+        # Assign next proposal_id
+        pid = f"P{store.next_proposal_seq:04d}"
+        store.next_proposal_seq += 1
+
+        # Generate unique code
+        try:
+            code = generate_unique_code(store)
+        except RuntimeError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return EXIT_SCHEMA_VIOLATION
+
+        # Build proposal
+        try:
+            proposal = AwaitingProposal(
+                proposal_id=pid,
+                code=code,
+                status="awaiting_owner_approval",
+                created_ts=now,
+                last_updated_ts=now,
+                absent_employee_id=args.absent_employee_id,
+                absent_date=args.absent_date,
+                absent_shift=args.absent_shift,
+                absent_role=args.absent_role,
+                absent_reason=args.absent_reason[:200],
+                input_message=args.input_message[:4000],
+                message_id=args.message_id,
+                candidate_employee_id=args.candidate_employee_id,
+                candidate_name=args.candidate_name,
+                proposed_message_rendered=args.rendered_message,
+                status_history=[{
+                    "from": None,
+                    "to": "awaiting_owner_approval",
+                    "ts": now.isoformat(),
+                    "cause": "created",
+                    "actor": "agent",
+                }],
+            )
+        except Exception as e:
+            print(f"ERROR: proposal validation: {e}", file=sys.stderr)
+            return EXIT_SCHEMA_VIOLATION
+
+        store.proposals[pid] = proposal
+        dump_model(PENDING_PATH, store)
+
+    # Log the creation
+    log_entry = ProposalCreated(
+        type="proposal_created",
+        ts=now,
+        proposal_id=pid,
+        code=code,
+        absent_employee_id=args.absent_employee_id,
+        candidate_employee_id=args.candidate_employee_id,
+    )
+    with FileLock(LOG_LOCK):
+        ndjson_append(LOG_PATH, TypeAdapter(ProposalCreated).dump_json(log_entry).decode())
+
+    print(json.dumps({"proposal_id": pid, "code": code}))
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

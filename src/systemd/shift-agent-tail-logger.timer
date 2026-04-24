@@ -1,0 +1,11 @@
+[Unit]
+Description=Shift Agent — run tail-logger every 30s
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=30
+AccuracySec=1
+Unit=shift-agent-tail-logger.service
+
+[Install]
+WantedBy=timers.target

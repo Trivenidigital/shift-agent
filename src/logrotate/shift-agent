@@ -1,0 +1,38 @@
+# Shift Agent log rotation.
+# IMPORTANT: decisions.log uses `create` mode (NOT copytruncate).
+# This works ONLY because all writers open-append-close per invocation — never cache fd.
+# If any writer is modified to hold a persistent fd, copytruncate would be needed (with line-loss risk).
+
+/opt/shift-agent/logs/decisions.log {
+    daily
+    rotate 30
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 shift-agent shift-agent
+    olddir /var/log/shift-agent-archive
+    dateext
+    createolddir 0750 shift-agent shift-agent
+}
+
+/opt/shift-agent/logs/hermes-gateway.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 shift-agent shift-agent
+    # Hermes may hold an open fd on this log; use copytruncate here.
+    copytruncate
+}
+
+/opt/shift-agent/state/health.log {
+    weekly
+    rotate 4
+    compress
+    missingok
+    notifempty
+    create 0640 shift-agent shift-agent
+}

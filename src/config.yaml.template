@@ -1,0 +1,45 @@
+# Shift Agent — per-customer configuration.
+# Copy to /opt/shift-agent/config.yaml and fill in customer-specific values.
+# Validated on every script invocation via schemas.py:Config.
+# Missing REQUIRED fields will cause the agent to refuse to start.
+
+schema_version: 1
+
+customer:
+  name: "Customer Name"
+  location_id: "loc_xxx_01"
+  timezone: "America/New_York"   # IANA timezone (validated by ZoneInfo)
+  languages: ["en", "te", "hi"]  # ISO codes the skill actively supports
+
+owner:
+  name: "Owner Full Name"
+  phone: "+19045550100"           # E.164 canonical — NO dashes
+  self_chat_jid: ""               # leave empty; populated on first owner message
+
+limits:
+  max_outbound_per_day: 6         # heuristic: 2x typical daily absence rate (~10% of roster size)
+  max_outbound_per_minute: 30     # Baileys-safe ceiling
+  pending_proposal_ttl_hours: 4   # proposals unapproved longer → owner dead-man
+  per_message_timeout_sec: 120    # LLM call timeout
+  send_failure_retry_count: 1     # retry send once, then fail loudly
+
+alerting:
+  # REQUIRED — agent refuses to start if either is empty.
+  # Create at pushover.net/api (5-minute signup, $5 one-time device fee).
+  pushover_user_key: "REQUIRED_FILL_ME_IN"
+  pushover_app_token: "REQUIRED_FILL_ME_IN"
+  # Optional: free external heartbeat. Create at healthchecks.io.
+  healthchecks_io_url: ""
+  # Optional: email (secondary; not yet wired in v2).
+  email: ""
+
+backup:
+  # GPG public key RECIPIENT — the private key must NEVER be on this VPS.
+  gpg_recipient_email: "your-email@example.com"
+  # Optional: S3 bucket for off-site copy. Requires aws CLI + creds.
+  s3_bucket: ""
+  retention_days: 30
+
+operations:
+  # Labels alert urgency. Agent runs 24/7 regardless.
+  business_hours_local: "08:00-22:00"
