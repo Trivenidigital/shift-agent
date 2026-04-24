@@ -97,22 +97,39 @@ def safe_load_json(path: Path, default: Any = None) -> Tuple[Any, str]:
             return default, "empty"
         return json.loads(raw), "ok"
     except json.JSONDecodeError as e:
+        # P3-FIX: path.with_suffix raises ValueError on suffixes containing dots
+        # (e.g. ".json.corrupt-1"). Use with_name instead.
         try:
-            corrupt = path.with_suffix(path.suffix + f".corrupt-{int(time.time())}")
+            corrupt = path.with_name(path.name + f".corrupt-{int(time.time())}")
             path.rename(corrupt)
-        except OSError:
-            pass
+        except OSError as rename_err:
+            # Distinct status so callers can alert vs. silently retry
+            return default, f"corrupt_unrenamed:{e} (rename_err={rename_err})"
         return default, f"corrupt:{e}"
     except OSError as e:
         return default, f"oserror:{e}"
 
 
-def atomic_write_text(path: Path, content: str, mode: int = 0o640) -> None:
+def atomic_write_text(path: Path, content: str, mode: int = 0o600) -> None:
     """Write+fsync to temp file, then os.replace, then fsync the parent directory.
-    Durable across kernel panics on ext4/xfs."""
+
+    P3-FIX: was using path.with_suffix which raises ValueError on dotted suffixes
+    like `pending.json.tmp-X`. Using with_name avoids the parse.
+
+    Security-M1 FIX: default 0o600 (not 0o640) for state files. Caller overrides.
+
+    Durable across kernel panics on ext4/xfs with default data=ordered.
+    Not guaranteed on data=writeback or nobarrier mounts.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + f".tmp-{os.getpid()}-{int(time.time()*1000)}")
+    tmp = path.with_name(path.name + f".tmp-{os.getpid()}-{int(time.time()*1000)}")
+    # Preserve existing mode if target was tightened manually
+    if path.exists():
+        try:
+            mode = path.stat().st_mode & 0o777
+        except OSError:
+            pass
     fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
     try:
         os.write(fd, content.encode("utf-8"))
@@ -144,15 +161,20 @@ def _json_default(x):
     raise TypeError(f"object of type {type(x).__name__} is not JSON serializable")
 
 
-def ndjson_append(path: Path, entry_json: str, lock: Optional[FileLock] = None) -> None:
-    """Append a single JSON-encoded line (no newlines inside) + \\n.
-    Caller should hold an appropriate lock if concurrent writers exist.
-    Uses O_APPEND + fsync for durability.
+def ndjson_append(path: Path, entry_json: str) -> None:
+    """Append a single JSON-encoded line (no line-break chars inside) + \\n.
+    Caller is responsible for holding an appropriate flock on `<path>.lock`
+    if concurrent writers exist. Uses O_APPEND + fsync for durability.
+
+    Comment-accuracy FIX: removed unused `lock` parameter from signature.
+    Security-M3 FIX: broadened line-break check to include Unicode line separators
+    (U+0085 NEL, U+2028, U+2029) that some NDJSON parsers treat as line terminators.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    if "\n" in entry_json:
-        raise ValueError("ndjson_append: entry_json must not contain newlines")
+    _LINE_BREAKERS = ("\n", "\r", "", " ", " ")
+    if any(c in entry_json for c in _LINE_BREAKERS):
+        raise ValueError("ndjson_append: entry_json must not contain line-break characters")
     fd = os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o640)
     try:
         os.write(fd, entry_json.encode("utf-8") + b"\n")

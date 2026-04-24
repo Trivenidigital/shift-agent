@@ -27,14 +27,15 @@ _PHONE_E164 = re.compile(r"^\+\d{10,15}$")
 
 
 class E164Phone(str):
-    """Canonical E.164 phone. Constructor handles dashed, @jid, 00-prefix variants."""
+    """Canonical E.164 phone. Constructor handles dashed, @jid, 00-prefix variants.
+
+    P2-FIX: was using Pydantic v1 `__get_validators__` API; switched to v2
+    `__get_pydantic_core_schema__` so validators actually run. The old version
+    silently passed through unvalidated strings, breaking canonicalization.
+    """
 
     @classmethod
-    def __get_validators__(cls):
-        yield cls.validate
-
-    @classmethod
-    def validate(cls, v: Any, _info=None) -> "E164Phone":
+    def validate(cls, v: Any) -> "E164Phone":
         if isinstance(v, E164Phone):
             return v
         if not isinstance(v, str):
@@ -56,6 +57,12 @@ class E164Phone(str):
             # bare digits — assume already includes country code
             s = "+" + s
         return s
+
+    @classmethod
+    def __get_pydantic_core_schema__(cls, source_type, handler):
+        """Pydantic v2 integration. Ensures .validate() runs on every assignment."""
+        from pydantic_core import core_schema
+        return core_schema.no_info_plain_validator_function(cls.validate)
 
     @classmethod
     def __get_pydantic_json_schema__(cls, schema, handler):
@@ -128,16 +135,27 @@ class Roster(BaseModel):
             raise ValueError("duplicate employee.id in roster")
         return self
 
-    def find_by_phone(self, phone: str) -> Optional[Employee]:
+    def find_by_phone(self, phone: str, now: Optional[datetime] = None) -> Optional[Employee]:
+        """P8-FIX: previous version had `or True` making effective_to check a no-op.
+        Now correctly honors phone_history effective windows."""
         canonical = E164Phone.from_any(phone)
+        if now is None:
+            from datetime import timezone as _tz
+            now = datetime.now(_tz.utc)
         for e in self.employees:
             if e.status != "active":
                 continue
             if e.phone == canonical:
                 return e
             for h in e.phone_history:
-                if h.phone == canonical and (h.effective_to is None or True):
-                    return e
+                if h.phone != canonical:
+                    continue
+                # Only match if the phone assignment was active at `now`
+                if h.effective_from and h.effective_from > now:
+                    continue
+                if h.effective_to is not None and h.effective_to < now:
+                    continue
+                return e
         return None
 
 

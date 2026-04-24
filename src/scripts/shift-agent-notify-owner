@@ -29,9 +29,10 @@ import json
 import os
 import sys
 import urllib.error
+import urllib.parse  # P1-FIX: was missing; every Pushover call would have crashed with AttributeError
 import urllib.request
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 sys.path.insert(0, "/opt/shift-agent")
 from safe_io import customer_now, FileLock  # noqa: E402
@@ -64,7 +65,8 @@ def pushover_send(cfg: Config, message: str, title: str, priority: int) -> tuple
     if priority == 2:
         data["retry"] = "60"
         data["expire"] = "3600"
-    body = "&".join(f"{k}={urllib.parse.quote(v)}" for k, v in data.items()).encode()
+    # P1-FIX: use urlencode for correct form-encoding (spaces, &, = in values)
+    body = urllib.parse.urlencode(data).encode()
     req = urllib.request.Request(
         "https://api.pushover.net/1/messages.json",
         data=body,
@@ -101,12 +103,26 @@ def whatsapp_fallback(cfg: Config, message: str) -> tuple[bool, str]:
         return False, f"bridge error: {e}"
 
 
+_SECRET_HINT_RE = None  # lazy-init
+
+
+def _redact(s: str) -> str:
+    """Replace any substring that looks like a Pushover token/key with <REDACTED>."""
+    global _SECRET_HINT_RE
+    if _SECRET_HINT_RE is None:
+        import re
+        _SECRET_HINT_RE = re.compile(r"[a-z0-9]{30,}", re.IGNORECASE)
+    return _SECRET_HINT_RE.sub("<REDACTED>", s or "")
+
+
 def append_notify_failed(message: str, results: list[tuple[str, bool, str]]) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
+    # Code-quality-M11 FIX: utcnow() deprecated in 3.12+, returns naive datetime; use timezone-aware
     entry = {
-        "ts": datetime.utcnow().isoformat() + "Z",
+        "ts": datetime.now(timezone.utc).isoformat(),
         "message": message,
-        "results": [{"channel": c, "ok": ok, "detail": d} for c, ok, d in results],
+        # Security-H2 FIX: redact detail strings that might echo the Pushover token from API error responses
+        "results": [{"channel": c, "ok": ok, "detail": _redact(d)} for c, ok, d in results],
     }
     with FileLock(NOTIFY_FAILED_LOG.with_suffix(".log.lock")):
         with NOTIFY_FAILED_LOG.open("a") as f:

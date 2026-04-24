@@ -7,7 +7,16 @@
 
 set -euo pipefail
 
-REASON="${1:-manual_kill}"
+# P4-FIX: Security-C2 — allowlist-strip REASON to prevent NDJSON/shell injection.
+# Previous version interpolated raw $REASON into a heredoc JSON body, which
+# accepted double-quotes, newlines, and would have corrupted the audit log.
+REASON_RAW="${1:-manual_kill}"
+REASON="${REASON_RAW//[^a-zA-Z0-9_ .-]/}"
+# Cap length so a huge input can't balloon the log line
+REASON="${REASON:0:200}"
+if [ -z "$REASON" ]; then
+    REASON="manual_kill"
+fi
 
 # Stop services (don't fail if already stopped)
 systemctl stop hermes-gateway || true

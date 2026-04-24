@@ -242,6 +242,13 @@ def main():
             employee_id = resolve_employee_id(canonical, roster) if roster else None
 
             # Write raw_inbound to decisions.log
+            # P7-FIX: Silent-failures-#4 — previously `seen.remember(msg_id)` was
+            # called AFTER the try/except unconditionally, meaning a validation or
+            # write failure would cause the message to be marked seen + never retried
+            # despite not having been logged. Now we only remember on success;
+            # failures are re-tried on the next timer tick, and persistently-failing
+            # messages raise an alert that won't stop firing until resolved.
+            logged = False
             try:
                 entry = RawInbound(
                     type="raw_inbound",
@@ -255,10 +262,12 @@ def main():
                 with FileLock(LOG_LOCK):
                     ndjson_append(LOG_PATH, json_line)
                 new_entries += 1
+                logged = True
             except Exception as e:
                 _alert_owner(f"tail-logger failed to log {msg_id}: {e}")
 
-            seen.remember(msg_id)
+            if logged:
+                seen.remember(msg_id)
 
         # Update offset + inode
         if AGENT_LOG.exists():

@@ -86,15 +86,21 @@ def bridge_post(jid: str, text: str, timeout: int = 15) -> tuple[bool, str]:
         BRIDGE_SEND_URL, data=data,
         headers={"Content-Type": "application/json"},
     )
+    # P6-FIX: Silent-failures-#2 — don't treat unparseable body as success.
+    # A partial bridge outage can return HTML/garbage with 200; requiring a
+    # non-empty message id from a JSON body eliminates the silent-success window.
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read().decode()
             if 200 <= resp.status < 300:
                 try:
                     parsed = json.loads(body)
-                    return True, parsed.get("id") or parsed.get("messageId") or ""
-                except Exception:
-                    return True, ""
+                except json.JSONDecodeError as je:
+                    return False, f"bridge 2xx but body not JSON: {je}"
+                msg_id = parsed.get("id") or parsed.get("messageId")
+                if not msg_id:
+                    return False, f"bridge 2xx but no id in body: {body[:200]}"
+                return True, msg_id
             return False, f"status={resp.status} body={body[:200]}"
     except urllib.error.URLError as e:
         return False, f"URLError: {e}"
@@ -108,14 +114,44 @@ def _run(cmd: list[str], check: bool = True, input_data: str | None = None) -> s
 
 
 def _notify_owner(title: str, message: str, priority: int = 1) -> None:
-    """Best-effort out-of-band alert. Doesn't block the main flow."""
+    """Out-of-band alert. Writes to notify-failed.log if the notifier itself fails.
+
+    P9-FIX: Silent-failures-#6 — previous version silently swallowed all notify
+    failures with bare `except: pass`. That meant a Pushover outage (or any
+    alert-path bug) could hide EVERY downstream alert in this script
+    (cap-exceeded, send-failed, bridge-down). Now failures go to notify-failed.log
+    so the nightly fsck + health-check can surface them.
+    """
     try:
-        subprocess.run([
+        result = subprocess.run([
             "/usr/local/bin/shift-agent-notify-owner",
             "--title", title, "--priority", str(priority), message,
         ], check=False, timeout=30)
+        if result.returncode != 0:
+            _append_notify_failed(title, message, f"exit_code={result.returncode} stderr={result.stderr[:200]}")
+    except Exception as e:
+        _append_notify_failed(title, message, f"exception: {e}")
+
+
+def _append_notify_failed(title: str, message: str, detail: str) -> None:
+    try:
+        import json as _json
+        import datetime as _dt
+        from pathlib import Path as _Path
+        path = _Path("/opt/shift-agent/state/notify-failed.log")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            "caller": "send-coverage-message._notify_owner",
+            "title": title[:200],
+            "message": message[:500],
+            "detail": detail[:300],
+        }
+        with path.open("a") as f:
+            f.write(_json.dumps(entry) + "\n")
     except Exception:
-        pass  # Pushover itself down is a separate concern — logged elsewhere
+        # Last resort — we really can't do anything. systemd journal captures stderr.
+        print(f"NOTIFY-FAILED (also couldn't log): {title}: {detail}", file=sys.stderr)
 
 
 def main():
