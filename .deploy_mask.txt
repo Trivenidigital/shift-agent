@@ -1,0 +1,30 @@
+=== disable timers (not mask — user enables after customer data) ===
+Removed "/etc/systemd/system/multi-user.target.wants/hermes-gateway.service".
+Removed "/etc/systemd/system/timers.target.wants/shift-agent-tail-logger.timer".
+Removed "/etc/systemd/system/timers.target.wants/shift-agent-health.timer".
+Removed "/etc/systemd/system/timers.target.wants/shift-agent-health-watchdog.timer".
+Removed "/etc/systemd/system/timers.target.wants/shift-agent-backup.timer".
+Removed "/etc/systemd/system/timers.target.wants/shift-agent-fsck.timer".
+
+=== verify unit files parse OK ===
+  hermes-gateway: LoadState=loaded
+  shift-agent-tail-logger.service: LoadState=loaded
+  shift-agent-tail-logger.timer: LoadState=loaded
+  shift-agent-health.service: LoadState=loaded
+  shift-agent-health.timer: LoadState=loaded
+  shift-agent-reconcile.service: LoadState=loaded
+
+=== touch disabled.flag to prevent any outbound sends even if manually started ===
+-rw-rw-r-- 1 shift-agent shift-agent 0 Apr 24 17:12 /opt/shift-agent/state/disabled.flag
+
+=== final state summary ===
+Build deployed to VPS:
+  scripts in /usr/local/bin: 18
+  skills in /root/.hermes/skills/ (local):
+6
+  systemd units in /etc/systemd/system/:
+12
+  config.yaml: placeholder — needs customer data
+  roster.json: absent — needs customer data
+  .env: placeholder — needs Pushover + OpenRouter keys
+  disabled.flag: SET (agent will refuse outbound even if accidentally started)

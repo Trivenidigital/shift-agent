@@ -1,0 +1,13 @@
+=== perms on Hermes venv python ===
+lrwxrwxrwx 1 shift-agent shift-agent 73 Apr 24 01:07 /root/.hermes/hermes-agent/venv/bin/python -> /root/.local/share/uv/python/cpython-3.11-linux-x86_64-gnu/bin/python3.11
+lrwxrwxrwx 1 shift-agent shift-agent  6 Apr 24 01:07 /root/.hermes/hermes-agent/venv/bin/python3 -> python
+
+=== perms on dir path ===
+drwxr-xr-x 33 shift-agent shift-agent 4096 Apr 24 01:08 /root/.hermes/hermes-agent
+drwxr-xr-x 5 shift-agent shift-agent 4096 Apr 24 01:07 /root/.hermes/hermes-agent/venv
+drwxr-xr-x 2 shift-agent shift-agent 4096 Apr 24 01:07 /root/.hermes/hermes-agent/venv/bin
+
+=== ownership of the full tree ===
+
+=== try direct exec ===
+sudo: unable to execute /root/.hermes/hermes-agent/venv/bin/python: Permission denied

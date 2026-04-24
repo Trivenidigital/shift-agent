@@ -1,0 +1,56 @@
+=== install Python modules to /opt/shift-agent ===
+-rw-r--r-- 1 shift-agent shift-agent  1135 Apr 24 17:07 /opt/shift-agent/exit_codes.py
+-rw-r--r-- 1 shift-agent shift-agent  8948 Apr 24 17:07 /opt/shift-agent/safe_io.py
+-rw-r--r-- 1 shift-agent shift-agent 18238 Apr 24 17:07 /opt/shift-agent/schemas.py
+
+=== install scripts to /usr/local/bin ===
+-rwxr-xr-x  1 root root     5950 Apr 24 17:07 create-proposal
+-rwxr-xr-x  1 root root     3401 Apr 24 17:07 identify-sender
+-rwxr-xr-x  1 root root     1317 Apr 24 17:07 log-decision
+-rwxr-xr-x  1 root root     2589 Apr 24 17:07 log-decision-direct
+-rwxr-xr-x  1 root root     3167 Apr 24 17:07 render-coverage-template
+-rwxr-xr-x  1 root root    19389 Apr 24 17:07 send-coverage-message
+-rwxr-xr-x  1 root root     4642 Apr 24 17:07 shift-agent-backup.sh
+-rwxr-xr-x  1 root root     3585 Apr 24 17:07 shift-agent-deploy.sh
+-rwxr-xr-x  1 root root     1668 Apr 24 17:07 shift-agent-disable
+-rwxr-xr-x  1 root root      703 Apr 24 17:07 shift-agent-enable
+-rwxr-xr-x  1 root root     7489 Apr 24 17:07 shift-agent-fsck.py
+-rwxr-xr-x  1 root root     4309 Apr 24 17:07 shift-agent-health-check.sh
+-rwxr-xr-x  1 root root     1320 Apr 24 17:07 shift-agent-health-watchdog.sh
+-rwxr-xr-x  1 root root     6188 Apr 24 17:07 shift-agent-notify-owner
+-rwxr-xr-x  1 root root     8283 Apr 24 17:07 shift-agent-reconcile.py
+-rwxr-xr-x  1 root root     4020 Apr 24 17:07 shift-agent-smoke-test.sh
+-rwxr-xr-x  1 root root    11252 Apr 24 17:07 shift-agent-tail-logger.py
+-rwxr-xr-x  1 root root     7626 Apr 24 17:07 update-proposal-status
+
+=== install templates ===
+total 24
+drwxr-xr-x 2 shift-agent shift-agent 4096 Apr 24 17:07 .
+drwxr-x--- 9 shift-agent shift-agent 4096 Apr 24 17:07 ..
+-rw-r--r-- 1 shift-agent shift-agent  192 Apr 24 17:07 coverage_message_to_candidate.txt
+-rw-r--r-- 1 shift-agent shift-agent  233 Apr 24 17:07 dead_man_alert.txt
+-rw-r--r-- 1 shift-agent shift-agent  164 Apr 24 17:07 owner_confirmation_after_accept.txt
+-rw-r--r-- 1 shift-agent shift-agent  380 Apr 24 17:07 proposal_to_owner.txt
+
+=== install systemd units ===
+hermes-gateway.service
+shift-agent-backup.service
+shift-agent-backup.timer
+shift-agent-fsck.service
+shift-agent-fsck.timer
+shift-agent-health.service
+shift-agent-health.timer
+shift-agent-health-watchdog.service
+shift-agent-health-watchdog.timer
+shift-agent-reconcile.service
+shift-agent-tail-logger.service
+shift-agent-tail-logger.timer
+
+=== install logrotate config ===
+
+=== install runbook ===
+
+=== install config template (not yet populated) ===
+
+=== systemctl daemon-reload ===
+done

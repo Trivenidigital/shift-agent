@@ -1,0 +1,12 @@
+=== /root/.local state ===
+drwxr-xr-x 5 root root 4096 Apr 24 03:11 /root/.local
+drwx------ 5 root root 4096 Apr 24 12:14 /root/.local/share
+drwxr-xr-x 3 root root 4096 Apr 24 01:07 /root/.local/share/uv
+
+=== chown + chmod /root/.local to shift-agent ===
+done
+
+=== verify python exec now works ===
+Python 3.11.15
+
+=== hermes skills list ===

@@ -1,0 +1,31 @@
+=== skills list with HERMES_HOME set (matching systemd unit) ===
+│ outlines                    │ mlops                │ builtin │ builtin │
+│ segment-anything-model      │ mlops                │ builtin │ builtin │
+│ serving-llms-vllm           │ mlops                │ builtin │ builtin │
+│ unsloth                     │ mlops                │ builtin │ builtin │
+│ weights-and-biases          │ mlops                │ builtin │ builtin │
+│ obsidian                    │ note-taking          │ builtin │ builtin │
+│ google-workspace            │ productivity         │ builtin │ builtin │
+│ linear                      │ productivity         │ builtin │ builtin │
+│ maps                        │ productivity         │ builtin │ builtin │
+│ nano-pdf                    │ productivity         │ builtin │ builtin │
+│ notion                      │ productivity         │ builtin │ builtin │
+│ ocr-and-documents           │ productivity         │ builtin │ builtin │
+│ powerpoint                  │ productivity         │ builtin │ builtin │
+│ godmode                     │ red-teaming          │ builtin │ builtin │
+│ arxiv                       │ research             │ builtin │ builtin │
+│ blogwatcher                 │ research             │ builtin │ builtin │
+│ llm-wiki                    │ research             │ builtin │ builtin │
+│ polymarket                  │ research             │ builtin │ builtin │
+│ research-paper-writing      │ research             │ builtin │ builtin │
+│ openhue                     │ smart-home           │ builtin │ builtin │
+│ xurl                        │ social-media         │ builtin │ builtin │
+│ plan                        │ software-development │ builtin │ builtin │
+│ requesting-code-review      │ software-development │ builtin │ builtin │
+│ subagent-driven-development │ software-development │ builtin │ builtin │
+│ systematic-debugging        │ software-development │ builtin │ builtin │
+│ test-driven-development     │ software-development │ builtin │ builtin │
+│ writing-plans               │ software-development │ builtin │ builtin │
+└─────────────────────────────┴──────────────────────┴─────────┴─────────┘
+0 hub-installed, 68 builtin, 5 local
+

@@ -71,8 +71,18 @@ else
 fi
 
 # 5. identify-sender works on the owner's own phone
-OWNER_PHONE=$(grep -E "^\s*phone:" /opt/shift-agent/config.yaml | head -1 | awk '{print $2}' | tr -d '"'"'"')
-if [ -n "$OWNER_PHONE" ]; then
+# Use Python to parse YAML; bash+awk+tr quoting here is fragile.
+OWNER_PHONE=$(python3 -c "
+import yaml, sys
+try:
+    with open('/opt/shift-agent/config.yaml') as f:
+        cfg = yaml.safe_load(f)
+    print(cfg.get('owner', {}).get('phone', ''))
+except Exception as e:
+    sys.stderr.write(f'(owner phone extraction failed: {e})')
+" 2>/dev/null)
+
+if [ -n "$OWNER_PHONE" ] && [ "$OWNER_PHONE" != "+10000000000" ]; then
     result=$(/usr/local/bin/identify-sender "$OWNER_PHONE")
     if ! echo "$result" | grep -q '"role":\s*"owner"'; then
         echo "FAIL: identify-sender does not classify owner phone correctly: $result"

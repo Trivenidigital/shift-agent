@@ -1,0 +1,15 @@
+=== before ===
+drwx------ 14 root root 4096 Apr 24 03:17 /root/
+
+=== chmod 711 /root (allow traversal, not listing) ===
+drwx--x--x 14 root root 4096 Apr 24 03:17 /root/
+
+=== verify shift-agent can now reach /root/.hermes ===
+audio_cache
+auth.json
+auth.lock
+bin
+cache
+sudo: unable to execute /root/.hermes/hermes-agent/venv/bin/python: Permission denied
+
+=== skills list via hermes CLI ===

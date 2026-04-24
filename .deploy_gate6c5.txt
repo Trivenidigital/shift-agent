@@ -1,0 +1,7 @@
+=== hermes skills list (timeout 20) ===
+┃ Name ┃ Category ┃ Source ┃ Trust ┃
+
+=== verify schemas.py imports cleanly ===
+imports OK
+E164Phone canonicalizes +1-904-555-0100 → +19045550100
+E164Phone canonicalizes 19045550100@s.whatsapp.net → +19045550100
