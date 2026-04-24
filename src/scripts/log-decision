@@ -26,13 +26,13 @@ except Exception:
     sys.exit(2)
 sys.exit(0 if 'type' in obj else 1)
 " ; then
-  # Missing type → Phase-0-compat mode. Write as raw to a Phase-0 legacy log section.
-  # For v2, recommend callers use the typed helper directly.
-  echo "WARNING: entry missing 'type' field; writing to legacy compatibility path" >&2
-  # Append to separate legacy file for manual review
-  mkdir -p /opt/shift-agent/logs
-  printf '%s\n' "$INPUT" >> /opt/shift-agent/logs/decisions-legacy.log
-  exit 0
+  # Priority-1 fix: reject (exit 5) instead of silently writing to a
+  # legacy log nobody reads. If a caller wants to write an un-typed entry,
+  # they need to adopt the LogEntry schema. Keeping the legacy path silently
+  # active meant the audit log invariant ("every event is typed") was broken.
+  echo "ERROR: entry missing 'type' field — reject rather than silent legacy write" >&2
+  echo "       adopt the schemas.LogEntry discriminator in callers" >&2
+  exit 5
 fi
 
 exec /usr/local/bin/log-decision-direct "$INPUT"

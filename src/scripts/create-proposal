@@ -151,17 +151,20 @@ def main():
         store.proposals[pid] = proposal
         dump_model(PENDING_PATH, store)
 
-    # Log the creation
-    log_entry = ProposalCreated(
-        type="proposal_created",
-        ts=now,
-        proposal_id=pid,
-        code=code,
-        absent_employee_id=args.absent_employee_id,
-        candidate_employee_id=args.candidate_employee_id,
-    )
-    with FileLock(LOG_LOCK):
-        ndjson_append(LOG_PATH, TypeAdapter(ProposalCreated).dump_json(log_entry).decode())
+        # Priority-1 fix: write ProposalCreated INSIDE the pending-lock section
+        # (was previously after the `with` block exited → race where a crash
+        # between pending-write and log-append left an orphan proposal for fsck
+        # to flag). The LOG_LOCK is a separate file lock — no deadlock risk.
+        log_entry = ProposalCreated(
+            type="proposal_created",
+            ts=now,
+            proposal_id=pid,
+            code=code,
+            absent_employee_id=args.absent_employee_id,
+            candidate_employee_id=args.candidate_employee_id,
+        )
+        with FileLock(LOG_LOCK):
+            ndjson_append(LOG_PATH, TypeAdapter(ProposalCreated).dump_json(log_entry).decode())
 
     print(json.dumps({"proposal_id": pid, "code": code}))
     return EXIT_OK

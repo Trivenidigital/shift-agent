@@ -399,12 +399,33 @@ def _revert_to_approved(store, pid, original_proposal, now, cause):
 
 
 def _revert_everything(pid, proposal, now, cfg, reason):
-    """Revert reconciling + counter after a pre-POST failure."""
+    """Revert reconciling + counter after a pre-POST failure.
+
+    Priority-1 tightening: re-read the proposal under lock and assert it's
+    still in `reconciling` status before reverting. Previous version used the
+    `proposal` snapshot from outside the lock — if a concurrent cancel or
+    expire had mutated state, our revert would clobber it.
+    """
     with FileLock(PENDING_LOCK), FileLock(COUNTER_LOCK):
         store, _ = load_model(PENDING_PATH, PendingStore, default=PendingStore())
         if pid in store.proposals:
-            _revert_to_approved(store, pid, proposal, now, reason)
-            dump_model(PENDING_PATH, store)
+            current = store.proposals[pid]
+            if current.status == "reconciling":
+                # Normal path: we own this reconciling marker; revert to approved.
+                _revert_to_approved(store, pid, proposal, now, reason)
+                dump_model(PENDING_PATH, store)
+            else:
+                # Something else changed the proposal concurrently. Don't clobber.
+                # Log a warning entry + notify owner for manual resolution.
+                print(
+                    f"WARNING: refused to revert {pid}: expected reconciling, found {current.status}",
+                    file=sys.stderr,
+                )
+                _notify_owner(
+                    "Revert skipped",
+                    f"{pid}: would have reverted after {reason}, but proposal is now {current.status}. Not clobbering concurrent change.",
+                    priority=2,
+                )
         counter, _ = load_model(
             COUNTER_PATH, SendCounter,
             default=SendCounter(day=customer_today_str(cfg.customer.timezone), count=0),

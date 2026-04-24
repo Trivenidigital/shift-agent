@@ -48,11 +48,17 @@ def main():
         print(json.dumps({"role": "error", "error": str(e)}))
         return EXIT_INVALID_INPUT
 
-    # Normalize
+    # Normalize + validate the canonical form is actually E.164.
+    # Priority-1 fix: previous version silently accepted garbage that produced
+    # a bogus "+garbage_not_a_phone" canonical; now we reject with exit 2.
     try:
         canonical = E164Phone.from_any(args.input)
     except Exception as e:
         print(json.dumps({"role": "error", "error": f"phone parse: {e}"}))
+        return EXIT_INVALID_INPUT
+    import re as _re
+    if not _re.match(r"^\+\d{10,15}$", canonical):
+        print(json.dumps({"role": "error", "error": f"canonicalization did not produce valid E.164: {canonical!r}"}))
         return EXIT_INVALID_INPUT
 
     # Load config

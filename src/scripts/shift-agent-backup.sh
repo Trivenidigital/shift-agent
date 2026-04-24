@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 # shift-agent-backup — nightly gpg-encrypted backup.
-# Stops tail-logger timer during tar to avoid partial-line snapshots.
+#
+# Hardening applied (Priority 1 round):
+#   - YAML parsed with python3 yaml.safe_load (not grep|sed)
+#   - tar-contents verified per-file (not substring regex)
+#   - gpg uses default trust-model with explicit key-presence precheck
+#     (no more --trust-model always which accepted rogue keys)
+#   - tail-logger restart failure raises an alert (no more || true)
+#   - tar-errors tempfile via mktemp, cleaned by trap
+#
+# Stops tail-logger service + timer during tar to avoid partial-line snapshots.
 # Copies baileys_auth to /tmp first to avoid tarring a live session.
 
 set -euo pipefail
@@ -10,112 +19,166 @@ BACKUP_DIR=/opt/shift-agent/backups
 STAMP=$(date +%F-%H%M)
 TAR_PATH=$BACKUP_DIR/$STAMP.tar.gz
 GPG_PATH=$TAR_PATH.gpg
-SESSION_COPY=/tmp/shift-session-$$
+SESSION_COPY=$(mktemp -d /tmp/shift-session.XXXXXX)
+TAR_ERRORS=$(mktemp /tmp/backup-tar-errors.XXXXXX)
 
 mkdir -p "$BACKUP_DIR"
 
-# Extract settings from config.yaml
-GPG_RECIPIENT=$(grep -E "^\s*gpg_recipient_email:" "$CONFIG" | sed 's/^[^:]*:\s*//; s/^"//; s/"$//; s/^'"'"'//; s/'"'"'$//')
-RETENTION_DAYS=$(grep -E "^\s*retention_days:" "$CONFIG" | awk '{print $2}')
-S3_BUCKET=$(grep -E "^\s*s3_bucket:" "$CONFIG" | sed 's/^[^:]*:\s*//; s/^"//; s/"$//' || echo "")
-: "${RETENTION_DAYS:=30}"
+# ─── Parse config.yaml via Python (not fragile grep|sed) ───
+# yaml.safe_load tolerates multi-line values, quoted strings, commented-out lines, etc.
+eval "$(python3 -c "
+import yaml
+with open('$CONFIG') as f:
+    cfg = yaml.safe_load(f) or {}
+backup = cfg.get('backup', {}) or {}
+print(f'GPG_RECIPIENT={backup.get(\"gpg_recipient_email\", \"\")!r}')
+print(f'RETENTION_DAYS={backup.get(\"retention_days\", 30)}')
+print(f'S3_BUCKET={backup.get(\"s3_bucket\", \"\")!r}')
+")"
 
-if [ -z "${GPG_RECIPIENT:-}" ] || [ "$GPG_RECIPIENT" = '""' ]; then
-    echo "ERROR: gpg_recipient_email not configured — cannot encrypt backup" >&2
+if [ -z "${GPG_RECIPIENT:-}" ]; then
+    echo "ERROR: gpg_recipient_email not configured in $CONFIG" >&2
     /usr/local/bin/shift-agent-notify-owner \
         --title "Backup misconfigured" \
         --priority 1 \
-        "Nightly backup skipped: gpg_recipient_email not set in config.yaml" || true
+        "Nightly backup skipped: gpg_recipient_email not set in config.yaml"
     exit 1
 fi
 
-# Cleanup on any exit
+# ─── GPG key-presence precheck (replaces --trust-model always) ───
+# A rogue key with the same email in the keyring would be silently used
+# under --trust-model always. We now:
+#   1. Require the key to be present.
+#   2. Use default trust model (pgp). If key isn't trusted, gpg will warn
+#      but proceed with interactive=no; we fail-loud on gpg non-zero.
+if ! gpg --list-keys --with-colons "$GPG_RECIPIENT" 2>/dev/null | grep -q '^pub:'; then
+    echo "ERROR: GPG key for '$GPG_RECIPIENT' not in keyring" >&2
+    /usr/local/bin/shift-agent-notify-owner \
+        --title "Backup misconfigured" \
+        --priority 1 \
+        "Nightly backup skipped: GPG key for $GPG_RECIPIENT not imported. Run 'gpg --import <pubkey>'."
+    exit 1
+fi
+
+# ─── Cleanup trap ───
 cleanup() {
-    rm -rf "$SESSION_COPY" "$TAR_PATH"
-    # Always try to restart the tail-logger timer even on failure
-    systemctl start shift-agent-tail-logger.timer 2>/dev/null || true
+    local exit_code=$?
+    rm -rf "$SESSION_COPY" "$TAR_ERRORS"
+    rm -f "$TAR_PATH"  # only if still present (gpg success removes it)
+    # Restart the tail-logger timer, alert loudly on failure
+    if ! systemctl start shift-agent-tail-logger.timer 2>/dev/null; then
+        /usr/local/bin/shift-agent-notify-owner \
+            --title "CRITICAL: tail-logger timer failed to restart" \
+            --priority 2 \
+            "After backup, shift-agent-tail-logger.timer did not restart. No audit capture until fixed. SSH immediately." \
+            || true  # last-resort; if Pushover is also down, we've done what we can
+    fi
+    exit "$exit_code"
 }
 trap cleanup EXIT
 
-# Stop tail-logger timer for consistency
-systemctl stop shift-agent-tail-logger.timer || true
-sleep 2  # let any in-flight run finish
+# ─── Stop tail-logger service AND timer to pause audit capture ───
+systemctl stop shift-agent-tail-logger.timer
+# Also wait for any in-flight run to finish
+systemctl stop shift-agent-tail-logger.service 2>/dev/null || true
+# Belt + suspenders: poll until no shift-agent-tail-logger process exists
+for i in 1 2 3 4 5; do
+    if ! pgrep -u shift-agent -f shift-agent-tail-logger.py >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
 
-# Snapshot baileys_auth (live session) to /tmp
+# ─── Snapshot baileys_auth (live session) to /tmp ───
 if [ -d /root/.hermes/whatsapp/session ]; then
-    cp -a /root/.hermes/whatsapp/session "$SESSION_COPY"
-else
-    mkdir -p "$SESSION_COPY"  # empty placeholder
+    cp -a /root/.hermes/whatsapp/session "$SESSION_COPY/"
 fi
 
-# Tar the snapshot + agent state
-if ! tar czf "$TAR_PATH" \
-        -C / \
-        opt/shift-agent/config.yaml \
-        opt/shift-agent/roster.json \
-        opt/shift-agent/state \
-        opt/shift-agent/logs \
-        -C /tmp "shift-session-$$" 2>/tmp/backup-tar-errors-$$; then
+# ─── Tar the snapshot + agent state ───
+# Required files we'll verify-per-file in the archive
+REQUIRED_PATHS=(
+    "opt/shift-agent/config.yaml"
+    "opt/shift-agent/roster.json"
+    "opt/shift-agent/state"
+    "opt/shift-agent/logs"
+)
+
+tar_cmd=(tar czf "$TAR_PATH" -C /)
+for p in "${REQUIRED_PATHS[@]}"; do
+    tar_cmd+=("$p")
+done
+# Include session snapshot if present
+if [ -d "$SESSION_COPY/session" ]; then
+    tar_cmd+=(-C "$(dirname "$SESSION_COPY")" "$(basename "$SESSION_COPY")")
+fi
+
+if ! "${tar_cmd[@]}" 2>"$TAR_ERRORS"; then
     echo "ERROR: tar failed:" >&2
-    cat /tmp/backup-tar-errors-$$ >&2
-    rm -f /tmp/backup-tar-errors-$$
+    cat "$TAR_ERRORS" >&2
     /usr/local/bin/shift-agent-notify-owner \
         --title "Backup FAILED (tar)" \
         --priority 2 \
-        "Nightly backup tar failed. Check /tmp/backup-tar-errors for details." || true
+        "Nightly backup tar exited non-zero. Stderr: $(head -c 300 "$TAR_ERRORS")"
     exit 1
 fi
-rm -f /tmp/backup-tar-errors-$$
 
-# Verify expected files are in the archive
-required_count=$(tar -tzf "$TAR_PATH" 2>/dev/null | grep -c "opt/shift-agent/config.yaml\|opt/shift-agent/roster.json\|opt/shift-agent/state\|opt/shift-agent/logs" || echo 0)
-if [ "$required_count" -lt 4 ]; then
-    echo "ERROR: backup tar missing required files" >&2
+# Per-file presence check — anchored exact-match, no substring leniency
+MISSING=()
+for p in "${REQUIRED_PATHS[@]}"; do
+    # tar uses trailing / for directories; accept either form
+    if ! tar -tzf "$TAR_PATH" 2>/dev/null | grep -Fxq "$p" \
+       && ! tar -tzf "$TAR_PATH" 2>/dev/null | grep -Fxq "$p/"; then
+        MISSING+=("$p")
+    fi
+done
+if [ "${#MISSING[@]}" -gt 0 ]; then
+    echo "ERROR: backup tar missing required files: ${MISSING[*]}" >&2
     /usr/local/bin/shift-agent-notify-owner \
         --title "Backup FAILED (incomplete)" \
         --priority 2 \
-        "Nightly backup archive is missing required files. Inspect $TAR_PATH before it's deleted." || true
+        "Nightly backup archive is missing: ${MISSING[*]}. Archive at $TAR_PATH before it's deleted."
     exit 1
 fi
 
-# Encrypt via GPG pubkey
-if ! gpg --batch --yes --trust-model always --recipient "$GPG_RECIPIENT" \
-        --output "$GPG_PATH" --encrypt "$TAR_PATH"; then
+# ─── Encrypt with gpg (default trust-model; key presence already checked) ───
+if ! gpg --batch --yes \
+         --recipient "$GPG_RECIPIENT" \
+         --output "$GPG_PATH" \
+         --encrypt "$TAR_PATH"; then
     echo "ERROR: gpg encrypt failed" >&2
     /usr/local/bin/shift-agent-notify-owner \
         --title "Backup FAILED (gpg)" \
         --priority 2 \
-        "Nightly backup gpg encryption failed. Check that $GPG_RECIPIENT key is imported: 'gpg --list-keys'." || true
+        "Nightly backup gpg encryption failed. Likely cause: untrusted key or gpg misconfig for $GPG_RECIPIENT."
     exit 1
 fi
 
-# Round-trip test: can we decrypt back? (only works if recipient's private key is ON this host — NOT recommended; so skip test if not possible)
-# We accept this trade-off: pubkey encryption means the private key is OFF the VPS, so we can't round-trip-test here.
-# Instead: verify the .gpg file is non-trivial in size.
+# Size sanity check (gpg should produce non-trivial output)
 gpg_size=$(stat -c%s "$GPG_PATH")
 if [ "$gpg_size" -lt 1024 ]; then
     /usr/local/bin/shift-agent-notify-owner \
         --title "Backup suspicious (tiny)" \
         --priority 2 \
-        "Nightly backup gpg file is only ${gpg_size} bytes — suspicious. Verify manually." || true
+        "Nightly backup gpg file is only ${gpg_size} bytes. Verify manually."
     exit 1
 fi
 
-# Delete plaintext
+# Delete plaintext tar (encrypted version is kept)
 rm -f "$TAR_PATH"
 
-# Optional S3 sync
-if [ -n "${S3_BUCKET:-}" ] && [ "$S3_BUCKET" != '""' ] && command -v aws >/dev/null 2>&1; then
-    aws s3 sync "$BACKUP_DIR" "s3://$S3_BUCKET/shift-agent-backups/" \
-        --exclude "*" --include "*.tar.gz.gpg" 2>/dev/null || {
+# ─── Optional S3 sync ───
+if [ -n "${S3_BUCKET:-}" ] && command -v aws >/dev/null 2>&1; then
+    if ! aws s3 sync "$BACKUP_DIR" "s3://$S3_BUCKET/shift-agent-backups/" \
+            --exclude "*" --include "*.tar.gz.gpg"; then
         /usr/local/bin/shift-agent-notify-owner \
             --title "S3 sync failed" \
             --priority 0 \
-            "Backup succeeded locally but S3 sync failed. Local copy is intact." || true
-    }
+            "Backup succeeded locally but S3 sync failed. Local copy is intact at $GPG_PATH." \
+            || true
+    fi
 fi
 
-# Retention
+# ─── Retention ───
 find "$BACKUP_DIR" -name "*.tar.gz.gpg" -mtime +"$RETENTION_DAYS" -delete 2>/dev/null || true
 
 echo "Backup OK: $GPG_PATH ($gpg_size bytes)"

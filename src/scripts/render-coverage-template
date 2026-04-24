@@ -36,8 +36,17 @@ _REASON_SHORT_MAX = 60
 
 
 def sanitize_reason_short(raw: str) -> str:
-    """Truncate + validate reason_short. Replaces invalid chars with spaces."""
+    """Truncate + validate reason_short.
+
+    Priority-1 tightening: also strip prompt-injection keywords that survive the
+    per-character filter. The outbound message goes to a human who might be
+    confused by "SYSTEM ignore previous"; stripping these reduces noise.
+    """
     cleaned = re.sub(r"[^\w\s.,!?'()\-/]", " ", raw or "", flags=re.UNICODE)
+    # Strip injection keywords (case-insensitive, word-boundary)
+    for bad in (r"\bSYSTEM\b", r"\bUSER\b", r"\bASSISTANT\b",
+                r"\bIGNORE\s+PREVIOUS\b", r"\bDISREGARD\b", r"\bOVERRIDE\b"):
+        cleaned = re.sub(bad, "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned[:_REASON_SHORT_MAX]
 
@@ -49,6 +58,20 @@ def main():
     args = ap.parse_args()
 
     template_path = TEMPLATES_DIR / f"{args.template_name}.txt"
+
+    # Security-M2 FIX: path-traversal guard. Resolve the candidate path and
+    # refuse if it escapes TEMPLATES_DIR. The previous version relied on the
+    # `.txt` suffix to limit damage; now we explicitly reject traversal regardless
+    # of whether the target file happens to exist.
+    try:
+        resolved = template_path.resolve()
+    except Exception as e:
+        print(f"ERROR: template path resolution: {e}", file=sys.stderr)
+        return EXIT_INVALID_INPUT
+    if resolved.parent != TEMPLATES_DIR.resolve():
+        print(f"ERROR: template path escapes templates dir: {resolved}", file=sys.stderr)
+        return EXIT_INVALID_INPUT
+
     if not template_path.exists():
         print(f"ERROR: template not found: {template_path}", file=sys.stderr)
         return EXIT_INVALID_INPUT

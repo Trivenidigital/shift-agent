@@ -233,7 +233,9 @@ def dump_model(path: Path, model: "BaseModel", mode: int = 0o640) -> None:
     atomic_write_json(path, model, mode=mode)
 
 
-_PHONE_SAFE = re.compile(r"^[+\d@.\w\-]+$")
+# Priority-1 tightening: accept parens + space (common customer input formats)
+# while still rejecting shell metachars: `;&|<>$\\*?'"!^{}[]\``.
+_PHONE_SAFE = re.compile(r"^[+\d@.\w\-() ]+$")
 
 
 def validate_phone_input(v: str) -> str:
