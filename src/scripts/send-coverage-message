@@ -299,6 +299,11 @@ def main():
         recipient_employee_id=candidate_id, attempt_id=attempt_id,
     ))
 
+    # Silent-failures-#1 FIX: guard against empty candidate.phone
+    # (shouldn't reach here due to roster validation, but defense in depth)
+    if not candidate.phone:
+        _revert_everything(pid, proposal, now, cfg, f"candidate {candidate_id} has empty phone")
+        return EXIT_NOT_FOUND
     # Resolve JID for WA send (phone → JID format the bridge expects)
     candidate_jid = candidate.phone.lstrip("+") + "@s.whatsapp.net"
 
@@ -309,14 +314,29 @@ def main():
         ok, detail = bridge_post(candidate_jid, rendered, timeout=15)
 
     if not ok:
-        # Failed — transition to send_failed + refund counter + alert
-        _mark_failed(pid, proposal, now, detail)
-        _refund_counter(cfg)
-        _log_entry(OutboundSendFailed(
-            type="outbound_send_failed", ts=customer_now(cfg.customer.timezone),
-            proposal_id=pid, recipient_employee_id=candidate_id,
-            error=detail, retry_count=1,
-        ))
+        # Failed path — P5-FIX: log FIRST, then mutate pending.
+        # Partial-failure surfaces to owner instead of hiding.
+        try:
+            _log_entry(OutboundSendFailed(
+                type="outbound_send_failed", ts=customer_now(cfg.customer.timezone),
+                proposal_id=pid, recipient_employee_id=candidate_id,
+                error=detail, retry_count=1,
+            ))
+        except Exception as log_err:
+            _notify_owner(
+                "Partial state (failed path)",
+                f"{pid}: bridge send failed AND audit log write failed ({log_err}). Inspect state manually.",
+                priority=2,
+            )
+        try:
+            _mark_failed(pid, proposal, now, detail)
+            _refund_counter(cfg)
+        except Exception as state_err:
+            _notify_owner(
+                "Partial state (failed path)",
+                f"{pid}: send failed + log OK but pending/counter update failed ({state_err}). Run update-proposal-status {pid} send_failed manually.",
+                priority=2,
+            )
         _notify_owner(
             "Send FAILED",
             f"Coverage message for {pid} could not be sent to {candidate.name}. Error: {detail[:200]}",
@@ -324,14 +344,31 @@ def main():
         )
         return EXIT_DEPENDENCY_DOWN
 
-    # Success — transition reconciling → sent + log OutboundSent
+    # Success path — P5-FIX: log OutboundSent BEFORE pending mutation.
+    # If _mark_sent fails post-log, reconciler sees "sent in log + pending=reconciling"
+    # and alerts owner (detectable, actionable). Opposite order would hide success
+    # from audit if the log write failed.
     outbound_msg_id = detail or attempt_id
-    _mark_sent(pid, proposal, now, outbound_msg_id)
-    _log_entry(OutboundSent(
-        type="outbound_sent", ts=customer_now(cfg.customer.timezone),
-        proposal_id=pid, recipient_employee_id=candidate_id,
-        outbound_message_id=outbound_msg_id, rendered=rendered,
-    ))
+    try:
+        _log_entry(OutboundSent(
+            type="outbound_sent", ts=customer_now(cfg.customer.timezone),
+            proposal_id=pid, recipient_employee_id=candidate_id,
+            outbound_message_id=outbound_msg_id, rendered=rendered,
+        ))
+    except Exception as log_err:
+        _notify_owner(
+            "Partial success (log write failed)",
+            f"{pid}: candidate WAS messaged (bridge 200, msg_id={outbound_msg_id}) but audit log write failed ({log_err}). Manually append OutboundSent.",
+            priority=2,
+        )
+    try:
+        _mark_sent(pid, proposal, now, outbound_msg_id)
+    except Exception as state_err:
+        _notify_owner(
+            "Partial success (pending update failed)",
+            f"{pid}: candidate WAS messaged and logged, but pending.json update failed ({state_err}). Run update-proposal-status {pid} sent manually.",
+            priority=2,
+        )
     print(f"SENT: {pid} → {candidate.name} ({candidate_jid}); msg_id={outbound_msg_id}")
     return EXIT_OK
 

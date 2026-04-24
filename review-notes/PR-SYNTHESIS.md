@@ -1,5 +1,16 @@
 # PR Review Synthesis — 5 Parallel Agents on commit efd1a5b
 
+> ⚠️ **STALE as of 2026-04-24 15:26 UTC — DO NOT USE FOR DEPLOY DECISIONS.**
+>
+> This synthesis was written against commit **efd1a5b** before fixes in **f1806f0** landed.
+> Per `review-notes/meta-review-2026-04-24.md`, **8 of 9 listed consensus BLOCKERs are fixed in HEAD** (including P4 — the security-review file's missing fix annotation misled my earlier status reporting). Open: **P5** + 3 elevated single-reviewer items (silent-failures #3, #11, #12).
+>
+> Citation bug acknowledged: P1 was incorrectly attributed to silent-failures #15 (a different bug in the same file — urlencode vs quote, also fixed in f1806f0).
+>
+> Authoritative post-fix synthesis will be `review-notes/PR-SYNTHESIS-post-f1806f0.md` once the remaining 4 items are patched.
+
+---
+
 **9 BLOCKERs found. Several would break the system on first use. Rigor paid off.**
 
 ## Consensus BLOCKERs (multiple reviewers caught same issue)

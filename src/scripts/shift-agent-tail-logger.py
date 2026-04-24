@@ -136,11 +136,17 @@ def classify_as_sick_call(text: str) -> bool:
     return bool(SICK_CALL_RE.search(text or ""))
 
 
-def extract_message_id(chat: str, msg: str, ts: str) -> str:
+def extract_message_id(chat: str, msg: str, ts: str, byte_offset: int = 0) -> str:
     """Stable message id. If Hermes emits one we could use it; since the log format
-    doesn't include a WA msg id inline, we synthesize a hash of (ts + chat + msg).
-    Including `chat` (sender phone) prevents collisions on identical-text-same-second."""
-    h = hashlib.sha256(f"{ts}|{chat}|{msg}".encode("utf-8")).hexdigest()[:24]
+    doesn't include a WA msg id inline, we synthesize a hash of (ts + chat + msg + offset).
+
+    Silent-failures-#3 FIX: previous version hashed only ts|chat|msg, which collides
+    when two identical-text messages arrive in the same wall-clock second (e.g., a
+    retry, or a distinct sender who happens to message at the same second with the
+    same phrasing). Including the source byte-offset in agent.log makes IDs unique
+    per log occurrence even on timestamp+content collisions.
+    """
+    h = hashlib.sha256(f"{ts}|{chat}|{msg}|{byte_offset}".encode("utf-8")).hexdigest()[:24]
     return f"synth:{h}"
 
 
@@ -201,15 +207,21 @@ def main():
 
         # Tail since last offset
         new_entries = 0
+        base_offset = seen.last_offset_bytes
         with AGENT_LOG.open("rb") as f:
-            f.seek(seen.last_offset_bytes)
+            f.seek(base_offset)
             remainder = f.read()
         try:
             text = remainder.decode("utf-8", errors="replace")
         except Exception:
             text = ""
 
-        for line in text.splitlines():
+        # Track per-line byte position so extract_message_id gets unique offset input
+        line_byte_offset = 0
+        for line in text.splitlines(keepends=True):
+            line_start = base_offset + line_byte_offset
+            line_byte_offset += len(line.encode("utf-8", errors="replace"))
+            line = line.rstrip("\n")
             m = INBOUND_LINE_RE.match(line)
             if not m:
                 continue
@@ -223,7 +235,9 @@ def main():
                 msg_body = msg_body[1:-1]
 
             ts = m.group("ts")
-            msg_id = extract_message_id(chat, msg_body, ts)
+            # Silent-failures-#3 FIX: include byte offset so same-second identical-text
+            # messages get distinct ids. Collision-free as long as the log doesn't rewind.
+            msg_id = extract_message_id(chat, msg_body, ts, byte_offset=line_start)
 
             if seen.has(msg_id):
                 continue

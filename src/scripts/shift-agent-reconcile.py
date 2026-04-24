@@ -47,9 +47,23 @@ def _alert(message: str, priority: int = 1, title: str = "Reconciler"):
         pass
 
 
+class AttemptLogUnreadable(RuntimeError):
+    """Raised when decisions.log cannot be scanned. Reconciler MUST NOT proceed —
+    returning False would misclassify previously-attempted sends as "no attempt"
+    and trigger duplicate WhatsApps."""
+
+
 def _proposal_has_attempt_in_log(proposal_id: str) -> bool:
-    """Scan decisions.log for OutboundAttempted with this proposal_id.
-    O(n) scan; acceptable at boot for our log volume."""
+    """Scan decisions.log for OutboundAttempted/OutboundSent with this proposal_id.
+
+    Silent-failures-#11 FIX: previous version caught OSError with pass and returned
+    False. If decisions.log was momentarily inaccessible at boot, reconciler would
+    classify every previously-attempted send as "no prior attempt" and retry them
+    — duplicate WhatsApps to candidates. Now raises AttemptLogUnreadable; caller
+    must refuse to reconcile and alert owner.
+
+    O(n) per call; main() collects attempted-pids in a single pass for efficiency.
+    """
     if not LOG_PATH.exists():
         return False
     try:
@@ -59,12 +73,11 @@ def _proposal_has_attempt_in_log(proposal_id: str) -> bool:
                     entry = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if entry.get("type") == "outbound_attempted" and entry.get("proposal_id") == proposal_id:
+                if entry.get("type") in ("outbound_attempted", "outbound_sent") \
+                        and entry.get("proposal_id") == proposal_id:
                     return True
-                if entry.get("type") == "outbound_sent" and entry.get("proposal_id") == proposal_id:
-                    return True
-    except OSError:
-        pass
+    except OSError as e:
+        raise AttemptLogUnreadable(f"cannot scan {LOG_PATH}: {e}") from e
     return False
 
 
@@ -97,7 +110,19 @@ def main():
                 if age > timedelta(minutes=RECONCILING_MAX_AGE_MIN):
                     stuck_reconciling.append(pid)
             elif prop.status == "approved":
-                if _proposal_has_attempt_in_log(pid):
+                try:
+                    has_attempt = _proposal_has_attempt_in_log(pid)
+                except AttemptLogUnreadable as e:
+                    # Silent-failures-#11 FIX: refuse to reconcile when we can't
+                    # verify prior attempts. Safer than risking a duplicate send.
+                    _alert(
+                        f"Reconciler refusing to process {pid}: decisions.log unreadable ({e}). "
+                        "Fix log access then manually retry or disable the proposal.",
+                        priority=2,
+                    )
+                    print(f"SKIP {pid}: {e}")
+                    continue
+                if has_attempt:
                     approved_attempted_but_uncertain.append(pid)
                 else:
                     approved_needing_send.append(pid)
@@ -142,7 +167,21 @@ def main():
                     priority=1,
                 )
         except subprocess.TimeoutExpired:
-            _alert(f"Reconciler: send-coverage-message {pid} timed out", priority=2)
+            # Silent-failures-#12 FIX: transition proposal to send_failed on timeout.
+            # Leaving status=approved caused a boot-loop: next boot → try → timeout
+            # → alert → repeat indefinitely. Now the proposal becomes terminal
+            # (send_failed) until owner sends RETRY #CODE.
+            _alert(f"Reconciler: send-coverage-message {pid} timed out; marking send_failed. Owner can RETRY after investigating.", priority=2)
+            try:
+                subprocess.run([
+                    "/usr/local/bin/update-proposal-status", pid, "send_failed",
+                    "--cause", "reconciler_timeout",
+                    "--actor", "reconciler",
+                    "--last-error", "reconciler_subprocess_timeout_60s",
+                    "--retry-count", "0",
+                ], check=False, timeout=15)
+            except Exception as e:
+                _alert(f"Reconciler: additionally failed to mark {pid} send_failed: {e}", priority=2)
 
     if not (stuck_reconciling or approved_attempted_but_uncertain or approved_needing_send):
         print("Reconciler: nothing to do")
