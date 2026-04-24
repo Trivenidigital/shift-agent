@@ -1,6 +1,0 @@
-│ dispatch_shift_agent        │                      │ local   │ local   │
-│ handle_candidate_response   │                      │ local   │ local   │
-│ handle_owner_command        │                      │ local   │ local   │
-│ handle_sick_call            │                      │ local   │ local   │
-│ roster_lookup               │                      │ local   │ local   │
-0 hub-installed, 68 builtin, 5 local

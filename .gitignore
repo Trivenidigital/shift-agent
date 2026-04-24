@@ -43,3 +43,6 @@ __pycache__/
 .DS_Store
 Thumbs.db
 _user-notes/
+.deploy_*.txt
+.smoke_test.txt
+.local_skills.txt
