@@ -25,6 +25,13 @@ Flow (see DESIGN v2 §6.2):
 Usage:
   send-coverage-message P0042
 
+Environment:
+  SHIFT_AGENT_DRY_RUN=1  — suppress actual bridge POST; return synthetic success
+                           with msg_id prefixed "DRY-RUN-". All state transitions,
+                           counter logic, flock, template render, and NDJSON audit
+                           entries still execute. Use for staging E2E without
+                           messaging real phones.
+
 Exit codes:
   0 — sent
   2 — agent disabled
@@ -78,10 +85,22 @@ DISABLED_FLAG = Path("/opt/shift-agent/state/disabled.flag")
 
 BRIDGE_SEND_URL = "http://127.0.0.1:3000/send"
 
+# Priority-4: staging dry-run. When set truthy, skip the actual bridge POST
+# and return synthetic success. All state transitions, counter logic, locks,
+# and NDJSON audit entries still run — only the outbound WhatsApp send is
+# suppressed. The resulting outbound_message_id is prefixed "DRY-RUN-" so
+# reconciler, backups, and humans can distinguish these entries from real sends.
+DRY_RUN = os.environ.get("SHIFT_AGENT_DRY_RUN", "").strip().lower() in ("1", "true", "yes", "on")
+
 
 def bridge_post(jid: str, text: str, timeout: int = 15) -> tuple[bool, str]:
-    """POST to bridge. Returns (ok, detail)."""
-    data = json.dumps({"jid": jid, "text": text}).encode()
+    """POST to bridge. Returns (ok, detail).
+
+    Bridge contract (from hermes-agent/scripts/whatsapp-bridge/bridge.js):
+        POST /send { chatId, message, replyTo? }
+    Wrong field names (jid/text) yield HTTP 400 'chatId and message are required'.
+    """
+    data = json.dumps({"chatId": jid, "message": text}).encode()
     req = urllib.request.Request(
         BRIDGE_SEND_URL, data=data,
         headers={"Content-Type": "application/json"},
@@ -160,6 +179,12 @@ def main():
     args = ap.parse_args()
     pid = args.proposal_id
 
+    if DRY_RUN:
+        print(
+            f"DRY-RUN: SHIFT_AGENT_DRY_RUN set — bridge POST will be suppressed for {pid}",
+            file=sys.stderr,
+        )
+
     assert_local_disk(Path("/opt/shift-agent/state"))
 
     # Load config
@@ -201,9 +226,12 @@ def main():
             return EXIT_NOT_FOUND
 
         # Transition approved → reconciling (holds the lock for concurrent senders)
+        # Drop "status" from the dump — it's a Literal discriminator on every
+        # variant, so spreading it would collide with the explicit status= kwarg
+        # and raise TypeError('multiple values for status').
         reconciling = ReconcilingProposal(
             **{k: v for k, v in proposal.model_dump(mode="json").items()
-               if k in ReconcilingProposal.model_fields},
+               if k in ReconcilingProposal.model_fields and k != "status"},
             status="reconciling",
             reconciling_started_ts=now,
             reconciling_pid=os.getpid(),
@@ -307,11 +335,19 @@ def main():
     # Resolve JID for WA send (phone → JID format the bridge expects)
     candidate_jid = candidate.phone.lstrip("+") + "@s.whatsapp.net"
 
-    # POST, retry once
-    ok, detail = bridge_post(candidate_jid, rendered, timeout=15)
-    if not ok:
-        time.sleep(5)
+    # POST, retry once — or short-circuit if SHIFT_AGENT_DRY_RUN is set
+    if DRY_RUN:
+        ok, detail = True, f"DRY-RUN-{secrets.token_hex(6)}"
+        print(
+            f"DRY-RUN: suppressed bridge POST to {candidate_jid} "
+            f"(rendered {len(rendered)} chars). Synthetic msg_id={detail}",
+            file=sys.stderr,
+        )
+    else:
         ok, detail = bridge_post(candidate_jid, rendered, timeout=15)
+        if not ok:
+            time.sleep(5)
+            ok, detail = bridge_post(candidate_jid, rendered, timeout=15)
 
     if not ok:
         # Failed path — P5-FIX: log FIRST, then mutate pending.
@@ -369,7 +405,8 @@ def main():
             f"{pid}: candidate WAS messaged and logged, but pending.json update failed ({state_err}). Run update-proposal-status {pid} sent manually.",
             priority=2,
         )
-    print(f"SENT: {pid} → {candidate.name} ({candidate_jid}); msg_id={outbound_msg_id}")
+    prefix = "SENT [DRY-RUN]" if DRY_RUN else "SENT"
+    print(f"{prefix}: {pid} → {candidate.name} ({candidate_jid}); msg_id={outbound_msg_id}")
     return EXIT_OK
 
 
@@ -382,10 +419,17 @@ def _log_entry(entry):
 
 
 def _revert_to_approved(store, pid, original_proposal, now, cause):
-    """In-memory revert reconciling → approved. Caller must dump_model."""
+    """In-memory revert reconciling → approved. Caller must dump_model.
+
+    Exclude any kwargs passed explicitly below from the spread — if original was
+    already ApprovedProposal (the common path — send-coverage-message only
+    reverts proposals that were 'approved'), its model_dump carries
+    approved_ts/owner_input and they'd collide with the explicit kwargs.
+    """
+    _explicit = {"status", "approved_ts", "owner_input"}
     approved = ApprovedProposal(
         **{k: v for k, v in original_proposal.model_dump(mode="json").items()
-           if k in ApprovedProposal.model_fields},
+           if k in ApprovedProposal.model_fields and k not in _explicit},
         status="approved",
         approved_ts=getattr(original_proposal, "approved_ts", now),
         owner_input=getattr(original_proposal, "owner_input", ""),
@@ -454,7 +498,7 @@ def _mark_failed(pid, original, now, err):
         current = store.proposals[pid]
         failed = SendFailedProposal(
             **{k: v for k, v in current.model_dump(mode="json").items()
-               if k in SendFailedProposal.model_fields},
+               if k in SendFailedProposal.model_fields and k != "status"},
             status="send_failed",
             failed_ts=now,
             last_error=err[:500],
@@ -477,7 +521,7 @@ def _mark_sent(pid, original, now, outbound_msg_id):
         current = store.proposals[pid]
         sent = SentProposal(
             **{k: v for k, v in current.model_dump(mode="json").items()
-               if k in SentProposal.model_fields},
+               if k in SentProposal.model_fields and k != "status"},
             status="sent",
             sent_ts=now,
             outbound_message_id=outbound_msg_id,

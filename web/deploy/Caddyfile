@@ -1,0 +1,31 @@
+# Caddy reverse-proxy for cockpit.<customer-domain>
+# - Auto Let's Encrypt cert
+# - Static SPA at /, FastAPI under /api/*
+# - HSTS + sane TLS
+
+cockpit.example.com {
+    encode zstd gzip
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Frame-Options "DENY"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none';"
+    }
+
+    # API routes (strip /api prefix → backend sees /auth, /roster, etc)
+    handle_path /api/* {
+        reverse_proxy 127.0.0.1:8080 {
+            transport http {
+                # SSE: long-lived; disable read timeout
+                read_timeout 0
+            }
+        }
+    }
+
+    # Static SPA
+    root * /opt/shift-agent/cockpit/static
+    try_files {path} /index.html
+    file_server
+}

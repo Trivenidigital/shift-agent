@@ -38,6 +38,8 @@ pytestmark = pytest.mark.skipif(
 )
 
 PENDING = Path("/opt/shift-agent/state/pending.json")
+DISABLED_FLAG = Path("/opt/shift-agent/state/disabled.flag")
+SEND_COUNTER = Path("/opt/shift-agent/state/send-counter.json")
 
 
 def _run(cmd, **kw):
@@ -55,6 +57,45 @@ def clean_pending():
         PENDING.write_text(backup)
     else:
         PENDING.unlink(missing_ok=True)
+
+
+@pytest.fixture
+def fresh_send_counter():
+    """Snapshot + zero send-counter so cap-bound tests run hermetically.
+
+    Needed by any test that exercises send-coverage-message — including dry-run —
+    because the counter persists across runs and a real day's sends would leave
+    it at cap, causing EXIT_CAP_EXCEEDED for subsequent test invocations.
+    """
+    backup = SEND_COUNTER.read_text() if SEND_COUNTER.exists() else None
+    if SEND_COUNTER.exists():
+        SEND_COUNTER.unlink()
+    try:
+        yield
+    finally:
+        if backup is not None:
+            SEND_COUNTER.write_text(backup)
+
+
+@pytest.fixture
+def temporarily_enabled():
+    """Snapshot + remove disabled.flag for the test window, then restore.
+
+    Lets dry-run tests execute the real enable-path without leaving the VPS
+    permanently enabled after the test. Restore is unconditional (finally) so
+    a crash mid-test still puts the flag back.
+    """
+    backup = DISABLED_FLAG.read_text() if DISABLED_FLAG.exists() else None
+    backup_mode = DISABLED_FLAG.stat().st_mode if DISABLED_FLAG.exists() else None
+    if backup is not None:
+        DISABLED_FLAG.unlink()
+    try:
+        yield
+    finally:
+        if backup is not None:
+            DISABLED_FLAG.write_text(backup)
+            if backup_mode is not None:
+                os.chmod(str(DISABLED_FLAG), backup_mode)
 
 
 def test_full_proposal_lifecycle(clean_pending):
@@ -133,18 +174,23 @@ def test_illegal_transition_rejected(clean_pending):
 
 
 def test_identify_sender_resolves_phase0_roster():
-    """A.2 regression: every Phase 0 employee phone resolves correctly."""
-    for phone, expected in [
-        ("+19045550101", "e001"),
-        ("+1-904-555-0101", "e001"),  # dashed
-        ("19045550101@s.whatsapp.net", "e001"),  # JID
-        ("+19045550104", "e004"),
-    ]:
+    """A.2 regression: every Phase 0 employee phone resolves correctly.
+
+    Reads the live roster.json to avoid breaking when phones are rotated for
+    rehearsals. Only asserts e001 in canonical, dashed, and JID forms — those
+    are stable across config changes.
+    """
+    roster = json.loads(Path("/opt/shift-agent/roster.json").read_text())
+    e001 = next(e for e in roster["employees"] if e["id"] == "e001")
+    e001_phone = e001["phone"]  # e.g., "+19045550101"
+    digits = e001_phone.lstrip("+")
+    dashed = e001_phone[:2] + "-" + e001_phone[2:5] + "-" + e001_phone[5:8] + "-" + e001_phone[8:]
+    for phone in [e001_phone, dashed, f"{digits}@s.whatsapp.net"]:
         r = _run(["/usr/local/bin/identify-sender", phone])
-        assert r.returncode == 0, r.stderr
+        assert r.returncode == 0, f"{phone}: {r.stderr}"
         out = json.loads(r.stdout)
         assert out["role"] == "employee"
-        assert out["employee_id"] == expected
+        assert out["employee_id"] == "e001"
 
 
 def test_identify_sender_exit_2_on_garbage():
@@ -172,3 +218,55 @@ def test_log_decision_rejects_no_type_field():
     """Priority-1 regression: legacy compat path now rejects."""
     r = _run(["/usr/local/bin/log-decision", '{"no_type": "here"}'])
     assert r.returncode == 5
+
+
+def test_dry_run_skips_bridge_but_still_transitions(clean_pending, temporarily_enabled, fresh_send_counter):
+    """Priority-4: SHIFT_AGENT_DRY_RUN=1 suppresses bridge POST, still advances pending."""
+    PENDING.unlink(missing_ok=True)
+
+    # 1. create → approved
+    r = _run([
+        "sudo", "-u", "shift-agent", "/usr/local/bin/create-proposal",
+        "--absent-employee-id", "e001",
+        "--absent-date", "2026-04-25",
+        "--absent-shift", "09:00-17:00",
+        "--absent-role", "cashier",
+        "--absent-reason", "dry-run-test",
+        "--input-message", "dry run",
+        "--message-id", "test-dryrun-001",
+        "--candidate-employee-id", "e004",
+        "--candidate-name", "Anjali Iyer",
+    ])
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    pid = out["proposal_id"]
+    code = out["code"]
+
+    r = _run([
+        "sudo", "-u", "shift-agent", "/usr/local/bin/update-proposal-status",
+        pid, "approved", "--cause", "dry-run-test", "--actor", "owner",
+        "--owner-input", code,
+    ])
+    assert r.returncode == 0, r.stderr
+
+    # 2. send with SHIFT_AGENT_DRY_RUN=1 — must succeed even though bridge is down/disabled
+    r = subprocess.run(
+        [
+            "sudo", "-u", "shift-agent",
+            "env", "SHIFT_AGENT_DRY_RUN=1",
+            "/usr/local/bin/send-coverage-message", pid,
+        ],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 0, f"dry-run send failed: stdout={r.stdout} stderr={r.stderr}"
+    assert "DRY-RUN" in r.stdout, f"expected DRY-RUN marker in stdout: {r.stdout}"
+    assert "DRY-RUN-" in r.stdout, "expected DRY-RUN- prefixed synthetic msg_id"
+
+    # 3. pending advanced to 'sent' and audit log has OutboundSent with DRY-RUN- msg_id
+    with PENDING.open() as f:
+        store = json.load(f)
+    p = store["proposals"][pid]
+    assert p["status"] == "sent", f"expected sent, got {p['status']}"
+    assert p["outbound_message_id"].startswith("DRY-RUN-"), (
+        f"expected DRY-RUN- prefix, got {p['outbound_message_id']}"
+    )
