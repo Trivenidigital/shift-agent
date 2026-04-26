@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
-import { type Section, useSection } from "@/hooks/useSection";
+import { useSection } from "@/hooks/useSection";
 import { cn } from "@/lib/cn";
 
 interface Dashboard {
@@ -27,7 +27,7 @@ export function StickyFooter() {
       <div className="flex items-center gap-3">
         <span className={cn("size-2 rounded-full", allOk ? "bg-green-500" : "bg-red-500")} />
         <span className="text-zinc-700">{allOk ? "All systems healthy" : "Issues detected"}</span>
-        <button onClick={() => setSection<Section>("safety" as Section)} className="ml-2 text-brand-700 hover:underline">
+        <button onClick={() => setSection("safety")} className="ml-2 text-brand-700 hover:underline">
           Safety →
         </button>
       </div>

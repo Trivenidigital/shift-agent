@@ -4,7 +4,7 @@ import { api } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
-import { STATUS_BADGE, type ProposalStatus } from "@/lib/proposalStatus";
+import { STATUS_BADGE, TERMINAL_STATUSES, type ProposalStatus } from "@/lib/proposalStatus";
 import { cn } from "@/lib/cn";
 
 interface ProposalView {
@@ -70,7 +70,7 @@ export function Pending() {
                   created {p.created_ts} · last updated {p.last_updated_ts}
                   {p.outbound_message_id && <> · msg_id={p.outbound_message_id}</>}
                 </div>
-                {!["accepted", "declined", "denied_by_owner", "expired", "cancelled", "no_response_timeout"].includes(p.status) && (
+                {!TERMINAL_STATUSES.has(p.status) && (
                   <CancelButton onCancel={(reason) => cancel.mutate({ id: p.proposal_id, reason })} pending={cancel.isPending} />
                 )}
               </CardContent>

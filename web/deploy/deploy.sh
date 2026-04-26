@@ -45,6 +45,15 @@ ssh "$VPS" 'set -euo pipefail
     # Runtime dir for pair sessions (mode 0700, root-created)
     sudo install -d -o shift-agent -g shift-agent -m 0700 /run/shift-agent
 
+    # Sudoers rule: allow shift-agent to systemctl stop/start hermes-gateway (re-pair flow)
+    # without a password, while keeping rest of root locked down.
+    if ! sudo grep -q "shift-agent.*hermes-gateway" /etc/sudoers.d/shift-agent 2>/dev/null; then
+        echo "shift-agent ALL=(root) NOPASSWD: /usr/bin/systemctl stop hermes-gateway, /usr/bin/systemctl start hermes-gateway, /usr/bin/systemctl restart hermes-gateway" | \
+            sudo tee /etc/sudoers.d/shift-agent > /dev/null
+        sudo chmod 0440 /etc/sudoers.d/shift-agent
+        sudo visudo -c -f /etc/sudoers.d/shift-agent
+    fi
+
     # Systemd
     sudo install -m 0644 /tmp/shift-agent-cockpit.service /etc/systemd/system/shift-agent-cockpit.service
     sudo systemctl daemon-reload

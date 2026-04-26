@@ -53,23 +53,23 @@ class DashboardResponse(BaseModel):
 
 
 class EmployeeIn(BaseModel):
-    id: str
-    name: str
-    nickname: str | None = None
-    role: str
-    phone: str
-    languages: list[str] = Field(default_factory=lambda: ["en"])
-    can_cover_roles: list[str]
+    id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,64}$")
+    name: str = Field(min_length=1, max_length=200)
+    nickname: str | None = Field(default=None, max_length=80)
+    role: str = Field(min_length=1, max_length=80)
+    phone: str = Field(min_length=4, max_length=40)
+    languages: list[str] = Field(default_factory=lambda: ["en"], max_length=10)
+    can_cover_roles: list[str] = Field(max_length=20)
     status: Literal["active", "inactive", "terminated"] = "active"
 
 
 class EmployeePatch(BaseModel):
-    name: str | None = None
-    nickname: str | None = None
-    role: str | None = None
-    phone: str | None = None
-    languages: list[str] | None = None
-    can_cover_roles: list[str] | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    nickname: str | None = Field(default=None, max_length=80)
+    role: str | None = Field(default=None, min_length=1, max_length=80)
+    phone: str | None = Field(default=None, min_length=4, max_length=40)
+    languages: list[str] | None = Field(default=None, max_length=10)
+    can_cover_roles: list[str] | None = Field(default=None, max_length=20)
     status: Literal["active", "inactive", "terminated"] | None = None
 
 
@@ -118,7 +118,7 @@ class ConfigPatch(BaseModel):
     Sensitive paths require fresh OTP.
     """
 
-    fields: dict[str, Any]
+    fields: dict[str, Any] = Field(max_length=20)  # bound to prevent payload-amplification DoS
 
 
 # ─── Safety ────────────────────────────────────────────────────────────
@@ -150,7 +150,7 @@ class PairSessionResponse(BaseModel):
 
 class DisclosureSign(BaseModel):
     disclosure_id: Literal["baileys_tos", "audit_immutability", "employee_notification"]
-    signed_by_name: str
+    signed_by_name: str = Field(min_length=1, max_length=200)
     signed_at: str | None = None  # set server-side
 
 

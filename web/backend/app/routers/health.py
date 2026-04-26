@@ -25,8 +25,12 @@ settings = get_settings()
 
 
 def _gateway_active() -> bool:
+    """Read-only systemctl check via absolute path. is-active doesn't need privilege."""
     try:
-        r = subprocess.run(["systemctl", "is-active", "hermes-gateway"], capture_output=True, text=True, timeout=3)
+        r = subprocess.run(
+            ["/usr/bin/systemctl", "is-active", "hermes-gateway"],
+            capture_output=True, text=True, timeout=3, shell=False,
+        )
         return r.stdout.strip() == "active"
     except Exception:
         return False

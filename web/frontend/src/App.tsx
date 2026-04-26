@@ -28,6 +28,15 @@ export function App() {
       .catch(() => setAuthed(false));
   }, []);
 
+  // Auto-logout 60s before token expires (prevents silent fetch failures)
+  useEffect(() => {
+    if (!me) return;
+    const msUntilExpiry = me.expires_at * 1000 - Date.now() - 60_000;
+    if (msUntilExpiry <= 0) { setAuthed(false); return; }
+    const t = window.setTimeout(() => setAuthed(false), msUntilExpiry);
+    return () => window.clearTimeout(t);
+  }, [me]);
+
   if (authed === null) return <div className="min-h-screen flex items-center justify-center text-zinc-500">Loading…</div>;
   if (!authed) return <LoginScreen onAuthed={() => window.location.reload()} />;
 

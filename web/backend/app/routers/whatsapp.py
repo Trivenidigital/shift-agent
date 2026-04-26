@@ -41,16 +41,19 @@ settings = get_settings()
 # ─── PairSession registry ──────────────────────────────────────────────
 
 
+from pydantic import ConfigDict
+
+
 class PairSession(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     sid: str
     pid: int
     pair_log: Path
+    fout_fd: int  # so _kill_session can close the bridge stdout/stderr handle
     started_at: float
     expires_at: float
     last_client_seen_at: float
-
-    class Config:
-        arbitrary_types_allowed = True
 
 
 _pair_sessions: dict[str, PairSession] = {}
@@ -71,12 +74,17 @@ async def _reap_loop():
 
 
 def _kill_session(sid: str) -> None:
+    """Idempotent — terminate bridge, close fd, unlink scratch file."""
     sess = _pair_sessions.pop(sid, None)
     if sess is None:
         return
     try:
         os.kill(sess.pid, signal.SIGTERM)
     except ProcessLookupError:
+        pass
+    try:
+        os.close(sess.fout_fd)
+    except OSError:
         pass
     sess.pair_log.unlink(missing_ok=True)
 
@@ -141,8 +149,12 @@ async def start_repair(request: Request, _=Depends(require_fresh_otp)):
     pair_log.write_text("")
     pair_log.chmod(0o600)
 
-    # Stop hermes-gateway (which holds the bridge), wipe session, start --pair-only bridge
-    subprocess.run(["systemctl", "stop", "hermes-gateway"], check=False, timeout=10)
+    # Stop hermes-gateway (which holds the bridge), wipe session, start --pair-only bridge.
+    # Sudoers rule provisioned in deploy.sh allows shift-agent → /usr/bin/systemctl stop|start hermes-gateway.
+    subprocess.run(
+        ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "stop", "hermes-gateway"],
+        check=False, timeout=10, shell=False,
+    )
     # Backup + clear session
     ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     bak = settings.hermes_session_dir.parent / f"session.bak-{ts}"
@@ -150,8 +162,14 @@ async def start_repair(request: Request, _=Depends(require_fresh_otp)):
         os.rename(settings.hermes_session_dir, bak)
     settings.hermes_session_dir.mkdir(parents=True, exist_ok=True)
 
+    # Validate bridge paths are within expected dirs (defense-in-depth)
+    if not str(settings.bridge_node_bin).startswith("/root/.hermes/node/"):
+        raise HTTPException(500, "bridge node binary path failed validation")
+    if not str(settings.bridge_js).startswith("/root/.hermes/hermes-agent/"):
+        raise HTTPException(500, "bridge js path failed validation")
+
     # Spawn bridge --pair-only with stdbuf -oL for line-buffered stdout
-    fout = pair_log.open("a")
+    fout_fd = os.open(str(pair_log), os.O_WRONLY | os.O_APPEND)
     proc = subprocess.Popen(
         [
             "/usr/bin/stdbuf",
@@ -167,10 +185,11 @@ async def start_repair(request: Request, _=Depends(require_fresh_otp)):
             "self-chat",
             "--pair-only",
         ],
-        stdout=fout,
-        stderr=fout,
+        stdout=fout_fd,
+        stderr=fout_fd,
         stdin=subprocess.DEVNULL,
         cwd=str(settings.bridge_js.parent),
+        shell=False,
     )
 
     expires_at = time.time() + _PAIR_TTL
@@ -178,6 +197,7 @@ async def start_repair(request: Request, _=Depends(require_fresh_otp)):
         sid=sid,
         pid=proc.pid,
         pair_log=pair_log,
+        fout_fd=fout_fd,
         started_at=time.time(),
         expires_at=expires_at,
         last_client_seen_at=time.time(),
@@ -205,66 +225,69 @@ async def repair_stream(sid: str, request: Request, _=Depends(require_auth)):
 
     async def event_gen():
         last_pos = 0
-        last_qr: str | None = None
         complete = False
-        sess.last_client_seen_at = time.time()
-        while not complete:
-            if await request.is_disconnected():
-                return
+        # qrcode-terminal renders the QR using these unicode block characters.
+        # We forward raw block-art lines as 'qr_line' events so the frontend
+        # can render them as a <pre> ASCII QR (proven to scan in this project's
+        # rehearsal flow). bridge.js does NOT emit the raw Baileys QR string.
+        QR_CHARS = set("▄█▀ ")
+        try:
             sess.last_client_seen_at = time.time()
-            if time.time() > sess.expires_at:
-                yield {"event": "error", "data": json.dumps({"message": "session expired"})}
-                return
-            try:
-                content = sess.pair_log.read_text()
-            except FileNotFoundError:
-                yield {"event": "error", "data": json.dumps({"message": "log gone"})}
-                return
-            new = content[last_pos:]
-            last_pos = len(content)
-            for line in new.splitlines():
-                # Look for QR data (Baileys format: 2@... or similar) — they're inside qrcode-terminal output blocks
-                # qrcode-terminal output isn't the raw QR data string. We need to read connection.update qr field.
-                # For this version, we surface raw lines; client renders QR if line matches pattern.
-                # Better: bridge.js patched to also print raw QR string. Skipping for v1; rely on visual render.
-                if "Pairing complete" in line or "Credentials saved" in line:
-                    # Process complete; read me.id from creds.json and update self_chat_jid
-                    me_id = None
-                    try:
-                        data = json.loads(settings.hermes_creds_json.read_text())
-                        me_id = data.get("me", {}).get("id")
-                    except Exception:
-                        pass
-                    if me_id:
-                        phone = me_id.split(":")[0]
-                        new_jid = f"{phone}@s.whatsapp.net"
+            while not complete:
+                if await request.is_disconnected():
+                    return
+                sess.last_client_seen_at = time.time()
+                if time.time() > sess.expires_at:
+                    yield {"event": "error", "data": json.dumps({"message": "session expired"})}
+                    return
+                try:
+                    content = sess.pair_log.read_text()
+                except FileNotFoundError:
+                    yield {"event": "error", "data": json.dumps({"message": "log gone"})}
+                    return
+                new = content[last_pos:]
+                last_pos = len(content)
+                for line in new.splitlines():
+                    if "Pairing complete" in line or "Credentials saved" in line:
+                        me_id = None
                         try:
-                            cfg = load_config()
-                            cfg.owner.self_chat_jid = new_jid
-                            save_config(cfg)
+                            data = json.loads(settings.hermes_creds_json.read_text())
+                            me_id = data.get("me", {}).get("id")
                         except Exception:
                             pass
-                        yield {
-                            "event": "complete",
-                            "data": json.dumps({"me": me_id, "self_chat_jid": new_jid}),
-                        }
-                    else:
-                        yield {"event": "complete", "data": json.dumps({})}
-                    complete = True
-                    break
-                elif "WhatsApp connected" in line:
-                    yield {"event": "connected", "data": json.dumps({})}
-                elif "stream errored" in line.lower():
-                    yield {"event": "error", "data": json.dumps({"message": line[:200]})}
-                else:
-                    # Forward raw line as a 'log' event so the client can show progress
-                    if line.strip():
+                        if me_id:
+                            phone = me_id.split(":")[0]
+                            new_jid = f"{phone}@s.whatsapp.net"
+                            try:
+                                cfg = load_config()
+                                cfg.owner.self_chat_jid = new_jid
+                                save_config(cfg)
+                            except Exception:
+                                pass
+                            yield {"event": "complete", "data": json.dumps({"me": me_id, "self_chat_jid": new_jid})}
+                        else:
+                            yield {"event": "complete", "data": json.dumps({})}
+                        complete = True
+                        break
+                    elif "WhatsApp connected" in line:
+                        yield {"event": "connected", "data": json.dumps({})}
+                    elif "stream errored" in line.lower():
+                        yield {"event": "error", "data": json.dumps({"message": line[:200]})}
+                    elif line and len(line) >= 30 and all((ch in QR_CHARS) for ch in line):
+                        # ASCII-block QR row — frontend renders as <pre>
+                        yield {"event": "qr_line", "data": line}
+                    elif line.strip():
                         yield {"event": "log", "data": line[:500]}
-            await asyncio.sleep(1)
-        # Cleanup
-        _kill_session(sid)
-        # Restart hermes-gateway with new session
-        subprocess.run(["systemctl", "start", "hermes-gateway"], check=False, timeout=15)
+                await asyncio.sleep(1)
+        finally:
+            # ALWAYS clean up the bridge process + scratch file, even on disconnect/exception.
+            # Closes the security gap where an attacker could observe QR via a re-opened stream
+            # while the original tab was closed.
+            _kill_session(sid)
+            subprocess.run(
+                ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "start", "hermes-gateway"],
+                check=False, timeout=15, shell=False,
+            )
 
     return EventSourceResponse(event_gen())
 
@@ -284,7 +307,10 @@ async def cancel_repair(sid: str, request: Request, _=Depends(require_auth)):
 @router.post("/unlink")
 async def unlink(request: Request, _=Depends(require_fresh_otp)):
     """Wipe the WA session — owner must re-pair."""
-    subprocess.run(["systemctl", "stop", "hermes-gateway"], check=False, timeout=10)
+    subprocess.run(
+        ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "stop", "hermes-gateway"],
+        check=False, timeout=10, shell=False,
+    )
     ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     bak = settings.hermes_session_dir.parent / f"session.unlinked-{ts}"
     if settings.hermes_session_dir.exists():

@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { QRCodeSVG } from "qrcode.react";
 import { api } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -24,45 +23,53 @@ export function WhatsApp() {
   });
 
   const [sid, setSid] = useState<string | null>(null);
-  const [qr, setQr] = useState<string | null>(null);
+  // QR comes as ASCII-block rows from the bridge (qrcode-terminal output).
+  // We render it as <pre>; bridge.js doesn't emit the raw Baileys QR string,
+  // and patching bridge.js is out of scope for this PR.
+  const [qrLines, setQrLines] = useState<string[]>([]);
   const [logLines, setLogLines] = useState<string[]>([]);
   const [done, setDone] = useState(false);
+  const [streamError, setStreamError] = useState<string | null>(null);
   const esRef = useRef<EventSource | null>(null);
 
   const startPair = useMutation({
     mutationFn: () => api.POST<PairSessionResp>("/whatsapp/repair"),
-    onSuccess: (r) => { setSid(r.session_id); setLogLines([]); setQr(null); setDone(false); },
+    onSuccess: (r) => { setSid(r.session_id); setLogLines([]); setQrLines([]); setDone(false); setStreamError(null); },
   });
   const cancelPair = useMutation({
     mutationFn: () => sid ? api.POST(`/whatsapp/repair/${sid}/cancel`) : Promise.resolve(),
-    onSuccess: () => { setSid(null); setQr(null); esRef.current?.close(); },
+    onSuccess: () => { esRef.current?.close(); setSid(null); setQrLines([]); },
   });
   const unlink = useMutation({
     mutationFn: () => api.POST("/whatsapp/unlink"),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["wa-status"] }),
   });
 
-  // SSE wiring
+  // SSE wiring — close immediately on error to prevent default-reconnect listener leaks.
   useEffect(() => {
     if (!sid) return;
     const es = new EventSource(`/api/whatsapp/repair/${sid}/stream`, { withCredentials: true });
     esRef.current = es;
-    es.addEventListener("log", (ev: MessageEvent) => {
-      const line = ev.data;
-      setLogLines((l) => [...l, line]);
-      // Try to extract a QR data string heuristically
-      if (line.length > 50 && /^[0-9A-Za-z+/=,]+$/.test(line)) setQr(line);
+    es.addEventListener("qr_line", (ev: MessageEvent) => {
+      setQrLines((l) => {
+        const next = [...l, ev.data as string];
+        return next.length > 40 ? next.slice(-33) : next;
+      });
     });
+    es.addEventListener("log", (ev: MessageEvent) => setLogLines((l) => [...l, ev.data as string]));
     es.addEventListener("connected", () => setLogLines((l) => [...l, "✓ WhatsApp connected"]));
     es.addEventListener("complete", (ev: MessageEvent) => {
       setDone(true);
-      setQr(null);
+      setQrLines([]);
       try { setLogLines((l) => [...l, `✓ Pairing complete: ${ev.data}`]); } catch {}
       es.close();
       qc.invalidateQueries({ queryKey: ["wa-status"] });
       qc.invalidateQueries({ queryKey: ["config"] });
     });
-    es.addEventListener("error", () => setLogLines((l) => [...l, "✗ stream error"]));
+    es.addEventListener("error", () => {
+      es.close();
+      setStreamError("Stream error — server may be restarting. Cancel and try again.");
+    });
     return () => es.close();
   }, [sid, qc]);
 
@@ -91,14 +98,24 @@ export function WhatsApp() {
           )}
           {sid && !done && (
             <>
-              {qr ? (
+              {qrLines.length >= 25 ? (
                 <div className="flex flex-col items-center gap-2">
-                  <QRCodeSVG value={qr} size={300} level="L" />
-                  <p className="text-xs text-zinc-500">WhatsApp → Settings → Linked Devices → Link a Device → scan</p>
+                  <pre
+                    aria-label="WhatsApp pairing QR code"
+                    className="font-mono whitespace-pre bg-white p-2 border border-zinc-200 rounded select-none"
+                    style={{ fontSize: "10px", lineHeight: "10px" }}
+                  >
+                    {qrLines.join("\n")}
+                  </pre>
+                  <p className="text-xs text-zinc-500 text-center">
+                    WhatsApp → Settings → Linked Devices → Link a Device → scan.
+                    <br />Code regenerates ~every 20s; if it expires, click Cancel and Start re-pair again.
+                  </p>
                 </div>
               ) : (
-                <p className="text-sm text-zinc-500">Waiting for QR…</p>
+                <p className="text-sm text-zinc-500">Waiting for QR ({qrLines.length}/33 rows captured)…</p>
               )}
+              {streamError && <div className="text-xs text-red-700">{streamError}</div>}
               <details className="text-xs">
                 <summary className="cursor-pointer text-zinc-500">Bridge log ({logLines.length} lines)</summary>
                 <pre className="bg-zinc-900 text-zinc-100 p-2 rounded mt-1 overflow-x-auto max-h-40 font-mono text-[10px]">
