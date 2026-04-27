@@ -23,10 +23,17 @@ os.environ.setdefault("COCKPIT_JWT_SECRET", "0" * 64)
 os.environ.setdefault("PUSHOVER_APP_TOKEN", "stub-app-token")
 os.environ.setdefault("PUSHOVER_USER_KEY", "stub-user-key")
 
-# Make `app.*` importable
+# Make `app.*` importable + give the agent's safe_io / schemas the same
+# path-injection treatment as conftest.py (so dump-openapi.py works on a
+# fresh clone without /opt/shift-agent existing).
 HERE = Path(__file__).resolve().parent
 BACKEND_ROOT = HERE.parent
+PROJECT_ROOT = BACKEND_ROOT.parent.parent  # SME-Agents/
+SRC = PROJECT_ROOT / "src"
+
 sys.path.insert(0, str(BACKEND_ROOT))
+if SRC.is_dir():
+    sys.path.insert(0, str(SRC))
 
 from app.main import app  # noqa: E402
 
