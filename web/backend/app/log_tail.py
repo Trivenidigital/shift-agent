@@ -9,7 +9,6 @@ add it when telemetry shows real latency. KISS.
 """
 from __future__ import annotations
 
-import io
 import json
 from pathlib import Path
 from typing import Iterator

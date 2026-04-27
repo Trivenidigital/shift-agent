@@ -14,16 +14,16 @@ import signal
 import subprocess
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sse_starlette.sse import EventSourceResponse
 
 from ..audit import log as audit_log
-from ..auth import require_auth, require_fresh_otp, require_fresh_pushover_otp
+from ..auth import require_auth, require_fresh_pushover_otp
 from ..config import get_settings
 from ..deps import client_ip, client_ua
 from ..models import PairSessionResponse, WhatsAppStatus
@@ -32,16 +32,12 @@ from ..state import load_config, save_config
 _AGENT_ROOT = Path("/opt/shift-agent")
 if str(_AGENT_ROOT) not in sys.path:
     sys.path.insert(0, str(_AGENT_ROOT))
-import safe_io  # noqa: E402
 
 router = APIRouter(prefix="/whatsapp", tags=["whatsapp"])
 settings = get_settings()
 
 
 # ─── PairSession registry ──────────────────────────────────────────────
-
-
-from pydantic import ConfigDict
 
 
 class PairSession(BaseModel):

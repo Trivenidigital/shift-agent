@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from ..audit import log as audit_log
 from ..auth import require_auth
 from ..deps import client_ip, client_ua
-from ..models import ScheduleDayPut, ScheduleEntryIn
+from ..models import ScheduleDayPut
 from ..state import load_roster, roster_session
 
 _AGENT_ROOT = Path("/opt/shift-agent")

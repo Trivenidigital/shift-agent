@@ -1,7 +1,6 @@
 """CSV import formula-injection guard + UnicodeDecodeError handling (BL-144)."""
 from __future__ import annotations
 
-import io
 
 import pytest
 
@@ -18,7 +17,6 @@ def _make_csv(rows: list[dict]) -> str:
 
 def test_formula_prefix_rejected():
     """Each forbidden cell prefix must trigger 422."""
-    from fastapi import HTTPException
 
     from app.routers.roster import _FORMULA_PREFIXES
 

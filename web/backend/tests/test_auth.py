@@ -4,11 +4,8 @@ Uses temp filesystem; doesn't actually call Pushover.
 """
 from __future__ import annotations
 
-import asyncio
 import time
-from pathlib import Path
 
-import pytest
 
 # Patch settings BEFORE importing auth
 def test_jwt_round_trip(monkeypatch, tmp_path):

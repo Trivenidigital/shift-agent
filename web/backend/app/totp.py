@@ -28,7 +28,7 @@ from typing import Any
 
 import pyotp
 import qrcode
-from fastapi import HTTPException, status
+from fastapi import HTTPException
 
 from .config import get_settings
 

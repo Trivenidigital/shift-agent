@@ -1,7 +1,6 @@
 """API I/O models — request bodies, response shapes."""
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field

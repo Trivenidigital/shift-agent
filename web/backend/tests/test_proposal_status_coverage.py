@@ -5,7 +5,6 @@ proposalStatus.ts to update or the backend to translate.
 """
 from __future__ import annotations
 
-import json
 import re
 import sys
 from pathlib import Path

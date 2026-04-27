@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ..audit import log as audit_log
-from ..auth import require_auth, require_fresh_otp, require_fresh_pushover_otp
+from ..auth import require_auth, require_fresh_pushover_otp
 from ..config import get_settings
 from ..deps import client_ip, client_ua
 from ..models import ConfigPatch

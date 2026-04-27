@@ -21,7 +21,6 @@ from ..auth import (
     issue_otp,
     mint_jwt,
     require_auth,
-    require_fresh_otp,
     require_fresh_pushover_otp,
     verify_otp,
 )
