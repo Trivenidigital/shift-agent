@@ -10,7 +10,7 @@ Group=shift-agent
 Environment=HOME=/opt/shift-agent
 EnvironmentFile=/opt/shift-agent/.env
 WorkingDirectory=/opt/shift-agent/cockpit/backend
-ExecStart=/opt/shift-agent/cockpit/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8080
+ExecStart=/opt/shift-agent/cockpit/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8081
 Restart=on-failure
 RestartSec=10
 StandardOutput=append:/opt/shift-agent/logs/cockpit.log

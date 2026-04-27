@@ -98,7 +98,7 @@ fi
 # 4. Health probe
 sleep 2
 for i in 1 2 3 4 5; do
-    if /usr/bin/curl -sf -o /dev/null --max-time 2 http://127.0.0.1:8080/health; then
+    if /usr/bin/curl -sf -o /dev/null --max-time 2 http://127.0.0.1:8081/health; then
         log "/health green after restart (attempt $i)"
         log "OK: rotation complete; owner must re-login (all prior sessions invalidated)"
         exit 0

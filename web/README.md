@@ -18,15 +18,15 @@ web/
 cd web/backend
 python -m venv .venv
 .venv/bin/pip install -e '.[dev]'
-.venv/bin/uvicorn app.main:app --reload --port 8080
+.venv/bin/uvicorn app.main:app --reload --port 8081
 ```
 
 ```bash
 # Frontend
 cd web/frontend
 npm install
-npm run generate:types   # requires backend running on :8080
-npm run dev              # → http://localhost:5173 (proxies /api/* → :8080)
+npm run generate:types   # requires backend running on :8081
+npm run dev              # → http://localhost:5173 (proxies /api/* → :8081)
 ```
 
 ## Deploy
