@@ -19,7 +19,7 @@ from ..state import load_roster, roster_session
 _AGENT_ROOT = Path("/opt/shift-agent")
 if str(_AGENT_ROOT) not in sys.path:
     sys.path.insert(0, str(_AGENT_ROOT))
-from schemas import Employee, PhoneHistoryEntry  # noqa: E402
+from schemas import Employee, PhoneAssignment  # noqa: E402
 
 router = APIRouter(prefix="/roster", tags=["roster"])
 
@@ -67,7 +67,7 @@ async def patch_employee(
             now = datetime.now(timezone.utc).isoformat()
             history = list(emp.phone_history or [])
             history.append(
-                PhoneHistoryEntry(
+                PhoneAssignment(
                     phone=emp.phone,
                     effective_from=getattr(emp, "phone_set_ts", None) or emp.created_ts or now,
                     effective_to=now,
