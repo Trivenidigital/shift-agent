@@ -215,7 +215,15 @@ class CustomerConfig(BaseModel):
 
 class BackupConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    # Email is informational only — humans use it to recall whose key. The actual
+    # encryption recipient is gpg_fingerprint (full 40 hex chars). Email-based
+    # recipient resolution is rogue-key vulnerable (SKS-style substitution).
     gpg_recipient_email: str
+    gpg_fingerprint: str = Field(
+        default="",
+        pattern=r"^([0-9A-Fa-f]{40})?$",
+        description="Full 40-char GPG primary-key fingerprint (uppercase or lowercase hex). Required for backups to encrypt; empty disables nightly backup.",
+    )
     s3_bucket: str = ""
     retention_days: int = 30
 

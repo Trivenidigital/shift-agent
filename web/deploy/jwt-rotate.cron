@@ -1,0 +1,11 @@
+# Monthly JWT secret rotation for shift-agent-cockpit.
+# Drop in /etc/cron.d/shift-agent-jwt-rotate (root-readable, mode 0644).
+#
+#  ┌─ minute (0)
+#  │  ┌─ hour (3 = 03:00 server time)
+#  │  │ ┌─ day-of-month (1)
+#  │  │ │ ┌─ month (every)
+#  │  │ │ │ ┌─ day-of-week (any)
+#  │  │ │ │ │ ┌─ user
+#  │  │ │ │ │ │       ┌─ command
+0  3 1 * * root /opt/shift-agent/cockpit/rotate-jwt-secret.sh >> /opt/shift-agent/logs/jwt-rotate.log 2>&1

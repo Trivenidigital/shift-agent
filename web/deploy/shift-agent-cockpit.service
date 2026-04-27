@@ -1,0 +1,29 @@
+[Unit]
+Description=Shift Agent Cockpit — owner-facing FastAPI admin
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=shift-agent
+Group=shift-agent
+Environment=HOME=/opt/shift-agent
+EnvironmentFile=/opt/shift-agent/.env
+WorkingDirectory=/opt/shift-agent/cockpit/backend
+ExecStart=/opt/shift-agent/cockpit/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8080
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/opt/shift-agent/logs/cockpit.log
+StandardError=append:/opt/shift-agent/logs/cockpit.log
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/shift-agent /run/shift-agent
+ProtectHome=read-only
+PrivateTmp=true
+RuntimeDirectory=shift-agent
+RuntimeDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target
