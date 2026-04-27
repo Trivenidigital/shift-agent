@@ -17,39 +17,36 @@ def _make_csv(rows: list[dict]) -> str:
 
 def test_formula_prefix_rejected():
     """Each forbidden cell prefix must trigger 422."""
-
     from app.routers.roster import _FORMULA_PREFIXES
 
     assert _FORMULA_PREFIXES == frozenset({"=", "+", "-", "@", "\t"})
 
 
 def test_decode_error_returns_422_not_500():
-    """Non-UTF-8 file should raise HTTPException(422), not let UnicodeDecodeError surface."""
-    # Latin-1 "café" — invalid as UTF-8
+    """Non-UTF-8 file → UnicodeDecodeError; the router catches and returns 422."""
     bad_bytes = "name,phone\ncafé,+12345678901\n".encode("latin-1")
     with pytest.raises(UnicodeDecodeError):
         bad_bytes.decode("utf-8-sig")
-    # The router catches this; this test confirms our assumption that the bytes
-    # actually fail UTF-8 decode.
 
 
-def test_csv_round_trip_via_module_constants():
-    """Exercise the row-parser path with a clean CSV, expecting NO formula
-    rejections. We don't run the full FastAPI handler here (that's an
-    integration test); we just validate the prefix-check logic works on
-    realistic data."""
-    csv = _make_csv([
-        {"id": "e001", "name": "Ravi Kumar", "role": "cashier",
-         "phone": "+19045550101", "can_cover_roles": "cashier|floor"},
-    ])
-    # Verify no row contains a forbidden prefix
-    rows = csv.strip().split("\n")[1:]  # skip header
-    from app.routers.roster import _FORMULA_PREFIXES
+def test_csv_round_trip_phone_with_plus_allowed():
+    """E.164 phone in 'phone' column starts with '+' — must be ALLOWED.
 
-    for row in rows:
-        for cell in row.split(","):
-            stripped = cell.lstrip()
-            assert not stripped or stripped[:1] not in _FORMULA_PREFIXES
+    Phone columns are special-cased; only `+digits-with-separators` is
+    permitted. `+SUM(...)` style expressions still rejected.
+    """
+    from app.routers.roster import _looks_like_e164_phone
+
+    # Real phone numbers
+    assert _looks_like_e164_phone("+19045550101")
+    assert _looks_like_e164_phone("+1-904-555-0101")
+    assert _looks_like_e164_phone("+1 (904) 555-0101")
+
+    # Excel formulas masquerading as phones
+    assert not _looks_like_e164_phone("+SUM(A1)")
+    assert not _looks_like_e164_phone("+CMD|/c calc.exe")
+    assert not _looks_like_e164_phone("+")
+    assert not _looks_like_e164_phone("+ABC")
 
 
 def test_explicit_formula_prefix_in_cell():

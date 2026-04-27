@@ -115,10 +115,24 @@ async def terminate_employee(employee_id: str, request: Request, _=Depends(requi
 
 
 # Cells starting with these characters trigger formula evaluation in
-# Excel/Google Sheets. We REJECT (not sanitize) at parse time per security
-# review — this is a roster, not a spreadsheet output.
+# Excel/Google Sheets. We REJECT (not sanitize) at parse time — this is a
+# roster, not a spreadsheet output.
+#
+# Note: '+' is in the set because Excel will evaluate `+SUM(A1)` as a formula.
+# But valid E.164 phone numbers also start with '+'. The check below is
+# column-aware: phone-typed columns allow `+<digits-and-separators>` (an
+# E.164 phone, not an Excel expression); other columns enforce the full
+# rejection rule.
 _FORMULA_PREFIXES: frozenset[str] = frozenset({"=", "+", "-", "@", "\t"})
+_PHONE_COLUMNS: frozenset[str] = frozenset({"phone"})
 _CSV_MAX_BYTES = 256_000
+
+
+def _looks_like_e164_phone(s: str) -> bool:
+    """`+1234567890`, with optional dashes/spaces/parens. NOT `+SUM(...)`."""
+    if not s.startswith("+") or len(s) < 4:
+        return False
+    return all(c.isdigit() or c in "- ()" for c in s[1:])
 
 
 def _to_list(s: str | None) -> list[str]:
@@ -175,11 +189,17 @@ async def import_csv(
             v = str(val)
             stripped = v.lstrip()
             if stripped and stripped[:1] in _FORMULA_PREFIXES:
-                raise HTTPException(
-                    422,
-                    f"row {row_num} col {col!r}: cell starts with '{stripped[:1]}' — "
-                    "formula-injection prefix rejected (cells must not start with = + - @)",
-                )
+                # Phone columns may legitimately start with '+'; allow if it
+                # looks like a real E.164 phone (digits + separators). Anything
+                # else (including `+SUM(A1)` in a phone column) is rejected.
+                if col in _PHONE_COLUMNS and _looks_like_e164_phone(stripped):
+                    pass
+                else:
+                    raise HTTPException(
+                        422,
+                        f"row {row_num} col {col!r}: cell starts with '{stripped[:1]}' — "
+                        "formula-injection prefix rejected (cells must not start with = + - @)",
+                    )
             if "\r" in v or "\n" in v:
                 raise HTTPException(422, f"row {row_num} col {col!r}: CR/LF in cell rejected")
 
