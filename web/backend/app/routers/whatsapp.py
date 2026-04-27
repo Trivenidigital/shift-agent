@@ -306,9 +306,14 @@ async def cancel_repair(sid: str, request: Request, _=Depends(require_auth)):
 
 @router.post("/unlink")
 async def unlink(request: Request, _=Depends(require_fresh_pushover_otp)):
-    """Wipe the WA session — Pushover-only sensitive (TOTP-compromised attacker
-    must NOT be able to unlink the owner's WhatsApp; that's the channel the
-    legitimate owner uses to receive Pushover OTPs in the first place).
+    """Wipe the WA session — Pushover-only sensitive.
+
+    Pushover OTP is delivered via api.pushover.net (NOT WhatsApp), so unlinking
+    does not directly break the OTP channel. The gate exists because (a) unlinking
+    bricks the agent's primary outbound channel for sick-call coverage messages,
+    and (b) recovery requires re-pairing, which is itself a Pushover-gated flow
+    (`/whatsapp/repair`). A TOTP-compromised attacker must not be able to chain
+    unlink → re-pair to attacker-controlled hardware.
 
     Owner must re-pair after unlink.
     """

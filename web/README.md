@@ -37,6 +37,31 @@ bash web/deploy/deploy.sh main-vps
 
 Idempotent. After first run, edit `/etc/caddy/Caddyfile.cockpit` to point at your real domain, then `sudo systemctl reload caddy`.
 
+### Upgrading from a pre-`auth_method` cockpit (one-time)
+
+Cockpit JWTs now carry an `auth_method` claim (`pushover` | `totp`). Sessions minted by the old version lack this claim, which means **all five Pushover-gated routes will 403 even for the legitimate owner** (`/auth/totp/disable`, `/auth/totp/enroll-start`, `/config/sensitive`, `/whatsapp/repair`, `/whatsapp/unlink`).
+
+After the deploy:
+
+```bash
+# Force all sessions to invalidate by rotating the JWT secret. Owner re-logs in
+# via Pushover OTP afterwards (which mints a JWT with auth_method='pushover').
+sudo bash /opt/shift-agent/cockpit/rotate-jwt-secret.sh
+```
+
+The rotation script's `/health` probe + `--wait` already verify the cockpit comes back up. Owner sees a "session expired" prompt on next click and re-logs in — that's normal post-rotation behavior.
+
+### Recovering when both factors fail
+
+If Pushover delivery is broken AND TOTP is enrolled but the device is lost:
+
+1. SSH to VPS as `shift-agent`.
+2. `sudo /usr/local/bin/shift-agent-disable "factor_recovery"` → halts outbound while you fix auth.
+3. Edit `/opt/shift-agent/config.yaml` to set fresh Pushover credentials, OR
+4. Delete `/opt/shift-agent/state/cockpit-totp-secret.json` to wipe TOTP enrollment.
+5. `sudo /usr/local/bin/shift-agent-enable "factor_recovery"`.
+6. Log in via the now-working factor.
+
 ## Auth
 
 Login is via **Pushover OTP** to the owner phone configured in `/opt/shift-agent/config.yaml`. The owner installs Pushover on their phone and uses the same user_key + app_token configured for the agent. There is no user registration — only the configured owner phone can receive OTPs.

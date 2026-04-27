@@ -1,7 +1,7 @@
 """Subprocess wrapper — strict allow-list, no shell, sanitized args.
 
-This is the ONLY place in the cockpit backend that spawns processes.
-All routers import `run_cli` here.
+This is the cockpit backend's only path for spawning CLI binaries.
+All routers MUST import `run_cli` here for any user-input-derived process call.
 
 Defenses (per design v1.1):
 - Allow-list of absolute paths. Anything else raises ValueError.
@@ -9,6 +9,16 @@ Defenses (per design v1.1):
 - Args must be strings. No content evaluation.
 - User-supplied positional args MUST be passed after a `--` terminator
   to prevent flag-injection (e.g., `--actor=evil`).
+
+Documented exceptions (do NOT add to this list without review):
+- `app.audit.verify_append_only`: read-only `lsattr` invocation on a fixed
+  path at startup. Diagnostic only; takes no user input. Lives outside
+  this module because it predates `run_cli` and the binary is OS-internal
+  rather than a project CLI.
+- `app.routers.whatsapp.{start_repair,unlink}`: `systemctl` calls with
+  fixed args (no user input) plus the bridge `Popen` with validated
+  config-derived paths. Documented in those handlers.
+- `app.routers.health._gateway_active`: read-only `systemctl is-active`.
 """
 from __future__ import annotations
 

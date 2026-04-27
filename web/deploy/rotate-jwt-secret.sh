@@ -7,6 +7,13 @@
 # Usage (manual):  sudo bash /opt/shift-agent/cockpit/rotate-jwt-secret.sh
 # Usage (cron):    0 3 1 * * /opt/shift-agent/cockpit/rotate-jwt-secret.sh >> /opt/shift-agent/logs/jwt-rotate.log 2>&1
 #
+# Side effects: ALL existing JWT cookies become unverifiable; the next request
+# from any logged-in browser returns 401, the SPA redirects to LoginScreen, and
+# the owner re-authenticates via Pushover OTP (the only login factor that
+# produces auth_method='pushover'-claim JWTs needed for sensitive routes).
+# This is intentional — rotation is also the recommended forced-re-login on
+# upgrade from a pre-auth_method-claim cockpit (see web/README.md).
+#
 # Exit codes:
 #   0 — rotation succeeded, /health green
 #   1 — write failed (no service change), or restart failed and rollback succeeded

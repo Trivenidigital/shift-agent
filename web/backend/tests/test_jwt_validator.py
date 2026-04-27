@@ -15,11 +15,15 @@ import pytest
 
 @contextmanager
 def reload_config_with(monkeypatch, **env_overrides):
-    """Apply env vars + reload config; restore + reload on exit."""
-    # Store originals so we can fully restore
-    originals: dict[str, str | None] = {}
+    """Apply env vars + reload config; restore module to sane defaults on exit.
+
+    `monkeypatch` itself handles env-var restoration when the test exits its
+    fixture scope. This helper's only job beyond that is to reload the
+    `app.config` module twice — once to pick up the test's env, and once
+    after the test to put the module back in known-good state for downstream
+    tests (config.py reads env at import time).
+    """
     for k, v in env_overrides.items():
-        originals[k] = monkeypatch.getenv(k) if hasattr(monkeypatch, "getenv") else None
         monkeypatch.setenv(k, v)
 
     from app import config as cfg_mod
@@ -28,8 +32,6 @@ def reload_config_with(monkeypatch, **env_overrides):
     try:
         yield cfg_mod
     finally:
-        # Restore — monkeypatch's own teardown handles env vars; we just need
-        # to put the module back in a sane state for downstream tests.
         monkeypatch.setenv("COCKPIT_TEST_MODE", "1")
         monkeypatch.setenv("COCKPIT_JWT_SECRET", "0" * 64)
         importlib.reload(cfg_mod)
