@@ -208,11 +208,13 @@ async def verify_otp(token: str, code: str, ip: str, ua: str) -> str:
                 audit_event = "auth.otp.verify_success"
                 audit_details["owner"] = rec.issued_to
     finally:
-        # Wall-time floor — sleep difference
+        # Audit write is inside the timed window — disk-pressure variance on
+        # the audit append should NOT differentiate happy/sad paths to a remote
+        # observer. Equalize timing AFTER audit, just before raise.
+        audit_log(audit_event, ip=ip, ua=ua, details=audit_details)
         elapsed = _now() - started
         if elapsed < settings.otp_verify_min_wall_seconds:
             await asyncio.sleep(settings.otp_verify_min_wall_seconds - elapsed)
-        audit_log(audit_event, ip=ip, ua=ua, details=audit_details)
 
     if jwt_token is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired code")
