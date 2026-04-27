@@ -31,32 +31,43 @@ import yaml
 with open('$CONFIG') as f:
     cfg = yaml.safe_load(f) or {}
 backup = cfg.get('backup', {}) or {}
+print(f'GPG_FPR={backup.get(\"gpg_fingerprint\", \"\")!r}')
 print(f'GPG_RECIPIENT={backup.get(\"gpg_recipient_email\", \"\")!r}')
 print(f'RETENTION_DAYS={backup.get(\"retention_days\", 30)}')
 print(f'S3_BUCKET={backup.get(\"s3_bucket\", \"\")!r}')
 ")"
 
-if [ -z "${GPG_RECIPIENT:-}" ]; then
-    echo "ERROR: gpg_recipient_email not configured in $CONFIG" >&2
+# Priority-1: require FULL 40-character GPG fingerprint, not email or short ID.
+# Short 16-char IDs are trivially collision-attackable (evil32 SKS attack 2019).
+# Email matching is rogue-key vulnerable if attacker imports a key with same email.
+if [ -z "${GPG_FPR:-}" ]; then
+    echo "ERROR: backup.gpg_fingerprint not configured in $CONFIG (must be 40 hex chars)" >&2
     /usr/local/bin/shift-agent-notify-owner \
         --title "Backup misconfigured" \
         --priority 1 \
-        "Nightly backup skipped: gpg_recipient_email not set in config.yaml"
+        "Nightly backup skipped: backup.gpg_fingerprint missing from config.yaml. Set the full 40-char GPG fingerprint."
     exit 1
 fi
 
-# ─── GPG key-presence precheck (replaces --trust-model always) ───
-# A rogue key with the same email in the keyring would be silently used
-# under --trust-model always. We now:
-#   1. Require the key to be present.
-#   2. Use default trust model (pgp). If key isn't trusted, gpg will warn
-#      but proceed with interactive=no; we fail-loud on gpg non-zero.
-if ! gpg --list-keys --with-colons "$GPG_RECIPIENT" 2>/dev/null | grep -q '^pub:'; then
-    echo "ERROR: GPG key for '$GPG_RECIPIENT' not in keyring" >&2
+if ! [[ "$GPG_FPR" =~ ^[0-9A-Fa-f]{40}$ ]]; then
+    echo "ERROR: backup.gpg_fingerprint must be exactly 40 hex chars; got: $GPG_FPR" >&2
     /usr/local/bin/shift-agent-notify-owner \
         --title "Backup misconfigured" \
         --priority 1 \
-        "Nightly backup skipped: GPG key for $GPG_RECIPIENT not imported. Run 'gpg --import <pubkey>'."
+        "Nightly backup skipped: backup.gpg_fingerprint is not a valid full fingerprint. Expected 40 hex chars."
+    exit 1
+fi
+
+# ─── GPG key-presence precheck (using full fingerprint) ───
+# Use --with-colons + grep on the full fingerprint line (fpr:) to avoid
+# matching a rogue key with the same short ID. The fingerprint is canonical.
+if ! gpg --list-keys --with-colons "0x${GPG_FPR}" 2>/dev/null \
+        | awk -F: '$1=="fpr"{print $10}' | grep -qi "^${GPG_FPR}\$"; then
+    echo "ERROR: GPG key with fingerprint $GPG_FPR not in keyring" >&2
+    /usr/local/bin/shift-agent-notify-owner \
+        --title "Backup misconfigured" \
+        --priority 1 \
+        "Nightly backup skipped: GPG key fingerprint $GPG_FPR not imported. Run 'gpg --import <pubkey>'."
     exit 1
 fi
 
@@ -140,16 +151,19 @@ if [ "${#MISSING[@]}" -gt 0 ]; then
     exit 1
 fi
 
-# ─── Encrypt with gpg (default trust-model; key presence already checked) ───
-if ! gpg --batch --yes \
-         --recipient "$GPG_RECIPIENT" \
+# ─── Encrypt with gpg (full-fingerprint pin + trust-model direct) ───
+# --recipient with a 0x<40-char> fingerprint is unambiguous: no email lookup,
+# no SKS-style key-substitution risk. --trust-model direct accepts the named
+# key without requiring it to be signed by ultimately-trusted keys.
+if ! gpg --batch --yes --no-default-keyring --trust-model direct \
+         --recipient "0x${GPG_FPR}" \
          --output "$GPG_PATH" \
          --encrypt "$TAR_PATH"; then
-    echo "ERROR: gpg encrypt failed" >&2
+    echo "ERROR: gpg encrypt failed for fingerprint $GPG_FPR" >&2
     /usr/local/bin/shift-agent-notify-owner \
         --title "Backup FAILED (gpg)" \
         --priority 2 \
-        "Nightly backup gpg encryption failed. Likely cause: untrusted key or gpg misconfig for $GPG_RECIPIENT."
+        "Nightly backup gpg encryption failed. Fingerprint $GPG_FPR — verify key is imported and not revoked."
     exit 1
 fi
 
