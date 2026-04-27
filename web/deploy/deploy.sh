@@ -24,6 +24,8 @@ echo "==> Install systemd unit + Caddy + logrotate"
 scp web/deploy/shift-agent-cockpit.service "$VPS:/tmp/shift-agent-cockpit.service"
 scp web/deploy/Caddyfile "$VPS:/tmp/cockpit-Caddyfile"
 scp web/deploy/logrotate.conf "$VPS:/tmp/cockpit-logrotate"
+scp web/deploy/rotate-jwt-secret.sh "$VPS:/tmp/rotate-jwt-secret.sh"
+scp web/deploy/jwt-rotate.cron "$VPS:/tmp/jwt-rotate.cron"
 
 ssh "$VPS" 'set -euo pipefail
     # OS deps required by health-check + cockpit (idempotent — apt-get install is a no-op if already present)
@@ -81,6 +83,10 @@ ssh "$VPS" 'set -euo pipefail
 
     # Logrotate
     sudo install -m 0644 /tmp/cockpit-logrotate /etc/logrotate.d/shift-agent-cockpit
+
+    # JWT rotation script + monthly cron (idempotent)
+    sudo install -m 0755 -o root -g root /tmp/rotate-jwt-secret.sh /opt/shift-agent/cockpit/rotate-jwt-secret.sh
+    sudo install -m 0644 -o root -g root /tmp/jwt-rotate.cron /etc/cron.d/shift-agent-jwt-rotate
 
     # Caddy (manual: edit hostname first if needed)
     sudo install -m 0644 /tmp/cockpit-Caddyfile /etc/caddy/Caddyfile.cockpit
