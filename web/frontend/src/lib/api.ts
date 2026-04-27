@@ -1,7 +1,24 @@
-// Lightweight typed-ish API client.
-// Long-term: switch to openapi-fetch with generated types via `npm run generate:types`.
+// Backwards-compat thin wrapper around the openapi-fetch typed client.
+// Existing callers use `api.GET<Type>(...)` / `api.POST<Type>(...)` syntax;
+// this wrapper keeps that ergonomics while the underlying call goes through
+// the generated `paths` so future migrations can use full openapi-fetch types.
+//
+// To get FULL type safety on a route, import the typed client directly:
+//   import { typedApi } from "@/lib/api";
+//   const { data, error } = await typedApi.GET("/roster", {});
+//
+// New code should prefer typedApi. The generic-T `api` is kept for the
+// existing call sites until they're migrated.
+
+import createClient from "openapi-fetch";
+import type { paths } from "@/api/schema";
 
 const BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "/api";
+
+export const typedApi = createClient<paths>({
+  baseUrl: BASE,
+  credentials: "include",
+});
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
@@ -16,7 +33,7 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
       detail = (await res.json())?.detail ?? detail;
     } catch {}
     const err = new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
-    (err as any).status = res.status;
+    (err as ApiError).status = res.status;
     throw err;
   }
   if (res.headers.get("content-type")?.includes("application/json")) {

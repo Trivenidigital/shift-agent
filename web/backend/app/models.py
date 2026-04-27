@@ -93,10 +93,29 @@ class CancelBody(BaseModel):
     reason: str = Field(min_length=5, max_length=200)
 
 
+# All 11 proposal status literals — must match schemas.ProposalStatus.
+# Using Literal here (instead of plain str) makes FastAPI emit `enum: [...]`
+# in OpenAPI; openapi-typescript renders this as a TS string-literal union
+# enabling exhaustive narrowing in the frontend.
+ProposalStatus = Literal[
+    "awaiting_owner_approval",
+    "approved",
+    "reconciling",
+    "sent",
+    "send_failed",
+    "accepted",
+    "declined",
+    "denied_by_owner",
+    "expired",
+    "cancelled",
+    "no_response_timeout",
+]
+
+
 class ProposalView(BaseModel):
     proposal_id: str
     code: str
-    status: str
+    status: ProposalStatus
     absent_employee_id: str
     candidate_employee_id: str | None = None
     absent_date: str

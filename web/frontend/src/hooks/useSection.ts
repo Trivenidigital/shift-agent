@@ -12,7 +12,11 @@ export type Section =
   | "disclosures"
   | "audit";
 
-const VALID: Section[] = [
+// `as const satisfies` enforces that VALID has exactly one entry per Section
+// variant at compile time. If a new Section is added but not added here,
+// `tsc -b` errors at the satisfies site — preventing the silent "always falls
+// back to dashboard" bug.
+const VALID = [
   "dashboard",
   "roster",
   "schedule",
@@ -23,7 +27,7 @@ const VALID: Section[] = [
   "safety",
   "disclosures",
   "audit",
-];
+] as const satisfies readonly Section[];
 
 function readFromUrl(): Section {
   const s = new URLSearchParams(window.location.search).get("s");
