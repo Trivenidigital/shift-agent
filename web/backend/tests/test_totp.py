@@ -7,10 +7,17 @@ from fastapi import HTTPException
 
 
 def _patch_paths(monkeypatch, tmp_path):
-    from app import config as cfg_mod
+    """Patch paths on the settings instance that `app.totp` actually uses.
 
-    cfg_mod.get_settings.cache_clear()
-    s = cfg_mod.get_settings()
+    `app.totp` does `settings = get_settings()` at module import time, so
+    patching the result of a fresh `get_settings()` call would create a
+    *different* instance — `app.totp.settings` is still the old one.
+    Solution: import `app.totp` first, then patch its module-level
+    `settings` attributes directly. Same instance, observed by totp.
+    """
+    from app import totp as totp_mod
+
+    s = totp_mod.settings
     monkeypatch.setattr(s, "cockpit_totp_pending_path", tmp_path / "pending.json")
     monkeypatch.setattr(s, "cockpit_totp_secret_path", tmp_path / "secret.json")
     monkeypatch.setattr(s, "cockpit_totp_failures_path", tmp_path / "failures.json")

@@ -52,6 +52,10 @@ def reverse_lines(path: Path, max_lines: int = 1000) -> Iterator[str]:
 
             # Yield in reverse (newest-first within this block)
             for line in reversed(lines):
+                # Strip trailing \r so CRLF-terminated lines (Windows-edited
+                # config, logrotate copytruncate on weird FS, etc.) match.
+                if line.endswith(b"\r"):
+                    line = line[:-1]
                 if not line:
                     continue
                 try:
@@ -64,10 +68,13 @@ def reverse_lines(path: Path, max_lines: int = 1000) -> Iterator[str]:
 
         # Final leftover at BOF
         if leftover and yielded < max_lines:
-            try:
-                yield leftover.decode("utf-8")
-            except UnicodeDecodeError:
-                pass
+            if leftover.endswith(b"\r"):
+                leftover = leftover[:-1]
+            if leftover:
+                try:
+                    yield leftover.decode("utf-8")
+                except UnicodeDecodeError:
+                    pass
 
 
 def reverse_json_entries(path: Path, max_lines: int = 1000) -> Iterator[dict]:

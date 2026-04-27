@@ -81,17 +81,25 @@ def run_cli(
     TypeError:
         If args contain non-string entries.
     """
+    # Cheap input validations FIRST (before disk-touch). This keeps the
+    # function unit-testable without /usr/local/bin/* present on the runner,
+    # AND short-circuits malformed calls before they touch the filesystem.
     if binary not in ALLOWED_BINS:
         raise ValueError(f"binary not in allowlist: {binary!r}")
-    if not Path(binary).is_file():
-        raise ValueError(f"binary missing on disk: {binary!r}")
     if any(not isinstance(a, str) for a in args):
         raise TypeError("args must be strings")
+    if user_args is not None:
+        if any(not isinstance(a, str) for a in user_args):
+            raise ValueError("user_args invalid: non-str entry")
+        if any("\x00" in a for a in user_args):
+            raise ValueError("user_args invalid: NUL byte in entry")
+
+    # Disk-touch happens last (after cheap validation passes).
+    if not Path(binary).is_file():
+        raise ValueError(f"binary missing on disk: {binary!r}")
 
     cmd: list[str] = [binary, *args]
     if user_args:
-        if any(not isinstance(a, str) or "\x00" in a for a in user_args):
-            raise ValueError("user_args invalid: empty/non-str/NUL")
         cmd.append("--")
         cmd.extend(user_args)
 
