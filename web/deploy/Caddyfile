@@ -17,6 +17,14 @@ cockpit.example.com {
     # API routes (strip /api prefix → backend sees /auth, /roster, etc)
     handle_path /api/* {
         reverse_proxy 127.0.0.1:8080 {
+            # Explicit X-Forwarded-* — overrides any client-supplied header.
+            # `client_ip` in deps.py reads X-Forwarded-For only from 127.0.0.1,
+            # so without these headers Caddy → app would lose the real client IP.
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+            header_up X-Forwarded-Host {host}
+
             transport http {
                 # SSE: long-lived; disable read timeout
                 read_timeout 0

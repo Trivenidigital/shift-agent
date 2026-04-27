@@ -26,6 +26,26 @@ scp web/deploy/Caddyfile "$VPS:/tmp/cockpit-Caddyfile"
 scp web/deploy/logrotate.conf "$VPS:/tmp/cockpit-logrotate"
 
 ssh "$VPS" 'set -euo pipefail
+    # OS deps required by health-check + cockpit (idempotent — apt-get install is a no-op if already present)
+    sudo apt-get update -qq
+    sudo apt-get install -y -qq jq    # required by shift-agent-health-check.sh fallback
+    sudo apt-get install -y -qq e2fsprogs  # for chattr / logrotate
+
+    # ─── Pre-merge JWT secret length sanity check ───
+    # Refuses to deploy if /opt/shift-agent/.env's COCKPIT_JWT_SECRET is set but
+    # too short (would brick the cockpit on first restart with the new validator).
+    # Skips if env var is missing — get_settings() will auto-generate.
+    if sudo grep -q "^COCKPIT_JWT_SECRET=" /opt/shift-agent/.env 2>/dev/null; then
+        SECRET_LEN=$(sudo grep "^COCKPIT_JWT_SECRET=" /opt/shift-agent/.env | head -1 | cut -d= -f2- | tr -d '"\047' | wc -c)
+        # wc -c counts trailing newline; subtract 1
+        SECRET_LEN=$((SECRET_LEN - 1))
+        if [ "$SECRET_LEN" -gt 0 ] && [ "$SECRET_LEN" -lt 64 ]; then
+            echo "ABORT: COCKPIT_JWT_SECRET is $SECRET_LEN chars; cockpit validator requires >= 64 hex chars."
+            echo "  Either remove the line (auto-generated) or replace with output of: python3 -c '\''import secrets; print(secrets.token_hex(32))'\''"
+            exit 1
+        fi
+    fi
+
     # Venv
     if [ ! -d /opt/shift-agent/cockpit/venv ]; then
         /usr/bin/python3 -m venv /opt/shift-agent/cockpit/venv
