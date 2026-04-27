@@ -79,11 +79,12 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: "npm"
-          cache-dependency-path: web/frontend/package-lock.json
+          # No npm cache — package-lock.json isn't checked in (npm install
+          # generates it on first run). Once we commit package-lock.json,
+          # add: `cache: "npm"; cache-dependency-path: web/frontend/package-lock.json`
 
       - name: Install
-        run: npm ci || npm install
+        run: npm install --no-audit --no-fund
 
       - name: Generate types from committed openapi.json
         run: npm run generate:types
