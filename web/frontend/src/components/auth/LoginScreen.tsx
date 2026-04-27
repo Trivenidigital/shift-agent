@@ -79,7 +79,7 @@ export function LoginScreen({ onAuthed }: { onAuthed: () => void }) {
           {showTabs && (
             <div className="flex border-b border-zinc-200 -mx-5 -mt-3 mb-2">
               <button
-                onClick={() => { setTab("pushover"); setCode(""); setStep("request"); setError(null); }}
+                onClick={() => { setTab("pushover"); setToken(""); setCode(""); setStep("request"); setError(null); }}
                 className={cn(
                   "flex-1 py-2 text-sm border-b-2",
                   tab === "pushover" ? "border-brand-600 text-brand-700 font-medium" : "border-transparent text-zinc-500",
@@ -88,7 +88,7 @@ export function LoginScreen({ onAuthed }: { onAuthed: () => void }) {
                 Pushover code
               </button>
               <button
-                onClick={() => { setTab("totp"); setCode(""); setError(null); }}
+                onClick={() => { setTab("totp"); setToken(""); setCode(""); setError(null); }}
                 className={cn(
                   "flex-1 py-2 text-sm border-b-2",
                   tab === "totp" ? "border-brand-600 text-brand-700 font-medium" : "border-transparent text-zinc-500",

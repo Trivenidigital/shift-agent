@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import csv
 import io
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request, Response
@@ -94,5 +94,5 @@ async def export_csv(
     return Response(
         buf.getvalue(),
         media_type="text/csv",
-        headers={"content-disposition": f'attachment; filename="decisions-{datetime.utcnow().strftime("%Y%m%d")}.csv"'},
+        headers={"content-disposition": f'attachment; filename="decisions-{datetime.now(timezone.utc).strftime("%Y%m%d")}.csv"'},
     )

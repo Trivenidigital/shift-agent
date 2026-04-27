@@ -21,6 +21,19 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 _TEST_MODE = os.environ.get("COCKPIT_TEST_MODE", "").lower() in ("1", "true", "yes")
 _TEST_BASE: Path | None = None
 
+# Security guard (Reviewer 2 R2 #1): refuse to run in test-mode if the
+# production filesystem layout exists. Prevents an operator who accidentally
+# exports COCKPIT_TEST_MODE=1 in the prod shell from silently bypassing the
+# JWT-secret hex validator (which would let a base64 secret be accepted).
+if _TEST_MODE and Path("/opt/shift-agent").exists():
+    import sys as _sys
+    _allowed_test = "pytest" in _sys.modules or os.environ.get("PYTEST_CURRENT_TEST")
+    if not _allowed_test:
+        raise RuntimeError(
+            "COCKPIT_TEST_MODE=1 with /opt/shift-agent present is forbidden outside pytest. "
+            "This bypass would weaken JWT-secret validation in production."
+        )
+
 
 def _test_base() -> Path:
     """Lazy tempdir for COCKPIT_TEST_MODE=1 paths."""
