@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
-import { api } from "@/lib/api";
+import { useRef, useState } from "react";
+import { api, type ApiError } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -43,9 +43,12 @@ export function Roster() {
   });
 
   if (isLoading || !data) return <div className="p-8 text-zinc-500">Loading…</div>;
+  void terminate; // ESLint placeholder; usage below in row buttons
+
 
   return (
     <div className="space-y-4">
+      <CsvImport onSuccess={() => qc.invalidateQueries({ queryKey: ["roster"] })} />
       <div className="flex items-center justify-between">
         <h2 className="text-2xl font-bold">Roster</h2>
         <Button onClick={() => { setAdding(true); setForm({ status: "active", languages: ["en"], can_cover_roles: [] }); }}>
@@ -118,5 +121,82 @@ export function Roster() {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+
+// ─── CSV bulk-import card ─────────────────────────────────────────────
+
+
+function CsvImport({ onSuccess }: { onSuccess: () => void }) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{ imported: number } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const onPick = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setError(null); setResult(null);
+
+    if (!file.name.toLowerCase().endsWith(".csv")) {
+      setError(`Expected a .csv file (got ${file.name})`);
+      e.target.value = "";
+      return;
+    }
+    if (file.size > 256_000) {
+      setError(`File is ${(file.size / 1024).toFixed(0)} KB; max is 256 KB`);
+      e.target.value = "";
+      return;
+    }
+    setBusy(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch("/api/roster/import-csv", {
+        method: "POST",
+        credentials: "include",
+        body: fd,
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const detail = (body as { detail?: string })?.detail ?? res.statusText;
+        if (res.status === 403) throw new Error("Fresh OTP required — log out and log back in within 5 min, then retry.");
+        throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+      }
+      setResult(body as { imported: number });
+      onSuccess();
+    } catch (err) {
+      const e2 = err as ApiError;
+      setError(e2.message);
+    } finally {
+      setBusy(false);
+      if (inputRef.current) inputRef.current.value = "";
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader><CardTitle>Bulk import (CSV)</CardTitle></CardHeader>
+      <CardContent className="space-y-2">
+        <p className="text-xs text-zinc-600">
+          Replaces ALL employees with rows from a UTF-8 CSV. Required columns:
+          <code className="mx-1">id, name, role, phone, can_cover_roles</code>.
+          Lists pipe- or comma-separated. Cell starting with <code>= + - @</code> is rejected.
+        </p>
+        <input
+          ref={inputRef}
+          type="file"
+          accept=".csv,text/csv"
+          onChange={onPick}
+          disabled={busy}
+          aria-label="Roster CSV upload"
+          className="text-sm"
+        />
+        {busy && <p className="text-xs text-brand-700">Uploading…</p>}
+        {result && <p className="text-xs text-green-700">✓ Imported {result.imported} employees</p>}
+        {error && <p className="text-xs text-red-700 whitespace-pre-wrap">{error}</p>}
+      </CardContent>
+    </Card>
   );
 }
