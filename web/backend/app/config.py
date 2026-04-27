@@ -26,12 +26,14 @@ _TEST_BASE: Path | None = None
 # exports COCKPIT_TEST_MODE=1 in the prod shell from silently bypassing the
 # JWT-secret hex validator (which would let a base64 secret be accepted).
 if _TEST_MODE and Path("/opt/shift-agent").exists():
-    import sys as _sys
-    _allowed_test = "pytest" in _sys.modules or os.environ.get("PYTEST_CURRENT_TEST")
-    if not _allowed_test:
+    # Tighter check (Reviewer Nit): only PYTEST_CURRENT_TEST env var indicates
+    # an active pytest run. `"pytest" in sys.modules` is too permissive — any
+    # `python -c "import pytest"` from a prod shell would pass it.
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
         raise RuntimeError(
-            "COCKPIT_TEST_MODE=1 with /opt/shift-agent present is forbidden outside pytest. "
-            "This bypass would weaken JWT-secret validation in production."
+            "COCKPIT_TEST_MODE=1 with /opt/shift-agent present is forbidden outside an "
+            "active pytest run (PYTEST_CURRENT_TEST must be set). This bypass would "
+            "weaken JWT-secret validation in production."
         )
 
 

@@ -144,22 +144,27 @@ def verify(code: str) -> str | None:
 
     Reads ONLY cockpit_totp_secret_path. The pending file is never authoritative.
     Lockout: 5 wrong codes → invalidate the secret store for 15 min, audit-logged.
+
+    Uses .get() defensively so a partially-corrupt failures-file doesn't 500
+    (Reviewer Nit #2 from PR-1 review).
     """
     rec = _read_json(settings.cockpit_totp_secret_path)
     if rec is None or rec.get("provisional"):
         raise HTTPException(412, "TOTP not enrolled — use Pushover OTP")
 
-    fail = _read_json(settings.cockpit_totp_failures_path) or {"attempts": 0, "locked_until": 0}
+    fail = _read_json(settings.cockpit_totp_failures_path) or {}
     now = time.time()
-    if fail["locked_until"] > now:
-        raise HTTPException(429, f"locked out, retry after {int(fail['locked_until'] - now)}s")
+    locked_until = fail.get("locked_until", 0)
+    if locked_until > now:
+        raise HTTPException(429, f"locked out, retry after {int(locked_until - now)}s")
 
     if not pyotp.TOTP(rec["secret"]).verify(code, valid_window=settings.totp_window):
-        fail["attempts"] = fail.get("attempts", 0) + 1
-        if fail["attempts"] >= settings.totp_max_verify_attempts:
-            fail["locked_until"] = now + 900  # 15 min
-            fail["attempts"] = 0
-        _write_json_0600(settings.cockpit_totp_failures_path, fail)
+        attempts = fail.get("attempts", 0) + 1
+        new_state = {"attempts": attempts, "locked_until": fail.get("locked_until", 0)}
+        if attempts >= settings.totp_max_verify_attempts:
+            new_state["locked_until"] = now + 900  # 15 min
+            new_state["attempts"] = 0
+        _write_json_0600(settings.cockpit_totp_failures_path, new_state)
         return None
 
     # Success — clear failures

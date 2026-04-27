@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from ..audit import log as audit_log
-from ..auth import require_auth, require_fresh_otp
+from ..auth import require_auth, require_fresh_otp, require_fresh_pushover_otp
 from ..config import get_settings
 from ..deps import client_ip, client_ua
 from ..models import PairSessionResponse, WhatsAppStatus
@@ -136,7 +136,7 @@ async def status(_=Depends(require_auth)):
 
 
 @router.post("/repair", response_model=PairSessionResponse)
-async def start_repair(request: Request, _=Depends(require_fresh_otp)):
+async def start_repair(request: Request, _=Depends(require_fresh_pushover_otp)):
     # 409 if active session exists
     now = time.time()
     for sess in _pair_sessions.values():
@@ -156,7 +156,7 @@ async def start_repair(request: Request, _=Depends(require_fresh_otp)):
         check=False, timeout=10, shell=False,
     )
     # Backup + clear session
-    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     bak = settings.hermes_session_dir.parent / f"session.bak-{ts}"
     if settings.hermes_session_dir.exists():
         os.rename(settings.hermes_session_dir, bak)
@@ -305,13 +305,18 @@ async def cancel_repair(sid: str, request: Request, _=Depends(require_auth)):
 
 
 @router.post("/unlink")
-async def unlink(request: Request, _=Depends(require_fresh_otp)):
-    """Wipe the WA session — owner must re-pair."""
+async def unlink(request: Request, _=Depends(require_fresh_pushover_otp)):
+    """Wipe the WA session — Pushover-only sensitive (TOTP-compromised attacker
+    must NOT be able to unlink the owner's WhatsApp; that's the channel the
+    legitimate owner uses to receive Pushover OTPs in the first place).
+
+    Owner must re-pair after unlink.
+    """
     subprocess.run(
         ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "stop", "hermes-gateway"],
         check=False, timeout=10, shell=False,
     )
-    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     bak = settings.hermes_session_dir.parent / f"session.unlinked-{ts}"
     if settings.hermes_session_dir.exists():
         os.rename(settings.hermes_session_dir, bak)

@@ -1,58 +1,66 @@
-"""JWT secret startup validator (BL-120 #6)."""
+"""JWT secret startup validator (BL-120 #6).
+
+Uses an isolated reload-context fixture so each test gets a fresh
+Settings module + clean env, rather than each test mutating module-level
+state and relying on cleanup. Removes ordering brittleness flagged in
+Reviewer Nit #3.
+"""
 from __future__ import annotations
+
+import importlib
+from contextlib import contextmanager
 
 import pytest
 
 
+@contextmanager
+def reload_config_with(monkeypatch, **env_overrides):
+    """Apply env vars + reload config; restore + reload on exit."""
+    # Store originals so we can fully restore
+    originals: dict[str, str | None] = {}
+    for k, v in env_overrides.items():
+        originals[k] = monkeypatch.getenv(k) if hasattr(monkeypatch, "getenv") else None
+        monkeypatch.setenv(k, v)
+
+    from app import config as cfg_mod
+
+    importlib.reload(cfg_mod)
+    try:
+        yield cfg_mod
+    finally:
+        # Restore — monkeypatch's own teardown handles env vars; we just need
+        # to put the module back in a sane state for downstream tests.
+        monkeypatch.setenv("COCKPIT_TEST_MODE", "1")
+        monkeypatch.setenv("COCKPIT_JWT_SECRET", "0" * 64)
+        importlib.reload(cfg_mod)
+
+
 def test_empty_secret_falls_back_to_from_env(monkeypatch):
-    """Empty jwt_secret on direct construct: validator allows; from_env populates."""
-    monkeypatch.setenv("COCKPIT_JWT_SECRET", "")
-    from app import config as cfg_mod
-
-    cfg_mod.get_settings.cache_clear()
-    s = cfg_mod.Settings()
-    # Empty is allowed; from_env() will populate from secret file
-    assert s.jwt_secret == ""
+    """Empty jwt_secret on direct construct: validator allows; from_env populates later."""
+    with reload_config_with(monkeypatch, COCKPIT_TEST_MODE="1", COCKPIT_JWT_SECRET="") as cfg_mod:
+        cfg_mod.get_settings.cache_clear()
+        s = cfg_mod.Settings()
+        assert s.jwt_secret == ""
 
 
-def test_short_secret_rejected_when_not_test_mode(monkeypatch):
-    """Disable test mode and confirm the validator fires."""
-    monkeypatch.setenv("COCKPIT_TEST_MODE", "0")
-    monkeypatch.setenv("COCKPIT_JWT_SECRET", "abc")
-    # Reload module to pick up new TEST_MODE
-    import importlib
-    from app import config as cfg_mod
-
-    importlib.reload(cfg_mod)
-    with pytest.raises(ValueError, match="64\\+ hex chars"):
-        cfg_mod.Settings()
-    # Restore for downstream tests
-    monkeypatch.setenv("COCKPIT_TEST_MODE", "1")
-    importlib.reload(cfg_mod)
+def test_short_secret_rejected(monkeypatch):
+    """Test mode off, short hex secret → validator raises."""
+    # Use a tempdir for COCKPIT_TEST_MODE=0 path — config.py would otherwise
+    # reject because /opt/shift-agent doesn't exist; we just want the validator.
+    with reload_config_with(monkeypatch, COCKPIT_TEST_MODE="0", COCKPIT_JWT_SECRET="abc") as cfg_mod:
+        with pytest.raises(ValueError, match="64\\+ hex chars"):
+            cfg_mod.Settings()
 
 
 def test_valid_hex_secret_accepted(monkeypatch):
-    monkeypatch.setenv("COCKPIT_TEST_MODE", "0")
-    monkeypatch.setenv("COCKPIT_JWT_SECRET", "0" * 64)
-    import importlib
-    from app import config as cfg_mod
-
-    importlib.reload(cfg_mod)
-    s = cfg_mod.Settings()
-    assert s.jwt_secret == "0" * 64
-    monkeypatch.setenv("COCKPIT_TEST_MODE", "1")
-    importlib.reload(cfg_mod)
+    with reload_config_with(monkeypatch, COCKPIT_TEST_MODE="0", COCKPIT_JWT_SECRET="0" * 64) as cfg_mod:
+        s = cfg_mod.Settings()
+        assert s.jwt_secret == "0" * 64
 
 
 def test_base64_secret_rejected(monkeypatch):
     """Base64 chars (=, /, +) are not in [0-9a-fA-F] — validator rejects."""
-    monkeypatch.setenv("COCKPIT_TEST_MODE", "0")
-    monkeypatch.setenv("COCKPIT_JWT_SECRET", "QmFzZTY0RW5jb2RlZFN0cmluZ09mU3VmZmljaWVudExlbmd0aA==")
-    import importlib
-    from app import config as cfg_mod
-
-    importlib.reload(cfg_mod)
-    with pytest.raises(ValueError, match="hex"):
-        cfg_mod.Settings()
-    monkeypatch.setenv("COCKPIT_TEST_MODE", "1")
-    importlib.reload(cfg_mod)
+    bad = "QmFzZTY0RW5jb2RlZFN0cmluZ09mU3VmZmljaWVudExlbmd0aA=="
+    with reload_config_with(monkeypatch, COCKPIT_TEST_MODE="0", COCKPIT_JWT_SECRET=bad) as cfg_mod:
+        with pytest.raises(ValueError, match="hex"):
+            cfg_mod.Settings()

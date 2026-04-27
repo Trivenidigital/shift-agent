@@ -15,7 +15,7 @@ from ..deps import client_ip, client_ua
 from ..models import EmployeeIn, EmployeePatch
 from ..state import load_roster, roster_session
 
-# Import schemas
+# Import schemas (single import — was duplicated mid-handler in prior commit)
 _AGENT_ROOT = Path("/opt/shift-agent")
 if str(_AGENT_ROOT) not in sys.path:
     sys.path.insert(0, str(_AGENT_ROOT))
@@ -63,7 +63,6 @@ async def patch_employee(
             raise HTTPException(404, f"employee {employee_id} not found")
 
         data = patch.model_dump(exclude_unset=True)
-        # Phone change → record phone_history
         if "phone" in data and data["phone"] != emp.phone:
             now = datetime.now(timezone.utc).isoformat()
             history = list(emp.phone_history or [])
@@ -119,14 +118,21 @@ async def terminate_employee(employee_id: str, request: Request, _=Depends(requi
 # Excel/Google Sheets. We REJECT (not sanitize) at parse time per security
 # review — this is a roster, not a spreadsheet output.
 _FORMULA_PREFIXES: frozenset[str] = frozenset({"=", "+", "-", "@", "\t"})
-_CSV_MAX_BYTES = 256_000  # ~256KB cap on CSV payload
+_CSV_MAX_BYTES = 256_000
+
+
+def _to_list(s: str | None) -> list[str]:
+    """Pipe- or comma-separated → cleaned list. Hoisted out of loop (Reviewer Nit)."""
+    if not s:
+        return []
+    return [x.strip() for x in s.replace("|", ",").split(",") if x.strip()]
 
 
 @router.post("/import-csv")
 async def import_csv(
     request: Request,
     file: UploadFile = File(...),
-    _=Depends(require_fresh_otp),  # destructive: replaces entire roster.employees
+    _=Depends(require_fresh_otp),
 ):
     """Atomic full-replace import of `roster.json` employees from CSV.
 
@@ -148,7 +154,6 @@ async def import_csv(
     if len(raw_bytes) > _CSV_MAX_BYTES:
         raise HTTPException(413, f"CSV exceeds {_CSV_MAX_BYTES // 1024} KB limit")
 
-    # Decode with BOM tolerance — fall back to clear 422 (not 500) on bad encoding.
     try:
         raw = raw_bytes.decode("utf-8-sig")
     except UnicodeDecodeError:
@@ -162,8 +167,8 @@ async def import_csv(
     if not reader.fieldnames or "id" not in reader.fieldnames:
         raise HTTPException(422, "CSV missing required header 'id'")
 
-    employees: list[dict] = []
-    for row_num, row in enumerate(reader, start=2):  # row 1 = header
+    validated_employees: list[dict] = []
+    for row_num, row in enumerate(reader, start=2):
         for col, val in row.items():
             if val is None:
                 continue
@@ -178,13 +183,7 @@ async def import_csv(
             if "\r" in v or "\n" in v:
                 raise HTTPException(422, f"row {row_num} col {col!r}: CR/LF in cell rejected")
 
-        # Parse list-typed fields (pipe or comma separated)
-        def _to_list(s: str | None) -> list[str]:
-            if not s:
-                return []
-            return [x.strip() for x in s.replace("|", ",").split(",") if x.strip()]
-
-        emp = {
+        emp_dict = {
             "id": (row.get("id") or "").strip(),
             "name": (row.get("name") or "").strip(),
             "nickname": (row.get("nickname") or "").strip() or None,
@@ -194,30 +193,26 @@ async def import_csv(
             "can_cover_roles": _to_list(row.get("can_cover_roles")),
             "status": (row.get("status") or "active").strip(),
         }
-        # Per-row Pydantic validation
+        # Per-row Pydantic validation. We KEEP the validated/normalized output —
+        # if EmployeeIn ever grows a field_validator that trims/lowercases,
+        # the CSV import will inherit that normalization.
         try:
-            EmployeeIn(**emp).model_dump()
+            validated = EmployeeIn(**emp_dict).model_dump()
         except Exception as e:
             raise HTTPException(422, f"row {row_num}: {e}")
-        employees.append(emp)
+        validated_employees.append(validated)
 
-    if not employees:
+    if not validated_employees:
         raise HTTPException(422, "CSV had no employee rows")
 
-    # Replace under flock; re-validate FULL Roster (referential integrity)
     with roster_session() as (roster, commit):
-        # Build the new employees from EmployeeIn shapes; Roster will re-validate.
-        from schemas import Employee  # noqa: PLC0415
-
-        roster.employees = [Employee(**e) for e in employees]
-        # If schedule references employees that disappeared, Roster validator
-        # raises and the with-block exits without committing.
+        roster.employees = [Employee(**e) for e in validated_employees]
         commit()
 
     audit_log(
         "roster.import_csv",
         ip=client_ip(request),
         ua=client_ua(request),
-        details={"imported": len(employees), "filename": file.filename or "unknown"},
+        details={"imported": len(validated_employees), "filename": file.filename or "unknown"},
     )
-    return {"ok": True, "imported": len(employees)}
+    return {"ok": True, "imported": len(validated_employees)}

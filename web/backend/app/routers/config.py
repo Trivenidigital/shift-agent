@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ..audit import log as audit_log
-from ..auth import require_auth, require_fresh_otp
+from ..auth import require_auth, require_fresh_otp, require_fresh_pushover_otp
 from ..config import get_settings
 from ..deps import client_ip, client_ua
 from ..models import ConfigPatch
@@ -78,9 +78,15 @@ async def patch_config(body: ConfigPatch, request: Request, _=Depends(require_au
 
 @router.patch("/sensitive")
 async def patch_config_sensitive(
-    body: ConfigPatch, request: Request, _=Depends(require_fresh_otp)
+    body: ConfigPatch, request: Request, _=Depends(require_fresh_pushover_otp)
 ):
-    """Patch sensitive fields — requires JWT issued ≤5min ago."""
+    """Patch sensitive fields — Pushover-only fresh OTP required.
+
+    Per PR-2 Reviewer High #2, swapping `alerting.pushover_*` keys via a
+    TOTP-only login would let an attacker who compromised TOTP also lock
+    the legitimate owner out of Pushover. Sensitive PATCH is therefore
+    Pushover-required, not just fresh-required.
+    """
     cfg = load_config()
     raw = cfg.model_dump(mode="json")
     for k, v in body.fields.items():

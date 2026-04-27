@@ -3,24 +3,30 @@
 Single-user model. The owner.phone in /opt/shift-agent/config.yaml is the
 only valid OTP recipient. There is no user registration.
 
-Security design notes (from review v1.1):
+Security design notes:
 - 5-attempt lockout per OTP token; on overflow, token is invalidated.
 - hmac.compare_digest for code comparison.
-- Verify handler enforces a minimum wall-clock floor (settings.otp_verify_min_wall_seconds)
-  to equalize timing whether code is right, wrong, or token unknown.
-- JWT secret minimum 256-bit, persisted at /opt/shift-agent/state/.cockpit-jwt-secret.
+- Verify handler enforces a minimum wall-clock floor
+  (settings.otp_verify_min_wall_seconds) to equalize timing whether code
+  is right, wrong, or token unknown.
+- JWT secret minimum 256-bit, persisted at
+  /opt/shift-agent/state/.cockpit-jwt-secret.
+- JWTs carry an `auth_method` claim ("pushover" | "totp") so sensitive
+  routes can distinguish factor used. See `require_fresh_pushover_otp`
+  for the gate that prevents TOTP-only attackers from disabling TOTP /
+  swapping Pushover keys (closes the self-recovery-prevention attack
+  surfaced in PR #2 review High #2).
 """
 from __future__ import annotations
 
 import asyncio
 import hmac
-import json
 import secrets
 import string
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from fastapi import HTTPException, Request, status
@@ -32,6 +38,9 @@ from .config import get_settings
 from .state import load_config
 
 settings = get_settings()
+
+
+AuthMethod = Literal["pushover", "totp"]
 
 
 class OtpRecord(BaseModel):
@@ -76,7 +85,7 @@ def _gen_code() -> str:
 
 
 def _gen_token() -> str:
-    return secrets.token_hex(16)  # 128-bit URL-safe-ish identifier
+    return secrets.token_hex(16)
 
 
 def _now() -> float:
@@ -86,15 +95,24 @@ def _now() -> float:
 # ─── Rate limiting (per IP and per owner) ───────────────────────────────
 
 _request_log: dict[str, list[float]] = {}
+_RL_MAX_KEYS = 4096   # cap dict size to prevent unbounded growth (Reviewer High #3)
 
 
 def _rl_check(key: str, max_count: int, window_seconds: int) -> bool:
     now = _now()
     cutoff = now - window_seconds
     times = _request_log.setdefault(key, [])
-    # Drop expired
     while times and times[0] < cutoff:
         times.pop(0)
+    # Evict empty entries so unique-IP spray cannot leak memory.
+    if not times and key in _request_log:
+        del _request_log[key]
+        times = _request_log.setdefault(key, [])
+    # Hard cap fallback: evict oldest entries if dict has grown beyond the limit.
+    if len(_request_log) > _RL_MAX_KEYS:
+        # Drop ~10% — pick any 10% to keep this O(n).
+        for k in list(_request_log.keys())[: _RL_MAX_KEYS // 10]:
+            del _request_log[k]
     if len(times) >= max_count:
         return False
     times.append(now)
@@ -105,15 +123,12 @@ def _rl_check(key: str, max_count: int, window_seconds: int) -> bool:
 
 
 async def issue_otp(ip: str, ua: str) -> str:
-    """Generate + persist + Pushover-deliver an OTP. Returns the opaque token."""
     cfg = load_config()
     owner_phone = cfg.owner.phone
 
-    # Rate limit per IP
     per_ip_max, per_ip_window = settings.otp_request_per_ip
     if not _rl_check(f"ip:{ip}", per_ip_max, per_ip_window):
         raise HTTPException(429, "Too many OTP requests from this IP — wait 15 min")
-    # Per owner
     per_o_max, per_o_window = settings.otp_request_per_owner
     if not _rl_check(f"owner:{owner_phone}", per_o_max, per_o_window):
         raise HTTPException(429, "Too many OTP requests for this account — wait 1 hour")
@@ -138,7 +153,6 @@ async def issue_otp(ip: str, ua: str) -> str:
 
 async def _send_pushover_otp(user_key: str, app_token: str, code: str) -> None:
     if not user_key or not app_token:
-        # Dev mode: print code to stderr for local testing
         import sys
 
         print(f"[cockpit-otp DEV] code={code}", file=sys.stderr, flush=True)
@@ -154,7 +168,6 @@ async def _send_pushover_otp(user_key: str, app_token: str, code: str) -> None:
         async with httpx.AsyncClient(timeout=10) as client:
             r = await client.post("https://api.pushover.net/1/messages.json", data=payload)
             if r.status_code != 200:
-                # Don't leak Pushover details to user; just log
                 audit_log("auth.otp.pushover_failed", details={"status": r.status_code})
     except Exception as e:
         audit_log("auth.otp.pushover_error", details={"error": str(e)[:200]})
@@ -164,10 +177,14 @@ async def _send_pushover_otp(user_key: str, app_token: str, code: str) -> None:
 
 
 async def verify_otp(token: str, code: str, ip: str, ua: str) -> str:
-    """Verify OTP, return JWT on success.
+    """Verify Pushover OTP; return JWT on success.
 
-    Equalizes wall-clock time to settings.otp_verify_min_wall_seconds floor
-    regardless of which path (no record / wrong code / expired / locked / OK).
+    Timing structure: (per Reviewer Medium #6)
+    1. All branch-distinguishing work (state read, comparison, mutations) happens.
+    2. Wall-clock floor enforced via asyncio.sleep, based on `started` timestamp
+       — independent of audit-log disk timing.
+    3. Audit log written AFTER the floor sleep, so disk-pressure variance does
+       not eat into the equalization budget.
     """
     started = _now()
     jwt_token: str | None = None
@@ -184,12 +201,10 @@ async def verify_otp(token: str, code: str, ip: str, ua: str) -> str:
             audit_details["reason"] = "expired"
             otp_store.clear()
         elif rec.verify_attempts >= settings.otp_max_verify_attempts:
-            # Already locked out
             rec.invalidated = True
             otp_store.write(rec)
             audit_details["reason"] = "locked_out"
         else:
-            # Token-string compare also constant-time
             if not hmac.compare_digest(rec.token, token):
                 rec.verify_attempts += 1
                 otp_store.write(rec)
@@ -202,35 +217,51 @@ async def verify_otp(token: str, code: str, ip: str, ua: str) -> str:
                 audit_details["reason"] = "wrong_code"
                 audit_details["attempts"] = rec.verify_attempts
             else:
-                # Success
-                jwt_token = mint_jwt(rec.issued_to)
+                jwt_token = mint_jwt(rec.issued_to, auth_method="pushover")
                 otp_store.clear()
                 audit_event = "auth.otp.verify_success"
                 audit_details["owner"] = rec.issued_to
     finally:
-        # Audit write is inside the timed window — disk-pressure variance on
-        # the audit append should NOT differentiate happy/sad paths to a remote
-        # observer. Equalize timing AFTER audit, just before raise.
-        audit_log(audit_event, ip=ip, ua=ua, details=audit_details)
+        # Floor based on hot work only — independent of audit-disk variance.
         elapsed = _now() - started
         if elapsed < settings.otp_verify_min_wall_seconds:
             await asyncio.sleep(settings.otp_verify_min_wall_seconds - elapsed)
+        # Audit AFTER the floor; its disk-pressure variance no longer eats
+        # into the equalization budget. Response timing = floor + audit_time;
+        # audit time is roughly uniform across branches (same-shape NDJSON).
+        audit_log(audit_event, ip=ip, ua=ua, details=audit_details)
 
     if jwt_token is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired code")
     return jwt_token
 
 
+async def floor_then_audit(started: float, event: str, ip: str, ua: str, details: dict) -> None:
+    """Helper for TOTP path — same floor + audit-after pattern."""
+    elapsed = _now() - started
+    if elapsed < settings.otp_verify_min_wall_seconds:
+        await asyncio.sleep(settings.otp_verify_min_wall_seconds - elapsed)
+    audit_log(event, ip=ip, ua=ua, details=details)
+
+
 # ─── JWT ────────────────────────────────────────────────────────────────
 
 
-def mint_jwt(owner_phone: str) -> str:
+def mint_jwt(owner_phone: str, *, auth_method: AuthMethod = "pushover") -> str:
+    """Mint a JWT carrying the auth method that produced it.
+
+    `auth_method` is used by `require_fresh_pushover_otp` to gate
+    self-recovery-prevention routes (TOTP-only login cannot disable own
+    TOTP or swap Pushover keys — would create an account-takeover from
+    a single-secret compromise).
+    """
     now = datetime.now(timezone.utc)
     claims = {
         "sub": owner_phone,
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(hours=settings.jwt_ttl_hours)).timestamp()),
         "jti": secrets.token_hex(8),
+        "auth_method": auth_method,
     }
     return jwt.encode(claims, settings.jwt_secret, algorithm=settings.jwt_algo)
 
@@ -253,14 +284,36 @@ async def require_auth(request: Request) -> dict[str, Any]:
 
 
 async def require_fresh_otp(request: Request) -> dict[str, Any]:
-    """Require a JWT issued within the last 5 minutes (for sensitive actions).
+    """JWT issued ≤5 min ago via ANY method (Pushover OR TOTP).
 
-    The owner must `POST /auth/refresh-otp` and `POST /auth/verify-otp`
-    immediately before a sensitive PATCH.
+    Used for medium-sensitivity actions (most config PATCHes, unlinking
+    WhatsApp). NOT used for self-recovery-prevention routes — see
+    require_fresh_pushover_otp for those.
     """
     claims = await require_auth(request)
     issued_at = claims.get("iat", 0)
-    age = _now() - issued_at
-    if age > 300:
+    if _now() - issued_at > 300:
         raise HTTPException(403, "Sensitive action requires fresh OTP — re-verify")
+    return claims
+
+
+async def require_fresh_pushover_otp(request: Request) -> dict[str, Any]:
+    """JWT issued ≤5 min ago via Pushover OTP specifically.
+
+    Closes the self-recovery-prevention attack: a TOTP-only-compromised
+    attacker MUST NOT be able to (a) disable TOTP, (b) re-enroll a new
+    TOTP secret, or (c) swap Pushover keys. Any of those would lock the
+    legitimate owner out from a single-secret compromise.
+
+    Pushover is always available to the owner (it's the primary login
+    method); if Pushover is genuinely down, owner SSHes in and edits
+    state directly per the runbook.
+    """
+    claims = await require_fresh_otp(request)
+    if claims.get("auth_method") != "pushover":
+        raise HTTPException(
+            403,
+            "This action requires Pushover OTP authentication "
+            "(TOTP login cannot perform self-recovery-prevention operations).",
+        )
     return claims

@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from . import audit as audit_mod
 from .config import get_settings
 from .routers import audit, auth, config, decisions, disclosures, health, pending, roster, safety, schedule, whatsapp
 
@@ -19,6 +20,9 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Tamper-evidence self-check (logs CRITICAL if audit log is not chattr +a)
+    audit_mod.startup_self_check()
+
     # Background reaper for pair sessions
     reaper_task = asyncio.create_task(whatsapp._reap_loop())
     try:

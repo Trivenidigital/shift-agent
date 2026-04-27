@@ -1,12 +1,30 @@
-"""Auth router — OTP request/verify/logout/me + TOTP fallback + status."""
+"""Auth router — OTP request/verify/logout/me + TOTP fallback + status.
+
+Sensitive routes split (per PR-2 Reviewer High #2):
+- `require_fresh_otp` (any method, ≤5 min): for medium-sensitivity actions.
+- `require_fresh_pushover_otp` (Pushover-only, ≤5 min): for self-recovery-
+  prevention routes — TOTP-only attacker MUST NOT be able to disable own
+  TOTP, re-enroll a new TOTP, or swap Pushover keys (would create
+  account-takeover from a single-secret compromise).
+"""
 from __future__ import annotations
+
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from .. import totp as totp_mod
 from ..audit import log as audit_log
-from ..auth import issue_otp, verify_otp, mint_jwt, require_auth, require_fresh_otp
+from ..auth import (
+    floor_then_audit,
+    issue_otp,
+    mint_jwt,
+    require_auth,
+    require_fresh_otp,
+    require_fresh_pushover_otp,
+    verify_otp,
+)
 from ..config import get_settings
 from ..deps import client_ip, client_ua
 from ..models import MeResponse, OtpRequestResponse, OtpVerifyBody
@@ -17,15 +35,17 @@ settings = get_settings()
 
 
 class AuthStatus(BaseModel):
-    """Public — drives the login screen's tab visibility logic.
-    No sensitive data (no owner phone, no rate-limit state)."""
+    """Public — drives login screen tab visibility. No sensitive data."""
 
     totp_enrolled: bool
     pushover_configured: bool
 
 
 class TotpVerifyBody(BaseModel):
-    code: str = Field(min_length=6, max_length=8, pattern=r"^\d{6,8}$")
+    # Reviewer Nit: pyotp default is 6 digits; pin to exactly 6 to avoid
+    # silent-rejection of 7-8 digit input. If we ever want longer codes,
+    # pass digits=N to pyotp.TOTP() and bump this together.
+    code: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
 
 
 # ─── Pushover OTP ──────────────────────────────────────────────────────
@@ -78,8 +98,7 @@ async def me(claims: dict = Depends(require_auth)):
 
 @router.get("/status", response_model=AuthStatus)
 async def auth_status() -> AuthStatus:
-    """Public — login screen reads this to decide tab visibility.
-    No sensitive data; no rate-limit info; no owner phone."""
+    """Public — login screen reads to decide tab visibility. No sensitive data."""
     cfg = load_config()
     return AuthStatus(
         totp_enrolled=totp_mod.is_enrolled(),
@@ -89,20 +108,26 @@ async def auth_status() -> AuthStatus:
     )
 
 
-# ─── TOTP enrollment + verification ────────────────────────────────────────
+# ─── TOTP enrollment ──────────────────────────────────────────────────────
 
 
 @router.post("/totp/enroll-start")
-async def totp_enroll_start(request: Request, _claims: dict = Depends(require_fresh_otp)):
-    """Begin TOTP enrollment — requires JWT issued via Pushover OTP ≤5 min ago.
+async def totp_enroll_start(
+    request: Request, _claims: dict = Depends(require_fresh_pushover_otp)
+):
+    """Begin TOTP enrollment.
 
-    Refuses if already enrolled (Reviewer 1 S1: was unbounded — now require_fresh_otp
-    + the totp.enroll_start guard make this safe; audit-log every call so multiple
-    enroll-start attempts are visible).
+    Requires fresh Pushover OTP — TOTP-only login cannot self-enroll a new
+    secret (closes self-recovery-prevention attack from PR-2 review).
     """
     cfg = load_config()
     body = totp_mod.enroll_start(cfg.owner.phone)
-    audit_log("auth.totp.enroll_start", ip=client_ip(request), ua=client_ua(request))
+    audit_log(
+        "auth.totp.enroll_start",
+        ip=client_ip(request),
+        ua=client_ua(request),
+        details={"actor_method": "pushover"},
+    )
     return body  # {otpauth_uri, qr_b64, secret_for_manual_entry}
 
 
@@ -112,14 +137,16 @@ async def totp_enroll_verify(
     request: Request,
     _claims: dict = Depends(require_auth),
 ):
-    """Confirm enrollment by submitting a valid TOTP from the authenticator app."""
+    """Confirm enrollment by submitting a valid TOTP from the authenticator."""
     totp_mod.enroll_verify(body.code)
     audit_log("auth.totp.enroll_verify", ip=client_ip(request), ua=client_ua(request))
     return {"ok": True}
 
 
 @router.post("/totp/disable")
-async def totp_disable(request: Request, _=Depends(require_fresh_otp)):
+async def totp_disable(request: Request, _=Depends(require_fresh_pushover_otp)):
+    """Disable TOTP — Pushover-only sensitive (TOTP attacker can't lock out the
+    legitimate owner's recovery channel)."""
     totp_mod.disable()
     audit_log("auth.totp.disable", ip=client_ip(request), ua=client_ua(request))
     return {"ok": True}
@@ -127,18 +154,39 @@ async def totp_disable(request: Request, _=Depends(require_fresh_otp)):
 
 @router.post("/verify-totp")
 async def verify_totp_route(body: TotpVerifyBody, request: Request, response: Response):
-    """Public — fallback login when Pushover OTP isn't available.
+    """Public — fallback login when Pushover is unavailable.
 
-    Reads ONLY the committed totp_secret_path; refuses 412 if only pending exists
-    (closes design-review S1 attack vector).
+    Same wall-clock floor + audit-after-floor pattern as Pushover verify_otp,
+    so timing doesn't differentiate happy/sad paths to a remote observer.
     """
+    started = time.time()
     ip = client_ip(request)
     ua = client_ua(request)
-    owner_phone = totp_mod.verify(body.code)
-    if owner_phone is None:
-        audit_log("auth.totp.verify_failed", ip=ip, ua=ua)
+
+    audit_event: str
+    audit_details: dict
+    jwt_token: str | None = None
+    try:
+        owner_phone = totp_mod.verify(body.code)
+        if owner_phone is None:
+            audit_event = "auth.totp.verify_failed"
+            audit_details = {"reason": "wrong_code"}
+        else:
+            jwt_token = mint_jwt(owner_phone, auth_method="totp")
+            audit_event = "auth.totp.verify_success"
+            audit_details = {"owner": owner_phone}
+    except HTTPException as he:
+        # Lockout / not-enrolled paths — record + still apply floor.
+        audit_event = "auth.totp.verify_failed"
+        audit_details = {"reason": f"http_{he.status_code}"}
+        await floor_then_audit(started, audit_event, ip, ua, audit_details)
+        raise
+
+    await floor_then_audit(started, audit_event, ip, ua, audit_details)
+
+    if jwt_token is None:
         raise HTTPException(401, "invalid TOTP code")
-    jwt_token = mint_jwt(owner_phone)
+
     response.set_cookie(
         key=settings.cookie_name,
         value=jwt_token,
@@ -148,5 +196,4 @@ async def verify_totp_route(body: TotpVerifyBody, request: Request, response: Re
         samesite="strict",
         path="/",
     )
-    audit_log("auth.totp.verify_success", ip=ip, ua=ua, details={"owner": owner_phone})
     return {"ok": True}
