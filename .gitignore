@@ -104,3 +104,13 @@ web/frontend/node_modules/
 web/frontend/dist/
 web/frontend/src/api/schema.gen.ts
 web/frontend/.vite/
+
+# Catch-all for review/diagnostic scratch files
+.chown_diag.txt
+.env_check.txt
+.env_recheck.txt
+.log_diag.txt
+.p3_patch_owner.py
+.pending_check.txt
+.reconnect_check.txt
+.step_a_poll.txt
