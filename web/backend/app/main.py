@@ -1,7 +1,7 @@
 """FastAPI cockpit entry point.
 
 Run:
-    uvicorn app.main:app --host 127.0.0.1 --port 8080
+    uvicorn app.main:app --host 127.0.0.1 --port 8081
 """
 from __future__ import annotations
 

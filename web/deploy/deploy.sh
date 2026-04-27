@@ -93,7 +93,7 @@ ssh "$VPS" 'set -euo pipefail
     echo "Edit /etc/caddy/Caddyfile.cockpit and integrate into main Caddyfile, then: sudo systemctl reload caddy"
 
     sleep 3
-    curl -sS http://127.0.0.1:8080/health | head
+    curl -sS http://127.0.0.1:8081/health | head
 '
 
 echo "==> Done. Hit https://cockpit.<your-domain>/ to log in (Pushover OTP)."
