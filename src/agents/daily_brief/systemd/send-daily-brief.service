@@ -1,0 +1,27 @@
+[Unit]
+Description=Daily Brief - owner morning summary
+After=network-online.target hermes-gateway.service
+Wants=network-online.target
+ConditionPathIsExecutable=/usr/local/bin/send-daily-brief
+ConditionPathExists=/opt/shift-agent/config.yaml
+
+[Service]
+Type=oneshot
+User=shift-agent
+Group=shift-agent
+EnvironmentFile=/opt/shift-agent/.env
+Environment=HOME=/opt/shift-agent
+ExecStart=/usr/local/bin/send-daily-brief
+StandardOutput=append:/opt/shift-agent/logs/daily-brief.log
+StandardError=append:/opt/shift-agent/logs/daily-brief.log
+
+# Security hardening (mirrors shift-agent-tail-logger.service)
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/shift-agent
+ProtectHome=read-only
+PrivateTmp=true
+RuntimeDirectory=shift-agent
+
+[Install]
+WantedBy=multi-user.target

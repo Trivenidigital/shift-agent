@@ -1,0 +1,7 @@
+{header}*Daily Brief — {brief_date}*{catchup_note}
+
+*Yesterday:* {yesterday_summary}
+
+*Today's outlook:* {today_outlook}
+
+*Needs your attention:* {alerts_summary}

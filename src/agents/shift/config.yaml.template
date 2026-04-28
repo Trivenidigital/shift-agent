@@ -43,3 +43,18 @@ backup:
 operations:
   # Labels alert urgency. Agent runs 24/7 regardless.
   business_hours_local: "08:00-22:00"
+
+# Agent #4 — Daily Brief. All fields optional; defaults shown.
+# Brief fires every morning at brief_time in the customer timezone.
+# If VPS was down at brief_time, catch-up window allows late delivery
+# up to catchup_window_minutes; past that, owner gets a Pushover
+# instead of a stale brief.
+daily_brief:
+  enabled: true
+  brief_time: "07:00"          # HH:MM in customer.timezone (regex-validated)
+  max_words: 150               # soft cap — renderer trims if exceeded
+  sections:                    # at least one required
+    - "yesterday"
+    - "today_outlook"
+    - "alerts"
+  catchup_window_minutes: 180  # 3h grace period after brief_time

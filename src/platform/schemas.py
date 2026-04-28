@@ -244,6 +244,34 @@ class OperationsConfig(BaseModel):
     business_hours_local: str = "08:00-22:00"
 
 
+# Daily Brief sub-config + section alias (Agent #4)
+BriefSection = Literal["yesterday", "today_outlook", "alerts"]
+
+
+class DailyBriefConfig(BaseModel):
+    """Owner-configurable morning brief settings (Agent #4)."""
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = True
+    # Regex rejects 24:00, 25:99 etc. (the v1 plan's `^[0-2]\d:[0-5]\d$` was buggy).
+    brief_time: str = Field(default="07:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    max_words: int = Field(default=150, ge=50, le=500)
+    sections: list[BriefSection] = Field(
+        default_factory=lambda: ["yesterday", "today_outlook", "alerts"],
+        min_length=1,
+    )
+    # Catch-up: if VPS was down at brief_time, fire the brief anyway up to N min later.
+    # Past this window, BriefSkipped(catchup_expired) + Pushover instead of stale brief.
+    catchup_window_minutes: int = Field(default=180, ge=15, le=720)
+
+    @field_validator("brief_time")
+    @classmethod
+    def _validate_brief_time_strptime(cls, v: str) -> str:
+        # Belt-and-suspenders — the regex catches structure; strptime catches semantics.
+        from datetime import datetime as _dt
+        _dt.strptime(v, "%H:%M")
+        return v
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
     schema_version: Literal[1] = 1
@@ -253,6 +281,7 @@ class Config(BaseModel):
     alerting: AlertingConfig
     backup: BackupConfig
     operations: OperationsConfig = OperationsConfig()
+    daily_brief: DailyBriefConfig = Field(default_factory=DailyBriefConfig)
 
     def tz(self) -> ZoneInfo:
         return ZoneInfo(self.customer.timezone)
@@ -577,6 +606,65 @@ class HealthCheckFailure(_BaseEntry):
     detail: str
 
 
+# ─────────────────────────────────────────────────────────────────
+# Daily Brief log entries (Agent #4)
+# ─────────────────────────────────────────────────────────────────
+
+# brief_date is YYYY-MM-DD in customer tz (matches SendCounter.day shape).
+_BRIEF_DATE_RE = r"^\d{4}-\d{2}-\d{2}$"
+
+
+class BriefAttempted(_BaseEntry):
+    """Written BEFORE bridge POST. Idempotency anchor — mirrors OutboundAttempted.
+
+    On crash between bridge_post and BriefSent append, the next run sees this
+    entry within the last 30 min and refuses to auto-resend (operator must
+    verify manually via WhatsApp + Pushover alert).
+    """
+    type: Literal["brief_attempted"]
+    brief_date: str = Field(pattern=_BRIEF_DATE_RE)
+    attempt_id: str = Field(min_length=1)         # uuid4 per attempt
+    word_count: int = Field(ge=0)
+    sections_included: list[BriefSection]
+    source_count: int = Field(ge=0)               # number of LogSource entries scanned
+    degraded_mode: bool = False                   # any data source unavailable?
+    catchup_minutes_late: int = Field(default=0, ge=0)
+
+
+class BriefSent(_BaseEntry):
+    """Written AFTER bridge 200 + non-empty messageId."""
+    type: Literal["brief_sent"]
+    brief_date: str = Field(pattern=_BRIEF_DATE_RE)
+    attempt_id: str = Field(min_length=1)         # links to BriefAttempted
+    outbound_message_id: str = Field(min_length=1)
+    self_chat_jid: str = Field(min_length=1)
+
+
+class BriefSendFailed(_BaseEntry):
+    """Bridge unreachable or returned non-2xx after retry."""
+    type: Literal["brief_send_failed"]
+    brief_date: str = Field(pattern=_BRIEF_DATE_RE)
+    attempt_id: str = Field(min_length=1)
+    error: str                                    # no length cap (matches OutboundSendFailed)
+    retry_count: int = Field(ge=0)
+
+
+class BriefSkipped(_BaseEntry):
+    """Brief intentionally not sent. NOTE: outside_window fires aren't logged
+    (would generate 95+ noise entries/day); script exits 0 silently for those.
+    NOTE: no_activity removed — we always send a 'quiet day' brief instead."""
+    type: Literal["brief_skipped"]
+    brief_date: str = Field(pattern=_BRIEF_DATE_RE)
+    reason: Literal[
+        "already_sent",
+        "data_unavailable",
+        "disabled",
+        "catchup_expired",
+        "dependency_down",
+        "send_uncertain",  # crash between send and log; manual verification needed
+    ]
+
+
 LogEntry = Annotated[
     Union[
         RawInbound, ProposalCreated, ProposalStatusChange,
@@ -587,6 +675,8 @@ LogEntry = Annotated[
         # BEGIN shift-agent-sender-id
         LidLearned,
         # END shift-agent-sender-id
+        # Agent #4 Daily Brief
+        BriefAttempted, BriefSent, BriefSendFailed, BriefSkipped,
     ],
     Field(discriminator="type"),
 ]
@@ -595,6 +685,7 @@ LogEntry = Annotated[
 __all__ = [
     "E164Phone", "Role", "EmployeeId", "Employee", "PhoneAssignment", "ScheduleEntry", "Roster",
     "Config", "CustomerConfig", "OwnerConfig", "LimitsConfig", "AlertingConfig", "BackupConfig", "OperationsConfig",
+    "DailyBriefConfig", "BriefSection",
     "Proposal", "ProposalId", "ProposalCode",
     "AwaitingProposal", "ApprovedProposal", "ReconcilingProposal", "SentProposal",
     "SendFailedProposal", "AcceptedProposal", "DeclinedProposal", "DeniedByOwnerProposal",
@@ -606,4 +697,5 @@ __all__ = [
     "OutboundResponse", "OutboundCapExceeded", "OutboundRefusedDisabled",
     "AgentStateChange", "UnknownSenderDeclined", "InvariantViolation", "HealthCheckFailure",
     "LidLearned",
+    "BriefAttempted", "BriefSent", "BriefSendFailed", "BriefSkipped",
 ]
