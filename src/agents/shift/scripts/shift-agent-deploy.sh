@@ -164,15 +164,49 @@ case "$ACTION" in
         # drift: Hermes commit moved, bridge.js content changed, or our patch
         # markers no longer anchored where we expect. Override mechanism for
         # legitimate Hermes upgrades documented in the check script.
-        if [ -x "$STAGING/tools/check-shift-agent-patch.sh" ]; then
-            echo "=== Hermes pin gate ==="
-            if ! "$STAGING/tools/check-shift-agent-patch.sh"; then
-                echo "ERROR: Hermes pin verification failed — refusing to install." >&2
-                echo "  No state change has been made. See output above for details." >&2
+        # Tightened from WARN to FAIL on missing script (per PR #17 reviewer's
+        # Low-4): once tarballs reliably ship tools/, a missing check script
+        # means tarball corruption or a refactor that moved the script — both
+        # cases where silently bypassing the gate is dangerous.
+        if [ ! -x "$STAGING/tools/check-shift-agent-patch.sh" ]; then
+            echo "ERROR: $STAGING/tools/check-shift-agent-patch.sh not found or not executable." >&2
+            echo "  Either the tarball is malformed or a refactor moved the script." >&2
+            echo "  Refusing to deploy without the pin gate." >&2
+            exit 1
+        fi
+        echo "=== Hermes pin gate ==="
+        if ! "$STAGING/tools/check-shift-agent-patch.sh"; then
+            echo "ERROR: Hermes pin verification failed — refusing to install." >&2
+            echo "  No state change has been made. See output above for details." >&2
+            exit 1
+        fi
+
+        # Env symlink integrity gate — verify /opt/shift-agent/.env still points
+        # where we set it up during the consolidation migration. Catches: Hermes
+        # setup re-run that recreates the file, manual editor truncation via
+        # `> /root/.hermes/.env`, redirect that broke the symlink. Same fail-closed
+        # pattern as the Hermes pin gate; exits before install_artifacts so no
+        # rollback is needed.
+        # If /opt/shift-agent/.env is a regular file (pre-migration state), this
+        # gate is a no-op — only enforced once the symlink exists.
+        if [ -L /opt/shift-agent/.env ]; then
+            echo "=== Env symlink integrity gate ==="
+            ENV_TARGET=$(readlink /opt/shift-agent/.env)
+            if [ "$ENV_TARGET" != "/root/.hermes/.env" ]; then
+                echo "ERROR: /opt/shift-agent/.env symlink target drifted." >&2
+                echo "  expected: /root/.hermes/.env" >&2
+                echo "  got:      $ENV_TARGET" >&2
+                echo "  Recovery: sudo ln -sf /root/.hermes/.env /opt/shift-agent/.env  &&  retry deploy" >&2
                 exit 1
             fi
-        else
-            echo "WARN: tools/check-shift-agent-patch.sh not found in staged tarball — skipping pin gate" >&2
+            if [ ! -r /opt/shift-agent/.env ]; then
+                echo "ERROR: /opt/shift-agent/.env symlink target unreadable." >&2
+                echo "  /root/.hermes/.env may have been deleted or permissions changed." >&2
+                echo "  Recovery: ls -la /root/.hermes/.env  (check existence + perms);" >&2
+                echo "            verify shift-agent user can read it." >&2
+                exit 1
+            fi
+            echo "OK: env symlink intact ($ENV_TARGET)"
         fi
 
         COMMIT_HASH=$(cat "$STAGING/.commit-hash" 2>/dev/null | head -c 8 || echo "unknown")

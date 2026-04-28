@@ -32,12 +32,20 @@ info() { echo "  $1" >&2; }
 [ -r "$BASELINE_FILE" ] || fail "baseline pin file missing: $BASELINE_FILE"
 
 # Source-style read (ignore comment + blank lines).
-# Strip ALL whitespace from values — defends against CRLF on the baseline file
-# (a recurring gotcha in this repo) and trailing spaces. A `\r` slipping into
-# PINNED_COMMIT would fail-close the deploy with no visible diff in operator
-# output, which is exactly the failure mode this gate is supposed to surface.
+# Normalizes:
+#   - whitespace including \r (defends against CRLF — recurring repo gotcha)
+#   - surrounding double or single quotes (KEY="abc" and KEY=abc are
+#     semantically identical to dotenv loaders, but raw string compare against
+#     `git rev-parse HEAD` would false-positive on a quoted baseline value)
+# Without this, a stray \r or quoted value would fail-close the deploy with
+# no visible diff in operator output — exactly the failure mode this gate is
+# supposed to surface, not produce.
 _read_pin() {
-    grep "^${1}=" "$BASELINE_FILE" | head -1 | cut -d= -f2- | tr -d '[:space:]'
+    grep "^${1}=" "$BASELINE_FILE" \
+        | head -1 \
+        | cut -d= -f2- \
+        | tr -d '[:space:]' \
+        | sed -E 's/^"(.*)"$/\1/; s/^'\''(.*)'\''$/\1/'
 }
 PINNED_COMMIT=$(_read_pin HERMES_COMMIT)
 PINNED_VERSION=$(_read_pin HERMES_VERSION)
