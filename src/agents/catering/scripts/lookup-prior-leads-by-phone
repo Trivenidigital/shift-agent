@@ -1,0 +1,283 @@
+#!/usr/bin/env python3
+"""lookup-prior-leads-by-phone — read-only customer history lookup (v3.1 C02).
+
+Used by the catering SKILL Python preamble to enrich Kimi's context for
+returning customers (e.g., "last booked 14 days ago, vegetarian"). Pure read —
+never mutates state.
+
+TODO: SKILL-integration follow-up ticket required before this script provides
+customer-visible value. The catering SKILL Python preamble must be updated
+separately to invoke this script subprocess-style and inject the returned dict
+into the Kimi prompt context. Tracked in tasks/todo.md as
+"v3.1 catering SKILL preamble integration for lookup_prior_leads_by_phone".
+
+Two invocation forms (matches dispatcher-accuracy-report:249 precedent):
+  CLI:        /usr/local/bin/lookup-prior-leads-by-phone --customer-phone "+1..."
+  Importable: from lookup_prior_leads_by_phone import lookup_prior_leads_by_phone
+
+Returns dict matching v3.1 C02 contract — see docs/catering-edge-cases.md.
+
+Phone canonicalization: handles formatting variants per E164Phone.from_any() —
+dashes, spaces, parens, dots, @jid suffix, 00- prefix, bare-digit. Letters are
+NOT translated to digits (the v3.1 C02 PRIYA example is illustrative of
+formatting normalization, NOT vanity-number translation; the doc binds to
+"matching the existing schema validator" which rejects letters via
+_PHONE_E164 = r"^\\+\\d{10,15}$"). Letter input → ValueError → CLI exit 2.
+
+Lock semantics: locks the leads.json file descriptor directly (NOT via
+safe_io.flock which locks a sibling .lock file — different lock target).
+Uses LOCK_NB + retry (3 × 1s sleep) so a long-running write does not block
+the customer-facing SKILL preamble indefinitely. On exhaustion, returns
+{lookup_status: "lock_timeout", ...} rather than raising.
+
+Time semantics: `last_seen_days_ago` uses `.days` truncation (23h59m → 0).
+Matches send-daily-brief watchdog precedent. Document semantic for SKILL prompts.
+
+Asymmetry resolution (design-review MEDIUM-2): the importable function raises
+RuntimeError on corrupt leads-store; the CLI catches it and returns a JSON
+dict with lookup_status="corrupt" alongside EXIT_SCHEMA_VIOLATION (5). SKILL
+preamble parsers see structured output even on the failure path.
+
+Exit codes (CLI):
+  0 — success (lookup_status ∈ {ok, missing_file, no_match, lock_timeout})
+  2 — invalid phone (E164 canonicalization failed: letters, too-short, etc.)
+  5 — leads.json corrupt (Pydantic ValidationError / parse error); JSON dict
+      still printed with lookup_status="corrupt"
+  1 — uncaught (defensive: TypeError from a future tz path bug)
+"""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
+
+from safe_io import load_model, customer_now  # noqa: E402
+from schemas import (  # noqa: E402
+    Config, CateringLeadStore, E164Phone,
+)
+from exit_codes import (  # noqa: E402
+    EXIT_OK, EXIT_INVALID_INPUT, EXIT_SCHEMA_VIOLATION, EXIT_GENERIC_ERROR,
+)
+from pydantic import ValidationError  # noqa: E402
+
+CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
+LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
+LOCK_RETRY_ATTEMPTS = 3
+LOCK_RETRY_SLEEP_SEC = 1.0
+
+
+# Single source of truth for lookup_status enum. Importable so SKILL preamble
+# (and tests) can grep without copy-paste drift.
+LOOKUP_STATUS_OK = "ok"
+LOOKUP_STATUS_MISSING_FILE = "missing_file"
+LOOKUP_STATUS_NO_MATCH = "no_match"
+LOOKUP_STATUS_LOCK_TIMEOUT = "lock_timeout"
+LOOKUP_STATUS_CORRUPT = "corrupt"
+
+
+def _empty_result(status: str) -> dict:
+    return {
+        "lookup_status": status,
+        "prior_lead_count": 0,
+        "most_recent_status": None,
+        "most_recent_event_date": None,
+        "most_recent_dietary_restrictions": [],
+        "last_seen_days_ago": None,
+    }
+
+
+def _canonicalize_phone(raw: str) -> Optional[str]:
+    """Canonical E.164 form, or None if input is invalid.
+
+    Letters are rejected by _PHONE_E164. PRIYA is illustrative — doc binds
+    "matching the existing schema validator" (per design-review).
+
+    Catches Pydantic's ValidationError too: in v2 it does NOT inherit from
+    ValueError, so a future change in E164Phone.validate that surfaces it
+    would otherwise propagate uncaught (silent-failure-hunter MEDIUM-6).
+    """
+    try:
+        return str(E164Phone.validate(raw))
+    except (TypeError, ValueError, ValidationError):
+        return None
+
+
+def _try_acquire_lock(fd) -> bool:
+    """Non-blocking exclusive lock. Returns True if acquired, False if contended."""
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except BlockingIOError:
+        return False
+
+
+def _read_leads_with_lock_timeout(leads_path: Path) -> tuple[Optional[CateringLeadStore], str]:
+    """Returns (store, status). status ∈ {ok, missing_file, lock_timeout, corrupt}.
+
+    TOCTOU-safe: catches FileNotFoundError at open() in case the file is
+    rotated/replaced between our check and our open (silent-failure-hunter
+    HIGH-1). All read failure modes map to a status string the caller can
+    branch on; never raises.
+    """
+    try:
+        fd = open(leads_path, "rb")  # noqa: SIM115 — manual close in finally
+    except FileNotFoundError:
+        return None, LOOKUP_STATUS_MISSING_FILE
+
+    try:
+        for attempt in range(LOCK_RETRY_ATTEMPTS):
+            if _try_acquire_lock(fd):
+                try:
+                    store, ld_status = load_model(
+                        leads_path, CateringLeadStore, default=CateringLeadStore(),
+                    )
+                    # safe_io.safe_load_json contract: status starts with "corrupt:"
+                    # on parse error (see safe_io.py docstring around line 100-122).
+                    if ld_status.startswith("corrupt"):
+                        return None, LOOKUP_STATUS_CORRUPT
+                    return store, LOOKUP_STATUS_OK
+                finally:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            if attempt < LOCK_RETRY_ATTEMPTS - 1:
+                time.sleep(LOCK_RETRY_SLEEP_SEC)
+        return None, LOOKUP_STATUS_LOCK_TIMEOUT
+    finally:
+        fd.close()
+
+
+def _normalize_aware(dt: datetime, *, source: str) -> datetime:
+    """Defensive: codebase invariant is tz-aware everywhere. If a naive datetime
+    arrives (legacy data, manually-edited leads.json, future writer bug), treat
+    it as UTC and emit a stderr WARN so ops sees the regression at first
+    occurrence rather than masking it indefinitely (silent-failure-hunter MEDIUM-3).
+    """
+    if dt.tzinfo is None:
+        sys.stderr.write(
+            f"WARN: naive datetime in {source} — assuming UTC. "
+            f"This indicates a writer regression; check leads.json for "
+            f"manually-edited or pre-tz-convention entries.\n"
+        )
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def lookup_prior_leads_by_phone(
+    customer_phone: str,
+    *,
+    leads_path: Path = LEADS_PATH,
+    now: Optional[datetime] = None,
+) -> dict:
+    """C02 contract — see module docstring.
+
+    Raises:
+        ValueError: phone canonicalization failed
+        RuntimeError: leads.json present but corrupt (CLI catches and converts
+                      to dict with lookup_status='corrupt')
+    """
+    canonical = _canonicalize_phone(customer_phone)
+    if canonical is None:
+        raise ValueError(f"invalid phone: {customer_phone!r}")
+
+    store, status = _read_leads_with_lock_timeout(leads_path)
+    if status == LOOKUP_STATUS_MISSING_FILE:
+        return _empty_result(LOOKUP_STATUS_MISSING_FILE)
+    if status == LOOKUP_STATUS_LOCK_TIMEOUT:
+        return _empty_result(LOOKUP_STATUS_LOCK_TIMEOUT)
+    if status == LOOKUP_STATUS_CORRUPT:
+        raise RuntimeError(f"leads-store corrupt at {leads_path}")
+    assert store is not None  # noqa: S101 — invariant: status==ok ⇒ store
+
+    matches = [l for l in store.leads if l.customer_phone == canonical]
+    if not matches:
+        return _empty_result(LOOKUP_STATUS_NO_MATCH)
+
+    matches.sort(key=lambda l: l.created_at, reverse=True)
+    most_recent = matches[0]
+
+    created_at = _normalize_aware(most_recent.created_at, source="lead.created_at")
+    if now is None:
+        now = datetime.now(tz=timezone.utc)
+    now = _normalize_aware(now, source="now argument")
+    days_ago = (now - created_at).days
+
+    # NOTE: most_recent_status is a CateringLeadStatus literal value. SKILL
+    # preamble comparisons against status values must use the literal strings
+    # from src/platform/schemas.py:276 — see CateringLeadStatus type.
+    return {
+        "lookup_status": LOOKUP_STATUS_OK,
+        "prior_lead_count": len(matches),
+        "most_recent_status": str(most_recent.status),
+        "most_recent_event_date": most_recent.extracted.event_date,
+        "most_recent_dietary_restrictions": list(most_recent.extracted.dietary_restrictions),
+        "last_seen_days_ago": days_ago,
+    }
+
+
+def _load_config_now() -> Optional[datetime]:
+    """Best-effort: load Config and return tz-aware now in customer tz. Falls
+    back to None (caller defaults to UTC). Narrow except per design-review
+    MEDIUM-5: bucket distinct error types separately so triage is unambiguous.
+    """
+    try:
+        import yaml
+        from zoneinfo import ZoneInfoNotFoundError
+        cfg_dict = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+        cfg = Config.model_validate(cfg_dict)
+        return customer_now(cfg.customer.timezone)
+    except FileNotFoundError:
+        sys.stderr.write(f"WARN: config not found at {CONFIG_PATH}; using UTC now\n")
+    except ValidationError as e:
+        sys.stderr.write(f"WARN: config validation failed; using UTC now: {e}\n")
+    except ZoneInfoNotFoundError as e:
+        sys.stderr.write(f"WARN: cfg.customer.timezone unresolvable; using UTC now: {e}\n")
+    except Exception as e:  # noqa: BLE001 — last-resort: never block CLI on config issues
+        # yaml.YAMLError, OSError, AttributeError on missing keys all land here.
+        # Distinct from above so triage knows it's a programming/yaml-shape bug.
+        sys.stderr.write(
+            f"WARN: config load unexpected error ({type(e).__name__}); using UTC now: {e}\n"
+        )
+    return None
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    """CLI entry point. argv override matches dispatcher-accuracy-report
+    precedent for testability."""
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--customer-phone", required=True)
+    args = ap.parse_args(argv)
+
+    now = _load_config_now() or datetime.now(tz=timezone.utc)
+
+    try:
+        result = lookup_prior_leads_by_phone(args.customer_phone, now=now)
+    except ValueError as e:
+        sys.stderr.write(f"{e}\n")
+        return EXIT_INVALID_INPUT
+    except RuntimeError as e:
+        # Corrupt leads.json: still emit a structured JSON dict so SKILL
+        # preamble parsers see consistent output regardless of failure mode
+        # (design-review MEDIUM-2 asymmetry resolution).
+        sys.stderr.write(f"{e}\n")
+        print(json.dumps(_empty_result(LOOKUP_STATUS_CORRUPT)))
+        return EXIT_SCHEMA_VIOLATION
+    except TypeError as e:
+        # Defensive: tz-aware/naive subtraction is normally caught by
+        # _normalize_aware, but this remains as belt-and-suspenders for any
+        # future tz path bug.
+        sys.stderr.write(f"unexpected tz error: {e}\n")
+        return EXIT_GENERIC_ERROR
+
+    print(json.dumps(result))
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -22,7 +22,8 @@ for script in \
     /usr/local/bin/shift-agent-tail-logger.py \
     /usr/local/bin/shift-agent-health-check.sh \
     /usr/local/bin/shift-agent-reconcile.py \
-    /usr/local/bin/send-routing-accuracy-summary ; do
+    /usr/local/bin/send-routing-accuracy-summary \
+    /usr/local/bin/lookup-prior-leads-by-phone ; do
     [ -x "$script" ] || { echo "FAIL: $script missing or not executable"; exit 1; }
 done
 echo "✓ All scripts present + executable"
