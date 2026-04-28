@@ -79,6 +79,14 @@ install_artifacts() {
         rsync -a src/agents/catering/skills/ /root/.hermes/skills/
         chown -R shift-agent:shift-agent /root/.hermes/skills/
     fi
+    # Tier 2 agents (Agents 6, 7, 9, 10, 12, 13, 14, 15, 16) — SKILL-only stubs.
+    # All default cfg.<agent>.enabled=False; opt-in per customer.
+    for tier2_agent in inventory supplier vip catering_followup hiring compliance employee_docs cash_ar sales_tax; do
+        if [ -d "src/agents/${tier2_agent}/skills" ]; then
+            rsync -a "src/agents/${tier2_agent}/skills/" /root/.hermes/skills/
+        fi
+    done
+    chown -R shift-agent:shift-agent /root/.hermes/skills/
 
     # Enable + start Daily Brief timer + EOD timer. Loud on failure.
     systemctl enable --now send-daily-brief.timer

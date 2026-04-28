@@ -390,6 +390,111 @@ class MultiLocationConfig(BaseModel):
         return v
 
 
+# ─────────────────────────────────────────────────────────────────
+# Tier 2 agents — schemas-only scaffolding (v0.1)
+# ─────────────────────────────────────────────────────────────────
+# Per portfolio.md.txt, Tier 2 = "build after Tier 1 has paying customers".
+# We ship schemas + SKILL stubs now so customers can opt-in agent-by-agent
+# as their needs solidify. Full implementations land in v0.2 per-agent
+# triggered by pilot customer onboarding.
+
+# Agent #6 — Inventory Tracker (High complexity; needs POS integration)
+class InventoryConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    low_stock_threshold_days: int = Field(default=7, ge=1)  # alert when fewer than N days of supply
+    expiry_warning_days: int = Field(default=3, ge=1)
+
+
+# Agent #7 — Supplier Coordination (Medium)
+class SupplierConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    follow_up_after_hours: int = Field(default=24, ge=1)  # chase orders past expected delivery
+    require_owner_approval_for_outbound: bool = True
+
+
+# Agent #9 — VIP Customer (Medium)
+class VipConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    min_orders_for_vip: int = Field(default=10, ge=1)
+    at_risk_silent_days: int = Field(default=60, ge=1)  # flag VIP after N silent days
+
+
+# Agent #10 — Catering Follow-up (Low-Medium; depends on Agent #2)
+class CateringFollowupConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    thank_you_delay_hours: int = Field(default=24, ge=1)
+    feedback_request_delay_hours: int = Field(default=48, ge=1)
+    anniversary_nudge_days_before: int = Field(default=14, ge=1)
+
+
+# Agent #12 — Hiring & Onboarding (Medium)
+class HiringConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    paperwork_overdue_days: int = Field(default=7, ge=1)
+
+
+# Agent #13 — Compliance Calendar (Low-Medium; calendar-only logic)
+class ComplianceConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    advance_warning_days: list[int] = Field(default_factory=lambda: [30, 14, 7, 3, 1])
+
+    @field_validator("advance_warning_days")
+    @classmethod
+    def _sorted_unique_positive(cls, v: list[int]) -> list[int]:
+        if not v:
+            raise ValueError("advance_warning_days must not be empty")
+        if any(d <= 0 for d in v):
+            raise ValueError("advance_warning_days values must be positive")
+        return sorted(set(v), reverse=True)
+
+
+# Agent #14 — Employee Document Tracker (Low; pure date logic)
+class EmployeeDocsConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    advance_warning_days: list[int] = Field(default_factory=lambda: [90, 60, 30, 14])
+
+    @field_validator("advance_warning_days")
+    @classmethod
+    def _sorted_unique_positive(cls, v: list[int]) -> list[int]:
+        if not v:
+            raise ValueError("advance_warning_days must not be empty")
+        if any(d <= 0 for d in v):
+            raise ValueError("advance_warning_days values must be positive")
+        return sorted(set(v), reverse=True)
+
+
+# Agent #15 — Cash & AR (Medium; invoice tracking)
+class CashArConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    reminder_cadence_days: list[int] = Field(default_factory=lambda: [7, 14, 30, 45])  # days overdue
+    escalate_threshold_days: int = Field(default=60, ge=1)
+    require_owner_approval_for_outbound: bool = True
+
+
+# Agent #16 — Sales Tax Filing (Medium-High; per-state rules)
+class SalesTaxConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    advance_warning_days: list[int] = Field(default_factory=lambda: [14, 7, 3, 1])
+
+    @field_validator("advance_warning_days")
+    @classmethod
+    def _sorted_unique_positive(cls, v: list[int]) -> list[int]:
+        if not v:
+            raise ValueError("advance_warning_days must not be empty")
+        if any(d <= 0 for d in v):
+            raise ValueError("advance_warning_days values must be positive")
+        return sorted(set(v), reverse=True)
+
+
 # Agent #5 EOD Reconciliation config
 class EodConfig(BaseModel):
     """End-of-day reconciliation snapshot settings (Agent #5)."""
@@ -421,6 +526,16 @@ class Config(BaseModel):
     eod: EodConfig = Field(default_factory=EodConfig)
     multi_location: MultiLocationConfig = Field(default_factory=MultiLocationConfig)
     catering: CateringConfig = Field(default_factory=CateringConfig)
+    # Tier 2 agents (all default enabled=False; opt-in per customer)
+    inventory: InventoryConfig = Field(default_factory=InventoryConfig)
+    supplier: SupplierConfig = Field(default_factory=SupplierConfig)
+    vip: VipConfig = Field(default_factory=VipConfig)
+    catering_followup: CateringFollowupConfig = Field(default_factory=CateringFollowupConfig)
+    hiring: HiringConfig = Field(default_factory=HiringConfig)
+    compliance: ComplianceConfig = Field(default_factory=ComplianceConfig)
+    employee_docs: EmployeeDocsConfig = Field(default_factory=EmployeeDocsConfig)
+    cash_ar: CashArConfig = Field(default_factory=CashArConfig)
+    sales_tax: SalesTaxConfig = Field(default_factory=SalesTaxConfig)
 
     def tz(self) -> ZoneInfo:
         return ZoneInfo(self.customer.timezone)
@@ -953,6 +1068,9 @@ __all__ = [
     "CateringConfig", "CateringLeadStatus", "CateringLeadExtractedFields",
     "CateringLead", "CateringLeadStore",
     "is_catering_terminal", "CATERING_TERMINAL_STATUSES",
+    # Tier 2 configs
+    "InventoryConfig", "SupplierConfig", "VipConfig", "CateringFollowupConfig",
+    "HiringConfig", "ComplianceConfig", "EmployeeDocsConfig", "CashArConfig", "SalesTaxConfig",
     "Proposal", "ProposalId", "ProposalCode",
     "AwaitingProposal", "ApprovedProposal", "ReconcilingProposal", "SentProposal",
     "SendFailedProposal", "AcceptedProposal", "DeclinedProposal", "DeniedByOwnerProposal",
