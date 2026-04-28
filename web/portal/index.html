@@ -194,21 +194,21 @@
   <!-- Top nav -->
   <nav class="top">
     <div class="wrap">
-      <a class="brand" href="/">
-        <div class="mark">T</div>
+      <a class="brand" href="/portal/">
+        <div class="mark">S</div>
         <div>
-          <div class="n">Triveni</div>
-          <div class="s">SMB-Agents Portfolio</div>
+          <div class="n">SMB-Agents</div>
+          <div class="s">Portfolio · 20 Agents</div>
         </div>
       </a>
       <div class="navlinks">
-        <a href="/">Home</a>
         <a href="/portal/" class="active">Portfolio</a>
-        <a href="http://46.62.206.192:8080/ui">Cockpit</a>
-        <a href="https://github.com/Trivenidigital/shift-agent">Source</a>
+        <a href="#tier1">Tier I</a>
+        <a href="#tier2">Tier II</a>
+        <a href="#tier3">Tier III</a>
       </div>
       <div class="navtail">
-        <span class="meta">46.62.206.192</span>
+        <span class="meta">For ethnic SMBs</span>
       </div>
     </div>
   </nav>
@@ -277,11 +277,11 @@
   <footer>
     <div class="wrap">
       <div class="row">
-        <div class="meta">Last updated 2026·04·28 — overnight sweep</div>
+        <div class="meta">SMB-Agents · A 20-agent suite for ethnic SMBs</div>
         <div class="links">
-          <a href="http://46.62.206.192:8080/ui">Shift Agent Cockpit</a>
-          <a href="https://github.com/Trivenidigital/shift-agent">Repository</a>
-          <a href="/">Triveni Home</a>
+          <a href="#tier1">Tier I</a>
+          <a href="#tier2">Tier II</a>
+          <a href="#tier3">Tier III</a>
         </div>
       </div>
     </div>
@@ -291,11 +291,11 @@
     // Single source of truth — hardcoded literal, no untrusted input.
     const AGENTS = [
       // Tier 1
-      { tier: 1, num: 1, name: "Shift Agent", purpose: "Sick-call coverage routing for hourly staff. Owner approves a 5-character code; the right teammate gets pinged.", state: "live", url: "http://46.62.206.192:8080/ui", state_detail: "Live — handling sick-call escalations on Triveni's roster." },
+      { tier: 1, num: 1, name: "Shift Agent", purpose: "Sick-call coverage routing for hourly staff. Owner approves a 5-character code; the right teammate gets pinged.", state: "live", url: "http://46.62.206.192:8080/ui", state_detail: "In production — handling sick-call escalations on a live roster." },
       { tier: 1, num: 2, name: "Catering Lead", purpose: "Capture catering inquiries, draft a quote in the owner's voice, gate behind a single approval.", state: "scaffold", state_detail: "Schema and three SKILLs deployed; cfg.catering.enabled = false (opt-in)." },
-      { tier: 1, num: 3, name: "Multi-Location Coordinator", purpose: "Cross-location queries (\"who's at Houston tomorrow?\") and inter-location coverage transfers.", state: "scaffold", state_detail: "Self-disables — Triveni hasn't onboarded a second location yet." },
-      { tier: 1, num: 4, name: "Daily Brief", purpose: "Morning WhatsApp summary of yesterday's activity and today's outlook — the agent owners actually pay for.", state: "live", state_detail: "Timer active; brief delivered Apr 28 03:55 UTC, idempotency verified." },
-      { tier: 1, num: 5, name: "EOD Reconciliation", purpose: "End-of-day snapshot of resolved and unresolved items — feeds tomorrow's brief.", state: "live", state_detail: "Timer active; daily snapshot at 22:00 customer-tz." },
+      { tier: 1, num: 3, name: "Multi-Location Coordinator", purpose: "Cross-location queries (\"who's at Houston tomorrow?\") and inter-location coverage transfers.", state: "scaffold", state_detail: "Self-disables for single-location operators; activates when a second location is onboarded." },
+      { tier: 1, num: 4, name: "Daily Brief", purpose: "Morning WhatsApp summary of yesterday's activity and today's outlook — the agent owners actually pay for.", state: "live", state_detail: "In production — daily morning brief delivered to the owner's WhatsApp." },
+      { tier: 1, num: 5, name: "EOD Reconciliation", purpose: "End-of-day snapshot of resolved and unresolved items — feeds tomorrow's brief.", state: "live", state_detail: "In production — daily snapshot at owner-configured close time." },
 
       // Tier 2
       { tier: 2, num: 6, name: "Inventory Tracker", purpose: "Stock counts, low-stock alerts, expiry warnings for perishables.", state: "scaffold", state_detail: "Awaits POS integration (Clover, Square, Cash App)." },
