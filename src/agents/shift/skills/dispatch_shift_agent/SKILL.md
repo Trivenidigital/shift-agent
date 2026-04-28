@@ -38,7 +38,7 @@ The `fromMe` flag in the block is **informational only**. **Owner routing is gat
 
 ## Step 3 — Decision table
 
-**FIRST**: scan the message_text (line 2+) for catering intent. If any of these
+**FIRST (catering routing)**: scan the message_text (line 2+) for catering intent. If any of these
 keywords/phrases appear AND `cfg.catering.enabled` is true (check
 `/opt/shift-agent/config.yaml`), route to **catering_dispatcher** instead of
 the table below:
@@ -46,6 +46,22 @@ the table below:
   cater, catering, cater for, headcount, guests, event, wedding, reception,
   party, birthday, anniversary, "menu for X people", "do you do catering",
   banquet, drop off, pickup for event, "feeding [number]"
+
+**SECOND (menu update routing)**: if the inbound has `mediaType=image` OR
+`mediaType=document` AND the sender is the OWNER (per identify-sender) AND
+the caption (or message text) contains "menu" (e.g. "update menu", "new
+menu", "menu update", "here's our menu"): route to **update_catering_menu**.
+The image/PDF path is in `mediaUrls[0]`. This applies regardless of the
+catering keyword check above — the owner sending a menu photo is its own
+intent.
+
+**THIRD (menu confirmation routing)**: if the OWNER's reply contains a
+5-char code matching `#[A-HJ-NP-Z2-9]{5}` AND a pending menu update exists
+at `/opt/shift-agent/state/catering-menu-pending.json` with that code:
+route to **apply_catering_menu_decision**. The code namespace is shared
+with catering leads + Shift proposals; check the menu-pending file FIRST,
+then catering-leads.json (catering owner approval), then pending.json
+(Shift proposal).
 
 This applies regardless of sender role — owner, employee, or unknown number.
 A regular employee sending a sick-call ("I have fever") goes through the

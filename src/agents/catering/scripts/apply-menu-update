@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""apply-menu-update — owner decision handler for a pending menu update.
+
+Called by Kimi (via apply_catering_menu_decision SKILL) when the owner
+replies to the menu preview with the confirmation_code + verb (YES / NO /
+EDIT). Looks up the pending update, applies the decision deterministically,
+archives the prior menu (if any), and writes the audit entry.
+
+Usage:
+  apply-menu-update --code "#A3F2X" --decision yes
+  apply-menu-update --code "#A3F2X" --decision no --reason "wrong photo"
+
+Exit codes:
+  0 — applied
+  2 — invalid input
+  4 — code not found among pending updates
+  5 — schema violation
+  9 — illegal transition (already applied / expired)
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import shutil
+import sys
+from datetime import datetime
+from pathlib import Path
+
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
+
+from safe_io import (  # noqa: E402
+    FileLock, atomic_write_json, ndjson_append, customer_now,
+    safe_load_json, load_model, flock,
+)
+from schemas import (  # noqa: E402
+    Config, Menu, MenuPendingUpdate,
+    MenuUpdateApplied, MenuUpdateRejected,
+)
+from exit_codes import (  # noqa: E402
+    EXIT_OK, EXIT_INVALID_INPUT, EXIT_NOT_FOUND,
+    EXIT_SCHEMA_VIOLATION, EXIT_ILLEGAL_TRANSITION,
+)
+from pydantic import TypeAdapter  # noqa: E402
+
+CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
+MENU_PATH = Path("/opt/shift-agent/state/catering-menu.json")
+MENU_LOCK = Path("/opt/shift-agent/state/catering-menu.json.lock")
+PENDING_PATH = Path("/opt/shift-agent/state/catering-menu-pending.json")
+PENDING_LOCK = Path("/opt/shift-agent/state/catering-menu-pending.json.lock")
+ARCHIVE_DIR = Path("/opt/shift-agent/state/catering-menu-archive")
+LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+
+
+def _log(adapter: TypeAdapter, entry) -> None:
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with flock(LOG_PATH):
+        ndjson_append(LOG_PATH, adapter.dump_json(entry).decode("utf-8"))
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--code", required=True, help="confirmation code, e.g. #A3F2X")
+    ap.add_argument("--decision", required=True, choices=["yes", "no", "expired"])
+    ap.add_argument("--reason", default="")
+    args = ap.parse_args()
+
+    code = args.code.strip()
+    if not code.startswith("#") or len(code) != 6:
+        sys.stderr.write(f"invalid code format: {code!r}\n")
+        return EXIT_INVALID_INPUT
+
+    try:
+        import yaml
+        cfg = Config.model_validate(yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")))
+    except Exception as e:
+        sys.stderr.write(f"config load failed: {e}\n")
+        return EXIT_SCHEMA_VIOLATION
+
+    # Load pending update
+    with FileLock(PENDING_LOCK):
+        pending, status = load_model(PENDING_PATH, MenuPendingUpdate, default=None)
+        if pending is None or status != "ok":
+            sys.stderr.write(f"no pending menu update found ({status})\n")
+            return EXIT_NOT_FOUND
+        if pending.confirmation_code != code:
+            sys.stderr.write(
+                f"code {code} does not match pending update "
+                f"(pending code is {pending.confirmation_code})\n"
+            )
+            return EXIT_NOT_FOUND
+
+        now = customer_now(cfg.customer.timezone)
+
+        if args.decision in ("no", "expired"):
+            reason = "owner_no" if args.decision == "no" else "ttl_expired"
+            _log(TypeAdapter(MenuUpdateRejected), MenuUpdateRejected(
+                type="menu_update_rejected", ts=now,
+                update_id=pending.update_id, reason=reason,
+            ))
+            # Clear pending file
+            try:
+                PENDING_PATH.unlink()
+            except FileNotFoundError:
+                pass
+            print(json.dumps({"update_id": pending.update_id, "status": "rejected",
+                              "reason": reason}))
+            return EXIT_OK
+
+        # YES path — apply
+        if not pending.extracted_items:
+            sys.stderr.write("pending update has 0 items — refusing to apply empty menu\n")
+            return EXIT_ILLEGAL_TRANSITION
+
+        # Load existing menu (or none)
+        with FileLock(MENU_LOCK):
+            existing, ex_status = load_model(MENU_PATH, Menu, default=None)
+            prev_version = 0
+            if existing is not None and ex_status == "ok":
+                prev_version = existing.version
+                # Archive
+                ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+                archive_path = ARCHIVE_DIR / f"menu-v{prev_version}-{int(now.timestamp())}.json"
+                try:
+                    shutil.copy2(MENU_PATH, archive_path)
+                except OSError as e:
+                    sys.stderr.write(f"WARN: archive failed: {e}\n")
+
+            # Build new menu
+            new_menu = Menu(
+                version=prev_version + 1,
+                updated_at=now,
+                updated_by="photo-ocr",
+                source_image_id=pending.source_image_id,
+                items=pending.extracted_items,
+                notes=existing.notes if existing else "",  # preserve owner-set catering notes across photo updates
+            )
+            atomic_write_json(MENU_PATH, new_menu)
+
+            _log(TypeAdapter(MenuUpdateApplied), MenuUpdateApplied(
+                type="menu_update_applied", ts=now,
+                update_id=pending.update_id,
+                new_version=new_menu.version,
+                item_count=len(new_menu.items),
+                prev_version=prev_version,
+            ))
+
+        # Clear pending
+        try:
+            PENDING_PATH.unlink()
+        except FileNotFoundError:
+            pass
+
+    print(json.dumps({
+        "update_id": pending.update_id,
+        "status": "applied",
+        "new_version": new_menu.version,
+        "item_count": len(new_menu.items),
+        "prev_version": prev_version,
+    }))
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

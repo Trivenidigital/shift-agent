@@ -1,0 +1,362 @@
+#!/usr/bin/env python3
+"""parse-menu-photo — extract structured menu from a photo or PDF using vision LLM.
+
+Called by Kimi (via update_catering_menu SKILL) after the owner sends a menu
+image to the WhatsApp business number with caption "update menu". Calls a
+vision-capable model via OpenRouter, validates the response against the
+MenuItem schema, writes a pending update file, and returns the
+confirmation_code that the owner will use to approve.
+
+Usage:
+  parse-menu-photo \\
+    --image-path /path/to/menu.jpg \\
+    --source-image-id "<meta whatsapp message id>" \\
+    --owner-phone "+918522041562"
+
+Outputs JSON:
+  {"update_id": "MU0001", "confirmation_code": "#A3F2X", "item_count": 47,
+   "preview_text": "..."}
+
+Exit codes:
+  0 — extracted (pending file written + preview ready)
+  2 — invalid input (image unreadable, file missing)
+  3 — catering disabled
+  5 — vision response failed schema validation
+  6 — OpenRouter unavailable / vision model error
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import mimetypes
+import os
+import secrets
+import sys
+import urllib.error
+import urllib.request
+import uuid
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
+
+from safe_io import (  # noqa: E402
+    FileLock, atomic_write_json, ndjson_append, customer_now,
+    load_model, flock,
+)
+from schemas import (  # noqa: E402
+    Config, MenuItem, MenuPendingUpdate,
+    MenuUpdateProposed,
+)
+from exit_codes import (  # noqa: E402
+    EXIT_OK, EXIT_INVALID_INPUT, EXIT_DISABLED,
+    EXIT_SCHEMA_VIOLATION, EXIT_DEPENDENCY_DOWN,
+)
+from pydantic import TypeAdapter, ValidationError  # noqa: E402
+
+CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
+PENDING_PATH = Path("/opt/shift-agent/state/catering-menu-pending.json")
+PENDING_LOCK = Path("/opt/shift-agent/state/catering-menu-pending.json.lock")
+LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+
+# Vision model — Claude 3.5 Sonnet via OpenRouter (best at structured menu extraction).
+# Override with VISION_MODEL env var if you want to swap (e.g., gpt-4o-mini for cheaper).
+VISION_MODEL = os.environ.get("VISION_MODEL", "anthropic/claude-3.5-sonnet")
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_TIMEOUT_SEC = 90  # vision parsing can take 30-60s
+
+# Same alphabet as Shift's proposal codes — visually unambiguous.
+_CODE_ALPHA = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+
+EXTRACTION_PROMPT = """You are extracting a structured menu from a photo or
+PDF page of an ethnic SMB (typically Indian/South-Asian grocery, restaurant,
+or banquet hall) catering menu.
+
+Output STRICT JSON matching this schema. NEVER guess. If a field is unclear,
+set it to null or an empty list. Multiple items per output array.
+
+```json
+{
+  "items": [
+    {
+      "name": "<dish name as printed, exact>",
+      "price_usd": <number or null if no price visible>,
+      "category": "<one of: appetizer, soup, salad, main, side, dessert, beverage, special, package>",
+      "dietary_tags": [<list from: veg, non-veg, vegan, jain, halal, kosher, gluten-free, nut-free, dairy-free, egg-free, spicy>],
+      "available": true,
+      "notes": "<short description if any, max 500 chars>",
+      "serves": <integer servings per unit, or null>
+    }
+  ],
+  "parser_notes": "<any caveats: 'prices unclear on page 2', 'handwritten edits', etc.>"
+}
+```
+
+RULES:
+- "veg" tag for items WITHOUT meat/eggs/fish. "non-veg" for items WITH meat/seafood/eggs.
+- A dish can have multiple dietary tags (e.g., ["veg", "gluten-free"]).
+- Categories: "package" = combo/platter pricing. "special" = chef's pick / seasonal.
+- Prices in USD only. If you see "Rs" / "₹" / "INR", convert to USD assuming 1 USD = 85 INR (rough). Note the conversion in parser_notes.
+- If the image isn't a menu (e.g., random photo, wrong document), return {"items": [], "parser_notes": "image is not a menu: <brief description>"}
+- Maximum 100 items per response. If the menu has more, return the first 100 + note in parser_notes.
+
+Return ONLY the JSON object. No markdown fences, no explanation, no preamble.
+"""
+
+
+def _generate_unique_code() -> str:
+    """5-char approval code reusing Shift's alphabet."""
+    return "#" + "".join(secrets.choice(_CODE_ALPHA) for _ in range(5))
+
+
+def _next_update_id() -> str:
+    """Update IDs are MU0001, MU0002 — incrementing per update across all time.
+
+    Stored as a counter inside the pending file's predecessor (we keep a tiny
+    counter file for safety since pending file is ephemeral).
+    """
+    counter = Path("/opt/shift-agent/state/catering-menu-update-counter.txt")
+    counter.parent.mkdir(parents=True, exist_ok=True)
+    n = 0
+    if counter.exists():
+        try:
+            n = int(counter.read_text().strip() or "0")
+        except ValueError:
+            n = 0
+    n += 1
+    counter.write_text(str(n))
+    return f"MU{n:04d}"
+
+
+def _read_image_b64(image_path: Path) -> tuple[str, str]:
+    """Read image, return (base64-encoded data, mime type)."""
+    if not image_path.exists():
+        raise FileNotFoundError(f"image not found: {image_path}")
+    raw = image_path.read_bytes()
+    if not raw:
+        raise ValueError(f"image is empty: {image_path}")
+    mime, _ = mimetypes.guess_type(str(image_path))
+    if not mime:
+        # Default to JPEG; OpenRouter accepts most image formats
+        mime = "image/jpeg"
+    if not mime.startswith("image/") and mime != "application/pdf":
+        raise ValueError(f"unsupported file type {mime}; expected image or PDF")
+    return base64.b64encode(raw).decode("ascii"), mime
+
+
+def _call_vision(api_key: str, image_b64: str, mime: str) -> dict:
+    """POST to OpenRouter's chat completions with image content. Returns parsed JSON dict."""
+    payload = {
+        "model": VISION_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": EXTRACTION_PROMPT},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime};base64,{image_b64}"},
+                    },
+                ],
+            }
+        ],
+        "max_tokens": 4096,
+        "temperature": 0,  # deterministic — same photo → same extraction
+    }
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        OPENROUTER_URL,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/Trivenidigital/shift-agent",
+            "X-Title": "SMB-Agents Catering Menu Extractor",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=OPENROUTER_TIMEOUT_SEC) as resp:
+        resp_body = resp.read().decode("utf-8", errors="replace")
+    doc = json.loads(resp_body)
+    choices = doc.get("choices") or []
+    if not choices:
+        raise RuntimeError(f"no choices in response: {resp_body[:500]}")
+    content = choices[0].get("message", {}).get("content", "")
+    if not content:
+        raise RuntimeError(f"empty content in response: {resp_body[:500]}")
+    # Some models wrap JSON in markdown; strip if present
+    content = content.strip()
+    if content.startswith("```"):
+        content = "\n".join(content.split("\n")[1:])  # drop opening fence
+        if content.endswith("```"):
+            content = "\n".join(content.split("\n")[:-1])  # drop closing fence
+        content = content.strip()
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"vision returned non-JSON: {e}\nbody: {content[:1000]}")
+
+
+def _format_preview(items: list[MenuItem], parser_notes: str) -> str:
+    """Build the owner-facing preview message. Intentionally compact — owner
+    will see this in WhatsApp self-chat with limited screen space."""
+    if not items:
+        body = "_(no items extracted — was the image a valid menu?)_\n"
+        if parser_notes:
+            body += f"\nParser notes: {parser_notes}"
+        return body
+
+    # Group by category for readability
+    by_cat: dict[str, list[MenuItem]] = {}
+    for it in items:
+        by_cat.setdefault(it.category, []).append(it)
+    cat_order = ["appetizer", "soup", "salad", "main", "side", "dessert",
+                 "beverage", "special", "package"]
+    lines = [f"Found *{len(items)} items*:\n"]
+    for cat in cat_order:
+        if cat not in by_cat:
+            continue
+        lines.append(f"_{cat.upper()}_:")
+        for it in by_cat[cat][:8]:  # cap per category in preview
+            tags = (" [" + "/".join(it.dietary_tags) + "]") if it.dietary_tags else ""
+            price = f" — ${it.price_usd:.2f}" if it.price_usd is not None else ""
+            lines.append(f"  - {it.name}{price}{tags}")
+        if len(by_cat[cat]) > 8:
+            lines.append(f"  ... and {len(by_cat[cat]) - 8} more {cat}s")
+        lines.append("")
+    if parser_notes:
+        lines.append(f"_Parser notes:_ {parser_notes}")
+    return "\n".join(lines)
+
+
+def _log(adapter: TypeAdapter, entry) -> None:
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with flock(LOG_PATH):
+        ndjson_append(LOG_PATH, adapter.dump_json(entry).decode("utf-8"))
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--image-path", required=True)
+    ap.add_argument("--source-image-id", default=None)
+    ap.add_argument("--owner-phone", default=None,
+                    help="not used in v0.2.0; reserved for audit attribution")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="extract + return JSON; don't write pending file or audit")
+    args = ap.parse_args()
+
+    # Load config
+    try:
+        import yaml
+        cfg = Config.model_validate(yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")))
+    except Exception as e:
+        sys.stderr.write(f"config load failed: {e}\n")
+        return EXIT_SCHEMA_VIOLATION
+
+    if not cfg.catering.enabled:
+        sys.stderr.write("catering disabled (cfg.catering.enabled=false)\n")
+        return EXIT_DISABLED
+
+    # Read OpenRouter API key — fall back through both env files.
+    api_key = (os.environ.get("OPENROUTER_API_KEY", "")
+               or _read_key_from_env("/root/.hermes/.env")
+               or _read_key_from_env("/opt/shift-agent/.env"))
+    if not api_key or "PLACEHOLDER" in api_key:
+        sys.stderr.write("OPENROUTER_API_KEY missing or placeholder\n")
+        return EXIT_DEPENDENCY_DOWN
+
+    # Read image
+    try:
+        image_b64, mime = _read_image_b64(Path(args.image_path))
+    except (FileNotFoundError, ValueError) as e:
+        sys.stderr.write(f"{e}\n")
+        return EXIT_INVALID_INPUT
+
+    # Vision call
+    try:
+        result = _call_vision(api_key, image_b64, mime)
+    except urllib.error.HTTPError as e:
+        sys.stderr.write(f"OpenRouter HTTP {e.code}: {e.reason}\n")
+        return EXIT_DEPENDENCY_DOWN
+    except (urllib.error.URLError, OSError) as e:
+        sys.stderr.write(f"OpenRouter network error: {e}\n")
+        return EXIT_DEPENDENCY_DOWN
+    except RuntimeError as e:
+        sys.stderr.write(f"vision response invalid: {e}\n")
+        return EXIT_DEPENDENCY_DOWN
+
+    # Validate extracted items
+    raw_items = result.get("items", [])
+    parser_notes = result.get("parser_notes", "") or ""
+    items: list[MenuItem] = []
+    item_errors: list[str] = []
+    for i, raw in enumerate(raw_items):
+        try:
+            items.append(MenuItem.model_validate(raw))
+        except ValidationError as e:
+            item_errors.append(f"item[{i}] ({raw.get('name', '?')}): {e.errors()[0].get('msg', '?')}")
+    if item_errors:
+        parser_notes = (parser_notes + "\n" if parser_notes else "") + \
+                       f"Validation issues: {'; '.join(item_errors[:5])}"
+
+    if args.dry_run:
+        print(json.dumps({
+            "items": [i.model_dump() for i in items],
+            "parser_notes": parser_notes,
+        }, indent=2, default=str))
+        return EXIT_OK
+
+    # Write pending file + audit
+    update_id = _next_update_id()
+    confirmation_code = _generate_unique_code()
+    now = customer_now(cfg.customer.timezone)
+
+    pending = MenuPendingUpdate(
+        update_id=update_id,
+        proposed_at=now,
+        source_image_id=args.source_image_id,
+        extracted_items=items,
+        confirmation_code=confirmation_code,
+        parser_notes=parser_notes,
+    )
+
+    PENDING_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with FileLock(PENDING_LOCK):
+        atomic_write_json(PENDING_PATH, pending)
+
+    _log(TypeAdapter(MenuUpdateProposed), MenuUpdateProposed(
+        type="menu_update_proposed", ts=now,
+        update_id=update_id, confirmation_code=confirmation_code,
+        item_count=len(items), source_image_id=args.source_image_id,
+    ))
+
+    preview = _format_preview(items, parser_notes)
+    print(json.dumps({
+        "update_id": update_id,
+        "confirmation_code": confirmation_code,
+        "item_count": len(items),
+        "preview_text": preview,
+    }))
+    return EXIT_OK
+
+
+def _read_key_from_env(path: str) -> str:
+    """Read OPENROUTER_API_KEY=... from a .env file. Returns empty if missing."""
+    p = Path(path)
+    if not p.exists():
+        return ""
+    try:
+        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if line.startswith("OPENROUTER_API_KEY="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
+
+if __name__ == "__main__":
+    sys.exit(main())

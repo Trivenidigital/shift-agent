@@ -343,6 +343,56 @@ class CateringLeadStore(BaseModel):
     leads: list[CateringLead] = Field(default_factory=list)
 
 
+# Catering menu (Agent #2 v0.2 — photo-upload menu management)
+DietaryTag = Literal[
+    "veg", "non-veg", "vegan", "jain", "halal", "kosher",
+    "gluten-free", "nut-free", "dairy-free", "egg-free", "spicy",
+]
+MenuCategory = Literal[
+    "appetizer", "soup", "salad", "main", "side",
+    "dessert", "beverage", "special", "package",
+]
+
+
+class MenuItem(BaseModel):
+    """One item in the catering menu."""
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=200)
+    price_usd: Optional[float] = Field(default=None, ge=0, le=10000)
+    category: MenuCategory = "main"
+    dietary_tags: list[DietaryTag] = Field(default_factory=list)
+    available: bool = True
+    notes: str = Field(default="", max_length=500)
+    serves: Optional[int] = Field(default=None, ge=1, le=1000,
+                                  description="Approx servings per unit (e.g. 'tray serves 10')")
+
+
+class Menu(BaseModel):
+    """The current menu — single source of truth, replaced on each update."""
+    model_config = ConfigDict(extra="forbid")
+    version: int = Field(default=1, ge=1)
+    updated_at: datetime
+    updated_by: str = Field(default="", max_length=200,
+                            description="Owner phone or 'photo-ocr' or 'manual'")
+    source_image_id: Optional[str] = Field(default=None, max_length=200,
+                                           description="WhatsApp message id of the source photo, if from photo-OCR")
+    items: list[MenuItem] = Field(default_factory=list)
+    notes: str = Field(default="", max_length=2000,
+                       description="Catering-specific terms (delivery zone, lead time, etc.)")
+
+
+class MenuPendingUpdate(BaseModel):
+    """A proposed menu update awaiting owner confirmation."""
+    model_config = ConfigDict(extra="forbid")
+    update_id: str = Field(min_length=1, max_length=64)
+    proposed_at: datetime
+    source_image_id: Optional[str] = None
+    extracted_items: list[MenuItem]
+    confirmation_code: str = Field(pattern=r"^#[A-HJ-NP-Z2-9]{5}$",
+                                   description="reuses Shift's #X9X9X code alphabet")
+    parser_notes: str = Field(default="", max_length=2000)
+
+
 # Agent #3 Multi-Location Coordinator config
 class LocationEntry(BaseModel):
     """One location in a multi-location operator config (Agent #3).
@@ -920,6 +970,38 @@ class BriefSkipped(_BaseEntry):
 
 
 # ─────────────────────────────────────────────────────────────────
+# Catering menu log entries (Agent #2 v0.2 — photo-upload UX)
+# ─────────────────────────────────────────────────────────────────
+
+
+class MenuUpdateProposed(_BaseEntry):
+    """Owner uploaded a menu photo; vision parser extracted items; preview
+    sent to owner self-chat awaiting confirmation."""
+    type: Literal["menu_update_proposed"]
+    update_id: str = Field(min_length=1)
+    confirmation_code: str = Field(pattern=r"^#[A-HJ-NP-Z2-9]{5}$")
+    item_count: int = Field(ge=0)
+    source_image_id: Optional[str] = None
+
+
+class MenuUpdateApplied(_BaseEntry):
+    """Owner approved the proposed update; catering-menu.json replaced."""
+    type: Literal["menu_update_applied"]
+    update_id: str = Field(min_length=1)
+    new_version: int = Field(ge=1)
+    item_count: int = Field(ge=0)
+    prev_version: int = Field(ge=0,
+                              description="0 if no prior menu existed")
+
+
+class MenuUpdateRejected(_BaseEntry):
+    """Owner declined or ignored the proposed update; pending file cleared."""
+    type: Literal["menu_update_rejected"]
+    update_id: str = Field(min_length=1)
+    reason: Literal["owner_no", "owner_edit_aborted", "ttl_expired"]
+
+
+# ─────────────────────────────────────────────────────────────────
 # Catering Lead log entries (Agent #2)
 # ─────────────────────────────────────────────────────────────────
 
@@ -1054,6 +1136,7 @@ LogEntry = Annotated[
         # Agent #2 Catering Lead
         CateringLeadCreated, CateringLeadStatusChange, CateringQuoteDrafted,
         CateringOwnerApprovalRequested, CateringOwnerDecision, CateringQuoteSent,
+        MenuUpdateProposed, MenuUpdateApplied, MenuUpdateRejected,
     ],
     Field(discriminator="type"),
 ]
@@ -1068,6 +1151,7 @@ __all__ = [
     "CateringConfig", "CateringLeadStatus", "CateringLeadExtractedFields",
     "CateringLead", "CateringLeadStore",
     "is_catering_terminal", "CATERING_TERMINAL_STATUSES",
+    "MenuItem", "Menu", "MenuPendingUpdate", "DietaryTag", "MenuCategory",
     # Tier 2 configs
     "InventoryConfig", "SupplierConfig", "VipConfig", "CateringFollowupConfig",
     "HiringConfig", "ComplianceConfig", "EmployeeDocsConfig", "CashArConfig", "SalesTaxConfig",
@@ -1087,4 +1171,5 @@ __all__ = [
     "CrossLocationQuery", "InterLocationTransferProposed",
     "CateringLeadCreated", "CateringLeadStatusChange", "CateringQuoteDrafted",
     "CateringOwnerApprovalRequested", "CateringOwnerDecision", "CateringQuoteSent",
+    "MenuUpdateProposed", "MenuUpdateApplied", "MenuUpdateRejected",
 ]
