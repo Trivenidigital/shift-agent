@@ -1,3 +1,5 @@
+⚕ *Daily Brief Agent*
+────────────
 {header}*Daily Brief — {brief_date}*{catchup_note}
 
 *Yesterday:* {yesterday_summary}

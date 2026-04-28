@@ -1,3 +1,5 @@
+⚕ *Catering Agent*
+────────────
 *Catering Inquiry — {lead_id}*
 
 From: {customer_name} ({customer_phone})

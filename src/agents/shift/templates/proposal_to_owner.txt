@@ -1,3 +1,5 @@
+⚕ *Shift Agent*
+────────────
 New sick call:
 
 {absent_employee_name} is out {absent_date_human} ({absent_reason_short}).

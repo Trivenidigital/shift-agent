@@ -150,6 +150,7 @@ def _render_approval_card(
             pass
     # Inline fallback
     return (
+        f"⚕ *Catering Agent*\n────────────\n"
         f"*New Catering Inquiry — {lead_id}*\n\n"
         f"From: {customer_name or '(unknown)'} ({customer_phone})\n\n"
         f"{raw[:300]}\n\n"
