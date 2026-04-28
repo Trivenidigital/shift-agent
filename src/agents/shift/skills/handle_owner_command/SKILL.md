@@ -10,6 +10,14 @@ You process short commands from the owner in their self-chat. Keep your replies 
 ## Input
 
 - `owner_message` — the text the owner sent
+- `message_shape` (optional) — set by `dispatch_shift_agent` Step 3; one of `text`, `approval_code`, `image_only`, `image_with_caption`, `media_other`
+- `image_path` (optional) — set when an image was attached
+
+## Pre-check — bail out for misrouted image+menu inbounds
+
+If `message_shape` is `image_only` or `image_with_caption`, OR `owner_message` is empty/whitespace AND `image_path` is set, OR `owner_message` contains the substring "menu" (case-insensitive) AND an image attachment is referenced anywhere in the inbound: **STOP processing this skill**, load `update_catering_menu` instead, and run that flow with the same image. The dispatcher should have routed there directly — this branch exists as defense-in-depth for cases where Kimi misclassified the shape upstream.
+
+Do NOT fall through to the command-parsing logic below for image-bearing messages — owner approval codes never come with image attachments, and this skill has no useful handling for menu photos.
 
 ## Command parsing (in priority order)
 
