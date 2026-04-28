@@ -35,6 +35,7 @@ Last updated: 2026-04-28
 ### Schema implications from review
 
 - 🟡 **C23 mango-lassi case** — schema slot landed (PR #21, 2026-04-28). Field is `off_menu_items: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(default_factory=list, max_length=20)` on `CateringLeadExtractedFields`. Field is currently WRITE-ONLY: extractor SKILL prompt + owner-approval-card renderer must ship together to avoid silent-drop. Renderer-target investigation deferred (design-review surfaced that `apply-catering-owner-decision` is NOT the owner-card builder; correct sender lives in lead-intake path). Bundled extractor-prompt + renderer PR is the next step here.
+- [ ] **Build `lookup_prior_leads_by_phone` script** — C02-Option-C foundation per `docs/catering-edge-cases.md` (v3.1) C02 case. Half-day PR with proper tests: E164Phone canonicalization, date arithmetic for `last_seen_days_ago`, defensive handling for malformed entries in `catering-leads.json`. Return shape pinned by C02 case as authoritative interface contract. Unblocks v3.1 C02 from "design-spec-pending" to runnable.
 
 ## P2 — Routing reliability hardening (incremental)
 
@@ -67,7 +68,7 @@ See `docs/hermes-alignment.md` Part 2 for the silent-failure-ranked operational 
 ### Deferred until specific need emerges
 
 - [ ] **Cryptographic audit-log chain** (deferred 2026-04-28; see PR #20 for context). Architecture if needed: move `_append_sha_chain` into `safe_io.ndjson_append` chokepoint so all writers covered, add `verify-decisions-log` script, add daily-cron verification, run one-time backfill (with explicit "trust boundary" docs noting pre-backfill entries aren't cryptographically defensible). Total ~half-day. **Chokepoint claim audited 2026-04-28** — every `decisions.log` writer in `src/agents/*/scripts/` and `src/platform/scripts/` calls `safe_io.ndjson_append`; no raw `open(..., "a")` bypass exists. Re-introduction at the chokepoint will cover all writers. Triggers: regulator audit requirement, formal customer dispute defense, multi-tenant compliance posture.
-- [ ] **Alignment-doc audit pass — next due 2026-07-28** (90 days from baseline) — three-in-a-row pattern observed (Hermes pin, .env consolidation, audit-log chain) where alignment doc framed at higher abstraction than deployed code reality. Cheap quarterly exercise; surfaces drift before it bites. Concrete cadence (vs "~quarterly?") so the entry can't rot in the backlog. Roll the next-due date forward 90 days each time it runs.
+- [ ] **Alignment-doc audit pass — next due 2026-07-28** (90 days from baseline) — pattern observed where alignment doc and deployed code drift in either direction: doc claims a feature we lack (PRs #17 Hermes pin, #18 .env consolidation, #20 audit chain), OR doc understates a feature we have (v3.1 catering-edge-cases audit-chain framing, 2026-04-28). Cheap quarterly exercise; surfaces drift before it bites. Concrete cadence (vs "~quarterly?") so the entry can't rot in the backlog. Roll the next-due date forward 90 days each time it runs.
 
 ### Deferred until informed by agent #2-style use case
 
