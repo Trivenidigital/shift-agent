@@ -1,3 +1,5 @@
+⚕ *Shift Agent — Health Alert*
+────────────
 AGENT STATUS: {summary}
 
 Components with issues:

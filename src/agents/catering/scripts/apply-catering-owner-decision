@@ -106,6 +106,7 @@ def _render_quote(lead, customer_name: str) -> str:
             pass
     # Inline fallback — generic acknowledgment when no template
     return (
+        f"⚕ *Catering Agent*\n────────────\n"
         f"Hi {fields['customer_name']}, thank you for the catering inquiry. "
         f"We can confirm — let's discuss details. Reply here when ready, or "
         f"reach us directly. (Ref: {lead.lead_id})"
