@@ -3,14 +3,16 @@
 Living checklist. Items grouped by priority; each completed item gets `✅` and a date.
 For history of *completed* multi-phase initiatives (platform extract, sender-id, agent #2/4/5, etc.), see git log + `tasks/all-phases-*.md`.
 
-Last updated: 2026-04-28
+Last updated: 2026-04-28 (post-PR-#22 catering edge case v3.1)
 
 ---
 
-## P0 — Live verification (passive, blocks "is it working?")
+## P0 — Live verification (passive, blocked on real customer traffic)
+
+Reporter floor as of 2026-04-28: **0/26 (0%)** — all 26 entries are pre-fix synthetic test injections; no real Kimi-routed inbound since dispatcher schema deployed. Floor will move once real traffic starts. Trigger: send any test message to self-chat to validate the pipeline end-to-end.
 
 - [ ] **Verify dispatcher routing live** — next real inbound to your self-chat should produce a `dispatcher_routed` entry in `decisions.log` within ~10s of the matching `raw_inbound`. Run `sudo /usr/local/bin/dispatcher-accuracy-report --days 1` to check. Validates PR #14 + #15 end-to-end.
-- [ ] **Verify menu photo upload pipeline** — yesterday's auxiliary-vision auth fix (OPENROUTER/OPENAI keys mirrored into `/opt/shift-agent/.env`) is unverified live. Send a menu photo to self-chat; expect `parse-menu-photo` to extract items → owner preview reply with confirmation code.
+- [ ] **Verify menu photo upload pipeline** — auxiliary-vision auth fix (OPENROUTER/OPENAI keys mirrored into `/opt/shift-agent/.env`) is unverified live. Send a menu photo to self-chat; expect `parse-menu-photo` to extract items → owner preview reply with confirmation code.
 - [ ] **Run dispatcher-accuracy-report after first real inbound** — confirm coverage % climbs above 0% as real traffic accumulates.
 
 ## P1 — Architecture review follow-ups (from reviewer thread, 2026-04-28)
@@ -34,13 +36,13 @@ Last updated: 2026-04-28
 
 ### Schema implications from review
 
-- 🟡 **C23 mango-lassi case** — schema slot landed (PR #21, 2026-04-28). Field is `off_menu_items: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(default_factory=list, max_length=20)` on `CateringLeadExtractedFields`. Field is currently WRITE-ONLY: extractor SKILL prompt + owner-approval-card renderer must ship together to avoid silent-drop. Renderer-target investigation deferred (design-review surfaced that `apply-catering-owner-decision` is NOT the owner-card builder; correct sender lives in lead-intake path). Bundled extractor-prompt + renderer PR is the next step here.
+- 🟡 **C23 renderer + extractor-prompt** — schema slot landed (PR #21, 2026-04-28). Field is `off_menu_items: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(default_factory=list, max_length=20)` on `CateringLeadExtractedFields`. **Currently WRITE-ONLY**: extractor SKILL prompt + owner-approval-card renderer MUST ship together to avoid silent-drop. **Blocked on**: identify the actual owner-card-sending script in the lead-intake path (design-review surfaced that `apply-catering-owner-decision` is NOT the owner-card builder). **Estimated effort**: ~half-day with proper investigation. **Pipeline**: needs its own plan/design/review cycle since the renderer-target gap is real architectural work, not just a code change.
 - [ ] **Build `lookup_prior_leads_by_phone` script** — C02-Option-C foundation per `docs/catering-edge-cases.md` (v3.1) C02 case. Half-day PR with proper tests: E164Phone canonicalization, date arithmetic for `last_seen_days_ago`, defensive handling for malformed entries in `catering-leads.json`. Return shape pinned by C02 case as authoritative interface contract. Unblocks v3.1 C02 from "design-spec-pending" to runnable.
 
 ## P2 — Routing reliability hardening (incremental)
 
-- [ ] **Log `dispatcher_routed` for declined unknowns too** — currently the SKILL writes only `unknown_sender_declined` for that path. Uniform logging would simplify the report (no fallback by-phone matching). Edit `dispatch_shift_agent` SKILL.md Step 4.
-- [ ] **Schedule weekly cron** for `dispatcher-accuracy-report` (Pushover summary on Sunday morning). Separate PR.
+- [ ] **Log `dispatcher_routed` for declined unknowns too** (Item 2 of original P1+P2 bundle, deferred during 2026-04-28 design-review pipeline). Currently the SKILL writes only `unknown_sender_declined` on the decline path. Uniform logging would simplify the report (no fallback by-phone matching). Small SKILL.md edit + reporter tweak — but **needs its own plan/design/review cycle** because the design review surfaced that `DispatcherRouted.message_id` is required (`Field(min_length=1)`) and `UnknownSenderDeclined` doesn't currently carry message_id; the source path in the SKILL instruction needs explicit specification + a no-op fallback warning addition in the reporter.
+- [ ] **Schedule weekly cron for `dispatcher-accuracy-report`** (Item 3 of original P1+P2 bundle, deferred during 2026-04-28 design-review pipeline). Pushover summary on Sunday morning. **Substantial silent-failure-hunter findings during design** that need addressing before build: (a) OnFailure handler service for cron-itself-broken case + ConditionPath* removal so OnFailure actually fires, (b) "cron never ran" watchdog (3-week silent skip undetected today), (c) exit-code surface 0/1/2/3 over-engineered for an 80-line script, (d) `capture_output=True` swallows reporter stderr WARN, (e) empty-window `0/0 (0%)` panics owner, (f) `Persistent=true` multi-fires after weekend outage, (g) `--priority -1` is silent on Pushover. Needs its own cycle.
 - [ ] **Capture interesting routing pairs to fixtures file** as they arrive — start a `tests/fixtures/dispatcher_traffic.jsonl` with manually-curated entries from `decisions.log`. Seeds Layer C.
 - [ ] **Strengthen image+menu fallback** — currently Fix 3 in PR #14 catches misrouted image+menu in `handle_owner_command`. Audit other handlers for similar misroute paths once data shows where Kimi actually misroutes.
 
@@ -84,8 +86,25 @@ See `docs/hermes-alignment.md` Part 2 for the silent-failure-ranked operational 
 
 ---
 
+## Process notes — pipeline cadence calibration
+
+Observation from PR #21 (2026-04-28): the full Plan→5×Review→Design→5×Review→Build→PR→5×Review pipeline took ~15 agent calls for a single 91-line schema PR. Three observations worth carrying forward:
+
+1. **The discipline caught real bugs.** Design review surfaced the wrong-renderer-target issue that would have cost a half-day of build+revert. PR review surfaced the silent-drop-infrastructure concern that drove the CONTRACT comment on the new field. Without the rigorous review rounds, both would have shipped.
+
+2. **Bundle splits naturally surfaced.** The original P1+P2 bundle was 3 items; rigorous review showed Items 2 + 3 had design-blocking issues that Item 1 didn't. The bundle decoupled cleanly into "ship Item 1 as a focused schema PR, defer 2 + 3 to their own cycles." Without the rigor, the bundle would have shipped half-baked.
+
+3. **For sub-100-line changes the pipeline cost is high.** ~15 agent calls per ~90-line PR is an expensive ratio. A lighter pipeline (e.g., Plan → Build → PR → 3×Review) would catch most issues at lower compute cost. Recommended cadence-by-PR-size:
+   - **<100 lines, schema/doc/single-script:** lighter pipeline (Plan → Build → PR → 3 reviews)
+   - **100-500 lines, multi-file feature with operational gates:** medium pipeline (Plan → 3 reviews → Design → 3 reviews → Build → PR → 5 reviews)
+   - **>500 lines or new architectural surface:** full pipeline as established
+   This is a future-process decision; not worth retrofitting prior PRs, but worth applying to upcoming work.
+
+---
+
 ## Recently completed (this week)
 
+- 🟡 2026-04-28 — PR #22 (in flight): catering edge case scenario library v3.1 (`docs/catering-edge-cases.md`); replaces v3 inline doc; 5 grounded corrections vs deployed code; awaits explicit merge approval
 - ✅ 2026-04-28 — PR #21: C23 schema field `off_menu_items` (full pipeline: plan → 5 reviews → design → 5 reviews → bundle-split decision → build → PR → 5 reviews → 8 review fixes → merge → deploy; 162 tests passing, deploy tagged 3b83c034)
 - ✅ 2026-04-28 — PR #20: SHA-256 chain decoration removed; deployed integrity story now matches reality (append-only flock + 0640 perms + logrotate + backups)
 - ✅ 2026-04-28 — PR #19: symlink-integrity gate strictness fix (PR #18's gate had inverted polarity — silently passed when symlink replaced by regular file; new gate is unconditionally strict; Step-5 break-then-restore validation confirmed exit 1)
