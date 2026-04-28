@@ -61,7 +61,7 @@ See `docs/hermes-alignment.md` Part 2 for the silent-failure-ranked operational 
 
 ### High tier (active gotcha)
 
-- [ ] **Single canonical `.env` (or sync mechanism)** — two `.env` files drift; auth-key gotcha cost hours on 2026-04-28. 1–2h to fix.
+- ✅ **2026-04-28** — Single canonical `.env` via symlink (PR #18 + PR #19 strict-gate fix). `/opt/shift-agent/.env` is now a symlink to `/root/.hermes/.env`. Pre-flight drift detector (`tools/check-env-drift.sh`) hashes overlapping keys without leaking secrets; idempotent migration (`tools/migrate-env-to-symlink.sh`) auto-detects shift-only keys + creates timestamped backup; strict symlink-integrity gate in `shift-agent-deploy.sh` fails-closed before install_artifacts. Gate validated end-to-end: break symlink → exit 1 → restore → deploy passes.
 - [ ] **Audit log rotation policy with SHA-256 chain handling** — `decisions.log` grows unbounded; naive logrotate would silently break chain continuity. Half-day for postrotate hook OR explicit ADR documenting per-rotation chain.
 
 ### Deferred until informed by agent #2-style use case
@@ -80,6 +80,8 @@ See `docs/hermes-alignment.md` Part 2 for the silent-failure-ranked operational 
 
 ## Recently completed (this week)
 
+- ✅ 2026-04-28 — PR #19: symlink-integrity gate strictness fix (PR #18's gate had inverted polarity — silently passed when symlink replaced by regular file; new gate is unconditionally strict; Step-5 break-then-restore validation confirmed exit 1)
+- ✅ 2026-04-28 — PR #18: `.env` symlink consolidation + Hermes pin WARN→FAIL tightening (drift detector, migration script, integrity gate, smoke-check doc)
 - ✅ 2026-04-28 — PR #17: Hermes pin gate (3-field baseline, fail-closed + override + dual audit; all 4 validation paths exercised live)
 - ✅ 2026-04-28 — PR #16: tarball-based deploy formalizing actual VPS pattern (`docs/deploy.md` + `tools/build-deploy-tarball.sh` + rewritten `shift-agent-deploy.sh`); end-to-end validated incl. rollback path
 - ✅ 2026-04-28 — `docs/hermes-alignment.md` v1: deployed-patterns reference + silent-failure-ranked operational checklist + read-deployed-code working agreement
