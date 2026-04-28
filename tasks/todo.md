@@ -45,10 +45,25 @@ Last updated: 2026-04-28
 
 ## P3 — Platform / infrastructure cleanup
 
-- [ ] **Reconcile `shift-agent-deploy.sh` with actual VPS pattern** — script expects `/opt/shift-agent/working` to be a git checkout but VPS uses tarball deploy. Either (a) make `working/` a git checkout, or (b) rewrite deploy.sh to match the tarball-staging pattern. Hit this twice today; worth fixing properly.
-- [ ] **Phase A.5 — `schemas.py` runtime registry split** (`register_agent_entries()`). Deferred from platform extract; LogEntry union now ~30 variants and growing. Design + tests for the registry, then split.
-- [ ] **Phase B — `/opt/shift-agent/` → `/opt/smb-agents/` rename** (~292 references including `tools/patch-hermes.py:158` bridge.js payload). Half-day, ideally bundled with a maintenance window.
-- [ ] **Phase C — cockpit modular split** (frontend section registry + backend `state.py` `_AGENT_ROOT` parameterization). Wait until agent #2 ships its own cockpit needs so the abstraction is informed by 2 use cases, not speculation.
+See `docs/hermes-alignment.md` Part 2 for the silent-failure-ranked operational drift checklist. Items below cross-reference that doc; resolve there as the canonical tracker.
+
+### Critical tier (silent-failure surface — from alignment doc)
+
+- [ ] **Reconcile `shift-agent-deploy.sh` with actual VPS pattern** — script expects `/opt/shift-agent/working` to be a git checkout but VPS uses tarball deploy. Blocks the next two items.
+- [ ] **Pin Hermes commit hash in deploy.sh** — Hermes upgrade silently breaks our patches today. Half-day after deploy.sh reconcile.
+- [ ] **`bridge.js` patch inventory + version markers** — upstream rename moves a marker comment by one character; outbound chatter filter silently no-ops. Half-day audit + compatibility check in `tools/patch-bridge-filter.py`.
+
+### High tier (active gotcha)
+
+- [ ] **Single canonical `.env` (or sync mechanism)** — two `.env` files drift; auth-key gotcha cost hours on 2026-04-28. 1–2h to fix.
+- [ ] **Audit log rotation policy with SHA-256 chain handling** — `decisions.log` grows unbounded; naive logrotate would silently break chain continuity. Half-day for postrotate hook OR explicit ADR documenting per-rotation chain.
+
+### Deferred until informed by agent #2-style use case
+
+- [ ] **`docs/platform-contract.md` with semver** — Medium tier in alignment doc. Enumerate `src/platform/*.py` public surface + log-entry types + script exit codes; tag v0.1.
+- [ ] **Phase A.5 — `schemas.py` runtime registry split** (`register_agent_entries()`). LogEntry union now ~30 variants and growing.
+- [ ] **Phase B — `/opt/shift-agent/` → `/opt/smb-agents/` rename** (~292 references including `tools/patch-hermes.py:158`). Half-day, ideally bundled with a maintenance window.
+- [ ] **Phase C — cockpit modular split** (frontend section registry + backend `state.py` `_AGENT_ROOT` parameterization). Wait until agent #2 ships its own cockpit needs.
 
 ## P4 — Hygiene + housekeeping
 
