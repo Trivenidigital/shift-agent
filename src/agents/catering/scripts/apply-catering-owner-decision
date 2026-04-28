@@ -51,7 +51,7 @@ from safe_io import (  # noqa: E402
     load_model, flock,
 )
 from schemas import (  # noqa: E402
-    Config, CateringLeadStore,
+    Config, CateringLeadStore, Menu, MenuItem,
     CateringLeadStatusChange, CateringOwnerDecision, CateringQuoteSent,
 )
 from exit_codes import (  # noqa: E402
@@ -63,10 +63,12 @@ from pydantic import TypeAdapter  # noqa: E402
 CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
 LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
 LEADS_LOCK = Path("/opt/shift-agent/state/catering-leads.json.lock")
+MENU_PATH = Path("/opt/shift-agent/state/catering-menu.json")
 LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
 TEMPLATE_DIR = Path("/opt/shift-agent/templates")
 BRIDGE_URL = "http://127.0.0.1:3000/send"
 BRIDGE_TIMEOUT = 10
+MENU_ITEMS_IN_QUOTE = 12  # cap to keep WhatsApp message readable
 
 
 def _bridge_post(jid: str, message: str) -> tuple[bool, str]:
@@ -88,15 +90,103 @@ def _bridge_post(jid: str, message: str) -> tuple[bool, str]:
         return False, f"{type(e).__name__}: {e}"
 
 
+def _load_menu_filtered(dietary_restrictions: list[str]) -> tuple[list[MenuItem], int]:
+    """Load the current menu and filter items by the customer's dietary requests.
+
+    Returns (filtered_items, total_items_in_menu).
+
+    Filtering rule: if the customer specified ANY dietary restriction (e.g.
+    "vegetarian"), keep only items whose dietary_tags include AT LEAST ONE
+    matching tag. If no dietary restriction was specified, return all items
+    (caller decides whether to include the full menu).
+    """
+    if not MENU_PATH.exists():
+        return [], 0
+    try:
+        menu, status = load_model(MENU_PATH, Menu)
+    except Exception:
+        return [], 0
+    if status != "ok":
+        return [], 0
+    items = [it for it in menu.items if it.available]
+    if not dietary_restrictions:
+        return items, len(menu.items)
+    # Normalize requested tags (e.g. "vegetarian" -> "veg", "non-vegetarian" -> "non-veg")
+    requested = set()
+    for r in dietary_restrictions:
+        t = r.lower().strip()
+        if t in ("vegetarian", "veg"):
+            requested.add("veg")
+        elif t in ("non-vegetarian", "non-veg", "nonveg"):
+            requested.add("non-veg")
+        elif t in ("vegan",):
+            requested.add("vegan")
+        elif t in ("jain",):
+            requested.add("jain")
+        elif t in ("halal",):
+            requested.add("halal")
+        elif t in ("kosher",):
+            requested.add("kosher")
+        elif t in ("gluten-free", "gf", "gluten free"):
+            requested.add("gluten-free")
+        elif t in ("nut-free", "nut free"):
+            requested.add("nut-free")
+        elif t in ("dairy-free", "dairy free"):
+            requested.add("dairy-free")
+        elif t in ("egg-free", "egg free", "no eggs"):
+            requested.add("egg-free")
+    filtered = [it for it in items if any(tag in requested for tag in it.dietary_tags)]
+    return filtered, len(menu.items)
+
+
+def _format_menu_section(items: list[MenuItem], total: int, dietary_restrictions: list[str]) -> str:
+    """Build the menu section that appears in the customer-facing quote."""
+    if not items:
+        if total == 0:
+            return ""  # no menu configured at all — silently omit
+        if dietary_restrictions:
+            return (f"\n_(We didn't find items matching {', '.join(dietary_restrictions)} "
+                    f"in our current menu. Reply with any specifics and we'll customize.)_\n")
+        return ""
+    by_cat: dict[str, list[MenuItem]] = {}
+    for it in items:
+        by_cat.setdefault(it.category, []).append(it)
+    cat_order = ["package", "appetizer", "main", "side", "dessert", "beverage", "salad", "soup", "special"]
+    lines = ["\n*Sample menu*"]
+    if dietary_restrictions:
+        lines[0] += f" ({', '.join(dietary_restrictions)})"
+    lines[0] += ":"
+    shown = 0
+    for cat in cat_order:
+        if cat not in by_cat or shown >= MENU_ITEMS_IN_QUOTE:
+            continue
+        for it in by_cat[cat][:max(1, MENU_ITEMS_IN_QUOTE // len(by_cat))]:
+            if shown >= MENU_ITEMS_IN_QUOTE:
+                break
+            price = f" — ${it.price_usd:.0f}" if it.price_usd is not None else ""
+            lines.append(f"  - {it.name}{price}")
+            shown += 1
+    leftover = len(items) - shown
+    if leftover > 0:
+        lines.append(f"  _...and {leftover} more options on request_")
+    return "\n".join(lines) + "\n"
+
+
 def _render_quote(lead, customer_name: str) -> str:
-    """Render the customer-facing quote. Uses template with fallback."""
+    """Render the customer-facing quote. Uses template with fallback. Includes
+    a sample-menu section filtered by the customer's dietary requests."""
     template_path = TEMPLATE_DIR / "catering_quote_to_customer.txt"
+    dietary = list(lead.extracted.dietary_restrictions or [])
+    filtered_items, total = _load_menu_filtered(dietary)
+    menu_section = _format_menu_section(filtered_items, total, dietary)
+
     fields = {
         "lead_id": lead.lead_id,
         "customer_name": customer_name or "there",
         "headcount": lead.extracted.headcount or "[TBD]",
         "event_date": lead.extracted.event_date or "[TBD]",
         "event_time": lead.extracted.event_time or "[TBD]",
+        "menu_section": menu_section,
     }
     if template_path.exists():
         try:
@@ -109,7 +199,7 @@ def _render_quote(lead, customer_name: str) -> str:
         f"⚕ *Catering Agent*\n────────────\n"
         f"Hi {fields['customer_name']}, thank you for the catering inquiry. "
         f"We can confirm — let's discuss details. Reply here when ready, or "
-        f"reach us directly. (Ref: {lead.lead_id})"
+        f"reach us directly.{menu_section}\n(Ref: {lead.lead_id})"
     )
 
 

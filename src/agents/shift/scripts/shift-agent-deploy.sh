@@ -85,6 +85,8 @@ install_artifacts() {
     if compgen -G "src/agents/catering/templates/*" > /dev/null; then
         install -m 644 src/agents/catering/templates/* /opt/shift-agent/templates/
     fi
+    # Ensure catering-menu state dirs exist
+    install -d -o shift-agent -g shift-agent /opt/shift-agent/state/catering-menu-archive 2>/dev/null || true
     # Tier 2 agents (Agents 6, 7, 9, 10, 12, 13, 14, 15, 16) — SKILL-only stubs.
     # All default cfg.<agent>.enabled=False; opt-in per customer.
     for tier2_agent in inventory supplier vip catering_followup hiring compliance employee_docs cash_ar sales_tax; do
