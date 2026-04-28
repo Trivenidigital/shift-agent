@@ -14,6 +14,12 @@ from pathlib import Path
 
 import pytest
 
+# safe_io uses fcntl (Unix-only). Skip the whole module on Windows so the rest
+# of the suite runs in local dev; the suite still runs on the Linux VPS where
+# flock is the whole point. importorskip works at collection time, before the
+# safe_io import below would explode.
+pytest.importorskip("fcntl")
+
 from safe_io import (
     FileLock, atomic_write_text, atomic_write_json,
     safe_load_json, ndjson_append, sweep_orphan_temps, validate_phone_input,
