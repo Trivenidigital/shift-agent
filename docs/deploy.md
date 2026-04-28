@@ -126,34 +126,49 @@ Every deploy verifies symlink integrity before `install_artifacts` runs. If `/op
 After editing `/root/.hermes/.env` and restarting services:
 
 ```bash
-# Check 1: Hermes-gateway connected to WhatsApp (proves auth keys loaded)
-ssh main-vps 'sudo journalctl -u hermes-gateway --since "30 seconds ago" --no-pager | grep "✓ whatsapp connected"' > .smoke.txt 2>&1
+# Check 1: Hermes-gateway connected to WhatsApp (proves auth keys loaded).
+# IMPORTANT: Hermes' app-level log lives in /root/.hermes/logs/agent.log,
+# NOT in journalctl (journalctl shows only systemd lifecycle events for
+# hermes-gateway). Looking in the wrong place was a smoke-check bug.
+ssh main-vps 'sudo tail -200 /root/.hermes/logs/agent.log | grep "✓ whatsapp connected" | tail -1'
+# Verify timestamp is within ~10s of your restart command.
 
 # Check 2: cockpit responds (proves systemd EnvironmentFile loaded with COCKPIT_COOKIE_SECURE)
 ssh main-vps 'curl -sf http://localhost:8080/api/health'
 
-# Check 3: no startup errors
+# Check 3: no startup errors in journalctl
 ssh main-vps 'sudo journalctl -u hermes-gateway -u shift-agent-cockpit --since "30 seconds ago" --no-pager | grep -iE "error|auth.*invalid|missing.*env" | grep -v "code -15"'
 ```
 
 The `code -15` filter excludes the expected systemd-restart-shutdown signal (the previous gateway process exiting cleanly is logged as `code -15`; without that filter, every clean restart looks like a failure).
 
-### One-time migration to symlink (operator runs once per VPS)
+### Customer-VPS bring-up: migration is step-0 (REQUIRED before first deploy)
 
-Already done on the production VPS as of 2026-04-28. For new customer VPSes:
+On a fresh customer VPS, `/opt/shift-agent/.env` is a regular file from initial provisioning. The deploy script's symlink-integrity gate is **strict** — it fails-closed if `/opt/shift-agent/.env` is not a symlink. So migration MUST happen before the first deploy attempts to run.
 
 ```bash
-# 1. Verify drift state — must show OK before proceeding
-sudo /opt/shift-agent/staging-new/tools/check-env-drift.sh
+# Step 0 — extract a tarball into staging (no install yet)
+scp shift-agent-deploy.tgz <customer-vps>:/tmp/
+ssh <customer-vps> 'sudo tar xzf /tmp/shift-agent-deploy.tgz -C /opt/shift-agent/staging-new/'
 
-# 2. If clean, run migration (backs up existing file, creates symlink)
-sudo /opt/shift-agent/staging-new/tools/migrate-env-to-symlink.sh
+# Step 1 — verify drift state. Must show OK (all keys match) before proceeding.
+ssh <customer-vps> 'sudo /opt/shift-agent/staging-new/tools/check-env-drift.sh'
 
-# 3. Restart services + run the smoke checks above
-sudo systemctl restart hermes-gateway shift-agent-cockpit
+# Step 2 — run the migration. Idempotent; safe to re-run.
+ssh <customer-vps> 'sudo /opt/shift-agent/staging-new/tools/migrate-env-to-symlink.sh'
+
+# Step 3 — restart services to pick up the unified env
+ssh <customer-vps> 'sudo systemctl restart hermes-gateway shift-agent-cockpit'
+
+# Step 4 — only NOW run the deploy. The symlink-integrity gate will pass.
+ssh <customer-vps> 'sudo /usr/local/bin/shift-agent-deploy.sh'
 ```
 
 If `check-env-drift.sh` reports drift, reconcile manually (the script prints sha256 hash + length per drifted key so the operator can identify placeholder-vs-real without leaking secrets) then re-run.
+
+If the operator skips migration and runs deploy directly, the symlink-integrity gate fails-closed with a clear error pointing at this section.
+
+The Triveni production VPS was migrated on 2026-04-28 and is post-step-0 going forward. Future customer VPSes follow the sequence above.
 
 ## Limits + known caveats
 

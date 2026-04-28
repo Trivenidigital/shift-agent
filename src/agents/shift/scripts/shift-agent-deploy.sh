@@ -181,33 +181,55 @@ case "$ACTION" in
             exit 1
         fi
 
-        # Env symlink integrity gate — verify /opt/shift-agent/.env still points
-        # where we set it up during the consolidation migration. Catches: Hermes
-        # setup re-run that recreates the file, manual editor truncation via
-        # `> /root/.hermes/.env`, redirect that broke the symlink. Same fail-closed
-        # pattern as the Hermes pin gate; exits before install_artifacts so no
-        # rollback is needed.
-        # If /opt/shift-agent/.env is a regular file (pre-migration state), this
-        # gate is a no-op — only enforced once the symlink exists.
-        if [ -L /opt/shift-agent/.env ]; then
-            echo "=== Env symlink integrity gate ==="
-            ENV_TARGET=$(readlink /opt/shift-agent/.env)
-            if [ "$ENV_TARGET" != "/root/.hermes/.env" ]; then
-                echo "ERROR: /opt/shift-agent/.env symlink target drifted." >&2
-                echo "  expected: /root/.hermes/.env" >&2
-                echo "  got:      $ENV_TARGET" >&2
-                echo "  Recovery: sudo ln -sf /root/.hermes/.env /opt/shift-agent/.env  &&  retry deploy" >&2
-                exit 1
+        # Env symlink integrity gate — strict. Fail-closed if /opt/shift-agent/.env
+        # is anything OTHER than a symlink to /root/.hermes/.env. Catches:
+        #   - regular file replacing the symlink (tarball with .env, mv newfile .env)
+        #   - symlink pointing somewhere else
+        #   - missing file
+        #   - target unreadable (Hermes uninstall, perms broken)
+        #
+        # Migration via tools/migrate-env-to-symlink.sh is REQUIRED on every
+        # customer VPS as step-0 of bring-up, BEFORE the first deploy. After
+        # migration runs, this gate enforces the symlink invariant forever.
+        #
+        # The earlier "if [ -L ... ] then check" version of this gate had inverted
+        # polarity — silently passed when the symlink was REPLACED by a regular
+        # file, which is exactly the failure mode the gate was supposed to catch.
+        # Validation on 2026-04-28 surfaced the bug; this is the corrected version.
+        echo "=== Env symlink integrity gate ==="
+        if [ ! -L /opt/shift-agent/.env ]; then
+            echo "ERROR: /opt/shift-agent/.env is not a symlink." >&2
+            if [ -e /opt/shift-agent/.env ]; then
+                echo "  got: $(stat -c '%F' /opt/shift-agent/.env)" >&2
+            else
+                echo "  got: missing entirely" >&2
             fi
-            if [ ! -r /opt/shift-agent/.env ]; then
-                echo "ERROR: /opt/shift-agent/.env symlink target unreadable." >&2
-                echo "  /root/.hermes/.env may have been deleted or permissions changed." >&2
-                echo "  Recovery: ls -la /root/.hermes/.env  (check existence + perms);" >&2
-                echo "            verify shift-agent user can read it." >&2
-                exit 1
-            fi
-            echo "OK: env symlink intact ($ENV_TARGET)"
+            echo "  expected: symlink → /root/.hermes/.env" >&2
+            echo "" >&2
+            echo "  If this is a fresh customer VPS that hasn't been migrated yet, run:" >&2
+            echo "    sudo $STAGING/tools/migrate-env-to-symlink.sh" >&2
+            echo "" >&2
+            echo "  If migration was previously done and the symlink was broken, restore via:" >&2
+            echo "    sudo rm -f /opt/shift-agent/.env" >&2
+            echo "    sudo ln -s /root/.hermes/.env /opt/shift-agent/.env" >&2
+            exit 1
         fi
+        ENV_TARGET=$(readlink /opt/shift-agent/.env)
+        if [ "$ENV_TARGET" != "/root/.hermes/.env" ]; then
+            echo "ERROR: /opt/shift-agent/.env symlink target drifted." >&2
+            echo "  expected: /root/.hermes/.env" >&2
+            echo "  got:      $ENV_TARGET" >&2
+            echo "  Recovery: sudo ln -sf /root/.hermes/.env /opt/shift-agent/.env  &&  retry deploy" >&2
+            exit 1
+        fi
+        if [ ! -r /opt/shift-agent/.env ]; then
+            echo "ERROR: /opt/shift-agent/.env symlink target unreadable." >&2
+            echo "  /root/.hermes/.env may have been deleted or permissions changed." >&2
+            echo "  Recovery: ls -la /root/.hermes/.env  (check existence + perms);" >&2
+            echo "            verify shift-agent user can read it." >&2
+            exit 1
+        fi
+        echo "OK: env symlink intact ($ENV_TARGET)"
 
         COMMIT_HASH=$(cat "$STAGING/.commit-hash" 2>/dev/null | head -c 8 || echo "unknown")
         NEW_TAG="deploy-$(date +%Y%m%d-%H%M%S)-${COMMIT_HASH}"
