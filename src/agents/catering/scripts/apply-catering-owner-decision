@@ -1,0 +1,274 @@
+#!/usr/bin/env python3
+"""apply-catering-owner-decision — Agent #2 owner-approval state writer.
+
+Called by Kimi (via the handle_catering_owner_approval SKILL) when the
+owner has replied to a catering approval card with a code + verb. This
+script is deterministic — it transitions the lead's status and, on
+APPROVE, sends the quote to the customer.
+
+Usage:
+  apply-catering-owner-decision \\
+    --code "#A3F2X" \\
+    --decision approve
+
+  apply-catering-owner-decision \\
+    --code "#A3F2X" \\
+    --decision edit \\
+    --edit-text "make it $400 cap; add appetizer pricing"
+
+  apply-catering-owner-decision \\
+    --code "#A3F2X" \\
+    --decision reject \\
+    --reason "out of capacity that weekend"
+
+Outputs JSON: {"lead_id": "L0007", "new_status": "SENT_TO_CUSTOMER",
+               "outbound_message_id": "..."}.
+
+Exit codes:
+  0  — applied
+  2  — invalid input
+  4  — code not found among active leads
+  5  — schema violation
+  6  — bridge unreachable (state still updated; quote delivery uncertain)
+  9  — illegal transition (lead in terminal/wrong status)
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import urllib.error
+import urllib.request
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
+
+from safe_io import (  # noqa: E402
+    FileLock, ndjson_append, atomic_write_json, customer_now,
+    load_model, flock,
+)
+from schemas import (  # noqa: E402
+    Config, CateringLeadStore,
+    CateringLeadStatusChange, CateringOwnerDecision, CateringQuoteSent,
+)
+from exit_codes import (  # noqa: E402
+    EXIT_OK, EXIT_INVALID_INPUT, EXIT_NOT_FOUND,
+    EXIT_SCHEMA_VIOLATION, EXIT_DEPENDENCY_DOWN, EXIT_ILLEGAL_TRANSITION,
+)
+from pydantic import TypeAdapter  # noqa: E402
+
+CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
+LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
+LEADS_LOCK = Path("/opt/shift-agent/state/catering-leads.json.lock")
+LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+TEMPLATE_DIR = Path("/opt/shift-agent/templates")
+BRIDGE_URL = "http://127.0.0.1:3000/send"
+BRIDGE_TIMEOUT = 10
+
+
+def _bridge_post(jid: str, message: str) -> tuple[bool, str]:
+    payload = json.dumps({"chatId": jid, "message": message}).encode("utf-8")
+    req = urllib.request.Request(
+        BRIDGE_URL, data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=BRIDGE_TIMEOUT) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            doc = json.loads(body)
+            mid = doc.get("id") or doc.get("messageId") or ""
+            if not mid:
+                return False, f"empty messageId: {body[:200]}"
+            return True, mid
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError) as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+def _render_quote(lead, customer_name: str) -> str:
+    """Render the customer-facing quote. Uses template with fallback."""
+    template_path = TEMPLATE_DIR / "catering_quote_to_customer.txt"
+    fields = {
+        "lead_id": lead.lead_id,
+        "customer_name": customer_name or "there",
+        "headcount": lead.extracted.headcount or "[TBD]",
+        "event_date": lead.extracted.event_date or "[TBD]",
+        "event_time": lead.extracted.event_time or "[TBD]",
+    }
+    if template_path.exists():
+        try:
+            tmpl = template_path.read_text(encoding="utf-8")
+            return tmpl.format(**fields)
+        except (KeyError, OSError):
+            pass
+    # Inline fallback — generic acknowledgment when no template
+    return (
+        f"Hi {fields['customer_name']}, thank you for the catering inquiry. "
+        f"We can confirm — let's discuss details. Reply here when ready, or "
+        f"reach us directly. (Ref: {lead.lead_id})"
+    )
+
+
+def _log(adapter: TypeAdapter, entry) -> None:
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with flock(LOG_PATH):
+        ndjson_append(LOG_PATH, adapter.dump_json(entry).decode("utf-8"))
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--code", required=True, help="approval code from owner reply, e.g. #A3F2X")
+    ap.add_argument("--decision", required=True, choices=["approve", "reject", "edit"])
+    ap.add_argument("--edit-text", default="", help="required when decision=edit")
+    ap.add_argument("--reason", default="", help="optional rejection reason")
+    args = ap.parse_args()
+
+    if args.decision == "edit" and not args.edit_text.strip():
+        sys.stderr.write("--edit-text required when decision=edit\n")
+        return EXIT_INVALID_INPUT
+
+    code = args.code.strip()
+    if not code.startswith("#") or len(code) != 6:
+        sys.stderr.write(f"invalid code format (expected #XXXXX): {code!r}\n")
+        return EXIT_INVALID_INPUT
+
+    # Load config
+    try:
+        import yaml
+        cfg_dict = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+        cfg = Config.model_validate(cfg_dict)
+    except Exception as e:
+        sys.stderr.write(f"config load failed: {e}\n")
+        return EXIT_SCHEMA_VIOLATION
+
+    # Find + transition the lead under FileLock
+    quote_text: Optional[str] = None
+    target_jid: Optional[str] = None
+    new_status_for_output: str = ""
+    lead_id_for_output: str = ""
+
+    with FileLock(LEADS_LOCK):
+        store, status = load_model(LEADS_PATH, CateringLeadStore, default=CateringLeadStore())
+        if status.startswith("corrupt"):
+            sys.stderr.write(f"catering-leads.json corrupt: {status}\n")
+            return EXIT_SCHEMA_VIOLATION
+
+        # Match code among non-terminal leads only
+        matches = [l for l in store.leads
+                   if l.owner_approval_code == code
+                   and l.status == "AWAITING_OWNER_APPROVAL"]
+        if not matches:
+            sys.stderr.write(f"no AWAITING_OWNER_APPROVAL lead with code {code}\n")
+            # Did the code exist on a different status? (helpful for debugging)
+            any_match = [l for l in store.leads if l.owner_approval_code == code]
+            if any_match:
+                sys.stderr.write(
+                    f"  (code {code} exists on lead {any_match[0].lead_id} but in status {any_match[0].status})\n"
+                )
+            return EXIT_NOT_FOUND
+        if len(matches) > 1:
+            # Should be impossible per generate_unique_code; defend anyway
+            sys.stderr.write(
+                f"BUG: {len(matches)} active leads share code {code}; refusing\n"
+            )
+            return EXIT_ILLEGAL_TRANSITION
+
+        lead = matches[0]
+        lead_id_for_output = lead.lead_id
+        now = customer_now(cfg.customer.timezone)
+        prev_status = lead.status
+
+        # Apply transition
+        decision_map = {
+            "approve": "OWNER_APPROVED",
+            "reject": "OWNER_REJECTED",
+            "edit": "OWNER_EDITED",
+        }
+        new_status = decision_map[args.decision]
+        new_status_for_output = new_status
+
+        # Update lead in-place
+        for i, l in enumerate(store.leads):
+            if l.lead_id == lead.lead_id:
+                store.leads[i] = l.model_copy(update={
+                    "status": new_status,
+                    "updated_at": now,
+                })
+                lead = store.leads[i]
+                break
+
+        # On approve, capture target JID before writing — we'll send AFTER lock release
+        if args.decision == "approve":
+            target_jid = f"{lead.customer_phone.lstrip('+')}@s.whatsapp.net"
+            quote_text = _render_quote(lead, lead.customer_name or "")
+
+        atomic_write_json(LEADS_PATH, store)
+
+        # Audit trail (in lock to keep ordering with state write)
+        _log(TypeAdapter(CateringLeadStatusChange), CateringLeadStatusChange(
+            type="catering_lead_status_change", ts=now,
+            lead_id=lead.lead_id, from_status=prev_status, to_status=new_status,
+            actor="owner", reason=args.reason or args.edit_text[:100] or args.decision,
+        ))
+        _log(TypeAdapter(CateringOwnerDecision), CateringOwnerDecision(
+            type="catering_owner_decision", ts=now,
+            lead_id=lead.lead_id, decision=args.decision,
+            edit_text=args.edit_text[:1000] if args.decision == "edit" else "",
+        ))
+
+    # Outside lock: handle outbound for approve
+    if args.decision != "approve":
+        print(json.dumps({"lead_id": lead_id_for_output, "new_status": new_status_for_output,
+                          "outbound_sent": False}))
+        return EXIT_OK
+
+    if not target_jid or not quote_text:
+        sys.stderr.write("BUG: approve path missing target_jid or quote_text\n")
+        return EXIT_SCHEMA_VIOLATION
+
+    ok, mid_or_err = _bridge_post(target_jid, quote_text)
+    if not ok:
+        sys.stderr.write(f"bridge_post to customer failed: {mid_or_err}\n")
+        # State has already moved to OWNER_APPROVED; quote delivery uncertain.
+        # Don't auto-transition to SENT_TO_CUSTOMER. Operator visibility via Pushover
+        # is the caller's responsibility (Kimi can decide based on this exit code).
+        print(json.dumps({"lead_id": lead_id_for_output, "new_status": new_status_for_output,
+                          "outbound_sent": False, "error": mid_or_err}))
+        return EXIT_DEPENDENCY_DOWN
+
+    # Quote delivered — record SENT_TO_CUSTOMER + CateringQuoteSent
+    with FileLock(LEADS_LOCK):
+        store, _ = load_model(LEADS_PATH, CateringLeadStore, default=CateringLeadStore())
+        for i, l in enumerate(store.leads):
+            if l.lead_id == lead_id_for_output:
+                store.leads[i] = l.model_copy(update={
+                    "status": "SENT_TO_CUSTOMER",
+                    "updated_at": customer_now(cfg.customer.timezone),
+                })
+                break
+        atomic_write_json(LEADS_PATH, store)
+
+        now2 = customer_now(cfg.customer.timezone)
+        _log(TypeAdapter(CateringLeadStatusChange), CateringLeadStatusChange(
+            type="catering_lead_status_change", ts=now2,
+            lead_id=lead_id_for_output, from_status="OWNER_APPROVED",
+            to_status="SENT_TO_CUSTOMER", actor="system",
+            reason="customer_send_succeeded",
+        ))
+        _log(TypeAdapter(CateringQuoteSent), CateringQuoteSent(
+            type="catering_quote_sent", ts=now2,
+            lead_id=lead_id_for_output,
+            customer_phone=store.leads[i].customer_phone,
+            outbound_message_id=mid_or_err,
+        ))
+
+    print(json.dumps({"lead_id": lead_id_for_output, "new_status": "SENT_TO_CUSTOMER",
+                      "outbound_sent": True, "outbound_message_id": mid_or_err}))
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

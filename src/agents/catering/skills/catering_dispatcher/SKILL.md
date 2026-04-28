@@ -1,64 +1,61 @@
 ---
 name: catering_dispatcher
-description: Use when an inbound message looks like a catering inquiry — keywords like "cater", "catering", "headcount", "guests", "event", "wedding", "party", "birthday", "menu for X people", or a clear "do you do catering for ...". This skill is invoked AFTER dispatch_shift_agent has classified the sender. It runs the catering classifier (Haiku-cheap) and, if confirmed catering, hands off to parse_catering_inquiry. For sick-call or unrelated messages, returns control to dispatch_shift_agent.
+description: Use when the dispatch_shift_agent skill detects catering intent in an inbound message (keywords like cater, catering, headcount, guests, event, wedding, reception, party, banquet, "do you do catering for"). This skill confirms catering is enabled, then delegates to parse_catering_inquiry for new inquiries or to handle_catering_owner_approval for owner replies with a 5-character approval code.
 ---
 
-# Catering Dispatcher (Agent #2)
+# Catering Dispatcher (Agent #2 — v0.2)
 
-You are the catering-domain front door. Inbound message has already been
-sender-id-resolved by dispatch_shift_agent. Your job:
+You are the catering-domain entry point. The Shift Agent dispatcher already
+detected catering keywords. Your job: confirm catering is enabled, decide
+whether this is a NEW inquiry or an OWNER REPLY to a pending lead, and
+delegate.
 
-1. **Classify intent.** Is this actually a catering inquiry, or is it
-   a sick-call / general / off-topic message?
-2. **If catering** → invoke `parse_catering_inquiry` with the raw body.
-3. **If NOT catering** → return control to `dispatch_shift_agent` (which
-   will route to handle_sick_call / handle_owner_command / etc.).
+## Step 1 — Check catering enabled
+
+Read `/opt/shift-agent/config.yaml` and confirm `catering.enabled: true`.
+
+If `false`: reply to the sender with *"Thanks — we're not currently taking
+catering inquiries through this channel. Please call our shop directly."*
+Log via `log-decision-direct`. Exit.
+
+## Step 2 — Decide: new inquiry vs owner reply
+
+Inputs available from dispatch_shift_agent:
+- `sender_phone`, `sender_lid`
+- `sender_role` (owner / employee / unknown)
+- `message_text` (line 2+ only — never line 1, which is the v=1 block)
+
+**Owner reply path** — if `sender_role == "owner"` AND `message_text` contains
+a 5-char approval code matching a non-terminal catering lead:
+- Delegate to `handle_catering_owner_approval` with the code + the message text.
+
+To check: grep for `#[A-HJ-NP-Z2-9]{5}` in message_text. If a code is found,
+look it up:
+```
+cat /opt/shift-agent/state/catering-leads.json | jq -r '.leads[] | select(.owner_approval_code == "<CODE>" and .status == "AWAITING_OWNER_APPROVAL") | .lead_id'
+```
+If a lead_id is returned, this IS an owner reply. Delegate to
+`handle_catering_owner_approval`.
+
+**New inquiry path** — otherwise (any sender role):
+- Delegate to `parse_catering_inquiry` with the raw message + sender phone +
+  sender_name (when known) + the inbound message_id.
 
 ## Hard rules
 
-- ONLY proceed if `cfg.catering.enabled == true`. v0.1 default is FALSE
-  — opt-in. Read config, exit cleanly with "catering disabled" log entry
-  if not enabled.
-- NEVER respond directly to the customer from THIS skill. The
-  `parse_catering_inquiry` skill (and downstream) handles all customer
-  replies via Meta-approved templates.
-- The sender role is owner-or-customer-or-unknown:
-  - `owner` is replying to a quote → invoke `handle_catering_owner_approval`.
-  - `customer` (employee or unknown) sent a NEW inquiry → invoke
-    `parse_catering_inquiry`.
-  - `unknown` sender + catering keywords → still allow (catering inquiries
-    typically come from numbers not in the employee roster). Log a
-    `unknown_sender_catering_inquiry` entry for owner review.
-
-## Phases
-
-**v0.1 (current):** `cfg.catering.enabled = False` by default. SKILL exists
-to claim the dispatch slot but doesn't do business logic. Real catering
-flow lands in v0.2 once a pilot customer onboards.
-
-**v0.2:** Full classifier + extractor + drafter + owner-approval flow per
-the offshore team's design (architecturally rebuilt on Hermes/Kimi instead
-of FastAPI/Anthropic).
-
-## Decision flow (v0.1)
-
-```
-cfg.catering.enabled?
-  no  → log "catering disabled", return to dispatch_shift_agent
-  yes → see SKILL parse_catering_inquiry
-```
+- NEVER process catering for a sender_role of "error". Escalate to owner via
+  Pushover and STOP.
+- NEVER respond to the customer from THIS skill. The downstream skills
+  (parse_catering_inquiry → owner approval → quote) handle all customer-
+  facing replies.
+- NEVER bypass the owner approval gate. Every customer-facing quote requires
+  owner sign-off via the 5-char code flow.
+- ALWAYS log a `cross_dispatch_to_catering` line via `log-decision-direct`
+  with the sender phone + which sub-skill is being invoked. (This helps
+  trace owner-reported routing surprises.)
 
 ## What this skill does NOT do
 
-- Send any message to the customer (templates are owner-approved only)
-- Make pricing decisions (deposit policy lives in cfg.catering)
-- Bypass the owner approval gate (every quote requires owner sign-off)
-
-## Architecture note
-
-The offshore team built a full FastAPI + Postgres + arq stack at
-`Trivenidigital/sme-agents` for catering. After review, we chose Path B
-(rebuild on the unified Hermes/JSON stack used by all other agents in
-this portfolio) for narrative + ops simplicity. The state machine + LLM
-prompt patterns from the offshore work are reused here; the runtime is
-unified.
+- Extract structured fields (parse_catering_inquiry does that)
+- Send any reply to the customer (owner-approved templates only)
+- Make pricing decisions (owner approves the quote text)

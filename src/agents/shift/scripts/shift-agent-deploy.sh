@@ -74,10 +74,16 @@ install_artifacts() {
         rsync -a src/agents/multi_location/skills/ /root/.hermes/skills/
         chown -R shift-agent:shift-agent /root/.hermes/skills/
     fi
-    # Catering Lead (Agent #2) — SKILL-only in v0.1 (cfg.catering.enabled=false default)
+    # Catering Lead (Agent #2) — v0.2: SKILLs + scripts + templates
     if [ -d src/agents/catering/skills ]; then
         rsync -a src/agents/catering/skills/ /root/.hermes/skills/
         chown -R shift-agent:shift-agent /root/.hermes/skills/
+    fi
+    if compgen -G "src/agents/catering/scripts/*" > /dev/null; then
+        install -m 755 src/agents/catering/scripts/* /usr/local/bin/
+    fi
+    if compgen -G "src/agents/catering/templates/*" > /dev/null; then
+        install -m 644 src/agents/catering/templates/* /opt/shift-agent/templates/
     fi
     # Tier 2 agents (Agents 6, 7, 9, 10, 12, 13, 14, 15, 16) — SKILL-only stubs.
     # All default cfg.<agent>.enabled=False; opt-in per customer.
