@@ -16,10 +16,12 @@ install_artifacts() {
     cd "$WORKING_COPY"
     # Scripts
     install -m 755 src/scripts/* /usr/local/bin/
-    # Python modules (schemas, safe_io, exit_codes)
+    # Python modules — schemas + platform/{safe_io, exit_codes}.
+    # VPS layout stays flat at /opt/shift-agent/ so scripts' sys.path inserts
+    # don't change. Repo layout is now src/platform/ for shared modules.
     install -m 644 src/schemas.py /opt/shift-agent/schemas.py
-    install -m 644 src/safe_io.py /opt/shift-agent/safe_io.py
-    install -m 644 src/exit_codes.py /opt/shift-agent/exit_codes.py
+    install -m 644 src/platform/safe_io.py /opt/shift-agent/safe_io.py
+    install -m 644 src/platform/exit_codes.py /opt/shift-agent/exit_codes.py
     # Templates
     install -d /opt/shift-agent/templates
     install -m 644 src/templates/* /opt/shift-agent/templates/
