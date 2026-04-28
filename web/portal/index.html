@@ -2,110 +2,321 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SMB-Agents — Portfolio Portal</title>
-  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="icon" type="image/jpeg" href="/photos/triveni-logo.jpeg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Inter+Tight:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-    .agent-card { transition: transform .12s ease, box-shadow .12s ease; }
-    .agent-card.clickable:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgb(0 0 0 / 0.08); }
-    .agent-card.disabled { opacity: 0.65; cursor: not-allowed; }
+    :root{
+      --ivory:#fbf6ec;
+      --ivory-warm:#f4ead4;
+      --ivory-deep:#ecdcb6;
+      --cream:#fdf9ef;
+      --blush:#f5e6d3;
+      --sand:#ead8b8;
+      --champagne:#e89318;
+      --champagne-light:#f4a93a;
+      --champagne-deep:#9d6b1f;
+      --champagne-darker:#6b4612;
+      --emerald:#1d3a30;
+      --emerald-deep:#13261f;
+      --emerald-light:#2d5a48;
+      --ink:#2a1d0e;
+      --ink-soft:#42321b;
+      --muted:rgba(42,29,14,0.6);
+      --muted-strong:rgba(42,29,14,0.45);
+      --rule:rgba(157,107,31,0.18);
+      --rule-soft:rgba(157,107,31,0.10);
+    }
+    *{box-sizing:border-box;margin:0;padding:0}
+    html{scroll-behavior:smooth}
+    body{
+      background:var(--ivory);
+      color:var(--ink);
+      font-family:'Inter Tight','Helvetica Neue',Helvetica,Arial,sans-serif;
+      font-weight:400;
+      line-height:1.5;
+      -webkit-font-smoothing:antialiased;
+    }
+    a{color:inherit;text-decoration:none}
+
+    .serif{font-family:'Cormorant Garamond',Georgia,serif;font-weight:400;letter-spacing:-0.015em}
+    .mono{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:11px;letter-spacing:0.12em;text-transform:uppercase}
+    .ital{font-style:italic}
+
+    .wrap{max-width:1280px;margin:0 auto;padding:0 clamp(20px,4vw,56px)}
+
+    /* Nav */
+    nav.top{
+      position:sticky;top:0;z-index:50;
+      background:rgba(247,241,228,0.85);
+      backdrop-filter:blur(16px);
+      -webkit-backdrop-filter:blur(16px);
+      border-bottom:1px solid var(--rule);
+    }
+    nav.top .wrap{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:32px;padding-top:18px;padding-bottom:18px}
+    .brand{display:flex;align-items:center;gap:14px;color:var(--ink)}
+    .brand .mark{width:36px;height:36px;flex:none;border-radius:6px;background:linear-gradient(135deg,var(--champagne) 0%,var(--champagne-deep) 100%);display:flex;align-items:center;justify-content:center;color:#fff;font-family:'Cormorant Garamond',serif;font-size:20px;font-weight:600}
+    .brand .n{font-family:'Cormorant Garamond',serif;font-size:22px;font-weight:500;letter-spacing:0.01em;line-height:1}
+    .brand .s{color:var(--champagne);font-size:9px;letter-spacing:0.18em;text-transform:uppercase;margin-top:3px;font-family:'JetBrains Mono',monospace}
+    .navlinks{display:flex;gap:34px;justify-content:center}
+    .navlinks a{font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink);opacity:0.72;transition:opacity .2s,color .2s;padding:4px 0}
+    .navlinks a:hover{opacity:1;color:var(--champagne)}
+    .navlinks a.active{color:var(--champagne);opacity:1}
+    .navtail{display:flex;justify-content:flex-end;align-items:center;gap:18px}
+    .navtail .meta{font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.1em;color:var(--muted)}
+
+    /* Hero */
+    .hero{padding:80px 0 64px;border-bottom:1px solid var(--rule)}
+    .hero .eyebrow{color:var(--champagne);margin-bottom:24px}
+    .hero h1{font-family:'Cormorant Garamond',serif;font-weight:500;font-size:clamp(48px,6.5vw,88px);line-height:1.02;letter-spacing:-0.012em;color:var(--ink);margin-bottom:24px}
+    .hero h1 em{color:var(--champagne);font-style:italic}
+    .hero p.lede{font-size:clamp(17px,1.4vw,20px);color:var(--ink-soft);max-width:720px;line-height:1.55}
+
+    /* Status row */
+    .status-row{display:flex;flex-wrap:wrap;gap:14px;margin-top:36px}
+    .status-pill{
+      display:inline-flex;align-items:center;gap:10px;
+      padding:10px 16px;
+      border:1px solid var(--rule);
+      background:var(--cream);
+      font-family:'JetBrains Mono',monospace;
+      font-size:11px;letter-spacing:0.1em;text-transform:uppercase;
+      color:var(--ink);
+    }
+    .status-pill .num{color:var(--champagne);font-weight:500;font-size:12px}
+    .status-pill .dot{width:6px;height:6px;border-radius:50%;display:inline-block}
+    .status-pill.live .dot{background:var(--emerald)}
+    .status-pill.scaffold .dot{background:var(--champagne)}
+    .status-pill.future .dot{background:var(--muted)}
+
+    /* Sections */
+    section.tier{padding:64px 0;border-bottom:1px solid var(--rule)}
+    section.tier:last-of-type{border-bottom:none}
+    .tier-head{display:flex;align-items:flex-end;justify-content:space-between;flex-wrap:wrap;gap:16px;margin-bottom:40px;padding-bottom:18px;border-bottom:1px solid var(--rule-soft)}
+    .tier-head .label{color:var(--champagne);margin-bottom:8px;display:block}
+    .tier-head h2{font-family:'Cormorant Garamond',serif;font-size:clamp(32px,3.6vw,46px);font-weight:500;letter-spacing:-0.01em;color:var(--ink);line-height:1.1}
+    .tier-head h2 em{font-style:italic;color:var(--champagne-deep)}
+    .tier-head .right{color:var(--muted);max-width:340px;text-align:right;font-size:13px;line-height:1.5}
+
+    /* Card grid */
+    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:20px}
+
+    /* Cards */
+    .card{
+      position:relative;
+      background:var(--cream);
+      border:1px solid var(--rule);
+      padding:28px 26px 22px;
+      display:flex;flex-direction:column;
+      transition:all .35s cubic-bezier(0.22,0.61,0.36,1);
+      min-height:260px;
+    }
+    .card.live{background:linear-gradient(180deg,var(--cream) 0%,var(--ivory-warm) 100%)}
+    .card.live::before{
+      content:'';position:absolute;left:0;top:0;bottom:0;width:3px;
+      background:linear-gradient(180deg,var(--champagne) 0%,var(--champagne-deep) 100%);
+    }
+    .card.future{background:rgba(255,255,255,0.55);opacity:0.78}
+    .card a, .card.link{cursor:pointer;color:inherit;text-decoration:none}
+    a.card:hover, .card.link:hover{transform:translateY(-3px);border-color:var(--champagne);box-shadow:0 14px 32px -16px rgba(157,107,31,0.32)}
+    a.card:hover .open-link, .card.link:hover .open-link{color:var(--champagne);gap:14px}
+
+    .card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:18px}
+    .card-num{font-family:'Cormorant Garamond',serif;font-size:46px;font-weight:500;line-height:0.9;color:var(--champagne);font-style:italic;letter-spacing:-0.02em}
+    .card-num::before{content:'№\00A0';font-size:13px;color:var(--muted);font-style:normal;letter-spacing:0.12em;text-transform:uppercase;font-family:'JetBrains Mono',monospace;display:block;margin-bottom:6px}
+
+    .card-name{font-family:'Cormorant Garamond',serif;font-size:26px;font-weight:500;line-height:1.1;letter-spacing:-0.01em;color:var(--ink);margin:8px 0 12px}
+    .card-purpose{font-size:14px;line-height:1.55;color:var(--ink-soft);margin-bottom:16px}
+    .card-detail{
+      font-family:'Inter Tight',sans-serif;
+      font-size:12px;line-height:1.55;
+      color:var(--muted);
+      font-style:italic;
+      padding:14px 0 12px;
+      border-top:1px solid var(--rule-soft);
+      margin-top:auto;
+    }
+
+    /* Status badge */
+    .badge{
+      display:inline-flex;align-items:center;gap:8px;
+      padding:6px 12px;
+      font-family:'JetBrains Mono',monospace;
+      font-size:9.5px;letter-spacing:0.14em;text-transform:uppercase;
+      font-weight:500;
+      border-radius:999px;
+      flex-shrink:0;
+    }
+    .badge .dot{width:5px;height:5px;border-radius:50%;display:inline-block}
+    .badge.live{background:var(--emerald);color:var(--cream);border:1px solid var(--emerald-deep)}
+    .badge.live .dot{background:var(--champagne-light);animation:livePulse 2s ease-in-out infinite}
+    .badge.scaffold{background:rgba(232,147,24,0.14);color:var(--champagne-darker);border:1px solid rgba(232,147,24,0.32)}
+    .badge.scaffold .dot{background:var(--champagne)}
+    .badge.future{background:rgba(42,29,14,0.06);color:var(--muted-strong);border:1px solid var(--rule)}
+    .badge.future .dot{background:var(--muted-strong)}
+    @keyframes livePulse{0%,100%{opacity:1}50%{opacity:0.45}}
+
+    /* Open-console link */
+    .open-link{
+      display:inline-flex;align-items:center;gap:10px;
+      font-family:'JetBrains Mono',monospace;
+      font-size:10.5px;letter-spacing:0.14em;text-transform:uppercase;
+      color:var(--champagne-deep);
+      transition:gap .25s,color .25s;
+      margin-top:4px;
+    }
+    .open-link.disabled{color:var(--muted);cursor:default;font-style:italic;text-transform:none;letter-spacing:0.01em;font-size:11.5px;font-family:'Inter Tight',sans-serif}
+
+    /* Footer */
+    footer{padding:48px 0 64px;border-top:1px solid var(--rule);background:var(--ivory-warm)}
+    footer .row{display:flex;flex-wrap:wrap;align-items:center;gap:24px;justify-content:space-between}
+    footer .meta{font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted)}
+    footer .links{display:flex;gap:24px;flex-wrap:wrap}
+    footer a{color:var(--ink);font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;border-bottom:1px solid transparent;padding-bottom:2px;transition:all .2s}
+    footer a:hover{color:var(--champagne);border-bottom-color:var(--champagne)}
+
+    /* Responsive */
+    @media (max-width:768px){
+      nav.top .wrap{grid-template-columns:auto 1fr;}
+      .navlinks{display:none}
+      .hero{padding:48px 0 40px}
+      .tier-head{flex-direction:column;align-items:flex-start}
+      .tier-head .right{text-align:left}
+      section.tier{padding:48px 0}
+    }
   </style>
 </head>
-<body class="bg-slate-50 text-slate-900">
-  <div class="max-w-6xl mx-auto px-4 py-10">
+<body>
 
-    <header class="mb-10">
-      <div class="flex items-baseline justify-between flex-wrap gap-3">
-        <h1 class="text-3xl font-semibold tracking-tight">SMB-Agents Portfolio</h1>
-        <span class="text-sm text-slate-500">Triveni Supermarket — 46.62.206.192</span>
+  <!-- Top nav -->
+  <nav class="top">
+    <div class="wrap">
+      <a class="brand" href="/">
+        <div class="mark">T</div>
+        <div>
+          <div class="n">Triveni</div>
+          <div class="s">SMB-Agents Portfolio</div>
+        </div>
+      </a>
+      <div class="navlinks">
+        <a href="/">Home</a>
+        <a href="/portal/" class="active">Portfolio</a>
+        <a href="http://46.62.206.192:8080/ui">Cockpit</a>
+        <a href="https://github.com/Trivenidigital/shift-agent">Source</a>
       </div>
-      <p class="mt-2 text-slate-600">
-        20 specialized agents for ethnic SMBs. Click an agent card to open its console.
-        Scaffolded agents are <span class="font-semibold text-amber-700">opt-in</span> — flip the
-        flag in <code class="font-mono text-sm">config.yaml</code> to activate.
+      <div class="navtail">
+        <span class="meta">46.62.206.192</span>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <header class="hero">
+    <div class="wrap">
+      <div class="mono eyebrow">Twenty-Agent Suite</div>
+      <h1>A portfolio for <em>ethnic SMB owners</em>,<br>built one agent at a time.</h1>
+      <p class="lede">
+        Twenty specialized agents that share one platform — Hermes runtime, JSON-on-disk,
+        per-customer VPS, single owner approval gate. Click any live agent to open its
+        console; opt-in agents activate from <span class="ital">config.yaml</span>.
       </p>
 
-      <div class="mt-5 flex flex-wrap gap-2 text-sm">
-        <span class="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-emerald-100 text-emerald-800">
-          <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
-          <span id="count-live">3</span> live
-        </span>
-        <span class="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-amber-100 text-amber-800">
-          <span class="w-2 h-2 rounded-full bg-amber-500"></span>
-          <span id="count-scaffold">11</span> scaffolded
-        </span>
-        <span class="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-slate-200 text-slate-700">
-          <span class="w-2 h-2 rounded-full bg-slate-500"></span>
-          <span id="count-future">6</span> deferred
-        </span>
+      <div class="status-row" id="status-row">
+        <span class="status-pill live"><span class="dot"></span><span class="num" id="count-live">3</span><span>live</span></span>
+        <span class="status-pill scaffold"><span class="dot"></span><span class="num" id="count-scaffold">11</span><span>scaffolded</span></span>
+        <span class="status-pill future"><span class="dot"></span><span class="num" id="count-future">6</span><span>deferred</span></span>
       </div>
-    </header>
+    </div>
+  </header>
 
-    <section class="mb-12">
-      <div class="flex items-baseline justify-between mb-4">
-        <h2 class="text-xl font-semibold">Tier 1 — Operations &amp; Synthesis</h2>
-        <span class="text-xs text-slate-500 uppercase tracking-wide">Must-build for product to exist</span>
+  <!-- Tier 1 -->
+  <section class="tier" id="tier1">
+    <div class="wrap">
+      <div class="tier-head">
+        <div>
+          <span class="mono label">Tier I</span>
+          <h2 class="serif">Operations &amp; <em>Synthesis</em></h2>
+        </div>
+        <div class="right">Must-build for the product to exist. Today: three live, two opt-in.</div>
       </div>
-      <div id="tier1-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"></div>
-    </section>
+      <div class="grid" id="tier1-grid"></div>
+    </div>
+  </section>
 
-    <section class="mb-12">
-      <div class="flex items-baseline justify-between mb-4">
-        <h2 class="text-xl font-semibold">Tier 2 — Build After Paying Customers</h2>
-        <span class="text-xs text-slate-500 uppercase tracking-wide">Schemas + SKILL stubs deployed</span>
+  <!-- Tier 2 -->
+  <section class="tier" id="tier2">
+    <div class="wrap">
+      <div class="tier-head">
+        <div>
+          <span class="mono label">Tier II</span>
+          <h2 class="serif">Build After <em>Paying Customers</em></h2>
+        </div>
+        <div class="right">Schemas &amp; SKILL stubs deployed. Each opens for a pilot customer.</div>
       </div>
-      <div id="tier2-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"></div>
-    </section>
+      <div class="grid" id="tier2-grid"></div>
+    </div>
+  </section>
 
-    <section class="mb-10">
-      <div class="flex items-baseline justify-between mb-4">
-        <h2 class="text-xl font-semibold">Tier 3 — On Customer Demand</h2>
-        <span class="text-xs text-slate-500 uppercase tracking-wide">Not yet built; some collapse to skill bundles</span>
+  <!-- Tier 3 -->
+  <section class="tier" id="tier3">
+    <div class="wrap">
+      <div class="tier-head">
+        <div>
+          <span class="mono label">Tier III</span>
+          <h2 class="serif">On <em>Customer Demand</em></h2>
+        </div>
+        <div class="right">Not yet built; some collapse to skill bundles inside Tier&nbsp;I/II.</div>
       </div>
-      <div id="tier3-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"></div>
-    </section>
+      <div class="grid" id="tier3-grid"></div>
+    </div>
+  </section>
 
-    <footer class="mt-12 pt-6 border-t border-slate-200 text-sm text-slate-500">
-      <div class="flex flex-wrap gap-x-6 gap-y-2 items-center">
-        <span>Reference: <code class="font-mono text-xs">docs/portfolio.md.txt</code></span>
-        <a href="http://46.62.206.192:8080/ui" class="text-blue-700 hover:underline">Shift Agent Cockpit &rarr;</a>
-        <span class="ml-auto">Last updated 2026-04-28 (overnight sweep)</span>
+  <footer>
+    <div class="wrap">
+      <div class="row">
+        <div class="meta">Last updated 2026·04·28 — overnight sweep</div>
+        <div class="links">
+          <a href="http://46.62.206.192:8080/ui">Shift Agent Cockpit</a>
+          <a href="https://github.com/Trivenidigital/shift-agent">Repository</a>
+          <a href="/">Triveni Home</a>
+        </div>
       </div>
-    </footer>
-  </div>
+    </div>
+  </footer>
 
   <script>
-    // Agents data — hardcoded literal, no user-supplied content. Safe per design.
+    // Single source of truth — hardcoded literal, no untrusted input.
     const AGENTS = [
       // Tier 1
-      { tier: 1, num: 1, name: "Shift Agent", purpose: "Sick-call coverage routing for hourly staff", state: "live", url: "http://46.62.206.192:8080/ui", state_detail: "Live - handling sick-call escalations" },
-      { tier: 1, num: 2, name: "Catering Lead", purpose: "Capture catering inquiries, draft quote, owner approval", state: "scaffold", state_detail: "Schema + 3 SKILLs deployed; cfg.catering.enabled=false (opt-in)" },
-      { tier: 1, num: 3, name: "Multi-Location Coordinator", purpose: "Cross-location queries + inter-location coverage transfers", state: "scaffold", state_detail: "Self-disables - Triveni hasn't onboarded a 2nd location" },
-      { tier: 1, num: 4, name: "Daily Brief", purpose: "Morning WhatsApp summary of yesterday + today's outlook", state: "live", state_detail: "Timer active; brief delivered Apr 28 03:55 UTC" },
-      { tier: 1, num: 5, name: "EOD Reconciliation", purpose: "End-of-day snapshot fed to next morning's brief", state: "live", state_detail: "Timer active; daily snapshot at 22:00 customer-tz" },
+      { tier: 1, num: 1, name: "Shift Agent", purpose: "Sick-call coverage routing for hourly staff. Owner approves a 5-character code; the right teammate gets pinged.", state: "live", url: "http://46.62.206.192:8080/ui", state_detail: "Live — handling sick-call escalations on Triveni's roster." },
+      { tier: 1, num: 2, name: "Catering Lead", purpose: "Capture catering inquiries, draft a quote in the owner's voice, gate behind a single approval.", state: "scaffold", state_detail: "Schema and three SKILLs deployed; cfg.catering.enabled = false (opt-in)." },
+      { tier: 1, num: 3, name: "Multi-Location Coordinator", purpose: "Cross-location queries (\"who's at Houston tomorrow?\") and inter-location coverage transfers.", state: "scaffold", state_detail: "Self-disables — Triveni hasn't onboarded a second location yet." },
+      { tier: 1, num: 4, name: "Daily Brief", purpose: "Morning WhatsApp summary of yesterday's activity and today's outlook — the agent owners actually pay for.", state: "live", state_detail: "Timer active; brief delivered Apr 28 03:55 UTC, idempotency verified." },
+      { tier: 1, num: 5, name: "EOD Reconciliation", purpose: "End-of-day snapshot of resolved and unresolved items — feeds tomorrow's brief.", state: "live", state_detail: "Timer active; daily snapshot at 22:00 customer-tz." },
 
       // Tier 2
-      { tier: 2, num: 6, name: "Inventory Tracker", purpose: "Stock counts + low-stock alerts + expiry warnings", state: "scaffold", state_detail: "Awaits POS integration" },
-      { tier: 2, num: 7, name: "Supplier Coordination", purpose: "Order placement, follow-ups, dispute logging", state: "scaffold", state_detail: "Awaits per-customer supplier roster" },
-      { tier: 2, num: 9, name: "VIP Customer", purpose: "Identify high-value repeat customers, surface preferences", state: "scaffold", state_detail: "Awaits customer order history (POS or manual)" },
-      { tier: 2, num: 10, name: "Catering Follow-up", purpose: "Post-event thank-you + feedback + anniversary nudges", state: "scaffold", state_detail: "Depends on Agent #2 Catering activation" },
-      { tier: 2, num: 12, name: "Hiring & Onboarding", purpose: "Paperwork tracking, training scheduling, roster entry", state: "scaffold", state_detail: "Awaits DocuSign/HelloSign integration" },
-      { tier: 2, num: 13, name: "Compliance Calendar", purpose: "Health inspection, license renewals, sales-tax deadlines", state: "scaffold", state_detail: "Pure date logic - ready to activate; needs per-state rules library" },
-      { tier: 2, num: 14, name: "Employee Document Tracker", purpose: "H-1B, I-9, food handler cert expiry tracking", state: "scaffold", state_detail: "Pure date logic - ready to activate" },
-      { tier: 2, num: 15, name: "Cash & AR", purpose: "Invoice tracking + payment reminders + overdue escalation", state: "scaffold", state_detail: "Awaits payment-processor sync (Stripe/Square)" },
-      { tier: 2, num: 16, name: "Sales Tax Filing", purpose: "Multi-state filing deadlines + taxable-sales compilation", state: "scaffold", state_detail: "Awaits POS sales data + per-state rule library" },
+      { tier: 2, num: 6, name: "Inventory Tracker", purpose: "Stock counts, low-stock alerts, expiry warnings for perishables.", state: "scaffold", state_detail: "Awaits POS integration (Clover, Square, Cash App)." },
+      { tier: 2, num: 7, name: "Supplier Coordination", purpose: "Order placement, follow-ups on late deliveries, dispute logging.", state: "scaffold", state_detail: "Awaits per-customer supplier roster." },
+      { tier: 2, num: 9, name: "VIP Customer", purpose: "Identify high-value repeat customers; surface preferences without privacy creep.", state: "scaffold", state_detail: "Awaits customer order history (POS-derived or manual)." },
+      { tier: 2, num: 10, name: "Catering Follow-up", purpose: "Post-event thank-you, single-question feedback, anniversary nudges.", state: "scaffold", state_detail: "Depends on Agent #2 Catering activation." },
+      { tier: 2, num: 12, name: "Hiring & Onboarding", purpose: "Paperwork tracking (W-4, I-9, food handler), training scheduling, roster entry.", state: "scaffold", state_detail: "Awaits DocuSign or HelloSign integration." },
+      { tier: 2, num: 13, name: "Compliance Calendar", purpose: "Health inspections, license renewals, sales-tax deadlines — surfaces dates, never advises.", state: "scaffold", state_detail: "Pure date logic — ready to activate when per-state rule library lands." },
+      { tier: 2, num: 14, name: "Employee Document Tracker", purpose: "H-1B, I-9 re-verification, food-handler cert, driver's license expiry warnings.", state: "scaffold", state_detail: "Pure date logic — ready to activate." },
+      { tier: 2, num: 15, name: "Cash & AR", purpose: "Invoice tracking, gentle-then-firm payment reminders, overdue escalation.", state: "scaffold", state_detail: "Awaits payment-processor sync (Stripe / Square / Razorpay)." },
+      { tier: 2, num: 16, name: "Sales Tax Filing", purpose: "Multi-state filing deadlines, taxable-sales compilation, owner-reviewable filing packages.", state: "scaffold", state_detail: "Awaits POS sales data and per-state rule library." },
 
       // Tier 3
-      { tier: 3, num: 8, name: "Receiving & QA", purpose: "Shipment receipt vs PO, damage logging via photo OCR", state: "future", state_detail: "OCR + product matching - high complexity, on demand" },
-      { tier: 3, num: 11, name: "Festival & Event Outreach", purpose: "Diwali/Ugadi/Pongal/Eid timed customer outreach", state: "future", state_detail: "Tradition-aware calendar + tone library - content moat" },
-      { tier: 3, num: 17, name: "Unit Economics", purpose: "Per-SKU & per-menu-item profit + repricing recommendations", state: "future", state_detail: "Recipe modeling + supplier-cost data; defer" },
-      { tier: 3, num: 18, name: "Customer Complaint", purpose: "Complaint intake, severity classification, owner-drafted response", state: "future", state_detail: "Sensitive content design > tech complexity; on demand" },
-      { tier: 3, num: 19, name: "Equipment & Maintenance", purpose: "Repair history, vendor routing, preventive calendar", state: "future", state_detail: "Niche, low frequency - on demand only" },
-      { tier: 3, num: 20, name: "Owner Wellbeing", purpose: "Owner workload metrics, break suggestions", state: "future", state_detail: "Recommend collapsing into Daily Brief subsection" },
+      { tier: 3, num: 8, name: "Receiving & QA", purpose: "Shipment receipt vs. PO, damage logging via photo OCR.", state: "future", state_detail: "OCR + product matching is high complexity. On demand." },
+      { tier: 3, num: 11, name: "Festival & Event Outreach", purpose: "Diwali, Ugadi, Pongal, Eid — timed customer outreach with the right register for each tradition.", state: "future", state_detail: "Tradition-aware calendar and tone library — content is the moat." },
+      { tier: 3, num: 17, name: "Unit Economics", purpose: "Per-SKU and per-menu-item profit; repricing recommendations on supplier-cost shifts.", state: "future", state_detail: "Recipe modeling and clean COGS data; defer until customers ask." },
+      { tier: 3, num: 18, name: "Customer Complaint", purpose: "Complaint intake, severity classification, owner-drafted response with brand-tone matching.", state: "future", state_detail: "Sensitive content design exceeds technical complexity. On demand." },
+      { tier: 3, num: 19, name: "Equipment & Maintenance", purpose: "Repair history, vendor routing, preventive-maintenance calendar.", state: "future", state_detail: "Niche, low frequency — on demand only." },
+      { tier: 3, num: 20, name: "Owner Wellbeing", purpose: "Owner workload metrics; suggests when to take a break.", state: "future", state_detail: "Recommend collapsing into a Daily Brief subsection rather than its own agent." },
     ];
 
-    // Helpers — build DOM via createElement + textContent (no innerHTML for data fields).
     function el(tag, opts) {
       const node = document.createElement(tag);
       if (!opts) return node;
@@ -115,72 +326,58 @@
       if (opts.target) node.target = opts.target;
       if (opts.rel) node.rel = opts.rel;
       if (opts.id) node.id = opts.id;
-      if (opts.children) {
-        for (const c of opts.children) if (c) node.appendChild(c);
-      }
+      if (opts.children) for (const c of opts.children) if (c) node.appendChild(c);
       return node;
     }
 
     function badge(state) {
-      const cfg = {
-        live:     { label: "LIVE",   classes: "bg-emerald-100 text-emerald-800", dot: "bg-emerald-500" },
-        scaffold: { label: "OPT-IN", classes: "bg-amber-100 text-amber-800",     dot: "bg-amber-500" },
-        future:   { label: "FUTURE", classes: "bg-slate-200 text-slate-700",     dot: "bg-slate-500" },
-      }[state];
-      return el("span", {
-        class: `inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${cfg.classes}`,
-        children: [
-          el("span", { class: `w-1.5 h-1.5 rounded-full ${cfg.dot}` }),
-          el("span", { text: cfg.label }),
-        ],
-      });
+      const map = {
+        live:     { label: "Live" },
+        scaffold: { label: "Opt-in" },
+        future:   { label: "Future" },
+      };
+      const info = map[state];
+      const span = el("span", { class: `badge ${state}` });
+      span.appendChild(el("span", { class: "dot" }));
+      span.appendChild(el("span", { text: info.label }));
+      return span;
     }
 
     function card(a) {
       const isClickable = !!a.url;
-      const wrapper = el(isClickable ? "a" : "div", {
-        class: isClickable
-          ? "agent-card clickable block bg-white rounded-xl border border-slate-200 p-5 hover:border-blue-300"
-          : "agent-card disabled bg-white rounded-xl border border-slate-200 p-5",
-      });
+      const wrap = el(isClickable ? "a" : "div", { class: `card ${a.state}` + (isClickable ? "" : "") });
       if (isClickable) {
-        wrapper.href = a.url;
-        wrapper.target = "_blank";
-        wrapper.rel = "noopener";
+        wrap.href = a.url;
+        wrap.target = "_blank";
+        wrap.rel = "noopener";
       }
 
-      const header = el("div", {
-        class: "flex items-start justify-between gap-3 mb-2",
-        children: [
-          el("div", {
-            children: [
-              el("div", { class: "text-xs text-slate-500 mb-1", text: `Agent ${a.num}` }),
-              el("h3", { class: "text-lg font-semibold text-slate-900", text: a.name }),
-            ],
-          }),
-          badge(a.state),
-        ],
-      });
+      // Header: number + badge
+      const head = el("div", { class: "card-head" });
+      head.appendChild(el("div", { class: "card-num", text: String(a.num) }));
+      head.appendChild(badge(a.state));
+      wrap.appendChild(head);
 
-      const purpose = el("p", { class: "text-sm text-slate-600 mb-3", text: a.purpose });
-      const detail = el("div", { class: "text-xs text-slate-500 italic mb-3", text: a.state_detail });
+      // Name
+      wrap.appendChild(el("h3", { class: "card-name", text: a.name }));
 
-      const linkHint = el("span", {
-        class: isClickable ? "text-xs text-blue-700" : "text-xs text-slate-400",
-        text: isClickable
-          ? "Open console →"
-          : (a.state === "future" ? "No console — not built" : "No console — opt-in disabled"),
-      });
-      const footer = el("div", {
-        class: "flex items-center justify-between mt-2",
-        children: [linkHint],
-      });
+      // Purpose
+      wrap.appendChild(el("p", { class: "card-purpose", text: a.purpose }));
 
-      wrapper.appendChild(header);
-      wrapper.appendChild(purpose);
-      wrapper.appendChild(detail);
-      wrapper.appendChild(footer);
-      return wrapper;
+      // Detail (italic, bottom-anchored)
+      wrap.appendChild(el("div", { class: "card-detail", text: a.state_detail }));
+
+      // Open-console link
+      const linkLabel = isClickable
+        ? "Open console →"
+        : (a.state === "future" ? "Not built — future" : "Configure in config.yaml");
+      const link = el("span", {
+        class: "open-link" + (isClickable ? "" : " disabled"),
+        text: linkLabel,
+      });
+      wrap.appendChild(link);
+
+      return wrap;
     }
 
     function render(tier, gridId) {
