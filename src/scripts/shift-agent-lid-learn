@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+"""shift-agent-lid-learn — apply phone↔LID pairs from lid-cache.json (written
+by bridge.js) into roster.json (employees) and config.yaml (owner).
+
+Cron-driven (every 5 min). Idempotent. Last-write-wins on phone re-pair.
+Audit log entry written BEFORE roster mutation (DC10) so a crash mid-write
+leaves at most a phantom audit entry, not a phantom mutation without trail.
+
+Lock ordering: roster.json.lock first, config.yaml.lock second, both
+matching cockpit's `safe_io.flock(...)` targets.
+
+Exit codes:
+  0  — success (or no work)
+  2  — load failure
+  5  — unknown schema_version
+"""
+from __future__ import annotations
+import json
+import os
+import sys
+from pathlib import Path
+
+# BEGIN shift-agent-sender-id
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # for tests against src/
+
+from safe_io import flock, atomic_write_text, atomic_write_json, ndjson_append, customer_now  # noqa: E402
+from schemas import Roster, Config, LidLearned, LogEntry  # noqa: E402
+from pydantic import TypeAdapter  # noqa: E402
+import yaml  # noqa: E402
+
+CACHE = Path(os.environ.get("SHIFT_AGENT_LID_CACHE_PATH", "/opt/shift-agent/state/lid-cache.json"))
+ROSTER = Path(os.environ.get("SHIFT_AGENT_ROSTER_PATH", "/opt/shift-agent/roster.json"))
+CONFIG = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
+LOG = Path(os.environ.get("SHIFT_AGENT_DECISIONS_LOG_PATH", "/opt/shift-agent/logs/decisions.log"))
+
+EXIT_OK = 0
+EXIT_LOAD_FAILURE = 2
+EXIT_BAD_VERSION = 5
+
+_LOG_ADAPTER = TypeAdapter(LogEntry)
+
+
+def _load_cache() -> dict | None:
+    if not CACHE.exists():
+        return None
+    raw = CACHE.read_text()
+    if not raw.strip():
+        return None  # empty file (e.g. crashed mid-write); skip this tick
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        sys.stderr.write(f"lid-learn: cache parse failed: {e}\n")
+        return None
+
+
+def main() -> int:
+    cache = _load_cache()
+    if cache is None:
+        return EXIT_OK
+    if cache.get("schema_version") != 1:
+        sys.stderr.write(f"lid-learn: unknown schema_version={cache.get('schema_version')!r}\n")
+        return EXIT_BAD_VERSION
+    pairs = cache.get("pairs", [])
+    if not pairs:
+        return EXIT_OK
+
+    # Acquire BOTH locks: roster.json.lock + config.yaml.lock.
+    # Lock ordering must match cockpit's roster_session() and save_config()
+    # to avoid deadlock; cockpit takes them independently, so taking both
+    # here in a fixed order is safe.
+    with flock(ROSTER), flock(CONFIG):
+        try:
+            roster_doc = json.loads(ROSTER.read_text())
+            cfg_doc = yaml.safe_load(CONFIG.read_text())
+        except Exception as e:
+            sys.stderr.write(f"lid-learn: load failed: {e}\n")
+            return EXIT_LOAD_FAILURE
+
+        applied: list[LidLearned] = []
+        roster_dirty = False
+        cfg_dirty = False
+        now = customer_now("America/New_York")
+
+        for p in pairs:
+            phone = p.get("phone")
+            lid = p.get("lid")
+            if not phone or not lid:
+                continue
+
+            # Owner first
+            owner_phone = (cfg_doc.get("owner") or {}).get("phone")
+            if owner_phone == phone:
+                old = (cfg_doc.get("owner") or {}).get("lid")
+                if old != lid:
+                    cfg_doc.setdefault("owner", {})["lid"] = lid
+                    cfg_dirty = True
+                    applied.append(LidLearned(
+                        type="lid_learned", ts=now, target="owner",
+                        phone=phone, employee_id=None,
+                        old_lid=old if isinstance(old, str) else None,
+                        new_lid=lid,
+                    ))
+                continue
+
+            # Employees
+            for emp in roster_doc.get("employees", []):
+                matches_primary = emp.get("phone") == phone
+                matches_history = any(
+                    h.get("phone") == phone
+                    for h in (emp.get("phone_history") or [])
+                )
+                if not (matches_primary or matches_history):
+                    continue
+                old = emp.get("lid")
+                if old != lid:
+                    emp["lid"] = lid
+                    roster_dirty = True
+                    applied.append(LidLearned(
+                        type="lid_learned", ts=now, target="employee",
+                        phone=phone, employee_id=emp["id"],
+                        old_lid=old if isinstance(old, str) else None,
+                        new_lid=lid,
+                    ))
+                break
+
+        # AUDIT FIRST: phantom audit entries are harmless noise; phantom
+        # mutations without a trail violate auditability silently.
+        for entry in applied:
+            ndjson_append(LOG, _LOG_ADAPTER.dump_json(entry).decode())
+
+        # Validate before write so we never persist a roster that won't load.
+        if roster_dirty:
+            Roster.model_validate(roster_doc)
+            atomic_write_json(ROSTER, roster_doc, mode=0o644)
+
+        if cfg_dirty:
+            # Use safe_io.atomic_write_text for full durability semantics:
+            # tmp file with PID+ms suffix (no race), fsync the tmp file,
+            # rename, fsync the parent dir. Direct tmp.write_text + os.replace
+            # has neither fsync nor unique-tmp guarantees.
+            atomic_write_text(
+                CONFIG,
+                yaml.safe_dump(cfg_doc, sort_keys=False, default_flow_style=False),
+                mode=0o644,
+            )
+
+        # Trim applied phones from cache so it doesn't grow unbounded.
+        if applied:
+            applied_phones = {a.phone for a in applied}
+            cache["pairs"] = [p for p in pairs if p.get("phone") not in applied_phones]
+            atomic_write_json(CACHE, cache, mode=0o644)
+
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+# END shift-agent-sender-id

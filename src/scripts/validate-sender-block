@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""validate-sender-block — deterministic parser for the [shift-agent-sender ...]
+block injected by Hermes' WhatsApp adapter.
+
+The dispatch_shift_agent SKILL calls this as its first tool. The LLM does
+NOT parse the block by hand — it calls this tool, which is a small
+regex-based parser, and branches on `valid`.
+
+Usage:
+    echo "<line 1 of the inbound user message>" | validate-sender-block
+    validate-sender-block --line "[shift-agent-sender v=1 ...]"
+
+Output (stdout, JSON, exit 0 always):
+    {"valid": true, "v": 1, "platform": "whatsapp",
+     "phone": "+17329837841" or null,
+     "lid": "201975216009469@lid" or null,
+     "fromMe": true|false,
+     "chat_id": "918522041562@s.whatsapp.net" or null}
+
+    {"valid": false, "reason": "..."}
+
+The parser is intentionally strict: missing fields, unknown order, invalid
+quoting, or `v != 1` all yield `valid: false`. The dispatcher SKILL must
+treat `valid=false` as fail-closed (treat sender as unknown, decline).
+
+Why a tool, not LLM string parsing? LLMs may misparse, skip assertions, or
+hallucinate. A 50-line regex tool is unambiguous and testable.
+"""
+from __future__ import annotations
+import argparse
+import json
+import re
+import sys
+
+# Strict block grammar. All fields required, in this order, all values either
+# quoted or `null`. Whitespace between fields is one or more spaces.
+_BLOCK_RE = re.compile(
+    r'^\[shift-agent-sender\s+v=1\s+'
+    r'platform=(\w+)\s+'
+    r'phone=(?:"((?:[^"\\]|\\.)*)"|null)\s+'
+    r'lid=(?:"((?:[^"\\]|\\.)*)"|null)\s+'
+    r'fromMe=(true|false)\s+'
+    r'chat_id=(?:"((?:[^"\\]|\\.)*)"|null)\]\s*$'
+)
+
+
+def _unq(v: str | None) -> str | None:
+    """Reverse the renderer's escape rules: \\\\ -> \\, \\" -> "."""
+    if v is None:
+        return None
+    return v.replace('\\"', '"').replace('\\\\', '\\')
+
+
+def parse(line: str) -> dict:
+    if not line:
+        return {"valid": False, "reason": "empty input"}
+    m = _BLOCK_RE.match(line.strip())
+    if not m:
+        return {"valid": False, "reason": "block format mismatch"}
+    plat, phone, lid, from_me, cid = m.groups()
+    return {
+        "valid": True,
+        "v": 1,
+        "platform": plat,
+        "phone": _unq(phone),
+        "lid": _unq(lid),
+        "fromMe": from_me == "true",
+        "chat_id": _unq(cid),
+    }
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("--line", default=None,
+                    help="The block line to parse (else read from stdin)")
+    args = ap.parse_args()
+    line = args.line if args.line is not None else sys.stdin.readline()
+    print(json.dumps(parse(line), separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

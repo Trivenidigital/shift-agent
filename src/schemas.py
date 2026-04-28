@@ -88,6 +88,11 @@ class PhoneAssignment(BaseModel):
 
 
 class Employee(BaseModel):
+    # extra="forbid" preserved: `lid` is now a properly-typed Optional
+    # field, so older code reading newer rosters (post-rollback) only
+    # rejects unknown OTHER fields — typo detection in hand-edited
+    # rosters stays valuable. Rollback procedure (see RUNBOOK.md) strips
+    # `lid` from roster.json BEFORE reverting schemas.py.
     model_config = ConfigDict(extra="forbid")
 
     id: EmployeeId
@@ -100,6 +105,9 @@ class Employee(BaseModel):
     status: Literal["active", "inactive", "terminated"] = "active"
     phone_history: list[PhoneAssignment] = []
     restrictions: Optional[dict] = None
+    # BEGIN shift-agent-sender-id
+    lid: Optional[str] = Field(default=None, pattern=r"^\d{6,20}@lid$")
+    # END shift-agent-sender-id
 
     @model_validator(mode="after")
     def dedup_can_cover(self):
@@ -168,6 +176,9 @@ class OwnerConfig(BaseModel):
     name: str
     phone: E164Phone
     self_chat_jid: str = ""  # populated on first run
+    # BEGIN shift-agent-sender-id
+    lid: Optional[str] = Field(default=None, pattern=r"^\d{6,20}@lid$")
+    # END shift-agent-sender-id
 
 
 class LimitsConfig(BaseModel):
@@ -430,9 +441,21 @@ class _BaseEntry(BaseModel):
 class RawInbound(_BaseEntry):
     type: Literal["raw_inbound"]
     message_id: str
-    sender_phone: E164Phone
+    # BEGIN shift-agent-sender-id (was: sender_phone required E164Phone;
+    # added sender_lid Optional[str]; at-least-one model_validator)
+    sender_phone: Optional[E164Phone] = None
+    sender_lid: Optional[str] = Field(default=None, pattern=r"^\d{6,20}@lid$")
+    # END shift-agent-sender-id
     employee_id: Optional[EmployeeId] = None
     input_message: str
+
+    # BEGIN shift-agent-sender-id
+    @model_validator(mode="after")
+    def _at_least_one_sender_id(self):
+        if not self.sender_phone and not self.sender_lid:
+            raise ValueError("RawInbound: at least one of sender_phone, sender_lid required")
+        return self
+    # END shift-agent-sender-id
 
 
 class ProposalCreated(_BaseEntry):
@@ -503,8 +526,43 @@ class AgentStateChange(_BaseEntry):
 
 class UnknownSenderDeclined(_BaseEntry):
     type: Literal["unknown_sender_declined"]
-    sender_phone: E164Phone
+    # BEGIN shift-agent-sender-id (was: sender_phone required E164Phone)
+    sender_phone: Optional[E164Phone] = None
+    sender_lid: Optional[str] = Field(default=None, pattern=r"^\d{6,20}@lid$")
+    # END shift-agent-sender-id
     input_message_truncated: str
+
+    # BEGIN shift-agent-sender-id
+    @model_validator(mode="after")
+    def _at_least_one_sender_id(self):
+        if not self.sender_phone and not self.sender_lid:
+            raise ValueError("UnknownSenderDeclined: at least one of sender_phone, sender_lid required")
+        return self
+    # END shift-agent-sender-id
+
+
+# BEGIN shift-agent-sender-id
+class LidLearned(_BaseEntry):
+    """Audit-log entry: a phone↔LID mapping was newly learned or updated.
+    Written by shift-agent-lid-learn cron after applying lid-cache.json
+    pairs to roster.json or config.yaml."""
+    type: Literal["lid_learned"]
+    target: Literal["owner", "employee"]
+    phone: E164Phone
+    employee_id: Optional[EmployeeId] = None  # set when target == "employee"
+    old_lid: Optional[str] = Field(default=None, pattern=r"^\d{6,20}@lid$")
+    new_lid: str = Field(pattern=r"^\d{6,20}@lid$")
+
+    @model_validator(mode="after")
+    def _target_employee_id_consistency(self):
+        if self.target == "employee" and not self.employee_id:
+            raise ValueError("LidLearned: target='employee' requires employee_id")
+        if self.target == "owner" and self.employee_id:
+            raise ValueError("LidLearned: target='owner' must NOT carry employee_id")
+        if self.old_lid is not None and self.old_lid == self.new_lid:
+            raise ValueError("LidLearned: old_lid == new_lid (no learning happened)")
+        return self
+# END shift-agent-sender-id
 
 
 class InvariantViolation(_BaseEntry):
@@ -526,6 +584,9 @@ LogEntry = Annotated[
         OutboundResponse, OutboundCapExceeded, OutboundRefusedDisabled,
         AgentStateChange, UnknownSenderDeclined, InvariantViolation,
         HealthCheckFailure,
+        # BEGIN shift-agent-sender-id
+        LidLearned,
+        # END shift-agent-sender-id
     ],
     Field(discriminator="type"),
 ]
@@ -544,4 +605,5 @@ __all__ = [
     "OutboundAttempted", "OutboundSent", "OutboundSendFailed",
     "OutboundResponse", "OutboundCapExceeded", "OutboundRefusedDisabled",
     "AgentStateChange", "UnknownSenderDeclined", "InvariantViolation", "HealthCheckFailure",
+    "LidLearned",
 ]
