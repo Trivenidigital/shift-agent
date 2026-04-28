@@ -74,6 +74,11 @@ install_artifacts() {
         rsync -a src/agents/multi_location/skills/ /root/.hermes/skills/
         chown -R shift-agent:shift-agent /root/.hermes/skills/
     fi
+    # Catering Lead (Agent #2) — SKILL-only in v0.1 (cfg.catering.enabled=false default)
+    if [ -d src/agents/catering/skills ]; then
+        rsync -a src/agents/catering/skills/ /root/.hermes/skills/
+        chown -R shift-agent:shift-agent /root/.hermes/skills/
+    fi
 
     # Enable + start Daily Brief timer + EOD timer. Loud on failure.
     systemctl enable --now send-daily-brief.timer
