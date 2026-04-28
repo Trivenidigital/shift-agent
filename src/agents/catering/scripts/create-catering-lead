@@ -34,9 +34,10 @@ import sys
 import urllib.error
 import urllib.request
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfoNotFoundError
 
 sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
@@ -47,7 +48,8 @@ from safe_io import (  # noqa: E402
 )
 from schemas import (  # noqa: E402
     Config, CateringLead, CateringLeadStore, CateringLeadExtractedFields,
-    CateringLeadCreated, CateringLeadStatusChange, CateringOwnerApprovalRequested,
+    CateringLeadCreated, CateringLeadStatusChange, CateringLeadRejected,
+    CateringOwnerApprovalRequested,
 )
 from exit_codes import (  # noqa: E402
     EXIT_OK, EXIT_INVALID_INPUT, EXIT_DISABLED,
@@ -161,6 +163,62 @@ def _render_approval_card(
     )
 
 
+# Maps CateringLeadRejected.reason → SKILL-readable stderr prefix.
+# Single source-of-truth: any new reason added to the schema Literal MUST also
+# land here, otherwise the .get() fallback fires (audited; not silent).
+REASON_TO_ERR_PREFIX = {
+    "event_date_past": "ERR_EVENT_DATE_PAST",
+    "event_date_invalid_calendar": "ERR_EVENT_DATE_INVALID",
+    "timezone_invalid": "ERR_TIMEZONE_INVALID",
+}
+
+
+def _validate_event_date(
+    fields: CateringLeadExtractedFields, tz_name: str
+) -> tuple[Optional[str], Optional[str]]:
+    """Returns (reason, detail) tuple. (None, None) means input is valid.
+
+    `reason` values match the CateringLeadRejected schema Literal — pinned by
+    Pydantic so a typo here raises ValidationError at log-write time.
+
+    Why script-level vs schema-level (per design v2): pydantic schema can't
+    carry tz context without making the schema stateful, which would break the
+    catering v3.1 C22 round-trip test that calls model_validate_json with no
+    context. Tz-aware date checks belong at the script (write-path) layer.
+
+    Why both invalid-calendar AND past-date here (not just past-date): schema
+    pattern is format-only (4-2-2 digit groups); accepts 2026-13-45 etc.
+    Past-date check needs strptime, which doubles as semantic validity check.
+    Rejecting both at this site avoids garbage dates persisting downstream.
+    """
+    if not fields.event_date:
+        return None, None  # No event_date → no check.
+
+    try:
+        ev = datetime.strptime(fields.event_date, "%Y-%m-%d").date()
+    except ValueError:
+        return "event_date_invalid_calendar", (
+            f"event_date {fields.event_date!r} matches format but is not a valid calendar date"
+        )
+
+    # Narrow except (per design-review HIGH-C): catch tz-resolution failures only.
+    # AttributeError / TypeError indicate config-shape bugs (None tz, int tz, etc.)
+    # and should propagate as the genuine programming bugs they are — not be
+    # bucketed into ERR_TIMEZONE_INVALID and confuse triage.
+    try:
+        today = customer_now(tz_name).date()
+    except (ZoneInfoNotFoundError, KeyError, ValueError) as e:
+        return "timezone_invalid", (
+            f"cfg.customer.timezone {tz_name!r} could not be resolved: {type(e).__name__}: {e}"
+        )
+
+    if ev < today:
+        return "event_date_past", (
+            f"event_date {fields.event_date} is before today {today.isoformat()} ({tz_name})"
+        )
+    return None, None
+
+
 def _log(adapter: TypeAdapter, entry) -> None:
     """Append a Pydantic-validated entry to decisions.log under flock."""
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -207,6 +265,9 @@ def main() -> int:
             return EXIT_SCHEMA_VIOLATION
 
         # Idempotency: same message_id replays?
+        # Runs BEFORE event-date validation (v3.1 C10): a lead created in the past
+        # may have had a then-future event_date that is now-past; replay must
+        # NOT reject — return the existing lead's id+code identically.
         existing = next(
             (l for l in store.leads if l.original_message_id == args.message_id),
             None,
@@ -218,6 +279,38 @@ def main() -> int:
                 "idempotent_replay": True,
             }))
             return EXIT_OK
+
+        # First-touch event-date validation (v3.1 C10).
+        # Three failure modes → three reasons in CateringLeadRejected.
+        # Order: log audit FIRST (durable), stderr SECOND (so SIGKILL between
+        # them doesn't lose the audit entry — design-review MEDIUM-E).
+        reason, detail = _validate_event_date(extracted, cfg.customer.timezone)
+        if reason is not None:
+            err_prefix = REASON_TO_ERR_PREFIX.get(reason, "ERR_UNKNOWN_REJECTION")
+            # Audit ts is ALWAYS UTC (design-review MEDIUM-D — consistent ordering
+            # for log-replay tools regardless of which failure mode fired).
+            ts_utc = datetime.now(tz=timezone.utc)
+            try:
+                _log(TypeAdapter(CateringLeadRejected), CateringLeadRejected(
+                    type="catering_lead_rejected",
+                    ts=ts_utc,
+                    customer_phone=args.customer_phone,
+                    original_message_id=args.message_id,
+                    reason=reason,
+                    detail=detail[:500] if detail else "",
+                ))
+            except Exception as log_err:  # noqa: BLE001 — audit best-effort; never block rejection
+                # Audit write failed (disk full, perms). Continue to stderr +
+                # exit so the customer/SKILL still gets the structured error.
+                # design-review HIGH-A: degraded audit beats lost rejection.
+                sys.stderr.write(
+                    f"WARN: rejection audit log failed (non-fatal): "
+                    f"{type(log_err).__name__}: {log_err}\n"
+                )
+            sys.stderr.write(f"{err_prefix}: {detail}\n")
+            # timezone_invalid is config-level (cfg.customer.timezone), not input-level
+            # (customer-supplied event_date). Distinct exit code surfaces the difference.
+            return EXIT_SCHEMA_VIOLATION if reason == "timezone_invalid" else EXIT_INVALID_INPUT
 
         # Mint new lead
         now = customer_now(cfg.customer.timezone)

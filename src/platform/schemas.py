@@ -1057,6 +1057,24 @@ class CateringLeadStatusChange(_BaseEntry):
     reason: str = ""
 
 
+class CateringLeadRejected(_BaseEntry):
+    """Lead creation rejected pre-state (no state mutation, no lead row).
+
+    Reasons are pinned by the discriminated `reason` field. Adding a new reason
+    requires updating BOTH this Literal AND the REASON_TO_ERR_PREFIX dict in
+    create-catering-lead — kept tight on purpose so future drift is loud.
+    """
+    type: Literal["catering_lead_rejected"]
+    customer_phone: E164Phone
+    original_message_id: str = Field(min_length=1)
+    reason: Literal[
+        "event_date_past",
+        "event_date_invalid_calendar",
+        "timezone_invalid",
+    ]
+    detail: str = Field(default="", max_length=500)
+
+
 class CateringQuoteDrafted(_BaseEntry):
     type: Literal["catering_quote_drafted"]
     lead_id: str = Field(min_length=1)
@@ -1171,7 +1189,8 @@ LogEntry = Annotated[
         # Agent #3 Multi-Location Coordinator
         CrossLocationQuery, InterLocationTransferProposed,
         # Agent #2 Catering Lead
-        CateringLeadCreated, CateringLeadStatusChange, CateringQuoteDrafted,
+        CateringLeadCreated, CateringLeadStatusChange, CateringLeadRejected,
+        CateringQuoteDrafted,
         CateringOwnerApprovalRequested, CateringOwnerDecision, CateringQuoteSent,
         MenuUpdateProposed, MenuUpdateApplied, MenuUpdateRejected,
     ],
@@ -1206,7 +1225,7 @@ __all__ = [
     "BriefAttempted", "BriefSent", "BriefSendFailed", "BriefSkipped",
     "EodSnapshot", "EodPushoverSent", "EodSkipped",
     "CrossLocationQuery", "InterLocationTransferProposed",
-    "CateringLeadCreated", "CateringLeadStatusChange", "CateringQuoteDrafted",
+    "CateringLeadCreated", "CateringLeadStatusChange", "CateringLeadRejected", "CateringQuoteDrafted",
     "CateringOwnerApprovalRequested", "CateringOwnerDecision", "CateringQuoteSent",
     "MenuUpdateProposed", "MenuUpdateApplied", "MenuUpdateRejected",
 ]
