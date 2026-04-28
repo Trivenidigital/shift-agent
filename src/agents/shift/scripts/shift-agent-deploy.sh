@@ -58,10 +58,20 @@ install_artifacts() {
 
     systemctl daemon-reload
 
-    # Enable + start Daily Brief timer. Loud on failure (no `|| true`) so
-    # first-deploy operator sees the smoke-test break immediately if the
-    # timer name doesn't match the unit file.
+    # EOD Reconciliation agent (Agent #5) — script + systemd
+    if [ -d src/agents/eod_reconcile/scripts ] && compgen -G "src/agents/eod_reconcile/scripts/*" > /dev/null; then
+        install -m 755 src/agents/eod_reconcile/scripts/* /usr/local/bin/
+    fi
+    if compgen -G "src/agents/eod_reconcile/systemd/*.service" > /dev/null; then
+        install -m 644 src/agents/eod_reconcile/systemd/*.service /etc/systemd/system/
+    fi
+    if compgen -G "src/agents/eod_reconcile/systemd/*.timer" > /dev/null; then
+        install -m 644 src/agents/eod_reconcile/systemd/*.timer /etc/systemd/system/
+    fi
+
+    # Enable + start Daily Brief timer + EOD timer. Loud on failure.
     systemctl enable --now send-daily-brief.timer
+    systemctl enable --now eod-reconcile.timer
 }
 
 case "$ACTION" in
