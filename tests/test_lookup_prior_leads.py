@@ -320,15 +320,18 @@ def test_cross_tz_aware_aware_succeeds(env_dir):
 
 
 def test_naive_input_normalized_to_utc_with_warn(env_dir, capsys):
-    """Silent-failure-hunter MEDIUM-3: naive datetime → coerce + WARN."""
+    """Silent-failure-hunter MEDIUM-3: naive datetime → coerce + WARN.
+
+    Pydantic v2 parses naive ISO into a naive datetime (tzinfo=None), so the
+    _normalize_aware coercion fires and emits a stderr WARN. PR-review crit-7
+    (D) — previously this test only asserted the days-ago value; now it also
+    asserts the WARN content so a regression to silent coercion is caught."""
     mod = _load_script()
     phone = "+19045551234"
     naive_created = datetime(2026, 4, 15, 14, 0)  # no tzinfo
     state = env_dir / "state"
     state.mkdir()
     leads_path = state / "catering-leads.json"
-    # Manually serialize a naive datetime — Pydantic would normally reject this,
-    # but a hand-edited file or future writer regression could produce it.
     leads_path.write_text(json.dumps({
         "leads": [_mk_lead(lead_id="L001", phone=phone, created_at=naive_created)]
     }), encoding="utf-8")
@@ -337,9 +340,11 @@ def test_naive_input_normalized_to_utc_with_warn(env_dir, capsys):
         phone, leads_path=leads_path,
         now=datetime(2026, 4, 28, 14, 0, tzinfo=timezone.utc),
     )
-    # Pydantic actually adds tz=UTC when parsing naive ISO into datetime; if it
-    # didn't, the WARN would fire. Either way the result is correct (13 days).
     assert result["last_seen_days_ago"] == 13
+    # Pin the WARN — guards against silent regression of MEDIUM-3 fix.
+    err = capsys.readouterr().err
+    assert "WARN: naive datetime" in err
+    assert "lead.created_at" in err  # source field is named in the WARN
 
 
 @pytest.mark.parametrize("delta_seconds, expected_days", [
@@ -474,6 +479,9 @@ def test_flock_is_invoked_on_read_path(env_dir):
         result = mod.lookup_prior_leads_by_phone(phone, leads_path=leads_path)
 
     assert result["lookup_status"] == "ok"
+    # Exactly 2 flock calls expected: acquire + release. Catches a future
+    # regression that double-acquires or skips release (PR-review crit-5 E).
+    assert len(flock_calls) == 2
     # First call: LOCK_EX | LOCK_NB (acquire). Second call: LOCK_UN (release).
     assert flock_calls[0] == (fcntl.LOCK_EX | fcntl.LOCK_NB)
     assert flock_calls[1] == fcntl.LOCK_UN
@@ -560,6 +568,125 @@ sys.exit(mod.main())
 
 
 # ---------- 8. pure-read invariant ----------
+
+# ---------- 9. PR-review NEW additions (oserror + config-load coverage) ----------
+
+def test_oserror_status_returns_io_error(env_dir, capsys):
+    """PR-review silent-failure-hunter NEW-1: an OSError reading leads.json
+    (perms, EIO) returns load_model status starting with 'oserror:'. Previously
+    this fell through as LOOKUP_STATUS_OK with empty store — silent I/O
+    failure indistinguishable from no_match. Now distinguishes via
+    LOOKUP_STATUS_IO_ERROR."""
+    mod = _load_script()
+    phone = "+19045551234"
+    leads_path = _seed_leads(env_dir, [
+        _mk_lead(lead_id="L001", phone=phone,
+                 created_at=datetime.now(tz=timezone.utc) - timedelta(days=1))
+    ])
+    # Patch load_model to return an oserror status without touching real fs perms
+    # (testing a permission flip is platform-dependent and racy).
+    original_load_model = mod.load_model
+
+    def fake_load_model(path, model_cls, default=None):
+        return default, "oserror:[Errno 13] Permission denied"
+
+    with patch.object(mod, "load_model", side_effect=fake_load_model):
+        result = mod.lookup_prior_leads_by_phone(phone, leads_path=leads_path)
+
+    assert result["lookup_status"] == "io_error"
+    assert result["prior_lead_count"] == 0
+
+
+def test_load_config_real_yaml_invokes_customer_now(env_dir, monkeypatch):
+    """PR-review pr-test-analyzer F (crit 8): the customer_now happy-path was
+    completely untested. A regression to customer_now (wrong attribute name,
+    wrong tz key) would ship silently. Pin that a real config.yaml triggers
+    customer_now invocation with the configured tz."""
+    mod = _load_script()
+    import yaml
+    cfg = {
+        "schema_version": 1,
+        "customer": {"name": "Test", "location_id": "loc_t",
+                     "timezone": "America/New_York"},
+        "owner": {"name": "Owner", "phone": "+19045550100",
+                  "self_chat_jid": "19045550100@s.whatsapp.net"},
+        "limits": {},
+        "alerting": {"pushover_user_key": "k", "pushover_app_token": "t"},
+        "backup": {"gpg_recipient_email": "x@y"},
+        "catering": {"enabled": True},
+    }
+    cfg_path = env_dir / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    monkeypatch.setattr(mod, "CONFIG_PATH", cfg_path)
+
+    customer_now_calls = []
+    original_customer_now = mod.customer_now
+
+    def spy_customer_now(tz_name):
+        customer_now_calls.append(tz_name)
+        return original_customer_now(tz_name)
+
+    monkeypatch.setattr(mod, "customer_now", spy_customer_now)
+    result = mod._load_config_now()
+    assert result is not None
+    assert customer_now_calls == ["America/New_York"]
+    assert result.tzinfo is not None  # tz-aware
+
+
+def test_load_config_validation_error_falls_back_with_warn(env_dir, monkeypatch, capsys):
+    """PR-review pr-test-analyzer B (crit 6): ValidationError branch of
+    _load_config_now had zero coverage. Pin distinct WARN message."""
+    mod = _load_script()
+    cfg_path = env_dir / "config.yaml"
+    # Missing required `customer` section → Pydantic ValidationError
+    cfg_path.write_text("schema_version: 1\n", encoding="utf-8")
+    monkeypatch.setattr(mod, "CONFIG_PATH", cfg_path)
+
+    result = mod._load_config_now()
+    assert result is None
+    err = capsys.readouterr().err
+    assert "WARN: config validation failed" in err
+
+
+def test_load_config_zoneinfo_not_found_falls_back_with_warn(env_dir, monkeypatch, capsys):
+    """PR-review pr-test-analyzer B (crit 6): ZoneInfoNotFoundError branch."""
+    mod = _load_script()
+    import yaml
+    cfg = {
+        "schema_version": 1,
+        "customer": {"name": "Test", "location_id": "loc_t",
+                     "timezone": "Mars/Olympus_Mons"},  # bogus tz
+        "owner": {"name": "Owner", "phone": "+19045550100",
+                  "self_chat_jid": "19045550100@s.whatsapp.net"},
+        "limits": {},
+        "alerting": {"pushover_user_key": "k", "pushover_app_token": "t"},
+        "backup": {"gpg_recipient_email": "x@y"},
+        "catering": {"enabled": True},
+    }
+    cfg_path = env_dir / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    monkeypatch.setattr(mod, "CONFIG_PATH", cfg_path)
+
+    result = mod._load_config_now()
+    assert result is None
+    err = capsys.readouterr().err
+    assert "WARN: cfg.customer.timezone unresolvable" in err
+
+
+def test_load_config_yaml_error_falls_back_with_warn(env_dir, monkeypatch, capsys):
+    """PR-review pr-test-analyzer B (crit 6): bare-Exception branch (yaml.YAMLError)."""
+    mod = _load_script()
+    cfg_path = env_dir / "config.yaml"
+    cfg_path.write_text("not: valid: yaml: [unclosed\n", encoding="utf-8")
+    monkeypatch.setattr(mod, "CONFIG_PATH", cfg_path)
+
+    result = mod._load_config_now()
+    assert result is None
+    err = capsys.readouterr().err
+    assert "WARN: config load unexpected error" in err
+
+
+# ---------- 10. pure-read invariant ----------
 
 def test_pure_read_no_state_mutation_bytes_snapshot(env_dir):
     """Test-analyzer #8 replacement: bytes-equality is behavior-based, not

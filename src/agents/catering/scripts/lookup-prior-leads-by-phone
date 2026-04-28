@@ -2,16 +2,22 @@
 """lookup-prior-leads-by-phone — read-only customer history lookup (v3.1 C02).
 
 Used by the catering SKILL Python preamble to enrich Kimi's context for
-returning customers (e.g., "last booked 14 days ago, vegetarian"). Pure read —
-never mutates state.
+returning customers (e.g., "last booked 14 days ago, vegetarian").
 
-TODO: SKILL-integration follow-up ticket required before this script provides
-customer-visible value. The catering SKILL Python preamble must be updated
-separately to invoke this script subprocess-style and inject the returned dict
-into the Kimi prompt context. Tracked in tasks/todo.md as
-"v3.1 catering SKILL preamble integration for lookup_prior_leads_by_phone".
+Pure-read of LEAD STATE — never modifies leads, audit logs, or lock files.
+Side-effect note: an unparseable leads.json triggers safe_io.safe_load_json's
+corrupt-file quarantine (renames the file to <name>.corrupt-<epoch>). That
+is filesystem hygiene by the platform helper, not lead-state mutation by
+this lookup. The bytes-snapshot test asserts pure-read semantics on the
+valid-input path; the corrupt path is documented as having that side-effect.
 
-Two invocation forms (matches dispatcher-accuracy-report:249 precedent):
+TODO (deferred follow-up): wire the catering SKILL Python preamble to invoke
+this script subprocess-style and inject the returned dict into the Kimi
+prompt context. Until that lands, this script is unused-but-deployed
+infrastructure. Filed as a separate backlog item in tasks/todo.md.
+
+Two invocation forms (matches the importable+CLI pattern from
+dispatcher-accuracy-report's main(argv) precedent):
   CLI:        /usr/local/bin/lookup-prior-leads-by-phone --customer-phone "+1..."
   Importable: from lookup_prior_leads_by_phone import lookup_prior_leads_by_phone
 
@@ -21,8 +27,8 @@ Phone canonicalization: handles formatting variants per E164Phone.from_any() —
 dashes, spaces, parens, dots, @jid suffix, 00- prefix, bare-digit. Letters are
 NOT translated to digits (the v3.1 C02 PRIYA example is illustrative of
 formatting normalization, NOT vanity-number translation; the doc binds to
-"matching the existing schema validator" which rejects letters via
-_PHONE_E164 = r"^\\+\\d{10,15}$"). Letter input → ValueError → CLI exit 2.
+"matching the existing schema validator" — see _PHONE_E164 in src/platform/schemas.py
+which rejects letters). Letter input → ValueError → CLI exit 2.
 
 Lock semantics: locks the leads.json file descriptor directly (NOT via
 safe_io.flock which locks a sibling .lock file — different lock target).
@@ -33,16 +39,16 @@ the customer-facing SKILL preamble indefinitely. On exhaustion, returns
 Time semantics: `last_seen_days_ago` uses `.days` truncation (23h59m → 0).
 Matches send-daily-brief watchdog precedent. Document semantic for SKILL prompts.
 
-Asymmetry resolution (design-review MEDIUM-2): the importable function raises
-RuntimeError on corrupt leads-store; the CLI catches it and returns a JSON
-dict with lookup_status="corrupt" alongside EXIT_SCHEMA_VIOLATION (5). SKILL
-preamble parsers see structured output even on the failure path.
+Asymmetry resolution: the importable function raises RuntimeError on corrupt
+leads-store; the CLI catches it and returns a JSON dict with
+lookup_status="corrupt" alongside EXIT_SCHEMA_VIOLATION (5). SKILL preamble
+parsers see structured output even on the failure path.
 
 Exit codes (CLI):
-  0 — success (lookup_status ∈ {ok, missing_file, no_match, lock_timeout})
+  0 — success (lookup_status ∈ {ok, missing_file, no_match, lock_timeout, io_error})
   2 — invalid phone (E164 canonicalization failed: letters, too-short, etc.)
-  5 — leads.json corrupt (Pydantic ValidationError / parse error); JSON dict
-      still printed with lookup_status="corrupt"
+  5 — leads.json corrupt (parse error); JSON dict still printed with
+      lookup_status="corrupt"
   1 — uncaught (defensive: TypeError from a future tz path bug)
 """
 from __future__ import annotations
@@ -81,6 +87,7 @@ LOOKUP_STATUS_MISSING_FILE = "missing_file"
 LOOKUP_STATUS_NO_MATCH = "no_match"
 LOOKUP_STATUS_LOCK_TIMEOUT = "lock_timeout"
 LOOKUP_STATUS_CORRUPT = "corrupt"
+LOOKUP_STATUS_IO_ERROR = "io_error"
 
 
 def _empty_result(status: str) -> dict:
@@ -139,10 +146,16 @@ def _read_leads_with_lock_timeout(leads_path: Path) -> tuple[Optional[CateringLe
                     store, ld_status = load_model(
                         leads_path, CateringLeadStore, default=CateringLeadStore(),
                     )
-                    # safe_io.safe_load_json contract: status starts with "corrupt:"
-                    # on parse error (see safe_io.py docstring around line 100-122).
+                    # safe_io.safe_load_json contract: status starts with
+                    # "corrupt:" on parse error or "oserror:" on read I/O
+                    # failure (see safe_load_json's docstring). PR-review
+                    # NEW-1: previously only "corrupt" was caught; "oserror"
+                    # silently fell through with default empty store, masking
+                    # I/O issues as no_match.
                     if ld_status.startswith("corrupt"):
                         return None, LOOKUP_STATUS_CORRUPT
+                    if ld_status.startswith("oserror"):
+                        return None, LOOKUP_STATUS_IO_ERROR
                     return store, LOOKUP_STATUS_OK
                 finally:
                     fcntl.flock(fd, fcntl.LOCK_UN)
@@ -191,6 +204,10 @@ def lookup_prior_leads_by_phone(
         return _empty_result(LOOKUP_STATUS_MISSING_FILE)
     if status == LOOKUP_STATUS_LOCK_TIMEOUT:
         return _empty_result(LOOKUP_STATUS_LOCK_TIMEOUT)
+    if status == LOOKUP_STATUS_IO_ERROR:
+        # OSError reading leads.json (perms, EIO, ENOSPC). Distinct from
+        # corrupt (parse-level) so SKILL preamble can route differently.
+        return _empty_result(LOOKUP_STATUS_IO_ERROR)
     if status == LOOKUP_STATUS_CORRUPT:
         raise RuntimeError(f"leads-store corrupt at {leads_path}")
     assert store is not None  # noqa: S101 — invariant: status==ok ⇒ store
@@ -210,7 +227,9 @@ def lookup_prior_leads_by_phone(
 
     # NOTE: most_recent_status is a CateringLeadStatus literal value. SKILL
     # preamble comparisons against status values must use the literal strings
-    # from src/platform/schemas.py:276 — see CateringLeadStatus type.
+    # defined in the CateringLeadStatus type in src/platform/schemas.py
+    # (currently includes NEW, EXTRACTING, NOT_CATERING, AWAITING_OWNER_APPROVAL,
+    # OWNER_APPROVED, OWNER_EDITED, OWNER_REJECTED, SENT_TO_CUSTOMER, CLOSED, STALE).
     return {
         "lookup_status": LOOKUP_STATUS_OK,
         "prior_lead_count": len(matches),
