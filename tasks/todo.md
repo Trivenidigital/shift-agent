@@ -34,7 +34,7 @@ Last updated: 2026-04-28
 
 ### Schema implications from review
 
-- [ ] **C23 mango-lassi case** — add `requested_off_menu_items: list[str]` field to `CateringLead` schema. Owner approval flow surfaces the off-menu request explicitly at quote time.
+- 🟡 **C23 mango-lassi case** — schema slot landed (PR #21, 2026-04-28). Field is `off_menu_items: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(default_factory=list, max_length=20)` on `CateringLeadExtractedFields`. Field is currently WRITE-ONLY: extractor SKILL prompt + owner-approval-card renderer must ship together to avoid silent-drop. Renderer-target investigation deferred (design-review surfaced that `apply-catering-owner-decision` is NOT the owner-card builder; correct sender lives in lead-intake path). Bundled extractor-prompt + renderer PR is the next step here.
 
 ## P2 — Routing reliability hardening (incremental)
 
@@ -85,6 +85,8 @@ See `docs/hermes-alignment.md` Part 2 for the silent-failure-ranked operational 
 
 ## Recently completed (this week)
 
+- ✅ 2026-04-28 — PR #21: C23 schema field `off_menu_items` (full pipeline: plan → 5 reviews → design → 5 reviews → bundle-split decision → build → PR → 5 reviews → 8 review fixes → merge → deploy; 162 tests passing, deploy tagged 3b83c034)
+- ✅ 2026-04-28 — PR #20: SHA-256 chain decoration removed; deployed integrity story now matches reality (append-only flock + 0640 perms + logrotate + backups)
 - ✅ 2026-04-28 — PR #19: symlink-integrity gate strictness fix (PR #18's gate had inverted polarity — silently passed when symlink replaced by regular file; new gate is unconditionally strict; Step-5 break-then-restore validation confirmed exit 1)
 - ✅ 2026-04-28 — PR #18: `.env` symlink consolidation + Hermes pin WARN→FAIL tightening (drift detector, migration script, integrity gate, smoke-check doc)
 - ✅ 2026-04-28 — PR #17: Hermes pin gate (3-field baseline, fail-closed + override + dual audit; all 4 validation paths exercised live)
