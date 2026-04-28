@@ -62,7 +62,12 @@ See `docs/hermes-alignment.md` Part 2 for the silent-failure-ranked operational 
 ### High tier (active gotcha)
 
 - ✅ **2026-04-28** — Single canonical `.env` via symlink (PR #18 + PR #19 strict-gate fix). `/opt/shift-agent/.env` is now a symlink to `/root/.hermes/.env`. Pre-flight drift detector (`tools/check-env-drift.sh`) hashes overlapping keys without leaking secrets; idempotent migration (`tools/migrate-env-to-symlink.sh`) auto-detects shift-only keys + creates timestamped backup; strict symlink-integrity gate in `shift-agent-deploy.sh` fails-closed before install_artifacts. Gate validated end-to-end: break symlink → exit 1 → restore → deploy passes.
-- [ ] **Audit log rotation policy with SHA-256 chain handling** — `decisions.log` grows unbounded; naive logrotate would silently break chain continuity. Half-day for postrotate hook OR explicit ADR documenting per-rotation chain.
+- ✅ **2026-04-28** — Audit log rotation (subsumed). Investigation revealed the SHA-256 chain was decoration (~3% coverage, no verifier). Logrotate already configured (daily, 30-day retention, archive to `/var/log/shift-agent-archive/`). Removed the chain (Option B per review thread) rather than spending half-day building infrastructure to back up an aspirational claim. Deployed integrity story is now honest: append-only via flock + `0640` perms + off-server backups + deploy-time gates. See `docs/hermes-alignment.md` Part 1 for the architecture sketch if compliance need emerges.
+
+### Deferred until specific need emerges
+
+- [ ] **Cryptographic audit-log chain** (deferred 2026-04-28; see PR for context). Architecture if needed: move `_append_sha_chain` into `safe_io.ndjson_append` chokepoint so all writers covered, add `verify-decisions-log` script, add daily-cron verification, run one-time backfill (with explicit "trust boundary" docs noting pre-backfill entries aren't cryptographically defensible). Total ~half-day. Triggers: regulator audit requirement, formal customer dispute defense, multi-tenant compliance posture.
+- [ ] **Recurring alignment-doc audit pass** — three-in-a-row pattern observed (Hermes pin, .env consolidation, audit-log chain) where alignment doc framed at higher abstraction than deployed code reality. Worth a periodic check (~quarterly?) to true up Part 1 against actual deployed code. Cheap exercise; surfaces drift before it bites.
 
 ### Deferred until informed by agent #2-style use case
 
