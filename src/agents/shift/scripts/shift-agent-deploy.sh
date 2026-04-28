@@ -118,6 +118,7 @@ install_artifacts() {
     # Enable + start cron timers
     systemctl enable --now send-daily-brief.timer 2>/dev/null || true
     systemctl enable --now eod-reconcile.timer 2>/dev/null || true
+    systemctl enable --now send-routing-accuracy-summary.timer 2>/dev/null || true
 }
 
 snapshot_staging() {

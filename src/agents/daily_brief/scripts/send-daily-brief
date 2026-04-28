@@ -79,6 +79,13 @@ BRIEF_ATTEMPT_RECOVERY_WINDOW_MIN = 180
 ALLOW_REMOTE_BRIDGE = os.environ.get("HERMES_BRIDGE_ALLOW_REMOTE", "0") == "1"
 MAX_LOG_LINE_BYTES = 64 * 1024  # DoS guard for log iteration
 
+# Watchdog: detects "weekly routing-accuracy cron stopped firing" via the
+# timestamp file written by send-routing-accuracy-summary on every healthy run.
+WATCHDOG_PATH = Path("/opt/shift-agent/state/routing-summary-last-run.json")
+WATCHDOG_TIMER_UNIT = Path("/etc/systemd/system/send-routing-accuracy-summary.timer")
+WATCHDOG_STALE_DAYS = 10
+WATCHDOG_TS_KEY = "ts"
+
 _LOG_ADAPTER_ATTEMPTED = TypeAdapter(BriefAttempted)
 _LOG_ADAPTER_SENT = TypeAdapter(BriefSent)
 _LOG_ADAPTER_FAILED = TypeAdapter(BriefSendFailed)
@@ -449,6 +456,46 @@ def _pushover_alert(title: str, message: str, priority: int = 1) -> bool:
     return False
 
 
+def _check_routing_watchdog(cfg: Config, dry_run: bool) -> None:
+    """Alert owner if send-routing-accuracy-summary cron is stale.
+
+    Contract: this function MUST NEVER raise. The daily brief's reliability is
+    the dominant invariant; a misbehaving watchdog must not block the brief.
+
+    Fires only when:
+      - dry_run is False (don't fire on smoke tests)
+      - The timer unit-file is present on disk (catches "code shipped, timer
+        not enabled" partial-deploy state — would otherwise alarm forever)
+      - Watchdog file exists (NOT a fresh deploy)
+      - Watchdog timestamp is >WATCHDOG_STALE_DAYS old
+
+    Time semantics: uses _customer_now (the local alias that respects
+    SHIFT_AGENT_NOW_OVERRIDE for tests), not safe_io.customer_now directly.
+    """
+    if dry_run:
+        return
+    if not WATCHDOG_TIMER_UNIT.exists():
+        return
+    try:
+        if not WATCHDOG_PATH.exists():
+            return
+        data = json.loads(WATCHDOG_PATH.read_text(encoding="utf-8"))
+        last_run = datetime.fromisoformat(data[WATCHDOG_TS_KEY])
+        days_stale = (_customer_now(cfg.customer.timezone) - last_run).days
+        if days_stale <= WATCHDOG_STALE_DAYS:
+            return
+        message = (
+            f"send-routing-accuracy-summary hasn't run in {days_stale} days. "
+            f"Check 'systemctl status send-routing-accuracy-summary.timer' on VPS."
+        )
+        try:
+            _pushover_alert("Routing summary cron stale", message, priority=1)
+        except Exception as e:  # noqa: BLE001 — invariant: never break the brief
+            sys.stderr.write(f"watchdog pushover failed (non-fatal): {type(e).__name__}: {e}\n")
+    except Exception as e:  # noqa: BLE001 — invariant: never break the brief
+        sys.stderr.write(f"watchdog check failed (non-fatal): {type(e).__name__}: {e}\n")
+
+
 def _log_entry(adapter: TypeAdapter, entry) -> None:
     """Append a Pydantic-validated entry to decisions.log under flock."""
     DECISIONS_LOG.parent.mkdir(parents=True, exist_ok=True)
@@ -548,6 +595,16 @@ def main() -> int:
     catchup_late = minutes_late if state == "in_catchup" else 0
 
     with FileLock(LOCK_PATH):
+        # Watchdog: fires at most once per actual brief-window day (FileLock
+        # serializes; self-gate ensures only one main() per day reaches here).
+        # Position rationale:
+        #   - INSIDE FileLock: concurrent --force can't double-fire
+        #   - BEFORE sentinel check: still runs even when today's brief was
+        #     already sent (single daily heartbeat)
+        #   - Reached only by `in_window` and `in_catchup` states; `before` and
+        #     `past_catchup` early-return at lines 528 and 540 respectively.
+        _check_routing_watchdog(cfg, args.dry_run)
+
         sentinel = _read_sentinel()
         if sentinel and sentinel.get("brief_date") == today_str and not args.force_resend:
             if not args.dry_run:
