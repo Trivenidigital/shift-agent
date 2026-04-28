@@ -36,7 +36,7 @@ Reporter floor as of 2026-04-28: **0/26 (0%)** — all 26 entries are pre-fix sy
 
 ### Schema implications from review
 
-- 🟡 **C23 renderer + extractor-prompt** — schema slot landed (PR #21, 2026-04-28). Field is `off_menu_items: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(default_factory=list, max_length=20)` on `CateringLeadExtractedFields`. **Currently WRITE-ONLY**: extractor SKILL prompt + owner-approval-card renderer MUST ship together to avoid silent-drop. **Blocked on**: identify the actual owner-card-sending script in the lead-intake path (design-review surfaced that `apply-catering-owner-decision` is NOT the owner-card builder). **Estimated effort**: ~half-day with proper investigation. **Pipeline**: needs its own plan/design/review cycle since the renderer-target gap is real architectural work, not just a code change.
+- 🟡 **C23 renderer + extractor-prompt** — schema slot landed (PR #21, 2026-04-28). Field is `off_menu_items: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(default_factory=list, max_length=20)` on `CateringLeadExtractedFields`. **As of PR #21's commit boundary, the field is write-only**: schema accepts it but no extractor populates it AND no renderer displays it. The next PR for this ticket must ship both halves together (extractor SKILL prompt + owner-approval-card renderer) to avoid creating a silent-drop window. **Blocked on**: identify the actual owner-card-sending script in the lead-intake path (design-review surfaced that `apply-catering-owner-decision` is NOT the owner-card builder). **Estimated effort**: ~half-day with proper investigation. **Pipeline**: needs its own plan/design/review cycle since the renderer-target gap is real architectural work, not just a code change.
 - [ ] **Build `lookup_prior_leads_by_phone` script** — C02-Option-C foundation per `docs/catering-edge-cases.md` (v3.1) C02 case. Half-day PR with proper tests: E164Phone canonicalization, date arithmetic for `last_seen_days_ago`, defensive handling for malformed entries in `catering-leads.json`. Return shape pinned by C02 case as authoritative interface contract. Unblocks v3.1 C02 from "design-spec-pending" to runnable.
 
 ## P2 — Routing reliability hardening (incremental)
@@ -88,17 +88,20 @@ See `docs/hermes-alignment.md` Part 2 for the silent-failure-ranked operational 
 
 ## Process notes — pipeline cadence calibration
 
-Observation from PR #21 (2026-04-28): the full Plan→5×Review→Design→5×Review→Build→PR→5×Review pipeline took ~15 agent calls for a single 91-line schema PR. Three observations worth carrying forward:
+Three observations from review-pipeline experience worth carrying forward:
 
-1. **The discipline caught real bugs.** Design review surfaced the wrong-renderer-target issue that would have cost a half-day of build+revert. PR review surfaced the silent-drop-infrastructure concern that drove the CONTRACT comment on the new field. Without the rigorous review rounds, both would have shipped.
+1. **The discipline catches real bugs at the design phase.** In one observed cycle, design review surfaced a wrong-target issue that would have cost a half-day of build+revert; PR review separately surfaced a silent-drop concern that drove a CONTRACT comment on a new field. Without the rigorous review rounds, both would have shipped silently.
 
-2. **Bundle splits naturally surfaced.** The original P1+P2 bundle was 3 items; rigorous review showed Items 2 + 3 had design-blocking issues that Item 1 didn't. The bundle decoupled cleanly into "ship Item 1 as a focused schema PR, defer 2 + 3 to their own cycles." Without the rigor, the bundle would have shipped half-baked.
+2. **Bundle splits naturally surface under rigor.** A 3-item bundled cycle decoupled cleanly into "ship Item 1 focused, defer Items 2 + 3 to own cycles" once design review found design-blocking issues unique to Items 2 + 3. Without the rigor, the bundle would have shipped half-baked.
 
-3. **For sub-100-line changes the pipeline cost is high.** ~15 agent calls per ~90-line PR is an expensive ratio. A lighter pipeline (e.g., Plan → Build → PR → 3×Review) would catch most issues at lower compute cost. Recommended cadence-by-PR-size:
+3. **Pipeline cost-per-line is high for small changes.** A representative observation point: ~15 agent calls per ~90-line schema PR. The recommendation below balances discipline against compute cost by sizing the pipeline to the PR.
+
+**Recommended cadence-by-PR-size:**
    - **<100 lines, schema/doc/single-script:** lighter pipeline (Plan → Build → PR → 3 reviews)
    - **100-500 lines, multi-file feature with operational gates:** medium pipeline (Plan → 3 reviews → Design → 3 reviews → Build → PR → 5 reviews)
-   - **>500 lines or new architectural surface:** full pipeline as established
-   This is a future-process decision; not worth retrofitting prior PRs, but worth applying to upcoming work.
+   - **>500 lines or new architectural surface:** full pipeline as established (Plan → 5 reviews → Design → 5 reviews → Build → PR → 5 reviews)
+
+This is a future-process decision; not worth retrofitting prior PRs, but worth applying to upcoming work. Re-evaluate the matrix periodically (e.g., as part of the alignment-doc audit pass) — if observed-vs-recommended cadence diverges meaningfully, the matrix needs recalibration.
 
 ---
 

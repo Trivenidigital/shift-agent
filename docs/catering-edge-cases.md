@@ -2,8 +2,8 @@
 
 **Project:** SMB-Agents → Catering Agent
 **Version:** v3.1 — Hermes-aligned hybrid (Path 3), grounded in deployed code as of 2026-04-28
-**Purpose:** 21 deterministic test cases against deployed Python scripts (one design-spec-pending), plus 14 deferred cases categorized by why they can't be automated tests today.
-**Supersedes:** v3 (this doc replaces it)
+**Purpose:** 21 deterministic test cases against deployed Python scripts (one design-spec-pending, one deferred to renderer PR), plus 15 deferred cases categorized by why they can't be automated tests today.
+**Supersedes:** v3
 
 ---
 
@@ -11,7 +11,7 @@
 
 Five corrections grounded in the actual deployed codebase:
 
-1. **PR #21 (`off_menu_items` schema field) shipped 2026-04-28.** Promoted from "stay loose in `notes`" to a structured field on `CateringLeadExtractedFields`. C-old-23 in v3's deferred-bucket-B is now lockable as new case **C22**. C18 (which v3 wrote against `notes` as the storage location) is **deferred to the renderer PR** since the field is currently write-only — see PR #21's CONTRACT comment in `src/platform/schemas.py:316-323`.
+1. **PR #21 (`off_menu_items` schema field) shipped 2026-04-28.** Promoted from "stay loose in `notes`" to a structured field on `CateringLeadExtractedFields`. C-old-23 in v3's deferred-bucket-B is now lockable as new case **C22**. C18 (which v3 wrote against `notes` as the storage location) is **deferred to the C23 renderer PR** (tracked in `tasks/todo.md`) since the field is write-only at PR #21's commit boundary — see CONTRACT comment in `src/platform/schemas.py:316-323`.
 
 2. **C02 returning-customer lookup — `lookup_prior_leads_by_phone` script does NOT exist** as of 2026-04-28. v3 wrote test code as if the script existed. v3.1 marks the case **design-spec-pending-script** and labels its test code as the **interface contract** for the future script (not illustrative — return shape is pinned by the C02-Option-C design decision). Building the script is a separate ~half-day PR (E164Phone normalization, date arithmetic, defensive handling, tests).
 
@@ -21,7 +21,7 @@ Five corrections grounded in the actual deployed codebase:
 
 5. **Manual smoke methodology collapsed.** v3 had its own inline 5-step smoke. `docs/deploy.md` "Verifying after a `.env` change (smoke test)" already documents 3 concrete commands (PR #18, refined by PR #19). v3.1 references that section + adds 2 catering-specific checks rather than duplicating the deploy-level smoke.
 
-Net case count: **21 listed (was 21)** — C18 deferred, C22 added. Of those, 20 are runnable today; C02 is design-spec-pending. **Deferred bucket: 14 (was 17)** — C-old-02 resolved by Option C; C-old-23 promoted to C22.
+Net case count: **21 listed** (count unchanged; C18 deferred, C22 added). Of those, 19 runnable today; C02 design-spec-pending; C18 deferred to renderer PR. **Deferred bucket: 15 (was 17)** — C-old-02 resolved by Option C; C-old-23 promoted to C22; C-old-18 (v3-form) shifted into the C18 case-list slot as DEFERRED.
 
 ---
 
@@ -49,7 +49,7 @@ Hermes is intentionally a thin runtime. Its philosophy:
 
 **Two surfaces** in our system have very different testing stories:
 
-**Surface 1 — Python scripts that SKILLs invoke.** Deterministic. Testable. Cheap. Fast. This is `create-catering-lead`, `apply-catering-owner-decision`, `_load_menu_filtered`, `_normalize`, the future C02 phone-lookup function. **Tests live here.** This is the Hermes-native testing pattern.
+**Surface 1 — Python scripts that SKILLs invoke.** Deterministic. Testable. Cheap. Fast. This is `create-catering-lead`, `apply-catering-owner-decision`, `_load_menu_filtered` (which contains inline dietary-tag normalization at lines 116-138), the future C02 phone-lookup function. **Tests live here.** This is the Hermes-native testing pattern.
 
 **Surface 2 — LLM judgment in SKILL.md interpretation.** Non-deterministic by design. Expensive to test (real Kimi calls). Flaky. Fighting Hermes's philosophy to put in CI. **Validated by manual smoke testing**, log inspection, and iterative use with real customers and burner WhatsApp.
 
@@ -190,7 +190,7 @@ With `sender_phone=` Ravi's roster phone.
 #### C04 — Identity-claim from unknown phone does not auto-link to prior leads (must-pass)
 
 LLM extraction layer: Kimi via catering SKILL.md prompt (not directly tested in B1)
-Python script under test: `lookup_prior_leads_by_phone` + `create-catering-lead` (lookup is design-spec-pending; integration test runnable once script lands)
+Python script under test: `create-catering-lead` (runnable today — tests that no auto-link happens) + `lookup_prior_leads_by_phone` (design-spec-pending; the negative-result assertion runs only after that script lands)
 
 **Input:** `sender_phone="+1-555-UNKNOWN"`, extraction includes `notes: "claims to be Priya's husband"`. Priya's leads exist in state under `+1-555-PRIYA`.
 
@@ -305,15 +305,18 @@ Python script under test (all 3): `create-catering-lead`
 
 ### CATEGORY 5 — Menu filtering & rendering (2 cases — was 3 in v3, C18 deferred)
 
+These test the deterministic Python that loads `catering-menu.json`, filters by dietary tags (with inline normalization in `_load_menu_filtered`), and renders into the draft template.
+
+
 #### C16 — Menu filter excludes non-vegetarian items (must-pass)
 
 LLM extraction layer: N/A (this is pure deterministic filtering)
 Python script under test: `apply-catering-owner-decision._load_menu_filtered`
 
 **Input:** `dietary_restrictions=["vegetarian"]`, menu file contains both veg and non-veg items.
-**Expected:** Returned menu list contains only items where `MenuItem.dietary_tags` includes `"veg"` (after `_normalize` translates `"vegetarian"` → `"veg"`).
+**Expected:** Returned menu list contains only items where `MenuItem.dietary_tags` includes `"veg"` (after the inline normalization in `_load_menu_filtered` translates `"vegetarian"` → `"veg"`; the normalization is an `if/elif` block at `apply-catering-owner-decision:116-138`, not a separate `_normalize` function).
 **Assertions:** All returned items have `"veg"` in their `dietary_tags`; no items have `"non-veg"` exclusively.
-**Failure modes:** `_normalize` doesn't map `"vegetarian"` correctly; filter uses OR logic where AND is needed; filter returns empty list silently when items exist.
+**Failure modes:** Inline normalization doesn't map `"vegetarian"` → `"veg"`; filter uses OR logic where AND is needed; filter returns empty list silently when items exist.
 
 #### C17 — Empty filter result surfaces "menu needs owner review" flag (should-pass)
 
@@ -325,13 +328,13 @@ Python script under test: `apply-catering-owner-decision` end-to-end
 **Assertions:** Generated draft not empty; contains marker like `[MENU_REVIEW_NEEDED]` or equivalent prose.
 **Failure modes:** Render fails silently with empty menu; render outputs draft pretending to have items.
 
-#### C18 — DEFERRED to renderer PR
+#### C18 — DEFERRED to C23 renderer + extractor-prompt PR
 
-> **Status:** deferred. v3 wrote this case against `notes` as the off-menu-item storage location. PR #21 (2026-04-28) added a structured `off_menu_items` field, but currently WRITE-ONLY: extractor SKILL prompt + owner-approval-card renderer must ship together (per the field's CONTRACT comment in `src/platform/schemas.py:316-323`).
+> **Status (as of v3.1, 2026-04-28):** deferred. PR #21 landed the `off_menu_items` schema slot, but the field is write-only at that PR's commit boundary — extractor SKILL prompt + owner-approval-card renderer haven't shipped (see CONTRACT comment in `src/platform/schemas.py:316-323`). v3 wrote this case against `notes` as the off-menu storage location; that's no longer the right shape post-PR-21.
 >
-> **Unblocked by:** the renderer PR that updates the catering extractor SKILL prompt to populate `off_menu_items` AND updates the owner-card-sending script (lead-intake path, NOT `apply-catering-owner-decision` — design-review surfaced this in PR #21's pipeline) to render the field.
+> **Unblocked by:** the C23 renderer + extractor-prompt PR tracked in `tasks/todo.md` P1 → "Schema implications from review → C23 renderer + extractor-prompt." That PR identifies the actual owner-card-sending script (lead-intake path, NOT `apply-catering-owner-decision` per the design-review finding from PR #21's pipeline) and updates both halves together.
 >
-> **What C18 will test once unblocked:** off-menu request extracted into `off_menu_items` round-trips through `create-catering-lead` AND surfaces in the rendered owner-approval card. The new C22 (below) covers the schema/round-trip half today.
+> **What C18 will test once unblocked:** off-menu request extracted into `off_menu_items` round-trips through `create-catering-lead` AND surfaces in the rendered owner-approval card. The new C22 (below) covers the schema/round-trip half at PR #21's commit boundary.
 
 ---
 
@@ -505,7 +508,7 @@ Run: `pytest tests/test_catering_scenarios_v3_1.py -m must_pass` for the blockin
 
 ## Deferred cases (14 total — was 17 in v3)
 
-### Recently resolved (3 items)
+### Resolved during v3 → v3.1 transition (3 items)
 
 | v3 case | Resolution | Source |
 |---|---|---|
@@ -513,7 +516,7 @@ Run: `pytest tests/test_catering_scenarios_v3_1.py -m must_pass` for the blockin
 | C-old-23 custom item request | Promoted from "stay loose in `notes`" to lockable as new C22 (off_menu_items round-trip) + future C18 (renderer surfacing). | PR #21 (2026-04-28) |
 | C-old-18 (v3) off-menu in notes | Deferred to renderer PR rather than resolved — v3's notes-based test is no longer the right shape; will return as field-aware C18 once renderer ships. | PR #21 (2026-04-28) |
 
-### Bucket A: Need schema additions (6 cases — was 8)
+### Bucket A: Need schema additions (8 cases — unchanged from v3)
 
 | Case | Blocked on | Suggested addition |
 |---|---|---|
@@ -550,17 +553,20 @@ Same as v3: multilingual inputs, voice notes, image uploads, group chats, long-r
 
 ---
 
-## Iteration plan
+## Iteration plan (v3.1 follow-on snapshot, 2026-04-28)
 
-1. Convert the 20 runnable B1 cases (excludes C02, design-spec-pending) to pytest cases extending `test_catering_v02_scripts.py`. Realistic estimate: a focused day, given the harness primitive exists.
-2. Run all 20 — expect 60–80% pass on first run; failures point to real script bugs or schema mismatches.
-3. Iterate scripts until all 16 must-pass cases are green.
+This is the planned next-step sequence at the time of v3.1 publication. Status of each step is tracked in `tasks/todo.md` rather than here — check there for what's done vs pending.
+
+1. Convert the 19 runnable B1 cases (excludes C02 design-spec-pending + C18 deferred) to pytest cases extending `test_catering_v02_scripts.py`. Realistic estimate: a focused day, given the harness primitive exists.
+2. Run all 19 — expect 60–80% pass on first run; failures point to real script bugs or schema mismatches.
+3. Iterate scripts until all must-pass cases are green.
 4. Adopt the manual smoke methodology (Layer 1 + Layer 2 above) as pre-deploy ritual.
-5. Build `lookup_prior_leads_by_phone` as a separate ~half-day PR; C02 becomes runnable on merge.
-6. Triage the 6 v0.3 schema tickets — pick 2-3 highest-value (probably allergens + lifecycle status enum members) for the v0.3 cycle.
-7. Triage the 3 architectural tickets — at minimum, surface C27 batching as a known limitation in customer-facing documentation; decide on C37 owner routing in next dispatcher revision.
-8. Defer the rest until real customer usage either validates looseness or reveals patterns justifying structured fields.
+5. Build `lookup_prior_leads_by_phone` as a separate ~half-day PR (tracked in `tasks/todo.md`); C02 becomes runnable on merge.
+6. Build the C23 renderer + extractor-prompt PR (tracked in `tasks/todo.md`); C18 becomes runnable on merge.
+7. Triage the 8 v0.3 schema tickets in Bucket A — pick 2-3 highest-value (probably allergens + lifecycle status enum members) for a v0.3 cycle.
+8. Triage the 3 architectural tickets in Bucket C — at minimum, surface C27 batching as a known limitation in customer-facing documentation; decide on C37 owner routing in next dispatcher revision.
+9. Defer the rest until real customer usage either validates looseness or reveals patterns justifying structured fields.
 
 ---
 
-*Document status: v3.1 — Hermes-aligned hybrid, grounded in deployed code as of 2026-04-28. 21 cases listed (20 lockable today, 1 design-spec-pending). 14 cases categorized into v0.3 roadmap, looseness-by-design, and architectural decisions. No fictional schema, no fictional Python scripts, no real-Kimi tests in CI.*
+*Document status: v3.1 — Hermes-aligned hybrid, grounded in deployed code as of 2026-04-28. 21 cases listed (19 runnable today, 1 design-spec-pending [C02], 1 deferred-to-renderer-PR [C18]). 15 deferred cases categorized into v0.3 roadmap, looseness-by-design, and architectural decisions. No fictional schema, no fictional Python scripts, no real-Kimi tests in CI.*
