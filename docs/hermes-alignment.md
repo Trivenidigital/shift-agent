@@ -77,8 +77,8 @@ A bug that breaks loudly is a 4am page; you fix it and move on. A bug that break
 
 | Item | Failure mode | Cost | State | Target |
 |---|---|---|---|---|
-| Hermes commit hash pinned in `deploy.sh` (or whatever the actual deploy mechanism is — see "deploy.sh vs tarball" below) | Hermes upgrade breaks our patches; first sign is broken customer behavior | Half-day (depends on first reconciling deploy.sh-vs-VPS-reality) | gap | next deploy cycle |
-| `bridge.js` patch inventory with version markers | Upstream rename moves a marker comment by one character; patch silently no-ops; outbound chatter filter stops applying | Half-day (audit existing patches in `tools/patch-bridge-filter.py` + add Hermes-version compatibility check) | gap | next deploy cycle |
+| Hermes commit hash pinned in `tools/hermes-patch-baseline.txt` + verified by `tools/check-shift-agent-patch.sh` as the first gate in `shift-agent-deploy.sh` | Hermes upgrade breaks our patches; first sign is broken customer behavior | done — `HERMES_COMMIT` + `HERMES_VERSION` + `BRIDGE_POST_PATCH_SHA256` pin, fail-closed gate, `HERMES_PIN_OVERRIDE=<new_hash> HERMES_PIN_OVERRIDE_REASON="..."` escape hatch | done | done — pin updates intentionally frequent (every reviewed Hermes commit produces a git diff = audit trail of due diligence) |
+| `bridge.js` patch inventory with version markers + sha256 fingerprint | Upstream rename moves a marker comment by one character; patch silently no-ops; outbound chatter filter stops applying | done — covered by the same `check-shift-agent-patch.sh` gate (sha256 of post-patch bridge.js + marker presence + anchor proximity for both `shift-agent-sender-id` and `shift-agent-template-bypass` patches) | done | done |
 | `deploy.sh` reconcile with actual VPS pattern | Script expects `/opt/shift-agent/working` to be a git checkout; VPS uses tarball/staging-new pattern. Today's deploys run by hand, leaving `deploy.sh` documentation-only | 1 day (decide: convert VPS to git checkout, OR rewrite deploy.sh for tarball pattern) | gap | before agent #6 build starts |
 
 ### High (active gotcha source)

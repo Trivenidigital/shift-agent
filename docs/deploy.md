@@ -41,9 +41,16 @@ Three actions:
 
 | Action | Effect |
 |---|---|
-| `deploy` (default) | Snapshot existing `staging-new` to `deploys/<tag>.tgz`, run `install_artifacts`, restart services, run smoke test, auto-rollback on failure |
+| `deploy` (default) | **Run Hermes pin gate** (`tools/check-shift-agent-patch.sh`); fail-closed exit if Hermes commit / bridge.js sha256 / patch markers drift. Then snapshot existing `staging-new` to `deploys/<tag>.tgz`, run `install_artifacts`, restart services, run smoke test, auto-rollback on smoke failure |
 | `rollback <tag>` | Extract `deploys/<tag>.tgz` into `staging-new`, run `install_artifacts`, restart services |
 | `list` | Show all available rollback tarballs at `deploys/` |
+
+**Hermes pin gate.** The deploy gate (first action above) reads `tools/hermes-patch-baseline.txt` and verifies:
+- `HERMES_COMMIT` matches `git -C /root/.hermes/hermes-agent rev-parse HEAD`
+- `BRIDGE_POST_PATCH_SHA256` matches `sha256sum scripts/whatsapp-bridge/bridge.js`
+- BEGIN/END markers for `shift-agent-sender-id` (in 3 files) + `shift-agent-template-bypass` (in bridge.js) are present and within line-distance of expected anchor symbols
+
+Any drift fail-closes the deploy before `install_artifacts` runs — no state change, no rollback needed. For legitimate Hermes upgrades, set both `HERMES_PIN_OVERRIDE=<current_full_commit_hash>` and `HERMES_PIN_OVERRIDE_REASON="..."`. The override does NOT auto-update the baseline; operator updates `tools/hermes-patch-baseline.txt` + commits + ships a new tarball as a follow-up, or the next deploy fails-closed again. Intentional friction.
 
 ### `/opt/shift-agent/` filesystem layout (post-deploy)
 

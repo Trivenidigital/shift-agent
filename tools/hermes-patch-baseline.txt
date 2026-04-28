@@ -1,1 +1,17 @@
-unknown
+# Hermes upstream baseline — drift detection for our patches.
+#
+# This file pins the Hermes version + commit hash + bridge.js sha256 that our
+# patches were authored/verified against. tools/check-shift-agent-patch.sh
+# fail-closes the deploy if the live VPS Hermes drifts from any of these.
+#
+# Update this file when:
+#   1. You upgrade Hermes (new commit hash, possibly new version, possibly new
+#      bridge.js content). Run check-shift-agent-patch.sh with the override
+#      env vars to ship the upgrade, then commit the updated baseline.
+#   2. You re-run tools/patch-bridge-filter.py and the bridge.js content
+#      changes deterministically. Capture the new sha256 + commit it.
+#
+# Fields are shell-sourceable (KEY=VALUE, no spaces).
+HERMES_COMMIT=6fdbf2f2d76cf37393e657bf37ceda3d84589200
+HERMES_VERSION=0.11.0
+BRIDGE_POST_PATCH_SHA256=fcfd69e9fa1380868e062458e893f2d79fbb4f8e9d8da15ba5164fd3e6fe1779
