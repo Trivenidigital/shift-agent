@@ -545,6 +545,68 @@ def test_replay_of_existing_lead_with_now_past_event_date_returns_idempotent(
     assert rejected == [], (
         f"replay must not write rejection audit entry, got: {rejected}"
     )
+    # Exactly ONE catering_lead_created entry — replay must NOT write a second
+    # creation audit (would corrupt the per-lead audit trail; pr-test-analyzer
+    # Gap D from PR review).
+    created = _read_audit_entries(env_dir, "catering_lead_created")
+    assert len(created) == 1, f"replay must not double-write created audit, got: {created}"
+
+
+def test_audit_fail_recovery_rejection_path(env_dir, bridge_server):
+    """Closes pr-test-analyzer Criticality 7: design-review HIGH-A invariant
+    untested.
+
+    When the audit log write fails (chmod logs/ readonly simulating disk full /
+    perms / NFS hiccup), the script MUST still:
+      - Emit the structured ERR_* prefix on stderr
+      - Exit with the documented code (2 for past-date input)
+      - Emit a WARN line on stderr explaining the audit failure
+
+    This pins the design-review HIGH-A 'degraded audit beats lost rejection'
+    behavior — generalized in PR-review fix to ALL audit calls via
+    _audit_best_effort wrapper.
+    """
+    port, _ = bridge_server
+    # Make logs/ writable but logs/decisions.log unwritable (a directory works
+    # cross-platform if we make decisions.log a directory — _log() will fail
+    # on the open() inside ndjson_append).
+    log_path = env_dir / "logs" / "decisions.log"
+    log_path.mkdir()  # decisions.log is now a DIR, not a file → ndjson_append fails
+
+    r = _run_create(
+        env_dir, port,
+        fields={"event_date": "2020-01-01"},
+        message_id="MSG_AUDIT_FAIL_001",
+    )
+    assert r.returncode == 2  # EXIT_INVALID_INPUT preserved
+    assert "ERR_EVENT_DATE_PAST:" in r.stderr  # structured contract preserved
+    assert "WARN: audit log failed" in r.stderr  # operator visibility
+
+
+def test_audit_fail_recovery_success_path(env_dir, bridge_server):
+    """Same pattern, success path. Closes silent-failure HIGH-1 (PR review):
+    bare success-path _log() calls would have stranded leads pre-fix.
+
+    Lead is persisted in catering-leads.json; audit fails; stdout JSON still
+    emitted; exit 0; multiple WARN lines for each failed audit write."""
+    port, _ = bridge_server
+    log_path = env_dir / "logs" / "decisions.log"
+    log_path.mkdir()  # same trick — decisions.log is a DIR
+
+    r = _run_create(
+        env_dir, port,
+        fields={"headcount": 25, "event_date": "2027-06-15"},
+        message_id="MSG_AUDIT_FAIL_SUCC_001",
+    )
+    assert r.returncode == 0, f"success path must exit 0 even on audit fail: stderr={r.stderr}"
+    # Lead is persisted (state file written by atomic_write_json BEFORE audit)
+    leads = json.loads((env_dir / "state" / "catering-leads.json").read_text())
+    assert len(leads.get("leads", [])) == 1
+    # Stdout still has the contract
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    assert "lead_id" in out and "approval_code" in out
+    # 3 success-path audit calls all warned
+    assert r.stderr.count("WARN: audit log failed") >= 1
 
 
 def test_catering_lead_rejected_reason_enum_enforced(env_dir):

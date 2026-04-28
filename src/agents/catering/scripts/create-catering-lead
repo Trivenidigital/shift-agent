@@ -164,8 +164,10 @@ def _render_approval_card(
 
 
 # Maps CateringLeadRejected.reason → SKILL-readable stderr prefix.
-# Single source-of-truth: any new reason added to the schema Literal MUST also
-# land here, otherwise the .get() fallback fires (audited; not silent).
+# Any new reason returned by _validate_event_date (and added to the schema
+# Literal) MUST also land here. The .get() fallback to "ERR_UNKNOWN_REJECTION"
+# is defense-in-depth so SKILL parsers see a structured prefix rather than
+# crashing on a None value when the helper/dict drift one step apart.
 REASON_TO_ERR_PREFIX = {
     "event_date_past": "ERR_EVENT_DATE_PAST",
     "event_date_invalid_calendar": "ERR_EVENT_DATE_INVALID",
@@ -181,10 +183,13 @@ def _validate_event_date(
     `reason` values match the CateringLeadRejected schema Literal — pinned by
     Pydantic so a typo here raises ValidationError at log-write time.
 
-    Why script-level vs schema-level (per design v2): pydantic schema can't
-    carry tz context without making the schema stateful, which would break the
-    catering v3.1 C22 round-trip test that calls model_validate_json with no
-    context. Tz-aware date checks belong at the script (write-path) layer.
+    Why script-level vs schema-level (per design v2): Pydantic v2 *does* support
+    model_validate(..., context={...}) and info.context access in validators,
+    but plumbing tz context through every model_validate_json call site (the
+    read path, replay tools, and the catering v3.1 C22 round-trip test that
+    calls model_validate_json with no context) would couple the schema to
+    runtime tz config. Keeping tz-aware checks at the script (write-path) layer
+    leaves the schema stateless and read-path-safe.
 
     Why both invalid-calendar AND past-date here (not just past-date): schema
     pattern is format-only (4-2-2 digit groups); accepts 2026-13-45 etc.
@@ -224,6 +229,28 @@ def _log(adapter: TypeAdapter, entry) -> None:
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with flock(LOG_PATH):
         ndjson_append(LOG_PATH, adapter.dump_json(entry).decode("utf-8"))
+
+
+def _audit_best_effort(adapter: TypeAdapter, entry, *, context: str) -> None:
+    """Best-effort audit write. Never raises.
+
+    Guarantees the caller can always emit its structured stdout/stderr/exit-code
+    contract regardless of audit durability (disk full, perms, NFS hiccup).
+
+    Generalizes the design-review HIGH-A pattern uniformly to ALL audit writes
+    in this script — previously only the rejection-path _log() was wrapped, so
+    a success-path audit failure after atomic_write_json(LEADS_PATH) already
+    persisted the lead would propagate as an uncaught traceback, stranding the
+    lead with no audit AND no stdout JSON. With this wrapper, the operator gets
+    a journald WARN line and the script still emits its contract.
+    """
+    try:
+        _log(adapter, entry)
+    except Exception as e:  # noqa: BLE001 — invariant: audit must not block flow
+        sys.stderr.write(
+            f"WARN: audit log failed (non-fatal, context={context}): "
+            f"{type(e).__name__}: {e}\n"
+        )
 
 
 def main() -> int:
@@ -290,23 +317,18 @@ def main() -> int:
             # Audit ts is ALWAYS UTC (design-review MEDIUM-D — consistent ordering
             # for log-replay tools regardless of which failure mode fired).
             ts_utc = datetime.now(tz=timezone.utc)
-            try:
-                _log(TypeAdapter(CateringLeadRejected), CateringLeadRejected(
+            _audit_best_effort(
+                TypeAdapter(CateringLeadRejected),
+                CateringLeadRejected(
                     type="catering_lead_rejected",
                     ts=ts_utc,
                     customer_phone=args.customer_phone,
                     original_message_id=args.message_id,
                     reason=reason,
                     detail=detail[:500] if detail else "",
-                ))
-            except Exception as log_err:  # noqa: BLE001 — audit best-effort; never block rejection
-                # Audit write failed (disk full, perms). Continue to stderr +
-                # exit so the customer/SKILL still gets the structured error.
-                # design-review HIGH-A: degraded audit beats lost rejection.
-                sys.stderr.write(
-                    f"WARN: rejection audit log failed (non-fatal): "
-                    f"{type(log_err).__name__}: {log_err}\n"
-                )
+                ),
+                context="rejected",
+            )
             sys.stderr.write(f"{err_prefix}: {detail}\n")
             # timezone_invalid is config-level (cfg.customer.timezone), not input-level
             # (customer-supplied event_date). Distinct exit code surfaces the difference.
@@ -339,22 +361,37 @@ def main() -> int:
 
         atomic_write_json(LEADS_PATH, store)
 
-        # Audit: created → awaiting → approval-requested
-        _log(TypeAdapter(CateringLeadCreated), CateringLeadCreated(
-            type="catering_lead_created", ts=now,
-            lead_id=lead_id,
-            customer_phone=args.customer_phone,
-            original_message_id=args.message_id,
-        ))
-        _log(TypeAdapter(CateringLeadStatusChange), CateringLeadStatusChange(
-            type="catering_lead_status_change", ts=now,
-            lead_id=lead_id, from_status="NEW", to_status="AWAITING_OWNER_APPROVAL",
-            actor="system", reason="extractor_completed",
-        ))
-        _log(TypeAdapter(CateringOwnerApprovalRequested), CateringOwnerApprovalRequested(
-            type="catering_owner_approval_requested", ts=now,
-            lead_id=lead_id, approval_code=approval_code,
-        ))
+        # Audit: created → awaiting → approval-requested.
+        # All writes are best-effort: if audit fails, lead is already persisted
+        # (atomic_write_json above) and the SKILL must still get lead_id+code on
+        # stdout. Operator gets a journald WARN line per failed write.
+        _audit_best_effort(
+            TypeAdapter(CateringLeadCreated),
+            CateringLeadCreated(
+                type="catering_lead_created", ts=now,
+                lead_id=lead_id,
+                customer_phone=args.customer_phone,
+                original_message_id=args.message_id,
+            ),
+            context="created",
+        )
+        _audit_best_effort(
+            TypeAdapter(CateringLeadStatusChange),
+            CateringLeadStatusChange(
+                type="catering_lead_status_change", ts=now,
+                lead_id=lead_id, from_status="NEW", to_status="AWAITING_OWNER_APPROVAL",
+                actor="system", reason="extractor_completed",
+            ),
+            context="status_change",
+        )
+        _audit_best_effort(
+            TypeAdapter(CateringOwnerApprovalRequested),
+            CateringOwnerApprovalRequested(
+                type="catering_owner_approval_requested", ts=now,
+                lead_id=lead_id, approval_code=approval_code,
+            ),
+            context="approval_requested",
+        )
 
     # Send approval card to owner — outside the FileLock; bridge slowness shouldn't block.
     if not cfg.owner.self_chat_jid:
