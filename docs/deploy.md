@@ -93,6 +93,66 @@ ssh main-vps 'sudo /usr/local/bin/shift-agent-deploy.sh rollback deploy-20260428
 
 Rollback re-extracts the prior tarball into `staging-new/` and re-runs `install_artifacts`. Idempotent.
 
+## Env file consolidation (post-2026-04-28)
+
+`/opt/shift-agent/.env` is a **symlink to `/root/.hermes/.env`**. Single canonical file, one source of truth for both readers (Hermes' `load_hermes_dotenv()` Python loader + shift-agent systemd `EnvironmentFile=`).
+
+### Why
+
+Pre-consolidation, the two files drifted independently and yesterday's auth-key gotcha (placeholder in one, real key in the other) cost real hours. The two readers are deliberate (different override semantics), but the two FILES are not — they were redundant, and redundancy without sync IS the failure mode.
+
+### Layout
+
+```
+/root/.hermes/.env                      # CANONICAL — edit this
+/opt/shift-agent/.env                   # symlink → /root/.hermes/.env
+/opt/shift-agent/.env.pre-symlink-backup  # one-time backup from migration day
+```
+
+### Editing rules
+
+- **Always edit `/root/.hermes/.env`**, never the symlink path. (Most editors handle symlinks correctly, but redirect-to-file via `> /root/.hermes/.env` truncates the target which is fine; redirect-to-file via `> /opt/shift-agent/.env` may break the symlink depending on the operator's shell.)
+- After editing, restart any services that need to pick up the change. Most commonly: `sudo systemctl restart hermes-gateway shift-agent-cockpit`.
+- The `tools/check-env-drift.sh` script (used during the original consolidation) still runs but trivially exits 0 once the symlink is in place. Useful to confirm the symlink is intact.
+
+### Pre-flight gate in `shift-agent-deploy.sh`
+
+Every deploy verifies symlink integrity before `install_artifacts` runs. If `/opt/shift-agent/.env` is no longer a symlink to `/root/.hermes/.env`, the deploy fails-closed before any state change. Catches: Hermes setup re-run that recreated the file, accidental editor truncation, target-path drift.
+
+### Verifying after a `.env` change (smoke test)
+
+After editing `/root/.hermes/.env` and restarting services:
+
+```bash
+# Check 1: Hermes-gateway connected to WhatsApp (proves auth keys loaded)
+ssh main-vps 'sudo journalctl -u hermes-gateway --since "30 seconds ago" --no-pager | grep "✓ whatsapp connected"' > .smoke.txt 2>&1
+
+# Check 2: cockpit responds (proves systemd EnvironmentFile loaded with COCKPIT_COOKIE_SECURE)
+ssh main-vps 'curl -sf http://localhost:8080/api/health'
+
+# Check 3: no startup errors
+ssh main-vps 'sudo journalctl -u hermes-gateway -u shift-agent-cockpit --since "30 seconds ago" --no-pager | grep -iE "error|auth.*invalid|missing.*env" | grep -v "code -15"'
+```
+
+The `code -15` filter excludes the expected systemd-restart-shutdown signal (the previous gateway process exiting cleanly is logged as `code -15`; without that filter, every clean restart looks like a failure).
+
+### One-time migration to symlink (operator runs once per VPS)
+
+Already done on the production VPS as of 2026-04-28. For new customer VPSes:
+
+```bash
+# 1. Verify drift state — must show OK before proceeding
+sudo /opt/shift-agent/staging-new/tools/check-env-drift.sh
+
+# 2. If clean, run migration (backs up existing file, creates symlink)
+sudo /opt/shift-agent/staging-new/tools/migrate-env-to-symlink.sh
+
+# 3. Restart services + run the smoke checks above
+sudo systemctl restart hermes-gateway shift-agent-cockpit
+```
+
+If `check-env-drift.sh` reports drift, reconcile manually (the script prints sha256 hash + length per drifted key so the operator can identify placeholder-vs-real without leaking secrets) then re-run.
+
 ## Limits + known caveats
 
 1. **State files are NOT in the deploy.** `pending.json`, `roster.json`, `catering-leads.json`, `decisions.log`, `config.yaml`, `.env` are customer-specific and never touched by `install_artifacts`. Schema migrations to those files need a separate one-shot script.
