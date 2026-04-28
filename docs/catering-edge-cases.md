@@ -2,7 +2,7 @@
 
 **Project:** SMB-Agents → Catering Agent
 **Version:** v3.1 — Hermes-aligned hybrid (Path 3), grounded in deployed code as of 2026-04-28
-**Purpose:** 21 deterministic test cases against deployed Python scripts (two design-spec-pending — C02 needs `lookup_prior_leads_by_phone`, C10 needs past-date validation in `create-catering-lead`; one deferred to renderer PR — C18), plus 15 deferred cases categorized by why they can't be automated tests today.
+**Purpose:** 21 deterministic test cases against deployed Python scripts (20 runnable; one deferred to renderer PR — C18), plus 15 deferred cases categorized by why they can't be automated tests today. *(C10 past-date validation: runnable since 2026-04-28 [PR #25]. C02 returning-customer lookup: runnable since 2026-04-28 [follow-up PR].)*
 **Supersedes:** v3
 
 ---
@@ -137,14 +137,14 @@ With `sender_phone="+1-555-NEWLEAD"`.
 
 ---
 
-#### C02 — Returning customer phone lookup enriches Kimi context (must-pass) [DESIGN-SPEC-PENDING-SCRIPT]
+#### C02 — Returning customer phone lookup enriches Kimi context (must-pass) [RUNNABLE]
 
-> **Status:** the script `lookup_prior_leads_by_phone` does NOT exist as of 2026-04-28. This case documents the **interface contract** the future script must satisfy. The test code below is authoritative — when the script is built, its return shape MUST match this case's assertions.
+> **Status:** runnable as of 2026-04-28. Script `lookup-prior-leads-by-phone` shipped. Return shape adds a `lookup_status` field (∈ {ok, missing_file, no_match, lock_timeout, corrupt}) beyond the original C02 contract — SKILL preambles can disambiguate "no prior leads" from infrastructure issues. PRIYA in the example below is illustrative of formatting normalization (dashes/spaces); letter-to-digit vanity translation is NOT supported (the regex `_PHONE_E164 = r"^\+\d{10,15}$"` rejects letters per the existing schema validator).
 
 LLM extraction layer: N/A (this case tests a Python preamble that runs BEFORE Kimi, per C02-Option-C design decision)
-Python script under test: `lookup_prior_leads_by_phone` (TO BE BUILT — separate ~half-day PR; backlogged)
+Python script under test: `lookup-prior-leads-by-phone` (shipped; importable as `lookup_prior_leads_by_phone` function or invokable via CLI subprocess)
 
-**Input:** `customer_phone="+1-555-PRIYA"`, `catering-leads.json` already contains 2 prior leads from this phone (one fulfilled, one closed).
+**Input:** `customer_phone="+19045551234"` (digit-only — PRIYA was illustrative), `catering-leads.json` already contains 2 prior leads from this phone (one fulfilled, one closed).
 
 **Expected:** Function returns dict with `prior_lead_count`, `most_recent_status`, `most_recent_event_date`, `most_recent_dietary_restrictions`, `last_seen_days_ago`. Returns empty/null structure if no matches. Pure read — does not mutate state.
 
