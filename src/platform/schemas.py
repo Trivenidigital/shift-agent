@@ -1060,6 +1060,11 @@ class CateringLeadStatusChange(_BaseEntry):
 class CateringLeadRejected(_BaseEntry):
     """Lead creation rejected pre-state (no state mutation, no lead row).
 
+    Intentionally has no lead_id — rejection happens before mint, so no lead
+    exists. customer_tz + event_date are carried so the audit entry is
+    self-describing (operator triaging a rejection doesn't need to JOIN against
+    catering-leads.json or config.yaml at query time).
+
     Reasons are pinned by the discriminated `reason` field. Adding a new reason
     requires updating BOTH this Literal AND the REASON_TO_ERR_PREFIX dict in
     create-catering-lead — kept tight on purpose so future drift is loud.
@@ -1073,6 +1078,8 @@ class CateringLeadRejected(_BaseEntry):
         "timezone_invalid",
     ]
     detail: str = Field(default="", max_length=500)
+    customer_tz: str = Field(default="", max_length=64)
+    event_date: Optional[str] = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
 
 
 class CateringQuoteDrafted(_BaseEntry):

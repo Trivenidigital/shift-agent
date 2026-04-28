@@ -206,13 +206,16 @@ def _validate_event_date(
             f"event_date {fields.event_date!r} matches format but is not a valid calendar date"
         )
 
-    # Narrow except (per design-review HIGH-C): catch tz-resolution failures only.
-    # AttributeError / TypeError indicate config-shape bugs (None tz, int tz, etc.)
-    # and should propagate as the genuine programming bugs they are — not be
-    # bucketed into ERR_TIMEZONE_INVALID and confuse triage.
+    # Narrow except (design-review HIGH-C + PR-review MEDIUM-1): catch
+    # tz-resolution failures specifically. ZoneInfoNotFoundError covers the
+    # tz-not-found case (it IS a KeyError subclass on 3.11+, but listing it
+    # explicitly documents intent). ValueError covers malformed tzdata. We do
+    # NOT catch KeyError or AttributeError/TypeError — those indicate
+    # config-shape bugs (None tz, int tz, etc.) and should propagate as the
+    # programming bugs they are, not be bucketed into ERR_TIMEZONE_INVALID.
     try:
         today = customer_now(tz_name).date()
-    except (ZoneInfoNotFoundError, KeyError, ValueError) as e:
+    except (ZoneInfoNotFoundError, ValueError) as e:
         return "timezone_invalid", (
             f"cfg.customer.timezone {tz_name!r} could not be resolved: {type(e).__name__}: {e}"
         )
@@ -326,6 +329,8 @@ def main() -> int:
                     original_message_id=args.message_id,
                     reason=reason,
                     detail=detail[:500] if detail else "",
+                    customer_tz=cfg.customer.timezone,
+                    event_date=extracted.event_date,
                 ),
                 context="rejected",
             )

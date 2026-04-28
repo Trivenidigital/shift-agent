@@ -383,11 +383,13 @@ def test_past_event_date_rejected(env_dir, bridge_server):
     # No state mutation
     leads_path = env_dir / "state" / "catering-leads.json"
     assert not leads_path.exists() or json.loads(leads_path.read_text()).get("leads", []) == []
-    # Audit trail RECORDED (CateringLeadRejected entry)
+    # Audit trail RECORDED with self-describing fields (PR-review MEDIUM-3+4)
     rejected = _read_audit_entries(env_dir, "catering_lead_rejected")
     assert len(rejected) == 1
     assert rejected[0]["reason"] == "event_date_past"
     assert rejected[0]["original_message_id"] == "MSG_PAST_001"
+    assert rejected[0]["customer_tz"] == "America/New_York"
+    assert rejected[0]["event_date"] == "2020-01-01"
     # No bridge call (approval card never sent)
     assert len(BridgeStub.requests) == 0
 
