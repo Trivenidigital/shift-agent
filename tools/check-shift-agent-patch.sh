@@ -31,10 +31,17 @@ info() { echo "  $1" >&2; }
 
 [ -r "$BASELINE_FILE" ] || fail "baseline pin file missing: $BASELINE_FILE"
 
-# Source-style read (ignore comment + blank lines)
-PINNED_COMMIT=$(grep "^HERMES_COMMIT=" "$BASELINE_FILE" | head -1 | cut -d= -f2-)
-PINNED_VERSION=$(grep "^HERMES_VERSION=" "$BASELINE_FILE" | head -1 | cut -d= -f2-)
-PINNED_BRIDGE_SHA=$(grep "^BRIDGE_POST_PATCH_SHA256=" "$BASELINE_FILE" | head -1 | cut -d= -f2-)
+# Source-style read (ignore comment + blank lines).
+# Strip ALL whitespace from values — defends against CRLF on the baseline file
+# (a recurring gotcha in this repo) and trailing spaces. A `\r` slipping into
+# PINNED_COMMIT would fail-close the deploy with no visible diff in operator
+# output, which is exactly the failure mode this gate is supposed to surface.
+_read_pin() {
+    grep "^${1}=" "$BASELINE_FILE" | head -1 | cut -d= -f2- | tr -d '[:space:]'
+}
+PINNED_COMMIT=$(_read_pin HERMES_COMMIT)
+PINNED_VERSION=$(_read_pin HERMES_VERSION)
+PINNED_BRIDGE_SHA=$(_read_pin BRIDGE_POST_PATCH_SHA256)
 
 [ -n "$PINNED_COMMIT" ] || fail "baseline missing HERMES_COMMIT field"
 [ -n "$PINNED_BRIDGE_SHA" ] || fail "baseline missing BRIDGE_POST_PATCH_SHA256 field"
@@ -56,7 +63,7 @@ if [ "$CURRENT_COMMIT" != "$PINNED_COMMIT" ]; then
         if [ -z "${HERMES_PIN_OVERRIDE_REASON:-}" ]; then
             fail "HERMES_PIN_OVERRIDE set but HERMES_PIN_OVERRIDE_REASON missing — both required"
         fi
-        warn "Hermes drift override accepted"
+        warn "Hermes drift override accepted (THIS RUN ONLY — unset HERMES_PIN_OVERRIDE after this deploy to avoid sticky-shell-var surprise on a later unrelated deploy)"
         info "  pinned:  $PINNED_COMMIT"
         info "  current: $CURRENT_COMMIT"
         info "  reason:  $HERMES_PIN_OVERRIDE_REASON"
@@ -66,10 +73,34 @@ if [ "$CURRENT_COMMIT" != "$PINNED_COMMIT" ]; then
         info "  and the new BRIDGE_POST_PATCH_SHA256, then commit + ship a new tarball."
         info "  Without that, the NEXT deploy will fail-close again."
 
-        # Best-effort audit log (not blocking — the warn above is the signal)
-        if [ -x /usr/local/bin/log-decision-direct ]; then
-            TS=$(date -Iseconds)
-            /usr/local/bin/log-decision-direct "$(printf '{"type":"agent_state_change","ts":"%s","to_state":"enabled","reason":"hermes_pin_override pinned=%s current=%s reason=%s"}' "$TS" "$PINNED_COMMIT" "$CURRENT_COMMIT" "${HERMES_PIN_OVERRIDE_REASON//\"/\\\"}")" 2>/dev/null || true
+        # Audit override events durably. Two-channel: a local fallback file
+        # (always succeeds, no dependencies) AND log-decision-direct (best-effort,
+        # may fail if binary missing or schema rejects). Don't gate audit on
+        # either alone — overrides are the single most important event to
+        # record because they bypass the gate's primary protection.
+        TS=$(date -Iseconds)
+        OVERRIDE_LOG=/opt/shift-agent/logs/pin-overrides.log
+        mkdir -p "$(dirname "$OVERRIDE_LOG")" 2>/dev/null || true
+        # Local fallback first — plain text, no dependencies, append-only.
+        printf '%s pinned=%s current=%s reason=%q\n' \
+            "$TS" "$PINNED_COMMIT" "$CURRENT_COMMIT" "$HERMES_PIN_OVERRIDE_REASON" \
+            >> "$OVERRIDE_LOG" 2>/dev/null || true
+        # Structured audit second. Build the JSON via python3 -c json.dumps so
+        # the reason string is properly escaped (handles backslashes, newlines,
+        # quotes, control chars — naive sed-escape misses backslashes + \n).
+        if [ -x /usr/local/bin/log-decision-direct ] && command -v python3 >/dev/null; then
+            ENTRY=$(python3 -c '
+import json, sys
+print(json.dumps({
+    "type": "agent_state_change",
+    "ts": sys.argv[1],
+    "to_state": "enabled",
+    "reason": f"hermes_pin_override pinned={sys.argv[2]} current={sys.argv[3]} reason={sys.argv[4]}",
+}))
+' "$TS" "$PINNED_COMMIT" "$CURRENT_COMMIT" "$HERMES_PIN_OVERRIDE_REASON" 2>/dev/null) || ENTRY=""
+            if [ -n "$ENTRY" ]; then
+                /usr/local/bin/log-decision-direct "$ENTRY" 2>/dev/null || true
+            fi
         fi
     else
         echo "FAIL: Hermes commit drift detected." >&2
