@@ -34,6 +34,7 @@ def test_catering_extracted_fields_optional_all():
     e = CateringLeadExtractedFields()  # all defaults
     assert e.headcount is None
     assert e.menu_preferences == []
+    assert e.off_menu_items == []
 
 
 def test_catering_extracted_validators():
@@ -129,7 +130,7 @@ def test_config_backward_compat_no_catering():
 
 
 # ─────────────────────────────────────────────────────────────────
-# off_menu_items field (C23 from catering test-case review thread)
+# off_menu_items field
 # ─────────────────────────────────────────────────────────────────
 
 
@@ -138,6 +139,16 @@ def test_off_menu_items_default_empty():
     with leads created before the field existed."""
     e = CateringLeadExtractedFields()
     assert e.off_menu_items == []
+
+
+def test_off_menu_items_default_empty_via_model_validate():
+    """Backward-compat: deserializing an existing state-file dict that lacks
+    off_menu_items must yield default []. This is the codepath used by
+    safe_io.load_model when reading state/catering-leads.json on the VPS,
+    distinct from the kwargs-construction path above."""
+    e = CateringLeadExtractedFields.model_validate({"headcount": 50})
+    assert e.off_menu_items == []
+    assert e.headcount == 50
 
 
 def test_off_menu_items_round_trip():
@@ -162,14 +173,20 @@ def test_off_menu_items_accepts_exactly_20():
 
 
 def test_off_menu_items_caps_item_length_at_200():
-    """Individual item names capped at 200 chars (matches MenuItem.name precedent)."""
+    """Individual item names capped at 200 chars."""
     with pytest.raises(ValidationError):
         CateringLeadExtractedFields(off_menu_items=["x" * 201])
 
 
+def test_off_menu_items_accepts_exactly_200_char_item():
+    """Boundary: 200 chars per item is allowed, 201 is not."""
+    e = CateringLeadExtractedFields(off_menu_items=["x" * 200])
+    assert len(e.off_menu_items[0]) == 200
+
+
 def test_off_menu_items_rejects_empty_string():
-    """Empty/whitespace-only entries would render as artifacts (e.g., trailing
-    `, ,` in joined output). min_length=1 prevents this at the schema level."""
+    """Empty entries would render as artifacts (e.g., trailing `, ,` in
+    joined output). min_length=1 prevents this at the schema level."""
     with pytest.raises(ValidationError):
         CateringLeadExtractedFields(off_menu_items=[""])
 
@@ -188,8 +205,7 @@ def test_off_menu_items_extra_ignore_still_works():
 
 def test_off_menu_items_rejects_non_list_shapes():
     """LLM emitting `off_menu_items: "mango lassi"` (string instead of list)
-    must fail loudly, not coerce silently. Catches a pr-test-analyzer concern
-    flagged in the design review."""
+    must fail loudly, not coerce silently."""
     with pytest.raises(ValidationError):
         CateringLeadExtractedFields(off_menu_items="mango lassi")
     with pytest.raises(ValidationError):
