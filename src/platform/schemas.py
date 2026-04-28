@@ -272,6 +272,53 @@ class DailyBriefConfig(BaseModel):
         return v
 
 
+# Agent #3 Multi-Location Coordinator config
+class LocationEntry(BaseModel):
+    """One location in a multi-location operator config (Agent #3).
+
+    For single-location customers this is unused — Customer.location_id is
+    the canonical id and CustomerConfig holds the timezone. Multi-location
+    customers (e.g. Triveni's 9 locations TX/MD/NC/SC/OH/VA) populate this
+    list and Agent #3 routes queries by location_id.
+    """
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(min_length=1)              # canonical id (e.g. "loc_jax_01")
+    name: str = Field(min_length=1)            # owner-friendly ("Jacksonville")
+    timezone: str                              # IANA tz; may differ across locations
+    owner_jid: str = ""                        # optional per-location owner (defaults to global)
+    address_short: str = ""                    # e.g. "Jacksonville, FL"
+
+    @field_validator("timezone")
+    @classmethod
+    def _valid_tz(cls, v: str) -> str:
+        try:
+            ZoneInfo(v)
+        except Exception as e:
+            raise ValueError(f"invalid IANA timezone {v!r}: {e}")
+        return v
+
+
+class MultiLocationConfig(BaseModel):
+    """Multi-location coordinator settings (Agent #3).
+
+    v0.1: schema scaffolding + cross-location query routing.
+    v0.2: inter-location coverage transfers, consolidated briefs.
+    Single-location customers leave `locations: []` — Agent #3 self-disables.
+    """
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = True
+    locations: list[LocationEntry] = Field(default_factory=list)
+    require_owner_approval_for_transfers: bool = True
+
+    @field_validator("locations")
+    @classmethod
+    def _unique_ids(cls, v: list[LocationEntry]) -> list[LocationEntry]:
+        ids = [loc.id for loc in v]
+        if len(ids) != len(set(ids)):
+            raise ValueError(f"duplicate location ids in multi_location.locations: {ids}")
+        return v
+
+
 # Agent #5 EOD Reconciliation config
 class EodConfig(BaseModel):
     """End-of-day reconciliation snapshot settings (Agent #5)."""
@@ -301,6 +348,7 @@ class Config(BaseModel):
     operations: OperationsConfig = OperationsConfig()
     daily_brief: DailyBriefConfig = Field(default_factory=DailyBriefConfig)
     eod: EodConfig = Field(default_factory=EodConfig)
+    multi_location: MultiLocationConfig = Field(default_factory=MultiLocationConfig)
 
     def tz(self) -> ZoneInfo:
         return ZoneInfo(self.customer.timezone)
@@ -685,6 +733,32 @@ class BriefSkipped(_BaseEntry):
 
 
 # ─────────────────────────────────────────────────────────────────
+# Multi-Location Coordinator log entries (Agent #3)
+# ─────────────────────────────────────────────────────────────────
+
+
+class CrossLocationQuery(_BaseEntry):
+    """Owner asked a cross-location question (e.g. 'who's at Houston tomorrow?')."""
+    type: Literal["cross_location_query"]
+    query_id: str = Field(min_length=1)
+    raw_query: str
+    location_ids_resolved: list[str]
+    answer_summary: str = ""
+
+
+class InterLocationTransferProposed(_BaseEntry):
+    """Agent #3 proposed an employee transfer between locations to cover a gap."""
+    type: Literal["inter_location_transfer_proposed"]
+    transfer_id: str = Field(min_length=1)
+    from_location_id: str
+    to_location_id: str
+    employee_id: str
+    proposed_date: str = Field(pattern=_BRIEF_DATE_RE)
+    reason: str = ""
+    requires_owner_approval: bool = True
+
+
+# ─────────────────────────────────────────────────────────────────
 # EOD Reconciliation log entries (Agent #5)
 # ─────────────────────────────────────────────────────────────────
 
@@ -740,6 +814,8 @@ LogEntry = Annotated[
         BriefAttempted, BriefSent, BriefSendFailed, BriefSkipped,
         # Agent #5 EOD Reconciliation
         EodSnapshot, EodPushoverSent, EodSkipped,
+        # Agent #3 Multi-Location Coordinator
+        CrossLocationQuery, InterLocationTransferProposed,
     ],
     Field(discriminator="type"),
 ]
@@ -750,6 +826,7 @@ __all__ = [
     "Config", "CustomerConfig", "OwnerConfig", "LimitsConfig", "AlertingConfig", "BackupConfig", "OperationsConfig",
     "DailyBriefConfig", "BriefSection",
     "EodConfig",
+    "LocationEntry", "MultiLocationConfig",
     "Proposal", "ProposalId", "ProposalCode",
     "AwaitingProposal", "ApprovedProposal", "ReconcilingProposal", "SentProposal",
     "SendFailedProposal", "AcceptedProposal", "DeclinedProposal", "DeniedByOwnerProposal",
@@ -763,4 +840,5 @@ __all__ = [
     "LidLearned",
     "BriefAttempted", "BriefSent", "BriefSendFailed", "BriefSkipped",
     "EodSnapshot", "EodPushoverSent", "EodSkipped",
+    "CrossLocationQuery", "InterLocationTransferProposed",
 ]

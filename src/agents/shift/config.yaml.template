@@ -67,3 +67,22 @@ eod:
   catchup_window_minutes: 120
   pushover_priority: 0         # -2..+2; auto-bumped to 1 if unresolved/failures exist
   pushover_only_if_unresolved: true  # quiet days: no Pushover
+
+# Agent #3 — Multi-Location Coordinator. Single-location customers leave
+# `locations: []` — Agent #3 self-disables. For multi-location operators
+# (e.g. Triveni's 9 stores across TX/MD/NC/SC/OH/VA), populate the list
+# below. Each location can override the global timezone.
+multi_location:
+  enabled: true
+  require_owner_approval_for_transfers: true
+  locations: []
+  # Example for a multi-location operator:
+  # locations:
+  #   - id: "loc_jax_01"
+  #     name: "Jacksonville"
+  #     timezone: "America/New_York"
+  #     address_short: "Jacksonville, FL"
+  #   - id: "loc_dal_01"
+  #     name: "Dallas"
+  #     timezone: "America/Chicago"
+  #     address_short: "Dallas, TX"
