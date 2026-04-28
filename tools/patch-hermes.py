@@ -224,14 +224,16 @@ def _patch_run_py():
         return
     text = RUN.read_text()
 
-    # Anchor 1: insert flag block after `import os` near the top
-    if "import os" not in text:
-        sys.stderr.write(f"FAIL: cannot locate `import os` in {RUN}\n")
+    # Anchor 1: insert flag block after the standalone `import os` line.
+    # Line-anchored regex so we don't match `import os.path` or `# import os`.
+    anchor_re = re.compile(r"^import os$", re.MULTILINE)
+    if not anchor_re.search(text):
+        sys.stderr.write(f"FAIL: cannot locate standalone `import os` line in {RUN}\n")
         sys.exit(1)
-    text = text.replace("import os", "import os" + RUN_PY_FLAG_BLOCK, 1)
+    text = anchor_re.sub("import os" + RUN_PY_FLAG_BLOCK, text, count=1)
 
-    # Anchor 2: in `_prepare_inbound_message_text`, inject BEFORE the existing
-    # `[{user_name}]` prefix (so sender block is line 1 unconditionally).
+    # Anchor 2: in `_prepare_inbound_message_text`, inject BEFORE the
+    # existing `[{user_name}]` prefix so sender block is line 1.
     pattern = re.compile(
         r"(    async def _prepare_inbound_message_text.*?\n"
         r"(?:        .*\n)*?)"
@@ -240,20 +242,19 @@ def _patch_run_py():
     )
     m = pattern.search(text)
     if not m:
-        # Fallback: find the function and insert at end of body before return
-        sys.stderr.write(f"WARN: could not locate ideal inject site in _prepare_inbound_message_text — may need manual placement\n")
-        # Try a simpler search: just `_prepare_inbound_message_text`
-        anchor_pattern = re.compile(r"(    async def _prepare_inbound_message_text\b[^\n]*\n)")
-        m2 = anchor_pattern.search(text)
-        if not m2:
-            sys.stderr.write(f"FAIL: cannot locate _prepare_inbound_message_text in {RUN}\n")
-            sys.exit(1)
-        # Insert right after the function signature line
-        insert_at = m2.end()
-        text = text[:insert_at] + RUN_PY_INJECT_BLOCK + text[insert_at:]
-    else:
-        # Insert the inject block BEFORE the user-name prefix
-        text = text[:m.start(2)] + RUN_PY_INJECT_BLOCK + text[m.start(2):]
+        # FAIL CLOSED — silent insertion at the function signature
+        # (the previous fallback) leads to inject running before
+        # `message_text` is defined → broad except in inject swallows the
+        # NameError every message → silent feature-off. Better to fail
+        # loudly so an operator notices on the next Hermes upgrade.
+        sys.stderr.write(
+            f"FAIL: ideal inject site not found in _prepare_inbound_message_text in {RUN}\n"
+            f"      The function exists but the `_is_shared_multi_user` anchor is missing.\n"
+            f"      Manually inspect Hermes' run.py and update tools/patch-hermes.py.\n"
+        )
+        sys.exit(1)
+    # Insert the inject block BEFORE the user-name prefix
+    text = text[:m.start(2)] + RUN_PY_INJECT_BLOCK + text[m.start(2):]
 
     RUN.write_text(text)
     print(f"  ✓ patched {RUN}")
@@ -265,8 +266,7 @@ def _patch_bridge_js():
         return
     text = BR.read_text()
 
-    # Anchor: insert helpers after the existing function declarations.
-    # Use `app.use(express.json())` as a stable late-init point.
+    # Anchor 1: insert helpers after express.json() init.
     anchor = re.search(r"^app\.use\(express\.json\(\)\);", text, re.MULTILINE)
     if not anchor:
         sys.stderr.write(f"FAIL: cannot locate express.json anchor in {BR}\n")
@@ -274,17 +274,39 @@ def _patch_bridge_js():
     insert_at = anchor.end()
     text = text[:insert_at] + "\n" + BRIDGE_JS_HELPERS + "\n" + text[insert_at:]
 
-    # Add the call to _shiftWriteLidCacheEntry near messageQueue.push.
-    # We append a marker block that captures the most recent senderPhone/Lid;
-    # since we can't easily mutate the existing event object insertion in this
-    # generic patcher, we instead append a hook AFTER messageQueue.push.
-    # But note: bridge.js may already not have senderPhone/senderLid on the
-    # event. Our complete patch (the v2 design) extends the queued event
-    # shape; that's a more invasive change deferred to manual review on the
-    # VPS.
+    # Anchor 2: wire _shiftResolveSender into the message-build site so
+    # the queued event carries fromMe/senderPhone/senderLid.
+    # We look for `messageQueue.push(event);` and inject a resolver call
+    # immediately before it that mutates `event` in place. If that call
+    # site cannot be located, we MUST fail loudly (not silently): the
+    # earlier "helpers inserted; event-shape extension manual" was a
+    # silent feature-off bug.
+    push_re = re.compile(r"^(\s*)messageQueue\.push\(event\);", re.MULTILINE)
+    m = push_re.search(text)
+    if not m:
+        sys.stderr.write(
+            f"FAIL: cannot locate `messageQueue.push(event)` in {BR}\n"
+            f"      The event-shape extension cannot be applied automatically.\n"
+            f"      Manually wire `_shiftResolveSender` into the event object.\n"
+        )
+        sys.exit(1)
+    indent = m.group(1)
+    wire = (
+        f'{indent}// BEGIN shift-agent-sender-id (event-shape extension)\n'
+        f'{indent}try {{\n'
+        f'{indent}  const _s = _shiftResolveSender(msg, sock, '
+        f'(typeof lidToPhone !== "undefined" ? lidToPhone : null));\n'
+        f'{indent}  event.fromMe = _s.fromMe;\n'
+        f'{indent}  event.senderPhone = _s.senderPhone;\n'
+        f'{indent}  event.senderLid = _s.senderLid;\n'
+        f'{indent}  _shiftWriteLidCacheEntry(_s.senderPhone, _s.senderLid);\n'
+        f'{indent}}} catch (_e) {{ console.error("[shift-agent] resolve failed:", _e); }}\n'
+        f'{indent}// END shift-agent-sender-id (event-shape extension)\n'
+    )
+    text = text[:m.start()] + wire + text[m.start():]
 
     BR.write_text(text)
-    print(f"  ✓ patched {BR} (helpers inserted; event-shape extension may need manual review)")
+    print(f"  ✓ patched {BR} (helpers + event-shape wiring)")
 
 
 def main() -> int:

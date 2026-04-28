@@ -88,10 +88,12 @@ class PhoneAssignment(BaseModel):
 
 
 class Employee(BaseModel):
-    # BEGIN shift-agent-sender-id (extra=ignore enables safe rollback of the
-    # `lid` field — older code that doesn't know about lid won't reject it)
-    model_config = ConfigDict(extra="ignore")
-    # END shift-agent-sender-id
+    # extra="forbid" preserved: `lid` is now a properly-typed Optional
+    # field, so older code reading newer rosters (post-rollback) only
+    # rejects unknown OTHER fields — typo detection in hand-edited
+    # rosters stays valuable. Rollback procedure (see RUNBOOK.md) strips
+    # `lid` from roster.json BEFORE reverting schemas.py.
+    model_config = ConfigDict(extra="forbid")
 
     id: EmployeeId
     name: str
@@ -550,6 +552,16 @@ class LidLearned(_BaseEntry):
     employee_id: Optional[EmployeeId] = None  # set when target == "employee"
     old_lid: Optional[str] = Field(default=None, pattern=r"^\d{6,20}@lid$")
     new_lid: str = Field(pattern=r"^\d{6,20}@lid$")
+
+    @model_validator(mode="after")
+    def _target_employee_id_consistency(self):
+        if self.target == "employee" and not self.employee_id:
+            raise ValueError("LidLearned: target='employee' requires employee_id")
+        if self.target == "owner" and self.employee_id:
+            raise ValueError("LidLearned: target='owner' must NOT carry employee_id")
+        if self.old_lid is not None and self.old_lid == self.new_lid:
+            raise ValueError("LidLearned: old_lid == new_lid (no learning happened)")
+        return self
 # END shift-agent-sender-id
 
 

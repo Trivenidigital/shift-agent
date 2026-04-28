@@ -82,6 +82,20 @@ class FileLock:
                 self.fd = None
 
 
+# BEGIN shift-agent-sender-id
+def flock(path):
+    """Convenience wrapper: hold an exclusive lock on `<path>.lock` (sibling
+    lock file). Used by every script that mutates roster.json or pending.json
+    so writers serialize regardless of which entry point invoked them.
+
+    Usage:
+        with flock(roster_path):
+            ...
+    """
+    return FileLock(Path(str(path) + ".lock"))
+# END shift-agent-sender-id
+
+
 def safe_load_json(path: Path, default: Any = None) -> Tuple[Any, str]:
     """
     Load a JSON file with explicit failure signaling.

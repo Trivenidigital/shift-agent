@@ -14,7 +14,6 @@ Responsibilities:
 """
 from __future__ import annotations
 import re
-import unicodedata
 from typing import Any
 
 # BEGIN shift-agent-sender-id (canonical regex source-of-truth — bridge.js
@@ -104,18 +103,21 @@ def _sanitize_user_body(body: str) -> str:
     """Defeat impersonation attempts where the user's message body contains
     `[shift-agent-sender ...]` (DC5).
 
-    Steps (in order):
-    1. NFKC-normalize so Unicode lookalikes (Cyrillic 's', etc.) collapse
-       to their canonical form.
-    2. Strip zero-width and bidi-override characters that could split the
-       literal `[shift-agent-sender` prefix into invisible pieces.
-    3. Replace any remaining occurrence with `[shift-agent-sender-stripped`
-       so the block is no longer recognisable as a v=1 marker.
+    IMPORTANT: must NOT NFKC-normalize the body. Multilingual employees
+    write in Tamil/Telugu/Hindi using combining forms NFKC would alter,
+    and the audit log (which receives the post-sanitize body) must preserve
+    the user's actual text. We strip ONLY zero-width / bidi-override chars,
+    which have no legitimate use in chat messages and are the reliable
+    spoofing vector (they can split `[shift-agent-sender` into invisible
+    pieces that bypass the regex). Homoglyph attacks (Cyrillic 'ѕ' that
+    looks like 's') are NOT defeated here — the dispatcher's fail-closed
+    v=1 assertion at validate-sender-block handles those downstream.
     """
     if not body:
         return body
-    body = unicodedata.normalize("NFKC", body)
+    # Strip zero-width / bidi controls — never legitimate in chat input.
     body = _INVISIBLES.sub("", body)
+    # Replace any prefix occurrence so the block no longer parses as v=1.
     return _PRE_BLOCK.sub("[shift-agent-sender-stripped", body)
 
 

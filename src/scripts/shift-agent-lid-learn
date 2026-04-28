@@ -135,10 +135,15 @@ def main() -> int:
             atomic_write_json(ROSTER, roster_doc, mode=0o644)
 
         if cfg_dirty:
-            # tmp+rename for atomicity (consistent with safe_io.atomic_write_text)
-            tmp = CONFIG.with_suffix(CONFIG.suffix + ".tmp-lid-learn")
-            tmp.write_text(yaml.safe_dump(cfg_doc, sort_keys=False, default_flow_style=False))
-            os.replace(str(tmp), str(CONFIG))
+            # Use safe_io.atomic_write_text for full durability semantics:
+            # tmp file with PID+ms suffix (no race), fsync the tmp file,
+            # rename, fsync the parent dir. Direct tmp.write_text + os.replace
+            # has neither fsync nor unique-tmp guarantees.
+            atomic_write_text(
+                CONFIG,
+                yaml.safe_dump(cfg_doc, sort_keys=False, default_flow_style=False),
+                mode=0o644,
+            )
 
         # Trim applied phones from cache so it doesn't grow unbounded.
         if applied:
