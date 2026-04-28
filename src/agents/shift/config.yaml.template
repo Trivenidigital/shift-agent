@@ -86,3 +86,13 @@ multi_location:
   #     name: "Dallas"
   #     timezone: "America/Chicago"
   #     address_short: "Dallas, TX"
+
+# Agent #2 — Catering Lead. Default OFF (opt-in). When enabled, customer
+# catering inquiries flow through extract → owner approval → send-quote.
+# v0.1: schemas + SKILL stubs only. Real classifier/extractor/drafter
+# lands in v0.2 once a pilot customer onboards.
+catering:
+  enabled: false
+  deposit_threshold_guests: 50      # require deposit for events >= N guests
+  deposit_pct: 0.25                 # 25% deposit
+  stale_after_hours: 336            # 14 days — silent leads move to STALE

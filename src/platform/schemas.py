@@ -272,6 +272,77 @@ class DailyBriefConfig(BaseModel):
         return v
 
 
+# Agent #2 Catering Lead config + state-machine
+CateringLeadStatus = Literal[
+    "NEW",                      # raw inquiry just arrived
+    "EXTRACTING",               # extractor running (LLM)
+    "NOT_CATERING",             # classifier said no (terminal)
+    "AWAITING_OWNER_APPROVAL",  # quote drafted; owner needs to approve
+    "OWNER_APPROVED",           # owner said go
+    "OWNER_EDITED",             # owner sent edits; re-draft pending
+    "OWNER_REJECTED",           # owner declined (terminal)
+    "SENT_TO_CUSTOMER",         # quote sent to inquirer
+    "CLOSED",                   # terminal — booked or customer-declined
+    "STALE",                    # terminal — silent for too long
+]
+
+CATERING_TERMINAL_STATUSES = frozenset({
+    "NOT_CATERING", "OWNER_REJECTED", "CLOSED", "STALE",
+})
+
+
+def is_catering_terminal(status: str) -> bool:
+    return status in CATERING_TERMINAL_STATUSES
+
+
+class CateringConfig(BaseModel):
+    """Catering Lead (Agent #2) settings."""
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False  # default OFF — opt-in (offshore work pending integration)
+    deposit_threshold_guests: int = Field(default=50, ge=1)
+    deposit_pct: float = Field(default=0.25, ge=0.0, le=1.0)
+    stale_after_hours: int = Field(default=14 * 24, ge=1)  # 14 days default
+    # Per-customer pricing knobs land in v0.2 (would otherwise bloat config).
+
+
+class CateringLeadExtractedFields(BaseModel):
+    """LLM-extracted structure from a catering inquiry. All optional — owner
+    fills in gaps via edit flow."""
+    model_config = ConfigDict(extra="ignore")  # extractor may emit extras
+    headcount: Optional[int] = Field(default=None, ge=1, le=10000)
+    event_date: Optional[str] = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    event_time: Optional[str] = Field(default=None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    menu_preferences: list[str] = Field(default_factory=list)
+    dietary_restrictions: list[str] = Field(default_factory=list)
+    delivery_or_pickup: Optional[Literal["delivery", "pickup", "unknown"]] = None
+    budget_hint_usd: Optional[int] = Field(default=None, ge=0)
+    notes: str = ""
+
+
+class CateringLead(BaseModel):
+    """One catering lead — full lifecycle from inquiry to closure."""
+    model_config = ConfigDict(extra="forbid")
+    lead_id: str = Field(min_length=1)
+    status: CateringLeadStatus
+    customer_phone: E164Phone
+    customer_name: Optional[str] = None
+    raw_inquiry: str
+    original_message_id: str = Field(min_length=1)  # idempotency key (Meta msg id)
+    created_at: datetime
+    updated_at: datetime
+    extracted: CateringLeadExtractedFields = Field(default_factory=CateringLeadExtractedFields)
+    quote_text: str = ""                    # drafted by Sonnet/Kimi in v0.2
+    quote_version: int = Field(default=0, ge=0)
+    owner_approval_code: Optional[ProposalCode] = None  # reuses Shift's pattern
+    customer_replied: bool = False
+
+
+class CateringLeadStore(BaseModel):
+    """Per-customer catering leads (lives at /opt/shift-agent/state/catering-leads.json)."""
+    model_config = ConfigDict(extra="forbid")
+    leads: list[CateringLead] = Field(default_factory=list)
+
+
 # Agent #3 Multi-Location Coordinator config
 class LocationEntry(BaseModel):
     """One location in a multi-location operator config (Agent #3).
@@ -349,6 +420,7 @@ class Config(BaseModel):
     daily_brief: DailyBriefConfig = Field(default_factory=DailyBriefConfig)
     eod: EodConfig = Field(default_factory=EodConfig)
     multi_location: MultiLocationConfig = Field(default_factory=MultiLocationConfig)
+    catering: CateringConfig = Field(default_factory=CateringConfig)
 
     def tz(self) -> ZoneInfo:
         return ZoneInfo(self.customer.timezone)
@@ -733,6 +805,54 @@ class BriefSkipped(_BaseEntry):
 
 
 # ─────────────────────────────────────────────────────────────────
+# Catering Lead log entries (Agent #2)
+# ─────────────────────────────────────────────────────────────────
+
+
+class CateringLeadCreated(_BaseEntry):
+    type: Literal["catering_lead_created"]
+    lead_id: str = Field(min_length=1)
+    customer_phone: E164Phone
+    original_message_id: str = Field(min_length=1)
+
+
+class CateringLeadStatusChange(_BaseEntry):
+    type: Literal["catering_lead_status_change"]
+    lead_id: str = Field(min_length=1)
+    from_status: CateringLeadStatus
+    to_status: CateringLeadStatus
+    actor: Literal["system", "owner", "customer"]
+    reason: str = ""
+
+
+class CateringQuoteDrafted(_BaseEntry):
+    type: Literal["catering_quote_drafted"]
+    lead_id: str = Field(min_length=1)
+    quote_version: int = Field(ge=0)
+    word_count: int = Field(ge=0)
+
+
+class CateringOwnerApprovalRequested(_BaseEntry):
+    type: Literal["catering_owner_approval_requested"]
+    lead_id: str = Field(min_length=1)
+    approval_code: str = Field(min_length=1)
+
+
+class CateringOwnerDecision(_BaseEntry):
+    type: Literal["catering_owner_decision"]
+    lead_id: str = Field(min_length=1)
+    decision: Literal["approve", "reject", "edit"]
+    edit_text: str = ""
+
+
+class CateringQuoteSent(_BaseEntry):
+    type: Literal["catering_quote_sent"]
+    lead_id: str = Field(min_length=1)
+    customer_phone: E164Phone
+    outbound_message_id: str = Field(min_length=1)
+
+
+# ─────────────────────────────────────────────────────────────────
 # Multi-Location Coordinator log entries (Agent #3)
 # ─────────────────────────────────────────────────────────────────
 
@@ -816,6 +936,9 @@ LogEntry = Annotated[
         EodSnapshot, EodPushoverSent, EodSkipped,
         # Agent #3 Multi-Location Coordinator
         CrossLocationQuery, InterLocationTransferProposed,
+        # Agent #2 Catering Lead
+        CateringLeadCreated, CateringLeadStatusChange, CateringQuoteDrafted,
+        CateringOwnerApprovalRequested, CateringOwnerDecision, CateringQuoteSent,
     ],
     Field(discriminator="type"),
 ]
@@ -827,6 +950,9 @@ __all__ = [
     "DailyBriefConfig", "BriefSection",
     "EodConfig",
     "LocationEntry", "MultiLocationConfig",
+    "CateringConfig", "CateringLeadStatus", "CateringLeadExtractedFields",
+    "CateringLead", "CateringLeadStore",
+    "is_catering_terminal", "CATERING_TERMINAL_STATUSES",
     "Proposal", "ProposalId", "ProposalCode",
     "AwaitingProposal", "ApprovedProposal", "ReconcilingProposal", "SentProposal",
     "SendFailedProposal", "AcceptedProposal", "DeclinedProposal", "DeniedByOwnerProposal",
@@ -841,4 +967,6 @@ __all__ = [
     "BriefAttempted", "BriefSent", "BriefSendFailed", "BriefSkipped",
     "EodSnapshot", "EodPushoverSent", "EodSkipped",
     "CrossLocationQuery", "InterLocationTransferProposed",
+    "CateringLeadCreated", "CateringLeadStatusChange", "CateringQuoteDrafted",
+    "CateringOwnerApprovalRequested", "CateringOwnerDecision", "CateringQuoteSent",
 ]
