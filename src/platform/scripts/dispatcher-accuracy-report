@@ -1,0 +1,287 @@
+#!/usr/bin/env python3
+"""dispatcher-accuracy-report — measure dispatcher routing reliability.
+
+Reads decisions.log and pairs each raw_inbound entry with its corresponding
+dispatcher_routed entry (or unknown_sender_declined for declined senders).
+Unpaired raw_inbound entries mean Kimi pattern-matched message content and
+skipped the dispatch_shift_agent SKILL — the exact failure mode the JSONL
+post-mortem surfaced before this script existed.
+
+Pairing rules:
+  1. raw_inbound + dispatcher_routed match by message_id (preferred, exact)
+  2. raw_inbound + unknown_sender_declined match by sender_phone or sender_lid
+     within PAIR_WINDOW_SECONDS (fallback, fuzzy — declines may not carry
+     message_id)
+
+Usage:
+  dispatcher-accuracy-report                    # last 7 days, text
+  dispatcher-accuracy-report --days 30          # last 30 days
+  dispatcher-accuracy-report --format json      # machine-readable
+  dispatcher-accuracy-report --log /path/to/decisions.log
+
+Exit codes:
+  0 — report rendered (regardless of accuracy floor; this is observability,
+      not a gate)
+  2 — invalid input (bad --since/--until, missing log file)
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Iterable
+
+DEFAULT_LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+PAIR_WINDOW_SECONDS = 10
+
+
+def _parse_ts(s: str) -> datetime:
+    """ISO-8601 with timezone. decisions.log entries always carry tz."""
+    return datetime.fromisoformat(s)
+
+
+def load_entries(
+    log_path: Path,
+    since: datetime | None = None,
+    until: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Read NDJSON, filter by timestamp window. Bad lines silently skipped —
+    this is monitoring, not validation."""
+    entries: list[dict[str, Any]] = []
+    with log_path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            ts_raw = e.get("ts")
+            if not ts_raw:
+                continue
+            try:
+                ts = _parse_ts(ts_raw)
+            except ValueError:
+                continue
+            if since and ts < since:
+                continue
+            if until and ts > until:
+                continue
+            entries.append(e)
+    return entries
+
+
+def pair_inbounds(
+    entries: Iterable[dict[str, Any]],
+    pair_window_seconds: int = PAIR_WINDOW_SECONDS,
+) -> tuple[list[tuple[dict, dict, str]], list[dict]]:
+    """Group entries by type and match each raw_inbound to its routing decision.
+
+    Returns (paired, unpaired). Each paired tuple is (inbound, match, kind)
+    where kind is 'dispatcher_routed' or 'unknown_sender_declined'.
+    """
+    inbounds = [e for e in entries if e.get("type") == "raw_inbound"]
+    routed = [e for e in entries if e.get("type") == "dispatcher_routed"]
+    declined = [e for e in entries if e.get("type") == "unknown_sender_declined"]
+
+    routed_by_mid = {e.get("message_id"): e for e in routed if e.get("message_id")}
+
+    paired: list[tuple[dict, dict, str]] = []
+    unpaired: list[dict] = []
+
+    for inb in inbounds:
+        mid = inb.get("message_id")
+        match = routed_by_mid.get(mid) if mid else None
+        if match:
+            paired.append((inb, match, "dispatcher_routed"))
+            continue
+
+        try:
+            inb_ts = _parse_ts(inb.get("ts", ""))
+        except (ValueError, TypeError):
+            unpaired.append(inb)
+            continue
+
+        decline_match = None
+        for d in declined:
+            try:
+                d_ts = _parse_ts(d.get("ts", ""))
+            except (ValueError, TypeError):
+                continue
+            if abs((d_ts - inb_ts).total_seconds()) > pair_window_seconds:
+                continue
+            phone_match = d.get("sender_phone") and d.get("sender_phone") == inb.get("sender_phone")
+            lid_match = d.get("sender_lid") and d.get("sender_lid") == inb.get("sender_lid")
+            if phone_match or lid_match:
+                decline_match = d
+                break
+
+        if decline_match:
+            paired.append((inb, decline_match, "unknown_sender_declined"))
+        else:
+            unpaired.append(inb)
+
+    return paired, unpaired
+
+
+def _coverage_pct(paired_count: int, total: int) -> float:
+    return round(paired_count / total * 100, 1) if total else 0.0
+
+
+def format_text_report(
+    paired: list[tuple[dict, dict, str]],
+    unpaired: list[dict],
+    since: datetime,
+    until: datetime,
+    unpaired_sample_size: int = 20,
+) -> str:
+    total = len(paired) + len(unpaired)
+    coverage = _coverage_pct(len(paired), total)
+
+    lines = [
+        f"Dispatcher Accuracy Report — {since.date()} to {until.date()}",
+        "=" * 70,
+        "",
+        f"Inbound traffic:    {total} raw_inbound entries",
+        f"Routing coverage:   {len(paired)}/{total} ({coverage}%)",
+        f"Unpaired (skipped): {len(unpaired)}",
+        "",
+    ]
+
+    shape_counts: dict[str, int] = defaultdict(int)
+    role_counts: dict[str, int] = defaultdict(int)
+    skill_counts: dict[str, int] = defaultdict(int)
+    declined_count = 0
+
+    for _inb, match, kind in paired:
+        if kind == "dispatcher_routed":
+            shape_counts[match.get("message_shape", "?")] += 1
+            role_counts[match.get("sender_role", "?")] += 1
+            skill_counts[match.get("routed_to_skill", "?")] += 1
+        else:
+            declined_count += 1
+
+    if shape_counts:
+        lines.append("Routed by message_shape:")
+        for shape, n in sorted(shape_counts.items(), key=lambda kv: -kv[1]):
+            lines.append(f"  {shape:22s} {n:>4d}")
+        lines.append("")
+
+    if role_counts:
+        lines.append("Routed by sender_role:")
+        for role, n in sorted(role_counts.items(), key=lambda kv: -kv[1]):
+            lines.append(f"  {role:22s} {n:>4d}")
+        lines.append("")
+
+    if skill_counts:
+        lines.append("Top destination skills:")
+        for skill, n in sorted(skill_counts.items(), key=lambda kv: -kv[1])[:10]:
+            lines.append(f"  {skill:32s} {n:>4d}")
+        lines.append("")
+
+    if declined_count:
+        lines.append(f"Declined unknown senders: {declined_count}")
+        lines.append("")
+
+    if unpaired:
+        lines.append("Unpaired raw_inbound (Kimi likely skipped dispatcher):")
+        for inb in unpaired[:unpaired_sample_size]:
+            ts = inb.get("ts", "?")[:19]
+            mid = (inb.get("message_id") or "")[:30]
+            sender = inb.get("sender_phone") or inb.get("sender_lid") or "?"
+            preview = (inb.get("input_message") or "").replace("\n", " ")[:50]
+            lines.append(f"  {ts}  mid={mid:30s} sender={sender:18s} text={preview!r}")
+        if len(unpaired) > unpaired_sample_size:
+            lines.append(f"  ... and {len(unpaired) - unpaired_sample_size} more")
+
+    return "\n".join(lines)
+
+
+def format_json_report(
+    paired: list[tuple[dict, dict, str]],
+    unpaired: list[dict],
+    since: datetime,
+    until: datetime,
+) -> str:
+    total = len(paired) + len(unpaired)
+    shape_counts: dict[str, int] = defaultdict(int)
+    role_counts: dict[str, int] = defaultdict(int)
+    skill_counts: dict[str, int] = defaultdict(int)
+    declined_count = 0
+    for _inb, match, kind in paired:
+        if kind == "dispatcher_routed":
+            shape_counts[match.get("message_shape", "?")] += 1
+            role_counts[match.get("sender_role", "?")] += 1
+            skill_counts[match.get("routed_to_skill", "?")] += 1
+        else:
+            declined_count += 1
+
+    return json.dumps(
+        {
+            "window": {"since": since.isoformat(), "until": until.isoformat()},
+            "total_raw_inbound": total,
+            "paired_count": len(paired),
+            "unpaired_count": len(unpaired),
+            "declined_count": declined_count,
+            "coverage_pct": _coverage_pct(len(paired), total),
+            "by_message_shape": dict(shape_counts),
+            "by_sender_role": dict(role_counts),
+            "by_routed_to_skill": dict(skill_counts),
+            "unpaired": [
+                {
+                    "ts": inb.get("ts"),
+                    "message_id": inb.get("message_id"),
+                    "sender_phone": inb.get("sender_phone"),
+                    "sender_lid": inb.get("sender_lid"),
+                    "input_preview": (inb.get("input_message") or "")[:80],
+                }
+                for inb in unpaired
+            ],
+        },
+        indent=2,
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--log", default=str(DEFAULT_LOG_PATH),
+                    help=f"path to decisions.log (default: {DEFAULT_LOG_PATH})")
+    ap.add_argument("--since", help="ISO timestamp; only include entries on/after")
+    ap.add_argument("--until", help="ISO timestamp; only include entries on/before")
+    ap.add_argument("--days", type=int, default=7,
+                    help="days back from now (default 7; overridden by --since)")
+    ap.add_argument("--format", choices=["text", "json"], default="text")
+    ap.add_argument("--window-seconds", type=int, default=PAIR_WINDOW_SECONDS,
+                    help=f"pair time-window for fallback matching (default {PAIR_WINDOW_SECONDS})")
+    args = ap.parse_args(argv)
+
+    log_path = Path(args.log)
+    if not log_path.exists():
+        sys.stderr.write(f"log file not found: {log_path}\n")
+        return 2
+
+    now = datetime.now(timezone.utc).astimezone()
+    try:
+        since = _parse_ts(args.since) if args.since else now - timedelta(days=args.days)
+        until = _parse_ts(args.until) if args.until else now
+    except ValueError as e:
+        sys.stderr.write(f"invalid timestamp: {e}\n")
+        return 2
+
+    entries = load_entries(log_path, since=since, until=until)
+    paired, unpaired = pair_inbounds(entries, pair_window_seconds=args.window_seconds)
+
+    if args.format == "json":
+        print(format_json_report(paired, unpaired, since, until))
+    else:
+        print(format_text_report(paired, unpaired, since, until))
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
