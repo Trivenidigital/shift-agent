@@ -27,11 +27,20 @@ if [ -L "$SHIFT_ENV" ] && [ "$(readlink "$SHIFT_ENV")" = "$HERMES_ENV" ]; then
     exit 0
 fi
 
-# Extract values for a key (exact match, last assignment wins). Strips trailing
-# whitespace including \r so Windows-line-ending files don't false-positive.
+# Extract values for a key (exact match, last assignment wins). Normalizes:
+#   - trailing whitespace including \r (CRLF tolerance)
+#   - surrounding double or single quotes (Hermes' Python dotenv loader and
+#     shell export both strip these, so KEY="foo" and KEY=foo are semantically
+#     identical — comparing them as drift would false-positive on operators
+#     who quote one file and not the other)
 _value_of() {
     local file="$1" key="$2"
-    grep "^${key}=" "$file" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '\r' | sed 's/[[:space:]]\+$//'
+    grep "^${key}=" "$file" 2>/dev/null \
+        | tail -1 \
+        | cut -d= -f2- \
+        | tr -d '\r' \
+        | sed 's/[[:space:]]\+$//' \
+        | sed -E 's/^"(.*)"$/\1/; s/^'\''(.*)'\''$/\1/'
 }
 
 # All keys present in either file (union)
@@ -68,11 +77,12 @@ if [ "$DRIFT_COUNT" -eq 0 ]; then
     exit 0
 fi
 
+N=$(echo "$COMMON_KEYS" | wc -w)
 cat >&2 <<EOF
 
-ACTION REQUIRED: $DRIFT_COUNT key(s) have drifted between the two .env files.
-Reconcile manually before running migrate-env-to-symlink.sh. Decide which file
-is canonical:
+ACTION REQUIRED: $DRIFT_COUNT of $N overlapping key(s) have drifted between the
+two .env files. Reconcile manually before running migrate-env-to-symlink.sh.
+Decide which file is canonical:
 
   - If $HERMES_ENV is correct, copy values to $SHIFT_ENV
   - If $SHIFT_ENV is correct, copy values to $HERMES_ENV

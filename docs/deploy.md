@@ -112,7 +112,9 @@ Pre-consolidation, the two files drifted independently and yesterday's auth-key 
 ### Editing rules
 
 - **Always edit `/root/.hermes/.env`**, never the symlink path. (Most editors handle symlinks correctly, but redirect-to-file via `> /root/.hermes/.env` truncates the target which is fine; redirect-to-file via `> /opt/shift-agent/.env` may break the symlink depending on the operator's shell.)
-- After editing, restart any services that need to pick up the change. Most commonly: `sudo systemctl restart hermes-gateway shift-agent-cockpit`.
+- After editing, **restart** services that need to pick up the change — `systemctl reload` will NOT reread `EnvironmentFile=`. systemd parses env files at unit *activation* (each `start`/`restart`), then injects them into the process's environment block; the long-running process never re-reads. Same for Hermes' Python `load_dotenv()` — it runs once at module import. So:
+  - `sudo systemctl restart hermes-gateway shift-agent-cockpit` after any `.env` change
+  - `reload` is a no-op for env-file changes; don't be misled if it succeeds silently
 - The `tools/check-env-drift.sh` script (used during the original consolidation) still runs but trivially exits 0 once the symlink is in place. Useful to confirm the symlink is intact.
 
 ### Pre-flight gate in `shift-agent-deploy.sh`

@@ -37,15 +37,19 @@ fi
 [ -r "$HERMES_ENV" ] || { echo "FAIL: $HERMES_ENV missing or unreadable" >&2; exit 2; }
 [ -f "$SHIFT_ENV" ]  || { echo "FAIL: $SHIFT_ENV missing or unreadable"  >&2; exit 2; }
 
-# Pre-flight 2: drift check must pass
-if [ -x "$SCRIPT_DIR/check-env-drift.sh" ]; then
-    echo "=== Pre-flight: drift check ==="
-    if ! "$SCRIPT_DIR/check-env-drift.sh"; then
-        echo "FAIL: drift detected; aborting migration. Reconcile and retry." >&2
-        exit 1
-    fi
-else
-    echo "WARN: check-env-drift.sh not found alongside this script — skipping drift gate" >&2
+# Pre-flight 2: drift check must pass. FAIL (not WARN) if missing — same
+# "missing safety check is dangerous" policy applied to deploy.sh's pin gate.
+# A migration that bypasses drift-detection is exactly the failure mode this
+# work exists to prevent.
+if [ ! -x "$SCRIPT_DIR/check-env-drift.sh" ]; then
+    echo "FAIL: $SCRIPT_DIR/check-env-drift.sh missing or not executable." >&2
+    echo "  Refusing to migrate without the drift gate." >&2
+    exit 2
+fi
+echo "=== Pre-flight: drift check ==="
+if ! "$SCRIPT_DIR/check-env-drift.sh"; then
+    echo "FAIL: drift detected; aborting migration. Reconcile and retry." >&2
+    exit 1
 fi
 
 # Migration step 1: copy any keys that exist ONLY in shift-agent .env into Hermes .env.
@@ -61,19 +65,31 @@ ONLY_IN_SHIFT=$(comm -23 <(echo "$SHIFT_KEYS") <(echo "$HERMES_KEYS"))
 if [ -z "$ONLY_IN_SHIFT" ]; then
     echo "  (no shift-agent-only keys to migrate)"
 else
-    # Append a section header so the operator can find migrated keys later
+    # Append a section header so the operator can find migrated keys later.
+    # Use printf for portability (some /bin/sh echo interprets backslashes).
     {
-        echo ""
-        echo "# Migrated from /opt/shift-agent/.env on $(date -Iseconds) by migrate-env-to-symlink.sh"
+        printf '\n'
+        printf '# Migrated from /opt/shift-agent/.env on %s by migrate-env-to-symlink.sh\n' "$(date -Iseconds)"
     } >> "$HERMES_ENV"
     for key in $ONLY_IN_SHIFT; do
-        line=$(grep "^${key}=" "$SHIFT_ENV" | tail -1)
-        echo "$line" >> "$HERMES_ENV"
+        # Strip CRLF before append so Windows-line-ending source files don't
+        # propagate \r into the canonical Hermes file (loaders may treat
+        # KEY=value\r as KEY with literal \r in the value).
+        line=$(grep "^${key}=" "$SHIFT_ENV" | tail -1 | tr -d '\r')
+        printf '%s\n' "$line" >> "$HERMES_ENV"
         echo "  added: $key"
     done
 fi
 
-# Migration step 2: backup current shift-agent .env
+# Migration step 2: backup current shift-agent .env.
+# If the predictable backup path already exists (e.g. partial-failure re-run
+# scenario where migration crashed after backup but before symlink creation),
+# don't overwrite — append a unix timestamp to the new backup. Preserves the
+# original snapshot.
+if [ -e "$BACKUP" ]; then
+    BACKUP="${BACKUP}-$(date +%s)"
+    echo "  (predictable backup path occupied; using timestamped path: $BACKUP)"
+fi
 echo ""
 echo "=== Backing up $SHIFT_ENV → $BACKUP ==="
 cp -p "$SHIFT_ENV" "$BACKUP"

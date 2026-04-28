@@ -196,12 +196,14 @@ case "$ACTION" in
                 echo "ERROR: /opt/shift-agent/.env symlink target drifted." >&2
                 echo "  expected: /root/.hermes/.env" >&2
                 echo "  got:      $ENV_TARGET" >&2
-                echo "  Recovery: ls -la /opt/shift-agent/.env, fix target, retry." >&2
+                echo "  Recovery: sudo ln -sf /root/.hermes/.env /opt/shift-agent/.env  &&  retry deploy" >&2
                 exit 1
             fi
             if [ ! -r /opt/shift-agent/.env ]; then
                 echo "ERROR: /opt/shift-agent/.env symlink target unreadable." >&2
                 echo "  /root/.hermes/.env may have been deleted or permissions changed." >&2
+                echo "  Recovery: ls -la /root/.hermes/.env  (check existence + perms);" >&2
+                echo "            verify shift-agent user can read it." >&2
                 exit 1
             fi
             echo "OK: env symlink intact ($ENV_TARGET)"
