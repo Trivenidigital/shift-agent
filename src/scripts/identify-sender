@@ -107,15 +107,23 @@ def main():
     # BEGIN shift-agent-sender-id (strict classifier — phone vs lid vs invalid)
     kind, normalized = _classify_input(args.input)
     if kind == "invalid":
-        # Fall back to legacy phone validator path (catches shell-injection-y inputs etc.)
+        # Fall back: legacy E164Phone canonicalization handles formatted
+        # phones like `+1-904-555-0101`. validate_phone_input rejects shell
+        # injection first.
         try:
             validate_phone_input(args.input)
+            canonical = E164Phone.from_any(args.input)
         except ValueError as e:
             print(json.dumps({"role": "error", "error": str(e)}))
             return EXIT_INVALID_INPUT
-        # If validate_phone_input passed but classifier rejected, still bail.
-        print(json.dumps({"role": "error", "error": f"refusing input: {args.input!r}"}))
-        return EXIT_INVALID_INPUT
+        except Exception as e:
+            print(json.dumps({"role": "error", "error": f"phone parse: {e}"}))
+            return EXIT_INVALID_INPUT
+        if not _E164_RE.match(canonical):
+            print(json.dumps({"role": "error", "error": f"refusing input: {args.input!r}"}))
+            return EXIT_INVALID_INPUT
+        kind = "phone"
+        normalized = canonical
     # END shift-agent-sender-id
 
     # Load config

@@ -23,14 +23,15 @@ for f in "$RUN" "$WA" "$BR"; do
   grep -q "END shift-agent-sender-id" "$f" || fail "$f missing END marker"
 done
 
-# 2. Anchor proximity in run.py — the marker must live within ±30 lines
-#    of `_prepare_inbound_message_text` so we know we're patching the
-#    correct function, not just any random spot that happens to have markers.
-RB=$(grep -n "BEGIN shift-agent-sender-id" "$RUN" | head -1 | cut -d: -f1)
+# 2. Anchor proximity in run.py — the INJECT-SITE marker (not the flag-block
+#    marker near `import os` at line ~20) must live within ±60 lines of
+#    `_prepare_inbound_message_text`. run.py has TWO markers: the flag block
+#    and the inject site. We pick the LAST one (tail -1) — that's the inject.
+RB=$(grep -n "BEGIN shift-agent-sender-id" "$RUN" | tail -1 | cut -d: -f1)
 RA=$(grep -n "_prepare_inbound_message_text" "$RUN" | head -1 | cut -d: -f1)
 [ -n "$RB" ] && [ -n "$RA" ] || fail "$RUN missing BEGIN marker or anchor symbol"
 DIFF=$(( RB > RA ? RB - RA : RA - RB ))
-[ "$DIFF" -le 30 ] || fail "$RUN BEGIN marker drifted from anchor (delta=$DIFF lines)"
+[ "$DIFF" -le 60 ] || fail "$RUN BEGIN marker drifted from anchor (delta=$DIFF lines)"
 
 # 3. Anchor proximity in whatsapp.py — `_resolve_sender_context` helper
 WB=$(grep -n "BEGIN shift-agent-sender-id" "$WA" | head -1 | cut -d: -f1)

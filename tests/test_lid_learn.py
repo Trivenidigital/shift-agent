@@ -138,17 +138,21 @@ def test_idempotent_no_rewrite_when_already_set(fixture_dir):
 
 
 def test_conflict_detection_logged(fixture_dir):
-    """Phone re-pair scenario: cache has new LID for same phone."""
+    """Phone re-pair scenario: cache has new LID for same phone.
+    LIDs must be digit-only per the schema regex `^\\d{6,20}@lid$`."""
+    OLD_LID = "100000000000001@lid"
+    NEW_LID = "200000000000002@lid"
+
     # First: set initial LID
     cache1 = {"schema_version": 1, "pairs": [
-        {"phone": "+17329837841", "lid": "OLDLID111111111111@lid",
+        {"phone": "+17329837841", "lid": OLD_LID,
          "learned_ts": "2026-04-28T00:00:00+00:00"}
     ]}
     _run(fixture_dir, cache1)
 
     # Then: re-pair with new LID
     cache2 = {"schema_version": 1, "pairs": [
-        {"phone": "+17329837841", "lid": "NEWLID222222222222@lid",
+        {"phone": "+17329837841", "lid": NEW_LID,
          "learned_ts": "2026-04-28T01:00:00+00:00"}
     ]}
     r = _run(fixture_dir, cache2)
@@ -156,12 +160,12 @@ def test_conflict_detection_logged(fixture_dir):
 
     roster = json.loads((fixture_dir / "roster.json").read_text())
     e004 = next(e for e in roster["employees"] if e["id"] == "e004")
-    assert e004["lid"] == "NEWLID222222222222@lid"
+    assert e004["lid"] == NEW_LID
 
     log = [json.loads(l) for l in (fixture_dir / "decisions.log").read_text().strip().split("\n")]
     assert len(log) == 2
-    assert log[1]["old_lid"] == "OLDLID111111111111@lid"
-    assert log[1]["new_lid"] == "NEWLID222222222222@lid"
+    assert log[1]["old_lid"] == OLD_LID
+    assert log[1]["new_lid"] == NEW_LID
 
 
 def test_unknown_phone_no_mutation(fixture_dir):

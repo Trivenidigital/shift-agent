@@ -39,9 +39,10 @@
 ### BL-102: Re-engage safety + final smoke test before customer goes live
 **Status:** OPEN
 **Files:** `/opt/shift-agent/state/disabled.flag`, `/usr/local/bin/shift-agent-smoke-test.sh`
-**Why:** The Apr 26 rehearsal left the agent in active state. Before customer messages real employees, run the canonical smoke test, then unset disabled.flag, raise `max_outbound_per_day` from rehearsal value (2) to production (6 for 45-employee roster).
+**Why:** The Apr 26 rehearsal left the agent in active state. Before customer messages real employees, run the canonical smoke test and unset disabled.flag.
 **Action:** smoke test must exit 0 with green checks for: identify-sender, dispatcher routing, handle_sick_call → proposal, tail-logger capturing inbound, all systemd timers active.
 **Acceptance:** `bash /usr/local/bin/shift-agent-smoke-test.sh` final line reads `=== All smoke checks passed ===`
+**Decision (2026-04-28):** `max_outbound_per_day` stays at **100** (not reverted to 6). Owner-acknowledged headroom for multi-agent expansion (catering / inventory / orders agents will share the cap).
 
 ### BL-103: Restore e005 (Vikram) status to active after rehearsal
 **Status:** OPEN — was set to `terminated` to force e007 candidate selection in Step A test

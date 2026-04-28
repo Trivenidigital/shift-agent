@@ -233,28 +233,31 @@ def _patch_run_py():
     text = anchor_re.sub("import os" + RUN_PY_FLAG_BLOCK, text, count=1)
 
     # Anchor 2: in `_prepare_inbound_message_text`, inject BEFORE the
-    # existing `[{user_name}]` prefix so sender block is line 1.
-    pattern = re.compile(
-        r"(    async def _prepare_inbound_message_text.*?\n"
-        r"(?:        .*\n)*?)"
-        r"(        if .*?_is_shared_multi_user)",
-        re.MULTILINE,
-    )
-    m = pattern.search(text)
-    if not m:
-        # FAIL CLOSED — silent insertion at the function signature
-        # (the previous fallback) leads to inject running before
-        # `message_text` is defined → broad except in inject swallows the
-        # NameError every message → silent feature-off. Better to fail
-        # loudly so an operator notices on the next Hermes upgrade.
+    # `if _is_shared_multi_user ...` user-name prefix line so sender block
+    # is line 1. Strategy: locate function def, then forward-scan for the
+    # anchor line within ~50 lines.
+    func_def_re = re.compile(r"^    async def _prepare_inbound_message_text\b", re.MULTILINE)
+    func_match = func_def_re.search(text)
+    if not func_match:
+        sys.stderr.write(f"FAIL: cannot find _prepare_inbound_message_text def in {RUN}\n")
+        sys.exit(1)
+    anchor_re = re.compile(r"^        if _is_shared_multi_user.*$", re.MULTILINE)
+    anchor_match = anchor_re.search(text, pos=func_match.end())
+    if not anchor_match:
         sys.stderr.write(
-            f"FAIL: ideal inject site not found in _prepare_inbound_message_text in {RUN}\n"
-            f"      The function exists but the `_is_shared_multi_user` anchor is missing.\n"
-            f"      Manually inspect Hermes' run.py and update tools/patch-hermes.py.\n"
+            f"FAIL: `if _is_shared_multi_user` line not found within {RUN} after function def — "
+            f"Hermes may have refactored the function.\n"
         )
         sys.exit(1)
-    # Insert the inject block BEFORE the user-name prefix
-    text = text[:m.start(2)] + RUN_PY_INJECT_BLOCK + text[m.start(2):]
+    line_diff = text.count("\n", func_match.start(), anchor_match.start())
+    if line_diff > 50:
+        sys.stderr.write(
+            f"FAIL: anchor `if _is_shared_multi_user` is {line_diff} lines from function def — "
+            f"likely matched a different function's line.\n"
+        )
+        sys.exit(1)
+    # Insert BEFORE the anchor line (preserve line break)
+    text = text[:anchor_match.start()] + RUN_PY_INJECT_BLOCK.lstrip("\n") + text[anchor_match.start():]
 
     RUN.write_text(text)
     print(f"  ✓ patched {RUN}")
