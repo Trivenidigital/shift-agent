@@ -26,17 +26,18 @@ install_artifacts() {
     install -m 644 src/platform/safe_io.py /opt/shift-agent/safe_io.py
     install -m 644 src/platform/sender_context.py /opt/shift-agent/sender_context.py
     install -m 644 src/platform/exit_codes.py /opt/shift-agent/exit_codes.py
-    # Templates
+    # Templates — Shift-Agent message templates
     install -d /opt/shift-agent/templates
-    install -m 644 src/templates/* /opt/shift-agent/templates/
-    # Skills → Hermes
-    rsync -a --delete src/skills/ /root/.hermes/skills/
+    install -m 644 src/agents/shift/templates/* /opt/shift-agent/templates/
+    # Skills → Hermes — Shift-Agent SKILL files
+    rsync -a --delete src/agents/shift/skills/ /root/.hermes/skills/
     chown -R shift-agent:shift-agent /root/.hermes/skills/
-    # systemd units
-    install -m 644 src/systemd/*.service /etc/systemd/system/ 2>/dev/null || true
-    install -m 644 src/systemd/*.timer /etc/systemd/system/ 2>/dev/null || true
-    # logrotate
-    [ -f src/logrotate/shift-agent ] && install -m 644 src/logrotate/shift-agent /etc/logrotate.d/
+    # systemd units — platform (hermes-gateway) + shift-agent specific
+    install -m 644 src/platform/systemd/*.service /etc/systemd/system/ 2>/dev/null || true
+    install -m 644 src/agents/shift/systemd/*.service /etc/systemd/system/ 2>/dev/null || true
+    install -m 644 src/agents/shift/systemd/*.timer /etc/systemd/system/ 2>/dev/null || true
+    # logrotate — Shift-Agent
+    [ -f src/agents/shift/logrotate/shift-agent ] && install -m 644 src/agents/shift/logrotate/shift-agent /etc/logrotate.d/
     systemctl daemon-reload
 }
 
