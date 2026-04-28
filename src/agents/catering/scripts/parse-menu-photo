@@ -62,9 +62,11 @@ PENDING_PATH = Path("/opt/shift-agent/state/catering-menu-pending.json")
 PENDING_LOCK = Path("/opt/shift-agent/state/catering-menu-pending.json.lock")
 LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
 
-# Vision model — Claude 3.5 Sonnet via OpenRouter (best at structured menu extraction).
-# Override with VISION_MODEL env var if you want to swap (e.g., gpt-4o-mini for cheaper).
-VISION_MODEL = os.environ.get("VISION_MODEL", "anthropic/claude-3.5-sonnet")
+# Vision model — gpt-4o-mini via OpenRouter (proven on Triveni VPS, low cost ~$0.01/update).
+# Override with VISION_MODEL env var; alternates that work on OpenRouter:
+#   anthropic/claude-3.5-sonnet  — better quality, ~10x cost (Note: model id varies by date; check openrouter.ai/models)
+#   google/gemini-flash-1.5       — cheapest; quality varies
+VISION_MODEL = os.environ.get("VISION_MODEL", "openai/gpt-4o-mini")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_TIMEOUT_SEC = 90  # vision parsing can take 30-60s
 
