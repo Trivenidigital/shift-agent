@@ -1,0 +1,35 @@
+[Unit]
+Description=Weekly routing-accuracy summary (one-shot)
+After=network-online.target
+Wants=network-online.target
+OnFailure=send-routing-accuracy-summary-failure.service
+
+[Service]
+Type=oneshot
+User=shift-agent
+Group=shift-agent
+EnvironmentFile=/opt/shift-agent/.env
+Environment=HOME=/opt/shift-agent
+Environment=TZ=UTC
+
+# ExecStartPre instead of ConditionPathIsExecutable: condition-failure produces
+# systemd result "condition" which does NOT trigger OnFailure=. test-x failure
+# produces result "exit-code" which DOES — so the failure handler fires on
+# missing-binary cases.
+ExecStartPre=/usr/bin/test -x /usr/local/bin/send-routing-accuracy-summary
+ExecStartPre=/usr/bin/test -x /usr/local/bin/dispatcher-accuracy-report
+ExecStartPre=/usr/bin/test -x /usr/local/bin/shift-agent-notify-owner
+ExecStart=/usr/local/bin/send-routing-accuracy-summary
+StandardOutput=append:/opt/shift-agent/logs/routing-accuracy-summary.log
+StandardError=append:/opt/shift-agent/logs/routing-accuracy-summary.log
+
+# Security hardening (mirrors send-daily-brief.service)
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/shift-agent
+ProtectHome=read-only
+PrivateTmp=true
+RuntimeDirectory=shift-agent
+
+[Install]
+WantedBy=multi-user.target
