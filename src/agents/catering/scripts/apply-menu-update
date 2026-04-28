@@ -112,19 +112,27 @@ def main() -> int:
             sys.stderr.write("pending update has 0 items — refusing to apply empty menu\n")
             return EXIT_ILLEGAL_TRANSITION
 
-        # Load existing menu (or none)
+        # Load existing menu (or none — first-run safe).
+        # safe_io.load_model raises FileNotFoundError on missing if the model
+        # has required fields with no default (Menu.updated_at qualifies).
+        # Check existence first.
         with FileLock(MENU_LOCK):
-            existing, ex_status = load_model(MENU_PATH, Menu, default=None)
+            existing = None
             prev_version = 0
-            if existing is not None and ex_status == "ok":
-                prev_version = existing.version
-                # Archive
-                ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
-                archive_path = ARCHIVE_DIR / f"menu-v{prev_version}-{int(now.timestamp())}.json"
+            if MENU_PATH.exists():
                 try:
-                    shutil.copy2(MENU_PATH, archive_path)
-                except OSError as e:
-                    sys.stderr.write(f"WARN: archive failed: {e}\n")
+                    existing, _ = load_model(MENU_PATH, Menu, default=None)
+                except (FileNotFoundError, Exception) as e:
+                    sys.stderr.write(f"WARN: existing menu unreadable, treating as first-run: {e}\n")
+                    existing = None
+                if existing is not None:
+                    prev_version = existing.version
+                    ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+                    archive_path = ARCHIVE_DIR / f"menu-v{prev_version}-{int(now.timestamp())}.json"
+                    try:
+                        shutil.copy2(MENU_PATH, archive_path)
+                    except OSError as e:
+                        sys.stderr.write(f"WARN: archive failed: {e}\n")
 
             # Build new menu
             new_menu = Menu(
