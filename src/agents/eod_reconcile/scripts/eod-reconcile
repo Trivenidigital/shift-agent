@@ -1,0 +1,304 @@
+#!/usr/bin/env python3
+"""eod-reconcile — Agent #5 end-of-day reconciliation snapshot.
+
+Triggered by eod-reconcile.timer every 15 min. Self-gates on
+cfg.eod.eod_time in customer tz. At fire time:
+  1. Reads decisions.log for "today" window
+  2. Reads pending.json for unresolved (non-terminal) proposals
+  3. Writes /opt/shift-agent/state/eod-snapshot.json (atomic)
+  4. Logs EodSnapshot to decisions.log
+  5. If unresolved > 0 (or pushover_only_if_unresolved=False), sends Pushover summary
+
+The snapshot is consumed by Daily Brief tomorrow morning for nicer
+"yesterday" prose. v0.1 has no POS integration — register/sales
+reconciliation deferred to v0.2.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Optional
+
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
+
+from safe_io import (  # noqa: E402
+    FileLock, atomic_write_json, ndjson_append, customer_now, customer_today_str,
+    safe_load_json, load_model, assert_local_disk, flock,
+)
+from schemas import (  # noqa: E402
+    Config, PendingStore,
+    EodSnapshot, EodPushoverSent, EodSkipped,
+    is_terminal_status,
+)
+from log_source import get_log_sources  # noqa: E402
+from exit_codes import (  # noqa: E402
+    EXIT_OK, EXIT_GENERIC_ERROR, EXIT_INVALID_INPUT,
+    EXIT_SCHEMA_VIOLATION, EXIT_NOT_FOUND,
+)
+from pydantic import TypeAdapter  # noqa: E402
+
+CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
+PENDING_PATH = Path(os.environ.get("SHIFT_AGENT_PENDING_PATH", "/opt/shift-agent/state/pending.json"))
+DECISIONS_LOG = Path(os.environ.get("SHIFT_AGENT_DECISIONS_LOG_PATH", "/opt/shift-agent/logs/decisions.log"))
+SNAPSHOT_PATH = Path(os.environ.get("SHIFT_AGENT_EOD_SNAPSHOT_PATH", "/opt/shift-agent/state/eod-snapshot.json"))
+DISABLED_FLAG = Path(os.environ.get("SHIFT_AGENT_DISABLED_FLAG", "/opt/shift-agent/state/disabled.flag"))
+NOTIFY_OWNER_BIN = os.environ.get("SHIFT_AGENT_NOTIFY_OWNER_BIN", "/usr/local/bin/shift-agent-notify-owner")
+
+SELF_GATE_WINDOW_MIN = 15  # must match eod-reconcile.timer OnUnitActiveSec
+
+_LOG_ADAPTER_SNAPSHOT = TypeAdapter(EodSnapshot)
+_LOG_ADAPTER_PUSHOVER = TypeAdapter(EodPushoverSent)
+_LOG_ADAPTER_SKIPPED = TypeAdapter(EodSkipped)
+
+
+def _now_override() -> Optional[datetime]:
+    raw = os.environ.get("SHIFT_AGENT_NOW_OVERRIDE")
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+def _customer_now(tz: str) -> datetime:
+    override = _now_override()
+    if override is not None:
+        return override
+    return customer_now(tz)
+
+
+def _self_gate_state(now_local: datetime, eod_time_str: str, catchup_min: int) -> tuple[str, int]:
+    h, m = (int(x) for x in eod_time_str.split(":"))
+    eod_dt = now_local.replace(hour=h, minute=m, second=0, microsecond=0)
+    window_end = eod_dt + timedelta(minutes=SELF_GATE_WINDOW_MIN)
+    catchup_end = eod_dt + timedelta(minutes=catchup_min)
+    if now_local < eod_dt:
+        return "before", 0
+    if now_local < window_end:
+        return "in_window", 0
+    minutes_late = int((now_local - eod_dt).total_seconds() // 60)
+    if now_local < catchup_end:
+        return "in_catchup", minutes_late
+    return "past_catchup", minutes_late
+
+
+def _aggregate_today(cfg: Config) -> tuple[dict, bool]:
+    """Aggregate today's events from decisions.log + pending.json."""
+    tz = cfg.tz()
+    now_local = _customer_now(cfg.customer.timezone)
+    today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_end = today_start + timedelta(days=1)
+
+    counts = {
+        "sick_calls": 0,
+        "proposals_created": 0,
+        "proposals_resolved": 0,
+        "proposals_unresolved": 0,
+        "outbound_sent": 0,
+        "outbound_send_failed": 0,
+        "invariant_violations": 0,
+    }
+    degraded = False
+
+    for source in get_log_sources():
+        entries, stats = source.iter_entries(today_start, today_end)
+        if stats.parse_failures > 0 or stats.oserror is not None:
+            degraded = True
+        for e in entries:
+            t = e.get("type")
+            if t == "raw_inbound":
+                counts["sick_calls"] += 1
+            elif t == "proposal_created":
+                counts["proposals_created"] += 1
+            elif t == "outbound_sent":
+                counts["outbound_sent"] += 1
+            elif t == "outbound_send_failed":
+                counts["outbound_send_failed"] += 1
+            elif t == "invariant_violation":
+                counts["invariant_violations"] += 1
+
+    # Pending: count terminal vs non-terminal proposals
+    try:
+        pending, status = load_model(PENDING_PATH, PendingStore)
+        if status == "ok":
+            for p in pending.proposals:
+                if is_terminal_status(p.status):
+                    counts["proposals_resolved"] += 1
+                else:
+                    counts["proposals_unresolved"] += 1
+        elif status not in ("missing", "empty"):
+            degraded = True
+    except Exception:
+        degraded = True
+
+    return counts, degraded
+
+
+def _log_entry(adapter: TypeAdapter, entry) -> None:
+    DECISIONS_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with flock(DECISIONS_LOG):
+        ndjson_append(DECISIONS_LOG, adapter.dump_json(entry).decode("utf-8"))
+
+
+def _read_snapshot(today_str: str) -> Optional[dict]:
+    if not SNAPSHOT_PATH.exists():
+        return None
+    val, status = safe_load_json(SNAPSHOT_PATH, default=None)
+    if status != "ok" or not isinstance(val, dict):
+        return None
+    if val.get("eod_date") != today_str:
+        return None
+    return val
+
+
+def _write_snapshot(today_str: str, snapshot_id: str, counts: dict, ts: datetime) -> None:
+    SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(SNAPSHOT_PATH, {
+        "eod_date": today_str,
+        "snapshot_id": snapshot_id,
+        "ts": ts.isoformat(),
+        **counts,
+    })
+
+
+def _pushover_summary(cfg: Config, counts: dict, today_str: str) -> bool:
+    """Send a one-line EOD summary via shift-agent-notify-owner. Returns success."""
+    import subprocess
+    sc = counts["sick_calls"]
+    pc = counts["proposals_created"]
+    pr = counts["proposals_resolved"]
+    pu = counts["proposals_unresolved"]
+    osent = counts["outbound_sent"]
+    ofail = counts["outbound_send_failed"]
+    title = f"EOD {today_str} — {sc} sick, {pu} unresolved"
+    msg = (
+        f"Sick calls: {sc} | Proposals: {pc} created, {pr} resolved, {pu} unresolved | "
+        f"Outbound: {osent} sent, {ofail} failed"
+    )
+    if counts["invariant_violations"] > 0:
+        msg += f" | INVARIANT VIOLATIONS: {counts['invariant_violations']}"
+    priority = cfg.eod.pushover_priority
+    if pu > 0 or ofail > 0 or counts["invariant_violations"] > 0:
+        priority = max(priority, 1)
+    try:
+        proc = subprocess.run(
+            [NOTIFY_OWNER_BIN, "--title", title, "--priority", str(priority), msg],
+            capture_output=True, text=True, timeout=30,
+        )
+        return proc.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        sys.stderr.write(f"WARN: pushover failed: {e}\n")
+        return False
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="EOD Reconciliation — end-of-day snapshot")
+    parser.add_argument("--force", action="store_true", help="bypass self-gate window")
+    parser.add_argument("--force-resnap", action="store_true",
+                        help="DANGEROUS — overwrite today's snapshot. Requires --force.")
+    parser.add_argument("--dry-run", action="store_true", help="aggregate but don't write snapshot or log")
+    args = parser.parse_args()
+
+    if args.force_resnap and not args.force:
+        sys.stderr.write("--force-resnap requires --force\n")
+        return EXIT_INVALID_INPUT
+
+    try:
+        import yaml
+        cfg_dict = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+        cfg = Config.model_validate(cfg_dict)
+    except FileNotFoundError:
+        sys.stderr.write(f"config not found: {CONFIG_PATH}\n")
+        return EXIT_NOT_FOUND
+    except Exception as e:
+        sys.stderr.write(f"config load/validate failed: {e}\n")
+        return EXIT_SCHEMA_VIOLATION
+
+    if not cfg.eod.enabled:
+        return EXIT_OK
+
+    try:
+        assert_local_disk(SNAPSHOT_PATH.parent)
+    except RuntimeError as e:
+        sys.stderr.write(f"{e}\n")
+        return EXIT_GENERIC_ERROR
+
+    today_str = customer_today_str(cfg.customer.timezone)
+
+    if DISABLED_FLAG.exists():
+        if not args.dry_run:
+            _log_entry(_LOG_ADAPTER_SKIPPED, EodSkipped(
+                type="eod_skipped", ts=_customer_now(cfg.customer.timezone),
+                eod_date=today_str, reason="disabled",
+            ))
+        return EXIT_OK
+
+    now_local = _customer_now(cfg.customer.timezone)
+    state, minutes_late = _self_gate_state(
+        now_local, cfg.eod.eod_time, cfg.eod.catchup_window_minutes,
+    )
+    if state == "before" and not args.force:
+        return EXIT_OK
+    if state == "past_catchup" and not args.force:
+        if not args.dry_run:
+            _log_entry(_LOG_ADAPTER_SKIPPED, EodSkipped(
+                type="eod_skipped", ts=now_local,
+                eod_date=today_str, reason="catchup_expired",
+            ))
+        return EXIT_OK
+
+    SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    LOCK_PATH = SNAPSHOT_PATH.parent / "eod-snapshot.json.lock"
+
+    with FileLock(LOCK_PATH):
+        existing = _read_snapshot(today_str)
+        if existing and not args.force_resnap:
+            if not args.dry_run:
+                _log_entry(_LOG_ADAPTER_SKIPPED, EodSkipped(
+                    type="eod_skipped", ts=now_local,
+                    eod_date=today_str, reason="already_done",
+                ))
+            return EXIT_OK
+
+        counts, degraded = _aggregate_today(cfg)
+        snapshot_id = uuid.uuid4().hex
+
+        if args.dry_run:
+            print(json.dumps({"eod_date": today_str, **counts, "degraded": degraded}, indent=2))
+            return EXIT_OK
+
+        _write_snapshot(today_str, snapshot_id, counts, _customer_now(cfg.customer.timezone))
+        _log_entry(_LOG_ADAPTER_SNAPSHOT, EodSnapshot(
+            type="eod_snapshot", ts=_customer_now(cfg.customer.timezone),
+            eod_date=today_str, snapshot_id=snapshot_id, **counts,
+        ))
+
+    # Pushover OUTSIDE the lock — owner notification is best-effort
+    has_unresolved = (counts["proposals_unresolved"] > 0
+                      or counts["outbound_send_failed"] > 0
+                      or counts["invariant_violations"] > 0)
+    if has_unresolved or not cfg.eod.pushover_only_if_unresolved:
+        ok = _pushover_summary(cfg, counts, today_str)
+        if ok:
+            unresolved_count = (counts["proposals_unresolved"]
+                                + counts["outbound_send_failed"]
+                                + counts["invariant_violations"])
+            _log_entry(_LOG_ADAPTER_PUSHOVER, EodPushoverSent(
+                type="eod_pushover_sent", ts=_customer_now(cfg.customer.timezone),
+                eod_date=today_str, snapshot_id=snapshot_id,
+                unresolved_count=unresolved_count,
+                pushover_priority=cfg.eod.pushover_priority,
+            ))
+
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

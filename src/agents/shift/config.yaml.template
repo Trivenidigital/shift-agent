@@ -58,3 +58,12 @@ daily_brief:
     - "today_outlook"
     - "alerts"
   catchup_window_minutes: 180  # 3h grace period after brief_time
+
+# Agent #5 — EOD Reconciliation. Snapshot of today's events at close time.
+# Output is consumed by Daily Brief tomorrow morning + sent to owner via Pushover.
+eod:
+  enabled: true
+  eod_time: "22:00"            # HH:MM in customer.timezone
+  catchup_window_minutes: 120
+  pushover_priority: 0         # -2..+2; auto-bumped to 1 if unresolved/failures exist
+  pushover_only_if_unresolved: true  # quiet days: no Pushover

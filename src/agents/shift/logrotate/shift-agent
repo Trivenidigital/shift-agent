@@ -47,3 +47,14 @@
     notifempty
     create 0640 shift-agent shift-agent
 }
+
+# Agent #5 EOD Reconciliation — script stdout/stderr.
+/opt/shift-agent/logs/eod-reconcile.log {
+    monthly
+    rotate 12
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 shift-agent shift-agent
+}

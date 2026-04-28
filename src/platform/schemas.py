@@ -272,6 +272,24 @@ class DailyBriefConfig(BaseModel):
         return v
 
 
+# Agent #5 EOD Reconciliation config
+class EodConfig(BaseModel):
+    """End-of-day reconciliation snapshot settings (Agent #5)."""
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = True
+    eod_time: str = Field(default="22:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    catchup_window_minutes: int = Field(default=120, ge=15, le=720)
+    pushover_priority: int = Field(default=0, ge=-2, le=2)
+    pushover_only_if_unresolved: bool = True
+
+    @field_validator("eod_time")
+    @classmethod
+    def _validate_eod_time(cls, v: str) -> str:
+        from datetime import datetime as _dt
+        _dt.strptime(v, "%H:%M")
+        return v
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
     schema_version: Literal[1] = 1
@@ -282,6 +300,7 @@ class Config(BaseModel):
     backup: BackupConfig
     operations: OperationsConfig = OperationsConfig()
     daily_brief: DailyBriefConfig = Field(default_factory=DailyBriefConfig)
+    eod: EodConfig = Field(default_factory=EodConfig)
 
     def tz(self) -> ZoneInfo:
         return ZoneInfo(self.customer.timezone)
@@ -665,6 +684,48 @@ class BriefSkipped(_BaseEntry):
     ]
 
 
+# ─────────────────────────────────────────────────────────────────
+# EOD Reconciliation log entries (Agent #5)
+# ─────────────────────────────────────────────────────────────────
+
+
+class EodSnapshot(_BaseEntry):
+    """End-of-day snapshot — written when EOD agent completes today's
+    reconciliation. Daily Brief consumes this snapshot tomorrow morning.
+    """
+    type: Literal["eod_snapshot"]
+    eod_date: str = Field(pattern=_BRIEF_DATE_RE)
+    snapshot_id: str = Field(min_length=1)
+    sick_calls: int = Field(ge=0)
+    proposals_created: int = Field(ge=0)
+    proposals_resolved: int = Field(ge=0)        # accepted + declined + denied + expired + cancelled
+    proposals_unresolved: int = Field(ge=0)      # awaiting + approved + reconciling + sent + send_failed
+    outbound_sent: int = Field(ge=0)
+    outbound_send_failed: int = Field(ge=0)
+    invariant_violations: int = Field(ge=0)
+
+
+class EodPushoverSent(_BaseEntry):
+    """EOD agent sent a Pushover summary to owner."""
+    type: Literal["eod_pushover_sent"]
+    eod_date: str = Field(pattern=_BRIEF_DATE_RE)
+    snapshot_id: str = Field(min_length=1)
+    unresolved_count: int = Field(ge=0)
+    pushover_priority: int = Field(ge=-2, le=2)
+
+
+class EodSkipped(_BaseEntry):
+    """EOD reconciliation was skipped."""
+    type: Literal["eod_skipped"]
+    eod_date: str = Field(pattern=_BRIEF_DATE_RE)
+    reason: Literal[
+        "already_done",
+        "disabled",
+        "catchup_expired",
+        "data_unavailable",
+    ]
+
+
 LogEntry = Annotated[
     Union[
         RawInbound, ProposalCreated, ProposalStatusChange,
@@ -677,6 +738,8 @@ LogEntry = Annotated[
         # END shift-agent-sender-id
         # Agent #4 Daily Brief
         BriefAttempted, BriefSent, BriefSendFailed, BriefSkipped,
+        # Agent #5 EOD Reconciliation
+        EodSnapshot, EodPushoverSent, EodSkipped,
     ],
     Field(discriminator="type"),
 ]
@@ -686,6 +749,7 @@ __all__ = [
     "E164Phone", "Role", "EmployeeId", "Employee", "PhoneAssignment", "ScheduleEntry", "Roster",
     "Config", "CustomerConfig", "OwnerConfig", "LimitsConfig", "AlertingConfig", "BackupConfig", "OperationsConfig",
     "DailyBriefConfig", "BriefSection",
+    "EodConfig",
     "Proposal", "ProposalId", "ProposalCode",
     "AwaitingProposal", "ApprovedProposal", "ReconcilingProposal", "SentProposal",
     "SendFailedProposal", "AcceptedProposal", "DeclinedProposal", "DeniedByOwnerProposal",
@@ -698,4 +762,5 @@ __all__ = [
     "AgentStateChange", "UnknownSenderDeclined", "InvariantViolation", "HealthCheckFailure",
     "LidLearned",
     "BriefAttempted", "BriefSent", "BriefSendFailed", "BriefSkipped",
+    "EodSnapshot", "EodPushoverSent", "EodSkipped",
 ]
