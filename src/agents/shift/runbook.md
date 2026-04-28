@@ -244,6 +244,8 @@ The Shift Agent uses an unofficial WhatsApp client (Baileys). WhatsApp's Terms o
 
 **Acknowledgment:** I understand the audit log is append-only with file-perm protection, not cryptographically tamper-evident. I will treat it as corroborating evidence, not authoritative. Signature: __________________ Date: __________
 
+> *Note for any acknowledgment signed before 2026-04-28:* the prior text claimed "checksum-protected (SHA-256 chain)." Investigation that day found the chain was decoration (~3% writer coverage, no verifier) and was removed in PR #20. Any earlier acknowledgment is superseded by the text above; re-sign at next opportunity.
+
 ### 3. Employee notification requirement
 
 Your employees' WhatsApp messages to you — including their names and reasons for absence — are processed by this agent. Under data privacy best practices (and GDPR if applicable), you must notify employees of this processing.
