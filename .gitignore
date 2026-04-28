@@ -105,6 +105,10 @@ web/frontend/dist/
 web/frontend/src/api/schema.gen.ts
 web/frontend/.vite/
 
+# Tarball-deploy artifacts (built by tools/build-deploy-tarball.sh)
+shift-agent-deploy.tgz
+.commit-hash
+
 # Catch-all for review/diagnostic scratch files
 .chown_diag.txt
 .env_check.txt
