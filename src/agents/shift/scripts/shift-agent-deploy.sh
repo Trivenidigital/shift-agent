@@ -69,6 +69,12 @@ install_artifacts() {
         install -m 644 src/agents/eod_reconcile/systemd/*.timer /etc/systemd/system/
     fi
 
+    # Multi-Location Coordinator (Agent #3) — SKILL-only in v0.1
+    if [ -d src/agents/multi_location/skills ]; then
+        rsync -a src/agents/multi_location/skills/ /root/.hermes/skills/
+        chown -R shift-agent:shift-agent /root/.hermes/skills/
+    fi
+
     # Enable + start Daily Brief timer + EOD timer. Loud on failure.
     systemctl enable --now send-daily-brief.timer
     systemctl enable --now eod-reconcile.timer
