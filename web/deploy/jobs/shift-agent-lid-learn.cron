@@ -1,0 +1,5 @@
+SHELL=/bin/sh
+PATH=/usr/bin:/bin
+PYTHONPATH=/opt/shift-agent
+MAILTO=root
+*/5 * * * * shift-agent /opt/shift-agent/venv/bin/python3 /usr/local/bin/shift-agent-lid-learn >> /opt/shift-agent/logs/lid-learn.log 2>&1

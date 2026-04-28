@@ -34,20 +34,29 @@ function readFromUrl(): Section {
   return (VALID.includes(s as Section) ? (s as Section) : "dashboard");
 }
 
+// Each useSection() call has its own useState. Sidebar updating URL didn't
+// re-render App because pushState doesn't fire popstate. Custom event syncs
+// every instance.
+const SECTION_EVENT = "shift-agent:section-change";
+
 export function useSection(): [Section, (s: Section) => void] {
   const [section, setSection] = useState<Section>(readFromUrl);
 
   useEffect(() => {
-    const onPop = () => setSection(readFromUrl());
-    window.addEventListener("popstate", onPop);
-    return () => window.removeEventListener("popstate", onPop);
+    const sync = () => setSection(readFromUrl());
+    window.addEventListener("popstate", sync);
+    window.addEventListener(SECTION_EVENT, sync);
+    return () => {
+      window.removeEventListener("popstate", sync);
+      window.removeEventListener(SECTION_EVENT, sync);
+    };
   }, []);
 
   const navigate = useCallback((s: Section) => {
     const url = new URL(window.location.href);
     url.searchParams.set("s", s);
     window.history.pushState({}, "", url);
-    setSection(s);
+    window.dispatchEvent(new Event(SECTION_EVENT));
   }, []);
 
   return [section, navigate];

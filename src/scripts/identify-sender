@@ -21,6 +21,8 @@ Exit codes:
 from __future__ import annotations
 import argparse
 import json
+import os
+import re
 import sys
 from pathlib import Path
 
@@ -31,35 +33,90 @@ from exit_codes import EXIT_OK, EXIT_INVALID_INPUT, EXIT_SCHEMA_VIOLATION  # noq
 import yaml
 
 
-CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
-ROSTER_PATH = Path("/opt/shift-agent/roster.json")
+# BEGIN shift-agent-sender-id (env-overridable so tests can run on temp fixtures)
+CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
+ROSTER_PATH = Path(os.environ.get("SHIFT_AGENT_ROSTER_PATH", "/opt/shift-agent/roster.json"))
+
+_LID_RE = re.compile(r"^\d{6,20}@lid$")
+_PHONE_JID_RE = re.compile(r"^\d{6,20}@s\.whatsapp\.net$")
+_E164_RE = re.compile(r"^\+\d{10,15}$")
+
+
+def _classify_input(raw: str) -> tuple[str, str]:
+    """Strict input dispatch — never coincidentally treat a LID as a phone.
+    Returns (kind, normalized) where kind in {phone, lid, invalid}."""
+    raw = (raw or "").strip()
+    if _LID_RE.match(raw):
+        return "lid", raw
+    if _PHONE_JID_RE.match(raw):
+        return "phone", "+" + raw.split("@")[0]
+    if _E164_RE.match(raw):
+        return "phone", raw
+    return "invalid", raw
+# END shift-agent-sender-id
+
+
+def _emit_employee(emp, *, phone=None, lid=None) -> int:
+    out = {
+        "role": "employee",
+        "employee_id": emp.id,
+        "name": emp.name,
+        "phone_normalized": phone if phone is not None else emp.phone,
+        "primary_role": emp.role,
+        "languages": emp.languages,
+        "can_cover_roles": sorted(emp.can_cover_roles),
+        # BEGIN shift-agent-sender-id
+        "lid": lid if lid is not None else emp.lid,
+        # END shift-agent-sender-id
+    }
+    print(json.dumps(out))
+    return EXIT_OK
+
+
+def _emit_owner(owner, *, phone=None, lid=None) -> int:
+    out = {
+        "role": "owner",
+        "name": owner.name,
+        "phone_normalized": phone if phone is not None else owner.phone,
+        # BEGIN shift-agent-sender-id
+        "lid": lid if lid is not None else owner.lid,
+        # END shift-agent-sender-id
+    }
+    print(json.dumps(out))
+    return EXIT_OK
+
+
+def _emit_unknown(*, phone=None, lid=None) -> int:
+    out = {
+        "role": "unknown",
+        "phone_normalized": phone,
+        # BEGIN shift-agent-sender-id
+        "lid": lid,
+        # END shift-agent-sender-id
+    }
+    print(json.dumps(out))
+    return EXIT_OK
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("input", help="phone or JID")
+    ap.add_argument("input", help="phone (+E.164), LID (<digits>@lid), or phone-JID (<digits>@s.whatsapp.net)")
     ap.add_argument("--json", action="store_true", default=True, help="JSON output (default)")
     args = ap.parse_args()
 
-    # Defensive: refuse shell-injection-y input before any subprocess/format ops
-    try:
-        validate_phone_input(args.input)
-    except ValueError as e:
-        print(json.dumps({"role": "error", "error": str(e)}))
+    # BEGIN shift-agent-sender-id (strict classifier — phone vs lid vs invalid)
+    kind, normalized = _classify_input(args.input)
+    if kind == "invalid":
+        # Fall back to legacy phone validator path (catches shell-injection-y inputs etc.)
+        try:
+            validate_phone_input(args.input)
+        except ValueError as e:
+            print(json.dumps({"role": "error", "error": str(e)}))
+            return EXIT_INVALID_INPUT
+        # If validate_phone_input passed but classifier rejected, still bail.
+        print(json.dumps({"role": "error", "error": f"refusing input: {args.input!r}"}))
         return EXIT_INVALID_INPUT
-
-    # Normalize + validate the canonical form is actually E.164.
-    # Priority-1 fix: previous version silently accepted garbage that produced
-    # a bogus "+garbage_not_a_phone" canonical; now we reject with exit 2.
-    try:
-        canonical = E164Phone.from_any(args.input)
-    except Exception as e:
-        print(json.dumps({"role": "error", "error": f"phone parse: {e}"}))
-        return EXIT_INVALID_INPUT
-    import re as _re
-    if not _re.match(r"^\+\d{10,15}$", canonical):
-        print(json.dumps({"role": "error", "error": f"canonicalization did not produce valid E.164: {canonical!r}"}))
-        return EXIT_INVALID_INPUT
+    # END shift-agent-sender-id
 
     # Load config
     try:
@@ -70,43 +127,36 @@ def main():
         print(json.dumps({"role": "error", "error": f"config_load: {e}"}), file=sys.stdout)
         return EXIT_SCHEMA_VIOLATION
 
-    # Owner check (canonical == owner's phone)
-    if canonical == cfg.owner.phone:
-        print(json.dumps({
-            "role": "owner",
-            "name": cfg.owner.name,
-            "phone_normalized": canonical,
-        }))
-        return EXIT_OK
-
     # Load roster
     try:
         roster, status = load_model(ROSTER_PATH, Roster)
     except Exception as e:
         print(json.dumps({"role": "error", "error": f"roster_load: {e}"}))
         return EXIT_SCHEMA_VIOLATION
-
     if status != "ok":
         print(json.dumps({"role": "error", "error": f"roster_load_failed: {status}"}))
         return EXIT_INVALID_INPUT
 
-    # Employee lookup
+    # BEGIN shift-agent-sender-id (LID branch)
+    if kind == "lid":
+        for e in roster.employees:
+            if e.lid == normalized:
+                return _emit_employee(e, lid=normalized)
+        if cfg.owner.lid == normalized:
+            return _emit_owner(cfg.owner, lid=normalized)
+        return _emit_unknown(lid=normalized)
+    # END shift-agent-sender-id
+
+    # kind == "phone": preserved legacy behavior + populate lid in output
+    canonical = normalized
+    if canonical == cfg.owner.phone:
+        return _emit_owner(cfg.owner, phone=canonical, lid=cfg.owner.lid)
+
     emp = roster.find_by_phone(canonical)
     if emp:
-        print(json.dumps({
-            "role": "employee",
-            "employee_id": emp.id,
-            "name": emp.name,
-            "phone_normalized": canonical,
-            "primary_role": emp.role,
-            "languages": emp.languages,
-            "can_cover_roles": sorted(emp.can_cover_roles),
-        }))
-        return EXIT_OK
+        return _emit_employee(emp, phone=canonical, lid=emp.lid)
 
-    # Unknown
-    print(json.dumps({"role": "unknown", "phone_normalized": canonical}))
-    return EXIT_OK
+    return _emit_unknown(phone=canonical)
 
 
 if __name__ == "__main__":
