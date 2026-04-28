@@ -34,9 +34,10 @@ import sys
 import urllib.error
 import urllib.request
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfoNotFoundError
 
 sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
@@ -47,7 +48,8 @@ from safe_io import (  # noqa: E402
 )
 from schemas import (  # noqa: E402
     Config, CateringLead, CateringLeadStore, CateringLeadExtractedFields,
-    CateringLeadCreated, CateringLeadStatusChange, CateringOwnerApprovalRequested,
+    CateringLeadCreated, CateringLeadStatusChange, CateringLeadRejected,
+    CateringOwnerApprovalRequested,
 )
 from exit_codes import (  # noqa: E402
     EXIT_OK, EXIT_INVALID_INPUT, EXIT_DISABLED,
@@ -161,11 +163,97 @@ def _render_approval_card(
     )
 
 
+# Maps CateringLeadRejected.reason → SKILL-readable stderr prefix.
+# Any new reason returned by _validate_event_date (and added to the schema
+# Literal) MUST also land here. The .get() fallback to "ERR_UNKNOWN_REJECTION"
+# is defense-in-depth so SKILL parsers see a structured prefix rather than
+# crashing on a None value when the helper/dict drift one step apart.
+REASON_TO_ERR_PREFIX = {
+    "event_date_past": "ERR_EVENT_DATE_PAST",
+    "event_date_invalid_calendar": "ERR_EVENT_DATE_INVALID",
+    "timezone_invalid": "ERR_TIMEZONE_INVALID",
+}
+
+
+def _validate_event_date(
+    fields: CateringLeadExtractedFields, tz_name: str
+) -> tuple[Optional[str], Optional[str]]:
+    """Returns (reason, detail) tuple. (None, None) means input is valid.
+
+    `reason` values match the CateringLeadRejected schema Literal — pinned by
+    Pydantic so a typo here raises ValidationError at log-write time.
+
+    Why script-level vs schema-level (per design v2): Pydantic v2 *does* support
+    model_validate(..., context={...}) and info.context access in validators,
+    but plumbing tz context through every model_validate_json call site (the
+    read path, replay tools, and the catering v3.1 C22 round-trip test that
+    calls model_validate_json with no context) would couple the schema to
+    runtime tz config. Keeping tz-aware checks at the script (write-path) layer
+    leaves the schema stateless and read-path-safe.
+
+    Why both invalid-calendar AND past-date here (not just past-date): schema
+    pattern is format-only (4-2-2 digit groups); accepts 2026-13-45 etc.
+    Past-date check needs strptime, which doubles as semantic validity check.
+    Rejecting both at this site avoids garbage dates persisting downstream.
+    """
+    if not fields.event_date:
+        return None, None  # No event_date → no check.
+
+    try:
+        ev = datetime.strptime(fields.event_date, "%Y-%m-%d").date()
+    except ValueError:
+        return "event_date_invalid_calendar", (
+            f"event_date {fields.event_date!r} matches format but is not a valid calendar date"
+        )
+
+    # Narrow except (design-review HIGH-C + PR-review MEDIUM-1): catch
+    # tz-resolution failures specifically. ZoneInfoNotFoundError covers the
+    # tz-not-found case (it IS a KeyError subclass on 3.11+, but listing it
+    # explicitly documents intent). ValueError covers malformed tzdata. We do
+    # NOT catch KeyError or AttributeError/TypeError — those indicate
+    # config-shape bugs (None tz, int tz, etc.) and should propagate as the
+    # programming bugs they are, not be bucketed into ERR_TIMEZONE_INVALID.
+    try:
+        today = customer_now(tz_name).date()
+    except (ZoneInfoNotFoundError, ValueError) as e:
+        return "timezone_invalid", (
+            f"cfg.customer.timezone {tz_name!r} could not be resolved: {type(e).__name__}: {e}"
+        )
+
+    if ev < today:
+        return "event_date_past", (
+            f"event_date {fields.event_date} is before today {today.isoformat()} ({tz_name})"
+        )
+    return None, None
+
+
 def _log(adapter: TypeAdapter, entry) -> None:
     """Append a Pydantic-validated entry to decisions.log under flock."""
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with flock(LOG_PATH):
         ndjson_append(LOG_PATH, adapter.dump_json(entry).decode("utf-8"))
+
+
+def _audit_best_effort(adapter: TypeAdapter, entry, *, context: str) -> None:
+    """Best-effort audit write. Never raises.
+
+    Guarantees the caller can always emit its structured stdout/stderr/exit-code
+    contract regardless of audit durability (disk full, perms, NFS hiccup).
+
+    Generalizes the design-review HIGH-A pattern uniformly to ALL audit writes
+    in this script — previously only the rejection-path _log() was wrapped, so
+    a success-path audit failure after atomic_write_json(LEADS_PATH) already
+    persisted the lead would propagate as an uncaught traceback, stranding the
+    lead with no audit AND no stdout JSON. With this wrapper, the operator gets
+    a journald WARN line and the script still emits its contract.
+    """
+    try:
+        _log(adapter, entry)
+    except Exception as e:  # noqa: BLE001 — invariant: audit must not block flow
+        sys.stderr.write(
+            f"WARN: audit log failed (non-fatal, context={context}): "
+            f"{type(e).__name__}: {e}\n"
+        )
 
 
 def main() -> int:
@@ -207,6 +295,9 @@ def main() -> int:
             return EXIT_SCHEMA_VIOLATION
 
         # Idempotency: same message_id replays?
+        # Runs BEFORE event-date validation (v3.1 C10): a lead created in the past
+        # may have had a then-future event_date that is now-past; replay must
+        # NOT reject — return the existing lead's id+code identically.
         existing = next(
             (l for l in store.leads if l.original_message_id == args.message_id),
             None,
@@ -218,6 +309,35 @@ def main() -> int:
                 "idempotent_replay": True,
             }))
             return EXIT_OK
+
+        # First-touch event-date validation (v3.1 C10).
+        # Three failure modes → three reasons in CateringLeadRejected.
+        # Order: log audit FIRST (durable), stderr SECOND (so SIGKILL between
+        # them doesn't lose the audit entry — design-review MEDIUM-E).
+        reason, detail = _validate_event_date(extracted, cfg.customer.timezone)
+        if reason is not None:
+            err_prefix = REASON_TO_ERR_PREFIX.get(reason, "ERR_UNKNOWN_REJECTION")
+            # Audit ts is ALWAYS UTC (design-review MEDIUM-D — consistent ordering
+            # for log-replay tools regardless of which failure mode fired).
+            ts_utc = datetime.now(tz=timezone.utc)
+            _audit_best_effort(
+                TypeAdapter(CateringLeadRejected),
+                CateringLeadRejected(
+                    type="catering_lead_rejected",
+                    ts=ts_utc,
+                    customer_phone=args.customer_phone,
+                    original_message_id=args.message_id,
+                    reason=reason,
+                    detail=detail[:500] if detail else "",
+                    customer_tz=cfg.customer.timezone,
+                    event_date=extracted.event_date,
+                ),
+                context="rejected",
+            )
+            sys.stderr.write(f"{err_prefix}: {detail}\n")
+            # timezone_invalid is config-level (cfg.customer.timezone), not input-level
+            # (customer-supplied event_date). Distinct exit code surfaces the difference.
+            return EXIT_SCHEMA_VIOLATION if reason == "timezone_invalid" else EXIT_INVALID_INPUT
 
         # Mint new lead
         now = customer_now(cfg.customer.timezone)
@@ -246,22 +366,37 @@ def main() -> int:
 
         atomic_write_json(LEADS_PATH, store)
 
-        # Audit: created → awaiting → approval-requested
-        _log(TypeAdapter(CateringLeadCreated), CateringLeadCreated(
-            type="catering_lead_created", ts=now,
-            lead_id=lead_id,
-            customer_phone=args.customer_phone,
-            original_message_id=args.message_id,
-        ))
-        _log(TypeAdapter(CateringLeadStatusChange), CateringLeadStatusChange(
-            type="catering_lead_status_change", ts=now,
-            lead_id=lead_id, from_status="NEW", to_status="AWAITING_OWNER_APPROVAL",
-            actor="system", reason="extractor_completed",
-        ))
-        _log(TypeAdapter(CateringOwnerApprovalRequested), CateringOwnerApprovalRequested(
-            type="catering_owner_approval_requested", ts=now,
-            lead_id=lead_id, approval_code=approval_code,
-        ))
+        # Audit: created → awaiting → approval-requested.
+        # All writes are best-effort: if audit fails, lead is already persisted
+        # (atomic_write_json above) and the SKILL must still get lead_id+code on
+        # stdout. Operator gets a journald WARN line per failed write.
+        _audit_best_effort(
+            TypeAdapter(CateringLeadCreated),
+            CateringLeadCreated(
+                type="catering_lead_created", ts=now,
+                lead_id=lead_id,
+                customer_phone=args.customer_phone,
+                original_message_id=args.message_id,
+            ),
+            context="created",
+        )
+        _audit_best_effort(
+            TypeAdapter(CateringLeadStatusChange),
+            CateringLeadStatusChange(
+                type="catering_lead_status_change", ts=now,
+                lead_id=lead_id, from_status="NEW", to_status="AWAITING_OWNER_APPROVAL",
+                actor="system", reason="extractor_completed",
+            ),
+            context="status_change",
+        )
+        _audit_best_effort(
+            TypeAdapter(CateringOwnerApprovalRequested),
+            CateringOwnerApprovalRequested(
+                type="catering_owner_approval_requested", ts=now,
+                lead_id=lead_id, approval_code=approval_code,
+            ),
+            context="approval_requested",
+        )
 
     # Send approval card to owner — outside the FileLock; bridge slowness shouldn't block.
     if not cfg.owner.self_chat_jid:

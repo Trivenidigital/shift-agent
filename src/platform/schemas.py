@@ -1057,6 +1057,31 @@ class CateringLeadStatusChange(_BaseEntry):
     reason: str = ""
 
 
+class CateringLeadRejected(_BaseEntry):
+    """Lead creation rejected pre-state (no state mutation, no lead row).
+
+    Intentionally has no lead_id — rejection happens before mint, so no lead
+    exists. customer_tz + event_date are carried so the audit entry is
+    self-describing (operator triaging a rejection doesn't need to JOIN against
+    catering-leads.json or config.yaml at query time).
+
+    Reasons are pinned by the discriminated `reason` field. Adding a new reason
+    requires updating BOTH this Literal AND the REASON_TO_ERR_PREFIX dict in
+    create-catering-lead — kept tight on purpose so future drift is loud.
+    """
+    type: Literal["catering_lead_rejected"]
+    customer_phone: E164Phone
+    original_message_id: str = Field(min_length=1)
+    reason: Literal[
+        "event_date_past",
+        "event_date_invalid_calendar",
+        "timezone_invalid",
+    ]
+    detail: str = Field(default="", max_length=500)
+    customer_tz: str = Field(default="", max_length=64)
+    event_date: Optional[str] = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
 class CateringQuoteDrafted(_BaseEntry):
     type: Literal["catering_quote_drafted"]
     lead_id: str = Field(min_length=1)
@@ -1171,7 +1196,8 @@ LogEntry = Annotated[
         # Agent #3 Multi-Location Coordinator
         CrossLocationQuery, InterLocationTransferProposed,
         # Agent #2 Catering Lead
-        CateringLeadCreated, CateringLeadStatusChange, CateringQuoteDrafted,
+        CateringLeadCreated, CateringLeadStatusChange, CateringLeadRejected,
+        CateringQuoteDrafted,
         CateringOwnerApprovalRequested, CateringOwnerDecision, CateringQuoteSent,
         MenuUpdateProposed, MenuUpdateApplied, MenuUpdateRejected,
     ],
@@ -1206,7 +1232,7 @@ __all__ = [
     "BriefAttempted", "BriefSent", "BriefSendFailed", "BriefSkipped",
     "EodSnapshot", "EodPushoverSent", "EodSkipped",
     "CrossLocationQuery", "InterLocationTransferProposed",
-    "CateringLeadCreated", "CateringLeadStatusChange", "CateringQuoteDrafted",
+    "CateringLeadCreated", "CateringLeadStatusChange", "CateringLeadRejected", "CateringQuoteDrafted",
     "CateringOwnerApprovalRequested", "CateringOwnerDecision", "CateringQuoteSent",
     "MenuUpdateProposed", "MenuUpdateApplied", "MenuUpdateRejected",
 ]
