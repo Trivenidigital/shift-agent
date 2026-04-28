@@ -60,7 +60,7 @@ tar czf "$TARBALL" \
     --exclude='*.pyc' \
     --exclude='*.pyo' \
     --exclude='.pytest_cache' \
-    src/ .commit-hash
+    src/ tools/ .commit-hash
 
 # Cleanup the staging hash file
 rm -f .commit-hash

@@ -160,6 +160,21 @@ case "$ACTION" in
             exit 2
         fi
 
+        # Hermes pin gate — fail-closed before any state change. Catches silent
+        # drift: Hermes commit moved, bridge.js content changed, or our patch
+        # markers no longer anchored where we expect. Override mechanism for
+        # legitimate Hermes upgrades documented in the check script.
+        if [ -x "$STAGING/tools/check-shift-agent-patch.sh" ]; then
+            echo "=== Hermes pin gate ==="
+            if ! "$STAGING/tools/check-shift-agent-patch.sh"; then
+                echo "ERROR: Hermes pin verification failed — refusing to install." >&2
+                echo "  No state change has been made. See output above for details." >&2
+                exit 1
+            fi
+        else
+            echo "WARN: tools/check-shift-agent-patch.sh not found in staged tarball — skipping pin gate" >&2
+        fi
+
         COMMIT_HASH=$(cat "$STAGING/.commit-hash" 2>/dev/null | head -c 8 || echo "unknown")
         NEW_TAG="deploy-$(date +%Y%m%d-%H%M%S)-${COMMIT_HASH}"
         PREV_TAG=$(ls -t "$DEPLOYS_DIR/"deploy-*.tgz 2>/dev/null | head -1 | xargs -n1 basename 2>/dev/null | sed 's/\.tgz$//' || echo "none")
