@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SMB-Agents — Portfolio Portal</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    .agent-card { transition: transform .12s ease, box-shadow .12s ease; }
+    .agent-card.clickable:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgb(0 0 0 / 0.08); }
+    .agent-card.disabled { opacity: 0.65; cursor: not-allowed; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900">
+  <div class="max-w-6xl mx-auto px-4 py-10">
+
+    <header class="mb-10">
+      <div class="flex items-baseline justify-between flex-wrap gap-3">
+        <h1 class="text-3xl font-semibold tracking-tight">SMB-Agents Portfolio</h1>
+        <span class="text-sm text-slate-500">Triveni Supermarket — 46.62.206.192</span>
+      </div>
+      <p class="mt-2 text-slate-600">
+        20 specialized agents for ethnic SMBs. Click an agent card to open its console.
+        Scaffolded agents are <span class="font-semibold text-amber-700">opt-in</span> — flip the
+        flag in <code class="font-mono text-sm">config.yaml</code> to activate.
+      </p>
+
+      <div class="mt-5 flex flex-wrap gap-2 text-sm">
+        <span class="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-emerald-100 text-emerald-800">
+          <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+          <span id="count-live">3</span> live
+        </span>
+        <span class="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-amber-100 text-amber-800">
+          <span class="w-2 h-2 rounded-full bg-amber-500"></span>
+          <span id="count-scaffold">11</span> scaffolded
+        </span>
+        <span class="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-slate-200 text-slate-700">
+          <span class="w-2 h-2 rounded-full bg-slate-500"></span>
+          <span id="count-future">6</span> deferred
+        </span>
+      </div>
+    </header>
+
+    <section class="mb-12">
+      <div class="flex items-baseline justify-between mb-4">
+        <h2 class="text-xl font-semibold">Tier 1 — Operations &amp; Synthesis</h2>
+        <span class="text-xs text-slate-500 uppercase tracking-wide">Must-build for product to exist</span>
+      </div>
+      <div id="tier1-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"></div>
+    </section>
+
+    <section class="mb-12">
+      <div class="flex items-baseline justify-between mb-4">
+        <h2 class="text-xl font-semibold">Tier 2 — Build After Paying Customers</h2>
+        <span class="text-xs text-slate-500 uppercase tracking-wide">Schemas + SKILL stubs deployed</span>
+      </div>
+      <div id="tier2-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"></div>
+    </section>
+
+    <section class="mb-10">
+      <div class="flex items-baseline justify-between mb-4">
+        <h2 class="text-xl font-semibold">Tier 3 — On Customer Demand</h2>
+        <span class="text-xs text-slate-500 uppercase tracking-wide">Not yet built; some collapse to skill bundles</span>
+      </div>
+      <div id="tier3-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"></div>
+    </section>
+
+    <footer class="mt-12 pt-6 border-t border-slate-200 text-sm text-slate-500">
+      <div class="flex flex-wrap gap-x-6 gap-y-2 items-center">
+        <span>Reference: <code class="font-mono text-xs">docs/portfolio.md.txt</code></span>
+        <a href="http://46.62.206.192:8080/ui" class="text-blue-700 hover:underline">Shift Agent Cockpit &rarr;</a>
+        <span class="ml-auto">Last updated 2026-04-28 (overnight sweep)</span>
+      </div>
+    </footer>
+  </div>
+
+  <script>
+    // Agents data — hardcoded literal, no user-supplied content. Safe per design.
+    const AGENTS = [
+      // Tier 1
+      { tier: 1, num: 1, name: "Shift Agent", purpose: "Sick-call coverage routing for hourly staff", state: "live", url: "http://46.62.206.192:8080/ui", state_detail: "Live - handling sick-call escalations" },
+      { tier: 1, num: 2, name: "Catering Lead", purpose: "Capture catering inquiries, draft quote, owner approval", state: "scaffold", state_detail: "Schema + 3 SKILLs deployed; cfg.catering.enabled=false (opt-in)" },
+      { tier: 1, num: 3, name: "Multi-Location Coordinator", purpose: "Cross-location queries + inter-location coverage transfers", state: "scaffold", state_detail: "Self-disables - Triveni hasn't onboarded a 2nd location" },
+      { tier: 1, num: 4, name: "Daily Brief", purpose: "Morning WhatsApp summary of yesterday + today's outlook", state: "live", state_detail: "Timer active; brief delivered Apr 28 03:55 UTC" },
+      { tier: 1, num: 5, name: "EOD Reconciliation", purpose: "End-of-day snapshot fed to next morning's brief", state: "live", state_detail: "Timer active; daily snapshot at 22:00 customer-tz" },
+
+      // Tier 2
+      { tier: 2, num: 6, name: "Inventory Tracker", purpose: "Stock counts + low-stock alerts + expiry warnings", state: "scaffold", state_detail: "Awaits POS integration" },
+      { tier: 2, num: 7, name: "Supplier Coordination", purpose: "Order placement, follow-ups, dispute logging", state: "scaffold", state_detail: "Awaits per-customer supplier roster" },
+      { tier: 2, num: 9, name: "VIP Customer", purpose: "Identify high-value repeat customers, surface preferences", state: "scaffold", state_detail: "Awaits customer order history (POS or manual)" },
+      { tier: 2, num: 10, name: "Catering Follow-up", purpose: "Post-event thank-you + feedback + anniversary nudges", state: "scaffold", state_detail: "Depends on Agent #2 Catering activation" },
+      { tier: 2, num: 12, name: "Hiring & Onboarding", purpose: "Paperwork tracking, training scheduling, roster entry", state: "scaffold", state_detail: "Awaits DocuSign/HelloSign integration" },
+      { tier: 2, num: 13, name: "Compliance Calendar", purpose: "Health inspection, license renewals, sales-tax deadlines", state: "scaffold", state_detail: "Pure date logic - ready to activate; needs per-state rules library" },
+      { tier: 2, num: 14, name: "Employee Document Tracker", purpose: "H-1B, I-9, food handler cert expiry tracking", state: "scaffold", state_detail: "Pure date logic - ready to activate" },
+      { tier: 2, num: 15, name: "Cash & AR", purpose: "Invoice tracking + payment reminders + overdue escalation", state: "scaffold", state_detail: "Awaits payment-processor sync (Stripe/Square)" },
+      { tier: 2, num: 16, name: "Sales Tax Filing", purpose: "Multi-state filing deadlines + taxable-sales compilation", state: "scaffold", state_detail: "Awaits POS sales data + per-state rule library" },
+
+      // Tier 3
+      { tier: 3, num: 8, name: "Receiving & QA", purpose: "Shipment receipt vs PO, damage logging via photo OCR", state: "future", state_detail: "OCR + product matching - high complexity, on demand" },
+      { tier: 3, num: 11, name: "Festival & Event Outreach", purpose: "Diwali/Ugadi/Pongal/Eid timed customer outreach", state: "future", state_detail: "Tradition-aware calendar + tone library - content moat" },
+      { tier: 3, num: 17, name: "Unit Economics", purpose: "Per-SKU & per-menu-item profit + repricing recommendations", state: "future", state_detail: "Recipe modeling + supplier-cost data; defer" },
+      { tier: 3, num: 18, name: "Customer Complaint", purpose: "Complaint intake, severity classification, owner-drafted response", state: "future", state_detail: "Sensitive content design > tech complexity; on demand" },
+      { tier: 3, num: 19, name: "Equipment & Maintenance", purpose: "Repair history, vendor routing, preventive calendar", state: "future", state_detail: "Niche, low frequency - on demand only" },
+      { tier: 3, num: 20, name: "Owner Wellbeing", purpose: "Owner workload metrics, break suggestions", state: "future", state_detail: "Recommend collapsing into Daily Brief subsection" },
+    ];
+
+    // Helpers — build DOM via createElement + textContent (no innerHTML for data fields).
+    function el(tag, opts) {
+      const node = document.createElement(tag);
+      if (!opts) return node;
+      if (opts.class) node.className = opts.class;
+      if (opts.text != null) node.textContent = opts.text;
+      if (opts.href) node.href = opts.href;
+      if (opts.target) node.target = opts.target;
+      if (opts.rel) node.rel = opts.rel;
+      if (opts.id) node.id = opts.id;
+      if (opts.children) {
+        for (const c of opts.children) if (c) node.appendChild(c);
+      }
+      return node;
+    }
+
+    function badge(state) {
+      const cfg = {
+        live:     { label: "LIVE",   classes: "bg-emerald-100 text-emerald-800", dot: "bg-emerald-500" },
+        scaffold: { label: "OPT-IN", classes: "bg-amber-100 text-amber-800",     dot: "bg-amber-500" },
+        future:   { label: "FUTURE", classes: "bg-slate-200 text-slate-700",     dot: "bg-slate-500" },
+      }[state];
+      return el("span", {
+        class: `inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${cfg.classes}`,
+        children: [
+          el("span", { class: `w-1.5 h-1.5 rounded-full ${cfg.dot}` }),
+          el("span", { text: cfg.label }),
+        ],
+      });
+    }
+
+    function card(a) {
+      const isClickable = !!a.url;
+      const wrapper = el(isClickable ? "a" : "div", {
+        class: isClickable
+          ? "agent-card clickable block bg-white rounded-xl border border-slate-200 p-5 hover:border-blue-300"
+          : "agent-card disabled bg-white rounded-xl border border-slate-200 p-5",
+      });
+      if (isClickable) {
+        wrapper.href = a.url;
+        wrapper.target = "_blank";
+        wrapper.rel = "noopener";
+      }
+
+      const header = el("div", {
+        class: "flex items-start justify-between gap-3 mb-2",
+        children: [
+          el("div", {
+            children: [
+              el("div", { class: "text-xs text-slate-500 mb-1", text: `Agent ${a.num}` }),
+              el("h3", { class: "text-lg font-semibold text-slate-900", text: a.name }),
+            ],
+          }),
+          badge(a.state),
+        ],
+      });
+
+      const purpose = el("p", { class: "text-sm text-slate-600 mb-3", text: a.purpose });
+      const detail = el("div", { class: "text-xs text-slate-500 italic mb-3", text: a.state_detail });
+
+      const linkHint = el("span", {
+        class: isClickable ? "text-xs text-blue-700" : "text-xs text-slate-400",
+        text: isClickable
+          ? "Open console →"
+          : (a.state === "future" ? "No console — not built" : "No console — opt-in disabled"),
+      });
+      const footer = el("div", {
+        class: "flex items-center justify-between mt-2",
+        children: [linkHint],
+      });
+
+      wrapper.appendChild(header);
+      wrapper.appendChild(purpose);
+      wrapper.appendChild(detail);
+      wrapper.appendChild(footer);
+      return wrapper;
+    }
+
+    function render(tier, gridId) {
+      const grid = document.getElementById(gridId);
+      grid.replaceChildren(...AGENTS.filter(a => a.tier === tier).map(card));
+    }
+
+    render(1, "tier1-grid");
+    render(2, "tier2-grid");
+    render(3, "tier3-grid");
+
+    document.getElementById("count-live").textContent = AGENTS.filter(a => a.state === "live").length;
+    document.getElementById("count-scaffold").textContent = AGENTS.filter(a => a.state === "scaffold").length;
+    document.getElementById("count-future").textContent = AGENTS.filter(a => a.state === "future").length;
+  </script>
+</body>
+</html>
