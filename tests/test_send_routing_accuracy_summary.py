@@ -234,6 +234,20 @@ def test_subprocess_timeout_exits_1(tmp_path, healthy_log, monkeypatch):
     assert not (tmp_path / "wd.json").exists()
 
 
+def test_unicode_decode_error_exits_1(tmp_path, healthy_log, monkeypatch):
+    """Non-UTF-8 bytes from subprocess(text=True) -> UnicodeDecodeError must
+    be caught (silent-failure-hunter HIGH-1 from PR review)."""
+    sras = _load_script()
+    _patch_paths(monkeypatch, sras, tmp_path / "wd.json", healthy_log)
+
+    def fake_run(args, **kwargs):
+        raise UnicodeDecodeError("utf-8", b"\xff\xfe", 0, 1, "invalid start byte")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert sras.main() == 1
+    assert not (tmp_path / "wd.json").exists()
+
+
 def test_reporter_stderr_forwarded(normal_report, tmp_path, healthy_log, monkeypatch, capsys):
     sras = _load_script()
     _patch_paths(monkeypatch, sras, tmp_path / "wd.json", healthy_log)

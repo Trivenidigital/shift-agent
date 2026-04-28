@@ -40,6 +40,9 @@ NOTIFY_BIN = "/usr/local/bin/shift-agent-notify-owner"
 DECISIONS_LOG = Path("/opt/shift-agent/logs/decisions.log")
 WATCHDOG_PATH = Path("/opt/shift-agent/state/routing-summary-last-run.json")
 SUBPROCESS_TIMEOUT_SEC = 60
+# 30 days (vs the 7-day report window) is permissive on purpose: a customer
+# truly seeing 0 traffic for ~10 days is plausible; we only flag corruption when
+# the audit log has been silent for 4x the report window.
 DECISIONS_LOG_MAX_STALE_DAYS = 30
 
 
@@ -108,9 +111,14 @@ def _write_watchdog() -> None:
 
 
 def main() -> int:
+    # UnicodeDecodeError can fire on subprocess.run(text=True) when the child
+    # emits non-UTF-8 bytes (locale=C, mojibake, partial-binary stdout). Catch
+    # explicitly so the script exits 1 cleanly and OnFailure= fires, instead of
+    # propagating an uncaught traceback.
     try:
         report = _run_report()
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, RuntimeError, OSError) as e:
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, RuntimeError,
+            OSError, UnicodeDecodeError) as e:
         sys.stderr.write(f"report failed: {type(e).__name__}: {e}\n")
         return 1
 
@@ -131,6 +139,9 @@ def main() -> int:
 
     # Cron + report were healthy -> reset staleness clock BEFORE format/notify so
     # downstream failures don't double-alarm via the daily-brief watchdog.
+    # Operator triage: format/notify failures fire the OnFailure handler
+    # (priority=1 Pushover); the watchdog is reserved for "cron stopped firing"
+    # detection, not "cron is unhealthy."
     _write_watchdog()
 
     try:
@@ -141,7 +152,7 @@ def main() -> int:
 
     try:
         _notify(summary)
-    except (subprocess.TimeoutExpired, RuntimeError, OSError) as e:
+    except (subprocess.TimeoutExpired, RuntimeError, OSError, UnicodeDecodeError) as e:
         sys.stderr.write(f"notify failed: {type(e).__name__}: {e}\n")
         return 1
 

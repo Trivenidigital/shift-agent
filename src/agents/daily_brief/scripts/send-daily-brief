@@ -459,24 +459,28 @@ def _pushover_alert(title: str, message: str, priority: int = 1) -> bool:
 def _check_routing_watchdog(cfg: Config, dry_run: bool) -> None:
     """Alert owner if send-routing-accuracy-summary cron is stale.
 
-    Contract: this function MUST NEVER raise. The daily brief's reliability is
-    the dominant invariant; a misbehaving watchdog must not block the brief.
+    Contract: this function should not raise under any expected condition; the
+    broad except Exception below provides the floor. The daily brief's reliability
+    is the dominant invariant; a misbehaving watchdog must not block the brief.
 
-    Fires only when:
-      - dry_run is False (don't fire on smoke tests)
-      - The timer unit-file is present on disk (catches "code shipped, timer
-        not enabled" partial-deploy state — would otherwise alarm forever)
-      - Watchdog file exists (NOT a fresh deploy)
-      - Watchdog timestamp is >WATCHDOG_STALE_DAYS old
+    Silent-return cases (no Pushover, no error): dry_run, timer-unit missing on
+    disk (partial-deploy guard), watchdog file missing (first-deploy grace),
+    timestamp fresher than WATCHDOG_STALE_DAYS.
+
+    Partial-deploy guard relies on WATCHDOG_TIMER_UNIT being installed at the
+    canonical /etc/systemd/system/ path (shift-agent-deploy.sh's `install -m 644
+    src/agents/shift/systemd/*.timer /etc/systemd/system/`). If a future deploy
+    layout changes and units land in /lib/systemd/system/ instead, update the
+    constant.
 
     Time semantics: uses _customer_now (the local alias that respects
     SHIFT_AGENT_NOW_OVERRIDE for tests), not safe_io.customer_now directly.
     """
-    if dry_run:
-        return
-    if not WATCHDOG_TIMER_UNIT.exists():
-        return
     try:
+        if dry_run:
+            return
+        if not WATCHDOG_TIMER_UNIT.exists():
+            return
         if not WATCHDOG_PATH.exists():
             return
         data = json.loads(WATCHDOG_PATH.read_text(encoding="utf-8"))
@@ -602,7 +606,8 @@ def main() -> int:
         #   - BEFORE sentinel check: still runs even when today's brief was
         #     already sent (single daily heartbeat)
         #   - Reached only by `in_window` and `in_catchup` states; `before` and
-        #     `past_catchup` early-return at lines 528 and 540 respectively.
+        #     `past_catchup` early-return earlier in main() via the
+        #     _self_gate_state branches above.
         _check_routing_watchdog(cfg, args.dry_run)
 
         sentinel = _read_sentinel()
