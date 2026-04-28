@@ -231,11 +231,20 @@ The Shift Agent uses an unofficial WhatsApp client (Baileys). WhatsApp's Terms o
 
 ### 2. Audit log integrity
 
-`/opt/shift-agent/logs/decisions.log` is the source of truth for sick-call / coverage decisions. Entries are checksum-protected (SHA-256 chain in `decisions.log.sha256`) but the underlying log is a plain file any root user could edit.
+`/opt/shift-agent/logs/decisions.log` is the source of truth for sick-call / coverage decisions. Operational integrity:
 
-**The log is tamper-evident, not tamper-proof.** If you ever need to use this as evidence in a labor dispute, the checksum chain can demonstrate whether the log was modified after the fact, but it is NOT notarized.
+- **Append-only writes** via `safe_io.ndjson_append` (flock + atomic write + fsync) — concurrent writers can't corrupt each other's entries.
+- **File perms `0640 shift-agent:shift-agent`** — only `shift-agent` user (and root) can write.
+- **Daily rotation** via logrotate to `/var/log/shift-agent-archive/`, 30-day retention.
+- **Off-server backups** via the existing backup pattern (see deploy.md).
 
-**Acknowledgment:** I understand the audit log is checksum-protected, not cryptographically immutable. I will not use it as sole evidence in labor disputes. Signature: __________________ Date: __________
+**No cryptographic tamper-evidence.** A SHA-256 chain file at `decisions.log.sha256` existed previously but was decoration — only ~3% of writers updated it, and there was no verifier. Removed 2026-04-28 to honestly reflect the deployed integrity story rather than claim a feature we don't have. If a future compliance need emerges (regulator audit, formal customer dispute defense), the chokepoint pattern in `safe_io.ndjson_append` makes adding a real chain straightforward — see `docs/hermes-alignment.md` Part 1 for the architecture sketch.
+
+**For labor disputes:** the audit log is corroborating evidence, not authoritative. The customer's WhatsApp message screenshots are the primary evidence; this log provides context for what the agent did.
+
+**Acknowledgment:** I understand the audit log is append-only with file-perm protection, not cryptographically tamper-evident. I will treat it as corroborating evidence, not authoritative. Signature: __________________ Date: __________
+
+> *Note for any acknowledgment signed before 2026-04-28:* the prior text claimed "checksum-protected (SHA-256 chain)." Investigation that day found the chain was decoration (~3% writer coverage, no verifier) and was removed in PR #20. Any earlier acknowledgment is superseded by the text above; re-sign at next opportunity.
 
 ### 3. Employee notification requirement
 

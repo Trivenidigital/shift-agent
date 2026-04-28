@@ -37,9 +37,10 @@ What `src/platform/` provides today and how agents are expected to use it.
 
 ### Audit pattern
 
-- **NDJSON audit log at `/opt/shift-agent/logs/decisions.log`.** Append-only. Every meaningful state change (`raw_inbound`, `proposal_created`, `proposal_status_change`, `dispatcher_routed`, `outbound_sent`, etc.) writes a Pydantic-validated entry through `log-decision-direct`.
+- **NDJSON audit log at `/opt/shift-agent/logs/decisions.log`.** Append-only via `safe_io.ndjson_append` (flock + atomic write + fsync). File perms `0640 shift-agent:shift-agent`. Multiple writers append directly: `log-decision-direct` (used by SKILLs via Hermes' terminal tool) plus per-agent scripts (`apply-catering-owner-decision`, `apply-menu-update`, `create-catering-lead`, `create-proposal`, `update-proposal-status`, etc.). Every writer uses the same chokepoint.
 - **30-variant discriminated union (`LogEntry`)** in `src/platform/schemas.py`. Add new variants to the union when shipping a new agent or new state transition. The pattern: subclass `_BaseEntry`, set `type: Literal["..."]`, list new fields with explicit types.
-- **SHA-256 chain at `/opt/shift-agent/logs/decisions.log.sha256`** for tamper-evidence. Each NDJSON line's hash is appended to the chain file. Audit log rotation must preserve chain continuity (see Part 2).
+- **Rotation:** daily via logrotate (`/etc/logrotate.d/shift-agent`), 30-day retention, archived to `/var/log/shift-agent-archive/`.
+- **No cryptographic tamper-evidence.** The integrity story is `0640` perms + Linux file ACLs + off-server backups + the deploy-time gates (Hermes pin, env symlink) which fail-close on state drift. If a future compliance requirement needs cryptographic chain (regulator audit, customer dispute defense), add `_append_sha_chain` at the `safe_io.ndjson_append` chokepoint, add a `verify-decisions-log` script, add daily-cron verification, run one-time backfill. Architecture is straightforward; we just don't have the requirement today. See backlog.
 
 ### Approval-code pattern
 
@@ -86,7 +87,7 @@ A bug that breaks loudly is a 4am page; you fix it and move on. A bug that break
 | Item | Failure mode | Cost | State | Target |
 |---|---|---|---|---|
 | Single canonical `.env` (or sync mechanism) | Two `.env` files (`/root/.hermes/.env` and `/opt/shift-agent/.env`) drift; placeholder API key in one cost hours of debugging on 2026-04-28 | 1–2h (decide: symlink, edit one loader, OR `make sync-env` step) | gap | this week |
-| Audit log rotation policy | `decisions.log` grows unbounded; SHA-256 chain in `.log.sha256` complicates rotation. Naive `logrotate` would silently break chain continuity, undetectable until audit needed | Half-day (custom postrotate hook re-anchoring chain, OR explicit ADR documenting why chain is per-rotation) | gap | when log >50MB or by 2026-06-01 |
+| Audit log rotation policy | `decisions.log` was thought to need chain-preserving rotation; investigation 2026-04-28 revealed the chain was decoration (~3% coverage, no verifier). Logrotate already configured (daily, 30-day retention, archive to `/var/log/shift-agent-archive/`) — no chain to preserve | done — chain removed (Option B); deployed integrity = append-only via flock + `0640` perms + off-server backups; chokepoint pattern documented for future re-introduction | done | done — `safe_io.ndjson_append` is the chokepoint if/when compliance need emerges |
 
 ### Medium (technical debt)
 

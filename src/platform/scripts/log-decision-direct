@@ -61,21 +61,25 @@ def main():
     with FileLock(LOG_LOCK):
         ndjson_append(LOG_PATH, canonical)
 
-    # Also update SHA-256 chain for tamper-evidence
-    _append_sha_chain(canonical)
-
     print(f"logged ({len(canonical)}b) to {LOG_PATH}")
     return EXIT_OK
 
 
-def _append_sha_chain(line: str) -> None:
-    import hashlib
-    chain_path = LOG_PATH.with_suffix(".log.sha256")
-    chain_lock = LOG_PATH.with_suffix(".log.sha256.lock")
-    h = hashlib.sha256(line.encode("utf-8")).hexdigest()
-    with FileLock(chain_lock):
-        with chain_path.open("a") as f:
-            f.write(h + "\n")
+# Historical note: this script previously called _append_sha_chain() to write
+# a SHA-256 chain file at /opt/shift-agent/logs/decisions.log.sha256 for
+# "tamper-evidence." That chain was decoration — only ~3% of decisions.log
+# entries went through this script (other writers in src/agents/*/scripts/
+# called safe_io.ndjson_append directly), and there was never a verifier in
+# the codebase. Removed 2026-04-28 (Option B per the audit-log-rotation
+# review thread).
+#
+# If/when a real compliance need emerges for cryptographic tamper-evidence,
+# the architecture is: move _append_sha_chain into safe_io.ndjson_append
+# (the chokepoint every writer uses), add a verify-decisions-log script,
+# add daily-cron verification, and run a one-time backfill for existing
+# entries (with explicit "trust boundary" docs noting pre-backfill entries
+# aren't cryptographically defensible). Total scope ~half-day. Logged in
+# tasks/todo.md under "deferred until compliance need emerges."
 
 
 if __name__ == "__main__":

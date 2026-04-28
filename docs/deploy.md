@@ -193,6 +193,37 @@ If the operator skips migration and runs deploy directly, the symlink-integrity 
 
 The Triveni production VPS was migrated on 2026-04-28 and is post-step-0 going forward. Future customer VPSes follow the sequence above.
 
+## One-time post-merge cleanups (per-VPS)
+
+Some PRs ship a state change that requires a one-shot cleanup on the VPS *after* the deploy lands. Listed here so a future operator setting up a new customer VPS, or someone reading deploy.md cold, sees them all in one place.
+
+Each item: which PR introduced it, what command(s) to run, what the system looks like afterward.
+
+### `decisions.log.sha256*` removal (PR #20, 2026-04-28)
+
+The audit-log SHA-256 chain was decoration (~3% writer coverage, no verifier). Removed code-side; orphan files on VPS need cleanup.
+
+```bash
+ssh main-vps 'sudo rm -f /opt/shift-agent/logs/decisions.log.sha256 \
+                          /opt/shift-agent/logs/decisions.log.sha256.lock'
+```
+
+Idempotent — safe to re-run; `rm -f` is a no-op if files are already gone. After run: `decisions.log` writes continue normally via `safe_io.ndjson_append`; no `.sha256` accumulating.
+
+### `.env.pre-symlink-backup` retention window (PR #18, 2026-04-28)
+
+`migrate-env-to-symlink.sh` creates a backup of the pre-migration `.env` for rollback safety. After 24h+ of clean operation, the backup can be removed:
+
+```bash
+ssh main-vps 'sudo rm /opt/shift-agent/.env.pre-symlink-backup'
+```
+
+If you re-ran migration partial-failure-then-recover, you may have timestamped backups (`.pre-symlink-backup-<unix-ts>`) — same removal pattern, list first to verify:
+
+```bash
+ssh main-vps 'ls -la /opt/shift-agent/.env.pre-symlink-backup*'
+```
+
 ## Limits + known caveats
 
 1. **State files are NOT in the deploy.** `pending.json`, `roster.json`, `catering-leads.json`, `decisions.log`, `config.yaml`, `.env` are customer-specific and never touched by `install_artifacts`. Schema migrations to those files need a separate one-shot script.
