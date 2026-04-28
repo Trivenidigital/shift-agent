@@ -317,6 +317,16 @@ class CateringLeadExtractedFields(BaseModel):
     delivery_or_pickup: Optional[Literal["delivery", "pickup", "unknown"]] = None
     budget_hint_usd: Optional[int] = Field(default=None, ge=0)
     notes: str = ""
+    # Items the customer asked about that aren't on the current menu —
+    # LLM-extracted from message text. Empty list = no off-menu requests
+    # detected.
+    #
+    # CONTRACT: this field is currently WRITE-ONLY — populated by the LLM
+    # extractor but not yet rendered on the owner-approval card. The catering
+    # extractor SKILL prompt + the owner-approval-card builder MUST be updated
+    # together; updating only the extractor produces silent drops (owner never
+    # sees what the customer asked for). Verify both sides ship in the same PR.
+    off_menu_items: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(default_factory=list, max_length=20)
 
 
 class CateringLead(BaseModel):
