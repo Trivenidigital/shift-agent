@@ -126,3 +126,83 @@ def test_config_backward_compat_no_catering():
     }
     c = Config.model_validate(old)
     assert c.catering.enabled is False  # default opt-in
+
+
+# ─────────────────────────────────────────────────────────────────
+# off_menu_items field (C23 from catering test-case review thread)
+# ─────────────────────────────────────────────────────────────────
+
+
+def test_off_menu_items_default_empty():
+    """Field is optional and defaults to empty list — backward-compatible
+    with leads created before the field existed."""
+    e = CateringLeadExtractedFields()
+    assert e.off_menu_items == []
+
+
+def test_off_menu_items_round_trip():
+    """LLM-extracted values populate cleanly through validation."""
+    e = CateringLeadExtractedFields.model_validate(
+        {"off_menu_items": ["mango lassi", "kheer"]}
+    )
+    assert e.off_menu_items == ["mango lassi", "kheer"]
+
+
+def test_off_menu_items_caps_list_length_at_20():
+    """Pathological LLM output (e.g., enumerating every menu item as off-menu)
+    is bounded to 20 items per lead."""
+    with pytest.raises(ValidationError):
+        CateringLeadExtractedFields(off_menu_items=["item"] * 21)
+
+
+def test_off_menu_items_accepts_exactly_20():
+    """Boundary: 20 items is allowed, 21 is not."""
+    e = CateringLeadExtractedFields(off_menu_items=["item"] * 20)
+    assert len(e.off_menu_items) == 20
+
+
+def test_off_menu_items_caps_item_length_at_200():
+    """Individual item names capped at 200 chars (matches MenuItem.name precedent)."""
+    with pytest.raises(ValidationError):
+        CateringLeadExtractedFields(off_menu_items=["x" * 201])
+
+
+def test_off_menu_items_rejects_empty_string():
+    """Empty/whitespace-only entries would render as artifacts (e.g., trailing
+    `, ,` in joined output). min_length=1 prevents this at the schema level."""
+    with pytest.raises(ValidationError):
+        CateringLeadExtractedFields(off_menu_items=[""])
+
+
+def test_off_menu_items_extra_ignore_still_works():
+    """Adding off_menu_items doesn't change the model's LLM-tolerant behavior:
+    extra fields the LLM emits beyond the schema continue to be silently ignored."""
+    e = CateringLeadExtractedFields.model_validate(
+        {"off_menu_items": ["x"], "noise_field": "ignored", "extra": "stuff"}
+    )
+    assert e.off_menu_items == ["x"]
+    # Sibling fields still default
+    assert e.headcount is None
+    assert e.notes == ""
+
+
+def test_off_menu_items_rejects_non_list_shapes():
+    """LLM emitting `off_menu_items: "mango lassi"` (string instead of list)
+    must fail loudly, not coerce silently. Catches a pr-test-analyzer concern
+    flagged in the design review."""
+    with pytest.raises(ValidationError):
+        CateringLeadExtractedFields(off_menu_items="mango lassi")
+    with pytest.raises(ValidationError):
+        CateringLeadExtractedFields(off_menu_items=None)
+    with pytest.raises(ValidationError):
+        CateringLeadExtractedFields(off_menu_items={"item": "x"})
+
+
+def test_off_menu_items_rejects_non_string_items():
+    """Items must be strings; LLM occasionally emits int or dict per item."""
+    with pytest.raises(ValidationError):
+        CateringLeadExtractedFields(off_menu_items=[123])
+    with pytest.raises(ValidationError):
+        CateringLeadExtractedFields(off_menu_items=[{"name": "x"}])
+    with pytest.raises(ValidationError):
+        CateringLeadExtractedFields(off_menu_items=[None])

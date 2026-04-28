@@ -317,6 +317,17 @@ class CateringLeadExtractedFields(BaseModel):
     delivery_or_pickup: Optional[Literal["delivery", "pickup", "unknown"]] = None
     budget_hint_usd: Optional[int] = Field(default=None, ge=0)
     notes: str = ""
+    # Items the customer asked about that aren't on the current menu — LLM-
+    # extracted from message text. Empty list = no off-menu requests detected.
+    # Length caps mirror MenuItem.name (max_length=200) precedent in this file.
+    # Renderer-side surfacing on the owner-approval card is a separate
+    # follow-up: this PR adds only the schema slot. Until that ships, off-menu
+    # items written by the LLM are stored on the lead but not displayed to the
+    # owner — confirm the owner-card-sending script (catering lead intake
+    # path) before adding the renderer change.
+    off_menu_items: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(
+        default_factory=list, max_length=20,
+    )
 
 
 class CateringLead(BaseModel):
