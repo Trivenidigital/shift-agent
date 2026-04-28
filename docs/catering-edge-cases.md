@@ -2,7 +2,7 @@
 
 **Project:** SMB-Agents → Catering Agent
 **Version:** v3.1 — Hermes-aligned hybrid (Path 3), grounded in deployed code as of 2026-04-28
-**Purpose:** 21 deterministic test cases against deployed Python scripts (one design-spec-pending, one deferred to renderer PR), plus 15 deferred cases categorized by why they can't be automated tests today.
+**Purpose:** 21 deterministic test cases against deployed Python scripts (two design-spec-pending — C02 needs `lookup_prior_leads_by_phone`, C10 needs past-date validation in `create-catering-lead`; one deferred to renderer PR — C18), plus 15 deferred cases categorized by why they can't be automated tests today.
 **Supersedes:** v3
 
 ---
@@ -21,7 +21,7 @@ Five corrections grounded in the actual deployed codebase:
 
 5. **Manual smoke methodology collapsed.** v3 had its own inline 5-step smoke. `docs/deploy.md` "Verifying after a `.env` change (smoke test)" already documents 3 concrete commands (PR #18, refined by PR #19). v3.1 references that section + adds 2 catering-specific checks rather than duplicating the deploy-level smoke.
 
-Net case count: **21 listed** (count unchanged; C18 deferred, C22 added). Of those, 19 runnable today; C02 design-spec-pending; C18 deferred to renderer PR. **Deferred bucket: 15 (was 17)** — C-old-02 resolved by Option C; C-old-23 promoted to C22; C-old-18 (v3-form) shifted into the C18 case-list slot as DEFERRED.
+Net case count: **21 listed** (count unchanged; C18 deferred, C22 added). Of those, 18 runnable today; C02 + C10 design-spec-pending (need future scripts/validation); C18 deferred to renderer PR. **Deferred bucket: 15 (was 17)** — C-old-02 resolved by Option C; C-old-23 promoted to C22; C-old-18 (v3-form) shifted into the C18 case-list slot as DEFERRED.
 
 ---
 
@@ -252,13 +252,16 @@ Python script under test (all 4): `create-catering-lead`
 **Expected:** `lead["event_date"] == "2026-09-05"`, ISO format string.
 **Failure modes:** Script normalizes to a different format; rejects valid future date.
 
-#### C10 — Past date triggers validation rejection or flag (must-pass)
+#### C10 — Past date triggers validation rejection (must-pass) [DESIGN-SPEC-PENDING-VALIDATION]
+
+> **Decision locked at v3.1:** option (A) — reject with `ValidationError`. Consistent with PR #21's fail-loudly pattern and the schema's other validators (Pydantic length caps, regex patterns). The flag-in-notes alternative was considered and rejected because: (1) it produces a "lead in inconsistent state" failure mode that owner has to clean up, (2) it diverges from the rest of the codebase's "fail at the boundary" pattern, (3) it pushes ambiguity downstream where every consumer has to re-check the flag.
+>
+> **Status:** `create-catering-lead` does NOT currently enforce past-date rejection. The `event_date` schema field has `pattern=r"^\d{4}-\d{2}-\d{2}$"` (ISO format) but no past-vs-future check. This case is locked to behavior (A) at the spec level; the script needs to add the validation. **Tracked as a separate ticket** in `tasks/todo.md`.
 
 **Input:** `{"headcount": 30, "event_date": "2024-01-01", "dietary_restrictions": [], ...}`
-**Expected:** Either (A) script rejects the lead with a validation error returned to the SKILL, OR (B) script accepts but flags in `notes`. Pick one and the test follows.
-**Assertions (A — reject):** Script raises `ValidationError` or returns error result; no lead created.
-**Assertions (B — flag):** Lead created with marker in `notes` like `[PAST_DATE_FLAGGED]`.
-**Failure modes:** Silently accepts past date (owner cleanup burden); crashes ungracefully.
+**Expected:** Script rejects the lead with `ValidationError` (or equivalent error result returned to the SKILL). No lead created.
+**Assertions:** `pytest.raises(ValidationError)` (or script returns non-zero exit + no entry in `catering-leads.json`).
+**Failure modes:** Silently accepts past date (current deployed behavior — the gap this case will close); crashes ungracefully; rejects valid future dates as a side effect of a too-aggressive check.
 
 #### C11 — Date ambiguity assumption recorded in notes (should-pass)
 
@@ -352,7 +355,7 @@ Python script under test: `create-catering-lead` + `apply-catering-owner-decisio
 **Assertions:**
 - Initial: `lead["status"] in ("NEW", "EXTRACTING")`
 - After draft: `lead["status"] == "AWAITING_OWNER_APPROVAL"`
-- Audit log has one `CateringLeadCreated` and one `CateringLeadStatusChange` entry
+- Audit log has one `CateringLeadCreated` and one `CateringLeadStatusChange` entry (both LogEntry variants exist in `src/platform/schemas.py:1051` for `CateringLeadStatusChange` and earlier in the union for `CateringLeadCreated`)
 
 **Failure modes:** Status not updated after draft; status updated but pending file not written (inconsistent state); transition not logged.
 
@@ -392,9 +395,9 @@ Python script under test: `create-catering-lead` + `apply-catering-owner-decisio
 
 ---
 
-### CATEGORY 8 — Schema field round-trips (1 case — NEW in v3.1)
+### CATEGORY 8 — Schema field persistence (1 case — NEW in v3.1)
 
-#### C22 — `off_menu_items` field round-trips through `create-catering-lead` (must-pass) [NEW]
+#### C22 — `off_menu_items` field persists through schema validation + state-file write/read (must-pass) [NEW]
 
 LLM extraction layer: Kimi via catering SKILL.md prompt (not directly tested in B1; whether Kimi correctly populates the field is smoke-validated until the renderer PR)
 Python script under test: `create-catering-lead` + `CateringLeadExtractedFields` schema
@@ -410,7 +413,9 @@ Python script under test: `create-catering-lead` + `CateringLeadExtractedFields`
 }
 ```
 
-**Expected:** Field persists exactly through schema validation + state-file write/read round-trip. Length caps (20 items, 200 chars per item) enforced — pathological extractions rejected at schema layer, not silently truncated.
+**Expected:** Field persists exactly through schema validation + state-file write/read. Length caps (20 items, 200 chars per item) enforced — pathological extractions rejected at schema layer, not silently truncated.
+
+**Scope note:** This is a write-then-read assertion against the schema-validating layer, not a true cross-process round-trip. True round-trip (write via `create-catering-lead`, read via the consuming script — the renderer or cockpit) is deferred until C18 unblocks (renderer PR ships) and there's a real consumer to validate against.
 
 **Assertions:**
 - After write: `lead["extracted"]["off_menu_items"] == ["mango lassi", "kheer"]`
@@ -491,7 +496,7 @@ def test_C01_clean_unknown_sender_creates_lead(fresh_state):
 # C22 (NEW in v3.1)
 @pytest.mark.must_pass
 @pytest.mark.schema
-def test_C22_off_menu_items_round_trip(fresh_state):
+def test_C22_off_menu_items_persists_through_schema_and_state_io(fresh_state):
     extraction = make_extraction(
         headcount=30, event_date="2026-09-05",
         dietary_restrictions=["vegetarian"],
@@ -557,16 +562,17 @@ Same as v3: multilingual inputs, voice notes, image uploads, group chats, long-r
 
 This is the planned next-step sequence at the time of v3.1 publication. Status of each step is tracked in `tasks/todo.md` rather than here — check there for what's done vs pending.
 
-1. Convert the 19 runnable B1 cases (excludes C02 design-spec-pending + C18 deferred) to pytest cases extending `test_catering_v02_scripts.py`. Realistic estimate: a focused day, given the harness primitive exists.
-2. Run all 19 — expect 60–80% pass on first run; failures point to real script bugs or schema mismatches.
+1. Convert the 18 runnable B1 cases (excludes C02 + C10 design-spec-pending + C18 deferred) to pytest cases extending `test_catering_v02_scripts.py`. Realistic estimate: a focused day, given the harness primitive exists.
+2. Run all 18 — expect 60–80% pass on first run; failures point to real script bugs or schema mismatches.
 3. Iterate scripts until all must-pass cases are green.
 4. Adopt the manual smoke methodology (Layer 1 + Layer 2 above) as pre-deploy ritual.
 5. Build `lookup_prior_leads_by_phone` as a separate ~half-day PR (tracked in `tasks/todo.md`); C02 becomes runnable on merge.
-6. Build the C23 renderer + extractor-prompt PR (tracked in `tasks/todo.md`); C18 becomes runnable on merge.
-7. Triage the 8 v0.3 schema tickets in Bucket A — pick 2-3 highest-value (probably allergens + lifecycle status enum members) for a v0.3 cycle.
-8. Triage the 3 architectural tickets in Bucket C — at minimum, surface C27 batching as a known limitation in customer-facing documentation; decide on C37 owner routing in next dispatcher revision.
-9. Defer the rest until real customer usage either validates looseness or reveals patterns justifying structured fields.
+6. Add past-date validation to `create-catering-lead` (~1h ticket per `tasks/todo.md`); C10 becomes runnable on merge.
+7. Build the C23 renderer + extractor-prompt PR (tracked in `tasks/todo.md`); C18 becomes runnable on merge.
+8. Triage the 8 v0.3 schema tickets in Bucket A — pick 2-3 highest-value (probably allergens + lifecycle status enum members) for a v0.3 cycle.
+9. Triage the 3 architectural tickets in Bucket C — at minimum, surface C27 batching as a known limitation in customer-facing documentation; decide on C37 owner routing in next dispatcher revision.
+10. Defer the rest until real customer usage either validates looseness or reveals patterns justifying structured fields.
 
 ---
 
-*Document status: v3.1 — Hermes-aligned hybrid, grounded in deployed code as of 2026-04-28. 21 cases listed (19 runnable today, 1 design-spec-pending [C02], 1 deferred-to-renderer-PR [C18]). 15 deferred cases categorized into v0.3 roadmap, looseness-by-design, and architectural decisions. No fictional schema, no fictional Python scripts, no real-Kimi tests in CI.*
+*Document status: v3.1 — Hermes-aligned hybrid, grounded in deployed code as of 2026-04-28 (revised post-merge to lock C10 contract, ground C19's audit-entry reference, and rescope C22 from "round-trip" to "schema + state-file persistence"). 21 cases listed (18 runnable today, 2 design-spec-pending [C02 needs `lookup_prior_leads_by_phone`, C10 needs past-date validation in `create-catering-lead`], 1 deferred-to-renderer-PR [C18]). 15 deferred cases categorized into v0.3 roadmap, looseness-by-design, and architectural decisions. No fictional schema, no fictional Python scripts, no real-Kimi tests in CI.*
