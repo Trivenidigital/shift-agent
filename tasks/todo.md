@@ -49,9 +49,9 @@ See `docs/hermes-alignment.md` Part 2 for the silent-failure-ranked operational 
 
 ### Critical tier (silent-failure surface — from alignment doc)
 
-- [ ] **Reconcile `shift-agent-deploy.sh` with actual VPS pattern** — script expects `/opt/shift-agent/working` to be a git checkout but VPS uses tarball deploy. Blocks the next two items.
-- [ ] **Pin Hermes commit hash in deploy.sh** — Hermes upgrade silently breaks our patches today. Half-day after deploy.sh reconcile.
-- [ ] **`bridge.js` patch inventory + version markers** — upstream rename moves a marker comment by one character; outbound chatter filter silently no-ops. Half-day audit + compatibility check in `tools/patch-bridge-filter.py`.
+- ✅ **2026-04-28** — Reconcile `shift-agent-deploy.sh` with actual VPS pattern (PR #16). Tarball-based deploy with snapshot-before-install, smoke gate, auto-rollback. End-to-end validated on VPS: deploy + rollback + rollforward + list. `tools/build-deploy-tarball.sh` runs pytest gate locally, captures `git rev-parse HEAD` into `.commit-hash`, ships ~116K tarball.
+- [ ] **Pin Hermes commit hash in deploy.sh** — Hermes upgrade silently breaks our patches today. Now unblocked.
+- [ ] **`bridge.js` patch inventory + version markers** — upstream rename moves a marker comment by one character; outbound chatter filter silently no-ops. Half-day audit + compatibility check in `tools/patch-bridge-filter.py`. Now unblocked.
 
 ### High tier (active gotcha)
 
@@ -74,6 +74,8 @@ See `docs/hermes-alignment.md` Part 2 for the silent-failure-ranked operational 
 
 ## Recently completed (this week)
 
+- ✅ 2026-04-28 — PR #16: tarball-based deploy formalizing actual VPS pattern (`docs/deploy.md` + `tools/build-deploy-tarball.sh` + rewritten `shift-agent-deploy.sh`); end-to-end validated incl. rollback path
+- ✅ 2026-04-28 — `docs/hermes-alignment.md` v1: deployed-patterns reference + silent-failure-ranked operational checklist + read-deployed-code working agreement
 - ✅ 2026-04-28 — PR #15: `dispatcher-accuracy-report` Layer 0 monitor (149 tests passing)
 - ✅ 2026-04-28 — PR #14: dispatcher routing reliability hardening (3 fixes: routing matrix, `DispatcherRouted` schema, image+menu fallback)
 - ✅ 2026-04-28 — `.gitattributes` enforces LF line endings for VPS scripts (root-cause fix for CRLF shebang break)
