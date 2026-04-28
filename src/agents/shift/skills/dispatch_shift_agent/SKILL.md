@@ -38,13 +38,41 @@ The `fromMe` flag in the block is **informational only**. **Owner routing is gat
 
 ## Step 3 — Decision table
 
+**FIRST**: scan the message_text (line 2+) for catering intent. If any of these
+keywords/phrases appear AND `cfg.catering.enabled` is true (check
+`/opt/shift-agent/config.yaml`), route to **catering_dispatcher** instead of
+the table below:
+
+  cater, catering, cater for, headcount, guests, event, wedding, reception,
+  party, birthday, anniversary, "menu for X people", "do you do catering",
+  banquet, drop off, pickup for event, "feeding [number]"
+
+This applies regardless of sender role — owner, employee, or unknown number.
+A regular employee sending a sick-call ("I have fever") goes through the
+table below; an employee sending "do you cater 50 people?" goes to catering.
+
+If catering routing fires, STOP this skill and let catering_dispatcher take over.
+
+Otherwise, fall through to:
+
 | identify-sender role | pending sent proposal for this employee_id? | -> Delegate to |
 |---|---|---|
+| owner | message contains 5-char approval code (`#XXXXX`) matching a catering lead? | handle_catering_owner_approval |
 | owner | n/a | handle_owner_command |
 | employee | YES | handle_candidate_response |
 | employee | NO | handle_sick_call |
 | unknown | n/a | DECLINE politely + log_decision_direct |
 | error | n/a | invoke shift-agent-notify-owner "State file load failed - handle manually" then STOP |
+
+To check whether an owner reply contains a catering approval code:
+```
+grep -oE "#[A-HJ-NP-Z2-9]{5}" <message_text>
+```
+If a code is found, look it up in `/opt/shift-agent/state/catering-leads.json`
+under `leads[].owner_approval_code` for any non-terminal lead. If found,
+route to `handle_catering_owner_approval`. If not found, route to
+`handle_owner_command` (the code may be a Shift proposal code, which the
+owner-command skill knows how to handle).
 
 When delegating, pass these as named inputs to the next skill:
 - sender_phone (from identify-sender's phone_normalized)

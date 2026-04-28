@@ -1,0 +1,10 @@
+Hi {customer_name}, thanks for your catering inquiry.
+
+We can confirm — based on what you shared:
+- Headcount: {headcount}
+- Date: {event_date}
+- Time: {event_time}
+
+We'll be in touch shortly with the menu options and final pricing. Reply here with any questions or changes.
+
+— Triveni Catering (Ref: {lead_id})

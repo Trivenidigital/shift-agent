@@ -1,0 +1,19 @@
+*Catering Inquiry — {lead_id}*
+
+From: {customer_name} ({customer_phone})
+
+Inquiry:
+{raw_inquiry}
+
+Extracted:
+{extracted_summary}
+
+----
+*To approve and send a quote, reply:*
+`{approval_code} approve`
+
+*To edit before sending, reply:*
+`{approval_code} edit <your changes>`
+
+*To decline, reply:*
+`{approval_code} reject`

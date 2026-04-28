@@ -1,0 +1,292 @@
+#!/usr/bin/env python3
+"""create-catering-lead — Agent #2 lead writer.
+
+Called by Kimi (via the parse_catering_inquiry SKILL) once the inquiry has
+been classified as catering and key fields have been extracted. This script
+is deterministic — it writes state and sends the owner approval card.
+
+Usage:
+  create-catering-lead \\
+    --customer-phone "+19045551234" \\
+    --customer-name "Priya Reddy" \\
+    --raw-inquiry "Need catering for 50 people June 15 wedding reception" \\
+    --message-id "3EB0F1A2E9" \\
+    --fields-json '{"headcount": 50, "event_date": "2026-06-15", "menu_preferences": ["vegetarian"]}'
+
+Idempotent on (customer_phone, message_id) — replays of the same inbound
+event are a no-op (returns the existing lead's id+code).
+
+Outputs JSON to stdout: {"lead_id": "L0007", "approval_code": "#A3F2X"}.
+
+Exit codes:
+  0  — created (or already-exists, idempotent replay)
+  2  — invalid input
+  3  — catering disabled (cfg.catering.enabled=False)
+  5  — schema violation
+  6  — bridge unreachable (approval card couldn't send; lead still saved)
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import secrets
+import sys
+import urllib.error
+import urllib.request
+import uuid
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
+
+from safe_io import (  # noqa: E402
+    FileLock, ndjson_append, atomic_write_json, customer_now,
+    safe_load_json, load_model, flock,
+)
+from schemas import (  # noqa: E402
+    Config, CateringLead, CateringLeadStore, CateringLeadExtractedFields,
+    CateringLeadCreated, CateringLeadStatusChange, CateringOwnerApprovalRequested,
+)
+from exit_codes import (  # noqa: E402
+    EXIT_OK, EXIT_INVALID_INPUT, EXIT_DISABLED,
+    EXIT_SCHEMA_VIOLATION, EXIT_DEPENDENCY_DOWN,
+)
+from pydantic import TypeAdapter, ValidationError  # noqa: E402
+
+CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
+LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
+LEADS_LOCK = Path("/opt/shift-agent/state/catering-leads.json.lock")
+LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+TEMPLATE_DIR = Path("/opt/shift-agent/templates")
+BRIDGE_URL = "http://127.0.0.1:3000/send"
+BRIDGE_TIMEOUT = 10
+
+# Same alphabet as Shift's proposal codes — visually unambiguous uppercase + digits.
+_CODE_ALPHA = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+
+
+def _generate_unique_code(store: CateringLeadStore) -> str:
+    """Generate a 5-char approval code not currently in use among non-terminal leads."""
+    active_codes = {
+        l.owner_approval_code for l in store.leads
+        if l.status not in {"NOT_CATERING", "OWNER_REJECTED", "CLOSED", "STALE"}
+        and l.owner_approval_code
+    }
+    for _ in range(50):
+        candidate = "#" + "".join(secrets.choice(_CODE_ALPHA) for _ in range(5))
+        if candidate not in active_codes:
+            return candidate
+    raise RuntimeError("unable to generate unique catering approval code after 50 attempts")
+
+
+def _next_lead_id(store: CateringLeadStore) -> str:
+    """Lead IDs are L0001, L0002, ... incrementing across the lifetime of the store."""
+    if not store.leads:
+        return "L0001"
+    last = max(int(l.lead_id.lstrip("L")) for l in store.leads if l.lead_id.startswith("L") and l.lead_id[1:].isdigit())
+    return f"L{last + 1:04d}"
+
+
+def _bridge_post(jid: str, message: str) -> tuple[bool, str]:
+    """POST to local bridge. Returns (success, message_id_or_error)."""
+    payload = json.dumps({"chatId": jid, "message": message}).encode("utf-8")
+    req = urllib.request.Request(
+        BRIDGE_URL, data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=BRIDGE_TIMEOUT) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            doc = json.loads(body)
+            mid = doc.get("id") or doc.get("messageId") or ""
+            if not mid:
+                return False, f"empty messageId: {body[:200]}"
+            return True, mid
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError) as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+def _render_approval_card(
+    lead_id: str, approval_code: str, customer_phone: str, customer_name: Optional[str],
+    raw: str, fields: CateringLeadExtractedFields,
+) -> str:
+    """Format the owner-facing approval card. Uses a template file with {field} substitution.
+
+    Falls back to inline text if template missing — defensive for first deploy.
+    """
+    template_path = TEMPLATE_DIR / "catering_approval_card_to_owner.txt"
+    summary_lines = []
+    if fields.headcount is not None:
+        summary_lines.append(f"  - Headcount: {fields.headcount}")
+    if fields.event_date:
+        ev = fields.event_date + (f" {fields.event_time}" if fields.event_time else "")
+        summary_lines.append(f"  - Event: {ev}")
+    if fields.menu_preferences:
+        summary_lines.append(f"  - Menu: {', '.join(fields.menu_preferences)}")
+    if fields.dietary_restrictions:
+        summary_lines.append(f"  - Dietary: {', '.join(fields.dietary_restrictions)}")
+    if fields.delivery_or_pickup:
+        summary_lines.append(f"  - Delivery: {fields.delivery_or_pickup}")
+    if fields.budget_hint_usd is not None:
+        summary_lines.append(f"  - Budget hint: ${fields.budget_hint_usd}")
+    summary = "\n".join(summary_lines) if summary_lines else "  (no structured fields extracted)"
+
+    fields_dict = {
+        "lead_id": lead_id,
+        "approval_code": approval_code,
+        "customer_phone": customer_phone,
+        "customer_name": customer_name or "(unknown)",
+        "raw_inquiry": raw[:300],
+        "extracted_summary": summary,
+    }
+    if template_path.exists():
+        try:
+            tmpl = template_path.read_text(encoding="utf-8")
+            return tmpl.format(**fields_dict)
+        except (KeyError, OSError):
+            pass
+    # Inline fallback
+    return (
+        f"*New Catering Inquiry — {lead_id}*\n\n"
+        f"From: {customer_name or '(unknown)'} ({customer_phone})\n\n"
+        f"{raw[:300]}\n\n"
+        f"Extracted:\n{summary}\n\n"
+        f"*To approve, reply with:* `{approval_code} approve`\n"
+        f"*To reject:* `{approval_code} reject`\n"
+        f"*To edit:* `{approval_code} edit <your changes>`"
+    )
+
+
+def _log(adapter: TypeAdapter, entry) -> None:
+    """Append a Pydantic-validated entry to decisions.log under flock."""
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with flock(LOG_PATH):
+        ndjson_append(LOG_PATH, adapter.dump_json(entry).decode("utf-8"))
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--customer-phone", required=True)
+    ap.add_argument("--customer-name", default=None)
+    ap.add_argument("--raw-inquiry", required=True)
+    ap.add_argument("--message-id", required=True, help="Meta WhatsApp message id (idempotency key)")
+    ap.add_argument("--fields-json", required=True,
+                    help='JSON dict matching CateringLeadExtractedFields')
+    args = ap.parse_args()
+
+    # Load config
+    try:
+        import yaml
+        cfg_dict = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+        cfg = Config.model_validate(cfg_dict)
+    except Exception as e:
+        sys.stderr.write(f"config load failed: {e}\n")
+        return EXIT_SCHEMA_VIOLATION
+
+    if not cfg.catering.enabled:
+        sys.stderr.write("catering disabled (cfg.catering.enabled=false)\n")
+        return EXIT_DISABLED
+
+    # Validate extracted fields
+    try:
+        extracted = CateringLeadExtractedFields.model_validate_json(args.fields_json)
+    except ValidationError as e:
+        sys.stderr.write(f"fields_json validation failed: {e}\n")
+        return EXIT_INVALID_INPUT
+
+    LEADS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with FileLock(LEADS_LOCK):
+        # Load store (or empty default)
+        store, status = load_model(LEADS_PATH, CateringLeadStore, default=CateringLeadStore())
+        if status.startswith("corrupt"):
+            sys.stderr.write(f"catering-leads.json corrupt: {status}\n")
+            return EXIT_SCHEMA_VIOLATION
+
+        # Idempotency: same message_id replays?
+        existing = next(
+            (l for l in store.leads if l.original_message_id == args.message_id),
+            None,
+        )
+        if existing:
+            print(json.dumps({
+                "lead_id": existing.lead_id,
+                "approval_code": existing.owner_approval_code,
+                "idempotent_replay": True,
+            }))
+            return EXIT_OK
+
+        # Mint new lead
+        now = customer_now(cfg.customer.timezone)
+        lead_id = _next_lead_id(store)
+        approval_code = _generate_unique_code(store)
+        lead = CateringLead(
+            lead_id=lead_id,
+            status="AWAITING_OWNER_APPROVAL",
+            customer_phone=args.customer_phone,
+            customer_name=args.customer_name,
+            raw_inquiry=args.raw_inquiry,
+            original_message_id=args.message_id,
+            created_at=now,
+            updated_at=now,
+            extracted=extracted,
+            owner_approval_code=approval_code,
+        )
+        store.leads.append(lead)
+
+        # Validate before persist
+        try:
+            CateringLeadStore.model_validate(store.model_dump())
+        except ValidationError as e:
+            sys.stderr.write(f"store validation failed: {e}\n")
+            return EXIT_SCHEMA_VIOLATION
+
+        atomic_write_json(LEADS_PATH, store)
+
+        # Audit: created → awaiting → approval-requested
+        _log(TypeAdapter(CateringLeadCreated), CateringLeadCreated(
+            type="catering_lead_created", ts=now,
+            lead_id=lead_id,
+            customer_phone=args.customer_phone,
+            original_message_id=args.message_id,
+        ))
+        _log(TypeAdapter(CateringLeadStatusChange), CateringLeadStatusChange(
+            type="catering_lead_status_change", ts=now,
+            lead_id=lead_id, from_status="NEW", to_status="AWAITING_OWNER_APPROVAL",
+            actor="system", reason="extractor_completed",
+        ))
+        _log(TypeAdapter(CateringOwnerApprovalRequested), CateringOwnerApprovalRequested(
+            type="catering_owner_approval_requested", ts=now,
+            lead_id=lead_id, approval_code=approval_code,
+        ))
+
+    # Send approval card to owner — outside the FileLock; bridge slowness shouldn't block.
+    if not cfg.owner.self_chat_jid:
+        sys.stderr.write("owner.self_chat_jid empty; lead saved but card not sent\n")
+        # Still success — lead is in state; owner can review via cockpit
+        print(json.dumps({"lead_id": lead_id, "approval_code": approval_code,
+                          "card_sent": False, "reason": "self_chat_jid_empty"}))
+        return EXIT_OK
+
+    card_text = _render_approval_card(
+        lead_id, approval_code, args.customer_phone, args.customer_name,
+        args.raw_inquiry, extracted,
+    )
+    ok, mid_or_err = _bridge_post(cfg.owner.self_chat_jid, card_text)
+    if not ok:
+        sys.stderr.write(f"bridge_post failed: {mid_or_err}\n")
+        # Lead is saved; owner just doesn't get the card. Return DEPENDENCY_DOWN
+        # so caller can fire Pushover separately. State is consistent.
+        print(json.dumps({"lead_id": lead_id, "approval_code": approval_code,
+                          "card_sent": False, "reason": mid_or_err}))
+        return EXIT_DEPENDENCY_DOWN
+
+    print(json.dumps({"lead_id": lead_id, "approval_code": approval_code,
+                      "card_sent": True, "outbound_message_id": mid_or_err}))
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())
