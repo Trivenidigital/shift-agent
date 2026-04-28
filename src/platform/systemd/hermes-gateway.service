@@ -9,6 +9,11 @@ User=shift-agent
 Group=shift-agent
 Environment=HOME=/opt/shift-agent
 Environment=HERMES_HOME=/root/.hermes
+# PATH must include /root/.hermes/node/bin so Hermes can spawn the WhatsApp
+# bridge subprocess (`["node", "bridge.js"]`). systemd's default service PATH
+# lacks this dir; without the override, Hermes logs "Node.js not installed
+# or bridge not configured" and refuses to start the WhatsApp adapter.
+Environment=PATH=/root/.hermes/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EnvironmentFile=/opt/shift-agent/.env
 
 # Idempotent ownership guard — Baileys rotates keys mid-session; if anything ever ran as root
