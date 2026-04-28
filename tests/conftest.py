@@ -13,11 +13,14 @@ from datetime import datetime, timezone
 
 import pytest
 
-# Make schemas/safe_io importable from any cwd
+# Make schemas/safe_io/sender_context importable from any cwd.
+# Platform-extraction layout: src/, src/platform/, src/agents/shift/ all on path
+# so flat imports (`from safe_io import ...`) keep working as modules migrate.
 _THIS_DIR = Path(__file__).resolve().parent
 _SRC_DIR = _THIS_DIR.parent / "src"
-if str(_SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(_SRC_DIR))
+for _p in (_SRC_DIR, _SRC_DIR / "platform", _SRC_DIR / "agents" / "shift"):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 
 @pytest.fixture
