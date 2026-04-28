@@ -196,22 +196,37 @@ case "$ACTION" in
         # polarity — silently passed when the symlink was REPLACED by a regular
         # file, which is exactly the failure mode the gate was supposed to catch.
         # Validation on 2026-04-28 surfaced the bug; this is the corrected version.
+        #
+        # No automated regression test for this gate. Manual Step-5 (deliberately
+        # break the symlink, run deploy, expect fail-closed, restore) is the
+        # canonical check — run it after any change to gate logic. PR #17 Low-5
+        # backlogs bats infrastructure as the long-term answer.
         echo "=== Env symlink integrity gate ==="
         if [ ! -L /opt/shift-agent/.env ]; then
             echo "ERROR: /opt/shift-agent/.env is not a symlink." >&2
             if [ -e /opt/shift-agent/.env ]; then
+                # `stat -c` is GNU-specific. This script is Linux-only by design
+                # (Hermes runtime requires fcntl etc.); BSD/macOS would need
+                # `stat -f '%HT'`. Not worth abstracting — production target
+                # is the customer Linux VPS.
                 echo "  got: $(stat -c '%F' /opt/shift-agent/.env)" >&2
             else
-                echo "  got: missing entirely" >&2
+                echo "  got: missing" >&2
             fi
             echo "  expected: symlink → /root/.hermes/.env" >&2
             echo "" >&2
-            echo "  If this is a fresh customer VPS that hasn't been migrated yet, run:" >&2
-            echo "    sudo $STAGING/tools/migrate-env-to-symlink.sh" >&2
+            echo "  Which scenario is this?" >&2
+            echo "    A) Fresh customer VPS — never migrated. ls -la would show a regular" >&2
+            echo "       file with handful-of-keys content matching the provisioning template." >&2
+            echo "       Action: run the migration:" >&2
+            echo "         sudo $STAGING/tools/migrate-env-to-symlink.sh" >&2
             echo "" >&2
-            echo "  If migration was previously done and the symlink was broken, restore via:" >&2
-            echo "    sudo rm -f /opt/shift-agent/.env" >&2
-            echo "    sudo ln -s /root/.hermes/.env /opt/shift-agent/.env" >&2
+            echo "    B) Post-migration breakage — symlink was replaced (mv, tarball with .env," >&2
+            echo "       editor save-as-new-file). ls -la would show a regular file with" >&2
+            echo "       hand-written content, OR /opt/shift-agent/.env.pre-symlink-backup-* exists." >&2
+            echo "       Action: restore the symlink:" >&2
+            echo "         sudo rm -f /opt/shift-agent/.env" >&2
+            echo "         sudo ln -s /root/.hermes/.env /opt/shift-agent/.env" >&2
             exit 1
         fi
         ENV_TARGET=$(readlink /opt/shift-agent/.env)

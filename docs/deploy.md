@@ -119,7 +119,28 @@ Pre-consolidation, the two files drifted independently and yesterday's auth-key 
 
 ### Pre-flight gate in `shift-agent-deploy.sh`
 
-Every deploy verifies symlink integrity before `install_artifacts` runs. If `/opt/shift-agent/.env` is no longer a symlink to `/root/.hermes/.env`, the deploy fails-closed before any state change. Catches: Hermes setup re-run that recreated the file, accidental editor truncation, target-path drift.
+Every deploy verifies symlink integrity before `install_artifacts` runs. If `/opt/shift-agent/.env` is no longer a symlink to `/root/.hermes/.env`, the deploy fails-closed before any state change. Catches: Hermes setup re-run that recreated the file, accidental editor truncation, target-path drift, tarball that contained a `.env` file replacing the symlink.
+
+**Manual regression check after any change to gate logic** (PR #19's lesson — code-reading missed the original polarity bug; only "deliberately break, expect fail-closed" caught it):
+
+```bash
+# 1. Replace symlink with regular file (simulates breakage)
+ssh main-vps 'sudo mv /opt/shift-agent/.env /opt/shift-agent/.env.symlink-saved && \
+              sudo bash -c "echo OPENROUTER_API_KEY=fake > /opt/shift-agent/.env"'
+
+# 2. Run a deploy — MUST fail-closed before install_artifacts
+ssh main-vps 'sudo /usr/local/bin/shift-agent-deploy.sh' ; echo "exit: $?"
+# Expected: exit 1, error pointing at this section, no service state change
+
+# 3. Restore symlink
+ssh main-vps 'sudo rm /opt/shift-agent/.env && \
+              sudo mv /opt/shift-agent/.env.symlink-saved /opt/shift-agent/.env'
+
+# 4. Verify deploy now passes
+ssh main-vps 'sudo /usr/local/bin/shift-agent-deploy.sh'
+```
+
+This is currently a manual procedure; bats infrastructure for automated bash-gate tests is backlogged (per PR #17 Low-5).
 
 ### Verifying after a `.env` change (smoke test)
 
@@ -145,6 +166,8 @@ The `code -15` filter excludes the expected systemd-restart-shutdown signal (the
 ### Customer-VPS bring-up: migration is step-0 (REQUIRED before first deploy)
 
 On a fresh customer VPS, `/opt/shift-agent/.env` is a regular file from initial provisioning. The deploy script's symlink-integrity gate is **strict** — it fails-closed if `/opt/shift-agent/.env` is not a symlink. So migration MUST happen before the first deploy attempts to run.
+
+**Prerequisite:** Hermes runtime must be installed and `/root/.hermes/.env` must exist before this sequence. If `/root/.hermes/.env` is missing, `check-env-drift.sh` exits 2 ("env files missing") and the migration cannot proceed. Order on a brand-new VPS: install Hermes → populate `/root/.hermes/.env` and `/opt/shift-agent/.env` from the customer-config templates → THEN run step-0 below.
 
 ```bash
 # Step 0 — extract a tarball into staging (no install yet)
