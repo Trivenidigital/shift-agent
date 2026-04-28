@@ -1,0 +1,17 @@
+# Default: let git decide based on file content + the user's core.autocrlf setting
+* text=auto
+
+# Shell + Python scripts deployed to Linux VPS MUST keep LF line endings,
+# regardless of local OS (Windows shebangs break with CRLF: '#!/usr/bin/env python3\r').
+# Applies to anything in src/platform/scripts/, src/agents/*/scripts/, and shell scripts.
+src/platform/scripts/*       text eol=lf
+src/agents/*/scripts/*       text eol=lf
+*.sh                         text eol=lf
+*.py                         text eol=lf
+
+# SKILL.md files are read by Hermes on Linux — keep LF.
+*.md                         text eol=lf
+
+# Systemd unit files
+*.service                    text eol=lf
+*.timer                      text eol=lf
