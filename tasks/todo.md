@@ -107,7 +107,7 @@ This is a future-process decision; not worth retrofitting prior PRs, but worth a
 
 ## Recently completed (this week)
 
-- 🟡 2026-04-28 — PR #22 (in flight): catering edge case scenario library v3.1 (`docs/catering-edge-cases.md`); replaces v3 inline doc; 5 grounded corrections vs deployed code; awaits explicit merge approval
+- ✅ 2026-04-28 — PR #22: catering edge case scenario library v3.1 (`docs/catering-edge-cases.md`); replaces v3 inline doc; 5 grounded corrections vs deployed code + 3-agent code-review round (must-fix `_normalize` accuracy bug + Bucket A count drift + claim-rot patterns); merged as 94177d2
 - ✅ 2026-04-28 — PR #21: C23 schema field `off_menu_items` (full pipeline: plan → 5 reviews → design → 5 reviews → bundle-split decision → build → PR → 5 reviews → 8 review fixes → merge → deploy; 162 tests passing, deploy tagged 3b83c034)
 - ✅ 2026-04-28 — PR #20: SHA-256 chain decoration removed; deployed integrity story now matches reality (append-only flock + 0640 perms + logrotate + backups)
 - ✅ 2026-04-28 — PR #19: symlink-integrity gate strictness fix (PR #18's gate had inverted polarity — silently passed when symlink replaced by regular file; new gate is unconditionally strict; Step-5 break-then-restore validation confirmed exit 1)
