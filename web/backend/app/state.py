@@ -10,6 +10,16 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
+# PLATFORM-EXTRACTION TODO (Phase C, deferred until agent #2 ships):
+# _AGENT_ROOT and the schemas import below are platform-shareable boundaries.
+# When the second agent's cockpit needs land (e.g. Daily Brief sections),
+# parameterize via env (AGENT_ROOT / AGENTS_ENABLED) and split shift-specific
+# routers (pending, roster, schedule) from platform routers (audit, auth,
+# config, health, disclosures, safety, whatsapp). The schemas import will
+# then split into platform schemas + per-agent schemas. See
+# web/frontend/src/components/layout/Layout.tsx:5-16 for the matching
+# frontend NAV array that needs the same agent #2-driven refactor.
+#
 # Add /opt/shift-agent to sys.path so we can import schemas + safe_io
 _AGENT_ROOT = Path("/opt/shift-agent")
 if str(_AGENT_ROOT) not in sys.path:
