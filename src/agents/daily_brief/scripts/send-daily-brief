@@ -27,7 +27,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -70,7 +70,14 @@ BRIDGE_TIMEOUT_SEC = int(os.environ.get("HERMES_BRIDGE_TIMEOUT_SEC", "10"))
 BRIDGE_RETRY_DELAY_SEC = 5.0
 
 SELF_GATE_WINDOW_MIN = 15  # must match send-daily-brief.timer OnUnitActiveSec
-BRIEF_ATTEMPT_RECOVERY_WINDOW_MIN = 30  # max age of BriefAttempted to consider "uncertain"
+# Recovery window for orphaned BriefAttempted entries — set to catchup_window_minutes
+# default (180 min) to prevent silent duplicate when an orphan is older than the
+# old 30-min cutoff but the brief actually succeeded.
+BRIEF_ATTEMPT_RECOVERY_WINDOW_MIN = 180
+
+# Bridge URL safety: refuse non-loopback unless explicit opt-in.
+ALLOW_REMOTE_BRIDGE = os.environ.get("HERMES_BRIDGE_ALLOW_REMOTE", "0") == "1"
+MAX_LOG_LINE_BYTES = 64 * 1024  # DoS guard for log iteration
 
 _LOG_ADAPTER_ATTEMPTED = TypeAdapter(BriefAttempted)
 _LOG_ADAPTER_SENT = TypeAdapter(BriefSent)
@@ -130,17 +137,30 @@ def _read_sentinel() -> Optional[dict]:
     return val if isinstance(val, dict) else None
 
 
-def _scan_recent_brief_attempted(today_str: str, now_local: datetime) -> Optional[dict]:
-    """Return the most recent BriefAttempted entry for today within the recovery window
-    that has NO matching BriefSent (i.e., uncertain state)."""
+def _scan_recent_brief_attempted(today_str: str, now_local: datetime) -> tuple[Optional[dict], bool]:
+    """Return (orphan_entry_or_None, scan_failed).
+
+    `scan_failed=True` means the log was unreadable — caller MUST treat as
+    uncertain (refuse send) rather than assuming no orphan exists. Silently
+    swallowing OSError + returning (None, False) was the bug that allowed
+    duplicate brief sends on disk-error days.
+    """
     if not DECISIONS_LOG.exists():
-        return None
+        return None, False
     cutoff = now_local - timedelta(minutes=BRIEF_ATTEMPT_RECOVERY_WINDOW_MIN)
     attempted_by_id: dict[str, dict] = {}
     sent_ids: set[str] = set()
     try:
         with open(DECISIONS_LOG, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
+            while True:
+                # Cap at MAX_LOG_LINE_BYTES to defend against malicious/corrupt
+                # writers dropping a multi-MB line and OOMing the brief job.
+                line = f.readline(MAX_LOG_LINE_BYTES + 1)
+                if not line:
+                    break
+                if len(line.encode("utf-8", errors="replace")) > MAX_LOG_LINE_BYTES:
+                    # Oversize line — count as parse failure but keep scanning
+                    continue
                 line = line.strip()
                 if not line:
                     continue
@@ -159,12 +179,13 @@ def _scan_recent_brief_attempted(today_str: str, now_local: datetime) -> Optiona
                         attempted_by_id[e.get("attempt_id", "")] = e
                 elif t == "brief_sent" and e.get("brief_date") == today_str:
                     sent_ids.add(e.get("attempt_id", ""))
-    except OSError:
-        return None
-    for aid, e in attempted_by_id.items():
+    except OSError as e:
+        sys.stderr.write(f"WARN: scan recent BriefAttempted failed: {e}\n")
+        return None, True  # FAIL CLOSED — caller treats as uncertain
+    for aid, entry in attempted_by_id.items():
         if aid not in sent_ids:
-            return e
-    return None
+            return entry, False
+    return None, False
 
 
 def _aggregate_yesterday(cfg: Config) -> tuple[dict, bool]:
@@ -337,8 +358,32 @@ def _render_brief_text(
     return template.format(**fields)
 
 
-def _bridge_post(jid: str, message: str) -> tuple[bool, str, str]:
-    """POST to local bridge. Returns (success, message_id, error_str)."""
+def _validate_bridge_url(url: str) -> Optional[str]:
+    """Return error string if URL is unsafe; None if OK. Defends against
+    HERMES_BRIDGE_URL env var being repointed at an exfiltration target."""
+    from urllib.parse import urlparse
+    p = urlparse(url)
+    if p.scheme not in ("http", "https"):
+        return f"unsupported scheme: {p.scheme!r}"
+    if ALLOW_REMOTE_BRIDGE:
+        return None
+    host = (p.hostname or "").lower()
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        return f"refusing non-loopback bridge URL: {host!r} (set HERMES_BRIDGE_ALLOW_REMOTE=1 to override)"
+    return None
+
+
+def _bridge_post(jid: str, message: str) -> tuple[bool, str, str, str]:
+    """POST to local bridge. Returns (success, message_id, error_str, status).
+
+    status ∈ {'sent', 'connect_failed', 'http_error', 'send_uncertain', 'unknown_error'}
+    The 'send_uncertain' state means the bridge ACCEPTED the request (2xx) but
+    the response body was malformed — message likely was delivered. Caller MUST
+    NOT auto-retry in this state (would cause duplicate brief).
+    """
+    bad = _validate_bridge_url(BRIDGE_URL)
+    if bad:
+        return False, "", bad, "connect_failed"
     payload = json.dumps({"chatId": jid, "message": message}).encode("utf-8")
     req = urllib.request.Request(
         BRIDGE_URL,
@@ -352,17 +397,19 @@ def _bridge_post(jid: str, message: str) -> tuple[bool, str, str]:
             try:
                 doc = json.loads(body)
             except json.JSONDecodeError:
-                return False, "", f"non-json bridge response: {body[:200]}"
+                # 2xx with bad body — bridge likely sent the message but we
+                # can't confirm. DO NOT RETRY (would duplicate).
+                return False, "", f"ack_parse_failed: {body[:200]}", "send_uncertain"
             mid = doc.get("id") or doc.get("messageId") or ""
             if not mid:
-                return False, "", f"empty messageId in bridge response: {body[:200]}"
-            return True, mid, ""
+                return False, "", f"empty_message_id: {body[:200]}", "send_uncertain"
+            return True, mid, "", "sent"
     except urllib.error.HTTPError as e:
-        return False, "", f"HTTP {e.code}: {e.reason}"
+        return False, "", f"HTTP {e.code}: {e.reason}", "http_error"
     except urllib.error.URLError as e:
-        return False, "", f"URLError: {e.reason}"
-    except Exception as e:  # network timeout, etc.
-        return False, "", f"{type(e).__name__}: {e}"
+        return False, "", f"URLError: {e.reason}", "connect_failed"
+    except Exception as e:
+        return False, "", f"{type(e).__name__}: {e}", "unknown_error"
 
 
 def _pushover_alert(title: str, message: str, priority: int = 1) -> bool:
@@ -378,19 +425,27 @@ def _pushover_alert(title: str, message: str, priority: int = 1) -> bool:
         err = f"{proc.returncode} {proc.stderr.strip()}"
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
         err = f"{type(e).__name__}: {e}"
-    # Pushover-also-fails fallback
+    # Pushover-also-fails fallback (mirrors send-coverage-message:155)
     try:
         NOTIFY_FAILED_LOG.parent.mkdir(parents=True, exist_ok=True)
         with open(NOTIFY_FAILED_LOG, "a", encoding="utf-8") as f:
             f.write(json.dumps({
-                "ts": datetime.now().isoformat(),
+                "ts": datetime.now(tz=timezone.utc).isoformat(),
                 "source": "send-daily-brief",
                 "title": title,
                 "message": message[:500],
                 "pushover_error": err[:200],
             }) + "\n")
-    except OSError:
-        pass
+    except OSError as fallback_err:
+        # Final-fallback log — at least journald captures stderr so an alert
+        # drop cannot vanish entirely. The previous `except OSError: pass`
+        # silently swallowed the alert in catastrophic cases (disk full,
+        # read-only mount on log dir).
+        sys.stderr.write(
+            f"CRITICAL: alert dropped — Pushover failed AND notify-failed.log "
+            f"unwritable. title={title!r} pushover_err={err[:200]!r} "
+            f"fallback_err={fallback_err!r}\n"
+        )
     return False
 
 
@@ -446,9 +501,17 @@ def main() -> int:
     if not cfg.daily_brief.enabled:
         return EXIT_OK  # silently disabled
 
+    # NFS check FIRST — before any log write. flock on NFS is unreliable.
+    try:
+        assert_local_disk(SENTINEL_PATH.parent)
+    except RuntimeError as e:
+        sys.stderr.write(f"{e}\n")
+        return EXIT_GENERIC_ERROR
+
+    today_str = customer_today_str(cfg.customer.timezone)
+
     if _check_disabled():
         # Global Shift Agent disable flag — also silences brief
-        today_str = customer_today_str(cfg.customer.timezone)
         if not args.dry_run:
             _log_entry(_LOG_ADAPTER_SKIPPED, BriefSkipped(
                 type="brief_skipped", ts=_customer_now(cfg.customer.timezone),
@@ -456,16 +519,8 @@ def main() -> int:
             ))
         return EXIT_OK
 
-    # Sanity: state dir exists + on local disk
-    try:
-        assert_local_disk(SENTINEL_PATH.parent)
-    except RuntimeError as e:
-        sys.stderr.write(f"{e}\n")
-        return EXIT_GENERIC_ERROR
-
     # Self-gate: skip silently if outside window UNLESS --force
     now_local = _customer_now(cfg.customer.timezone)
-    today_str = customer_today_str(cfg.customer.timezone)
     state, minutes_late = _self_gate_state(
         now_local, cfg.daily_brief.brief_time, cfg.daily_brief.catchup_window_minutes,
     )
@@ -484,9 +539,15 @@ def main() -> int:
             )
         return EXIT_OK
 
-    # Idempotency layer 1: FileLock + sentinel
+    # Idempotency check — under FileLock for the duration of the check (cheap).
+    # Lock is RELEASED before the network call to avoid lock-pile-up under
+    # bridge slowness (a stuck POST would block every subsequent timer fire).
     SENTINEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with FileLock(SENTINEL_PATH.parent / "last-brief-sent.json.lock"):
+    LOCK_PATH = SENTINEL_PATH.parent / "last-brief-sent.json.lock"
+    attempt_id = uuid.uuid4().hex
+    catchup_late = minutes_late if state == "in_catchup" else 0
+
+    with FileLock(LOCK_PATH):
         sentinel = _read_sentinel()
         if sentinel and sentinel.get("brief_date") == today_str and not args.force_resend:
             if not args.dry_run:
@@ -496,21 +557,25 @@ def main() -> int:
                 ))
             return EXIT_OK
 
-        # Idempotency layer 3: scan recent BriefAttempted with no matching BriefSent
-        # (crash between bridge_post and log append → uncertain whether send happened)
+        # Recovery scan: orphaned BriefAttempted with no matching BriefSent.
+        # If scan_failed=True (OSError reading log), FAIL CLOSED — treat as
+        # uncertain rather than risking a duplicate.
         if not args.force_resend:
-            uncertain = _scan_recent_brief_attempted(today_str, now_local)
-            if uncertain:
+            uncertain, scan_failed = _scan_recent_brief_attempted(today_str, now_local)
+            if scan_failed or uncertain:
                 if not args.dry_run:
                     _log_entry(_LOG_ADAPTER_SKIPPED, BriefSkipped(
                         type="brief_skipped", ts=now_local,
                         brief_date=today_str, reason="send_uncertain",
                     ))
+                    detail = (
+                        f"Log scan failed (disk error?). Refusing to send to avoid duplicate. "
+                        if scan_failed else
+                        f"BriefAttempted {(uncertain or {}).get('attempt_id', '?')[:8]} found with no BriefSent. "
+                    )
                     _pushover_alert(
                         "Daily Brief — uncertain delivery",
-                        f"BriefAttempted {uncertain.get('attempt_id', '?')[:8]} found with no BriefSent. "
-                        "Delivery uncertain — verify in WhatsApp. If undelivered, run: "
-                        "send-daily-brief --force --force-resend",
+                        detail + "Verify in WhatsApp. If undelivered, run: send-daily-brief --force --force-resend",
                         priority=1,
                     )
                 return EXIT_OK
@@ -526,31 +591,33 @@ def main() -> int:
             sys.stderr.write("owner.self_chat_jid empty — cannot send brief\n")
             return EXIT_NOT_FOUND
 
-        # Aggregate
-        yesterday_counts, deg_y = _aggregate_yesterday(cfg)
-        today_data, deg_t = _aggregate_today(cfg)
-        degraded = deg_y or deg_t
-        source_count = sum(yesterday_counts.values())
-        catchup_late = minutes_late if state == "in_catchup" else 0
+    # Aggregate + render OUTSIDE the FileLock (no shared state mutation here;
+    # safe for parallel runs to attempt this in their own process).
+    yesterday_counts, deg_y = _aggregate_yesterday(cfg)
+    today_data, deg_t = _aggregate_today(cfg)
+    degraded = deg_y or deg_t
+    source_count = sum(yesterday_counts.values())
 
-        # Render
-        try:
-            brief_text = _render_brief_text(
-                cfg, today_str, yesterday_counts, today_data, degraded, catchup_late,
-            )
-        except (KeyError, OSError) as e:
-            sys.stderr.write(f"template render failed: {e}\n")
-            if not args.dry_run:
-                _pushover_alert("Daily Brief — render failed", f"{e}", priority=2)
-            return EXIT_GENERIC_ERROR
+    try:
+        brief_text = _render_brief_text(
+            cfg, today_str, yesterday_counts, today_data, degraded, catchup_late,
+        )
+    except (KeyError, OSError) as e:
+        sys.stderr.write(f"template render failed: {e}\n")
+        if not args.dry_run:
+            _pushover_alert("Daily Brief — render failed", f"{e}", priority=2)
+        return EXIT_GENERIC_ERROR
 
-        if args.dry_run:
-            print(brief_text)
-            return EXIT_OK
+    if args.dry_run:
+        print(brief_text)
+        return EXIT_OK
 
-        # PRE-log BriefAttempted (idempotency anchor)
-        attempt_id = uuid.uuid4().hex
-        word_count = len(brief_text.split())
+    word_count = len(brief_text.split())
+
+    # PRE-log BriefAttempted (idempotency anchor) BEFORE bridge POST.
+    # Re-acquire lock briefly for the log write to keep concurrent runs serialized
+    # at the attempted-id level.
+    with FileLock(LOCK_PATH):
         _log_entry(_LOG_ADAPTER_ATTEMPTED, BriefAttempted(
             type="brief_attempted", ts=now_local,
             brief_date=today_str, attempt_id=attempt_id,
@@ -560,32 +627,58 @@ def main() -> int:
             catchup_minutes_late=catchup_late,
         ))
 
-        # Send (one retry on failure)
-        ok, msg_id, err = _bridge_post(cfg.owner.self_chat_jid, brief_text)
-        if not ok:
-            time.sleep(BRIDGE_RETRY_DELAY_SEC)
-            ok, msg_id, err = _bridge_post(cfg.owner.self_chat_jid, brief_text)
+    # Network call OUTSIDE the lock — bridge slowness must not block the lock.
+    retry_count = 0
+    ok, msg_id, err, status = _bridge_post(cfg.owner.self_chat_jid, brief_text)
+    if not ok and status not in ("send_uncertain",):
+        # Retry only on connect_failed / http_error / unknown_error.
+        # Never retry on send_uncertain — bridge accepted but ack was unparseable;
+        # message was likely delivered, retry would duplicate.
+        time.sleep(BRIDGE_RETRY_DELAY_SEC)
+        ok, msg_id, err, status = _bridge_post(cfg.owner.self_chat_jid, brief_text)
+        retry_count = 1
 
+    # Re-acquire lock briefly for the post-send log write — keeps the
+    # ndjson append + sentinel-write atomic from the caller's perspective.
+    with FileLock(LOCK_PATH):
         if ok:
-            _write_sentinel(today_str, attempt_id, msg_id, now_local)
+            _write_sentinel(today_str, attempt_id, msg_id, _customer_now(cfg.customer.timezone))
             _log_entry(_LOG_ADAPTER_SENT, BriefSent(
                 type="brief_sent", ts=_customer_now(cfg.customer.timezone),
                 brief_date=today_str, attempt_id=attempt_id,
                 outbound_message_id=msg_id, self_chat_jid=cfg.owner.self_chat_jid,
             ))
             return EXIT_OK
-        else:
-            _log_entry(_LOG_ADAPTER_FAILED, BriefSendFailed(
-                type="brief_send_failed", ts=_customer_now(cfg.customer.timezone),
-                brief_date=today_str, attempt_id=attempt_id,
-                error=err, retry_count=1,
+
+        if status == "send_uncertain":
+            # Bridge ACCEPTED but ack was unparseable — message likely sent.
+            # Log uncertainty, alert owner, do NOT auto-resend (sentinel NOT written
+            # so future runs see no "already_sent" — but they WILL see the
+            # BriefAttempted orphan and refuse via the recovery scan.)
+            _log_entry(_LOG_ADAPTER_SKIPPED, BriefSkipped(
+                type="brief_skipped", ts=_customer_now(cfg.customer.timezone),
+                brief_date=today_str, reason="send_uncertain",
             ))
             _pushover_alert(
-                "Daily Brief send failed",
-                f"Bridge unreachable after retry: {err[:300]}",
+                "Daily Brief — send uncertain",
+                f"Bridge returned 2xx with bad ack ({err[:200]}). Message likely delivered. "
+                "Verify in WhatsApp; if not received, run: send-daily-brief --force --force-resend",
                 priority=1,
             )
-            return EXIT_DEPENDENCY_DOWN
+            return EXIT_OK
+
+        # Genuine failure (connect_failed / http_error / unknown_error)
+        _log_entry(_LOG_ADAPTER_FAILED, BriefSendFailed(
+            type="brief_send_failed", ts=_customer_now(cfg.customer.timezone),
+            brief_date=today_str, attempt_id=attempt_id,
+            error=err, retry_count=retry_count,
+        ))
+        _pushover_alert(
+            "Daily Brief send failed",
+            f"Bridge unreachable after retry: {err[:300]}",
+            priority=1,
+        )
+        return EXIT_DEPENDENCY_DOWN
 
 
 if __name__ == "__main__":

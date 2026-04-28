@@ -54,10 +54,22 @@ class LogSource:
             stats.file_missing = True
             return entries, stats
 
+        # DoS guard — cap line read at 64KB. A malicious or corrupt writer
+        # could otherwise blow memory by writing a multi-MB single line.
+        MAX_LINE_BYTES = 64 * 1024
         try:
             with open(self.log_path, "r", encoding="utf-8", errors="replace") as f:
-                for line in f:
+                while True:
+                    line = f.readline(MAX_LINE_BYTES + 1)
+                    if not line:
+                        break
                     stats.total_lines += 1
+                    if len(line.encode("utf-8", errors="replace")) > MAX_LINE_BYTES:
+                        stats.parse_failures += 1
+                        # Drain to next newline to avoid splitting mid-record on next read
+                        while line and not line.endswith("\n"):
+                            line = f.readline(MAX_LINE_BYTES + 1)
+                        continue
                     line = line.strip()
                     if not line:
                         continue
