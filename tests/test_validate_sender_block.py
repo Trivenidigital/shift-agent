@@ -10,7 +10,7 @@ from pathlib import Path
 
 # Load the script as a module so we can call parse() directly without subprocess.
 # The file has no .py extension, so use SourceFileLoader directly.
-SCRIPT = Path(__file__).resolve().parent.parent / "src" / "scripts" / "validate-sender-block"
+SCRIPT = Path(__file__).resolve().parent.parent / "src" / "platform" / "scripts" / "validate-sender-block"
 loader = importlib.machinery.SourceFileLoader("validate_sender_block", str(SCRIPT))
 spec = importlib.util.spec_from_loader("validate_sender_block", loader)
 mod = importlib.util.module_from_spec(spec)

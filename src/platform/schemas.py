@@ -874,6 +874,31 @@ class UnknownSenderDeclined(_BaseEntry):
     # END shift-agent-sender-id
 
 
+class DispatcherRouted(_BaseEntry):
+    """Audit log: dispatch_shift_agent SKILL classified an inbound message and
+    handed it to a downstream handler. Lets us measure routing-reliability
+    drift over time without parsing Hermes JSONL transcripts.
+
+    Written by the dispatcher SKILL via /usr/local/bin/log-decision-direct
+    immediately after the routing decision, BEFORE delegating. If a raw_inbound
+    has no matching dispatcher_routed entry within ~10s, that's itself the
+    signal that Kimi skipped the dispatcher and pattern-matched directly.
+    """
+    type: Literal["dispatcher_routed"]
+    message_id: str = Field(min_length=1)
+    sender_role: Literal["owner", "employee", "unknown", "error"]
+    message_shape: Literal[
+        "text",                # plain text message
+        "approval_code",       # 5-char #XXXXX, optionally with verb (yes/no/approve/deny/retry/cancel)
+        "image_only",          # image attachment with no caption
+        "image_with_caption",  # image attachment with text caption
+        "media_other",         # audio / document / video / sticker
+    ]
+    routed_to_skill: str = Field(min_length=1, max_length=64)
+    sender_phone: Optional[E164Phone] = None
+    sender_lid: Optional[str] = Field(default=None, pattern=r"^\d{6,20}@lid$")
+
+
 # BEGIN shift-agent-sender-id
 class LidLearned(_BaseEntry):
     """Audit-log entry: a phone↔LID mapping was newly learned or updated.
@@ -1127,6 +1152,8 @@ LogEntry = Annotated[
         # BEGIN shift-agent-sender-id
         LidLearned,
         # END shift-agent-sender-id
+        # Dispatcher routing audit (added with Fix 2 of dispatcher-routing-fixes)
+        DispatcherRouted,
         # Agent #4 Daily Brief
         BriefAttempted, BriefSent, BriefSendFailed, BriefSkipped,
         # Agent #5 EOD Reconciliation
@@ -1165,7 +1192,7 @@ __all__ = [
     "OutboundAttempted", "OutboundSent", "OutboundSendFailed",
     "OutboundResponse", "OutboundCapExceeded", "OutboundRefusedDisabled",
     "AgentStateChange", "UnknownSenderDeclined", "InvariantViolation", "HealthCheckFailure",
-    "LidLearned",
+    "LidLearned", "DispatcherRouted",
     "BriefAttempted", "BriefSent", "BriefSendFailed", "BriefSkipped",
     "EodSnapshot", "EodPushoverSent", "EodSkipped",
     "CrossLocationQuery", "InterLocationTransferProposed",

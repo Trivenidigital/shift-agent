@@ -316,3 +316,70 @@ def test_proposal_discriminator_rejects_sent_without_sent_ts(now_aware):
     # intentionally missing sent_ts
     with pytest.raises(ValidationError):
         adapter.validate_python(raw)
+
+
+# ─────────────────────────────────────────────────────────────────
+# DispatcherRouted (routing-reliability audit entry)
+# ─────────────────────────────────────────────────────────────────
+
+
+def test_dispatcher_routed_happy_path(now_aware):
+    from pydantic import TypeAdapter
+    from schemas import LogEntry, DispatcherRouted
+    adapter = TypeAdapter(LogEntry)
+    entry = adapter.validate_python({
+        "type": "dispatcher_routed",
+        "ts": now_aware.isoformat(),
+        "message_id": "wa:abc123",
+        "sender_role": "owner",
+        "message_shape": "approval_code",
+        "routed_to_skill": "handle_owner_command",
+        "sender_phone": "+918522041562",
+    })
+    assert isinstance(entry, DispatcherRouted)
+    assert entry.routed_to_skill == "handle_owner_command"
+
+
+def test_dispatcher_routed_rejects_invalid_role(now_aware):
+    from pydantic import TypeAdapter, ValidationError
+    from schemas import LogEntry
+    adapter = TypeAdapter(LogEntry)
+    with pytest.raises(ValidationError):
+        adapter.validate_python({
+            "type": "dispatcher_routed",
+            "ts": now_aware.isoformat(),
+            "message_id": "wa:abc123",
+            "sender_role": "admin",  # not in the enum
+            "message_shape": "text",
+            "routed_to_skill": "handle_sick_call",
+        })
+
+
+def test_dispatcher_routed_rejects_invalid_shape(now_aware):
+    from pydantic import TypeAdapter, ValidationError
+    from schemas import LogEntry
+    adapter = TypeAdapter(LogEntry)
+    with pytest.raises(ValidationError):
+        adapter.validate_python({
+            "type": "dispatcher_routed",
+            "ts": now_aware.isoformat(),
+            "message_id": "wa:abc123",
+            "sender_role": "employee",
+            "message_shape": "video",  # not in the enum (would be "media_other")
+            "routed_to_skill": "handle_sick_call",
+        })
+
+
+def test_dispatcher_routed_routed_to_skill_required(now_aware):
+    from pydantic import TypeAdapter, ValidationError
+    from schemas import LogEntry
+    adapter = TypeAdapter(LogEntry)
+    with pytest.raises(ValidationError):
+        adapter.validate_python({
+            "type": "dispatcher_routed",
+            "ts": now_aware.isoformat(),
+            "message_id": "wa:abc123",
+            "sender_role": "employee",
+            "message_shape": "text",
+            "routed_to_skill": "",  # empty string violates min_length=1
+        })
