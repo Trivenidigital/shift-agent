@@ -1,0 +1,12 @@
+{
+  "window": {"since": "2026-04-21T13:00:00+00:00", "until": "2026-04-28T13:00:00+00:00"},
+  "total_raw_inbound": 0,
+  "paired_count": 0,
+  "unpaired_count": 0,
+  "declined_count": 0,
+  "coverage_pct": 0.0,
+  "by_message_shape": {},
+  "by_sender_role": {},
+  "by_routed_to_skill": {},
+  "unpaired": []
+}

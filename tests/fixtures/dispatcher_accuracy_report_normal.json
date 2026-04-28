@@ -1,0 +1,12 @@
+{
+  "window": {"since": "2026-04-21T13:00:00+00:00", "until": "2026-04-28T13:00:00+00:00"},
+  "total_raw_inbound": 47,
+  "paired_count": 44,
+  "unpaired_count": 3,
+  "declined_count": 5,
+  "coverage_pct": 93.6,
+  "by_message_shape": {"command_word": 30, "owner_question": 14},
+  "by_sender_role": {"owner": 35, "employee": 9},
+  "by_routed_to_skill": {"shift-coverage-coordinator": 28, "catering-lead-extractor": 11, "daily-brief-recap": 5},
+  "unpaired": []
+}

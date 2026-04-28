@@ -1,0 +1,24 @@
+[Unit]
+Description=Failure handler — alert owner if weekly routing-accuracy summary failed
+
+[Service]
+Type=oneshot
+User=shift-agent
+Group=shift-agent
+EnvironmentFile=/opt/shift-agent/.env
+Environment=HOME=/opt/shift-agent
+TimeoutStartSec=30s
+ExecStart=/usr/local/bin/shift-agent-notify-owner \
+    --title "Weekly routing summary cron FAILED" \
+    --priority 1 \
+    "send-routing-accuracy-summary.service exited non-zero. Check journalctl -u send-routing-accuracy-summary + /opt/shift-agent/logs/routing-accuracy-summary.log"
+
+# Security hardening — must match main service unit (closes plan-review #2).
+# No OnFailure= here: if notify-owner is itself broken, journald is the floor;
+# avoid recursive cascade.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/shift-agent
+ProtectHome=read-only
+PrivateTmp=true
+RuntimeDirectory=shift-agent

@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""send-routing-accuracy-summary — weekly Pushover summary of dispatcher-accuracy-report.
+
+Cron via send-routing-accuracy-summary.timer (Sundays 13:00 UTC; service unit pins TZ=UTC).
+
+Watchdog semantics:
+  - Written after _run_report succeeds AND decisions.log sanity passes (cron ran +
+    audit log was healthy). NOT written on report failure or audit-log anomaly.
+  - send-daily-brief watchdog reader treats >10 days stale as "cron broken."
+  - Decoupled write-point: format-failure or notify-owner-failure exits 1 (failure
+    handler fires) but does NOT also trigger the cron-stale alarm next day.
+
+Empty-window safety:
+  - total_raw_inbound==0 AND decisions.log healthy -> skip Pushover, write watchdog,
+    exit 0. The watchdog write proves cron actually ran.
+  - total_raw_inbound==0 AND decisions.log missing/empty/very stale -> exit 1.
+    Catches the silent-failure case where decisions.log was wiped or permissions
+    flipped (would otherwise look like "no traffic").
+
+Exit codes:
+  0 - success (including healthy empty-window skip)
+  1 - any failure (report broken, JSON invalid, audit-log anomaly, format failure,
+      notify-owner failed, subprocess timeout)
+"""
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
+
+from safe_io import atomic_write_json  # noqa: E402
+
+REPORT_BIN = "/usr/local/bin/dispatcher-accuracy-report"
+NOTIFY_BIN = "/usr/local/bin/shift-agent-notify-owner"
+DECISIONS_LOG = Path("/opt/shift-agent/logs/decisions.log")
+WATCHDOG_PATH = Path("/opt/shift-agent/state/routing-summary-last-run.json")
+SUBPROCESS_TIMEOUT_SEC = 60
+# 30 days (vs the 7-day report window) is permissive on purpose: a customer
+# truly seeing 0 traffic for ~10 days is plausible; we only flag corruption when
+# the audit log has been silent for 4x the report window.
+DECISIONS_LOG_MAX_STALE_DAYS = 30
+
+
+def _check_decisions_log_healthy() -> tuple[bool, str]:
+    """Distinguishes 'genuinely no traffic' from 'audit log was wiped/corrupted'."""
+    if not DECISIONS_LOG.exists():
+        return False, f"decisions.log missing: {DECISIONS_LOG}"
+    try:
+        st = DECISIONS_LOG.stat()
+    except OSError as e:
+        return False, f"decisions.log stat failed: {e}"
+    if st.st_size == 0:
+        return False, "decisions.log empty (size=0)"
+    age_days = (datetime.now(tz=timezone.utc).timestamp() - st.st_mtime) / 86400
+    if age_days > DECISIONS_LOG_MAX_STALE_DAYS:
+        return False, f"decisions.log stale ({age_days:.1f} days since last write)"
+    return True, "ok"
+
+
+def _run_report() -> dict:
+    proc = subprocess.run(
+        [REPORT_BIN, "--days", "7", "--format", "json"],
+        capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_SEC,
+    )
+    if proc.stderr:
+        sys.stderr.write(proc.stderr)
+    if proc.returncode != 0:
+        raise RuntimeError(f"dispatcher-accuracy-report exited {proc.returncode}")
+    return json.loads(proc.stdout)
+
+
+def _format_summary(report: dict) -> str:
+    total = report["total_raw_inbound"]
+    paired = report["paired_count"]
+    coverage = report["coverage_pct"]
+    declined = report.get("declined_count", 0)
+    skill_counts = report.get("by_routed_to_skill", {})
+    top_3 = sorted(skill_counts.items(), key=lambda kv: -kv[1])[:3]
+    top_str = ", ".join(f"{name} ({n})" for name, n in top_3) if top_3 else "none"
+    today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    return (
+        f"Weekly routing accuracy {today}: "
+        f"{paired}/{total} ({coverage}%) paired, {declined} declined. "
+        f"Top: {top_str}."
+    )
+
+
+def _notify(message: str) -> None:
+    proc = subprocess.run(
+        [NOTIFY_BIN, "--title", "Weekly routing accuracy",
+         "--priority", "0", message],
+        capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_SEC,
+    )
+    if proc.stderr:
+        sys.stderr.write(proc.stderr)
+    if proc.returncode != 0:
+        raise RuntimeError(f"shift-agent-notify-owner exited {proc.returncode}")
+
+
+def _write_watchdog() -> None:
+    """tz-aware UTC ISO timestamp; consumed by send-daily-brief watchdog reader."""
+    WATCHDOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(WATCHDOG_PATH, {
+        "ts": datetime.now(tz=timezone.utc).isoformat(),
+    })
+
+
+def main() -> int:
+    # UnicodeDecodeError can fire on subprocess.run(text=True) when the child
+    # emits non-UTF-8 bytes (locale=C, mojibake, partial-binary stdout). Catch
+    # explicitly so the script exits 1 cleanly and OnFailure= fires, instead of
+    # propagating an uncaught traceback.
+    try:
+        report = _run_report()
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, RuntimeError,
+            OSError, UnicodeDecodeError) as e:
+        sys.stderr.write(f"report failed: {type(e).__name__}: {e}\n")
+        return 1
+
+    try:
+        total = report["total_raw_inbound"]
+    except KeyError as e:
+        sys.stderr.write(f"report missing required key: {e}\n")
+        return 1
+
+    if total == 0:
+        ok, msg = _check_decisions_log_healthy()
+        if not ok:
+            sys.stderr.write(f"empty-window with audit-log anomaly: {msg}\n")
+            return 1
+        _write_watchdog()
+        print("OK: no inbound traffic in window; skipping Pushover")
+        return 0
+
+    # Cron + report were healthy -> reset staleness clock BEFORE format/notify so
+    # downstream failures don't double-alarm via the daily-brief watchdog.
+    # Operator triage: format/notify failures fire the OnFailure handler
+    # (priority=1 Pushover); the watchdog is reserved for "cron stopped firing"
+    # detection, not "cron is unhealthy."
+    _write_watchdog()
+
+    try:
+        summary = _format_summary(report)
+    except (KeyError, TypeError) as e:
+        sys.stderr.write(f"summary format failed: {type(e).__name__}: {e}\n")
+        return 1
+
+    try:
+        _notify(summary)
+    except (subprocess.TimeoutExpired, RuntimeError, OSError, UnicodeDecodeError) as e:
+        sys.stderr.write(f"notify failed: {type(e).__name__}: {e}\n")
+        return 1
+
+    print(f"OK: {summary}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

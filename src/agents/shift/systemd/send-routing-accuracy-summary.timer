@@ -1,0 +1,14 @@
+[Unit]
+Description=Weekly routing-accuracy summary to owner via Pushover
+
+[Timer]
+# Sundays 13:00 UTC. Pre-merge VPS check enforces VPS timezone is Etc/UTC so
+# the calendar fires at the intended absolute time. Persistent=false: a missed
+# week (e.g. VPS down all weekend) is acceptable; the staleness watchdog inside
+# send-daily-brief catches "cron stopped firing" within 10 days.
+OnCalendar=Sun 13:00:00
+Persistent=false
+Unit=send-routing-accuracy-summary.service
+
+[Install]
+WantedBy=timers.target

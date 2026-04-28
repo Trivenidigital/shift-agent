@@ -21,7 +21,8 @@ for script in \
     /usr/local/bin/shift-agent-enable \
     /usr/local/bin/shift-agent-tail-logger.py \
     /usr/local/bin/shift-agent-health-check.sh \
-    /usr/local/bin/shift-agent-reconcile.py ; do
+    /usr/local/bin/shift-agent-reconcile.py \
+    /usr/local/bin/send-routing-accuracy-summary ; do
     [ -x "$script" ] || { echo "FAIL: $script missing or not executable"; exit 1; }
 done
 echo "✓ All scripts present + executable"
@@ -117,13 +118,25 @@ fi
 echo "✓ Pushover channel working"
 
 # 8. systemd units enabled
-for unit in hermes-gateway shift-agent-tail-logger.timer shift-agent-health.timer; do
+for unit in hermes-gateway shift-agent-tail-logger.timer shift-agent-health.timer send-routing-accuracy-summary.timer; do
     if ! systemctl is-enabled --quiet "$unit"; then
         echo "FAIL: $unit not enabled"
         exit 1
     fi
 done
 echo "✓ systemd units enabled"
+
+# 9. systemd unit syntax (catches typos before timer fires)
+if ! systemd-analyze verify \
+        /etc/systemd/system/send-routing-accuracy-summary.service \
+        /etc/systemd/system/send-routing-accuracy-summary.timer \
+        /etc/systemd/system/send-routing-accuracy-summary-failure.service \
+        2>/tmp/sd-verify.log; then
+    echo "FAIL: systemd-analyze verify reported issues:" >&2
+    cat /tmp/sd-verify.log >&2
+    exit 1
+fi
+echo "✓ weekly routing-summary systemd units verified"
 
 echo ""
 echo "=== All smoke checks passed ==="
