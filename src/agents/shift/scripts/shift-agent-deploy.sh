@@ -26,6 +26,7 @@ install_artifacts() {
     install -m 644 src/platform/safe_io.py /opt/shift-agent/safe_io.py
     install -m 644 src/platform/sender_context.py /opt/shift-agent/sender_context.py
     install -m 644 src/platform/exit_codes.py /opt/shift-agent/exit_codes.py
+    install -m 644 src/platform/log_source.py /opt/shift-agent/log_source.py
     # Templates — Shift-Agent message templates
     install -d /opt/shift-agent/templates
     install -m 644 src/agents/shift/templates/* /opt/shift-agent/templates/
@@ -38,7 +39,17 @@ install_artifacts() {
     install -m 644 src/agents/shift/systemd/*.timer /etc/systemd/system/ 2>/dev/null || true
     # logrotate — Shift-Agent
     [ -f src/agents/shift/logrotate/shift-agent ] && install -m 644 src/agents/shift/logrotate/shift-agent /etc/logrotate.d/
+
+    # Daily Brief agent (Agent #4) — scripts + systemd + templates
+    [ -d src/agents/daily_brief/scripts ] && install -m 755 src/agents/daily_brief/scripts/* /usr/local/bin/
+    [ -d src/agents/daily_brief/systemd ] && install -m 644 src/agents/daily_brief/systemd/*.service /etc/systemd/system/ 2>/dev/null || true
+    [ -d src/agents/daily_brief/systemd ] && install -m 644 src/agents/daily_brief/systemd/*.timer /etc/systemd/system/ 2>/dev/null || true
+    [ -d src/agents/daily_brief/templates ] && install -m 644 src/agents/daily_brief/templates/* /opt/shift-agent/templates/
+
     systemctl daemon-reload
+
+    # Enable + start Daily Brief timer (idempotent — won't re-enable if already on)
+    systemctl enable --now send-daily-brief.timer 2>/dev/null || true
 }
 
 case "$ACTION" in

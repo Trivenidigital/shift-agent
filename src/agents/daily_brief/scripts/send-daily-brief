@@ -1,0 +1,592 @@
+#!/usr/bin/env python3
+"""send-daily-brief — Agent #4 morning summary to owner's WhatsApp self-chat.
+
+Triggered by send-daily-brief.timer every 15 min. Self-gates on
+cfg.daily_brief.brief_time in the customer's timezone.
+
+Idempotency (3 layers):
+  1. FileLock(state/last-brief-sent.json.lock) prevents concurrent runs
+  2. Sentinel state/last-brief-sent.json (atomic) — fast "already sent today" check
+  3. BriefAttempted log entry written BEFORE bridge POST — recovery anchor
+     for crash-between-send-and-log scenario; if found within 30 min and no
+     matching BriefSent, refuses to auto-resend (operator must verify).
+
+CLI flags:
+  --force         bypass self-gate window only; idempotency still applies
+  --force-resend  bypass idempotency too (DANGEROUS, requires --force; for testing)
+  --dry-run       run aggregation + render but skip bridge POST and log appends
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+import uuid
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Optional
+
+# sys.path bootstrap — prefer /opt/shift-agent (deployed) but accept src/platform for tests
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
+
+from safe_io import (  # noqa: E402
+    FileLock, atomic_write_json, ndjson_append, customer_now, customer_today_str,
+    safe_load_json, load_model, assert_local_disk, flock,
+)
+from schemas import (  # noqa: E402
+    Config, Roster, PendingStore,
+    BriefAttempted, BriefSent, BriefSendFailed, BriefSkipped,
+)
+from log_source import get_log_sources  # noqa: E402
+from exit_codes import (  # noqa: E402
+    EXIT_OK, EXIT_GENERIC_ERROR, EXIT_INVALID_INPUT,
+    EXIT_DEPENDENCY_DOWN, EXIT_SCHEMA_VIOLATION, EXIT_NOT_FOUND,
+)
+from pydantic import TypeAdapter  # noqa: E402
+
+# ─────────────────────────────────────────────────────────────────
+# Constants
+# ─────────────────────────────────────────────────────────────────
+
+CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
+ROSTER_PATH = Path(os.environ.get("SHIFT_AGENT_ROSTER_PATH", "/opt/shift-agent/roster.json"))
+PENDING_PATH = Path(os.environ.get("SHIFT_AGENT_PENDING_PATH", "/opt/shift-agent/state/pending.json"))
+DECISIONS_LOG = Path(os.environ.get("SHIFT_AGENT_DECISIONS_LOG_PATH", "/opt/shift-agent/logs/decisions.log"))
+SENTINEL_PATH = Path(os.environ.get("SHIFT_AGENT_BRIEF_SENTINEL_PATH", "/opt/shift-agent/state/last-brief-sent.json"))
+DISABLED_FLAG = Path(os.environ.get("SHIFT_AGENT_DISABLED_FLAG", "/opt/shift-agent/state/disabled.flag"))
+TEMPLATES_DIR = Path(os.environ.get("SHIFT_AGENT_TEMPLATES_DIR", "/opt/shift-agent/templates"))
+NOTIFY_OWNER_BIN = os.environ.get("SHIFT_AGENT_NOTIFY_OWNER_BIN", "/usr/local/bin/shift-agent-notify-owner")
+RENDER_TEMPLATE_BIN = os.environ.get("SHIFT_AGENT_RENDER_TEMPLATE_BIN", "/usr/local/bin/render-coverage-template")
+NOTIFY_FAILED_LOG = Path(os.environ.get("SHIFT_AGENT_NOTIFY_FAILED_LOG", "/opt/shift-agent/logs/notify-failed.log"))
+
+BRIDGE_URL = os.environ.get("HERMES_BRIDGE_URL", "http://127.0.0.1:3000/send")
+BRIDGE_TIMEOUT_SEC = int(os.environ.get("HERMES_BRIDGE_TIMEOUT_SEC", "10"))
+BRIDGE_RETRY_DELAY_SEC = 5.0
+
+SELF_GATE_WINDOW_MIN = 15  # must match send-daily-brief.timer OnUnitActiveSec
+BRIEF_ATTEMPT_RECOVERY_WINDOW_MIN = 30  # max age of BriefAttempted to consider "uncertain"
+
+_LOG_ADAPTER_ATTEMPTED = TypeAdapter(BriefAttempted)
+_LOG_ADAPTER_SENT = TypeAdapter(BriefSent)
+_LOG_ADAPTER_FAILED = TypeAdapter(BriefSendFailed)
+_LOG_ADAPTER_SKIPPED = TypeAdapter(BriefSkipped)
+
+# ─────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────
+
+
+def _now_override() -> Optional[datetime]:
+    """Test hook: SHIFT_AGENT_NOW_OVERRIDE='2026-04-28T07:05:00-04:00' freezes time."""
+    raw = os.environ.get("SHIFT_AGENT_NOW_OVERRIDE")
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+def _customer_now(tz: str) -> datetime:
+    override = _now_override()
+    if override is not None:
+        return override
+    return customer_now(tz)
+
+
+def _check_disabled() -> bool:
+    return DISABLED_FLAG.exists()
+
+
+def _self_gate_state(now_local: datetime, brief_time_str: str, catchup_min: int) -> tuple[str, int]:
+    """Return ('before' | 'in_window' | 'in_catchup' | 'past_catchup', minutes_late)."""
+    h, m = (int(x) for x in brief_time_str.split(":"))
+    brief_dt = now_local.replace(hour=h, minute=m, second=0, microsecond=0)
+    window_end = brief_dt + timedelta(minutes=SELF_GATE_WINDOW_MIN)
+    catchup_end = brief_dt + timedelta(minutes=catchup_min)
+    if now_local < brief_dt:
+        return "before", 0
+    if now_local < window_end:
+        return "in_window", 0
+    minutes_late = int((now_local - brief_dt).total_seconds() // 60)
+    if now_local < catchup_end:
+        return "in_catchup", minutes_late
+    return "past_catchup", minutes_late
+
+
+def _read_sentinel() -> Optional[dict]:
+    """Return sentinel dict (or None if missing/invalid). Should be called under FileLock."""
+    if not SENTINEL_PATH.exists():
+        return None
+    val, status = safe_load_json(SENTINEL_PATH, default=None)
+    if status != "ok":
+        return None
+    return val if isinstance(val, dict) else None
+
+
+def _scan_recent_brief_attempted(today_str: str, now_local: datetime) -> Optional[dict]:
+    """Return the most recent BriefAttempted entry for today within the recovery window
+    that has NO matching BriefSent (i.e., uncertain state)."""
+    if not DECISIONS_LOG.exists():
+        return None
+    cutoff = now_local - timedelta(minutes=BRIEF_ATTEMPT_RECOVERY_WINDOW_MIN)
+    attempted_by_id: dict[str, dict] = {}
+    sent_ids: set[str] = set()
+    try:
+        with open(DECISIONS_LOG, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                t = e.get("type")
+                if t == "brief_attempted" and e.get("brief_date") == today_str:
+                    ts_str = e.get("ts", "")
+                    try:
+                        ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                    except ValueError:
+                        continue
+                    if ts >= cutoff:
+                        attempted_by_id[e.get("attempt_id", "")] = e
+                elif t == "brief_sent" and e.get("brief_date") == today_str:
+                    sent_ids.add(e.get("attempt_id", ""))
+    except OSError:
+        return None
+    for aid, e in attempted_by_id.items():
+        if aid not in sent_ids:
+            return e
+    return None
+
+
+def _aggregate_yesterday(cfg: Config) -> tuple[dict, bool]:
+    """Return (counts_dict, degraded_mode). Reads all registered LogSources for the
+    customer-tz "yesterday" window."""
+    tz = cfg.tz()
+    now_local = _customer_now(cfg.customer.timezone)
+    today = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    yesterday_start = today - timedelta(days=1)
+    yesterday_end = today
+
+    counts = {
+        "sick_calls": 0,
+        "proposals_created": 0,
+        "proposals_accepted": 0,
+        "proposals_declined": 0,
+        "proposals_no_response": 0,
+        "outbound_sent": 0,
+        "outbound_send_failed": 0,
+        "agent_state_changes": 0,
+        "invariant_violations": 0,
+    }
+    degraded = False
+
+    for source in get_log_sources():
+        entries, stats = source.iter_entries(yesterday_start, yesterday_end)
+        if stats.parse_failures > 0 or stats.oserror is not None or (stats.file_missing and source.agent_name == "shift"):
+            # Shift's log is REQUIRED in v0.1; missing it = degraded mode
+            degraded = True
+        for e in entries:
+            t = e.get("type")
+            if t == "raw_inbound":
+                counts["sick_calls"] += 1
+            elif t == "proposal_created":
+                counts["proposals_created"] += 1
+            elif t == "proposal_status_change":
+                to = e.get("to_status")
+                if to == "accepted":
+                    counts["proposals_accepted"] += 1
+                elif to == "declined":
+                    counts["proposals_declined"] += 1
+                elif to == "no_response_timeout":
+                    counts["proposals_no_response"] += 1
+            elif t == "outbound_sent":
+                counts["outbound_sent"] += 1
+            elif t == "outbound_send_failed":
+                counts["outbound_send_failed"] += 1
+            elif t == "agent_state_change":
+                counts["agent_state_changes"] += 1
+            elif t == "invariant_violation":
+                counts["invariant_violations"] += 1
+
+    return counts, degraded
+
+
+def _aggregate_today(cfg: Config) -> tuple[dict, bool]:
+    """Return (today_dict, degraded_mode)."""
+    today_str = customer_today_str(cfg.customer.timezone)
+    out = {
+        "today_date": today_str,
+        "shifts_today": [],
+        "pending_active_count": 0,
+        "pending_send_failed_count": 0,
+    }
+    degraded = False
+
+    # Roster: today's schedule
+    try:
+        roster, status = load_model(ROSTER_PATH, Roster)
+        if status == "ok":
+            day_entries = roster.schedule.get(today_str, [])
+            out["shifts_today"] = [
+                {"employee_id": s.employee_id, "shift": s.shift, "role": s.role}
+                for s in day_entries
+            ]
+        else:
+            degraded = True
+    except Exception:
+        degraded = True
+
+    # Pending: counts of non-terminal proposals
+    try:
+        pending, status = load_model(PENDING_PATH, PendingStore)
+        if status == "ok":
+            for p in pending.proposals:
+                if p.status in ("awaiting_owner_approval", "approved", "reconciling", "sent"):
+                    out["pending_active_count"] += 1
+                if p.status == "send_failed":
+                    out["pending_send_failed_count"] += 1
+        elif status == "missing" or status == "empty":
+            pass  # zero counts is correct
+        else:
+            degraded = True
+    except Exception:
+        degraded = True
+
+    return out, degraded
+
+
+def _render_yesterday(counts: dict) -> str:
+    """Format yesterday counts as a single-line bullet summary."""
+    sc = counts["sick_calls"]
+    pc = counts["proposals_created"]
+    pa = counts["proposals_accepted"]
+    pd_ = counts["proposals_declined"]
+    pn = counts["proposals_no_response"]
+    if sc == 0 and pc == 0:
+        return "Quiet day — 0 sick calls, 0 proposals."
+    parts = [f"{sc} sick call{'' if sc == 1 else 's'}"]
+    if pc > 0:
+        outcomes = []
+        if pa > 0:
+            outcomes.append(f"{pa} accepted")
+        if pd_ > 0:
+            outcomes.append(f"{pd_} declined")
+        if pn > 0:
+            outcomes.append(f"{pn} no-response")
+        outcomes_s = f" ({', '.join(outcomes)})" if outcomes else ""
+        parts.append(f"{pc} proposal{'' if pc == 1 else 's'}{outcomes_s}")
+    return ", ".join(parts) + "."
+
+
+def _render_today(today: dict) -> str:
+    n = len(today["shifts_today"])
+    pending = today["pending_active_count"]
+    if n == 0 and pending == 0:
+        return "No shifts scheduled, nothing pending."
+    parts = [f"{n} scheduled shift{'' if n == 1 else 's'}"]
+    if pending > 0:
+        parts.append(f"{pending} pending proposal{'' if pending == 1 else 's'}")
+    return ", ".join(parts) + "."
+
+
+def _render_alerts(yesterday: dict, today: dict) -> str:
+    alerts = []
+    if yesterday["outbound_send_failed"] > 0:
+        alerts.append(f"{yesterday['outbound_send_failed']} outbound send failed yesterday")
+    if yesterday["invariant_violations"] > 0:
+        alerts.append(f"{yesterday['invariant_violations']} invariant violation(s) yesterday")
+    if today["pending_send_failed_count"] > 0:
+        alerts.append(f"{today['pending_send_failed_count']} proposal stuck in send_failed")
+    if not alerts:
+        return "Nothing — all green."
+    return "; ".join(alerts) + "."
+
+
+def _render_brief_text(
+    cfg: Config,
+    today_str: str,
+    yesterday_counts: dict,
+    today_data: dict,
+    degraded: bool,
+    catchup_minutes_late: int,
+) -> str:
+    """Render the brief by interpolating into the template (no LLM in v0.1)."""
+    template_path = TEMPLATES_DIR / "daily_brief.txt"
+    template = template_path.read_text(encoding="utf-8")
+    header = ""
+    if degraded:
+        header = "WARNING: DEGRADED BRIEF — some data sources unavailable. Outlook + alerts may be incomplete.\n\n"
+    catchup_note = f" (catch-up: {catchup_minutes_late} min late)" if catchup_minutes_late > 0 else ""
+    fields = {
+        "header": header,
+        "brief_date": today_str,
+        "catchup_note": catchup_note,
+        "yesterday_summary": _render_yesterday(yesterday_counts),
+        "today_outlook": _render_today(today_data),
+        "alerts_summary": _render_alerts(yesterday_counts, today_data),
+    }
+    return template.format(**fields)
+
+
+def _bridge_post(jid: str, message: str) -> tuple[bool, str, str]:
+    """POST to local bridge. Returns (success, message_id, error_str)."""
+    payload = json.dumps({"chatId": jid, "message": message}).encode("utf-8")
+    req = urllib.request.Request(
+        BRIDGE_URL,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=BRIDGE_TIMEOUT_SEC) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            try:
+                doc = json.loads(body)
+            except json.JSONDecodeError:
+                return False, "", f"non-json bridge response: {body[:200]}"
+            mid = doc.get("id") or doc.get("messageId") or ""
+            if not mid:
+                return False, "", f"empty messageId in bridge response: {body[:200]}"
+            return True, mid, ""
+    except urllib.error.HTTPError as e:
+        return False, "", f"HTTP {e.code}: {e.reason}"
+    except urllib.error.URLError as e:
+        return False, "", f"URLError: {e.reason}"
+    except Exception as e:  # network timeout, etc.
+        return False, "", f"{type(e).__name__}: {e}"
+
+
+def _pushover_alert(title: str, message: str, priority: int = 1) -> bool:
+    """Invoke shift-agent-notify-owner. Returns True on success.
+    On failure, append to notify-failed.log (mirrors send-coverage-message:155)."""
+    try:
+        proc = subprocess.run(
+            [NOTIFY_OWNER_BIN, "--title", title, "--priority", str(priority), message],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode == 0:
+            return True
+        err = f"{proc.returncode} {proc.stderr.strip()}"
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        err = f"{type(e).__name__}: {e}"
+    # Pushover-also-fails fallback
+    try:
+        NOTIFY_FAILED_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(NOTIFY_FAILED_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "ts": datetime.now().isoformat(),
+                "source": "send-daily-brief",
+                "title": title,
+                "message": message[:500],
+                "pushover_error": err[:200],
+            }) + "\n")
+    except OSError:
+        pass
+    return False
+
+
+def _log_entry(adapter: TypeAdapter, entry) -> None:
+    """Append a Pydantic-validated entry to decisions.log under flock."""
+    DECISIONS_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with flock(DECISIONS_LOG):
+        ndjson_append(DECISIONS_LOG, adapter.dump_json(entry).decode("utf-8"))
+
+
+def _write_sentinel(brief_date: str, attempt_id: str, msg_id: str, ts: datetime) -> None:
+    """Atomic write — sentinel is the fast-path idempotency check (faster than scanning log)."""
+    SENTINEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(SENTINEL_PATH, {
+        "brief_date": brief_date,
+        "attempt_id": attempt_id,
+        "outbound_message_id": msg_id,
+        "ts": ts.isoformat(),
+    })
+
+
+# ─────────────────────────────────────────────────────────────────
+# Main orchestration
+# ─────────────────────────────────────────────────────────────────
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Daily Brief — owner morning summary")
+    parser.add_argument("--force", action="store_true",
+                        help="bypass self-gate window (idempotency still applies)")
+    parser.add_argument("--force-resend", action="store_true",
+                        help="DANGEROUS — bypass idempotency. Requires --force.")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="aggregate + render but don't send or log")
+    args = parser.parse_args()
+
+    if args.force_resend and not args.force:
+        sys.stderr.write("--force-resend requires --force\n")
+        return EXIT_INVALID_INPUT
+
+    # Load config
+    try:
+        import yaml
+        cfg_dict = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+        cfg = Config.model_validate(cfg_dict)
+    except FileNotFoundError:
+        sys.stderr.write(f"config not found: {CONFIG_PATH}\n")
+        return EXIT_NOT_FOUND
+    except Exception as e:
+        sys.stderr.write(f"config load/validate failed: {e}\n")
+        return EXIT_SCHEMA_VIOLATION
+
+    if not cfg.daily_brief.enabled:
+        return EXIT_OK  # silently disabled
+
+    if _check_disabled():
+        # Global Shift Agent disable flag — also silences brief
+        today_str = customer_today_str(cfg.customer.timezone)
+        if not args.dry_run:
+            _log_entry(_LOG_ADAPTER_SKIPPED, BriefSkipped(
+                type="brief_skipped", ts=_customer_now(cfg.customer.timezone),
+                brief_date=today_str, reason="disabled",
+            ))
+        return EXIT_OK
+
+    # Sanity: state dir exists + on local disk
+    try:
+        assert_local_disk(SENTINEL_PATH.parent)
+    except RuntimeError as e:
+        sys.stderr.write(f"{e}\n")
+        return EXIT_GENERIC_ERROR
+
+    # Self-gate: skip silently if outside window UNLESS --force
+    now_local = _customer_now(cfg.customer.timezone)
+    today_str = customer_today_str(cfg.customer.timezone)
+    state, minutes_late = _self_gate_state(
+        now_local, cfg.daily_brief.brief_time, cfg.daily_brief.catchup_window_minutes,
+    )
+    if state == "before" and not args.force:
+        return EXIT_OK  # silent — fires 95+ times/day outside window
+    if state == "past_catchup" and not args.force:
+        if not args.dry_run:
+            _log_entry(_LOG_ADAPTER_SKIPPED, BriefSkipped(
+                type="brief_skipped", ts=now_local,
+                brief_date=today_str, reason="catchup_expired",
+            ))
+            _pushover_alert(
+                "Daily Brief missed",
+                f"Today's brief was not sent — VPS was down past catch-up window ({minutes_late} min late, max {cfg.daily_brief.catchup_window_minutes}).",
+                priority=1,
+            )
+        return EXIT_OK
+
+    # Idempotency layer 1: FileLock + sentinel
+    SENTINEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with FileLock(SENTINEL_PATH.parent / "last-brief-sent.json.lock"):
+        sentinel = _read_sentinel()
+        if sentinel and sentinel.get("brief_date") == today_str and not args.force_resend:
+            if not args.dry_run:
+                _log_entry(_LOG_ADAPTER_SKIPPED, BriefSkipped(
+                    type="brief_skipped", ts=now_local,
+                    brief_date=today_str, reason="already_sent",
+                ))
+            return EXIT_OK
+
+        # Idempotency layer 3: scan recent BriefAttempted with no matching BriefSent
+        # (crash between bridge_post and log append → uncertain whether send happened)
+        if not args.force_resend:
+            uncertain = _scan_recent_brief_attempted(today_str, now_local)
+            if uncertain:
+                if not args.dry_run:
+                    _log_entry(_LOG_ADAPTER_SKIPPED, BriefSkipped(
+                        type="brief_skipped", ts=now_local,
+                        brief_date=today_str, reason="send_uncertain",
+                    ))
+                    _pushover_alert(
+                        "Daily Brief — uncertain delivery",
+                        f"BriefAttempted {uncertain.get('attempt_id', '?')[:8]} found with no BriefSent. "
+                        "Delivery uncertain — verify in WhatsApp. If undelivered, run: "
+                        "send-daily-brief --force --force-resend",
+                        priority=1,
+                    )
+                return EXIT_OK
+
+        # Owner self-chat JID required for send
+        if not cfg.owner.self_chat_jid:
+            if not args.dry_run:
+                _pushover_alert(
+                    "Daily Brief — config incomplete",
+                    "owner.self_chat_jid is empty. Owner must send at least one WhatsApp message to populate it.",
+                    priority=1,
+                )
+            sys.stderr.write("owner.self_chat_jid empty — cannot send brief\n")
+            return EXIT_NOT_FOUND
+
+        # Aggregate
+        yesterday_counts, deg_y = _aggregate_yesterday(cfg)
+        today_data, deg_t = _aggregate_today(cfg)
+        degraded = deg_y or deg_t
+        source_count = sum(yesterday_counts.values())
+        catchup_late = minutes_late if state == "in_catchup" else 0
+
+        # Render
+        try:
+            brief_text = _render_brief_text(
+                cfg, today_str, yesterday_counts, today_data, degraded, catchup_late,
+            )
+        except (KeyError, OSError) as e:
+            sys.stderr.write(f"template render failed: {e}\n")
+            if not args.dry_run:
+                _pushover_alert("Daily Brief — render failed", f"{e}", priority=2)
+            return EXIT_GENERIC_ERROR
+
+        if args.dry_run:
+            print(brief_text)
+            return EXIT_OK
+
+        # PRE-log BriefAttempted (idempotency anchor)
+        attempt_id = uuid.uuid4().hex
+        word_count = len(brief_text.split())
+        _log_entry(_LOG_ADAPTER_ATTEMPTED, BriefAttempted(
+            type="brief_attempted", ts=now_local,
+            brief_date=today_str, attempt_id=attempt_id,
+            word_count=word_count,
+            sections_included=list(cfg.daily_brief.sections),
+            source_count=source_count, degraded_mode=degraded,
+            catchup_minutes_late=catchup_late,
+        ))
+
+        # Send (one retry on failure)
+        ok, msg_id, err = _bridge_post(cfg.owner.self_chat_jid, brief_text)
+        if not ok:
+            time.sleep(BRIDGE_RETRY_DELAY_SEC)
+            ok, msg_id, err = _bridge_post(cfg.owner.self_chat_jid, brief_text)
+
+        if ok:
+            _write_sentinel(today_str, attempt_id, msg_id, now_local)
+            _log_entry(_LOG_ADAPTER_SENT, BriefSent(
+                type="brief_sent", ts=_customer_now(cfg.customer.timezone),
+                brief_date=today_str, attempt_id=attempt_id,
+                outbound_message_id=msg_id, self_chat_jid=cfg.owner.self_chat_jid,
+            ))
+            return EXIT_OK
+        else:
+            _log_entry(_LOG_ADAPTER_FAILED, BriefSendFailed(
+                type="brief_send_failed", ts=_customer_now(cfg.customer.timezone),
+                brief_date=today_str, attempt_id=attempt_id,
+                error=err, retry_count=1,
+            ))
+            _pushover_alert(
+                "Daily Brief send failed",
+                f"Bridge unreachable after retry: {err[:300]}",
+                priority=1,
+            )
+            return EXIT_DEPENDENCY_DOWN
+
+
+if __name__ == "__main__":
+    sys.exit(main())

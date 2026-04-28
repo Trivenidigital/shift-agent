@@ -36,3 +36,14 @@
     notifempty
     create 0640 shift-agent shift-agent
 }
+
+# Agent #4 Daily Brief — script stdout/stderr (one entry per day).
+/opt/shift-agent/logs/daily-brief.log {
+    monthly
+    rotate 12
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 shift-agent shift-agent
+}
