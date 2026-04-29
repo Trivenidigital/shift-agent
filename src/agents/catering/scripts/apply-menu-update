@@ -113,26 +113,64 @@ def main() -> int:
             return EXIT_ILLEGAL_TRANSITION
 
         # Load existing menu (or none — first-run safe).
-        # safe_io.load_model raises FileNotFoundError on missing if the model
-        # has required fields with no default (Menu.updated_at qualifies).
-        # Check existence first.
+        # v0.3 M1 (CRITICAL): narrow-except + always-archive.
+        # Was: bare `except Exception` → on corrupt JSON / schema drift / OSError,
+        # silently treated as first-run AND skipped archive AND overwrote MENU_PATH
+        # → only trace was safe_io's quarantine rename. Fixed:
+        #   - FileNotFoundError → first-run, OK to write fresh menu
+        #   - RuntimeError (corrupt-after-quarantine; safe_io renamed file) → OK
+        #     to write fresh menu (the corrupt file is preserved by safe_io)
+        #   - PermissionError / OSError / ValidationError / other → ABORT with
+        #     EXIT_SCHEMA_VIOLATION; never overwrite a menu we couldn't read.
+        # Always archive the raw bytes BEFORE attempting validation so a
+        # backup exists even if load fails.
         with FileLock(MENU_LOCK):
             existing = None
             prev_version = 0
             if MENU_PATH.exists():
+                # Always archive raw bytes BEFORE attempting load
+                ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+                pre_load_archive = ARCHIVE_DIR / f"menu-pre-load-{int(now.timestamp())}.json"
+                try:
+                    shutil.copy2(MENU_PATH, pre_load_archive)
+                except OSError as archive_err:
+                    sys.stderr.write(
+                        f"WARN: pre-load archive failed: {archive_err}\n"
+                    )
                 try:
                     existing, _ = load_model(MENU_PATH, Menu, default=None)
-                except (FileNotFoundError, Exception) as e:
-                    sys.stderr.write(f"WARN: existing menu unreadable, treating as first-run: {e}\n")
+                except FileNotFoundError:
+                    # Race between exists() and load_model()
                     existing = None
+                except RuntimeError as e:
+                    # safe_io quarantined the corrupt file (.corrupt-<ts> rename).
+                    # OK to proceed as first-run since corrupt file is preserved.
+                    sys.stderr.write(
+                        f"WARN: existing menu corrupt (quarantined by safe_io): {e}\n"
+                    )
+                    existing = None
+                except (PermissionError, OSError) as e:
+                    # I/O error — refuse to overwrite a menu we couldn't read.
+                    sys.stderr.write(
+                        f"ERROR: existing menu unreadable (I/O): {type(e).__name__}: {e}\n"
+                        f"  Refusing to overwrite. Restore manually from {pre_load_archive}\n"
+                    )
+                    return EXIT_SCHEMA_VIOLATION
+                except Exception as e:
+                    # ValidationError / unexpected: refuse to overwrite. Operator
+                    # can inspect pre_load_archive + the quarantined file.
+                    sys.stderr.write(
+                        f"ERROR: existing menu schema-invalid: {type(e).__name__}: {e}\n"
+                        f"  Refusing to overwrite. Pre-load archive at {pre_load_archive}\n"
+                    )
+                    return EXIT_SCHEMA_VIOLATION
                 if existing is not None:
                     prev_version = existing.version
-                    ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
                     archive_path = ARCHIVE_DIR / f"menu-v{prev_version}-{int(now.timestamp())}.json"
                     try:
                         shutil.copy2(MENU_PATH, archive_path)
                     except OSError as e:
-                        sys.stderr.write(f"WARN: archive failed: {e}\n")
+                        sys.stderr.write(f"WARN: versioned archive failed: {e}\n")
 
             # Build new menu
             new_menu = Menu(
