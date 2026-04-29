@@ -22,11 +22,12 @@ from pathlib import Path
 sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
 
-from safe_io import flock, ndjson_append, atomic_write_json, load_model  # noqa: E402
+from safe_io import flock, ndjson_append, atomic_write_json, load_model, load_yaml_model  # noqa: E402
 from schemas import (  # noqa: E402
     Config, ExpenseLeadStore, EXPENSE_RETENTION_CANDIDATES,
     ExpenseLeadStatusChange, ExpenseReceiptPruned,
 )
+from pydantic import ValidationError  # noqa: E402
 
 
 CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
@@ -40,9 +41,15 @@ def _log(entry):
 
 
 def main():
-    cfg, status = load_model(CONFIG_PATH, Config)
-    if status != "ok":
-        sys.stderr.write(f"config load status={status}\n")
+    # FIX (PR #34): config.yaml is YAML, NOT JSON. load_model calls json.loads
+    # → JSONDecodeError → safe_load_json renames the file to
+    # config.yaml.corrupt-<epoch>. Particularly important here because this
+    # script runs from a systemd timer; before the fix, every timer fire
+    # rename-quarantined customer config.yaml.
+    try:
+        cfg = load_yaml_model(CONFIG_PATH, Config)
+    except (FileNotFoundError, RuntimeError, ValidationError) as e:
+        sys.stderr.write(f"config load failed: {e}\n")
         return 1
     if not cfg.expense_bookkeeper.enabled:
         return 0  # silent no-op
