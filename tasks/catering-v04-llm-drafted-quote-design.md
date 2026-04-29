@@ -1,4 +1,11 @@
-# Design — Catering v0.4: LLM-drafted customer quote
+# Design v1 — Catering v0.4: LLM-drafted customer quote
+
+> ⚠️ **SUPERSEDED by `tasks/catering-v04-llm-drafted-quote-design-v2.md`**
+> after 5-design-review synthesis (2026-04-29). v2 corrects: state transition
+> moved out of prepare, anti-hallucination guards rewritten with Decimal,
+> stdin-pipe for quote_text (closes argv-limit), new `EXIT_HALLUCINATION`,
+> pre-v0.4 backport for `CustomerConfig`+`LogEntry` rollback safety, 78-test
+> scope, Sonnet model selection. Kept for the pipeline trail.
 
 **Context:** The catering agent's v0.2/v0.3 customer-facing quote is template-rendered Python (`apply-catering-owner-decision._render_quote()` + `catering_quote_to_customer.txt`). Per the agent's stated value prop ("draft a quote in the **owner's voice**, gate behind a single approval"), this should be LLM-drafted, not template-substituted. v0.4 closes that gap.
 
