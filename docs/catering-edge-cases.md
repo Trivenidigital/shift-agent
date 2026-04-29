@@ -2,7 +2,7 @@
 
 **Project:** SMB-Agents → Catering Agent
 **Version:** v3.1 — Hermes-aligned hybrid (Path 3), grounded in deployed code as of 2026-04-28
-**Purpose:** 21 deterministic test cases against deployed Python scripts (20 runnable; one deferred to renderer PR — C18), plus 15 deferred cases categorized by why they can't be automated tests today. *(C10 past-date validation: runnable since 2026-04-28 [PR #25]. C02 returning-customer lookup: runnable since 2026-04-28 [follow-up PR].)*
+**Purpose:** 21 deterministic test cases against deployed Python scripts — all 21 runnable, plus 15 deferred cases categorized by why they can't be automated tests today. *(C10 past-date validation: runnable since 2026-04-28 [PR #25]. C02 returning-customer lookup: runnable since 2026-04-28 [PR #26]. C18 off-menu items renderer: runnable since 2026-04-29 [C23 PR].)*
 **Supersedes:** v3
 
 ---
@@ -331,13 +331,23 @@ Python script under test: `apply-catering-owner-decision` end-to-end
 **Assertions:** Generated draft not empty; contains marker like `[MENU_REVIEW_NEEDED]` or equivalent prose.
 **Failure modes:** Render fails silently with empty menu; render outputs draft pretending to have items.
 
-#### C18 — DEFERRED to C23 renderer + extractor-prompt PR
+#### C18 — Off-menu request items render on owner-approval card (must-pass) [RUNNABLE]
 
-> **Status (as of v3.1, 2026-04-28):** deferred. PR #21 landed the `off_menu_items` schema slot, but the field is write-only at that PR's commit boundary — extractor SKILL prompt + owner-approval-card renderer haven't shipped (see CONTRACT comment in `src/platform/schemas.py:316-323`). v3 wrote this case against `notes` as the off-menu storage location; that's no longer the right shape post-PR-21.
->
-> **Unblocked by:** the C23 renderer + extractor-prompt PR tracked in `tasks/todo.md` P1 → "Schema implications from review → C23 renderer + extractor-prompt." That PR identifies the actual owner-card-sending script (lead-intake path, NOT `apply-catering-owner-decision` per the design-review finding from PR #21's pipeline) and updates both halves together.
->
-> **What C18 will test once unblocked:** off-menu request extracted into `off_menu_items` round-trips through `create-catering-lead` AND surfaces in the rendered owner-approval card. The new C22 (below) covers the schema/round-trip half at PR #21's commit boundary.
+> **Status (as of 2026-04-29):** runnable. The C23 renderer + extractor-prompt PR shipped both halves: parse_catering_inquiry SKILL.md prompts Kimi to populate `off_menu_items`, and `_render_approval_card` in `create-catering-lead` adds an "Off-menu requests:" line to the owner-approval card after `dietary_restrictions` (clustered with customer-intent fields). When non-empty, a top-of-card marker `[!] Off-menu requests detected — see below` is prepended for mobile-preview-fold visibility.
+
+LLM extraction layer: parse_catering_inquiry SKILL extracts `off_menu_items` field
+Python script under test: `_render_approval_card` in `create-catering-lead`
+
+**Input:** `fields_json` includes `"off_menu_items": ["butter chicken", "lamb biryani"]` for a normal lead.
+
+**Expected:**
+- Owner-approval card body contains exact line `"  - Off-menu requests: butter chicken, lamb biryani"` (2-space indent, comma-space separator).
+- When off_menu_items is non-empty, top-of-card marker `"  [!] Off-menu requests detected — see below"` appears at line 0 of summary block.
+- Empty list omits both the line and the marker (no stray empty rows).
+- Both template path and inline-fallback path render the line consistently.
+- Total card stays under WhatsApp 4096-char limit; extra-long lists truncate to "(and N more)" form per WHATSAPP_OFF_MENU_BUDGET=1500 chars.
+
+**Tests:** see `tests/test_catering_v02_scripts.py` (8 C23 tests including exact-line assertion, inline-fallback, truncation, idempotent-replay carve-out, None-defensive handling, SKILL example schema validation).
 
 ---
 
