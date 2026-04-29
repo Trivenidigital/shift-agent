@@ -59,17 +59,49 @@ class E164Phone(str):
         return cls(canonical)
 
     @classmethod
-    def from_any(cls, raw: str) -> str:
-        """Canonicalize: strip @jid suffix, dashes, spaces; add + if missing; convert 00- prefix."""
+    def from_any(cls, raw: str, *, country_code: Optional[str] = None) -> str:
+        """Canonicalize: strip @jid suffix, dashes, spaces; convert 00- prefix.
+
+        v0.3 (PM2 / L0 fix): bare 10-digit input is no longer auto-prepended
+        with `+` (the historical bug that produced `+9045551234` from US local
+        input). Behavior:
+          - +XXXXXXXXXX...      : passed through if matches E.164 (10-15 digits)
+          - 1XXXXXXXXXX (11d)   : prepended with `+` (US 11-digit)
+          - 10-15 digits        : prepended with `+` (international with code)
+          - exactly 10 digits   : if country_code='US', prepend `+1`; else raise
+          - `00XXX...`          : convert to `+XXX...`
+
+        country_code: ISO-3166 alpha-2. Currently 'US' is honored; future
+        country codes can be added as customers expand.
+
+        Raises ValueError for 10-digit bare-no-country input when no
+        country_code provided.
+        """
         if "@" in raw:
             raw = raw.split("@", 1)[0]
         s = re.sub(r"[\s\-().]", "", raw)
         if s.startswith("00"):
             s = "+" + s[2:]
-        if not s.startswith("+"):
-            # bare digits — assume already includes country code
-            s = "+" + s
-        return s
+        if s.startswith("+"):
+            return s
+        # Bare digits path
+        if not s.isdigit():
+            return s  # let validate() raise the format error
+        n = len(s)
+        if n == 10:
+            # US local format (no country code). Default-prepend +1 if cfg
+            # tells us this is a US customer; otherwise reject.
+            if country_code == "US":
+                return "+1" + s
+            raise ValueError(
+                f"phone {raw!r} is bare 10-digit without country code. "
+                f"Set cfg.customer.country_code='US' or include the country prefix."
+            )
+        if n == 11 and s.startswith("1"):
+            return "+" + s  # US 11-digit
+        if 10 <= n <= 15:
+            return "+" + s  # International with country code
+        return "+" + s  # let validate() raise on length
 
     @classmethod
     def __get_pydantic_core_schema__(cls, source_type, handler):

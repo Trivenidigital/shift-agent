@@ -101,18 +101,30 @@ def _empty_result(status: str) -> dict:
     }
 
 
-def _canonicalize_phone(raw: str) -> Optional[str]:
+def _canonicalize_phone(raw: str, *, country_code: Optional[str] = None) -> Optional[str]:
     """Canonical E.164 form, or None if input is invalid.
 
     Letters are rejected by _PHONE_E164. PRIYA is illustrative — doc binds
     "matching the existing schema validator" (per design-review).
+
+    v0.3 (PM2): when country_code is provided (typically from
+    cfg.customer.country_code), bare 10-digit US-local input is accepted
+    via from_any's prepend logic. Without country_code, 10-digit bare
+    input is rejected (returns None) — was: silently mis-prepended +.
 
     Catches Pydantic's ValidationError too: in v2 it does NOT inherit from
     ValueError, so a future change in E164Phone.validate that surfaces it
     would otherwise propagate uncaught (silent-failure-hunter MEDIUM-6).
     """
     try:
-        return str(E164Phone.validate(raw))
+        if not isinstance(raw, str):
+            return None
+        canon = E164Phone.from_any(raw, country_code=country_code)
+        # Validate the canonical form matches E.164 regex
+        from schemas import _PHONE_E164  # noqa: WPS433  (private import OK — co-package)
+        if not _PHONE_E164.match(canon):
+            return None
+        return canon
     except (TypeError, ValueError, ValidationError):
         return None
 
@@ -187,15 +199,20 @@ def lookup_prior_leads_by_phone(
     *,
     leads_path: Path = LEADS_PATH,
     now: Optional[datetime] = None,
+    country_code: Optional[str] = None,
 ) -> dict:
     """C02 contract — see module docstring.
+
+    v0.3 (PM2): country_code is forwarded to phone canonicalization. When
+    set to 'US', accepts bare 10-digit US-local input. Otherwise 10-digit
+    bare input raises ValueError (was: silently produced +XXXXXXXXXX).
 
     Raises:
         ValueError: phone canonicalization failed
         RuntimeError: leads.json present but corrupt (CLI catches and converts
                       to dict with lookup_status='corrupt')
     """
-    canonical = _canonicalize_phone(customer_phone)
+    canonical = _canonicalize_phone(customer_phone, country_code=country_code)
     if canonical is None:
         raise ValueError(f"invalid phone: {customer_phone!r}")
 
@@ -240,6 +257,25 @@ def lookup_prior_leads_by_phone(
     }
 
 
+def _load_config() -> Optional[Config]:
+    """v0.3: load Config (returns None on any failure, with narrow except
+    bucketing). Used to derive both `now` and `country_code`.
+    """
+    try:
+        import yaml
+        cfg_dict = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+        return Config.model_validate(cfg_dict)
+    except FileNotFoundError:
+        sys.stderr.write(f"WARN: config not found at {CONFIG_PATH}; using UTC now\n")
+    except ValidationError as e:
+        sys.stderr.write(f"WARN: config validation failed: {e}\n")
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write(
+            f"WARN: config load unexpected error ({type(e).__name__}): {e}\n"
+        )
+    return None
+
+
 def _load_config_now() -> Optional[datetime]:
     """Best-effort: load Config and return tz-aware now in customer tz. Falls
     back to None (caller defaults to UTC). Narrow except per design-review
@@ -273,10 +309,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--customer-phone", required=True)
     args = ap.parse_args(argv)
 
-    now = _load_config_now() or datetime.now(tz=timezone.utc)
+    cfg = _load_config()
+    now = customer_now(cfg.customer.timezone) if cfg else datetime.now(tz=timezone.utc)
+    country_code = cfg.customer.country_code if cfg else None
 
     try:
-        result = lookup_prior_leads_by_phone(args.customer_phone, now=now)
+        result = lookup_prior_leads_by_phone(
+            args.customer_phone, now=now, country_code=country_code,
+        )
     except ValueError as e:
         sys.stderr.write(f"{e}\n")
         return EXIT_INVALID_INPUT
