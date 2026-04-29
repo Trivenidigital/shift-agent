@@ -322,3 +322,159 @@ def test_redact_strips_bare_jwt():
     redacted = redact_qbo_error(err)
     assert "eyJhbGciOiJIUzI1NiJ9" not in redacted, f"leaked: {redacted}"
     assert "<REDACTED>" in redacted
+
+
+# ───────────────────────────────────────────────────
+# Audit-fix v1.1 regression tests
+# ───────────────────────────────────────────────────
+
+
+def _base_lead():
+    return {
+        "expense_id": "E0001",
+        "original_message_id": "wa_msg_xyz123",
+        "sender_phone": "+19045550000",
+        "received_at": "2026-04-29T12:00:00+00:00",
+        "image_path": "/tmp/test/E0001.jpg",
+        "image_phash": "a3f2c19d8b5e4067",
+        "image_byte_hash": "a" * 64,
+    }
+
+
+@pytest.mark.parametrize("bad_value", ["", " ", "  ", "\t", "\n"])
+def test_audit_bug2_lead_sender_phone_blank_or_whitespace_rejected(bad_value):
+    """BUG-2 audit fix: sender_phone must reject empty AND whitespace-only.
+    Plain Field(min_length=1) does NOT cover whitespace — Pydantic doesn't
+    trim. The shared validator's `not v.strip()` check is what catches this.
+    Reviewer-d HIGH + reviewer-b MED both flagged this gap."""
+    base = _base_lead()
+    base["sender_phone"] = bad_value
+    with pytest.raises(Exception, match="empty or whitespace"):
+        ExpenseLead.model_validate(base)
+
+
+def test_audit_bug2_lead_sender_phone_field_required():
+    """BUG-2: Pydantic's required-field error fires when field is omitted."""
+    base = _base_lead()
+    del base["sender_phone"]
+    with pytest.raises(Exception, match="sender_phone"):
+        ExpenseLead.model_validate(base)
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    [
+        "msg\0null",      # null byte mid-string
+        "\0",             # null byte alone (passes min_length=1; validator catches)
+        "msg\rbreak",     # carriage return
+        "msg\nbreak",     # newline (NDJSON log corruption risk)
+        "msg\ttab",       # tab
+    ],
+)
+def test_audit_bug3_lead_original_message_id_control_chars_rejected(bad_value):
+    """BUG-3 audit fix: original_message_id must reject null byte AND other
+    control chars (\\r, \\n, \\t) for NDJSON log-safety. Mirrors image_path
+    validator's defensive shape per reviewer-b LOW."""
+    base = _base_lead()
+    base["original_message_id"] = bad_value
+    with pytest.raises(Exception, match="null byte or control"):
+        ExpenseLead.model_validate(base)
+
+
+_TEMPLATE_DIR = (
+    Path(__file__).resolve().parent.parent
+    / "src" / "agents" / "expense_bookkeeper" / "templates"
+)
+_EM_DASH = "—"  # U+2014, allowed typography (NOT an emoji)
+
+
+@pytest.mark.parametrize(
+    "template_path",
+    sorted(_TEMPLATE_DIR.glob("*.txt")),
+    ids=lambda p: p.name,
+)
+def test_audit_bug4_no_emojis_in_any_template(template_path):
+    """BUG-4 audit fix: CLAUDE.md no-emoji rule applies to every owner-facing
+    template. Em-dash (U+2014) is typography, allowed. Anything else
+    non-ASCII is flagged. Reviewer-d MED: parametrize across all templates
+    so future regression is caught."""
+    raw = template_path.read_text(encoding="utf-8")
+    assert "✓" not in raw, (
+        f"{template_path.name}: ✓ checkmark must be removed (CLAUDE.md no-emoji rule)"
+    )
+    non_ascii = {c for c in raw if ord(c) > 127 and c != _EM_DASH}
+    assert non_ascii == set(), (
+        f"{template_path.name}: unexpected non-ASCII chars: "
+        f"{[hex(ord(c)) for c in non_ascii]}"
+    )
+
+
+def test_audit_bug4_pushed_confirmation_no_trailing_space():
+    """Reviewer-c LOW: subtle paste-artifact prevention — confirmation
+    message first line must not end with trailing space."""
+    p = _TEMPLATE_DIR / "expense_pushed_confirmation.txt"
+    first_line = p.read_text(encoding="utf-8").split("\n", 1)[0]
+    assert not first_line.endswith(" "), (
+        "first line ends with trailing space (paste artifact?)"
+    )
+
+
+_DISPATCHER_SKILL = (
+    Path(__file__).resolve().parent.parent
+    / "src" / "agents" / "shift" / "skills"
+    / "dispatch_shift_agent" / "SKILL.md"
+)
+
+
+def test_audit_bug1_dispatcher_skill_includes_expense_jq_lookup():
+    """BUG-1 audit fix: dispatch_shift_agent SKILL.md Step-3 grep block must
+    include a jq lookup for state/expense-bookkeeper/leads.json in priority
+    order between catering-leads.json and pending.json.
+
+    Reviewer-d HIGH: replace v1's brittle rfind() with anchored slice on the
+    'Look up across the' comment block."""
+    raw = _DISPATCHER_SKILL.read_text(encoding="utf-8")
+
+    # Anchor to the Step-3 grep block by its leading comment
+    anchor = "# Look up across the"
+    start = raw.find(anchor)
+    assert start != -1, f"could not find Step-3 grep block (anchor: {anchor!r})"
+    end = raw.find("\n```", start)  # closing fence of the bash code block
+    assert end != -1, "could not find end of Step-3 grep block"
+    block = raw[start:end]
+
+    # All 4 expected lookups must be present in the block, in order
+    assert "expense-bookkeeper/leads.json" in block, (
+        "BUG-1: dispatcher SKILL.md Step-3 grep block must include "
+        "expense-bookkeeper/leads.json lookup"
+    )
+
+    pos_catering_menu = block.find("catering-menu-pending.json")
+    pos_catering_leads = block.find("catering-leads.json")
+    pos_expense = block.find("expense-bookkeeper/leads.json")
+    pos_pending = block.find("/state/pending.json")
+
+    assert all(p != -1 for p in (pos_catering_menu, pos_catering_leads, pos_expense, pos_pending)), (
+        f"missing pool: catering_menu={pos_catering_menu} catering_leads={pos_catering_leads} "
+        f"expense={pos_expense} pending={pos_pending}"
+    )
+
+    # Priority order: catering-menu < catering-leads < expense < pending
+    assert pos_catering_menu < pos_catering_leads < pos_expense < pos_pending, (
+        f"BUG-1 priority order broken in Step-3 block: "
+        f"catering-menu={pos_catering_menu}, catering-leads={pos_catering_leads}, "
+        f"expense={pos_expense}, pending={pos_pending}"
+    )
+
+    # Status filter: must exclude approval-flow-closed states.
+    # Slice the FULL line containing the expense path (find prev newline).
+    line_start = block.rfind("\n", 0, pos_expense) + 1
+    line_end = block.find("\n", pos_expense)
+    if line_end == -1:
+        line_end = len(block)
+    expense_line = block[line_start:line_end]
+    for closed in ("PUSHED", "REVERSED", "REJECTED", "EXPIRED"):
+        assert closed in expense_line, (
+            f"BUG-1: expense jq filter missing exclusion for status {closed} "
+            f"in line: {expense_line!r}"
+        )

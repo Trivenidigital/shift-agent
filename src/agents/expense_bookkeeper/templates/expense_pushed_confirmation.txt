@@ -1,4 +1,4 @@
-{{expense_id}} pushed to QuickBooks ✓
+{{expense_id}} pushed to QuickBooks
   Vendor:   {{vendor_display}}
   Total:    ${{total_display}}
   Category: {{qbo_account}}
