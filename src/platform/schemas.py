@@ -1754,11 +1754,24 @@ class CateringQuoteAttempted(_BaseEntry):
     Written BEFORE bridge POST in the SAME lock as state-mutation. On retry,
     presence of this row → script returns idempotent without re-POSTing,
     preventing duplicate quotes to the customer.
+
+    PR-D1 extension (design v2 §3.3 / H8 / R2 HIGH-2): added
+    `bridge_post_outcome` so retries can distinguish 'anchor-then-success'
+    (skip bridge POST) from 'anchor-then-failed/unknown' (retry bridge POST).
+    Without this field, an anchor + failed bridge POST would create a
+    stuck-loop where retries see the anchor and never re-attempt.
+
+    Two-step write contract:
+      1. First anchor row written BEFORE bridge POST with outcome="unknown".
+      2. After bridge POST returns, second anchor row is appended with
+         outcome="success" or "failed" — supersedes step-1 row via tail-scan.
+    Field has default `"unknown"` so legacy rows (pre-PR-D1) read cleanly.
     """
     type: Literal["catering_quote_attempted"]
     lead_id: str = Field(min_length=1)
     original_message_id: str = Field(min_length=1)
     code: str = Field(pattern=_CODE_FULL_PATTERN)
+    bridge_post_outcome: Literal["success", "failed", "unknown"] = "unknown"
 
 
 class CateringOwnerApprovalCardAttempted(_BaseEntry):
@@ -1803,6 +1816,27 @@ class CateringDeclineAttempted(_BaseEntry):
     lead_id: str = Field(min_length=1)
     original_message_id: str = Field(min_length=1)
     code: str = Field(pattern=_CODE_FULL_PATTERN)
+
+
+class CateringQuoteSentLeadMissing(_BaseEntry):
+    """PR-D1: emitted by apply-catering-owner-decision when the post-bridge
+    re-load of leads.json finds the lead absent (matched_idx is None).
+
+    Customer demonstrably received the quote (bridge POST succeeded), but
+    SENT_TO_CUSTOMER could not be persisted because the lead vanished
+    between the two LEADS_LOCK windows. Operator must reconcile via
+    catering-lead-reconcile (PR-D2 §8).
+
+    Naming: design v2 §14.2 R5-H-2 — `Catering<Subject><PastParticiple>`
+    pattern. Subject="QuoteSent" (the past-tense fact), Past-participle
+    qualifier="LeadMissing" (the deviation that triggered audit).
+    """
+    type: Literal["catering_quote_sent_lead_missing"]
+    lead_id: str = Field(min_length=1)
+    original_message_id: str = Field(min_length=1)
+    customer_phone_at_approve: E164Phone
+    outbound_message_id: str = Field(min_length=1)
+    detail: str = Field(default="", max_length=500)
 
 
 class CateringQuoteRenderFailed(_BaseEntry):
@@ -1953,6 +1987,8 @@ LogEntry = Annotated[
         Annotated[CateringDeclineAttempted, Tag("catering_decline_attempted")],
         # v0.3 (review M2): render-failure observability
         Annotated[CateringQuoteRenderFailed, Tag("catering_quote_render_failed")],
+        # PR-D1: post-bridge state-vs-outbound divergence audit
+        Annotated[CateringQuoteSentLeadMissing, Tag("catering_quote_sent_lead_missing")],
         Annotated[MenuUpdateProposed, Tag("menu_update_proposed")],
         Annotated[MenuUpdateApplied, Tag("menu_update_applied")],
         Annotated[MenuUpdateRejected, Tag("menu_update_rejected")],
@@ -2060,5 +2096,7 @@ __all__ = [
     "CateringOwnerApprovalCardFailed", "CateringOwnerApprovalCardSkipped",
     "CateringOwnerEdited", "CateringDeclineAttempted",
     "CateringQuoteRenderFailed",
+    # PR-D1
+    "CateringQuoteSentLeadMissing",
     "MenuUpdateProposed", "MenuUpdateApplied", "MenuUpdateRejected",
 ]
