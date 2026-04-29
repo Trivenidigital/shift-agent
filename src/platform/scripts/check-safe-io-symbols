@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+"""check-safe-io-symbols — single source of truth for safe_io chokepoint imports.
+
+Used by both shift-agent-deploy.sh's pre-restart import gate AND
+shift-agent-smoke-test.sh step 2. Single symbol list prevents drift between
+the two gates (PR-A R3 finding + PR-C design-review R5 DRY finding).
+
+Exits 0 with stdout marker `SAFE_IO_SYMBOLS_OK` if every required name
+imports cleanly. Exits 1 with stderr trace if any import fails.
+
+Required names (catering scripts depend on each):
+- assert_load_status_clean / LoadStatusError (PR #33 — oserror surfacing)
+- try_acquire_filelock_with_retry / LockUnavailable (PR #33 — lookup serialization)
+- load_yaml_model (PR #34 — YAML-loaded-as-JSON regression fix)
+
+Adding a new chokepoint helper that catering depends on?  Add the name here
+AND a corresponding callsite test that exercises it.  Smoke gate auto-rolls-
+back missing-symbol regressions before any restart of hermes-gateway.
+"""
+from __future__ import annotations
+import sys
+
+
+REQUIRED_SYMBOLS = (
+    "assert_load_status_clean",
+    "LoadStatusError",
+    "try_acquire_filelock_with_retry",
+    "LockUnavailable",
+    "load_yaml_model",
+)
+
+
+def main() -> int:
+    sys.path.insert(0, "/opt/shift-agent")
+    try:
+        import safe_io
+    except ImportError as e:
+        sys.stderr.write(f"FAIL: cannot import safe_io: {e}\n")
+        return 1
+    missing = [name for name in REQUIRED_SYMBOLS if not hasattr(safe_io, name)]
+    if missing:
+        sys.stderr.write(f"FAIL: safe_io missing symbols: {missing}\n")
+        return 1
+    print("SAFE_IO_SYMBOLS_OK")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

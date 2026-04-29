@@ -28,22 +28,20 @@ for script in \
 done
 echo "✓ All scripts present + executable"
 
-# 2. Python modules importable + new safe_io chokepoint symbols present
-# Per design-review R3: module-level import alone won't catch a missing
-# *symbol* on the module, only a missing module. Fail-closed on the specific
-# names that catering scripts now depend on (assert_load_status_clean,
-# LoadStatusError, try_acquire_filelock_with_retry, LockUnavailable).
+# 2. Python modules importable + safe_io chokepoint symbols present
+# Symbol list lives in tools/check-safe-io-symbols.py — single source of truth
+# shared with shift-agent-deploy.sh's pre-restart gate (PR-C design R5 DRY).
 if ! python3 -c "
 import sys
 sys.path.insert(0, '/opt/shift-agent')
 import schemas, safe_io, exit_codes
-from safe_io import (
-    assert_load_status_clean, LoadStatusError,
-    try_acquire_filelock_with_retry, LockUnavailable,
-)
 print('schema classes:', [c for c in dir(schemas) if not c.startswith('_')][:5])
 " > /dev/null; then
-    echo "FAIL: Python modules / safe_io chokepoint symbols don't import"
+    echo "FAIL: Python modules don't import"
+    exit 1
+fi
+if ! /usr/local/bin/check-safe-io-symbols.py > /dev/null; then
+    echo "FAIL: safe_io chokepoint symbols missing — run check-safe-io-symbols.py for details"
     exit 1
 fi
 echo "✓ Python modules importable (incl. safe_io chokepoint symbols)"
