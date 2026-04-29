@@ -90,27 +90,40 @@ def _bridge_post(jid: str, message: str) -> tuple[bool, str]:
         return False, f"{type(e).__name__}: {e}"
 
 
-def _load_menu_filtered(dietary_restrictions: list[str]) -> tuple[list[MenuItem], int]:
+def _load_menu_filtered(dietary_restrictions: list[str]) -> tuple[list[MenuItem], int, str]:
     """Load the current menu and filter items by the customer's dietary requests.
 
-    Returns (filtered_items, total_items_in_menu).
+    v0.3 (A3 fix): three-way return (items, total, error_kind) where:
+      - "ok": menu loaded cleanly, items returned
+      - "absent": MENU_PATH does not exist (legitimate first-run customer state)
+      - "corrupt": JSON or schema validation failed
+      - "io_error": filesystem/permission failure
 
-    Filtering rule: if the customer specified ANY dietary restriction (e.g.
-    "vegetarian"), keep only items whose dietary_tags include AT LEAST ONE
-    matching tag. If no dietary restriction was specified, return all items
-    (caller decides whether to include the full menu).
+    Approve flow MUST refuse on "corrupt"/"io_error" but proceed on "absent"
+    (empty menu section is valid for first-run customers without an uploaded
+    menu yet).
     """
     if not MENU_PATH.exists():
-        return [], 0
+        return [], 0, "absent"
     try:
         menu, status = load_model(MENU_PATH, Menu)
+    except (FileNotFoundError, PermissionError):
+        return [], 0, "io_error"
+    except OSError:
+        return [], 0, "io_error"
+    except RuntimeError:
+        # safe_io's quarantine path — file was renamed to .corrupt-<epoch>
+        return [], 0, "corrupt"
     except Exception:
-        return [], 0
+        # Pydantic ValidationError or unexpected
+        return [], 0, "corrupt"
+    if status.startswith("corrupt"):
+        return [], 0, "corrupt"
     if status != "ok":
-        return [], 0
+        return [], 0, "io_error"
     items = [it for it in menu.items if it.available]
     if not dietary_restrictions:
-        return items, len(menu.items)
+        return items, len(menu.items), "ok"
     # Normalize requested tags (e.g. "vegetarian" -> "veg", "non-vegetarian" -> "non-veg")
     requested = set()
     for r in dietary_restrictions:
@@ -136,7 +149,7 @@ def _load_menu_filtered(dietary_restrictions: list[str]) -> tuple[list[MenuItem]
         elif t in ("egg-free", "egg free", "no eggs"):
             requested.add("egg-free")
     filtered = [it for it in items if any(tag in requested for tag in it.dietary_tags)]
-    return filtered, len(menu.items)
+    return filtered, len(menu.items), "ok"
 
 
 def _format_menu_section(items: list[MenuItem], total: int, dietary_restrictions: list[str]) -> str:
@@ -172,13 +185,30 @@ def _format_menu_section(items: list[MenuItem], total: int, dietary_restrictions
     return "\n".join(lines) + "\n"
 
 
-def _render_quote(lead, customer_name: str) -> str:
-    """Render the customer-facing quote. Uses template with fallback. Includes
-    a sample-menu section filtered by the customer's dietary requests."""
+def _render_quote(lead, customer_name: str) -> tuple[str, str]:
+    """Render the customer-facing quote.
+
+    v0.3 (A3+A4+A5 fixes):
+      - A3: three-way menu_load result; raises on "corrupt"/"io_error"
+        (caller must refuse approve and emit InvariantViolation+Pushover)
+      - A4: template format error is LOUD — no inline-stub fallback. Raises
+        a ValueError that the caller maps to EXIT_DEPENDENCY_DOWN.
+      - A5: off_menu_items rendered into customer quote (was owner-card-only)
+      - Q1: caller MUST persist returned quote_text on the lead
+
+    Returns (rendered_text, menu_status) where menu_status ∈ {"ok","absent","corrupt","io_error"}.
+    Caller refuses approve on "corrupt"/"io_error".
+    """
     template_path = TEMPLATE_DIR / "catering_quote_to_customer.txt"
     dietary = list(lead.extracted.dietary_restrictions or [])
-    filtered_items, total = _load_menu_filtered(dietary)
+    filtered_items, total, menu_status = _load_menu_filtered(dietary)
     menu_section = _format_menu_section(filtered_items, total, dietary)
+
+    # A5: include off_menu_items in customer-facing quote
+    off_menu_section = ""
+    if lead.extracted.off_menu_items:
+        items_list = "\n".join(f"  - {it}" for it in lead.extracted.off_menu_items)
+        off_menu_section = f"\n*Custom requests we'll discuss:*\n{items_list}\n"
 
     fields = {
         "lead_id": lead.lead_id,
@@ -187,20 +217,25 @@ def _render_quote(lead, customer_name: str) -> str:
         "event_date": lead.extracted.event_date or "[TBD]",
         "event_time": lead.extracted.event_time or "[TBD]",
         "menu_section": menu_section,
+        "off_menu_items_section": off_menu_section,
     }
     if template_path.exists():
         try:
             tmpl = template_path.read_text(encoding="utf-8")
-            return tmpl.format(**fields)
-        except (KeyError, OSError):
-            pass
-    # Inline fallback — generic acknowledgment when no template
+            return tmpl.format(**fields), menu_status
+        except KeyError as e:
+            raise ValueError(f"catering_quote_to_customer.txt missing key: {e}") from e
+        except OSError as e:
+            raise ValueError(f"catering_quote_to_customer.txt read failed: {e}") from e
+
+    # No template installed — render via inline composition (this is NOT a
+    # silent fallback for template-format errors; only for missing-template).
     return (
         f"⚕ *Catering Agent*\n────────────\n"
         f"Hi {fields['customer_name']}, thank you for the catering inquiry. "
         f"We can confirm — let's discuss details. Reply here when ready, or "
-        f"reach us directly.{menu_section}\n(Ref: {lead.lead_id})"
-    )
+        f"reach us directly.{menu_section}{off_menu_section}\n(Ref: {lead.lead_id})"
+    ), menu_status
 
 
 def _log(adapter: TypeAdapter, entry) -> None:
@@ -291,10 +326,41 @@ def main() -> int:
                 lead = store.leads[i]
                 break
 
-        # On approve, capture target JID before writing — we'll send AFTER lock release
+        # On approve, capture target JID and render quote BEFORE writing —
+        # we'll send AFTER lock release. v0.3 Q1 fix: quote_text MUST be
+        # persisted on the lead before atomic_write_json (currently empty
+        # for all production leads — the data integrity bug discovered during
+        # E2E audit).
         if args.decision == "approve":
-            target_jid = f"{lead.customer_phone.lstrip('+')}@s.whatsapp.net"
-            quote_text = _render_quote(lead, lead.customer_name or "")
+            target_jid = f"{lead.customer_phone[1:]}@s.whatsapp.net"
+            try:
+                quote_text, menu_load_status = _render_quote(lead, lead.customer_name or "")
+            except ValueError as render_err:
+                # A4 fix: template format error is LOUD, NOT a silent inline fallback.
+                sys.stderr.write(
+                    f"FATAL: catering quote template error: {render_err}\n"
+                    f"  Owner approved lead {lead.lead_id} but customer quote could "
+                    f"not be rendered. State left at AWAITING_OWNER_APPROVAL.\n"
+                )
+                return EXIT_DEPENDENCY_DOWN
+            # A3 fix: refuse approve when menu load returned corrupt/io_error.
+            # "absent" is OK — first-run customer with no menu uploaded yet.
+            if menu_load_status in ("corrupt", "io_error"):
+                sys.stderr.write(
+                    f"FATAL: catering menu load failed (status={menu_load_status}). "
+                    f"Refusing approve for {lead.lead_id}.\n"
+                )
+                return EXIT_DEPENDENCY_DOWN
+
+            # Q1 fix: persist quote_text on the lead before atomic write.
+            for i, l in enumerate(store.leads):
+                if l.lead_id == lead.lead_id:
+                    store.leads[i] = l.model_copy(update={
+                        "quote_text": quote_text,
+                        "quote_version": (l.quote_version or 0) + 1,
+                    })
+                    lead = store.leads[i]
+                    break
 
         atomic_write_json(LEADS_PATH, store)
 

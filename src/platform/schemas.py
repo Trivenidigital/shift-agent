@@ -25,6 +25,12 @@ import sys
 _CODE_BODY_PATTERN = r"[A-HJKMNPQR-Z2-9]{5}"
 _CODE_FULL_PATTERN = rf"^#{_CODE_BODY_PATTERN}$"
 
+# Sentinel values for mode="before" validator backfill of legacy data.
+# Defined at module scope (NOT class-level) to avoid Pydantic v2's
+# ModelPrivateAttr treatment of leading-underscore class attributes.
+LEGACY_QUOTE_TEXT_SENTINEL = "<legacy-pre-v0.3-no-quote-persisted>"
+LEGACY_EDIT_TEXT_SENTINEL = "<legacy-pre-v0.3-no-edit-text-recorded>"
+
 
 # ─────────────────────────────────────────────────────────────────
 # Phone canonicalization
@@ -411,7 +417,9 @@ class CateringLead(BaseModel):
     # (pre-v0.3 leads with empty quote_text) is backfilled with sentinel by
     # mode="before" shim, then strict validator runs. Migration tool fixes
     # legacy leads pre-deploy; shim is a safety net.
-    _LEGACY_QUOTE_SENTINEL = "<legacy-pre-v0.3-no-quote-persisted>"
+    # NOTE: sentinel is defined at module scope (LEGACY_QUOTE_TEXT_SENTINEL)
+    # to avoid Pydantic v2's ModelPrivateAttr treatment of leading-underscore
+    # class attributes.
 
     @model_validator(mode="before")
     @classmethod
@@ -426,7 +434,7 @@ class CateringLead(BaseModel):
                 f"WARN: legacy quote_text=empty on lead_id={data.get('lead_id')!r} "
                 f"status={status!r}; backfilling with sentinel.\n"
             )
-            data["quote_text"] = cls._LEGACY_QUOTE_SENTINEL
+            data["quote_text"] = LEGACY_QUOTE_TEXT_SENTINEL
         return data
 
     @model_validator(mode="after")
@@ -1241,8 +1249,6 @@ class CateringOwnerDecision(_BaseEntry):
     decision: Literal["approve", "reject", "edit"]
     edit_text: str = Field(default="", max_length=2000)
 
-    _LEGACY_EDIT_TEXT_SENTINEL = "<legacy-pre-v0.3-no-edit-text-recorded>"
-
     @model_validator(mode="before")
     @classmethod
     def _backfill_legacy_edit_text(cls, data: Any) -> Any:
@@ -1255,7 +1261,7 @@ class CateringOwnerDecision(_BaseEntry):
                 f"WARN: legacy edit_text=empty on lead_id={data.get('lead_id')!r}; "
                 f"backfilling with sentinel.\n"
             )
-            data["edit_text"] = cls._LEGACY_EDIT_TEXT_SENTINEL
+            data["edit_text"] = LEGACY_EDIT_TEXT_SENTINEL
         return data
 
     @model_validator(mode="after")
