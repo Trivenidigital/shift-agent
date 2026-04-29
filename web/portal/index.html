@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SMB-Agents — Portfolio Portal</title>
+  <title>SMB-Agents — Portfolio Portal (Solid 17)</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Inter+Tight:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
@@ -28,6 +28,12 @@
       --muted-strong:rgba(42,29,14,0.45);
       --rule:rgba(157,107,31,0.18);
       --rule-soft:rgba(157,107,31,0.10);
+      /* Chess-board palette (r6 2026-04-29): lighter terracotta + navy ink (Option A) */
+      --terracotta:#e07a5f;
+      --terracotta-light:#ec9077;
+      --navy:#1f2d4a;
+      --navy-deep:#131a2d;
+      --navy-light:#2c3d60;
     }
     *{box-sizing:border-box;margin:0;padding:0}
     html{scroll-behavior:smooth}
@@ -87,7 +93,7 @@
     }
     .status-pill .num{color:var(--champagne);font-weight:500;font-size:12px}
     .status-pill .dot{width:6px;height:6px;border-radius:50%;display:inline-block}
-    .status-pill.live .dot{background:var(--emerald)}
+    .status-pill.live .dot{background:var(--navy)}
     .status-pill.scaffold .dot{background:var(--champagne)}
     .status-pill.future .dot{background:var(--muted)}
 
@@ -103,25 +109,59 @@
     /* Card grid */
     .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:20px}
 
-    /* Cards */
+    /* Cards — vibrant chess-board palette: marigold (light) + emerald (dark). Every card fully filled. */
     .card{
       position:relative;
-      background:var(--cream);
-      border:1px solid var(--rule);
       padding:28px 26px 22px;
       display:flex;flex-direction:column;
       transition:all .35s cubic-bezier(0.22,0.61,0.36,1);
       min-height:260px;
+      border:1px solid transparent;
     }
-    .card.live{background:linear-gradient(180deg,var(--cream) 0%,var(--ivory-warm) 100%)}
     .card.live::before{
-      content:'';position:absolute;left:0;top:0;bottom:0;width:3px;
-      background:linear-gradient(180deg,var(--champagne) 0%,var(--champagne-deep) 100%);
+      content:'';position:absolute;left:0;top:0;bottom:0;width:4px;
     }
-    .card.future{background:rgba(255,255,255,0.55);opacity:0.78}
+
+    /* Chess board: odd = vibrant terracotta; even = navy ink. */
+    .grid > .card:nth-child(odd){
+      background:var(--terracotta);             /* #c9573f warm clay */
+      color:var(--ink);
+      border-color:rgba(0,0,0,0.22);
+    }
+    .grid > .card:nth-child(even){
+      background:var(--navy);                   /* #1f2d4a navy ink */
+      color:var(--cream);
+      border-color:rgba(255,255,255,0.18);
+    }
+    /* Future cards — no transparency; lighter shade of each square + dashed border as state cue. */
+    .grid > .card.future:nth-child(odd){background:var(--terracotta-light)}  /* #e07a5f brighter clay */
+    .grid > .card.future:nth-child(even){background:var(--navy-light)}       /* #2c3d60 lighter navy */
+    .grid > .card.future{border-style:dashed;opacity:1}
+    /* Live stripe — recoloured per square so it reads on both. */
+    .grid > .card.live:nth-child(odd)::before{background:linear-gradient(180deg,var(--navy) 0%,var(--navy-deep) 100%)}
+    .grid > .card.live:nth-child(even)::before{background:linear-gradient(180deg,var(--terracotta) 0%,var(--terracotta-light) 100%)}
+
+    /* Element-level text overrides per square colour. */
+    .grid > .card:nth-child(odd) .card-num{color:var(--navy-deep)}
+    .grid > .card:nth-child(even) .card-num{color:var(--terracotta-light)}
+    .grid > .card:nth-child(odd) .card-num::before{color:rgba(19,26,45,0.65)}
+    .grid > .card:nth-child(even) .card-num::before{color:rgba(253,249,239,0.55)}
+    .grid > .card:nth-child(odd) .card-name{color:var(--ink)}
+    .grid > .card:nth-child(even) .card-name{color:var(--cream)}
+    .grid > .card:nth-child(odd) .card-purpose{color:var(--ink-soft)}
+    .grid > .card:nth-child(even) .card-purpose{color:rgba(253,249,239,0.9)}
+    .grid > .card:nth-child(odd) .card-detail{color:rgba(42,29,14,0.72);border-top-color:rgba(0,0,0,0.22)}
+    .grid > .card:nth-child(even) .card-detail{color:rgba(253,249,239,0.78);border-top-color:rgba(255,255,255,0.22)}
+    .grid > .card:nth-child(odd) .open-link{color:var(--navy-deep)}
+    .grid > .card:nth-child(even) .open-link{color:var(--terracotta-light)}
+    .grid > .card:nth-child(odd) .open-link.disabled{color:rgba(42,29,14,0.6)}
+    .grid > .card:nth-child(even) .open-link.disabled{color:rgba(253,249,239,0.6)}
+
     .card a, .card.link{cursor:pointer;color:inherit;text-decoration:none}
-    a.card:hover, .card.link:hover{transform:translateY(-3px);border-color:var(--champagne);box-shadow:0 14px 32px -16px rgba(157,107,31,0.32)}
-    a.card:hover .open-link, .card.link:hover .open-link{color:var(--champagne);gap:14px}
+    a.card:hover, .card.link:hover{transform:translateY(-4px);box-shadow:0 18px 38px -16px rgba(0,0,0,0.45)}
+    .grid > .card:nth-child(odd):hover{border-color:var(--navy-deep)}
+    .grid > .card:nth-child(even):hover{border-color:var(--terracotta-light)}
+    a.card:hover .open-link, .card.link:hover .open-link{gap:14px}
 
     .card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:18px}
     .card-num{font-family:'Cormorant Garamond',serif;font-size:46px;font-weight:500;line-height:0.9;color:var(--champagne);font-style:italic;letter-spacing:-0.02em}
@@ -150,12 +190,13 @@
       flex-shrink:0;
     }
     .badge .dot{width:5px;height:5px;border-radius:50%;display:inline-block}
-    .badge.live{background:var(--emerald);color:var(--cream);border:1px solid var(--emerald-deep)}
-    .badge.live .dot{background:var(--champagne-light);animation:livePulse 2s ease-in-out infinite}
-    .badge.scaffold{background:rgba(232,147,24,0.14);color:var(--champagne-darker);border:1px solid rgba(232,147,24,0.32)}
-    .badge.scaffold .dot{background:var(--champagne)}
-    .badge.future{background:rgba(42,29,14,0.06);color:var(--muted-strong);border:1px solid var(--rule)}
-    .badge.future .dot{background:var(--muted-strong)}
+    /* Badges — solid dark bodies so they read on both terracotta and navy squares. */
+    .badge.live{background:var(--navy-deep);color:var(--cream);border:1px solid var(--navy-deep)}
+    .badge.live .dot{background:var(--terracotta-light);animation:livePulse 2s ease-in-out infinite}
+    .badge.scaffold{background:var(--champagne-darker);color:var(--cream);border:1px solid var(--champagne-darker)}
+    .badge.scaffold .dot{background:var(--champagne-light)}
+    .badge.future{background:var(--ink);color:var(--ivory-warm);border:1px solid var(--ink)}
+    .badge.future .dot{background:var(--ivory-warm)}
     @keyframes livePulse{0%,100%{opacity:1}50%{opacity:0.45}}
 
     /* Open-console link */
@@ -197,7 +238,7 @@
         <div class="mark">S</div>
         <div>
           <div class="n">SMB-Agents</div>
-          <div class="s">Portfolio · 20 Agents</div>
+          <div class="s">Portfolio · 17 Agents + Backlog</div>
         </div>
       </a>
       <div class="navlinks">
@@ -215,18 +256,19 @@
   <!-- Hero -->
   <header class="hero">
     <div class="wrap">
-      <div class="mono eyebrow">Twenty-Agent Suite</div>
-      <h1>A portfolio for <em>ethnic SMB owners</em>,<br>built one agent at a time.</h1>
+      <div class="mono eyebrow">Solid 17 · Consolidated 2026-04-29</div>
+      <h1>A portfolio for <em>ethnic SMB owners</em>,<br>seventeen agents — disciplined.</h1>
       <p class="lede">
-        Twenty specialized agents that share one platform — Hermes runtime, JSON-on-disk,
+        Seventeen specialized agents that share one platform — Hermes runtime, JSON-on-disk,
         per-customer VPS, single owner approval gate. Click any live agent to open its
         console; opt-in agents activate from <span class="ital">config.yaml</span>.
+        A backlog of five sits behind, built only on customer demand.
       </p>
 
       <div class="status-row" id="status-row">
         <span class="status-pill live"><span class="dot"></span><span class="num" id="count-live">3</span><span>live</span></span>
-        <span class="status-pill scaffold"><span class="dot"></span><span class="num" id="count-scaffold">11</span><span>scaffolded</span></span>
-        <span class="status-pill future"><span class="dot"></span><span class="num" id="count-future">6</span><span>deferred</span></span>
+        <span class="status-pill scaffold"><span class="dot"></span><span class="num" id="count-scaffold">14</span><span>scaffolded</span></span>
+        <span class="status-pill future"><span class="dot"></span><span class="num" id="count-future">5</span><span>backlog</span></span>
       </div>
     </div>
   </header>
@@ -239,7 +281,7 @@
           <span class="mono label">Tier I</span>
           <h2 class="serif">Operations &amp; <em>Synthesis</em></h2>
         </div>
-        <div class="right">Must-build for the product to exist. Today: three live, two opt-in.</div>
+        <div class="right">Must-build for the product to exist. Today: three live, three opt-in.</div>
       </div>
       <div class="grid" id="tier1-grid"></div>
     </div>
@@ -264,10 +306,10 @@
     <div class="wrap">
       <div class="tier-head">
         <div>
-          <span class="mono label">Tier III</span>
+          <span class="mono label">Backlog</span>
           <h2 class="serif">On <em>Customer Demand</em></h2>
         </div>
-        <div class="right">Not yet built; some collapse to skill bundles inside Tier&nbsp;I/II.</div>
+        <div class="right">Build only when a paying customer asks. Some former candidates folded into Tier I/II.</div>
       </div>
       <div class="grid" id="tier3-grid"></div>
     </div>
@@ -288,32 +330,39 @@
 
   <script>
     // Single source of truth — hardcoded literal, no untrusted input.
+    // Solid 17 portfolio (consolidated 2026-04-29): 17 active + 5 backlog.
+    // Retired (folded into others): #17 Unit Economics → #22 P&L Anomaly Detective;
+    // #18 Customer Complaint → folded into #9 VIP + #4 Daily Brief;
+    // #20 Owner Wellbeing → folded into #4 Daily Brief + platform quiet-hours.
+    // Reframed in place: #11 Festival & Event Outreach → Festival & Peak Prep (ops-side).
     const AGENTS = [
-      // Tier 1
-      { tier: 1, num: 1, name: "Shift Agent", purpose: "Sick-call coverage routing for hourly staff. Owner approves a 5-character code; the right teammate gets pinged.", state: "live", url: "http://46.62.206.192:8080/ui", state_detail: "In production — handling sick-call escalations on a live roster." },
-      { tier: 1, num: 2, name: "Catering Lead", purpose: "Capture catering inquiries, draft a quote in the owner's voice, gate behind a single approval.", state: "scaffold", state_detail: "Schema and three SKILLs deployed; cfg.catering.enabled = false (opt-in)." },
-      { tier: 1, num: 3, name: "Multi-Location Coordinator", purpose: "Cross-location queries (\"who's at Houston tomorrow?\") and inter-location coverage transfers.", state: "scaffold", state_detail: "Self-disables for single-location operators; activates when a second location is onboarded." },
-      { tier: 1, num: 4, name: "Daily Brief", purpose: "Morning WhatsApp summary of yesterday's activity and today's outlook — the agent owners actually pay for.", state: "live", state_detail: "In production — daily morning brief delivered to the owner's WhatsApp." },
+      // Tier 1 — Operations & Synthesis (6: 3 live + 3 opt-in)
+      { tier: 1, num: 1, name: "Shift Agent", purpose: "Sick-call coverage routing for hourly staff. Owner approves a 5-character code; the right teammate gets pinged.", state: "live", url: "http://46.62.206.192:8080/ui", state_detail: "In production. v0.2 roadmap: no-show prediction from past patterns + holiday calendar." },
+      { tier: 1, num: 2, name: "Catering Lead", purpose: "Capture catering inquiries, draft a quote in the owner's voice, gate behind a single approval.", state: "scaffold", state_detail: "Schema and SKILLs deployed; cfg.catering.enabled = false (opt-in). v0.2 roadmap: deposit-link via Zelle/Cash App." },
+      { tier: 1, num: 3, name: "Multi-Location Coordinator", purpose: "Cross-location queries (\"who's at Houston tomorrow?\") and inter-location coverage / inventory transfers.", state: "scaffold", state_detail: "Self-disables for single-location operators. v0.2 roadmap: inter-location stock transfers with QuickBooks sync." },
+      { tier: 1, num: 4, name: "Daily Brief", purpose: "Morning WhatsApp summary of yesterday's activity and today's outlook — the agent owners actually pay for.", state: "live", state_detail: "In production. v0.2 roadmap: demand forecast (POS history + local events) + weekly owner-load summary." },
       { tier: 1, num: 5, name: "EOD Reconciliation", purpose: "End-of-day snapshot of resolved and unresolved items — feeds tomorrow's brief.", state: "live", state_detail: "In production — daily snapshot at owner-configured close time." },
+      { tier: 1, num: 21, name: "Expense Bookkeeper", purpose: "Photo of a receipt → categorized expense (personal vs. business) → pushed to QuickBooks. The endemic pain in family SMBs: commingled cards.", state: "scaffold", state_detail: "Tier 1, build gate-released (2026-04-29 r2). Two investigations precede v0.1: (a) 1+ owner committed to 2-week prototype trial running ≥5 receipts/day; (b) QBO API ground-truthing (OAuth scope, attachments, sandbox approval, accountant webhooks). OCR gate retired — Catering's menu pipeline tested E2E 2026-04-29 (image → extract → reply, all in Hermes). Hermes carries the source-in / vision-extract / structured-out / response-out loop end-to-end. Genuinely net-new: QBO OAuth + write API, money-moving UX discipline. Net-new effort ~2–3 weeks." },
 
-      // Tier 2
-      { tier: 2, num: 6, name: "Inventory Tracker", purpose: "Stock counts, low-stock alerts, expiry warnings for perishables.", state: "scaffold", state_detail: "Awaits POS integration (Clover, Square, Cash App)." },
-      { tier: 2, num: 7, name: "Supplier Coordination", purpose: "Order placement, follow-ups on late deliveries, dispute logging.", state: "scaffold", state_detail: "Awaits per-customer supplier roster." },
-      { tier: 2, num: 9, name: "VIP Customer", purpose: "Identify high-value repeat customers; surface preferences without privacy creep.", state: "scaffold", state_detail: "Awaits customer order history (POS-derived or manual)." },
-      { tier: 2, num: 10, name: "Catering Follow-up", purpose: "Post-event thank-you, single-question feedback, anniversary nudges.", state: "scaffold", state_detail: "Depends on Agent #2 Catering activation." },
-      { tier: 2, num: 12, name: "Hiring & Onboarding", purpose: "Paperwork tracking (W-4, I-9, food handler), training scheduling, roster entry.", state: "scaffold", state_detail: "Awaits DocuSign or HelloSign integration." },
-      { tier: 2, num: 13, name: "Compliance Calendar", purpose: "Health inspections, license renewals, sales-tax deadlines — surfaces dates, never advises.", state: "scaffold", state_detail: "Pure date logic — ready to activate when per-state rule library lands." },
-      { tier: 2, num: 14, name: "Employee Document Tracker", purpose: "H-1B, I-9 re-verification, food-handler cert, driver's license expiry warnings.", state: "scaffold", state_detail: "Pure date logic — ready to activate." },
+      // Tier 2 — Build After Paying Customers (11 opt-in)
+      { tier: 2, num: 6, name: "Inventory Tracker", purpose: "Stock counts, low-stock alerts, expiry warnings, near-expiry use-today recipe suggestions.", state: "scaffold", state_detail: "Awaits POS integration (Clover, Square, Cash App). v0.2 roadmap: use-today recipe / waste-reducer skill." },
+      { tier: 2, num: 7, name: "Supplier Coordination", purpose: "Order placement, follow-ups on late deliveries, dispute logging, cross-supplier price-drift alerts.", state: "scaffold", state_detail: "Awaits per-customer supplier roster. v0.2 roadmap: detect_price_drift skill (\"same ghee now $4 more\")." },
+      { tier: 2, num: 9, name: "VIP Customer Nurturer", purpose: "Identify high-value repeat customers (Mrs. Reddy's puja orders), surface preferences, drive personal-touch outreach.", state: "scaffold", state_detail: "Awaits customer order history (POS-derived or manual). Absorbs former #18 Customer Complaint sensitivity surface." },
+      { tier: 2, num: 10, name: "Catering Follow-up", purpose: "Post-event thank-you, single-question feedback, anniversary nudges 11 months later.", state: "scaffold", state_detail: "Depends on Agent #2 Catering activation." },
+      { tier: 2, num: 11, name: "Festival & Peak Prep", purpose: "3–5 days before Diwali, Eid, Ugadi, Ramadan — alerts on extra staffing, inventory, menu specials. Learns from last year's actuals.", state: "scaffold", state_detail: "Reframed 2026-04-29 from customer-marketing to ops-prep (former #11 Festival & Event Outreach). Stronger framing: owners pay faster for \"don't run out of paneer during Diwali\" than for marketing campaigns." },
+      { tier: 2, num: 12, name: "Hiring & Onboarding", purpose: "Paperwork tracking (W-4, I-9, food handler), training scheduling, roster entry, bite-sized SOPs via WhatsApp.", state: "scaffold", state_detail: "Awaits DocuSign or HelloSign integration. v0.2 roadmap: training curriculum + WhatsApp quizzes (from new-hire onboarding pain)." },
+      { tier: 2, num: 13, name: "Compliance Calendar", purpose: "Health inspections, license renewals, sales-tax deadlines, ServSafe logs — surfaces dates, never advises.", state: "scaffold", state_detail: "Pure date logic — ready to activate when per-state rule library lands. v0.2 roadmap: prefill_servsafe_log skill." },
+      { tier: 2, num: 14, name: "Employee Document Tracker", purpose: "H-1B, I-9 re-verification, food-handler cert, driver's license expiry warnings.", state: "scaffold", state_detail: "Pure date logic — ready to activate. Liability-conscious: no advice, dates only." },
       { tier: 2, num: 15, name: "Cash & AR", purpose: "Invoice tracking, gentle-then-firm payment reminders, overdue escalation.", state: "scaffold", state_detail: "Awaits payment-processor sync (Stripe / Square / Razorpay)." },
-      { tier: 2, num: 16, name: "Sales Tax Filing", purpose: "Multi-state filing deadlines, taxable-sales compilation, owner-reviewable filing packages.", state: "scaffold", state_detail: "Awaits POS sales data and per-state rule library." },
+      { tier: 2, num: 16, name: "Sales Tax Filing", purpose: "Multi-state filing deadlines (TX/MD/NC/SC/OH/VA), taxable-sales compilation, owner-reviewable filing packages.", state: "scaffold", state_detail: "Awaits POS sales data and per-state rule library." },
+      { tier: 2, num: 22, name: "P&L Anomaly Detective", purpose: "Daily/weekly heartbeat across locations: flags \"biriyani margin dropped 8%\" or \"Pineville location underperforming.\" Suggests actions.", state: "scaffold", state_detail: "NEW (added 2026-04-29) — replaces retired #17 Unit Economics with a lighter, owner-facing shape. No recipe modeling; flags from POS + cost data only. Stub pending — schema + dispatcher SKILL scaffolds in next sprint." },
 
-      // Tier 3
-      { tier: 3, num: 8, name: "Receiving & QA", purpose: "Shipment receipt vs. PO, damage logging via photo OCR.", state: "future", state_detail: "OCR + product matching is high complexity. On demand." },
-      { tier: 3, num: 11, name: "Festival & Event Outreach", purpose: "Diwali, Ugadi, Pongal, Eid — timed customer outreach with the right register for each tradition.", state: "future", state_detail: "Tradition-aware calendar and tone library — content is the moat." },
-      { tier: 3, num: 17, name: "Unit Economics", purpose: "Per-SKU and per-menu-item profit; repricing recommendations on supplier-cost shifts.", state: "future", state_detail: "Recipe modeling and clean COGS data; defer until customers ask." },
-      { tier: 3, num: 18, name: "Customer Complaint", purpose: "Complaint intake, severity classification, owner-drafted response with brand-tone matching.", state: "future", state_detail: "Sensitive content design exceeds technical complexity. On demand." },
-      { tier: 3, num: 19, name: "Equipment & Maintenance", purpose: "Repair history, vendor routing, preventive-maintenance calendar.", state: "future", state_detail: "Niche, low frequency — on demand only." },
-      { tier: 3, num: 20, name: "Owner Wellbeing", purpose: "Owner workload metrics; suggests when to take a break.", state: "future", state_detail: "Recommend collapsing into a Daily Brief subsection rather than its own agent." },
+      // Backlog — On Customer Demand (5)
+      { tier: 3, num: 8, name: "Receiving & QA", purpose: "Shipment receipt vs. PO, damage logging via photo OCR.", state: "future", state_detail: "OCR + product matching is high complexity. Build only on customer demand." },
+      { tier: 3, num: 19, name: "Equipment & Maintenance", purpose: "Repair history, vendor routing, preventive-maintenance calendar.", state: "future", state_detail: "Niche, low frequency — on customer demand only." },
+      { tier: 3, num: 23, name: "Order Status & Pickup", purpose: "Customers text \"where's my order?\" → kitchen status check + photo of ready bag with name/number callout.", state: "future", state_detail: "NEW backlog item. Requires KDS/POS integration depth not in current architecture — promote on first restaurant pilot." },
+      { tier: 3, num: 24, name: "Upsell & Menu Personalizer", purpose: "Order-time add-on suggestions (\"add fresh paneer for $3?\") based on past orders + dietary prefs.", state: "future", state_detail: "NEW backlog item. Restaurant-only, requires deep POS or phone-AI integration; better delivered by POS vendor's own upsell tools." },
+      { tier: 3, num: 25, name: "Third-Party Delivery Coordinator", purpose: "Monitor DoorDash/UberEats tablets, prevent double-cooking, auto-update status, reconcile fees.", state: "future", state_detail: "NEW backlog item. No consolidation API exists — \"tablet hell.\" Build cost gates this until paying customer demands it." },
     ];
 
     function el(tag, opts) {

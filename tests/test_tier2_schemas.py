@@ -112,6 +112,8 @@ def test_config_backward_compat_no_tier2_blocks():
     assert c.employee_docs.enabled is False
     assert c.cash_ar.enabled is False
     assert c.sales_tax.enabled is False
+    assert c.expense_bookkeeper.enabled is False
+    assert c.expense_bookkeeper.qbo_client_mode == "mock"
 
 
 def test_config_partial_tier2_overrides():

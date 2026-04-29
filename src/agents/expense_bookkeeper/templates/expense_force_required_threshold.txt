@@ -1,0 +1,9 @@
+{{expense_id}} — high-value review needed
+
+This receipt (${{total_display}}) is above your ${{threshold_display}} review threshold.
+
+To approve via WhatsApp anyway, reply:
+  "{{approval_code}} {{total_display}} force"
+
+Or to reject:
+  "{{approval_code}} reject"

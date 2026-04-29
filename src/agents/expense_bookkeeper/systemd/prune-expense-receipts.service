@@ -1,0 +1,11 @@
+[Unit]
+Description=Agent #21 Expense Bookkeeper — prune expired receipts + expire stale leads
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/shift-agent/venv/bin/python /usr/local/bin/prune-and-expire-expenses.py
+User=shift-agent
+Group=shift-agent
+StandardOutput=append:/opt/shift-agent/logs/prune-expense.log
+StandardError=append:/opt/shift-agent/logs/prune-expense.log

@@ -1,0 +1,6 @@
+Amount doesn't match — receipt shows ${{extracted_total_display}}, you replied ${{owner_total_display}}.
+
+Please re-check and reply:
+  "{{approval_code}} {{extracted_total_display}}"
+Or to reject:
+  "{{approval_code}} reject"

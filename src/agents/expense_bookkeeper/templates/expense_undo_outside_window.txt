@@ -1,0 +1,6 @@
+{{expense_id}} is past the {{window_hours}}h reversibility window
+(pushed {{pushed_at_display}}, {{hours_since_push_display}}h ago).
+
+The accounting period may be closed, and your accountant will see the void
+in the audit history. To attempt anyway:
+  reply "undo {{expense_id}} force"

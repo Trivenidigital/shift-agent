@@ -1,0 +1,9 @@
+{{expense_id}} — possible duplicate
+
+Looks like a duplicate of {{matched_id}}.
+
+If this is genuinely a separate receipt, reply:
+  "{{approval_code}} {{total_display}} force"
+
+Or to skip:
+  "{{approval_code}} reject"

@@ -13,10 +13,45 @@ Conventions:
 
 from __future__ import annotations
 from pydantic import BaseModel, Field, ConfigDict, constr, model_validator, field_validator
-from typing import Literal, Annotated, Union, Optional, Any
-from datetime import datetime
+from typing import Literal, Annotated, Union, Optional, Any, get_args
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
+import os
 import re
+import sys
+
+# v0.3 catering hardening — single source of truth for code-generation alphabet.
+# Excludes I, O, 0, 1, L (visually confusing chars). Used by ProposalCode,
+# MenuPendingUpdate.confirmation_code, and runtime code generators.
+_CODE_BODY_PATTERN = r"[A-HJKMNPQR-Z2-9]{5}"
+_CODE_FULL_PATTERN = rf"^#{_CODE_BODY_PATTERN}$"
+
+# ─────────────────────────────────────────────────────────────────
+# Lifecycle sentinels — quote_text / edit_text by stage (review M1)
+# ─────────────────────────────────────────────────────────────────
+# All sentinels share the "<...-v0.3-...>" shape: searchable in audit logs,
+# unmistakable for real owner content, and grep-friendly. Defined at module
+# scope (NOT class-level) to avoid Pydantic v2's ModelPrivateAttr treatment
+# of leading-underscore class attributes.
+#
+# Lifecycle of CateringLead.quote_text:
+#   1. create-catering-lead mints lead with quote_text=PRE_QUOTE_DRAFT_SENTINEL
+#      (extractor stage doesn't draft; S1 invariant requires non-empty)
+#   2. apply-catering-owner-decision approve flow renders the real quote and
+#      overwrites quote_text via model_copy (Q1 fix — Commit 3a)
+#   3. Legacy pre-v0.3 leads with empty quote_text are backfilled on READ
+#      by CateringLead's mode="before" shim with LEGACY_QUOTE_TEXT_SENTINEL.
+#      The shim is a safety net; tools/catering-state-migrate.py is the
+#      proper pre-deploy fix.
+#
+# Lifecycle of CateringOwnerDecision.edit_text:
+#   1. New decisions with decision="edit" require non-empty edit_text
+#      (mode="after" strict validator)
+#   2. Legacy pre-v0.3 audit entries with decision="edit" + empty edit_text
+#      are backfilled on READ with LEGACY_EDIT_TEXT_SENTINEL.
+PRE_QUOTE_DRAFT_SENTINEL = "<v0.3-pre-quote-draft>"
+LEGACY_QUOTE_TEXT_SENTINEL = "<legacy-pre-v0.3-no-quote-persisted>"
+LEGACY_EDIT_TEXT_SENTINEL = "<legacy-pre-v0.3-no-edit-text-recorded>"
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -24,6 +59,18 @@ import re
 # ─────────────────────────────────────────────────────────────────
 
 _PHONE_E164 = re.compile(r"^\+\d{10,15}$")
+
+# Public alias for the E.164 regex (review M3) — avoids cross-package
+# private imports (e.g. lookup-prior-leads-by-phone). Callers should use
+# this constant or is_valid_e164() instead of the underscore-prefixed
+# _PHONE_E164 module attribute.
+PHONE_E164_PATTERN = r"^\+\d{10,15}$"
+
+
+def is_valid_e164(s: Any) -> bool:
+    """Public predicate — True if s is a string matching the E.164 canonical
+    pattern. Safe on non-string input (returns False rather than raising)."""
+    return isinstance(s, str) and bool(_PHONE_E164.match(s))
 
 
 class E164Phone(str):
@@ -46,17 +93,73 @@ class E164Phone(str):
         return cls(canonical)
 
     @classmethod
-    def from_any(cls, raw: str) -> str:
-        """Canonicalize: strip @jid suffix, dashes, spaces; add + if missing; convert 00- prefix."""
+    def from_any(cls, raw: str, *, country_code: Optional[str] = None) -> str:
+        """Canonicalize: strip @jid suffix, dashes, spaces; convert 00- prefix.
+
+        v0.3 (PM2 / L0 fix): bare 10-digit input is no longer auto-prepended
+        with `+` (the historical bug that produced `+9045551234` from US local
+        input). Behavior:
+          - +XXXXXXXXXX...      : passed through if matches E.164 (10-15 digits)
+          - 1XXXXXXXXXX (11d)   : prepended with `+` (US 11-digit)
+          - 10-15 digits        : prepended with `+` (international with code)
+          - exactly 10 digits   : if country_code='US', prepend `+1`; else raise
+          - `00XXX...`          : convert to `+XXX...`
+
+        country_code: ISO-3166 alpha-2 (case-insensitive — coerced to upper).
+        Currently 'US' is honored; future country codes can be added as
+        customers expand.
+
+        Always validates the result against PHONE_E164_PATTERN before
+        returning (review L7). Raises ValueError on any failure mode:
+          - 10-digit bare-no-country input when no country_code provided
+          - non-digit input
+          - canonical form fails E.164 length bounds (10-15 digits with +)
+        """
+        if not isinstance(raw, str):
+            raise ValueError(f"phone must be str, got {type(raw).__name__}")
+        if country_code is not None:
+            country_code = country_code.upper()  # review L6: case-insensitive
         if "@" in raw:
             raw = raw.split("@", 1)[0]
         s = re.sub(r"[\s\-().]", "", raw)
         if s.startswith("00"):
             s = "+" + s[2:]
-        if not s.startswith("+"):
-            # bare digits — assume already includes country code
-            s = "+" + s
-        return s
+
+        if s.startswith("+"):
+            canonical = s
+        elif s.isdigit():
+            n = len(s)
+            if n == 10:
+                # US local format (no country code). Default-prepend +1 if
+                # cfg tells us this is a US customer; otherwise reject.
+                if country_code == "US":
+                    canonical = "+1" + s
+                else:
+                    raise ValueError(
+                        f"phone {raw!r} is bare 10-digit without country "
+                        f"code. Set cfg.customer.country_code='US' or "
+                        f"include the country prefix."
+                    )
+            elif n == 11 and s.startswith("1"):
+                canonical = "+" + s  # US 11-digit
+            elif 10 <= n <= 15:
+                canonical = "+" + s  # International with country code
+            else:
+                raise ValueError(
+                    f"phone {raw!r} has {n} digits; E.164 requires 10-15."
+                )
+        else:
+            raise ValueError(
+                f"phone {raw!r} contains non-digit characters after canonicalization"
+            )
+
+        # Always validate the canonical form (review L7 — close fail-open hole).
+        if not _PHONE_E164.match(canonical):
+            raise ValueError(
+                f"canonical form {canonical!r} does not match E.164 pattern "
+                f"(input was {raw!r})"
+            )
+        return canonical
 
     @classmethod
     def __get_pydantic_core_schema__(cls, source_type, handler):
@@ -213,6 +316,17 @@ class CustomerConfig(BaseModel):
     location_id: str
     timezone: str
     languages: list[str] = []
+    # v0.3 (review L6): ISO-3166 alpha-2 country code, case-insensitive.
+    # Used by E164Phone.from_any to default-prepend country prefix for
+    # bare 10-digit US input. Optional — if absent, bare 10-digit phones
+    # are rejected (safer than guessing). Coerced to upper-case so
+    # operators can write "us" or "US" in config.yaml without confusion.
+    country_code: Optional[str] = Field(default=None, pattern=r"^[A-Za-z]{2}$")
+
+    @field_validator("country_code", mode="after")
+    @classmethod
+    def _country_code_uppercase(cls, v: Optional[str]) -> Optional[str]:
+        return v.upper() if isinstance(v, str) else v
 
     @field_validator("timezone")
     @classmethod
@@ -295,6 +409,58 @@ def is_catering_terminal(status: str) -> bool:
     return status in CATERING_TERMINAL_STATUSES
 
 
+# v0.3: state-machine transition table. Single source of truth, used by
+# scripts at every status change. Forbidden transitions raise via
+# is_catering_transition_allowed; the schema layer does NOT enforce
+# (would break replay of historic leads).
+#
+# Review L9: typed against the CateringLeadStatus Literal so mypy catches
+# typos (a misspelled status as key OR value would be a type error).
+CATERING_TRANSITIONS: dict[CateringLeadStatus, set[CateringLeadStatus]] = {
+    "NEW": {"EXTRACTING", "NOT_CATERING"},
+    "EXTRACTING": {"AWAITING_OWNER_APPROVAL", "NOT_CATERING"},
+    "NOT_CATERING": set(),                                                # terminal
+    "AWAITING_OWNER_APPROVAL": {"OWNER_APPROVED", "OWNER_EDITED", "OWNER_REJECTED", "STALE"},
+    "OWNER_EDITED": {"AWAITING_OWNER_APPROVAL", "OWNER_REJECTED"},
+    # Review L8: OWNER_APPROVED → AWAITING_OWNER_APPROVAL covers
+    # retry-from-failure. If apply-script approve flow crashes after the
+    # state-write but before customer-quote send (or the bridge POST
+    # returns 5xx), retrying needs to re-enter AWAITING so the new approve
+    # attempt can be re-evaluated. Without this, the lead is stuck in
+    # OWNER_APPROVED with no quote sent, and the operator can't recover
+    # without manual state surgery. The CateringQuoteAttempted idempotency
+    # anchor prevents duplicate sends on legit retries.
+    "OWNER_APPROVED": {"SENT_TO_CUSTOMER", "AWAITING_OWNER_APPROVAL"},
+    "SENT_TO_CUSTOMER": {"CLOSED", "STALE"},
+    "OWNER_REJECTED": set(),                                              # terminal
+    "CLOSED": set(),                                                      # terminal
+    "STALE": set(),                                                       # terminal
+}
+
+
+def is_catering_transition_allowed(from_s: str, to_s: str) -> bool:
+    """v0.3: returns True only for allowed transitions. False for unknown
+    statuses. Accepts plain str (not Literal) for runtime ergonomics —
+    callers pass strings extracted from log entries and disk JSON.
+    """
+    return to_s in CATERING_TRANSITIONS.get(from_s, set())  # type: ignore[arg-type]
+
+
+def assert_rejection_reason_complete(reason_dict: dict) -> None:
+    """v0.3: at create-script main() entry, assert REASON_TO_ERR_PREFIX
+    matches CateringLeadRejected.reason Literal exactly (==, not subset).
+    Drift is loud rather than silent."""
+    schema_reasons = set(get_args(CateringLeadRejected.model_fields["reason"].annotation))
+    runtime_reasons = set(reason_dict.keys())
+    if runtime_reasons != schema_reasons:
+        missing_in_dict = schema_reasons - runtime_reasons
+        missing_in_schema = runtime_reasons - schema_reasons
+        raise RuntimeError(
+            f"REASON drift: missing in dict {missing_in_dict}, "
+            f"missing in schema {missing_in_schema}"
+        )
+
+
 class CateringConfig(BaseModel):
     """Catering Lead (Agent #2) settings."""
     model_config = ConfigDict(extra="forbid")
@@ -328,6 +494,18 @@ class CateringLeadExtractedFields(BaseModel):
     # sees what the customer asked for). Verify both sides ship in the same PR.
     off_menu_items: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(default_factory=list, max_length=20)
 
+    @field_validator("event_date")
+    @classmethod
+    def _validate_calendar_date(cls, v: Optional[str]) -> Optional[str]:
+        """v0.3: regex passes 2026-13-99 etc.; this catches calendar-invalid dates."""
+        if v is None:
+            return v
+        try:
+            datetime.fromisoformat(v).date()
+        except ValueError as e:
+            raise ValueError(f"event_date must be a valid ISO date: {v!r} ({e})") from e
+        return v
+
 
 class CateringLead(BaseModel):
     """One catering lead — full lifecycle from inquiry to closure."""
@@ -346,10 +524,49 @@ class CateringLead(BaseModel):
     owner_approval_code: Optional[ProposalCode] = None  # reuses Shift's pattern
     customer_replied: bool = False
 
+    # v0.3: post-AWAITING statuses require non-empty quote_text. Legacy data
+    # (pre-v0.3 leads with empty quote_text) is backfilled with sentinel by
+    # mode="before" shim, then strict validator runs. Migration tool fixes
+    # legacy leads pre-deploy; shim is a safety net.
+    # NOTE: sentinel is defined at module scope (LEGACY_QUOTE_TEXT_SENTINEL)
+    # to avoid Pydantic v2's ModelPrivateAttr treatment of leading-underscore
+    # class attributes.
+
+    @model_validator(mode="before")
+    @classmethod
+    def _backfill_legacy_quote_text(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        status = data.get("status")
+        post_awaiting = {"AWAITING_OWNER_APPROVAL", "OWNER_APPROVED", "OWNER_EDITED",
+                         "SENT_TO_CUSTOMER"}
+        if status in post_awaiting and not (data.get("quote_text", "") or "").strip():
+            sys.stderr.write(
+                f"WARN: legacy quote_text=empty on lead_id={data.get('lead_id')!r} "
+                f"status={status!r}; backfilling with sentinel.\n"
+            )
+            data["quote_text"] = LEGACY_QUOTE_TEXT_SENTINEL
+        return data
+
+    @model_validator(mode="after")
+    def _quote_required_post_awaiting(self) -> "CateringLead":
+        post_awaiting = {"AWAITING_OWNER_APPROVAL", "OWNER_APPROVED", "OWNER_EDITED",
+                         "SENT_TO_CUSTOMER"}
+        if self.status in post_awaiting and not self.quote_text.strip():
+            raise ValueError(
+                f"status={self.status!r} requires non-empty quote_text"
+            )
+        return self
+
 
 class CateringLeadStore(BaseModel):
-    """Per-customer catering leads (lives at /opt/shift-agent/state/catering-leads.json)."""
-    model_config = ConfigDict(extra="forbid")
+    """Per-customer catering leads (lives at /opt/shift-agent/state/catering-leads.json).
+
+    v0.3: extra='ignore' (was 'forbid') for rollback safety. New `schema_version`
+    field allows future migrations; old code drops it cleanly on rollback.
+    """
+    model_config = ConfigDict(extra="ignore")
+    schema_version: int = Field(default=1, ge=1)
     leads: list[CateringLead] = Field(default_factory=list)
 
 
@@ -390,6 +607,18 @@ class Menu(BaseModel):
     notes: str = Field(default="", max_length=2000,
                        description="Catering-specific terms (delivery zone, lead time, etc.)")
 
+    @field_validator("updated_by")
+    @classmethod
+    def _validate_updated_by(cls, v: str) -> str:
+        """v0.3: must be empty, 'photo-ocr', 'manual', or an E.164 phone."""
+        if v == "" or v in ("photo-ocr", "manual"):
+            return v
+        if not re.match(r"^\+\d{10,15}$", v):
+            raise ValueError(
+                f"updated_by must be 'photo-ocr', 'manual', or E.164 phone: {v!r}"
+            )
+        return v
+
 
 class MenuPendingUpdate(BaseModel):
     """A proposed menu update awaiting owner confirmation."""
@@ -398,7 +627,9 @@ class MenuPendingUpdate(BaseModel):
     proposed_at: datetime
     source_image_id: Optional[str] = None
     extracted_items: list[MenuItem]
-    confirmation_code: str = Field(pattern=r"^#[A-HJ-NP-Z2-9]{5}$",
+    # v0.3: unified to _CODE_FULL_PATTERN (excludes I, O, 0, 1, L). Pre-deploy
+    # scan verified no L-bearing codes in production catering-menu-pending.json.
+    confirmation_code: str = Field(pattern=_CODE_FULL_PATTERN,
                                    description="reuses Shift's #X9X9X code alphabet")
     parser_notes: str = Field(default="", max_length=2000)
 
@@ -555,6 +786,154 @@ class SalesTaxConfig(BaseModel):
         return sorted(set(v), reverse=True)
 
 
+# Agent #21 — Expense Bookkeeper (v0.1; mocked QBOClient interface)
+# See tasks/expense-bookkeeper-v01-design.md for full design.
+class ExpenseBookkeeperConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    cockpit_threshold_cents: int = Field(default=5000, gt=0)
+    auto_categorize_threshold: float = Field(default=0.85, ge=0.5, le=1.0)
+    require_owner_approval_for_personal_flag: bool = True
+    reversibility_window_hours: int = Field(default=24, ge=1, le=168)
+    dedup_hash_distance_threshold: int = Field(default=4, ge=0, le=20)
+    receipt_retention_days: int = Field(default=90, ge=7, le=2555)
+    proposal_ttl_hours: int = Field(default=72, ge=1, le=336)
+    qbo_client_mode: Literal["mock", "real"] = "mock"
+
+
+# Expense Bookkeeper domain models
+class ExpenseLineItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    description: str = Field(min_length=1, max_length=200)
+    amount_cents: int  # cents only; never float
+    quantity: Optional[float] = Field(default=None, ge=0)
+    unit_price_cents: Optional[int] = None
+
+
+class ExpenseClassification(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    is_business: bool
+    confidence: float = Field(ge=0.0, le=1.0)
+    rationale: str = Field(min_length=1, max_length=300)
+    qbo_account: str = Field(min_length=1, max_length=100)
+
+
+class ReceiptExtraction(BaseModel):
+    """Vision-extractor output. extracted totals are ADVISORY ONLY;
+    owner-confirmed total is the source of truth for the QBO push (defends
+    against prompt injection in receipt text).
+
+    extra='ignore' matches CateringLeadExtractedFields precedent — LLM-output
+    shapes tolerate unmodelled future fields per docs/hermes-alignment.md
+    Part 1 schema pattern."""
+    model_config = ConfigDict(extra="ignore")
+    vendor_name: Optional[str] = Field(default=None, max_length=200)
+    vendor_normalized: Optional[str] = None
+    receipt_date: Optional[str] = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    line_items: list[ExpenseLineItem] = Field(default_factory=list, max_length=200)
+    subtotal_cents: Optional[int] = None
+    tax_cents: Optional[int] = None
+    total_cents: Optional[int] = None  # ADVISORY — not the push truth
+    payment_method: Optional[str] = Field(default=None, max_length=20)
+    extraction_confidence: float = Field(ge=0.0, le=1.0, default=0.0)
+    raw_text_for_audit: str = Field(default="", max_length=4000)
+
+
+ExpenseLeadStatus = Literal[
+    "EXTRACTING",
+    "AWAITING_OWNER_APPROVAL",
+    "APPROVED_PENDING_PUSH",
+    "PUSHED",
+    "PUSH_FAILED",
+    "REVERSED",
+    "REJECTED",
+    "EXPIRED",
+]
+
+EXPENSE_TERMINAL_STATUSES: frozenset[str] = frozenset({"REVERSED", "REJECTED", "EXPIRED"})
+"""Strict no-outbound-transitions terminals. PUSHED is NOT here because
+owner can still `undo` to REVERSED within the reversibility window."""
+
+EXPENSE_RETENTION_CANDIDATES: frozenset[str] = frozenset(
+    {"PUSHED", "REVERSED", "REJECTED", "EXPIRED"}
+)
+"""Statuses whose receipt JPEGs are eligible for retention-based pruning.
+Used by prune-and-expire-expenses.py."""
+
+EXPENSE_APPROVAL_CLOSED_STATUSES: frozenset[str] = frozenset(
+    {"PUSHED", "REVERSED", "REJECTED", "EXPIRED"}
+)
+"""Statuses where owner approval flow is no longer active. Used by
+_find_lead_by_code to skip leads that already completed approval."""
+
+EXPENSE_TRANSITIONS: dict[str, frozenset[str]] = {
+    "EXTRACTING":              frozenset({"AWAITING_OWNER_APPROVAL", "REJECTED", "EXPIRED"}),
+    "AWAITING_OWNER_APPROVAL": frozenset({"APPROVED_PENDING_PUSH", "REJECTED", "EXPIRED"}),
+    "APPROVED_PENDING_PUSH":   frozenset({"PUSHED", "PUSH_FAILED"}),
+    "PUSH_FAILED":             frozenset({"APPROVED_PENDING_PUSH", "REJECTED"}),
+    "PUSHED":                  frozenset({"REVERSED"}),
+    "REVERSED":                frozenset(),
+    "REJECTED":                frozenset(),
+    "EXPIRED":                 frozenset(),
+}
+
+
+def is_expense_transition_allowed(src: str, tgt: str) -> bool:
+    return tgt in EXPENSE_TRANSITIONS.get(src, frozenset())
+
+
+class ExpenseLead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expense_id: str = Field(pattern=r"^E\d{4,}$")
+    original_message_id: str = Field(min_length=1)
+    sender_phone: str
+    sender_lid: Optional[str] = None
+    received_at: datetime
+    image_path: str
+    image_phash: str = Field(min_length=16, max_length=16)
+    image_byte_hash: str = Field(min_length=64, max_length=64)
+    extraction: Optional[ReceiptExtraction] = None
+    classification: Optional[ExpenseClassification] = None
+    qbo_account: Optional[str] = None
+    owner_approval_code: Optional[ProposalCode] = None
+    owner_approval_received_at: Optional[datetime] = None
+    owner_confirmed_total_cents: Optional[int] = None
+    extracted_total_cents: Optional[int] = None
+    qbo_pushed_total_cents: Optional[int] = None
+    qbo_transaction_id: Optional[str] = None
+    pushed_at: Optional[datetime] = None
+    status: ExpenseLeadStatus = "EXTRACTING"
+    rejection_reason: Optional[str] = Field(default=None, max_length=500)
+    duplicate_of: Optional[str] = None
+    reconcile_required: bool = False  # set by orphan detection; blocks new owner actions until cleared
+
+    @field_validator("image_path")
+    @classmethod
+    def _path_under_managed_dir(cls, v: str) -> str:
+        """Reject path traversal + sibling-dir attacks. B-H3 fix: ensure
+        managed dir has trailing separator before prefix-match (defends
+        against EXPENSE_RECEIPTS_DIR='/opt/.../receipts' (no slash) →
+        sibling '/opt/.../receipts-evil/foo.jpg' passing startswith)."""
+        managed = os.environ.get(
+            "EXPENSE_RECEIPTS_DIR",
+            "/opt/shift-agent/state/expense-bookkeeper/receipts/",
+        )
+        if not managed.endswith("/"):
+            managed = managed + "/"
+        if ".." in v or "\0" in v:
+            raise ValueError("invalid image_path: contains path traversal")
+        if not v.startswith(managed):
+            raise ValueError(f"image_path must be under {managed!r}")
+        return v
+
+
+class ExpenseLeadStore(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    schema_version: int = Field(default=1, ge=1)
+    leads: list[ExpenseLead] = Field(default_factory=list)
+    last_id: int = Field(default=0, ge=0)
+
+
 # Agent #5 EOD Reconciliation config
 class EodConfig(BaseModel):
     """End-of-day reconciliation snapshot settings (Agent #5)."""
@@ -596,6 +975,7 @@ class Config(BaseModel):
     employee_docs: EmployeeDocsConfig = Field(default_factory=EmployeeDocsConfig)
     cash_ar: CashArConfig = Field(default_factory=CashArConfig)
     sales_tax: SalesTaxConfig = Field(default_factory=SalesTaxConfig)
+    expense_bookkeeper: ExpenseBookkeeperConfig = Field(default_factory=ExpenseBookkeeperConfig)
 
     def tz(self) -> ZoneInfo:
         return ZoneInfo(self.customer.timezone)
@@ -779,6 +1159,30 @@ class SeenIds(BaseModel):
 class _BaseEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
     ts: datetime
+
+    @field_validator("ts", mode="before")
+    @classmethod
+    def _ensure_tz_aware(cls, v: Any) -> Any:
+        """v0.3: tz-aware-only invariant. Naive datetimes auto-converted to UTC
+        with WARN — preserves backward compat for any historic naive entries
+        while new writes are tz-aware. Audit log replay never raises."""
+        if isinstance(v, datetime):
+            if v.tzinfo is None:
+                sys.stderr.write(
+                    f"WARN: naive ts {v.isoformat()!r} auto-converted to UTC\n"
+                )
+                return v.replace(tzinfo=timezone.utc)
+        elif isinstance(v, str):
+            try:
+                parsed = datetime.fromisoformat(v)
+                if parsed.tzinfo is None:
+                    sys.stderr.write(
+                        f"WARN: naive ts string {v!r} auto-converted to UTC\n"
+                    )
+                    return parsed.replace(tzinfo=timezone.utc)
+            except ValueError:
+                pass  # Pydantic surfaces its own clear error
+        return v
 
 
 class RawInbound(_BaseEntry):
@@ -1014,9 +1418,12 @@ class MenuUpdateProposed(_BaseEntry):
     sent to owner self-chat awaiting confirmation."""
     type: Literal["menu_update_proposed"]
     update_id: str = Field(min_length=1)
-    confirmation_code: str = Field(pattern=r"^#[A-HJ-NP-Z2-9]{5}$")
+    confirmation_code: str = Field(pattern=_CODE_FULL_PATTERN)
     item_count: int = Field(ge=0)
     source_image_id: Optional[str] = None
+    # v0.3: count of items dropped during validation. Surfaces extraction
+    # quality regressions (e.g., LLM started emitting bad dietary_tags).
+    extraction_dropped_count: int = Field(default=0, ge=0)
 
 
 class MenuUpdateApplied(_BaseEntry):
@@ -1034,6 +1441,137 @@ class MenuUpdateRejected(_BaseEntry):
     type: Literal["menu_update_rejected"]
     update_id: str = Field(min_length=1)
     reason: Literal["owner_no", "owner_edit_aborted", "ttl_expired"]
+
+
+# ─────────────────────────────────────────────────────────────────
+# Agent #21 Expense Bookkeeper log entries (15 types)
+# ─────────────────────────────────────────────────────────────────
+
+class ExpenseReceiptReceived(_BaseEntry):
+    type: Literal["expense_receipt_received"]
+    expense_id: str
+    sender_phone: str
+    image_path: str
+    image_phash: str
+    original_message_id: str
+
+
+class ExpenseDuplicateDetected(_BaseEntry):
+    type: Literal["expense_duplicate_detected"]
+    expense_id: str
+    matched_expense_id: str
+    phash_distance: int
+    owner_override: bool = False
+
+
+class ExpenseExtractionCompleted(_BaseEntry):
+    type: Literal["expense_extraction_completed"]
+    expense_id: str
+    extraction_confidence: float
+    line_item_count: int
+    extracted_total_cents: Optional[int] = None
+
+
+class ExpenseClassificationProposed(_BaseEntry):
+    type: Literal["expense_classification_proposed"]
+    expense_id: str
+    is_business: bool
+    classification_confidence: float
+    qbo_account: str
+
+
+class ExpenseOwnerApprovalRequested(_BaseEntry):
+    type: Literal["expense_owner_approval_requested"]
+    expense_id: str
+    owner_approval_code: ProposalCode
+    extracted_total_cents: int
+    routed_to: Literal["whatsapp", "cockpit_v01_paper"]
+
+
+class ExpenseOwnerDecision(_BaseEntry):
+    type: Literal["expense_owner_decision"]
+    expense_id: str
+    decision: Literal[
+        "approved", "rejected", "force_approved",
+        "amount_mismatch", "force_required",
+    ]
+    raw_message: str = Field(max_length=500)
+    code_matched: bool
+    amount_matched: bool
+    force_context: Literal["threshold", "dedup", "both", "none"] = "none"
+
+
+class ExpenseLeadStatusChange(_BaseEntry):
+    type: Literal["expense_lead_status_change"]
+    expense_id: str
+    from_status: ExpenseLeadStatus
+    to_status: ExpenseLeadStatus
+    reason: Optional[str] = Field(default=None, max_length=200)
+
+
+class ExpensePushAttempted(_BaseEntry):
+    type: Literal["expense_push_attempted"]
+    expense_id: str
+    qbo_client_mode: Literal["mock", "real"]
+    extracted_total_cents: Optional[int] = None
+    owner_confirmed_total_cents: int
+    push_total_cents: int
+
+
+class ExpensePushed(_BaseEntry):
+    type: Literal["expense_pushed"]
+    expense_id: str
+    qbo_transaction_id: str
+    qbo_amount_cents: int
+    push_attempt_no: int = 1
+
+
+class ExpensePushFailed(_BaseEntry):
+    type: Literal["expense_push_failed"]
+    expense_id: str
+    error_class: Literal[
+        "token_expired", "rate_limit", "bad_account",
+        "server", "network", "invalid_request",
+    ]
+    error_message_redacted: str = Field(max_length=200)
+
+
+class ExpenseReversalRequested(_BaseEntry):
+    type: Literal["expense_reversal_requested"]
+    expense_id: str
+    requested_by_phone: str
+    requested_by_role: str
+    within_window: bool
+    hours_since_push: float
+
+
+class ExpenseReversed(_BaseEntry):
+    type: Literal["expense_reversed"]
+    expense_id: str
+    qbo_transaction_id: str
+    void_method: Literal["api_void", "manual_flag"]
+
+
+class ExpenseReceiptPruned(_BaseEntry):
+    type: Literal["expense_receipt_pruned"]
+    expense_id: str
+    vendor_normalized: Optional[str] = None
+    extracted_total_cents: Optional[int] = None
+    reason: Literal["retention_expired", "manual"] = "retention_expired"
+
+
+class ExpenseNonOwnerUndoDeclined(_BaseEntry):
+    type: Literal["expense_non_owner_undo_declined"]
+    expense_id: str
+    requested_by_phone: Optional[str] = None
+    requested_by_lid: Optional[str] = None
+
+
+class ExpenseOrphanDetected(_BaseEntry):
+    type: Literal["expense_orphan_detected"]
+    expense_id: str
+    last_known_status: ExpenseLeadStatus
+    detected_by: Literal["startup_scan", "manual"]
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -1076,6 +1614,7 @@ class CateringLeadRejected(_BaseEntry):
         "event_date_past",
         "event_date_invalid_calendar",
         "timezone_invalid",
+        "message_id_phone_mismatch",  # v0.3: idempotency-key collision with mismatched phone
     ]
     detail: str = Field(default="", max_length=500)
     customer_tz: str = Field(default="", max_length=64)
@@ -1099,7 +1638,28 @@ class CateringOwnerDecision(_BaseEntry):
     type: Literal["catering_owner_decision"]
     lead_id: str = Field(min_length=1)
     decision: Literal["approve", "reject", "edit"]
-    edit_text: str = ""
+    edit_text: str = Field(default="", max_length=2000)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _backfill_legacy_edit_text(cls, data: Any) -> Any:
+        """v0.3: legacy edit decisions had empty edit_text. Backfill on read
+        with sentinel + WARN. New writes hit strict mode='after' validator."""
+        if not isinstance(data, dict):
+            return data
+        if data.get("decision") == "edit" and not (data.get("edit_text") or "").strip():
+            sys.stderr.write(
+                f"WARN: legacy edit_text=empty on lead_id={data.get('lead_id')!r}; "
+                f"backfilling with sentinel.\n"
+            )
+            data["edit_text"] = LEGACY_EDIT_TEXT_SENTINEL
+        return data
+
+    @model_validator(mode="after")
+    def _edit_text_required_for_edit(self) -> "CateringOwnerDecision":
+        if self.decision == "edit" and not self.edit_text.strip():
+            raise ValueError("decision='edit' requires non-empty edit_text")
+        return self
 
 
 class CateringQuoteSent(_BaseEntry):
@@ -1107,6 +1667,81 @@ class CateringQuoteSent(_BaseEntry):
     lead_id: str = Field(min_length=1)
     customer_phone: E164Phone
     outbound_message_id: str = Field(min_length=1)
+
+
+# v0.3 NEW audit classes — idempotency anchors + state-transition coverage
+
+class CateringQuoteAttempted(_BaseEntry):
+    """v0.3 idempotency anchor for customer-quote send (apply-script approve flow).
+
+    Written BEFORE bridge POST in the SAME lock as state-mutation. On retry,
+    presence of this row → script returns idempotent without re-POSTing,
+    preventing duplicate quotes to the customer.
+    """
+    type: Literal["catering_quote_attempted"]
+    lead_id: str = Field(min_length=1)
+    original_message_id: str = Field(min_length=1)
+    code: str = Field(pattern=_CODE_FULL_PATTERN)
+
+
+class CateringOwnerApprovalCardAttempted(_BaseEntry):
+    """v0.3 idempotency anchor for owner-approval card send (create-script flow).
+
+    Written BEFORE bridge POST in same lock as state-mutation. Mirror of
+    CateringQuoteAttempted — prevents duplicate owner card on retry.
+    """
+    type: Literal["catering_owner_approval_card_attempted"]
+    lead_id: str = Field(min_length=1)
+    original_message_id: str = Field(min_length=1)
+
+
+class CateringOwnerApprovalCardFailed(_BaseEntry):
+    """v0.3: bridge POST for owner-approval card failed (timeout, 5xx, etc.).
+    Distinguishes 'card sent' from 'card failed' in the audit log."""
+    type: Literal["catering_owner_approval_card_failed"]
+    lead_id: str = Field(min_length=1)
+    reason: str = Field(min_length=1, max_length=500)
+    bridge_error: str = Field(default="", max_length=2000)
+
+
+class CateringOwnerApprovalCardSkipped(_BaseEntry):
+    """v0.3: card not even attempted (config issue). Distinct from CardFailed."""
+    type: Literal["catering_owner_approval_card_skipped"]
+    lead_id: str = Field(min_length=1)
+    reason: Literal["self_chat_jid_empty", "config_disabled"]
+
+
+class CateringOwnerEdited(_BaseEntry):
+    """v0.3: explicit audit class for OWNER_EDITED transition. Separates
+    'owner intent' from CateringOwnerDecision (which is a generic decision row)."""
+    type: Literal["catering_owner_edited"]
+    lead_id: str = Field(min_length=1)
+    edit_text: str = Field(min_length=1, max_length=2000)
+
+
+class CateringDeclineAttempted(_BaseEntry):
+    """v0.3 idempotency anchor for decline-with-reason customer message
+    (apply-script reject path). Symmetric to CateringQuoteAttempted."""
+    type: Literal["catering_decline_attempted"]
+    lead_id: str = Field(min_length=1)
+    original_message_id: str = Field(min_length=1)
+    code: str = Field(pattern=_CODE_FULL_PATTERN)
+
+
+class CateringQuoteRenderFailed(_BaseEntry):
+    """v0.3 (review M2): emitted when apply-catering-owner-decision approve
+    flow fails to render the customer quote (template KeyError, OSError,
+    or unexpected validation issue). Without this audit row, an
+    approve-blocked-on-render-error left the lead at AWAITING_OWNER_APPROVAL
+    with no durable trace of why retries kept failing — operators saw stderr
+    only.
+    """
+    type: Literal["catering_quote_render_failed"]
+    lead_id: str = Field(min_length=1)
+    code: str = Field(pattern=_CODE_FULL_PATTERN)
+    error_class: str = Field(min_length=1, max_length=80,
+                             description="Python exception class name (e.g. 'KeyError')")
+    detail: str = Field(default="", max_length=2000)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -1199,13 +1834,32 @@ LogEntry = Annotated[
         CateringLeadCreated, CateringLeadStatusChange, CateringLeadRejected,
         CateringQuoteDrafted,
         CateringOwnerApprovalRequested, CateringOwnerDecision, CateringQuoteSent,
+        # v0.3: idempotency anchors + state-transition coverage
+        CateringQuoteAttempted, CateringOwnerApprovalCardAttempted,
+        CateringOwnerApprovalCardFailed, CateringOwnerApprovalCardSkipped,
+        CateringOwnerEdited, CateringDeclineAttempted,
+        # v0.3 (review M2): render-failure observability
+        CateringQuoteRenderFailed,
         MenuUpdateProposed, MenuUpdateApplied, MenuUpdateRejected,
+        # Agent #21 Expense Bookkeeper (15 entry types)
+        ExpenseReceiptReceived, ExpenseDuplicateDetected,
+        ExpenseExtractionCompleted, ExpenseClassificationProposed,
+        ExpenseOwnerApprovalRequested, ExpenseOwnerDecision,
+        ExpenseLeadStatusChange,
+        ExpensePushAttempted, ExpensePushed, ExpensePushFailed,
+        ExpenseReversalRequested, ExpenseReversed,
+        ExpenseReceiptPruned, ExpenseNonOwnerUndoDeclined,
+        ExpenseOrphanDetected,
     ],
     Field(discriminator="type"),
 ]
 
 
 __all__ = [
+    # v0.3 phone helpers
+    "PHONE_E164_PATTERN", "is_valid_e164",
+    # v0.3 lifecycle sentinels
+    "PRE_QUOTE_DRAFT_SENTINEL", "LEGACY_QUOTE_TEXT_SENTINEL", "LEGACY_EDIT_TEXT_SENTINEL",
     "E164Phone", "Role", "EmployeeId", "Employee", "PhoneAssignment", "ScheduleEntry", "Roster",
     "Config", "CustomerConfig", "OwnerConfig", "LimitsConfig", "AlertingConfig", "BackupConfig", "OperationsConfig",
     "DailyBriefConfig", "BriefSection",
@@ -1214,10 +1868,29 @@ __all__ = [
     "CateringConfig", "CateringLeadStatus", "CateringLeadExtractedFields",
     "CateringLead", "CateringLeadStore",
     "is_catering_terminal", "CATERING_TERMINAL_STATUSES",
+    # v0.3 status-machine + helpers
+    "CATERING_TRANSITIONS", "is_catering_transition_allowed",
+    "assert_rejection_reason_complete",
+    # v0.3 code-pattern constants
+    "_CODE_BODY_PATTERN", "_CODE_FULL_PATTERN",
     "MenuItem", "Menu", "MenuPendingUpdate", "DietaryTag", "MenuCategory",
     # Tier 2 configs
     "InventoryConfig", "SupplierConfig", "VipConfig", "CateringFollowupConfig",
     "HiringConfig", "ComplianceConfig", "EmployeeDocsConfig", "CashArConfig", "SalesTaxConfig",
+    # Agent #21 Expense Bookkeeper
+    "ExpenseBookkeeperConfig", "ExpenseLineItem", "ExpenseClassification", "ReceiptExtraction",
+    "ExpenseLeadStatus", "EXPENSE_TERMINAL_STATUSES", "EXPENSE_TRANSITIONS",
+    "EXPENSE_RETENTION_CANDIDATES", "EXPENSE_APPROVAL_CLOSED_STATUSES",
+    "is_expense_transition_allowed",
+    "ExpenseLead", "ExpenseLeadStore",
+    "ExpenseReceiptReceived", "ExpenseDuplicateDetected",
+    "ExpenseExtractionCompleted", "ExpenseClassificationProposed",
+    "ExpenseOwnerApprovalRequested", "ExpenseOwnerDecision",
+    "ExpenseLeadStatusChange",
+    "ExpensePushAttempted", "ExpensePushed", "ExpensePushFailed",
+    "ExpenseReversalRequested", "ExpenseReversed",
+    "ExpenseReceiptPruned", "ExpenseNonOwnerUndoDeclined",
+    "ExpenseOrphanDetected",
     "Proposal", "ProposalId", "ProposalCode",
     "AwaitingProposal", "ApprovedProposal", "ReconcilingProposal", "SentProposal",
     "SendFailedProposal", "AcceptedProposal", "DeclinedProposal", "DeniedByOwnerProposal",
@@ -1234,5 +1907,10 @@ __all__ = [
     "CrossLocationQuery", "InterLocationTransferProposed",
     "CateringLeadCreated", "CateringLeadStatusChange", "CateringLeadRejected", "CateringQuoteDrafted",
     "CateringOwnerApprovalRequested", "CateringOwnerDecision", "CateringQuoteSent",
+    # v0.3 catering audit classes
+    "CateringQuoteAttempted", "CateringOwnerApprovalCardAttempted",
+    "CateringOwnerApprovalCardFailed", "CateringOwnerApprovalCardSkipped",
+    "CateringOwnerEdited", "CateringDeclineAttempted",
+    "CateringQuoteRenderFailed",
     "MenuUpdateProposed", "MenuUpdateApplied", "MenuUpdateRejected",
 ]

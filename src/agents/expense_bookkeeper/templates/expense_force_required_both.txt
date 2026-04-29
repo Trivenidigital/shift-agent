@@ -1,0 +1,9 @@
+{{expense_id}} — high-value AND possible duplicate
+
+This receipt (${{total_display}}) is above your ${{threshold_display}} review threshold AND looks like a duplicate of {{matched_id}}.
+
+To approve anyway, reply:
+  "{{approval_code}} {{total_display}} force"
+
+Or to skip:
+  "{{approval_code}} reject"
