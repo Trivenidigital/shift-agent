@@ -61,6 +61,7 @@ from schemas import (  # noqa: E402
     ExpenseReceiptReceived, ExpenseDuplicateDetected,
     ExpenseExtractionCompleted, ExpenseClassificationProposed,
     ExpenseOwnerApprovalRequested, ExpenseLeadStatusChange,
+    ExpenseOrphanDetected,
 )
 from exit_codes import (  # noqa: E402
     EXIT_OK, EXIT_INVALID_INPUT, EXIT_DISABLED,
@@ -484,6 +485,81 @@ def _log(entry):
 
 
 # ─────────────────────────────────────────────────────────────────
+# Orphan reconcile (A-H3): mirror of apply-expense-decision's _check_orphans
+# kept inline here to avoid importing from a sibling agent script. Same
+# audit-log cross-check + age-gate semantics.
+# ─────────────────────────────────────────────────────────────────
+
+ORPHAN_STALE_SECONDS = 60
+
+
+def _check_extract_orphans(store: ExpenseLeadStore) -> int:
+    """Scan for APPROVED_PENDING_PUSH leads with no completion entry in
+    audit log AND older than ORPHAN_STALE_SECONDS. Mark reconcile_required +
+    write ExpenseOrphanDetected. Persist via the caller's atomic_write_json
+    (caller is already inside the file lock)."""
+    candidates: list[ExpenseLead] = []
+    candidate_ids: set[str] = set()
+    now = datetime.now(timezone.utc)
+    for lead in store.leads:
+        if lead.status != "APPROVED_PENDING_PUSH" or lead.reconcile_required:
+            continue
+        approved_at = lead.owner_approval_received_at
+        if isinstance(approved_at, str):
+            try:
+                approved_at = datetime.fromisoformat(approved_at)
+            except (ValueError, TypeError):
+                approved_at = None
+        if approved_at is None:
+            candidates.append(lead)
+            candidate_ids.add(lead.expense_id)
+            continue
+        if approved_at.tzinfo is None:
+            approved_at = approved_at.replace(tzinfo=timezone.utc)
+        if (now - approved_at).total_seconds() < ORPHAN_STALE_SECONDS:
+            continue
+        candidates.append(lead)
+        candidate_ids.add(lead.expense_id)
+
+    if not candidate_ids:
+        return 0
+
+    # Audit cross-check: leads with completion entries are NOT orphans.
+    completed: set[str] = set()
+    if LOG_PATH.exists():
+        try:
+            with open(LOG_PATH, "r", encoding="utf-8", errors="replace") as f:
+                tail = f.readlines()[-500:]
+            for line in tail:
+                if '"expense_pushed"' not in line and '"expense_push_failed"' not in line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                eid = entry.get("expense_id")
+                et = entry.get("type")
+                if eid in candidate_ids and et in ("expense_pushed", "expense_push_failed"):
+                    completed.add(eid)
+        except OSError:
+            pass
+
+    flagged = 0
+    for lead in candidates:
+        if lead.expense_id in completed:
+            continue
+        lead.reconcile_required = True
+        _log(ExpenseOrphanDetected(
+            ts=now, type="expense_orphan_detected",
+            expense_id=lead.expense_id,
+            last_known_status=lead.status,
+            detected_by="startup_scan",
+        ))
+        flagged += 1
+    return flagged
+
+
+# ─────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────
 
@@ -518,6 +594,12 @@ def main():
                                default=ExpenseLeadStore())
         if st not in ("ok", "missing", "empty"):
             return EXIT_SCHEMA_VIOLATION
+
+        # A-H3 fix: orphan scan at script entry. Design v2 §B2 mandates that
+        # both extract-receipt and apply-expense-decision run this. v1 only
+        # had it in apply-expense-decision; ports the audit-cross-check + age
+        # gate inline so we don't depend on apply-expense-decision symbols.
+        _check_extract_orphans(store)
 
         # Idempotency check (reviewer-a MED — original_message_id)
         for lead in store.leads:

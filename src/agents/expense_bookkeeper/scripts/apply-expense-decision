@@ -145,11 +145,17 @@ def parse_owner_message(text: str) -> dict | None:
         return {"verb": "undo", "code": None, "amount_cents": None,
                 "eid": m.group("eid").upper(), "force": bool(m.group("modifier"))}
 
-    # Detect "missing decimals" case for friendly nudge: #CODE 234 (no .##)
+    # Detect "missing decimals" case for friendly nudge.
+    # C-H2 fix: support both forward (#CODE 234) and reversed (234 #CODE) order.
     m = re.match(
         r"^\s*(?P<code>#[A-HJKMNPQR-Z2-9]{5})\s+\$?[\d,]+(?:\.\d{0,1})?\s*$",
         text, re.IGNORECASE,
     )
+    if not m:
+        m = re.match(
+            r"^\s*\$?[\d,]+(?:\.\d{0,1})?\s+(?P<code>#[A-HJKMNPQR-Z2-9]{5})\s*$",
+            text, re.IGNORECASE,
+        )
     if m:
         return {"verb": "missing_decimals", "code": m.group("code"),
                 "amount_cents": None, "eid": None, "force": False}
@@ -202,28 +208,99 @@ def _cents_to_str(c: int) -> str:
     return f"{c / 100:.2f}"
 
 
-def _check_orphans(store: ExpenseLeadStore, log_path: Path) -> int:
-    """Reviewer-b HIGH B2: at script entry, scan for APPROVED_PENDING_PUSH
-    leads that lack a terminal audit entry. Mark reconcile_required and
-    write ExpenseOrphanDetected. Returns count detected.
+# A-H2 fix: stale-push threshold. Anything older than this with no
+# expense_pushed/expense_push_failed audit entry is presumed orphaned
+# from a crash. Healthy push completes in < ~5s; 60s gives safety margin.
+ORPHAN_STALE_SECONDS = 60
 
-    Owner-decision logic refuses to act on reconcile_required=True leads.
-    v0.2 watchdog automates clearing the flag.
+
+def _scan_audit_for_push_completion(log_path: Path, expense_ids: set[str]) -> set[str]:
+    """A-H2 fix: scan recent decisions.log for matching expense_pushed or
+    expense_push_failed entries. Returns the subset of expense_ids that have
+    completion entries. Cheap: tail-read; we only need recent entries since
+    older PUSHED leads are already in PUSHED status (not APPROVED_PENDING_PUSH).
     """
-    count = 0
+    if not log_path.exists() or not expense_ids:
+        return set()
+    completed: set[str] = set()
+    try:
+        # Read last ~500 lines — enough for any plausible orphan window
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            tail = f.readlines()[-500:]
+    except OSError:
+        return set()
+    for line in tail:
+        if '"expense_pushed"' not in line and '"expense_push_failed"' not in line:
+            continue
+        try:
+            entry = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        eid = entry.get("expense_id")
+        et = entry.get("type")
+        if eid in expense_ids and et in ("expense_pushed", "expense_push_failed"):
+            completed.add(eid)
+    return completed
+
+
+def _check_orphans(store: ExpenseLeadStore) -> tuple[int, list[str]]:
+    """A-H1 + A-H2 fix: scan for APPROVED_PENDING_PUSH leads that BOTH:
+      (a) have no corresponding expense_pushed/expense_push_failed entry in
+          recent audit log (matches design v2 §B2 intent — not just status)
+      (b) are older than ORPHAN_STALE_SECONDS (avoids false-positive against
+          legitimately in-flight pushes during the lock-released window)
+
+    Mutates lead.reconcile_required = True for orphans, writes audit entries.
+    Returns (count, list_of_expense_ids) so caller can persist + alert.
+    """
+    candidates: list[ExpenseLead] = []
+    candidate_ids: set[str] = set()
+    now = datetime.now(timezone.utc)
     for lead in store.leads:
-        if lead.status == "APPROVED_PENDING_PUSH" and not lead.reconcile_required:
-            # Mark for operator review
-            lead.reconcile_required = True
-            count += 1
-            _log(ExpenseOrphanDetected(
-                ts=datetime.now(timezone.utc),
-                type="expense_orphan_detected",
-                expense_id=lead.expense_id,
-                last_known_status=lead.status,
-                detected_by="startup_scan",
-            ))
-    return count
+        if lead.status != "APPROVED_PENDING_PUSH" or lead.reconcile_required:
+            continue
+        # Age check — owner_approval_received_at is when status entered PENDING
+        approved_at = lead.owner_approval_received_at
+        if isinstance(approved_at, str):
+            try:
+                approved_at = datetime.fromisoformat(approved_at)
+            except (ValueError, TypeError):
+                approved_at = None
+        if approved_at is None:
+            # No timestamp → can't gauge age; treat as orphan defensively
+            candidates.append(lead)
+            candidate_ids.add(lead.expense_id)
+            continue
+        if approved_at.tzinfo is None:
+            approved_at = approved_at.replace(tzinfo=timezone.utc)
+        age_seconds = (now - approved_at).total_seconds()
+        if age_seconds < ORPHAN_STALE_SECONDS:
+            continue  # legit in-flight push
+        candidates.append(lead)
+        candidate_ids.add(lead.expense_id)
+
+    if not candidate_ids:
+        return 0, []
+
+    # Audit-log cross-check: anything with a push completion entry is NOT
+    # an orphan — push succeeded/failed but state-write to leads.json crashed.
+    # Same recovery shape, but distinguishing matters for forensics.
+    completed_ids = _scan_audit_for_push_completion(LOG_PATH, candidate_ids)
+
+    flagged_ids: list[str] = []
+    for lead in candidates:
+        if lead.expense_id in completed_ids:
+            continue  # not orphaned; v0.2 watchdog reconciles state from audit
+        lead.reconcile_required = True
+        _log(ExpenseOrphanDetected(
+            ts=now,
+            type="expense_orphan_detected",
+            expense_id=lead.expense_id,
+            last_known_status=lead.status,
+            detected_by="startup_scan",
+        ))
+        flagged_ids.append(lead.expense_id)
+    return len(flagged_ids), flagged_ids
 
 
 def _find_lead_by_code(store: ExpenseLeadStore, code: str) -> ExpenseLead | None:
@@ -278,7 +355,12 @@ def _handle_approve(parsed, owner_phone, owner_jid, sender_phone, raw_message,
             sys.stderr.write(f"leads.json status={status}; refusing\n")
             return EXIT_SCHEMA_VIOLATION
 
-        _check_orphans(store, LOG_PATH)
+        # A-H1 fix: persist orphan-flag mutations BEFORE any early return.
+        # _check_orphans mutates lead.reconcile_required + writes audit; without
+        # this atomic_write the flag is lost on every early-return path.
+        orphan_count, orphan_ids = _check_orphans(store)
+        if orphan_count > 0:
+            atomic_write_json(LEADS_PATH, store.model_dump(mode="json"))
 
         lead = _find_lead_by_code(store, code)
         if lead is None:
@@ -337,14 +419,44 @@ def _handle_approve(parsed, owner_phone, owner_jid, sender_phone, raw_message,
         else:
             force_context = "none"
 
-        # If force is required (threshold/dedup) but not provided
+        # C-H1 fix: if force is required (threshold/dedup) but not provided,
+        # do NOT silently no-op. Owner under WhatsApp deluge would assume
+        # their #CODE 234.50 went through. Audit + reply explicitly.
         if force_context != "none" and not force:
-            # Re-send the appropriate template; lead stays AWAITING; owner re-replies
-            sys.stderr.write(
-                f"lead {lead.expense_id} requires force ({force_context}); reminded owner\n"
-            )
-            return EXIT_OK  # not a failure — we sent the right message originally;
-            # the SKILL is responsible for not double-sending. Phase-2 polish.
+            _log(ExpenseOwnerDecision(
+                ts=datetime.now(timezone.utc),
+                type="expense_owner_decision",
+                expense_id=lead.expense_id,
+                decision="force_required",
+                raw_message=raw_message[:500],
+                code_matched=True,
+                amount_matched=True,
+                force_context=force_context,
+            ))
+            atomic_write_json(LEADS_PATH, store.model_dump(mode="json"))
+            owner_total_display = _cents_to_str(owner_amount_cents)
+            if force_context == "threshold":
+                msg = (
+                    f"{lead.expense_id} is above the cockpit threshold. "
+                    f"To approve via WhatsApp, reply "
+                    f"'{code} {owner_total_display} force'."
+                )
+            elif force_context == "dedup":
+                dup_id = lead.duplicate_of or "?"
+                msg = (
+                    f"{lead.expense_id} looks like a duplicate of {dup_id}. "
+                    f"To push it anyway, reply "
+                    f"'{code} {owner_total_display} force'."
+                )
+            else:  # both
+                dup_id = lead.duplicate_of or "?"
+                msg = (
+                    f"{lead.expense_id} is above-threshold AND looks like a "
+                    f"duplicate of {dup_id}. To push it anyway, reply "
+                    f"'{code} {owner_total_display} force'."
+                )
+            _bridge_post(owner_jid, msg)
+            return EXIT_OK
 
         # Transition to APPROVED_PENDING_PUSH
         lead.owner_approval_received_at = datetime.now(timezone.utc)
@@ -365,15 +477,13 @@ def _handle_approve(parsed, owner_phone, owner_jid, sender_phone, raw_message,
         atomic_write_json(LEADS_PATH, store.model_dump(mode="json"))
         # snapshot lead for use after lock release
         snapshot = lead.model_copy(deep=True)
-        store_snapshot = store
 
     # Lock RELEASED — QBO push is slow; we don't hold the file lock during
-    # external call. Reviewer-b HIGH B2: orphan-recovery is in _check_orphans
-    # at next script entry.
-    return _push_to_qbo(snapshot, store_snapshot, owner_jid, cfg, customer_tz)
+    # external call. A-H1+A-H2: orphan recovery in _check_orphans at next entry.
+    return _push_to_qbo(snapshot, owner_jid, cfg, customer_tz)
 
 
-def _push_to_qbo(lead: ExpenseLead, store: ExpenseLeadStore, owner_jid: str,
+def _push_to_qbo(lead: ExpenseLead, owner_jid: str,
                  cfg: Config, customer_tz: str) -> int:
     """External push step. Lead has owner_confirmed_total_cents set."""
     client = make_qbo_client(cfg.expense_bookkeeper, customer_timezone=customer_tz)
@@ -483,7 +593,12 @@ def _handle_reject(parsed, owner_jid, raw_message, cfg):
                                    default=ExpenseLeadStore())
         if status not in ("ok", "missing", "empty"):
             return EXIT_SCHEMA_VIOLATION
-        _check_orphans(store, LOG_PATH)
+        # A-H1 fix: persist orphan-flag mutations BEFORE any early return.
+        # _check_orphans mutates lead.reconcile_required + writes audit; without
+        # this atomic_write the flag is lost on every early-return path.
+        orphan_count, orphan_ids = _check_orphans(store)
+        if orphan_count > 0:
+            atomic_write_json(LEADS_PATH, store.model_dump(mode="json"))
         lead = _find_lead_by_code(store, code)
         if lead is None:
             return EXIT_NOT_FOUND
@@ -513,14 +628,30 @@ def _handle_reject(parsed, owner_jid, raw_message, cfg):
     return EXIT_OK if sent else EXIT_DEPENDENCY_DOWN
 
 
-def _handle_undo(parsed, owner_phone, owner_jid, sender_phone, sender_lid,
-                 raw_message, cfg, customer_tz):
-    """Reverse a PUSHED lead. Owner-only; window-checked."""
+def _handle_undo(parsed, owner_phone, owner_lid, owner_jid, sender_phone,
+                 sender_lid, raw_message, cfg, customer_tz):
+    """Reverse a PUSHED lead. Owner-only; window-checked.
+
+    B-H2 fix: owner re-auth accepts EITHER matching phone OR matching LID.
+    Defends against WhatsApp delivering an inbound with only sender_lid set
+    (legitimate owner from a multi-device session) — without LID fallback,
+    legit owner cannot undo.
+
+    C-H3 fix: when sender is not the owner, send a friendly reply rather than
+    silently logging — staff member typing 'undo' on a shared phone deserves
+    to know why nothing happened.
+    """
     eid = parsed["eid"]
     force = parsed["force"]
 
-    # Owner re-auth (security MED B-MED)
-    if not sender_phone or sender_phone != owner_phone:
+    # Owner re-auth (B-H2): phone OR LID match
+    is_owner = False
+    if sender_phone and owner_phone and sender_phone == owner_phone:
+        is_owner = True
+    elif sender_lid and owner_lid and sender_lid == owner_lid:
+        is_owner = True
+
+    if not is_owner:
         with flock(LEADS_PATH):
             store, _ = load_model(LEADS_PATH, ExpenseLeadStore,
                                   default=ExpenseLeadStore())
@@ -532,7 +663,17 @@ def _handle_undo(parsed, owner_phone, owner_jid, sender_phone, sender_lid,
                 requested_by_phone=sender_phone,
                 requested_by_lid=sender_lid,
             ))
-        # Reply best-effort; not a customer-facing error
+        # C-H3: tell the sender why we declined (don't go silent under deluge)
+        # Reply goes to the SENDER, not the owner — they're the one who tried.
+        sender_jid = (
+            f"{sender_phone.lstrip('+')}@s.whatsapp.net" if sender_phone
+            else (sender_lid if sender_lid else owner_jid)
+        )
+        _bridge_post(
+            sender_jid,
+            "Only the owner can undo expenses. If you ARE the owner, "
+            "please reply from your registered owner number.",
+        )
         return EXIT_INVALID_INPUT
 
     with flock(LEADS_PATH):
@@ -540,7 +681,12 @@ def _handle_undo(parsed, owner_phone, owner_jid, sender_phone, sender_lid,
                                    default=ExpenseLeadStore())
         if status not in ("ok", "missing", "empty"):
             return EXIT_SCHEMA_VIOLATION
-        _check_orphans(store, LOG_PATH)
+        # A-H1 fix: persist orphan-flag mutations BEFORE any early return.
+        # _check_orphans mutates lead.reconcile_required + writes audit; without
+        # this atomic_write the flag is lost on every early-return path.
+        orphan_count, orphan_ids = _check_orphans(store)
+        if orphan_count > 0:
+            atomic_write_json(LEADS_PATH, store.model_dump(mode="json"))
         lead = _find_lead_by_id(store, eid)
         if lead is None:
             return EXIT_NOT_FOUND
@@ -581,6 +727,14 @@ def _handle_undo(parsed, owner_phone, owner_jid, sender_phone, sender_lid,
             return EXIT_OUTSIDE_WINDOW
         tx_id = lead.qbo_transaction_id
         atomic_write_json(LEADS_PATH, store.model_dump(mode="json"))
+
+    # Reviewer-a MED: defensive None-check before unlock + external call
+    if not tx_id:
+        sys.stderr.write(
+            f"lead {eid} has status PUSHED but no qbo_transaction_id — "
+            f"data corruption or manual edit; refusing to void\n"
+        )
+        return EXIT_SCHEMA_VIOLATION
 
     # Lock released for QBO call
     client = make_qbo_client(cfg.expense_bookkeeper, customer_timezone=customer_tz)
@@ -627,7 +781,12 @@ def _handle_undo(parsed, owner_phone, owner_jid, sender_phone, sender_lid,
 
 
 def _handle_missing_decimals(parsed, owner_jid):
-    """Friendly nudge for `#CODE 234` (no decimals). Lead stays AWAITING."""
+    """Friendly nudge for `#CODE 234` (no decimals). Lead stays AWAITING.
+
+    Reviewer-c MED fix: returns EXIT_INVALID_INPUT (malformed input), not
+    EXIT_AMOUNT_MISMATCH — operator dashboards filtering by exit code
+    were misclassifying this as a real amount mismatch.
+    """
     with flock(LEADS_PATH):
         store, _ = load_model(LEADS_PATH, ExpenseLeadStore,
                               default=ExpenseLeadStore())
@@ -639,7 +798,7 @@ def _handle_missing_decimals(parsed, owner_jid):
         f"Please include cents — reply '{parsed['code']} {_cents_to_str(extracted)}'."
     )
     _bridge_post(owner_jid, msg)
-    return EXIT_AMOUNT_MISMATCH
+    return EXIT_INVALID_INPUT
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -663,6 +822,7 @@ def main():
 
     customer_tz = cfg.customer.timezone
     owner_phone = cfg.owner.phone
+    owner_lid = cfg.owner.lid  # B-H2: required for LID-only sender re-auth
     owner_jid = cfg.owner.self_chat_jid or f"{owner_phone.lstrip('+')}@s.whatsapp.net"
 
     parsed = parse_owner_message(args.raw_message)
@@ -682,8 +842,9 @@ def main():
     if verb == "reject":
         return _handle_reject(parsed, owner_jid, args.raw_message, cfg)
     if verb == "undo":
-        return _handle_undo(parsed, owner_phone, owner_jid, args.sender_phone,
-                            args.sender_lid, args.raw_message, cfg, customer_tz)
+        return _handle_undo(parsed, owner_phone, owner_lid, owner_jid,
+                            args.sender_phone, args.sender_lid,
+                            args.raw_message, cfg, customer_tz)
     if verb == "missing_decimals":
         return _handle_missing_decimals(parsed, owner_jid)
 

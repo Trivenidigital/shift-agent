@@ -70,11 +70,21 @@ class QBOClient(Protocol):
 # ─────────────────────────────────────────────────────────────────
 
 _TOKEN_PATTERNS = [
+    # URL-encoded forms (key=value)
     re.compile(r"access_token=[^&\s\"']+", re.IGNORECASE),
     re.compile(r"refresh_token=[^&\s\"']+", re.IGNORECASE),
     re.compile(r"code=[A-Za-z0-9_\-\.]{16,}", re.IGNORECASE),
     re.compile(r"Authorization:\s*Bearer\s+[^\s\"']+", re.IGNORECASE),
-    re.compile(r"\?[^\s\"']*"),  # strip URL query strings entirely
+    # B-H1 fix: JSON-bodied tokens — QBO error responses sometimes echo the
+    # request payload, which may contain "access_token":"..." or
+    # "refresh_token":"...". URL-pattern alone misses these.
+    re.compile(r'"(access_token|refresh_token|id_token)"\s*:\s*"[^"]*"', re.IGNORECASE),
+    # Bare JWT: 3 base64url segments separated by dots, leading "eyJ" header.
+    # Catches Bearer tokens that leaked into log messages without the
+    # "Bearer " prefix or "key=" wrapping.
+    re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\b"),
+    # URL query strings — strip wholesale; tokens often live inside
+    re.compile(r"\?[^\s\"']*"),
 ]
 
 

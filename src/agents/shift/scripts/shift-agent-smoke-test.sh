@@ -128,18 +128,49 @@ done
 echo "✓ systemd units enabled"
 
 # 9. systemd unit syntax (catches typos before timer fires)
-if ! systemd-analyze verify \
-        /etc/systemd/system/send-routing-accuracy-summary.service \
-        /etc/systemd/system/send-routing-accuracy-summary.timer \
-        /etc/systemd/system/send-routing-accuracy-summary-failure.service \
-        2>/tmp/sd-verify.log; then
+sd_verify_units=(
+    /etc/systemd/system/send-routing-accuracy-summary.service
+    /etc/systemd/system/send-routing-accuracy-summary.timer
+    /etc/systemd/system/send-routing-accuracy-summary-failure.service
+)
+# Include Agent #21 prune timer if installed (catches User=/log-path typos)
+if [ -f /etc/systemd/system/prune-expense-receipts.service ]; then
+    sd_verify_units+=( /etc/systemd/system/prune-expense-receipts.service )
+fi
+if [ -f /etc/systemd/system/prune-expense-receipts.timer ]; then
+    sd_verify_units+=( /etc/systemd/system/prune-expense-receipts.timer )
+fi
+if ! systemd-analyze verify "${sd_verify_units[@]}" 2>/tmp/sd-verify.log; then
     echo "FAIL: systemd-analyze verify reported issues:" >&2
     cat /tmp/sd-verify.log >&2
     exit 1
 fi
-echo "✓ weekly routing-summary systemd units verified"
+echo "✓ systemd units verified (incl. expense-bookkeeper if installed)"
 
-# 10. Agent #21 Expense Bookkeeper — scripts + dirs + perms + disabled-default config
+# 10. v0.3: catering schema validation against current state files
+#     Catches S1 (quote_text invariant), S6 (regex unification), L0 (phone canon)
+#     at smoke-time → triggers auto-rollback before customer impact.
+if ! sudo -u shift-agent /opt/shift-agent/venv/bin/python -c "
+import json, sys, pathlib
+sys.path.insert(0, '/opt/shift-agent')
+from schemas import CateringLeadStore, MenuPendingUpdate, is_catering_transition_allowed
+leads_p = pathlib.Path('/opt/shift-agent/state/catering-leads.json')
+if leads_p.exists():
+    CateringLeadStore.model_validate(json.loads(leads_p.read_text()))
+pending_p = pathlib.Path('/opt/shift-agent/state/catering-menu-pending.json')
+if pending_p.exists():
+    MenuPendingUpdate.model_validate(json.loads(pending_p.read_text()))
+assert not is_catering_transition_allowed('CLOSED', 'NEW'), 'CLOSED is terminal — must not allow NEW'
+assert is_catering_transition_allowed('NEW', 'EXTRACTING'), 'NEW->EXTRACTING happy-path'
+assert is_catering_transition_allowed('AWAITING_OWNER_APPROVAL', 'OWNER_APPROVED'), 'approve flow'
+print('catering schema + transition table validated')
+" 2>&1; then
+    echo "FAIL: catering schema validation" >&2
+    exit 1
+fi
+echo "✓ catering schema + transition table"
+
+# 11. Agent #21 Expense Bookkeeper — scripts + dirs + perms + disabled-default config
 test -x /usr/local/bin/extract-receipt        || { echo "FAIL: extract-receipt missing/not-exec" >&2; exit 1; }
 test -x /usr/local/bin/apply-expense-decision || { echo "FAIL: apply-expense-decision missing/not-exec" >&2; exit 1; }
 test -x /usr/local/bin/prune-and-expire-expenses.py || { echo "FAIL: prune-and-expire-expenses.py missing/not-exec" >&2; exit 1; }
