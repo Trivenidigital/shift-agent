@@ -28,17 +28,25 @@ for script in \
 done
 echo "✓ All scripts present + executable"
 
-# 2. Python modules importable
+# 2. Python modules importable + new safe_io chokepoint symbols present
+# Per design-review R3: module-level import alone won't catch a missing
+# *symbol* on the module, only a missing module. Fail-closed on the specific
+# names that catering scripts now depend on (assert_load_status_clean,
+# LoadStatusError, try_acquire_filelock_with_retry, LockUnavailable).
 if ! python3 -c "
 import sys
 sys.path.insert(0, '/opt/shift-agent')
 import schemas, safe_io, exit_codes
+from safe_io import (
+    assert_load_status_clean, LoadStatusError,
+    try_acquire_filelock_with_retry, LockUnavailable,
+)
 print('schema classes:', [c for c in dir(schemas) if not c.startswith('_')][:5])
 " > /dev/null; then
-    echo "FAIL: Python modules don't import"
+    echo "FAIL: Python modules / safe_io chokepoint symbols don't import"
     exit 1
 fi
-echo "✓ Python modules importable"
+echo "✓ Python modules importable (incl. safe_io chokepoint symbols)"
 
 # 3. Config loads and validates
 if ! python3 -c "
