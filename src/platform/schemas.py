@@ -1818,6 +1818,41 @@ class CateringDeclineAttempted(_BaseEntry):
     code: str = Field(pattern=_CODE_FULL_PATTERN)
 
 
+class ConfigLoadFailed(_BaseEntry):
+    """PR-D1: emitted best-effort by audit_helpers.log_config_load_failed_best_effort
+    when a config file fails to load (parse error, validation error,
+    FileNotFoundError, OSError). Captures the error class + path so
+    operators can correlate a missing-config bug with the specific
+    script that hit it.
+
+    Helper uses datetime.now(timezone.utc) always — when config fails
+    to load, customer_now() has no tz source. UTC is the only safe ts
+    (design v2 §4.2 / M4).
+    """
+    type: Literal["config_load_failed"]
+    path: str = Field(min_length=1)
+    error_class: str = Field(min_length=1, max_length=80)
+    error_detail: str = Field(default="", max_length=2000)
+    script_name: str = Field(min_length=1, max_length=80)
+
+
+class CateringLeadManuallyReconciled(_BaseEntry):
+    """PR-D1: emitted by catering-lead-reconcile script (PR-D2). Distinguishes
+    operator intervention from automated state advance (which uses
+    CateringLeadStatusChange with actor='system' or 'owner').
+
+    Naming: design v2 §14.2 R5-H-2 — verb form `Reconcile` violates
+    Catering<Subject><PastParticiple> pattern; renamed to past-participle
+    `Reconciled`.
+    """
+    type: Literal["catering_lead_manually_reconciled"]
+    lead_id: str = Field(min_length=1)
+    from_status: CateringLeadStatus
+    to_status: CateringLeadStatus
+    reason: str = Field(min_length=1, max_length=2000)
+    operator_uid: int  # os.getuid() — captures who ran the script
+
+
 class CateringQuoteSentLeadMissing(_BaseEntry):
     """PR-D1: emitted by apply-catering-owner-decision when the post-bridge
     re-load of leads.json finds the lead absent (matched_idx is None).
@@ -1989,6 +2024,9 @@ LogEntry = Annotated[
         Annotated[CateringQuoteRenderFailed, Tag("catering_quote_render_failed")],
         # PR-D1: post-bridge state-vs-outbound divergence audit
         Annotated[CateringQuoteSentLeadMissing, Tag("catering_quote_sent_lead_missing")],
+        # PR-D1: config load observability + operator reconcile audit
+        Annotated[ConfigLoadFailed, Tag("config_load_failed")],
+        Annotated[CateringLeadManuallyReconciled, Tag("catering_lead_manually_reconciled")],
         Annotated[MenuUpdateProposed, Tag("menu_update_proposed")],
         Annotated[MenuUpdateApplied, Tag("menu_update_applied")],
         Annotated[MenuUpdateRejected, Tag("menu_update_rejected")],
@@ -2097,6 +2135,7 @@ __all__ = [
     "CateringOwnerEdited", "CateringDeclineAttempted",
     "CateringQuoteRenderFailed",
     # PR-D1
-    "CateringQuoteSentLeadMissing",
+    "CateringQuoteSentLeadMissing", "ConfigLoadFailed",
+    "CateringLeadManuallyReconciled",
     "MenuUpdateProposed", "MenuUpdateApplied", "MenuUpdateRejected",
 ]
