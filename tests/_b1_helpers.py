@@ -1,13 +1,29 @@
 """Shared helpers for v3.1 B1 case pytest (`test_catering_b1_cases.py`).
 
-Private module (leading underscore — pytest does not collect). Mirrors the
+Private module (leading underscore - pytest does not collect). Mirrors the
 plain-function helpers in `tests/test_catering_v02_scripts.py` but keeps the
 B1 doc-spec test file self-contained against future helper drift. If both
 modules ever need to share a single source of truth, extract upward to
 `tests/conftest.py` per design-review HIGH-C1.
 
-Intentionally Linux-only — every function depends on `safe_io`'s fcntl path
+Intentionally Linux-only - every function depends on `safe_io`'s fcntl path
 or hyphen-named scripts that need importlib loading.
+
+IMPORTANT - importlib pattern for hyphen-named scripts (no .py extension):
+  spec_from_file_location(name, path) returns None for files without a
+  recognized extension. We must construct an explicit SourceFileLoader.
+  Additionally, we cannot pre-set mod.__name__ to "__main__" because the
+  loader's _check_name_wrapper rejects exec_module calls where
+  module.__name__ != spec.name. The correct pattern is:
+    1. Build SourceFileLoader explicitly
+    2. exec_module first (with __name__ = spec.name)
+    3. Override module-level path attrs AFTER exec_module so they survive
+    4. Apply any monkey-patches (e.g. customer_now)
+    5. Call sys.exit(mod.main()) explicitly
+  This pattern is what `tests/test_validate_sender_block.py` already does
+  for hyphen-named scripts; the existing v02 helpers used a broken
+  pattern that returned spec=None - tests written against it never
+  actually executed.
 """
 from __future__ import annotations
 
@@ -24,7 +40,7 @@ from typing import Optional
 
 import yaml
 
-# Script paths (resolved from this file's location: tests/_b1_helpers.py → repo root)
+# Script paths (resolved from this file's location: tests/_b1_helpers.py -> repo root)
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 CREATE = _REPO_ROOT / "src" / "agents" / "catering" / "scripts" / "create-catering-lead"
 APPLY = _REPO_ROOT / "src" / "agents" / "catering" / "scripts" / "apply-catering-owner-decision"
@@ -34,7 +50,10 @@ PLATFORM_DIR = _REPO_ROOT / "src" / "platform"
 
 
 class BridgeStub(BaseHTTPRequestHandler):
-    """Captures bridge POST bodies into BridgeStub.requests (class attribute)."""
+    """Captures bridge POST bodies into BridgeStub.requests (class attribute).
+
+    Class-level requests list reset by `bridge_server` fixture between tests.
+    """
     requests: list = []
 
     def do_POST(self):
@@ -42,8 +61,9 @@ class BridgeStub(BaseHTTPRequestHandler):
         body = self.rfile.read(length).decode("utf-8")
         try:
             doc = json.loads(body)
-        except Exception:
-            doc = {}
+        except json.JSONDecodeError as e:
+            # Stash raw bytes + error so bridge_post_text can surface diagnosis
+            doc = {"_raw_body": body, "_decode_error": str(e)}
         self.__class__.requests.append(doc)
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -76,7 +96,7 @@ def make_env_dir(tmp_path: Path, *, customer_tz: str = "America/New_York") -> Pa
     return tmp_path
 
 
-def _env_for_subprocess(env_dir: Path, bridge_port: int) -> dict:
+def _env_for_subprocess() -> dict:
     return {
         **os.environ,
         "PYTHONPATH": str(PLATFORM_DIR),
@@ -97,11 +117,17 @@ def run_create(
     """Invoke create-catering-lead via importlib wrapper.
 
     now_override (tz-aware datetime): patches mod.customer_now BEFORE main() runs.
+
+    Pattern: SourceFileLoader (hyphen-named script) -> exec_module ->
+    override module-level paths -> patch customer_now -> sys.exit(mod.main()).
     """
     now_iso = now_override.isoformat() if now_override else None
     use_now = now_override is not None
     wrapper = f"""
 import sys, pathlib
+import importlib.util
+import importlib.machinery
+
 sys.argv = [
     "create-catering-lead",
     "--customer-phone", {customer_phone!r},
@@ -110,18 +136,21 @@ sys.argv = [
     "--message-id", {message_id!r},
     "--fields-json", {json.dumps(fields)!r},
 ]
-import importlib.util
-spec = importlib.util.spec_from_file_location("ccl", {str(CREATE)!r})
+
+# SourceFileLoader: required for hyphen-named scripts (no .py extension).
+loader = importlib.machinery.SourceFileLoader("ccl", {str(CREATE)!r})
+spec = importlib.util.spec_from_file_location("ccl", {str(CREATE)!r}, loader=loader)
 mod = importlib.util.module_from_spec(spec)
-mod.__name__ = "ccl_test_loaded"
+sys.path.insert(0, str(pathlib.Path({str(PLATFORM_DIR)!r})))
+spec.loader.exec_module(mod)
+
+# Override module-level paths AFTER exec_module so they survive.
 mod.CONFIG_PATH = pathlib.Path({str(env_dir / 'config.yaml')!r})
 mod.LEADS_PATH = pathlib.Path({str(env_dir / 'state' / 'catering-leads.json')!r})
 mod.LEADS_LOCK = pathlib.Path({str(env_dir / 'state' / 'catering-leads.json.lock')!r})
 mod.LOG_PATH = pathlib.Path({str(env_dir / 'logs' / 'decisions.log')!r})
 mod.TEMPLATE_DIR = pathlib.Path({str(env_dir / 'templates')!r})
 mod.BRIDGE_URL = "http://127.0.0.1:{bridge_port}/send"
-sys.path.insert(0, str(pathlib.Path({str(PLATFORM_DIR)!r})))
-spec.loader.exec_module(mod)
 
 if {use_now!r}:
     from datetime import datetime as _dt
@@ -135,7 +164,7 @@ sys.exit(mod.main())
 """
     return subprocess.run(
         [sys.executable, "-c", wrapper],
-        capture_output=True, text=True, env=_env_for_subprocess(env_dir, bridge_port),
+        capture_output=True, text=True, env=_env_for_subprocess(),
         timeout=20,
     )
 
@@ -153,6 +182,9 @@ def run_apply(
     """Invoke apply-catering-owner-decision via importlib wrapper.
 
     menu_path: if set, overrides mod.MENU_PATH for the subprocess (used by C16/C17).
+
+    Pattern matches run_create: SourceFileLoader -> exec_module -> override
+    paths (including MENU_PATH) -> sys.exit(mod.main()).
     """
     extra = []
     if edit_text:
@@ -164,15 +196,22 @@ def run_apply(
         menu_override = f"mod.MENU_PATH = pathlib.Path({str(menu_path)!r})"
     wrapper = f"""
 import sys, pathlib
+import importlib.util
+import importlib.machinery
+
 sys.argv = [
     "apply-catering-owner-decision",
     "--code", {code!r},
     "--decision", {decision!r},
 ] + {extra!r}
-import importlib.util
-spec = importlib.util.spec_from_file_location("acod", {str(APPLY)!r})
+
+loader = importlib.machinery.SourceFileLoader("acod", {str(APPLY)!r})
+spec = importlib.util.spec_from_file_location("acod", {str(APPLY)!r}, loader=loader)
 mod = importlib.util.module_from_spec(spec)
-mod.__name__ = "__main__"
+sys.path.insert(0, str(pathlib.Path({str(PLATFORM_DIR)!r})))
+spec.loader.exec_module(mod)
+
+# Override module-level paths AFTER exec_module so they survive.
 mod.CONFIG_PATH = pathlib.Path({str(env_dir / 'config.yaml')!r})
 mod.LEADS_PATH = pathlib.Path({str(env_dir / 'state' / 'catering-leads.json')!r})
 mod.LEADS_LOCK = pathlib.Path({str(env_dir / 'state' / 'catering-leads.json.lock')!r})
@@ -180,24 +219,29 @@ mod.LOG_PATH = pathlib.Path({str(env_dir / 'logs' / 'decisions.log')!r})
 mod.TEMPLATE_DIR = pathlib.Path({str(env_dir / 'templates')!r})
 mod.BRIDGE_URL = "http://127.0.0.1:{bridge_port}/send"
 {menu_override}
-sys.path.insert(0, str(pathlib.Path({str(PLATFORM_DIR)!r})))
-spec.loader.exec_module(mod)
+
+sys.exit(mod.main())
 """
     return subprocess.run(
         [sys.executable, "-c", wrapper],
-        capture_output=True, text=True, env=_env_for_subprocess(env_dir, bridge_port),
+        capture_output=True, text=True, env=_env_for_subprocess(),
         timeout=20,
     )
 
 
 def lookup_prior_leads_by_phone_helper(phone: str, leads_path: Path) -> dict:
     """Load lookup-prior-leads-by-phone via importlib (hyphen-named script)
-    and call the importable function directly. Mirrors test_lookup_prior_leads.py
-    pattern."""
+    and call the importable function directly.
+
+    Uses SourceFileLoader explicitly (matches the pattern documented in
+    test_validate_sender_block.py for hyphen-named scripts).
+    """
     import importlib.util
-    spec = importlib.util.spec_from_file_location("lookup_mod", LOOKUP)
-    mod = importlib.util.module_from_spec(spec)
+    import importlib.machinery
     sys.path.insert(0, str(PLATFORM_DIR))
+    loader = importlib.machinery.SourceFileLoader("lookup_mod", str(LOOKUP))
+    spec = importlib.util.spec_from_file_location("lookup_mod", str(LOOKUP), loader=loader)
+    mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod.lookup_prior_leads_by_phone(phone, leads_path=leads_path)
 
@@ -257,7 +301,10 @@ def read_audit_entries(env_dir: Path, type_filter: Optional[str] = None) -> list
 
 def bridge_post_text(BridgeStubCls) -> str:
     """Most-recent bridge POST's `message` field (per create-catering-lead's
-    payload structure: {"chatId": jid, "message": message})."""
+    payload structure: {"chatId": jid, "message": message}).
+
+    Asserts loudly on schema drift via 'message' key check.
+    """
     assert BridgeStubCls.requests, "no bridge POST captured"
     last = BridgeStubCls.requests[-1]
     assert "message" in last, f"unexpected payload keys: {list(last.keys())}"
@@ -270,7 +317,8 @@ def make_menu_fixture(tmp_path: Path) -> Path:
     Ensures schema-drift fails LOUDLY at fixture-construction time (per
     silent-failure-hunter MEDIUM-5). Verified against current schema:
     MenuItem fields = (name, price_usd, category, dietary_tags, available, notes, serves);
-    Menu requires updated_at."""
+    Menu requires updated_at.
+    """
     sys.path.insert(0, str(PLATFORM_DIR))
     from schemas import Menu, MenuItem  # noqa: E402
     items = [
