@@ -96,6 +96,70 @@ def flock(path):
 # END shift-agent-sender-id
 
 
+class LockUnavailable(RuntimeError):
+    """Raised by try_acquire_filelock_with_retry when all attempts exhaust
+    without acquiring the lock. Caller MUST handle — the contextmanager body
+    runs ONLY when the lock is held; LockUnavailable raises BEFORE the body.
+
+    This raise-on-exhaustion contract is deliberate: a bool-return shape would
+    be a footgun (caller forgets to check; runs lockless; corrupts state).
+    """
+
+
+from contextlib import contextmanager  # noqa: E402  — kept near the helper that uses it
+
+
+@contextmanager
+def try_acquire_filelock_with_retry(lockpath: Path, *, attempts: int = 3, sleep_sec: float = 1.0):
+    """Non-blocking flock with retry; raises LockUnavailable on exhaustion.
+
+    Targets the SAME `.lock` sibling pattern that FileLock(LEADS_LOCK) writers
+    use — serializes correctly with them. Use when blocking on a contended
+    lock would harm UX (e.g. a customer-facing SKILL preamble that must
+    complete in seconds).
+
+    Usage:
+        try:
+            with try_acquire_filelock_with_retry(LEADS_LOCK, attempts=3, sleep_sec=1.0):
+                # body runs only when lock is held
+                ...
+        except LockUnavailable:
+            return _empty_result("lock_timeout")
+
+    Caller MUST catch LockUnavailable; failing to do so is a programming bug
+    (the body never runs without the lock — there's no silent pass-through).
+
+    Implementation note: fd is opened OUTSIDE the retry loop and closed in
+    finally even when no acquire succeeds. `acquired` flag guards LOCK_UN so
+    we never call UN on a fd that never held the lock.
+    """
+    lockpath = Path(lockpath)
+    lockpath.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lockpath), os.O_RDWR | os.O_CREAT, 0o640)
+    acquired = False
+    try:
+        for attempt in range(max(1, attempts)):
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except BlockingIOError:
+                if attempt < max(1, attempts) - 1:
+                    time.sleep(max(0.0, sleep_sec))
+        if not acquired:
+            raise LockUnavailable(
+                f"could not acquire {lockpath} after {attempts} attempts"
+            )
+        yield
+    finally:
+        if acquired:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass  # fd close below releases anyway
+        os.close(fd)
+
+
 def safe_load_json(path: Path, default: Any = None) -> Tuple[Any, str]:
     """
     Load a JSON file with explicit failure signaling.
