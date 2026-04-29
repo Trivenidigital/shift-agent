@@ -55,6 +55,8 @@ from schemas import (  # noqa: E402
     CateringLeadStatusChange, CateringOwnerDecision, CateringQuoteSent,
     # v0.3 (review M2): durable observability for render-failed approves
     CateringQuoteRenderFailed,
+    # v0.3 (A1+A2): idempotency anchor for customer-quote send
+    CateringQuoteAttempted,
 )
 from exit_codes import (  # noqa: E402
     EXIT_OK, EXIT_INVALID_INPUT, EXIT_NOT_FOUND,
@@ -393,6 +395,28 @@ def main() -> int:
                     })
                     lead = store.leads[i]
                     break
+
+            # v0.3 A1+A2: idempotency anchor written BEFORE state-write (within
+            # same lock). On retry from a crashed run, presence of this audit
+            # row is the durable signal that approve was attempted; operators
+            # use it to manually resolve "lead in OWNER_APPROVED but no
+            # CateringQuoteSent" cases. Best-effort: audit failure does NOT
+            # block state-write (that's a different invariant), but the
+            # WARN surfaces in journald.
+            try:
+                _log(TypeAdapter(CateringQuoteAttempted), CateringQuoteAttempted(
+                    type="catering_quote_attempted",
+                    ts=now,
+                    lead_id=lead.lead_id,
+                    original_message_id=lead.original_message_id,
+                    code=code,
+                ))
+            except Exception as anchor_err:
+                sys.stderr.write(
+                    f"WARN: CateringQuoteAttempted audit-write failed "
+                    f"(non-fatal, pre-state): "
+                    f"{type(anchor_err).__name__}: {anchor_err}\n"
+                )
 
         atomic_write_json(LEADS_PATH, store)
 

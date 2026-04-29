@@ -52,6 +52,8 @@ from schemas import (  # noqa: E402
     CateringOwnerApprovalRequested,
     # v0.3 audit classes
     CateringOwnerApprovalCardFailed, CateringOwnerApprovalCardSkipped,
+    # v0.3 C3: idempotency anchor written before bridge POST in create flow
+    CateringOwnerApprovalCardAttempted,
     InvariantViolation,
     assert_rejection_reason_complete,
     # v0.3 lifecycle sentinel — review M1 consolidation
@@ -111,8 +113,8 @@ def _next_lead_id(store: CateringLeadStore) -> str:
     return f"L{last + 1:04d}"
 
 
-def _bridge_post(jid: str, message: str) -> tuple[bool, str]:
-    """POST to local bridge. Returns (success, message_id_or_error)."""
+def _bridge_post_once(jid: str, message: str) -> tuple[bool, str]:
+    """Single-attempt POST. Internal — callers use _bridge_post for retry."""
     payload = json.dumps({"chatId": jid, "message": message}).encode("utf-8")
     req = urllib.request.Request(
         BRIDGE_URL, data=payload,
@@ -129,6 +131,40 @@ def _bridge_post(jid: str, message: str) -> tuple[bool, str]:
             return True, mid
     except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError) as e:
         return False, f"{type(e).__name__}: {e}"
+
+
+def _bridge_post(jid: str, message: str) -> tuple[bool, str]:
+    """v0.3 C3: POST with one retry on connect-class failures.
+
+    Mirror of `send-coverage-message`'s retry pattern. Retries ONLY on
+    connect-side failures (URLError that wraps a ConnectionError /
+    timeout-before-handshake). Does NOT retry on:
+      - HTTPError (server returned a status code — likely deterministic)
+      - JSONDecodeError (server returned non-JSON — deterministic)
+      - empty messageId (server processed but returned bad shape)
+    so we don't double-send a message that the bridge already accepted.
+
+    Backoff: 0.5s between attempts. Total worst-case latency is
+    BRIDGE_TIMEOUT*2 + 0.5s = ~20.5s, still well within Hermes's
+    timeout budget for a SKILL invocation.
+    """
+    import time
+    ok, err = _bridge_post_once(jid, message)
+    if ok:
+        return ok, err
+    # Retry only on connect-class transient failures
+    if err.startswith("URLError:") and (
+        "Connection refused" in err
+        or "timed out" in err
+        or "Network is unreachable" in err
+        or "Temporary failure" in err
+    ):
+        sys.stderr.write(
+            f"INFO: bridge POST first attempt failed ({err}); retrying in 0.5s\n"
+        )
+        time.sleep(0.5)
+        return _bridge_post_once(jid, message)
+    return ok, err
 
 
 def _render_approval_card(
@@ -176,7 +212,10 @@ def _render_approval_card(
             running = 0
             cutoff = 0
             for i, item in enumerate(items):
-                running += len(item) + 2  # ", " separator
+                # v0.3 C6: separators only inserted between items, not before
+                # the first one. Was: `running += len(item) + 2` always,
+                # over-counting by 2 (joined.len = sum(item.len) + (n-1)*2).
+                running += len(item) + (2 if i > 0 else 0)
                 if running > WHATSAPP_OFF_MENU_BUDGET:
                     cutoff = i
                     break
@@ -596,6 +635,21 @@ def main() -> int:
     card_text = _render_approval_card(
         lead_id, approval_code, args.customer_phone, args.customer_name,
         args.raw_inquiry, extracted,
+    )
+    # v0.3 C3: idempotency anchor. Mirror of CateringQuoteAttempted in
+    # apply-script. Written BEFORE bridge POST so a crash mid-POST leaves
+    # a durable trail that approve-card was attempted; operators use this
+    # to manually resolve "lead in AWAITING but no card sent" cases.
+    # Best-effort — bridge POST is the more important step.
+    _audit_best_effort(
+        TypeAdapter(CateringOwnerApprovalCardAttempted),
+        CateringOwnerApprovalCardAttempted(
+            type="catering_owner_approval_card_attempted",
+            ts=datetime.now(tz=timezone.utc),
+            lead_id=lead_id,
+            original_message_id=args.message_id,
+        ),
+        context="card_attempted",
     )
     ok, mid_or_err = _bridge_post(cfg.owner.self_chat_jid, card_text)
     if not ok:
