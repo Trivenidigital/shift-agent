@@ -282,6 +282,26 @@ case "$ACTION" in
 
         install_artifacts "$STAGING"
 
+        # Pre-restart import gate: a missing safe_io chokepoint symbol means
+        # traffic hits new code BEFORE smoke fires post-restart. Run the
+        # symbol-import check against the just-installed binary (still old
+        # service) — failure path rolls back without touching live traffic.
+        if ! /usr/local/bin/check-safe-io-symbols > /dev/null; then
+            echo "FAIL: pre-restart import gate — refusing to restart hermes-gateway" >&2
+            if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                "$0" rollback "$PREV_TAG"
+                # Evict the broken tarball from the rotation so next deploy
+                # doesn't surface it as a candidate rollback target.
+                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+            else
+                /usr/local/bin/shift-agent-notify-owner \
+                    --title "Deploy FAILED at pre-restart import gate, no prior tarball" \
+                    --priority 2 \
+                    "Deploy $NEW_TAG failed pre-restart symbol-import check. New files installed but service still on OLD code (gateway not yet restarted). Manual revert by re-extracting prior staging or installing $PREV_TAG.tgz." 2>/dev/null || true
+            fi
+            exit 1
+        fi
+
         # Restart services (in order: tail-logger first, gateway last)
         systemctl restart shift-agent-tail-logger.timer 2>/dev/null || true
         systemctl restart shift-agent-health.timer 2>/dev/null || true
