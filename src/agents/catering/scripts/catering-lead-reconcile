@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+"""catering-lead-reconcile — operator script for state-vs-outbound divergence.
+
+PR-D2 commit 7 / design v2 §8 + §9.1 B-1.
+
+Operator-driven status correction when apply-catering-owner-decision's
+post-bridge re-load found the lead absent (CateringQuoteSentLeadMissing
+audit row + Pushover P2 fired). This script lets the operator manually
+advance the lead's status under LEADS_LOCK with an audit trail.
+
+Whitelist (per design v2 §9.1 B-1 R3+R4+R5 convergent fix):
+  --target-status SENT_TO_CUSTOMER  — when customer received the quote
+  --target-status OWNER_REJECTED    — when the lead should be killed
+  --target-status CLOSED            — terminal cleanup (used by
+                                       synthetic-retry-harness for probe
+                                       lead disposal)
+
+Usage:
+  catering-lead-reconcile \\
+      --lead-id L00042 \\
+      --target-status SENT_TO_CUSTOMER \\
+      --reason "post-bridge divergence ticket #123"
+
+  catering-lead-reconcile \\
+      --lead-id L00099 \\
+      --target-status CLOSED \\
+      --reason "synthetic-probe-cleanup"
+
+Exit codes:
+  0 — reconciled
+  2 — invalid args / forbidden transition / same-state refusal
+  3 — lead not found
+  4 — leads.json corrupt (load failed)
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
+
+from safe_io import (  # noqa: E402
+    FileLock, atomic_write_json, ndjson_append, customer_now,
+    load_model, flock, load_yaml_model,
+)
+from schemas import (  # noqa: E402
+    Config, CateringLeadStore,
+    CateringLeadStatusChange, CateringLeadManuallyReconciled,
+)
+from exit_codes import (  # noqa: E402
+    EXIT_OK, EXIT_INVALID_INPUT, EXIT_NOT_FOUND, EXIT_SCHEMA_VIOLATION,
+)
+from audit_helpers import log_config_load_failed_best_effort  # noqa: E402
+from pydantic import TypeAdapter, ValidationError  # noqa: E402
+
+CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
+LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
+LEADS_LOCK = Path("/opt/shift-agent/state/catering-leads.json.lock")
+LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+
+ALLOWED_TARGETS = ("SENT_TO_CUSTOMER", "OWNER_REJECTED", "CLOSED")
+SAFE_FROM_STATUSES = (
+    "AWAITING_OWNER_APPROVAL", "OWNER_APPROVED", "OWNER_EDITED",
+    "OWNER_REJECTED", "SENT_TO_CUSTOMER",
+)
+
+
+def _append_audit_under_leadslock(adapter: TypeAdapter, entry) -> None:
+    """Caller MUST hold LEADS_LOCK. Acquires inner LOG_PATH flock."""
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with flock(LOG_PATH):
+        ndjson_append(LOG_PATH, adapter.dump_json(entry).decode("utf-8"))
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--lead-id", required=True, help="Lead ID, e.g. L00042")
+    ap.add_argument("--target-status", required=True, choices=ALLOWED_TARGETS)
+    ap.add_argument("--reason", required=True, help="Operator reason (1-2000 chars)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Validate inputs + state without mutating")
+    args = ap.parse_args()
+
+    if not args.reason.strip():
+        sys.stderr.write("--reason cannot be empty\n")
+        return EXIT_INVALID_INPUT
+
+    # Load config (best-effort tz; falls back to UTC)
+    try:
+        cfg = load_yaml_model(CONFIG_PATH, Config)
+        now = customer_now(cfg.customer.timezone)
+    except (FileNotFoundError, RuntimeError, ValidationError) as e:
+        log_config_load_failed_best_effort(CONFIG_PATH, e)
+        sys.stderr.write(f"WARN: config load failed; using UTC: {e}\n")
+        now = datetime.now(timezone.utc)
+
+    with FileLock(LEADS_LOCK):
+        try:
+            store, status = load_model(LEADS_PATH, CateringLeadStore, default=CateringLeadStore())
+            if status not in ("ok", "missing", "empty"):
+                sys.stderr.write(f"leads.json status={status!r}; refusing to mutate\n")
+                return EXIT_SCHEMA_VIOLATION
+        except Exception as e:
+            sys.stderr.write(f"failed to load leads.json: {e}\n")
+            return EXIT_SCHEMA_VIOLATION
+
+        matched_idx = next(
+            (i for i, l in enumerate(store.leads) if l.lead_id == args.lead_id),
+            None,
+        )
+        if matched_idx is None:
+            sys.stderr.write(f"lead {args.lead_id} not found\n")
+            return EXIT_NOT_FOUND
+
+        lead = store.leads[matched_idx]
+        from_status = lead.status
+
+        if from_status not in SAFE_FROM_STATUSES:
+            sys.stderr.write(
+                f"refusing reconcile from terminal/unsafe status {from_status!r} "
+                f"(allowed from-statuses: {SAFE_FROM_STATUSES})\n"
+            )
+            return EXIT_INVALID_INPUT
+
+        # R3-M-1 (design v2 §9.3): same-state refuse to avoid zero-delta audit churn
+        if from_status == args.target_status:
+            sys.stderr.write(
+                f"lead {args.lead_id} already in target status {args.target_status}\n"
+            )
+            return EXIT_INVALID_INPUT
+
+        if args.dry_run:
+            print(json.dumps({
+                "lead_id": args.lead_id,
+                "from_status": from_status,
+                "to_status": args.target_status,
+                "dry_run": True,
+            }))
+            return EXIT_OK
+
+        # Mutate state
+        store.leads[matched_idx] = lead.model_copy(update={
+            "status": args.target_status,
+            "updated_at": now,
+        })
+        atomic_write_json(LEADS_PATH, store)
+
+        # Two audit rows: status_change (operator-actor) + new manually-reconciled variant
+        _append_audit_under_leadslock(
+            TypeAdapter(CateringLeadStatusChange),
+            CateringLeadStatusChange(
+                type="catering_lead_status_change", ts=now,
+                lead_id=args.lead_id,
+                from_status=from_status,
+                to_status=args.target_status,
+                actor="operator",
+                reason=args.reason[:2000],
+            ),
+        )
+        _append_audit_under_leadslock(
+            TypeAdapter(CateringLeadManuallyReconciled),
+            CateringLeadManuallyReconciled(
+                type="catering_lead_manually_reconciled", ts=now,
+                lead_id=args.lead_id,
+                from_status=from_status,
+                to_status=args.target_status,
+                reason=args.reason[:2000],
+                operator_uid=os.getuid() if hasattr(os, "getuid") else 0,
+            ),
+        )
+
+    print(json.dumps({
+        "lead_id": args.lead_id,
+        "from_status": from_status,
+        "to_status": args.target_status,
+        "reconciled": True,
+    }))
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())
