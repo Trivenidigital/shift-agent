@@ -1,5 +1,10 @@
 # Plan — Catering Comprehensive Fix (all actionable findings)
 
+> ⚠️ **SUPERSEDED** — see `tasks/catering-comprehensive-fix-design-v2.md`
+> for the current design (post 5-plan-review + 5-design-review synthesis).
+> This plan is the v0 surface inventory that fed Design v1; kept for the
+> pipeline trail.
+
 **Drift-check tag:** extends-Hermes (no Hermes-internal change; schema + script + test additions only)
 
 **Source:** `tasks/catering-e2e-report.md` — 63 findings from 4-subagent E2E audit (10 CRITICAL, 19 HIGH, 19 MEDIUM, 15 LOW). User directive: "fix everything", full autonomous pipeline.

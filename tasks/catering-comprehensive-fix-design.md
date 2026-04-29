@@ -1,5 +1,11 @@
 # Design v1 — Catering Comprehensive Fix
 
+> ⚠️ **SUPERSEDED** — see `tasks/catering-comprehensive-fix-design-v2.md`
+> for the final design (post 5-design-review synthesis). v2 corrects the
+> CATERING_TRANSITIONS status names, fixes the rstrip bug, moves
+> module-level asserts, and addresses 34 reviewer concerns. This v1 is
+> kept for the pipeline trail.
+
 **Drift-check tag:** extends-Hermes (no Hermes-internal change)
 **Branch:** `fix/catering-comprehensive`
 **Source:** Plan at `tasks/catering-comprehensive-fix-plan.md` + 5-parallel plan-review synthesis (this doc) + pre-deploy live audit (`tasks/catering-e2e-report.md`)

@@ -25,9 +25,30 @@ import sys
 _CODE_BODY_PATTERN = r"[A-HJKMNPQR-Z2-9]{5}"
 _CODE_FULL_PATTERN = rf"^#{_CODE_BODY_PATTERN}$"
 
-# Sentinel values for mode="before" validator backfill of legacy data.
-# Defined at module scope (NOT class-level) to avoid Pydantic v2's
-# ModelPrivateAttr treatment of leading-underscore class attributes.
+# ─────────────────────────────────────────────────────────────────
+# Lifecycle sentinels — quote_text / edit_text by stage (review M1)
+# ─────────────────────────────────────────────────────────────────
+# All sentinels share the "<...-v0.3-...>" shape: searchable in audit logs,
+# unmistakable for real owner content, and grep-friendly. Defined at module
+# scope (NOT class-level) to avoid Pydantic v2's ModelPrivateAttr treatment
+# of leading-underscore class attributes.
+#
+# Lifecycle of CateringLead.quote_text:
+#   1. create-catering-lead mints lead with quote_text=PRE_QUOTE_DRAFT_SENTINEL
+#      (extractor stage doesn't draft; S1 invariant requires non-empty)
+#   2. apply-catering-owner-decision approve flow renders the real quote and
+#      overwrites quote_text via model_copy (Q1 fix — Commit 3a)
+#   3. Legacy pre-v0.3 leads with empty quote_text are backfilled on READ
+#      by CateringLead's mode="before" shim with LEGACY_QUOTE_TEXT_SENTINEL.
+#      The shim is a safety net; tools/catering-state-migrate.py is the
+#      proper pre-deploy fix.
+#
+# Lifecycle of CateringOwnerDecision.edit_text:
+#   1. New decisions with decision="edit" require non-empty edit_text
+#      (mode="after" strict validator)
+#   2. Legacy pre-v0.3 audit entries with decision="edit" + empty edit_text
+#      are backfilled on READ with LEGACY_EDIT_TEXT_SENTINEL.
+PRE_QUOTE_DRAFT_SENTINEL = "<v0.3-pre-quote-draft>"
 LEGACY_QUOTE_TEXT_SENTINEL = "<legacy-pre-v0.3-no-quote-persisted>"
 LEGACY_EDIT_TEXT_SENTINEL = "<legacy-pre-v0.3-no-edit-text-recorded>"
 
@@ -37,6 +58,18 @@ LEGACY_EDIT_TEXT_SENTINEL = "<legacy-pre-v0.3-no-edit-text-recorded>"
 # ─────────────────────────────────────────────────────────────────
 
 _PHONE_E164 = re.compile(r"^\+\d{10,15}$")
+
+# Public alias for the E.164 regex (review M3) — avoids cross-package
+# private imports (e.g. lookup-prior-leads-by-phone). Callers should use
+# this constant or is_valid_e164() instead of the underscore-prefixed
+# _PHONE_E164 module attribute.
+PHONE_E164_PATTERN = r"^\+\d{10,15}$"
+
+
+def is_valid_e164(s: Any) -> bool:
+    """Public predicate — True if s is a string matching the E.164 canonical
+    pattern. Safe on non-string input (returns False rather than raising)."""
+    return isinstance(s, str) and bool(_PHONE_E164.match(s))
 
 
 class E164Phone(str):
@@ -71,37 +104,61 @@ class E164Phone(str):
           - exactly 10 digits   : if country_code='US', prepend `+1`; else raise
           - `00XXX...`          : convert to `+XXX...`
 
-        country_code: ISO-3166 alpha-2. Currently 'US' is honored; future
-        country codes can be added as customers expand.
+        country_code: ISO-3166 alpha-2 (case-insensitive — coerced to upper).
+        Currently 'US' is honored; future country codes can be added as
+        customers expand.
 
-        Raises ValueError for 10-digit bare-no-country input when no
-        country_code provided.
+        Always validates the result against PHONE_E164_PATTERN before
+        returning (review L7). Raises ValueError on any failure mode:
+          - 10-digit bare-no-country input when no country_code provided
+          - non-digit input
+          - canonical form fails E.164 length bounds (10-15 digits with +)
         """
+        if not isinstance(raw, str):
+            raise ValueError(f"phone must be str, got {type(raw).__name__}")
+        if country_code is not None:
+            country_code = country_code.upper()  # review L6: case-insensitive
         if "@" in raw:
             raw = raw.split("@", 1)[0]
         s = re.sub(r"[\s\-().]", "", raw)
         if s.startswith("00"):
             s = "+" + s[2:]
+
         if s.startswith("+"):
-            return s
-        # Bare digits path
-        if not s.isdigit():
-            return s  # let validate() raise the format error
-        n = len(s)
-        if n == 10:
-            # US local format (no country code). Default-prepend +1 if cfg
-            # tells us this is a US customer; otherwise reject.
-            if country_code == "US":
-                return "+1" + s
+            canonical = s
+        elif s.isdigit():
+            n = len(s)
+            if n == 10:
+                # US local format (no country code). Default-prepend +1 if
+                # cfg tells us this is a US customer; otherwise reject.
+                if country_code == "US":
+                    canonical = "+1" + s
+                else:
+                    raise ValueError(
+                        f"phone {raw!r} is bare 10-digit without country "
+                        f"code. Set cfg.customer.country_code='US' or "
+                        f"include the country prefix."
+                    )
+            elif n == 11 and s.startswith("1"):
+                canonical = "+" + s  # US 11-digit
+            elif 10 <= n <= 15:
+                canonical = "+" + s  # International with country code
+            else:
+                raise ValueError(
+                    f"phone {raw!r} has {n} digits; E.164 requires 10-15."
+                )
+        else:
             raise ValueError(
-                f"phone {raw!r} is bare 10-digit without country code. "
-                f"Set cfg.customer.country_code='US' or include the country prefix."
+                f"phone {raw!r} contains non-digit characters after canonicalization"
             )
-        if n == 11 and s.startswith("1"):
-            return "+" + s  # US 11-digit
-        if 10 <= n <= 15:
-            return "+" + s  # International with country code
-        return "+" + s  # let validate() raise on length
+
+        # Always validate the canonical form (review L7 — close fail-open hole).
+        if not _PHONE_E164.match(canonical):
+            raise ValueError(
+                f"canonical form {canonical!r} does not match E.164 pattern "
+                f"(input was {raw!r})"
+            )
+        return canonical
 
     @classmethod
     def __get_pydantic_core_schema__(cls, source_type, handler):
@@ -258,10 +315,17 @@ class CustomerConfig(BaseModel):
     location_id: str
     timezone: str
     languages: list[str] = []
-    # v0.3: ISO-3166 alpha-2 country code. Used by E164Phone.from_any to
-    # default-prepend country prefix for bare 10-digit US input. Optional —
-    # if absent, bare 10-digit phones are rejected (safer than guessing).
-    country_code: Optional[str] = Field(default=None, pattern=r"^[A-Z]{2}$")
+    # v0.3 (review L6): ISO-3166 alpha-2 country code, case-insensitive.
+    # Used by E164Phone.from_any to default-prepend country prefix for
+    # bare 10-digit US input. Optional — if absent, bare 10-digit phones
+    # are rejected (safer than guessing). Coerced to upper-case so
+    # operators can write "us" or "US" in config.yaml without confusion.
+    country_code: Optional[str] = Field(default=None, pattern=r"^[A-Za-z]{2}$")
+
+    @field_validator("country_code", mode="after")
+    @classmethod
+    def _country_code_uppercase(cls, v: Optional[str]) -> Optional[str]:
+        return v.upper() if isinstance(v, str) else v
 
     @field_validator("timezone")
     @classmethod
@@ -348,13 +412,24 @@ def is_catering_terminal(status: str) -> bool:
 # scripts at every status change. Forbidden transitions raise via
 # is_catering_transition_allowed; the schema layer does NOT enforce
 # (would break replay of historic leads).
-CATERING_TRANSITIONS: dict[str, set[str]] = {
+#
+# Review L9: typed against the CateringLeadStatus Literal so mypy catches
+# typos (a misspelled status as key OR value would be a type error).
+CATERING_TRANSITIONS: dict[CateringLeadStatus, set[CateringLeadStatus]] = {
     "NEW": {"EXTRACTING", "NOT_CATERING"},
     "EXTRACTING": {"AWAITING_OWNER_APPROVAL", "NOT_CATERING"},
     "NOT_CATERING": set(),                                                # terminal
     "AWAITING_OWNER_APPROVAL": {"OWNER_APPROVED", "OWNER_EDITED", "OWNER_REJECTED", "STALE"},
     "OWNER_EDITED": {"AWAITING_OWNER_APPROVAL", "OWNER_REJECTED"},
-    "OWNER_APPROVED": {"SENT_TO_CUSTOMER", "AWAITING_OWNER_APPROVAL"},   # AWAITING for retry-from-failure
+    # Review L8: OWNER_APPROVED → AWAITING_OWNER_APPROVAL covers
+    # retry-from-failure. If apply-script approve flow crashes after the
+    # state-write but before customer-quote send (or the bridge POST
+    # returns 5xx), retrying needs to re-enter AWAITING so the new approve
+    # attempt can be re-evaluated. Without this, the lead is stuck in
+    # OWNER_APPROVED with no quote sent, and the operator can't recover
+    # without manual state surgery. The CateringQuoteAttempted idempotency
+    # anchor prevents duplicate sends on legit retries.
+    "OWNER_APPROVED": {"SENT_TO_CUSTOMER", "AWAITING_OWNER_APPROVAL"},
     "SENT_TO_CUSTOMER": {"CLOSED", "STALE"},
     "OWNER_REJECTED": set(),                                              # terminal
     "CLOSED": set(),                                                      # terminal
@@ -363,8 +438,11 @@ CATERING_TRANSITIONS: dict[str, set[str]] = {
 
 
 def is_catering_transition_allowed(from_s: str, to_s: str) -> bool:
-    """v0.3: returns True only for allowed transitions. False for unknown statuses."""
-    return to_s in CATERING_TRANSITIONS.get(from_s, set())
+    """v0.3: returns True only for allowed transitions. False for unknown
+    statuses. Accepts plain str (not Literal) for runtime ergonomics —
+    callers pass strings extracted from log entries and disk JSON.
+    """
+    return to_s in CATERING_TRANSITIONS.get(from_s, set())  # type: ignore[arg-type]
 
 
 def assert_rejection_reason_complete(reason_dict: dict) -> None:
@@ -1369,6 +1447,22 @@ class CateringDeclineAttempted(_BaseEntry):
     code: str = Field(pattern=_CODE_FULL_PATTERN)
 
 
+class CateringQuoteRenderFailed(_BaseEntry):
+    """v0.3 (review M2): emitted when apply-catering-owner-decision approve
+    flow fails to render the customer quote (template KeyError, OSError,
+    or unexpected validation issue). Without this audit row, an
+    approve-blocked-on-render-error left the lead at AWAITING_OWNER_APPROVAL
+    with no durable trace of why retries kept failing — operators saw stderr
+    only.
+    """
+    type: Literal["catering_quote_render_failed"]
+    lead_id: str = Field(min_length=1)
+    code: str = Field(pattern=_CODE_FULL_PATTERN)
+    error_class: str = Field(min_length=1, max_length=80,
+                             description="Python exception class name (e.g. 'KeyError')")
+    detail: str = Field(default="", max_length=2000)
+
+
 # ─────────────────────────────────────────────────────────────────
 # Multi-Location Coordinator log entries (Agent #3)
 # ─────────────────────────────────────────────────────────────────
@@ -1463,6 +1557,8 @@ LogEntry = Annotated[
         CateringQuoteAttempted, CateringOwnerApprovalCardAttempted,
         CateringOwnerApprovalCardFailed, CateringOwnerApprovalCardSkipped,
         CateringOwnerEdited, CateringDeclineAttempted,
+        # v0.3 (review M2): render-failure observability
+        CateringQuoteRenderFailed,
         MenuUpdateProposed, MenuUpdateApplied, MenuUpdateRejected,
     ],
     Field(discriminator="type"),
@@ -1470,6 +1566,10 @@ LogEntry = Annotated[
 
 
 __all__ = [
+    # v0.3 phone helpers
+    "PHONE_E164_PATTERN", "is_valid_e164",
+    # v0.3 lifecycle sentinels
+    "PRE_QUOTE_DRAFT_SENTINEL", "LEGACY_QUOTE_TEXT_SENTINEL", "LEGACY_EDIT_TEXT_SENTINEL",
     "E164Phone", "Role", "EmployeeId", "Employee", "PhoneAssignment", "ScheduleEntry", "Roster",
     "Config", "CustomerConfig", "OwnerConfig", "LimitsConfig", "AlertingConfig", "BackupConfig", "OperationsConfig",
     "DailyBriefConfig", "BriefSection",
@@ -1507,5 +1607,6 @@ __all__ = [
     "CateringQuoteAttempted", "CateringOwnerApprovalCardAttempted",
     "CateringOwnerApprovalCardFailed", "CateringOwnerApprovalCardSkipped",
     "CateringOwnerEdited", "CateringDeclineAttempted",
+    "CateringQuoteRenderFailed",
     "MenuUpdateProposed", "MenuUpdateApplied", "MenuUpdateRejected",
 ]

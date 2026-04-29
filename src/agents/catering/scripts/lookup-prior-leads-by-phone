@@ -67,7 +67,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "p
 
 from safe_io import load_model, customer_now  # noqa: E402
 from schemas import (  # noqa: E402
-    Config, CateringLeadStore, E164Phone,
+    Config, CateringLeadStore, E164Phone, is_valid_e164,
 )
 from exit_codes import (  # noqa: E402
     EXIT_OK, EXIT_INVALID_INPUT, EXIT_SCHEMA_VIOLATION, EXIT_GENERIC_ERROR,
@@ -120,9 +120,10 @@ def _canonicalize_phone(raw: str, *, country_code: Optional[str] = None) -> Opti
         if not isinstance(raw, str):
             return None
         canon = E164Phone.from_any(raw, country_code=country_code)
-        # Validate the canonical form matches E.164 regex
-        from schemas import _PHONE_E164  # noqa: WPS433  (private import OK — co-package)
-        if not _PHONE_E164.match(canon):
+        # v0.3 (review M3): use public is_valid_e164 helper instead of
+        # private _PHONE_E164 cross-package import. from_any now always
+        # validates internally (review L7), so this is defense-in-depth.
+        if not is_valid_e164(canon):
             return None
         return canon
     except (TypeError, ValueError, ValidationError):

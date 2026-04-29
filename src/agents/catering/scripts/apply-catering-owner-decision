@@ -53,12 +53,15 @@ from safe_io import (  # noqa: E402
 from schemas import (  # noqa: E402
     Config, CateringLeadStore, Menu, MenuItem,
     CateringLeadStatusChange, CateringOwnerDecision, CateringQuoteSent,
+    # v0.3 (review M2): durable observability for render-failed approves
+    CateringQuoteRenderFailed,
 )
 from exit_codes import (  # noqa: E402
     EXIT_OK, EXIT_INVALID_INPUT, EXIT_NOT_FOUND,
     EXIT_SCHEMA_VIOLATION, EXIT_DEPENDENCY_DOWN, EXIT_ILLEGAL_TRANSITION,
 )
 from pydantic import TypeAdapter  # noqa: E402
+from datetime import timezone  # noqa: E402  (UTC for audit ts on render-failure)
 
 CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
 LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
@@ -332,11 +335,40 @@ def main() -> int:
         # for all production leads — the data integrity bug discovered during
         # E2E audit).
         if args.decision == "approve":
+            # target_jid is captured pre-mutation intentionally (review L5):
+            # subsequent model_copy preserves customer_phone, but capturing
+            # here makes the JID-vs-mutation invariant explicit at the
+            # point of computation rather than implicit in the model_copy
+            # contract.
             target_jid = f"{lead.customer_phone[1:]}@s.whatsapp.net"
             try:
                 quote_text, menu_load_status = _render_quote(lead, lead.customer_name or "")
             except ValueError as render_err:
                 # A4 fix: template format error is LOUD, NOT a silent inline fallback.
+                # Review M2: also emit a durable audit row so operators see
+                # the loop in decisions.log (was: stderr-only, retries showed
+                # no audit trail — operator could not diagnose stuck approves).
+                try:
+                    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+                    with flock(LOG_PATH):
+                        ndjson_append(
+                            LOG_PATH,
+                            TypeAdapter(CateringQuoteRenderFailed).dump_json(
+                                CateringQuoteRenderFailed(
+                                    type="catering_quote_render_failed",
+                                    ts=datetime.now(tz=timezone.utc),
+                                    lead_id=lead.lead_id,
+                                    code=code,
+                                    error_class=type(render_err).__name__,
+                                    detail=str(render_err)[:2000],
+                                ),
+                            ).decode("utf-8"),
+                        )
+                except Exception as audit_err:
+                    sys.stderr.write(
+                        f"WARN: CateringQuoteRenderFailed audit-write failed "
+                        f"(non-fatal): {type(audit_err).__name__}: {audit_err}\n"
+                    )
                 sys.stderr.write(
                     f"FATAL: catering quote template error: {render_err}\n"
                     f"  Owner approved lead {lead.lead_id} but customer quote could "

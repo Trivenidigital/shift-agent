@@ -54,6 +54,8 @@ from schemas import (  # noqa: E402
     CateringOwnerApprovalCardFailed, CateringOwnerApprovalCardSkipped,
     InvariantViolation,
     assert_rejection_reason_complete,
+    # v0.3 lifecycle sentinel — review M1 consolidation
+    PRE_QUOTE_DRAFT_SENTINEL,
 )
 from exit_codes import (  # noqa: E402
     EXIT_OK, EXIT_INVALID_INPUT, EXIT_DISABLED,
@@ -524,8 +526,9 @@ def main() -> int:
                 # draft quote yet; status=AWAITING_OWNER_APPROVAL with empty
                 # quote_text would fail v0.3 S1 invariant. Use sentinel until
                 # v0.4 inline drafting lands. apply-script's Q1 fix populates
-                # real quote_text on approve.
-                quote_text="<v0.3-pre-quote-draft>",
+                # real quote_text on approve. (review M1 consolidation —
+                # imported from schemas.PRE_QUOTE_DRAFT_SENTINEL).
+                quote_text=PRE_QUOTE_DRAFT_SENTINEL,
             )
         except ValidationError as e:
             sys.stderr.write(f"lead construction failed: {e}\n")
