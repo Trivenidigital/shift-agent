@@ -339,18 +339,41 @@ def main() -> int:
     with FileLock(LEADS_LOCK):
         store, status = load_model(LEADS_PATH, CateringLeadStore, default=CateringLeadStore())
         if status != "ok":
-            # POST-BRIDGE re-load is stricter: missing/empty here means
-            # leads.json disappeared between our two locks, AFTER we already
-            # POSTed the customer. State + outbound diverge — surface as a
-            # BUG so the operator can reconcile manually. Likely causes:
-            # operator deleted leads.json mid-flight, filesystem unmounted,
-            # atomic-write race on slow disk.
-            sys.stderr.write(
+            # POST-BRIDGE re-load is stricter: missing/empty/corrupt/oserror
+            # here means leads.json disappeared or became unreadable between
+            # our two locks, AFTER we already POSTed the customer. State +
+            # outbound diverge — operator must reconcile manually.
+            #
+            # atomic_write uses os.replace (atomic) so readers never see
+            # missing/empty during a benign in-flight write. Likely real
+            # causes: operator deleted leads.json | filesystem unmounted |
+            # writer crashed mid-create before first os.replace landed |
+            # quota/EIO at the writer's tmpfile step.
+            #
+            # PR #33 review-R5 fix: send Pushover priority=2 because
+            # state-vs-outbound divergence is the single highest-stakes
+            # silent-failure surface in the catering flow. journald-only
+            # signaling is too quiet for this branch.
+            divergence_msg = (
                 f"BUG: leads.json status={status!r} on post-bridge re-load "
                 f"(lead {lead_id_for_output}); customer received quote but "
-                f"SENT_TO_CUSTOMER not persisted. Likely: operator deleted "
-                f"leads.json | filesystem unmounted | atomic-write race.\n"
+                f"SENT_TO_CUSTOMER not persisted."
             )
+            sys.stderr.write(divergence_msg + "\n")
+            try:
+                import subprocess as _sp
+                _sp.run(
+                    ["/usr/local/bin/shift-agent-notify-owner",
+                     "--priority", "2",
+                     "--title", f"BUG state-outbound divergence (lead {lead_id_for_output})",
+                     divergence_msg],
+                    check=False, timeout=10,
+                )
+            except Exception as e:  # noqa: BLE001 — notify is best-effort
+                sys.stderr.write(
+                    f"WARN: shift-agent-notify-owner failed (non-fatal): "
+                    f"{type(e).__name__}: {e}\n"
+                )
             return EXIT_SCHEMA_VIOLATION
         for i, l in enumerate(store.leads):
             if l.lead_id == lead_id_for_output:

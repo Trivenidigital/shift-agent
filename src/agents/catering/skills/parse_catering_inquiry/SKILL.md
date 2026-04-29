@@ -28,6 +28,14 @@ The dispatcher delegates to this SKILL with these named inputs:
 helper, do not improvise. Skipping Step 0 produces a degraded extraction
 (no soft-prior signal for returning customers, no dietary inheritance hint).
 
+Unlike `validate-sender-block` in `dispatch_shift_agent` (which fails closed
+on error), this lookup is **fall-open by design** — soft priors are advisory,
+not authoritative. A failed lookup proceeds to Step 1 with no priors.
+
+(Audit signal note: this lookup currently produces no `decisions.log` entry;
+soak-monitoring is journald-only. A `lookup_invoked` LogEntry variant is
+tracked as a P1.4 follow-up — see `tasks/todo.md`.)
+
 Run this exactly:
 
 ```
