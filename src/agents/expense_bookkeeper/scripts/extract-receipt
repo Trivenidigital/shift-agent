@@ -52,7 +52,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "p
 
 from safe_io import (  # noqa: E402
     flock, ndjson_append, atomic_write_json, customer_now, load_model,
-    assert_local_disk,
+    assert_local_disk, load_yaml_model,
 )
 from schemas import (  # noqa: E402
     Config, ExpenseLead, ExpenseLeadStore, ReceiptExtraction,
@@ -571,9 +571,14 @@ def main():
     ap.add_argument("--sender-lid", default=None)
     args = ap.parse_args()
 
-    cfg, status = load_model(CONFIG_PATH, Config)
-    if status != "ok":
-        sys.stderr.write(f"config load status={status}\n")
+    # FIX (PR #34): config.yaml is YAML, NOT JSON. load_model calls
+    # safe_load_json which calls json.loads → JSONDecodeError → file gets
+    # rename-quarantined to config.yaml.corrupt-<epoch>. Use load_yaml_model
+    # instead. See tasks/expense-yaml-load-fix-plan.md.
+    try:
+        cfg = load_yaml_model(CONFIG_PATH, Config)
+    except (FileNotFoundError, RuntimeError, ValidationError) as e:
+        sys.stderr.write(f"config load failed: {e}\n")
         return EXIT_SCHEMA_VIOLATION
     if not cfg.expense_bookkeeper.enabled:
         sys.stderr.write("expense_bookkeeper disabled\n")
