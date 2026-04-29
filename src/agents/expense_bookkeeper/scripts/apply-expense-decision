@@ -1,0 +1,694 @@
+#!/usr/bin/env python3
+"""apply-expense-decision — Agent #21 owner-decision state writer.
+
+Called by Kimi (via the handle_expense_owner_approval SKILL) when the owner
+replies to an expense approval card with "#CODE total.cc" / "#CODE reject" /
+"undo E####" / "undo E#### force". Deterministic — parses verb, validates
+code+amount, transitions the lead, calls QBOClient (mock in v0.1), notifies
+owner.
+
+Usage:
+  apply-expense-decision \\
+    --raw-message "#A47C2 234.50" \\
+    --sender-phone "+19045550100" \\
+    [--sender-lid "201975216009469@lid"]
+
+Outputs JSON: {"expense_id":"E0042","new_status":"PUSHED","qbo_transaction_id":"...",
+               "outbound_message_id":"..."}.
+
+Exit codes:
+  0  — applied (push succeeded, reject finalised, undo voided, OR friendly
+       nudge sent — all non-failure outcomes)
+  2  — invalid input (malformed message; nudge already sent)
+  4  — code/expense_id not found among active leads
+  5  — schema violation (Pushover sent)
+  6  — bridge unreachable (state still updated; outbound delivery uncertain)
+  7  — owner amount mismatch (no push, friendly nudge sent)
+  8  — undo outside reversibility window (force-instruction sent)
+  9  — illegal status transition (reconcile_required set, owner notified)
+ 10  — QBO push failure (status PUSH_FAILED, owner notified)
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
+
+from safe_io import (  # noqa: E402
+    FileLock, ndjson_append, atomic_write_json, customer_now,
+    load_model, flock,
+)
+from schemas import (  # noqa: E402
+    Config, ExpenseLead, ExpenseLeadStore, ExpenseLeadStatus,
+    EXPENSE_TRANSITIONS, EXPENSE_TERMINAL_STATUSES, EXPENSE_APPROVAL_CLOSED_STATUSES,
+    is_expense_transition_allowed,
+    ExpenseOwnerDecision, ExpenseLeadStatusChange,
+    ExpensePushAttempted, ExpensePushed, ExpensePushFailed,
+    ExpenseReversalRequested, ExpenseReversed,
+    ExpenseNonOwnerUndoDeclined, ExpenseOrphanDetected,
+)
+from qbo_client import (  # noqa: E402
+    QBOClient, QBOPushError, RETRYABLE_ERROR_CLASSES,
+    redact_qbo_error, make_qbo_client,
+)
+from exit_codes import (  # noqa: E402
+    EXIT_OK, EXIT_INVALID_INPUT, EXIT_NOT_FOUND,
+    EXIT_SCHEMA_VIOLATION, EXIT_DEPENDENCY_DOWN, EXIT_ILLEGAL_TRANSITION,
+)
+
+
+# Module-level paths — patched by tests via importlib attribute injection.
+CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
+LEADS_PATH = Path("/opt/shift-agent/state/expense-bookkeeper/leads.json")
+LEADS_LOCK = Path("/opt/shift-agent/state/expense-bookkeeper/leads.json.lock")
+LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+TEMPLATE_DIR = Path("/opt/shift-agent/templates")
+BRIDGE_URL = "http://127.0.0.1:3000/send"
+BRIDGE_TIMEOUT = 10
+
+EXIT_AMOUNT_MISMATCH = 7
+EXIT_OUTSIDE_WINDOW = 8
+EXIT_PUSH_FAILED = 10
+
+
+# ─────────────────────────────────────────────────────────────────
+# Owner-message parser — restored two-anchor pattern from plan §4e.
+# Code AND 2-decimal amount are MANDATORY for approve paths.
+# ─────────────────────────────────────────────────────────────────
+
+# Forward order: #CODE amount [verb]
+RE_APPROVE_FWD = re.compile(
+    r"^\s*"
+    r"(?P<code>#[A-HJKMNPQR-Z2-9]{5})"
+    r"\s+\$?(?P<amount>[\d,]+\.\d{2})"
+    r"(?:\s+(?P<modifier>force|reject))?"
+    r"\s*$",
+    re.IGNORECASE,
+)
+# Reversed: amount #CODE [verb]
+RE_APPROVE_REV = re.compile(
+    r"^\s*"
+    r"\$?(?P<amount>[\d,]+\.\d{2})"
+    r"\s+(?P<code>#[A-HJKMNPQR-Z2-9]{5})"
+    r"(?:\s+(?P<modifier>force|reject))?"
+    r"\s*$",
+    re.IGNORECASE,
+)
+# Reject only: #CODE reject
+RE_REJECT = re.compile(
+    r"^\s*(?P<code>#[A-HJKMNPQR-Z2-9]{5})\s+reject\s*$",
+    re.IGNORECASE,
+)
+# Undo: undo E#### [force]
+RE_UNDO = re.compile(
+    r"^\s*undo\s+(?P<eid>E\d{4,})(?:\s+(?P<modifier>force))?\s*$",
+    re.IGNORECASE,
+)
+
+
+def parse_owner_message(text: str) -> dict | None:
+    """Returns dict with keys: verb, code|None, amount_cents|None, eid|None,
+    force|False. None for malformed input."""
+    text = text.strip()
+    if not text:
+        return None
+
+    m = RE_REJECT.match(text)
+    if m:
+        return {"verb": "reject", "code": m.group("code"), "amount_cents": None,
+                "eid": None, "force": False}
+
+    m = RE_APPROVE_FWD.match(text) or RE_APPROVE_REV.match(text)
+    if m:
+        modifier = (m.group("modifier") or "").lower()
+        amount_str = m.group("amount").replace(",", "")
+        try:
+            amount_cents = int(round(float(amount_str) * 100))
+        except (ValueError, TypeError):
+            return None
+        verb = "reject" if modifier == "reject" else "approve"
+        force = (modifier == "force")
+        return {"verb": verb, "code": m.group("code"),
+                "amount_cents": amount_cents, "eid": None, "force": force}
+
+    m = RE_UNDO.match(text)
+    if m:
+        return {"verb": "undo", "code": None, "amount_cents": None,
+                "eid": m.group("eid").upper(), "force": bool(m.group("modifier"))}
+
+    # Detect "missing decimals" case for friendly nudge: #CODE 234 (no .##)
+    m = re.match(
+        r"^\s*(?P<code>#[A-HJKMNPQR-Z2-9]{5})\s+\$?[\d,]+(?:\.\d{0,1})?\s*$",
+        text, re.IGNORECASE,
+    )
+    if m:
+        return {"verb": "missing_decimals", "code": m.group("code"),
+                "amount_cents": None, "eid": None, "force": False}
+
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────
+# Bridge helpers
+# ─────────────────────────────────────────────────────────────────
+
+def _bridge_post(jid: str, message: str) -> tuple[bool, str]:
+    payload = json.dumps({"chatId": jid, "message": message}).encode("utf-8")
+    req = urllib.request.Request(
+        BRIDGE_URL, data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=BRIDGE_TIMEOUT) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            doc = json.loads(body)
+            mid = doc.get("id") or doc.get("messageId") or ""
+            if not mid:
+                return False, f"empty messageId"
+            return True, mid
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError) as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+def _render_template(name: str, **fields) -> str:
+    """Tiny mustache-ish renderer — replaces {{key}} with values."""
+    text = (TEMPLATE_DIR / name).read_text(encoding="utf-8")
+    for key, val in fields.items():
+        text = text.replace("{{" + key + "}}", str(val))
+    return text
+
+
+def _log(entry):
+    """Append a Pydantic audit-entry to decisions.log via safe_io chokepoint."""
+    ndjson_append(LOG_PATH, entry.model_dump_json())
+
+
+# ─────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────
+
+def _cents_to_str(c: int) -> str:
+    """Format cents as $ amount with exactly 2 decimals, no $ prefix."""
+    return f"{c / 100:.2f}"
+
+
+def _check_orphans(store: ExpenseLeadStore, log_path: Path) -> int:
+    """Reviewer-b HIGH B2: at script entry, scan for APPROVED_PENDING_PUSH
+    leads that lack a terminal audit entry. Mark reconcile_required and
+    write ExpenseOrphanDetected. Returns count detected.
+
+    Owner-decision logic refuses to act on reconcile_required=True leads.
+    v0.2 watchdog automates clearing the flag.
+    """
+    count = 0
+    for lead in store.leads:
+        if lead.status == "APPROVED_PENDING_PUSH" and not lead.reconcile_required:
+            # Mark for operator review
+            lead.reconcile_required = True
+            count += 1
+            _log(ExpenseOrphanDetected(
+                ts=datetime.now(timezone.utc),
+                type="expense_orphan_detected",
+                expense_id=lead.expense_id,
+                last_known_status=lead.status,
+                detected_by="startup_scan",
+            ))
+    return count
+
+
+def _find_lead_by_code(store: ExpenseLeadStore, code: str) -> ExpenseLead | None:
+    """Find an active lead by approval code (i.e. approval flow not closed)."""
+    for lead in store.leads:
+        if (lead.owner_approval_code == code and
+                lead.status not in EXPENSE_APPROVAL_CLOSED_STATUSES):
+            return lead
+    return None
+
+
+def _find_lead_by_id(store: ExpenseLeadStore, expense_id: str) -> ExpenseLead | None:
+    for lead in store.leads:
+        if lead.expense_id == expense_id:
+            return lead
+    return None
+
+
+def _transition(lead: ExpenseLead, new_status: str, reason: str | None = None) -> None:
+    """Mutate lead + emit ExpenseLeadStatusChange. Raises if illegal."""
+    if not is_expense_transition_allowed(lead.status, new_status):
+        raise ValueError(
+            f"illegal transition {lead.status} → {new_status} for {lead.expense_id}"
+        )
+    old = lead.status
+    lead.status = new_status  # type: ignore[assignment]
+    _log(ExpenseLeadStatusChange(
+        ts=datetime.now(timezone.utc),
+        type="expense_lead_status_change",
+        expense_id=lead.expense_id,
+        from_status=old,
+        to_status=new_status,
+        reason=reason,
+    ))
+
+
+# ─────────────────────────────────────────────────────────────────
+# Decision handlers — one per verb.
+# ─────────────────────────────────────────────────────────────────
+
+def _handle_approve(parsed, owner_phone, owner_jid, sender_phone, raw_message,
+                    cfg, customer_tz):
+    """Approve / force-approve flow."""
+    code = parsed["code"]
+    owner_amount_cents = parsed["amount_cents"]
+    force = parsed["force"]
+
+    with flock(LEADS_PATH):
+        store, status = load_model(LEADS_PATH, ExpenseLeadStore,
+                                   default=ExpenseLeadStore())
+        if status not in ("ok", "missing", "empty"):
+            sys.stderr.write(f"leads.json status={status}; refusing\n")
+            return EXIT_SCHEMA_VIOLATION
+
+        _check_orphans(store, LOG_PATH)
+
+        lead = _find_lead_by_code(store, code)
+        if lead is None:
+            sys.stderr.write(f"code {code!r} not found in active leads\n")
+            return EXIT_NOT_FOUND
+
+        if lead.reconcile_required:
+            _bridge_post(
+                owner_jid,
+                f"Lead {lead.expense_id} needs operator reconciliation; "
+                f"see Pushover. Cannot accept new owner actions until cleared.",
+            )
+            return EXIT_ILLEGAL_TRANSITION
+
+        if lead.status != "AWAITING_OWNER_APPROVAL":
+            sys.stderr.write(
+                f"lead {lead.expense_id} in status {lead.status!r}, not AWAITING\n"
+            )
+            return EXIT_ILLEGAL_TRANSITION
+
+        # Code+amount validation
+        amount_matched = (owner_amount_cents == lead.extracted_total_cents)
+        if not amount_matched:
+            _log(ExpenseOwnerDecision(
+                ts=datetime.now(timezone.utc),
+                type="expense_owner_decision",
+                expense_id=lead.expense_id,
+                decision="amount_mismatch",
+                raw_message=raw_message[:500],
+                code_matched=True,
+                amount_matched=False,
+                force_context="none",
+            ))
+            atomic_write_json(LEADS_PATH, store.model_dump(mode="json"))
+            msg = _render_template(
+                "expense_amount_mismatch.txt",
+                approval_code=code,
+                extracted_total_display=_cents_to_str(lead.extracted_total_cents or 0),
+                owner_total_display=_cents_to_str(owner_amount_cents),
+            )
+            _bridge_post(owner_jid, msg)
+            return EXIT_AMOUNT_MISMATCH
+
+        # Determine force_context
+        threshold_breach = (
+            lead.extracted_total_cents is not None and
+            lead.extracted_total_cents > cfg.expense_bookkeeper.cockpit_threshold_cents
+        )
+        dedup_present = lead.duplicate_of is not None
+        if threshold_breach and dedup_present:
+            force_context = "both"
+        elif threshold_breach:
+            force_context = "threshold"
+        elif dedup_present:
+            force_context = "dedup"
+        else:
+            force_context = "none"
+
+        # If force is required (threshold/dedup) but not provided
+        if force_context != "none" and not force:
+            # Re-send the appropriate template; lead stays AWAITING; owner re-replies
+            sys.stderr.write(
+                f"lead {lead.expense_id} requires force ({force_context}); reminded owner\n"
+            )
+            return EXIT_OK  # not a failure — we sent the right message originally;
+            # the SKILL is responsible for not double-sending. Phase-2 polish.
+
+        # Transition to APPROVED_PENDING_PUSH
+        lead.owner_approval_received_at = datetime.now(timezone.utc)
+        lead.owner_confirmed_total_cents = owner_amount_cents
+        decision_label = "force_approved" if force else "approved"
+        _log(ExpenseOwnerDecision(
+            ts=datetime.now(timezone.utc),
+            type="expense_owner_decision",
+            expense_id=lead.expense_id,
+            decision=decision_label,
+            raw_message=raw_message[:500],
+            code_matched=True,
+            amount_matched=True,
+            force_context=force_context,
+        ))
+        _transition(lead, "APPROVED_PENDING_PUSH",
+                    reason="owner approved" + (" (force)" if force else ""))
+        atomic_write_json(LEADS_PATH, store.model_dump(mode="json"))
+        # snapshot lead for use after lock release
+        snapshot = lead.model_copy(deep=True)
+        store_snapshot = store
+
+    # Lock RELEASED — QBO push is slow; we don't hold the file lock during
+    # external call. Reviewer-b HIGH B2: orphan-recovery is in _check_orphans
+    # at next script entry.
+    return _push_to_qbo(snapshot, store_snapshot, owner_jid, cfg, customer_tz)
+
+
+def _push_to_qbo(lead: ExpenseLead, store: ExpenseLeadStore, owner_jid: str,
+                 cfg: Config, customer_tz: str) -> int:
+    """External push step. Lead has owner_confirmed_total_cents set."""
+    client = make_qbo_client(cfg.expense_bookkeeper, customer_timezone=customer_tz)
+    push_total = lead.owner_confirmed_total_cents or 0
+
+    _log(ExpensePushAttempted(
+        ts=datetime.now(timezone.utc),
+        type="expense_push_attempted",
+        expense_id=lead.expense_id,
+        qbo_client_mode=cfg.expense_bookkeeper.qbo_client_mode,
+        extracted_total_cents=lead.extracted_total_cents,
+        owner_confirmed_total_cents=push_total,
+        push_total_cents=push_total,
+    ))
+
+    try:
+        result = client.push_expense(lead)
+    except QBOPushError as e:
+        # Sanitize error before audit-write
+        redacted = redact_qbo_error(e)
+        _log(ExpensePushFailed(
+            ts=datetime.now(timezone.utc),
+            type="expense_push_failed",
+            expense_id=lead.expense_id,
+            error_class=e.error_class,
+            error_message_redacted=redacted,
+        ))
+        # Re-acquire lock to update status
+        with flock(LEADS_PATH):
+            fresh, _ = load_model(LEADS_PATH, ExpenseLeadStore,
+                                  default=ExpenseLeadStore())
+            target = _find_lead_by_id(fresh, lead.expense_id)
+            if target:
+                _transition(target, "PUSH_FAILED",
+                            reason=f"qbo push failed: {e.error_class}")
+                atomic_write_json(LEADS_PATH, fresh.model_dump(mode="json"))
+        # Notify owner
+        retry_marker = " (retrying)" if e.error_class in RETRYABLE_ERROR_CLASSES else ""
+        action_text = (
+            "I'll retry automatically." if e.error_class in RETRYABLE_ERROR_CLASSES
+            else "Please review and re-approve, or reject."
+        )
+        msg = _render_template(
+            "expense_failure_message.txt",
+            expense_id=lead.expense_id,
+            error_class=e.error_class,
+            retry_marker=retry_marker,
+            action_required_text=action_text,
+        )
+        _bridge_post(owner_jid, msg)
+        print(json.dumps({
+            "expense_id": lead.expense_id, "new_status": "PUSH_FAILED",
+            "error_class": e.error_class,
+        }))
+        return EXIT_PUSH_FAILED
+
+    # Success
+    _log(ExpensePushed(
+        ts=datetime.now(timezone.utc),
+        type="expense_pushed",
+        expense_id=lead.expense_id,
+        qbo_transaction_id=result.transaction_id,
+        qbo_amount_cents=result.amount_cents,
+        push_attempt_no=1,
+    ))
+    # Re-acquire lock to update status + tx_id
+    with flock(LEADS_PATH):
+        fresh, _ = load_model(LEADS_PATH, ExpenseLeadStore,
+                              default=ExpenseLeadStore())
+        target = _find_lead_by_id(fresh, lead.expense_id)
+        if target:
+            target.qbo_transaction_id = result.transaction_id
+            target.qbo_pushed_total_cents = result.amount_cents
+            target.pushed_at = datetime.fromisoformat(result.pushed_at) \
+                if isinstance(result.pushed_at, str) else result.pushed_at
+            _transition(target, "PUSHED", reason="qbo push succeeded")
+            atomic_write_json(LEADS_PATH, fresh.model_dump(mode="json"))
+
+    # Notify owner
+    vendor_display = (
+        (lead.extraction.vendor_normalized if lead.extraction else None) or
+        (lead.extraction.vendor_name if lead.extraction else None) or
+        "Unknown vendor"
+    )
+    msg = _render_template(
+        "expense_pushed_confirmation.txt",
+        expense_id=lead.expense_id,
+        vendor_display=vendor_display,
+        total_display=_cents_to_str(result.amount_cents),
+        qbo_account=lead.qbo_account or "Uncategorised",
+        qbo_transaction_id=result.transaction_id,
+    )
+    sent, mid = _bridge_post(owner_jid, msg)
+    print(json.dumps({
+        "expense_id": lead.expense_id, "new_status": "PUSHED",
+        "qbo_transaction_id": result.transaction_id,
+        "outbound_message_id": mid if sent else "",
+    }))
+    return EXIT_OK if sent else EXIT_DEPENDENCY_DOWN
+
+
+def _handle_reject(parsed, owner_jid, raw_message, cfg):
+    """Owner rejects — direct transition to REJECTED."""
+    code = parsed["code"]
+    with flock(LEADS_PATH):
+        store, status = load_model(LEADS_PATH, ExpenseLeadStore,
+                                   default=ExpenseLeadStore())
+        if status not in ("ok", "missing", "empty"):
+            return EXIT_SCHEMA_VIOLATION
+        _check_orphans(store, LOG_PATH)
+        lead = _find_lead_by_code(store, code)
+        if lead is None:
+            return EXIT_NOT_FOUND
+        if lead.reconcile_required:
+            return EXIT_ILLEGAL_TRANSITION
+        if lead.status not in ("AWAITING_OWNER_APPROVAL", "PUSH_FAILED"):
+            return EXIT_ILLEGAL_TRANSITION
+        _log(ExpenseOwnerDecision(
+            ts=datetime.now(timezone.utc),
+            type="expense_owner_decision",
+            expense_id=lead.expense_id,
+            decision="rejected",
+            raw_message=raw_message[:500],
+            code_matched=True,
+            amount_matched=False,  # reject doesn't carry amount
+            force_context="none",
+        ))
+        lead.rejection_reason = "owner declined"
+        _transition(lead, "REJECTED", reason="owner declined")
+        atomic_write_json(LEADS_PATH, store.model_dump(mode="json"))
+
+    sent, mid = _bridge_post(
+        owner_jid, f"Got it — {code} dropped, no QuickBooks push."
+    )
+    print(json.dumps({"expense_id": lead.expense_id, "new_status": "REJECTED",
+                      "outbound_message_id": mid if sent else ""}))
+    return EXIT_OK if sent else EXIT_DEPENDENCY_DOWN
+
+
+def _handle_undo(parsed, owner_phone, owner_jid, sender_phone, sender_lid,
+                 raw_message, cfg, customer_tz):
+    """Reverse a PUSHED lead. Owner-only; window-checked."""
+    eid = parsed["eid"]
+    force = parsed["force"]
+
+    # Owner re-auth (security MED B-MED)
+    if not sender_phone or sender_phone != owner_phone:
+        with flock(LEADS_PATH):
+            store, _ = load_model(LEADS_PATH, ExpenseLeadStore,
+                                  default=ExpenseLeadStore())
+            lead = _find_lead_by_id(store, eid) if eid else None
+            _log(ExpenseNonOwnerUndoDeclined(
+                ts=datetime.now(timezone.utc),
+                type="expense_non_owner_undo_declined",
+                expense_id=lead.expense_id if lead else eid,
+                requested_by_phone=sender_phone,
+                requested_by_lid=sender_lid,
+            ))
+        # Reply best-effort; not a customer-facing error
+        return EXIT_INVALID_INPUT
+
+    with flock(LEADS_PATH):
+        store, status = load_model(LEADS_PATH, ExpenseLeadStore,
+                                   default=ExpenseLeadStore())
+        if status not in ("ok", "missing", "empty"):
+            return EXIT_SCHEMA_VIOLATION
+        _check_orphans(store, LOG_PATH)
+        lead = _find_lead_by_id(store, eid)
+        if lead is None:
+            return EXIT_NOT_FOUND
+        if lead.status != "PUSHED":
+            _bridge_post(
+                owner_jid,
+                f"{eid} is in status {lead.status}; can't undo.",
+            )
+            return EXIT_ILLEGAL_TRANSITION
+        # Window check
+        now = datetime.now(timezone.utc)
+        pushed_at = lead.pushed_at
+        if isinstance(pushed_at, str):
+            pushed_at = datetime.fromisoformat(pushed_at)
+        if pushed_at and pushed_at.tzinfo is None:
+            pushed_at = pushed_at.replace(tzinfo=timezone.utc)
+        hours_since = ((now - pushed_at).total_seconds() / 3600.0) if pushed_at else 0.0
+        within_window = hours_since <= cfg.expense_bookkeeper.reversibility_window_hours
+        _log(ExpenseReversalRequested(
+            ts=datetime.now(timezone.utc),
+            type="expense_reversal_requested",
+            expense_id=lead.expense_id,
+            requested_by_phone=sender_phone,
+            requested_by_role="owner",
+            within_window=within_window,
+            hours_since_push=round(hours_since, 2),
+        ))
+        if not within_window and not force:
+            window_hours = cfg.expense_bookkeeper.reversibility_window_hours
+            msg = _render_template(
+                "expense_undo_outside_window.txt",
+                expense_id=eid,
+                window_hours=window_hours,
+                pushed_at_display=pushed_at.isoformat() if pushed_at else "?",
+                hours_since_push_display=f"{hours_since:.1f}",
+            )
+            _bridge_post(owner_jid, msg)
+            return EXIT_OUTSIDE_WINDOW
+        tx_id = lead.qbo_transaction_id
+        atomic_write_json(LEADS_PATH, store.model_dump(mode="json"))
+
+    # Lock released for QBO call
+    client = make_qbo_client(cfg.expense_bookkeeper, customer_timezone=customer_tz)
+    try:
+        client.void_transaction(tx_id)
+    except QBOPushError as e:
+        redacted = redact_qbo_error(e)
+        _log(ExpensePushFailed(
+            ts=datetime.now(timezone.utc),
+            type="expense_push_failed",
+            expense_id=eid,
+            error_class=e.error_class,
+            error_message_redacted=f"void: {redacted}",
+        ))
+        _bridge_post(
+            owner_jid,
+            f"Couldn't void {eid} ({e.error_class}). Manual review needed.",
+        )
+        return EXIT_PUSH_FAILED
+
+    with flock(LEADS_PATH):
+        fresh, _ = load_model(LEADS_PATH, ExpenseLeadStore,
+                              default=ExpenseLeadStore())
+        target = _find_lead_by_id(fresh, eid)
+        if target:
+            _transition(target, "REVERSED", reason="owner undo within window"
+                        if within_window else "owner undo force")
+            atomic_write_json(LEADS_PATH, fresh.model_dump(mode="json"))
+    _log(ExpenseReversed(
+        ts=datetime.now(timezone.utc),
+        type="expense_reversed",
+        expense_id=eid,
+        qbo_transaction_id=tx_id,
+        void_method="api_void",
+    ))
+    sent, mid = _bridge_post(
+        owner_jid,
+        f"Reversed {eid} (transaction {tx_id} voided in QuickBooks).",
+    )
+    print(json.dumps({"expense_id": eid, "new_status": "REVERSED",
+                      "qbo_transaction_id": tx_id,
+                      "outbound_message_id": mid if sent else ""}))
+    return EXIT_OK if sent else EXIT_DEPENDENCY_DOWN
+
+
+def _handle_missing_decimals(parsed, owner_jid):
+    """Friendly nudge for `#CODE 234` (no decimals). Lead stays AWAITING."""
+    with flock(LEADS_PATH):
+        store, _ = load_model(LEADS_PATH, ExpenseLeadStore,
+                              default=ExpenseLeadStore())
+        lead = _find_lead_by_code(store, parsed["code"])
+        if lead is None:
+            return EXIT_NOT_FOUND
+        extracted = lead.extracted_total_cents or 0
+    msg = (
+        f"Please include cents — reply '{parsed['code']} {_cents_to_str(extracted)}'."
+    )
+    _bridge_post(owner_jid, msg)
+    return EXIT_AMOUNT_MISMATCH
+
+
+# ─────────────────────────────────────────────────────────────────
+# Entry point
+# ─────────────────────────────────────────────────────────────────
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--raw-message", required=True)
+    ap.add_argument("--sender-phone", required=True)
+    ap.add_argument("--sender-lid", default=None)
+    args = ap.parse_args()
+
+    cfg, status = load_model(CONFIG_PATH, Config)
+    if status != "ok":
+        sys.stderr.write(f"config load status={status}\n")
+        return EXIT_SCHEMA_VIOLATION
+    if not cfg.expense_bookkeeper.enabled:
+        sys.stderr.write("expense_bookkeeper not enabled\n")
+        return EXIT_INVALID_INPUT
+
+    customer_tz = cfg.customer.timezone
+    owner_phone = cfg.owner.phone
+    owner_jid = cfg.owner.self_chat_jid or f"{owner_phone.lstrip('+')}@s.whatsapp.net"
+
+    parsed = parse_owner_message(args.raw_message)
+    if parsed is None:
+        # Friendly nudge
+        _bridge_post(
+            owner_jid,
+            "I didn't recognise that — reply '#CODE 12.34' to approve, "
+            "'#CODE reject' to reject, or 'undo E####' to reverse.",
+        )
+        return EXIT_INVALID_INPUT
+
+    verb = parsed["verb"]
+    if verb == "approve":
+        return _handle_approve(parsed, owner_phone, owner_jid, args.sender_phone,
+                               args.raw_message, cfg, customer_tz)
+    if verb == "reject":
+        return _handle_reject(parsed, owner_jid, args.raw_message, cfg)
+    if verb == "undo":
+        return _handle_undo(parsed, owner_phone, owner_jid, args.sender_phone,
+                            args.sender_lid, args.raw_message, cfg, customer_tz)
+    if verb == "missing_decimals":
+        return _handle_missing_decimals(parsed, owner_jid)
+
+    return EXIT_INVALID_INPUT
+
+
+if __name__ == "__main__":
+    sys.exit(main())

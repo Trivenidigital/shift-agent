@@ -96,3 +96,16 @@ catering:
   deposit_threshold_guests: 50      # require deposit for events >= N guests
   deposit_pct: 0.25                 # 25% deposit
   stale_after_hours: 336            # 14 days — silent leads move to STALE
+
+# Agent #21 — Expense Bookkeeper. Default OFF (opt-in). v0.1 ships with
+# mocked QBOClient; v0.2 will swap to real QBO OAuth + write API.
+expense_bookkeeper:
+  enabled: false
+  cockpit_threshold_cents: 5000
+  auto_categorize_threshold: 0.85
+  require_owner_approval_for_personal_flag: true
+  reversibility_window_hours: 24
+  dedup_hash_distance_threshold: 4
+  receipt_retention_days: 90
+  proposal_ttl_hours: 72
+  qbo_client_mode: mock

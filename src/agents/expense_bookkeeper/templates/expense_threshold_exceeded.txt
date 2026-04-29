@@ -1,0 +1,17 @@
+{{expense_id}} — Receipt approval (above-threshold)
+
+Vendor: {{vendor_display}}
+Date:   {{receipt_date}}
+
+{{top_items}}
+
+Total: ${{total_display}}  (above ${{threshold_display}} threshold)
+
+Category: {{qbo_account}} ({{biz_personal}})
+Why: {{rationale}}{{low_confidence_marker}}
+
+Above-threshold receipts will route to the cockpit web review in v0.2.
+For now, to approve via WhatsApp anyway:
+  reply "{{approval_code}} {{total_display}} force"
+To reject:
+  reply "{{approval_code}} reject"

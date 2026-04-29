@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field, ConfigDict, constr, model_validator, fiel
 from typing import Literal, Annotated, Union, Optional, Any
 from datetime import datetime
 from zoneinfo import ZoneInfo
+import os
 import re
 
 
@@ -555,6 +556,129 @@ class SalesTaxConfig(BaseModel):
         return sorted(set(v), reverse=True)
 
 
+# Agent #21 — Expense Bookkeeper (v0.1; mocked QBOClient interface)
+# See tasks/expense-bookkeeper-v01-design.md for full design.
+class ExpenseBookkeeperConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    cockpit_threshold_cents: int = Field(default=5000, gt=0)
+    auto_categorize_threshold: float = Field(default=0.85, ge=0.5, le=1.0)
+    require_owner_approval_for_personal_flag: bool = True
+    reversibility_window_hours: int = Field(default=24, ge=1, le=168)
+    dedup_hash_distance_threshold: int = Field(default=4, ge=0, le=20)
+    receipt_retention_days: int = Field(default=90, ge=7, le=2555)
+    proposal_ttl_hours: int = Field(default=72, ge=1, le=336)
+    qbo_client_mode: Literal["mock", "real"] = "mock"
+
+
+# Expense Bookkeeper domain models
+class ExpenseLineItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    description: str = Field(min_length=1, max_length=200)
+    amount_cents: int  # cents only; never float
+    quantity: Optional[float] = Field(default=None, ge=0)
+    unit_price_cents: Optional[int] = None
+
+
+class ExpenseClassification(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    is_business: bool
+    confidence: float = Field(ge=0.0, le=1.0)
+    rationale: str = Field(min_length=1, max_length=300)
+    qbo_account: str = Field(min_length=1, max_length=100)
+
+
+class ReceiptExtraction(BaseModel):
+    """Vision-extractor output. extracted totals are ADVISORY ONLY;
+    owner-confirmed total is the source of truth for the QBO push."""
+    model_config = ConfigDict(extra="ignore")
+    vendor_name: Optional[str] = Field(default=None, max_length=200)
+    vendor_normalized: Optional[str] = None
+    receipt_date: Optional[str] = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    line_items: list[ExpenseLineItem] = Field(default_factory=list, max_length=200)
+    subtotal_cents: Optional[int] = None
+    tax_cents: Optional[int] = None
+    total_cents: Optional[int] = None
+    payment_method: Optional[str] = Field(default=None, max_length=20)
+    extraction_confidence: float = Field(ge=0.0, le=1.0, default=0.0)
+    raw_text_for_audit: str = Field(default="", max_length=4000)
+
+
+ExpenseLeadStatus = Literal[
+    "EXTRACTING", "AWAITING_OWNER_APPROVAL", "APPROVED_PENDING_PUSH",
+    "PUSHED", "PUSH_FAILED", "REVERSED", "REJECTED", "EXPIRED",
+]
+
+EXPENSE_TERMINAL_STATUSES: frozenset[str] = frozenset({"REVERSED", "REJECTED", "EXPIRED"})
+EXPENSE_RETENTION_CANDIDATES: frozenset[str] = frozenset(
+    {"PUSHED", "REVERSED", "REJECTED", "EXPIRED"}
+)
+EXPENSE_APPROVAL_CLOSED_STATUSES: frozenset[str] = frozenset(
+    {"PUSHED", "REVERSED", "REJECTED", "EXPIRED"}
+)
+
+EXPENSE_TRANSITIONS: dict[str, frozenset[str]] = {
+    "EXTRACTING":              frozenset({"AWAITING_OWNER_APPROVAL", "REJECTED", "EXPIRED"}),
+    "AWAITING_OWNER_APPROVAL": frozenset({"APPROVED_PENDING_PUSH", "REJECTED", "EXPIRED"}),
+    "APPROVED_PENDING_PUSH":   frozenset({"PUSHED", "PUSH_FAILED"}),
+    "PUSH_FAILED":             frozenset({"APPROVED_PENDING_PUSH", "REJECTED"}),
+    "PUSHED":                  frozenset({"REVERSED"}),
+    "REVERSED":                frozenset(),
+    "REJECTED":                frozenset(),
+    "EXPIRED":                 frozenset(),
+}
+
+
+def is_expense_transition_allowed(src: str, tgt: str) -> bool:
+    return tgt in EXPENSE_TRANSITIONS.get(src, frozenset())
+
+
+class ExpenseLead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expense_id: str = Field(pattern=r"^E\d{4,}$")
+    original_message_id: str = Field(min_length=1)
+    sender_phone: str
+    sender_lid: Optional[str] = None
+    received_at: datetime
+    image_path: str
+    image_phash: str = Field(min_length=16, max_length=16)
+    image_byte_hash: str = Field(min_length=64, max_length=64)
+    extraction: Optional[ReceiptExtraction] = None
+    classification: Optional[ExpenseClassification] = None
+    qbo_account: Optional[str] = None
+    owner_approval_code: Optional[ProposalCode] = None
+    owner_approval_received_at: Optional[datetime] = None
+    owner_confirmed_total_cents: Optional[int] = None
+    extracted_total_cents: Optional[int] = None
+    qbo_pushed_total_cents: Optional[int] = None
+    qbo_transaction_id: Optional[str] = None
+    pushed_at: Optional[datetime] = None
+    status: ExpenseLeadStatus = "EXTRACTING"
+    rejection_reason: Optional[str] = Field(default=None, max_length=500)
+    duplicate_of: Optional[str] = None
+    reconcile_required: bool = False
+
+    @field_validator("image_path")
+    @classmethod
+    def _path_under_managed_dir(cls, v: str) -> str:
+        managed = os.environ.get(
+            "EXPENSE_RECEIPTS_DIR",
+            "/opt/shift-agent/state/expense-bookkeeper/receipts/",
+        )
+        if ".." in v or "\0" in v:
+            raise ValueError("invalid image_path: contains path traversal")
+        if not v.startswith(managed):
+            raise ValueError(f"image_path must be under {managed!r}")
+        return v
+
+
+class ExpenseLeadStore(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    schema_version: int = Field(default=1, ge=1)
+    leads: list[ExpenseLead] = Field(default_factory=list)
+    last_id: int = Field(default=0, ge=0)
+
+
 # Agent #5 EOD Reconciliation config
 class EodConfig(BaseModel):
     """End-of-day reconciliation snapshot settings (Agent #5)."""
@@ -596,6 +720,7 @@ class Config(BaseModel):
     employee_docs: EmployeeDocsConfig = Field(default_factory=EmployeeDocsConfig)
     cash_ar: CashArConfig = Field(default_factory=CashArConfig)
     sales_tax: SalesTaxConfig = Field(default_factory=SalesTaxConfig)
+    expense_bookkeeper: ExpenseBookkeeperConfig = Field(default_factory=ExpenseBookkeeperConfig)
 
     def tz(self) -> ZoneInfo:
         return ZoneInfo(self.customer.timezone)
@@ -1037,6 +1162,134 @@ class MenuUpdateRejected(_BaseEntry):
 
 
 # ─────────────────────────────────────────────────────────────────
+# Agent #21 Expense Bookkeeper log entries (15 types)
+# ─────────────────────────────────────────────────────────────────
+
+class ExpenseReceiptReceived(_BaseEntry):
+    type: Literal["expense_receipt_received"]
+    expense_id: str
+    sender_phone: str
+    image_path: str
+    image_phash: str
+    original_message_id: str
+
+
+class ExpenseDuplicateDetected(_BaseEntry):
+    type: Literal["expense_duplicate_detected"]
+    expense_id: str
+    matched_expense_id: str
+    phash_distance: int
+    owner_override: bool = False
+
+
+class ExpenseExtractionCompleted(_BaseEntry):
+    type: Literal["expense_extraction_completed"]
+    expense_id: str
+    extraction_confidence: float
+    line_item_count: int
+    extracted_total_cents: Optional[int] = None
+
+
+class ExpenseClassificationProposed(_BaseEntry):
+    type: Literal["expense_classification_proposed"]
+    expense_id: str
+    is_business: bool
+    classification_confidence: float
+    qbo_account: str
+
+
+class ExpenseOwnerApprovalRequested(_BaseEntry):
+    type: Literal["expense_owner_approval_requested"]
+    expense_id: str
+    owner_approval_code: ProposalCode
+    extracted_total_cents: int
+    routed_to: Literal["whatsapp", "cockpit_v01_paper"]
+
+
+class ExpenseOwnerDecision(_BaseEntry):
+    type: Literal["expense_owner_decision"]
+    expense_id: str
+    decision: Literal["approved", "rejected", "force_approved", "amount_mismatch"]
+    raw_message: str = Field(max_length=500)
+    code_matched: bool
+    amount_matched: bool
+    force_context: Literal["threshold", "dedup", "both", "none"] = "none"
+
+
+class ExpenseLeadStatusChange(_BaseEntry):
+    type: Literal["expense_lead_status_change"]
+    expense_id: str
+    from_status: ExpenseLeadStatus
+    to_status: ExpenseLeadStatus
+    reason: Optional[str] = Field(default=None, max_length=200)
+
+
+class ExpensePushAttempted(_BaseEntry):
+    type: Literal["expense_push_attempted"]
+    expense_id: str
+    qbo_client_mode: Literal["mock", "real"]
+    extracted_total_cents: Optional[int] = None
+    owner_confirmed_total_cents: int
+    push_total_cents: int
+
+
+class ExpensePushed(_BaseEntry):
+    type: Literal["expense_pushed"]
+    expense_id: str
+    qbo_transaction_id: str
+    qbo_amount_cents: int
+    push_attempt_no: int = 1
+
+
+class ExpensePushFailed(_BaseEntry):
+    type: Literal["expense_push_failed"]
+    expense_id: str
+    error_class: Literal[
+        "token_expired", "rate_limit", "bad_account",
+        "server", "network", "invalid_request",
+    ]
+    error_message_redacted: str = Field(max_length=200)
+
+
+class ExpenseReversalRequested(_BaseEntry):
+    type: Literal["expense_reversal_requested"]
+    expense_id: str
+    requested_by_phone: str
+    requested_by_role: str
+    within_window: bool
+    hours_since_push: float
+
+
+class ExpenseReversed(_BaseEntry):
+    type: Literal["expense_reversed"]
+    expense_id: str
+    qbo_transaction_id: str
+    void_method: Literal["api_void", "manual_flag"]
+
+
+class ExpenseReceiptPruned(_BaseEntry):
+    type: Literal["expense_receipt_pruned"]
+    expense_id: str
+    vendor_normalized: Optional[str] = None
+    extracted_total_cents: Optional[int] = None
+    reason: Literal["retention_expired", "manual"] = "retention_expired"
+
+
+class ExpenseNonOwnerUndoDeclined(_BaseEntry):
+    type: Literal["expense_non_owner_undo_declined"]
+    expense_id: str
+    requested_by_phone: Optional[str] = None
+    requested_by_lid: Optional[str] = None
+
+
+class ExpenseOrphanDetected(_BaseEntry):
+    type: Literal["expense_orphan_detected"]
+    expense_id: str
+    last_known_status: ExpenseLeadStatus
+    detected_by: Literal["startup_scan", "manual"]
+
+
+# ─────────────────────────────────────────────────────────────────
 # Catering Lead log entries (Agent #2)
 # ─────────────────────────────────────────────────────────────────
 
@@ -1200,6 +1453,15 @@ LogEntry = Annotated[
         CateringQuoteDrafted,
         CateringOwnerApprovalRequested, CateringOwnerDecision, CateringQuoteSent,
         MenuUpdateProposed, MenuUpdateApplied, MenuUpdateRejected,
+        # Agent #21 Expense Bookkeeper (15 entry types)
+        ExpenseReceiptReceived, ExpenseDuplicateDetected,
+        ExpenseExtractionCompleted, ExpenseClassificationProposed,
+        ExpenseOwnerApprovalRequested, ExpenseOwnerDecision,
+        ExpenseLeadStatusChange,
+        ExpensePushAttempted, ExpensePushed, ExpensePushFailed,
+        ExpenseReversalRequested, ExpenseReversed,
+        ExpenseReceiptPruned, ExpenseNonOwnerUndoDeclined,
+        ExpenseOrphanDetected,
     ],
     Field(discriminator="type"),
 ]
@@ -1218,6 +1480,19 @@ __all__ = [
     # Tier 2 configs
     "InventoryConfig", "SupplierConfig", "VipConfig", "CateringFollowupConfig",
     "HiringConfig", "ComplianceConfig", "EmployeeDocsConfig", "CashArConfig", "SalesTaxConfig",
+    "ExpenseBookkeeperConfig", "ExpenseLineItem", "ExpenseClassification", "ReceiptExtraction",
+    "ExpenseLeadStatus", "EXPENSE_TERMINAL_STATUSES", "EXPENSE_TRANSITIONS",
+    "EXPENSE_RETENTION_CANDIDATES", "EXPENSE_APPROVAL_CLOSED_STATUSES",
+    "is_expense_transition_allowed",
+    "ExpenseLead", "ExpenseLeadStore",
+    "ExpenseReceiptReceived", "ExpenseDuplicateDetected",
+    "ExpenseExtractionCompleted", "ExpenseClassificationProposed",
+    "ExpenseOwnerApprovalRequested", "ExpenseOwnerDecision",
+    "ExpenseLeadStatusChange",
+    "ExpensePushAttempted", "ExpensePushed", "ExpensePushFailed",
+    "ExpenseReversalRequested", "ExpenseReversed",
+    "ExpenseReceiptPruned", "ExpenseNonOwnerUndoDeclined",
+    "ExpenseOrphanDetected",
     "Proposal", "ProposalId", "ProposalCode",
     "AwaitingProposal", "ApprovedProposal", "ReconcilingProposal", "SentProposal",
     "SendFailedProposal", "AcceptedProposal", "DeclinedProposal", "DeniedByOwnerProposal",

@@ -1,0 +1,12 @@
+{{expense_id}} — Possible duplicate
+
+Looks like a duplicate of {{matched_id}} ({{matched_vendor}} ${{matched_total_display}} on {{matched_date}}).
+
+Vendor: {{vendor_display}}
+Date:   {{receipt_date}}
+Total:  ${{total_display}}
+
+If this is genuinely a separate receipt, reply:
+  "{{approval_code}} {{total_display}} force"
+To skip:
+  "{{approval_code}} reject"

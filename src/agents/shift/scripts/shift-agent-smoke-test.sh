@@ -139,6 +139,34 @@ if ! systemd-analyze verify \
 fi
 echo "✓ weekly routing-summary systemd units verified"
 
+# 10. Agent #21 Expense Bookkeeper — scripts + dirs + perms + disabled-default config
+test -x /usr/local/bin/extract-receipt        || { echo "FAIL: extract-receipt missing/not-exec" >&2; exit 1; }
+test -x /usr/local/bin/apply-expense-decision || { echo "FAIL: apply-expense-decision missing/not-exec" >&2; exit 1; }
+test -x /usr/local/bin/prune-and-expire-expenses.py || { echo "FAIL: prune-and-expire-expenses.py missing/not-exec" >&2; exit 1; }
+test -d /opt/shift-agent/state/expense-bookkeeper/receipts || { echo "FAIL: receipts dir missing" >&2; exit 1; }
+recpts_perm=$(stat -c '%a' /opt/shift-agent/state/expense-bookkeeper/receipts 2>/dev/null || echo "")
+[ "$recpts_perm" = "700" ] || { echo "FAIL: receipts dir perms != 700 (got: $recpts_perm)" >&2; exit 1; }
+test -f /opt/shift-agent/qbo_client.py || { echo "FAIL: qbo_client.py missing" >&2; exit 1; }
+
+if ! sudo -u shift-agent /opt/shift-agent/venv/bin/python -c "
+import json, sys, pathlib, yaml
+sys.path.insert(0, '/opt/shift-agent')
+from schemas import Config, ExpenseLeadStore, EXPENSE_TRANSITIONS, is_expense_transition_allowed
+cfg = Config.model_validate(yaml.safe_load(open('/opt/shift-agent/config.yaml').read()))
+assert cfg.expense_bookkeeper.enabled is False, 'expense_bookkeeper MUST ship disabled (got True)'
+assert cfg.expense_bookkeeper.qbo_client_mode == 'mock', 'qbo_client_mode MUST be mock in v0.1'
+leads_p = pathlib.Path('/opt/shift-agent/state/expense-bookkeeper/leads.json')
+if leads_p.exists():
+    ExpenseLeadStore.model_validate(json.loads(leads_p.read_text()))
+assert is_expense_transition_allowed('AWAITING_OWNER_APPROVAL', 'APPROVED_PENDING_PUSH')
+assert not is_expense_transition_allowed('REVERSED', 'PUSHED')
+print('expense_bookkeeper schema + config + transitions validated')
+" 2>&1; then
+    echo "FAIL: expense_bookkeeper schema/config validation" >&2
+    exit 1
+fi
+echo "✓ expense_bookkeeper config + schema + dirs"
+
 echo ""
 echo "=== All smoke checks passed ==="
 exit 0

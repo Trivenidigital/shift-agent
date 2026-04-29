@@ -1,0 +1,11 @@
+[Unit]
+Description=Agent #21 daily prune + expire timer
+Requires=prune-expense-receipts.service
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=3600s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

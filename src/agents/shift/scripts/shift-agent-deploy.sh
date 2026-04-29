@@ -115,10 +115,31 @@ install_artifacts() {
     done
     chown -R shift-agent:shift-agent /root/.hermes/skills/
 
+    # Agent #21 — Expense Bookkeeper (v0.1; mocked QBOClient; ships disabled-default)
+    install -m 644 src/platform/qbo_client.py /opt/shift-agent/qbo_client.py
+    install -d -o shift-agent -g shift-agent -m 0700 /opt/shift-agent/state/expense-bookkeeper 2>/dev/null || true
+    install -d -o shift-agent -g shift-agent -m 0700 /opt/shift-agent/state/expense-bookkeeper/receipts 2>/dev/null || true
+    if [ -d src/agents/expense_bookkeeper/skills ]; then
+        rsync -a src/agents/expense_bookkeeper/skills/ /root/.hermes/skills/
+        chown -R shift-agent:shift-agent /root/.hermes/skills/
+    fi
+    if compgen -G "src/agents/expense_bookkeeper/scripts/*" > /dev/null; then
+        install -m 755 src/agents/expense_bookkeeper/scripts/* /usr/local/bin/
+    fi
+    if compgen -G "src/agents/expense_bookkeeper/templates/*" > /dev/null; then
+        install -m 644 src/agents/expense_bookkeeper/templates/* /opt/shift-agent/templates/
+    fi
+    if compgen -G "src/agents/expense_bookkeeper/systemd/*" > /dev/null; then
+        install -m 644 src/agents/expense_bookkeeper/systemd/*.service /etc/systemd/system/ 2>/dev/null || true
+        install -m 644 src/agents/expense_bookkeeper/systemd/*.timer   /etc/systemd/system/ 2>/dev/null || true
+    fi
+
     # Enable + start cron timers
     systemctl enable --now send-daily-brief.timer 2>/dev/null || true
     systemctl enable --now eod-reconcile.timer 2>/dev/null || true
     systemctl enable --now send-routing-accuracy-summary.timer 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable --now prune-expense-receipts.timer 2>/dev/null || true
 }
 
 snapshot_staging() {

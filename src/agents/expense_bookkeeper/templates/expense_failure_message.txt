@@ -1,0 +1,6 @@
+{{expense_id}} — push to QuickBooks failed.
+
+Reason: {{error_class}}{{retry_marker}}
+
+Audit ID: {{expense_id}}
+{{action_required_text}}
