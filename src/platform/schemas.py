@@ -12,7 +12,10 @@ Conventions:
 """
 
 from __future__ import annotations
-from pydantic import BaseModel, Field, ConfigDict, constr, model_validator, field_validator
+from pydantic import (
+    BaseModel, Field, ConfigDict, constr, model_validator, field_validator,
+    Tag, Discriminator,
+)
 from typing import Literal, Annotated, Union, Optional, Any, get_args
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -1209,6 +1212,56 @@ class _BaseEntry(BaseModel):
         return v
 
 
+class _UnknownLogEntry(_BaseEntry):
+    """Forward-compat passthrough for unrecognized LogEntry `type` values.
+
+    Old binaries reading rows written by newer binaries downgrade unknown
+    `type` values to this model rather than raising ValidationError. The
+    raw payload is captured (extra="allow") so audit-replay tooling can
+    still inspect the row even though no isinstance branch matches.
+
+    Convention departure (validated for Pydantic 2.10+):
+    - Other LogEntry variants use `type: Literal[...]` + `extra="forbid"`.
+    - `_UnknownLogEntry` uses `type: str` + `extra="allow"` to absorb any
+      future variant. The picker `_pick_log_entry_tag` routes any tag that
+      isn't in `_KNOWN_LOG_ENTRY_TYPES` here, including `""` and unknown
+      strings (intentional capture-and-preserve; missing-key returns None
+      from `dict.get` and also routes here).
+    - Type validation discipline is preserved: a known type with bad
+      fields still raises ValidationError; only UNKNOWN types pass through.
+
+    Tag(``_unknown_``) on the union member is the routing handle; the
+    `type: str` field stores the original tag value (e.g. `"future_xyz"`)
+    so round-trips are lossless.
+    """
+    model_config = ConfigDict(extra="allow")  # OVERRIDES _BaseEntry's extra="forbid"
+    type: str  # NOT Literal — accepts any string the discriminator routes here
+
+
+def _pick_log_entry_tag(v: Any) -> str:
+    """LogEntry discriminator picker (Pydantic v2 callable form, validated
+    on Pydantic 2.12.5).
+
+    Returns the value of `type` if it matches a known variant's Tag, else
+    the sentinel `"_unknown_"` which routes the row to _UnknownLogEntry.
+
+    Empty string `""`, missing-key (None from dict.get), and any unknown
+    string ALL route to `"_unknown_"` — capture-and-preserve is the design
+    intent for forward-compat. Non-string `type` values (int, etc.) ALSO
+    route to `"_unknown_"`; Pydantic's `_UnknownLogEntry.type: str` validation
+    will then raise on those, which is the correct discrimination
+    (a recognized literal + bad fields raises; only truly unknown tags
+    pass through).
+    """
+    if isinstance(v, dict):
+        t = v.get("type")
+    else:
+        t = getattr(v, "type", None)
+    if isinstance(t, str) and t in _KNOWN_LOG_ENTRY_TYPES:
+        return t
+    return "_unknown_"
+
+
 class RawInbound(_BaseEntry):
     type: Literal["raw_inbound"]
     message_id: str
@@ -1836,47 +1889,117 @@ class EodSkipped(_BaseEntry):
     ]
 
 
+# PR-D1: callable Discriminator + Tag-wrapped union members + _UnknownLogEntry
+# forward-compat shim. Replaces `Field(discriminator="type")` which raised
+# `union_tag_invalid` on unknown tags BEFORE any validator could run.
+#
+# Pattern (validated on Pydantic 2.12.5):
+#   - Each known variant wrapped Annotated[Variant, Tag("type_literal")].
+#   - _UnknownLogEntry wrapped Annotated[_UnknownLogEntry, Tag("_unknown_")].
+#   - Discriminator(_pick_log_entry_tag) routes by callable; unknown tags
+#     return "_unknown_" → captured by _UnknownLogEntry (extra="allow").
+#
+# CONVENTION DEPARTURE: every other variant subclasses _BaseEntry with
+# extra="forbid" + type: Literal[...]. _UnknownLogEntry deliberately uses
+# extra="allow" + type: str. The picker confines this exception to
+# unknown-tag routing only; known-but-malformed rows still raise
+# ValidationError (test asserts this in test_log_entry_forward_compat.py).
 LogEntry = Annotated[
     Union[
-        RawInbound, ProposalCreated, ProposalStatusChange,
-        OutboundAttempted, OutboundSent, OutboundSendFailed,
-        OutboundResponse, OutboundCapExceeded, OutboundRefusedDisabled,
-        AgentStateChange, UnknownSenderDeclined, InvariantViolation,
-        HealthCheckFailure,
+        Annotated[RawInbound, Tag("raw_inbound")],
+        Annotated[ProposalCreated, Tag("proposal_created")],
+        Annotated[ProposalStatusChange, Tag("proposal_status_change")],
+        Annotated[OutboundAttempted, Tag("outbound_attempted")],
+        Annotated[OutboundSent, Tag("outbound_sent")],
+        Annotated[OutboundSendFailed, Tag("outbound_send_failed")],
+        Annotated[OutboundResponse, Tag("outbound_response")],
+        Annotated[OutboundCapExceeded, Tag("outbound_cap_exceeded")],
+        Annotated[OutboundRefusedDisabled, Tag("outbound_refused_disabled")],
+        Annotated[AgentStateChange, Tag("agent_state_change")],
+        Annotated[UnknownSenderDeclined, Tag("unknown_sender_declined")],
+        Annotated[InvariantViolation, Tag("invariant_violation")],
+        Annotated[HealthCheckFailure, Tag("health_check_failure")],
         # BEGIN shift-agent-sender-id
-        LidLearned,
+        Annotated[LidLearned, Tag("lid_learned")],
         # END shift-agent-sender-id
         # Dispatcher routing audit (added with Fix 2 of dispatcher-routing-fixes)
-        DispatcherRouted,
+        Annotated[DispatcherRouted, Tag("dispatcher_routed")],
         # Agent #4 Daily Brief
-        BriefAttempted, BriefSent, BriefSendFailed, BriefSkipped,
+        Annotated[BriefAttempted, Tag("brief_attempted")],
+        Annotated[BriefSent, Tag("brief_sent")],
+        Annotated[BriefSendFailed, Tag("brief_send_failed")],
+        Annotated[BriefSkipped, Tag("brief_skipped")],
         # Agent #5 EOD Reconciliation
-        EodSnapshot, EodPushoverSent, EodSkipped,
+        Annotated[EodSnapshot, Tag("eod_snapshot")],
+        Annotated[EodPushoverSent, Tag("eod_pushover_sent")],
+        Annotated[EodSkipped, Tag("eod_skipped")],
         # Agent #3 Multi-Location Coordinator
-        CrossLocationQuery, InterLocationTransferProposed,
+        Annotated[CrossLocationQuery, Tag("cross_location_query")],
+        Annotated[InterLocationTransferProposed, Tag("inter_location_transfer_proposed")],
         # Agent #2 Catering Lead
-        CateringLeadCreated, CateringLeadStatusChange, CateringLeadRejected,
-        CateringQuoteDrafted,
-        CateringOwnerApprovalRequested, CateringOwnerDecision, CateringQuoteSent,
+        Annotated[CateringLeadCreated, Tag("catering_lead_created")],
+        Annotated[CateringLeadStatusChange, Tag("catering_lead_status_change")],
+        Annotated[CateringLeadRejected, Tag("catering_lead_rejected")],
+        Annotated[CateringQuoteDrafted, Tag("catering_quote_drafted")],
+        Annotated[CateringOwnerApprovalRequested, Tag("catering_owner_approval_requested")],
+        Annotated[CateringOwnerDecision, Tag("catering_owner_decision")],
+        Annotated[CateringQuoteSent, Tag("catering_quote_sent")],
         # v0.3: idempotency anchors + state-transition coverage
-        CateringQuoteAttempted, CateringOwnerApprovalCardAttempted,
-        CateringOwnerApprovalCardFailed, CateringOwnerApprovalCardSkipped,
-        CateringOwnerEdited, CateringDeclineAttempted,
+        Annotated[CateringQuoteAttempted, Tag("catering_quote_attempted")],
+        Annotated[CateringOwnerApprovalCardAttempted, Tag("catering_owner_approval_card_attempted")],
+        Annotated[CateringOwnerApprovalCardFailed, Tag("catering_owner_approval_card_failed")],
+        Annotated[CateringOwnerApprovalCardSkipped, Tag("catering_owner_approval_card_skipped")],
+        Annotated[CateringOwnerEdited, Tag("catering_owner_edited")],
+        Annotated[CateringDeclineAttempted, Tag("catering_decline_attempted")],
         # v0.3 (review M2): render-failure observability
-        CateringQuoteRenderFailed,
-        MenuUpdateProposed, MenuUpdateApplied, MenuUpdateRejected,
+        Annotated[CateringQuoteRenderFailed, Tag("catering_quote_render_failed")],
+        Annotated[MenuUpdateProposed, Tag("menu_update_proposed")],
+        Annotated[MenuUpdateApplied, Tag("menu_update_applied")],
+        Annotated[MenuUpdateRejected, Tag("menu_update_rejected")],
         # Agent #21 Expense Bookkeeper (15 entry types)
-        ExpenseReceiptReceived, ExpenseDuplicateDetected,
-        ExpenseExtractionCompleted, ExpenseClassificationProposed,
-        ExpenseOwnerApprovalRequested, ExpenseOwnerDecision,
-        ExpenseLeadStatusChange,
-        ExpensePushAttempted, ExpensePushed, ExpensePushFailed,
-        ExpenseReversalRequested, ExpenseReversed,
-        ExpenseReceiptPruned, ExpenseNonOwnerUndoDeclined,
-        ExpenseOrphanDetected,
+        Annotated[ExpenseReceiptReceived, Tag("expense_receipt_received")],
+        Annotated[ExpenseDuplicateDetected, Tag("expense_duplicate_detected")],
+        Annotated[ExpenseExtractionCompleted, Tag("expense_extraction_completed")],
+        Annotated[ExpenseClassificationProposed, Tag("expense_classification_proposed")],
+        Annotated[ExpenseOwnerApprovalRequested, Tag("expense_owner_approval_requested")],
+        Annotated[ExpenseOwnerDecision, Tag("expense_owner_decision")],
+        Annotated[ExpenseLeadStatusChange, Tag("expense_lead_status_change")],
+        Annotated[ExpensePushAttempted, Tag("expense_push_attempted")],
+        Annotated[ExpensePushed, Tag("expense_pushed")],
+        Annotated[ExpensePushFailed, Tag("expense_push_failed")],
+        Annotated[ExpenseReversalRequested, Tag("expense_reversal_requested")],
+        Annotated[ExpenseReversed, Tag("expense_reversed")],
+        Annotated[ExpenseReceiptPruned, Tag("expense_receipt_pruned")],
+        Annotated[ExpenseNonOwnerUndoDeclined, Tag("expense_non_owner_undo_declined")],
+        Annotated[ExpenseOrphanDetected, Tag("expense_orphan_detected")],
+        # PR-D1 forward-compat shim — UNKNOWN tags route here
+        Annotated[_UnknownLogEntry, Tag("_unknown_")],
     ],
-    Field(discriminator="type"),
+    Discriminator(_pick_log_entry_tag),
 ]
+
+
+def _build_known_log_entry_types() -> frozenset[str]:
+    """Computed once at module-import via introspection of LogEntry union args.
+
+    Excludes the `_unknown_` sentinel: the picker uses this set to decide
+    whether to ROUTE to a known variant or fall through to the sentinel.
+    Sentinel is the FALLBACK return, not a routable known type.
+
+    Eliminates drift between the LogEntry union and the picker's
+    known-tags set: adding a new Tag-wrapped variant to the union
+    automatically extends this set.
+    """
+    union_arg = get_args(LogEntry)[0]  # Union[Annotated[Model, Tag(...)], ...]
+    tags: set[str] = set()
+    for member in get_args(union_arg):  # each is Annotated[Model, Tag(...)]
+        for meta in get_args(member):
+            if isinstance(meta, Tag):
+                tags.add(meta.tag)
+    return frozenset(tags - {"_unknown_"})
+
+
+_KNOWN_LOG_ENTRY_TYPES: frozenset[str] = _build_known_log_entry_types()
 
 
 __all__ = [
@@ -1921,7 +2044,8 @@ __all__ = [
     "ExpiredProposal", "CancelledProposal", "NoResponseTimeoutProposal",
     "TERMINAL_STATUSES", "LEGAL_TRANSITIONS", "is_terminal_status", "is_legal_transition",
     "PendingStore", "SendCounter", "SeenIds",
-    "LogEntry", "RawInbound", "ProposalCreated", "ProposalStatusChange",
+    "LogEntry", "_UnknownLogEntry", "_KNOWN_LOG_ENTRY_TYPES",
+    "RawInbound", "ProposalCreated", "ProposalStatusChange",
     "OutboundAttempted", "OutboundSent", "OutboundSendFailed",
     "OutboundResponse", "OutboundCapExceeded", "OutboundRefusedDisabled",
     "AgentStateChange", "UnknownSenderDeclined", "InvariantViolation", "HealthCheckFailure",
