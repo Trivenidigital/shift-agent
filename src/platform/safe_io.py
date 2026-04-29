@@ -331,17 +331,28 @@ def load_yaml_model(path: Path, model_cls: Type[T]) -> T:
 
     Raises:
         FileNotFoundError: path missing.
-        RuntimeError: empty YAML / yaml parse error.
+        RuntimeError: empty/null YAML / yaml parse error / read I/O error /
+                      non-UTF-8 file content. RuntimeError is the closed
+                      "content-or-IO problem" exception class so callers'
+                      `except (FileNotFoundError, RuntimeError, ValidationError)`
+                      tuple stays complete (PR #34 reviewers R1+R3 finding).
         pydantic.ValidationError: data shape doesn't match model.
     """
     import yaml as _yaml
-    raw = path.read_text(encoding="utf-8")
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise  # caller catches separately
+    except OSError as e:
+        raise RuntimeError(f"I/O error reading {path}: {e}") from e
+    except UnicodeDecodeError as e:
+        raise RuntimeError(f"non-UTF-8 content in {path}: {e}") from e
     try:
         data = _yaml.safe_load(raw)
     except _yaml.YAMLError as e:
         raise RuntimeError(f"YAML parse failed for {path}: {e}") from e
     if data is None:
-        raise RuntimeError(f"YAML file is empty: {path}")
+        raise RuntimeError(f"YAML file is empty or null at root: {path}")
     return model_cls.model_validate(data)
 
 

@@ -86,6 +86,29 @@ def test_load_yaml_model_does_not_rename_on_parse_error(tmp_path):
     assert siblings == [], f"unexpected corrupt-rename siblings: {siblings}"
 
 
+def test_load_yaml_model_non_utf8_raises_runtime_error(tmp_path):
+    """Reviewer R1+R3 finding: helper must convert UnicodeDecodeError into
+    RuntimeError so callers' except (FileNotFoundError, RuntimeError,
+    ValidationError) tuple stays complete."""
+    p = tmp_path / "binary.yaml"
+    # Latin-1 byte that's not valid UTF-8 start sequence
+    p.write_bytes(b"\xff\xfename: triveni\n")
+    with pytest.raises(RuntimeError) as exc:
+        load_yaml_model(p, _SampleModel)
+    assert "utf-8" in str(exc.value).lower() or "decode" in str(exc.value).lower()
+
+
+def test_load_yaml_model_null_root_raises(tmp_path):
+    """yaml.safe_load('null') returns None — same code path as truly-empty
+    file. Message updated to reflect the broader case (empty OR null)."""
+    p = tmp_path / "null.yaml"
+    p.write_text("null\n", encoding="utf-8")
+    with pytest.raises(RuntimeError) as exc:
+        load_yaml_model(p, _SampleModel)
+    msg = str(exc.value).lower()
+    assert "empty" in msg or "null" in msg
+
+
 def test_load_yaml_model_does_not_rename_on_yaml_content_via_json_loader_path(tmp_path):
     """The original bug: calling load_model (JSON-loader) on YAML content
     triggers the corrupt-rename. Confirm load_yaml_model NEVER touches that
