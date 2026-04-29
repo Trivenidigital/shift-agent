@@ -30,11 +30,15 @@ formatting normalization, NOT vanity-number translation; the doc binds to
 "matching the existing schema validator" — see _PHONE_E164 in src/platform/schemas.py
 which rejects letters). Letter input → ValueError → CLI exit 2.
 
-Lock semantics: locks the leads.json file descriptor directly (NOT via
-safe_io.flock which locks a sibling .lock file — different lock target).
-Uses LOCK_NB + retry (3 × 1s sleep) so a long-running write does not block
-the customer-facing SKILL preamble indefinitely. On exhaustion, returns
-{lookup_status: "lock_timeout", ...} rather than raising.
+Lock semantics: locks the SAME `.lock` sibling pattern that writers use via
+`safe_io.try_acquire_filelock_with_retry` (LEADS_LOCK = LEADS_PATH + ".lock").
+This serializes correctly with `create-catering-lead` and
+`apply-catering-owner-decision` which both use `FileLock(LEADS_LOCK)`. The
+prior fd-on-data-file pattern (locking the data fd directly) did NOT serialize
+against the writers' .lock-sibling target — silent-failure-hunter NEW-5 from
+PR #26 review. Uses LOCK_NB + retry (3 × 1s sleep) so a long-running write
+does not block the customer-facing SKILL preamble indefinitely. On exhaustion,
+returns {lookup_status: "lock_timeout", ...} rather than raising.
 
 Time semantics: `last_seen_days_ago` uses `.days` truncation (23h59m → 0).
 Matches send-daily-brief watchdog precedent. Document semantic for SKILL prompts.
@@ -54,10 +58,8 @@ Exit codes (CLI):
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -65,7 +67,10 @@ from typing import Optional
 sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
 
-from safe_io import load_model, customer_now  # noqa: E402
+from safe_io import (  # noqa: E402
+    load_model, customer_now,
+    try_acquire_filelock_with_retry, LockUnavailable,
+)
 from schemas import (  # noqa: E402
     Config, CateringLeadStore, E164Phone,
 )
@@ -76,6 +81,11 @@ from pydantic import ValidationError  # noqa: E402
 
 CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
 LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
+# v3.1 NEW-5 fix: unified .lock-sibling target matches writers' FileLock
+# pattern (apply-catering-owner-decision + create-catering-lead). Convention:
+# LEADS_LOCK == str(LEADS_PATH) + ".lock". Pinned by
+# test_lookup_lock_target_constant_matches_leads_path_dot_lock.
+LEADS_LOCK = Path(str(LEADS_PATH) + ".lock")
 LOCK_RETRY_ATTEMPTS = 3
 LOCK_RETRY_SLEEP_SEC = 1.0
 
@@ -117,53 +127,42 @@ def _canonicalize_phone(raw: str) -> Optional[str]:
         return None
 
 
-def _try_acquire_lock(fd) -> bool:
-    """Non-blocking exclusive lock. Returns True if acquired, False if contended."""
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return True
-    except BlockingIOError:
-        return False
-
-
 def _read_leads_with_lock_timeout(leads_path: Path) -> tuple[Optional[CateringLeadStore], str]:
-    """Returns (store, status). status ∈ {ok, missing_file, lock_timeout, corrupt}.
+    """Returns (store, status). status ∈ {ok, missing_file, lock_timeout, corrupt, io_error}.
 
-    TOCTOU-safe: catches FileNotFoundError at open() in case the file is
-    rotated/replaced between our check and our open (silent-failure-hunter
+    Locks via the SAME .lock sibling that create-catering-lead and
+    apply-catering-owner-decision use (safe_io.FileLock target). This is the
+    NEW-5 unified-lock-target fix — the prior fd-on-data-file pattern did NOT
+    serialize against writers' .lock-sibling target.
+
+    TOCTOU-safe: catches FileNotFoundError around load_model in case the file
+    is rotated/replaced between our check and our open (silent-failure-hunter
     HIGH-1). All read failure modes map to a status string the caller can
     branch on; never raises.
     """
-    try:
-        fd = open(leads_path, "rb")  # noqa: SIM115 — manual close in finally
-    except FileNotFoundError:
+    if not leads_path.exists():
         return None, LOOKUP_STATUS_MISSING_FILE
-
     try:
-        for attempt in range(LOCK_RETRY_ATTEMPTS):
-            if _try_acquire_lock(fd):
-                try:
-                    store, ld_status = load_model(
-                        leads_path, CateringLeadStore, default=CateringLeadStore(),
-                    )
-                    # safe_io.safe_load_json contract: status starts with
-                    # "corrupt:" on parse error or "oserror:" on read I/O
-                    # failure (see safe_load_json's docstring). PR-review
-                    # NEW-1: previously only "corrupt" was caught; "oserror"
-                    # silently fell through with default empty store, masking
-                    # I/O issues as no_match.
-                    if ld_status.startswith("corrupt"):
-                        return None, LOOKUP_STATUS_CORRUPT
-                    if ld_status.startswith("oserror"):
-                        return None, LOOKUP_STATUS_IO_ERROR
-                    return store, LOOKUP_STATUS_OK
-                finally:
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-            if attempt < LOCK_RETRY_ATTEMPTS - 1:
-                time.sleep(LOCK_RETRY_SLEEP_SEC)
+        with try_acquire_filelock_with_retry(
+            LEADS_LOCK, attempts=LOCK_RETRY_ATTEMPTS, sleep_sec=LOCK_RETRY_SLEEP_SEC,
+        ):
+            try:
+                store, ld_status = load_model(
+                    leads_path, CateringLeadStore, default=CateringLeadStore(),
+                )
+            except FileNotFoundError:
+                # Race: file existed at our exists() check but disappeared
+                # before load (rotation, eviction, operator surgery).
+                return None, LOOKUP_STATUS_MISSING_FILE
+            # safe_io.safe_load_json contract: "corrupt:" on parse error or
+            # "oserror:" on read I/O failure. Map to our status enum.
+            if ld_status.startswith("corrupt"):
+                return None, LOOKUP_STATUS_CORRUPT
+            if ld_status.startswith("oserror"):
+                return None, LOOKUP_STATUS_IO_ERROR
+            return store, LOOKUP_STATUS_OK
+    except LockUnavailable:
         return None, LOOKUP_STATUS_LOCK_TIMEOUT
-    finally:
-        fd.close()
 
 
 def _normalize_aware(dt: datetime, *, source: str) -> datetime:
