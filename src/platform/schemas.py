@@ -1447,20 +1447,12 @@ class CateringDeclineAttempted(_BaseEntry):
     code: str = Field(pattern=_CODE_FULL_PATTERN)
 
 
-class CateringQuoteRenderFailed(_BaseEntry):
-    """v0.3 (review M2): emitted when apply-catering-owner-decision approve
-    flow fails to render the customer quote (template KeyError, OSError,
-    or unexpected validation issue). Without this audit row, an
-    approve-blocked-on-render-error left the lead at AWAITING_OWNER_APPROVAL
-    with no durable trace of why retries kept failing — operators saw stderr
-    only.
-    """
-    type: Literal["catering_quote_render_failed"]
-    lead_id: str = Field(min_length=1)
-    code: str = Field(pattern=_CODE_FULL_PATTERN)
-    error_class: str = Field(min_length=1, max_length=80,
-                             description="Python exception class name (e.g. 'KeyError')")
-    detail: str = Field(default="", max_length=2000)
+# Path B carve (post-architecture-review 2026-04-29): CateringQuoteRenderFailed
+# was added in v0.3 to surface template-format errors in the apply-script
+# render path. v0.4 replaces template rendering with LLM-drafted quotes,
+# so the template-error class dissolves and is replaced by
+# CateringQuoteHallucinationDetected (anti-hallucination guard failures).
+# See tasks/catering-v04-llm-drafted-quote-design.md.
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -1557,8 +1549,8 @@ LogEntry = Annotated[
         CateringQuoteAttempted, CateringOwnerApprovalCardAttempted,
         CateringOwnerApprovalCardFailed, CateringOwnerApprovalCardSkipped,
         CateringOwnerEdited, CateringDeclineAttempted,
-        # v0.3 (review M2): render-failure observability
-        CateringQuoteRenderFailed,
+        # Path B carve: CateringQuoteRenderFailed removed; replaced in v0.4
+        # by CateringQuoteHallucinationDetected (anti-hallucination guard).
         MenuUpdateProposed, MenuUpdateApplied, MenuUpdateRejected,
     ],
     Field(discriminator="type"),
@@ -1607,6 +1599,5 @@ __all__ = [
     "CateringQuoteAttempted", "CateringOwnerApprovalCardAttempted",
     "CateringOwnerApprovalCardFailed", "CateringOwnerApprovalCardSkipped",
     "CateringOwnerEdited", "CateringDeclineAttempted",
-    "CateringQuoteRenderFailed",
     "MenuUpdateProposed", "MenuUpdateApplied", "MenuUpdateRejected",
 ]

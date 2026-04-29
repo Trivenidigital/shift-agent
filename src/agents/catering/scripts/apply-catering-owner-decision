@@ -53,13 +53,15 @@ from safe_io import (  # noqa: E402
 from schemas import (  # noqa: E402
     Config, CateringLeadStore, Menu, MenuItem,
     CateringLeadStatusChange, CateringOwnerDecision, CateringQuoteSent,
-    # v0.3 (review M2): durable observability for render-failed approves
-    CateringQuoteRenderFailed,
     # v0.3 (A1+A2): idempotency anchor for customer-quote send
     CateringQuoteAttempted,
     # v0.3 A9: code-collision audit row (was stderr-only)
     InvariantViolation,
 )
+# Path B carve: CateringQuoteRenderFailed import removed; v0.4 replaces
+# template rendering with LLM drafting + anti-hallucination guards, so the
+# render-failure class is no longer applicable. See
+# tasks/catering-v04-llm-drafted-quote-design.md.
 from exit_codes import (  # noqa: E402
     EXIT_OK, EXIT_INVALID_INPUT, EXIT_NOT_FOUND,
     EXIT_SCHEMA_VIOLATION, EXIT_DEPENDENCY_DOWN, EXIT_ILLEGAL_TRANSITION,
@@ -97,39 +99,11 @@ def _bridge_post(jid: str, message: str) -> tuple[bool, str]:
         return False, f"{type(e).__name__}: {e}"
 
 
-_DIETARY_TAG_ALIASES = {
-    "vegetarian": "veg", "veg": "veg",
-    "non-vegetarian": "non-veg", "non-veg": "non-veg", "nonveg": "non-veg",
-    "vegan": "vegan",
-    "jain": "jain",
-    "halal": "halal",
-    "kosher": "kosher",
-    "gluten-free": "gluten-free", "gf": "gluten-free", "gluten free": "gluten-free",
-    "nut-free": "nut-free", "nut free": "nut-free",
-    "dairy-free": "dairy-free", "dairy free": "dairy-free",
-    "egg-free": "egg-free", "egg free": "egg-free", "no eggs": "egg-free",
-}
-
-
-def _normalize_dietary_tags(raw_tags: list[str]) -> tuple[set[str], list[str]]:
-    """v0.3 A8: returns (recognized_tags, unknown_input_tags).
-
-    Unknown tags surface in the customer message as a "we didn't recognize"
-    note, instead of being silently dropped (which previously produced
-    misleading "we don't have items matching X" copy that implied the
-    restaurant doesn't do X — when really we just didn't tag for it).
-    """
-    recognized: set[str] = set()
-    unknown: list[str] = []
-    for r in raw_tags:
-        if not isinstance(r, str):
-            continue
-        t = r.lower().strip()
-        if t in _DIETARY_TAG_ALIASES:
-            recognized.add(_DIETARY_TAG_ALIASES[t])
-        else:
-            unknown.append(r)  # preserve original casing for customer message
-    return recognized, unknown
+# Path B carve: _DIETARY_TAG_ALIASES + _normalize_dietary_tags removed.
+# v0.4 hands the LLM a list of input tags and recognizable menu tags;
+# the LLM handles "we didn't recognize 'halaal'" prose directly.
+# Inline tag-normalization preserved below in _load_menu_filtered for
+# the deterministic menu filter (still needed pre-LLM-call).
 
 
 def _load_menu_filtered(dietary_restrictions: list[str]) -> tuple[list[MenuItem], int, str]:
@@ -166,15 +140,39 @@ def _load_menu_filtered(dietary_restrictions: list[str]) -> tuple[list[MenuItem]
     items = [it for it in menu.items if it.available]
     if not dietary_restrictions:
         return items, len(menu.items), "ok"
-    # v0.3 A8: route through the normalize helper so unknown tags can be
-    # surfaced upstream (instead of silently dropped). The returned set is
-    # the recognized-tag set; unknowns are tracked separately via
-    # _normalize_dietary_tags and surfaced in _format_menu_section's caller.
-    requested, _unknown = _normalize_dietary_tags(dietary_restrictions)
+    # Inline tag normalization (was extracted to _normalize_dietary_tags
+    # in v0.3; carved back here in Path B since the unknown-tag tracking
+    # path dissolves when v0.4 LLM drafting takes over).
+    requested = set()
+    for r in dietary_restrictions:
+        if not isinstance(r, str):
+            continue
+        t = r.lower().strip()
+        if t in ("vegetarian", "veg"):
+            requested.add("veg")
+        elif t in ("non-vegetarian", "non-veg", "nonveg"):
+            requested.add("non-veg")
+        elif t in ("vegan",):
+            requested.add("vegan")
+        elif t in ("jain",):
+            requested.add("jain")
+        elif t in ("halal",):
+            requested.add("halal")
+        elif t in ("kosher",):
+            requested.add("kosher")
+        elif t in ("gluten-free", "gf", "gluten free"):
+            requested.add("gluten-free")
+        elif t in ("nut-free", "nut free"):
+            requested.add("nut-free")
+        elif t in ("dairy-free", "dairy free"):
+            requested.add("dairy-free")
+        elif t in ("egg-free", "egg free", "no eggs"):
+            requested.add("egg-free")
     if not requested:
         # All input tags were unknown — return ALL available items so the
-        # customer at least sees what we offer. The "we didn't recognize"
-        # note is added downstream.
+        # customer at least sees what we offer. v0.4 LLM drafting will
+        # add the "we didn't recognize 'halaal'" prose; v0.3-carved
+        # behavior here is just to not silently drop matches.
         return items, len(menu.items), "ok"
     filtered = [it for it in items if any(tag in requested for tag in it.dietary_tags)]
     return filtered, len(menu.items), "ok"
@@ -227,34 +225,14 @@ def _render_quote(lead, customer_name: str) -> tuple[str, str]:
     Returns (rendered_text, menu_status) where menu_status ∈ {"ok","absent","corrupt","io_error"}.
     Caller refuses approve on "corrupt"/"io_error".
     """
+    # Path B carve: A4 (template format error LOUD), A5 (off_menu in customer
+    # quote), A8 (dietary-tag-note section) all dissolve in v0.4 LLM-drafted
+    # quote. Restoring v0.2-style template-format-with-fallback rendering for
+    # the 2-4 weeks until v0.4 ships.
     template_path = TEMPLATE_DIR / "catering_quote_to_customer.txt"
     dietary = list(lead.extracted.dietary_restrictions or [])
-    # v0.3 A8: track unknown dietary tags BEFORE filtering so we can surface
-    # them in the customer message even when filtering succeeded against
-    # OTHER (recognized) tags. Was: silent partial drop.
-    _, unknown_tags = _normalize_dietary_tags(dietary)
     filtered_items, total, menu_status = _load_menu_filtered(dietary)
     menu_section = _format_menu_section(filtered_items, total, dietary)
-
-    # A5: include off_menu_items in customer-facing quote
-    off_menu_section = ""
-    if lead.extracted.off_menu_items:
-        items_list = "\n".join(f"  - {it}" for it in lead.extracted.off_menu_items)
-        off_menu_section = f"\n*Custom requests we'll discuss:*\n{items_list}\n"
-
-    # v0.3 A8: dietary-restriction note. When ANY input tag is unknown,
-    # append a note (regardless of whether filtering matched OTHER tags) so
-    # the customer can clarify. Avoids the misleading "we don't have items
-    # matching X" copy that previously implied we don't serve X — when in
-    # reality our menu just isn't tagged for X yet.
-    dietary_note_section = ""
-    if unknown_tags:
-        joined_unknown = ", ".join(f"'{t}'" for t in unknown_tags)
-        dietary_note_section = (
-            f"\n_Note: we don't currently classify items by {joined_unknown}. "
-            f"If that's a hard requirement, please confirm and we'll send "
-            f"custom options._\n"
-        )
 
     fields = {
         "lead_id": lead.lead_id,
@@ -263,26 +241,24 @@ def _render_quote(lead, customer_name: str) -> tuple[str, str]:
         "event_date": lead.extracted.event_date or "[TBD]",
         "event_time": lead.extracted.event_time or "[TBD]",
         "menu_section": menu_section,
-        "off_menu_items_section": off_menu_section,
-        "dietary_note_section": dietary_note_section,
     }
     if template_path.exists():
         try:
             tmpl = template_path.read_text(encoding="utf-8")
             return tmpl.format(**fields), menu_status
-        except KeyError as e:
-            raise ValueError(f"catering_quote_to_customer.txt missing key: {e}") from e
-        except OSError as e:
-            raise ValueError(f"catering_quote_to_customer.txt read failed: {e}") from e
+        except (KeyError, OSError):
+            # Template format error — fall through to inline composition.
+            # NOTE: v0.3 made this a LOUD failure (A4 fix). Reverted in
+            # Path B since v0.4 removes the template entirely; the inline
+            # fallback is the v0.2 behavior.
+            pass
 
-    # No template installed — render via inline composition (this is NOT a
-    # silent fallback for template-format errors; only for missing-template).
+    # Inline fallback — no template OR template format failed.
     return (
         f"⚕ *Catering Agent*\n────────────\n"
         f"Hi {fields['customer_name']}, thank you for the catering inquiry. "
         f"We can confirm — let's discuss details. Reply here when ready, or "
-        f"reach us directly.{menu_section}{off_menu_section}{dietary_note_section}\n"
-        f"(Ref: {lead.lead_id})"
+        f"reach us directly.{menu_section}\n(Ref: {lead.lead_id})"
     ), menu_status
 
 
@@ -408,40 +384,11 @@ def main() -> int:
             # point of computation rather than implicit in the model_copy
             # contract.
             target_jid = f"{lead.customer_phone[1:]}@s.whatsapp.net"
-            try:
-                quote_text, menu_load_status = _render_quote(lead, lead.customer_name or "")
-            except ValueError as render_err:
-                # A4 fix: template format error is LOUD, NOT a silent inline fallback.
-                # Review M2: also emit a durable audit row so operators see
-                # the loop in decisions.log (was: stderr-only, retries showed
-                # no audit trail — operator could not diagnose stuck approves).
-                try:
-                    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-                    with flock(LOG_PATH):
-                        ndjson_append(
-                            LOG_PATH,
-                            TypeAdapter(CateringQuoteRenderFailed).dump_json(
-                                CateringQuoteRenderFailed(
-                                    type="catering_quote_render_failed",
-                                    ts=datetime.now(tz=timezone.utc),
-                                    lead_id=lead.lead_id,
-                                    code=code,
-                                    error_class=type(render_err).__name__,
-                                    detail=str(render_err)[:2000],
-                                ),
-                            ).decode("utf-8"),
-                        )
-                except Exception as audit_err:
-                    sys.stderr.write(
-                        f"WARN: CateringQuoteRenderFailed audit-write failed "
-                        f"(non-fatal): {type(audit_err).__name__}: {audit_err}\n"
-                    )
-                sys.stderr.write(
-                    f"FATAL: catering quote template error: {render_err}\n"
-                    f"  Owner approved lead {lead.lead_id} but customer quote could "
-                    f"not be rendered. State left at AWAITING_OWNER_APPROVAL.\n"
-                )
-                return EXIT_DEPENDENCY_DOWN
+            # Path B carve: A4 LOUD-on-template-error + CateringQuoteRenderFailed
+            # audit removed. _render_quote now falls back to inline composition
+            # on template format errors (v0.2 behavior). v0.4 LLM drafting
+            # replaces this whole render path with anti-hallucination guards.
+            quote_text, menu_load_status = _render_quote(lead, lead.customer_name or "")
             # A3 fix: refuse approve when menu load returned corrupt/io_error.
             # "absent" is OK — first-run customer with no menu uploaded yet.
             if menu_load_status in ("corrupt", "io_error"):
