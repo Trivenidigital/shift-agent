@@ -371,13 +371,37 @@ def main() -> int:
             sys.stderr.write(f"{e}\n")
             return EXIT_SCHEMA_VIOLATION
 
-        # Match code among non-terminal leads only
-        matches = [l for l in store.leads
-                   if l.owner_approval_code == code
-                   and l.status == "AWAITING_OWNER_APPROVAL"]
+        # PR-D2 commit 4: retry-state-machine via matcher widening + idempotent_replay short-circuit.
+        # Decision tree (design v2 §4.6, 5 rows simplified into 3 branches):
+        #   Row 1+2: tail-scan finds catering_quote_sent for the lead → customer
+        #            already received quote → idempotent_replay short-circuit.
+        #            Advance status if still OWNER_APPROVED.
+        #   Row 3+4: code matches a lead in {AWAITING_OWNER_APPROVAL, OWNER_APPROVED}
+        #            AND no quote_sent row → fresh attempt or resume.
+        #            Anchor (if present) gets superseded by success/failed
+        #            anchor written by the post-bridge sequence.
+        #   Row 5:   no recoverable state → EXIT_NOT_FOUND.
+        # OWNER_EDITED is NOT in the matcher (R2-H1 fix): owner sent edit, retry-
+        # approve with same code would ship un-edited quote — money-moving correctness.
+
+        if args.decision == "approve":
+            quote_sent_existing = _tail_scan_quote_sent(LOG_PATH, "")  # placeholder; needs lead_id resolved first
+        else:
+            quote_sent_existing = None
+
+        # Match code: AWAITING_OWNER_APPROVAL (fresh) OR OWNER_APPROVED (retry/self-heal)
+        # for approve decision. For reject/edit, only AWAITING_OWNER_APPROVAL.
+        if args.decision == "approve":
+            matches = [l for l in store.leads
+                       if l.owner_approval_code == code
+                       and l.status in ("AWAITING_OWNER_APPROVAL", "OWNER_APPROVED")]
+        else:
+            matches = [l for l in store.leads
+                       if l.owner_approval_code == code
+                       and l.status == "AWAITING_OWNER_APPROVAL"]
+
         if not matches:
-            sys.stderr.write(f"no AWAITING_OWNER_APPROVAL lead with code {code}\n")
-            # Did the code exist on a different status? (helpful for debugging)
+            sys.stderr.write(f"no recoverable lead with code {code}\n")
             any_match = [l for l in store.leads if l.owner_approval_code == code]
             if any_match:
                 sys.stderr.write(
@@ -385,7 +409,6 @@ def main() -> int:
                 )
             return EXIT_NOT_FOUND
         if len(matches) > 1:
-            # Should be impossible per generate_unique_code; defend anyway
             sys.stderr.write(
                 f"BUG: {len(matches)} active leads share code {code}; refusing\n"
             )
@@ -393,6 +416,46 @@ def main() -> int:
 
         lead = matches[0]
         lead_id_for_output = lead.lead_id
+
+        # ROW 1+2 (idempotent_replay): tail-scan for quote_sent of THIS lead.
+        # If found, customer demonstrably received quote (post-B-1 reorder, this
+        # row is written FIRST after bridge POST). Advance status under the
+        # SAME LEADS_LOCK as the tail-scan (R2-H-2 pin).
+        if args.decision == "approve":
+            quote_sent_existing = _tail_scan_quote_sent(LOG_PATH, lead.lead_id)
+            if quote_sent_existing is not None:
+                now_replay = customer_now(cfg.customer.timezone)
+                if lead.status == "OWNER_APPROVED":
+                    matched_idx = next(
+                        (i for i, l in enumerate(store.leads) if l.lead_id == lead.lead_id),
+                        None,
+                    )
+                    if matched_idx is not None:
+                        store.leads[matched_idx] = store.leads[matched_idx].model_copy(update={
+                            "status": "SENT_TO_CUSTOMER",
+                            "updated_at": now_replay,
+                        })
+                        atomic_write_json(LEADS_PATH, store)
+                        _append_log_with_outer_leadslock(
+                            TypeAdapter(CateringLeadStatusChange),
+                            CateringLeadStatusChange(
+                                type="catering_lead_status_change", ts=now_replay,
+                                lead_id=lead.lead_id,
+                                from_status="OWNER_APPROVED",
+                                to_status="SENT_TO_CUSTOMER",
+                                actor="system",
+                                reason="idempotent_replay_recovered",
+                            ),
+                        )
+                print(json.dumps({
+                    "lead_id": lead.lead_id,
+                    "new_status": "SENT_TO_CUSTOMER",
+                    "outbound_sent": True,
+                    "idempotent_replay": True,
+                    "outbound_message_id": quote_sent_existing.outbound_message_id,
+                }))
+                return EXIT_OK
+
         now = customer_now(cfg.customer.timezone)
         prev_status = lead.status
 
