@@ -43,6 +43,72 @@ The Stage 1 decision doc for Expense Bookkeeper (drafted before this rule landed
 
 ---
 
+## ⚠️ DRIFT RULES — Read deployed code BEFORE proposing
+
+Authoritative source: `docs/hermes-alignment.md` (Parts 1 and 3 are binding). This section summarises; the doc is canonical.
+
+### The rule (Part 3 working agreement)
+
+**Before proposing schema, test, or architecture work, READ the relevant deployed code first.**
+
+| Work type | Read first (mandatory before drafting) |
+|---|---|
+| Schema work | `src/platform/schemas.py` — grep for the relevant model first |
+| Test work | 1–2 existing test files (e.g. `tests/test_catering_v02_scripts.py`, `tests/test_catering_b1_cases.py`) |
+| Routing / dispatcher work | `src/agents/shift/skills/dispatch_shift_agent/SKILL.md` + at least one handler SKILL |
+| New script proposal | grep `src/platform/scripts/` + `src/agents/*/scripts/` for the closest similar |
+| Audit-log entries | `LogEntry` discriminated union in `src/platform/schemas.py` |
+| Deploy work | `src/agents/shift/scripts/shift-agent-deploy.sh` + `tools/check-shift-agent-patch.sh` |
+| New SKILL | one existing SKILL.md to mirror frontmatter + structure |
+| File-locking / atomic writes | `src/platform/safe_io.py` — see what helpers exist |
+
+This rule eliminates ~80% of corrections at zero infrastructure cost. Most "drift" in this codebase comes from importing a SaaS-style frame before grounding in this codebase's specific shape.
+
+### Drift-check tag (mandatory at top of every plan/spec/design doc)
+
+Every plan, spec, or design document MUST carry one tag at the top:
+
+- **`Hermes-native`** — uses Hermes primitives without modification
+- **`extends-Hermes`** — adds custom infrastructure on top (most platform work falls here)
+- **`drifts-from-Hermes`** — explicitly fights Hermes conventions; MUST explain operationally what compensating infrastructure exists
+
+Self-disclosure mechanism. Surfaces deviation at proposal time so reviewers can engage with it explicitly. Does NOT replace the read-deployed-code rule.
+
+### Deployed pattern checklist (Part 1 — verify, do NOT silently import alternatives)
+
+- **Storage:** JSON-on-disk + `safe_io.atomic_write_json` + `fcntl.flock`. Do NOT introduce SQLite/Postgres without explicit `drifts-from-Hermes` tag + reason.
+- **NDJSON audit log:** append via `safe_io.ndjson_append` through the `log-decision-direct` chokepoint (used by SKILLs) or via per-agent scripts that share the same chokepoint. Add new variants to `LogEntry` discriminated union (subclass `_BaseEntry`, set `type: Literal["..."]`).
+- **Approval codes:** 5-char `#XXXXX` from the 28.6M-entry alphabet via `generate_unique_code` helper. Do NOT invent parallel generators. Codes share a namespace across agents; the dispatcher disambiguates by state-file priority.
+- **Schemas:** Pydantic v2 with explicit `model_config`. `extra="forbid"` on state schemas; `extra="ignore"` on LLM-output shapes (extractor outputs may emit unmodelled fields). Status enums use `Literal[...]` not `Enum`.
+- **Sender identity:** phone OR LID via `identify-sender`; NEVER trust message content or WhatsApp profile name for routing. ALWAYS call `validate-sender-block` to parse the v=1 block before downstream logic. The `fromMe` flag is informational only.
+- **Tests:** Deterministic Python scripts get pytest with subprocess-invoke + assert on file mutations + stdout (matches `test_catering_v02_scripts.py`). Pure-function units (parsers, hash, state-machine table) get in-process tests. SKILL.md interpretation is observability + manual smoke (not unit-tested).
+- **Dispatcher routing:** amend the existing `dispatch_shift_agent` matrix in priority order; write `dispatcher_routed` audit entry BEFORE delegating to a handler. Skipping dispatcher = silent routing-correctness regression.
+- **Image inputs:** Hermes provides transient `/opt/shift-agent/.hermes/image_cache/img_*.jpg`; agents copy to managed `/opt/shift-agent/state/<agent>/...` for retention.
+- **Per-customer-VPS isolation:** each VPS is single-tenant. Don't propose cross-VPS state sharing.
+
+### Operational drift checklist (Part 2)
+
+`docs/hermes-alignment.md` Part 2 lists silent-failure surfaces (Hermes pin gate via `tools/check-shift-agent-patch.sh`, env symlink integrity, audit-log rotation, etc.). DO NOT propose changes that compromise these without an explicit `drifts-from-Hermes` tag and described compensating infrastructure.
+
+### How to apply (mandatory checklist before any plan/spec/code)
+
+1. Identify the work type in the table above
+2. Read the listed file(s) — `Read` tool, ~1 second each
+3. Apply the drift-check tag at the top of the doc you draft
+4. Verify your proposal against the deployed-pattern checklist; flag ANY divergence in the doc explicitly
+5. If your proposal silently violates a Part-1 pattern, the reviewer will catch it — better to surface it yourself first
+
+### Why this rule exists (separate from Hermes-first)
+
+**Hermes-first** says: default to Hermes substrate; only write custom code for what it cannot do.
+**Drift rules** say: before drafting anything, read the actual deployed code so your proposal is grounded.
+
+Together they prevent: (a) reinventing substrate that exists, (b) proposing patterns that contradict deployed conventions, (c) wasting reviewer time on corrections that the contributor could have caught with a 1-second `Read`.
+
+The Expense Bookkeeper plan v2 (2026-04-29) had 10 drift items that the 5-agent review missed — they emerged only after I read `dispatch_shift_agent/SKILL.md`, `safe_io.py`, and the catering scripts that the plan claimed to mirror. Read-before-propose would have caught all 10 upstream.
+
+---
+
 ## Project context
 
 - **Project:** SMB-Agents — autonomous AI agents for ethnic SMBs (restaurants, groceries, food courts, catering)
