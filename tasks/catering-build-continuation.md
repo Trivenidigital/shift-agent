@@ -9,7 +9,24 @@ This file is a self-contained handoff for resuming the build. Read this and `tas
 
 ---
 
-## What's done (Commit 1 = `1bfd9e6`)
+## What's done (6 commits — branch `fix/catering-comprehensive`)
+
+**As of session-end-2 (resume point):**
+
+| # | Hash | Scope |
+|---|---|---|
+| 1 | `1bfd9e6` | Schema layer + smoke + migration tool |
+| 1.5 | `24b0deb` | Build-continuation handoff doc |
+| 3a | `2679979` | apply-script Q1+A3+A4+A5 + sentinel module-scope bugfix |
+| 2 | `3dd927c` | create-script C1+C2+C4+C5+L4-CL+M1-CL+M2-CL+M3-CL |
+| 5 | `6335809` | E164Phone.from_any country_code (PM2/L0) + lookup threading |
+| 4a | `edb3d75` | apply-menu-update M1 narrow-except + always-archive |
+
+VPS Linux: 19/19 B1 tests pass after each commit.
+
+---
+
+### Original commit-1 detail
 
 ✅ All schema-layer additions (`src/platform/schemas.py`):
 - `_CODE_FULL_PATTERN`, `CATERING_TRANSITIONS` table, `is_catering_transition_allowed`, `assert_rejection_reason_complete`
