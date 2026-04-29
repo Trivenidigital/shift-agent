@@ -247,6 +247,43 @@ def dump_model(path: Path, model: "BaseModel", mode: int = 0o640) -> None:
     atomic_write_json(path, model, mode=mode)
 
 
+class LoadStatusError(RuntimeError):
+    """Raised when safe_load_json/load_model returned an unhealthy status that
+    a writer cannot safely fall through (corrupt parse, OS-level I/O failure,
+    rename-failure on corrupt quarantine, novel future status).
+    """
+
+
+_HEALTHY_LOAD_STATUSES = frozenset({"ok", "missing", "empty"})
+
+
+def assert_load_status_clean(path: Path, status: str, *, context: str) -> None:
+    """Raise LoadStatusError if `status` indicates an unsafe load.
+
+    Healthy statuses (caller falls through to default): ok / missing / empty.
+    All other statuses (corrupt:* / corrupt_unrenamed:* / oserror:* / future)
+    raise.
+
+    Use at the head of every writer's load_model() block. Canonical 5-line
+    callsite pattern (keep identical across all writers for grep-based audits):
+
+        store, status = load_model(LEADS_PATH, CateringLeadStore, default=...)
+        try:
+            assert_load_status_clean(LEADS_PATH, status, context="apply-decision read")
+        except LoadStatusError as e:
+            sys.stderr.write(f"{e}\n")
+            return EXIT_SCHEMA_VIOLATION
+
+    A future status addition (e.g. 'too_large:') automatically protects every
+    writer rather than silently falling through three different scripts.
+    """
+    if status in _HEALTHY_LOAD_STATUSES:
+        return
+    raise LoadStatusError(
+        f"unhealthy load status for {path} (context={context!r}): {status}"
+    )
+
+
 # Priority-1 tightening: accept parens + space (common customer input formats)
 # while still rejecting shell metachars: `;&|<>$\\*?'"!^{}[]\``.
 _PHONE_SAFE = re.compile(r"^[+\d@.\w\-() ]+$")
