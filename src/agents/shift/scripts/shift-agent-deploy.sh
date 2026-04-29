@@ -282,11 +282,13 @@ case "$ACTION" in
 
         install_artifacts "$STAGING"
 
-        # Pre-restart import gate: a missing safe_io chokepoint symbol means
-        # traffic hits new code BEFORE smoke fires post-restart. Run the
-        # symbol-import check against the just-installed binary (still old
-        # service) — failure path rolls back without touching live traffic.
-        if ! /usr/local/bin/check-safe-io-symbols > /dev/null; then
+        # Pre-restart import gate: a missing safe_io OR audit_helpers chokepoint
+        # symbol means traffic hits new code BEFORE smoke fires post-restart.
+        # Run the symbol-import checks against the just-installed binary (still
+        # old service) — failure path rolls back without touching live traffic.
+        # PR-D1 R3-H-Gate1: chained check-audit-helpers-symbols.
+        if ! /usr/local/bin/check-safe-io-symbols > /dev/null \
+              || ! /usr/local/bin/check-audit-helpers-symbols > /dev/null; then
             echo "FAIL: pre-restart import gate — refusing to restart hermes-gateway" >&2
             if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
                 "$0" rollback "$PREV_TAG"
