@@ -204,6 +204,20 @@ print('expense_bookkeeper schema + config + transitions validated')
 fi
 echo "✓ expense_bookkeeper config + schema + dirs"
 
+# 12. Agent #21 — exercise the prune-and-expire-expenses config-load path end-to-end.
+# Catches regressions of the kind PR #34 fixed (load_model called on YAML →
+# safe_load_json rename-quarantines customer config.yaml). Marker-line check
+# (not bare `if !`) so a future non-config exit-1 doesn't auto-rollback benign cases.
+smoke_out=$(sudo -u shift-agent /opt/shift-agent/venv/bin/python /usr/local/bin/prune-and-expire-expenses.py --dry-run 2>&1)
+if ! echo "$smoke_out" | grep -q "^SMOKE_OK$"; then
+    fail_line=$(echo "$smoke_out" | grep "^SMOKE_FAIL:" | head -1)
+    [ -n "$fail_line" ] && echo "$fail_line" >&2
+    echo "FAIL: prune-and-expire-expenses --dry-run missing OK marker (config-load regression?)" >&2
+    echo "$smoke_out" >&2
+    exit 1
+fi
+echo "✓ prune-and-expire-expenses --dry-run config-load path"
+
 echo ""
 echo "=== All smoke checks passed ==="
 exit 0
