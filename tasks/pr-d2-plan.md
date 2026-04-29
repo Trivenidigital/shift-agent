@@ -137,7 +137,265 @@ Smoke gate (per design v2 §9.2 R3-M-Smoke1) iterates ALL ~58 known LogEntry var
 
 ---
 
-## Status: PLAN-DRAFTED, ready for 5-agent plan review
+## Plan v2 — 5-agent plan-review revisions (BINDING)
+
+This section supersedes any conflicting earlier text. Build phase reads from here first.
+
+### v2.1 BLOCKERs (must be fixed before any build commit)
+
+#### B-1 (R2) — Position 5/6 duplicate-quote window: post-bridge write reorder
+
+**Problem:** plan v1 Task 3 kept the deployed write-order: bridge POST → re-acquire LEADS_LOCK → status=SENT_TO_CUSTOMER → atomic_write → `CateringLeadStatusChange` → `CateringQuoteSent` → `CateringQuoteAttempted(outcome="success")`. If the apply-script process dies between bridge-POST-success and the `CateringQuoteSent` write, retry sees anchor=unknown + no quote_sent + status=OWNER_APPROVED. Task 4 row 3 ("anchor outcome=unknown → re-attempt bridge") fires → customer gets quote a second time.
+
+**Resolution (binding canonical write order — Tasks 3+4 build from this):** inside the SECOND LEADS_LOCK block, immediately after bridge POST returns `ok=True`:
+
+```python
+# Step 1: write CateringQuoteSent FIRST — the only retry-defeating signal.
+#         Append-only NDJSON; written before any state mutation. If process
+#         dies after this row but before step 2, retry's quote_sent tail-scan
+#         finds it → idempotent_replay short-circuit (Task 4 row 1).
+_append_log_with_outer_leadslock(
+    TypeAdapter(CateringQuoteSent),
+    CateringQuoteSent(type="catering_quote_sent", ts=now, lead_id=...,
+                      customer_phone=customer_phone_pre_bridge,
+                      outbound_message_id=mid_or_err),
+)
+# Step 2: write success-anchor superseding the step-6 outcome="unknown" anchor.
+_append_log_with_outer_leadslock(
+    TypeAdapter(CateringQuoteAttempted),
+    CateringQuoteAttempted(type="catering_quote_attempted", ts=now, lead_id=...,
+                           original_message_id=..., code=...,
+                           bridge_post_outcome="success"),
+)
+# Step 3: mutate state (last because audit-rows are append-only NDJSON;
+#         if this step dies, retry's quote_sent short-circuit advances state).
+matched_idx = next((i for i,l in enumerate(store.leads) if l.lead_id == lead_id_for_output), None)
+if matched_idx is None:
+    log_quote_sent_lead_missing_best_effort(...)
+    _pushover_p2(...)
+    return EXIT_SCHEMA_VIOLATION
+store.leads[matched_idx] = store.leads[matched_idx].model_copy(update={
+    "status": "SENT_TO_CUSTOMER",
+    "updated_at": customer_now(...),
+})
+atomic_write_json(LEADS_PATH, store)
+# Step 4: status-change audit row.
+_append_log_with_outer_leadslock(
+    TypeAdapter(CateringLeadStatusChange),
+    CateringLeadStatusChange(...from_status="OWNER_APPROVED",
+                             to_status="SENT_TO_CUSTOMER",
+                             actor="system", reason="customer_send_succeeded"),
+)
+```
+
+This reorder makes the retry-state-machine's row 1 ("quote_sent found → idempotent") actually short-circuit at every position 5/6/7 process-death point. The bridge POST is exactly-once even under SIGKILL.
+
+**Test coverage (per R3-H-1 below):** `tests/test_catering_apply_case_b_to_c_recovery.py` MUST contain BOTH `test_process_dies_after_anchor_before_bridge` AND `test_process_dies_after_bridge_before_success_anchor`. The second test pins the reorder.
+
+#### B-2 (R5) — multi-VPS canary deploy strategy
+
+**Problem:** plan v1 Deploy step says "build tarball + scp + shift-agent-deploy.sh" (singular). Triveni runs 9 VPS. Parallel rollout would consume all 9 rollback slots simultaneously on apply-script bug.
+
+**Resolution:** add `Deploy step 0 — canary` to plan deploy section:
+
+1. **Step 0**: pick lowest-traffic VPS as canary (suggest the most recently quiet by `dispatcher-accuracy-report --days 1`).
+2. **Step 1**: operator runs `tools/check-pr-d2-rollback-target.sh <canary-vps> 3f96c07`.
+3. **Step 2**: deploy PR-D2 to canary; **60-minute** soak with synthetic-retry probe (per R5-H-2 below) at minute 5.
+4. **Step 3**: only if canary clears all soak watchlist signals AND synthetic-retry probe succeeds, bulk-deploy to remaining 8 VPS staggered ~2 min apart (so smoke-fail rollback per VPS doesn't lose more than 1 VPS at a time to in-flight rollback).
+5. **Step 4**: 20-min soak per non-canary VPS (per design v2 §14.3 M9; canary already burned the longer window).
+
+### v2.2 HIGH
+
+#### R2-HIGH-1 — N=5000 + 24h binding at Triveni-scale
+
+**Resolution:** raise tail-scan defaults: `max_lines=5000` stays, but `max_age_hours` raised from 24 → **96** (covers Friday-quote-Monday-approve weekend window). New observability: emit `tail_scan_truncated` audit row whenever scan hits `max_lines` without `max_age_hours` exhaustion. Helper signature update:
+
+```python
+def _tail_scan_anchor(
+    log_path: Path, code: str,
+    max_lines: int = 5000,
+    max_age_hours: float = 96.0,  # was 24 in design v2 §14.3
+) -> Optional[CateringQuoteAttempted]:
+    """... see design v2. PR-D2 plan v2 R2-HIGH-1: raised max_age_hours to
+    96 (4-day weekend window) to handle Friday-quote-Monday-approve
+    legitimate retry. Emits tail_scan_truncated row if max_lines hit
+    before max_age_hours exhaustion (signals fleet-scale capacity drift)."""
+```
+
+NEW LogEntry variant **deferred to PR-D3** (small scope; doesn't block PR-D2). For PR-D2 instead: `tail_scan_truncated` is emitted as `_UnknownLogEntry`-style row via direct `ndjson_append` with `{"type": "tail_scan_truncated", "ts": ..., "code": ..., "max_lines": ...}`. Soak watchlist greps for it. **Decision: instead, tail_scan helpers log via `sys.stderr.write` only (which lands in journald) — no NDJSON emission.** Avoids growing the discriminated union further in PR-D2.
+
+#### R2-HIGH-2 — Idempotent_replay status-advance LEADS_LOCK contract pin
+
+**Resolution:** add explicit pin to plan Task 4 tactical decision:
+
+> Task 4 row 1 (quote_sent found): status advance happens INSIDE the same LEADS_LOCK block that performs the tail-scan. Sequence: `tail-scan(under_lock) → if quote_sent found → matched_idx via next() → mutate store.leads[matched_idx] → atomic_write_json → emit CateringLeadStatusChange(actor="system", reason="idempotent_replay_recovered") → release lock`. NEVER advance status without the lock; NEVER emit the audit row before atomic_write succeeds.
+
+#### R3-HIGH-1 — Case B-then-C needs 2 tests
+
+**Resolution:** plan Task 7 `tests/test_catering_apply_case_b_to_c_recovery.py` description updated from "1 test" to "2 tests":
+
+1. `test_process_dies_after_anchor_before_bridge`: monkeypatch `_bridge_post` to raise `SystemExit` AFTER anchor=unknown written, BEFORE HTTP call. Retry: real bridge. Assert `BridgeStub.requests == 1` (one POST total in run 2), tail-scan finds anchor=success after both runs, single `catering_quote_sent` row.
+2. `test_process_dies_after_bridge_before_success_anchor`: monkeypatch the post-bridge step to die AFTER bridge returns success, BEFORE step 1 of the reorder (the `CateringQuoteSent` write). Retry: bridge POST NOT re-attempted (because reorder ensures this scenario can't actually happen — but test verifies the no-quote_sent + anchor=unknown path correctly resumes from Case A step 6 rather than re-POSTing the same code). Specifically, the second test must demonstrate that with the post-bridge reorder, the window is closed: the `CateringQuoteSent` row is the FIRST audit-row written after bridge return, so no death-window leaves anchor=unknown + bridge-was-actually-successful + no-quote_sent.
+
+#### R3-HIGH-2 — stronger v02 probe assertion
+
+**Resolution:** plan Task 5 probe strengthened. Probe inserts a sentinel side-effect inside one of the v02 helpers' import path:
+
+```python
+# tests/test_v02_probe.py
+def test_v02_helpers_main_body_executes(tmp_path: Path, monkeypatch):
+    """Stronger than design v2 §9.3: not just hasattr(mod, 'main') but
+    proves the body of main() (or its loaded module) executes during
+    the v02 import pattern. If the helpers' importlib pattern truly
+    'never executed' (per _b1_helpers.py docstring claim), this fails."""
+    # Insert sentinel via monkeypatching a known import target
+    sentinel = tmp_path / "v02_executed_sentinel"
+    # Use one of the v02 test bodies (subprocess invocation of create-catering-lead)
+    # The script's `if __name__ == "__main__": sys.exit(main())` block runs only if
+    # mod.__name__ is set to "__main__" before exec_module — which is the v02 pattern.
+    # Monkeypatch a function in the module path that, if called, writes the sentinel.
+    # ... (probe implementation written at build time; the assertion is sentinel.exists()
+    #     after running one v02 test fixture in subprocess)
+    # If sentinel exists: v02 helpers DID execute → hoist preserves real behavior.
+    # If absent: docstring claim was correct → hoist surfaces real bugs (flag in commit).
+```
+
+Commit message records observation either way.
+
+#### R5-H-1 — bypassable rollback gate + 9-VPS amplification
+
+**Resolution:** **out-of-scope for PR-D2 build phase**, but plan must explicitly document mitigation:
+
+- The R4-H-2 broken-tarball eviction (PR-D1) means: if operator skips the gate AND no other deploy lands between PR-D1 and PR-D2, rollback is safe.
+- With CANARY strategy (B-2 above), risk is concentrated on canary VPS only; bulk-deploy follows clean canary, reducing window for inter-deploy hotfix.
+- For 9-VPS-scale enforcement: track as PR-D3 follow-up — embed expected-PREV-SHA in tarball metadata + `shift-agent-deploy.sh` refuses if PREV_TAG SHA doesn't match. Estimated 30 LOC + 1 test.
+
+Plan adds explicit follow-up note in §"Out-of-scope (PR-B + PR-D3 carryover)".
+
+#### R5-H-2 — 20-min soak misses retry path
+
+**Resolution:** add synthetic retry probe to canary VPS soak (B-2 step 2 minute 5):
+
+```bash
+# tools/synthetic-retry-probe.sh — runs ONCE at minute 5 of canary soak
+# 1. Create test catering lead via direct script invocation (--test-mode flag).
+# 2. Simulate owner-approve.
+# 3. SIGKILL apply-script process between anchor-write and bridge POST.
+# 4. Trigger retry (re-invoke apply-decision with same code).
+# 5. Assert: bridge_post_outcome transitions unknown→success in audit, exactly
+#    one catering_quote_sent row, no duplicate customer message via WhatsApp
+#    bridge.
+# 6. Cleanup: delete synthetic test lead.
+```
+
+Probe ships as a new tool in PR-D2 commit 7. **20-min soak per non-canary VPS** (B-2 step 4) does NOT run the probe (overhead too high for 9-VPS bulk).
+
+#### R5-H-3 — live-state migration: in-flight lead at OWNER_APPROVED with no anchor
+
+**Problem:** PR-D2 ships while a lead is mid-approve under old code: state=OWNER_APPROVED, no `CateringQuoteAttempted` anchor, no `CateringQuoteSent`. The matcher (line 256-258) filters status=`AWAITING_OWNER_APPROVAL` only → EXIT_NOT_FOUND on retry → quote never sent.
+
+**Resolution:** extend Task 4 retry-state-machine to handle this case explicitly. Decision tree updated:
+
+```python
+quote_sent = _tail_scan_quote_sent(LOG_PATH, lead_id, ...)
+anchor = _tail_scan_anchor(LOG_PATH, code, ...)
+
+if quote_sent is not None:
+    # Row 1: idempotent_replay (covers R5-H-3 if quote_sent was somehow recorded)
+    ...
+elif anchor is not None and anchor.bridge_post_outcome == "success":
+    # Row 2: bridge succeeded but quote_sent missing — synthesize CateringQuoteSent
+    # (post-reorder this is unreachable in normal flow; defensive only)
+    ...
+elif anchor is not None and anchor.bridge_post_outcome in ("failed", "unknown"):
+    # Row 3: bridge may have failed — re-attempt
+    ...
+elif (code matches a lead with status="OWNER_APPROVED" or "OWNER_EDITED") and anchor is None:
+    # Row 4 NEW (R5-H-3): in-flight lead at OWNER_APPROVED under old code
+    # at PR-D2 deploy moment. Treat as fresh attempt: write anchor outcome="unknown",
+    # bridge POST, then post-bridge sequence per B-1 reorder.
+    # No backfill script needed — apply-script self-heals on retry.
+    sys.stderr.write(f"recovery: retry on OWNER_APPROVED lead with no anchor "
+                     f"(PR-D2 live-state migration) — proceeding as fresh attempt\n")
+    # ... resume Case A step 6
+else:
+    # Row 5 (existing fresh-attempt path): no match
+    return EXIT_NOT_FOUND
+```
+
+Test in Task 4 file: `test_owner_approved_no_anchor_self_heals_on_retry`.
+
+### v2.3 MEDIUM
+
+#### R1-M-3 — naming consistency note
+
+Plan v1 §"Tactical decisions" Task 7 mentions `CateringLeadManuallyReconciled` (correct, post-PR-D1). Design v2 §8 body still references the pre-rename `CateringLeadManualReconcile`; design v2 §14.2 R5-H-2 supersedes. Plan v2 explicitly aligns with the post-rename: `CateringLeadStatusChange(actor="operator")` AND `CateringLeadManuallyReconciled` (PR-D1 schema, 2 audit rows per reconcile invocation).
+
+#### R2-MED-1 — Position 2 retry path under-specified
+
+**Resolution:** addressed in R5-H-3 row 4 above. Position 2 (status=OWNER_APPROVED + no anchor + no quote_sent) maps to row 4 of the updated decision tree.
+
+#### R3-M-1 — reconcile script same-state idempotency case (9th case)
+
+**Resolution:** plan Task 7 reconcile test count grows from 8 to **9 cases**. New case: `test_reconcile_refuses_same_target_status` — operator passes `--target-status SENT_TO_CUSTOMER` against a lead already at SENT_TO_CUSTOMER. Refuse with EXIT_INVALID_INPUT + stderr "lead already in target status". Avoids zero-delta audit-log churn.
+
+#### R3-M-2 — format invariant test parametrized over all variants
+
+**Resolution:** `tests/test_decisions_log_format.py` parametrizes over `_KNOWN_LOG_ENTRY_TYPES` with the same minimal-fields fixture map planned for the design v2 §9.2 R3-M-Smoke1 smoke gate. Fixture map inlined in the test file.
+
+#### R5-M-1 — soak watchlist gaps
+
+**Resolution:** plan Deploy step 6 watchlist extended:
+
+- Pairing check: `awk 'BEGIN{FS=","} /catering_quote_attempted.*outcome="failed"/ {failed[$0]=1} /catering_quote_attempted.*outcome="success"/ {delete failed[$0]} END{for(k in failed) print k}'` — any failed without a superseding success row within the same scan window = apply-script crashed during retry.
+- Threshold: any single `catering_quote_sent_lead_missing` occurrence pages operator (not just visible in tail).
+- Apply-script exit-code rate: `journalctl -u hermes-gateway --since "20m ago" | grep -E "EXIT_(SCHEMA_VIOLATION|DEPENDENCY_DOWN|NOT_FOUND)" | grep -i catering | wc -l` — non-zero rate triggers investigation.
+
+### v2.4 LOW
+
+R1-L-1, R1-L-2, R3-L-1 (tombstone integrity in doc test), R5-L (cosmetic LOC math) — all addressed inline in tactical decisions or accepted no-op.
+
+### v2.5 Updated build sequence
+
+Same 7 commits as plan v1 §Build sequence; tactical changes within commits per §v2.1 + §v2.2:
+
+| # | Commit subject | What changed in v2 |
+|---|---|---|
+| 1 | yaml migration | (no change) |
+| 2 | matched_idx + customer_phone_pre_bridge | (no change) |
+| 3 | anchor two-step write + tail-scan helpers | tail-scan `max_age_hours=96` (R2-H-1); helpers emit stderr `tail_scan_truncated` line on cap-hit |
+| 4 | retry-state-machine | **5-row decision tree** (was 4): added row 4 OWNER_APPROVED-no-anchor self-heal (R5-H-3); status-advance lock contract pinned (R2-H-2); post-bridge write reorder (B-1) |
+| 5 | v02 probe | strengthened to sentinel-based assertion (R3-H-2) |
+| 6 | conftest hoist | (no change) |
+| 7 | reconcile + tests + doc | reconcile gains 9th same-state-refuse test (R3-M-1); 2 Case-B-then-C tests (R3-H-1); format test parametrized (R3-M-2); synthetic-retry probe tool (R5-H-2); doc tombstone integrity check (R3-L-1) |
+
+### v2.6 Updated deploy sequence (canary)
+
+| Step | Action |
+|---|---|
+| 0 | Pick canary VPS (lowest-traffic) |
+| 1 | Operator runs `tools/check-pr-d2-rollback-target.sh <canary> 3f96c07` |
+| 2 | Deploy PR-D2 to canary; 60-min soak; synthetic-retry probe at minute 5 |
+| 3 | If canary clears: bulk-deploy remaining 8 VPS staggered 2-min apart |
+| 4 | 20-min soak per non-canary VPS (no synthetic probe) |
+
+### v2.7 Out-of-scope (PR-B + PR-D3 carryover)
+
+- PR-B: `lookup_invoked` LogEntry variant + SKILL preamble emission (per design v2 M12)
+- PR-D3: non-bypassable rollback gate via tarball metadata (R5-H-1 follow-up)
+- PR-D3: `tail_scan_truncated` LogEntry variant (R2-H-1 — NDJSON observability instead of stderr-only)
+
+### Status: PLAN-REVIEWED, design phase BLOCKED until B-1 + B-2 lock down in design
+
+Plan-review surfaced 2 BLOCKERs that prevent design phase from advancing safely. Resolution paths documented above. Design phase should:
+1. Apply B-1 fix (write-order reorder) as binding canonical sequence in §6.3.
+2. Apply B-2 fix (canary VPS strategy) as binding deploy plan.
+3. Apply 9 HIGH + 6 MEDIUM tactical updates per §v2.2 + §v2.3.
+4. Then dispatch 5 design-reviewers.
+
+---
+
+## Status (v1, superseded by §v2): PLAN-DRAFTED, ready for 5-agent plan review
 
 Reviewers should focus on:
 1. **Drift correctness** — extends-Hermes is correct (no convention departure in PR-D2). Verify against deployed-code evidence.
