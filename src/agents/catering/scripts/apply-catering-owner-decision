@@ -383,6 +383,15 @@ def main() -> int:
         #   Row 5:   no recoverable state → EXIT_NOT_FOUND.
         # OWNER_EDITED is NOT in the matcher (R2-H1 fix): owner sent edit, retry-
         # approve with same code would ship un-edited quote — money-moving correctness.
+        #
+        # R1 H-1 (PR-review) acknowledgement: design v2 Row 2 (anchor=success +
+        # quote_sent missing) is intentionally NOT implemented as a separate
+        # branch. Post-B-1 reorder writes CateringQuoteSent FIRST after bridge
+        # POST, so anchor=success without quote_sent is unreachable in normal
+        # flow. If it occurs (e.g. legacy row from pre-PR-D2 emission, or
+        # journald rotation losing the quote_sent row), the retry would re-POST.
+        # Policy: "delivered twice << never delivered". Synthetic retry probe
+        # (canary minute 5 + 45) measures real-world frequency.
 
         # Match code: AWAITING_OWNER_APPROVAL (fresh) OR OWNER_APPROVED (retry/self-heal)
         # for approve decision. For reject/edit, only AWAITING_OWNER_APPROVAL.

@@ -47,8 +47,10 @@ RECONCILE_SCRIPT = Path("/usr/local/bin/catering-lead-reconcile")
 LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
 
 # NANP-reserved test phone range (R5-H-3): 555-0100..555-0199
+# PR-review R2 H2 fix: prefix "+155550" was too loose (matched real assignable
+# 555-50XX numbers). Tightened to "+1555501" pinning to 555-01XX range.
 SYNTHETIC_PHONE = "+15555550199"
-SYNTHETIC_PHONE_PREFIX = "+155550"
+SYNTHETIC_PHONE_PREFIX = "+1555501"
 
 
 def _load_apply_module():
