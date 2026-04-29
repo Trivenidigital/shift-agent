@@ -282,6 +282,29 @@ case "$ACTION" in
 
         install_artifacts "$STAGING"
 
+        # Pre-restart import gate: a missing safe_io chokepoint symbol means
+        # traffic hits new code BEFORE smoke fires post-restart. Run the
+        # symbol-import check against the just-installed binary (still old
+        # service) — failure path rolls back without touching live traffic.
+        if ! /usr/local/bin/check-safe-io-symbols > /dev/null; then
+            echo "FAIL: pre-restart import gate — refusing to restart hermes-gateway" >&2
+            if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                "$0" rollback "$PREV_TAG"
+                # Evict the broken tarball from the rotation so next deploy
+                # doesn't surface it as a candidate rollback target.
+                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+            else
+                /usr/local/bin/shift-agent-notify-owner \
+                    --title "Deploy FAILED at pre-restart import gate, no prior tarball" \
+                    --priority 2 \
+                    "Deploy $NEW_TAG failed pre-restart symbol-import check. New files installed but service still on OLD code (gateway not yet restarted). No prior tarball to roll back to — SSH immediately." 2>/dev/null || true
+                # Evict the broken tarball from the rotation so it isn't surfaced
+                # as a rollback candidate on the next deploy.
+                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+            fi
+            exit 1
+        fi
+
         # Restart services (in order: tail-logger first, gateway last)
         systemctl restart shift-agent-tail-logger.timer 2>/dev/null || true
         systemctl restart shift-agent-health.timer 2>/dev/null || true
@@ -334,10 +357,22 @@ case "$ACTION" in
         systemctl restart hermes-gateway
         sleep 5
 
+        # Re-run smoke after rollback. If the prior tarball is itself broken
+        # (e.g. operator manually edited /opt/shift-agent/safe_io.py between
+        # deploys), exit 1 + Pushover P2 — operator must SSH. Terminal:
+        # we do NOT attempt rollback-of-rollback.
+        if ! /usr/local/bin/shift-agent-smoke-test.sh; then
+            /usr/local/bin/shift-agent-notify-owner \
+                --priority 2 \
+                --title "Rollback to $TARGET FAILED smoke — agent in uncertain state" \
+                "Rollback completed but smoke test failed against $TARGET. Prior tarball may itself be broken. SSH immediately." 2>/dev/null || true
+            exit 1
+        fi
+
         /usr/local/bin/shift-agent-notify-owner \
             --title "Rolled back to $TARGET" \
             --priority 1 \
-            "Rolled back from broken deploy. Re-run smoke test if needed." 2>/dev/null || true
+            "Rolled back from broken deploy. Smoke test passed against $TARGET." 2>/dev/null || true
         echo "Rollback to $TARGET complete."
         ;;
 

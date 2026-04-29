@@ -22,6 +22,7 @@ import re
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TypeVar, Type, Any, Optional, Tuple
 from datetime import datetime
@@ -104,9 +105,6 @@ class LockUnavailable(RuntimeError):
     This raise-on-exhaustion contract is deliberate: a bool-return shape would
     be a footgun (caller forgets to check; runs lockless; corrupts state).
     """
-
-
-from contextlib import contextmanager  # noqa: E402  — kept near the helper that uses it
 
 
 @contextmanager

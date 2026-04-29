@@ -13,6 +13,7 @@ src/agents/expense_bookkeeper/systemd/prune-expense-receipts.timer (daily).
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -41,16 +42,30 @@ def _log(entry):
 
 
 def main():
-    # FIX (PR #34): config.yaml is YAML, NOT JSON. load_model calls json.loads
-    # → JSONDecodeError → safe_load_json renames the file to
-    # config.yaml.corrupt-<epoch>. Particularly important here because this
-    # script runs from a systemd timer; before the fix, every timer fire
-    # rename-quarantined customer config.yaml.
+    ap = argparse.ArgumentParser(prog="prune-and-expire-expenses")
+    ap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate config-load and exit; emit SMOKE_OK marker on success "
+             "or SMOKE_FAIL: <reason> on failure. Used by smoke-test step 12.",
+    )
+    args = ap.parse_args()
+
+    # config.yaml is YAML, NOT JSON. PR #34 added load_yaml_model so this
+    # path no longer rename-quarantines customer config every timer fire.
     try:
         cfg = load_yaml_model(CONFIG_PATH, Config)
     except (FileNotFoundError, RuntimeError, ValidationError) as e:
+        if args.dry_run:
+            print(f"SMOKE_FAIL: {type(e).__name__}: {e}")
         sys.stderr.write(f"config load failed: {e}\n")
         return 1
+    if args.dry_run:
+        # --dry-run validates config-load only; does NOT exercise the prune
+        # loop body. A future regression in the prune logic itself won't be
+        # caught here. PR-C R2 finding accepted: scope is config-load-only.
+        print("SMOKE_OK")
+        return 0
     if not cfg.expense_bookkeeper.enabled:
         return 0  # silent no-op
 

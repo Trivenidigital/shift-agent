@@ -28,22 +28,20 @@ for script in \
 done
 echo "✓ All scripts present + executable"
 
-# 2. Python modules importable + new safe_io chokepoint symbols present
-# Per design-review R3: module-level import alone won't catch a missing
-# *symbol* on the module, only a missing module. Fail-closed on the specific
-# names that catering scripts now depend on (assert_load_status_clean,
-# LoadStatusError, try_acquire_filelock_with_retry, LockUnavailable).
+# 2. Python modules importable + safe_io chokepoint symbols present
+# Symbol list lives in src/platform/scripts/check-safe-io-symbols — single
+# source of truth shared with shift-agent-deploy.sh pre-restart gate.
 if ! python3 -c "
 import sys
 sys.path.insert(0, '/opt/shift-agent')
 import schemas, safe_io, exit_codes
-from safe_io import (
-    assert_load_status_clean, LoadStatusError,
-    try_acquire_filelock_with_retry, LockUnavailable,
-)
 print('schema classes:', [c for c in dir(schemas) if not c.startswith('_')][:5])
 " > /dev/null; then
-    echo "FAIL: Python modules / safe_io chokepoint symbols don't import"
+    echo "FAIL: Python modules don't import"
+    exit 1
+fi
+if ! /usr/local/bin/check-safe-io-symbols > /dev/null; then
+    echo "FAIL: safe_io chokepoint symbols missing — run check-safe-io-symbols for details"
     exit 1
 fi
 echo "✓ Python modules importable (incl. safe_io chokepoint symbols)"
@@ -205,6 +203,20 @@ print('expense_bookkeeper schema + config + transitions validated')
     exit 1
 fi
 echo "✓ expense_bookkeeper config + schema + dirs"
+
+# 12. Agent #21 — exercise the prune-and-expire-expenses config-load path end-to-end.
+# Catches regressions of the kind PR #34 fixed (load_model called on YAML →
+# safe_load_json rename-quarantines customer config.yaml). Marker-line check
+# (not bare `if !`) so a future non-config exit-1 doesn't auto-rollback benign cases.
+smoke_out=$(sudo -u shift-agent /opt/shift-agent/venv/bin/python /usr/local/bin/prune-and-expire-expenses.py --dry-run 2>&1)
+if ! echo "$smoke_out" | grep -q "^SMOKE_OK$"; then
+    fail_line=$(echo "$smoke_out" | grep "^SMOKE_FAIL:" | head -1)
+    [ -n "$fail_line" ] && echo "$fail_line" >&2
+    echo "FAIL: prune-and-expire-expenses --dry-run missing OK marker (config-load regression?)" >&2
+    echo "$smoke_out" >&2
+    exit 1
+fi
+echo "✓ prune-and-expire-expenses --dry-run config-load path"
 
 echo ""
 echo "=== All smoke checks passed ==="

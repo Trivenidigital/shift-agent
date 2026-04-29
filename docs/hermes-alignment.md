@@ -26,6 +26,7 @@ What `src/platform/` provides today and how agents are expected to use it.
 ### Storage
 
 - **JSON-on-disk + `fcntl.flock` + atomic writes.** All state lives at `/opt/shift-agent/state/*.json` on the VPS, written through `safe_io.atomic_write_json` and read with `safe_io.load_model` (Pydantic-validating). NDJSON for append-only logs (`decisions.log`).
+- **YAML files (`config.yaml`) use `safe_io.load_yaml_model`, NOT `load_model`.** `load_model` calls `safe_load_json` which calls `json.loads` and rename-quarantines on `JSONDecodeError`. Calling it on YAML content silently moves the customer's actual config aside as `config.yaml.corrupt-<epoch>`. PR #34 added `load_yaml_model` (yaml-aware, no auto-rename, raises explicitly). Operator-edited files surface parse errors in place; auto-quarantine is wrong policy for them.
 - **No database engine in the request path.** No SQLite, no Postgres. If you need concurrent multi-writer or query patterns this can't handle, propose alternative explicitly — don't introduce silently.
 - **Per-customer-VPS isolation.** Each VPS is single-tenant. State files are not shared across customers. This is the whole reason JSON-on-disk is sufficient.
 
