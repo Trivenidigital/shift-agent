@@ -297,7 +297,10 @@ case "$ACTION" in
                 /usr/local/bin/shift-agent-notify-owner \
                     --title "Deploy FAILED at pre-restart import gate, no prior tarball" \
                     --priority 2 \
-                    "Deploy $NEW_TAG failed pre-restart symbol-import check. New files installed but service still on OLD code (gateway not yet restarted). Manual revert by re-extracting prior staging or installing $PREV_TAG.tgz." 2>/dev/null || true
+                    "Deploy $NEW_TAG failed pre-restart symbol-import check. New files installed but service still on OLD code (gateway not yet restarted). No prior tarball to roll back to — SSH immediately." 2>/dev/null || true
+                # Evict the broken tarball from the rotation so it isn't surfaced
+                # as a rollback candidate on the next deploy.
+                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
             fi
             exit 1
         fi

@@ -29,8 +29,8 @@ done
 echo "✓ All scripts present + executable"
 
 # 2. Python modules importable + safe_io chokepoint symbols present
-# Symbol list lives in tools/check-safe-io-symbols.py — single source of truth
-# shared with shift-agent-deploy.sh's pre-restart gate (PR-C design R5 DRY).
+# Symbol list lives in src/platform/scripts/check-safe-io-symbols — single
+# source of truth shared with shift-agent-deploy.sh pre-restart gate.
 if ! python3 -c "
 import sys
 sys.path.insert(0, '/opt/shift-agent')
@@ -40,8 +40,8 @@ print('schema classes:', [c for c in dir(schemas) if not c.startswith('_')][:5])
     echo "FAIL: Python modules don't import"
     exit 1
 fi
-if ! /usr/local/bin/check-safe-io-symbols.py > /dev/null; then
-    echo "FAIL: safe_io chokepoint symbols missing — run check-safe-io-symbols.py for details"
+if ! /usr/local/bin/check-safe-io-symbols > /dev/null; then
+    echo "FAIL: safe_io chokepoint symbols missing — run check-safe-io-symbols for details"
     exit 1
 fi
 echo "✓ Python modules importable (incl. safe_io chokepoint symbols)"

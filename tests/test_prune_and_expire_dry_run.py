@@ -90,10 +90,20 @@ def test_dry_run_emits_smoke_ok_when_enabled(tmp_path):
 
 def test_dry_run_missing_config_emits_smoke_fail(tmp_path):
     """No config.yaml file → load_yaml_model raises FileNotFoundError →
-    SMOKE_FAIL marker emitted on stdout for smoke-test.sh to surface."""
+    SMOKE_FAIL marker emitted on stdout for smoke-test.sh to surface.
+
+    Asserts LINE-START match (anchored ^SMOKE_FAIL:), not just substring —
+    smoke-test.sh's grep uses `^SMOKE_FAIL:` so a future logging-prefix
+    regression that breaks the line-start contract must fail this test.
+    """
     r = _run_dry(tmp_path)
     assert r.returncode == 1, (r.returncode, r.stderr)
     assert "SMOKE_FAIL: FileNotFoundError" in r.stdout, r.stdout
+    # Line-start invariant — matches smoke-test.sh's anchored grep
+    assert any(line.startswith("SMOKE_FAIL: ") for line in r.stdout.splitlines()), (
+        f"SMOKE_FAIL: must appear at line start (smoke uses ^SMOKE_FAIL: grep). "
+        f"stdout: {r.stdout!r}"
+    )
 
 
 def test_dry_run_corrupt_yaml_emits_smoke_fail(tmp_path):
