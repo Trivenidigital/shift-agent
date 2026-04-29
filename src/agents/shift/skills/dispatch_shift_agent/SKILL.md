@@ -77,9 +77,10 @@ When the message is a code, decide which state file to look it up in by running 
 
 ```bash
 grep -oE '#[A-HJ-NP-Z2-9]{5}' <<<"<message_text>" | head -1   # extract first code
-# Look up across the three pools, in this priority:
+# Look up across the four pools, in this priority:
 jq --arg c "$CODE" '.confirmation_code == $c' /opt/shift-agent/state/catering-menu-pending.json   # menu pending → apply_catering_menu_decision
 jq --arg c "$CODE" '.leads[] | select(.owner_approval_code == $c) | select(.status != "CLOSED" and .status != "OWNER_REJECTED" and .status != "STALE")' /opt/shift-agent/state/catering-leads.json   # catering lead → handle_catering_owner_approval
+jq --arg c "$CODE" '.leads[] | select(.owner_approval_code == $c) | select(.status != "PUSHED" and .status != "REVERSED" and .status != "REJECTED" and .status != "EXPIRED")' /opt/shift-agent/state/expense-bookkeeper/leads.json   # expense lead → expense_bookkeeper_dispatcher (sub-dispatcher rejects politely if cfg.expense_bookkeeper.enabled = false)
 jq --arg c "$CODE" '.proposals[] | select(.code == $c)' /opt/shift-agent/state/pending.json   # shift proposal → handle_owner_command
 ```
 

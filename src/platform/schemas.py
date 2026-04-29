@@ -885,7 +885,11 @@ def is_expense_transition_allowed(src: str, tgt: str) -> bool:
 class ExpenseLead(BaseModel):
     model_config = ConfigDict(extra="forbid")
     expense_id: str = Field(pattern=r"^E\d{4,}$")
-    original_message_id: str = Field(min_length=1)
+    # min_length is enforced by the shared field-validator below (which also
+    # rejects whitespace-only and control chars). Keeping a separate Field
+    # constraint would race with the validator and produce a different error
+    # message on the empty-string case (see audit-bug v1.1).
+    original_message_id: str
     sender_phone: str
     sender_lid: Optional[str] = None
     received_at: datetime
@@ -906,6 +910,26 @@ class ExpenseLead(BaseModel):
     rejection_reason: Optional[str] = Field(default=None, max_length=500)
     duplicate_of: Optional[str] = None
     reconcile_required: bool = False  # set by orphan detection; blocks new owner actions until cleared
+
+    @field_validator("sender_phone", "original_message_id")
+    @classmethod
+    def _validate_required_no_whitespace_no_nullbyte(cls, v: str) -> str:
+        """Audit-bug v1.1 fix: addresses BUGs 2 + 3 together.
+
+        - sender_phone (BUG-2 audit): reject empty / whitespace-only.
+          Field(min_length=1) alone passes "   " which would break owner
+          re-auth at apply-expense-decision step where
+          `sender_phone == owner_phone`.
+        - original_message_id (BUG-3 audit): reject null byte / control
+          char. NDJSON audit-log safety; Pydantic `model_dump_json`
+          escapes these but defence-in-depth keeps log-corruption surface
+          zero.
+        """
+        if not v.strip():
+            raise ValueError("must not be empty or whitespace-only")
+        if any(c in v for c in ("\0", "\r", "\n", "\t")):
+            raise ValueError("must not contain null byte or control characters")
+        return v
 
     @field_validator("image_path")
     @classmethod
