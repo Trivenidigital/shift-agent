@@ -354,10 +354,22 @@ case "$ACTION" in
         systemctl restart hermes-gateway
         sleep 5
 
+        # Re-run smoke after rollback. If the prior tarball is itself broken
+        # (e.g. operator manually edited /opt/shift-agent/safe_io.py between
+        # deploys), exit 1 + Pushover P2 — operator must SSH. Terminal:
+        # we do NOT attempt rollback-of-rollback.
+        if ! /usr/local/bin/shift-agent-smoke-test.sh; then
+            /usr/local/bin/shift-agent-notify-owner \
+                --priority 2 \
+                --title "Rollback to $TARGET FAILED smoke — agent in uncertain state" \
+                "Rollback completed but smoke test failed against $TARGET. Prior tarball may itself be broken. SSH immediately." 2>/dev/null || true
+            exit 1
+        fi
+
         /usr/local/bin/shift-agent-notify-owner \
             --title "Rolled back to $TARGET" \
             --priority 1 \
-            "Rolled back from broken deploy. Re-run smoke test if needed." 2>/dev/null || true
+            "Rolled back from broken deploy. Smoke test passed against $TARGET." 2>/dev/null || true
         echo "Rollback to $TARGET complete."
         ;;
 
