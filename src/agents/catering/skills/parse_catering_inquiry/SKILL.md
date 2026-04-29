@@ -9,6 +9,61 @@ You receive a free-text catering inquiry. Extract whatever structured fields
 the customer provided. Pass them to the deterministic state writer. Do not
 guess, do not invent, do not reply to the customer.
 
+## Inputs received from catering_dispatcher
+
+The dispatcher delegates to this SKILL with these named inputs:
+
+- `sender_phone` — already E.164-validated by `validate-sender-block`. Use
+  VERBATIM in any subprocess call below. Do NOT reformat, normalize, or
+  derive a phone from `message_text`. Phone is metadata-only.
+- `sender_name` — from identify-sender (when known). Profile names are
+  unreliable (shared phones, group chats). Pass empty string when absent.
+- `message_text` — body line 2+ of the inbound (line 1 is the v=1 block,
+  already stripped by the dispatcher).
+- `message_id` — Meta WhatsApp message id; idempotency key.
+
+## Step 0 — Lookup prior leads (preamble)
+
+**Hard rule:** Step 0 runs BEFORE Step 1 every time. It is a deterministic
+helper, do not improvise. Skipping Step 0 produces a degraded extraction
+(no soft-prior signal for returning customers, no dietary inheritance hint).
+
+Unlike `validate-sender-block` in `dispatch_shift_agent` (which fails closed
+on error), this lookup is **fall-open by design** — soft priors are advisory,
+not authoritative. A failed lookup proceeds to Step 1 with no priors.
+
+(Audit signal note: this lookup currently produces no `decisions.log` entry;
+soak-monitoring is journald-only. A `lookup_invoked` LogEntry variant is
+tracked as a P1.4 follow-up — see `tasks/todo.md`.)
+
+Run this exactly:
+
+```
+/usr/local/bin/lookup-prior-leads-by-phone --customer-phone "<sender_phone>"
+```
+
+The script prints a JSON dict to stdout. Parse it. Read `lookup_status`:
+
+| `lookup_status` | What it means | What to do |
+|---|---|---|
+| `ok` | Phone matched ≥1 prior lead | Use `most_recent_status`, `last_seen_days_ago`, `most_recent_dietary_restrictions` as **soft priors** for Step 1 extraction (e.g., if current message omits dietary but prior had `vegetarian`, you MAY default to vegetarian — never override explicit current-message content). DO NOT echo any prior detail to the customer. |
+| `no_match` | Phone unknown — first-time customer | Standard new-inquiry flow. |
+| `missing_file` | Leads store not yet present (clean install) | Standard new-inquiry flow. |
+| `lock_timeout` | Writer is mid-update; lookup couldn't acquire lock in 3s | Standard new-inquiry flow. Do NOT retry. |
+| `corrupt` / `io_error` | State unreadable (alert path) | Standard new-inquiry flow. Script exits non-zero + emits stderr; operator gets visibility via journald. |
+| any other status / stdout not parseable as JSON / script exited unexpectedly | Treat as unavailable | Proceed to Step 1 with no priors. Do NOT retry. Do NOT mention to the customer. |
+
+**Hard rule:** the four prior-customer fields (`prior_lead_count`,
+`last_seen_days_ago`, `most_recent_status`, `most_recent_dietary_restrictions`)
+are extraction priors only. They MUST NEVER appear in any string sent to the
+customer or written to `--raw-inquiry`. They never leave this SKILL's reasoning.
+
+The acknowledgment in Step 3 stays standard regardless of `lookup_status`. Do
+NOT differentiate the customer-facing acknowledgment based on prior records —
+phone numbers are frequently shared between household members and predecessor
+roles in this customer segment, and continuity-of-identity assertions are a
+trust hazard.
+
 ## Step 1 — Extract structured fields
 
 From the message_text (line 2+ of the inbound, excluding the sender block),

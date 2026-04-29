@@ -48,7 +48,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "p
 
 from safe_io import (  # noqa: E402
     FileLock, ndjson_append, atomic_write_json, customer_now,
-    load_model, flock,
+    load_model, flock, assert_load_status_clean, LoadStatusError,
 )
 from schemas import (  # noqa: E402
     Config, CateringLeadStore, Menu, MenuItem,
@@ -243,8 +243,13 @@ def main() -> int:
 
     with FileLock(LEADS_LOCK):
         store, status = load_model(LEADS_PATH, CateringLeadStore, default=CateringLeadStore())
-        if status.startswith("corrupt"):
-            sys.stderr.write(f"catering-leads.json corrupt: {status}\n")
+        try:
+            assert_load_status_clean(LEADS_PATH, status, context="apply-decision initial load")
+        except LoadStatusError as e:
+            # Silent-failure-hunter NEW-1: oserror MUST NOT be silently masked
+            # as no-such-lead. File-but-unreadable is a different operator
+            # signal than missing.
+            sys.stderr.write(f"{e}\n")
             return EXIT_SCHEMA_VIOLATION
 
         # Match code among non-terminal leads only
@@ -332,7 +337,44 @@ def main() -> int:
 
     # Quote delivered — record SENT_TO_CUSTOMER + CateringQuoteSent
     with FileLock(LEADS_LOCK):
-        store, _ = load_model(LEADS_PATH, CateringLeadStore, default=CateringLeadStore())
+        store, status = load_model(LEADS_PATH, CateringLeadStore, default=CateringLeadStore())
+        if status != "ok":
+            # POST-BRIDGE re-load is stricter: missing/empty/corrupt/oserror
+            # here means leads.json disappeared or became unreadable between
+            # our two locks, AFTER we already POSTed the customer. State +
+            # outbound diverge — operator must reconcile manually.
+            #
+            # atomic_write uses os.replace (atomic) so readers never see
+            # missing/empty during a benign in-flight write. Likely real
+            # causes: operator deleted leads.json | filesystem unmounted |
+            # writer crashed mid-create before first os.replace landed |
+            # quota/EIO at the writer's tmpfile step.
+            #
+            # PR #33 review-R5 fix: send Pushover priority=2 because
+            # state-vs-outbound divergence is the single highest-stakes
+            # silent-failure surface in the catering flow. journald-only
+            # signaling is too quiet for this branch.
+            divergence_msg = (
+                f"BUG: leads.json status={status!r} on post-bridge re-load "
+                f"(lead {lead_id_for_output}); customer received quote but "
+                f"SENT_TO_CUSTOMER not persisted."
+            )
+            sys.stderr.write(divergence_msg + "\n")
+            try:
+                import subprocess as _sp
+                _sp.run(
+                    ["/usr/local/bin/shift-agent-notify-owner",
+                     "--priority", "2",
+                     "--title", f"BUG state-outbound divergence (lead {lead_id_for_output})",
+                     divergence_msg],
+                    check=False, timeout=10,
+                )
+            except Exception as e:  # noqa: BLE001 — notify is best-effort
+                sys.stderr.write(
+                    f"WARN: shift-agent-notify-owner failed (non-fatal): "
+                    f"{type(e).__name__}: {e}\n"
+                )
+            return EXIT_SCHEMA_VIOLATION
         for i, l in enumerate(store.leads):
             if l.lead_id == lead_id_for_output:
                 store.leads[i] = l.model_copy(update={

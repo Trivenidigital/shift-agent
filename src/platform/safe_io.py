@@ -96,6 +96,70 @@ def flock(path):
 # END shift-agent-sender-id
 
 
+class LockUnavailable(RuntimeError):
+    """Raised by try_acquire_filelock_with_retry when all attempts exhaust
+    without acquiring the lock. Caller MUST handle — the contextmanager body
+    runs ONLY when the lock is held; LockUnavailable raises BEFORE the body.
+
+    This raise-on-exhaustion contract is deliberate: a bool-return shape would
+    be a footgun (caller forgets to check; runs lockless; corrupts state).
+    """
+
+
+from contextlib import contextmanager  # noqa: E402  — kept near the helper that uses it
+
+
+@contextmanager
+def try_acquire_filelock_with_retry(lockpath: Path, *, attempts: int = 3, sleep_sec: float = 1.0):
+    """Non-blocking flock with retry; raises LockUnavailable on exhaustion.
+
+    Targets the SAME `.lock` sibling pattern that FileLock(LEADS_LOCK) writers
+    use — serializes correctly with them. Use when blocking on a contended
+    lock would harm UX (e.g. a customer-facing SKILL preamble that must
+    complete in seconds).
+
+    Usage:
+        try:
+            with try_acquire_filelock_with_retry(LEADS_LOCK, attempts=3, sleep_sec=1.0):
+                # body runs only when lock is held
+                ...
+        except LockUnavailable:
+            return _empty_result("lock_timeout")
+
+    Caller MUST catch LockUnavailable; failing to do so is a programming bug
+    (the body never runs without the lock — there's no silent pass-through).
+
+    Implementation note: fd is opened OUTSIDE the retry loop and closed in
+    finally even when no acquire succeeds. `acquired` flag guards LOCK_UN so
+    we never call UN on a fd that never held the lock.
+    """
+    lockpath = Path(lockpath)
+    lockpath.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lockpath), os.O_RDWR | os.O_CREAT, 0o640)
+    acquired = False
+    try:
+        for attempt in range(max(1, attempts)):
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except BlockingIOError:
+                if attempt < max(1, attempts) - 1:
+                    time.sleep(max(0.0, sleep_sec))
+        if not acquired:
+            raise LockUnavailable(
+                f"could not acquire {lockpath} after {attempts} attempts"
+            )
+        yield
+    finally:
+        if acquired:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass  # fd close below releases anyway
+        os.close(fd)
+
+
 def safe_load_json(path: Path, default: Any = None) -> Tuple[Any, str]:
     """
     Load a JSON file with explicit failure signaling.
@@ -245,6 +309,43 @@ def load_model(path: Path, model_cls: Type[T], default: Optional[T] = None) -> T
 def dump_model(path: Path, model: "BaseModel", mode: int = 0o640) -> None:
     """Atomic Pydantic-safe dump."""
     atomic_write_json(path, model, mode=mode)
+
+
+class LoadStatusError(RuntimeError):
+    """Raised when safe_load_json/load_model returned an unhealthy status that
+    a writer cannot safely fall through (corrupt parse, OS-level I/O failure,
+    rename-failure on corrupt quarantine, novel future status).
+    """
+
+
+_HEALTHY_LOAD_STATUSES = frozenset({"ok", "missing", "empty"})
+
+
+def assert_load_status_clean(path: Path, status: str, *, context: str) -> None:
+    """Raise LoadStatusError if `status` indicates an unsafe load.
+
+    Healthy statuses (caller falls through to default): ok / missing / empty.
+    All other statuses (corrupt:* / corrupt_unrenamed:* / oserror:* / future)
+    raise.
+
+    Use at the head of every writer's load_model() block. Canonical 5-line
+    callsite pattern (keep identical across all writers for grep-based audits):
+
+        store, status = load_model(LEADS_PATH, CateringLeadStore, default=...)
+        try:
+            assert_load_status_clean(LEADS_PATH, status, context="apply-decision read")
+        except LoadStatusError as e:
+            sys.stderr.write(f"{e}\n")
+            return EXIT_SCHEMA_VIOLATION
+
+    A future status addition (e.g. 'too_large:') automatically protects every
+    writer rather than silently falling through three different scripts.
+    """
+    if status in _HEALTHY_LOAD_STATUSES:
+        return
+    raise LoadStatusError(
+        f"unhealthy load status for {path} (context={context!r}): {status}"
+    )
 
 
 # Priority-1 tightening: accept parens + space (common customer input formats)
