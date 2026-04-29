@@ -25,7 +25,7 @@ import json
 from pathlib import Path
 
 sys.path.insert(0, "/opt/shift-agent")
-from schemas import LogEntry  # noqa: E402
+from schemas import LogEntry, _UnknownLogEntry  # noqa: E402
 from safe_io import FileLock, ndjson_append  # noqa: E402
 from exit_codes import EXIT_OK, EXIT_INVALID_INPUT, EXIT_SCHEMA_VIOLATION  # noqa: E402
 from pydantic import TypeAdapter
@@ -53,6 +53,21 @@ def main():
         entry = _LOG_ENTRY_ADAPTER.validate_python(parsed)
     except Exception as e:
         print(f"ERROR: entry does not match any LogEntry variant: {e}", file=sys.stderr)
+        return EXIT_SCHEMA_VIOLATION
+
+    # PR-D1 R5-HIGH-2: the forward-compat shim widens the union for READERS
+    # (so old binaries can ingest rows from newer binaries during partial-
+    # rollback windows) but writers must NEVER legitimately emit unknown
+    # tags — that's what the schema-add PR is for. Reject _UnknownLogEntry
+    # at the writer chokepoint so a typo'd `type` field is caught here
+    # instead of silently landing in decisions.log.
+    if isinstance(entry, _UnknownLogEntry):
+        print(
+            f"ERROR: refusing to write unrecognized type {entry.type!r}. "
+            f"Writers must emit a known LogEntry variant; if this is a new "
+            f"event, add the variant to schemas.py first.",
+            file=sys.stderr,
+        )
         return EXIT_SCHEMA_VIOLATION
 
     # Serialize back to compact single-line JSON via Pydantic (ensures canonical form)

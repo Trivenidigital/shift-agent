@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+"""check-audit-helpers-symbols — pre-restart import gate for audit_helpers.py.
+
+Mirrors check-safe-io-symbols. Catches missing-symbol regressions in the
+audit_helpers module BEFORE hermes-gateway restarts.
+
+Used by shift-agent-deploy.sh's pre-restart import block (line ~289)
+in addition to check-safe-io-symbols. PR-D1 R3-H-Gate1.
+
+Required names (catering apply-script + reconcile script depend on each):
+- log_config_load_failed_best_effort (PR-D1 — config-load observability)
+- log_quote_sent_lead_missing_best_effort (PR-D1 — post-bridge divergence)
+
+Adding a new chokepoint helper that scripts depend on?  Add the name
+here AND a corresponding callsite test that exercises it.  Smoke gate
+auto-rolls-back missing-symbol regressions before any restart of
+hermes-gateway.
+"""
+from __future__ import annotations
+import sys
+
+
+REQUIRED_SYMBOLS = (
+    "log_config_load_failed_best_effort",
+    "log_quote_sent_lead_missing_best_effort",
+)
+
+
+def main() -> int:
+    sys.path.insert(0, "/opt/shift-agent")
+    try:
+        import audit_helpers
+    except ImportError as e:
+        sys.stderr.write(f"FAIL: cannot import audit_helpers: {e}\n")
+        return 1
+    missing = [name for name in REQUIRED_SYMBOLS if not hasattr(audit_helpers, name)]
+    if missing:
+        sys.stderr.write(f"FAIL: audit_helpers missing symbols: {missing}\n")
+        return 1
+    print("AUDIT_HELPERS_SYMBOLS_OK")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

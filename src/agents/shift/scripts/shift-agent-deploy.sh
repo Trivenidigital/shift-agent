@@ -44,6 +44,11 @@ install_artifacts() {
     install -m 644 src/platform/sender_context.py /opt/shift-agent/sender_context.py
     install -m 644 src/platform/exit_codes.py /opt/shift-agent/exit_codes.py
     install -m 644 src/platform/log_source.py /opt/shift-agent/log_source.py
+    # PR-D1: audit_helpers.py — best-effort emitters for config_load_failed
+    # + catering_quote_sent_lead_missing. Pre-restart gate
+    # check-audit-helpers-symbols imports this module; missing here =
+    # forced rollback on every deploy.
+    install -m 644 src/platform/audit_helpers.py /opt/shift-agent/audit_helpers.py
 
     # Templates — Shift-Agent message templates (idempotent: shared dir filled by multiple agents below)
     install -d /opt/shift-agent/templates
@@ -282,11 +287,13 @@ case "$ACTION" in
 
         install_artifacts "$STAGING"
 
-        # Pre-restart import gate: a missing safe_io chokepoint symbol means
-        # traffic hits new code BEFORE smoke fires post-restart. Run the
-        # symbol-import check against the just-installed binary (still old
-        # service) — failure path rolls back without touching live traffic.
-        if ! /usr/local/bin/check-safe-io-symbols > /dev/null; then
+        # Pre-restart import gate: a missing safe_io OR audit_helpers chokepoint
+        # symbol means traffic hits new code BEFORE smoke fires post-restart.
+        # Run the symbol-import checks against the just-installed binary (still
+        # old service) — failure path rolls back without touching live traffic.
+        # PR-D1 R3-H-Gate1: chained check-audit-helpers-symbols.
+        if ! /usr/local/bin/check-safe-io-symbols > /dev/null \
+              || ! /usr/local/bin/check-audit-helpers-symbols > /dev/null; then
             echo "FAIL: pre-restart import gate — refusing to restart hermes-gateway" >&2
             if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
                 "$0" rollback "$PREV_TAG"
@@ -316,11 +323,19 @@ case "$ACTION" in
             echo "SMOKE TEST FAILED — rolling back to $PREV_TAG" >&2
             if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
                 "$0" rollback "$PREV_TAG"
+                # PR-D1 R4-H2: evict the broken tarball from rotation so the
+                # next deploy doesn't surface it as a candidate rollback target.
+                # Mirror of the pre-restart-gate eviction at the failure path
+                # above; without this, ls -t shows the broken tarball first
+                # and PR-D2 rollback chains backward to a pre-shim binary.
+                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
             else
                 /usr/local/bin/shift-agent-notify-owner \
                     --title "Deploy FAILED, no prior tarball" \
                     --priority 2 \
                     "Deploy $NEW_TAG failed smoke test and no prior tarball exists to roll back to. Agent in uncertain state. SSH immediately." 2>/dev/null || true
+                # PR-D1 R4-H2: evict the broken tarball even when no prior exists.
+                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
             fi
             exit 1
         fi
