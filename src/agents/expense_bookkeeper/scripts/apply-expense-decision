@@ -435,25 +435,30 @@ def _handle_approve(parsed, owner_phone, owner_jid, sender_phone, raw_message,
             ))
             atomic_write_json(LEADS_PATH, store.model_dump(mode="json"))
             owner_total_display = _cents_to_str(owner_amount_cents)
+            threshold_display = _cents_to_str(
+                cfg.expense_bookkeeper.cockpit_threshold_cents
+            )
+            # Template-discipline (reviewer-c re-review HIGH): use rendered
+            # templates instead of inline f-strings. Owner-facing copy lives
+            # in templates/, parallel to other reply paths.
+            common_fields = dict(
+                expense_id=lead.expense_id,
+                approval_code=code,
+                total_display=owner_total_display,
+                threshold_display=threshold_display,
+                matched_id=lead.duplicate_of or "?",
+            )
             if force_context == "threshold":
-                msg = (
-                    f"{lead.expense_id} is above the cockpit threshold. "
-                    f"To approve via WhatsApp, reply "
-                    f"'{code} {owner_total_display} force'."
+                msg = _render_template(
+                    "expense_force_required_threshold.txt", **common_fields
                 )
             elif force_context == "dedup":
-                dup_id = lead.duplicate_of or "?"
-                msg = (
-                    f"{lead.expense_id} looks like a duplicate of {dup_id}. "
-                    f"To push it anyway, reply "
-                    f"'{code} {owner_total_display} force'."
+                msg = _render_template(
+                    "expense_force_required_dedup.txt", **common_fields
                 )
             else:  # both
-                dup_id = lead.duplicate_of or "?"
-                msg = (
-                    f"{lead.expense_id} is above-threshold AND looks like a "
-                    f"duplicate of {dup_id}. To push it anyway, reply "
-                    f"'{code} {owner_total_display} force'."
+                msg = _render_template(
+                    "expense_force_required_both.txt", **common_fields
                 )
             _bridge_post(owner_jid, msg)
             return EXIT_OK

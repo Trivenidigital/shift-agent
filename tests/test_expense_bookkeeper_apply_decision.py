@@ -408,10 +408,67 @@ def test_above_threshold_approve_without_force_audited(env_dir, bridge_server):
     assert decision_entries[0]["decision"] == "force_required"
     assert decision_entries[0]["force_context"] == "threshold"
 
-    # Owner got a reply with 'force' instruction
+    # Owner got a templated reply (not inline f-string) with 'force' + threshold
     assert len(stub.requests) == 1
     msg = stub.requests[-1].get("message", "")
     assert "force" in msg.lower()
+    # Re-review (c) HIGH: owner-facing copy must NOT contain "cockpit" jargon
+    assert "cockpit" not in msg.lower(), (
+        "owner-facing message leaks internal 'cockpit' jargon"
+    )
+    # Templated message includes the actual threshold dollar amount
+    assert "50.00" in msg
+
+
+def test_dedup_only_approve_without_force_audited(env_dir, bridge_server):
+    """Re-review (c) MED test gap: dedup-only branch (under threshold but
+    is a duplicate) must also audit + reply with template."""
+    port, stub = bridge_server
+    # Under threshold ($30 < $50); marked as duplicate of E0019
+    _seed_lead(env_dir, extracted_total_cents=3000, duplicate_of="E0019")
+    mod = _load_apply(env_dir, port)
+
+    sys.argv = [str(APPLY_PATH),
+                "--raw-message", "#A47C2 30.00",
+                "--sender-phone", "+19045550100"]
+    rc = mod.main()
+    assert rc == mod.EXIT_OK
+
+    entries = _read_audit(env_dir)
+    decision_entries = [e for e in entries if e["type"] == "expense_owner_decision"]
+    assert len(decision_entries) == 1
+    assert decision_entries[0]["decision"] == "force_required"
+    assert decision_entries[0]["force_context"] == "dedup"
+
+    msg = stub.requests[-1].get("message", "")
+    assert "force" in msg.lower()
+    assert "duplicate" in msg.lower()
+    assert "E0019" in msg
+
+
+def test_threshold_and_dedup_approve_without_force_audited(env_dir, bridge_server):
+    """Re-review (c) MED test gap: 'both' branch (above threshold AND
+    duplicate) must use the combined template."""
+    port, stub = bridge_server
+    _seed_lead(env_dir, extracted_total_cents=10000, duplicate_of="E0019")
+    mod = _load_apply(env_dir, port)
+
+    sys.argv = [str(APPLY_PATH),
+                "--raw-message", "#A47C2 100.00",
+                "--sender-phone", "+19045550100"]
+    rc = mod.main()
+    assert rc == mod.EXIT_OK
+
+    entries = _read_audit(env_dir)
+    decision_entries = [e for e in entries if e["type"] == "expense_owner_decision"]
+    assert len(decision_entries) == 1
+    assert decision_entries[0]["force_context"] == "both"
+
+    msg = stub.requests[-1].get("message", "")
+    assert "force" in msg.lower()
+    assert "duplicate" in msg.lower()
+    assert "E0019" in msg
+    assert "high-value" in msg.lower() or "review threshold" in msg.lower()
 
 
 # ───────────────────────────────────────────────────
