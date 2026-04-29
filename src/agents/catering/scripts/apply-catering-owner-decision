@@ -57,6 +57,8 @@ from schemas import (  # noqa: E402
     CateringQuoteRenderFailed,
     # v0.3 (A1+A2): idempotency anchor for customer-quote send
     CateringQuoteAttempted,
+    # v0.3 A9: code-collision audit row (was stderr-only)
+    InvariantViolation,
 )
 from exit_codes import (  # noqa: E402
     EXIT_OK, EXIT_INVALID_INPUT, EXIT_NOT_FOUND,
@@ -95,6 +97,41 @@ def _bridge_post(jid: str, message: str) -> tuple[bool, str]:
         return False, f"{type(e).__name__}: {e}"
 
 
+_DIETARY_TAG_ALIASES = {
+    "vegetarian": "veg", "veg": "veg",
+    "non-vegetarian": "non-veg", "non-veg": "non-veg", "nonveg": "non-veg",
+    "vegan": "vegan",
+    "jain": "jain",
+    "halal": "halal",
+    "kosher": "kosher",
+    "gluten-free": "gluten-free", "gf": "gluten-free", "gluten free": "gluten-free",
+    "nut-free": "nut-free", "nut free": "nut-free",
+    "dairy-free": "dairy-free", "dairy free": "dairy-free",
+    "egg-free": "egg-free", "egg free": "egg-free", "no eggs": "egg-free",
+}
+
+
+def _normalize_dietary_tags(raw_tags: list[str]) -> tuple[set[str], list[str]]:
+    """v0.3 A8: returns (recognized_tags, unknown_input_tags).
+
+    Unknown tags surface in the customer message as a "we didn't recognize"
+    note, instead of being silently dropped (which previously produced
+    misleading "we don't have items matching X" copy that implied the
+    restaurant doesn't do X — when really we just didn't tag for it).
+    """
+    recognized: set[str] = set()
+    unknown: list[str] = []
+    for r in raw_tags:
+        if not isinstance(r, str):
+            continue
+        t = r.lower().strip()
+        if t in _DIETARY_TAG_ALIASES:
+            recognized.add(_DIETARY_TAG_ALIASES[t])
+        else:
+            unknown.append(r)  # preserve original casing for customer message
+    return recognized, unknown
+
+
 def _load_menu_filtered(dietary_restrictions: list[str]) -> tuple[list[MenuItem], int, str]:
     """Load the current menu and filter items by the customer's dietary requests.
 
@@ -129,30 +166,16 @@ def _load_menu_filtered(dietary_restrictions: list[str]) -> tuple[list[MenuItem]
     items = [it for it in menu.items if it.available]
     if not dietary_restrictions:
         return items, len(menu.items), "ok"
-    # Normalize requested tags (e.g. "vegetarian" -> "veg", "non-vegetarian" -> "non-veg")
-    requested = set()
-    for r in dietary_restrictions:
-        t = r.lower().strip()
-        if t in ("vegetarian", "veg"):
-            requested.add("veg")
-        elif t in ("non-vegetarian", "non-veg", "nonveg"):
-            requested.add("non-veg")
-        elif t in ("vegan",):
-            requested.add("vegan")
-        elif t in ("jain",):
-            requested.add("jain")
-        elif t in ("halal",):
-            requested.add("halal")
-        elif t in ("kosher",):
-            requested.add("kosher")
-        elif t in ("gluten-free", "gf", "gluten free"):
-            requested.add("gluten-free")
-        elif t in ("nut-free", "nut free"):
-            requested.add("nut-free")
-        elif t in ("dairy-free", "dairy free"):
-            requested.add("dairy-free")
-        elif t in ("egg-free", "egg free", "no eggs"):
-            requested.add("egg-free")
+    # v0.3 A8: route through the normalize helper so unknown tags can be
+    # surfaced upstream (instead of silently dropped). The returned set is
+    # the recognized-tag set; unknowns are tracked separately via
+    # _normalize_dietary_tags and surfaced in _format_menu_section's caller.
+    requested, _unknown = _normalize_dietary_tags(dietary_restrictions)
+    if not requested:
+        # All input tags were unknown — return ALL available items so the
+        # customer at least sees what we offer. The "we didn't recognize"
+        # note is added downstream.
+        return items, len(menu.items), "ok"
     filtered = [it for it in items if any(tag in requested for tag in it.dietary_tags)]
     return filtered, len(menu.items), "ok"
 
@@ -206,6 +229,10 @@ def _render_quote(lead, customer_name: str) -> tuple[str, str]:
     """
     template_path = TEMPLATE_DIR / "catering_quote_to_customer.txt"
     dietary = list(lead.extracted.dietary_restrictions or [])
+    # v0.3 A8: track unknown dietary tags BEFORE filtering so we can surface
+    # them in the customer message even when filtering succeeded against
+    # OTHER (recognized) tags. Was: silent partial drop.
+    _, unknown_tags = _normalize_dietary_tags(dietary)
     filtered_items, total, menu_status = _load_menu_filtered(dietary)
     menu_section = _format_menu_section(filtered_items, total, dietary)
 
@@ -215,6 +242,20 @@ def _render_quote(lead, customer_name: str) -> tuple[str, str]:
         items_list = "\n".join(f"  - {it}" for it in lead.extracted.off_menu_items)
         off_menu_section = f"\n*Custom requests we'll discuss:*\n{items_list}\n"
 
+    # v0.3 A8: dietary-restriction note. When ANY input tag is unknown,
+    # append a note (regardless of whether filtering matched OTHER tags) so
+    # the customer can clarify. Avoids the misleading "we don't have items
+    # matching X" copy that previously implied we don't serve X — when in
+    # reality our menu just isn't tagged for X yet.
+    dietary_note_section = ""
+    if unknown_tags:
+        joined_unknown = ", ".join(f"'{t}'" for t in unknown_tags)
+        dietary_note_section = (
+            f"\n_Note: we don't currently classify items by {joined_unknown}. "
+            f"If that's a hard requirement, please confirm and we'll send "
+            f"custom options._\n"
+        )
+
     fields = {
         "lead_id": lead.lead_id,
         "customer_name": customer_name or "there",
@@ -223,6 +264,7 @@ def _render_quote(lead, customer_name: str) -> tuple[str, str]:
         "event_time": lead.extracted.event_time or "[TBD]",
         "menu_section": menu_section,
         "off_menu_items_section": off_menu_section,
+        "dietary_note_section": dietary_note_section,
     }
     if template_path.exists():
         try:
@@ -239,7 +281,8 @@ def _render_quote(lead, customer_name: str) -> tuple[str, str]:
         f"⚕ *Catering Agent*\n────────────\n"
         f"Hi {fields['customer_name']}, thank you for the catering inquiry. "
         f"We can confirm — let's discuss details. Reply here when ready, or "
-        f"reach us directly.{menu_section}{off_menu_section}\n(Ref: {lead.lead_id})"
+        f"reach us directly.{menu_section}{off_menu_section}{dietary_note_section}\n"
+        f"(Ref: {lead.lead_id})"
     ), menu_status
 
 
@@ -301,9 +344,31 @@ def main() -> int:
                 )
             return EXIT_NOT_FOUND
         if len(matches) > 1:
-            # Should be impossible per generate_unique_code; defend anyway
+            # v0.3 A9: code-collision should be impossible per
+            # generate_unique_code's 50-attempt unique check, but if it
+            # happens we want a durable audit row + Pushover alert, not
+            # just stderr. Operator may need to intervene to clean up
+            # the duplicate code.
+            collision_lead_ids = [l.lead_id for l in matches]
+            try:
+                _log(TypeAdapter(InvariantViolation), InvariantViolation(
+                    type="invariant_violation",
+                    ts=datetime.now(tz=timezone.utc),
+                    check="catering_code_collision",
+                    detail=(
+                        f"code={code!r} matches {len(matches)} active leads: "
+                        f"{collision_lead_ids}. Refusing to apply decision; "
+                        f"manual operator intervention required."
+                    ),
+                ))
+            except Exception as audit_err:
+                sys.stderr.write(
+                    f"WARN: collision-audit write failed (non-fatal): "
+                    f"{type(audit_err).__name__}: {audit_err}\n"
+                )
             sys.stderr.write(
-                f"BUG: {len(matches)} active leads share code {code}; refusing\n"
+                f"BUG: {len(matches)} active leads share code {code}; "
+                f"lead_ids={collision_lead_ids}; refusing.\n"
             )
             return EXIT_ILLEGAL_TRANSITION
 
