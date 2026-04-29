@@ -139,6 +139,29 @@ if ! systemd-analyze verify \
 fi
 echo "✓ weekly routing-summary systemd units verified"
 
+# 10. v0.3: catering schema validation against current state files
+#     Catches S1 (quote_text invariant), S6 (regex unification), L0 (phone canon)
+#     at smoke-time → triggers auto-rollback before customer impact.
+if ! sudo -u shift-agent /opt/shift-agent/venv/bin/python -c "
+import json, sys, pathlib
+sys.path.insert(0, '/opt/shift-agent')
+from schemas import CateringLeadStore, MenuPendingUpdate, is_catering_transition_allowed
+leads_p = pathlib.Path('/opt/shift-agent/state/catering-leads.json')
+if leads_p.exists():
+    CateringLeadStore.model_validate(json.loads(leads_p.read_text()))
+pending_p = pathlib.Path('/opt/shift-agent/state/catering-menu-pending.json')
+if pending_p.exists():
+    MenuPendingUpdate.model_validate(json.loads(pending_p.read_text()))
+assert not is_catering_transition_allowed('CLOSED', 'NEW'), 'CLOSED is terminal — must not allow NEW'
+assert is_catering_transition_allowed('NEW', 'EXTRACTING'), 'NEW->EXTRACTING happy-path'
+assert is_catering_transition_allowed('AWAITING_OWNER_APPROVAL', 'OWNER_APPROVED'), 'approve flow'
+print('catering schema + transition table validated')
+" 2>&1; then
+    echo "FAIL: catering schema validation" >&2
+    exit 1
+fi
+echo "✓ catering schema + transition table"
+
 echo ""
 echo "=== All smoke checks passed ==="
 exit 0

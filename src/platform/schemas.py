@@ -13,10 +13,17 @@ Conventions:
 
 from __future__ import annotations
 from pydantic import BaseModel, Field, ConfigDict, constr, model_validator, field_validator
-from typing import Literal, Annotated, Union, Optional, Any
-from datetime import datetime
+from typing import Literal, Annotated, Union, Optional, Any, get_args
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 import re
+import sys
+
+# v0.3 catering hardening — single source of truth for code-generation alphabet.
+# Excludes I, O, 0, 1, L (visually confusing chars). Used by ProposalCode,
+# MenuPendingUpdate.confirmation_code, and runtime code generators.
+_CODE_BODY_PATTERN = r"[A-HJKMNPQR-Z2-9]{5}"
+_CODE_FULL_PATTERN = rf"^#{_CODE_BODY_PATTERN}$"
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -213,6 +220,10 @@ class CustomerConfig(BaseModel):
     location_id: str
     timezone: str
     languages: list[str] = []
+    # v0.3: ISO-3166 alpha-2 country code. Used by E164Phone.from_any to
+    # default-prepend country prefix for bare 10-digit US input. Optional —
+    # if absent, bare 10-digit phones are rejected (safer than guessing).
+    country_code: Optional[str] = Field(default=None, pattern=r"^[A-Z]{2}$")
 
     @field_validator("timezone")
     @classmethod
@@ -295,6 +306,44 @@ def is_catering_terminal(status: str) -> bool:
     return status in CATERING_TERMINAL_STATUSES
 
 
+# v0.3: state-machine transition table. Single source of truth, used by
+# scripts at every status change. Forbidden transitions raise via
+# is_catering_transition_allowed; the schema layer does NOT enforce
+# (would break replay of historic leads).
+CATERING_TRANSITIONS: dict[str, set[str]] = {
+    "NEW": {"EXTRACTING", "NOT_CATERING"},
+    "EXTRACTING": {"AWAITING_OWNER_APPROVAL", "NOT_CATERING"},
+    "NOT_CATERING": set(),                                                # terminal
+    "AWAITING_OWNER_APPROVAL": {"OWNER_APPROVED", "OWNER_EDITED", "OWNER_REJECTED", "STALE"},
+    "OWNER_EDITED": {"AWAITING_OWNER_APPROVAL", "OWNER_REJECTED"},
+    "OWNER_APPROVED": {"SENT_TO_CUSTOMER", "AWAITING_OWNER_APPROVAL"},   # AWAITING for retry-from-failure
+    "SENT_TO_CUSTOMER": {"CLOSED", "STALE"},
+    "OWNER_REJECTED": set(),                                              # terminal
+    "CLOSED": set(),                                                      # terminal
+    "STALE": set(),                                                       # terminal
+}
+
+
+def is_catering_transition_allowed(from_s: str, to_s: str) -> bool:
+    """v0.3: returns True only for allowed transitions. False for unknown statuses."""
+    return to_s in CATERING_TRANSITIONS.get(from_s, set())
+
+
+def assert_rejection_reason_complete(reason_dict: dict) -> None:
+    """v0.3: at create-script main() entry, assert REASON_TO_ERR_PREFIX
+    matches CateringLeadRejected.reason Literal exactly (==, not subset).
+    Drift is loud rather than silent."""
+    schema_reasons = set(get_args(CateringLeadRejected.model_fields["reason"].annotation))
+    runtime_reasons = set(reason_dict.keys())
+    if runtime_reasons != schema_reasons:
+        missing_in_dict = schema_reasons - runtime_reasons
+        missing_in_schema = runtime_reasons - schema_reasons
+        raise RuntimeError(
+            f"REASON drift: missing in dict {missing_in_dict}, "
+            f"missing in schema {missing_in_schema}"
+        )
+
+
 class CateringConfig(BaseModel):
     """Catering Lead (Agent #2) settings."""
     model_config = ConfigDict(extra="forbid")
@@ -328,6 +377,18 @@ class CateringLeadExtractedFields(BaseModel):
     # sees what the customer asked for). Verify both sides ship in the same PR.
     off_menu_items: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(default_factory=list, max_length=20)
 
+    @field_validator("event_date")
+    @classmethod
+    def _validate_calendar_date(cls, v: Optional[str]) -> Optional[str]:
+        """v0.3: regex passes 2026-13-99 etc.; this catches calendar-invalid dates."""
+        if v is None:
+            return v
+        try:
+            datetime.fromisoformat(v).date()
+        except ValueError as e:
+            raise ValueError(f"event_date must be a valid ISO date: {v!r} ({e})") from e
+        return v
+
 
 class CateringLead(BaseModel):
     """One catering lead — full lifecycle from inquiry to closure."""
@@ -346,10 +407,47 @@ class CateringLead(BaseModel):
     owner_approval_code: Optional[ProposalCode] = None  # reuses Shift's pattern
     customer_replied: bool = False
 
+    # v0.3: post-AWAITING statuses require non-empty quote_text. Legacy data
+    # (pre-v0.3 leads with empty quote_text) is backfilled with sentinel by
+    # mode="before" shim, then strict validator runs. Migration tool fixes
+    # legacy leads pre-deploy; shim is a safety net.
+    _LEGACY_QUOTE_SENTINEL = "<legacy-pre-v0.3-no-quote-persisted>"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _backfill_legacy_quote_text(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        status = data.get("status")
+        post_awaiting = {"AWAITING_OWNER_APPROVAL", "OWNER_APPROVED", "OWNER_EDITED",
+                         "SENT_TO_CUSTOMER"}
+        if status in post_awaiting and not (data.get("quote_text", "") or "").strip():
+            sys.stderr.write(
+                f"WARN: legacy quote_text=empty on lead_id={data.get('lead_id')!r} "
+                f"status={status!r}; backfilling with sentinel.\n"
+            )
+            data["quote_text"] = cls._LEGACY_QUOTE_SENTINEL
+        return data
+
+    @model_validator(mode="after")
+    def _quote_required_post_awaiting(self) -> "CateringLead":
+        post_awaiting = {"AWAITING_OWNER_APPROVAL", "OWNER_APPROVED", "OWNER_EDITED",
+                         "SENT_TO_CUSTOMER"}
+        if self.status in post_awaiting and not self.quote_text.strip():
+            raise ValueError(
+                f"status={self.status!r} requires non-empty quote_text"
+            )
+        return self
+
 
 class CateringLeadStore(BaseModel):
-    """Per-customer catering leads (lives at /opt/shift-agent/state/catering-leads.json)."""
-    model_config = ConfigDict(extra="forbid")
+    """Per-customer catering leads (lives at /opt/shift-agent/state/catering-leads.json).
+
+    v0.3: extra='ignore' (was 'forbid') for rollback safety. New `schema_version`
+    field allows future migrations; old code drops it cleanly on rollback.
+    """
+    model_config = ConfigDict(extra="ignore")
+    schema_version: int = Field(default=1, ge=1)
     leads: list[CateringLead] = Field(default_factory=list)
 
 
@@ -390,6 +488,18 @@ class Menu(BaseModel):
     notes: str = Field(default="", max_length=2000,
                        description="Catering-specific terms (delivery zone, lead time, etc.)")
 
+    @field_validator("updated_by")
+    @classmethod
+    def _validate_updated_by(cls, v: str) -> str:
+        """v0.3: must be empty, 'photo-ocr', 'manual', or an E.164 phone."""
+        if v == "" or v in ("photo-ocr", "manual"):
+            return v
+        if not re.match(r"^\+\d{10,15}$", v):
+            raise ValueError(
+                f"updated_by must be 'photo-ocr', 'manual', or E.164 phone: {v!r}"
+            )
+        return v
+
 
 class MenuPendingUpdate(BaseModel):
     """A proposed menu update awaiting owner confirmation."""
@@ -398,7 +508,9 @@ class MenuPendingUpdate(BaseModel):
     proposed_at: datetime
     source_image_id: Optional[str] = None
     extracted_items: list[MenuItem]
-    confirmation_code: str = Field(pattern=r"^#[A-HJ-NP-Z2-9]{5}$",
+    # v0.3: unified to _CODE_FULL_PATTERN (excludes I, O, 0, 1, L). Pre-deploy
+    # scan verified no L-bearing codes in production catering-menu-pending.json.
+    confirmation_code: str = Field(pattern=_CODE_FULL_PATTERN,
                                    description="reuses Shift's #X9X9X code alphabet")
     parser_notes: str = Field(default="", max_length=2000)
 
@@ -780,6 +892,30 @@ class _BaseEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
     ts: datetime
 
+    @field_validator("ts", mode="before")
+    @classmethod
+    def _ensure_tz_aware(cls, v: Any) -> Any:
+        """v0.3: tz-aware-only invariant. Naive datetimes auto-converted to UTC
+        with WARN — preserves backward compat for any historic naive entries
+        while new writes are tz-aware. Audit log replay never raises."""
+        if isinstance(v, datetime):
+            if v.tzinfo is None:
+                sys.stderr.write(
+                    f"WARN: naive ts {v.isoformat()!r} auto-converted to UTC\n"
+                )
+                return v.replace(tzinfo=timezone.utc)
+        elif isinstance(v, str):
+            try:
+                parsed = datetime.fromisoformat(v)
+                if parsed.tzinfo is None:
+                    sys.stderr.write(
+                        f"WARN: naive ts string {v!r} auto-converted to UTC\n"
+                    )
+                    return parsed.replace(tzinfo=timezone.utc)
+            except ValueError:
+                pass  # Pydantic surfaces its own clear error
+        return v
+
 
 class RawInbound(_BaseEntry):
     type: Literal["raw_inbound"]
@@ -1014,9 +1150,12 @@ class MenuUpdateProposed(_BaseEntry):
     sent to owner self-chat awaiting confirmation."""
     type: Literal["menu_update_proposed"]
     update_id: str = Field(min_length=1)
-    confirmation_code: str = Field(pattern=r"^#[A-HJ-NP-Z2-9]{5}$")
+    confirmation_code: str = Field(pattern=_CODE_FULL_PATTERN)
     item_count: int = Field(ge=0)
     source_image_id: Optional[str] = None
+    # v0.3: count of items dropped during validation. Surfaces extraction
+    # quality regressions (e.g., LLM started emitting bad dietary_tags).
+    extraction_dropped_count: int = Field(default=0, ge=0)
 
 
 class MenuUpdateApplied(_BaseEntry):
@@ -1076,6 +1215,7 @@ class CateringLeadRejected(_BaseEntry):
         "event_date_past",
         "event_date_invalid_calendar",
         "timezone_invalid",
+        "message_id_phone_mismatch",  # v0.3: idempotency-key collision with mismatched phone
     ]
     detail: str = Field(default="", max_length=500)
     customer_tz: str = Field(default="", max_length=64)
@@ -1099,7 +1239,30 @@ class CateringOwnerDecision(_BaseEntry):
     type: Literal["catering_owner_decision"]
     lead_id: str = Field(min_length=1)
     decision: Literal["approve", "reject", "edit"]
-    edit_text: str = ""
+    edit_text: str = Field(default="", max_length=2000)
+
+    _LEGACY_EDIT_TEXT_SENTINEL = "<legacy-pre-v0.3-no-edit-text-recorded>"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _backfill_legacy_edit_text(cls, data: Any) -> Any:
+        """v0.3: legacy edit decisions had empty edit_text. Backfill on read
+        with sentinel + WARN. New writes hit strict mode='after' validator."""
+        if not isinstance(data, dict):
+            return data
+        if data.get("decision") == "edit" and not (data.get("edit_text") or "").strip():
+            sys.stderr.write(
+                f"WARN: legacy edit_text=empty on lead_id={data.get('lead_id')!r}; "
+                f"backfilling with sentinel.\n"
+            )
+            data["edit_text"] = cls._LEGACY_EDIT_TEXT_SENTINEL
+        return data
+
+    @model_validator(mode="after")
+    def _edit_text_required_for_edit(self) -> "CateringOwnerDecision":
+        if self.decision == "edit" and not self.edit_text.strip():
+            raise ValueError("decision='edit' requires non-empty edit_text")
+        return self
 
 
 class CateringQuoteSent(_BaseEntry):
@@ -1107,6 +1270,65 @@ class CateringQuoteSent(_BaseEntry):
     lead_id: str = Field(min_length=1)
     customer_phone: E164Phone
     outbound_message_id: str = Field(min_length=1)
+
+
+# v0.3 NEW audit classes — idempotency anchors + state-transition coverage
+
+class CateringQuoteAttempted(_BaseEntry):
+    """v0.3 idempotency anchor for customer-quote send (apply-script approve flow).
+
+    Written BEFORE bridge POST in the SAME lock as state-mutation. On retry,
+    presence of this row → script returns idempotent without re-POSTing,
+    preventing duplicate quotes to the customer.
+    """
+    type: Literal["catering_quote_attempted"]
+    lead_id: str = Field(min_length=1)
+    original_message_id: str = Field(min_length=1)
+    code: str = Field(pattern=_CODE_FULL_PATTERN)
+
+
+class CateringOwnerApprovalCardAttempted(_BaseEntry):
+    """v0.3 idempotency anchor for owner-approval card send (create-script flow).
+
+    Written BEFORE bridge POST in same lock as state-mutation. Mirror of
+    CateringQuoteAttempted — prevents duplicate owner card on retry.
+    """
+    type: Literal["catering_owner_approval_card_attempted"]
+    lead_id: str = Field(min_length=1)
+    original_message_id: str = Field(min_length=1)
+
+
+class CateringOwnerApprovalCardFailed(_BaseEntry):
+    """v0.3: bridge POST for owner-approval card failed (timeout, 5xx, etc.).
+    Distinguishes 'card sent' from 'card failed' in the audit log."""
+    type: Literal["catering_owner_approval_card_failed"]
+    lead_id: str = Field(min_length=1)
+    reason: str = Field(min_length=1, max_length=500)
+    bridge_error: str = Field(default="", max_length=2000)
+
+
+class CateringOwnerApprovalCardSkipped(_BaseEntry):
+    """v0.3: card not even attempted (config issue). Distinct from CardFailed."""
+    type: Literal["catering_owner_approval_card_skipped"]
+    lead_id: str = Field(min_length=1)
+    reason: Literal["self_chat_jid_empty", "config_disabled"]
+
+
+class CateringOwnerEdited(_BaseEntry):
+    """v0.3: explicit audit class for OWNER_EDITED transition. Separates
+    'owner intent' from CateringOwnerDecision (which is a generic decision row)."""
+    type: Literal["catering_owner_edited"]
+    lead_id: str = Field(min_length=1)
+    edit_text: str = Field(min_length=1, max_length=2000)
+
+
+class CateringDeclineAttempted(_BaseEntry):
+    """v0.3 idempotency anchor for decline-with-reason customer message
+    (apply-script reject path). Symmetric to CateringQuoteAttempted."""
+    type: Literal["catering_decline_attempted"]
+    lead_id: str = Field(min_length=1)
+    original_message_id: str = Field(min_length=1)
+    code: str = Field(pattern=_CODE_FULL_PATTERN)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -1199,6 +1421,10 @@ LogEntry = Annotated[
         CateringLeadCreated, CateringLeadStatusChange, CateringLeadRejected,
         CateringQuoteDrafted,
         CateringOwnerApprovalRequested, CateringOwnerDecision, CateringQuoteSent,
+        # v0.3: idempotency anchors + state-transition coverage
+        CateringQuoteAttempted, CateringOwnerApprovalCardAttempted,
+        CateringOwnerApprovalCardFailed, CateringOwnerApprovalCardSkipped,
+        CateringOwnerEdited, CateringDeclineAttempted,
         MenuUpdateProposed, MenuUpdateApplied, MenuUpdateRejected,
     ],
     Field(discriminator="type"),
@@ -1214,6 +1440,11 @@ __all__ = [
     "CateringConfig", "CateringLeadStatus", "CateringLeadExtractedFields",
     "CateringLead", "CateringLeadStore",
     "is_catering_terminal", "CATERING_TERMINAL_STATUSES",
+    # v0.3 status-machine + helpers
+    "CATERING_TRANSITIONS", "is_catering_transition_allowed",
+    "assert_rejection_reason_complete",
+    # v0.3 code-pattern constants
+    "_CODE_BODY_PATTERN", "_CODE_FULL_PATTERN",
     "MenuItem", "Menu", "MenuPendingUpdate", "DietaryTag", "MenuCategory",
     # Tier 2 configs
     "InventoryConfig", "SupplierConfig", "VipConfig", "CateringFollowupConfig",
@@ -1234,5 +1465,9 @@ __all__ = [
     "CrossLocationQuery", "InterLocationTransferProposed",
     "CateringLeadCreated", "CateringLeadStatusChange", "CateringLeadRejected", "CateringQuoteDrafted",
     "CateringOwnerApprovalRequested", "CateringOwnerDecision", "CateringQuoteSent",
+    # v0.3 catering audit classes
+    "CateringQuoteAttempted", "CateringOwnerApprovalCardAttempted",
+    "CateringOwnerApprovalCardFailed", "CateringOwnerApprovalCardSkipped",
+    "CateringOwnerEdited", "CateringDeclineAttempted",
     "MenuUpdateProposed", "MenuUpdateApplied", "MenuUpdateRejected",
 ]
