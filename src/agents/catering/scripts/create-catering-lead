@@ -45,6 +45,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "p
 from safe_io import (  # noqa: E402
     FileLock, ndjson_append, atomic_write_json, customer_now,
     safe_load_json, load_model, flock,
+    assert_load_status_clean, LoadStatusError,
 )
 from schemas import (  # noqa: E402
     Config, CateringLead, CateringLeadStore, CateringLeadExtractedFields,
@@ -363,8 +364,13 @@ def main() -> int:
     with FileLock(LEADS_LOCK):
         # Load store (or empty default)
         store, status = load_model(LEADS_PATH, CateringLeadStore, default=CateringLeadStore())
-        if status.startswith("corrupt"):
-            sys.stderr.write(f"catering-leads.json corrupt: {status}\n")
+        try:
+            assert_load_status_clean(LEADS_PATH, status, context="create-lead initial load")
+        except LoadStatusError as e:
+            # Silent-failure-hunter NEW-1: oserror MUST NOT silently fall
+            # through to a fresh empty store — that would mint a duplicate
+            # L0001 and lose the existing leads on the next write.
+            sys.stderr.write(f"{e}\n")
             return EXIT_SCHEMA_VIOLATION
 
         # Idempotency: same message_id replays?
