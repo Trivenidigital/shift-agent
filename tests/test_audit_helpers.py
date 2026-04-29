@@ -160,6 +160,39 @@ def test_quote_sent_lead_missing_swallows_invalid_phone(tmp_path: Path):
         assert _read_lines(log_path) == []
 
 
+def test_config_load_failed_with_newline_in_error_detail(tmp_path: Path):
+    """R2-MED-1: ndjson_append rejects raw newlines in the on-the-wire line.
+    Pydantic's JSON serializer escapes \\n inside string values to \\\\n, so
+    multi-line error messages survive. Pin this contract — a future refactor
+    that pre-serializes detail or bypasses Pydantic would silently break the
+    swallow contract (the row is lost; outer except swallows)."""
+    log_path = tmp_path / "decisions.log"
+    log_config_load_failed_best_effort(
+        config_path=tmp_path / "x.yaml",
+        exc=RuntimeError("line1\nline2\nline3"),
+        log_path=log_path,
+    )
+    rows = _read_lines(log_path)
+    assert len(rows) == 1
+    assert rows[0]["error_detail"] == "line1\nline2\nline3"
+
+
+def test_config_load_failed_default_log_path_kwarg(tmp_path: Path, monkeypatch):
+    """R2-MED-2: exercise the default-kwarg wiring. Patches _LOG_PATH_DEFAULT
+    to a tmp path then calls the helper WITHOUT explicit log_path so a
+    refactor renaming the kwarg surfaces here."""
+    import audit_helpers
+    custom_default = tmp_path / "default_decisions.log"
+    monkeypatch.setattr(audit_helpers, "_LOG_PATH_DEFAULT", custom_default)
+    audit_helpers.log_config_load_failed_best_effort(
+        config_path=tmp_path / "x.yaml",
+        exc=RuntimeError("default-path-test"),
+    )
+    rows = _read_lines(custom_default)
+    assert len(rows) == 1
+    assert rows[0]["error_detail"] == "default-path-test"
+
+
 def test_quote_sent_lead_missing_default_log_path_module_constant():
     """Sanity: module constant points at the deployed VPS path. Tests
     that need to override pass log_path explicitly."""

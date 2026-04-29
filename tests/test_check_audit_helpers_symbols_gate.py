@@ -64,3 +64,31 @@ def test_rollback_target_gate_exists():
     assert "EXPECTED_SHA" in text
     # Must use the two-step ssh-to-file Windows pattern
     assert ".pr_d2_gate.txt" in text or "OUT_FILE" in text
+
+
+def test_deploy_script_installs_audit_helpers_module():
+    """Per PR-D1 R4-B1 (BLOCKER): audit_helpers.py MUST land at
+    /opt/shift-agent/audit_helpers.py or the new pre-restart gate
+    ImportErrors on every deploy and forces rollback."""
+    deploy_path = (Path(__file__).resolve().parent.parent / "src" / "agents"
+                   / "shift" / "scripts" / "shift-agent-deploy.sh")
+    text = deploy_path.read_text(encoding="utf-8")
+    assert "src/platform/audit_helpers.py /opt/shift-agent/audit_helpers.py" in text, (
+        "shift-agent-deploy.sh install_artifacts must install audit_helpers.py"
+    )
+
+
+def test_smoke_test_rollback_evicts_broken_tarball():
+    """Per PR-D1 R4-H2 (HIGH): smoke-test failure branch must rm -f the
+    broken tarball after rollback, mirroring the pre-restart-gate eviction.
+    Without this, a later PR-D2 deploy attempt would see the broken-PR-D2
+    tarball as PREV_TAG via mtime ordering, breaking the rollback chain."""
+    deploy_path = (Path(__file__).resolve().parent.parent / "src" / "agents"
+                   / "shift" / "scripts" / "shift-agent-deploy.sh")
+    text = deploy_path.read_text(encoding="utf-8")
+    smoke_idx = text.find("SMOKE TEST FAILED")
+    assert smoke_idx != -1, "smoke-test-failure branch missing"
+    next_block = text[smoke_idx:smoke_idx + 1500]
+    assert 'rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"' in next_block, (
+        "smoke-test-failure branch must evict broken tarball (R4-H2 fix)"
+    )
