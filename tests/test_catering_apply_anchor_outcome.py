@@ -113,3 +113,37 @@ def test_tail_scan_emits_truncated_signal_on_cap_hit(script_text: str):
 def test_cateringquoteattempted_imported(script_text: str):
     """CateringQuoteAttempted (with bridge_post_outcome from PR-D1) imported."""
     assert "CateringQuoteAttempted" in script_text
+
+
+def test_no_empty_original_message_id_at_callsites(script_text: str):
+    """R5 BLOCKER fix: CateringQuoteAttempted.original_message_id has
+    min_length=1. Empty string passed to anchor writes would crash the
+    apply-script with ValidationError on every approve. All 4 callsites
+    must use a non-empty sentinel (e.g. _no_inbound_msg_<lead_id>) until
+    the inbound Meta message_id is threaded through.
+
+    Catch a regression where future code re-introduces empty strings
+    BEFORE the script is invoked in production."""
+    assert 'original_message_id=""' not in script_text, (
+        "R5 BLOCKER regression: CateringQuoteAttempted callsite passes "
+        "empty original_message_id; min_length=1 would raise ValidationError "
+        "and crash apply-script on every approve"
+    )
+    # Defensive: also ensure the sentinel is the chosen pattern
+    assert '_no_inbound_msg_' in script_text
+
+
+def test_anchor_callsites_count(script_text: str):
+    """4 anchor writes total: pre-bridge (line 522 area), failed-bridge
+    (line 554), post-bridge missing-lead divergence path NOT a CateringQuoteAttempted
+    (it's CateringQuoteSentLeadMissing), success-anchor (line 670). Plus the
+    placeholder lookup_status anchor — let's count CateringQuoteAttempted
+    callsites specifically."""
+    # Count occurrences of CateringQuoteAttempted constructor invocation
+    callsite_count = script_text.count("CateringQuoteAttempted(\n                ")
+    callsite_count += script_text.count("CateringQuoteAttempted(\n                    ")
+    callsite_count += script_text.count("CateringQuoteAttempted(\n                        ")
+    # 3 callsites: anchor=unknown pre-bridge + anchor=failed + anchor=success
+    assert callsite_count >= 3, (
+        f"expected >= 3 CateringQuoteAttempted callsites, found {callsite_count}"
+    )

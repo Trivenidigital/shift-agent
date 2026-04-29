@@ -384,11 +384,6 @@ def main() -> int:
         # OWNER_EDITED is NOT in the matcher (R2-H1 fix): owner sent edit, retry-
         # approve with same code would ship un-edited quote — money-moving correctness.
 
-        if args.decision == "approve":
-            quote_sent_existing = _tail_scan_quote_sent(LOG_PATH, "")  # placeholder; needs lead_id resolved first
-        else:
-            quote_sent_existing = None
-
         # Match code: AWAITING_OWNER_APPROVAL (fresh) OR OWNER_APPROVED (retry/self-heal)
         # for approve decision. For reject/edit, only AWAITING_OWNER_APPROVAL.
         if args.decision == "approve":
@@ -519,7 +514,7 @@ def main() -> int:
                 CateringQuoteAttempted(
                     type="catering_quote_attempted", ts=now,
                     lead_id=lead.lead_id,
-                    original_message_id="",  # TODO: thread inbound msg id
+                    original_message_id=f"_no_inbound_msg_{lead.lead_id}",  # R5 BLOCKER fix: min_length=1
                     code=code,
                     bridge_post_outcome="unknown",
                 ),
@@ -551,7 +546,7 @@ def main() -> int:
                         type="catering_quote_attempted",
                         ts=customer_now(cfg.customer.timezone),
                         lead_id=lead_id_for_output,
-                        original_message_id="",
+                        original_message_id=f"_no_inbound_msg_{lead_id_for_output}",  # R5 BLOCKER fix
                         code=code,
                         bridge_post_outcome="failed",
                     ),
@@ -621,7 +616,7 @@ def main() -> int:
             sys.stderr.write(divergence_msg + "\n")
             log_quote_sent_lead_missing_best_effort(
                 lead_id=lead_id_for_output,
-                original_message_id="",  # apply-script does not currently track inbound msg id
+                original_message_id=f"_no_inbound_msg_{lead_id_for_output}",  # R5 BLOCKER fix
                 customer_phone_at_approve=customer_phone_pre_bridge or "",
                 outbound_message_id=mid_or_err,
                 detail=divergence_msg[:500],
@@ -667,7 +662,7 @@ def main() -> int:
             CateringQuoteAttempted(
                 type="catering_quote_attempted", ts=now2,
                 lead_id=lead_id_for_output,
-                original_message_id="",
+                original_message_id=f"_no_inbound_msg_{lead_id_for_output}",  # R5 BLOCKER fix
                 code=code,
                 bridge_post_outcome="success",
             ),
