@@ -621,7 +621,441 @@ The `--test-mode` and `--kill-after-anchor` flags are NEW for PR-D2. Both ship i
 - [x] Synthetic retry probe in canary soak (R5-H-2).
 - [x] Soak watchlist extended (R5-M-1).
 
-## Status: DESIGN-DRAFTED, ready for 5-agent design review
+## §9. Design v2 revisions — 5-agent design-review fixes (BINDING)
+
+This section supersedes any conflicting earlier text. Build phase reads from here first.
+
+### v2.1 BLOCKERs (all resolved)
+
+#### B-1 (R3+R4+R5 convergence) — synthetic probe cleanup uses CLOSED, not DELETED
+
+**Problem:** §6.2 cleanup invokes `catering-lead-reconcile --target-status DELETED`. `CateringLeadStatus` Literal does NOT include `DELETED` (10 statuses: NEW, EXTRACTING, NOT_CATERING, AWAITING_OWNER_APPROVAL, OWNER_APPROVED, OWNER_EDITED, OWNER_REJECTED, SENT_TO_CUSTOMER, CLOSED, STALE). Probe fails canary every run + leaves test leads in production state.
+
+**Resolution:** synthetic probe cleanup transitions to `CLOSED` (Hermes-native terminal status) with `reason="synthetic-probe-cleanup"`. Reconcile script's target whitelist (design v2 parent §8) extended from `{SENT_TO_CUSTOMER, OWNER_REJECTED}` to `{SENT_TO_CUSTOMER, OWNER_REJECTED, CLOSED}`. CLOSED is a legitimate operator-driven terminal transition for any non-terminal status; the whitelist expansion is conservative and Hermes-aligned.
+
+#### B-1' (R2) — row 4 anchor write encoded as branch, not comment
+
+**Problem:** §4.6 ROW 4 falls through to "Bridge-POST-resume code" with a prose comment "write anchor=unknown if not already present (ROW 4) or skip (ROW 3)". Build phase needs explicit code.
+
+**Resolution:** §4.6 resume block is rewritten as explicit branches:
+
+```python
+# ROW 3 + ROW 4 share this resume block. Difference: ROW 3 has an anchor
+# already (outcome="failed" or "unknown"); ROW 4 has no anchor at all.
+target_jid = f"{lead.customer_phone.lstrip('+')}@s.whatsapp.net"
+customer_phone_pre_bridge = lead.customer_phone
+quote_text = _render_quote(lead, lead.customer_name or "")
+
+# Re-acquire LEADS_LOCK if released between row-detection and resume
+# (depending on which row we're in, lock state may differ — pin in build).
+with FileLock(LEADS_LOCK):
+    if anchor is None:
+        # ROW 4: no anchor exists. Write outcome="unknown" anchor BEFORE bridge POST.
+        _append_log_with_outer_leadslock(
+            TypeAdapter(CateringQuoteAttempted),
+            CateringQuoteAttempted(
+                type="catering_quote_attempted", ts=now,
+                lead_id=lead.lead_id,
+                original_message_id=args.original_message_id,
+                code=code,
+                bridge_post_outcome="unknown",
+            ),
+        )
+    # ROW 3: anchor already exists with outcome="failed"/"unknown" — do not duplicate.
+
+# Release LEADS_LOCK and POST.
+ok, mid_or_err = _bridge_post(target_jid, quote_text)
+
+# ... continue with §4.4 post-bridge sequence
+```
+
+#### B-2 (R5) — commit 2 boundary pin
+
+**Problem:** §5.3 row 1 (`test_catering_apply_post_bridge_missing_lead.py`) exercises `matched_idx is None` branch. That branch only exists after §4.4 reorder (commit 3). At commit-2 HEAD, apply-script still has the leaked-`i` for-loop.
+
+**Resolution:** redefine commit boundaries:
+
+| # | Was | NOW |
+|---|---|---|
+| 2 | matched_idx + customer_phone_pre_bridge | matched_idx + customer_phone_pre_bridge + log_quote_sent_lead_missing_best_effort wiring + `_log` rename to `_append_log_with_outer_leadslock`. The post-bridge re-load skeleton lands here so commit-2 tests exercise real code. **NO write-order reorder yet** (still bridge-POST → status-mutation → CateringQuoteSent — same as deployed). |
+| 3 | anchor two-step write + tail-scan helpers | (unchanged scope, but now also reorders post-bridge sequence per §4.4: CateringQuoteSent FIRST, success-anchor SECOND, state mutation THIRD, status_change LAST). |
+| 4 | retry-state-machine | (unchanged) — but row-4 self-heal references the §4.4 reorder shipped in commit 3. |
+
+Tests in commit 2 use the deployed write-order; tests in commit 3 update the same files for the reorder; tests in commit 4 add the retry-state-machine. CI passes at each commit HEAD.
+
+### v2.2 HIGH (all resolved)
+
+#### R4-H-2 + R3-B-2 (CONVERGENT) — extract synthetic-retry to test-only harness
+
+**Problem:** §6.2 ships `--test-mode` + `--kill-after-anchor` flags on PRODUCTION `apply-catering-owner-decision` script. Operator typo on a real customer code = silent loss-of-message. R3 marks BLOCKER; R4 marks HIGH; both recommend extraction.
+
+**Resolution:** ship NO new flags on production catering scripts. Synthetic-retry probe lives entirely in `tools/synthetic-retry-harness.py` which:
+- Imports `apply-catering-owner-decision`'s `main()` via `importlib.util.spec_from_file_location` (deployed v02 pattern).
+- Monkey-patches `_bridge_post` with a controllable mock that returns canned `_synthetic_<uuid>` message_id.
+- Optionally raises `SystemExit` after anchor-write to simulate process death.
+- Probe assertions live in the harness; production scripts unchanged.
+
+```python
+# tools/synthetic-retry-harness.py
+"""Synthetic retry probe — runs against canary VPS at minute 5 of soak.
+
+Imports the production apply-catering-owner-decision module and monkey-
+patches _bridge_post for controlled retry-path exercise. Production
+script gets NO new flags. Harness lives in tools/ which is operator-
+only; not installed by shift-agent-deploy.sh's install_artifacts.
+
+Per design v2 §9.2 R4-H-2 + R3-B-2 convergent fix.
+"""
+from __future__ import annotations
+import importlib.util
+import sys
+import uuid
+from pathlib import Path
+
+APPLY_SCRIPT = Path("/usr/local/bin/apply-catering-owner-decision")
+
+def _load_apply_module():
+    spec = importlib.util.spec_from_file_location("apply_catering", APPLY_SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+def main():
+    apply_mod = _load_apply_module()
+    synthetic_mid = f"_synthetic_{uuid.uuid4().hex[:12]}"
+
+    # Phase 1: simulate process death after anchor write.
+    def _bridge_post_kill_after_anchor(jid, text):
+        sys.stderr.write(f"synthetic-probe: simulating SIGKILL after anchor\n")
+        raise SystemExit(99)
+    apply_mod._bridge_post = _bridge_post_kill_after_anchor
+    # ... invoke apply_mod.main() with synthetic args; expect non-zero exit
+
+    # Phase 2: real bridge with mock recording.
+    delivered = {"count": 0, "mid": None}
+    def _bridge_post_mock(jid, text):
+        delivered["count"] += 1
+        delivered["mid"] = synthetic_mid
+        return True, synthetic_mid
+    apply_mod._bridge_post = _bridge_post_mock
+    # ... re-invoke apply_mod.main() with same synthetic args; expect EXIT_OK
+
+    # Phase 3: assertions
+    assert delivered["count"] == 1, "bridge POST exactly-once required"
+    # ... tail-scan decisions.log for catering_quote_attempted with outcome="success"
+    # and catering_quote_sent with outbound_message_id starting with "_synthetic_"
+
+    # Phase 4: cleanup via CLOSED transition
+    # subprocess invocation of /usr/local/bin/catering-lead-reconcile
+    #   --lead-id <synthetic-lead-id> --target-status CLOSED
+    #   --reason "synthetic-probe-cleanup"
+```
+
+The `--kill-after-anchor` mechanism is monkey-patching, not a production flag. `_synthetic_<uuid>` prefix is greppable for any audit-row safety check (see R3-H-1 below).
+
+#### R3-H-1 — canned message_id discriminated prefix + grep test
+
+**Resolution:** all synthetic probe message_ids use prefix `_synthetic_<uuid12>`. Add to commit 7:
+
+```python
+# tests/test_decisions_log_no_synthetic_in_production.py
+def test_no_synthetic_prefix_in_production_audit_row():
+    """Defensive: production decisions.log must never contain a
+    synthetic-probe message_id outside of the synthetic-probe path.
+    Probe writes to a probe-only path; if a row leaks via copy-paste
+    or refactor bug, this test catches it."""
+    if not Path("/opt/shift-agent/logs/decisions.log").exists():
+        pytest.skip("not on a deployed VPS")
+    # ... grep for "_synthetic_" in decisions.log AND verify each match's
+    # surrounding context (script_name, code, etc.) shows it's an
+    # intentional synthetic-probe row, not a production leak.
+```
+
+Test runs only on deployed VPS via `pytest --vps-only`.
+
+#### R2-H1 — row 4 OWNER_EDITED money-moving correctness bug
+
+**Problem:** row 4 condition currently `{OWNER_APPROVED, OWNER_EDITED}`. OWNER_EDITED leads have NO bridge POST yet (apply-script's edit branch returns at line 319 BEFORE bridge). Treating OWNER_EDITED as "fresh attempt" → ships un-edited quote to customer.
+
+**Resolution:** restrict row 4 to `lead.status == "OWNER_APPROVED"` ONLY. OWNER_EDITED with code retry falls to row 5 → EXIT_NOT_FOUND. Operator must re-issue the edit cycle.
+
+```python
+# §4.6 row 4 — UPDATED:
+elif lead.status == "OWNER_APPROVED" and anchor is None:  # was: in ("OWNER_APPROVED", "OWNER_EDITED")
+    # ROW 4: legitimate live-state migration — fresh attempt.
+    sys.stderr.write(
+        "recovery: lead in OWNER_APPROVED has no quote-attempt anchor; "
+        "treating as fresh quote attempt\n"  # neutral phrasing per R2-M1
+    )
+    # Fall through to bridge-POST-resume (row 3+4 shared block, §9.1 B-1' branch).
+```
+
+Test in commit 4 file: `test_owner_edited_no_anchor_does_not_self_heal` — assert OWNER_EDITED + retry-approve + no anchor returns EXIT_NOT_FOUND, NOT bridge POST.
+
+#### R2-H2 — row 4 → row 3 idempotency test
+
+**Resolution:** add to `tests/test_catering_apply_idempotent_replay.py`:
+
+```python
+def test_row4_then_row3_idempotent_across_two_deaths(env_dir, bridge_server):
+    """ROW 4 fires + dies pre-bridge → tail-scan finds anchor=unknown
+    (from row 4's own write per §9.1 B-1') → ROW 3 fires + dies pre-bridge
+    → third retry → ROW 3 succeeds. Exactly one CateringQuoteSent,
+    exactly one anchor=success, no duplicate quote."""
+```
+
+#### R1-H-1 — drop "exactly-once" overclaim; document irreducible window
+
+**Problem:** §8 self-review claims "Post-bridge write reorder makes bridge POST exactly-once under SIGKILL." Reality: between `_bridge_post` returning success and step-1 (CateringQuoteSent write), the script must re-acquire LEADS_LOCK + re-load store + validate status (50-500ms window). SIGKILL/OOM there leaves anchor=unknown + no quote_sent → retry row 3 fires → re-POSTs.
+
+**Resolution:** rewrite §8 self-review item to honest framing:
+
+> "Post-bridge write reorder closes the duplicate-quote window in all cases except the irreducible bridge-return-to-LEADS_LOCK-reacquire window (50-500ms). On process death in that window, retry treats it as anchor=unknown and re-POSTs. Policy: 'delivered twice ≪ never delivered' — duplicate quote is the safe failure mode. Synthetic retry probe (§9.2) measures real-world frequency on canary."
+
+Add to canary soak watchlist: count of `_synthetic_*` rows in decisions.log proves exactly-once under controlled SIGKILL.
+
+#### R1-H-2 — drop max_age_hours ts cutoff
+
+**Problem:** NTP correction events skew `entry.ts` vs `now`. Better idiom: rely on file-position bound (max_lines=5000), not ts.
+
+**Resolution:** §4.5 helper signature simplified:
+
+```python
+def _tail_scan_anchor(
+    log_path: Path, code: str,
+    max_lines: int = 5000,
+) -> Optional[CateringQuoteAttempted]:
+    """Scan back through decisions.log for the LATEST catering_quote_attempted
+    row with matching code. Returns None if no match within max_lines.
+
+    No timestamp cutoff: trust file order, not server clock. Forward read,
+    take last filtered match. Tolerates NTP correction events.
+    """
+```
+
+Same simplification for `_tail_scan_quote_sent`.
+
+#### R5-H1 — canary bulk-deploy halt-on-failure
+
+**Problem:** §6 step 5 has 2-min stagger but no halt-on-failure → 4 VPS could rollback simultaneously.
+
+**Resolution:** §6 step 5 rewritten:
+
+```bash
+# tools/canary-bulk-deploy.sh
+set -euo pipefail
+for vps in $REMAINING_8; do
+    # Per-VPS deploy + smoke
+    ssh "$vps" 'shift-agent-deploy.sh' || { echo "ABORT: $vps deploy failed"; exit 1; }
+    # Wait for smoke clear (gate before next VPS launches)
+    for i in 1 2 3; do
+        STATUS=$(ssh "$vps" 'tail -1 /var/log/shift-agent/last-deploy-status.txt')
+        [ "$STATUS" = "OK" ] && break
+        sleep 30
+    done
+    [ "$STATUS" = "OK" ] || { echo "ABORT: $vps smoke unclear"; exit 1; }
+    # 2-min cooldown only AFTER smoke clear
+    sleep 120
+done
+```
+
+Single-VPS rollback at most.
+
+#### R5-H2 — pin _log → _append_log_with_outer_leadslock rename to commit 2
+
+**Resolution:** commit 2 description (per §9.1 B-2) updated to: "matched_idx + customer_phone_pre_bridge + log_quote_sent_lead_missing_best_effort wiring + `_log` rename to `_append_log_with_outer_leadslock` per design v2 §6.1." All later commits call the new name.
+
+#### R5-H3 — NANP-reserved test phone range + assertion
+
+**Resolution:** synthetic probe uses `+15555550199` (in NANP-reserved 555-0100..555-0199 range). Harness asserts `customer_phone.startswith("+155550")` before any cleanup write. Defense-in-depth against copy-paste mistakes.
+
+### v2.3 MEDIUM (all addressed)
+
+#### R1-M-1 — death after step 4 before step 5 audit gap
+
+**Resolution:** row 1 idempotent_replay path adds backfill branch:
+
+```python
+if quote_sent is not None:
+    if lead.status == "OWNER_APPROVED":
+        # ... advance + emit status_change
+        ...
+    elif lead.status == "SENT_TO_CUSTOMER":
+        # Lead crashed between step 4 (state mutation) and step 5
+        # (status_change row). Backfill the missing audit row.
+        # Tail-scan for existing status_change with from_status=OWNER_APPROVED
+        # to_status=SENT_TO_CUSTOMER for this lead — only emit if absent.
+        if not _tail_scan_status_change_to_sent(LOG_PATH, lead.lead_id):
+            _append_log_with_outer_leadslock(
+                TypeAdapter(CateringLeadStatusChange),
+                CateringLeadStatusChange(...,
+                    actor="system", reason="status_change_backfill_post_crash"),
+            )
+```
+
+New helper `_tail_scan_status_change_to_sent`. Cheap (mirror of existing tail-scan).
+
+#### R1-M-2 + R3-M-2 — soak observability for tail-scan lock-hold
+
+**Resolution:** add to canary soak watchlist:
+
+```bash
+journalctl -u hermes-gateway --since "60m ago" \
+  | grep "apply-decision wall-time" \
+  | awk '{print $NF}' | sort -n | tail -5
+# Expected: p95 wall-time < 500ms; >2s indicates tail-scan contention.
+```
+
+Apply-script logs wall-time in journald via existing log channel. No code change.
+
+#### R2-M1 — neutral stderr phrasing
+
+**Resolution:** row 4 stderr changed from "PR-D2 live-state migration" to "lead has no quote-attempt anchor; treating as fresh quote attempt" (already shown in v2.2 R2-H1 above).
+
+#### R3-M-1 — `--config-path` flag explicit in §3 NEW block
+
+**Resolution:** §3 NEW code block extended:
+
+```python
+# At top of each migrated script:
+parser.add_argument(
+    "--config-path",
+    type=Path,
+    default=Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml")),
+    help="Override config.yaml path (test-only; defaults to deployed location)",
+)
+# In main():
+try:
+    cfg = load_yaml_model(args.config_path, Config)
+except (FileNotFoundError, RuntimeError, ValidationError) as e:
+    log_config_load_failed_best_effort(args.config_path, e)
+    ...
+```
+
+`SHIFT_AGENT_CONFIG_PATH` env var hides the override from operator-typo risk in normal usage.
+
+#### R4-M-1 — synthetic probe writes to dedicated audit row (not catering_quote_sent)
+
+**Resolution:** with the harness extraction (R4-H-2), synthetic probe NO LONGER writes `catering_quote_sent` rows to production decisions.log. The harness's mock `_bridge_post` returns success but the apply-script's existing `_log(CateringQuoteSent)` call still writes — using the `_synthetic_<uuid>` prefix in `outbound_message_id` makes the row distinguishable. Operator queries that filter `WHERE NOT outbound_message_id LIKE '_synthetic_%'` separate production from synthetic.
+
+#### R4-M-2 + R5-M1 — trap cleanup + second probe run
+
+**Resolution:**
+- `tools/synthetic-retry-harness.py` wraps phase 1-3 in try/finally with cleanup-via-reconcile invocation regardless of phase outcome.
+- Canary soak script invokes harness at minute 5 AND minute 45 (cheap; no marginal infrastructure).
+
+#### R5-M2 — pre-stage PR description template
+
+**Resolution:** add §10 below.
+
+### v2.4 LOW (all addressed)
+
+#### R1-L-1 — addressed in §9.1 B-1' (explicit branch).
+#### R1-L-2 — synthetic-retry-harness extraction obsoletes flag-gating concern.
+#### R2-L1 — code_match length check:
+
+```python
+# §4.6 retry-state-machine, after `code_match = [l for l in store.leads if ...]`:
+if len(code_match) > 1:
+    sys.stderr.write(f"BUG: {len(code_match)} leads share code {code}; refusing\n")
+    return EXIT_ILLEGAL_TRANSITION
+```
+
+#### R5-L1 — awk pairing-check fix:
+
+```bash
+# §6.1 watchlist — UPDATED awk pattern:
+awk '
+  match($0, /"code":[[:space:]]*"([^"]+)"/, c) {
+    if ($0 ~ /"failed"/) failed[c[1]] = $0
+    if ($0 ~ /"success"/) delete failed[c[1]]
+  }
+  END { for (k in failed) print "STUCK_FAILED code=" k }
+' /opt/shift-agent/logs/decisions.log
+```
+
+Indexes by extracted `code` field, not full line. Now correctly pairs failed + success rows.
+
+### v2.5 Updated build sequence (final)
+
+| # | Commit subject | What changed in v2 |
+|---|---|---|
+| 1 | yaml migration + `--config-path` flag (env-var override) | flag pinned (R3-M-1) |
+| 2 | matched_idx + customer_phone_pre_bridge + audit_helpers wire-in + `_log` rename to `_append_log_with_outer_leadslock` | rename pin (R5-H2); skeleton present so commit-2 tests exercise real code (B-2) |
+| 3 | post-bridge reorder + anchor two-step write + tail-scan helpers (max_lines only, no ts cutoff) | reorder lands here, not commit 2 (B-2); R1-H-2 ts cutoff removed |
+| 4 | retry-state-machine — 5-row decision tree (row 4 OWNER_APPROVED-only); audit backfill branch in row 1 | R2-H1 OWNER_EDITED removed; R1-M-1 backfill |
+| 5 | v02 probe — sentinel-based assertion | (no v2 change) |
+| 6 | conftest hoist | (no change) |
+| 7 | catering-lead-reconcile (whitelist += CLOSED) + 5 R3 test gaps + 2 Case-B-then-C tests + format test parametrized + edge-case doc v3.2 + tools/synthetic-retry-harness.py + tools/canary-bulk-deploy.sh + grep-test for `_synthetic_*` | reconcile whitelist (B-1); harness extraction (R4-H-2 + R3-B-2); canary halt-on-failure (R5-H1); grep-test (R3-H-1) |
+
+### v2.6 Canary deploy sequence (final, halt-on-failure)
+
+| Step | Action |
+|---|---|
+| 0 | Pick canary VPS (lowest-traffic via `dispatcher-accuracy-report --days 1`) |
+| 1 | Operator runs `tools/check-pr-d2-rollback-target.sh <canary-vps> 3f96c07` |
+| 2 | Deploy PR-D2 to canary; 60-min soak |
+| 3 | Minute 5 of canary soak: `python3 tools/synthetic-retry-harness.py <canary>` |
+| 4 | Minute 45 of canary soak: re-run harness (R5-M1) |
+| 5 | If canary clears all signals: `bash tools/canary-bulk-deploy.sh $REMAINING_8` (halt-on-failure per R5-H1) |
+| 6 | 20-min soak per non-canary VPS (no synthetic probe; canary is the retry-path proof) |
+
+### v2.7 Out-of-scope (PR-B + PR-D3)
+
+- PR-B: `lookup_invoked` LogEntry variant + SKILL preamble emission.
+- PR-D3: non-bypassable rollback gate via tarball metadata (R5-H-1 from plan v2 § already deferred).
+- PR-D3: `tail_scan_truncated` LogEntry variant for fleet-scale capacity drift observability (stderr-only in PR-D2).
+- PR-D3: `DELETED` status if a real use case emerges. CLOSED handles synthetic-probe cleanup for now.
+
+---
+
+## §10. Pre-staged PR description template (R5-M2)
+
+```markdown
+# PR-D2: behavior changes — apply-script rewrite + reconcile + doc v3.2
+
+## Summary
+
+PR-D2 = behavior changes half of the PR-D split. Branches from PR-D1-merged main (3f96c07).
+Uses primitives shipped in PR-D1 (forward-compat shim, 3 new variants, audit_helpers,
+pre-restart gates).
+
+## Pipeline cycles applied
+- Plan v1+v2 → 5-agent plan-review → 2 BLOCKERs + 9 HIGH + 6 MEDIUM resolved
+- Design v1+v2 → 5-agent design-review → 3 BLOCKERs + 9 HIGH + 9 MEDIUM resolved
+- 7-commit build → 5-agent PR-review → fixes applied
+- Canary VPS deploy + 60-min soak with synthetic-retry probe at minutes 5 + 45
+- Bulk-deploy 8 VPS halt-on-failure stagger + 20-min per-VPS soak
+
+## What ships
+- yaml.safe_load → load_yaml_model migration (5 catering scripts) + config_load_failed emission
+- apply-catering-owner-decision rewrite: matched_idx + post-bridge reorder + 5-row retry-state-machine
+- catering-lead-reconcile operator script (whitelist: SENT_TO_CUSTOMER, OWNER_REJECTED, CLOSED)
+- conftest hoist (BridgeStub + helpers to tests/_shared_catering_helpers.py)
+- 5 PR-A R3 test gaps + 2 Case-B-then-C end-to-end recovery tests
+- format invariant test parametrized over all _KNOWN_LOG_ENTRY_TYPES
+- docs/catering-edge-cases.md v3.2 (drops + C23/C24/C25)
+- tools/synthetic-retry-harness.py (test-only; not in install_artifacts)
+- tools/canary-bulk-deploy.sh (halt-on-failure stagger)
+
+## Drift-tag: extends-Hermes
+PR-D1 was the convention departure; PR-D2 only USES shipped primitives.
+
+## Test plan
+- [ ] Full suite: ~444 expected pass post-PR-D2 (374 pre + ~70 new)
+- [ ] Linux CI: audit_helpers tests + apply-script subprocess tests
+- [ ] Canary VPS: 60-min soak + synthetic probe @ min 5 + 45
+- [ ] 8 VPS bulk: halt-on-failure stagger + 20-min per-VPS soak
+- [ ] Operator preflight: tools/check-pr-d2-rollback-target.sh <vps> 3f96c07
+```
+
+### Status: design v2 ready for build phase
+
+All BLOCKERs + HIGH + MEDIUM from 5-agent design-review resolved in §9. No further design-review cycle needed before build per pipeline definition. Build phase reads §9 first, then §3-§7 for context.
+
+---
+
+## Status (v1, superseded by §9): DESIGN-DRAFTED, ready for 5-agent design review
 
 Reviewers should focus on:
 1. **Lock-ordering correctness** — does the post-bridge reorder (§4.4) actually close the position 5/6 window? Walk through process-death at every line.
