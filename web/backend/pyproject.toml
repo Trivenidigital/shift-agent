@@ -10,7 +10,11 @@ requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115",
   "uvicorn[standard]>=0.32",
-  "pydantic>=2.9",
+  # PR-D1 R1-HIGH-2 + R5-HIGH-1: callable Discriminator + Tag union pattern
+  # is stable from Pydantic 2.10 (validated on 2.12.5). Older versions silently
+  # ignore the Tag-on-Annotated-union-member form and fall back to single-arm
+  # validation, which would silently break the LogEntry forward-compat shim.
+  "pydantic>=2.10",
   "pyyaml>=6.0",
   "python-jose[cryptography]>=3.3",
   "python-multipart>=0.0.20",

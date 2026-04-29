@@ -78,6 +78,35 @@ def test_deploy_script_installs_audit_helpers_module():
     )
 
 
+def test_log_decision_direct_refuses_unknown_log_entry():
+    """Per PR-D1 R5-HIGH-2: forward-compat shim is for READERS only. Writers
+    must reject _UnknownLogEntry — emitting an unknown tag through this
+    chokepoint would silently land typo'd `type` values in decisions.log.
+
+    Static check: the script must import _UnknownLogEntry and contain the
+    isinstance(entry, _UnknownLogEntry) refusal."""
+    p = Path(__file__).resolve().parent.parent / "src" / "platform" / "scripts" / "log-decision-direct"
+    text = p.read_text(encoding="utf-8")
+    assert "_UnknownLogEntry" in text, (
+        "log-decision-direct must import _UnknownLogEntry"
+    )
+    assert "isinstance(entry, _UnknownLogEntry)" in text, (
+        "log-decision-direct must refuse _UnknownLogEntry at writer chokepoint"
+    )
+    assert "EXIT_SCHEMA_VIOLATION" in text
+
+
+def test_pydantic_pin_is_2_10_or_newer():
+    """Per PR-D1 R5-HIGH-1: callable Discriminator + Tag union pattern
+    is stable from Pydantic 2.10. Older versions silently fall back."""
+    p = Path(__file__).resolve().parent.parent / "web" / "backend" / "pyproject.toml"
+    text = p.read_text(encoding="utf-8")
+    assert 'pydantic>=2.10"' in text or 'pydantic>=2.1' in text, (
+        "web/backend/pyproject.toml must pin pydantic>=2.10 for callable "
+        "Discriminator stability (PR-D1 R5-HIGH-1)"
+    )
+
+
 def test_smoke_test_rollback_evicts_broken_tarball():
     """Per PR-D1 R4-H2 (HIGH): smoke-test failure branch must rm -f the
     broken tarball after rollback, mirroring the pre-restart-gate eviction.
