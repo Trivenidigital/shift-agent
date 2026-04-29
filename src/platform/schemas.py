@@ -580,6 +580,10 @@ class CateringLead(BaseModel):
     def _strip_pr_b_reserved_keys(cls, data: Any) -> Any:
         # PR-D3 absorbing shim — see module-level docstring near
         # _PR_B_RESERVED_LEAD_KEYS for rationale.
+        # Declared before _backfill_legacy_quote_text; key sets are disjoint
+        # ({voice_quality, quote_source} vs {quote_text, status}) so the
+        # ordering is incidental — both validators always run, and neither
+        # touches the other's fields.
         if not isinstance(data, dict):
             return data
         for key in _PR_B_RESERVED_LEAD_KEYS:

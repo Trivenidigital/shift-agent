@@ -14,11 +14,15 @@ This is the same ladder shape as PR-D1 (schema infra) → PR-D2 (writers): infra
 
 ## Read-deployed-code evidence
 
+Line numbers below are from the pre-PR-D3 (main HEAD) state of the file.
+Post-PR-D3, line numbers shift down ~30-40 lines due to the constants /
+helper / shim insertions.
+
 | File | Confirmed |
 |---|---|
-| `src/platform/schemas.py:515` | `CateringLead.model_config = ConfigDict(extra="forbid")` |
-| `src/platform/schemas.py:317` | `CustomerConfig.model_config = ConfigDict(extra="forbid")` |
-| `src/platform/schemas.py:540` | `_backfill_legacy_quote_text` `mode='before'` validator — exact precedent |
+| `src/platform/schemas.py:515` (pre-shim) / `:553` (post-shim) | `CateringLead.model_config = ConfigDict(extra="forbid")` |
+| `src/platform/schemas.py:317` (pre-shim) / `:343` (post-shim) | `CustomerConfig.model_config = ConfigDict(extra="forbid")` |
+| `src/platform/schemas.py:540` (pre-shim) / `:593` (post-shim) | `_backfill_legacy_quote_text` `mode='before'` validator — exact precedent |
 | `src/platform/safe_io.py:226-229` | `atomic_write_json` calls `obj.model_dump_json(indent=2)` — no exclude_defaults |
 | `src/agents/catering/scripts/apply-catering-owner-decision:442,497,685` | three `atomic_write_json(LEADS_PATH, store)` callsites |
 | `src/agents/catering/scripts/catering-lead-reconcile:151` | round-trips store on reconcile |
@@ -92,7 +96,38 @@ def _warn_pr_b_reserved_key_once(model_name: str, key: str) -> None:
 
 ---
 
-## Test plan (3 cases per model = 6 total)
+## Test plan (synced with shipped tests: 21 total)
+
+Note: shipped count grew from the original 6-case skeleton to 21 cases
+after PR review feedback (R2 HIGH gaps + R2 MEDIUMs). All counted in
+`tests/test_pr_d3_absorbing_shim.py`.
+
+**Core strip behavior (9 cases):**
+- 3 CateringLead: strip voice_quality + strip quote_source + strip both at once
+- 3 CustomerConfig: strip tone_profile + strip tone_examples + (round-trip idempotent)
+- 3 round-trip / extra-forbid: lead round-trip idempotent, lead extra-forbid, config extra-forbid
+
+**Once-per-process WARN behavior (4 cases):**
+- WARN once per (model, key): single-key, separate-key, separate-model, across different lead instances
+
+**End-to-end + post-strip integration (2 cases):**
+- post-strip idempotency: load → dump → re-load emits no second WARN
+- e2e via `safe_io.atomic_write_json`: round-trip writes a clean JSON file with no reserved keys
+
+**Shape & format pinning (4 cases):**
+- value-shape coverage (parameterized: None, "", 42, nested-dict, list)
+- case-sensitivity: `VoiceQuality` is NOT stripped (extra-forbid still rejects)
+- WARN format greppable: literal "PR-D3 absorbing-shim stripped" in stderr
+- WARN goes to stderr only (stdout empty)
+
+**Fixture-drift sentinel (1 case):**
+- minimum dicts produce valid models (catches future required-field additions)
+
+**Regression suite:** full pytest 451 passed (was 433; +18 net), 238 skipped, zero regressions.
+
+(legacy section header retained below for diff readability)
+
+### Original 6-case skeleton (superseded by above)
 
 `tests/test_pr_d3_absorbing_shim.py` (new file):
 
