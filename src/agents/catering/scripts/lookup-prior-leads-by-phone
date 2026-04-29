@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -70,6 +71,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "p
 from safe_io import (  # noqa: E402
     load_model, customer_now,
     try_acquire_filelock_with_retry, LockUnavailable,
+    load_yaml_model,
 )
 from schemas import (  # noqa: E402
     Config, CateringLeadStore, E164Phone,
@@ -77,9 +79,11 @@ from schemas import (  # noqa: E402
 from exit_codes import (  # noqa: E402
     EXIT_OK, EXIT_INVALID_INPUT, EXIT_SCHEMA_VIOLATION, EXIT_GENERIC_ERROR,
 )
+from audit_helpers import log_config_load_failed_best_effort  # noqa: E402
 from pydantic import ValidationError  # noqa: E402
 
-CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
+# PR-D2 commit 1: SHIFT_AGENT_CONFIG_PATH env var override (test-only).
+CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
 LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
 # v3.1 NEW-5 fix: unified .lock-sibling target matches writers' FileLock
 # pattern (apply-catering-owner-decision + create-catering-lead). Convention:
@@ -245,20 +249,22 @@ def _load_config_now() -> Optional[datetime]:
     MEDIUM-5: bucket distinct error types separately so triage is unambiguous.
     """
     try:
-        import yaml
         from zoneinfo import ZoneInfoNotFoundError
-        cfg_dict = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
-        cfg = Config.model_validate(cfg_dict)
+        cfg = load_yaml_model(CONFIG_PATH, Config)
         return customer_now(cfg.customer.timezone)
     except FileNotFoundError:
         sys.stderr.write(f"WARN: config not found at {CONFIG_PATH}; using UTC now\n")
     except ValidationError as e:
+        log_config_load_failed_best_effort(CONFIG_PATH, e)
         sys.stderr.write(f"WARN: config validation failed; using UTC now: {e}\n")
+    except RuntimeError as e:
+        # PR-D2 commit 1: load_yaml_model raises RuntimeError for parse/IO/encoding
+        # errors (per its docstring contract). Best-effort emit + log.
+        log_config_load_failed_best_effort(CONFIG_PATH, e)
+        sys.stderr.write(f"WARN: config load failed; using UTC now: {e}\n")
     except ZoneInfoNotFoundError as e:
         sys.stderr.write(f"WARN: cfg.customer.timezone unresolvable; using UTC now: {e}\n")
     except Exception as e:  # noqa: BLE001 — last-resort: never block CLI on config issues
-        # yaml.YAMLError, OSError, AttributeError on missing keys all land here.
-        # Distinct from above so triage knows it's a programming/yaml-shape bug.
         sys.stderr.write(
             f"WARN: config load unexpected error ({type(e).__name__}); using UTC now: {e}\n"
         )

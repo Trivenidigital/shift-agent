@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -49,18 +50,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "p
 from safe_io import (  # noqa: E402
     FileLock, ndjson_append, atomic_write_json, customer_now,
     load_model, flock, assert_load_status_clean, LoadStatusError,
+    load_yaml_model,
 )
 from schemas import (  # noqa: E402
     Config, CateringLeadStore, Menu, MenuItem,
     CateringLeadStatusChange, CateringOwnerDecision, CateringQuoteSent,
+    CateringQuoteAttempted,  # PR-D2 commit 3: anchor row schema (PR-D1)
 )
 from exit_codes import (  # noqa: E402
     EXIT_OK, EXIT_INVALID_INPUT, EXIT_NOT_FOUND,
     EXIT_SCHEMA_VIOLATION, EXIT_DEPENDENCY_DOWN, EXIT_ILLEGAL_TRANSITION,
 )
-from pydantic import TypeAdapter  # noqa: E402
+from audit_helpers import (  # noqa: E402
+    log_config_load_failed_best_effort,
+    log_quote_sent_lead_missing_best_effort,
+)
+from schemas import CateringQuoteSentLeadMissing  # noqa: E402  # PR-D2 commit 2
+from pydantic import TypeAdapter, ValidationError  # noqa: E402
 
-CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
+# PR-D2 commit 1: SHIFT_AGENT_CONFIG_PATH env var override (test-only;
+# defaults to deployed location). Hides the override from operator-typo
+# risk in normal usage; tests use monkeypatch.setenv.
+CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
 LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
 LEADS_LOCK = Path("/opt/shift-agent/state/catering-leads.json.lock")
 MENU_PATH = Path("/opt/shift-agent/state/catering-menu.json")
@@ -203,10 +214,119 @@ def _render_quote(lead, customer_name: str) -> str:
     )
 
 
-def _log(adapter: TypeAdapter, entry) -> None:
+def _append_log_with_outer_leadslock(adapter: TypeAdapter, entry) -> None:
+    """PR-D2: rename of _log() with docstring pinning lock-acquisition order.
+
+    Caller MUST hold LEADS_LOCK (outer). This helper acquires LOG_PATH flock
+    (inner) for cross-script append safety with parse-menu-photo +
+    apply-menu-update which hold DIFFERENT state locks but write the same
+    LOG_PATH. Lock-acquisition order: outer LEADS_LOCK → inner LOG_PATH.
+    Menu-side scripts hold no LEADS_LOCK so cannot deadlock against this
+    nesting.
+
+    Renamed from _log() per design v2 §9.2 R5-H2 (rename pin). All callsites
+    in this file updated atomically in this commit.
+    """
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with flock(LOG_PATH):
         ndjson_append(LOG_PATH, adapter.dump_json(entry).decode("utf-8"))
+
+
+# Backwards-compat shim — keep `_log` as an alias so any local reference
+# this commit might miss surfaces as a runtime error rather than silent
+# fallback. Removed in a later commit once rename is verified clean.
+_log = _append_log_with_outer_leadslock
+
+
+def _tail_scan_anchor(
+    log_path: Path,
+    code: str,
+    max_lines: int = 5000,
+) -> Optional[CateringQuoteAttempted]:
+    """PR-D2 commit 3 + design v2 §9.2 R1-H-2: scan back through decisions.log
+    for the LATEST catering_quote_attempted row matching `code`. Returns None
+    if no match within max_lines.
+
+    No timestamp cutoff (R1-H-2 fix): trust file order, not server clock.
+    Forward-read all rows, filter by code+type, return the LAST match
+    (latest by file order). Tolerates NTP correction events.
+
+    Tolerates concurrent menu-script appends to the same log; only
+    catering_quote_attempted rows match. apply-decision is the sole writer
+    of those rows so no race on filtered subset.
+
+    On max_lines exhaustion: emits stderr line `tail_scan_truncated` so
+    soak watchlist (deploy step 6) can grep for fleet-scale capacity drift.
+    NDJSON variant deferred to PR-D3.
+    """
+    if not log_path.exists():
+        return None
+    matches: list[CateringQuoteAttempted] = []
+    line_count = 0
+    truncated = False
+    adapter = TypeAdapter(CateringQuoteAttempted)
+    with log_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line_count += 1
+            if line_count > max_lines:
+                truncated = True
+                break
+            line = line.strip()
+            if not line or '"catering_quote_attempted"' not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if row.get("type") != "catering_quote_attempted" or row.get("code") != code:
+                continue
+            try:
+                entry = adapter.validate_python(row)
+            except Exception:
+                continue
+            matches.append(entry)
+    if truncated:
+        sys.stderr.write(f"tail_scan_truncated kind=anchor code={code} max_lines={max_lines}\n")
+    return matches[-1] if matches else None
+
+
+def _tail_scan_quote_sent(
+    log_path: Path,
+    lead_id: str,
+    max_lines: int = 5000,
+) -> Optional[CateringQuoteSent]:
+    """PR-D2 commit 3: mirror of _tail_scan_anchor for catering_quote_sent
+    rows. Used by retry-state-machine (commit 4) to short-circuit on
+    proven customer delivery."""
+    if not log_path.exists():
+        return None
+    matches: list[CateringQuoteSent] = []
+    line_count = 0
+    truncated = False
+    adapter = TypeAdapter(CateringQuoteSent)
+    with log_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line_count += 1
+            if line_count > max_lines:
+                truncated = True
+                break
+            line = line.strip()
+            if not line or '"catering_quote_sent"' not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if row.get("type") != "catering_quote_sent" or row.get("lead_id") != lead_id:
+                continue
+            try:
+                entry = adapter.validate_python(row)
+            except Exception:
+                continue
+            matches.append(entry)
+    if truncated:
+        sys.stderr.write(f"tail_scan_truncated kind=quote_sent lead_id={lead_id} max_lines={max_lines}\n")
+    return matches[-1] if matches else None
 
 
 def main() -> int:
@@ -226,13 +346,12 @@ def main() -> int:
         sys.stderr.write(f"invalid code format (expected #XXXXX): {code!r}\n")
         return EXIT_INVALID_INPUT
 
-    # Load config
+    # Load config — PR-D2 commit 1: load_yaml_model + best-effort audit
     try:
-        import yaml
-        cfg_dict = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
-        cfg = Config.model_validate(cfg_dict)
-    except Exception as e:
-        sys.stderr.write(f"config load failed: {e}\n")
+        cfg = load_yaml_model(CONFIG_PATH, Config)
+    except (FileNotFoundError, RuntimeError, ValidationError) as e:
+        log_config_load_failed_best_effort(CONFIG_PATH, e)
+        sys.stderr.write(f"config load failed: {type(e).__name__}: {e}\n")
         return EXIT_SCHEMA_VIOLATION
 
     # Find + transition the lead under FileLock
@@ -252,13 +371,41 @@ def main() -> int:
             sys.stderr.write(f"{e}\n")
             return EXIT_SCHEMA_VIOLATION
 
-        # Match code among non-terminal leads only
-        matches = [l for l in store.leads
-                   if l.owner_approval_code == code
-                   and l.status == "AWAITING_OWNER_APPROVAL"]
+        # PR-D2 commit 4: retry-state-machine via matcher widening + idempotent_replay short-circuit.
+        # Decision tree (design v2 §4.6, 5 rows simplified into 3 branches):
+        #   Row 1+2: tail-scan finds catering_quote_sent for the lead → customer
+        #            already received quote → idempotent_replay short-circuit.
+        #            Advance status if still OWNER_APPROVED.
+        #   Row 3+4: code matches a lead in {AWAITING_OWNER_APPROVAL, OWNER_APPROVED}
+        #            AND no quote_sent row → fresh attempt or resume.
+        #            Anchor (if present) gets superseded by success/failed
+        #            anchor written by the post-bridge sequence.
+        #   Row 5:   no recoverable state → EXIT_NOT_FOUND.
+        # OWNER_EDITED is NOT in the matcher (R2-H1 fix): owner sent edit, retry-
+        # approve with same code would ship un-edited quote — money-moving correctness.
+        #
+        # R1 H-1 (PR-review) acknowledgement: design v2 Row 2 (anchor=success +
+        # quote_sent missing) is intentionally NOT implemented as a separate
+        # branch. Post-B-1 reorder writes CateringQuoteSent FIRST after bridge
+        # POST, so anchor=success without quote_sent is unreachable in normal
+        # flow. If it occurs (e.g. legacy row from pre-PR-D2 emission, or
+        # journald rotation losing the quote_sent row), the retry would re-POST.
+        # Policy: "delivered twice << never delivered". Synthetic retry probe
+        # (canary minute 5 + 45) measures real-world frequency.
+
+        # Match code: AWAITING_OWNER_APPROVAL (fresh) OR OWNER_APPROVED (retry/self-heal)
+        # for approve decision. For reject/edit, only AWAITING_OWNER_APPROVAL.
+        if args.decision == "approve":
+            matches = [l for l in store.leads
+                       if l.owner_approval_code == code
+                       and l.status in ("AWAITING_OWNER_APPROVAL", "OWNER_APPROVED")]
+        else:
+            matches = [l for l in store.leads
+                       if l.owner_approval_code == code
+                       and l.status == "AWAITING_OWNER_APPROVAL"]
+
         if not matches:
-            sys.stderr.write(f"no AWAITING_OWNER_APPROVAL lead with code {code}\n")
-            # Did the code exist on a different status? (helpful for debugging)
+            sys.stderr.write(f"no recoverable lead with code {code}\n")
             any_match = [l for l in store.leads if l.owner_approval_code == code]
             if any_match:
                 sys.stderr.write(
@@ -266,7 +413,6 @@ def main() -> int:
                 )
             return EXIT_NOT_FOUND
         if len(matches) > 1:
-            # Should be impossible per generate_unique_code; defend anyway
             sys.stderr.write(
                 f"BUG: {len(matches)} active leads share code {code}; refusing\n"
             )
@@ -274,6 +420,46 @@ def main() -> int:
 
         lead = matches[0]
         lead_id_for_output = lead.lead_id
+
+        # ROW 1+2 (idempotent_replay): tail-scan for quote_sent of THIS lead.
+        # If found, customer demonstrably received quote (post-B-1 reorder, this
+        # row is written FIRST after bridge POST). Advance status under the
+        # SAME LEADS_LOCK as the tail-scan (R2-H-2 pin).
+        if args.decision == "approve":
+            quote_sent_existing = _tail_scan_quote_sent(LOG_PATH, lead.lead_id)
+            if quote_sent_existing is not None:
+                now_replay = customer_now(cfg.customer.timezone)
+                if lead.status == "OWNER_APPROVED":
+                    matched_idx = next(
+                        (i for i, l in enumerate(store.leads) if l.lead_id == lead.lead_id),
+                        None,
+                    )
+                    if matched_idx is not None:
+                        store.leads[matched_idx] = store.leads[matched_idx].model_copy(update={
+                            "status": "SENT_TO_CUSTOMER",
+                            "updated_at": now_replay,
+                        })
+                        atomic_write_json(LEADS_PATH, store)
+                        _append_log_with_outer_leadslock(
+                            TypeAdapter(CateringLeadStatusChange),
+                            CateringLeadStatusChange(
+                                type="catering_lead_status_change", ts=now_replay,
+                                lead_id=lead.lead_id,
+                                from_status="OWNER_APPROVED",
+                                to_status="SENT_TO_CUSTOMER",
+                                actor="system",
+                                reason="idempotent_replay_recovered",
+                            ),
+                        )
+                print(json.dumps({
+                    "lead_id": lead.lead_id,
+                    "new_status": "SENT_TO_CUSTOMER",
+                    "outbound_sent": True,
+                    "idempotent_replay": True,
+                    "outbound_message_id": quote_sent_existing.outbound_message_id,
+                }))
+                return EXIT_OK
+
         now = customer_now(cfg.customer.timezone)
         prev_status = lead.status
 
@@ -297,23 +483,51 @@ def main() -> int:
                 break
 
         # On approve, capture target JID before writing — we'll send AFTER lock release
+        customer_phone_pre_bridge: Optional[str] = None
         if args.decision == "approve":
             target_jid = f"{lead.customer_phone.lstrip('+')}@s.whatsapp.net"
+            # PR-D2 commit 2: capture phone INSIDE the first LEADS_LOCK block,
+            # before lock release. Used by post-bridge divergence audit
+            # (CateringQuoteSentLeadMissing) if matched_idx returns None on
+            # re-load. Captured here because store.leads[matched_idx] may not
+            # exist post-bridge.
+            customer_phone_pre_bridge = lead.customer_phone
             quote_text = _render_quote(lead, lead.customer_name or "")
 
         atomic_write_json(LEADS_PATH, store)
 
         # Audit trail (in lock to keep ordering with state write)
-        _log(TypeAdapter(CateringLeadStatusChange), CateringLeadStatusChange(
+        _append_log_with_outer_leadslock(TypeAdapter(CateringLeadStatusChange), CateringLeadStatusChange(
             type="catering_lead_status_change", ts=now,
             lead_id=lead.lead_id, from_status=prev_status, to_status=new_status,
             actor="owner", reason=args.reason or args.edit_text[:100] or args.decision,
         ))
-        _log(TypeAdapter(CateringOwnerDecision), CateringOwnerDecision(
+        _append_log_with_outer_leadslock(TypeAdapter(CateringOwnerDecision), CateringOwnerDecision(
             type="catering_owner_decision", ts=now,
             lead_id=lead.lead_id, decision=args.decision,
             edit_text=args.edit_text[:1000] if args.decision == "edit" else "",
         ))
+
+        # PR-D2 commit 3: anchor BEFORE bridge POST. Two-step write contract:
+        #   1. Write anchor with bridge_post_outcome="unknown" here, BEFORE
+        #      releasing LEADS_LOCK and POSTing.
+        #   2. After bridge returns, second anchor row written with
+        #      outcome="success" or "failed" (supersedes step-1 row via
+        #      tail-scan picking LAST match by file order).
+        # If process dies between this write and the bridge POST, retry's
+        # tail-scan finds anchor=unknown → re-attempts bridge (Case C row 3
+        # in commit 4's retry-state-machine).
+        if args.decision == "approve":
+            _append_log_with_outer_leadslock(
+                TypeAdapter(CateringQuoteAttempted),
+                CateringQuoteAttempted(
+                    type="catering_quote_attempted", ts=now,
+                    lead_id=lead.lead_id,
+                    original_message_id=f"_no_inbound_msg_{lead.lead_id}",  # R5 BLOCKER fix: min_length=1
+                    code=code,
+                    bridge_post_outcome="unknown",
+                ),
+            )
 
     # Outside lock: handle outbound for approve
     if args.decision != "approve":
@@ -329,8 +543,25 @@ def main() -> int:
     if not ok:
         sys.stderr.write(f"bridge_post to customer failed: {mid_or_err}\n")
         # State has already moved to OWNER_APPROVED; quote delivery uncertain.
-        # Don't auto-transition to SENT_TO_CUSTOMER. Operator visibility via Pushover
-        # is the caller's responsibility (Kimi can decide based on this exit code).
+        # PR-D2 commit 3: write second anchor row with outcome="failed" so
+        # retry knows to re-attempt bridge POST (Case C row 3 in commit 4).
+        # Acquire LEADS_LOCK briefly to keep the second-anchor write under
+        # the same lock-acquisition convention as the first.
+        try:
+            with FileLock(LEADS_LOCK):
+                _append_log_with_outer_leadslock(
+                    TypeAdapter(CateringQuoteAttempted),
+                    CateringQuoteAttempted(
+                        type="catering_quote_attempted",
+                        ts=customer_now(cfg.customer.timezone),
+                        lead_id=lead_id_for_output,
+                        original_message_id=f"_no_inbound_msg_{lead_id_for_output}",  # R5 BLOCKER fix
+                        code=code,
+                        bridge_post_outcome="failed",
+                    ),
+                )
+        except Exception as _e:  # noqa: BLE001 — best-effort audit
+            sys.stderr.write(f"WARN: failed-anchor write best-effort: {_e}\n")
         print(json.dumps({"lead_id": lead_id_for_output, "new_status": new_status_for_output,
                           "outbound_sent": False, "error": mid_or_err}))
         return EXIT_DEPENDENCY_DOWN
@@ -375,28 +606,94 @@ def main() -> int:
                     f"{type(e).__name__}: {e}\n"
                 )
             return EXIT_SCHEMA_VIOLATION
-        for i, l in enumerate(store.leads):
-            if l.lead_id == lead_id_for_output:
-                store.leads[i] = l.model_copy(update={
-                    "status": "SENT_TO_CUSTOMER",
-                    "updated_at": customer_now(cfg.customer.timezone),
-                })
-                break
+        # PR-D2 commit 2: matched_idx via next() — eliminates the for-loop
+        # index leak (line 397 of pre-PR-D2 code referenced store.leads[i].
+        # customer_phone where i retained its last-iteration value if no
+        # match was found). If matched_idx is None, customer received quote
+        # but lead vanished from re-loaded store — emit divergence audit
+        # via best-effort helper + Pushover P2 + EXIT_SCHEMA_VIOLATION.
+        matched_idx = next(
+            (i for i, l in enumerate(store.leads) if l.lead_id == lead_id_for_output),
+            None,
+        )
+        if matched_idx is None:
+            divergence_msg = (
+                f"BUG: lead {lead_id_for_output} absent from re-loaded store "
+                f"after bridge POST succeeded; customer received quote but "
+                f"SENT_TO_CUSTOMER not persisted."
+            )
+            sys.stderr.write(divergence_msg + "\n")
+            log_quote_sent_lead_missing_best_effort(
+                lead_id=lead_id_for_output,
+                original_message_id=f"_no_inbound_msg_{lead_id_for_output}",  # R5 BLOCKER fix
+                customer_phone_at_approve=customer_phone_pre_bridge or "",
+                outbound_message_id=mid_or_err,
+                detail=divergence_msg[:500],
+            )
+            try:
+                import subprocess as _sp
+                _sp.run(
+                    ["/usr/local/bin/shift-agent-notify-owner",
+                     "--priority", "2",
+                     "--title", f"BUG state-outbound divergence (lead {lead_id_for_output})",
+                     divergence_msg],
+                    check=False, timeout=10,
+                )
+            except Exception as e:  # noqa: BLE001
+                sys.stderr.write(
+                    f"WARN: shift-agent-notify-owner failed (non-fatal): "
+                    f"{type(e).__name__}: {e}\n"
+                )
+            return EXIT_SCHEMA_VIOLATION
+
+        # PR-D2 commit 3 / design v2 §4.4 / B-1 BLOCKER fix:
+        # POST-BRIDGE WRITE ORDER. Append-only NDJSON; CateringQuoteSent is
+        # written FIRST because it's the only retry-defeating signal for
+        # the idempotent_replay short-circuit (commit 4 row 1). If process
+        # dies AFTER this row but BEFORE state mutation, retry's tail-scan
+        # finds the row → idempotent advance (no duplicate quote).
+        now2 = customer_now(cfg.customer.timezone)
+
+        # Step 1: CateringQuoteSent FIRST.
+        _append_log_with_outer_leadslock(
+            TypeAdapter(CateringQuoteSent),
+            CateringQuoteSent(
+                type="catering_quote_sent", ts=now2,
+                lead_id=lead_id_for_output,
+                customer_phone=store.leads[matched_idx].customer_phone,
+                outbound_message_id=mid_or_err,
+            ),
+        )
+
+        # Step 2: success-anchor SECOND (supersedes step-from-first-lock anchor=unknown).
+        _append_log_with_outer_leadslock(
+            TypeAdapter(CateringQuoteAttempted),
+            CateringQuoteAttempted(
+                type="catering_quote_attempted", ts=now2,
+                lead_id=lead_id_for_output,
+                original_message_id=f"_no_inbound_msg_{lead_id_for_output}",  # R5 BLOCKER fix
+                code=code,
+                bridge_post_outcome="success",
+            ),
+        )
+
+        # Step 3: state mutation THIRD.
+        store.leads[matched_idx] = store.leads[matched_idx].model_copy(update={
+            "status": "SENT_TO_CUSTOMER",
+            "updated_at": now2,
+        })
         atomic_write_json(LEADS_PATH, store)
 
-        now2 = customer_now(cfg.customer.timezone)
-        _log(TypeAdapter(CateringLeadStatusChange), CateringLeadStatusChange(
-            type="catering_lead_status_change", ts=now2,
-            lead_id=lead_id_for_output, from_status="OWNER_APPROVED",
-            to_status="SENT_TO_CUSTOMER", actor="system",
-            reason="customer_send_succeeded",
-        ))
-        _log(TypeAdapter(CateringQuoteSent), CateringQuoteSent(
-            type="catering_quote_sent", ts=now2,
-            lead_id=lead_id_for_output,
-            customer_phone=store.leads[i].customer_phone,
-            outbound_message_id=mid_or_err,
-        ))
+        # Step 4: status_change audit LAST.
+        _append_log_with_outer_leadslock(
+            TypeAdapter(CateringLeadStatusChange),
+            CateringLeadStatusChange(
+                type="catering_lead_status_change", ts=now2,
+                lead_id=lead_id_for_output, from_status="OWNER_APPROVED",
+                to_status="SENT_TO_CUSTOMER", actor="system",
+                reason="customer_send_succeeded",
+            ),
+        )
 
     print(json.dumps({"lead_id": lead_id_for_output, "new_status": "SENT_TO_CUSTOMER",
                       "outbound_sent": True, "outbound_message_id": mid_or_err}))

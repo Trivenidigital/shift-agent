@@ -46,6 +46,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "p
 from safe_io import (  # noqa: E402
     FileLock, atomic_write_json, ndjson_append, customer_now,
     load_model, flock,
+    load_yaml_model,
 )
 from schemas import (  # noqa: E402
     Config, MenuItem, MenuPendingUpdate,
@@ -55,9 +56,11 @@ from exit_codes import (  # noqa: E402
     EXIT_OK, EXIT_INVALID_INPUT, EXIT_DISABLED,
     EXIT_SCHEMA_VIOLATION, EXIT_DEPENDENCY_DOWN,
 )
+from audit_helpers import log_config_load_failed_best_effort  # noqa: E402
 from pydantic import TypeAdapter, ValidationError  # noqa: E402
 
-CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
+# PR-D2 commit 1: SHIFT_AGENT_CONFIG_PATH env var override (test-only).
+CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
 PENDING_PATH = Path("/opt/shift-agent/state/catering-menu-pending.json")
 PENDING_LOCK = Path("/opt/shift-agent/state/catering-menu-pending.json.lock")
 LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
@@ -252,10 +255,10 @@ def main() -> int:
 
     # Load config
     try:
-        import yaml
-        cfg = Config.model_validate(yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")))
-    except Exception as e:
-        sys.stderr.write(f"config load failed: {e}\n")
+        cfg = load_yaml_model(CONFIG_PATH, Config)
+    except (FileNotFoundError, RuntimeError, ValidationError) as e:
+        log_config_load_failed_best_effort(CONFIG_PATH, e)
+        sys.stderr.write(f"config load failed: {type(e).__name__}: {e}\n")
         return EXIT_SCHEMA_VIOLATION
 
     if not cfg.catering.enabled:
