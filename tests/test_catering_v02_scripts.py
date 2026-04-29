@@ -644,36 +644,48 @@ def test_catering_lead_rejected_reason_enum_enforced(env_dir):
 
 def _bridge_post_text(BridgeStub) -> str:
     """Extract the message body from the most recent bridge POST.
-    BridgeStub.requests is a list of decoded JSON dicts with 'text' field."""
+    BridgeStub.requests is a list of decoded JSON dicts; the bridge POST
+    payload structure is {"chatId": jid, "message": message} per
+    create-catering-lead's _bridge_post (line 108). Existing canonical test
+    at line 238 confirms this — `BridgeStub.requests[0]["message"]`."""
     assert BridgeStub.requests, "no bridge POST captured"
-    return BridgeStub.requests[-1].get("text", "")
+    last = BridgeStub.requests[-1]
+    assert "message" in last, f"unexpected payload keys: {list(last.keys())}"
+    return last["message"]
 
 
 def test_render_includes_off_menu_with_marker_and_exact_line(env_dir, bridge_server):
-    """C23 + design-review (architect/test-analyzer): exact-line assertion
-    pins label, indent, separator, AND top-of-card marker at index 0."""
+    """Exact-line assertion pins label, indent, separator, AND top-of-card
+    marker at index 0. Cluster ordering pin: dietary_restrictions appears
+    BEFORE off_menu_items, off_menu_items appears BEFORE delivery_or_pickup."""
     port, BridgeStub = bridge_server
     BridgeStub.requests.clear()
     fields = {
         "headcount": 50,
+        "menu_preferences": ["spicy", "north-indian"],
         "off_menu_items": ["butter chicken", "lamb biryani"],
         "dietary_restrictions": ["vegetarian"],
+        "delivery_or_pickup": "delivery",
     }
     r = _run_create(env_dir, port, fields, message_id="MSG_C23_001")
     assert r.returncode == 0
     text = _bridge_post_text(BridgeStub)
-    # Top-of-card marker at very start of the summary cluster
-    assert "  [!] Off-menu requests detected — see below" in text
+    # Top-of-card marker (ASCII " - " separator, no em-dash)
+    assert "  [!] Off-menu requests detected - see below" in text
     # Exact off-menu line with 2-space indent + comma-space delimiter
     assert "  - Off-menu requests: butter chicken, lamb biryani" in text
     # Marker appears BEFORE the off-menu line (positional pin)
     assert text.find("[!] Off-menu requests detected") < text.find(
         "- Off-menu requests: butter chicken"
     )
-    # Customer-intent cluster ordering: marker, headcount, dietary, off-menu
-    # (off-menu inserted after dietary_restrictions per architect Q1 fix)
-    assert text.find("Dietary: vegetarian") < text.find(
-        "Off-menu requests: butter chicken"
+    # Cluster ordering: Menu < Dietary < Off-menu < Delivery
+    pos_menu = text.find("Menu: spicy")
+    pos_dietary = text.find("Dietary: vegetarian")
+    pos_off_menu = text.find("Off-menu requests: butter chicken")
+    pos_delivery = text.find("Delivery: delivery")
+    assert pos_menu < pos_dietary < pos_off_menu < pos_delivery, (
+        f"cluster ordering wrong: menu={pos_menu} dietary={pos_dietary} "
+        f"off_menu={pos_off_menu} delivery={pos_delivery}"
     )
 
 
@@ -689,34 +701,36 @@ def test_render_omits_off_menu_when_empty(env_dir, bridge_server):
     assert "[!]" not in text
 
 
-def test_render_off_menu_in_inline_fallback_when_template_missing(env_dir, bridge_server, monkeypatch):
-    """Test-analyzer #2: monkeypatch TEMPLATE_DIR to nonexistent path. Inline
-    fallback (lines 154-163) builds from the same `summary` so off-menu MUST
-    propagate identically to the template path."""
+def test_render_off_menu_in_inline_fallback_when_template_missing(env_dir, bridge_server):
+    """Inline-fallback path: when the template file is absent, _render_approval_card
+    falls back to inline boilerplate. The `summary` string is built once and
+    consumed by both paths, so off-menu MUST propagate identically. Pins this
+    invariant against future regressions that build inline-text from a
+    different code path."""
     port, BridgeStub = bridge_server
     BridgeStub.requests.clear()
-    # Run with a nonexistent template dir so `template_path.exists()` returns False
-    fields = {"off_menu_items": ["mango lassi", "chai"]}
-    r = _run_create(
-        env_dir, port, fields, message_id="MSG_C23_003",
-        # extra kwarg not yet supported in helper — handled inline below via env override
-    )
-    # Above call uses default env_dir/templates; for fallback we need to test
-    # with template missing. Use direct subprocess + missing TEMPLATE_DIR.
-    import shutil
+    # Unlink the template so template_path.exists() returns False at render time
     template_path = env_dir / "templates" / "catering_approval_card_to_owner.txt"
     if template_path.exists():
         template_path.unlink()
-    BridgeStub.requests.clear()
-    r = _run_create(env_dir, port, fields, message_id="MSG_C23_003B")
-    assert r.returncode == 0
+    fields = {"off_menu_items": ["mango lassi", "chai"]}
+    r = _run_create(env_dir, port, fields, message_id="MSG_C23_003")
+    assert r.returncode == 0, f"stderr: {r.stderr}"
     text = _bridge_post_text(BridgeStub)
-    # Inline fallback uses different boilerplate but same `summary` content
+    # Inline fallback's distinct boilerplate marker (proves we hit the fallback
+    # branch, not the template branch)
+    assert "*New Catering Inquiry" in text, "inline fallback boilerplate missing"
+    # Off-menu line still renders identically
     assert "Off-menu requests: mango lassi, chai" in text
 
 
 def test_render_truncates_long_off_menu_at_budget(env_dir, bridge_server):
-    """Silent-failure SF-1 + test-analyzer C: parametrized truncation cases."""
+    """Truncation cases:
+    1. Under-budget — no truncation marker, all items rendered
+    2. Over-budget multi-item — truncates with "(and N more)" suffix matching
+       a strict regex r"\\(and \\d+ more\\)"
+    """
+    import re as _re
     port, BridgeStub = bridge_server
 
     # Case 1: under-budget — no truncation
@@ -736,16 +750,22 @@ def test_render_truncates_long_off_menu_at_budget(env_dir, bridge_server):
                     message_id="MSG_C23_TRUNC_BIG")
     assert r.returncode == 0
     text = _bridge_post_text(BridgeStub)
-    assert "(and " in text and "more)" in text
+    # Strict regex match (vs weak substring) — catches malformed N or missing parens
+    assert _re.search(r"\(and \d+ more\)", text), (
+        f"truncation suffix missing or malformed; expected '(and N more)' in: {text[-200:]}"
+    )
 
-    # Case 3: single-oversized item (SF-1 escape-hatch fix)
-    BridgeStub.requests.clear()
-    items_oversized = ["c" * 1600]  # one item alone exceeds budget
+
+def test_oversized_single_item_rejected_by_schema_before_renderer(env_dir, bridge_server):
+    """A single off_menu_item exceeding schema max_length=200 is rejected by
+    Pydantic at fields_json validation — exit 2, BEFORE the renderer's
+    escape-hatch can fire. Pins the schema-vs-renderer ordering. The renderer's
+    cutoff==0 escape-hatch is defensive against a future schema relaxation
+    and remains intentionally untested at runtime through this entry point."""
+    port, _ = bridge_server
+    items_oversized = ["c" * 1600]
     r = _run_create(env_dir, port, {"off_menu_items": items_oversized},
-                    message_id="MSG_C23_TRUNC_SINGLE")
-    # NOTE: schema enforces max_length=200 per item, so this case won't actually
-    # get past Pydantic — but the renderer's escape-hatch is defensive against
-    # a future schema relaxation. Test would EXPECT exit 2 (input invalid).
+                    message_id="MSG_C23_OVERSIZED")
     assert r.returncode == 2  # EXIT_INVALID_INPUT — schema rejects 1600-char item
 
 
@@ -818,14 +838,47 @@ def test_idempotent_replay_with_off_menu_does_not_resend_card(env_dir, bridge_se
     assert out2["lead_id"] == out1["lead_id"]
     # Pin: still exactly 1 bridge POST (no replay re-render)
     assert len(BridgeStub.requests) == 1, "replay must not send a second card"
-    # Replay branch should emit a stderr breadcrumb when off_menu_items present
-    assert "idempotent_replay" in r2.stderr or "verify in cockpit" in r2.stderr
+    # Replay branch should emit a stderr breadcrumb when off_menu_items present.
+    # Pin the unique substring "verify in cockpit" — the JSON-key
+    # `idempotent_replay` reflects through stdout/combined-output streams,
+    # weakening that check; "verify in cockpit" only appears in the breadcrumb.
+    assert "verify in cockpit" in r2.stderr, (
+        f"replay breadcrumb missing from stderr: {r2.stderr!r}"
+    )
+
+
+def test_render_with_both_menu_preferences_and_off_menu_items_clusters_correctly(
+    env_dir, bridge_server,
+):
+    """Co-presence: when BOTH menu_preferences (soft categories) AND
+    off_menu_items (specific dishes not on menu) are populated, both render on
+    the same card so owner can visually disambiguate and detect Kimi's
+    misclassification. Pins the architect-Q1 cluster ordering invariant."""
+    port, BridgeStub = bridge_server
+    BridgeStub.requests.clear()
+    fields = {
+        "menu_preferences": ["spicy", "vegetarian-heavy"],
+        "off_menu_items": ["paneer makhani", "rasmalai"],
+    }
+    r = _run_create(env_dir, port, fields, message_id="MSG_C23_COPRESENCE")
+    assert r.returncode == 0
+    text = _bridge_post_text(BridgeStub)
+    # Both lines render
+    assert "  - Menu: spicy, vegetarian-heavy" in text
+    assert "  - Off-menu requests: paneer makhani, rasmalai" in text
+    # Marker present at top
+    assert "[!] Off-menu requests detected" in text
+    # Order: marker (index 0) -> Menu -> Off-menu (cluster ordering pin)
+    assert text.find("[!]") < text.find("Menu: spicy") < text.find(
+        "Off-menu requests: paneer makhani"
+    )
 
 
 def test_skill_example_outputs_validate_against_schema():
-    """Test-analyzer #5 + superpowers Important #4: every JSON example output
-    in parse_catering_inquiry/SKILL.md must validate against
-    CateringLeadExtractedFields. Catches future SKILL/schema drift."""
+    """Every JSON example output in parse_catering_inquiry/SKILL.md must
+    validate against CateringLeadExtractedFields. Catches future SKILL/schema
+    drift. Strict count assertion + minimum length floor catches truncated
+    or wrong-pattern extraction."""
     import sys as _sys
     _sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src" / "platform"))
     from schemas import CateringLeadExtractedFields  # noqa: E402
@@ -837,13 +890,24 @@ def test_skill_example_outputs_validate_against_schema():
     )
     text = skill_md_path.read_text(encoding="utf-8")
 
-    # Extract JSON examples — looks for `Output: \`{...}\`` patterns. Robust
-    # to extra whitespace; brittle to fence-syntax changes (acceptable per
-    # design — SKILL.md format is stable).
+    # Pattern: matches `Output: \`{...}\`` blocks. Brittle to fence-syntax
+    # changes — if SKILL.md format ever drifts, the strict count below fires
+    # rather than silently extracting wrong examples.
     import re
     pattern = re.compile(r"Output:\s*`(\{[^`]*\})`", re.DOTALL)
     examples = pattern.findall(text)
-    assert len(examples) >= 3, f"expected ≥3 JSON examples in SKILL.md; got {len(examples)}"
+    # Strict count (not >=) — alerts if SKILL.md adds/removes examples without
+    # updating this test
+    assert len(examples) == 3, (
+        f"expected exactly 3 JSON examples in SKILL.md; got {len(examples)}. "
+        f"If SKILL.md was edited, update this assertion accordingly."
+    )
+    # Length floor catches truncated extraction (regex matched wrong substring)
+    for i, example in enumerate(examples):
+        assert len(example) > 50, (
+            f"SKILL.md example #{i+1} is suspiciously short ({len(example)} chars); "
+            f"regex may have extracted a partial match: {example!r}"
+        )
 
     for i, example in enumerate(examples):
         try:
