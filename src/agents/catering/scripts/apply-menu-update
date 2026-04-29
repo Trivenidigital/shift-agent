@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 from datetime import datetime
@@ -32,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "p
 from safe_io import (  # noqa: E402
     FileLock, atomic_write_json, ndjson_append, customer_now,
     safe_load_json, load_model, flock,
+    load_yaml_model,
 )
 from schemas import (  # noqa: E402
     Config, Menu, MenuPendingUpdate,
@@ -41,9 +43,11 @@ from exit_codes import (  # noqa: E402
     EXIT_OK, EXIT_INVALID_INPUT, EXIT_NOT_FOUND,
     EXIT_SCHEMA_VIOLATION, EXIT_ILLEGAL_TRANSITION,
 )
-from pydantic import TypeAdapter  # noqa: E402
+from audit_helpers import log_config_load_failed_best_effort  # noqa: E402
+from pydantic import TypeAdapter, ValidationError  # noqa: E402
 
-CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
+# PR-D2 commit 1: SHIFT_AGENT_CONFIG_PATH env var override (test-only).
+CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
 MENU_PATH = Path("/opt/shift-agent/state/catering-menu.json")
 MENU_LOCK = Path("/opt/shift-agent/state/catering-menu.json.lock")
 PENDING_PATH = Path("/opt/shift-agent/state/catering-menu-pending.json")
@@ -71,10 +75,10 @@ def main() -> int:
         return EXIT_INVALID_INPUT
 
     try:
-        import yaml
-        cfg = Config.model_validate(yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")))
-    except Exception as e:
-        sys.stderr.write(f"config load failed: {e}\n")
+        cfg = load_yaml_model(CONFIG_PATH, Config)
+    except (FileNotFoundError, RuntimeError, ValidationError) as e:
+        log_config_load_failed_best_effort(CONFIG_PATH, e)
+        sys.stderr.write(f"config load failed: {type(e).__name__}: {e}\n")
         return EXIT_SCHEMA_VIOLATION
 
     # Load pending update

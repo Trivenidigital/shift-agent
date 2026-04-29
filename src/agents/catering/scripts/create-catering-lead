@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import secrets
 import sys
 import urllib.error
@@ -46,6 +47,7 @@ from safe_io import (  # noqa: E402
     FileLock, ndjson_append, atomic_write_json, customer_now,
     safe_load_json, load_model, flock,
     assert_load_status_clean, LoadStatusError,
+    load_yaml_model,
 )
 from schemas import (  # noqa: E402
     Config, CateringLead, CateringLeadStore, CateringLeadExtractedFields,
@@ -56,9 +58,11 @@ from exit_codes import (  # noqa: E402
     EXIT_OK, EXIT_INVALID_INPUT, EXIT_DISABLED,
     EXIT_SCHEMA_VIOLATION, EXIT_DEPENDENCY_DOWN,
 )
+from audit_helpers import log_config_load_failed_best_effort  # noqa: E402
 from pydantic import TypeAdapter, ValidationError  # noqa: E402
 
-CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
+# PR-D2 commit 1: SHIFT_AGENT_CONFIG_PATH env var override (test-only).
+CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
 LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
 LEADS_LOCK = Path("/opt/shift-agent/state/catering-leads.json.lock")
 LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
@@ -342,11 +346,10 @@ def main() -> int:
 
     # Load config
     try:
-        import yaml
-        cfg_dict = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
-        cfg = Config.model_validate(cfg_dict)
-    except Exception as e:
-        sys.stderr.write(f"config load failed: {e}\n")
+        cfg = load_yaml_model(CONFIG_PATH, Config)
+    except (FileNotFoundError, RuntimeError, ValidationError) as e:
+        log_config_load_failed_best_effort(CONFIG_PATH, e)
+        sys.stderr.write(f"config load failed: {type(e).__name__}: {e}\n")
         return EXIT_SCHEMA_VIOLATION
 
     if not cfg.catering.enabled:
