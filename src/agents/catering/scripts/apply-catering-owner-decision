@@ -55,6 +55,7 @@ from safe_io import (  # noqa: E402
 from schemas import (  # noqa: E402
     Config, CateringLeadStore, Menu, MenuItem,
     CateringLeadStatusChange, CateringOwnerDecision, CateringQuoteSent,
+    CateringQuoteAttempted,  # PR-D2 commit 3: anchor row schema (PR-D1)
 )
 from exit_codes import (  # noqa: E402
     EXIT_OK, EXIT_INVALID_INPUT, EXIT_NOT_FOUND,
@@ -237,6 +238,97 @@ def _append_log_with_outer_leadslock(adapter: TypeAdapter, entry) -> None:
 _log = _append_log_with_outer_leadslock
 
 
+def _tail_scan_anchor(
+    log_path: Path,
+    code: str,
+    max_lines: int = 5000,
+) -> Optional[CateringQuoteAttempted]:
+    """PR-D2 commit 3 + design v2 §9.2 R1-H-2: scan back through decisions.log
+    for the LATEST catering_quote_attempted row matching `code`. Returns None
+    if no match within max_lines.
+
+    No timestamp cutoff (R1-H-2 fix): trust file order, not server clock.
+    Forward-read all rows, filter by code+type, return the LAST match
+    (latest by file order). Tolerates NTP correction events.
+
+    Tolerates concurrent menu-script appends to the same log; only
+    catering_quote_attempted rows match. apply-decision is the sole writer
+    of those rows so no race on filtered subset.
+
+    On max_lines exhaustion: emits stderr line `tail_scan_truncated` so
+    soak watchlist (deploy step 6) can grep for fleet-scale capacity drift.
+    NDJSON variant deferred to PR-D3.
+    """
+    if not log_path.exists():
+        return None
+    matches: list[CateringQuoteAttempted] = []
+    line_count = 0
+    truncated = False
+    adapter = TypeAdapter(CateringQuoteAttempted)
+    with log_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line_count += 1
+            if line_count > max_lines:
+                truncated = True
+                break
+            line = line.strip()
+            if not line or '"catering_quote_attempted"' not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if row.get("type") != "catering_quote_attempted" or row.get("code") != code:
+                continue
+            try:
+                entry = adapter.validate_python(row)
+            except Exception:
+                continue
+            matches.append(entry)
+    if truncated:
+        sys.stderr.write(f"tail_scan_truncated kind=anchor code={code} max_lines={max_lines}\n")
+    return matches[-1] if matches else None
+
+
+def _tail_scan_quote_sent(
+    log_path: Path,
+    lead_id: str,
+    max_lines: int = 5000,
+) -> Optional[CateringQuoteSent]:
+    """PR-D2 commit 3: mirror of _tail_scan_anchor for catering_quote_sent
+    rows. Used by retry-state-machine (commit 4) to short-circuit on
+    proven customer delivery."""
+    if not log_path.exists():
+        return None
+    matches: list[CateringQuoteSent] = []
+    line_count = 0
+    truncated = False
+    adapter = TypeAdapter(CateringQuoteSent)
+    with log_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line_count += 1
+            if line_count > max_lines:
+                truncated = True
+                break
+            line = line.strip()
+            if not line or '"catering_quote_sent"' not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if row.get("type") != "catering_quote_sent" or row.get("lead_id") != lead_id:
+                continue
+            try:
+                entry = adapter.validate_python(row)
+            except Exception:
+                continue
+            matches.append(entry)
+    if truncated:
+        sys.stderr.write(f"tail_scan_truncated kind=quote_sent lead_id={lead_id} max_lines={max_lines}\n")
+    return matches[-1] if matches else None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--code", required=True, help="approval code from owner reply, e.g. #A3F2X")
@@ -349,6 +441,27 @@ def main() -> int:
             edit_text=args.edit_text[:1000] if args.decision == "edit" else "",
         ))
 
+        # PR-D2 commit 3: anchor BEFORE bridge POST. Two-step write contract:
+        #   1. Write anchor with bridge_post_outcome="unknown" here, BEFORE
+        #      releasing LEADS_LOCK and POSTing.
+        #   2. After bridge returns, second anchor row written with
+        #      outcome="success" or "failed" (supersedes step-1 row via
+        #      tail-scan picking LAST match by file order).
+        # If process dies between this write and the bridge POST, retry's
+        # tail-scan finds anchor=unknown → re-attempts bridge (Case C row 3
+        # in commit 4's retry-state-machine).
+        if args.decision == "approve":
+            _append_log_with_outer_leadslock(
+                TypeAdapter(CateringQuoteAttempted),
+                CateringQuoteAttempted(
+                    type="catering_quote_attempted", ts=now,
+                    lead_id=lead.lead_id,
+                    original_message_id="",  # TODO: thread inbound msg id
+                    code=code,
+                    bridge_post_outcome="unknown",
+                ),
+            )
+
     # Outside lock: handle outbound for approve
     if args.decision != "approve":
         print(json.dumps({"lead_id": lead_id_for_output, "new_status": new_status_for_output,
@@ -363,8 +476,25 @@ def main() -> int:
     if not ok:
         sys.stderr.write(f"bridge_post to customer failed: {mid_or_err}\n")
         # State has already moved to OWNER_APPROVED; quote delivery uncertain.
-        # Don't auto-transition to SENT_TO_CUSTOMER. Operator visibility via Pushover
-        # is the caller's responsibility (Kimi can decide based on this exit code).
+        # PR-D2 commit 3: write second anchor row with outcome="failed" so
+        # retry knows to re-attempt bridge POST (Case C row 3 in commit 4).
+        # Acquire LEADS_LOCK briefly to keep the second-anchor write under
+        # the same lock-acquisition convention as the first.
+        try:
+            with FileLock(LEADS_LOCK):
+                _append_log_with_outer_leadslock(
+                    TypeAdapter(CateringQuoteAttempted),
+                    CateringQuoteAttempted(
+                        type="catering_quote_attempted",
+                        ts=customer_now(cfg.customer.timezone),
+                        lead_id=lead_id_for_output,
+                        original_message_id="",
+                        code=code,
+                        bridge_post_outcome="failed",
+                    ),
+                )
+        except Exception as _e:  # noqa: BLE001 — best-effort audit
+            sys.stderr.write(f"WARN: failed-anchor write best-effort: {_e}\n")
         print(json.dumps({"lead_id": lead_id_for_output, "new_status": new_status_for_output,
                           "outbound_sent": False, "error": mid_or_err}))
         return EXIT_DEPENDENCY_DOWN
@@ -449,25 +579,54 @@ def main() -> int:
                 )
             return EXIT_SCHEMA_VIOLATION
 
+        # PR-D2 commit 3 / design v2 §4.4 / B-1 BLOCKER fix:
+        # POST-BRIDGE WRITE ORDER. Append-only NDJSON; CateringQuoteSent is
+        # written FIRST because it's the only retry-defeating signal for
+        # the idempotent_replay short-circuit (commit 4 row 1). If process
+        # dies AFTER this row but BEFORE state mutation, retry's tail-scan
+        # finds the row → idempotent advance (no duplicate quote).
+        now2 = customer_now(cfg.customer.timezone)
+
+        # Step 1: CateringQuoteSent FIRST.
+        _append_log_with_outer_leadslock(
+            TypeAdapter(CateringQuoteSent),
+            CateringQuoteSent(
+                type="catering_quote_sent", ts=now2,
+                lead_id=lead_id_for_output,
+                customer_phone=store.leads[matched_idx].customer_phone,
+                outbound_message_id=mid_or_err,
+            ),
+        )
+
+        # Step 2: success-anchor SECOND (supersedes step-from-first-lock anchor=unknown).
+        _append_log_with_outer_leadslock(
+            TypeAdapter(CateringQuoteAttempted),
+            CateringQuoteAttempted(
+                type="catering_quote_attempted", ts=now2,
+                lead_id=lead_id_for_output,
+                original_message_id="",
+                code=code,
+                bridge_post_outcome="success",
+            ),
+        )
+
+        # Step 3: state mutation THIRD.
         store.leads[matched_idx] = store.leads[matched_idx].model_copy(update={
             "status": "SENT_TO_CUSTOMER",
-            "updated_at": customer_now(cfg.customer.timezone),
+            "updated_at": now2,
         })
         atomic_write_json(LEADS_PATH, store)
 
-        now2 = customer_now(cfg.customer.timezone)
-        _append_log_with_outer_leadslock(TypeAdapter(CateringLeadStatusChange), CateringLeadStatusChange(
-            type="catering_lead_status_change", ts=now2,
-            lead_id=lead_id_for_output, from_status="OWNER_APPROVED",
-            to_status="SENT_TO_CUSTOMER", actor="system",
-            reason="customer_send_succeeded",
-        ))
-        _append_log_with_outer_leadslock(TypeAdapter(CateringQuoteSent), CateringQuoteSent(
-            type="catering_quote_sent", ts=now2,
-            lead_id=lead_id_for_output,
-            customer_phone=store.leads[matched_idx].customer_phone,
-            outbound_message_id=mid_or_err,
-        ))
+        # Step 4: status_change audit LAST.
+        _append_log_with_outer_leadslock(
+            TypeAdapter(CateringLeadStatusChange),
+            CateringLeadStatusChange(
+                type="catering_lead_status_change", ts=now2,
+                lead_id=lead_id_for_output, from_status="OWNER_APPROVED",
+                to_status="SENT_TO_CUSTOMER", actor="system",
+                reason="customer_send_succeeded",
+            ),
+        )
 
     print(json.dumps({"lead_id": lead_id_for_output, "new_status": "SENT_TO_CUSTOMER",
                       "outbound_sent": True, "outbound_message_id": mid_or_err}))
