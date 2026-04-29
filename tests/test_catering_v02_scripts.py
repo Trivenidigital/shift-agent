@@ -638,3 +638,215 @@ def test_catering_lead_rejected_reason_enum_enforced(env_dir):
             original_message_id="X",
             reason="event_date_pastt",  # typo
         )
+
+
+# === C23 off-menu-items renderer + extractor-prompt (v3.1 C18) ===
+
+def _bridge_post_text(BridgeStub) -> str:
+    """Extract the message body from the most recent bridge POST.
+    BridgeStub.requests is a list of decoded JSON dicts with 'text' field."""
+    assert BridgeStub.requests, "no bridge POST captured"
+    return BridgeStub.requests[-1].get("text", "")
+
+
+def test_render_includes_off_menu_with_marker_and_exact_line(env_dir, bridge_server):
+    """C23 + design-review (architect/test-analyzer): exact-line assertion
+    pins label, indent, separator, AND top-of-card marker at index 0."""
+    port, BridgeStub = bridge_server
+    BridgeStub.requests.clear()
+    fields = {
+        "headcount": 50,
+        "off_menu_items": ["butter chicken", "lamb biryani"],
+        "dietary_restrictions": ["vegetarian"],
+    }
+    r = _run_create(env_dir, port, fields, message_id="MSG_C23_001")
+    assert r.returncode == 0
+    text = _bridge_post_text(BridgeStub)
+    # Top-of-card marker at very start of the summary cluster
+    assert "  [!] Off-menu requests detected — see below" in text
+    # Exact off-menu line with 2-space indent + comma-space delimiter
+    assert "  - Off-menu requests: butter chicken, lamb biryani" in text
+    # Marker appears BEFORE the off-menu line (positional pin)
+    assert text.find("[!] Off-menu requests detected") < text.find(
+        "- Off-menu requests: butter chicken"
+    )
+    # Customer-intent cluster ordering: marker, headcount, dietary, off-menu
+    # (off-menu inserted after dietary_restrictions per architect Q1 fix)
+    assert text.find("Dietary: vegetarian") < text.find(
+        "Off-menu requests: butter chicken"
+    )
+
+
+def test_render_omits_off_menu_when_empty(env_dir, bridge_server):
+    """Empty off_menu_items: NO marker, NO Off-menu line, no stray empty row."""
+    port, BridgeStub = bridge_server
+    BridgeStub.requests.clear()
+    fields = {"headcount": 30, "off_menu_items": []}
+    r = _run_create(env_dir, port, fields, message_id="MSG_C23_002")
+    assert r.returncode == 0
+    text = _bridge_post_text(BridgeStub)
+    assert "Off-menu requests" not in text
+    assert "[!]" not in text
+
+
+def test_render_off_menu_in_inline_fallback_when_template_missing(env_dir, bridge_server, monkeypatch):
+    """Test-analyzer #2: monkeypatch TEMPLATE_DIR to nonexistent path. Inline
+    fallback (lines 154-163) builds from the same `summary` so off-menu MUST
+    propagate identically to the template path."""
+    port, BridgeStub = bridge_server
+    BridgeStub.requests.clear()
+    # Run with a nonexistent template dir so `template_path.exists()` returns False
+    fields = {"off_menu_items": ["mango lassi", "chai"]}
+    r = _run_create(
+        env_dir, port, fields, message_id="MSG_C23_003",
+        # extra kwarg not yet supported in helper — handled inline below via env override
+    )
+    # Above call uses default env_dir/templates; for fallback we need to test
+    # with template missing. Use direct subprocess + missing TEMPLATE_DIR.
+    import shutil
+    template_path = env_dir / "templates" / "catering_approval_card_to_owner.txt"
+    if template_path.exists():
+        template_path.unlink()
+    BridgeStub.requests.clear()
+    r = _run_create(env_dir, port, fields, message_id="MSG_C23_003B")
+    assert r.returncode == 0
+    text = _bridge_post_text(BridgeStub)
+    # Inline fallback uses different boilerplate but same `summary` content
+    assert "Off-menu requests: mango lassi, chai" in text
+
+
+def test_render_truncates_long_off_menu_at_budget(env_dir, bridge_server):
+    """Silent-failure SF-1 + test-analyzer C: parametrized truncation cases."""
+    port, BridgeStub = bridge_server
+
+    # Case 1: under-budget — no truncation
+    BridgeStub.requests.clear()
+    items_small = ["a" * 50] * 10  # 10 × 52 chars = ~520 chars (under 1500)
+    r = _run_create(env_dir, port, {"off_menu_items": items_small},
+                    message_id="MSG_C23_TRUNC_SMALL")
+    assert r.returncode == 0
+    text = _bridge_post_text(BridgeStub)
+    assert "(and " not in text  # no truncation marker
+    assert text.count("a" * 50) == 10  # all 10 items present
+
+    # Case 2: over-budget multi-item — truncates with "(and N more)"
+    BridgeStub.requests.clear()
+    items_big = ["b" * 100] * 20  # 20 × 102 chars = ~2040 chars (over 1500)
+    r = _run_create(env_dir, port, {"off_menu_items": items_big},
+                    message_id="MSG_C23_TRUNC_BIG")
+    assert r.returncode == 0
+    text = _bridge_post_text(BridgeStub)
+    assert "(and " in text and "more)" in text
+
+    # Case 3: single-oversized item (SF-1 escape-hatch fix)
+    BridgeStub.requests.clear()
+    items_oversized = ["c" * 1600]  # one item alone exceeds budget
+    r = _run_create(env_dir, port, {"off_menu_items": items_oversized},
+                    message_id="MSG_C23_TRUNC_SINGLE")
+    # NOTE: schema enforces max_length=200 per item, so this case won't actually
+    # get past Pydantic — but the renderer's escape-hatch is defensive against
+    # a future schema relaxation. Test would EXPECT exit 2 (input invalid).
+    assert r.returncode == 2  # EXIT_INVALID_INPUT — schema rejects 1600-char item
+
+
+def test_render_handles_max_length_item_at_200_chars(env_dir, bridge_server):
+    """Test-analyzer G: schema boundary — item at exactly 200 chars renders cleanly."""
+    port, BridgeStub = bridge_server
+    BridgeStub.requests.clear()
+    items = ["x" * 200]
+    r = _run_create(env_dir, port, {"off_menu_items": items},
+                    message_id="MSG_C23_MAXITEM")
+    assert r.returncode == 0
+    text = _bridge_post_text(BridgeStub)
+    assert ("x" * 200) in text
+
+
+def test_render_handles_max_items_list_at_20(env_dir, bridge_server):
+    """Test-analyzer H: schema boundary — exactly 20 items at small length renders cleanly."""
+    port, BridgeStub = bridge_server
+    BridgeStub.requests.clear()
+    items = [f"item{i:02d}" for i in range(20)]  # 20 × ~6 chars = ~120 chars
+    r = _run_create(env_dir, port, {"off_menu_items": items},
+                    message_id="MSG_C23_MAX20")
+    assert r.returncode == 0
+    text = _bridge_post_text(BridgeStub)
+    # All 20 items present
+    for i in range(20):
+        assert f"item{i:02d}" in text
+
+
+def test_off_menu_items_persists_through_script_round_trip(env_dir, bridge_server):
+    """Plan-review #6: SCRIPT-level round-trip. Schema-level test at
+    test_catering_schemas.py:154 only covers MODEL-level via Pydantic.
+    This test pins atomic_write_json(LEADS_PATH) → re-read → field preserved."""
+    port, _ = bridge_server
+    items = ["paneer tikka", "kheer"]
+    r = _run_create(env_dir, port, {"off_menu_items": items},
+                    message_id="MSG_C23_ROUND_TRIP")
+    assert r.returncode == 0
+    leads_path = env_dir / "state" / "catering-leads.json"
+    leads = json.loads(leads_path.read_text())
+    assert len(leads["leads"]) == 1
+    persisted = leads["leads"][0]["extracted"]["off_menu_items"]
+    assert persisted == items
+
+
+def test_idempotent_replay_with_off_menu_does_not_resend_card(env_dir, bridge_server):
+    """Test-analyzer #7 + F (crit-9): replay carve-out test pins accepted
+    behavior. Single bridge_server fixture spans BOTH calls (function-scope);
+    pin by checking len(requests) == 1 AND payload content."""
+    port, BridgeStub = bridge_server
+    BridgeStub.requests.clear()
+
+    # First call — creates lead, sends original card
+    items = ["dosa", "uttapam"]
+    r1 = _run_create(env_dir, port, {"off_menu_items": items},
+                     message_id="MSG_C23_REPLAY")
+    assert r1.returncode == 0
+    out1 = json.loads(r1.stdout.strip().splitlines()[-1])
+    assert "lead_id" in out1
+    assert len(BridgeStub.requests) == 1, "first call should send 1 card"
+    first_payload = BridgeStub.requests[0].get("text", "")
+    assert "Off-menu requests: dosa, uttapam" in first_payload
+
+    # Second call — same message_id → idempotent_replay, NO new bridge POST
+    r2 = _run_create(env_dir, port, {"off_menu_items": items},
+                     message_id="MSG_C23_REPLAY")
+    assert r2.returncode == 0
+    out2 = json.loads(r2.stdout.strip().splitlines()[-1])
+    assert out2.get("idempotent_replay") is True
+    assert out2["lead_id"] == out1["lead_id"]
+    # Pin: still exactly 1 bridge POST (no replay re-render)
+    assert len(BridgeStub.requests) == 1, "replay must not send a second card"
+    # Replay branch should emit a stderr breadcrumb when off_menu_items present
+    assert "idempotent_replay" in r2.stderr or "verify in cockpit" in r2.stderr
+
+
+def test_skill_example_outputs_validate_against_schema():
+    """Test-analyzer #5 + superpowers Important #4: every JSON example output
+    in parse_catering_inquiry/SKILL.md must validate against
+    CateringLeadExtractedFields. Catches future SKILL/schema drift."""
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src" / "platform"))
+    from schemas import CateringLeadExtractedFields  # noqa: E402
+
+    skill_md_path = (
+        Path(__file__).resolve().parent.parent
+        / "src" / "agents" / "catering" / "skills"
+        / "parse_catering_inquiry" / "SKILL.md"
+    )
+    text = skill_md_path.read_text(encoding="utf-8")
+
+    # Extract JSON examples — looks for `Output: \`{...}\`` patterns. Robust
+    # to extra whitespace; brittle to fence-syntax changes (acceptable per
+    # design — SKILL.md format is stable).
+    import re
+    pattern = re.compile(r"Output:\s*`(\{[^`]*\})`", re.DOTALL)
+    examples = pattern.findall(text)
+    assert len(examples) >= 3, f"expected ≥3 JSON examples in SKILL.md; got {len(examples)}"
+
+    for i, example in enumerate(examples):
+        try:
+            CateringLeadExtractedFields.model_validate_json(example)
+        except Exception as e:
+            pytest.fail(f"SKILL.md example #{i+1} fails schema validation: {e}\nJSON: {example}")

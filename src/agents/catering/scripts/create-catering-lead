@@ -65,6 +65,18 @@ TEMPLATE_DIR = Path("/opt/shift-agent/templates")
 BRIDGE_URL = "http://127.0.0.1:3000/send"
 BRIDGE_TIMEOUT = 10
 
+# Off-menu render budget (v3.1 C23 silent-failure-hunter SF-6 fix — extracted
+# from inline magic number to a named constant). Budget arithmetic:
+# WhatsApp's effective message limit is ~4096 chars. Allocations:
+#   raw_inquiry         : 300 chars (template substitution slice)
+#   template boilerplate: ~200 chars
+#   other summary lines : ~200 chars typical
+#   off_menu items join : ≤1500 chars (this constant)
+#   safety margin       : ~1900 chars
+# Schema caps off_menu_items at 20 items × 200 chars = 4000 chars worst-case;
+# without truncation, the message can blow the WhatsApp limit.
+WHATSAPP_OFF_MENU_BUDGET = 1500
+
 # Same alphabet as Shift's proposal codes — visually unambiguous uppercase + digits.
 _CODE_ALPHA = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 
@@ -130,10 +142,63 @@ def _render_approval_card(
         summary_lines.append(f"  - Menu: {', '.join(fields.menu_preferences)}")
     if fields.dietary_restrictions:
         summary_lines.append(f"  - Dietary: {', '.join(fields.dietary_restrictions)}")
+
+    # Off-menu items (v3.1 C23): customer-intent data, clustered with the
+    # what-they-want fields above. Defensive None handling — schema default is
+    # `Field(default_factory=list)` so None should never arrive from valid Pydantic
+    # instantiation, but a manually-edited leads.json or future schema regression
+    # could produce it (silent-failure-hunter HIGH-1).
+    items = fields.off_menu_items
+    if items is None:
+        sys.stderr.write(
+            "WARN: off_menu_items unexpectedly None (schema default is empty list); "
+            "treating as empty. Check leads.json for manually-edited entries.\n"
+        )
+        items = []
+    if items:
+        # Conservative truncation against WhatsApp limit per WHATSAPP_OFF_MENU_BUDGET.
+        # Two regimes:
+        #   (a) total joined exceeds budget → truncate item-list with "(and N more)"
+        #   (b) FIRST item alone exceeds budget → truncate the item itself
+        #       (silent-failure-hunter SF-1 escape-hatch fix)
+        joined = ", ".join(items)
+        if len(joined) > WHATSAPP_OFF_MENU_BUDGET:
+            running = 0
+            cutoff = 0
+            for i, item in enumerate(items):
+                running += len(item) + 2  # ", " separator
+                if running > WHATSAPP_OFF_MENU_BUDGET:
+                    cutoff = i
+                    break
+            if cutoff == 0:
+                # Single item alone exceeds budget — truncate the item itself.
+                trunc_item = items[0][:WHATSAPP_OFF_MENU_BUDGET - 10] + "..."
+                joined = trunc_item + (
+                    f" (and {len(items) - 1} more)" if len(items) > 1 else ""
+                )
+                sys.stderr.write(
+                    f"WARN: single off_menu_item exceeded budget "
+                    f"({len(items[0])} chars); truncated.\n"
+                )
+            else:
+                shown = items[:cutoff]
+                joined = ", ".join(shown) + f" (and {len(items) - len(shown)} more)"
+        summary_lines.append(f"  - Off-menu requests: {joined}")
+
     if fields.delivery_or_pickup:
         summary_lines.append(f"  - Delivery: {fields.delivery_or_pickup}")
     if fields.budget_hint_usd is not None:
         summary_lines.append(f"  - Budget hint: ${fields.budget_hint_usd}")
+
+    # Top-of-card marker (v3.1 C23 mobile-preview-fold mitigation, silent-failure
+    # SF-2 fix — must be insert(0, ...) NOT append; the marker MUST appear at
+    # summary_lines[0] so it lands above-the-fold in WhatsApp message previews).
+    # Only added when off_menu_items is present so regular leads stay clean.
+    # Using ASCII "[!]" instead of unicode glyph (test-analyzer E + SF-7 fix —
+    # avoids encoding-fragility test gap).
+    if items:
+        summary_lines.insert(0, "  [!] Off-menu requests detected — see below")
+
     summary = "\n".join(summary_lines) if summary_lines else "  (no structured fields extracted)"
 
     fields_dict = {
@@ -148,8 +213,14 @@ def _render_approval_card(
         try:
             tmpl = template_path.read_text(encoding="utf-8")
             return tmpl.format(**fields_dict)
-        except (KeyError, OSError):
-            pass
+        except (KeyError, OSError) as e:
+            # Pre-existing silent-pass converted to stderr WARN per design-review
+            # bonus finding — template render failure now visible in journald
+            # rather than silently degrading to inline fallback.
+            sys.stderr.write(
+                f"WARN: template render fell back to inline (template_path={template_path}): "
+                f"{type(e).__name__}: {e}\n"
+            )
     # Inline fallback
     return (
         f"⚕ *Catering Agent*\n────────────\n"
@@ -303,6 +374,19 @@ def main() -> int:
             None,
         )
         if existing:
+            # v3.1 C23 breadcrumb (silent-failure SF-4 fix): if existing lead has
+            # off_menu_items, log a journald breadcrumb so a $2k+ booking whose
+            # original card was lost (auto-archived, owner missed) leaves a trail
+            # for post-hoc operator triage. Wording is honest about uncertainty —
+            # we DON'T have card_sent persisted on the lead today (filed as a
+            # separate ticket for durable card_sent flag), so cannot claim the
+            # original card was successfully delivered.
+            if existing.extracted.off_menu_items:
+                sys.stderr.write(
+                    f"INFO: idempotent_replay on lead {existing.lead_id} with "
+                    f"non-empty off_menu_items={existing.extracted.off_menu_items!r}. "
+                    f"Original card-send disposition unknown — verify in cockpit.\n"
+                )
             print(json.dumps({
                 "lead_id": existing.lead_id,
                 "approval_code": existing.owner_approval_code,

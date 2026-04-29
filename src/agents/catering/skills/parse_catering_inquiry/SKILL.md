@@ -21,6 +21,7 @@ extract these fields. Set ANY field you can't determine from the message to
   "event_date": "<YYYY-MM-DD or null>",
   "event_time": "<HH:MM 24h or null>",
   "menu_preferences": [<list of menu items mentioned, or empty>],
+  "off_menu_items": [<list of specific dishes the customer named that AREN'T on your current menu, or empty>],
   "dietary_restrictions": [<list: vegetarian, vegan, jain, halal, kosher, gluten-free, etc. or empty>],
   "delivery_or_pickup": "<delivery | pickup | unknown>",
   "budget_hint_usd": <int >=0 or null>,
@@ -28,16 +29,18 @@ extract these fields. Set ANY field you can't determine from the message to
 }
 ```
 
+**`menu_preferences` vs `off_menu_items`**: `menu_preferences` is soft categories (vegetarian, spicy, north-indian). `off_menu_items` is specific dishes the customer named that you cannot find on the current menu — owner needs these to decide whether to add ad-hoc or decline. When in doubt, leave both empty.
+
 **Examples:**
 
-Input: "Need catering for 50 people on June 15 wedding reception, budget around $1000, vegetarian please"
-Output: `{"headcount": 50, "event_date": "2026-06-15", "event_time": null, "menu_preferences": [], "dietary_restrictions": ["vegetarian"], "delivery_or_pickup": "unknown", "budget_hint_usd": 1000, "notes": "wedding reception"}`
+Input: "Need catering for 50 people on June 15 wedding reception, budget around $1000, vegetarian please. Can you do butter chicken and lamb biryani?"
+Output: `{"headcount": 50, "event_date": "2026-06-15", "event_time": null, "menu_preferences": [], "off_menu_items": ["butter chicken", "lamb biryani"], "dietary_restrictions": ["vegetarian"], "delivery_or_pickup": "unknown", "budget_hint_usd": 1000, "notes": "wedding reception"}`
 
 Input: "Hi, do you do catering for ~20 ppl?"
-Output: `{"headcount": 20, "event_date": null, "event_time": null, "menu_preferences": [], "dietary_restrictions": [], "delivery_or_pickup": "unknown", "budget_hint_usd": null, "notes": ""}`
+Output: `{"headcount": 20, "event_date": null, "event_time": null, "menu_preferences": [], "off_menu_items": [], "dietary_restrictions": [], "delivery_or_pickup": "unknown", "budget_hint_usd": null, "notes": ""}`
 
 Input: "Anyone there?"
-Output: `{"headcount": null, "event_date": null, "event_time": null, "menu_preferences": [], "dietary_restrictions": [], "delivery_or_pickup": null, "budget_hint_usd": null, "notes": ""}`
+Output: `{"headcount": null, "event_date": null, "event_time": null, "menu_preferences": [], "off_menu_items": [], "dietary_restrictions": [], "delivery_or_pickup": null, "budget_hint_usd": null, "notes": ""}`
 
 ## Step 2 — Call create-catering-lead
 
