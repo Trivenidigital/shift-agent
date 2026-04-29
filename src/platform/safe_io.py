@@ -311,6 +311,40 @@ def dump_model(path: Path, model: "BaseModel", mode: int = 0o640) -> None:
     atomic_write_json(path, model, mode=mode)
 
 
+def load_yaml_model(path: Path, model_cls: Type[T]) -> T:
+    """Load + Pydantic-validate a YAML file (e.g., config.yaml).
+
+    UNLIKE load_model (which is JSON-only and rename-quarantines on parse error),
+    this helper:
+    - parses with yaml.safe_load (correct for YAML)
+    - does NOT rename-quarantine on parse error (YAML files like config.yaml are
+      operator-edited; auto-quarantine on a transient parse hiccup or syntax
+      typo is wrong policy — operator should see the parse error and fix the
+      file in place, NOT find their config silently moved aside)
+    - raises explicitly so callers control the failure path
+
+    Use for: config.yaml and any other YAML state file. Do NOT use load_model
+    (which calls safe_load_json) for these — calling json.loads on YAML content
+    raises JSONDecodeError, which safe_load_json then converts into a corrupt-
+    rename. That's how the Expense Bookkeeper scripts' load_model(CONFIG_PATH)
+    callsites silently quarantined customer config.yaml during PR-A deploy.
+
+    Raises:
+        FileNotFoundError: path missing.
+        RuntimeError: empty YAML / yaml parse error.
+        pydantic.ValidationError: data shape doesn't match model.
+    """
+    import yaml as _yaml
+    raw = path.read_text(encoding="utf-8")
+    try:
+        data = _yaml.safe_load(raw)
+    except _yaml.YAMLError as e:
+        raise RuntimeError(f"YAML parse failed for {path}: {e}") from e
+    if data is None:
+        raise RuntimeError(f"YAML file is empty: {path}")
+    return model_cls.model_validate(data)
+
+
 class LoadStatusError(RuntimeError):
     """Raised when safe_load_json/load_model returned an unhealthy status that
     a writer cannot safely fall through (corrupt parse, OS-level I/O failure,
