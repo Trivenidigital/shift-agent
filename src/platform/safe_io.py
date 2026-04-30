@@ -25,7 +25,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TypeVar, Type, Any, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 try:
@@ -401,3 +401,89 @@ def validate_phone_input(v: str) -> str:
     if not _PHONE_SAFE.match(v):
         raise ValueError(f"refusing suspicious phone input: {v!r}")
     return v
+
+
+# ─────────────────────────────────────────────────────────────────
+# Owner notification with fallback log
+# ─────────────────────────────────────────────────────────────────
+
+# Env-var overrides for testability (callers can also pass explicit kwargs).
+# SHIFT_AGENT_NOTIFY_OWNER_BIN: path to shift-agent-notify-owner (test stub override).
+# SHIFT_AGENT_NOTIFY_FAILED_LOG: fallback log path. Note historical drift —
+#   Shift's send-coverage-message wrote to /opt/shift-agent/state/notify-failed.log
+#   while Daily Brief wrote to /opt/shift-agent/logs/notify-failed.log.
+#   Default here is /logs/ (Daily Brief's path; matches operator-log convention);
+#   send-coverage-message passes the /state/ path explicitly to preserve its
+#   deployed location.
+NOTIFY_OWNER_BIN = os.environ.get(
+    "SHIFT_AGENT_NOTIFY_OWNER_BIN", "/usr/local/bin/shift-agent-notify-owner",
+)
+NOTIFY_FAILED_LOG = Path(os.environ.get(
+    "SHIFT_AGENT_NOTIFY_FAILED_LOG", "/opt/shift-agent/logs/notify-failed.log",
+))
+
+
+def notify_owner_with_fallback(
+    title: str,
+    message: str,
+    priority: int = 1,
+    *,
+    source: str = "unknown",
+    notify_owner_bin: str = NOTIFY_OWNER_BIN,
+    notify_failed_log: Path = NOTIFY_FAILED_LOG,
+) -> bool:
+    """Invoke shift-agent-notify-owner subprocess. On any failure, append a
+    structured entry to notify-failed.log so the nightly fsck + health-check
+    can surface dropped alerts.
+
+    Returns True on Pushover success, False on any failure path.
+
+    Replaces the near-mirror implementations previously inlined in:
+      - send-coverage-message._notify_owner + _append_notify_failed
+      - send-daily-brief._pushover_alert
+      - eod-reconcile._pushover_summary (subprocess call portion)
+
+    `source` identifies the caller (e.g. "send-coverage-message",
+    "send-daily-brief", "eod-reconcile") and lands in notify-failed.log
+    entries for triage. Final fallback (notify-failed.log itself unwritable)
+    writes to stderr so journald captures the alert-drop event.
+
+    The notify_owner_bin and notify_failed_log kwargs are for testability;
+    callers should not override them in production code.
+    """
+    import json as _json
+    import subprocess as _subprocess
+
+    err_detail = ""
+    try:
+        proc = _subprocess.run(
+            [notify_owner_bin, "--title", title, "--priority", str(priority), message],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode == 0:
+            return True
+        err_detail = f"exit={proc.returncode} stderr={proc.stderr.strip()[:200]}"
+    except (_subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        err_detail = f"{type(e).__name__}: {e}"
+
+    # Pushover-also-fails fallback: append to notify-failed.log
+    try:
+        notify_failed_log.parent.mkdir(parents=True, exist_ok=True)
+        with notify_failed_log.open("a", encoding="utf-8") as f:
+            f.write(_json.dumps({
+                "ts": datetime.now(tz=timezone.utc).isoformat(),
+                "source": source,
+                "title": title[:200],
+                "message": message[:500],
+                "pushover_error": err_detail[:300],
+            }) + "\n")
+    except OSError as fallback_err:
+        # Final fallback — disk full, read-only mount, etc. journald captures
+        # stderr so the alert-drop event cannot vanish entirely.
+        sys.stderr.write(
+            f"CRITICAL: alert dropped — Pushover failed AND notify-failed.log "
+            f"unwritable. source={source} title={title!r} "
+            f"pushover_err={err_detail[:200]!r} "
+            f"fallback_err={fallback_err!r}\n"
+        )
+    return False

@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "p
 from safe_io import (  # noqa: E402
     FileLock, atomic_write_json, ndjson_append, customer_now, customer_today_str,
     safe_load_json, load_model, assert_local_disk, flock,
+    notify_owner_with_fallback,
 )
 from schemas import (  # noqa: E402
     Config, PendingStore,
@@ -169,8 +170,11 @@ def _write_snapshot(today_str: str, snapshot_id: str, counts: dict, ts: datetime
 
 
 def _pushover_summary(cfg: Config, counts: dict, today_str: str) -> bool:
-    """Send a one-line EOD summary via shift-agent-notify-owner. Returns success."""
-    import subprocess
+    """Send a one-line EOD summary via shift-agent-notify-owner. Returns success.
+    Refactored 2026-04-30 to call shared safe_io.notify_owner_with_fallback —
+    NOTE this adds notify-failed.log fallback that EOD previously LACKED
+    (was just stderr-write on subprocess failure). Deduplicated across
+    Shift / Daily Brief / EOD."""
     sc = counts["sick_calls"]
     pc = counts["proposals_created"]
     pr = counts["proposals_resolved"]
@@ -187,15 +191,7 @@ def _pushover_summary(cfg: Config, counts: dict, today_str: str) -> bool:
     priority = cfg.eod.pushover_priority
     if pu > 0 or ofail > 0 or counts["invariant_violations"] > 0:
         priority = max(priority, 1)
-    try:
-        proc = subprocess.run(
-            [NOTIFY_OWNER_BIN, "--title", title, "--priority", str(priority), msg],
-            capture_output=True, text=True, timeout=30,
-        )
-        return proc.returncode == 0
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
-        sys.stderr.write(f"WARN: pushover failed: {e}\n")
-        return False
+    return notify_owner_with_fallback(title, msg, priority, source="eod-reconcile")
 
 
 def main() -> int:

@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "p
 from safe_io import (  # noqa: E402
     FileLock, atomic_write_json, ndjson_append, customer_now, customer_today_str,
     safe_load_json, load_model, assert_local_disk, flock,
+    notify_owner_with_fallback,
 )
 from schemas import (  # noqa: E402
     Config, Roster, PendingStore,
@@ -421,39 +422,11 @@ def _bridge_post(jid: str, message: str) -> tuple[bool, str, str, str]:
 
 def _pushover_alert(title: str, message: str, priority: int = 1) -> bool:
     """Invoke shift-agent-notify-owner. Returns True on success.
-    On failure, append to notify-failed.log (mirrors send-coverage-message:155)."""
-    try:
-        proc = subprocess.run(
-            [NOTIFY_OWNER_BIN, "--title", title, "--priority", str(priority), message],
-            capture_output=True, text=True, timeout=30,
-        )
-        if proc.returncode == 0:
-            return True
-        err = f"{proc.returncode} {proc.stderr.strip()}"
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
-        err = f"{type(e).__name__}: {e}"
-    # Pushover-also-fails fallback (mirrors send-coverage-message:155)
-    try:
-        NOTIFY_FAILED_LOG.parent.mkdir(parents=True, exist_ok=True)
-        with open(NOTIFY_FAILED_LOG, "a", encoding="utf-8") as f:
-            f.write(json.dumps({
-                "ts": datetime.now(tz=timezone.utc).isoformat(),
-                "source": "send-daily-brief",
-                "title": title,
-                "message": message[:500],
-                "pushover_error": err[:200],
-            }) + "\n")
-    except OSError as fallback_err:
-        # Final-fallback log — at least journald captures stderr so an alert
-        # drop cannot vanish entirely. The previous `except OSError: pass`
-        # silently swallowed the alert in catastrophic cases (disk full,
-        # read-only mount on log dir).
-        sys.stderr.write(
-            f"CRITICAL: alert dropped — Pushover failed AND notify-failed.log "
-            f"unwritable. title={title!r} pushover_err={err[:200]!r} "
-            f"fallback_err={fallback_err!r}\n"
-        )
-    return False
+    Refactored 2026-04-30 to call shared safe_io.notify_owner_with_fallback
+    (was inline; deduplicated across Shift / Daily Brief / EOD)."""
+    return notify_owner_with_fallback(
+        title, message, priority, source="send-daily-brief",
+    )
 
 
 def _check_routing_watchdog(cfg: Config, dry_run: bool) -> None:
