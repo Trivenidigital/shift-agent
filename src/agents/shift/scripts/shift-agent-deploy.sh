@@ -58,9 +58,14 @@ install_artifacts() {
     rsync -a --delete src/agents/shift/skills/ /root/.hermes/skills/
     chown -R shift-agent:shift-agent /root/.hermes/skills/
 
-    # logs dir — bootstrap target for decisions.log, prune-expense.log, etc.
-    # Idempotent; safe on already-provisioned VPS.
-    install -d -o shift-agent -g shift-agent /opt/shift-agent/logs 2>/dev/null || true
+    # logs dir — bootstrap target for prune-expense.log + similar systemd
+    # StandardOutput=append: writers (systemd doesn't auto-mkdir parents).
+    # Python writers using safe_io.ndjson_append self-bootstrap via
+    # path.parent.mkdir(parents=True, exist_ok=True), so decisions.log /
+    # hermes-gateway.log don't strictly need this — but it's load-bearing
+    # for the prune-expense systemd unit on a fresh VPS.
+    # Mode 0750: matches createolddir 0750 in src/agents/shift/logrotate/shift-agent.
+    install -d -o shift-agent -g shift-agent -m 0750 /opt/shift-agent/logs 2>/dev/null || true
 
     # systemd units — platform (hermes-gateway) + shift-agent specific
     install -m 644 src/platform/systemd/*.service /etc/systemd/system/ 2>/dev/null || true

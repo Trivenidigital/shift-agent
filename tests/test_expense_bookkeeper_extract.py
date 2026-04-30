@@ -98,27 +98,43 @@ def test_collision_regenerate_raises_after_100_consecutive_collisions(extract_mo
 
 def test_multi_receipt_batch_generates_distinct_codes(extract_mod, monkeypatch):
     """5 sequential receipts (the rapid-fire batch case in plan §4g #16)
-    must produce 5 distinct approval codes. Asserts the cross-state-file
-    collision check sees this-call's prior leads on subsequent invocations
-    so codes don't collide within a single batch."""
-    monkeypatch.setattr(extract_mod, "_collect_active_codes",
-                        extract_mod._collect_active_codes.__wrapped__
-                        if hasattr(extract_mod._collect_active_codes, "__wrapped__")
-                        else extract_mod._collect_active_codes)
-    # Use real secrets.choice (real entropy); 5 codes from 28.6M pool collide
-    # at vanishing probability — this is the production behavior we're
-    # asserting works correctly across calls.
+    must produce 5 distinct approval codes — including under deterministic
+    intra-batch collision pressure.
+
+    Reviewer-d MED + reviewer-f 6th-lens: the original implementation only
+    asserted set-math under real-entropy `secrets.choice`. This version
+    forces a deterministic collision on the 3rd iteration (its first
+    candidate matches the 1st iteration's code) so the assertion actually
+    exercises the retry-on-existing-code path WITHIN a batch — proving the
+    cross-state-file scan sees prior batch leads and the retry loop fires.
+    Without this, the test would pass even if `_generate_unique_code`
+    silently dropped its store-collision check."""
+    # Force the cross-state-file pool to reflect ONLY our growing store
+    # (avoid leaking real catering/menu/pending state files into the test).
+    monkeypatch.setattr(
+        extract_mod, "_collect_active_codes",
+        lambda s: {l.owner_approval_code for l in s.leads
+                   if l.owner_approval_code},
+    )
+
+    # Deterministic char sequence: 5 chars per candidate, 5 candidates total.
+    # Round 3 first-candidate is forced to equal round 1's code (collision);
+    # round 3's second candidate is unique. Rounds 1, 2, 4, 5 are each unique.
+    chars = (
+        "AAAAA"        # round 1 → #AAAAA
+        "BBBBB"        # round 2 → #BBBBB
+        "AAAAA"        # round 3 first try → COLLIDES with round 1
+        "CCCCC"        # round 3 retry → #CCCCC
+        "DDDDD"        # round 4 → #DDDDD
+        "EEEEE"        # round 5 → #EEEEE
+    )
+    char_iter = iter(chars)
+    monkeypatch.setattr(extract_mod.secrets, "choice",
+                        lambda alpha: next(char_iter))
 
     store = _empty_store(extract_mod)
     codes: list[str] = []
     for i in range(1, 6):
-        # Force the cross-state-file pool to be just our growing store
-        # (avoid leaking real catering/menu/pending state files into the test).
-        monkeypatch.setattr(
-            extract_mod, "_collect_active_codes",
-            lambda s: {l.owner_approval_code for l in s.leads
-                       if l.owner_approval_code},
-        )
         code = extract_mod._generate_unique_code(store)
         # Mint a fake AWAITING lead with the generated code so the next
         # iteration sees it in the active pool (mirrors what extract-receipt's
@@ -137,4 +153,9 @@ def test_multi_receipt_batch_generates_distinct_codes(extract_mod, monkeypatch):
         store.leads.append(lead)
         codes.append(code)
 
-    assert len(set(codes)) == 5, f"expected 5 distinct codes, got: {codes}"
+    # 5 distinct codes (round-3 retry succeeded with a non-colliding candidate)
+    assert codes == ["#AAAAA", "#BBBBB", "#CCCCC", "#DDDDD", "#EEEEE"], (
+        f"expected explicit code sequence proving round-3 retried past "
+        f"the AAAAA collision; got: {codes}"
+    )
+    assert len(set(codes)) == 5
