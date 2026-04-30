@@ -226,17 +226,24 @@ A previous draft of this doc claimed "subsequent strips are observed via `decisi
 
 ---
 
-## Removal plan (review #38 LOW)
+## Removal plan (review #38 LOW + expanded 2026-04-30 after catering Hermes-first review)
 
-The shim is by nature temporary. After PR-B1 + PR-B2 ship and PR-B2 has soaked cleanly across the fleet, the shim becomes dead code that:
-1. Silently strips legitimately-named future fields if anyone reuses these key names
-2. Adds two `mode='before'` passes on every model load forever (negligible cost, but unnecessary)
+The shim is by nature temporary. After PR-B v3 ships (was PR-B2 in earlier draft — descoped to single PR-B v3) and bulk-deploys cleanly across the fleet, the shim + several adjacent items become dead code.
 
-**Removal trigger:** **after PR-B2 has soaked 7 days post-bulk-deploy across all 9 Triveni VPS**, with zero `"PR-D3 absorbing-shim stripped"` WARN lines in journald during the 7-day window (rollback window has closed). At that point: open `tasks/pr-d4-shim-removal.md` (single commit, deletes the two validators + the four module-level constants + the WARN helper + the absorbing-shim tests; full regression test).
+**Removal trigger:** **after PR-B v3 has bulk-deployed clean + 7 days post-bulk-deploy** across all 9 Triveni VPS, with zero `"PR-D3 absorbing-shim stripped"` WARN lines in journald during the 7-day window.
 
-**Tracking:** create a calendar reminder when PR-B2 bulk-deploy completes ("7 days from today: open PR-D4 to remove the PR-D3 absorbing shim"). The `/schedule` tooling can carry this; alternatively land a `# TODO(remove-after-pr-b2-soak-7d)` comment next to the helper to surface during code review until removed.
+**PR-D4 scope (single commit, ~50 LOC + 3 tests):**
 
-**Why a removal PR rather than leaving the shim:** the steady-state cost is small but the strip-on-read silently absorbing legitimately-named future fields is a real footgun for a future contributor who reuses any of `voice_quality`, `quote_source`, `tone_profile`, `tone_examples` for a new purpose. Removing the shim once it's no longer load-bearing eliminates that surface.
+1. Delete `_strip_pr_b_reserved_keys` `mode='before'` validators from `CateringLead` + `CustomerConfig` (the absorbing shim itself).
+2. Delete the 4 module-level helpers: `_PR_B_RESERVED_LEAD_KEYS`, `_PR_B_RESERVED_CONFIG_KEYS`, `_PR_B_WARNED`, `_warn_pr_b_reserved_key_once`.
+3. Delete `CateringQuoteRenderFailed` LogEntry variant + Tag-union entry. Becomes dead code after PR-B v3 deletes the template-render path — there is no render-failure mode to emit. Also delete from `__all__`.
+4. Delete `/opt/shift-agent/templates/` provisioning from `shift-agent-deploy.sh install_artifacts()` if present (verify; may not be there). Template directory is empty after PR-B v3 deletes the `.txt` file.
+5. Delete `tests/test_pr_d3_absorbing_shim.py` entirely.
+6. Drift-tag: `extends-Hermes` (cleanup PR; removes scaffolding without altering behavior).
+
+**Tracking:** when PR-B v3 bulk-deploy completes, `/schedule` an agent for ~7 days later to fire the cleanup. Until then, leave a `# TODO(remove-after-pr-b-v3-soak-7d)` comment next to `_strip_pr_b_reserved_keys` to surface in code review.
+
+**Why a removal PR rather than leaving the shim:** the steady-state cost is small but the strip-on-read silently absorbing legitimately-named future fields is a real footgun for a future contributor who reuses any of `voice_quality`, `quote_source`, `tone_profile`, `tone_examples` for a new purpose. Same logic applies to `CateringQuoteRenderFailed` — keeping a dead variant clutters the audit-class catalog and risks accidental re-use for an unrelated failure mode.
 
 ---
 

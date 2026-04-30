@@ -41,6 +41,20 @@
 
 The Stage 1 decision doc for Expense Bookkeeper (drafted before this rule landed) described 4 "architectural surfaces" as if greenfield infrastructure. Reality: Hermes already handled vision extraction, WhatsApp media routing, structured output, audit chain, approval codes, skill chaining. The genuinely net-new surfaces shrank from 4 to 1.5 (QBO write API + money-moving discipline) once Hermes was credited honestly. This rule prevents the same failure mode from repeating.
 
+### How this rule is enforced (mechanical, not discipline-based)
+
+The rule fired for the v0.4 catering paradigm change (PR-B), then went unapplied at PR-B2 design time — 8 commits / 476 LOC of design slipped past, of which only 2 commits / 125 LOC were the actual paradigm change. The other ~350 LOC was scaffolding. Five reviewers caught security and correctness BLOCKERs but, given scope-assumed lenses, did not push back on whether the scope itself was needed. Documentation alone is insufficient — the system needs interception points.
+
+**Three enforcement mechanisms (added 2026-04-30, all live):**
+
+1. **Hook on `Write`/`Edit` to plan/design/spec docs in `tasks/`.** Configured in `~/.claude/settings.json` `PreToolUse`. Runs `~/.claude/hooks/hermes-first-check.py`, which blocks the write if the resulting content lacks BOTH a `**Drift-check tag:**` line AND a `Hermes-first` checklist heading. Exit code 2 returns stderr to Claude as feedback. Catches the omission at doc-creation time.
+
+2. **`/hermes-check <task>` slash command.** Templated walk-through of the per-step capability checklist. Lives at `~/.claude/commands/hermes-check.md`. Use proactively before any plan/spec/design/build/bug-fix work; the command body itself instructs to refuse skipping.
+
+3. **Reviewer-lens addition for 5-agent review cycles.** When dispatching parallel reviewers, ALWAYS include one reviewer with the explicit lens *"could Hermes already do this — is the scope itself needed?"*. The five existing lenses (security / drift / schema / truth-guard / deploy) take scope as given; this sixth lens questions it. Without it, the reviewers find BLOCKERs *within* the proposed scope but never flag the scope as bloated. This is the lens that, applied at PR-B2 design time, would have flagged 5 of 8 commits as avoidable.
+
+**Procedural rule: at every stage transition** (plan → design → build → PR → review → merge → bug-fix), re-run the per-step `[Hermes]` / `[net-new]` checklist if any step has changed since the last application. The hook catches plan/design files; the slash command + procedural rule covers everything else.
+
 ---
 
 ## ⚠️ DRIFT RULES — Read deployed code BEFORE proposing
