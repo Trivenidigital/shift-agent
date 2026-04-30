@@ -1949,6 +1949,44 @@ class CateringQuoteSentLeadMissing(_BaseEntry):
     detail: str = Field(default="", max_length=500)
 
 
+class CateringQuoteSkillFailed(_BaseEntry):
+    """PR-B v0.4: emitted when the LLM-drafting SKILL → apply-script handoff
+    fails. Three failure surfaces:
+
+    - apply-script side: --quote-text-stdin missing OR drafted text fails
+      the truth-guard regex sanity check (headcount integer / ISO event_date
+      not present in the prose). Emitted via SKILL on apply-script's
+      non-zero exit (apply-script writes the row best-effort itself, then
+      SKILL emits a covering row so observability is on the SKILL path).
+    - SKILL side: LLM call returned malformed/empty/error. SKILL emits
+      directly via log-decision-direct.
+
+    `reason` Literal kept narrow on purpose — wider taxonomy can be added
+    in v0.5 if canary surfaces patterns we haven't anticipated.
+
+    Naming: Catering<Subject><PastParticiple> pattern. Subject="QuoteSkill"
+    (the SKILL responsible for drafting), past-participle="Failed".
+    """
+    type: Literal["catering_quote_skill_failed"]
+    lead_id: str = Field(min_length=1)
+    code: str = Field(
+        # Review-fix M1: pattern enforced — matches the 28.6M-entry alphabet
+        # used by generate_unique_code (no visually-ambiguous chars).
+        # Without the pattern, a future external caller could land malformed
+        # rows in decisions.log; min_length alone wouldn't catch "ABCDEF".
+        pattern=r"^#[A-HJ-NP-Z2-9]{5}$",
+        description="Owner approval code, format #XXXXX (no I/O/0/1)",
+    )
+    reason: Literal[
+        "missing_quote_text",       # --quote-text-stdin not provided OR empty
+        "truth_guard_failed",       # headcount/ISO-date sanity check rejected
+        "apply_decision_nonzero",   # SKILL detected non-zero exit (catch-all)
+        "llm_unreachable",          # Hermes gateway unavailable (SKILL-side)
+        "llm_malformed_response",   # gateway returned non-text/empty/error
+    ]
+    detail: str = Field(default="", max_length=2000)
+
+
 class CateringQuoteRenderFailed(_BaseEntry):
     """v0.3 (review M2): emitted when apply-catering-owner-decision approve
     flow fails to render the customer quote (template KeyError, OSError,
@@ -2099,6 +2137,8 @@ LogEntry = Annotated[
         Annotated[CateringQuoteRenderFailed, Tag("catering_quote_render_failed")],
         # PR-D1: post-bridge state-vs-outbound divergence audit
         Annotated[CateringQuoteSentLeadMissing, Tag("catering_quote_sent_lead_missing")],
+        # PR-B v0.4: SKILL → apply-script handoff failure (LLM-drafted quote)
+        Annotated[CateringQuoteSkillFailed, Tag("catering_quote_skill_failed")],
         # PR-D1: config load observability + operator reconcile audit
         Annotated[ConfigLoadFailed, Tag("config_load_failed")],
         Annotated[CateringLeadManuallyReconciled, Tag("catering_lead_manually_reconciled")],
@@ -2212,5 +2252,7 @@ __all__ = [
     # PR-D1
     "CateringQuoteSentLeadMissing", "ConfigLoadFailed",
     "CateringLeadManuallyReconciled",
+    # PR-B v0.4
+    "CateringQuoteSkillFailed",
     "MenuUpdateProposed", "MenuUpdateApplied", "MenuUpdateRejected",
 ]

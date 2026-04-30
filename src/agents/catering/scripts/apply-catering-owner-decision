@@ -37,7 +37,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
+import unicodedata
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -53,13 +55,15 @@ from safe_io import (  # noqa: E402
     load_yaml_model,
 )
 from schemas import (  # noqa: E402
-    Config, CateringLeadStore, Menu, MenuItem,
+    Config, CateringLeadStore,
     CateringLeadStatusChange, CateringOwnerDecision, CateringQuoteSent,
     CateringQuoteAttempted,  # PR-D2 commit 3: anchor row schema (PR-D1)
+    CateringQuoteSkillFailed,  # PR-B v3: SKILL handoff failure audit
 )
 from exit_codes import (  # noqa: E402
     EXIT_OK, EXIT_INVALID_INPUT, EXIT_NOT_FOUND,
     EXIT_SCHEMA_VIOLATION, EXIT_DEPENDENCY_DOWN, EXIT_ILLEGAL_TRANSITION,
+    EXIT_TRUTH_GUARD_FAILED,  # PR-B v3 review fix: distinct from bridge-unreachable
 )
 from audit_helpers import (  # noqa: E402
     log_config_load_failed_best_effort,
@@ -74,12 +78,21 @@ from pydantic import TypeAdapter, ValidationError  # noqa: E402
 CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
 LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
 LEADS_LOCK = Path("/opt/shift-agent/state/catering-leads.json.lock")
-MENU_PATH = Path("/opt/shift-agent/state/catering-menu.json")
 LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
-TEMPLATE_DIR = Path("/opt/shift-agent/templates")
 BRIDGE_URL = "http://127.0.0.1:3000/send"
 BRIDGE_TIMEOUT = 10
-MENU_ITEMS_IN_QUOTE = 12  # cap to keep WhatsApp message readable
+
+# PR-B v3 — drafted-quote stdin caps and Unicode strip categories.
+# 8KB stdin read cap is generous (LLM drafts run ~300-500 chars in practice);
+# 4KB final-text cap rejects payloads that grow past sane limits during the
+# read; 600-char output cap is the WhatsApp readability ceiling. Cc=control
+# chars (NUL, BEL, ESC); Cf=format chars (RTL-override, zero-width, BOM, etc.)
+# — both stripped except literal newlines.
+_QUOTE_STDIN_READ_CAP = 8192
+_QUOTE_TEXT_MAX_BYTES = 4096
+_QUOTE_OUTPUT_CAP_CHARS = 600
+_STRIP_UNICODE_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn"})
+_MARKDOWN_DELIM_RE = re.compile(r"[*_~`]+")
 
 
 def _bridge_post(jid: str, message: str) -> tuple[bool, str]:
@@ -101,117 +114,88 @@ def _bridge_post(jid: str, message: str) -> tuple[bool, str]:
         return False, f"{type(e).__name__}: {e}"
 
 
-def _load_menu_filtered(dietary_restrictions: list[str]) -> tuple[list[MenuItem], int]:
-    """Load the current menu and filter items by the customer's dietary requests.
+def _normalize_quote_text(s: str) -> str:
+    """PR-B v3 — strip control/format Unicode + markdown delimiters; cap length.
 
-    Returns (filtered_items, total_items_in_menu).
-
-    Filtering rule: if the customer specified ANY dietary restriction (e.g.
-    "vegetarian"), keep only items whose dietary_tags include AT LEAST ONE
-    matching tag. If no dietary restriction was specified, return all items
-    (caller decides whether to include the full menu).
+    NFC normalize, drop Cc/Cf/Cs/Co/Cn categories (control + format + surrogate
+    + private + unassigned) except literal '\\n', strip markdown delimiters
+    (`* _ ~ \\``), normalize CRLF→LF, cap to 600 chars. Defense against:
+    - Prompt-injected RTL-override / zero-width chars in WhatsApp display
+    - LLM emitting markdown when prompted for plain prose
+    - Runaway output exceeding WhatsApp message limits
     """
-    if not MENU_PATH.exists():
-        return [], 0
-    try:
-        menu, status = load_model(MENU_PATH, Menu)
-    except Exception:
-        return [], 0
-    if status != "ok":
-        return [], 0
-    items = [it for it in menu.items if it.available]
-    if not dietary_restrictions:
-        return items, len(menu.items)
-    # Normalize requested tags (e.g. "vegetarian" -> "veg", "non-vegetarian" -> "non-veg")
-    requested = set()
-    for r in dietary_restrictions:
-        t = r.lower().strip()
-        if t in ("vegetarian", "veg"):
-            requested.add("veg")
-        elif t in ("non-vegetarian", "non-veg", "nonveg"):
-            requested.add("non-veg")
-        elif t in ("vegan",):
-            requested.add("vegan")
-        elif t in ("jain",):
-            requested.add("jain")
-        elif t in ("halal",):
-            requested.add("halal")
-        elif t in ("kosher",):
-            requested.add("kosher")
-        elif t in ("gluten-free", "gf", "gluten free"):
-            requested.add("gluten-free")
-        elif t in ("nut-free", "nut free"):
-            requested.add("nut-free")
-        elif t in ("dairy-free", "dairy free"):
-            requested.add("dairy-free")
-        elif t in ("egg-free", "egg free", "no eggs"):
-            requested.add("egg-free")
-    filtered = [it for it in items if any(tag in requested for tag in it.dietary_tags)]
-    return filtered, len(menu.items)
-
-
-def _format_menu_section(items: list[MenuItem], total: int, dietary_restrictions: list[str]) -> str:
-    """Build the menu section that appears in the customer-facing quote."""
-    if not items:
-        if total == 0:
-            return ""  # no menu configured at all — silently omit
-        if dietary_restrictions:
-            return (f"\n_(We didn't find items matching {', '.join(dietary_restrictions)} "
-                    f"in our current menu. Reply with any specifics and we'll customize.)_\n")
-        return ""
-    by_cat: dict[str, list[MenuItem]] = {}
-    for it in items:
-        by_cat.setdefault(it.category, []).append(it)
-    cat_order = ["package", "appetizer", "main", "side", "dessert", "beverage", "salad", "soup", "special"]
-    lines = ["\n*Sample menu*"]
-    if dietary_restrictions:
-        lines[0] += f" ({', '.join(dietary_restrictions)})"
-    lines[0] += ":"
-    shown = 0
-    for cat in cat_order:
-        if cat not in by_cat or shown >= MENU_ITEMS_IN_QUOTE:
+    chars = []
+    for ch in unicodedata.normalize("NFC", s):
+        if ch == "\n":
+            chars.append(ch)
             continue
-        for it in by_cat[cat][:max(1, MENU_ITEMS_IN_QUOTE // len(by_cat))]:
-            if shown >= MENU_ITEMS_IN_QUOTE:
-                break
-            price = f" — ${it.price_usd:.0f}" if it.price_usd is not None else ""
-            lines.append(f"  - {it.name}{price}")
-            shown += 1
-    leftover = len(items) - shown
-    if leftover > 0:
-        lines.append(f"  _...and {leftover} more options on request_")
-    return "\n".join(lines) + "\n"
+        if unicodedata.category(ch) in _STRIP_UNICODE_CATEGORIES:
+            continue
+        chars.append(ch)
+    out = "".join(chars).replace("\r\n", "\n").replace("\r", "\n")
+    out = _MARKDOWN_DELIM_RE.sub("", out)
+    return out[:_QUOTE_OUTPUT_CAP_CHARS]
 
 
-def _render_quote(lead, customer_name: str) -> str:
-    """Render the customer-facing quote. Uses template with fallback. Includes
-    a sample-menu section filtered by the customer's dietary requests."""
-    template_path = TEMPLATE_DIR / "catering_quote_to_customer.txt"
-    dietary = list(lead.extracted.dietary_restrictions or [])
-    filtered_items, total = _load_menu_filtered(dietary)
-    menu_section = _format_menu_section(filtered_items, total, dietary)
+def _truth_guard_check(quote_text: str, lead) -> tuple[bool, str]:
+    """PR-B v3 — minimum sanity check on LLM-drafted quote.
 
-    fields = {
-        "lead_id": lead.lead_id,
-        "customer_name": customer_name or "there",
-        "headcount": lead.extracted.headcount or "[TBD]",
-        "event_date": lead.extracted.event_date or "[TBD]",
-        "event_time": lead.extracted.event_time or "[TBD]",
-        "menu_section": menu_section,
-    }
-    if template_path.exists():
-        try:
-            tmpl = template_path.read_text(encoding="utf-8")
-            return tmpl.format(**fields)
-        except (KeyError, OSError):
-            pass
-    # Inline fallback — generic acknowledgment when no template
-    return (
-        f"⚕ *Catering Agent*\n────────────\n"
-        f"Hi {fields['customer_name']}, thank you for the catering inquiry. "
-        f"We can confirm — let's discuss details. Reply here when ready, or "
-        f"reach us directly.{menu_section}\n(Ref: {lead.lead_id})"
-    )
+    Returns (passed, reason). Reason empty on pass; otherwise one of the
+    CateringQuoteSkillFailed.reason Literals (specifically truth_guard_failed
+    sub-reasons surfaced via `detail`).
+
+    Two checks only (anti-hallucination minimum):
+    - if lead.extracted.headcount is set: literal integer must appear in the
+      drafted prose with a word boundary, NOT as a substring of a longer
+      number (e.g. "50,000" doesn't pass the headcount=50 check)
+    - if lead.extracted.event_date is set: literal ISO YYYY-MM-DD must
+      appear (SKILL prompt instructs LLM to include `(YYYY-MM-DD)`
+      parenthetical alongside any prose date — see SKILL.md)
+
+    Wider checks (customer-name match, headcount-None hallucination scan,
+    fuzzy date prose, menu-item / price hallucination) intentionally
+    deferred to v0.5 per design v3 §1 Hermes-first checklist.
+    """
+    hc = lead.extracted.headcount
+    if hc is not None:
+        # \b{hc}\b with negative lookahead: rejects "50,000" / "50.5" etc.
+        # Accepts "for 50, our buffet..." (comma-followed-by-space, not digit).
+        if not re.search(rf"\b{re.escape(str(hc))}\b(?!\d|[,.]\d)", quote_text):
+            return False, f"headcount={hc} not present"
+    ed = lead.extracted.event_date
+    if ed and ed not in quote_text:
+        return False, f"event_date={ed!r} ISO not present"
+    return True, ""
+
+
+def _emit_quote_skill_failed_best_effort(lead_id: str, code: str,
+                                          reason: str, detail: str = "") -> None:
+    """PR-B v3 — write CateringQuoteSkillFailed audit row best-effort.
+
+    Best-effort: failures during emission (lock contention, disk full,
+    schema regression) write a stderr WARN but do NOT raise. Mirrors
+    audit_helpers.log_quote_sent_lead_missing_best_effort pattern (PR-D2).
+
+    Review-fix B1: pass model_dump_json (str) to ndjson_append, NOT
+    json.loads of it (which produced a dict and silently AttributeError'd
+    inside the bare except). Matches deployed pattern at line ~210
+    (_append_log_with_outer_leadslock).
+    Review-fix H3: wrap the append in flock(LOG_PATH) — every other
+    LOG_PATH writer holds it; deployed-pattern drift caught at PR review.
+    """
+    try:
+        ts = customer_now().isoformat()
+        entry = CateringQuoteSkillFailed(
+            type="catering_quote_skill_failed", ts=ts,
+            lead_id=lead_id, code=code, reason=reason, detail=detail[:2000],
+        )
+        with flock(LOG_PATH):
+            ndjson_append(LOG_PATH, entry.model_dump_json())
+    except Exception as e:  # noqa: BLE001 — best-effort by contract
+        sys.stderr.write(
+            f"WARN: failed to emit CateringQuoteSkillFailed audit row: "
+            f"{type(e).__name__}: {e}\n"
+        )
 
 
 def _append_log_with_outer_leadslock(adapter: TypeAdapter, entry) -> None:
@@ -335,6 +319,14 @@ def main() -> int:
     ap.add_argument("--decision", required=True, choices=["approve", "reject", "edit"])
     ap.add_argument("--edit-text", default="", help="required when decision=edit")
     ap.add_argument("--reason", default="", help="optional rejection reason")
+    ap.add_argument(
+        "--quote-text-stdin", action="store_true",
+        help="PR-B v3: read drafted customer quote text from stdin (required "
+             "for decision=approve). Replaces the previous template-render path "
+             "and the argv-based --quote-text (which was a shell-escape RCE "
+             "surface). Stdin is read up to 8KB; final text capped at 4KB; "
+             "output is normalize-stripped and capped at 600 chars.",
+    )
     args = ap.parse_args()
 
     if args.decision == "edit" and not args.edit_text.strip():
@@ -492,7 +484,54 @@ def main() -> int:
             # re-load. Captured here because store.leads[matched_idx] may not
             # exist post-bridge.
             customer_phone_pre_bridge = lead.customer_phone
-            quote_text = _render_quote(lead, lead.customer_name or "")
+
+            # PR-B v3: read LLM-drafted quote from stdin (replaces _render_quote
+            # template path). Truth-guard checks headcount integer + ISO event_date
+            # are present in drafted prose; normalize strips control/format Unicode
+            # + markdown delimiters + caps length.
+            if not args.quote_text_stdin:
+                _emit_quote_skill_failed_best_effort(
+                    lead.lead_id, code, "missing_quote_text",
+                    "--quote-text-stdin flag not provided in approve decision",
+                )
+                sys.stderr.write(
+                    "PR-B v3: --quote-text-stdin required for decision=approve\n"
+                )
+                return EXIT_INVALID_INPUT
+            raw_quote = sys.stdin.read(_QUOTE_STDIN_READ_CAP)
+            if len(raw_quote.encode("utf-8")) > _QUOTE_TEXT_MAX_BYTES:
+                _emit_quote_skill_failed_best_effort(
+                    lead.lead_id, code, "missing_quote_text",
+                    f"stdin payload {len(raw_quote.encode('utf-8'))}B exceeds "
+                    f"{_QUOTE_TEXT_MAX_BYTES}B cap",
+                )
+                sys.stderr.write(
+                    f"PR-B v3: stdin > {_QUOTE_TEXT_MAX_BYTES}B; refusing\n"
+                )
+                return EXIT_INVALID_INPUT
+            if not raw_quote.strip():
+                _emit_quote_skill_failed_best_effort(
+                    lead.lead_id, code, "missing_quote_text",
+                    "stdin empty / whitespace-only",
+                )
+                sys.stderr.write("PR-B v3: stdin empty\n")
+                return EXIT_INVALID_INPUT
+            quote_text = _normalize_quote_text(raw_quote)
+            passed, fail_detail = _truth_guard_check(quote_text, lead)
+            if not passed:
+                _emit_quote_skill_failed_best_effort(
+                    lead.lead_id, code, "truth_guard_failed", fail_detail,
+                )
+                sys.stderr.write(
+                    f"PR-B v3: truth_guard rejected drafted quote: {fail_detail}\n"
+                )
+                # Review-fix HIGH-1: use EXIT_TRUTH_GUARD_FAILED (=11), NOT
+                # EXIT_DEPENDENCY_DOWN (=6, "bridge unreachable"). The two
+                # failures need DIFFERENT operator responses: bridge-unreachable
+                # is a retryable transient that PR-D2 retry-state-machine
+                # handles; truth-guard fail needs a re-DRAFT (only the SKILL
+                # can do that). Collision would silently misroute retry logic.
+                return EXIT_TRUTH_GUARD_FAILED
 
         atomic_write_json(LEADS_PATH, store)
 
