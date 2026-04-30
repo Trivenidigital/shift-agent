@@ -1,5 +1,7 @@
 # Expense Bookkeeper — v0.2 Follow-up Items
 
+**Drift-check tag:** `extends-Hermes` — backlog of substrate extensions; each item flagged YAGNI / DEFER / CUT in `tasks/expense-bookkeeper-resume-audit.md` (2026-04-30).
+
 Items deferred during v0.1 audit-fix (PR for `fix/expense-bookkeeper-v01-audit-bugs`).
 None are blockers for the v0.1 ship; each has a stated rationale for deferral.
 
