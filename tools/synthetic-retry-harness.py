@@ -46,11 +46,13 @@ CREATE_SCRIPT = Path("/usr/local/bin/create-catering-lead")
 RECONCILE_SCRIPT = Path("/usr/local/bin/catering-lead-reconcile")
 LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
 
-# NANP-reserved test phone range (R5-H-3): 555-0100..555-0199
-# PR-review R2 H2 fix: prefix "+155550" was too loose (matched real assignable
-# 555-50XX numbers). Tightened to "+1555501" pinning to 555-01XX range.
+# NANP-reserved test phone range (R5-H-3): NPA=555 + NXX=555 + subscriber 0100-0199
+# PR-D3 hotfix: PR-review R2-H-2 prefix "+1555501" had off-by-position — that
+# slice doesn't appear in `+15555550199`. Correct prefix is "+155555501",
+# matching `+1` + NPA `555` + NXX `555` + first 2 digits of subscriber `01`.
+# Surfaced on canary 2026-04-30 when probe ABORTed at the prefix check.
 SYNTHETIC_PHONE = "+15555550199"
-SYNTHETIC_PHONE_PREFIX = "+1555501"
+SYNTHETIC_PHONE_PREFIX = "+155555501"
 
 
 def _load_apply_module():
@@ -62,7 +64,13 @@ def _load_apply_module():
 
 
 def _create_synthetic_lead() -> tuple[str, str]:
-    """Returns (lead_id, owner_approval_code)."""
+    """Returns (lead_id, approval_code).
+
+    PR-D3 hotfix: deployed create-catering-lead emits the key as
+    `approval_code` (NOT `owner_approval_code`). Surfaced on canary
+    2026-04-30 by probe KeyError. The model field IS owner_approval_code
+    on CateringLead, but the script's stdout JSON drops the prefix.
+    """
     result = subprocess.run(
         [
             str(CREATE_SCRIPT),
@@ -79,7 +87,7 @@ def _create_synthetic_lead() -> tuple[str, str]:
         capture_output=True, text=True, check=True,
     )
     out = json.loads(result.stdout)
-    return out["lead_id"], out["owner_approval_code"]
+    return out["lead_id"], out["approval_code"]
 
 
 def _cleanup_synthetic_lead(lead_id: str) -> None:

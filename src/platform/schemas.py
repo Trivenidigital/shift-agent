@@ -1739,7 +1739,11 @@ class CateringLeadStatusChange(_BaseEntry):
     lead_id: str = Field(min_length=1)
     from_status: CateringLeadStatus
     to_status: CateringLeadStatus
-    actor: Literal["system", "owner", "customer"]
+    # PR-D3 hotfix: added "operator" — catering-lead-reconcile (PR-D2 commit 7)
+    # writes actor="operator" but the deployed schema rejected it, crashing
+    # every reconcile invocation. Surfaced on canary 2026-04-30 by synthetic
+    # probe orphan cleanup. Static-only tests didn't catch (R4 H1+H2 risk).
+    actor: Literal["system", "owner", "customer", "operator"]
     reason: str = ""
 
 

@@ -98,6 +98,13 @@ def test_catering_log_entries():
         type="catering_lead_status_change", ts=now, lead_id="L1",
         from_status="NEW", to_status="EXTRACTING", actor="system",
     )
+    # PR-D3 hotfix regression: actor="operator" must validate (catering-lead-
+    # reconcile writes this; pre-hotfix Literal omitted "operator" → crash).
+    CateringLeadStatusChange(
+        type="catering_lead_status_change", ts=now, lead_id="L1",
+        from_status="OWNER_APPROVED", to_status="CLOSED", actor="operator",
+        reason="synthetic-probe-cleanup",
+    )
     CateringQuoteDrafted(
         type="catering_quote_drafted", ts=now, lead_id="L1",
         quote_version=1, word_count=42,
