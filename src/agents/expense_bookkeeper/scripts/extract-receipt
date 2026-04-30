@@ -686,16 +686,11 @@ def main():
         ))
 
         # Render approval card
-        threshold = cfg.expense_bookkeeper.cockpit_threshold_cents
-        above_threshold = (
-            extraction.total_cents is not None and extraction.total_cents > threshold
-        )
-        routed_to = "cockpit_v01_paper" if above_threshold else "whatsapp"
         _log(ExpenseOwnerApprovalRequested(
             ts=now, type="expense_owner_approval_requested",
             expense_id=expense_id, owner_approval_code=approval_code,
             extracted_total_cents=extraction.total_cents or 0,
-            routed_to=routed_to,
+            routed_to="whatsapp",
         ))
 
         # Persist
