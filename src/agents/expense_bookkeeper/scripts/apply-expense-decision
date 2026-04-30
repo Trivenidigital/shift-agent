@@ -47,6 +47,7 @@ from safe_io import (  # noqa: E402
     FileLock, ndjson_append, atomic_write_json, customer_now,
     load_model, flock, load_yaml_model,
 )
+from audit_helpers import scan_expense_orphan_pushes  # noqa: E402
 from pydantic import ValidationError  # noqa: E402
 from schemas import (  # noqa: E402
     Config, ExpenseLead, ExpenseLeadStore, ExpenseLeadStatus,
@@ -215,35 +216,6 @@ def _cents_to_str(c: int) -> str:
 ORPHAN_STALE_SECONDS = 60
 
 
-def _scan_audit_for_push_completion(log_path: Path, expense_ids: set[str]) -> set[str]:
-    """A-H2 fix: scan recent decisions.log for matching expense_pushed or
-    expense_push_failed entries. Returns the subset of expense_ids that have
-    completion entries. Cheap: tail-read; we only need recent entries since
-    older PUSHED leads are already in PUSHED status (not APPROVED_PENDING_PUSH).
-    """
-    if not log_path.exists() or not expense_ids:
-        return set()
-    completed: set[str] = set()
-    try:
-        # Read last ~500 lines — enough for any plausible orphan window
-        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
-            tail = f.readlines()[-500:]
-    except OSError:
-        return set()
-    for line in tail:
-        if '"expense_pushed"' not in line and '"expense_push_failed"' not in line:
-            continue
-        try:
-            entry = json.loads(line)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        eid = entry.get("expense_id")
-        et = entry.get("type")
-        if eid in expense_ids and et in ("expense_pushed", "expense_push_failed"):
-            completed.add(eid)
-    return completed
-
-
 def _check_orphans(store: ExpenseLeadStore) -> tuple[int, list[str]]:
     """A-H1 + A-H2 fix: scan for APPROVED_PENDING_PUSH leads that BOTH:
       (a) have no corresponding expense_pushed/expense_push_failed entry in
@@ -251,48 +223,17 @@ def _check_orphans(store: ExpenseLeadStore) -> tuple[int, list[str]]:
       (b) are older than ORPHAN_STALE_SECONDS (avoids false-positive against
           legitimately in-flight pushes during the lock-released window)
 
+    Refactored 2026-04-30 to call shared audit_helpers.scan_orphan_pushes —
+    deduplicated with extract-receipt._check_extract_orphans.
+
     Mutates lead.reconcile_required = True for orphans, writes audit entries.
     Returns (count, list_of_expense_ids) so caller can persist + alert.
     """
-    candidates: list[ExpenseLead] = []
-    candidate_ids: set[str] = set()
+    flagged_leads, flagged_ids = scan_expense_orphan_pushes(
+        store.leads, LOG_PATH, stale_seconds=ORPHAN_STALE_SECONDS,
+    )
     now = datetime.now(timezone.utc)
-    for lead in store.leads:
-        if lead.status != "APPROVED_PENDING_PUSH" or lead.reconcile_required:
-            continue
-        # Age check — owner_approval_received_at is when status entered PENDING
-        approved_at = lead.owner_approval_received_at
-        if isinstance(approved_at, str):
-            try:
-                approved_at = datetime.fromisoformat(approved_at)
-            except (ValueError, TypeError):
-                approved_at = None
-        if approved_at is None:
-            # No timestamp → can't gauge age; treat as orphan defensively
-            candidates.append(lead)
-            candidate_ids.add(lead.expense_id)
-            continue
-        if approved_at.tzinfo is None:
-            approved_at = approved_at.replace(tzinfo=timezone.utc)
-        age_seconds = (now - approved_at).total_seconds()
-        if age_seconds < ORPHAN_STALE_SECONDS:
-            continue  # legit in-flight push
-        candidates.append(lead)
-        candidate_ids.add(lead.expense_id)
-
-    if not candidate_ids:
-        return 0, []
-
-    # Audit-log cross-check: anything with a push completion entry is NOT
-    # an orphan — push succeeded/failed but state-write to leads.json crashed.
-    # Same recovery shape, but distinguishing matters for forensics.
-    completed_ids = _scan_audit_for_push_completion(LOG_PATH, candidate_ids)
-
-    flagged_ids: list[str] = []
-    for lead in candidates:
-        if lead.expense_id in completed_ids:
-            continue  # not orphaned; v0.2 watchdog reconciles state from audit
-        lead.reconcile_required = True
+    for lead in flagged_leads:
         _log(ExpenseOrphanDetected(
             ts=now,
             type="expense_orphan_detected",
@@ -300,7 +241,6 @@ def _check_orphans(store: ExpenseLeadStore) -> tuple[int, list[str]]:
             last_known_status=lead.status,
             detected_by="startup_scan",
         ))
-        flagged_ids.append(lead.expense_id)
     return len(flagged_ids), flagged_ids
 
 

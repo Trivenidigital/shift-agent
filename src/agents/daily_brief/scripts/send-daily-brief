@@ -21,7 +21,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 import time
 import urllib.error
@@ -38,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "p
 from safe_io import (  # noqa: E402
     FileLock, atomic_write_json, ndjson_append, customer_now, customer_today_str,
     safe_load_json, load_model, assert_local_disk, flock,
+    notify_owner_with_fallback, self_gate_window_state,
 )
 from schemas import (  # noqa: E402
     Config, Roster, PendingStore,
@@ -61,9 +61,10 @@ DECISIONS_LOG = Path(os.environ.get("SHIFT_AGENT_DECISIONS_LOG_PATH", "/opt/shif
 SENTINEL_PATH = Path(os.environ.get("SHIFT_AGENT_BRIEF_SENTINEL_PATH", "/opt/shift-agent/state/last-brief-sent.json"))
 DISABLED_FLAG = Path(os.environ.get("SHIFT_AGENT_DISABLED_FLAG", "/opt/shift-agent/state/disabled.flag"))
 TEMPLATES_DIR = Path(os.environ.get("SHIFT_AGENT_TEMPLATES_DIR", "/opt/shift-agent/templates"))
-NOTIFY_OWNER_BIN = os.environ.get("SHIFT_AGENT_NOTIFY_OWNER_BIN", "/usr/local/bin/shift-agent-notify-owner")
 RENDER_TEMPLATE_BIN = os.environ.get("SHIFT_AGENT_RENDER_TEMPLATE_BIN", "/usr/local/bin/render-coverage-template")
-NOTIFY_FAILED_LOG = Path(os.environ.get("SHIFT_AGENT_NOTIFY_FAILED_LOG", "/opt/shift-agent/logs/notify-failed.log"))
+# NOTIFY_OWNER_BIN + NOTIFY_FAILED_LOG removed 2026-04-30 — both env vars are
+# now read by safe_io.notify_owner_with_fallback at its module-import time
+# inside the same subprocess (see env-var compat note in helper docstring).
 
 BRIDGE_URL = os.environ.get("HERMES_BRIDGE_URL", "http://127.0.0.1:3000/send")
 BRIDGE_TIMEOUT_SEC = int(os.environ.get("HERMES_BRIDGE_TIMEOUT_SEC", "10"))
@@ -119,19 +120,14 @@ def _check_disabled() -> bool:
 
 
 def _self_gate_state(now_local: datetime, brief_time_str: str, catchup_min: int) -> tuple[str, int]:
-    """Return ('before' | 'in_window' | 'in_catchup' | 'past_catchup', minutes_late)."""
-    h, m = (int(x) for x in brief_time_str.split(":"))
-    brief_dt = now_local.replace(hour=h, minute=m, second=0, microsecond=0)
-    window_end = brief_dt + timedelta(minutes=SELF_GATE_WINDOW_MIN)
-    catchup_end = brief_dt + timedelta(minutes=catchup_min)
-    if now_local < brief_dt:
-        return "before", 0
-    if now_local < window_end:
-        return "in_window", 0
-    minutes_late = int((now_local - brief_dt).total_seconds() // 60)
-    if now_local < catchup_end:
-        return "in_catchup", minutes_late
-    return "past_catchup", minutes_late
+    """Return ('before' | 'in_window' | 'in_catchup' | 'past_catchup', minutes_late).
+
+    Refactored 2026-04-30 to call shared safe_io.self_gate_window_state
+    (was inline; deduplicated with eod-reconcile)."""
+    return self_gate_window_state(
+        now_local, brief_time_str,
+        window_min=SELF_GATE_WINDOW_MIN, catchup_min=catchup_min,
+    )
 
 
 def _read_sentinel() -> Optional[dict]:
@@ -421,39 +417,11 @@ def _bridge_post(jid: str, message: str) -> tuple[bool, str, str, str]:
 
 def _pushover_alert(title: str, message: str, priority: int = 1) -> bool:
     """Invoke shift-agent-notify-owner. Returns True on success.
-    On failure, append to notify-failed.log (mirrors send-coverage-message:155)."""
-    try:
-        proc = subprocess.run(
-            [NOTIFY_OWNER_BIN, "--title", title, "--priority", str(priority), message],
-            capture_output=True, text=True, timeout=30,
-        )
-        if proc.returncode == 0:
-            return True
-        err = f"{proc.returncode} {proc.stderr.strip()}"
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
-        err = f"{type(e).__name__}: {e}"
-    # Pushover-also-fails fallback (mirrors send-coverage-message:155)
-    try:
-        NOTIFY_FAILED_LOG.parent.mkdir(parents=True, exist_ok=True)
-        with open(NOTIFY_FAILED_LOG, "a", encoding="utf-8") as f:
-            f.write(json.dumps({
-                "ts": datetime.now(tz=timezone.utc).isoformat(),
-                "source": "send-daily-brief",
-                "title": title,
-                "message": message[:500],
-                "pushover_error": err[:200],
-            }) + "\n")
-    except OSError as fallback_err:
-        # Final-fallback log — at least journald captures stderr so an alert
-        # drop cannot vanish entirely. The previous `except OSError: pass`
-        # silently swallowed the alert in catastrophic cases (disk full,
-        # read-only mount on log dir).
-        sys.stderr.write(
-            f"CRITICAL: alert dropped — Pushover failed AND notify-failed.log "
-            f"unwritable. title={title!r} pushover_err={err[:200]!r} "
-            f"fallback_err={fallback_err!r}\n"
-        )
-    return False
+    Refactored 2026-04-30 to call shared safe_io.notify_owner_with_fallback
+    (was inline; deduplicated across Shift / Daily Brief / EOD)."""
+    return notify_owner_with_fallback(
+        title, message, priority, source="send-daily-brief",
+    )
 
 
 def _check_routing_watchdog(cfg: Config, dry_run: bool) -> None:

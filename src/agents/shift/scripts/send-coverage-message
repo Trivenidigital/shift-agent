@@ -63,7 +63,7 @@ from schemas import (  # noqa: E402
 )
 from safe_io import (  # noqa: E402
     FileLock, load_model, dump_model, ndjson_append, customer_now,
-    customer_today_str, assert_local_disk,
+    customer_today_str, assert_local_disk, notify_owner_with_fallback,
 )
 from exit_codes import (  # noqa: E402
     EXIT_OK, EXIT_DISABLED, EXIT_CAP_EXCEEDED, EXIT_NOT_FOUND,
@@ -133,44 +133,21 @@ def _run(cmd: list[str], check: bool = True, input_data: str | None = None) -> s
 
 
 def _notify_owner(title: str, message: str, priority: int = 1) -> None:
-    """Out-of-band alert. Writes to notify-failed.log if the notifier itself fails.
+    """Out-of-band alert via shift-agent-notify-owner subprocess. On failure
+    appends to notify-failed.log so the nightly fsck + health-check can
+    surface dropped alerts. Refactored 2026-04-30 to call shared
+    safe_io.notify_owner_with_fallback (was inline _notify_owner +
+    _append_notify_failed; deduplicated across Shift / Daily Brief / EOD).
 
-    P9-FIX: Silent-failures-#6 — previous version silently swallowed all notify
-    failures with bare `except: pass`. That meant a Pushover outage (or any
-    alert-path bug) could hide EVERY downstream alert in this script
-    (cap-exceeded, send-failed, bridge-down). Now failures go to notify-failed.log
-    so the nightly fsck + health-check can surface them.
+    Preserves Shift's historical /opt/shift-agent/state/notify-failed.log
+    location (Daily Brief uses /logs/; safe_io default is /logs/).
     """
-    try:
-        result = subprocess.run([
-            "/usr/local/bin/shift-agent-notify-owner",
-            "--title", title, "--priority", str(priority), message,
-        ], check=False, timeout=30)
-        if result.returncode != 0:
-            _append_notify_failed(title, message, f"exit_code={result.returncode} stderr={result.stderr[:200]}")
-    except Exception as e:
-        _append_notify_failed(title, message, f"exception: {e}")
-
-
-def _append_notify_failed(title: str, message: str, detail: str) -> None:
-    try:
-        import json as _json
-        import datetime as _dt
-        from pathlib import Path as _Path
-        path = _Path("/opt/shift-agent/state/notify-failed.log")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        entry = {
-            "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-            "caller": "send-coverage-message._notify_owner",
-            "title": title[:200],
-            "message": message[:500],
-            "detail": detail[:300],
-        }
-        with path.open("a") as f:
-            f.write(_json.dumps(entry) + "\n")
-    except Exception:
-        # Last resort — we really can't do anything. systemd journal captures stderr.
-        print(f"NOTIFY-FAILED (also couldn't log): {title}: {detail}", file=sys.stderr)
+    from pathlib import Path as _Path
+    notify_owner_with_fallback(
+        title, message, priority,
+        source="send-coverage-message",
+        notify_failed_log=_Path("/opt/shift-agent/state/notify-failed.log"),
+    )
 
 
 def main():

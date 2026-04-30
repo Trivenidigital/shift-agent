@@ -54,6 +54,7 @@ from safe_io import (  # noqa: E402
     flock, ndjson_append, atomic_write_json, customer_now, load_model,
     assert_local_disk, load_yaml_model,
 )
+from audit_helpers import scan_expense_orphan_pushes  # noqa: E402
 from schemas import (  # noqa: E402
     Config, ExpenseLead, ExpenseLeadStore, ReceiptExtraction,
     ExpenseClassification, ExpenseLineItem, CateringLeadStore,
@@ -485,9 +486,9 @@ def _log(entry):
 
 
 # ─────────────────────────────────────────────────────────────────
-# Orphan reconcile (A-H3): mirror of apply-expense-decision's _check_orphans
-# kept inline here to avoid importing from a sibling agent script. Same
-# audit-log cross-check + age-gate semantics.
+# Orphan reconcile (A-H3): refactored 2026-04-30 to call shared
+# audit_helpers.scan_orphan_pushes() — was inline mirror of
+# apply-expense-decision's _check_orphans; deduplicated.
 # ─────────────────────────────────────────────────────────────────
 
 ORPHAN_STALE_SECONDS = 60
@@ -498,65 +499,18 @@ def _check_extract_orphans(store: ExpenseLeadStore) -> int:
     audit log AND older than ORPHAN_STALE_SECONDS. Mark reconcile_required +
     write ExpenseOrphanDetected. Persist via the caller's atomic_write_json
     (caller is already inside the file lock)."""
-    candidates: list[ExpenseLead] = []
-    candidate_ids: set[str] = set()
+    flagged_leads, _ = scan_expense_orphan_pushes(
+        store.leads, LOG_PATH, stale_seconds=ORPHAN_STALE_SECONDS,
+    )
     now = datetime.now(timezone.utc)
-    for lead in store.leads:
-        if lead.status != "APPROVED_PENDING_PUSH" or lead.reconcile_required:
-            continue
-        approved_at = lead.owner_approval_received_at
-        if isinstance(approved_at, str):
-            try:
-                approved_at = datetime.fromisoformat(approved_at)
-            except (ValueError, TypeError):
-                approved_at = None
-        if approved_at is None:
-            candidates.append(lead)
-            candidate_ids.add(lead.expense_id)
-            continue
-        if approved_at.tzinfo is None:
-            approved_at = approved_at.replace(tzinfo=timezone.utc)
-        if (now - approved_at).total_seconds() < ORPHAN_STALE_SECONDS:
-            continue
-        candidates.append(lead)
-        candidate_ids.add(lead.expense_id)
-
-    if not candidate_ids:
-        return 0
-
-    # Audit cross-check: leads with completion entries are NOT orphans.
-    completed: set[str] = set()
-    if LOG_PATH.exists():
-        try:
-            with open(LOG_PATH, "r", encoding="utf-8", errors="replace") as f:
-                tail = f.readlines()[-500:]
-            for line in tail:
-                if '"expense_pushed"' not in line and '"expense_push_failed"' not in line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                eid = entry.get("expense_id")
-                et = entry.get("type")
-                if eid in candidate_ids and et in ("expense_pushed", "expense_push_failed"):
-                    completed.add(eid)
-        except OSError:
-            pass
-
-    flagged = 0
-    for lead in candidates:
-        if lead.expense_id in completed:
-            continue
-        lead.reconcile_required = True
+    for lead in flagged_leads:
         _log(ExpenseOrphanDetected(
             ts=now, type="expense_orphan_detected",
             expense_id=lead.expense_id,
             last_known_status=lead.status,
             detected_by="startup_scan",
         ))
-        flagged += 1
-    return flagged
+    return len(flagged_leads)
 
 
 # ─────────────────────────────────────────────────────────────────

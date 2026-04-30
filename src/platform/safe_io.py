@@ -1,7 +1,7 @@
 """
-Shift Agent — safe I/O helpers.
+Shift Agent — safe I/O + cross-script reusable primitives.
 
-Every script doing filesystem/state work imports from here:
+Filesystem / lock / atomic-IO primitives:
   - assert_local_disk: flock is unreliable on NFS; refuse to run there
   - FileLock: context-manager wrapper over fcntl.LOCK_EX
   - safe_load_json: distinguishes missing / empty / corrupt / ok
@@ -9,9 +9,27 @@ Every script doing filesystem/state work imports from here:
   - atomic_write_text: same, for plain text
   - ndjson_append: flock-protected newline-terminated append with fsync
   - sweep_orphan_temps: cleanup SIGKILL-orphaned .tmp-<pid> files
-  - customer_now: always-timezone-aware datetime in customer tz
   - load_model: Pydantic-validating load of a JSON file into a Pydantic model
   - dump_model: Pydantic-safe dump of a Pydantic model to JSON (atomic)
+
+Time helpers:
+  - customer_now: always-timezone-aware datetime in customer tz
+  - customer_today_str: ISO YYYY-MM-DD in customer tz
+  - self_gate_window_state: 4-state cron-self-gate (before / in_window /
+    in_catchup / past_catchup) — shared across send-daily-brief + eod-reconcile
+
+Cross-script notification:
+  - notify_owner_with_fallback: subprocess invocation of shift-agent-notify-owner
+    with structured fallback to notify-failed.log on Pushover failure — shared
+    across send-coverage-message + send-daily-brief + eod-reconcile
+
+Module scope (drift note 2026-04-30): this module historically held only
+filesystem/lock primitives. The platform-helpers consolidation expanded
+the scope to include cross-script primitives that share a common
+"safe-IO + operational hygiene" theme. New helpers should belong here
+when they are: (a) used by 2+ deployed scripts, (b) pure functions or
+narrow subprocess invocations, (c) have no schema dependencies (those
+go in audit_helpers.py).
 """
 
 from __future__ import annotations
@@ -25,7 +43,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TypeVar, Type, Any, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 try:
@@ -401,3 +419,143 @@ def validate_phone_input(v: str) -> str:
     if not _PHONE_SAFE.match(v):
         raise ValueError(f"refusing suspicious phone input: {v!r}")
     return v
+
+
+# ─────────────────────────────────────────────────────────────────
+# Owner notification with fallback log
+# ─────────────────────────────────────────────────────────────────
+
+# Env-var overrides for testability (callers can also pass explicit kwargs).
+# SHIFT_AGENT_NOTIFY_OWNER_BIN: path to shift-agent-notify-owner (test stub override).
+# SHIFT_AGENT_NOTIFY_FAILED_LOG: fallback log path. Note historical drift —
+#   Shift's send-coverage-message wrote to /opt/shift-agent/state/notify-failed.log
+#   while Daily Brief wrote to /opt/shift-agent/logs/notify-failed.log.
+#   Default here is /logs/ (Daily Brief's path; matches operator-log convention);
+#   send-coverage-message passes the /state/ path explicitly to preserve its
+#   deployed location.
+NOTIFY_OWNER_BIN = os.environ.get(
+    "SHIFT_AGENT_NOTIFY_OWNER_BIN", "/usr/local/bin/shift-agent-notify-owner",
+)
+NOTIFY_FAILED_LOG = Path(os.environ.get(
+    "SHIFT_AGENT_NOTIFY_FAILED_LOG", "/opt/shift-agent/logs/notify-failed.log",
+))
+
+
+def self_gate_window_state(
+    now_local: datetime,
+    target_time_str: str,
+    *,
+    window_min: int = 15,
+    catchup_min: int,
+) -> Tuple[str, int]:
+    """Self-gate state for cron-driven scripts that fire repeatedly.
+
+    Returns ('before' | 'in_window' | 'in_catchup' | 'past_catchup', minutes_late).
+
+    The cron timer fires every `window_min` minutes; only the firing inside
+    the [target_time, target_time + window_min) window should actually do
+    the work. Catchup window extends eligibility past the primary window
+    to allow recovery from VPS downtime.
+
+    Used by:
+    - send-daily-brief (target_time = cfg.daily_brief.brief_time)
+    - eod-reconcile (target_time = cfg.eod.eod_time)
+
+    Args:
+        now_local: timezone-aware local time (caller's responsibility to
+            convert via customer_now() before calling).
+        target_time_str: HH:MM 24h format (parsed and matched against
+            now_local on the same day).
+        window_min: primary firing window in minutes after target time.
+            Must match the cron OnUnitActiveSec.
+        catchup_min: additional minutes after the primary window during
+            which a "this-firing-is-late-but-still-counts" path runs.
+    """
+    from datetime import timedelta as _timedelta
+    h, m = (int(x) for x in target_time_str.split(":"))
+    target_dt = now_local.replace(hour=h, minute=m, second=0, microsecond=0)
+    window_end = target_dt + _timedelta(minutes=window_min)
+    catchup_end = target_dt + _timedelta(minutes=catchup_min)
+    if now_local < target_dt:
+        return "before", 0
+    if now_local < window_end:
+        return "in_window", 0
+    minutes_late = int((now_local - target_dt).total_seconds() // 60)
+    if now_local < catchup_end:
+        return "in_catchup", minutes_late
+    return "past_catchup", minutes_late
+
+
+def notify_owner_with_fallback(
+    title: str,
+    message: str,
+    priority: int = 1,
+    *,
+    source: str = "unknown",
+    notify_owner_bin: str = NOTIFY_OWNER_BIN,
+    notify_failed_log: Path = NOTIFY_FAILED_LOG,
+) -> bool:
+    """Invoke shift-agent-notify-owner subprocess. On any failure, append a
+    structured entry to notify-failed.log so the nightly fsck + health-check
+    can surface dropped alerts.
+
+    Returns True on Pushover success, False on any failure path.
+
+    Replaces the near-mirror implementations previously inlined in:
+      - send-coverage-message._notify_owner + _append_notify_failed
+      - send-daily-brief._pushover_alert
+      - eod-reconcile._pushover_summary (subprocess call portion)
+
+    `source` identifies the caller (e.g. "send-coverage-message",
+    "send-daily-brief", "eod-reconcile") and lands in notify-failed.log
+    entries for triage. Final fallback (notify-failed.log itself unwritable)
+    writes to stderr so journald captures the alert-drop event.
+
+    The notify_owner_bin and notify_failed_log kwargs are for testability;
+    callers should not override them in production code.
+
+    Default-binding note: NOTIFY_OWNER_BIN and NOTIFY_FAILED_LOG are
+    captured at module-import time (which reads the env vars then). Python
+    binds function defaults at function-def time, so a long-lived process
+    that monkeypatches the env vars after first import would see stale
+    defaults. In practice all callers are short-lived subprocess
+    invocations where systemd sets the env vars before exec, so this is
+    not a concern. Tests that need post-import overrides should pass
+    explicit kwargs (the helper's own tests do).
+    """
+    import json as _json
+    import subprocess as _subprocess
+
+    err_detail = ""
+    try:
+        proc = _subprocess.run(
+            [notify_owner_bin, "--title", title, "--priority", str(priority), message],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode == 0:
+            return True
+        err_detail = f"exit={proc.returncode} stderr={proc.stderr.strip()[:200]}"
+    except (_subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        err_detail = f"{type(e).__name__}: {e}"
+
+    # Pushover-also-fails fallback: append to notify-failed.log
+    try:
+        notify_failed_log.parent.mkdir(parents=True, exist_ok=True)
+        with notify_failed_log.open("a", encoding="utf-8") as f:
+            f.write(_json.dumps({
+                "ts": datetime.now(tz=timezone.utc).isoformat(),
+                "source": source,
+                "title": title[:200],
+                "message": message[:500],
+                "pushover_error": err_detail[:300],
+            }) + "\n")
+    except OSError as fallback_err:
+        # Final fallback — disk full, read-only mount, etc. journald captures
+        # stderr so the alert-drop event cannot vanish entirely.
+        sys.stderr.write(
+            f"CRITICAL: alert dropped — Pushover failed AND notify-failed.log "
+            f"unwritable. source={source} title={title!r} "
+            f"pushover_err={err_detail[:200]!r} "
+            f"fallback_err={fallback_err!r}\n"
+        )
+    return False
