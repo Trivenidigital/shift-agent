@@ -63,6 +63,7 @@ from schemas import (  # noqa: E402
 from exit_codes import (  # noqa: E402
     EXIT_OK, EXIT_INVALID_INPUT, EXIT_NOT_FOUND,
     EXIT_SCHEMA_VIOLATION, EXIT_DEPENDENCY_DOWN, EXIT_ILLEGAL_TRANSITION,
+    EXIT_TRUTH_GUARD_FAILED,  # PR-B v3 review fix: distinct from bridge-unreachable
 )
 from audit_helpers import (  # noqa: E402
     log_config_load_failed_best_effort,
@@ -174,6 +175,13 @@ def _emit_quote_skill_failed_best_effort(lead_id: str, code: str,
     Best-effort: failures during emission (lock contention, disk full,
     schema regression) write a stderr WARN but do NOT raise. Mirrors
     audit_helpers.log_quote_sent_lead_missing_best_effort pattern (PR-D2).
+
+    Review-fix B1: pass model_dump_json (str) to ndjson_append, NOT
+    json.loads of it (which produced a dict and silently AttributeError'd
+    inside the bare except). Matches deployed pattern at line ~210
+    (_append_log_with_outer_leadslock).
+    Review-fix H3: wrap the append in flock(LOG_PATH) — every other
+    LOG_PATH writer holds it; deployed-pattern drift caught at PR review.
     """
     try:
         ts = customer_now().isoformat()
@@ -181,7 +189,8 @@ def _emit_quote_skill_failed_best_effort(lead_id: str, code: str,
             type="catering_quote_skill_failed", ts=ts,
             lead_id=lead_id, code=code, reason=reason, detail=detail[:2000],
         )
-        ndjson_append(LOG_PATH, json.loads(entry.model_dump_json()))
+        with flock(LOG_PATH):
+            ndjson_append(LOG_PATH, entry.model_dump_json())
     except Exception as e:  # noqa: BLE001 — best-effort by contract
         sys.stderr.write(
             f"WARN: failed to emit CateringQuoteSkillFailed audit row: "
@@ -516,7 +525,13 @@ def main() -> int:
                 sys.stderr.write(
                     f"PR-B v3: truth_guard rejected drafted quote: {fail_detail}\n"
                 )
-                return EXIT_DEPENDENCY_DOWN
+                # Review-fix HIGH-1: use EXIT_TRUTH_GUARD_FAILED (=11), NOT
+                # EXIT_DEPENDENCY_DOWN (=6, "bridge unreachable"). The two
+                # failures need DIFFERENT operator responses: bridge-unreachable
+                # is a retryable transient that PR-D2 retry-state-machine
+                # handles; truth-guard fail needs a re-DRAFT (only the SKILL
+                # can do that). Collision would silently misroute retry logic.
+                return EXIT_TRUTH_GUARD_FAILED
 
         atomic_write_json(LEADS_PATH, store)
 

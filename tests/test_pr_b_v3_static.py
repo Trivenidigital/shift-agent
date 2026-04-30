@@ -89,3 +89,57 @@ def test_strip_unicode_categories_constant_present(apply_src):
     # All five categories should appear in the constant definition
     for cat in ['"Cc"', '"Cf"', '"Cs"', '"Co"', '"Cn"']:
         assert cat in apply_src
+
+
+# ──────── Review fixes ────────
+
+
+def test_review_fix_b1_emit_passes_str_not_dict(apply_src):
+    """Review BLOCKER B1: ndjson_append takes a str. The previous
+    `json.loads(entry.model_dump_json())` produced a dict and silently
+    AttributeError'd. Verify the fixed call passes the raw model_dump_json."""
+    # The buggy call: ndjson_append(LOG_PATH, json.loads(entry.model_dump_json()))
+    # The correct call: ndjson_append(LOG_PATH, entry.model_dump_json())
+    assert "ndjson_append(LOG_PATH, json.loads(entry.model_dump_json()))" not in apply_src, \
+        "Regression of review BLOCKER B1: ndjson_append must take str, not dict"
+    # Positive: verify the str-passing form is present
+    assert "ndjson_append(LOG_PATH, entry.model_dump_json())" in apply_src
+
+
+def test_review_fix_h1_truth_guard_uses_distinct_exit_code(apply_src):
+    """Review HIGH-1: truth-guard fail must NOT collide with bridge-unreachable
+    (EXIT_DEPENDENCY_DOWN=6). Use EXIT_TRUTH_GUARD_FAILED=11."""
+    assert "EXIT_TRUTH_GUARD_FAILED" in apply_src
+    # The truth_guard_failed branch must return EXIT_TRUTH_GUARD_FAILED
+    # (not EXIT_DEPENDENCY_DOWN). Check via context: find the
+    # `truth_guard_failed` reason emit and ensure it's followed by
+    # EXIT_TRUTH_GUARD_FAILED.
+    import re
+    # Match the emit + return block (multiline). Positional-arg form: the
+    # reason literal "truth_guard_failed" appears as a quoted positional in
+    # the _emit_quote_skill_failed_best_effort call, followed (within ~10
+    # lines) by `return EXIT_<NAME>`.
+    m = re.search(
+        r'"truth_guard_failed".*?return EXIT_(\w+)',
+        apply_src, re.DOTALL,
+    )
+    assert m is not None, "truth_guard_failed emit + return block not found"
+    assert m.group(1) == "TRUTH_GUARD_FAILED", \
+        f"Regression of review HIGH-1: truth_guard returns EXIT_{m.group(1)} " \
+        f"(should be TRUTH_GUARD_FAILED to avoid collision with DEPENDENCY_DOWN)"
+
+
+def test_review_fix_h3_emit_uses_flock(apply_src):
+    """Review HIGH-3: best-effort emit must hold flock(LOG_PATH) like every
+    other deployed-pattern writer."""
+    # Find the helper body and verify flock is used
+    import re
+    # Match the helper function body
+    m = re.search(
+        r'def _emit_quote_skill_failed_best_effort.*?(?=\ndef |\nclass |\Z)',
+        apply_src, re.DOTALL,
+    )
+    assert m is not None
+    body = m.group(0)
+    assert "flock(LOG_PATH)" in body, \
+        "Regression of review HIGH-3: emit must wrap ndjson_append in flock(LOG_PATH)"

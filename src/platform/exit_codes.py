@@ -38,3 +38,11 @@ EXIT_ILLEGAL_TRANSITION = 9
 
 # 10 — environment problem (NFS detected, missing binary, etc.)
 EXIT_ENVIRONMENT = 10
+
+# 11 — PR-B v0.4: truth-guard rejected the LLM-drafted text on stdin
+# (headcount integer or ISO event_date missing from the draft). Distinct from
+# EXIT_DEPENDENCY_DOWN (=6, "bridge unreachable") so PR-D2's retry-state-machine
+# does NOT re-attempt the bridge POST — the lead needs a re-DRAFT, which only
+# the SKILL can do. Caller must NOT auto-retry; the lead stays at
+# AWAITING_OWNER_APPROVAL pending a fresh owner-reply.
+EXIT_TRUTH_GUARD_FAILED = 11

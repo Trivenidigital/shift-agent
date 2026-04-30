@@ -1969,8 +1969,14 @@ class CateringQuoteSkillFailed(_BaseEntry):
     """
     type: Literal["catering_quote_skill_failed"]
     lead_id: str = Field(min_length=1)
-    code: str = Field(min_length=6, max_length=6,
-                      description="Owner approval code, format #XXXXX")
+    code: str = Field(
+        # Review-fix M1: pattern enforced — matches the 28.6M-entry alphabet
+        # used by generate_unique_code (no visually-ambiguous chars).
+        # Without the pattern, a future external caller could land malformed
+        # rows in decisions.log; min_length alone wouldn't catch "ABCDEF".
+        pattern=r"^#[A-HJ-NP-Z2-9]{5}$",
+        description="Owner approval code, format #XXXXX (no I/O/0/1)",
+    )
     reason: Literal[
         "missing_quote_text",       # --quote-text-stdin not provided OR empty
         "truth_guard_failed",       # headcount/ISO-date sanity check rejected

@@ -157,3 +157,87 @@ def test_single_turn_documented(skill_text):
            "single-turn" in lowered or \
            "same kimi turn" in lowered or \
            "no second llm round-trip" in lowered
+
+
+# ──────── Review fixes ────────
+
+
+def test_review_fix_b2_decision_var_assigned_in_step_2(skill_text):
+    """Review BLOCKER B2: $DECISION must be explicitly assigned in shell so
+    Step 5's audit-emission conditional has the var bound. Pre-fix, the
+    var was never assigned and Step 5 was dead code."""
+    # Look for `DECISION=approve` (the assignment, not just the comparison)
+    import re
+    assert re.search(r"DECISION=approve\b", skill_text), \
+        "Regression of review BLOCKER B2: SKILL.md must assign DECISION=approve in shell"
+
+
+def test_review_fix_h2_execution_order_narration_correct(skill_text):
+    """Review HIGH-2: Step 4's numbered list must reflect actual apply-script
+    execution order — read+normalize+truth-guard FIRST (before any state
+    persistence), then atomic state write, then bridge POST.
+
+    The pre-fix narration claimed transition happened first, which was
+    wrong (and would mislead operators when truth-guard failed mid-flow)."""
+    # Look for explicit phrase about the lead staying at AWAITING_OWNER_APPROVAL
+    # if truth-guard fails — that's the operationally important guarantee
+    # the narration must surface.
+    assert "AWAITING_OWNER_APPROVAL" in skill_text
+    # And specifically: must say BEFORE persisting any state change
+    assert "before persisting" in skill_text.lower() or \
+           "BEFORE persisting" in skill_text or \
+           "stays at `AWAITING_OWNER_APPROVAL`" in skill_text
+
+
+def test_review_fix_h4_lead_id_fallback(skill_text):
+    """Review HIGH-4: LEAD_ID must have a fallback for the empty-LEAD_JSON
+    branch so Step 5's audit emission has a non-empty value (Pydantic
+    min_length=1 on the variant's lead_id field)."""
+    # Look for the default assignment before the LEAD_JSON conditional
+    assert "LEAD_ID=UNKNOWN" in skill_text or \
+           'LEAD_ID="UNKNOWN"' in skill_text
+
+
+def test_review_fix_m2_printf_not_echo(skill_text):
+    """Review M2: SKILL Step 4 must use `printf '%s'` not `echo "$QUOTE_TEXT"`
+    to avoid the trailing-newline that echo appends (would land in the
+    customer's WhatsApp message)."""
+    assert "printf '%s' \"$QUOTE_TEXT\"" in skill_text, \
+        "Regression of review M2: SKILL.md must use printf not echo for stdin pipe"
+    # Defensive: echo of QUOTE_TEXT must NOT appear anywhere (the entire
+    # pipe-to-apply-script path uses printf).
+    assert "echo \"$QUOTE_TEXT\"" not in skill_text
+
+
+def test_review_fix_m3_pipestatus_capture(skill_text):
+    """Review M3: log-decision-direct exit code must be captured separately
+    so a real schema-mismatch failure isn't masked by a `|| true` swallow."""
+    # Look for explicit capture of the exit code via $? after log-decision-direct
+    assert "LDD_RC=$?" in skill_text or \
+           re.search(r"log-decision-direct.*?\n.*?\$\?", skill_text, re.DOTALL), \
+        "Regression of review M3: log-decision-direct exit code must be captured"
+    # Also: the WARN must be emitted on non-zero
+    assert "log-decision-direct returned" in skill_text
+
+
+def test_review_fix_m1_sec_prompt_injection_hardening(skill_text):
+    """Review M1-sec: SKILL Step 3b must instruct the LLM to treat
+    customer-derived fields as untrusted data, not commands."""
+    lowered = skill_text.lower()
+    assert "untrusted" in lowered or "do not follow" in lowered or \
+           "not commands" in lowered, \
+        "SKILL must include prompt-injection hardening prose in Step 3b"
+
+
+def test_exit_code_11_truth_guard_failed_documented(skill_text):
+    """Review HIGH-1 follow-through: SKILL exit-code table must document
+    the new EXIT_TRUTH_GUARD_FAILED=11 code with operationally-correct
+    response (re-DRAFT not retry-bridge)."""
+    # Exit 11 must appear in the table
+    assert re.search(r"\|\s*\*?\*?11\*?\*?\s*\|", skill_text), \
+        "Exit code 11 (EXIT_TRUTH_GUARD_FAILED) not documented in SKILL table"
+    # The response prose must mention "another pass" or "fresh draft" or
+    # "re-draft" — NOT "retry bridge" (that's exit 6).
+    assert "another pass" in skill_text.lower() or \
+           "re-draft" in skill_text.lower() or \
+           "fresh draft" in skill_text.lower()
