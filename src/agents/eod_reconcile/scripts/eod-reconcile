@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "p
 from safe_io import (  # noqa: E402
     FileLock, atomic_write_json, ndjson_append, customer_now, customer_today_str,
     safe_load_json, load_model, assert_local_disk, flock,
-    notify_owner_with_fallback,
+    notify_owner_with_fallback, self_gate_window_state,
 )
 from schemas import (  # noqa: E402
     Config, PendingStore,
@@ -76,18 +76,12 @@ def _customer_now(tz: str) -> datetime:
 
 
 def _self_gate_state(now_local: datetime, eod_time_str: str, catchup_min: int) -> tuple[str, int]:
-    h, m = (int(x) for x in eod_time_str.split(":"))
-    eod_dt = now_local.replace(hour=h, minute=m, second=0, microsecond=0)
-    window_end = eod_dt + timedelta(minutes=SELF_GATE_WINDOW_MIN)
-    catchup_end = eod_dt + timedelta(minutes=catchup_min)
-    if now_local < eod_dt:
-        return "before", 0
-    if now_local < window_end:
-        return "in_window", 0
-    minutes_late = int((now_local - eod_dt).total_seconds() // 60)
-    if now_local < catchup_end:
-        return "in_catchup", minutes_late
-    return "past_catchup", minutes_late
+    """Refactored 2026-04-30 to call shared safe_io.self_gate_window_state
+    (was inline; deduplicated with send-daily-brief)."""
+    return self_gate_window_state(
+        now_local, eod_time_str,
+        window_min=SELF_GATE_WINDOW_MIN, catchup_min=catchup_min,
+    )
 
 
 def _aggregate_today(cfg: Config) -> tuple[dict, bool]:

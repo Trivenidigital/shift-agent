@@ -423,6 +423,51 @@ NOTIFY_FAILED_LOG = Path(os.environ.get(
 ))
 
 
+def self_gate_window_state(
+    now_local: datetime,
+    target_time_str: str,
+    *,
+    window_min: int = 15,
+    catchup_min: int,
+) -> Tuple[str, int]:
+    """Self-gate state for cron-driven scripts that fire repeatedly.
+
+    Returns ('before' | 'in_window' | 'in_catchup' | 'past_catchup', minutes_late).
+
+    The cron timer fires every `window_min` minutes; only the firing inside
+    the [target_time, target_time + window_min) window should actually do
+    the work. Catchup window extends eligibility past the primary window
+    to allow recovery from VPS downtime.
+
+    Used by:
+    - send-daily-brief (target_time = cfg.daily_brief.brief_time)
+    - eod-reconcile (target_time = cfg.eod.eod_time)
+
+    Args:
+        now_local: timezone-aware local time (caller's responsibility to
+            convert via customer_now() before calling).
+        target_time_str: HH:MM 24h format (parsed and matched against
+            now_local on the same day).
+        window_min: primary firing window in minutes after target time.
+            Must match the cron OnUnitActiveSec.
+        catchup_min: additional minutes after the primary window during
+            which a "this-firing-is-late-but-still-counts" path runs.
+    """
+    from datetime import timedelta as _timedelta
+    h, m = (int(x) for x in target_time_str.split(":"))
+    target_dt = now_local.replace(hour=h, minute=m, second=0, microsecond=0)
+    window_end = target_dt + _timedelta(minutes=window_min)
+    catchup_end = target_dt + _timedelta(minutes=catchup_min)
+    if now_local < target_dt:
+        return "before", 0
+    if now_local < window_end:
+        return "in_window", 0
+    minutes_late = int((now_local - target_dt).total_seconds() // 60)
+    if now_local < catchup_end:
+        return "in_catchup", minutes_late
+    return "past_catchup", minutes_late
+
+
 def notify_owner_with_fallback(
     title: str,
     message: str,
