@@ -47,7 +47,7 @@ from safe_io import (  # noqa: E402
     FileLock, ndjson_append, atomic_write_json, customer_now,
     load_model, flock, load_yaml_model,
 )
-from audit_helpers import scan_orphan_pushes  # noqa: E402
+from audit_helpers import scan_expense_orphan_pushes  # noqa: E402
 from pydantic import ValidationError  # noqa: E402
 from schemas import (  # noqa: E402
     Config, ExpenseLead, ExpenseLeadStore, ExpenseLeadStatus,
@@ -229,14 +229,8 @@ def _check_orphans(store: ExpenseLeadStore) -> tuple[int, list[str]]:
     Mutates lead.reconcile_required = True for orphans, writes audit entries.
     Returns (count, list_of_expense_ids) so caller can persist + alert.
     """
-    flagged_leads, flagged_ids = scan_orphan_pushes(
-        store.leads,
-        pending_status="APPROVED_PENDING_PUSH",
-        completion_types=("expense_pushed", "expense_push_failed"),
-        id_attr="expense_id",
-        timestamp_attr="owner_approval_received_at",
-        log_path=LOG_PATH,
-        stale_seconds=ORPHAN_STALE_SECONDS,
+    flagged_leads, flagged_ids = scan_expense_orphan_pushes(
+        store.leads, LOG_PATH, stale_seconds=ORPHAN_STALE_SECONDS,
     )
     now = datetime.now(timezone.utc)
     for lead in flagged_leads:

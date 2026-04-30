@@ -1,7 +1,7 @@
 """
-Shift Agent — safe I/O helpers.
+Shift Agent — safe I/O + cross-script reusable primitives.
 
-Every script doing filesystem/state work imports from here:
+Filesystem / lock / atomic-IO primitives:
   - assert_local_disk: flock is unreliable on NFS; refuse to run there
   - FileLock: context-manager wrapper over fcntl.LOCK_EX
   - safe_load_json: distinguishes missing / empty / corrupt / ok
@@ -9,9 +9,27 @@ Every script doing filesystem/state work imports from here:
   - atomic_write_text: same, for plain text
   - ndjson_append: flock-protected newline-terminated append with fsync
   - sweep_orphan_temps: cleanup SIGKILL-orphaned .tmp-<pid> files
-  - customer_now: always-timezone-aware datetime in customer tz
   - load_model: Pydantic-validating load of a JSON file into a Pydantic model
   - dump_model: Pydantic-safe dump of a Pydantic model to JSON (atomic)
+
+Time helpers:
+  - customer_now: always-timezone-aware datetime in customer tz
+  - customer_today_str: ISO YYYY-MM-DD in customer tz
+  - self_gate_window_state: 4-state cron-self-gate (before / in_window /
+    in_catchup / past_catchup) — shared across send-daily-brief + eod-reconcile
+
+Cross-script notification:
+  - notify_owner_with_fallback: subprocess invocation of shift-agent-notify-owner
+    with structured fallback to notify-failed.log on Pushover failure — shared
+    across send-coverage-message + send-daily-brief + eod-reconcile
+
+Module scope (drift note 2026-04-30): this module historically held only
+filesystem/lock primitives. The platform-helpers consolidation expanded
+the scope to include cross-script primitives that share a common
+"safe-IO + operational hygiene" theme. New helpers should belong here
+when they are: (a) used by 2+ deployed scripts, (b) pure functions or
+narrow subprocess invocations, (c) have no schema dependencies (those
+go in audit_helpers.py).
 """
 
 from __future__ import annotations
@@ -495,6 +513,15 @@ def notify_owner_with_fallback(
 
     The notify_owner_bin and notify_failed_log kwargs are for testability;
     callers should not override them in production code.
+
+    Default-binding note: NOTIFY_OWNER_BIN and NOTIFY_FAILED_LOG are
+    captured at module-import time (which reads the env vars then). Python
+    binds function defaults at function-def time, so a long-lived process
+    that monkeypatches the env vars after first import would see stale
+    defaults. In practice all callers are short-lived subprocess
+    invocations where systemd sets the env vars before exec, so this is
+    not a concern. Tests that need post-import overrides should pass
+    explicit kwargs (the helper's own tests do).
     """
     import json as _json
     import subprocess as _subprocess

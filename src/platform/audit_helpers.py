@@ -109,86 +109,78 @@ def log_quote_sent_lead_missing_best_effort(
 
 
 # ─────────────────────────────────────────────────────────────────
-# Orphan-push detection (consolidated from extract-receipt + apply-expense-decision)
+# Expense orphan-push detection (consolidated from extract-receipt + apply-expense-decision)
 # ─────────────────────────────────────────────────────────────────
 
 DEFAULT_ORPHAN_STALE_SECONDS = 60
+_EXPENSE_PENDING_STATUS = "APPROVED_PENDING_PUSH"
+_EXPENSE_COMPLETION_TYPES = ("expense_pushed", "expense_push_failed")
+_EXPENSE_ID_ATTR = "expense_id"
+_EXPENSE_TIMESTAMP_ATTR = "owner_approval_received_at"
+_TAIL_LINES = 500
 
 
-def scan_orphan_pushes(
+def scan_expense_orphan_pushes(
     leads: Iterable[Any],
-    *,
-    pending_status: str,
-    completion_types: tuple[str, ...],
-    id_attr: str,
-    timestamp_attr: str,
     log_path: Path,
+    *,
     stale_seconds: int = DEFAULT_ORPHAN_STALE_SECONDS,
-    tail_lines: int = 500,
 ) -> tuple[list[Any], list[str]]:
-    """Scan leads for "approved-but-no-completion-audit" orphans.
+    """Scan expense-bookkeeper leads for "approved-but-no-completion-audit" orphans.
+
+    Consolidated from extract-receipt._check_extract_orphans + apply-expense-
+    decision._check_orphans. Constants (pending status, completion types, id
+    field, timestamp field, tail-lines window) are baked in to match the two
+    deployed callers — both pass identical values. Generic-kwargs version was
+    YAGNI per PR #41 review (no third caller exists). If a future agent needs
+    the same shape, refactor this back into a kwarg-driven helper at that
+    point.
 
     Caller responsibilities:
       - hold the leads.json file lock for the whole call
       - persist mutated leads via atomic_write_json after this returns
-      - emit ExpenseOrphanDetected (or equivalent) audit rows for the
-        returned `flagged_leads` — caller knows which schema variant
-        to emit; this helper stays schema-agnostic
+      - emit ExpenseOrphanDetected audit rows for the returned `flagged_leads`
 
     Algorithm:
-      1. For each lead with status == pending_status AND not already flagged
-         (lead.reconcile_required is False), check the timestamp at
-         `lead.<timestamp_attr>` is older than stale_seconds.
+      1. For each lead with status == APPROVED_PENDING_PUSH AND not already
+         flagged (lead.reconcile_required is False), check
+         lead.owner_approval_received_at is older than stale_seconds.
       2. If stale (or timestamp missing — defensive), it's a candidate.
-      3. Cross-check the audit log tail: any candidate whose <id_attr>
-         appears in a completion entry (one of completion_types) is NOT
+      3. Cross-check the audit log tail: any candidate whose expense_id
+         appears in an expense_pushed / expense_push_failed entry is NOT
          orphaned (push completed; only the state-write to leads.json
          crashed — different recovery shape).
-      4. For remaining candidates, mutate `lead.reconcile_required = True`
+      4. For remaining candidates, mutate lead.reconcile_required = True
          and return them so the caller can audit + persist.
 
     Args:
-        leads: iterable of lead objects (typically store.leads).
-        pending_status: status string that gates which leads are candidates.
-            Per current callers: "APPROVED_PENDING_PUSH".
-        completion_types: tuple of audit-row `type` values that mark a
-            push as completed. Per current callers: ("expense_pushed",
-            "expense_push_failed").
-        id_attr: attribute name on each lead for the audit-row ID match
-            (e.g. "expense_id"). The audit row's "expense_id" field must
-            match this attribute on the lead.
-        timestamp_attr: attribute name on each lead for the age gate
-            (e.g. "owner_approval_received_at"). Accepts datetime, str
-            (ISO-8601), or None (defensive: treat as orphan).
-        log_path: path to decisions.log (audit-log tail scan target).
+        leads: iterable of ExpenseLead objects (typically store.leads).
+        log_path: path to decisions.log for the audit-log tail scan.
         stale_seconds: minimum age before a pending lead is considered
             orphaned (avoids false-positives during legitimate in-flight
-            pushes when the lock is briefly released).
-        tail_lines: how many trailing audit-log lines to scan.
+            pushes when the lock is briefly released). Default 60.
 
     Returns:
-        (flagged_leads, flagged_ids): the flagged leads (for caller to
-        emit audit rows in its preferred shape) and their IDs (for
-        callers that want a list).
+        (flagged_leads, flagged_ids): the flagged leads (for the caller to
+        emit ExpenseOrphanDetected audit rows) and their IDs (for callers
+        that want a list).
     """
     candidates: list[Any] = []
     candidate_ids: set[str] = set()
     now = datetime.now(timezone.utc)
     for lead in leads:
-        status = getattr(lead, "status", None)
-        if status != pending_status:
+        if getattr(lead, "status", None) != _EXPENSE_PENDING_STATUS:
             continue
         if getattr(lead, "reconcile_required", False):
             continue
-        ts = getattr(lead, timestamp_attr, None)
+        ts = getattr(lead, _EXPENSE_TIMESTAMP_ATTR, None)
         if isinstance(ts, str):
             try:
                 ts = datetime.fromisoformat(ts)
             except (ValueError, TypeError):
                 ts = None
-        lead_id = getattr(lead, id_attr, None)
+        lead_id = getattr(lead, _EXPENSE_ID_ATTR, None)
         if lead_id is None:
-            # Can't track; skip silently.
             continue
         if ts is None:
             # No timestamp → can't gauge age; treat as orphan defensively.
@@ -210,18 +202,18 @@ def scan_orphan_pushes(
     if log_path.exists():
         try:
             with log_path.open("r", encoding="utf-8", errors="replace") as f:
-                tail = f.readlines()[-tail_lines:]
+                tail = f.readlines()[-_TAIL_LINES:]
             for line in tail:
                 # Cheap pre-filter to skip JSON parsing for non-completion entries.
-                if not any(f'"{ct}"' in line for ct in completion_types):
+                if not any(f'"{ct}"' in line for ct in _EXPENSE_COMPLETION_TYPES):
                     continue
                 try:
                     entry = _json.loads(line)
                 except (_json.JSONDecodeError, ValueError):
                     continue
-                eid = entry.get(id_attr)
+                eid = entry.get(_EXPENSE_ID_ATTR)
                 et = entry.get("type")
-                if eid in candidate_ids and et in completion_types:
+                if eid in candidate_ids and et in _EXPENSE_COMPLETION_TYPES:
                     completed.add(eid)
         except OSError:
             pass
@@ -229,7 +221,7 @@ def scan_orphan_pushes(
     flagged_leads: list[Any] = []
     flagged_ids: list[str] = []
     for lead in candidates:
-        lead_id = getattr(lead, id_attr)
+        lead_id = getattr(lead, _EXPENSE_ID_ATTR)
         if lead_id in completed:
             continue
         lead.reconcile_required = True
