@@ -288,3 +288,36 @@ def test_minimum_dicts_are_actually_valid():
     unrelated WARN/strip test failure."""
     CateringLead.model_validate(_minimum_lead_dict())
     CustomerConfig.model_validate(_minimum_config_dict())
+
+
+# ────────── Review #38 MEDIUM: caller's input dict not mutated ──────────
+
+
+def test_lead_validator_does_not_mutate_caller_input():
+    """Review #38 MEDIUM: shim must not surprise callers by mutating
+    their input dict. Pin the no-mutation contract."""
+    raw = {**_minimum_lead_dict(), "voice_quality": "good", "quote_source": "llm"}
+    snapshot = dict(raw)
+    CateringLead.model_validate(raw)
+    assert raw == snapshot, "shim mutated caller's input dict"
+    assert "voice_quality" in raw
+    assert "quote_source" in raw
+
+
+def test_config_validator_does_not_mutate_caller_input():
+    """Review #38 MEDIUM: same contract on CustomerConfig."""
+    raw = {**_minimum_config_dict(), "tone_profile": {"formality": "casual"}}
+    snapshot = dict(raw)
+    CustomerConfig.model_validate(raw)
+    assert raw == snapshot, "shim mutated caller's input dict"
+    assert "tone_profile" in raw
+
+
+def test_clean_input_takes_fast_path_unchanged():
+    """Steady-state (no reserved keys) returns the dict unchanged
+    without making a defensive copy — caller dict is naturally untouched
+    because the shim short-circuits before reaching the mutation block."""
+    raw = _minimum_lead_dict()
+    snapshot = dict(raw)
+    CateringLead.model_validate(raw)
+    assert raw == snapshot

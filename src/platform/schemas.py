@@ -358,8 +358,16 @@ class CustomerConfig(BaseModel):
     def _strip_pr_b_reserved_keys(cls, data: Any) -> Any:
         # PR-D3 absorbing shim — see module-level docstring near
         # _PR_B_RESERVED_CONFIG_KEYS for rationale.
+        # Defensive shallow copy so the caller's input dict is never
+        # mutated (review #38 MEDIUM). The precedent
+        # _backfill_legacy_quote_text mutates in place; we deviate here
+        # because new code should be defensive even if existing code is
+        # consistent in the other direction.
         if not isinstance(data, dict):
             return data
+        if not any(key in data for key in _PR_B_RESERVED_CONFIG_KEYS):
+            return data  # fast-path: no copy when nothing to strip
+        data = dict(data)
         for key in _PR_B_RESERVED_CONFIG_KEYS:
             if key in data:
                 _warn_pr_b_reserved_key_once("CustomerConfig", key)
@@ -584,8 +592,14 @@ class CateringLead(BaseModel):
         # ({voice_quality, quote_source} vs {quote_text, status}) so the
         # ordering is incidental — both validators always run, and neither
         # touches the other's fields.
+        # Defensive shallow copy so the caller's input dict is never
+        # mutated (review #38 MEDIUM). Fast-path skips the copy when the
+        # dict has no reserved keys (the steady-state case post-soak).
         if not isinstance(data, dict):
             return data
+        if not any(key in data for key in _PR_B_RESERVED_LEAD_KEYS):
+            return data
+        data = dict(data)
         for key in _PR_B_RESERVED_LEAD_KEYS:
             if key in data:
                 _warn_pr_b_reserved_key_once("CateringLead", key)

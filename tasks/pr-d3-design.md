@@ -123,7 +123,14 @@ after PR review feedback (R2 HIGH gaps + R2 MEDIUMs). All counted in
 **Fixture-drift sentinel (1 case):**
 - minimum dicts produce valid models (catches future required-field additions)
 
-**Regression suite:** full pytest 451 passed (was 433; +18 net), 238 skipped, zero regressions.
+**No-mutation contract (3 cases, review #38 MEDIUM):**
+- CateringLead validator does not mutate caller's input dict
+- CustomerConfig validator does not mutate caller's input dict
+- Clean (no-reserved-key) input takes the fast-path and is left untouched
+
+**Regression suite:** full pytest passes with these tests added (was 433 baseline + the new shim tests + the no-mutation pins), zero regressions.
+
+**Test-import convention.** Tests use `from schemas import (...)` directly (bare). The conftest.py at `tests/conftest.py:18-22` puts `src/platform/` on `sys.path`, so this is the canonical project pattern (matches `tests/test_catering_schemas.py:8`). The pseudo-code below shows `from src.platform.schemas import ...` for cross-package readability; the shipped tests use the bare-import canonical form.
 
 (legacy section header retained below for diff readability)
 
@@ -209,12 +216,34 @@ Plus 1 integration regression check: full pytest suite (433 existing tests) pass
    - WARN line `"PR-D3 absorbing-shim stripped"` — should NOT appear during soak (no PR-B1 writes exist yet); appearance = unexpected data shape.
 4. Bulk-deploy 8 non-canary VPS via `tools/canary-bulk-deploy.sh` after canary clears.
 
+### Observability honest-statement (review #38 LOW)
+
+A previous draft of this doc claimed "subsequent strips are observed via `decisions.log` ratio of pre/post-rollback writes." That is **not actually backed by the code** — the shim writes only `sys.stderr` (one WARN per `(model, key)` pair per process). No `_BaseEntry` LogEntry variant is emitted on strip. Adding one would mean writing an audit row from a `mode='before'` Pydantic validator that runs on every model load — high-cardinality and invasive for an absorbing shim that should be quiet.
+
+**Correct observability statement:** strip events are visible **only** in per-VPS journald via the WARN line `"PR-D3 absorbing-shim stripped"`. After the first WARN per `(model, key)` per process, subsequent strips are silent within that process; new processes (e.g., separate script invocations) re-emit the first WARN. Operator detection on rollback = grep journald on each VPS, not central audit-log query.
+
+**Future improvement (out of scope for PR-D3):** if operator detection across the fleet becomes load-bearing, add a `PrBReservedKeyAbsorbed` LogEntry variant emitted at most once per process via the same memo set. Defer until a real operational need; the soak window is the only relevant detection moment, and per-VPS journald grep is sufficient there.
+
+---
+
+## Removal plan (review #38 LOW)
+
+The shim is by nature temporary. After PR-B1 + PR-B2 ship and PR-B2 has soaked cleanly across the fleet, the shim becomes dead code that:
+1. Silently strips legitimately-named future fields if anyone reuses these key names
+2. Adds two `mode='before'` passes on every model load forever (negligible cost, but unnecessary)
+
+**Removal trigger:** **after PR-B2 has soaked 7 days post-bulk-deploy across all 9 Triveni VPS**, with zero `"PR-D3 absorbing-shim stripped"` WARN lines in journald during the 7-day window (rollback window has closed). At that point: open `tasks/pr-d4-shim-removal.md` (single commit, deletes the two validators + the four module-level constants + the WARN helper + the absorbing-shim tests; full regression test).
+
+**Tracking:** create a calendar reminder when PR-B2 bulk-deploy completes ("7 days from today: open PR-D4 to remove the PR-D3 absorbing shim"). The `/schedule` tooling can carry this; alternatively land a `# TODO(remove-after-pr-b2-soak-7d)` comment next to the helper to surface during code review until removed.
+
+**Why a removal PR rather than leaving the shim:** the steady-state cost is small but the strip-on-read silently absorbing legitimately-named future fields is a real footgun for a future contributor who reuses any of `voice_quality`, `quote_source`, `tone_profile`, `tone_examples` for a new purpose. Removing the shim once it's no longer load-bearing eliminates that surface.
+
 ---
 
 ## Self-review
 
 - [x] Drift-tag at top.
-- [x] Mirrors deployed `_backfill_legacy_quote_text` precedent (schemas.py:540).
+- [x] Mirrors deployed `_backfill_legacy_quote_text` precedent (schemas.py:540 pre-shim / :593 post-shim).
 - [x] No new dependencies.
 - [x] No behavior change for clean reads (shim is no-op on PR-D2 data).
 - [x] Once-per-process WARN avoids log spam after rollback.
