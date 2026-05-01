@@ -76,6 +76,10 @@ LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
 TEMPLATE_DIR = Path("/opt/shift-agent/templates")
 BRIDGE_URL = "http://127.0.0.1:3000/send"
 BRIDGE_TIMEOUT = 10
+# Mock-QBO ledger persistence (cross-process undo support, E2E Layer B fix
+# 2026-05-01). Only consulted when cfg.qbo_client_mode == "mock". Production
+# RealQBOClient owns its own server-side ledger and ignores this path.
+MOCK_QBO_STATE_PATH = Path("/opt/shift-agent/state/expense-bookkeeper/mock-qbo-pushed.json")
 
 EXIT_AMOUNT_MISMATCH = 7
 EXIT_OUTSIDE_WINDOW = 8
@@ -432,7 +436,11 @@ def _handle_approve(parsed, owner_phone, owner_jid, sender_phone, raw_message,
 def _push_to_qbo(lead: ExpenseLead, owner_jid: str,
                  cfg: Config, customer_tz: str) -> int:
     """External push step. Lead has owner_confirmed_total_cents set."""
-    client = make_qbo_client(cfg.expense_bookkeeper, customer_timezone=customer_tz)
+    client = make_qbo_client(
+        cfg.expense_bookkeeper,
+        customer_timezone=customer_tz,
+        state_path=MOCK_QBO_STATE_PATH,
+    )
     push_total = lead.owner_confirmed_total_cents or 0
 
     _log(ExpensePushAttempted(
@@ -683,7 +691,11 @@ def _handle_undo(parsed, owner_phone, owner_lid, owner_jid, sender_phone,
         return EXIT_SCHEMA_VIOLATION
 
     # Lock released for QBO call
-    client = make_qbo_client(cfg.expense_bookkeeper, customer_timezone=customer_tz)
+    client = make_qbo_client(
+        cfg.expense_bookkeeper,
+        customer_timezone=customer_tz,
+        state_path=MOCK_QBO_STATE_PATH,
+    )
     try:
         client.void_transaction(tx_id)
     except QBOPushError as e:

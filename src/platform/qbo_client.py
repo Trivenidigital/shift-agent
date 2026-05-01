@@ -11,8 +11,10 @@ The mock honours the same Protocol so all guardrails + tests are real.
 """
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Protocol, Literal, Optional, Dict
 from zoneinfo import ZoneInfo
 
@@ -105,6 +107,9 @@ def redact_qbo_error(err: QBOPushError, max_chars: int = 200) -> str:
 # MockQBOClient — v0.1 default. Deterministic, parametrised failure injection.
 # ─────────────────────────────────────────────────────────────────
 
+_MOCK_STATE_SCHEMA_VERSION = 1
+
+
 class MockQBOClient:
     """Deterministic mock. fail_mode injects parametrised error_class.
 
@@ -114,6 +119,15 @@ class MockQBOClient:
     Real-shape conformance pinned in docs/qbo-protocol-v1.md (TBD); mock
     returns transaction_id of the form MOCK-<expense_id>-<seq>, amount_cents
     matching owner_confirmed_total_cents, ISO8601 pushed_at in customer tz.
+
+    state_path (optional): when set, persists pushed-transaction state +
+    seq counter to a JSON file via safe_io.atomic_write_json. Required for
+    cross-process undo (E2E Layer B finding 2026-05-01: each
+    apply-expense-decision invocation creates a fresh MockQBOClient; without
+    persistence, void_transaction always fails because the in-memory _pushed
+    dict is empty in process 2). When state_path is None, behaviour matches
+    the pre-fix in-memory mock (used by unit tests that exercise push+void
+    in the same process).
     """
 
     def __init__(
@@ -121,14 +135,62 @@ class MockQBOClient:
         timezone: str = "UTC",
         fail_mode: Optional[QBOErrorClass] = None,
         push_void_fail_mode: Optional[QBOErrorClass] = None,
+        state_path: Optional[Path] = None,
     ) -> None:
         self._tz = ZoneInfo(timezone)
         self.fail_mode = fail_mode
         # Allow void to fail independently from push (e.g. push succeeds, then
         # owner tries to undo and the void fails).
         self.push_void_fail_mode = push_void_fail_mode
-        self._seq = 0
-        self._pushed: Dict[str, QBOPushResult] = {}
+        self._state_path: Optional[Path] = Path(state_path) if state_path else None
+        self._seq, self._pushed = self._load_state()
+
+    def _load_state(self) -> tuple[int, Dict[str, QBOPushResult]]:
+        """Read persisted state from JSON file. Returns (seq, transactions).
+        Empty defaults if state_path is None or the file doesn't exist yet.
+        Raises (loudly) on corrupted file rather than silently losing state.
+        """
+        if self._state_path is None or not self._state_path.exists():
+            return 0, {}
+        raw = json.loads(self._state_path.read_text(encoding="utf-8"))
+        if raw.get("schema_version") != _MOCK_STATE_SCHEMA_VERSION:
+            raise ValueError(
+                f"unsupported mock-qbo state schema_version={raw.get('schema_version')!r}; "
+                f"expected {_MOCK_STATE_SCHEMA_VERSION}"
+            )
+        seq = int(raw.get("seq", 0))
+        transactions = {
+            tid: QBOPushResult(**row)
+            for tid, row in raw.get("transactions", {}).items()
+        }
+        return seq, transactions
+
+    def _save_state(self) -> None:
+        """Atomic-write via tmp-file + rename (last-writer-wins for the
+        single-tenant mock; sufficient since each apply-expense-decision
+        invocation does one read + one write per call). No-op when
+        state_path is None (in-memory mode).
+
+        Inlined rather than calling safe_io.atomic_write_json because
+        safe_io imports fcntl at module load, which fails on Windows test
+        environments. The atomic-write semantics here (tmp + rename) are
+        the load-bearing portion; flock isn't needed because the mock has
+        no inter-process locking contract.
+        """
+        if self._state_path is None:
+            return
+        self._state_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema_version": _MOCK_STATE_SCHEMA_VERSION,
+            "seq": self._seq,
+            "transactions": {
+                tid: r.model_dump(mode="json")
+                for tid, r in self._pushed.items()
+            },
+        }
+        tmp = self._state_path.with_suffix(self._state_path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        tmp.replace(self._state_path)
 
     def push_expense(self, lead: "ExpenseLead") -> QBOPushResult:
         if self.fail_mode is not None:
@@ -141,6 +203,12 @@ class MockQBOClient:
                 "invalid_request",
                 "owner_confirmed_total_cents is required for push",
             )
+        # Re-load only when persisting — otherwise we'd reset in-memory seq
+        # to 0 between calls on the same instance (breaks unit-test
+        # contract that two consecutive pushes mint distinct sequence
+        # numbers).
+        if self._state_path is not None:
+            self._seq, self._pushed = self._load_state()
         self._seq += 1
         result = QBOPushResult(
             transaction_id=f"MOCK-{lead.expense_id}-{self._seq}",
@@ -148,6 +216,7 @@ class MockQBOClient:
             pushed_at=datetime.now(self._tz).isoformat(),
         )
         self._pushed[result.transaction_id] = result
+        self._save_state()
         return result
 
     def void_transaction(self, transaction_id: str) -> None:
@@ -156,12 +225,16 @@ class MockQBOClient:
                 self.push_void_fail_mode,
                 f"mock-injected error during void: {self.push_void_fail_mode}",
             )
+        # Re-load only when persisting — see push_expense for rationale.
+        if self._state_path is not None:
+            self._seq, self._pushed = self._load_state()
         if transaction_id not in self._pushed:
             raise QBOPushError(
                 "invalid_request",
-                f"unknown transaction_id (was it pushed by this client?)",
+                f"unknown transaction_id (already voided or never pushed)",
             )
         del self._pushed[transaction_id]
+        self._save_state()
 
     def health_check(self) -> bool:
         return self.fail_mode != "network" and self.push_void_fail_mode != "network"
@@ -198,8 +271,19 @@ class RealQBOClient:
 # after RealQBOClient.__init__ guard validates token.
 # ─────────────────────────────────────────────────────────────────
 
-def make_qbo_client(cfg, customer_timezone: str = "UTC") -> QBOClient:
-    """cfg is ExpenseBookkeeperConfig (typed loosely to avoid circular import)."""
+def make_qbo_client(
+    cfg,
+    customer_timezone: str = "UTC",
+    state_path: Optional[Path] = None,
+) -> QBOClient:
+    """cfg is ExpenseBookkeeperConfig (typed loosely to avoid circular import).
+
+    state_path (optional): forwarded to MockQBOClient for cross-process
+    persistence. Production scripts pass it (mirrors LEADS_PATH pattern);
+    unit tests omit it for in-memory behaviour. Has no effect when
+    cfg.qbo_client_mode == "real" since RealQBOClient owns its own
+    server-side ledger.
+    """
     if cfg.qbo_client_mode == "mock":
-        return MockQBOClient(timezone=customer_timezone)
+        return MockQBOClient(timezone=customer_timezone, state_path=state_path)
     return RealQBOClient()  # raises in v0.1
