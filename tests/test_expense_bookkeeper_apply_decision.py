@@ -120,9 +120,13 @@ def env_dir(tmp_path):
     return tmp_path
 
 
-def _load_apply(env_dir, bridge_port, frozen_now=None):
-    """Load apply-expense-decision as a module, inject test paths + frozen
-    timestamp. Mirrors test_catering_v02_scripts.py:97-167."""
+def _load_apply(env_dir, bridge_port):
+    """Load apply-expense-decision as a module, inject test paths.
+    Mirrors test_catering_v02_scripts.py:97-167.
+
+    Note: tests that need frozen time use injected received_at / pushed_at
+    on seeded leads — the script uses datetime.now(timezone.utc) directly
+    and isn't easily freezable without deeper refactor."""
     os.environ["EXPENSE_RECEIPTS_DIR"] = str(env_dir / "state" / "expense-bookkeeper" / "receipts") + "/"
     spec = importlib.util.spec_from_file_location(
         "apply_expense_decision_test", str(APPLY_PATH)
@@ -136,18 +140,6 @@ def _load_apply(env_dir, bridge_port, frozen_now=None):
     mod.LOG_PATH = env_dir / "logs" / "decisions.log"
     mod.TEMPLATE_DIR = env_dir / "templates"
     mod.BRIDGE_URL = f"http://127.0.0.1:{bridge_port}/send"
-    if frozen_now is not None:
-        # D-H3 fix: customer_now freezing for tz-edge tests
-        original_now = mod.datetime.now
-        class _FrozenDatetime:
-            @staticmethod
-            def now(tz=None):
-                return frozen_now if tz is None else frozen_now.astimezone(tz)
-            fromisoformat = staticmethod(datetime.fromisoformat)
-        # Lighter approach: monkey-patch a `_now()` helper if the script uses one.
-        # Since the script uses `datetime.now(timezone.utc)` directly, we can't
-        # easily freeze without deeper refactor. Tests that need frozen time
-        # use injected received_at / pushed_at on seeded leads instead.
     return mod
 
 

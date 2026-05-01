@@ -58,3 +58,14 @@
     notifempty
     create 0640 shift-agent shift-agent
 }
+
+# Agent #21 Expense Bookkeeper — daily prune-and-expire script stdout/stderr.
+/opt/shift-agent/logs/prune-expense.log {
+    weekly
+    rotate 8
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 shift-agent shift-agent
+}

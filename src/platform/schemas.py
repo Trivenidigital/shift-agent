@@ -1633,7 +1633,7 @@ class ExpenseOwnerApprovalRequested(_BaseEntry):
     expense_id: str
     owner_approval_code: ProposalCode
     extracted_total_cents: int
-    routed_to: Literal["whatsapp", "cockpit_v01_paper"]
+    routed_to: Literal["whatsapp"]
 
 
 class ExpenseOwnerDecision(_BaseEntry):
