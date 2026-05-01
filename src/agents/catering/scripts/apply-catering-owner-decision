@@ -327,6 +327,16 @@ def main() -> int:
              "surface). Stdin is read up to 8KB; final text capped at 4KB; "
              "output is normalize-stripped and capped at 600 chars.",
     )
+    ap.add_argument(
+        "--skip-finalize", action="store_true",
+        help="PR-CF1: by default, approve refuses if the lead has no "
+             "customer_finalized_at (i.e. customer hasn't run the finalize "
+             "flow yet). Owner can override with --skip-finalize to approve "
+             "based on the original inquiry alone. The default is a soft "
+             "guard against owner approving speculatively — the customer "
+             "may have made selections in conversation that the owner "
+             "should see before approving.",
+    )
     args = ap.parse_args()
 
     if args.decision == "edit" and not args.edit_text.strip():
@@ -388,13 +398,25 @@ def main() -> int:
         # Match code: AWAITING_OWNER_APPROVAL (fresh) OR OWNER_APPROVED (retry/self-heal)
         # for approve decision. For reject/edit, only AWAITING_OWNER_APPROVAL.
         if args.decision == "approve":
+            # PR-CF1: CUSTOMER_FINALIZED is the new "ready to approve" state.
+            # AWAITING_OWNER_APPROVAL still allowed (legacy / non-finalized leads
+            # via --skip-finalize override). OWNER_APPROVED retained for retry.
             matches = [l for l in store.leads
                        if l.owner_approval_code == code
-                       and l.status in ("AWAITING_OWNER_APPROVAL", "OWNER_APPROVED")]
+                       and l.status in (
+                           "AWAITING_OWNER_APPROVAL",
+                           "CUSTOMER_FINALIZED",  # PR-CF1
+                           "OWNER_APPROVED",
+                       )]
         else:
+            # PR-CF1: edit/reject also valid from CUSTOMER_FINALIZED (customer
+            # finalized but owner wants to revise / decline).
             matches = [l for l in store.leads
                        if l.owner_approval_code == code
-                       and l.status == "AWAITING_OWNER_APPROVAL"]
+                       and l.status in (
+                           "AWAITING_OWNER_APPROVAL",
+                           "CUSTOMER_FINALIZED",  # PR-CF1
+                       )]
 
         if not matches:
             sys.stderr.write(f"no recoverable lead with code {code}\n")
@@ -412,6 +434,56 @@ def main() -> int:
 
         lead = matches[0]
         lead_id_for_output = lead.lead_id
+
+        # PR-CF1: owner-approve guard for non-finalized leads.
+        # If customer hasn't run the finalize flow (customer_finalized_at is
+        # None), approving sends a quote based on the original inquiry alone
+        # — without seeing what the customer might have curated during
+        # brainstorm. Soft-guard that the owner explicitly overrides via
+        # --skip-finalize. Skip the guard for OWNER_APPROVED retries (the
+        # idempotent_replay branch below handles those — the lead was already
+        # past the gate).
+        if (
+            args.decision == "approve"
+            and lead.status == "AWAITING_OWNER_APPROVAL"
+            and lead.customer_finalized_at is None
+            and not args.skip_finalize
+        ):
+            sys.stderr.write(
+                f"PR-CF1: lead {lead.lead_id} {code} not customer-finalized "
+                f"and --skip-finalize not set; refusing approve.\n"
+            )
+            # Audit (best-effort; ndjson_append used directly per deployed pattern)
+            now_guard = customer_now(cfg.customer.timezone)
+            try:
+                ndjson_append(
+                    LOG_PATH,
+                    CateringQuoteSkillFailed(
+                        type="catering_quote_skill_failed", ts=now_guard,
+                        lead_id=lead.lead_id, code=code,
+                        reason="owner_approve_without_customer_finalize",
+                        detail=(
+                            "owner sent #XXXXX approve without customer "
+                            "finalize; --skip-finalize override required"
+                        ),
+                    ).model_dump_json(),
+                )
+            except Exception as e:
+                sys.stderr.write(f"audit emit (cf1-guard) failed (non-fatal): {e}\n")
+            # Reprompt the owner (best-effort; bridge failure is not blocking)
+            if cfg.owner.self_chat_jid:
+                reprompt = (
+                    f"⚕ *Catering Agent*\n────────────\n"
+                    f"Lead {lead.lead_id} {code}: customer hasn't finalized "
+                    f"their menu yet. Reply '{code} approve --skip-finalize' "
+                    f"(or send via cockpit) to override and approve based on "
+                    f"the original inquiry."
+                )
+                try:
+                    _bridge_post(cfg.owner.self_chat_jid, reprompt)
+                except Exception as e:
+                    sys.stderr.write(f"reprompt POST failed (non-fatal): {e}\n")
+            return EXIT_TRUTH_GUARD_FAILED
 
         # ROW 1+2 (idempotent_replay): tail-scan for quote_sent of THIS lead.
         # If found, customer demonstrably received quote (post-B-1 reorder, this
