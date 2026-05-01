@@ -53,6 +53,8 @@ from schemas import (  # noqa: E402
     Config, CateringLead, CateringLeadStore, CateringLeadExtractedFields,
     CateringLeadCreated, CateringLeadStatusChange, CateringLeadRejected,
     CateringOwnerApprovalRequested,
+    Menu, MenuItem,
+    CateringCustomerAckSent, CateringCustomerAckFailed,
 )
 from exit_codes import (  # noqa: E402
     EXIT_OK, EXIT_INVALID_INPUT, EXIT_DISABLED,
@@ -67,8 +69,10 @@ LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
 LEADS_LOCK = Path("/opt/shift-agent/state/catering-leads.json.lock")
 LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
 TEMPLATE_DIR = Path("/opt/shift-agent/templates")
+MENU_PATH = Path("/opt/shift-agent/state/catering-menu.json")
 BRIDGE_URL = "http://127.0.0.1:3000/send"
 BRIDGE_TIMEOUT = 10
+PROPOSAL_MENU_ITEMS_CAP = 12  # cap to keep WhatsApp message readable
 
 # Off-menu render budget. Budget arithmetic:
 # WhatsApp Cloud API caps text.body at ~4096 chars (per Meta's Cloud API
@@ -107,6 +111,115 @@ def _next_lead_id(store: CateringLeadStore) -> str:
         return "L0001"
     last = max(int(l.lead_id.lstrip("L")) for l in store.leads if l.lead_id.startswith("L") and l.lead_id[1:].isdigit())
     return f"L{last + 1:04d}"
+
+
+def _load_menu_filtered(dietary_restrictions: list[str]) -> tuple[list[MenuItem], int]:
+    """Load current menu and filter items by customer's dietary requests.
+
+    Returns (filtered_items, total_items_in_menu). Falls open on missing menu
+    (returns ([], 0)) — proposal still gets sent without the menu section.
+    """
+    if not MENU_PATH.exists():
+        return [], 0
+    try:
+        menu, status = load_model(MENU_PATH, Menu)
+    except Exception:
+        return [], 0
+    if status != "ok":
+        return [], 0
+    items = [it for it in menu.items if it.available]
+    if not dietary_restrictions:
+        return items, len(menu.items)
+    requested: set[str] = set()
+    for r in dietary_restrictions:
+        t = r.lower().strip()
+        if t in ("vegetarian", "veg"):
+            requested.add("veg")
+        elif t in ("non-vegetarian", "non-veg", "nonveg"):
+            requested.add("non-veg")
+        elif t == "vegan":
+            requested.add("vegan")
+        elif t == "jain":
+            requested.add("jain")
+        elif t == "halal":
+            requested.add("halal")
+        elif t == "kosher":
+            requested.add("kosher")
+        elif t in ("gluten-free", "gf", "gluten free"):
+            requested.add("gluten-free")
+        elif t in ("nut-free", "nut free"):
+            requested.add("nut-free")
+        elif t in ("dairy-free", "dairy free"):
+            requested.add("dairy-free")
+        elif t in ("egg-free", "egg free", "no eggs"):
+            requested.add("egg-free")
+    filtered = [it for it in items if any(tag in requested for tag in it.dietary_tags)]
+    return filtered, len(menu.items)
+
+
+def _format_menu_section(items: list[MenuItem], total: int, dietary_restrictions: list[str]) -> str:
+    """Build the menu section that appears in the customer-facing proposal."""
+    if not items:
+        if total == 0:
+            return ""  # no menu configured at all
+        if dietary_restrictions:
+            return (f"\n_(We didn't find items matching {', '.join(dietary_restrictions)} "
+                    f"in our current menu. Reply with any specifics and we'll customize.)_\n")
+        return ""
+    by_cat: dict[str, list[MenuItem]] = {}
+    for it in items:
+        by_cat.setdefault(it.category, []).append(it)
+    cat_order = ["package", "appetizer", "main", "side", "dessert", "beverage", "salad", "soup", "special"]
+    lines = ["\n*Sample menu*"]
+    if dietary_restrictions:
+        lines[0] += f" ({', '.join(dietary_restrictions)})"
+    lines[0] += ":"
+    shown = 0
+    n_cats = max(1, len(by_cat))
+    per_cat = max(1, PROPOSAL_MENU_ITEMS_CAP // n_cats)
+    for cat in cat_order:
+        if cat not in by_cat or shown >= PROPOSAL_MENU_ITEMS_CAP:
+            continue
+        for it in by_cat[cat][:per_cat]:
+            if shown >= PROPOSAL_MENU_ITEMS_CAP:
+                break
+            price = f" — ${it.price_usd:.0f}" if it.price_usd is not None else ""
+            lines.append(f"  - {it.name}{price}")
+            shown += 1
+    leftover = len(items) - shown
+    if leftover > 0:
+        lines.append(f"  _...and {leftover} more options on request_")
+    return "\n".join(lines) + "\n"
+
+
+def _render_proposal(lead_id: str, customer_name: str, fields: CateringLeadExtractedFields) -> str:
+    """Render the customer-facing proposal. Uses catering_quote_to_customer.txt
+    template (which includes the bridge `template_bypass` prefix) populated
+    with extracted fields + sample-menu section filtered by dietary."""
+    template_path = TEMPLATE_DIR / "catering_quote_to_customer.txt"
+    dietary = list(fields.dietary_restrictions or [])
+    filtered_items, total = _load_menu_filtered(dietary)
+    menu_section = _format_menu_section(filtered_items, total, dietary)
+    fmt_fields = {
+        "lead_id": lead_id,
+        "customer_name": customer_name or "there",
+        "headcount": fields.headcount if fields.headcount is not None else "[TBD]",
+        "event_date": fields.event_date or "[TBD]",
+        "event_time": fields.event_time or "[TBD]",
+        "menu_section": menu_section,
+    }
+    if template_path.exists():
+        try:
+            tmpl = template_path.read_text(encoding="utf-8")
+            return tmpl.format(**fmt_fields)
+        except (KeyError, OSError):
+            pass
+    # Inline fallback — already includes bridge `template_bypass` prefix
+    return (
+        f"⚕ *Catering Agent*\n────────────\n"
+        f"Hi {fmt_fields['customer_name']}, thanks for your catering inquiry. "
+        f"We'll be in touch shortly with details.{menu_section}\n(Ref: {lead_id})"
+    )
 
 
 def _bridge_post(jid: str, message: str) -> tuple[bool, str]:
@@ -514,8 +627,47 @@ def main() -> int:
                           "card_sent": False, "reason": mid_or_err}))
         return EXIT_DEPENDENCY_DOWN
 
-    print(json.dumps({"lead_id": lead_id, "approval_code": approval_code,
-                      "card_sent": True, "outbound_message_id": mid_or_err}))
+    # F14 2026-05-01: send the customer proposal automatically — full menu-rendered
+    # template (filtered by dietary). This is the reply the customer sees IMMEDIATELY,
+    # before any owner approval. Owner involvement is reserved for the FINAL priced
+    # quote (handle_catering_owner_approval flow), not the initial proposal.
+    customer_jid = f"{args.customer_phone.lstrip('+')}@s.whatsapp.net"
+    proposal_text = _render_proposal(lead_id, args.customer_name, extracted)
+    proposal_ok, proposal_mid_or_err = _bridge_post(customer_jid, proposal_text)
+    if proposal_ok:
+        try:
+            ack_entry = CateringCustomerAckSent(
+                ts=now,
+                type="catering_customer_ack_sent",
+                customer_jid=customer_jid,
+                outbound_message_id=proposal_mid_or_err,
+                lead_id=lead_id,
+            )
+            with FileLock(LEADS_LOCK):
+                ndjson_append(LOG_PATH, ack_entry.model_dump_json())
+        except Exception as e:
+            sys.stderr.write(f"audit emit (ack_sent) failed (non-fatal): {e}\n")
+    else:
+        sys.stderr.write(f"customer proposal bridge_post failed: {proposal_mid_or_err}\n")
+        try:
+            fail_entry = CateringCustomerAckFailed(
+                ts=now,
+                type="catering_customer_ack_failed",
+                customer_jid=customer_jid,
+                reason="bridge_unreachable",
+                detail=proposal_mid_or_err[:2000],
+            )
+            with FileLock(LEADS_LOCK):
+                ndjson_append(LOG_PATH, fail_entry.model_dump_json())
+        except Exception as e:
+            sys.stderr.write(f"audit emit (ack_failed) failed (non-fatal): {e}\n")
+
+    print(json.dumps({
+        "lead_id": lead_id, "approval_code": approval_code,
+        "card_sent": True, "outbound_message_id": mid_or_err,
+        "proposal_sent": proposal_ok,
+        "proposal_message_id": proposal_mid_or_err if proposal_ok else None,
+    }))
     return EXIT_OK
 
 
