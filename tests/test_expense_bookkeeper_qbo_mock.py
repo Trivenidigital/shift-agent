@@ -241,12 +241,12 @@ def test_mock_state_unsupported_schema_version_raises(tmp_path):
         MockQBOClient(state_path=state)
 
 
-def test_factory_forwards_state_path():
+def test_factory_forwards_state_path(tmp_path):
     """make_qbo_client must forward state_path to MockQBOClient so the
     apply-expense-decision integration actually gets persistence."""
     class FakeCfg:
         qbo_client_mode = "mock"
-    state = Path("/tmp/test/mock-qbo-factory.json")
+    state = tmp_path / "mock-qbo-factory.json"
     client = make_qbo_client(FakeCfg(), customer_timezone="UTC", state_path=state)
     assert isinstance(client, MockQBOClient)
     assert client._state_path == state

@@ -12,7 +12,9 @@ The mock honours the same Protocol so all guardrails + tests are real.
 from __future__ import annotations
 
 import json
+import os
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol, Literal, Optional, Dict
@@ -148,14 +150,28 @@ class MockQBOClient:
     def _load_state(self) -> tuple[int, Dict[str, QBOPushResult]]:
         """Read persisted state from JSON file. Returns (seq, transactions).
         Empty defaults if state_path is None or the file doesn't exist yet.
-        Raises (loudly) on corrupted file rather than silently losing state.
+
+        Raises loudly (not silently quarantine like safe_io.safe_load_json)
+        on corruption — divergent from precedent on purpose: the mock state
+        file is mock-only and shouldn't ever be operator-edited; if it's
+        corrupted, an operator misconfigured something and a loud failure
+        surfaces it immediately instead of silently re-minting transactions.
         """
         if self._state_path is None or not self._state_path.exists():
             return 0, {}
-        raw = json.loads(self._state_path.read_text(encoding="utf-8"))
+        try:
+            raw = json.loads(self._state_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            # Wrap with context — raw decoder error doesn't include the path.
+            raise json.JSONDecodeError(
+                f"corrupted mock-qbo state at {self._state_path}: {e.msg}",
+                e.doc,
+                e.pos,
+            ) from e
         if raw.get("schema_version") != _MOCK_STATE_SCHEMA_VERSION:
             raise ValueError(
-                f"unsupported mock-qbo state schema_version={raw.get('schema_version')!r}; "
+                f"unsupported mock-qbo state schema_version="
+                f"{raw.get('schema_version')!r} at {self._state_path}; "
                 f"expected {_MOCK_STATE_SCHEMA_VERSION}"
             )
         seq = int(raw.get("seq", 0))
@@ -166,20 +182,22 @@ class MockQBOClient:
         return seq, transactions
 
     def _save_state(self) -> None:
-        """Atomic-write via tmp-file + rename (last-writer-wins for the
-        single-tenant mock; sufficient since each apply-expense-decision
-        invocation does one read + one write per call). No-op when
-        state_path is None (in-memory mode).
+        """Atomic write with fsync — mirrors `safe_io.atomic_write_text`
+        semantics inline because safe_io has a module-level `import fcntl`
+        that breaks Windows test imports (and `atomic_write_text` itself
+        doesn't actually use fcntl). Portable: skips the parent-dir fsync
+        on Windows where `os.open(dir, O_RDONLY)` raises PermissionError.
 
-        Inlined rather than calling safe_io.atomic_write_json because
-        safe_io imports fcntl at module load, which fails on Windows test
-        environments. The atomic-write semantics here (tmp + rename) are
-        the load-bearing portion; flock isn't needed because the mock has
-        no inter-process locking contract.
+        No flock — mock is single-tenant per VPS; concurrent push during
+        void = last-writer-wins. RealQBOClient (v0.2) MUST add proper
+        locking when it lands; this divergence is mock-only.
+
+        No-op when state_path is None (in-memory mode for unit tests).
         """
         if self._state_path is None:
             return
-        self._state_path.parent.mkdir(parents=True, exist_ok=True)
+        path = self._state_path
+        path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "schema_version": _MOCK_STATE_SCHEMA_VERSION,
             "seq": self._seq,
@@ -188,9 +206,37 @@ class MockQBOClient:
                 for tid, r in self._pushed.items()
             },
         }
-        tmp = self._state_path.with_suffix(self._state_path.suffix + ".tmp")
-        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        tmp.replace(self._state_path)
+        content = json.dumps(payload, indent=2).encode("utf-8")
+        tmp = path.with_name(
+            path.name + f".tmp-{os.getpid()}-{int(time.time() * 1000)}"
+        )
+        # Write + fsync the data file. Cleanup tmp on partial-write failure
+        # so a stale .tmp-* sibling doesn't accumulate.
+        wrote = False
+        try:
+            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                os.write(fd, content)
+                os.fsync(fd)
+                wrote = True
+            finally:
+                os.close(fd)
+        finally:
+            if not wrote:
+                try:
+                    tmp.unlink()
+                except FileNotFoundError:
+                    pass
+        os.replace(str(tmp), str(path))
+        # Fsync the parent dir so the rename entry is durable. POSIX-only;
+        # NTFS rename durability is implementation-defined and the standard
+        # `os.open(dir, O_RDONLY)` path raises PermissionError on Windows.
+        if os.name == "posix":
+            dfd = os.open(str(path.parent), os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
 
     def push_expense(self, lead: "ExpenseLead") -> QBOPushResult:
         if self.fail_mode is not None:
