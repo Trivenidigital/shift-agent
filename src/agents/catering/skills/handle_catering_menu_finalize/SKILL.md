@@ -34,29 +34,43 @@ finalize.
 
 ## Step 1 — Look up the active lead (deterministic, do not improvise)
 
-Call:
+Required because LLM recall of `(Ref: L0001)` lines and `#XXXXX` codes
+is unreliable across long conversations. Read the lead state file
+directly via `jq` — mirrors `handle_catering_owner_approval` Step 3a:
 
 ```bash
-/usr/local/bin/lookup-prior-leads-by-phone --customer-phone "<sender_phone>"
+LEAD_JSON=$(jq -c --arg phone "$SENDER_PHONE" \
+  '[.leads[] | select(.customer_phone==$phone and (.status=="AWAITING_OWNER_APPROVAL" or .status=="CUSTOMER_FINALIZED" or .status=="OWNER_EDITED"))] | sort_by(.created_at) | reverse | .[0] // empty' \
+  /opt/shift-agent/state/catering-leads.json)
+
+if [ -z "$LEAD_JSON" ]; then
+    # No active lead. Run lookup-prior-leads-by-phone to determine
+    # whether the customer has terminal leads (closed) or none at all,
+    # so we can give a precise reply.
+    LOOKUP=$(/usr/local/bin/lookup-prior-leads-by-phone --customer-phone "$SENDER_PHONE")
+    PRIOR_COUNT=$(echo "$LOOKUP" | jq -r '.prior_lead_count')
+    if [ "$PRIOR_COUNT" = "0" ]; then
+        # Reply: "I don't see an open catering inquiry on file. Could
+        # you share what you'd like to cater?"
+        :
+    else
+        # Reply: "Looks like this booking was already closed — would
+        # you like to start a new inquiry?"
+        :
+    fi
+    exit 0  # don't invoke finalize-catering-menu
+fi
+
+# Active lead found. Extract the fields the finalize script needs.
+LEAD_ID=$(echo "$LEAD_JSON" | jq -r '.lead_id')
+CODE=$(echo "$LEAD_JSON" | jq -r '.owner_approval_code')
+LEAD_STATUS=$(echo "$LEAD_JSON" | jq -r '.status')
 ```
 
-The script returns JSON. Read `most_recent_status` and `most_recent_lead_id`.
-
-- If `most_recent_status` is in {`AWAITING_OWNER_APPROVAL`,
-  `CUSTOMER_FINALIZED`, `OWNER_EDITED`} → there's an active lead;
-  proceed.
-- If `most_recent_status` is terminal (CLOSED, OWNER_REJECTED, STALE,
-  NOT_CATERING, SENT_TO_CUSTOMER) → tell customer briefly: "Looks like
-  this booking was already closed — would you like to start a new
-  inquiry?"
-- If no leads at all → tell customer: "I don't see an open catering
-  inquiry on file. Could you share what you'd like to cater?"
-
-Required because LLM recall of `(Ref: L0001)` lines is unreliable across
-long conversations. The script exit 4 path also covers this safety net.
-
-The owner approval `#XXXXX` code is on the lookup result. You'll need it
-verbatim.
+The `lookup-prior-leads-by-phone` script's return shape does NOT
+include `most_recent_lead_id` or `owner_approval_code` — use the `jq`
+pattern above (deployed pattern from owner-approval SKILL) to retrieve
+them from the state file directly.
 
 ## Step 2 — Extract `customer_message_id` (idempotency key)
 
@@ -97,11 +111,10 @@ Example:
 ```bash
 TOTAL=$(/usr/local/lib/hermes-agent/venv/bin/python -c "import sys, json; print(sum(i['qty']*i['price_usd'] for i in json.loads('''<JSON>''')))")
 /usr/local/bin/finalize-catering-menu \
-  --code "<#XXXXX from lookup>" \
+  --code "$CODE" \
   --customer-message-id "<bridge messageId>" \
   --selected-items-json '<JSON array>' \
-  --quote-total-usd $TOTAL \
-  --customer-message-text "<original customer text>"
+  --quote-total-usd $TOTAL
 ```
 
 ## Step 5 — Read exit code and respond

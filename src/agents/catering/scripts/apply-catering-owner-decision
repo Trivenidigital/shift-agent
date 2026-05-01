@@ -470,14 +470,20 @@ def main() -> int:
                 )
             except Exception as e:
                 sys.stderr.write(f"audit emit (cf1-guard) failed (non-fatal): {e}\n")
-            # Reprompt the owner (best-effort; bridge failure is not blocking)
+            # Reprompt the owner (best-effort; bridge failure is not blocking).
+            # R2.H1 fix: do NOT instruct WhatsApp '#XXXXX approve --skip-finalize'.
+            # The SKILL parser cannot reliably extract argparse flags from a
+            # WhatsApp natural-language reply; that path would loop indefinitely.
+            # Either wait for the customer to finalize, or override via cockpit
+            # (the operator-tooling path that DOES forward --skip-finalize).
             if cfg.owner.self_chat_jid:
                 reprompt = (
                     f"⚕ *Catering Agent*\n────────────\n"
                     f"Lead {lead.lead_id} {code}: customer hasn't finalized "
-                    f"their menu yet. Reply '{code} approve --skip-finalize' "
-                    f"(or send via cockpit) to override and approve based on "
-                    f"the original inquiry."
+                    f"their menu selection yet. Either (a) wait for the customer "
+                    f"to confirm their items, or (b) override via cockpit "
+                    f"(operator action — sends the original inquiry as a quote "
+                    f"without customer-curated items)."
                 )
                 try:
                     _bridge_post(cfg.owner.self_chat_jid, reprompt)
