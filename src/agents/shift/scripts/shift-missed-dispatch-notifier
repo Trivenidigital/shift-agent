@@ -67,7 +67,8 @@ def _ensure_audit_imports() -> None:
 
 # Paths
 BRIDGE_LOG = Path("/root/.hermes/whatsapp/bridge.log")
-GATEWAY_LOG = Path("/opt/shift-agent/logs/hermes-gateway.log")
+# F12 2026-05-01: see catering-dispatcher-watchdog for the same fix.
+GATEWAY_LOG = Path("/root/.hermes/logs/agent.log")
 DECISIONS_LOG = Path("/opt/shift-agent/logs/decisions.log")
 
 # Tunables

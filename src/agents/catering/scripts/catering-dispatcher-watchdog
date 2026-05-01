@@ -82,7 +82,12 @@ def _ensure_audit_imports() -> None:
 
 # Paths
 BRIDGE_LOG = Path("/root/.hermes/whatsapp/bridge.log")
-GATEWAY_LOG = Path("/opt/shift-agent/logs/hermes-gateway.log")
+# F12 2026-05-01: gateway logs inbound text to /root/.hermes/logs/agent.log,
+# NOT /opt/shift-agent/logs/hermes-gateway.log. The latter only captures
+# stdout/stderr (per StandardOutput= in systemd unit). The former is where
+# the gateway's Python `logger.info("inbound message: ...")` lands. Fixing
+# this unblocks the watchdog for all real customer traffic.
+GATEWAY_LOG = Path("/root/.hermes/logs/agent.log")
 DECISIONS_LOG = Path("/opt/shift-agent/logs/decisions.log")
 
 # Tunables
