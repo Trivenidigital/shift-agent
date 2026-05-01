@@ -5,6 +5,7 @@ all 6 error_class values, exercise both retryable + non-retryable branches.
 """
 from __future__ import annotations
 
+import json
 import os
 os.environ.setdefault("EXPENSE_RECEIPTS_DIR", "/tmp/test/")
 
@@ -152,3 +153,100 @@ def test_factory_real_raises_v01():
         qbo_client_mode = "real"
     with pytest.raises(NotImplementedError):
         make_qbo_client(FakeCfg())
+
+
+# ─────────────────────────────────────────────────────────────────
+# F2 (E2E Layer B fix 2026-05-01): cross-process state persistence.
+# Without state_path, MockQBOClient._pushed is in-memory and a fresh
+# instance can't void a transaction pushed by a prior instance — exactly
+# what blocked the live undo flow on the VPS during E2E Layer B testing.
+# ─────────────────────────────────────────────────────────────────
+
+
+def test_mock_void_works_across_process_boundaries(lead, tmp_path):
+    """Two separate MockQBOClient instances sharing a state_path file:
+    process 1 pushes, process 2 (fresh instance, no in-memory state) voids
+    successfully. Without persistence the void raises 'unknown
+    transaction_id' — that's the bug this fix addresses."""
+    state = tmp_path / "mock-qbo.json"
+
+    # Process 1: push
+    client1 = MockQBOClient(state_path=state)
+    result = client1.push_expense(lead)
+    assert result.transaction_id == "MOCK-E0042-1"
+    assert state.exists(), "state file must be written after push"
+
+    # Process 2: completely fresh instance; same state_path → void succeeds
+    client2 = MockQBOClient(state_path=state)
+    client2.void_transaction("MOCK-E0042-1")  # must NOT raise
+
+    # Process 3: same transaction now gone from ledger → re-void raises
+    client3 = MockQBOClient(state_path=state)
+    with pytest.raises(QBOPushError, match="unknown transaction_id"):
+        client3.void_transaction("MOCK-E0042-1")
+
+
+def test_mock_state_path_none_preserves_in_memory_behaviour(lead):
+    """state_path=None (default) means no file persistence — preserves the
+    pre-fix in-memory behaviour that all existing unit tests depend on."""
+    client = MockQBOClient()  # no state_path
+    assert client._state_path is None
+    result = client.push_expense(lead)
+    # Same-instance void works (in-memory)
+    client.void_transaction(result.transaction_id)
+    # Fresh instance with no state_path has no shared state — void raises
+    fresh = MockQBOClient()
+    with pytest.raises(QBOPushError, match="unknown transaction_id"):
+        fresh.void_transaction(result.transaction_id)
+
+
+def test_mock_state_seq_persists_across_instances(lead, tmp_path):
+    """seq counter must survive process boundary so transaction IDs don't
+    collide on retry-after-crash scenarios."""
+    state = tmp_path / "mock-qbo.json"
+    client1 = MockQBOClient(state_path=state)
+    r1 = client1.push_expense(lead)
+    assert r1.transaction_id == "MOCK-E0042-1"
+
+    # Different lead (different expense_id), fresh client, same state file
+    other_lead = ExpenseLead.model_validate({
+        **lead.model_dump(),
+        "expense_id": "E0099",
+        "original_message_id": "wa_other",
+    })
+    client2 = MockQBOClient(state_path=state)
+    r2 = client2.push_expense(other_lead)
+    # seq must continue from where client1 left off (1 → 2), not reset to 1
+    assert r2.transaction_id == "MOCK-E0099-2"
+
+
+def test_mock_state_corrupted_file_raises_loudly(tmp_path):
+    """A corrupted state file must NOT silently lose transaction state.
+    Fail loudly so operator notices and triages."""
+    state = tmp_path / "mock-qbo.json"
+    state.write_text("{ this is not valid json", encoding="utf-8")
+    with pytest.raises(json.JSONDecodeError):
+        MockQBOClient(state_path=state)
+
+
+def test_mock_state_unsupported_schema_version_raises(tmp_path):
+    """Future schema versions on disk must NOT be silently accepted —
+    forces explicit migration tooling when v2 lands."""
+    state = tmp_path / "mock-qbo.json"
+    state.write_text(
+        '{"schema_version": 99, "seq": 0, "transactions": {}}',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="schema_version"):
+        MockQBOClient(state_path=state)
+
+
+def test_factory_forwards_state_path(tmp_path):
+    """make_qbo_client must forward state_path to MockQBOClient so the
+    apply-expense-decision integration actually gets persistence."""
+    class FakeCfg:
+        qbo_client_mode = "mock"
+    state = tmp_path / "mock-qbo-factory.json"
+    client = make_qbo_client(FakeCfg(), customer_timezone="UTC", state_path=state)
+    assert isinstance(client, MockQBOClient)
+    assert client._state_path == state

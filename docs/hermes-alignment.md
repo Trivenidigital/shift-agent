@@ -106,6 +106,17 @@ A bug that breaks loudly is a 4am page; you fix it and move on. A bug that break
 | Approval-code TTL per agent | Codes never expire if parent record stuck non-terminal | Acceptable as global config; per-agent TTL deferred until evidence it's needed | acceptable as-is |
 | LF line endings on VPS-deployed scripts | CRLF shebang breaks `#!/usr/bin/env python3\r` | `.gitattributes` enforcement | done 2026-04-28 |
 
+### Known upstream issues (Hermes, not our repo)
+
+These are observed failure modes in Hermes infrastructure that affect our agents but cannot be fixed in this codebase. Documented here for triage signal — workaround is the only available action from our side until Hermes-agent maintainers fix upstream.
+
+| Issue | Symptom | Observed | Workaround | Owner |
+|---|---|---|---|---|
+| **Gateway dispatcher reasoning hang** | After `inbound message` log line, `agent.auxiliary_client: Auxiliary auto-detect: using main provider openrouter (moonshotai/kimi-k2-thinking)` writes; then no further log lines for 5+ minutes. Eventual `response ready: ... time=320.6s api_calls=11 response=0 chars`. SKILL never invoked, no `dispatcher_routed` audit entry, no owner reply. | E2E Layer C 2026-05-01 (twice, ~5h apart). Observed during expense-bookkeeper E2E with caption="expense" image inbound. Bridge also exited code -15 ~6 times same day. | Restart hermes-gateway via `systemctl restart hermes-gateway`. Re-send inbound message. | Hermes-agent upstream (NOT this repo) |
+| WhatsApp bridge `code -15` exits | Bridge process exits unexpectedly; gateway shuts down; systemd restarts. Inbound messages during the gap are lost. | Multiple times daily on the test VPS (2026-05-01). Pre-existing pattern, increasing frequency. | systemd auto-restart usually recovers within 30–60s. Re-send messages that fell in the gap. | Hermes-agent upstream |
+
+These items are NOT to be patched from our side. If a fix is attempted in our scripts, it constitutes drift (working around a substrate bug instead of escalating). Open an upstream Hermes issue first; document the patch only after upstream rejects or defers.
+
 ### Discipline for items added later
 
 Each new item gets: description, **silent-vs-loud failure mode**, realistic time estimate (not "5-minute fix" unless it really is), current state, target date or explicit "deferred indefinitely, here's why."
