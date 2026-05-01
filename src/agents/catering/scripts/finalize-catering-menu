@@ -262,8 +262,15 @@ def _render_owner_card(
     if template_path.exists():
         try:
             return template_path.read_text(encoding="utf-8").format(**fmt_fields)
-        except (KeyError, OSError):
-            pass
+        except (KeyError, OSError) as e:
+            sys.stderr.write(
+                f"WARN: owner-card template at {template_path} unrenderable ({e}); "
+                "using inline fallback\n"
+            )
+    else:
+        sys.stderr.write(
+            f"WARN: owner-card template missing at {template_path}; using inline fallback\n"
+        )
     # Inline fallback (mirrors create-catering-lead inline pattern)
     return (
         f"⚕ *Catering Agent*\n────────────\n"
@@ -330,9 +337,10 @@ def _emit_quote_mismatch_audit(
 
     Best-effort. Caller exits 11 regardless of audit success.
     """
-    # Look up lead to get customer_phone for the audit row (lead may not exist —
-    # if so, this is moot; just log to stderr and move on)
-    customer_phone = "+10000000000"  # placeholder if lead lookup fails
+    # Look up lead to recover lead_id + customer_phone for the audit row.
+    # Falls back to placeholders only when the lookup itself fails (R1.M1 / R3.OB-Blocker).
+    audit_lead_id = "(quote-mismatch)"
+    customer_phone = "+10000000000"
     try:
         if LEADS_PATH.exists():
             store, _status = load_model(LEADS_PATH, CateringLeadStore)
@@ -341,6 +349,7 @@ def _emit_quote_mismatch_audit(
                 None,
             )
             if target is not None:
+                audit_lead_id = target.lead_id
                 customer_phone = target.customer_phone
     except Exception:
         pass
@@ -351,7 +360,7 @@ def _emit_quote_mismatch_audit(
                 CateringMenuFinalized(
                     type="catering_menu_finalized", ts=now,
                     outcome="rejected_quote_mismatch",
-                    lead_id="(quote-mismatch)",  # we don't reach lead.lead_id at this stage
+                    lead_id=audit_lead_id,
                     customer_phone=customer_phone,
                     item_count=len(items),
                     server_recompute_usd=server_total,
@@ -373,7 +382,6 @@ def main() -> int:
     parser.add_argument("--customer-message-id", required=True)
     parser.add_argument("--selected-items-json", required=True)
     parser.add_argument("--quote-total-usd", required=True, type=int)
-    parser.add_argument("--customer-message-text", default="")
     args = parser.parse_args()
 
     # Cache config once
@@ -442,7 +450,10 @@ def main() -> int:
         # Idempotency: same message_id => replay (no state mutation)
         if target.last_finalize_message_id == args.customer_message_id:
             replay = True
-            # B2 fix: render card from persisted items, NOT input items
+            # R2.B2 fix: render card from persisted items AND persisted total.
+            # On replay we must NOT use the freshly-recomputed server_total —
+            # if the menu drifted between first finalize and replay, the line
+            # items (persisted prices) and total (recomputed) would disagree.
             persisted_items_with_prices = [
                 (it.name, it.qty, it.price_usd) for it in target.selected_items
             ]
@@ -452,7 +463,6 @@ def main() -> int:
             prior_item_count = len(target.selected_items)
             prev_status = target.status
 
-            # B1 fix: single list comprehension, no two-step assignment
             target.selected_items = [
                 CateringSelectedItem(name=name, qty=qty, price_usd=price)
                 for name, qty, price in fresh_items_with_prices
@@ -462,8 +472,13 @@ def main() -> int:
             target.last_finalize_message_id = args.customer_message_id
             target.updated_at = now
 
-            # Status transition (if needed)
-            if target.status in {"AWAITING_OWNER_APPROVAL", "OWNER_EDITED"}:
+            # Status transition. R2.B1 fix: include CUSTOMER_FINALIZED in the
+            # transition guard set + emit status_change audit on every re-finalize
+            # (even though from==to), so the audit chain captures the customer's
+            # mind-change. CATERING_TRANSITIONS now includes the self-edge.
+            if target.status in {
+                "AWAITING_OWNER_APPROVAL", "OWNER_EDITED", "CUSTOMER_FINALIZED",
+            }:
                 if "CUSTOMER_FINALIZED" not in CATERING_TRANSITIONS.get(target.status, set()):
                     sys.stderr.write(
                         f"transition {target.status!r} -> CUSTOMER_FINALIZED disallowed\n"
@@ -482,8 +497,14 @@ def main() -> int:
             atomic_write_json(LEADS_PATH, store)
             persisted_items_with_prices = fresh_items_with_prices
 
-    # Step 5: status-change audit (separate LOG_LOCK, OUT of LEADS_LOCK)
+    # Step 5: status-change audit (separate LOG_LOCK, OUT of LEADS_LOCK).
+    # R2.B1 fix: emit on EVERY non-replay finalize, including the
+    # CUSTOMER_FINALIZED -> CUSTOMER_FINALIZED self-edge (re-finalize). The
+    # audit chain MUST record customer mind-changes so the routing-reliability
+    # monitor can pair raw_inbound -> dispatcher_routed -> status_change
+    # without a gap on every re-finalize.
     if status_changed and target is not None and prev_status is not None:
+        is_re_finalize = prev_status == "CUSTOMER_FINALIZED"
         try:
             with FileLock(LOG_LOCK):
                 ndjson_append(
@@ -492,7 +513,10 @@ def main() -> int:
                         type="catering_lead_status_change", ts=now,
                         lead_id=target.lead_id, from_status=prev_status,
                         to_status="CUSTOMER_FINALIZED", actor="customer",
-                        reason="customer_finalized_menu",
+                        reason=(
+                            "customer_re_finalized_menu" if is_re_finalize
+                            else "customer_finalized_menu"
+                        ),
                     ).model_dump_json(),
                 )
         except Exception as e:
@@ -508,8 +532,12 @@ def main() -> int:
     elif replay and _recent_resend_for(target.lead_id, now):
         suppressed = True
     else:
+        # R2.B2 fix: on replay, total in card MUST be the persisted
+        # target.quote_total_usd (the value the owner saw on first finalize),
+        # NOT the fresh server_total (which can drift if menu prices changed).
+        card_total = target.quote_total_usd if replay else server_total
         card_text = _render_owner_card(
-            target, persisted_items_with_prices, server_total, price_drift,
+            target, persisted_items_with_prices, card_total, price_drift,
         )
         ok, mid_or_err = _bridge_post(cfg.owner.self_chat_jid, card_text)
         if ok:

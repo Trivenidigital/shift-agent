@@ -478,6 +478,13 @@ CATERING_TRANSITIONS: dict[CateringLeadStatus, set[CateringLeadStatus]] = {
     },
     "CUSTOMER_FINALIZED": {  # PR-CF1
         "OWNER_APPROVED", "OWNER_EDITED", "OWNER_REJECTED", "STALE",
+        # PR-CF1 review-fix R2.B1: explicit self-edge for re-finalize.
+        # When a customer changes their mind and submits a different menu
+        # selection (different customer_message_id), the status remains
+        # CUSTOMER_FINALIZED but the script emits a status_change audit row
+        # so the audit chain records the mind-change. Without this self-edge,
+        # the transition guard at finalize-catering-menu rejects re-finalize.
+        "CUSTOMER_FINALIZED",
     },
     "OWNER_EDITED": {
         "AWAITING_OWNER_APPROVAL", "OWNER_REJECTED",
