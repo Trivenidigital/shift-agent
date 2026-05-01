@@ -1987,6 +1987,41 @@ class CateringQuoteSkillFailed(_BaseEntry):
     detail: str = Field(default="", max_length=2000)
 
 
+class CateringCustomerAckSent(_BaseEntry):
+    """F5b 2026-05-01: emitted by send-catering-ack after successful customer
+    ack POST to the bridge. Without this audit row, customer acks from
+    parse_catering_inquiry were silently sent (and frequently silently
+    dropped by the bridge filter when the LLM forgot the prefix) with no
+    observability. Mirrors CateringQuoteSent pattern but covers the
+    parse-inquiry → ack path (not the owner-decision → quote path).
+
+    `customer_jid` is the raw JID (`<phone>@s.whatsapp.net` or `<lid>@lid`)
+    rather than a phone string because parse-inquiry frequently sees
+    LID-only senders (no phone resolved yet); insisting on E.164 here
+    would force callers to fail closed.
+    """
+    type: Literal["catering_customer_ack_sent"]
+    customer_jid: str = Field(min_length=1, max_length=200)
+    outbound_message_id: str = Field(min_length=1)
+    lead_id: str = Field(default="", description="optional lead linkage when ack follows lead creation")
+
+
+class CateringCustomerAckFailed(_BaseEntry):
+    """F5b 2026-05-01: emitted by send-catering-ack when bridge POST returns
+    error or empty messageId. Pairs with CateringCustomerAckSent to give
+    full coverage of the customer-ack outbound path.
+
+    Note: the bridge's announcement-filter drop is NOT detectable from the
+    HTTP response (filter logs to bridge stderr only) — that gap is tracked
+    as PR #43 HIGH-4 follow-up. This variant covers the cases the script
+    CAN observe: connection error, non-2xx, malformed response.
+    """
+    type: Literal["catering_customer_ack_failed"]
+    customer_jid: str = Field(min_length=1, max_length=200)
+    reason: Literal["bridge_unreachable", "empty_response", "bad_input"]
+    detail: str = Field(default="", max_length=2000)
+
+
 class CateringQuoteRenderFailed(_BaseEntry):
     """v0.3 (review M2): emitted when apply-catering-owner-decision approve
     flow fails to render the customer quote (template KeyError, OSError,
@@ -2139,6 +2174,9 @@ LogEntry = Annotated[
         Annotated[CateringQuoteSentLeadMissing, Tag("catering_quote_sent_lead_missing")],
         # PR-B v0.4: SKILL → apply-script handoff failure (LLM-drafted quote)
         Annotated[CateringQuoteSkillFailed, Tag("catering_quote_skill_failed")],
+        # F5b 2026-05-01: customer-ack outbound observability (parse-inquiry path)
+        Annotated[CateringCustomerAckSent, Tag("catering_customer_ack_sent")],
+        Annotated[CateringCustomerAckFailed, Tag("catering_customer_ack_failed")],
         # PR-D1: config load observability + operator reconcile audit
         Annotated[ConfigLoadFailed, Tag("config_load_failed")],
         Annotated[CateringLeadManuallyReconciled, Tag("catering_lead_manually_reconciled")],
@@ -2254,5 +2292,7 @@ __all__ = [
     "CateringLeadManuallyReconciled",
     # PR-B v0.4
     "CateringQuoteSkillFailed",
+    # F5b 2026-05-01
+    "CateringCustomerAckSent", "CateringCustomerAckFailed",
     "MenuUpdateProposed", "MenuUpdateApplied", "MenuUpdateRejected",
 ]
