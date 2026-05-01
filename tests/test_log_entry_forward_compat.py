@@ -22,6 +22,31 @@ from schemas import LogEntry, _UnknownLogEntry, _KNOWN_LOG_ENTRY_TYPES, RawInbou
 _ADAPTER = TypeAdapter(LogEntry)
 
 
+# Rollback-compat case: ExpenseOwnerApprovalRequested.routed_to was narrowed
+# from Literal["whatsapp", "cockpit_v01_paper"] to Literal["whatsapp"] in
+# PR #42 (the writer was always hardcoded to "whatsapp" post-cleanup). PR #42
+# post-merge review caught that this was a backwards-incompatible read-side
+# break — historical decisions.log rows could contain "cockpit_v01_paper".
+# This test pins the read-side widening: legacy rows must still validate
+# through the LogEntry adapter. Removal of the legacy value follows the
+# rollback-window-lapse + live-VPS grep-zero confirmation per the comment
+# on the schema field itself.
+def test_expense_owner_approval_requested_legacy_cockpit_v01_paper_compat():
+    row = {
+        "type": "expense_owner_approval_requested",
+        "ts": "2026-04-29T12:00:00Z",
+        "expense_id": "E0001",
+        "owner_approval_code": "#A47C2",
+        "extracted_total_cents": 23450,
+        "routed_to": "cockpit_v01_paper",  # legacy value pre-PR #42
+    }
+    parsed = _ADAPTER.validate_python(row)
+    # Routes to typed variant (NOT _UnknownLogEntry — `type` is known)
+    assert parsed.type == "expense_owner_approval_requested"
+    assert parsed.routed_to == "cockpit_v01_paper"
+    assert parsed.expense_id == "E0001"
+
+
 # Case 1 — known variants round-trip to their typed class.
 def test_known_variant_routes_to_typed_class():
     row = {

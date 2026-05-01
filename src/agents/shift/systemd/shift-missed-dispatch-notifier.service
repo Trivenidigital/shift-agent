@@ -1,0 +1,34 @@
+[Unit]
+Description=Shift Missed-Dispatch Notifier — F9 owner-alert when employee sick-call doesn't reach the dispatcher SKILL (companion to catering F7)
+After=network-online.target hermes-gateway.service
+Wants=network-online.target
+PartOf=hermes-gateway.service
+
+[Service]
+Type=simple
+User=shift-agent
+Group=shift-agent
+EnvironmentFile=/opt/shift-agent/.env
+Environment=HOME=/opt/shift-agent
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+
+ExecStart=/root/.hermes/hermes-agent/venv/bin/python /usr/local/bin/shift-missed-dispatch-notifier
+Restart=on-failure
+RestartSec=10
+StartLimitInterval=300
+StartLimitBurst=10
+
+StandardOutput=append:/opt/shift-agent/logs/shift-missed-dispatch-notifier.log
+StandardError=append:/opt/shift-agent/logs/shift-missed-dispatch-notifier.log
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadOnlyPaths=/root/.hermes
+ReadWritePaths=/opt/shift-agent
+ProtectHome=read-only
+PrivateTmp=true
+RuntimeDirectory=shift-agent
+RuntimeDirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target

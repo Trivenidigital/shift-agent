@@ -1633,7 +1633,15 @@ class ExpenseOwnerApprovalRequested(_BaseEntry):
     expense_id: str
     owner_approval_code: ProposalCode
     extracted_total_cents: int
-    routed_to: Literal["whatsapp"]
+    # `cockpit_v01_paper` retained as a deprecated-but-readable Literal value
+    # for rollback-window safety per the absorbing-shim discipline (PR-D3 /
+    # catering precedent). The writer in extract-receipt is hardcoded to
+    # "whatsapp" post-PR #42; this widening exists ONLY so historical
+    # decisions.log rows containing the legacy value validate cleanly on
+    # re-read by daily-brief / dispatcher-accuracy-report / fsck. Remove
+    # this value once the rollback window has lapsed AND a grep across all
+    # live VPSes confirms zero historical entries.
+    routed_to: Literal["whatsapp", "cockpit_v01_paper"]
 
 
 class ExpenseOwnerDecision(_BaseEntry):
@@ -2022,6 +2030,116 @@ class CateringCustomerAckFailed(_BaseEntry):
     detail: str = Field(default="", max_length=2000)
 
 
+class CateringDispatcherWatchdogFired(_BaseEntry):
+    """F7 2026-05-01: catering-dispatcher-watchdog detected a missed catering
+    dispatch and triggered the fallback create-catering-lead invocation.
+    Companion to CateringDispatcherWatchdogSuppressed (the no-action audit).
+
+    Hermes WhatsApp adapter has no `auto_skill` channel-binding, so on chat
+    turns 2+ the LLM may skip invoking `catering_dispatcher` SKILL → no
+    `dispatcher_routed` audit, no lead, customer silence. Watchdog catches
+    those out-of-band via regex content classification.
+
+    `signals` is the classifier's accumulated evidence (e.g.
+    `["primary:catering","headcount:120","food_keyword","delivery_keyword"]`).
+    """
+    type: Literal["catering_dispatcher_watchdog_fired"]
+    chat_id: str = Field(min_length=1, max_length=200)
+    message_id: str = Field(min_length=1, max_length=200)
+    customer_phone: E164Phone
+    signals: list[str] = Field(default_factory=list, max_length=20)
+    success: bool
+    detail: str = Field(default="", max_length=2000)
+
+
+class CateringDispatcherWatchdogSuppressed(_BaseEntry):
+    """F7 2026-05-01: watchdog intentionally did NOT fire the fallback. Reasons:
+    - non_customer_role: sender is owner/employee — wrong handler chain
+    - text_unavailable: gateway.log had no matching inbound message line
+    - not_catering: regex classifier rejected the content
+    - lid_no_phone_resolution: LID-only sender with no cache hit
+    """
+    type: Literal["catering_dispatcher_watchdog_suppressed"]
+    chat_id: str = Field(min_length=1, max_length=200)
+    message_id: str = Field(min_length=1, max_length=200)
+    reason: Literal[
+        "non_customer_role", "text_unavailable", "not_catering",
+        "lid_no_phone_resolution",
+    ]
+    detail: str = Field(default="", max_length=2000)
+
+
+class CateringOwnerActionWatchdogFired(_BaseEntry):
+    """F8 2026-05-01: catering-owner-action-watchdog detected a missed owner
+    `#XXXXX (approve|reject)` command and triggered the fallback
+    apply-catering-owner-decision invocation. Companion to
+    CateringOwnerActionWatchdogSuppressed.
+
+    Same root cause as F7 (Hermes WhatsApp lacks auto_skill binding) but on
+    the owner-side path. Approve fallback uses a deterministic minimal
+    quote text built from extracted headcount + event_date (truth-guard
+    compliant). Reject fallback passes through with reason="watchdog_owner_fallback".
+    """
+    type: Literal["catering_owner_action_watchdog_fired"]
+    chat_id: str = Field(min_length=1, max_length=200)
+    message_id: str = Field(min_length=1, max_length=200)
+    code: str = Field(pattern=r"^#[A-HJ-NP-Z2-9]{5}$")
+    action: Literal["approve", "reject"]
+    lead_id: str = Field(min_length=0, max_length=20)
+    success: bool
+    detail: str = Field(default="", max_length=2000)
+
+
+class ShiftMissedDispatchNotified(_BaseEntry):
+    """F9 2026-05-01: shift-missed-dispatch-notifier sent owner alert via
+    shift-agent-notify-owner (Pushover-first / WhatsApp-fallback) because
+    an employee inbound that looked sick-call-shaped never produced a
+    dispatcher_routed audit row. Owner now has visibility to act manually.
+
+    NOT auto-creation of a proposal — too risky overnight. Future work
+    can layer roster-lookup + create-proposal call on top of this signal.
+    """
+    type: Literal["shift_missed_dispatch_notified"]
+    chat_id: str = Field(min_length=1, max_length=200)
+    message_id: str = Field(min_length=1, max_length=200)
+    employee_id: str = Field(default="", max_length=20)
+    employee_name: str = Field(default="", max_length=200)
+    signals: list[str] = Field(default_factory=list, max_length=10)
+    success: bool
+    detail: str = Field(default="", max_length=2000)
+
+
+class ShiftMissedDispatchSuppressed(_BaseEntry):
+    """F9 2026-05-01: shift-missed-dispatch-notifier intentionally did NOT
+    notify. Reasons:
+    - non_employee_role: sender is owner/customer/unknown — outside scope
+    - text_unavailable: gateway.log had no matching inbound message line
+    - not_shift_signal: regex classifier saw no sick-call signals
+    """
+    type: Literal["shift_missed_dispatch_suppressed"]
+    chat_id: str = Field(min_length=1, max_length=200)
+    message_id: str = Field(min_length=1, max_length=200)
+    reason: Literal["non_employee_role", "text_unavailable", "not_shift_signal"]
+    detail: str = Field(default="", max_length=2000)
+
+
+class CateringOwnerActionWatchdogSuppressed(_BaseEntry):
+    """F8 2026-05-01: watchdog intentionally did NOT fire the fallback. Reasons:
+    - code_not_found: no lead with matching owner_approval_code
+    - lead_terminal_state: lead already CLOSED/REJECTED/etc.
+    - action_unsupported_by_watchdog: edit/wait need LLM-side handling
+    """
+    type: Literal["catering_owner_action_watchdog_suppressed"]
+    chat_id: str = Field(min_length=1, max_length=200)
+    message_id: str = Field(min_length=1, max_length=200)
+    code: str = Field(pattern=r"^#[A-HJ-NP-Z2-9]{5}$")
+    action: Literal["approve", "reject", "edit", "wait"]
+    reason: Literal[
+        "code_not_found", "lead_terminal_state", "action_unsupported_by_watchdog",
+    ]
+    detail: str = Field(default="", max_length=2000)
+
+
 class CateringQuoteRenderFailed(_BaseEntry):
     """v0.3 (review M2): emitted when apply-catering-owner-decision approve
     flow fails to render the customer quote (template KeyError, OSError,
@@ -2177,6 +2295,15 @@ LogEntry = Annotated[
         # F5b 2026-05-01: customer-ack outbound observability (parse-inquiry path)
         Annotated[CateringCustomerAckSent, Tag("catering_customer_ack_sent")],
         Annotated[CateringCustomerAckFailed, Tag("catering_customer_ack_failed")],
+        # F7 2026-05-01: dispatcher watchdog (missed-SKILL recovery)
+        Annotated[CateringDispatcherWatchdogFired, Tag("catering_dispatcher_watchdog_fired")],
+        Annotated[CateringDispatcherWatchdogSuppressed, Tag("catering_dispatcher_watchdog_suppressed")],
+        # F8 2026-05-01: owner-action watchdog (missed #XXXXX approve/reject recovery)
+        Annotated[CateringOwnerActionWatchdogFired, Tag("catering_owner_action_watchdog_fired")],
+        Annotated[CateringOwnerActionWatchdogSuppressed, Tag("catering_owner_action_watchdog_suppressed")],
+        # F9 2026-05-01: shift missed-dispatch notifier (employee sick-call alert path)
+        Annotated[ShiftMissedDispatchNotified, Tag("shift_missed_dispatch_notified")],
+        Annotated[ShiftMissedDispatchSuppressed, Tag("shift_missed_dispatch_suppressed")],
         # PR-D1: config load observability + operator reconcile audit
         Annotated[ConfigLoadFailed, Tag("config_load_failed")],
         Annotated[CateringLeadManuallyReconciled, Tag("catering_lead_manually_reconciled")],
@@ -2294,5 +2421,11 @@ __all__ = [
     "CateringQuoteSkillFailed",
     # F5b 2026-05-01
     "CateringCustomerAckSent", "CateringCustomerAckFailed",
+    # F7 2026-05-01 (catering dispatcher watchdog)
+    "CateringDispatcherWatchdogFired", "CateringDispatcherWatchdogSuppressed",
+    # F8 2026-05-01 (catering owner-action watchdog)
+    "CateringOwnerActionWatchdogFired", "CateringOwnerActionWatchdogSuppressed",
+    # F9 2026-05-01 (shift missed-dispatch notifier)
+    "ShiftMissedDispatchNotified", "ShiftMissedDispatchSuppressed",
     "MenuUpdateProposed", "MenuUpdateApplied", "MenuUpdateRejected",
 ]

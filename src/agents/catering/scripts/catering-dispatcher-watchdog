@@ -1,0 +1,415 @@
+#!/usr/bin/env python3
+"""catering-dispatcher-watchdog — F7 2026-05-01.
+
+Out-of-band absorber for missed-dispatch on the catering customer-inquiry
+path. Mirrors the PR-D3 absorbing-shim pattern but for inbound dispatch
+rather than outbound state.
+
+WHY THIS EXISTS
+---------------
+
+Hermes' WhatsApp adapter has no `auto_skill` channel-binding (Telegram and
+Discord do). After turn 1 in a chat, the LLM has the dispatcher SKILL's
+content baked into conversation history and may or may not voluntarily
+re-invoke `catering_dispatcher` on subsequent messages. Tonight's tests
+showed ~25% miss rate — silent failure mode for production catering.
+
+This daemon catches the misses by tailing the gateway+bridge logs,
+detecting inbound customer messages whose `dispatcher_routed` audit row
+never appears within a timeout window, classifying the message text via a
+conservative regex, and invoking `create-catering-lead` directly when the
+classifier says "catering". F6 (collapse customer ack into create-lead)
+ensures the customer also gets the standard ack as a side effect.
+
+WORST CASE if classifier is wrong:
+  - False positive: a catering lead gets created from a non-catering
+    message → owner sees a lead with empty extracted fields, can reject
+    with `#XXXXX reject`. Not money-moving; recoverable.
+  - False negative: a real catering inquiry slips through → same as
+    today's behavior (silent), no regression.
+
+The classifier is intentionally conservative to bias toward false
+negatives over false positives.
+
+DETERMINISM
+-----------
+
+This daemon does NOT call any LLM. It uses regex content classification
+and shells out to `create-catering-lead` (which is fully deterministic
+Python). The only non-determinism is the timing of the dispatcher_routed
+audit row appearing.
+
+Idempotency on `(customer_phone, message_id)` is enforced by
+create-catering-lead itself (existing behavior). Replays are no-ops.
+"""
+from __future__ import annotations
+
+import argparse
+import ast
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+sys.path.insert(0, "/opt/shift-agent")
+
+# safe_io + schema imports are deferred into _audit_imports() so the --text
+# classifier-only test mode runs cross-platform (safe_io needs fcntl, Linux only).
+_audit_imports_loaded = False
+_ndjson_append = None
+_CateringDispatcherWatchdogFired = None
+_CateringDispatcherWatchdogSuppressed = None
+
+
+def _ensure_audit_imports() -> None:
+    global _audit_imports_loaded, _ndjson_append
+    global _CateringDispatcherWatchdogFired, _CateringDispatcherWatchdogSuppressed
+    if _audit_imports_loaded:
+        return
+    from safe_io import ndjson_append
+    from schemas import (
+        CateringDispatcherWatchdogFired, CateringDispatcherWatchdogSuppressed,
+    )
+    _ndjson_append = ndjson_append
+    _CateringDispatcherWatchdogFired = CateringDispatcherWatchdogFired
+    _CateringDispatcherWatchdogSuppressed = CateringDispatcherWatchdogSuppressed
+    _audit_imports_loaded = True
+
+# Paths
+BRIDGE_LOG = Path("/root/.hermes/whatsapp/bridge.log")
+GATEWAY_LOG = Path("/opt/shift-agent/logs/hermes-gateway.log")
+DECISIONS_LOG = Path("/opt/shift-agent/logs/decisions.log")
+
+# Tunables
+WATCHDOG_TIMEOUT_SECS = 30
+POLL_INTERVAL_SECS = 5
+CREATE_LEAD_BIN = "/usr/local/bin/create-catering-lead"
+IDENTIFY_SENDER_BIN = "/usr/local/bin/identify-sender"
+
+# Conservative regex classifier — requires "catering" word OR (event/food+headcount).
+# Tighter than what an LLM would do, intentionally biased toward false negatives.
+_CATERING_PRIMARY = re.compile(r"\bcatering\b|\bcaterer\b", re.IGNORECASE)
+_HEADCOUNT_PATTERNS = [
+    re.compile(
+        r"(\d+)\s*(?:people|persons?|guests?|ppl|attendees?|heads?|"
+        r"meals?|plates?|covers?|settings?|members?|pax)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:for|of|serve|serving|feed|cater(?:ing)?\s+(?:to|for))\s+(\d+)\b", re.IGNORECASE),
+    re.compile(r"\b(\d+)\s+(?:vegetarian|veg|non[\s-]?veg|vegan|jain|halal|kosher)\b", re.IGNORECASE),
+]
+_EVENT_KEYWORDS = re.compile(
+    r"\b(?:event|reception|wedding|birthday|anniversary|graduation|baby\s*shower|"
+    r"engagement|housewarming|festival|gathering|party|celebration|function)\b",
+    re.IGNORECASE,
+)
+_FOOD_KEYWORDS = re.compile(
+    r"\b(?:menu|food|dinner|lunch|breakfast|buffet|biryani|veg(?:etarian)?|"
+    r"non[\s-]?veg|nonveg|halal|kosher|vegan|jain|spread|appetizers?)\b",
+    re.IGNORECASE,
+)
+_DELIVERY_KEYWORDS = re.compile(
+    r"\b(?:deliver(?:y|ed)?|pickup|drop[\s-]?off|setup)\b", re.IGNORECASE,
+)
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def classify_catering(text: str) -> tuple[bool, list[str]]:
+    """Return (is_catering, signals). Conservative: needs strong evidence."""
+    if not text or len(text) < 10:
+        return False, ["too_short"]
+
+    signals: list[str] = []
+    if _CATERING_PRIMARY.search(text):
+        signals.append("primary:catering")
+    for pat in _HEADCOUNT_PATTERNS:
+        m = pat.search(text)
+        if m:
+            try:
+                hc = int(m.group(1))
+                if 5 <= hc <= 10000:
+                    signals.append(f"headcount:{hc}")
+                    break
+            except (ValueError, IndexError):
+                pass
+    if _EVENT_KEYWORDS.search(text):
+        signals.append("event_keyword")
+    if _FOOD_KEYWORDS.search(text):
+        signals.append("food_keyword")
+    if _DELIVERY_KEYWORDS.search(text):
+        signals.append("delivery_keyword")
+
+    has_catering = any(s.startswith("primary:catering") for s in signals)
+    has_headcount = any(s.startswith("headcount:") for s in signals)
+    has_event = "event_keyword" in signals
+    has_food = "food_keyword" in signals
+    has_delivery = "delivery_keyword" in signals
+
+    is_catering = (
+        (has_catering and (has_headcount or has_event or has_food or has_delivery))
+        or (has_headcount and has_event)
+        or (has_headcount and has_food and (has_delivery or has_event))
+    )
+
+    if not is_catering:
+        signals.append("rejected:insufficient_evidence")
+
+    return is_catering, signals
+
+
+def lid_to_phone_via_identify_sender(lid_or_jid: str) -> tuple[Optional[str], str]:
+    """Resolve a LID/JID to phone (E.164) + role via identify-sender."""
+    try:
+        result = subprocess.run(
+            [IDENTIFY_SENDER_BIN, lid_or_jid],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return None, "unknown"
+        doc = json.loads(result.stdout)
+        return doc.get("phone_normalized"), doc.get("role", "unknown")
+    except (subprocess.SubprocessError, json.JSONDecodeError, OSError):
+        return None, "unknown"
+
+
+def find_dispatcher_routed_for(chat_id: str, since_ts: float) -> bool:
+    """Check decisions.log for dispatcher_routed entries matching chat_id since_ts."""
+    if not DECISIONS_LOG.exists():
+        return False
+    chat_lid_only = chat_id.split("@", 1)[0] if "@" in chat_id else chat_id
+    try:
+        with DECISIONS_LOG.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or "dispatcher_routed" not in line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if entry.get("type") != "dispatcher_routed":
+                    continue
+                ts_str = entry.get("ts", "")
+                try:
+                    ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
+                except (ValueError, AttributeError):
+                    continue
+                if ts < since_ts - 5:
+                    continue
+                sender_lid = entry.get("sender_lid") or ""
+                sender_phone = entry.get("sender_phone") or ""
+                if chat_lid_only in sender_lid or chat_lid_only in (sender_phone or "").lstrip("+"):
+                    return True
+    except OSError:
+        pass
+    return False
+
+
+def find_inbound_text_for(chat_id: str) -> Optional[str]:
+    """Scan gateway.log for the most recent 'inbound message:' line matching chat_id.
+
+    Gateway log format (run.py):
+      logger.info('inbound message: platform=%s user=%s chat=%s msg=%r', ...)
+    """
+    if not GATEWAY_LOG.exists():
+        return None
+    chat_lid_only = chat_id.split("@", 1)[0] if "@" in chat_id else chat_id
+    pattern = re.compile(
+        r"inbound message: platform=\S+ user=\S+ chat=(\S+) msg=([^\n]+)$"
+    )
+    matches: list[str] = []
+    try:
+        with GATEWAY_LOG.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                m = pattern.search(line)
+                if not m:
+                    continue
+                line_chat = m.group(1)
+                line_chat_lid = line_chat.split("@", 1)[0] if "@" in line_chat else line_chat
+                if chat_lid_only != line_chat_lid:
+                    continue
+                msg_repr = m.group(2).strip()
+                # repr() output — safe parse via ast.literal_eval (no code execution)
+                try:
+                    msg = ast.literal_eval(msg_repr)
+                except (ValueError, SyntaxError):
+                    msg = msg_repr.strip("'\"")
+                matches.append(str(msg))
+    except OSError:
+        return None
+    return matches[-1] if matches else None
+
+
+def emit_audit(entry_obj) -> None:
+    """Best-effort audit emission. Failures logged to stderr, non-fatal."""
+    _ensure_audit_imports()
+    try:
+        _ndjson_append(DECISIONS_LOG, entry_obj.model_dump_json())
+    except Exception as e:
+        sys.stderr.write(f"audit emit failed (non-fatal): {e}\n")
+
+
+def _make_fired(**kwargs):
+    _ensure_audit_imports()
+    return _CateringDispatcherWatchdogFired(**kwargs)
+
+
+def _make_suppressed(**kwargs):
+    _ensure_audit_imports()
+    return _CateringDispatcherWatchdogSuppressed(**kwargs)
+
+
+def trigger_create_catering_lead(
+    customer_phone: str, customer_name: str, raw_inquiry: str, message_id: str,
+) -> tuple[bool, str]:
+    """Invoke create-catering-lead with empty extracted fields."""
+    fields_json = json.dumps({
+        "headcount": None,
+        "event_date": None,
+        "event_time": None,
+        "menu_preferences": [],
+        "off_menu_items": [],
+        "dietary_restrictions": [],
+        "delivery_or_pickup": "unknown",
+        "budget_hint_usd": None,
+        "notes": "(watchdog-recovered from missed-dispatch; LLM bypassed parse_catering_inquiry SKILL)",
+    })
+    try:
+        result = subprocess.run(
+            [
+                CREATE_LEAD_BIN,
+                "--customer-phone", customer_phone,
+                "--customer-name", customer_name,
+                "--raw-inquiry", raw_inquiry[:1000],
+                "--message-id", message_id,
+                "--fields-json", fields_json,
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            return True, result.stdout.strip()
+        return False, f"exit={result.returncode} stderr={result.stderr[:500]}"
+    except (subprocess.SubprocessError, OSError) as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+def process_inbound(chat_id: str, message_id: str, inbound_seen_ts: float) -> None:
+    """Wait for dispatcher_routed; if absent → classify + (maybe) trigger fallback."""
+    deadline = inbound_seen_ts + WATCHDOG_TIMEOUT_SECS
+    while time.time() < deadline:
+        if find_dispatcher_routed_for(chat_id, inbound_seen_ts):
+            return  # SKILL ran successfully
+        time.sleep(2)
+
+    phone, role = lid_to_phone_via_identify_sender(chat_id)
+
+    if role in {"owner", "employee"}:
+        emit_audit(_make_suppressed(
+            ts=_now_iso(), type="catering_dispatcher_watchdog_suppressed",
+            chat_id=chat_id, message_id=message_id, reason="non_customer_role",
+            detail=f"role={role}",
+        ))
+        return
+
+    inbound_text = find_inbound_text_for(chat_id)
+    if not inbound_text:
+        emit_audit(_make_suppressed(
+            ts=_now_iso(), type="catering_dispatcher_watchdog_suppressed",
+            chat_id=chat_id, message_id=message_id, reason="text_unavailable",
+            detail="gateway.log had no matching 'inbound message:' line",
+        ))
+        return
+
+    is_catering, signals = classify_catering(inbound_text)
+    if not is_catering:
+        emit_audit(_make_suppressed(
+            ts=_now_iso(), type="catering_dispatcher_watchdog_suppressed",
+            chat_id=chat_id, message_id=message_id, reason="not_catering",
+            detail=f"signals={','.join(signals)} text_preview={inbound_text[:60]!r}",
+        ))
+        return
+
+    if not phone:
+        emit_audit(_make_suppressed(
+            ts=_now_iso(), type="catering_dispatcher_watchdog_suppressed",
+            chat_id=chat_id, message_id=message_id, reason="lid_no_phone_resolution",
+            detail=f"signals={','.join(signals)} text_preview={inbound_text[:60]!r}",
+        ))
+        return
+
+    success, detail = trigger_create_catering_lead(
+        customer_phone=phone, customer_name="",
+        raw_inquiry=inbound_text, message_id=f"watchdog:{message_id}",
+    )
+    emit_audit(_make_fired(
+        ts=_now_iso(), type="catering_dispatcher_watchdog_fired",
+        chat_id=chat_id, message_id=message_id, customer_phone=phone,
+        signals=signals, success=success, detail=detail[:2000],
+    ))
+
+
+def follow_bridge_log() -> None:
+    """Tail bridge.log and dispatch each inbound notify event to process_inbound."""
+    seen_message_ids: set[str] = set()
+    notify_pattern = re.compile(
+        r'\{"event":"upsert","type":"notify","fromMe":false,'
+        r'"chatId":"([^"]+)","senderId":"([^"]+)","messageKeys":\[([^\]]+)\]\}'
+    )
+
+    if not BRIDGE_LOG.exists():
+        sys.stderr.write(f"bridge log not found: {BRIDGE_LOG}\n")
+        sys.exit(2)
+
+    with BRIDGE_LOG.open("r", encoding="utf-8", errors="replace") as f:
+        f.seek(0, os.SEEK_END)
+        while True:
+            line = f.readline()
+            if not line:
+                time.sleep(POLL_INTERVAL_SECS)
+                continue
+            m = notify_pattern.search(line)
+            if not m:
+                continue
+            chat_id, _sender_id, _keys = m.group(1), m.group(2), m.group(3)
+            if chat_id == "status@broadcast" or chat_id.endswith("@g.us"):
+                continue
+            message_id = f"bridge_notify_{chat_id}_{int(time.time()*1000)}"
+            if message_id in seen_message_ids:
+                continue
+            seen_message_ids.add(message_id)
+            if len(seen_message_ids) > 1000:
+                seen_message_ids = set(list(seen_message_ids)[-500:])
+            try:
+                process_inbound(chat_id, message_id, time.time())
+            except Exception as e:
+                sys.stderr.write(f"process_inbound failed (non-fatal): {e}\n")
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--text", help="(test mode) classify this text and exit")
+    args = p.parse_args()
+
+    if args.text is not None:
+        is_catering, signals = classify_catering(args.text)
+        print(json.dumps({"is_catering": is_catering, "signals": signals}))
+        return 0
+
+    sys.stderr.write(
+        f"catering-dispatcher-watchdog starting; tailing {BRIDGE_LOG}, "
+        f"timeout={WATCHDOG_TIMEOUT_SECS}s\n"
+    )
+    follow_bridge_log()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

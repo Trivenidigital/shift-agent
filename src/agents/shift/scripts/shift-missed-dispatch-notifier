@@ -1,0 +1,332 @@
+#!/usr/bin/env python3
+"""shift-missed-dispatch-notifier — F9 2026-05-01.
+
+Catering counterpart: F7 (catering-dispatcher-watchdog) auto-creates leads
+when LLM bypasses dispatcher SKILL on customer-side inbounds. Shift agent
+has the same risk on EMPLOYEE-side inbounds (sick-call → handle_sick_call
+→ create-proposal → owner card), but the auto-creation logic is
+significantly more complex (requires roster_lookup ranking, candidate
+selection, template rendering, multi-script orchestration).
+
+For overnight demo-readiness, this daemon takes a NARROWER, SAFER
+approach: detect missed dispatches and ALERT THE OWNER via Pushover
+(through the existing shift-agent-notify-owner chokepoint). No state
+mutation. Owner sees the original message and can manually create the
+proposal via cockpit OR by following the standard sick-call response
+chain.
+
+WORST CASE: owner gets a Pushover alert with the inbound text. They can
+respond with `#XXXXX` commands or use the cockpit. Failing to alert is
+the only failure mode that matters for the demo (worse than today since
+today is also silent).
+
+DETERMINISM
+-----------
+
+No LLM, no SKILL invocation. Single subprocess call to
+shift-agent-notify-owner. Audit via ShiftMissedDispatchNotified.
+
+This is a stop-gap. The full deterministic create-proposal fallback
+(roster lookup + candidate selection + template render + bridge POST)
+is documented as a follow-up in the morning report.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+sys.path.insert(0, "/opt/shift-agent")
+
+# Deferred imports for cross-platform --text test mode
+_audit_imports_loaded = False
+_ndjson_append = None
+_ShiftMissedDispatchNotified = None
+_ShiftMissedDispatchSuppressed = None
+
+
+def _ensure_audit_imports() -> None:
+    global _audit_imports_loaded, _ndjson_append
+    global _ShiftMissedDispatchNotified, _ShiftMissedDispatchSuppressed
+    if _audit_imports_loaded:
+        return
+    from safe_io import ndjson_append
+    from schemas import ShiftMissedDispatchNotified, ShiftMissedDispatchSuppressed
+    _ndjson_append = ndjson_append
+    _ShiftMissedDispatchNotified = ShiftMissedDispatchNotified
+    _ShiftMissedDispatchSuppressed = ShiftMissedDispatchSuppressed
+    _audit_imports_loaded = True
+
+
+# Paths
+BRIDGE_LOG = Path("/root/.hermes/whatsapp/bridge.log")
+GATEWAY_LOG = Path("/opt/shift-agent/logs/hermes-gateway.log")
+DECISIONS_LOG = Path("/opt/shift-agent/logs/decisions.log")
+
+# Tunables
+WATCHDOG_TIMEOUT_SECS = 30
+POLL_INTERVAL_SECS = 5
+NOTIFY_OWNER_BIN = "/usr/local/bin/shift-agent-notify-owner"
+IDENTIFY_SENDER_BIN = "/usr/local/bin/identify-sender"
+
+# Regex: detect text shapes that suggest a sick-call / shift-related employee message.
+# Conservative — biased toward false positives here is OK because the action is
+# "notify owner" not "auto-create state". Owner can ignore notifications.
+_SHIFT_SIGNAL_PATTERNS = [
+    re.compile(r"\b(?:sick|fever|cough|cold|stomach|headache|vomit|migraine|flu|food\s*poisoning)\b", re.IGNORECASE),
+    re.compile(r"\b(?:can'?t|cannot|won'?t|unable\s+to)\s+(?:come|make\s+it|work|attend)\b", re.IGNORECASE),
+    re.compile(r"\b(?:not\s+feeling|feeling\s+(?:unwell|bad|ill|under\s+the\s+weather))\b", re.IGNORECASE),
+    re.compile(r"\b(?:family\s+emergency|personal\s+emergency|hospital|doctor|emergency\s+room|er\b)\b", re.IGNORECASE),
+    re.compile(r"\b(?:miss(?:ing)?|skip(?:ping)?|cover|coverage)\s+(?:my\s+)?(?:shift|today|tomorrow|tonight|evening|morning)\b", re.IGNORECASE),
+    re.compile(r"\b(?:boss|sir|madam),?\s+(?:i'?m|i\s+am|today)\b", re.IGNORECASE),
+]
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _safe_unrepr(s: str) -> str:
+    s = s.strip()
+    if len(s) < 2:
+        return s
+    quote = s[0]
+    if quote not in ("'", '"') or s[-1] != quote:
+        return s
+    inner = s[1:-1]
+    try:
+        return json.loads('"' + inner.replace('"', '\\"').replace("\\'", "'") + '"')
+    except (ValueError, json.JSONDecodeError):
+        return inner
+
+
+def is_shift_relevant(text: str) -> tuple[bool, list[str]]:
+    """Return (is_shift_signal, matched_patterns)."""
+    if not text or len(text) < 4:
+        return False, ["too_short"]
+    matches: list[str] = []
+    for i, pat in enumerate(_SHIFT_SIGNAL_PATTERNS):
+        if pat.search(text):
+            matches.append(f"pat:{i}")
+    return (len(matches) > 0), matches
+
+
+def lid_to_role_and_name(lid_or_jid: str) -> tuple[str, str, Optional[str]]:
+    """Resolve a LID/JID to (role, name, employee_id) via identify-sender."""
+    try:
+        result = subprocess.run(
+            [IDENTIFY_SENDER_BIN, lid_or_jid],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return "unknown", "", None
+        doc = json.loads(result.stdout)
+        return doc.get("role", "unknown"), doc.get("name", ""), doc.get("employee_id")
+    except (subprocess.SubprocessError, json.JSONDecodeError, OSError):
+        return "unknown", "", None
+
+
+def find_dispatcher_routed_for(chat_id: str, since_ts: float) -> bool:
+    if not DECISIONS_LOG.exists():
+        return False
+    chat_lid_only = chat_id.split("@", 1)[0] if "@" in chat_id else chat_id
+    try:
+        with DECISIONS_LOG.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or "dispatcher_routed" not in line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if entry.get("type") != "dispatcher_routed":
+                    continue
+                ts_str = entry.get("ts", "")
+                try:
+                    ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
+                except (ValueError, AttributeError):
+                    continue
+                if ts < since_ts - 5:
+                    continue
+                sender_lid = entry.get("sender_lid") or ""
+                sender_phone = entry.get("sender_phone") or ""
+                if chat_lid_only in sender_lid or chat_lid_only in (sender_phone or "").lstrip("+"):
+                    return True
+    except OSError:
+        pass
+    return False
+
+
+def find_inbound_text_for(chat_id: str) -> Optional[str]:
+    if not GATEWAY_LOG.exists():
+        return None
+    chat_lid_only = chat_id.split("@", 1)[0] if "@" in chat_id else chat_id
+    pattern = re.compile(
+        r"inbound message: platform=\S+ user=\S+ chat=(\S+) msg=([^\n]+)$"
+    )
+    matches: list[str] = []
+    try:
+        with GATEWAY_LOG.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                m = pattern.search(line)
+                if not m:
+                    continue
+                line_chat = m.group(1)
+                line_chat_lid = line_chat.split("@", 1)[0] if "@" in line_chat else line_chat
+                if chat_lid_only != line_chat_lid:
+                    continue
+                msg_repr = m.group(2).strip()
+                msg = _safe_unrepr(msg_repr)
+                matches.append(str(msg))
+    except OSError:
+        return None
+    return matches[-1] if matches else None
+
+
+def emit_audit(entry_obj) -> None:
+    _ensure_audit_imports()
+    try:
+        _ndjson_append(DECISIONS_LOG, entry_obj.model_dump_json())
+    except Exception as e:
+        sys.stderr.write(f"audit emit failed (non-fatal): {e}\n")
+
+
+def _make_notified(**kwargs):
+    _ensure_audit_imports()
+    return _ShiftMissedDispatchNotified(**kwargs)
+
+
+def _make_suppressed(**kwargs):
+    _ensure_audit_imports()
+    return _ShiftMissedDispatchSuppressed(**kwargs)
+
+
+def notify_owner(message: str, title: str = "Shift Agent — missed dispatch") -> tuple[bool, str]:
+    """Shell out to shift-agent-notify-owner. Returns (success, detail)."""
+    try:
+        result = subprocess.run(
+            [NOTIFY_OWNER_BIN, "--title", title, message[:900]],
+            capture_output=True, text=True, timeout=20,
+        )
+        if result.returncode == 0:
+            return True, "notify ok"
+        return False, f"exit={result.returncode} stderr={result.stderr[:300]}"
+    except (subprocess.SubprocessError, OSError) as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+def process_inbound(chat_id: str, message_id: str, inbound_seen_ts: float) -> None:
+    deadline = inbound_seen_ts + WATCHDOG_TIMEOUT_SECS
+    while time.time() < deadline:
+        if find_dispatcher_routed_for(chat_id, inbound_seen_ts):
+            return
+        time.sleep(2)
+
+    role, name, employee_id = lid_to_role_and_name(chat_id)
+
+    if role != "employee":
+        emit_audit(_make_suppressed(
+            ts=_now_iso(), type="shift_missed_dispatch_suppressed",
+            chat_id=chat_id, message_id=message_id, reason="non_employee_role",
+            detail=f"role={role}",
+        ))
+        return
+
+    inbound_text = find_inbound_text_for(chat_id)
+    if not inbound_text:
+        emit_audit(_make_suppressed(
+            ts=_now_iso(), type="shift_missed_dispatch_suppressed",
+            chat_id=chat_id, message_id=message_id, reason="text_unavailable",
+            detail="gateway.log had no matching inbound message line",
+        ))
+        return
+
+    is_shift, signals = is_shift_relevant(inbound_text)
+    if not is_shift:
+        emit_audit(_make_suppressed(
+            ts=_now_iso(), type="shift_missed_dispatch_suppressed",
+            chat_id=chat_id, message_id=message_id, reason="not_shift_signal",
+            detail=f"text_preview={inbound_text[:80]!r}",
+        ))
+        return
+
+    notification = (
+        f"Possible missed sick-call from {name or 'employee'} ({employee_id or '?'}):\n\n"
+        f"\"{inbound_text[:400]}\"\n\n"
+        f"The shift dispatcher SKILL did not run within {WATCHDOG_TIMEOUT_SECS}s. "
+        f"Reply with #XXXXX command if you've already created a proposal manually, "
+        f"or use the cockpit to create one."
+    )
+    success, detail = notify_owner(notification)
+    emit_audit(_make_notified(
+        ts=_now_iso(), type="shift_missed_dispatch_notified",
+        chat_id=chat_id, message_id=message_id, employee_id=employee_id or "",
+        employee_name=name or "", signals=signals, success=success,
+        detail=detail[:2000],
+    ))
+
+
+def follow_bridge_log() -> None:
+    seen_message_ids: set[str] = set()
+    notify_pattern = re.compile(
+        r'\{"event":"upsert","type":"notify","fromMe":false,'
+        r'"chatId":"([^"]+)","senderId":"([^"]+)","messageKeys":\[([^\]]+)\]\}'
+    )
+
+    if not BRIDGE_LOG.exists():
+        sys.stderr.write(f"bridge log not found: {BRIDGE_LOG}\n")
+        sys.exit(2)
+
+    with BRIDGE_LOG.open("r", encoding="utf-8", errors="replace") as f:
+        f.seek(0, os.SEEK_END)
+        while True:
+            line = f.readline()
+            if not line:
+                time.sleep(POLL_INTERVAL_SECS)
+                continue
+            m = notify_pattern.search(line)
+            if not m:
+                continue
+            chat_id, _sender_id, _keys = m.group(1), m.group(2), m.group(3)
+            if chat_id == "status@broadcast" or chat_id.endswith("@g.us"):
+                continue
+            message_id = f"bridge_emp_notify_{chat_id}_{int(time.time()*1000)}"
+            if message_id in seen_message_ids:
+                continue
+            seen_message_ids.add(message_id)
+            if len(seen_message_ids) > 1000:
+                seen_message_ids = set(list(seen_message_ids)[-500:])
+            try:
+                process_inbound(chat_id, message_id, time.time())
+            except Exception as e:
+                sys.stderr.write(f"process_inbound failed (non-fatal): {e}\n")
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--text", help="(test mode) classify this text and exit")
+    args = p.parse_args()
+
+    if args.text is not None:
+        is_shift, signals = is_shift_relevant(args.text)
+        print(json.dumps({"is_shift_signal": is_shift, "signals": signals}))
+        return 0
+
+    sys.stderr.write(
+        f"shift-missed-dispatch-notifier starting; tailing {BRIDGE_LOG}, "
+        f"timeout={WATCHDOG_TIMEOUT_SECS}s\n"
+    )
+    follow_bridge_log()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
