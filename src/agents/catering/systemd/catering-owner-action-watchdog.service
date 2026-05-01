@@ -1,0 +1,34 @@
+[Unit]
+Description=Catering Owner-Action Watchdog — F8 absorbing shim for missed owner #XXXXX (approve|reject) commands (Hermes WhatsApp lacks auto_skill binding)
+After=network-online.target hermes-gateway.service
+Wants=network-online.target
+PartOf=hermes-gateway.service
+
+[Service]
+Type=simple
+User=shift-agent
+Group=shift-agent
+EnvironmentFile=/opt/shift-agent/.env
+Environment=HOME=/opt/shift-agent
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+
+ExecStart=/root/.hermes/hermes-agent/venv/bin/python /usr/local/bin/catering-owner-action-watchdog
+Restart=on-failure
+RestartSec=10
+StartLimitInterval=300
+StartLimitBurst=10
+
+StandardOutput=append:/opt/shift-agent/logs/catering-owner-action-watchdog.log
+StandardError=append:/opt/shift-agent/logs/catering-owner-action-watchdog.log
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadOnlyPaths=/root/.hermes
+ReadWritePaths=/opt/shift-agent
+ProtectHome=read-only
+PrivateTmp=true
+RuntimeDirectory=shift-agent
+RuntimeDirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target

@@ -2069,6 +2069,44 @@ class CateringDispatcherWatchdogSuppressed(_BaseEntry):
     detail: str = Field(default="", max_length=2000)
 
 
+class CateringOwnerActionWatchdogFired(_BaseEntry):
+    """F8 2026-05-01: catering-owner-action-watchdog detected a missed owner
+    `#XXXXX (approve|reject)` command and triggered the fallback
+    apply-catering-owner-decision invocation. Companion to
+    CateringOwnerActionWatchdogSuppressed.
+
+    Same root cause as F7 (Hermes WhatsApp lacks auto_skill binding) but on
+    the owner-side path. Approve fallback uses a deterministic minimal
+    quote text built from extracted headcount + event_date (truth-guard
+    compliant). Reject fallback passes through with reason="watchdog_owner_fallback".
+    """
+    type: Literal["catering_owner_action_watchdog_fired"]
+    chat_id: str = Field(min_length=1, max_length=200)
+    message_id: str = Field(min_length=1, max_length=200)
+    code: str = Field(pattern=r"^#[A-HJ-NP-Z2-9]{5}$")
+    action: Literal["approve", "reject"]
+    lead_id: str = Field(min_length=0, max_length=20)
+    success: bool
+    detail: str = Field(default="", max_length=2000)
+
+
+class CateringOwnerActionWatchdogSuppressed(_BaseEntry):
+    """F8 2026-05-01: watchdog intentionally did NOT fire the fallback. Reasons:
+    - code_not_found: no lead with matching owner_approval_code
+    - lead_terminal_state: lead already CLOSED/REJECTED/etc.
+    - action_unsupported_by_watchdog: edit/wait need LLM-side handling
+    """
+    type: Literal["catering_owner_action_watchdog_suppressed"]
+    chat_id: str = Field(min_length=1, max_length=200)
+    message_id: str = Field(min_length=1, max_length=200)
+    code: str = Field(pattern=r"^#[A-HJ-NP-Z2-9]{5}$")
+    action: Literal["approve", "reject", "edit", "wait"]
+    reason: Literal[
+        "code_not_found", "lead_terminal_state", "action_unsupported_by_watchdog",
+    ]
+    detail: str = Field(default="", max_length=2000)
+
+
 class CateringQuoteRenderFailed(_BaseEntry):
     """v0.3 (review M2): emitted when apply-catering-owner-decision approve
     flow fails to render the customer quote (template KeyError, OSError,
@@ -2227,6 +2265,9 @@ LogEntry = Annotated[
         # F7 2026-05-01: dispatcher watchdog (missed-SKILL recovery)
         Annotated[CateringDispatcherWatchdogFired, Tag("catering_dispatcher_watchdog_fired")],
         Annotated[CateringDispatcherWatchdogSuppressed, Tag("catering_dispatcher_watchdog_suppressed")],
+        # F8 2026-05-01: owner-action watchdog (missed #XXXXX approve/reject recovery)
+        Annotated[CateringOwnerActionWatchdogFired, Tag("catering_owner_action_watchdog_fired")],
+        Annotated[CateringOwnerActionWatchdogSuppressed, Tag("catering_owner_action_watchdog_suppressed")],
         # PR-D1: config load observability + operator reconcile audit
         Annotated[ConfigLoadFailed, Tag("config_load_failed")],
         Annotated[CateringLeadManuallyReconciled, Tag("catering_lead_manually_reconciled")],
@@ -2346,5 +2387,7 @@ __all__ = [
     "CateringCustomerAckSent", "CateringCustomerAckFailed",
     # F7 2026-05-01 (catering dispatcher watchdog)
     "CateringDispatcherWatchdogFired", "CateringDispatcherWatchdogSuppressed",
+    # F8 2026-05-01 (catering owner-action watchdog)
+    "CateringOwnerActionWatchdogFired", "CateringOwnerActionWatchdogSuppressed",
     "MenuUpdateProposed", "MenuUpdateApplied", "MenuUpdateRejected",
 ]
