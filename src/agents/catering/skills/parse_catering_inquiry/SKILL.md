@@ -129,13 +129,51 @@ The script will:
 
 DO NOT send the customer a quote. DO NOT promise pricing.
 
+**Reply MUST be prefixed with the agent header** to bypass the WhatsApp
+bridge's outbound filter. Without this prefix, replies matching LLM-narration
+patterns (`Thanks for`, `I'll`, `I understand`, etc.) are silently dropped
+by the bridge as `reason=announcement`. The header triggers `template_bypass`
+in the bridge. See `bridge.js:133` for the exact regex match:
+
+```
+/^⚕ \*[A-Za-z][A-Za-z ]*\*\n[─\-]+\n/
+```
+
+Important constraint: agent name MUST be `[A-Za-z ]+` (letters and spaces
+only). No digits, no hyphens, no punctuation in the agent name slot.
+
+**EXACT format below — copy these examples verbatim, including the REAL
+newline characters between lines.** The triple-backtick code fences below
+contain literal newline characters (U+000A). When you emit the message,
+press Enter at each line break — do NOT emit the two-character escape
+sequence `\` + `n` as text. The bridge regex requires real newlines.
+
 You may send ONE brief acknowledgment if the inquiry was clear enough to
-process: *"Thanks — we got your inquiry, we'll be back to you shortly."*
+process:
+
+```
+⚕ *Catering Agent*
+────────────
+Thanks — we got your inquiry, we'll be back to you shortly.
+```
 
 If extraction was unclear (e.g., no headcount, no date, vague intent), you
-may instead reply: *"Thanks for reaching out. To help, can you share the
-date and headcount?"* — but DO NOT loop on this. ONE clarifying reply max,
-then escalate to the owner via the lead state.
+may instead reply with the same prefix:
+
+```
+⚕ *Catering Agent*
+────────────
+Thanks for reaching out. To help, can you share the date and headcount?
+```
+
+DO NOT loop on this. ONE clarifying reply max, then escalate to the owner
+via the lead state.
+
+**Hard rule on the prefix:** the bridge filter is defense-in-depth against
+LLM internal monologue (`I'll process X`, `Let me check Y`). The
+`⚕ *Catering Agent*` header signals "this is a deliberate customer-facing
+message, not LLM thinking-aloud." Skipping the prefix = customer never
+receives the reply.
 
 ## Hard rules
 
