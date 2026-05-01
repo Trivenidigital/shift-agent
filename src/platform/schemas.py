@@ -443,6 +443,7 @@ CateringLeadStatus = Literal[
     "EXTRACTING",               # extractor running (LLM)
     "NOT_CATERING",             # classifier said no (terminal)
     "AWAITING_OWNER_APPROVAL",  # quote drafted; owner needs to approve
+    "CUSTOMER_FINALIZED",       # PR-CF1: customer locked in selected_items
     "OWNER_APPROVED",           # owner said go
     "OWNER_EDITED",             # owner sent edits; re-draft pending
     "OWNER_REJECTED",           # owner declined (terminal)
@@ -471,8 +472,17 @@ CATERING_TRANSITIONS: dict[CateringLeadStatus, set[CateringLeadStatus]] = {
     "NEW": {"EXTRACTING", "NOT_CATERING"},
     "EXTRACTING": {"AWAITING_OWNER_APPROVAL", "NOT_CATERING"},
     "NOT_CATERING": set(),                                                # terminal
-    "AWAITING_OWNER_APPROVAL": {"OWNER_APPROVED", "OWNER_EDITED", "OWNER_REJECTED", "STALE"},
-    "OWNER_EDITED": {"AWAITING_OWNER_APPROVAL", "OWNER_REJECTED"},
+    "AWAITING_OWNER_APPROVAL": {
+        "OWNER_APPROVED", "OWNER_EDITED", "OWNER_REJECTED", "STALE",
+        "CUSTOMER_FINALIZED",  # PR-CF1
+    },
+    "CUSTOMER_FINALIZED": {  # PR-CF1
+        "OWNER_APPROVED", "OWNER_EDITED", "OWNER_REJECTED", "STALE",
+    },
+    "OWNER_EDITED": {
+        "AWAITING_OWNER_APPROVAL", "OWNER_REJECTED",
+        "CUSTOMER_FINALIZED",  # PR-CF1: customer can re-finalize after owner edits
+    },
     # Review L8: OWNER_APPROVED → AWAITING_OWNER_APPROVAL covers
     # retry-from-failure. If apply-script approve flow crashes after the
     # state-write but before customer-quote send (or the bridge POST
@@ -558,8 +568,27 @@ class CateringLeadExtractedFields(BaseModel):
         return v
 
 
+class CateringSelectedItem(BaseModel):
+    """One item in a customer-finalized catering menu (PR-CF1).
+
+    Whole-dollar prices to mirror CateringLeadExtractedFields.budget_hint_usd
+    convention and avoid float-rounding error on `qty * price` accumulation
+    in finalize-catering-menu's server recompute.
+    """
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=200)
+    qty: int = Field(ge=1, le=500)
+    price_usd: int = Field(ge=0)
+
+
 class CateringLead(BaseModel):
-    """One catering lead — full lifecycle from inquiry to closure."""
+    """One catering lead — full lifecycle from inquiry to closure.
+
+    quote_text contract (PR-CF1): populated ONLY by apply-catering-owner-decision
+    on owner approve. Pre-approval lifecycle (NEW, AWAITING_OWNER_APPROVAL,
+    CUSTOMER_FINALIZED, OWNER_EDITED) uses the F14 proposal template rendered
+    by create-catering-lead. finalize-catering-menu does NOT write quote_text.
+    """
     model_config = ConfigDict(extra="forbid")
     lead_id: str = Field(min_length=1)
     status: CateringLeadStatus
@@ -574,6 +603,29 @@ class CateringLead(BaseModel):
     quote_version: int = Field(default=0, ge=0)
     owner_approval_code: Optional[ProposalCode] = None  # reuses Shift's pattern
     customer_replied: bool = False
+
+    # PR-CF1: customer-finalized menu fields. All default-empty so legacy
+    # leads (pre-finalize) decode unchanged. Set only by finalize-catering-menu
+    # under FileLock(LEADS_LOCK).
+    selected_items: list[CateringSelectedItem] = Field(
+        default_factory=list, max_length=50,
+        description="Customer-curated menu at finalize time",
+    )
+    quote_total_usd: Optional[int] = Field(
+        default=None, ge=0,
+        description="Server-recomputed sum(qty*price). Source of truth; "
+                    "LLM-passed total is cross-check only.",
+    )
+    customer_finalized_at: Optional[datetime] = Field(
+        default=None,
+        description="Timestamp of first finalize. Re-finalize via different "
+                    "customer_message_id refreshes this; replay does not.",
+    )
+    last_finalize_message_id: Optional[str] = Field(
+        default=None, min_length=1, max_length=200,
+        description="Idempotency anchor — bridge messageId of customer's "
+                    "finalize message. Same id seen twice => no-op replay.",
+    )
 
     # v0.3: post-AWAITING statuses require non-empty quote_text. Legacy data
     # (pre-v0.3 leads with empty quote_text) is backfilled with sentinel by
@@ -612,8 +664,10 @@ class CateringLead(BaseModel):
         if not isinstance(data, dict):
             return data
         status = data.get("status")
-        post_awaiting = {"AWAITING_OWNER_APPROVAL", "OWNER_APPROVED", "OWNER_EDITED",
-                         "SENT_TO_CUSTOMER"}
+        post_awaiting = {
+            "AWAITING_OWNER_APPROVAL", "CUSTOMER_FINALIZED",  # PR-CF1
+            "OWNER_APPROVED", "OWNER_EDITED", "SENT_TO_CUSTOMER",
+        }
         if status in post_awaiting and not (data.get("quote_text", "") or "").strip():
             sys.stderr.write(
                 f"WARN: legacy quote_text=empty on lead_id={data.get('lead_id')!r} "
@@ -624,8 +678,10 @@ class CateringLead(BaseModel):
 
     @model_validator(mode="after")
     def _quote_required_post_awaiting(self) -> "CateringLead":
-        post_awaiting = {"AWAITING_OWNER_APPROVAL", "OWNER_APPROVED", "OWNER_EDITED",
-                         "SENT_TO_CUSTOMER"}
+        post_awaiting = {
+            "AWAITING_OWNER_APPROVAL", "CUSTOMER_FINALIZED",  # PR-CF1
+            "OWNER_APPROVED", "OWNER_EDITED", "SENT_TO_CUSTOMER",
+        }
         if self.status in post_awaiting and not self.quote_text.strip():
             raise ValueError(
                 f"status={self.status!r} requires non-empty quote_text"
@@ -1991,8 +2047,46 @@ class CateringQuoteSkillFailed(_BaseEntry):
         "apply_decision_nonzero",   # SKILL detected non-zero exit (catch-all)
         "llm_unreachable",          # Hermes gateway unavailable (SKILL-side)
         "llm_malformed_response",   # gateway returned non-text/empty/error
+        "finalized_total_missing_from_quote",      # PR-CF1: soft-warn (apply-script Change 5A)
+        "owner_approve_without_customer_finalize", # PR-CF1: hard-fail (apply-script Change 5B)
     ]
     detail: str = Field(default="", max_length=2000)
+
+
+class CateringMenuFinalized(_BaseEntry):
+    """PR-CF1: customer finalized their catering menu, owner approval card sent.
+
+    `outcome` distinguishes success from quote-mismatch rejection so audit
+    consumers can filter cleanly without numeric heuristics.
+
+    `replay=true` is set when the same `last_finalize_message_id` is seen
+    twice — state is unchanged, owner card NOT resent (rate-limited 60s).
+    `suppressed=true` is set when replay AND a recent owner-card send was
+    detected within the cooldown window.
+
+    `price_drift_detected=true` is set when one or more selected items had a
+    different price in the current menu than what the LLM passed; we use the
+    CURRENT menu price (server-authoritative). Owner card includes a
+    `price_drift_note` line so the owner is aware.
+
+    `prior_total_usd` and `prior_item_count` are populated only on re-finalize
+    (different `customer_message_id` while status was already CUSTOMER_FINALIZED
+    or after OWNER_EDITED) — gives operator visibility into customer revisions.
+    """
+    type: Literal["catering_menu_finalized"]
+    outcome: Literal["finalized", "rejected_quote_mismatch"]
+    lead_id: str = Field(min_length=1)
+    customer_phone: E164Phone
+    item_count: int = Field(ge=0, le=50)             # 0 allowed for outcome=rejected
+    server_recompute_usd: int = Field(ge=0)          # source of truth
+    llm_passed_total_usd: int = Field(ge=0)          # what LLM claimed (audit-only)
+    quote_total_usd: int = Field(ge=0)               # = server_recompute_usd on success; 0 on rejection
+    owner_card_outbound_id: str = Field(default="", max_length=200)
+    replay: bool = False
+    suppressed: bool = False
+    price_drift_detected: bool = False
+    prior_total_usd: Optional[int] = Field(default=None, ge=0)
+    prior_item_count: Optional[int] = Field(default=None, ge=0)
 
 
 class CateringCustomerAckSent(_BaseEntry):
@@ -2292,6 +2386,9 @@ LogEntry = Annotated[
         Annotated[CateringQuoteSentLeadMissing, Tag("catering_quote_sent_lead_missing")],
         # PR-B v0.4: SKILL → apply-script handoff failure (LLM-drafted quote)
         Annotated[CateringQuoteSkillFailed, Tag("catering_quote_skill_failed")],
+        # PR-CF1: customer-finalize-menu audit (one variant for success + rejection,
+        # discriminated by `outcome` field — no Tag-union bloat)
+        Annotated[CateringMenuFinalized, Tag("catering_menu_finalized")],
         # F5b 2026-05-01: customer-ack outbound observability (parse-inquiry path)
         Annotated[CateringCustomerAckSent, Tag("catering_customer_ack_sent")],
         Annotated[CateringCustomerAckFailed, Tag("catering_customer_ack_failed")],
@@ -2419,6 +2516,8 @@ __all__ = [
     "CateringLeadManuallyReconciled",
     # PR-B v0.4
     "CateringQuoteSkillFailed",
+    # PR-CF1
+    "CateringSelectedItem", "CateringMenuFinalized",
     # F5b 2026-05-01
     "CateringCustomerAckSent", "CateringCustomerAckFailed",
     # F7 2026-05-01 (catering dispatcher watchdog)
