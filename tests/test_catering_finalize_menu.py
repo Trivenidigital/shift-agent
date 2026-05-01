@@ -158,7 +158,6 @@ def _run_script(env_dir, bridge_port, **kwargs):
         "customer_message_id": kwargs.get("customer_message_id", "msg_finalize_001"),
         "selected_items_json": kwargs.get("selected_items_json", '[{"name":"Aloo Paratha","qty":2,"price_usd":4}]'),
         "quote_total_usd": kwargs.get("quote_total_usd", 8),
-        "customer_message_text": kwargs.get("customer_message_text", "send to owner for approval"),
     }
     sys_argv = [
         "finalize-catering-menu",
@@ -166,7 +165,6 @@ def _run_script(env_dir, bridge_port, **kwargs):
         "--customer-message-id", args_dict["customer_message_id"],
         "--selected-items-json", args_dict["selected_items_json"],
         "--quote-total-usd", str(args_dict["quote_total_usd"]),
-        "--customer-message-text", args_dict["customer_message_text"],
     ]
     wrapper = f"""
 import sys, pathlib, json, io
@@ -256,7 +254,11 @@ class TestHappyPath:
         assert lead["quote_total_usd"] == 23
         assert lead["customer_finalized_at"] is not None
         assert lead["last_finalize_message_id"] == "msg_finalize_001"
-        assert len(lead["selected_items"]) == 2
+        # R3.TQ: exact round-trip of selected_items (was: only count check)
+        assert lead["selected_items"] == [
+            {"name": "Aloo Paratha", "qty": 2, "price_usd": 4},
+            {"name": "Gulab Jamun", "qty": 5, "price_usd": 3},
+        ]
         assert len(stub.requests) == 1  # owner card sent
         audit = _read_audit(env_dir)
         types = [r["type"] for r in audit]
@@ -484,3 +486,276 @@ class TestEdgeCases:
         assert lead["selected_items"][0]["price_usd"] == 5  # current, NOT stale 4
         audit = [r for r in _read_audit(env_dir) if r["type"] == "catering_menu_finalized"]
         assert audit[0]["price_drift_detected"] is True
+
+
+# ============================================================================
+# PR-CF1 review-fix coverage (R3 BLOCKER-COVERAGE + R1.M1)
+# ============================================================================
+
+class TestToleranceBoundary:
+    """R3.BC3 — boundary tests for min(5%, $25) tolerance cap."""
+
+    def _menu_for_total(self, env_dir, server_total: int) -> None:
+        # Single item priced 1; qty equals server_total => total is server_total
+        _seed_menu(env_dir, [{
+            "name": "Aloo Paratha", "price_usd": 1.0, "category": "side",
+            "dietary_tags": ["veg"], "available": True, "notes": "", "serves": None,
+        }])
+
+    def test_dollar_cap_at_boundary_passes(self, bridge_server, env_dir):
+        """server=$1000, llm=$1025 (diff=$25, exactly at cap) => exit 0."""
+        port, _ = bridge_server
+        self._menu_for_total(env_dir, 1000)
+        _seed_lead(env_dir, "L0001", "#ABCDE")
+        items = [{"name": "Aloo Paratha", "qty": 1000, "price_usd": 1}]
+        _, parsed = _run_script(env_dir, port,
+            selected_items_json=json.dumps(items), quote_total_usd=1025)
+        assert parsed["rc"] == 0
+
+    def test_dollar_cap_one_over_boundary_fails(self, bridge_server, env_dir):
+        """server=$1000, llm=$1026 (diff=$26, one over $25 cap) => exit 11."""
+        port, _ = bridge_server
+        self._menu_for_total(env_dir, 1000)
+        _seed_lead(env_dir, "L0001", "#ABCDE")
+        items = [{"name": "Aloo Paratha", "qty": 1000, "price_usd": 1}]
+        _, parsed = _run_script(env_dir, port,
+            selected_items_json=json.dumps(items), quote_total_usd=1026)
+        assert parsed["rc"] == 11
+
+    def test_pct_branch_under_cap_passes(self, bridge_server, env_dir):
+        """server=$100, llm=$104 (diff=$4 = 4%, under 5% pct cap of $5) => 0.
+
+        At server=$100, min(5%=$5, $25) = $5; $4 <= $5 passes.
+        """
+        port, _ = bridge_server
+        self._menu_for_total(env_dir, 100)
+        _seed_lead(env_dir, "L0001", "#ABCDE")
+        items = [{"name": "Aloo Paratha", "qty": 100, "price_usd": 1}]
+        _, parsed = _run_script(env_dir, port,
+            selected_items_json=json.dumps(items), quote_total_usd=104)
+        assert parsed["rc"] == 0
+
+    def test_pct_branch_over_cap_fails(self, bridge_server, env_dir):
+        """server=$100, llm=$106 (diff=$6 = 6%, over 5% pct cap of $5) => 11.
+
+        At server=$100, min(5%=$5, $25) = $5; $6 > $5 fails.
+        """
+        port, _ = bridge_server
+        self._menu_for_total(env_dir, 100)
+        _seed_lead(env_dir, "L0001", "#ABCDE")
+        items = [{"name": "Aloo Paratha", "qty": 100, "price_usd": 1}]
+        _, parsed = _run_script(env_dir, port,
+            selected_items_json=json.dumps(items), quote_total_usd=106)
+        assert parsed["rc"] == 11
+
+
+class TestReplayTotalConsistency:
+    """R2.B2 — on replay, owner card total MUST come from persisted
+    quote_total_usd, NOT from a fresh server recompute. Otherwise the
+    line items (persisted prices) and total (fresh prices) disagree
+    when the menu drifts between first finalize and replay.
+    """
+
+    def test_replay_uses_persisted_total_after_menu_drift(self, bridge_server, env_dir):
+        port, stub = bridge_server
+        _seed_menu(env_dir, DEFAULT_MENU)  # Aloo Paratha @ $4
+        _seed_lead(env_dir, "L0001", "#ABCDE")
+        items = [{"name": "Aloo Paratha", "qty": 10, "price_usd": 4}]
+        # First finalize at $40
+        _, parsed1 = _run_script(env_dir, port,
+            customer_message_id="msg_replay_drift",
+            selected_items_json=json.dumps(items), quote_total_usd=40)
+        assert parsed1["rc"] == 0
+        first_card = stub.requests[0]["message"]
+        assert "$40" in first_card  # baseline
+
+        # Menu drifts to $5/item (sleep past 60s cooldown so replay sends card)
+        new_menu = [{"name": "Aloo Paratha", "price_usd": 5.0, "category": "side",
+                     "dietary_tags": ["veg"], "available": True, "notes": "", "serves": None}]
+        _seed_menu(env_dir, new_menu)
+        # Manipulate audit timestamp to bypass 60s cooldown without sleeping.
+        log_path = env_dir / "logs" / "decisions.log"
+        original = log_path.read_text(encoding="utf-8")
+        # Rewrite ts on existing finalized rows to be 2 hours ago.
+        from datetime import datetime, timezone, timedelta
+        old_ts = (datetime.now(tz=timezone.utc) - timedelta(hours=2)).isoformat()
+        rewritten = []
+        for line in original.splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if row.get("type") == "catering_menu_finalized":
+                row["ts"] = old_ts
+            rewritten.append(json.dumps(row))
+        log_path.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
+
+        # Replay (same message_id, same items — but server recompute is now $50)
+        items_replay = [{"name": "Aloo Paratha", "qty": 10, "price_usd": 4}]
+        _, parsed2 = _run_script(env_dir, port,
+            customer_message_id="msg_replay_drift",
+            selected_items_json=json.dumps(items_replay), quote_total_usd=40)
+        assert parsed2["rc"] == 0
+        # 2nd card sent (cooldown bypassed via ts rewrite)
+        assert len(stub.requests) == 2
+        replay_card = stub.requests[1]["message"]
+        # The replay card MUST use persisted $40 (not fresh server $50).
+        assert "$40" in replay_card, f"Replay card should show persisted $40, got: {replay_card}"
+        assert "$50" not in replay_card or replay_card.count("$50") < replay_card.count("$40")
+
+
+class TestReFinalizeAudit:
+    """R2.B1 — re-finalize from CUSTOMER_FINALIZED MUST emit a
+    catering_lead_status_change row (from=CUSTOMER_FINALIZED, to=CUSTOMER_FINALIZED,
+    reason=customer_re_finalized_menu) so the audit chain captures customer
+    mind-changes for routing-reliability monitoring.
+    """
+
+    def test_re_finalize_emits_status_change_audit(self, bridge_server, env_dir):
+        port, _ = bridge_server
+        _seed_menu(env_dir, DEFAULT_MENU)
+        _seed_lead(env_dir, "L0001", "#ABCDE")
+        items_a = [{"name": "Aloo Paratha", "qty": 2, "price_usd": 4}]
+        _, p1 = _run_script(env_dir, port,
+            customer_message_id="msg_v1",
+            selected_items_json=json.dumps(items_a), quote_total_usd=8)
+        assert p1["rc"] == 0
+        items_b = [{"name": "Gulab Jamun", "qty": 10, "price_usd": 3}]
+        _, p2 = _run_script(env_dir, port,
+            customer_message_id="msg_v2",
+            selected_items_json=json.dumps(items_b), quote_total_usd=30)
+        assert p2["rc"] == 0
+        status_changes = [r for r in _read_audit(env_dir)
+                          if r["type"] == "catering_lead_status_change"]
+        # Two status_change rows: one for AWAITING -> CUSTOMER_FINALIZED, one
+        # for CUSTOMER_FINALIZED -> CUSTOMER_FINALIZED (re-finalize).
+        assert len(status_changes) == 2
+        first, second = status_changes
+        assert first["from_status"] == "AWAITING_OWNER_APPROVAL"
+        assert first["to_status"] == "CUSTOMER_FINALIZED"
+        assert first["reason"] == "customer_finalized_menu"
+        assert second["from_status"] == "CUSTOMER_FINALIZED"
+        assert second["to_status"] == "CUSTOMER_FINALIZED"
+        assert second["reason"] == "customer_re_finalized_menu"
+
+
+class TestCooldownSuppression:
+    """R3.HC — replay within 60s suppresses owner-card resend; replay outside
+    cooldown sends a fresh card. Both audit rows have replay=True; suppressed
+    differs.
+    """
+
+    def test_replay_within_cooldown_suppresses_card(self, bridge_server, env_dir):
+        port, stub = bridge_server
+        _seed_menu(env_dir, DEFAULT_MENU)
+        _seed_lead(env_dir, "L0001", "#ABCDE")
+        items = [{"name": "Aloo Paratha", "qty": 2, "price_usd": 4}]
+        _, p1 = _run_script(env_dir, port,
+            customer_message_id="msg_cool",
+            selected_items_json=json.dumps(items), quote_total_usd=8)
+        assert p1["rc"] == 0
+        assert len(stub.requests) == 1
+        # Replay immediately (within 60s)
+        _, p2 = _run_script(env_dir, port,
+            customer_message_id="msg_cool",
+            selected_items_json=json.dumps(items), quote_total_usd=8)
+        assert p2["rc"] == 0
+        assert len(stub.requests) == 1  # NO second card
+        finalized = [r for r in _read_audit(env_dir)
+                     if r["type"] == "catering_menu_finalized"]
+        assert len(finalized) == 2
+        assert finalized[1]["replay"] is True
+        assert finalized[1]["suppressed"] is True
+
+    def test_replay_outside_cooldown_resends_card(self, bridge_server, env_dir):
+        """Bypass 60s cooldown by rewriting log ts to 2h ago."""
+        port, stub = bridge_server
+        _seed_menu(env_dir, DEFAULT_MENU)
+        _seed_lead(env_dir, "L0001", "#ABCDE")
+        items = [{"name": "Aloo Paratha", "qty": 2, "price_usd": 4}]
+        _, p1 = _run_script(env_dir, port,
+            customer_message_id="msg_cool",
+            selected_items_json=json.dumps(items), quote_total_usd=8)
+        assert p1["rc"] == 0
+        # Rewrite finalized row ts to 2h ago
+        log_path = env_dir / "logs" / "decisions.log"
+        from datetime import datetime, timezone, timedelta
+        old_ts = (datetime.now(tz=timezone.utc) - timedelta(hours=2)).isoformat()
+        rewritten = []
+        for line in log_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if row.get("type") == "catering_menu_finalized":
+                row["ts"] = old_ts
+            rewritten.append(json.dumps(row))
+        log_path.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
+        # Replay
+        _, p2 = _run_script(env_dir, port,
+            customer_message_id="msg_cool",
+            selected_items_json=json.dumps(items), quote_total_usd=8)
+        assert p2["rc"] == 0
+        assert len(stub.requests) == 2  # second card sent
+        finalized = [r for r in _read_audit(env_dir)
+                     if r["type"] == "catering_menu_finalized"]
+        assert finalized[-1]["replay"] is True
+        assert finalized[-1]["suppressed"] is False
+
+
+class TestQuoteMismatchAuditLeadId:
+    """R1.M1 / R3.OB-Blocker — quote-mismatch audit row MUST use the actual
+    lead_id when the lead exists, NOT the placeholder '(quote-mismatch)'.
+    """
+
+    def test_mismatch_audit_uses_actual_lead_id(self, bridge_server, env_dir):
+        port, _ = bridge_server
+        _seed_menu(env_dir, DEFAULT_MENU)
+        _seed_lead(env_dir, "L0042", "#ABCDE")
+        items = [{"name": "Chicken Biryani", "qty": 100, "price_usd": 15}]
+        _, parsed = _run_script(env_dir, port,
+            selected_items_json=json.dumps(items), quote_total_usd=2000)  # off by 500
+        assert parsed["rc"] == 11
+        audit = [r for r in _read_audit(env_dir) if r["type"] == "catering_menu_finalized"]
+        assert len(audit) == 1
+        assert audit[0]["outcome"] == "rejected_quote_mismatch"
+        assert audit[0]["lead_id"] == "L0042"  # actual, NOT '(quote-mismatch)'
+
+
+class TestConcurrency:
+    """R3.BC4 — two parallel finalize calls on same code with DIFFERENT
+    customer_message_ids must serialize cleanly under LEADS_LOCK. Final state
+    reflects whichever finalize won the race; both audit rows emitted with
+    replay=False.
+    """
+
+    def test_parallel_finalizes_serialize(self, bridge_server, env_dir):
+        port, _ = bridge_server
+        _seed_menu(env_dir, DEFAULT_MENU)
+        _seed_lead(env_dir, "L0001", "#ABCDE")
+
+        results: list = []
+        def run_once(mid: str, qty: int):
+            items = [{"name": "Aloo Paratha", "qty": qty, "price_usd": 4}]
+            _, parsed = _run_script(env_dir, port,
+                customer_message_id=mid,
+                selected_items_json=json.dumps(items),
+                quote_total_usd=qty * 4)
+            results.append((mid, parsed))
+
+        t1 = threading.Thread(target=run_once, args=("msg_par_a", 3))
+        t2 = threading.Thread(target=run_once, args=("msg_par_b", 7))
+        t1.start(); t2.start()
+        t1.join(timeout=15); t2.join(timeout=15)
+
+        assert len(results) == 2
+        for _, parsed in results:
+            assert parsed["rc"] == 0
+        # Final lead state matches one of the two
+        lead = _read_lead(env_dir, "#ABCDE")
+        assert lead["status"] == "CUSTOMER_FINALIZED"
+        assert lead["last_finalize_message_id"] in {"msg_par_a", "msg_par_b"}
+        # Two finalized audit rows; both replay=False (real finalizes, not idempotent)
+        finalized = [r for r in _read_audit(env_dir)
+                     if r["type"] == "catering_menu_finalized"]
+        assert len(finalized) == 2
+        for row in finalized:
+            assert row["replay"] is False
