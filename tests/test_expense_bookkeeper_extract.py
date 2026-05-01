@@ -38,14 +38,20 @@ EXTRACT_SCRIPT = (
 
 @pytest.fixture(scope="module")
 def extract_mod():
-    """Load extract-receipt as a module; suppress __main__ block."""
+    """Load extract-receipt as a module; suppress __main__ block.
+
+    Uses SourceFileLoader explicitly because the script has no .py extension
+    — Python 3.12 spec_from_file_location returns None for unrecognised
+    suffixes, which is what blocked Linux test execution pre-fix (E2E
+    Layer A finding 2026-05-01).
+    """
+    from importlib.machinery import SourceFileLoader
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src" / "platform"))
-    spec = importlib.util.spec_from_file_location(
-        "extract_receipt_test", str(EXTRACT_SCRIPT)
-    )
+    loader = SourceFileLoader("extract_receipt_test", str(EXTRACT_SCRIPT))
+    spec = importlib.util.spec_from_loader("extract_receipt_test", loader)
     mod = importlib.util.module_from_spec(spec)
     mod.__name__ = "extract_receipt_test"
-    spec.loader.exec_module(mod)
+    loader.exec_module(mod)
     return mod
 
 

@@ -127,19 +127,26 @@ def _load_apply(env_dir, bridge_port):
     Note: tests that need frozen time use injected received_at / pushed_at
     on seeded leads — the script uses datetime.now(timezone.utc) directly
     and isn't easily freezable without deeper refactor."""
+    # Uses SourceFileLoader explicitly because the script has no .py
+    # extension — Python 3.12 spec_from_file_location returns None for
+    # unrecognised suffixes (E2E Layer A finding 2026-05-01).
+    from importlib.machinery import SourceFileLoader
     os.environ["EXPENSE_RECEIPTS_DIR"] = str(env_dir / "state" / "expense-bookkeeper" / "receipts") + "/"
-    spec = importlib.util.spec_from_file_location(
-        "apply_expense_decision_test", str(APPLY_PATH)
-    )
+    loader = SourceFileLoader("apply_expense_decision_test", str(APPLY_PATH))
+    spec = importlib.util.spec_from_loader("apply_expense_decision_test", loader)
     mod = importlib.util.module_from_spec(spec)
     mod.__name__ = "apply_expense_decision_test"  # suppress __main__
-    spec.loader.exec_module(mod)
+    loader.exec_module(mod)
     mod.CONFIG_PATH = env_dir / "config.yaml"
     mod.LEADS_PATH = env_dir / "state" / "expense-bookkeeper" / "leads.json"
     mod.LEADS_LOCK = env_dir / "state" / "expense-bookkeeper" / "leads.json.lock"
     mod.LOG_PATH = env_dir / "logs" / "decisions.log"
     mod.TEMPLATE_DIR = env_dir / "templates"
     mod.BRIDGE_URL = f"http://127.0.0.1:{bridge_port}/send"
+    # F2 (E2E Layer B fix): isolate the mock-qbo ledger per-test so tests
+    # don't write to the production state path. In-process tests still see
+    # cross-process behaviour via this file.
+    mod.MOCK_QBO_STATE_PATH = env_dir / "state" / "expense-bookkeeper" / "mock-qbo-pushed.json"
     return mod
 
 

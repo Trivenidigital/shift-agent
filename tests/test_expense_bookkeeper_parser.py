@@ -37,13 +37,16 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def parse_owner_message():
+    """Uses SourceFileLoader explicitly because the script has no .py
+    extension — Python 3.12 spec_from_file_location returns None for
+    unrecognised suffixes (E2E Layer A finding 2026-05-01)."""
+    from importlib.machinery import SourceFileLoader
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src" / "platform"))
-    spec = importlib.util.spec_from_file_location(
-        "apply_expense_decision_test", str(APPLY_SCRIPT)
-    )
+    loader = SourceFileLoader("apply_expense_decision_test", str(APPLY_SCRIPT))
+    spec = importlib.util.spec_from_loader("apply_expense_decision_test", loader)
     mod = importlib.util.module_from_spec(spec)
     mod.__name__ = "apply_expense_decision_test"  # suppress __main__
-    spec.loader.exec_module(mod)
+    loader.exec_module(mod)
     return mod.parse_owner_message
 
 
