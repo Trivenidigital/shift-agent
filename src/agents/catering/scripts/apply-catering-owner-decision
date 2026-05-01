@@ -581,11 +581,13 @@ def main() -> int:
     # F1 fix 2026-05-01: prepend the bridge `template_bypass` prefix so the
     # WhatsApp bridge's outbound filter (defense-in-depth against LLM
     # internal monologue) doesn't drop the customer quote as `announcement`.
-    # See bridge.js:45 — messages matching `^⚕ *<AgentName>*\n────────────\n`
+    # See bridge.js:133 — messages matching the regex
+    #   /^⚕ \*[A-Za-z][A-Za-z ]*\*\n[─\-]+\n/
     # bypass the filter. Without this, LLM-drafted quotes starting with
     # "Thanks", "I", "We're confirming", etc. are silently filtered out.
     # The prefix is added AFTER normalize (which strips markdown delimiters
-    # — applied to the LLM body, not this server-side header).
+    # — applied to the LLM body, not this server-side header). Order matters:
+    # _normalize_quote_text → _truth_guard_check → prepend prefix → bridge POST.
     quote_text_with_prefix = f"⚕ *Catering Agent*\n────────────\n{quote_text}"
 
     ok, mid_or_err = _bridge_post(target_jid, quote_text_with_prefix)

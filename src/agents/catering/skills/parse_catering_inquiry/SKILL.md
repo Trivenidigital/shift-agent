@@ -129,15 +129,27 @@ The script will:
 
 DO NOT send the customer a quote. DO NOT promise pricing.
 
-**Reply MUST be prefixed with the agent header** (`⚕ *Catering Agent*\n────────────\n`)
-to bypass the WhatsApp bridge's outbound filter. Without this prefix, replies
-matching LLM-narration patterns (`Thanks for`, `I'll`, `I understand`, etc.)
-are silently dropped by the bridge as `reason=announcement`. The header
-triggers `template_bypass` in the bridge. See `bridge.js` line 45 for the
-exact regex match: `^⚕ *<AgentName>*\n────────────\n`.
+**Reply MUST be prefixed with the agent header** to bypass the WhatsApp
+bridge's outbound filter. Without this prefix, replies matching LLM-narration
+patterns (`Thanks for`, `I'll`, `I understand`, etc.) are silently dropped
+by the bridge as `reason=announcement`. The header triggers `template_bypass`
+in the bridge. See `bridge.js:133` for the exact regex match:
+
+```
+/^⚕ \*[A-Za-z][A-Za-z ]*\*\n[─\-]+\n/
+```
+
+Important constraint: agent name MUST be `[A-Za-z ]+` (letters and spaces
+only). No digits, no hyphens, no punctuation in the agent name slot.
+
+**EXACT format below — copy these examples verbatim, including the REAL
+newline characters between lines.** The triple-backtick code fences below
+contain literal newline characters (U+000A). When you emit the message,
+press Enter at each line break — do NOT emit the two-character escape
+sequence `\` + `n` as text. The bridge regex requires real newlines.
 
 You may send ONE brief acknowledgment if the inquiry was clear enough to
-process. EXACT format (use `\n` for line breaks, not literal `\n`):
+process:
 
 ```
 ⚕ *Catering Agent*
