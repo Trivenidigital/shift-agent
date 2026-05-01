@@ -1633,7 +1633,15 @@ class ExpenseOwnerApprovalRequested(_BaseEntry):
     expense_id: str
     owner_approval_code: ProposalCode
     extracted_total_cents: int
-    routed_to: Literal["whatsapp"]
+    # `cockpit_v01_paper` retained as a deprecated-but-readable Literal value
+    # for rollback-window safety per the absorbing-shim discipline (PR-D3 /
+    # catering precedent). The writer in extract-receipt is hardcoded to
+    # "whatsapp" post-PR #42; this widening exists ONLY so historical
+    # decisions.log rows containing the legacy value validate cleanly on
+    # re-read by daily-brief / dispatcher-accuracy-report / fsck. Remove
+    # this value once the rollback window has lapsed AND a grep across all
+    # live VPSes confirms zero historical entries.
+    routed_to: Literal["whatsapp", "cockpit_v01_paper"]
 
 
 class ExpenseOwnerDecision(_BaseEntry):
