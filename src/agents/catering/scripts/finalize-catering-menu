@@ -1,0 +1,587 @@
+#!/usr/local/lib/hermes-agent/venv/bin/python
+"""finalize-catering-menu — PR-CF1.
+
+Called by handle_catering_menu_finalize SKILL when the customer signals
+"finalize" during a catering brainstorm. Validates customer's selected
+items against the current menu, server-recomputes the total, persists
+the curated selections + total to the lead state, transitions status
+to CUSTOMER_FINALIZED, and sends the owner an approval card.
+
+Server-authoritative on quote total. LLM-passed total is cross-check only;
+if drift > min(5%, $25), exit 11 without state mutation.
+
+Idempotent on (code, customer_message_id): same message id twice => no-op
+replay. Different message_id while status=CUSTOMER_FINALIZED => re-finalize
+(state mutated, owner card resent).
+
+LOCK + AUDIT ORDERING (deliberate divergence from PR-D1 absorbing-shim):
+
+  PR-D1 apply-catering-owner-decision uses two-row anchor pattern (anchor
+  =unknown BEFORE bridge POST, then anchor=success/failed AFTER) because
+  its retry path consumes `unknown` anchors during reconcile.
+  finalize-catering-menu has NO retry consumer:
+
+    - State (selected_items, quote_total_usd, status=CUSTOMER_FINALIZED) is
+      persisted under LEADS_LOCK BEFORE bridge POST.
+    - Bridge POST happens OUTSIDE LEADS_LOCK.
+    - On bridge failure (exit 6), the lead state IS persisted; operator
+      sees `owner_card_outbound_id=""` in the SINGLE post-POST audit row.
+    - SKILL tells the customer "owner will see this shortly"; manual
+      re-poke happens via cockpit, not via this script.
+
+  Therefore a single post-POST audit row is correct.
+
+RATE-LIMIT SCOPE:
+
+  `_recent_resend_for` is best-effort (TOCTOU possible — two concurrent
+  replays could both pass). Worst case: 2 owner cards per replay storm,
+  not unbounded. Acceptable. Re-finalize (different message_id) is NOT
+  rate-limited; sending a fresh owner card on real revisions is correct.
+
+Exit codes:
+  0  OK (success or idempotent replay)
+  2  invalid input (bad JSON, item not in menu, qty out of range, recompute=0)
+  4  lead-not-actionable (not found OR status not in actionable set)
+  6  bridge unreachable (state IS persisted)
+  11 quote mismatch (LLM-passed total drift > min(5%, $25))
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.request
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
+
+from safe_io import (  # noqa: E402
+    FileLock, ndjson_append, atomic_write_json, customer_now,
+    load_model, load_yaml_model,
+    assert_load_status_clean, LoadStatusError,
+)
+from schemas import (  # noqa: E402
+    Config, CateringLead, CateringLeadStore, CateringSelectedItem,
+    CateringLeadStatusChange, CateringMenuFinalized, Menu,
+    CATERING_TRANSITIONS,
+)
+from exit_codes import (  # noqa: E402
+    EXIT_OK, EXIT_INVALID_INPUT, EXIT_NOT_FOUND,
+    EXIT_DEPENDENCY_DOWN, EXIT_TRUTH_GUARD_FAILED,
+)
+from pydantic import TypeAdapter, ValidationError  # noqa: E402
+
+# Paths (test-overridable via env or monkeypatch)
+CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
+LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
+LEADS_LOCK = Path("/opt/shift-agent/state/catering-leads.json.lock")
+LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+LOG_LOCK = Path("/opt/shift-agent/logs/decisions.log.lock")
+MENU_PATH = Path("/opt/shift-agent/state/catering-menu.json")
+TEMPLATE_DIR = Path("/opt/shift-agent/templates")
+BRIDGE_URL = "http://127.0.0.1:3000/send"
+BRIDGE_TIMEOUT = 10
+
+# Quote validation tolerance: stricter of 5% or $25 absolute.
+QUOTE_TOLERANCE_PCT = 0.05
+QUOTE_TOLERANCE_USD_ABS = 25
+
+# Owner-card resend cooldown (replay storm protection).
+OWNER_CARD_RESEND_COOLDOWN_SECS = 60
+
+CODE_PATTERN = r"^#[A-HJ-NP-Z2-9]{5}$"
+
+
+def _validate_inputs(args) -> tuple[list[CateringSelectedItem], int]:
+    """Pure validation. Returns (parsed_items, llm_total).
+
+    Exits 2 on any violation. No state mutation, no menu lookup.
+    """
+    if not re.fullmatch(CODE_PATTERN, args.code or ""):
+        sys.stderr.write(f"invalid code format: {args.code!r}\n")
+        sys.exit(EXIT_INVALID_INPUT)
+
+    if not args.customer_message_id or len(args.customer_message_id) > 200:
+        sys.stderr.write("invalid customer-message-id\n")
+        sys.exit(EXIT_INVALID_INPUT)
+
+    try:
+        raw = json.loads(args.selected_items_json)
+    except json.JSONDecodeError as e:
+        sys.stderr.write(f"selected-items-json not valid JSON: {e}\n")
+        sys.exit(EXIT_INVALID_INPUT)
+
+    if not isinstance(raw, list) or not (1 <= len(raw) <= 50):
+        n = len(raw) if isinstance(raw, list) else "n/a"
+        sys.stderr.write(
+            f"selected_items must be list[1..50]; got {type(raw).__name__} len={n}\n"
+        )
+        sys.exit(EXIT_INVALID_INPUT)
+
+    try:
+        items = [CateringSelectedItem.model_validate(x) for x in raw]
+    except ValidationError as e:
+        sys.stderr.write(f"selected_items validation failed: {e}\n")
+        sys.exit(EXIT_INVALID_INPUT)
+
+    llm_total = args.quote_total_usd
+    if llm_total is None or llm_total < 0:
+        sys.stderr.write(f"quote-total-usd must be non-negative int; got {llm_total!r}\n")
+        sys.exit(EXIT_INVALID_INPUT)
+
+    return items, llm_total
+
+
+def _load_config() -> Config:
+    """Load config.yaml. Cached at main() top via call-once pattern."""
+    return load_yaml_model(CONFIG_PATH, Config)
+
+
+def _load_menu_index() -> dict[str, int]:
+    """Returns name -> price_usd (whole dollars) for available items only.
+
+    Exits 2 if menu missing or unloadable (finalize cannot proceed without it).
+    """
+    if not MENU_PATH.exists():
+        sys.stderr.write(f"menu not found at {MENU_PATH}; cannot finalize\n")
+        sys.exit(EXIT_INVALID_INPUT)
+    try:
+        menu, status = load_model(MENU_PATH, Menu)
+    except Exception as e:
+        sys.stderr.write(f"menu load failed: {e}\n")
+        sys.exit(EXIT_INVALID_INPUT)
+    if status != "ok":
+        sys.stderr.write(f"menu load_status={status}; cannot finalize\n")
+        sys.exit(EXIT_INVALID_INPUT)
+    # Convert price_usd (float) -> int (whole dollars). Round to nearest.
+    return {
+        it.name: int(round(it.price_usd))
+        for it in menu.items
+        if it.available and it.price_usd is not None
+    }
+
+
+def _cross_check_and_recompute(
+    items: list[CateringSelectedItem], menu_index: dict[str, int],
+) -> tuple[int, bool]:
+    """Validates items against menu; replaces stale prices with current.
+
+    Returns (server_recompute_usd, price_drift_detected).
+    Exits 2 if any item not in menu or recompute is 0.
+    """
+    drift = False
+    total = 0
+    for item in items:
+        if item.name not in menu_index:
+            sys.stderr.write(
+                f"item {item.name!r} not in current menu; refusing finalize\n"
+            )
+            sys.exit(EXIT_INVALID_INPUT)
+        current_price = menu_index[item.name]
+        if current_price != item.price_usd:
+            drift = True
+        total += item.qty * current_price
+    if total <= 0:
+        sys.stderr.write(f"recomputed total is {total}; refusing finalize\n")
+        sys.exit(EXIT_INVALID_INPUT)
+    return total, drift
+
+
+def _within_quote_tolerance(server: int, llm: int) -> bool:
+    """Returns True iff |server - llm| <= min(5%, $25)."""
+    if server == 0:
+        return llm == 0
+    abs_diff = abs(server - llm)
+    pct_cap = server * QUOTE_TOLERANCE_PCT
+    cap = min(pct_cap, float(QUOTE_TOLERANCE_USD_ABS))
+    return abs_diff <= cap
+
+
+def _bridge_post(jid: str, message: str) -> tuple[bool, str]:
+    """POST to local bridge. Returns (success, message_id_or_error)."""
+    payload = json.dumps({"chatId": jid, "message": message}).encode("utf-8")
+    req = urllib.request.Request(
+        BRIDGE_URL, data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=BRIDGE_TIMEOUT) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            doc = json.loads(body)
+            mid = doc.get("id") or doc.get("messageId") or ""
+            if not mid:
+                return False, f"empty messageId: {body[:200]}"
+            return True, mid
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError) as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+def _render_owner_card(
+    lead: CateringLead,
+    items_with_prices: list[tuple[str, int, int]],  # (name, qty, price_usd)
+    server_total: int,
+    price_drift: bool,
+) -> str:
+    """Render owner card. Caller passes (name, qty, price) tuples — on FIRST
+    finalize the prices are current-menu values; on REPLAY the caller passes
+    the PERSISTED prices from target.selected_items (captured at first
+    finalize-time). The card always reflects the canonical persisted state.
+    """
+    template_path = TEMPLATE_DIR / "catering_finalized_menu_to_owner.txt"
+    items_section = "\n".join(
+        f"  - {name} × {qty}  ${qty * price}"
+        for name, qty, price in items_with_prices
+    )
+    drift_note = (
+        "_(Note: prices reflect current menu — some items had updated "
+        "pricing since the customer brainstormed.)_"
+        if price_drift else ""
+    )
+    extracted = lead.extracted
+    fmt_fields = {
+        "lead_id": lead.lead_id,
+        "approval_code": lead.owner_approval_code or "#?????",
+        "customer_name": lead.customer_name or "(unknown)",
+        "customer_phone": lead.customer_phone,
+        "event_date": extracted.event_date or "[TBD]",
+        "event_time": extracted.event_time or "[TBD]",
+        "headcount": extracted.headcount if extracted.headcount is not None else "[TBD]",
+        "dietary": ", ".join(extracted.dietary_restrictions or []) or "(none specified)",
+        "item_count": len(items_with_prices),
+        "items_section": items_section,
+        "quote_total_usd": server_total,
+        "price_drift_note": drift_note,
+    }
+    if template_path.exists():
+        try:
+            return template_path.read_text(encoding="utf-8").format(**fmt_fields)
+        except (KeyError, OSError) as e:
+            sys.stderr.write(
+                f"WARN: owner-card template at {template_path} unrenderable ({e}); "
+                "using inline fallback\n"
+            )
+    else:
+        sys.stderr.write(
+            f"WARN: owner-card template missing at {template_path}; using inline fallback\n"
+        )
+    # Inline fallback (mirrors create-catering-lead inline pattern)
+    return (
+        f"⚕ *Catering Agent*\n────────────\n"
+        f"Customer FINALIZED their menu — your approval needed\n\n"
+        f"Lead: {fmt_fields['lead_id']}    Code: {fmt_fields['approval_code']}\n"
+        f"Customer: {fmt_fields['customer_name']} ({fmt_fields['customer_phone']})\n"
+        f"Event: {fmt_fields['event_date']} at {fmt_fields['event_time']} — "
+        f"{fmt_fields['headcount']} guests\n"
+        f"Dietary: {fmt_fields['dietary']}\n\n"
+        f"Selected menu ({fmt_fields['item_count']} items):\n"
+        f"{items_section}\n\n"
+        f"Customer-confirmed total: ${server_total}\n"
+        f"{drift_note}\n\n"
+        f"To approve and send the priced quote to the customer:\n"
+        f"  Reply: {fmt_fields['approval_code']} approve\n\n"
+        f"To edit before sending:\n"
+        f"  Reply: {fmt_fields['approval_code']} edit <your changes>\n\n"
+        f"To decline:\n"
+        f"  Reply: {fmt_fields['approval_code']} reject <reason>\n"
+    )
+
+
+def _recent_resend_for(lead_id: str, now: datetime) -> bool:
+    """True if a non-empty owner_card_outbound_id was audited within
+    OWNER_CARD_RESEND_COOLDOWN_SECS for this lead. Tail-scan last 50 rows.
+    Best-effort (TOCTOU possible on concurrent replays — accepted)."""
+    if not LOG_PATH.exists():
+        return False
+    try:
+        with LOG_PATH.open("r", encoding="utf-8") as f:
+            lines = f.readlines()[-50:]
+    except OSError:
+        return False
+    cutoff = now.timestamp() - OWNER_CARD_RESEND_COOLDOWN_SECS
+    for line in reversed(lines):
+        line = line.strip()
+        if "catering_menu_finalized" not in line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("type") != "catering_menu_finalized":
+            continue
+        if entry.get("lead_id") != lead_id:
+            continue
+        if not entry.get("owner_card_outbound_id"):
+            continue
+        try:
+            ts = datetime.fromisoformat(
+                entry["ts"].replace("Z", "+00:00")
+            ).timestamp()
+        except (ValueError, KeyError, AttributeError):
+            continue
+        if ts >= cutoff:
+            return True
+    return False
+
+
+def _emit_quote_mismatch_audit(
+    *, now: datetime, args, items, server_total: int, llm_total: int, price_drift: bool,
+) -> None:
+    """Audit-only: writes CateringMenuFinalized with outcome='rejected_quote_mismatch'.
+
+    Best-effort. Caller exits 11 regardless of audit success.
+    """
+    # Look up lead to recover lead_id + customer_phone for the audit row.
+    # Falls back to placeholders only when the lookup itself fails (R1.M1 / R3.OB-Blocker).
+    audit_lead_id = "(quote-mismatch)"
+    customer_phone = "+10000000000"
+    try:
+        if LEADS_PATH.exists():
+            store, _status = load_model(LEADS_PATH, CateringLeadStore)
+            target = next(
+                (l for l in store.leads if l.owner_approval_code == args.code),
+                None,
+            )
+            if target is not None:
+                audit_lead_id = target.lead_id
+                customer_phone = target.customer_phone
+    except Exception:
+        pass
+    try:
+        with FileLock(LOG_LOCK):
+            ndjson_append(
+                LOG_PATH,
+                CateringMenuFinalized(
+                    type="catering_menu_finalized", ts=now,
+                    outcome="rejected_quote_mismatch",
+                    lead_id=audit_lead_id,
+                    customer_phone=customer_phone,
+                    item_count=len(items),
+                    server_recompute_usd=server_total,
+                    llm_passed_total_usd=llm_total,
+                    quote_total_usd=0,
+                    owner_card_outbound_id="",
+                    replay=False, suppressed=False,
+                    price_drift_detected=price_drift,
+                    prior_total_usd=None, prior_item_count=None,
+                ).model_dump_json(),
+            )
+    except Exception as e:
+        sys.stderr.write(f"audit emit (mismatch) failed (non-fatal): {e}\n")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--code", required=True)
+    parser.add_argument("--customer-message-id", required=True)
+    parser.add_argument("--selected-items-json", required=True)
+    parser.add_argument("--quote-total-usd", required=True, type=int)
+    args = parser.parse_args()
+
+    # Cache config once
+    cfg = _load_config()
+    now = customer_now(cfg.customer.timezone)
+
+    # Step 1: pure input validation (no I/O, no lock)
+    items, llm_total = _validate_inputs(args)
+
+    # Step 2: load menu (no lock; menu is read-mostly)
+    menu_index = _load_menu_index()
+
+    # Step 3: cross-check + recompute (no lock)
+    server_total, price_drift = _cross_check_and_recompute(items, menu_index)
+
+    fresh_items_with_prices: list[tuple[str, int, int]] = [
+        (it.name, it.qty, menu_index[it.name]) for it in items
+    ]
+
+    # Step 3b: tolerance check (server-authoritative)
+    if not _within_quote_tolerance(server_total, llm_total):
+        _emit_quote_mismatch_audit(
+            now=now, args=args, items=items,
+            server_total=server_total, llm_total=llm_total,
+            price_drift=price_drift,
+        )
+        sys.stderr.write(
+            f"quote total mismatch: server={server_total} llm={llm_total} "
+            f"diff={abs(server_total-llm_total)} tolerance=min(5%,$25)\n"
+        )
+        return EXIT_TRUTH_GUARD_FAILED
+
+    # Step 4: state mutation under LEADS_LOCK
+    replay = False
+    suppressed = False
+    prior_total: Optional[int] = None
+    prior_item_count: Optional[int] = None
+    status_changed = False
+    prev_status: Optional[str] = None
+    persisted_items_with_prices: list[tuple[str, int, int]] = []
+    target: Optional[CateringLead] = None
+
+    with FileLock(LEADS_LOCK):
+        store, status_load = load_model(LEADS_PATH, CateringLeadStore, default=CateringLeadStore())
+        try:
+            assert_load_status_clean(LEADS_PATH, status_load, context="finalize-menu initial load")
+        except LoadStatusError as e:
+            sys.stderr.write(f"leads.json load failed: {e}\n")
+            return EXIT_INVALID_INPUT
+
+        target = next(
+            (l for l in store.leads if l.owner_approval_code == args.code),
+            None,
+        )
+        if target is None:
+            sys.stderr.write(f"lead with code {args.code} not found\n")
+            return EXIT_NOT_FOUND
+        if target.status not in {
+            "AWAITING_OWNER_APPROVAL", "CUSTOMER_FINALIZED", "OWNER_EDITED",
+        }:
+            sys.stderr.write(
+                f"lead {target.lead_id} status={target.status!r}; not actionable\n"
+            )
+            return EXIT_NOT_FOUND
+
+        # Idempotency: same message_id => replay (no state mutation)
+        if target.last_finalize_message_id == args.customer_message_id:
+            replay = True
+            # R2.B2 fix: render card from persisted items AND persisted total.
+            # On replay we must NOT use the freshly-recomputed server_total —
+            # if the menu drifted between first finalize and replay, the line
+            # items (persisted prices) and total (recomputed) would disagree.
+            persisted_items_with_prices = [
+                (it.name, it.qty, it.price_usd) for it in target.selected_items
+            ]
+        else:
+            # Real finalize OR re-finalize
+            prior_total = target.quote_total_usd
+            prior_item_count = len(target.selected_items)
+            prev_status = target.status
+
+            target.selected_items = [
+                CateringSelectedItem(name=name, qty=qty, price_usd=price)
+                for name, qty, price in fresh_items_with_prices
+            ]
+            target.quote_total_usd = server_total
+            target.customer_finalized_at = now
+            target.last_finalize_message_id = args.customer_message_id
+            target.updated_at = now
+
+            # Status transition. R2.B1 fix: include CUSTOMER_FINALIZED in the
+            # transition guard set + emit status_change audit on every re-finalize
+            # (even though from==to), so the audit chain captures the customer's
+            # mind-change. CATERING_TRANSITIONS now includes the self-edge.
+            if target.status in {
+                "AWAITING_OWNER_APPROVAL", "OWNER_EDITED", "CUSTOMER_FINALIZED",
+            }:
+                if "CUSTOMER_FINALIZED" not in CATERING_TRANSITIONS.get(target.status, set()):
+                    sys.stderr.write(
+                        f"transition {target.status!r} -> CUSTOMER_FINALIZED disallowed\n"
+                    )
+                    return EXIT_INVALID_INPUT
+                target.status = "CUSTOMER_FINALIZED"
+                status_changed = True
+
+            # Validate before persist
+            try:
+                CateringLeadStore.model_validate(store.model_dump())
+            except ValidationError as e:
+                sys.stderr.write(f"store validation failed: {e}\n")
+                return EXIT_INVALID_INPUT
+
+            atomic_write_json(LEADS_PATH, store)
+            persisted_items_with_prices = fresh_items_with_prices
+
+    # Step 5: status-change audit (separate LOG_LOCK, OUT of LEADS_LOCK).
+    # R2.B1 fix: emit on EVERY non-replay finalize, including the
+    # CUSTOMER_FINALIZED -> CUSTOMER_FINALIZED self-edge (re-finalize). The
+    # audit chain MUST record customer mind-changes so the routing-reliability
+    # monitor can pair raw_inbound -> dispatcher_routed -> status_change
+    # without a gap on every re-finalize.
+    if status_changed and target is not None and prev_status is not None:
+        is_re_finalize = prev_status == "CUSTOMER_FINALIZED"
+        try:
+            with FileLock(LOG_LOCK):
+                ndjson_append(
+                    LOG_PATH,
+                    CateringLeadStatusChange(
+                        type="catering_lead_status_change", ts=now,
+                        lead_id=target.lead_id, from_status=prev_status,
+                        to_status="CUSTOMER_FINALIZED", actor="customer",
+                        reason=(
+                            "customer_re_finalized_menu" if is_re_finalize
+                            else "customer_finalized_menu"
+                        ),
+                    ).model_dump_json(),
+                )
+        except Exception as e:
+            sys.stderr.write(f"status-change audit failed (non-fatal): {e}\n")
+
+    # Step 6: bridge POST (NO lock; mirrors create-catering-lead pattern)
+    bridge_failed = False
+    owner_card_outbound_id = ""
+    assert target is not None  # mypy hint; we returned earlier on None
+    if not cfg.owner.self_chat_jid:
+        sys.stderr.write("owner.self_chat_jid empty; state persisted but card not sent\n")
+        bridge_failed = True
+    elif replay and _recent_resend_for(target.lead_id, now):
+        suppressed = True
+    else:
+        # R2.B2 fix: on replay, total in card MUST be the persisted
+        # target.quote_total_usd (the value the owner saw on first finalize),
+        # NOT the fresh server_total (which can drift if menu prices changed).
+        card_total = target.quote_total_usd if replay else server_total
+        card_text = _render_owner_card(
+            target, persisted_items_with_prices, card_total, price_drift,
+        )
+        ok, mid_or_err = _bridge_post(cfg.owner.self_chat_jid, card_text)
+        if ok:
+            owner_card_outbound_id = mid_or_err
+        else:
+            sys.stderr.write(f"bridge_post failed: {mid_or_err}\n")
+            bridge_failed = True
+
+    # Step 7: emit CateringMenuFinalized audit row (always — outcome='finalized')
+    try:
+        with FileLock(LOG_LOCK):
+            ndjson_append(
+                LOG_PATH,
+                CateringMenuFinalized(
+                    type="catering_menu_finalized", ts=now,
+                    outcome="finalized",
+                    lead_id=target.lead_id, customer_phone=target.customer_phone,
+                    item_count=len(persisted_items_with_prices),
+                    server_recompute_usd=server_total,
+                    llm_passed_total_usd=llm_total,
+                    quote_total_usd=server_total,
+                    owner_card_outbound_id=owner_card_outbound_id,
+                    replay=replay, suppressed=suppressed,
+                    price_drift_detected=price_drift,
+                    prior_total_usd=prior_total,
+                    prior_item_count=prior_item_count,
+                ).model_dump_json(),
+            )
+    except Exception as e:
+        sys.stderr.write(f"audit emit failed (non-fatal): {e}\n")
+
+    print(json.dumps({
+        "lead_id": target.lead_id,
+        "status": target.status,
+        "quote_total_usd": server_total,
+        "owner_card_sent": owner_card_outbound_id != "",
+        "owner_card_outbound_id": owner_card_outbound_id or None,
+        "replay": replay,
+        "suppressed": suppressed,
+        "price_drift_detected": price_drift,
+    }))
+
+    return EXIT_DEPENDENCY_DOWN if bridge_failed else EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

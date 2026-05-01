@@ -1,0 +1,23 @@
+⚕ *Catering Agent*
+────────────
+Customer FINALIZED their menu — your approval needed
+
+Lead: {lead_id}    Code: {approval_code}
+Customer: {customer_name} ({customer_phone})
+Event: {event_date} at {event_time} — {headcount} guests
+Dietary: {dietary}
+
+Selected menu ({item_count} items):
+{items_section}
+
+Customer-confirmed total: ${quote_total_usd}
+{price_drift_note}
+
+To approve and send the priced quote to the customer:
+  Reply: {approval_code} approve
+
+To edit before sending:
+  Reply: {approval_code} edit <your changes>
+
+To decline:
+  Reply: {approval_code} reject <reason>

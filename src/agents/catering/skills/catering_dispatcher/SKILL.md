@@ -37,6 +37,29 @@ cat /opt/shift-agent/state/catering-leads.json | jq -r '.leads[] | select(.owner
 If a lead_id is returned, this IS an owner reply. Delegate to
 `handle_catering_owner_approval`.
 
+**Customer-finalize path** (PR-CF1) — if `sender_role != "owner"` AND
+`message_text` expresses finalize-intent (substrings `finalize`,
+`send to owner`, `confirm the menu`, `confirm this menu`,
+`lock it in`, `proceed with this menu`, `submit for approval`,
+`ready to book`, case-insensitive — same set as `dispatch_shift_agent`)
+AND a non-terminal catering lead exists for `sender_phone` in
+{`AWAITING_OWNER_APPROVAL`, `CUSTOMER_FINALIZED`, `OWNER_EDITED`}:
+
+```bash
+ACTIVE=$(jq -r --arg phone "$sender_phone" \
+  '[.leads[] | select(.customer_phone==$phone and (.status=="AWAITING_OWNER_APPROVAL" or .status=="CUSTOMER_FINALIZED" or .status=="OWNER_EDITED"))] | length' \
+  /opt/shift-agent/state/catering-leads.json)
+```
+
+If `ACTIVE > 0`, delegate to `handle_catering_menu_finalize` with the
+customer's message_id (for idempotency) + `sender_phone` (the SKILL
+re-reads the lead state). Do NOT invoke `parse_catering_inquiry` — that
+would create a duplicate lead.
+
+If the customer's message expresses finalize-intent but they have NO
+active lead, fall through to `parse_catering_inquiry` (treat as new
+inquiry — they may be re-engaging after a closed lead).
+
 **New inquiry path** — otherwise (any sender role):
 - Delegate to `parse_catering_inquiry` with the raw message + sender phone +
   sender_name (when known) + the inbound message_id.

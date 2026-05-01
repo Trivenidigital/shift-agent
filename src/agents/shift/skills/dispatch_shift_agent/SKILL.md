@@ -30,6 +30,8 @@ You are the front door for every inbound message. Your ONLY job: identify who se
 
 Catering keywords (case-insensitive substring): `cater`, `catering`, `headcount`, `guests`, `event`, `wedding`, `reception`, `banquet`, `birthday`, `anniversary`, `party`, `drop off`, `pickup for event`, `do you do catering`, `feeding [number]`, `menu for [number] people`.
 
+PR-CF1 — customer-finalize-intent terms also route to catering_dispatcher when the sender has an active non-terminal catering lead. Substring match (case-insensitive): `finalize`, `send to owner`, `confirm the menu`, `confirm this menu`, `lock it in`, `proceed with this menu`, `submit for approval`, `ready to book`. The catering_dispatcher then differentiates new-inquiry vs finalize-intent vs owner-reply (see catering_dispatcher SKILL Step 2).
+
 The matrix is in priority order — earlier rows fire first. A `#XXXXX` code from the owner short-circuits the catering keyword check; a menu-pending code short-circuits everything.
 
 ## Step 1 — Parse the sender block (deterministic helper, do not improvise)

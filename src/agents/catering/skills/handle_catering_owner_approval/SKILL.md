@@ -140,6 +140,27 @@ printf '%s' "$QUOTE_TEXT" | /usr/local/bin/apply-catering-owner-decision \
 RC=$?
 ```
 
+**PR-CF1 — owner-approve guard.** The apply-script REFUSES approve
+(EXIT_TRUTH_GUARD_FAILED, exit code 11) when the lead has no
+`customer_finalized_at` (i.e. customer never ran the finalize flow).
+The script sends the owner a reprompt explaining the override path.
+
+If the owner explicitly tells you to "approve anyway" / "send the
+original quote" / "skip the finalize check" after seeing the reprompt,
+re-invoke with `--skip-finalize`:
+
+```bash
+printf '%s' "$QUOTE_TEXT" | /usr/local/bin/apply-catering-owner-decision \
+    --code "$CODE" --decision approve --quote-text-stdin --skip-finalize
+RC=$?
+```
+
+When the lead status is already `CUSTOMER_FINALIZED` (customer DID
+finalize), the guard does NOT fire — use the regular approve form
+without `--skip-finalize`. The lead's `selected_items` and
+`quote_total_usd` are visible in the cockpit and were summarized in the
+finalized-menu owner card the owner saw.
+
 For `reject` (no stdin):
 
 ```bash
