@@ -419,7 +419,7 @@ def main() -> int:
     with FileLock(LEADS_LOCK):
         store, status_load = load_model(LEADS_PATH, CateringLeadStore, default=CateringLeadStore())
         try:
-            assert_load_status_clean(LEADS_PATH, status_load)
+            assert_load_status_clean(LEADS_PATH, status_load, context="finalize-menu initial load")
         except LoadStatusError as e:
             sys.stderr.write(f"leads.json load failed: {e}\n")
             return EXIT_INVALID_INPUT
