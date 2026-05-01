@@ -1,13 +1,14 @@
 ---
 name: parse_catering_inquiry
-description: Use when catering_dispatcher determines this is a NEW catering inquiry from a customer. Extract structured fields (event_date, headcount, menu, dietary, contact) from the free-text inquiry, then call /usr/local/bin/create-catering-lead to write state and trigger the owner approval flow. Does NOT reply to the customer.
+description: Use when catering_dispatcher determines this is a NEW catering inquiry from a customer. Extract structured fields (event_date, headcount, menu, dietary, contact) from the free-text inquiry, call /usr/local/bin/create-catering-lead to write state and trigger the owner approval flow, THEN send ONE brief acknowledgment to the customer via /usr/local/bin/send-catering-ack (Step 3).
 ---
 
-# Parse Catering Inquiry (Agent #2 — v0.2)
+# Parse Catering Inquiry (Agent #2 — v0.4 / F5)
 
 You receive a free-text catering inquiry. Extract whatever structured fields
-the customer provided. Pass them to the deterministic state writer. Do not
-guess, do not invent, do not reply to the customer.
+the customer provided. Pass them to the deterministic state writer. Then send
+ONE brief acknowledgment to the customer via the dedicated send script — never
+reply directly. Do not guess, do not invent.
 
 ## Inputs received from catering_dispatcher
 
@@ -125,61 +126,74 @@ The script will:
 - 5: schema violation on existing state file — alert owner via Pushover, STOP, do not retry.
 - 6: owner card couldn't send (bridge issue). Lead is saved. Run shift-agent-notify-owner with title="Catering card delivery failed" and the lead_id.
 
-## Step 3 — Acknowledge customer (sparingly)
+## Step 3 — Acknowledge customer via send-catering-ack (F5b)
 
-DO NOT send the customer a quote. DO NOT promise pricing.
+DO NOT send the customer a quote. DO NOT promise pricing. DO NOT compose
+the customer reply yourself in the chat — call the dedicated script.
 
-**Reply MUST be prefixed with the agent header** to bypass the WhatsApp
-bridge's outbound filter. Without this prefix, replies matching LLM-narration
-patterns (`Thanks for`, `I'll`, `I understand`, etc.) are silently dropped
-by the bridge as `reason=announcement`. The header triggers `template_bypass`
-in the bridge. See `bridge.js:133` for the exact regex match:
+The script `/usr/local/bin/send-catering-ack` prepends the WhatsApp bridge's
+`template_bypass` prefix server-side and POSTs to the bridge. You only
+choose the body text. This is the same fix shape as PR #43 for the
+owner-decision → customer-quote path — the prefix is no longer the LLM's
+responsibility, period. Background on why: the bridge filter (defense-in-depth
+against LLM internal monologue) silently drops outbound messages matching
+announcement patterns ("Thanks for", "I'll", etc.) unless prefixed; we cannot
+trust the LLM to remember the prefix on every invocation, so the script
+handles it.
 
-```
-/^⚕ \*[A-Za-z][A-Za-z ]*\*\n[─\-]+\n/
-```
+**Hard rule:** Step 3 runs ONLY if Step 2 returned exit 0 (lead saved).
+If create-catering-lead failed, do not send any customer ack — the lead
+isn't on the owner's plate, so there's nothing to acknowledge. The owner
+gets notified via the script's own failure path (Step 2 exit 6).
 
-Important constraint: agent name MUST be `[A-Za-z ]+` (letters and spaces
-only). No digits, no hyphens, no punctuation in the agent name slot.
+**Body selection — pick ONE depending on extraction quality:**
 
-**EXACT format below — copy these examples verbatim, including the REAL
-newline characters between lines.** The triple-backtick code fences below
-contain literal newline characters (U+000A). When you emit the message,
-press Enter at each line break — do NOT emit the two-character escape
-sequence `\` + `n` as text. The bridge regex requires real newlines.
-
-You may send ONE brief acknowledgment if the inquiry was clear enough to
-process:
-
-```
-⚕ *Catering Agent*
-────────────
-Thanks — we got your inquiry, we'll be back to you shortly.
-```
-
-If extraction was unclear (e.g., no headcount, no date, vague intent), you
-may instead reply with the same prefix:
+If the inquiry was clear enough that Step 2 succeeded with headcount AND
+event_date populated, send the standard ack:
 
 ```
-⚕ *Catering Agent*
-────────────
-Thanks for reaching out. To help, can you share the date and headcount?
+/usr/local/bin/send-catering-ack \
+  --customer-jid "<sender_jid>" \
+  --lead-id "<lead_id from Step 2 stdout>" \
+  --message-text "Thanks — we got your inquiry, we'll be back to you shortly."
 ```
 
-DO NOT loop on this. ONE clarifying reply max, then escalate to the owner
-via the lead state.
+If extraction was unclear (no headcount OR no date OR very vague intent),
+send the clarifying ack instead:
 
-**Hard rule on the prefix:** the bridge filter is defense-in-depth against
-LLM internal monologue (`I'll process X`, `Let me check Y`). The
-`⚕ *Catering Agent*` header signals "this is a deliberate customer-facing
-message, not LLM thinking-aloud." Skipping the prefix = customer never
-receives the reply.
+```
+/usr/local/bin/send-catering-ack \
+  --customer-jid "<sender_jid>" \
+  --lead-id "<lead_id from Step 2 stdout>" \
+  --message-text "Thanks for reaching out. To help, can you share the date and headcount?"
+```
+
+**`<sender_jid>` formation:** the dispatcher passes `sender_phone` and/or
+`sender_lid` to this SKILL. Build the JID as follows:
+- If `sender_phone` is non-empty: `<digits>@s.whatsapp.net`
+  (strip the leading `+` from E.164; e.g. `+17329837841` → `17329837841@s.whatsapp.net`)
+- Else if `sender_lid` is non-empty: pass the LID verbatim (already in
+  `<digits>@lid` form from validate-sender-block)
+- Else: do NOT call send-catering-ack — log via stderr and STOP
+
+**Read the script's exit code:**
+- 0: success — `outbound_message_id` printed on stdout, `CateringCustomerAckSent` audited
+- 2: invalid input (bad JID format, empty body, body > 3500 chars) — `CateringCustomerAckFailed(bad_input)` audited; do NOT retry, do NOT compose a fallback reply
+- 6: bridge unreachable / empty response — `CateringCustomerAckFailed(bridge_unreachable|empty_response)` audited; do NOT retry; lead is already on owner's plate via Step 2
+
+DO NOT loop on Step 3. ONE call max per invocation. The owner sees the lead
+either way.
 
 ## Hard rules
 
 - NEVER guess fields. Empty/null is correct when unsure.
-- NEVER skip the script call — without it there's no audit trail and no
-  owner approval flow.
+- NEVER skip Step 2 (create-catering-lead) — without it there's no audit
+  trail and no owner approval flow.
+- NEVER skip Step 3 (send-catering-ack) when Step 2 succeeded — the
+  customer needs an acknowledgment. The script handles the prefix.
+- NEVER write a customer reply directly in the chat (it will be dropped
+  by the bridge filter when LLM-drafted text matches an announcement
+  pattern). Always go through send-catering-ack.
 - NEVER use the customer's WhatsApp profile name as `customer_name`. Profile
   names are unreliable (shared phones, group chats, fake names). Pass
   empty string if you only have what's in the message body.

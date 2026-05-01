@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""send-catering-ack — F5b 2026-05-01 customer-acknowledgment send.
+
+Called by the parse_catering_inquiry SKILL (Step 3) AFTER create-catering-lead
+has succeeded and the lead is on the owner's plate. The SKILL passes the
+caller-facing message body; this script prepends the WhatsApp bridge's
+required `template_bypass` prefix and POSTs to the bridge.
+
+Why server-side prepend (mirrors PR #43 / apply-catering-owner-decision F1):
+the bridge filter (defense-in-depth against LLM internal monologue) drops
+outbound messages matching announcement patterns ("Thanks for", "I'll",
+"I understand", etc.) unless they begin with the `template_bypass` prefix
+(see bridge.js:133). The SKILL used to embed the prefix in its LLM-drafted
+reply, but the LLM forgot the prefix on the May 1 02:36 UTC customer
+inquiry from LID 269612545511591 → 143-char ack dropped silently → second
+production silent-drop incident (first was 01:04 UTC, fixed by PR #43 on
+the OTHER outbound path). Server-side prepend means the prefix is never
+the LLM's responsibility — same fix shape as PR #43.
+
+Usage:
+  send-catering-ack \\
+    --customer-jid "<jid>" \\
+    --message-text "<body — no prefix>" \\
+    [--lead-id "<L0014>"]
+
+`--customer-jid` accepts either form the bridge uses:
+  - "<digits>@s.whatsapp.net" (phone-resolved sender)
+  - "<digits>@lid"            (LID-only sender, common for first contact)
+
+Outputs JSON to stdout: {"outbound_message_id": "...", "ok": true}.
+
+Exit codes:
+  0  — success (message accepted by bridge with messageId)
+  2  — invalid input (missing/malformed flags)
+  6  — bridge unreachable / empty response
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
+
+from safe_io import ndjson_append  # noqa: E402
+from schemas import CateringCustomerAckSent, CateringCustomerAckFailed  # noqa: E402
+from exit_codes import EXIT_OK, EXIT_INVALID_INPUT, EXIT_DEPENDENCY_DOWN  # noqa: E402
+
+LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+BRIDGE_URL = "http://127.0.0.1:3000/send"
+BRIDGE_TIMEOUT = 10
+
+# F5b: server-side bridge `template_bypass` prefix. Mirrors apply-script F1
+# (PR #43). See bridge.js:133 for the exact regex:
+#   /^⚕ \*[A-Za-z][A-Za-z ]*\*\n[─\-]+\n/
+# Agent name MUST be `[A-Za-z ]+` (letters and spaces only).
+BRIDGE_PREFIX = "⚕ *Catering Agent*\n────────────\n"
+
+# Hard cap on the LLM-drafted body. WhatsApp Cloud API caps text.body at
+# ~4096 chars; subtract prefix (24 chars) and leave headroom.
+MAX_ACK_BODY_CHARS = 3500
+
+# Valid JID suffixes — anything else is rejected as malformed input.
+_VALID_JID_SUFFIXES = ("@s.whatsapp.net", "@lid")
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _bridge_post(jid: str, message: str) -> tuple[bool, str]:
+    payload = json.dumps({"chatId": jid, "message": message}).encode("utf-8")
+    req = urllib.request.Request(
+        BRIDGE_URL, data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=BRIDGE_TIMEOUT) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            doc = json.loads(body)
+            mid = doc.get("id") or doc.get("messageId") or ""
+            if not mid:
+                return False, f"empty messageId: {body[:200]}"
+            return True, mid
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError) as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+def _emit_ack_failed(jid: str, reason: str, detail: str) -> None:
+    try:
+        entry = CateringCustomerAckFailed(
+            ts=_now_iso(),
+            type="catering_customer_ack_failed",
+            customer_jid=jid,
+            reason=reason,
+            detail=detail[:2000],
+        )
+        ndjson_append(LOG_PATH, entry.model_dump_json())
+    except Exception as e:
+        sys.stderr.write(f"audit emit failed (non-fatal): {e}\n")
+
+
+def _emit_ack_sent(jid: str, mid: str, lead_id: str) -> None:
+    try:
+        entry = CateringCustomerAckSent(
+            ts=_now_iso(),
+            type="catering_customer_ack_sent",
+            customer_jid=jid,
+            outbound_message_id=mid,
+            lead_id=lead_id,
+        )
+        ndjson_append(LOG_PATH, entry.model_dump_json())
+    except Exception as e:
+        sys.stderr.write(f"audit emit failed (non-fatal): {e}\n")
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description="Send catering customer ack with bridge prefix prepended.")
+    p.add_argument("--customer-jid", required=True, help="JID, e.g. 17329837841@s.whatsapp.net or 269612545511591@lid")
+    p.add_argument("--message-text", required=True, help="Ack body without the prefix; ≤3500 chars")
+    p.add_argument("--lead-id", default="", help="Optional lead linkage")
+    args = p.parse_args()
+
+    jid = args.customer_jid.strip()
+    body = args.message_text.strip()
+
+    if not jid or not any(jid.endswith(s) for s in _VALID_JID_SUFFIXES):
+        _emit_ack_failed(jid or "<empty>", "bad_input",
+                         f"jid must end with one of {_VALID_JID_SUFFIXES}")
+        sys.stderr.write(f"invalid --customer-jid: {jid!r}\n")
+        return EXIT_INVALID_INPUT
+
+    if not body:
+        _emit_ack_failed(jid, "bad_input", "empty message-text")
+        sys.stderr.write("--message-text is empty after strip\n")
+        return EXIT_INVALID_INPUT
+
+    if len(body) > MAX_ACK_BODY_CHARS:
+        _emit_ack_failed(jid, "bad_input",
+                         f"message-text {len(body)} chars exceeds {MAX_ACK_BODY_CHARS}")
+        sys.stderr.write(f"--message-text {len(body)} chars > {MAX_ACK_BODY_CHARS}\n")
+        return EXIT_INVALID_INPUT
+
+    full_message = f"{BRIDGE_PREFIX}{body}"
+    ok, mid_or_err = _bridge_post(jid, full_message)
+
+    if not ok:
+        _emit_ack_failed(jid, "bridge_unreachable", mid_or_err)
+        sys.stderr.write(f"bridge_post failed: {mid_or_err}\n")
+        return EXIT_DEPENDENCY_DOWN
+
+    if not mid_or_err:
+        _emit_ack_failed(jid, "empty_response", "bridge returned ok with no messageId")
+        sys.stderr.write("bridge returned ok with no messageId\n")
+        return EXIT_DEPENDENCY_DOWN
+
+    _emit_ack_sent(jid, mid_or_err, args.lead_id)
+    json.dump({"ok": True, "outbound_message_id": mid_or_err}, sys.stdout)
+    sys.stdout.write("\n")
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())
