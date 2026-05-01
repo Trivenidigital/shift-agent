@@ -1,14 +1,52 @@
 ---
 name: parse_catering_inquiry
-description: Use when catering_dispatcher determines this is a NEW catering inquiry from a customer. Extract structured fields (event_date, headcount, menu, dietary, contact) from the free-text inquiry, call /usr/local/bin/create-catering-lead to write state and trigger the owner approval flow, THEN send ONE brief acknowledgment to the customer via /usr/local/bin/send-catering-ack (Step 3).
+description: Use when catering_dispatcher determines this is a NEW catering inquiry from a customer. Extract structured fields (event_date, headcount, menu, dietary, contact) from the free-text inquiry, call /usr/local/bin/create-catering-lead to write state and trigger the owner approval flow. The script handles the customer acknowledgment automatically.
 ---
 
-# Parse Catering Inquiry (Agent #2 — v0.4 / F5)
+# Parse Catering Inquiry (Agent #2 — v0.4 / F10)
 
 You receive a free-text catering inquiry. Extract whatever structured fields
-the customer provided. Pass them to the deterministic state writer. Then send
-ONE brief acknowledgment to the customer via the dedicated send script — never
-reply directly. Do not guess, do not invent.
+the customer provided. Pass them to the deterministic state writer. The
+state writer also handles the customer acknowledgment automatically — you
+do NOT send any text reply yourself.
+
+## ⚠️ CRITICAL HARD RULES — read these first, override everything below ⚠️
+
+These rules are **absolute** and **non-negotiable**. They override any
+"helpful" instinct to ask follow-up questions or to compose chat replies.
+
+1. **NEVER ASK THE CUSTOMER FOR ANY INFORMATION.** Not phone, not name,
+   not date, not headcount, not anything. The customer's message is the
+   ONLY input you act on. If a field is missing, leave it `null` in
+   `fields_json` — owner can follow up via cockpit. **In particular: the
+   customer's phone is in `sender_phone` (the message metadata) — you
+   ALREADY HAVE IT. Asking the customer "what is your phone number?"
+   when their message arrived FROM that phone is a critical UX failure.**
+
+2. **NEVER COMPOSE A CHAT REPLY TO THE CUSTOMER.** No "Thank you for your
+   inquiry...", no "I'll prepare a quote...", no "Could you please
+   share...". Those replies bypass the bridge filter, leak system internals,
+   and damage trust. The script `create-catering-lead` sends the canonical
+   prefixed acknowledgment automatically — that is the ONLY message the
+   customer should see.
+
+3. **NEVER MIX SHIFT-AGENT RESPONSES INTO THIS FLOW.** This SKILL is for
+   CUSTOMER catering inquiries. Phrases like "Got it. Take care, we'll
+   handle the shift." come from the shift-agent's sick-call handler and
+   MUST NOT appear in customer chats. If you find yourself about to write
+   shift-related text to a customer, STOP — that's a SKILL-mixing error.
+
+4. **The script call in Step 2 IS the work.** Steps 0 and 1 are inputs
+   to it. Step 3 is now empty (collapsed into Step 2 server-side).
+   If you've called create-catering-lead and it returned exit 0, you are
+   DONE. Output nothing further to the chat.
+
+If the inquiry text is too vague to extract any fields (no headcount, no
+date, no event hint), still call create-catering-lead with all-null fields
+and a `notes` value documenting the ambiguity. Owner reviews via cockpit.
+Do not ask the customer to clarify.
+
+## Inputs received from catering_dispatcher
 
 ## Inputs received from catering_dispatcher
 
@@ -126,74 +164,42 @@ The script will:
 - 5: schema violation on existing state file — alert owner via Pushover, STOP, do not retry.
 - 6: owner card couldn't send (bridge issue). Lead is saved. Run shift-agent-notify-owner with title="Catering card delivery failed" and the lead_id.
 
-## Step 3 — Acknowledge customer via send-catering-ack (F5b)
+## Step 3 — DONE (acknowledgment is server-side)
 
-DO NOT send the customer a quote. DO NOT promise pricing. DO NOT compose
-the customer reply yourself in the chat — call the dedicated script.
+**As of F6 (2026-05-01), `create-catering-lead` sends the customer
+acknowledgment automatically with the bridge `template_bypass` prefix
+prepended server-side.** You do NOT need to call send-catering-ack or
+write any chat reply — the script handled it.
 
-The script `/usr/local/bin/send-catering-ack` prepends the WhatsApp bridge's
-`template_bypass` prefix server-side and POSTs to the bridge. You only
-choose the body text. This is the same fix shape as PR #43 for the
-owner-decision → customer-quote path — the prefix is no longer the LLM's
-responsibility, period. Background on why: the bridge filter (defense-in-depth
-against LLM internal monologue) silently drops outbound messages matching
-announcement patterns ("Thanks for", "I'll", etc.) unless prefixed; we cannot
-trust the LLM to remember the prefix on every invocation, so the script
-handles it.
+If Step 2 returned exit 0, you are DONE. Output nothing further.
 
-**Hard rule:** Step 3 runs ONLY if Step 2 returned exit 0 (lead saved).
-If create-catering-lead failed, do not send any customer ack — the lead
-isn't on the owner's plate, so there's nothing to acknowledge. The owner
-gets notified via the script's own failure path (Step 2 exit 6).
+If Step 2 returned exit 6 (owner card couldn't send), the lead is still
+saved but the owner didn't get the card. Run shift-agent-notify-owner
+with title="Catering card delivery failed" and the lead_id. Still do
+NOT write any chat reply to the customer.
 
-**Body selection — pick ONE depending on extraction quality:**
-
-If the inquiry was clear enough that Step 2 succeeded with headcount AND
-event_date populated, send the standard ack:
-
-```
-/usr/local/bin/send-catering-ack \
-  --customer-jid "<sender_jid>" \
-  --lead-id "<lead_id from Step 2 stdout>" \
-  --message-text "Thanks — we got your inquiry, we'll be back to you shortly."
-```
-
-If extraction was unclear (no headcount OR no date OR very vague intent),
-send the clarifying ack instead:
-
-```
-/usr/local/bin/send-catering-ack \
-  --customer-jid "<sender_jid>" \
-  --lead-id "<lead_id from Step 2 stdout>" \
-  --message-text "Thanks for reaching out. To help, can you share the date and headcount?"
-```
-
-**`<sender_jid>` formation:** the dispatcher passes `sender_phone` and/or
-`sender_lid` to this SKILL. Build the JID as follows:
-- If `sender_phone` is non-empty: `<digits>@s.whatsapp.net`
-  (strip the leading `+` from E.164; e.g. `+17329837841` → `17329837841@s.whatsapp.net`)
-- Else if `sender_lid` is non-empty: pass the LID verbatim (already in
-  `<digits>@lid` form from validate-sender-block)
-- Else: do NOT call send-catering-ack — log via stderr and STOP
-
-**Read the script's exit code:**
-- 0: success — `outbound_message_id` printed on stdout, `CateringCustomerAckSent` audited
-- 2: invalid input (bad JID format, empty body, body > 3500 chars) — `CateringCustomerAckFailed(bad_input)` audited; do NOT retry, do NOT compose a fallback reply
-- 6: bridge unreachable / empty response — `CateringCustomerAckFailed(bridge_unreachable|empty_response)` audited; do NOT retry; lead is already on owner's plate via Step 2
-
-DO NOT loop on Step 3. ONE call max per invocation. The owner sees the lead
-either way.
+(Historical note: before F6, the customer ack was a separate step that
+the LLM had to remember to call. That created two failure modes — LLM
+forgot the prefix, or LLM skipped the call entirely. Both were observed
+in production. F6 collapsed the ack into the lead-create script so the
+ack ALWAYS fires whenever a lead is created. The send-catering-ack
+script still exists as a fallback for edge cases but you should not
+need to call it.)
 
 ## Hard rules
 
 - NEVER guess fields. Empty/null is correct when unsure.
 - NEVER skip Step 2 (create-catering-lead) — without it there's no audit
-  trail and no owner approval flow.
-- NEVER skip Step 3 (send-catering-ack) when Step 2 succeeded — the
-  customer needs an acknowledgment. The script handles the prefix.
-- NEVER write a customer reply directly in the chat (it will be dropped
-  by the bridge filter when LLM-drafted text matches an announcement
-  pattern). Always go through send-catering-ack.
+  trail, no owner approval flow, AND no customer ack.
+- NEVER ask the customer for any information (phone, name, contact, date,
+  headcount). All metadata is in `sender_phone`/`sender_name`/`message_id`;
+  all extracted fields are best-effort from `message_text`. Missing field
+  → null in fields_json, owner reviews via cockpit.
+- NEVER compose a chat reply to the customer. F6 in create-catering-lead
+  sends the canonical prefixed acknowledgment. Anything else you write
+  bypasses the bridge filter, leaks system prose, and damages trust.
+- NEVER respond with shift-agent text ("Got it. Take care, we'll handle
+  the shift.") in catering chats. That's a SKILL-mixing error.
 - NEVER use the customer's WhatsApp profile name as `customer_name`. Profile
   names are unreliable (shared phones, group chats, fake names). Pass
   empty string if you only have what's in the message body.
