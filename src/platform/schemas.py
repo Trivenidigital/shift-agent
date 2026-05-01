@@ -2090,6 +2090,39 @@ class CateringOwnerActionWatchdogFired(_BaseEntry):
     detail: str = Field(default="", max_length=2000)
 
 
+class ShiftMissedDispatchNotified(_BaseEntry):
+    """F9 2026-05-01: shift-missed-dispatch-notifier sent owner alert via
+    shift-agent-notify-owner (Pushover-first / WhatsApp-fallback) because
+    an employee inbound that looked sick-call-shaped never produced a
+    dispatcher_routed audit row. Owner now has visibility to act manually.
+
+    NOT auto-creation of a proposal — too risky overnight. Future work
+    can layer roster-lookup + create-proposal call on top of this signal.
+    """
+    type: Literal["shift_missed_dispatch_notified"]
+    chat_id: str = Field(min_length=1, max_length=200)
+    message_id: str = Field(min_length=1, max_length=200)
+    employee_id: str = Field(default="", max_length=20)
+    employee_name: str = Field(default="", max_length=200)
+    signals: list[str] = Field(default_factory=list, max_length=10)
+    success: bool
+    detail: str = Field(default="", max_length=2000)
+
+
+class ShiftMissedDispatchSuppressed(_BaseEntry):
+    """F9 2026-05-01: shift-missed-dispatch-notifier intentionally did NOT
+    notify. Reasons:
+    - non_employee_role: sender is owner/customer/unknown — outside scope
+    - text_unavailable: gateway.log had no matching inbound message line
+    - not_shift_signal: regex classifier saw no sick-call signals
+    """
+    type: Literal["shift_missed_dispatch_suppressed"]
+    chat_id: str = Field(min_length=1, max_length=200)
+    message_id: str = Field(min_length=1, max_length=200)
+    reason: Literal["non_employee_role", "text_unavailable", "not_shift_signal"]
+    detail: str = Field(default="", max_length=2000)
+
+
 class CateringOwnerActionWatchdogSuppressed(_BaseEntry):
     """F8 2026-05-01: watchdog intentionally did NOT fire the fallback. Reasons:
     - code_not_found: no lead with matching owner_approval_code
@@ -2268,6 +2301,9 @@ LogEntry = Annotated[
         # F8 2026-05-01: owner-action watchdog (missed #XXXXX approve/reject recovery)
         Annotated[CateringOwnerActionWatchdogFired, Tag("catering_owner_action_watchdog_fired")],
         Annotated[CateringOwnerActionWatchdogSuppressed, Tag("catering_owner_action_watchdog_suppressed")],
+        # F9 2026-05-01: shift missed-dispatch notifier (employee sick-call alert path)
+        Annotated[ShiftMissedDispatchNotified, Tag("shift_missed_dispatch_notified")],
+        Annotated[ShiftMissedDispatchSuppressed, Tag("shift_missed_dispatch_suppressed")],
         # PR-D1: config load observability + operator reconcile audit
         Annotated[ConfigLoadFailed, Tag("config_load_failed")],
         Annotated[CateringLeadManuallyReconciled, Tag("catering_lead_manually_reconciled")],
@@ -2389,5 +2425,7 @@ __all__ = [
     "CateringDispatcherWatchdogFired", "CateringDispatcherWatchdogSuppressed",
     # F8 2026-05-01 (catering owner-action watchdog)
     "CateringOwnerActionWatchdogFired", "CateringOwnerActionWatchdogSuppressed",
+    # F9 2026-05-01 (shift missed-dispatch notifier)
+    "ShiftMissedDispatchNotified", "ShiftMissedDispatchSuppressed",
     "MenuUpdateProposed", "MenuUpdateApplied", "MenuUpdateRejected",
 ]
