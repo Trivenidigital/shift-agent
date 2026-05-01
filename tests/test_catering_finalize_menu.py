@@ -495,19 +495,19 @@ class TestEdgeCases:
 class TestToleranceBoundary:
     """R3.BC3 — boundary tests for min(5%, $25) tolerance cap."""
 
-    def _menu_for_total(self, env_dir, server_total: int) -> None:
-        # Single item priced 1; qty equals server_total => total is server_total
+    def _menu_with_price(self, env_dir, price: float) -> None:
+        """Single-item menu at the given price (whole dollars)."""
         _seed_menu(env_dir, [{
-            "name": "Aloo Paratha", "price_usd": 1.0, "category": "side",
+            "name": "Aloo Paratha", "price_usd": price, "category": "side",
             "dietary_tags": ["veg"], "available": True, "notes": "", "serves": None,
         }])
 
     def test_dollar_cap_at_boundary_passes(self, bridge_server, env_dir):
-        """server=$1000, llm=$1025 (diff=$25, exactly at cap) => exit 0."""
+        """server=$1000 (price $5 × qty 200), llm=$1025 (diff=$25, exactly at cap) => exit 0."""
         port, _ = bridge_server
-        self._menu_for_total(env_dir, 1000)
+        self._menu_with_price(env_dir, 5.0)
         _seed_lead(env_dir, "L0001", "#ABCDE")
-        items = [{"name": "Aloo Paratha", "qty": 1000, "price_usd": 1}]
+        items = [{"name": "Aloo Paratha", "qty": 200, "price_usd": 5}]
         _, parsed = _run_script(env_dir, port,
             selected_items_json=json.dumps(items), quote_total_usd=1025)
         assert parsed["rc"] == 0
@@ -515,20 +515,20 @@ class TestToleranceBoundary:
     def test_dollar_cap_one_over_boundary_fails(self, bridge_server, env_dir):
         """server=$1000, llm=$1026 (diff=$26, one over $25 cap) => exit 11."""
         port, _ = bridge_server
-        self._menu_for_total(env_dir, 1000)
+        self._menu_with_price(env_dir, 5.0)
         _seed_lead(env_dir, "L0001", "#ABCDE")
-        items = [{"name": "Aloo Paratha", "qty": 1000, "price_usd": 1}]
+        items = [{"name": "Aloo Paratha", "qty": 200, "price_usd": 5}]
         _, parsed = _run_script(env_dir, port,
             selected_items_json=json.dumps(items), quote_total_usd=1026)
         assert parsed["rc"] == 11
 
     def test_pct_branch_under_cap_passes(self, bridge_server, env_dir):
-        """server=$100, llm=$104 (diff=$4 = 4%, under 5% pct cap of $5) => 0.
+        """server=$100 (price $1 × qty 100), llm=$104 (diff=$4 = 4%) => 0.
 
         At server=$100, min(5%=$5, $25) = $5; $4 <= $5 passes.
         """
         port, _ = bridge_server
-        self._menu_for_total(env_dir, 100)
+        self._menu_with_price(env_dir, 1.0)
         _seed_lead(env_dir, "L0001", "#ABCDE")
         items = [{"name": "Aloo Paratha", "qty": 100, "price_usd": 1}]
         _, parsed = _run_script(env_dir, port,
@@ -541,7 +541,7 @@ class TestToleranceBoundary:
         At server=$100, min(5%=$5, $25) = $5; $6 > $5 fails.
         """
         port, _ = bridge_server
-        self._menu_for_total(env_dir, 100)
+        self._menu_with_price(env_dir, 1.0)
         _seed_lead(env_dir, "L0001", "#ABCDE")
         items = [{"name": "Aloo Paratha", "qty": 100, "price_usd": 1}]
         _, parsed = _run_script(env_dir, port,
@@ -556,31 +556,39 @@ class TestReplayTotalConsistency:
     when the menu drifts between first finalize and replay.
     """
 
-    def test_replay_uses_persisted_total_after_menu_drift(self, bridge_server, env_dir):
+    def test_replay_uses_persisted_total_not_server_recompute(self, bridge_server, env_dir):
+        """On replay, owner card MUST use target.quote_total_usd (persisted),
+        NOT a freshly recomputed server_total. Constructed scenario:
+          1. First finalize at $40 (menu @ $4 × qty=10 → server=$40, persisted=$40)
+          2. Manually mutate persisted state to quote_total_usd=$77
+             (representing operator surgery / a bug that caused divergence)
+          3. Replay with same message_id, same args (server=$40 again)
+          4. Card MUST show $77 (persisted), NOT $40 (server recompute)
+        Without R2.B2 fix, the card shows $40.
+        """
         port, stub = bridge_server
         _seed_menu(env_dir, DEFAULT_MENU)  # Aloo Paratha @ $4
         _seed_lead(env_dir, "L0001", "#ABCDE")
         items = [{"name": "Aloo Paratha", "qty": 10, "price_usd": 4}]
         # First finalize at $40
         _, parsed1 = _run_script(env_dir, port,
-            customer_message_id="msg_replay_drift",
+            customer_message_id="msg_replay_total",
             selected_items_json=json.dumps(items), quote_total_usd=40)
         assert parsed1["rc"] == 0
-        first_card = stub.requests[0]["message"]
-        assert "$40" in first_card  # baseline
+        assert len(stub.requests) == 1
 
-        # Menu drifts to $5/item (sleep past 60s cooldown so replay sends card)
-        new_menu = [{"name": "Aloo Paratha", "price_usd": 5.0, "category": "side",
-                     "dietary_tags": ["veg"], "available": True, "notes": "", "serves": None}]
-        _seed_menu(env_dir, new_menu)
-        # Manipulate audit timestamp to bypass 60s cooldown without sleeping.
+        # Mutate persisted quote_total_usd to a divergent value
+        leads_path = env_dir / "state" / "catering-leads.json"
+        store = json.loads(leads_path.read_text(encoding="utf-8"))
+        store["leads"][0]["quote_total_usd"] = 77
+        leads_path.write_text(json.dumps(store), encoding="utf-8")
+
+        # Bypass cooldown via ts rewrite so replay actually sends a card
         log_path = env_dir / "logs" / "decisions.log"
-        original = log_path.read_text(encoding="utf-8")
-        # Rewrite ts on existing finalized rows to be 2 hours ago.
         from datetime import datetime, timezone, timedelta
         old_ts = (datetime.now(tz=timezone.utc) - timedelta(hours=2)).isoformat()
         rewritten = []
-        for line in original.splitlines():
+        for line in log_path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
             row = json.loads(line)
@@ -589,18 +597,17 @@ class TestReplayTotalConsistency:
             rewritten.append(json.dumps(row))
         log_path.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
 
-        # Replay (same message_id, same items — but server recompute is now $50)
-        items_replay = [{"name": "Aloo Paratha", "qty": 10, "price_usd": 4}]
+        # Replay
         _, parsed2 = _run_script(env_dir, port,
-            customer_message_id="msg_replay_drift",
-            selected_items_json=json.dumps(items_replay), quote_total_usd=40)
+            customer_message_id="msg_replay_total",
+            selected_items_json=json.dumps(items), quote_total_usd=40)
         assert parsed2["rc"] == 0
-        # 2nd card sent (cooldown bypassed via ts rewrite)
         assert len(stub.requests) == 2
         replay_card = stub.requests[1]["message"]
-        # The replay card MUST use persisted $40 (not fresh server $50).
-        assert "$40" in replay_card, f"Replay card should show persisted $40, got: {replay_card}"
-        assert "$50" not in replay_card or replay_card.count("$50") < replay_card.count("$40")
+        # R2.B2 fix: replay card uses persisted $77, NOT server recompute $40
+        assert "$77" in replay_card, (
+            f"Replay card must use persisted total $77 (R2.B2). Got: {replay_card[:500]}"
+        )
 
 
 class TestReFinalizeAudit:
