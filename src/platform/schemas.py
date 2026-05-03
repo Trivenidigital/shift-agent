@@ -2181,6 +2181,66 @@ class CateringDispatcherWatchdogSuppressed(_BaseEntry):
     detail: str = Field(default="", max_length=2000)
 
 
+class StateFileMigrated(_BaseEntry):
+    """PR-CF5: a state file's on-disk shape was migrated from legacy to current schema.
+
+    Emitted by `tools/migrate-state-files.py --apply` after successfully
+    backing up a legacy-shape file and writing the current-shape replacement.
+
+    `from_shape`: JSON-stringified sorted list of legacy keys (e.g.,
+                  '["date","sent_count"]')
+    `to_shape`: JSON-stringified sorted list of current keys
+    `backup_path`: full path to the .pre-migrate-<epoch> backup written before
+                   rewrite (matches safe_load_json corrupt-quarantine convention)
+    """
+    type: Literal["state_file_migrated"]
+    file: str = Field(min_length=1, max_length=200)
+    from_shape: str = Field(min_length=1, max_length=500)
+    to_shape: str = Field(min_length=1, max_length=500)
+    backup_path: str = Field(min_length=1, max_length=500)
+
+
+class StateFileMigrationFailed(_BaseEntry):
+    """PR-CF5: migration could not complete — operator must investigate.
+
+    Emitted by `tools/migrate-state-files.py` on any per-file failure path.
+    The operator-override case is NOT emitted via this variant — see
+    StateFileMigrationOverridden instead (separate semantic event).
+
+    Reason enum:
+      - unknown_shape: file shape matches neither current schema nor known-legacy
+      - load_failed_non_extra: Pydantic load failed with error other than
+                                extra_forbidden (e.g., type mismatch on a
+                                key-set-correct file)
+      - json_decode_failed: file contains invalid JSON (corrupt at parser level,
+                            distinct from schema mismatch)
+      - write_failed: backup or atomic_write step failed
+      - backup_failed: backup file could not be created
+    """
+    type: Literal["state_file_migration_failed"]
+    file: str = Field(min_length=1, max_length=200)
+    reason: Literal[
+        "unknown_shape", "load_failed_non_extra", "json_decode_failed",
+        "write_failed", "backup_failed",
+    ]
+    detail: str = Field(default="", max_length=2000)
+
+
+class StateFileMigrationOverridden(_BaseEntry):
+    """PR-CF5: operator used STATE_MIGRATION_OVERRIDE=skip to bypass the gate.
+
+    Separate from StateFileMigrationFailed because the override is a
+    deliberate operator action, not a failure. `file` is omitted because
+    the override skips ALL files (no per-file action). Mirrors the
+    HERMES_PIN_OVERRIDE audit pattern.
+    """
+    type: Literal["state_file_migration_overridden"]
+    reason: str = Field(
+        min_length=1, max_length=2000,
+        description="Operator-supplied STATE_MIGRATION_OVERRIDE_REASON",
+    )
+
+
 class CateringOwnerActionWatchdogFired(_BaseEntry):
     """F8 2026-05-01: catering-owner-action-watchdog detected a missed owner
     `#XXXXX (approve|reject)` command and triggered the fallback
@@ -2413,6 +2473,10 @@ LogEntry = Annotated[
         # F7 2026-05-01: dispatcher watchdog (missed-SKILL recovery)
         Annotated[CateringDispatcherWatchdogFired, Tag("catering_dispatcher_watchdog_fired")],
         Annotated[CateringDispatcherWatchdogSuppressed, Tag("catering_dispatcher_watchdog_suppressed")],
+        # PR-CF5 2026-05-03: state-file migration audit (legacy schema → current)
+        Annotated[StateFileMigrated, Tag("state_file_migrated")],
+        Annotated[StateFileMigrationFailed, Tag("state_file_migration_failed")],
+        Annotated[StateFileMigrationOverridden, Tag("state_file_migration_overridden")],
         # F8 2026-05-01: owner-action watchdog (missed #XXXXX approve/reject recovery)
         Annotated[CateringOwnerActionWatchdogFired, Tag("catering_owner_action_watchdog_fired")],
         Annotated[CateringOwnerActionWatchdogSuppressed, Tag("catering_owner_action_watchdog_suppressed")],
@@ -2540,6 +2604,8 @@ __all__ = [
     "CateringCustomerAckSent", "CateringCustomerAckFailed",
     # F7 2026-05-01 (catering dispatcher watchdog)
     "CateringDispatcherWatchdogFired", "CateringDispatcherWatchdogSuppressed",
+    # PR-CF5 2026-05-03 (state-file migration)
+    "StateFileMigrated", "StateFileMigrationFailed", "StateFileMigrationOverridden",
     # F8 2026-05-01 (catering owner-action watchdog)
     "CateringOwnerActionWatchdogFired", "CateringOwnerActionWatchdogSuppressed",
     # F9 2026-05-01 (shift missed-dispatch notifier)

@@ -165,8 +165,16 @@ snapshot_staging() {
     local tag="deploy-$(date +%Y%m%d-%H%M%S)-${commit_hash}"
 
     if [ -d "$STAGING/src" ]; then
-        tar czf "$DEPLOYS_DIR/${tag}.tgz" -C "$STAGING" src .commit-hash 2>/dev/null \
-            || tar czf "$DEPLOYS_DIR/${tag}.tgz" -C "$STAGING" src
+        # PR-CF5: include tools/ so rollback to a CF5+ tarball preserves the
+        # state-file migrator. If tools/ is missing (pre-CF5 staging), tar
+        # gracefully includes only what's present via the conditional.
+        if [ -d "$STAGING/tools" ]; then
+            tar czf "$DEPLOYS_DIR/${tag}.tgz" -C "$STAGING" src tools .commit-hash 2>/dev/null \
+                || tar czf "$DEPLOYS_DIR/${tag}.tgz" -C "$STAGING" src tools
+        else
+            tar czf "$DEPLOYS_DIR/${tag}.tgz" -C "$STAGING" src .commit-hash 2>/dev/null \
+                || tar czf "$DEPLOYS_DIR/${tag}.tgz" -C "$STAGING" src
+        fi
     fi
     echo "$tag"
 }
@@ -215,6 +223,33 @@ case "$ACTION" in
             echo "ERROR: Hermes pin verification failed — refusing to install." >&2
             echo "  No state change has been made. See output above for details." >&2
             exit 1
+        fi
+
+        # PR-CF5 2026-05-03: state-file migration gate. Brings legacy state
+        # files (e.g. {date, sent_count} send-counter.json) up to current
+        # Pydantic schemas before the new code starts reading them. Bootstrap-
+        # friendly: skips with WARN if migrator script absent (rollback to
+        # pre-CF5 tarball compatibility). Fail-closed otherwise.
+        echo "=== state-file migration check ==="
+        MIGRATOR="$STAGING/tools/migrate-state-files.py"
+        if [ ! -x "$MIGRATOR" ]; then
+            if [ -f "$MIGRATOR" ]; then
+                echo "WARN: migrator exists but is not executable — permission problem? Skipping." >&2
+            else
+                echo "WARN: state-file migrator absent at $MIGRATOR — skipping (tarball is pre-CF5 vintage)" >&2
+            fi
+        else
+            if ! "$MIGRATOR" --check; then
+                # Migrations needed (or override-malformed) — try to apply
+                if ! "$MIGRATOR" --apply; then
+                    echo "ERROR: state-file migration failed — refusing to install." >&2
+                    echo "  See decisions.log for state_file_migration_failed audit row + runbook" >&2
+                    echo "  in tasks/runbook-state-migration.md." >&2
+                    exit 1
+                fi
+            else
+                echo "OK: all state files current; no migration needed"
+            fi
         fi
 
         # Env symlink integrity gate — strict. Fail-closed if /opt/shift-agent/.env
