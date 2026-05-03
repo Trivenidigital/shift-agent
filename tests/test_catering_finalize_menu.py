@@ -860,6 +860,41 @@ class TestReplayWindow:
                      if r["type"] == "catering_menu_finalized"]
         assert finalized[1]["replay"] is True
 
+    def test_legacy_lead_with_msgid_but_null_finalized_at_treated_as_fresh(
+        self, bridge_server, env_dir,
+    ):
+        """PR-CF2 review-fix MEDIUM-2: a partially-written legacy row could
+        have last_finalize_message_id set but customer_finalized_at=None.
+        Submitting the same message_id MUST be treated as a fresh finalize
+        (replay=False, state mutates, status_change row written), NOT
+        suppressed-as-replay. Also confirms no TypeError from the tz-aware
+        subtraction guard.
+        """
+        port, _ = bridge_server
+        _seed_menu(env_dir, DEFAULT_MENU)
+        # Seed lead with last_finalize_message_id pre-set but no finalized_at
+        _seed_lead(
+            env_dir, "L0001", "#ABCDE",
+            last_finalize_message_id="msg_legacy_partial",
+            customer_finalized_at=None,
+        )
+        items = [{"name": "Aloo Paratha", "qty": 2, "price_usd": 4}]
+        _, parsed = _run_script(env_dir, port,
+            customer_message_id="msg_legacy_partial",
+            selected_items_json=json.dumps(items), quote_total_usd=8)
+        assert parsed["rc"] == 0
+        finalized = [r for r in _read_audit(env_dir)
+                     if r["type"] == "catering_menu_finalized"]
+        assert len(finalized) == 1
+        assert finalized[0]["replay"] is False  # treated as fresh
+        # Status_change row written (initial transition AWAITING -> FINALIZED)
+        status_changes = [r for r in _read_audit(env_dir)
+                          if r["type"] == "catering_lead_status_change"]
+        assert len(status_changes) == 1
+        # Lead has customer_finalized_at populated now
+        lead = _read_lead(env_dir, "#ABCDE")
+        assert lead["customer_finalized_at"] is not None
+
     def test_replay_outside_24h_treated_as_fresh_finalize(self, bridge_server, env_dir):
         """Manipulate persisted customer_finalized_at to >24h ago. Replay
         with same message_id then becomes a real re-finalize (state

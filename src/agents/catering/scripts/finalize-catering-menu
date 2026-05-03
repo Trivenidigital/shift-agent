@@ -467,10 +467,23 @@ def main() -> int:
         # PR-CF2 (R1.H3): also require the prior finalize be within
         # REPLAY_WINDOW_HOURS. Past that window, treat as fresh finalize so a
         # rare bridge messageId reuse doesn't suppress a real customer action.
-        within_replay_window = (
-            target.customer_finalized_at is not None
-            and (now - target.customer_finalized_at) < timedelta(hours=REPLAY_WINDOW_HOURS)
-        )
+        # PR-CF2 review-fix: defend against naive `customer_finalized_at`
+        # (legacy / operator-patched rows). `now` is tz-aware; subtraction
+        # would raise TypeError. Default to "not within window" — safer to
+        # treat suspicious data as fresh finalize than to crash inside the
+        # lock.
+        within_replay_window = False
+        if target.customer_finalized_at is not None:
+            try:
+                within_replay_window = (
+                    (now - target.customer_finalized_at)
+                    < timedelta(hours=REPLAY_WINDOW_HOURS)
+                )
+            except TypeError as e:
+                sys.stderr.write(
+                    f"WARN: customer_finalized_at tz-mismatch on lead "
+                    f"{target.lead_id} ({e}); treating as outside replay window\n"
+                )
         if (
             target.last_finalize_message_id == args.customer_message_id
             and within_replay_window
