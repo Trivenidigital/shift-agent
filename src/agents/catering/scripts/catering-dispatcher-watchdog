@@ -336,7 +336,7 @@ def process_inbound(chat_id: str, message_id: str, inbound_seen_ts: float) -> No
         emit_audit(_make_suppressed(
             ts=_now_iso(), type="catering_dispatcher_watchdog_suppressed",
             chat_id=chat_id, message_id=message_id, reason="text_unavailable",
-            detail="agent.log had no matching 'inbound message:' line",
+            detail=f"agent.log had no matching 'inbound message:' line for chat_id={chat_id}",
         ))
         return
 
