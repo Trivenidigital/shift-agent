@@ -119,15 +119,28 @@ if ! /usr/local/bin/render-coverage-template coverage_message_to_candidate --fie
 fi
 echo "✓ render-coverage-template works"
 
-# 7. Pushover test — uses an unprivileged API endpoint
-if ! /usr/local/bin/shift-agent-notify-owner \
+# 7. Pushover test — uses an unprivileged API endpoint.
+# Skip with WARN if alerting credentials are intentionally muted (operator
+# placeholder pattern: keys starting with "MUTED_..."). Used on dev VPS where
+# alerts are silenced. Real-credential VPS still get a real-channel probe
+# and fail-close on credential breakage.
+PUSHOVER_KEY=$($PY -c "
+import sys, yaml; sys.path.insert(0, '/opt/shift-agent')
+with open('/opt/shift-agent/config.yaml') as f:
+    cfg = yaml.safe_load(f) or {}
+print((cfg.get('alerting') or {}).get('pushover_user_key', ''))
+" 2>/dev/null)
+if [[ "$PUSHOVER_KEY" == MUTED_* ]]; then
+    echo "⚠  Pushover credentials muted (key=$PUSHOVER_KEY) — skipping channel probe (dev VPS)"
+elif ! /usr/local/bin/shift-agent-notify-owner \
         --priority -1 \
         --title "Smoke test" \
         "Shift Agent smoke test — please ignore" ; then
     echo "FAIL: Pushover notification failed — out-of-band alerts won't work"
     exit 1
+else
+    echo "✓ Pushover channel working"
 fi
-echo "✓ Pushover channel working"
 
 # 8. systemd units enabled
 for unit in hermes-gateway shift-agent-tail-logger.timer shift-agent-health.timer send-routing-accuracy-summary.timer; do
