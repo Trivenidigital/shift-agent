@@ -165,8 +165,16 @@ snapshot_staging() {
     local tag="deploy-$(date +%Y%m%d-%H%M%S)-${commit_hash}"
 
     if [ -d "$STAGING/src" ]; then
-        tar czf "$DEPLOYS_DIR/${tag}.tgz" -C "$STAGING" src .commit-hash 2>/dev/null \
-            || tar czf "$DEPLOYS_DIR/${tag}.tgz" -C "$STAGING" src
+        # PR-CF5: include tools/ so rollback to a CF5+ tarball preserves the
+        # state-file migrator. If tools/ is missing (pre-CF5 staging), tar
+        # gracefully includes only what's present via the conditional.
+        if [ -d "$STAGING/tools" ]; then
+            tar czf "$DEPLOYS_DIR/${tag}.tgz" -C "$STAGING" src tools .commit-hash 2>/dev/null \
+                || tar czf "$DEPLOYS_DIR/${tag}.tgz" -C "$STAGING" src tools
+        else
+            tar czf "$DEPLOYS_DIR/${tag}.tgz" -C "$STAGING" src .commit-hash 2>/dev/null \
+                || tar czf "$DEPLOYS_DIR/${tag}.tgz" -C "$STAGING" src
+        fi
     fi
     echo "$tag"
 }
@@ -215,6 +223,49 @@ case "$ACTION" in
             echo "ERROR: Hermes pin verification failed — refusing to install." >&2
             echo "  No state change has been made. See output above for details." >&2
             exit 1
+        fi
+
+        # PR-CF5 2026-05-03: state-file migration gate. Brings legacy state
+        # files (e.g. {date, sent_count} send-counter.json) up to current
+        # Pydantic schemas before the new code starts reading them. Bootstrap-
+        # friendly: skips with WARN if migrator script absent (rollback to
+        # pre-CF5 tarball compatibility). Fail-closed otherwise.
+        echo "=== state-file migration check ==="
+        MIGRATOR="$STAGING/tools/migrate-state-files.py"
+        if [ ! -x "$MIGRATOR" ]; then
+            if [ -f "$MIGRATOR" ]; then
+                echo "WARN: migrator exists but is not executable — permission problem? Skipping." >&2
+            else
+                echo "WARN: state-file migrator absent at $MIGRATOR — skipping (tarball is pre-CF5 vintage)" >&2
+            fi
+        else
+            "$MIGRATOR" --check
+            CHECK_RC=$?
+            case "$CHECK_RC" in
+                0)
+                    echo "OK: all state files current; no migration needed"
+                    ;;
+                1)
+                    # Migrations needed (or malformed override) — try to apply
+                    if ! "$MIGRATOR" --apply; then
+                        echo "ERROR: state-file migration apply failed — refusing to install." >&2
+                        echo "  See decisions.log for state_file_migration_failed audit row + runbook" >&2
+                        echo "  in tasks/runbook-state-migration.md." >&2
+                        exit 1
+                    fi
+                    ;;
+                2)
+                    # Unknown shape / corrupt JSON / non-extra load failure — operator must triage
+                    echo "ERROR: state-file migration check failed (rc=2: unknown shape or corrupt state)." >&2
+                    echo "  Do NOT auto-apply. See decisions.log state_file_migration_failed audit row" >&2
+                    echo "  + runbook tasks/runbook-state-migration.md scenario B." >&2
+                    exit 1
+                    ;;
+                *)
+                    echo "ERROR: state-file migration check returned unexpected rc=$CHECK_RC — refusing to install." >&2
+                    exit 1
+                    ;;
+            esac
         fi
 
         # Env symlink integrity gate — strict. Fail-closed if /opt/shift-agent/.env
@@ -291,8 +342,17 @@ case "$ACTION" in
         # Snapshot current staging as the new tarball BEFORE install (so the tarball
         # we'd roll back to is the source we're about to install — symmetric with
         # rollback's "extract tarball into staging then install_artifacts" flow).
-        tar czf "$DEPLOYS_DIR/${NEW_TAG}.tgz" -C "$STAGING" src .commit-hash 2>/dev/null \
-            || tar czf "$DEPLOYS_DIR/${NEW_TAG}.tgz" -C "$STAGING" src
+        # PR-CF5: include tools/ so rollback to a CF5+ tarball preserves the
+        # state-file migrator. CRITICAL — without this, every CF5+ deploy writes
+        # a rollback tarball missing tools/ and the next deploy's migration gate
+        # WARN-skips, silently bypassing the migration on rollback.
+        if [ -d "$STAGING/tools" ]; then
+            tar czf "$DEPLOYS_DIR/${NEW_TAG}.tgz" -C "$STAGING" src tools .commit-hash 2>/dev/null \
+                || tar czf "$DEPLOYS_DIR/${NEW_TAG}.tgz" -C "$STAGING" src tools
+        else
+            tar czf "$DEPLOYS_DIR/${NEW_TAG}.tgz" -C "$STAGING" src .commit-hash 2>/dev/null \
+                || tar czf "$DEPLOYS_DIR/${NEW_TAG}.tgz" -C "$STAGING" src
+        fi
 
         install_artifacts "$STAGING"
 
