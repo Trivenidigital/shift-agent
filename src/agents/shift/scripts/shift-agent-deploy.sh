@@ -391,8 +391,10 @@ case "$ACTION" in
         # Run the symbol-import checks against the just-installed binary (still
         # old service) — failure path rolls back without touching live traffic.
         # PR-D1 R3-H-Gate1: chained check-audit-helpers-symbols.
-        if ! /usr/local/bin/check-safe-io-symbols > /dev/null \
-              || ! /usr/local/bin/check-audit-helpers-symbols > /dev/null; then
+        # Both gate scripts use #!/usr/bin/env python3 (system Python, no
+        # pydantic). Invoke through the Hermes venv so schemas import works.
+        if ! "$VENV_PY" /usr/local/bin/check-safe-io-symbols > /dev/null \
+              || ! "$VENV_PY" /usr/local/bin/check-audit-helpers-symbols > /dev/null; then
             echo "FAIL: pre-restart import gate — refusing to restart hermes-gateway" >&2
             if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
                 "$0" rollback "$PREV_TAG"
