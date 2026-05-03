@@ -104,7 +104,7 @@ RULES:
 - "veg" tag for items WITHOUT meat/eggs/fish. "non-veg" for items WITH meat/seafood/eggs.
 - A dish can have multiple dietary tags (e.g., ["veg", "gluten-free"]).
 - Categories: "package" = combo/platter pricing. "special" = chef's pick / seasonal.
-- Prices in USD only. If you see "Rs" / "₹" / "INR", convert to USD assuming 1 USD = 85 INR (rough). Note the conversion in parser_notes.
+- Prices are in USD as displayed on the menu. Treat numeric amounts as literal USD unless the menu EXPLICITLY shows a non-USD currency symbol (₹, Rs, INR, €, £, ¥). Only convert when a non-USD symbol is unambiguously present, and document the conversion rate in parser_notes. Default assumption: USD (vision LLMs tend to over-convert when given INR-as-default; this prompt corrects that — PR-CF3).
 - If the image isn't a menu (e.g., random photo, wrong document), return {"items": [], "parser_notes": "image is not a menu: <brief description>"}
 - Maximum 100 items per response. If the menu has more, return the first 100 + note in parser_notes.
 
@@ -168,7 +168,13 @@ def _call_vision(api_key: str, image_b64: str, mime: str) -> dict:
                 ],
             }
         ],
-        "max_tokens": 4096,
+        # PR-CF3: bumped from 4096 to 8192. Real catering menus (verified
+        # 2026-05-03 with a 80-item South Indian menu) emit ~18-26KB of JSON
+        # — 4096 tokens (~13KB output) truncated mid-item, producing
+        # "Unterminated string" JSON parse failures with exit 6. 8192 tokens
+        # (~26KB) covers the observed 100-item ceiling. gpt-4o-mini supports
+        # up to 16384 but takes >120s for that — 8192 is the sweet spot.
+        "max_tokens": 8192,
         "temperature": 0,  # deterministic — same photo → same extraction
     }
     body = json.dumps(payload).encode("utf-8")

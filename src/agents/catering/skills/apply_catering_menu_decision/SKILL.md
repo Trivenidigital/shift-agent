@@ -73,6 +73,33 @@ After exit 5 / 6 / other failure:
 - After applying, report the new version + item count so the owner has a
   clear "did it stick?" signal.
 
+### PR-CF3 fail-closed rule (do NOT improvise)
+
+**This SKILL's ONLY job is to invoke `/usr/local/bin/apply-menu-update` and
+surface its output.** You are NOT permitted to:
+
+- Read or modify `/opt/shift-agent/state/catering-menu-pending.json` directly
+- Read or modify `/opt/shift-agent/state/catering-menu.json` directly
+- Use `python3`, heredocs, or any inline scripting to look up the
+  confirmation code, parse the pending file, or write the active menu
+- Generate the version number, archive path, or audit row yourself —
+  `apply-menu-update` does all of that deterministically with file locking
+  and atomic writes
+
+If `apply-menu-update` returns a non-zero exit code, you MUST surface the
+error to the owner per the Step 2 exit-code table and STOP. Under NO
+circumstance should you "helpfully" do the work in-context — that bypasses
+the file locking, the version increment, the archive write, the audit
+emission, and the empty-menu refusal. The deployed pipeline will silently
+diverge from what the owner sees if you improvise.
+
+This rule exists because of an observed PR-CF2 incident on 2026-05-03
+where the LLM saw the dispatcher route the owner's `#XXXXX yes` reply
+into this SKILL, then improvised a `python3 -c "import json; ..."` inline
+script to inspect the pending file rather than calling `apply-menu-update`.
+The improvisation would have bypassed the deterministic apply pipeline
+entirely.
+
 ## What this skill does NOT do
 
 - Render quotes (apply-catering-owner-decision does that)
