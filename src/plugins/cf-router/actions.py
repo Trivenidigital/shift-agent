@@ -31,25 +31,55 @@ NOTIFY_OWNER_BIN = Path("/usr/local/bin/shift-agent-notify-owner")
 
 PYTHON_BIN = Path("/usr/local/lib/hermes-agent/venv/bin/python")
 PLATFORM_DIR = Path("/opt/shift-agent")  # Where schemas.py lives
+IDENTIFY_SENDER_BIN = Path("/usr/local/bin/identify-sender")
 
 SUBPROCESS_TIMEOUT_SEC = 30
 ALERT_THROTTLE_SEC = 300  # Suppress duplicate Pushover alerts within 5 min
 
 
+def _ensure_platform_path() -> None:
+    """Idempotently insert PLATFORM_DIR onto sys.path. Called once before any
+    safe_io / schemas import. Avoids per-call sys.path growth that the
+    previous implementation caused."""
+    p = str(PLATFORM_DIR)
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+
 # === Owner / employee identity ===
 
 def is_owner_chat(chat_id: str) -> bool:
-    """Check if chat_id matches owner's self-chat per config.yaml.
+    """Check if chat_id matches owner per config.yaml OR via identify-sender.
 
-    Strict equality match — no pattern bypass. Returns False on any error
-    (config unreadable, owner.self_chat_jid unset).
+    Two-step check (mirrors F8 watchdog F13 fix):
+      1. Strict equality against owner.self_chat_jid (the phone-JID side).
+      2. If chat_id ends with @lid, fall back to identify-sender → role check.
+         The bridge inbound notify often surfaces the owner's LID
+         (<digits>@lid) rather than the phone-JID configured in
+         owner.self_chat_jid; without this fallback, owner #XXXXX commands
+         on the LID side would silently fail to be intercepted.
+    Returns False on any error (config unreadable, identify-sender failure).
     """
     try:
         import yaml  # type: ignore
         with CONFIG_PATH.open() as f:
             cfg = yaml.safe_load(f)
         owner_jid = (cfg or {}).get("owner", {}).get("self_chat_jid", "")
-        return bool(owner_jid) and chat_id == owner_jid
+        if owner_jid and chat_id == owner_jid:
+            return True
+        # F13: LID fallback via identify-sender
+        if chat_id.endswith("@lid"):
+            try:
+                result = subprocess.run(
+                    [str(IDENTIFY_SENDER_BIN), chat_id],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if result.returncode == 0:
+                    doc = json.loads(result.stdout)
+                    return doc.get("role") == "owner"
+            except (subprocess.SubprocessError, json.JSONDecodeError, OSError):
+                return False
+        return False
     except Exception:
         return False
 
@@ -81,24 +111,26 @@ def is_employee_chat(chat_id: str) -> bool:
 
 # === State lookups ===
 
-def find_catering_lead_by_code(code: str) -> Optional[str]:
+ACTIONABLE_LEAD_STATUSES = frozenset({
+    "AWAITING_OWNER_APPROVAL", "CUSTOMER_FINALIZED",
+    "OWNER_EDITED", "OWNER_APPROVED",
+})
+
+
+def find_catering_lead_by_code(code: str) -> Optional[dict]:
     """Look up a non-terminal catering lead by owner_approval_code.
 
-    Returns the lead's status if found in {AWAITING_OWNER_APPROVAL,
-    CUSTOMER_FINALIZED, OWNER_EDITED, OWNER_APPROVED}; None otherwise.
+    Returns the lead dict (full record) if found in an actionable status;
+    None otherwise. Caller passes this dict to invoke_apply_owner_decision
+    to avoid a second read of LEADS_PATH (TOCTOU mitigation).
     """
     try:
         with LEADS_PATH.open() as f:
             store = json.load(f)
-        actionable = {
-            "AWAITING_OWNER_APPROVAL", "CUSTOMER_FINALIZED",
-            "OWNER_EDITED", "OWNER_APPROVED",
-        }
         for lead in store.get("leads", []):
             if lead.get("owner_approval_code") == code:
-                status = lead.get("status")
-                if status in actionable:
-                    return status
+                if lead.get("status") in ACTIONABLE_LEAD_STATUSES:
+                    return lead
         return None
     except Exception:
         return None
@@ -121,13 +153,16 @@ def find_menu_pending_by_code(code: str) -> Optional[dict]:
 
 # === Subprocess invocations ===
 
-def invoke_apply_owner_decision(code: str, decision: str) -> int:
+def invoke_apply_owner_decision(code: str, decision: str,
+                                lead: Optional[dict] = None) -> int:
     """Invoke apply-catering-owner-decision; returns exit code.
 
-    For `approve`: reads the lead's existing quote_text (drafted by F14 at
-    lead-creation) and pipes it via --quote-text-stdin. This matches what
-    F8 watchdog did.
+    For `approve`: caller passes the lead dict (snapshot from
+    find_catering_lead_by_code). The lead's quote_text (F14-drafted
+    proposal) is piped via --quote-text-stdin. Callers must NOT
+    re-read LEADS_PATH — TOCTOU mitigation.
     For `reject`: passes --reason "owner_reject_via_cf_router".
+    Lead dict is ignored on reject.
     """
     try:
         env = {**os.environ, "PYTHONPATH": str(PLATFORM_DIR)}
@@ -135,15 +170,11 @@ def invoke_apply_owner_decision(code: str, decision: str) -> int:
                "--code", code, "--decision", decision]
         stdin_text: Optional[str] = None
         if decision == "approve":
-            # Read the lead's existing quote_text (F14-drafted proposal)
-            with LEADS_PATH.open() as f:
-                store = json.load(f)
-            lead = next((l for l in store.get("leads", []) if l.get("owner_approval_code") == code), None)
             if lead is None:
-                return 4  # EXIT_NOT_FOUND
+                return 4  # EXIT_NOT_FOUND — caller forgot to pass lead
             stdin_text = lead.get("quote_text", "")
             if not stdin_text or stdin_text.startswith("<legacy"):
-                # No drafted quote available — let LLM handle (return error code)
+                # No drafted quote available — let LLM handle
                 return 2  # EXIT_INVALID_INPUT
             cmd.append("--quote-text-stdin")
         elif decision == "reject":
@@ -178,13 +209,18 @@ def invoke_apply_menu_update(code: str, decision: str) -> int:
 
 def fire_pushover_alert(title: str, body: str, priority: int = 2) -> None:
     """Fire a Pushover alert via the deployed shift-agent-notify-owner script.
+
+    The deployed script's argparse takes `message` as a POSITIONAL argument
+    after the optional --title / --priority flags. We insert `--` before
+    `body` so a leading-dash in the body (e.g. "- can't come tomorrow")
+    isn't misinterpreted by argparse as a flag.
     Best-effort: failures are logged to stderr, never raised.
     """
     try:
         subprocess.run(
             [str(NOTIFY_OWNER_BIN),
              "--priority", str(priority),
-             "--title", title, body],
+             "--title", title, "--", body],
             check=False, timeout=10,
         )
     except Exception as e:
@@ -213,10 +249,15 @@ def was_recently_alerted(chat_id: str, kind: str) -> bool:
 
 
 def mark_alerted(chat_id: str, kind: str) -> None:
-    """Record alert timestamp for throttle. Best-effort; failures are
-    swallowed (worst case: a duplicate Pushover fires).
+    """Record alert timestamp for throttle. Uses safe_io.atomic_write_json
+    so concurrent gateway turns don't clobber each other (deployed-pattern
+    requirement per CLAUDE.md Part 1). Best-effort: failures are swallowed
+    (worst case: a duplicate Pushover fires).
     """
     try:
+        _ensure_platform_path()
+        from safe_io import atomic_write_json  # type: ignore
+
         state: dict = {}
         if THROTTLE_PATH.exists():
             try:
@@ -230,11 +271,7 @@ def mark_alerted(chat_id: str, kind: str) -> None:
         cutoff = time.time() - 3 * ALERT_THROTTLE_SEC
         state = {k: v for k, v in state.items() if isinstance(v, (int, float)) and v >= cutoff}
         THROTTLE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        # Atomic-ish write (rename pattern; full atomic would use safe_io)
-        tmp = THROTTLE_PATH.with_suffix(".tmp")
-        with tmp.open("w") as f:
-            json.dump(state, f)
-        tmp.replace(THROTTLE_PATH)
+        atomic_write_json(THROTTLE_PATH, state)
     except Exception:
         pass
 
@@ -247,10 +284,12 @@ def audit_intercepted(reason: str, chat_id: str, code: Optional[str] = None,
     safe_io.ndjson_append chokepoint.
 
     Best-effort: failures are logged to stderr; the plugin still returns
-    its action so the gateway flow continues.
+    its action so the gateway flow continues. The wrapping try/except is
+    critical — if this raises, the outer plugin try/except converts a
+    successful skip into a `None` (LLM re-runs after apply already fired).
     """
     try:
-        sys.path.insert(0, str(PLATFORM_DIR))
+        _ensure_platform_path()
         from safe_io import ndjson_append  # type: ignore
         from schemas import CfRouterIntercepted  # type: ignore
         entry = CfRouterIntercepted(

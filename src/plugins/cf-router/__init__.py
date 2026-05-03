@@ -16,8 +16,11 @@ Behavior:
     Pushover P2 alert to owner so they know to check the dispatcher route within
     60s. Plugin returns {"action": "allow"} (LLM still runs); this is alert-only.
 
-Drift-check tag: Hermes-native (uses Hermes plugin substrate as documented;
-no custom infrastructure beyond the plugin itself).
+Drift-check tag: extends-Hermes. Uses the Hermes plugin substrate as
+documented but adds custom infrastructure: a per-VPS throttle file
+(state/cf-router-throttle.json), a new audit variant CfRouterIntercepted
+in the LogEntry discriminated union, and ~120 LOC of net-new interception
+logic (owner LID resolution, verb classification, subprocess invocation).
 
 PR-CF6 (2026-05-03).
 """

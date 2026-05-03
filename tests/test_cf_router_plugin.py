@@ -184,7 +184,10 @@ class TestF8OwnerApprove:
         assert result is not None
         assert result["action"] == "skip"
         assert "F8" in result["reason"]
-        mock_apply.assert_called_once_with("#ABCDE", "approve")
+        mock_apply.assert_called_once()
+        call = mock_apply.call_args
+        assert call.args[:2] == ("#ABCDE", "approve")
+        assert call.kwargs.get("lead", {}).get("owner_approval_code") == "#ABCDE"
 
     def test_owner_reject_intercepted(self, mods, state_env):
         hooks_mod, actions_mod = mods
@@ -197,7 +200,7 @@ class TestF8OwnerApprove:
 
         assert result is not None
         assert result["action"] == "skip"
-        mock_apply.assert_called_once_with("#ABCDE", "reject")
+        mock_apply.assert_called_once_with("#ABCDE", "reject")  # reject doesn't pass lead
 
     def test_owner_edit_NOT_intercepted_lets_LLM_handle(self, mods, state_env):
         """Edit needs LLM extraction — plugin should let LLM handle."""
@@ -276,6 +279,86 @@ class TestF8OwnerApprove:
         assert f8_rows[0]["code"] == "#ABCDE"
         assert f8_rows[0]["chat_id"] == "918522041562@s.whatsapp.net"
         assert f8_rows[0]["subprocess_rc"] == 0
+
+    def test_owner_approve_past_tense_intercepted(self, mods, state_env):
+        """Owner often replies 'approved' (past tense) — must intercept."""
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        _seed_lead(state_env, code="#ABCDE")
+
+        with patch.object(actions_mod, "invoke_apply_owner_decision", return_value=0) as mock_apply:
+            event = _make_event("#ABCDE approved", "918522041562@s.whatsapp.net")
+            result = hooks_mod.pre_gateway_dispatch(event)
+
+        assert result is not None and result["action"] == "skip"
+        mock_apply.assert_called_once()
+
+    def test_owner_reject_past_tense_intercepted(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        _seed_lead(state_env, code="#ABCDE")
+
+        with patch.object(actions_mod, "invoke_apply_owner_decision", return_value=0) as mock_apply:
+            event = _make_event("#ABCDE rejected", "918522041562@s.whatsapp.net")
+            result = hooks_mod.pre_gateway_dispatch(event)
+
+        assert result is not None and result["action"] == "skip"
+        mock_apply.assert_called_once()
+
+    def test_apply_script_failure_falls_back_to_LLM(self, mods, state_env):
+        """If apply-script returns non-zero, plugin returns None so LLM
+        runs and surfaces the failure to the owner — does NOT silently skip.
+        """
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        _seed_lead(state_env, code="#ABCDE")
+
+        with patch.object(actions_mod, "invoke_apply_owner_decision", return_value=9):
+            event = _make_event("#ABCDE approve", "918522041562@s.whatsapp.net")
+            result = hooks_mod.pre_gateway_dispatch(event)
+
+        # Non-zero rc → fall back to LLM (don't silently eat the message)
+        assert result is None
+        # But audit row IS written so the failure is observable
+        audit = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
+        rows = [r for r in audit if r["type"] == "cf_router_intercepted" and r["reason"] == "f8_owner_approve"]
+        assert len(rows) == 1
+        assert rows[0]["subprocess_rc"] == 9
+
+    def test_owner_via_LID_intercepted_via_identify_sender(self, mods, state_env):
+        """Owner inbound via @lid (not phone-JID) — F13 fix: fall back to
+        identify-sender → role=owner.
+        """
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, owner_jid="918522041562@s.whatsapp.net")
+        _seed_lead(state_env, code="#ABCDE")
+        owner_lid = "211390371475536@lid"
+
+        # Mock identify-sender subprocess + apply-script
+        fake_run = SimpleNamespace(returncode=0, stdout='{"role":"owner"}', stderr="")
+        with patch("subprocess.run", return_value=fake_run):
+            with patch.object(actions_mod, "invoke_apply_owner_decision", return_value=0) as mock_apply:
+                event = _make_event("#ABCDE approve", owner_lid)
+                result = hooks_mod.pre_gateway_dispatch(event)
+
+        assert result is not None and result["action"] == "skip"
+        mock_apply.assert_called_once()
+
+    def test_LID_non_owner_NOT_intercepted(self, mods, state_env):
+        """LID sender that identify-sender flags as non-owner → not intercepted."""
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        _seed_lead(state_env, code="#ABCDE")
+        random_lid = "999999999999@lid"
+
+        fake_run = SimpleNamespace(returncode=0, stdout='{"role":"unknown"}', stderr="")
+        with patch("subprocess.run", return_value=fake_run):
+            with patch.object(actions_mod, "invoke_apply_owner_decision") as mock_apply:
+                event = _make_event("#ABCDE approve", random_lid)
+                result = hooks_mod.pre_gateway_dispatch(event)
+
+        assert result is None
+        mock_apply.assert_not_called()
 
 
 class TestF8MenuYesNo:

@@ -1,6 +1,8 @@
 # PR-CF6 — cf-router Hermes plugin (replaces F8/F9 watchdogs)
 
-**Drift-check tag:** `Hermes-native`
+**Drift-check tag:** `extends-Hermes`
+
+(Hermes substrate is used unchanged, but the PR adds: a per-VPS throttle JSON file, a new `CfRouterIntercepted` audit variant in the `LogEntry` discriminated union, owner-LID resolution via `identify-sender`, and ~120 LOC of net-new interception logic. All net-new is plugin-local and uses the `safe_io` chokepoints; no parallel storage / audit infrastructure is introduced.)
 
 The whole point: replace custom watchdog daemons (F8, F9) with native Hermes plugin hooks. Moves rescue-layer logic from `/usr/local/bin/*-watchdog` (custom code + systemd timers) to `~/.hermes/plugins/cf-router/` (Hermes substrate). F11 deferred to v2.
 
@@ -97,3 +99,36 @@ Total estimate: ~250 LOC. ~3-4 hours including review cycle.
 - F7 catering-dispatcher-watchdog → plugin migration
 - F11 cross-agent leakage → `pre_tool_call` veto (needs bridge-POST tool wrapping first)
 - Plugin-side LLM extraction for F9 (would let plugin actually invoke create-proposal with extracted fields)
+
+## Rollback runbook (operator-facing)
+
+If the plugin misbehaves in production (silently dropping owner approvals, firing wrong subprocesses, blocking the gateway, etc.):
+
+```bash
+# 1. Disable the plugin (remove from Hermes plugin dir)
+sudo rm -rf /root/.hermes/plugins/cf-router
+
+# 2. Restart hermes-gateway so the plugin no longer loads
+sudo systemctl restart hermes-gateway
+
+# 3. Re-enable the legacy F8/F9 watchdog timers (they were disabled at deploy time
+#    by install_artifacts() when cf-router was installed)
+sudo systemctl enable --now catering-owner-action-watchdog.timer
+sudo systemctl enable --now shift-missed-dispatch-notifier.timer
+
+# 4. Verify both are running
+systemctl status catering-owner-action-watchdog.timer shift-missed-dispatch-notifier.timer
+
+# 5. (Optional) Audit verification — recent intercepts should stop appearing
+tail -f /opt/shift-agent/logs/decisions.log | grep cf_router_intercepted
+```
+
+Total revert time: under 30 seconds. The watchdog scripts and timers ship with every deploy and are only *disabled* (not deleted) when cf-router is present, so they are immediately re-armable.
+
+## Cutover policy (avoiding F8/F9 dual-fire)
+
+The plugin writes `cf_router_intercepted` audit entries; the F8/F9 watchdogs scan only for `dispatcher_routed` entries. If both are running simultaneously, the watchdogs would NOT see the plugin's intercept and would re-fire `apply-catering-owner-decision` (sending a duplicate quote to the customer) or emit a redundant Pushover.
+
+Therefore the deploy script **disables F8/F9 systemd timers at install time** when `/root/.hermes/plugins/cf-router/` is present (see `install_artifacts()` in `shift-agent-deploy.sh`). The plan's earlier "24h dual-run observation window" idea was unsafe and has been removed.
+
+If the operator needs to back out (see rollback runbook above), the timers are re-enabled and the watchdogs resume their old behavior.

@@ -195,6 +195,12 @@ BA=$(grep -n "messageQueue.push" "$BR" | head -1 | cut -d: -f1)
 DIFF3=$(( BB > BA ? BB - BA : BA - BB ))
 [ "$DIFF3" -le 200 ] || fail "$BR BEGIN marker drifted from anchor (delta=$DIFF3 lines)"
 
+# PR-CF6: cf-router plugin requires the pre_gateway_dispatch hook surface in
+# gateway/run.py. If Hermes upstream renames or removes the hook, the plugin's
+# register() call silently no-ops and our owner #XXXXX interception stops
+# working. Verify the hook name is still present in gateway/run.py.
+grep -q "pre_gateway_dispatch" "$RUN" || fail "$RUN missing pre_gateway_dispatch hook surface (cf-router plugin would silently fail)"
+
 # ─────────────────────────────────────────────────────────────────
 # 5. Hermes Python module version (informational warn only)
 # ─────────────────────────────────────────────────────────────────

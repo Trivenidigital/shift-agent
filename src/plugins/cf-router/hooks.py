@@ -26,23 +26,35 @@ from . import actions
 
 # Owner-approval code regex — same alphabet as the deployed dispatcher
 # (`#[A-HJ-NP-Z2-9]{5}`, 28.6M-entry alphabet excluding I/O/0/1/L).
-_CODE_PATTERN = re.compile(r"#([A-HJ-NP-Z2-9]{5})", re.IGNORECASE)
+# No IGNORECASE: codes are emitted uppercase by generate_unique_code; the
+# dispatcher rejects lowercase, so matching lowercase here just adds surface.
+_CODE_PATTERN = re.compile(r"#([A-HJ-NP-Z2-9]{5})")
 
-# Verb classifier (case-insensitive substring match per
-# handle_catering_owner_approval SKILL.md Step 2).
-_VERB_APPROVE = re.compile(r"\b(approve|yes|send|ok|go|send it)\b", re.IGNORECASE)
-_VERB_REJECT = re.compile(r"\b(reject|no|decline|pass|cancel)\b", re.IGNORECASE)
+# Verb classifier — mirrors the F8 watchdog's accepted verb set so plugin
+# coverage matches the watchdog it replaces. Past-tense forms ("approved",
+# "rejected") are common in owner replies and were handled by the watchdog.
+_VERB_APPROVE = re.compile(r"\b(approve|approved|yes|send|ok|go|send it)\b", re.IGNORECASE)
+_VERB_REJECT = re.compile(r"\b(reject|rejected|no|decline|pass|cancel)\b", re.IGNORECASE)
 _VERB_EDIT = re.compile(r"\b(edit|change|modify)\b", re.IGNORECASE)
 
-# Sick-call regex (employee path — F9 replacement).
-# Conservative: require at least one strong absence verb plus a temporal cue.
-_SICK_CALL_PATTERN = re.compile(
-    r"\b(sick|fever|flu|covid|cold|emergency|"
-    r"can(?:'?| no)t (?:come|make it|work)|won'?t be|"
-    r"unable to (?:come|work)|not feeling well|"
-    r"calling (?:in|out) sick|out today|out tomorrow)\b",
-    re.IGNORECASE,
-)
+# Sick-call regex set (employee path — F9 replacement). Mirrors the six
+# patterns from src/agents/shift/scripts/shift-missed-dispatch-notifier
+# so plugin coverage matches the watchdog it replaces. Conservative bias
+# toward false-positives is acceptable because the action is alert-only.
+_SICK_CALL_PATTERNS = [
+    re.compile(r"\b(?:sick|fever|cough|cold|stomach|headache|vomit|migraine|flu|food\s*poisoning)\b", re.IGNORECASE),
+    re.compile(r"\b(?:can'?t|cannot|won'?t|unable\s+to)\s+(?:come|make\s+it|work|attend)\b", re.IGNORECASE),
+    re.compile(r"\b(?:not\s+feeling|feeling\s+(?:unwell|bad|ill|under\s+the\s+weather))\b", re.IGNORECASE),
+    re.compile(r"\b(?:family\s+emergency|personal\s+emergency|hospital|doctor|emergency\s+room|er\b)\b", re.IGNORECASE),
+    re.compile(r"\b(?:miss(?:ing)?|skip(?:ping)?|cover|coverage)\s+(?:my\s+)?(?:shift|today|tomorrow|tonight|evening|morning)\b", re.IGNORECASE),
+    re.compile(r"\b(?:boss|sir|madam),?\s+(?:i'?m|i\s+am|today)\b", re.IGNORECASE),
+]
+
+
+def _is_sick_call(text: str) -> bool:
+    if not text or len(text) < 4:
+        return False
+    return any(p.search(text) for p in _SICK_CALL_PATTERNS)
 
 
 def pre_gateway_dispatch(event: Any, gateway: Any = None, session_store: Any = None,
@@ -70,7 +82,7 @@ def pre_gateway_dispatch(event: Any, gateway: Any = None, session_store: Any = N
                 return f8_result
 
         # F9 path — employee sender + sick-call regex → alert only
-        if _SICK_CALL_PATTERN.search(text) and actions.is_employee_chat(chat_id):
+        if _is_sick_call(text) and actions.is_employee_chat(chat_id):
             _try_f9_alert(text, chat_id)
             # Always allow LLM to handle normally — F9 is alert-only
             return None
@@ -93,7 +105,10 @@ def _try_f8_intercept(text: str, chat_id: str) -> Optional[dict]:
 
     Returns:
       {"action": "skip", "reason": ...} — plugin handled, LLM bypassed
-      None                              — no match; let LLM dispatch normally
+      None                              — no match OR apply-script failed;
+                                          let LLM dispatch normally so the
+                                          owner can see/recover from the
+                                          failure
     """
     code_match = _CODE_PATTERN.search(text)
     if not code_match:
@@ -107,29 +122,28 @@ def _try_f8_intercept(text: str, chat_id: str) -> Optional[dict]:
     has_edit = bool(_VERB_EDIT.search(text))
 
     # Try catering lead first (more common path)
-    lead_status = actions.find_catering_lead_by_code(code)
-    if lead_status is not None:
+    lead = actions.find_catering_lead_by_code(code)
+    if lead is not None:
+        lead_status = lead.get("status")
         # Edit needs LLM extraction — let LLM handle
         if has_edit:
             return None
         if has_approve:
-            rc = actions.invoke_apply_owner_decision(code, "approve")
-            actions.audit_intercepted(
-                reason="f8_owner_approve", chat_id=chat_id, code=code,
-                subprocess_rc=rc,
+            rc = actions.invoke_apply_owner_decision(code, "approve", lead=lead)
+            return _build_skip_or_passthrough(
+                rc=rc, chat_id=chat_id, code=code,
+                reason="f8_owner_approve",
                 detail=f"lead status was {lead_status}",
+                action_label=f"apply-owner-decision approve for {code}",
             )
-            return {"action": "skip",
-                    "reason": f"cf-router F8: invoked apply-owner-decision approve for {code} (rc={rc})"}
         if has_reject:
             rc = actions.invoke_apply_owner_decision(code, "reject")
-            actions.audit_intercepted(
-                reason="f8_owner_reject", chat_id=chat_id, code=code,
-                subprocess_rc=rc,
+            return _build_skip_or_passthrough(
+                rc=rc, chat_id=chat_id, code=code,
+                reason="f8_owner_reject",
                 detail=f"lead status was {lead_status}",
+                action_label=f"apply-owner-decision reject for {code}",
             )
-            return {"action": "skip",
-                    "reason": f"cf-router F8: invoked apply-owner-decision reject for {code} (rc={rc})"}
         # Code matched but no clear verb — let LLM ask for clarification
         return None
 
@@ -138,24 +152,44 @@ def _try_f8_intercept(text: str, chat_id: str) -> Optional[dict]:
     if menu_pending is not None:
         if has_approve:  # "yes" matches _VERB_APPROVE
             rc = actions.invoke_apply_menu_update(code, "yes")
-            actions.audit_intercepted(
-                reason="f8_menu_yes", chat_id=chat_id, code=code,
-                subprocess_rc=rc,
+            return _build_skip_or_passthrough(
+                rc=rc, chat_id=chat_id, code=code,
+                reason="f8_menu_yes", detail="",
+                action_label=f"apply-menu-update yes for {code}",
             )
-            return {"action": "skip",
-                    "reason": f"cf-router F8: invoked apply-menu-update yes for {code} (rc={rc})"}
         if has_reject:  # "no" matches _VERB_REJECT
             rc = actions.invoke_apply_menu_update(code, "no")
-            actions.audit_intercepted(
-                reason="f8_menu_no", chat_id=chat_id, code=code,
-                subprocess_rc=rc,
+            return _build_skip_or_passthrough(
+                rc=rc, chat_id=chat_id, code=code,
+                reason="f8_menu_no", detail="",
+                action_label=f"apply-menu-update no for {code}",
             )
-            return {"action": "skip",
-                    "reason": f"cf-router F8: invoked apply-menu-update no for {code} (rc={rc})"}
         return None
 
     # Code didn't match any open lead/pending — let LLM handle (might be
     # a stale reference; LLM can tell the owner)
+    return None
+
+
+def _build_skip_or_passthrough(*, rc: int, chat_id: str, code: str,
+                                reason: str, detail: str,
+                                action_label: str) -> Optional[dict]:
+    """Audit the outcome, then return skip iff apply-script succeeded.
+
+    On non-zero rc, return None so the LLM runs and can surface the
+    failure to the owner (e.g. "I tried to approve but the apply script
+    returned exit 9 — the lead may already be in a terminal state").
+    Audit is best-effort: if it raises, we still return the right value
+    (audit_intercepted swallows its own exceptions).
+    """
+    actions.audit_intercepted(
+        reason=reason, chat_id=chat_id, code=code,
+        subprocess_rc=rc, detail=detail,
+    )
+    if rc == 0:
+        return {"action": "skip",
+                "reason": f"cf-router F8: invoked {action_label} (rc=0)"}
+    # Non-zero exit → let LLM handle; owner gets diagnostic feedback
     return None
 
 
