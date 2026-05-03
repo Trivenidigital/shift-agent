@@ -29,13 +29,26 @@
 
 **Canonical reference (the test that proves the loop):** Owner sends menu image to their WhatsApp → Hermes extracts → structured menu created → customer-facing reply with menu items. End-to-end, all inside Hermes. This is the template for "image/document-in → structured-out → response-out" — works for receipts, invoices, supplier price sheets, with only the schema swapping.
 
+### Install-now ecosystem skills (verified 2026-05-03; cover 6 of 17 prioritized agents)
+
+Per `tasks/skills-roadmap.md` (4-source ecosystem audit), these 5 official-bundled skills replace ~1,200 LOC of substrate work across the portfolio. Install proactively before scaffolding the named agents — and check this list FIRST in the per-step Hermes-first checklist before tagging anything `[net-new]`:
+
+1. **`productivity/google-workspace`** — Calendar/Sheets/Drive/Gmail/Docs OAuth. Covers agents #1, #4, #10, #12, #13, #14 (~500 LOC saved).
+2. **`productivity/maps`** — OSRM routing + Nominatim geocoding (free, 1 req/s). Covers agent #3 + future routing (~150 LOC saved).
+3. **`productivity/airtable`** — CRUD for SKU lists, cost data, P&L history. Covers agents #6, #7, #17, #22 (~250 LOC saved).
+4. **`productivity/ocr-and-documents`** — pymupdf (instant) + marker-pdf (90+ langs, table support). Complements Hermes vision for non-image PDFs. Covers agents #6, #7, #14, #21, #8 (~200 LOC saved).
+5. **`productivity/notion`** — Notion CRUD as Airtable alternative. Covers agents #6, #12 (~100 LOC saved).
+
+**Strategic escape hatch — `mcp/native-mcp`**: bridges Hermes to ~8,600+ MCP servers in the broader ecosystem. Likely path for QBO/Stripe/DocuSign integrations the in-house Hermes ecosystem does NOT cover. Investigate maintained MCP server BEFORE estimating ~400 LOC custom QBO write etc.
+
 ### What is genuine net-new engineering (NOT Hermes substrate)
 
-- **External write APIs:** QuickBooks OAuth + write scope, Stripe charges, e-sign services, calendar invites, etc. Hermes consumes externals; writing to them is per-agent work
+- **External write APIs:** QuickBooks OAuth + write scope, Stripe charges, e-sign services, calendar invites, etc. Hermes consumes externals; writing to them is per-agent work. **Verified 2026-05-03 against 4-source ecosystem audit (`tasks/skills-roadmap.md`)** — no Hermes/OpenClaw/community skill exists for QBO write, Stripe/Square/PayPal/Venmo standalone, DocuSign/HelloSign/PandaDoc, state tax filings, DoorDash/UberEats/GrubHub, or restaurant equipment vendor APIs. **Always check `mcp/native-mcp` for community MCP servers before estimating custom LOC** for these.
 - **Money-moving UX discipline:** code+amount approval format, perceptual-hash dedup, per-amount cockpit-vs-WhatsApp thresholds, reversibility windows
 - **Per-customer business logic:** chart-of-accounts mapping, supplier roster matching, festival-calendar regional variants, etc.
 - **Specialised classifiers** beyond what a prompt-engineered LLM call can do
 - **Cross-agent coordination logic:** state-machine handoffs between agents (rare; usually a skill chain handles this)
+- **Trap skills to AVOID** (per skills-roadmap.md): `bookkeeper` meta-skill (writes to Xero not QBO; paid Maton+DeepRead deps; VirusTotal "Suspicious"-flagged), `sentiment-priority-scorer` (real-estate-specific, misleading for #9/#20), `cognify-skills` (referenced as 19 business ops skills but repo returns 404), `farmos-equipment` for #19 (farm not restaurant). Do not waste investigation cycles on these.
 
 ### Why this rule exists
 
