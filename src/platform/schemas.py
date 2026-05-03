@@ -2079,6 +2079,12 @@ class CateringMenuFinalized(_BaseEntry):
     `prior_total_usd` and `prior_item_count` are populated only on re-finalize
     (different `customer_message_id` while status was already CUSTOMER_FINALIZED
     or after OWNER_EDITED) — gives operator visibility into customer revisions.
+
+    PR-CF2: `customer_message_id` is the bridge messageId of the customer's
+    finalize message (the same value compared against `last_finalize_message_id`
+    on the lead). Lets ops trace audit row → raw_inbound → dispatcher_routed
+    without phone-based fuzzy matching. Optional for forward-compat with
+    PR-CF1-vintage rows; new emissions always populate it.
     """
     type: Literal["catering_menu_finalized"]
     outcome: Literal["finalized", "rejected_quote_mismatch"]
@@ -2094,6 +2100,11 @@ class CateringMenuFinalized(_BaseEntry):
     price_drift_detected: bool = False
     prior_total_usd: Optional[int] = Field(default=None, ge=0)
     prior_item_count: Optional[int] = Field(default=None, ge=0)
+    customer_message_id: Optional[str] = Field(  # PR-CF2 (R1.M1, R3.OBH)
+        default=None, max_length=200,
+        description="Bridge messageId of the customer finalize message. Optional"
+                    " for backward-compat with PR-CF1-vintage rows.",
+    )
 
 
 class CateringCustomerAckSent(_BaseEntry):

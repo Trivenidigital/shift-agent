@@ -153,3 +153,80 @@ State-side: lead status transitions from `AWAITING_OWNER_APPROVAL`
 (or `OWNER_EDITED`) to `CUSTOMER_FINALIZED`. Audit chain:
 `catering_lead_status_change` + `catering_menu_finalized` rows in
 decisions.log.
+
+## Troubleshooting (PR-CF2)
+
+Use these greps when an operator reports a finalize-flow surprise.
+All paths assume `/opt/shift-agent/logs/decisions.log`.
+
+### "Customer says they finalized but owner saw no card"
+
+```bash
+# 1. Confirm the dispatcher routed the message
+grep '"type":"dispatcher_routed"' /opt/shift-agent/logs/decisions.log \
+  | grep -i 'finalize\|handle_catering_menu_finalize' | tail -5
+
+# 2. Confirm the script ran for that customer
+grep '"type":"catering_menu_finalized"' /opt/shift-agent/logs/decisions.log \
+  | jq -c 'select(.customer_phone=="<phone>") | {ts, outcome, owner_card_outbound_id, replay, suppressed}' \
+  | tail -5
+```
+
+- `dispatcher_routed` missing → routing regression: dispatch_shift_agent
+  did not match the finalize-intent keyword set, OR catering_dispatcher
+  fell through to parse_catering_inquiry. Re-check the customer's
+  message text against the keyword list in dispatch_shift_agent SKILL.
+- `catering_menu_finalized.outcome=finalized` AND `owner_card_outbound_id=""`
+  → bridge POST failed (Pushover P2 should have fired). Lead is at
+  CUSTOMER_FINALIZED; re-deliver via cockpit operator action.
+- `catering_menu_finalized.suppressed=true` → cooldown-suppressed
+  replay within 60s of the previous send. The original card was
+  delivered; verify owner saw it.
+
+### "Customer's quote doesn't match what the menu shows"
+
+```bash
+# Find the finalize row for that lead
+grep '"type":"catering_menu_finalized"' /opt/shift-agent/logs/decisions.log \
+  | jq -c 'select(.lead_id=="L0001") | {ts, server_recompute_usd, llm_passed_total_usd, price_drift_detected, item_count}'
+```
+
+- `price_drift_detected=true` → menu prices changed between brainstorm
+  and finalize. The card includes a `price_drift_note` line.
+- `outcome=rejected_quote_mismatch` → drift exceeded `min(5%, $25)`
+  tolerance. State unchanged. Customer needs to re-finalize after
+  the LLM re-reads the current menu.
+
+### "Owner approved but got a 'reply with --skip-finalize' message"
+
+```bash
+grep '"reason":"owner_approve_without_customer_finalize"' \
+  /opt/shift-agent/logs/decisions.log | jq -c '{ts, lead_id, code}'
+```
+
+The customer never ran the finalize flow; the apply-script guard fired.
+Owner must override via cockpit (operator action), not WhatsApp —
+the SKILL parser cannot extract argparse flags from natural-language
+WhatsApp replies.
+
+### "Customer is changing their mind every minute (re-finalize storm)"
+
+```bash
+grep '"reason":"customer_re_finalized_menu"' \
+  /opt/shift-agent/logs/decisions.log | jq -c '{ts, lead_id}' | tail -10
+```
+
+Each row is a customer-side mind-change. The state machine handles
+re-finalize via the CUSTOMER_FINALIZED → CUSTOMER_FINALIZED self-edge;
+the 60s cooldown rate-limits owner-card resends. If the rate is
+genuinely problematic, pause the LLM-side proposal loop until the
+customer settles.
+
+### Audit-row reference
+
+| Variant | When emitted | Key fields |
+|---|---|---|
+| `catering_lead_status_change` | every status transition (incl. CUSTOMER_FINALIZED self-edge on re-finalize) | `from_status`, `to_status`, `reason` |
+| `catering_menu_finalized` (`outcome=finalized`) | every successful finalize OR replay | `replay`, `suppressed`, `price_drift_detected`, `customer_message_id`, `prior_total_usd` (set on re-finalize) |
+| `catering_menu_finalized` (`outcome=rejected_quote_mismatch`) | quote total drift > tolerance | `server_recompute_usd`, `llm_passed_total_usd`, `customer_message_id` |
+| `catering_quote_skill_failed` (`reason=owner_approve_without_customer_finalize`) | apply-script guard fires on owner approve before customer finalize | `code`, `lead_id` |

@@ -54,7 +54,7 @@ import re
 import sys
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -94,6 +94,14 @@ QUOTE_TOLERANCE_USD_ABS = 25
 
 # Owner-card resend cooldown (replay storm protection).
 OWNER_CARD_RESEND_COOLDOWN_SECS = 60
+
+# PR-CF2 (R1.H3): replay window. If the same customer_message_id is re-presented
+# more than this many hours after the first finalize, treat it as a fresh finalize
+# rather than a replay. Defends against the rare bridge messageId reuse case
+# (Baileys would have to reissue an identical id, which is exotic but possible
+# after a long bridge restart cycle). 24h is generous — the LLM/SKILL won't
+# legitimately resubmit a message that old.
+REPLAY_WINDOW_HOURS = 24
 
 CODE_PATTERN = r"^#[A-HJ-NP-Z2-9]{5}$"
 
@@ -174,9 +182,16 @@ def _cross_check_and_recompute(
 
     Returns (server_recompute_usd, price_drift_detected).
     Exits 2 if any item not in menu or recompute is 0.
+
+    PR-CF2 (R1.M2): drift detection compares LLM's *line-item subtotal* to
+    server's recompute, NOT per-item LLM-passed price_usd. The previous
+    per-item check tripped on every $4.50 menu item because the LLM and
+    server might round in different directions (4 vs 5), polluting the
+    drift signal even when no menu actually changed. Subtotal-based
+    detection only fires on a real numerical disagreement.
     """
-    drift = False
-    total = 0
+    server_total = 0
+    llm_total = 0
     for item in items:
         if item.name not in menu_index:
             sys.stderr.write(
@@ -184,13 +199,13 @@ def _cross_check_and_recompute(
             )
             sys.exit(EXIT_INVALID_INPUT)
         current_price = menu_index[item.name]
-        if current_price != item.price_usd:
-            drift = True
-        total += item.qty * current_price
-    if total <= 0:
-        sys.stderr.write(f"recomputed total is {total}; refusing finalize\n")
+        server_total += item.qty * current_price
+        llm_total += item.qty * item.price_usd
+    if server_total <= 0:
+        sys.stderr.write(f"recomputed total is {server_total}; refusing finalize\n")
         sys.exit(EXIT_INVALID_INPUT)
-    return total, drift
+    drift = server_total != llm_total
+    return server_total, drift
 
 
 def _within_quote_tolerance(server: int, llm: int) -> bool:
@@ -370,6 +385,7 @@ def _emit_quote_mismatch_audit(
                     replay=False, suppressed=False,
                     price_drift_detected=price_drift,
                     prior_total_usd=None, prior_item_count=None,
+                    customer_message_id=args.customer_message_id,  # PR-CF2
                 ).model_dump_json(),
             )
     except Exception as e:
@@ -447,8 +463,31 @@ def main() -> int:
             )
             return EXIT_NOT_FOUND
 
-        # Idempotency: same message_id => replay (no state mutation)
-        if target.last_finalize_message_id == args.customer_message_id:
+        # Idempotency: same message_id => replay (no state mutation).
+        # PR-CF2 (R1.H3): also require the prior finalize be within
+        # REPLAY_WINDOW_HOURS. Past that window, treat as fresh finalize so a
+        # rare bridge messageId reuse doesn't suppress a real customer action.
+        # PR-CF2 review-fix: defend against naive `customer_finalized_at`
+        # (legacy / operator-patched rows). `now` is tz-aware; subtraction
+        # would raise TypeError. Default to "not within window" — safer to
+        # treat suspicious data as fresh finalize than to crash inside the
+        # lock.
+        within_replay_window = False
+        if target.customer_finalized_at is not None:
+            try:
+                within_replay_window = (
+                    (now - target.customer_finalized_at)
+                    < timedelta(hours=REPLAY_WINDOW_HOURS)
+                )
+            except TypeError as e:
+                sys.stderr.write(
+                    f"WARN: customer_finalized_at tz-mismatch on lead "
+                    f"{target.lead_id} ({e}); treating as outside replay window\n"
+                )
+        if (
+            target.last_finalize_message_id == args.customer_message_id
+            and within_replay_window
+        ):
             replay = True
             # R2.B2 fix: render card from persisted items AND persisted total.
             # On replay we must NOT use the freshly-recomputed server_total —
@@ -545,6 +584,28 @@ def main() -> int:
         else:
             sys.stderr.write(f"bridge_post failed: {mid_or_err}\n")
             bridge_failed = True
+            # PR-CF2 (R3.OBH): Pushover P2 alert on owner-card delivery failure.
+            # State IS persisted at CUSTOMER_FINALIZED but owner is unaware;
+            # without this alert the lead would silently stall until operator
+            # sweep. Mirrors apply-catering-owner-decision divergence pattern.
+            try:
+                import subprocess as _sp
+                _sp.run(
+                    ["/usr/local/bin/shift-agent-notify-owner",
+                     "--priority", "2",
+                     "--title", f"Catering finalize: owner card not delivered (lead {target.lead_id})",
+                     f"Lead {target.lead_id} ({target.customer_name or target.customer_phone}) "
+                     f"customer-finalized at ${server_total} but bridge POST failed "
+                     f"({mid_or_err}). Lead state is CUSTOMER_FINALIZED; owner has "
+                     f"NOT seen the approval card. Re-trigger via cockpit, or "
+                     f"operator-approve via apply-catering-owner-decision."],
+                    check=False, timeout=10,
+                )
+            except Exception as e:  # noqa: BLE001 — notify is best-effort
+                sys.stderr.write(
+                    f"WARN: shift-agent-notify-owner failed (non-fatal): "
+                    f"{type(e).__name__}: {e}\n"
+                )
 
     # Step 7: emit CateringMenuFinalized audit row (always — outcome='finalized')
     try:
@@ -558,12 +619,18 @@ def main() -> int:
                     item_count=len(persisted_items_with_prices),
                     server_recompute_usd=server_total,
                     llm_passed_total_usd=llm_total,
-                    quote_total_usd=server_total,
+                    # PR-CF2: on replay, persisted card total is what the owner
+                    # saw / will see; on first finalize server_total is the source
+                    # of truth. Mirror the same value the owner card carries.
+                    quote_total_usd=(
+                        target.quote_total_usd if replay else server_total
+                    ),
                     owner_card_outbound_id=owner_card_outbound_id,
                     replay=replay, suppressed=suppressed,
                     price_drift_detected=price_drift,
                     prior_total_usd=prior_total,
                     prior_item_count=prior_item_count,
+                    customer_message_id=args.customer_message_id,  # PR-CF2
                 ).model_dump_json(),
             )
     except Exception as e:
