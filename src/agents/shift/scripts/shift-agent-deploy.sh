@@ -258,6 +258,10 @@ case "$ACTION" in
         # pre-CF5 tarball compatibility). Fail-closed otherwise.
         echo "=== state-file migration check ==="
         MIGRATOR="$STAGING/tools/migrate-state-files.py"
+        # Invoke with the Hermes venv Python so pydantic + safe_io + schemas
+        # imports resolve. The migrator's #!/usr/bin/env python3 shebang
+        # would land on system Python which lacks pydantic.
+        VENV_PY="/usr/local/lib/hermes-agent/venv/bin/python"
         if [ ! -x "$MIGRATOR" ]; then
             if [ -f "$MIGRATOR" ]; then
                 echo "WARN: migrator exists but is not executable — permission problem? Skipping." >&2
@@ -265,7 +269,7 @@ case "$ACTION" in
                 echo "WARN: state-file migrator absent at $MIGRATOR — skipping (tarball is pre-CF5 vintage)" >&2
             fi
         else
-            "$MIGRATOR" --check
+            "$VENV_PY" "$MIGRATOR" --check
             CHECK_RC=$?
             case "$CHECK_RC" in
                 0)
@@ -273,7 +277,7 @@ case "$ACTION" in
                     ;;
                 1)
                     # Migrations needed (or malformed override) — try to apply
-                    if ! "$MIGRATOR" --apply; then
+                    if ! "$VENV_PY" "$MIGRATOR" --apply; then
                         echo "ERROR: state-file migration apply failed — refusing to install." >&2
                         echo "  See decisions.log for state_file_migration_failed audit row + runbook" >&2
                         echo "  in tasks/runbook-state-migration.md." >&2
