@@ -5,6 +5,11 @@
 
 set -euo pipefail
 
+# Use Hermes venv Python so pydantic + safe_io + schemas resolve. System
+# Python (/usr/bin/python3) lacks pydantic, which would false-fail every
+# import probe below.
+PY="/usr/local/lib/hermes-agent/venv/bin/python"
+
 echo "=== Shift Agent smoke test ==="
 
 # 1. Scripts exist and are executable
@@ -31,7 +36,7 @@ echo "✓ All scripts present + executable"
 # 2. Python modules importable + safe_io chokepoint symbols present
 # Symbol list lives in src/platform/scripts/check-safe-io-symbols — single
 # source of truth shared with shift-agent-deploy.sh pre-restart gate.
-if ! python3 -c "
+if ! $PY -c "
 import sys
 sys.path.insert(0, '/opt/shift-agent')
 import schemas, safe_io, exit_codes
@@ -47,7 +52,7 @@ fi
 echo "✓ Python modules importable (incl. safe_io chokepoint symbols)"
 
 # 3. Config loads and validates
-if ! python3 -c "
+if ! $PY -c "
 import sys, yaml
 sys.path.insert(0, '/opt/shift-agent')
 from schemas import Config
@@ -62,7 +67,7 @@ echo "✓ config.yaml validates"
 
 # 4. Roster loads and validates (if present)
 if [ -f /opt/shift-agent/roster.json ]; then
-    if ! python3 -c "
+    if ! $PY -c "
 import sys, json
 sys.path.insert(0, '/opt/shift-agent')
 from schemas import Roster
@@ -80,7 +85,7 @@ fi
 
 # 5. identify-sender works on the owner's own phone
 # Use Python to parse YAML; bash+awk+tr quoting here is fragile.
-OWNER_PHONE=$(python3 -c "
+OWNER_PHONE=$($PY -c "
 import yaml, sys
 try:
     with open('/opt/shift-agent/config.yaml') as f:
