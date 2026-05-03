@@ -459,16 +459,12 @@ class TestEdgeCases:
         assert parsed["rc"] == 2  # EXIT_INVALID_INPUT
 
     def test_menu_price_drift_detected(self, bridge_server, env_dir):
-        """Menu has Aloo Paratha at $5; LLM passes price_usd=4 (saw stale).
-        Server uses $5, recomputes; price_drift_detected=true; total uses
-        current price.
+        """PR-CF2: drift detection now operates on subtotals, not per-item.
 
-        At qty=100: LLM total = 400, server total = 500, drift = $100.
-        5% of 500 = $25 → tolerance = min($25, $25) = $25. $100 > $25 → would
-        be rejected. But the LLM's $400 is computed from STALE prices —
-        for the test, set quote_total_usd to match the server recompute
-        (LLM compensates by using current price internally even if items
-        list still has stale price). This validates the soft-fail path.
+        Menu has Aloo Paratha at $5; LLM passes price_usd=4 (saw stale).
+        Server line subtotal = 100*5 = 500. LLM line subtotal = 100*4 = 400.
+        Subtotals differ → drift=True. Args.quote_total_usd=500 matches
+        server, so tolerance passes. Lead persists with current ($5) price.
         """
         port, _ = bridge_server
         menu = [{"name": "Aloo Paratha", "price_usd": 5.0, "category": "side",
@@ -476,8 +472,6 @@ class TestEdgeCases:
         _seed_menu(env_dir, menu)
         _seed_lead(env_dir, "L0001", "#ABCDE")
         items = [{"name": "Aloo Paratha", "qty": 100, "price_usd": 4}]  # stale price
-        # LLM total: 500 (correct using current price). Server: 100*5=500.
-        # Drift on price_usd field is detected, but total matches -> exit 0.
         result, parsed = _run_script(env_dir, port,
             selected_items_json=json.dumps(items), quote_total_usd=500)
         assert parsed["rc"] == 0, f"stderr: {result.stderr}"
@@ -486,6 +480,21 @@ class TestEdgeCases:
         assert lead["selected_items"][0]["price_usd"] == 5  # current, NOT stale 4
         audit = [r for r in _read_audit(env_dir) if r["type"] == "catering_menu_finalized"]
         assert audit[0]["price_drift_detected"] is True
+
+    def test_drift_NOT_triggered_when_subtotals_match(self, bridge_server, env_dir):
+        """PR-CF2 (R1.M2): no drift when LLM and server subtotals agree —
+        even if individual price_usd values look numerically different.
+        Eliminates the false-positive drift from $4.50 menu items.
+        """
+        port, _ = bridge_server
+        _seed_menu(env_dir, DEFAULT_MENU)  # Aloo Paratha @ $4
+        _seed_lead(env_dir, "L0001", "#ABCDE")
+        items = [{"name": "Aloo Paratha", "qty": 10, "price_usd": 4}]  # matches menu
+        result, parsed = _run_script(env_dir, port,
+            selected_items_json=json.dumps(items), quote_total_usd=40)
+        assert parsed["rc"] == 0, f"stderr: {result.stderr}"
+        audit = [r for r in _read_audit(env_dir) if r["type"] == "catering_menu_finalized"]
+        assert audit[0]["price_drift_detected"] is False
 
 
 # ============================================================================
@@ -766,3 +775,121 @@ class TestConcurrency:
         assert len(finalized) == 2
         for row in finalized:
             assert row["replay"] is False
+
+
+# ============================================================================
+# PR-CF2 review follow-ups
+# ============================================================================
+
+
+class TestCustomerMessageIdInAudit:
+    """PR-CF2 (R1.M1, R3.OBH) — every catering_menu_finalized row carries
+    customer_message_id so ops can join audit rows ↔ raw_inbound ↔ dispatcher_routed
+    without phone-based fuzzy matching.
+    """
+
+    def test_success_audit_carries_customer_message_id(self, bridge_server, env_dir):
+        port, _ = bridge_server
+        _seed_menu(env_dir, DEFAULT_MENU)
+        _seed_lead(env_dir, "L0001", "#ABCDE")
+        items = [{"name": "Aloo Paratha", "qty": 2, "price_usd": 4}]
+        _, parsed = _run_script(env_dir, port,
+            customer_message_id="msg_traceability_001",
+            selected_items_json=json.dumps(items), quote_total_usd=8)
+        assert parsed["rc"] == 0
+        finalized = [r for r in _read_audit(env_dir)
+                     if r["type"] == "catering_menu_finalized"]
+        assert finalized[0]["customer_message_id"] == "msg_traceability_001"
+
+    def test_replay_audit_carries_customer_message_id(self, bridge_server, env_dir):
+        port, _ = bridge_server
+        _seed_menu(env_dir, DEFAULT_MENU)
+        _seed_lead(env_dir, "L0001", "#ABCDE")
+        items = [{"name": "Aloo Paratha", "qty": 2, "price_usd": 4}]
+        _, p1 = _run_script(env_dir, port,
+            customer_message_id="msg_replay_traceability",
+            selected_items_json=json.dumps(items), quote_total_usd=8)
+        assert p1["rc"] == 0
+        _, p2 = _run_script(env_dir, port,
+            customer_message_id="msg_replay_traceability",
+            selected_items_json=json.dumps(items), quote_total_usd=8)
+        assert p2["rc"] == 0
+        finalized = [r for r in _read_audit(env_dir)
+                     if r["type"] == "catering_menu_finalized"]
+        assert len(finalized) == 2
+        assert finalized[0]["customer_message_id"] == "msg_replay_traceability"
+        assert finalized[1]["customer_message_id"] == "msg_replay_traceability"
+        assert finalized[1]["replay"] is True
+
+    def test_mismatch_audit_carries_customer_message_id(self, bridge_server, env_dir):
+        port, _ = bridge_server
+        _seed_menu(env_dir, DEFAULT_MENU)
+        _seed_lead(env_dir, "L0001", "#ABCDE")
+        items = [{"name": "Chicken Biryani", "qty": 100, "price_usd": 15}]
+        _, parsed = _run_script(env_dir, port,
+            customer_message_id="msg_mismatch_traceability",
+            selected_items_json=json.dumps(items), quote_total_usd=2000)
+        assert parsed["rc"] == 11
+        rejected = [r for r in _read_audit(env_dir)
+                    if r["type"] == "catering_menu_finalized"
+                    and r["outcome"] == "rejected_quote_mismatch"]
+        assert len(rejected) == 1
+        assert rejected[0]["customer_message_id"] == "msg_mismatch_traceability"
+
+
+class TestReplayWindow:
+    """PR-CF2 (R1.H3) — replay short-circuit only fires within REPLAY_WINDOW_HOURS
+    (24h). Past that, same message_id is treated as a fresh finalize so a
+    rare bridge messageId reuse cannot suppress a real customer action.
+    """
+
+    def test_replay_within_24h_short_circuits(self, bridge_server, env_dir):
+        port, _ = bridge_server
+        _seed_menu(env_dir, DEFAULT_MENU)
+        _seed_lead(env_dir, "L0001", "#ABCDE")
+        items = [{"name": "Aloo Paratha", "qty": 2, "price_usd": 4}]
+        _, p1 = _run_script(env_dir, port,
+            customer_message_id="msg_window_a",
+            selected_items_json=json.dumps(items), quote_total_usd=8)
+        assert p1["rc"] == 0
+        _, p2 = _run_script(env_dir, port,
+            customer_message_id="msg_window_a",
+            selected_items_json=json.dumps(items), quote_total_usd=8)
+        assert p2["rc"] == 0
+        finalized = [r for r in _read_audit(env_dir)
+                     if r["type"] == "catering_menu_finalized"]
+        assert finalized[1]["replay"] is True
+
+    def test_replay_outside_24h_treated_as_fresh_finalize(self, bridge_server, env_dir):
+        """Manipulate persisted customer_finalized_at to >24h ago. Replay
+        with same message_id then becomes a real re-finalize (state
+        mutation, status_change row, replay=False).
+        """
+        port, _ = bridge_server
+        _seed_menu(env_dir, DEFAULT_MENU)
+        _seed_lead(env_dir, "L0001", "#ABCDE")
+        items = [{"name": "Aloo Paratha", "qty": 2, "price_usd": 4}]
+        _, p1 = _run_script(env_dir, port,
+            customer_message_id="msg_window_b",
+            selected_items_json=json.dumps(items), quote_total_usd=8)
+        assert p1["rc"] == 0
+        # Rewrite customer_finalized_at to 30h ago (outside the 24h window)
+        from datetime import datetime, timezone, timedelta
+        old_ts = (datetime.now(tz=timezone.utc) - timedelta(hours=30)).isoformat()
+        leads_path = env_dir / "state" / "catering-leads.json"
+        store = json.loads(leads_path.read_text(encoding="utf-8"))
+        store["leads"][0]["customer_finalized_at"] = old_ts
+        leads_path.write_text(json.dumps(store), encoding="utf-8")
+        # Replay with same message_id — treated as fresh finalize, not replay
+        _, p2 = _run_script(env_dir, port,
+            customer_message_id="msg_window_b",
+            selected_items_json=json.dumps(items), quote_total_usd=8)
+        assert p2["rc"] == 0
+        finalized = [r for r in _read_audit(env_dir)
+                     if r["type"] == "catering_menu_finalized"]
+        assert len(finalized) == 2
+        assert finalized[1]["replay"] is False  # NOT treated as replay
+        # Status change row written for the re-finalize (CUSTOMER_FINALIZED self-edge)
+        status_changes = [r for r in _read_audit(env_dir)
+                          if r["type"] == "catering_lead_status_change"]
+        assert len(status_changes) == 2  # initial + re-finalize
