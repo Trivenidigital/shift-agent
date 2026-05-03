@@ -18,6 +18,9 @@ the owner a preview, and wait for their explicit confirmation.
 ### PR-CF3 fail-closed rule (do NOT improvise)
 
 **This SKILL's ONLY job is to invoke `parse-menu-photo` and surface its output.**
+(Pre-flight path and caption checks in Step 1 are permitted before the
+script call; the prohibition is on in-context extraction and file writing.)
+
 You are NOT permitted to:
 
 - Use `vision_analyze` or any other vision tool yourself to extract menu items
