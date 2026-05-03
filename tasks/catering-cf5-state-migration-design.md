@@ -429,8 +429,14 @@ def main(argv=None) -> int:
     )
     args = parser.parse_args(argv)
 
-    # Override gate (mirrors HERMES_PIN_OVERRIDE attestation pattern;
-    # malformed override → exit 1 matching check-shift-agent-patch.sh fail() convention)
+    # Override gate. Deliberately weaker than HERMES_PIN_OVERRIDE:
+    # HERMES_PIN_OVERRIDE requires re-typing the actual current commit hash
+    # (high-entropy, prevents muscle-memory bypass); state-file migration is
+    # fleet-wide (no per-deploy version) so the literal "skip" sentinel is
+    # the available trade-off. Compensating controls: (a) required REASON env
+    # ensures operator-supplied attestation, (b) two-channel audit (NDJSON +
+    # plain-text fallback log), (c) malformed override → exit 1 matching
+    # check-shift-agent-patch.sh fail() convention.
     override = os.environ.get("STATE_MIGRATION_OVERRIDE", "").strip()
     if override:
         if override != "skip":

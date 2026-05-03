@@ -93,8 +93,13 @@ def migrate_send_counter(legacy: dict, *, customer_tz_resolved: Optional[str]) -
 
     # Defensive no-op: dispatch layer already pre-checks key-set match.
     # Reached only if caller bypasses _migrate_one_file (e.g., direct unit test).
-    if keys == {"day", "count", "last_send_ts"} or keys == {"day", "count"}:
+    # Note: 2-field {day, count} subset is NOT a no-op here — it's a partial
+    # write that needs `last_send_ts: None` filled in. Dispatch routes it to
+    # the migrator on key-set diff; we synthesize the missing field.
+    if keys == {"day", "count", "last_send_ts"}:
         return None
+    if keys == {"day", "count"}:
+        return {"day": legacy["day"], "count": legacy["count"], "last_send_ts": None}
 
     # Intermediate: post-partial-migration {day, count, sent_count} — strip extra
     if keys == {"day", "count", "sent_count"} or keys == {"day", "count", "sent_count", "last_send_ts"}:
@@ -124,7 +129,11 @@ def migrate_seen_ids(legacy: dict, **_kwargs) -> Optional[dict]:
     `last_offset_bytes` and `agent_log_inode` are zeroed. This means the
     tail-logger starts a fresh scan from EOF on next start (matches
     `_fresh_seen_ids_at_eof()` behavior). Correct for empty-dict legacy
-    file (no historic state to preserve). Documented in audit row 'detail'.
+    file (no historic state to preserve). The `state_file_migrated` audit
+    row carries from_shape + to_shape — the operator can see the inode/offset
+    fields appeared in to_shape but not from_shape, indicating they were
+    zeroed during migration. (StateFileMigrated has no `detail` field;
+    earlier docstring claim of "documented in detail" was incorrect.)
 
     Returns None if already current (defensive; unreachable via dispatch).
     Raises UnknownStateShapeError if shape unrecognized.
@@ -252,7 +261,7 @@ def _migrate_one_file(
         try:
             raw = file.read_text(encoding="utf-8")
         except OSError as e:
-            _audit_failed(file, "json_decode_failed", f"read failed: {e}")
+            _audit_failed(file, "read_failed", f"OSError: {e}")
             raise UnknownStateShapeError(f"{file.name}: read failed: {e}")
 
         try:
@@ -299,7 +308,7 @@ def _migrate_one_file(
             model_cls.model_validate(new_data)
         except ValidationError as ve:
             _audit_failed(
-                file, "write_failed",
+                file, "migrator_output_invalid",
                 f"migrator output failed validation: {ve.errors()[:1]}"
             )
             raise UnknownStateShapeError(
@@ -355,15 +364,29 @@ def main(argv=None) -> int:
                 "FAIL: STATE_MIGRATION_OVERRIDE=skip requires STATE_MIGRATION_OVERRIDE_REASON='...'\n"
             )
             return EXIT_MIGRATIONS_NEEDED
-        # Audit the override using dedicated variant
+        # Audit the override using dedicated variant. Two-channel pattern
+        # mirrors HERMES_PIN_OVERRIDE (pin-overrides.log + structured audit):
+        # the override is the single most security-relevant event; silent loss
+        # of either channel is unacceptable.
         try:
             ndjson_append(LOG_PATH, StateFileMigrationOverridden(
                 type="state_file_migration_overridden",
                 ts=datetime.now(timezone.utc),
                 reason=reason[:2000],
             ).model_dump_json())
-        except Exception:
-            pass
+        except Exception as e:
+            sys.stderr.write(f"WARN: structured audit emit failed: {e}\n")
+        # Plain-text fallback log (always succeeds even if structured audit broke)
+        try:
+            override_log = LOG_PATH.parent / "state-migration-overrides.log"
+            override_log.parent.mkdir(parents=True, exist_ok=True)
+            with open(override_log, "a", encoding="utf-8") as f:
+                f.write(
+                    f"{datetime.now(timezone.utc).isoformat()} "
+                    f"STATE_MIGRATION_OVERRIDE=skip reason={reason[:500]}\n"
+                )
+        except Exception as e:
+            sys.stderr.write(f"WARN: fallback override log write failed: {e}\n")
         sys.stderr.write(f"WARN: state-file migration SKIPPED by operator override; reason: {reason}\n")
         return EXIT_OK
 

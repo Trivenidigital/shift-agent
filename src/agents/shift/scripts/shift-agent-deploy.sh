@@ -239,17 +239,33 @@ case "$ACTION" in
                 echo "WARN: state-file migrator absent at $MIGRATOR — skipping (tarball is pre-CF5 vintage)" >&2
             fi
         else
-            if ! "$MIGRATOR" --check; then
-                # Migrations needed (or override-malformed) — try to apply
-                if ! "$MIGRATOR" --apply; then
-                    echo "ERROR: state-file migration failed — refusing to install." >&2
-                    echo "  See decisions.log for state_file_migration_failed audit row + runbook" >&2
-                    echo "  in tasks/runbook-state-migration.md." >&2
+            "$MIGRATOR" --check
+            CHECK_RC=$?
+            case "$CHECK_RC" in
+                0)
+                    echo "OK: all state files current; no migration needed"
+                    ;;
+                1)
+                    # Migrations needed (or malformed override) — try to apply
+                    if ! "$MIGRATOR" --apply; then
+                        echo "ERROR: state-file migration apply failed — refusing to install." >&2
+                        echo "  See decisions.log for state_file_migration_failed audit row + runbook" >&2
+                        echo "  in tasks/runbook-state-migration.md." >&2
+                        exit 1
+                    fi
+                    ;;
+                2)
+                    # Unknown shape / corrupt JSON / non-extra load failure — operator must triage
+                    echo "ERROR: state-file migration check failed (rc=2: unknown shape or corrupt state)." >&2
+                    echo "  Do NOT auto-apply. See decisions.log state_file_migration_failed audit row" >&2
+                    echo "  + runbook tasks/runbook-state-migration.md scenario B." >&2
                     exit 1
-                fi
-            else
-                echo "OK: all state files current; no migration needed"
-            fi
+                    ;;
+                *)
+                    echo "ERROR: state-file migration check returned unexpected rc=$CHECK_RC — refusing to install." >&2
+                    exit 1
+                    ;;
+            esac
         fi
 
         # Env symlink integrity gate — strict. Fail-closed if /opt/shift-agent/.env
@@ -326,8 +342,17 @@ case "$ACTION" in
         # Snapshot current staging as the new tarball BEFORE install (so the tarball
         # we'd roll back to is the source we're about to install — symmetric with
         # rollback's "extract tarball into staging then install_artifacts" flow).
-        tar czf "$DEPLOYS_DIR/${NEW_TAG}.tgz" -C "$STAGING" src .commit-hash 2>/dev/null \
-            || tar czf "$DEPLOYS_DIR/${NEW_TAG}.tgz" -C "$STAGING" src
+        # PR-CF5: include tools/ so rollback to a CF5+ tarball preserves the
+        # state-file migrator. CRITICAL — without this, every CF5+ deploy writes
+        # a rollback tarball missing tools/ and the next deploy's migration gate
+        # WARN-skips, silently bypassing the migration on rollback.
+        if [ -d "$STAGING/tools" ]; then
+            tar czf "$DEPLOYS_DIR/${NEW_TAG}.tgz" -C "$STAGING" src tools .commit-hash 2>/dev/null \
+                || tar czf "$DEPLOYS_DIR/${NEW_TAG}.tgz" -C "$STAGING" src tools
+        else
+            tar czf "$DEPLOYS_DIR/${NEW_TAG}.tgz" -C "$STAGING" src .commit-hash 2>/dev/null \
+                || tar czf "$DEPLOYS_DIR/${NEW_TAG}.tgz" -C "$STAGING" src
+        fi
 
         install_artifacts "$STAGING"
 

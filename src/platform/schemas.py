@@ -2221,6 +2221,7 @@ class StateFileMigrationFailed(_BaseEntry):
     file: str = Field(min_length=1, max_length=200)
     reason: Literal[
         "unknown_shape", "load_failed_non_extra", "json_decode_failed",
+        "read_failed", "migrator_output_invalid",
         "write_failed", "backup_failed",
     ]
     detail: str = Field(default="", max_length=2000)

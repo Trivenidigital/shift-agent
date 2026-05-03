@@ -13,9 +13,9 @@
    ```bash
    ls -lat /opt/shift-agent/state/<file>.pre-migrate-* | head -3
    ```
-3. Restore + restart:
+3. Restore + restart (`<EPOCH>` is the timestamp from step 2 — your actual backup, NOT the example below):
    ```bash
-   cp /opt/shift-agent/state/send-counter.json.pre-migrate-1735834212 /opt/shift-agent/state/send-counter.json
+   cp /opt/shift-agent/state/send-counter.json.pre-migrate-<EPOCH> /opt/shift-agent/state/send-counter.json
    systemctl restart hermes-gateway
    ```
 4. Post-mortem: file `tasks/cf5-followup-<file>-shape.md` documenting the actual shape vs expected.
@@ -51,15 +51,16 @@
    shift-agent-deploy rollback <pre-cf5-tag>
    ```
 2. State files remain in current shape. The pre-CF5 deployed code expected the legacy shape — it may break.
-3. **If a `.pre-migrate-*` backup exists** (migration ran during the CF5+ period), manually restore it:
+3. **If a `.pre-migrate-*` backup exists** (migration ran during the CF5+ period), manually restore it (`<EPOCH>` is the actual timestamp on the backup, NOT the example below):
    ```bash
-   cp /opt/shift-agent/state/send-counter.json.pre-migrate-1735834212 /opt/shift-agent/state/send-counter.json
+   cp /opt/shift-agent/state/send-counter.json.pre-migrate-<EPOCH> /opt/shift-agent/state/send-counter.json
    ```
 4. **If NO `.pre-migrate-*` backup exists** (state files were already current at CF5 deploy time), construct the legacy shape manually (impossible to perfectly reverse — `last_offset_bytes` was zeroed by the forward migration; tail-logger will start a fresh scan from current EOF):
    ```bash
    echo '{"date": "2026-05-03", "sent_count": 0}' > /opt/shift-agent/state/send-counter.json
    echo '{}' > /opt/shift-agent/state/seen-ids.json
    ```
+   **Side effect**: the tail-logger's `seen_message_ids: []` is empty, so any inbound messages received during the CF5+ window may be re-processed by the rolled-back binary. WhatsApp message-id idempotency at the create-catering-lead / handle_sick_call layer makes this benign (duplicate creates are no-ops), but expect to see "lead L0XXX already exists" warnings in journald for ~5-10 minutes after rollback.
 5. Restart: `systemctl restart hermes-gateway`
 
 ## Scenario D: Operator override caused unexpected behavior

@@ -421,3 +421,184 @@ class TestCLI:
         )
         assert result.returncode == 1, f"stderr: {result.stderr}"
         assert "must be exactly 'skip'" in result.stderr
+
+    def test_override_emits_two_channel_audit(self, state_env):
+        """Both structured audit row AND plain-text fallback log written."""
+        result = _run_cli(
+            ["--apply"],
+            env_extra={
+                "STATE_MIGRATION_OVERRIDE": "skip",
+                "STATE_MIGRATION_OVERRIDE_REASON": "two-channel test",
+            },
+            state_dir=state_env["state_dir"], log_path=state_env["log_path"],
+        )
+        assert result.returncode == 0
+        # Channel 1: structured audit
+        audit = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
+        assert any(r["type"] == "state_file_migration_overridden" for r in audit)
+        # Channel 2: plain-text fallback log
+        fallback = state_env["log_path"].parent / "state-migration-overrides.log"
+        assert fallback.exists()
+        assert "two-channel test" in fallback.read_text(encoding="utf-8")
+
+    def test_apply_single_file_only(self, state_env):
+        """--file path filter migrates only the named file."""
+        # Both files in legacy shape
+        (state_env["state_dir"] / "send-counter.json").write_text(
+            json.dumps({"date": "2026-05-01", "sent_count": 3}), encoding="utf-8")
+        (state_env["state_dir"] / "seen-ids.json").write_text(
+            json.dumps({}), encoding="utf-8")
+        # Migrate only send-counter via --file
+        result = _run_cli(
+            ["--apply", "--file", "send-counter.json"],
+            state_dir=state_env["state_dir"], log_path=state_env["log_path"],
+        )
+        assert result.returncode == 0
+        # send-counter is migrated
+        sc = json.loads((state_env["state_dir"] / "send-counter.json").read_text(encoding="utf-8"))
+        assert "day" in sc
+        # seen-ids is NOT migrated (still empty dict)
+        si = json.loads((state_env["state_dir"] / "seen-ids.json").read_text(encoding="utf-8"))
+        assert si == {}
+
+    def test_apply_single_file_unknown_path_rejected(self, state_env):
+        """--file path NOT in registry → exit 2 with clear error."""
+        result = _run_cli(
+            ["--apply", "--file", "unknown-file.json"],
+            state_dir=state_env["state_dir"], log_path=state_env["log_path"],
+        )
+        assert result.returncode == 2, f"stderr: {result.stderr}"
+        assert "not in migrator registry" in result.stderr
+
+
+# ============================================================================
+# Lock discipline + concurrency
+# ============================================================================
+
+class TestLockDiscipline:
+    def test_concurrent_writer_blocks_migrator(self, mod, state_env):
+        """Synthetic concurrent writer holds flock; migrator blocks then succeeds.
+
+        Spawns a thread that acquires safe_io.flock(send-counter.json) and
+        holds it for ~0.5s. Main thread starts a migration that must block on
+        the same lock target, then proceed cleanly after release.
+        """
+        from safe_io import flock as sio_flock
+
+        # Seed legacy shape
+        (state_env["state_dir"] / "send-counter.json").write_text(
+            json.dumps({"date": "2026-05-01", "sent_count": 7}), encoding="utf-8",
+        )
+
+        lock_acquired = threading.Event()
+        lock_release_signal = threading.Event()
+
+        def hold_lock():
+            with sio_flock(mod.SEND_COUNTER_PATH):
+                lock_acquired.set()
+                # Hold lock until main thread signals release window OR 2s timeout
+                lock_release_signal.wait(timeout=2.0)
+                # File still locked while in-with; release after this returns
+
+        holder = threading.Thread(target=hold_lock, daemon=True)
+        holder.start()
+        assert lock_acquired.wait(timeout=2.0), "concurrent writer never acquired lock"
+
+        # Migrator MUST block while lock is held
+        start = time.time()
+        result_box = {}
+        def run_migrate():
+            try:
+                needed, msg = mod._migrate_one_file(
+                    mod.SEND_COUNTER_PATH, model_cls=mod.SendCounter,
+                    migrator=mod.migrate_send_counter,
+                    customer_tz_resolved="UTC", dry_run=False,
+                )
+                result_box["ok"] = (needed, msg, time.time() - start)
+            except Exception as e:
+                result_box["err"] = e
+
+        migrator_thread = threading.Thread(target=run_migrate, daemon=True)
+        migrator_thread.start()
+
+        # Sleep briefly to ensure migrator is blocked
+        time.sleep(0.3)
+        # Migrator should still be blocked (no result yet)
+        assert "ok" not in result_box and "err" not in result_box, \
+            "migrator should block on held lock"
+
+        # Release the lock
+        lock_release_signal.set()
+        holder.join(timeout=2.0)
+        migrator_thread.join(timeout=3.0)
+
+        assert "err" not in result_box, f"migrator raised: {result_box.get('err')}"
+        assert "ok" in result_box, "migrator did not complete after lock release"
+        needed, msg, elapsed = result_box["ok"]
+        assert needed is True
+        assert elapsed >= 0.2, f"migrator did not actually wait for lock (elapsed {elapsed:.3f}s)"
+
+        # Verify file actually migrated
+        result = json.loads((state_env["state_dir"] / "send-counter.json").read_text(encoding="utf-8"))
+        assert result["day"] == "2026-05-01" and result["count"] == 7
+
+
+# ============================================================================
+# Schema variant validation (LogEntry union)
+# ============================================================================
+
+class TestSchemaVariants:
+    """Cross-platform schema validation tests (no fcntl needed)."""
+
+    def test_state_file_migrated_validates_via_log_entry_union(self):
+        from schemas import LogEntry
+        from pydantic import TypeAdapter
+        adapter = TypeAdapter(LogEntry)
+        entry = adapter.validate_python({
+            "type": "state_file_migrated",
+            "ts": "2026-05-03T20:42:53.316678+00:00",
+            "file": "/opt/shift-agent/state/send-counter.json",
+            "from_shape": "[\"date\", \"sent_count\"]",
+            "to_shape": "[\"count\", \"day\", \"last_send_ts\"]",
+            "backup_path": "/opt/shift-agent/state/send-counter.json.pre-migrate-1777840973",
+        })
+        assert entry.type == "state_file_migrated"
+
+    def test_state_file_migration_failed_reason_literal_enforced(self):
+        """Invalid reason value is rejected by Literal."""
+        from schemas import StateFileMigrationFailed
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError):
+            StateFileMigrationFailed(
+                type="state_file_migration_failed",
+                ts=datetime.now(timezone.utc),
+                file="x",
+                reason="oops_not_in_literal",  # invalid
+                detail="",
+            )
+
+    def test_state_file_migration_failed_all_reasons_accepted(self):
+        """All 7 documented reasons are accepted."""
+        from schemas import StateFileMigrationFailed
+        for reason in [
+            "unknown_shape", "load_failed_non_extra", "json_decode_failed",
+            "read_failed", "migrator_output_invalid",
+            "write_failed", "backup_failed",
+        ]:
+            entry = StateFileMigrationFailed(
+                type="state_file_migration_failed",
+                ts=datetime.now(timezone.utc),
+                file="/x", reason=reason, detail="",
+            )
+            assert entry.reason == reason
+
+    def test_state_file_migration_overridden_validates(self):
+        from schemas import LogEntry
+        from pydantic import TypeAdapter
+        adapter = TypeAdapter(LogEntry)
+        entry = adapter.validate_python({
+            "type": "state_file_migration_overridden",
+            "ts": "2026-05-03T20:42:53.316678+00:00",
+            "reason": "operator chose to bypass for hotfix",
+        })
+        assert entry.type == "state_file_migration_overridden"
