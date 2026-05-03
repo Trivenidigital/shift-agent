@@ -219,16 +219,23 @@ def find_dispatcher_routed_for(chat_id: str, since_ts: float) -> bool:
 
 
 def find_inbound_text_for(chat_id: str) -> Optional[str]:
-    """Scan gateway.log for the most recent 'inbound message:' line matching chat_id.
+    """Scan agent.log for the most recent 'inbound message:' line matching chat_id.
 
     Gateway log format (run.py):
       logger.info('inbound message: platform=%s user=%s chat=%s msg=%r', ...)
+
+    PR-CF4: user names contain spaces (e.g., "Srini Yalavarthi(Bangaru)").
+    Previous regex used `user=\\S+` which only matched single-token names,
+    silently suppressing all inbounds from multi-word users. Now uses
+    non-greedy `.+?` bounded by the mandatory ` chat=` literal — relies on
+    the structural guarantee that agent.log emits one `chat=` per inbound
+    message line via gateway.run's logger.info call.
     """
     if not GATEWAY_LOG.exists():
         return None
     chat_lid_only = chat_id.split("@", 1)[0] if "@" in chat_id else chat_id
     pattern = re.compile(
-        r"inbound message: platform=\S+ user=\S+ chat=(\S+) msg=([^\n]+)$"
+        r"inbound message: platform=\S+ user=.+? chat=(\S+) msg=([^\n]+)$"
     )
     matches: list[str] = []
     try:
@@ -329,7 +336,7 @@ def process_inbound(chat_id: str, message_id: str, inbound_seen_ts: float) -> No
         emit_audit(_make_suppressed(
             ts=_now_iso(), type="catering_dispatcher_watchdog_suppressed",
             chat_id=chat_id, message_id=message_id, reason="text_unavailable",
-            detail="gateway.log had no matching 'inbound message:' line",
+            detail=f"agent.log had no matching 'inbound message:' line for chat_id={chat_id}",
         ))
         return
 
