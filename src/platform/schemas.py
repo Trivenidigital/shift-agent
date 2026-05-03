@@ -2227,6 +2227,39 @@ class StateFileMigrationFailed(_BaseEntry):
     detail: str = Field(default="", max_length=2000)
 
 
+class CfRouterIntercepted(_BaseEntry):
+    """PR-CF6: cf-router Hermes plugin intercepted an inbound message and either
+    invoked a deployed script directly (skipping the LLM) or fired an alert.
+
+    Replaces F8 (catering-owner-action-watchdog) and F9 (shift-missed-dispatch-notifier)
+    rescue-layer audit variants with a single plugin-side variant.
+
+    `reason` enum:
+      - f8_owner_approve / f8_owner_reject — owner sent #XXXXX approve/reject;
+        plugin invoked apply-catering-owner-decision; LLM bypassed
+      - f8_menu_yes / f8_menu_no — owner sent #XXXXX yes/no on a pending menu
+        update; plugin invoked apply-menu-update
+      - f9_sick_call_alert — sick-call regex pattern detected from employee
+        sender; plugin fired Pushover P2 to owner; LLM still ran normally
+      - error — plugin caught an unexpected error during interception
+        attempt; LLM still ran normally (plugin returns None on error)
+
+    `code` is the #XXXXX code if applicable. `chat_id` is the WhatsApp chat
+    (owner self-chat or employee chat). `subprocess_rc` is the apply-script's
+    exit code if a subprocess was invoked.
+    """
+    type: Literal["cf_router_intercepted"]
+    reason: Literal[
+        "f8_owner_approve", "f8_owner_reject",
+        "f8_menu_yes", "f8_menu_no",
+        "f9_sick_call_alert", "error",
+    ]
+    chat_id: str = Field(min_length=1, max_length=200)
+    code: Optional[str] = Field(default=None, max_length=10)
+    subprocess_rc: Optional[int] = Field(default=None)
+    detail: str = Field(default="", max_length=2000)
+
+
 class StateFileMigrationOverridden(_BaseEntry):
     """PR-CF5: operator used STATE_MIGRATION_OVERRIDE=skip to bypass the gate.
 
@@ -2478,6 +2511,8 @@ LogEntry = Annotated[
         Annotated[StateFileMigrated, Tag("state_file_migrated")],
         Annotated[StateFileMigrationFailed, Tag("state_file_migration_failed")],
         Annotated[StateFileMigrationOverridden, Tag("state_file_migration_overridden")],
+        # PR-CF6 2026-05-03: cf-router Hermes plugin (replaces F8/F9 watchdogs)
+        Annotated[CfRouterIntercepted, Tag("cf_router_intercepted")],
         # F8 2026-05-01: owner-action watchdog (missed #XXXXX approve/reject recovery)
         Annotated[CateringOwnerActionWatchdogFired, Tag("catering_owner_action_watchdog_fired")],
         Annotated[CateringOwnerActionWatchdogSuppressed, Tag("catering_owner_action_watchdog_suppressed")],
@@ -2607,6 +2642,8 @@ __all__ = [
     "CateringDispatcherWatchdogFired", "CateringDispatcherWatchdogSuppressed",
     # PR-CF5 2026-05-03 (state-file migration)
     "StateFileMigrated", "StateFileMigrationFailed", "StateFileMigrationOverridden",
+    # PR-CF6 2026-05-03 (cf-router Hermes plugin)
+    "CfRouterIntercepted",
     # F8 2026-05-01 (catering owner-action watchdog)
     "CateringOwnerActionWatchdogFired", "CateringOwnerActionWatchdogSuppressed",
     # F9 2026-05-01 (shift missed-dispatch notifier)

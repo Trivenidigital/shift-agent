@@ -1,0 +1,6 @@
+name: cf-router
+version: 1.0.0
+description: SMB-Agents safety net — intercepts owner #XXXXX approve/reject and employee sick-call patterns at the gateway BEFORE the LLM runs. Replaces F8 + F9 watchdog daemons with native Hermes hooks.
+author: SMB-Agents (Triveni)
+provides_hooks:
+  - pre_gateway_dispatch
