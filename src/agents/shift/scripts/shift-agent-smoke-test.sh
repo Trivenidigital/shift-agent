@@ -188,7 +188,7 @@ echo "✓ systemd units verified (incl. expense-bookkeeper if installed)"
 # 10. v0.3: catering schema validation against current state files
 #     Catches S1 (quote_text invariant), S6 (regex unification), L0 (phone canon)
 #     at smoke-time → triggers auto-rollback before customer impact.
-if ! sudo -u shift-agent /opt/shift-agent/venv/bin/python -c "
+if ! sudo -u shift-agent "$PY" -c "
 import json, sys, pathlib
 sys.path.insert(0, '/opt/shift-agent')
 from schemas import CateringLeadStore, MenuPendingUpdate, is_catering_transition_allowed
