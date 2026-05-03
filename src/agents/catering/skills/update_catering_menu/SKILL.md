@@ -15,6 +15,35 @@ the owner a preview, and wait for their explicit confirmation.
 - NEVER apply the menu without the owner's explicit YES — every update goes through the preview-confirm loop.
 - The image is at `mediaUrls[0]` from the inbound event. v0.2 supports JPEG, PNG, WebP, PDF.
 
+### PR-CF3 fail-closed rule (do NOT improvise)
+
+**This SKILL's ONLY job is to invoke `parse-menu-photo` and surface its output.**
+(Pre-flight path and caption checks in Step 1 are permitted before the
+script call; the prohibition is on in-context extraction and file writing.)
+
+You are NOT permitted to:
+
+- Use `vision_analyze` or any other vision tool yourself to extract menu items
+- Generate the pending-update file (`catering-menu-pending.json`) directly
+- Generate the confirmation code yourself (the script does this via `_generate_unique_code` using the deployed alphabet)
+- Improvise an alternate item schema (size variants, INR pricing, etc.) — the only acceptable schema is whatever `parse-menu-photo` writes, validated by the deployed `MenuPendingUpdate` Pydantic model
+
+If `parse-menu-photo` returns a non-zero exit code, you MUST surface the
+error to the owner per the Step 2 exit-code table and STOP. Under NO
+circumstance should you "helpfully" do the work in-context — that bypasses
+the schema validation, the deterministic preview rendering, the audit
+emission, and the dispatcher's `#XXXXX` code lookup. The deployed pipeline
+will reject any improvised pending file with `extra_forbidden` schema errors,
+silently leaving the owner unable to apply the menu.
+
+This rule exists because of an observed PR-CF2 incident on 2026-05-03 where
+the LLM saw `parse-menu-photo` fail (vision auth was 401-ing at that point
+in the session) and improvised its own pending file format with a non-`#`
+confirmation code (`RQUKH` instead of `#YDW6J`), `menu_items` instead of
+`extracted_items`, and size-variant pricing. The dispatcher could not route
+the owner's reply, the active menu file was eventually written with all
+prices as `null`, and the entire downstream finalize flow was broken.
+
 ## Step 1 — Validate the inbound
 
 The inbound message must have:
