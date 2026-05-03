@@ -58,6 +58,18 @@ install_artifacts() {
     rsync -a --delete src/agents/shift/skills/ /root/.hermes/skills/
     chown -R shift-agent:shift-agent /root/.hermes/skills/
 
+    # PR-CF6: Hermes plugins — cf-router + any future plugins under src/plugins/.
+    # Loaded by hermes-gateway at startup from ~/.hermes/plugins/<name>/.
+    # Replaces F8/F9 custom watchdogs by intercepting at pre_gateway_dispatch.
+    # IMPORTANT: when cf-router is installed, the F8/F9 systemd timers must be
+    # disabled (see "stop_f8_f9_watchdogs" call below) to avoid dual-fire on
+    # the same inbound message.
+    if [ -d src/plugins ]; then
+        mkdir -p /root/.hermes/plugins
+        rsync -a --delete src/plugins/ /root/.hermes/plugins/
+        chown -R shift-agent:shift-agent /root/.hermes/plugins/
+    fi
+
     # logs dir — bootstrap target for prune-expense.log + similar systemd
     # StandardOutput=append: writers (systemd doesn't auto-mkdir parents).
     # Python writers using safe_io.ndjson_append self-bootstrap via
@@ -154,6 +166,20 @@ install_artifacts() {
     systemctl enable --now send-routing-accuracy-summary.timer 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
     systemctl enable --now prune-expense-receipts.timer 2>/dev/null || true
+
+    # PR-CF6: when cf-router plugin is present, disable the F8/F9 watchdog
+    # timers it replaces. The watchdogs scan for `dispatcher_routed` audit
+    # entries to decide whether to fire; the plugin writes
+    # `cf_router_intercepted` instead, so the watchdogs would not see the
+    # plugin's intercept and would re-fire the apply-script (double-quote
+    # to customer) or emit a duplicate Pushover alert. Keeping both running
+    # is unsafe — disable the legacy timers at deploy time.
+    if [ -d /root/.hermes/plugins/cf-router ]; then
+        for unit in catering-owner-action-watchdog.timer \
+                    shift-missed-dispatch-notifier.timer; do
+            systemctl disable --now "$unit" 2>/dev/null || true
+        done
+    fi
 }
 
 snapshot_staging() {
