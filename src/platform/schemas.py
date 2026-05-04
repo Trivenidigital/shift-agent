@@ -997,6 +997,20 @@ class SalesTaxConfig(BaseModel):
         return sorted(set(v), reverse=True)
 
 
+# Agent #22 — P&L Anomaly Detective (Tier-2 scaffold; PR-Agent22-v0.1 2026-05-04)
+# Replaces retired Agent #17 Unit Economics. v0.1 ships scaffold only —
+# anomaly-detection logic + POS integration deferred to v0.2 (gated on
+# customer POS choice: clover / square / toast / other). See portfolio.md
+# Agent 22 spec at lines 793-822.
+class PnlAnomalyConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    margin_drop_alert_pct: float = Field(default=8.0, ge=0.5, le=50.0)
+    location_underperform_alert_pct: float = Field(default=15.0, ge=1.0, le=50.0)
+    trailing_window_weeks: int = Field(default=4, ge=1, le=52)
+    pos_provider: Optional[Literal["clover", "square", "toast", "other"]] = None
+
+
 # Agent #21 — Expense Bookkeeper (v0.1; mocked QBOClient interface)
 # Original design at tasks/expense-bookkeeper-v01-design.md was archived in
 # the 2026-05-04 bucket-C cleanup; recover via the backup tag if needed:
@@ -1213,6 +1227,7 @@ class Config(BaseModel):
     cash_ar: CashArConfig = Field(default_factory=CashArConfig)
     sales_tax: SalesTaxConfig = Field(default_factory=SalesTaxConfig)
     expense_bookkeeper: ExpenseBookkeeperConfig = Field(default_factory=ExpenseBookkeeperConfig)
+    pnl_anomaly: PnlAnomalyConfig = Field(default_factory=PnlAnomalyConfig)
 
     def tz(self) -> ZoneInfo:
         return ZoneInfo(self.customer.timezone)
@@ -2482,6 +2497,32 @@ class ComplianceItemMarkedDone(_BaseEntry):
     sentinel_keys_pruned: int = Field(ge=0)
 
 
+# ─────────────────────────────────────────────────────────────────
+# P&L Anomaly Detective audit variants (Agent #22 — PR-Agent22-v0.1 2026-05-04)
+# v0.1 ships these as scaffold; v0.2 anomaly-detection logic emits PnlAnomalyDetected,
+# v0.1 SKILL emits PnlAnomalyDeclined when invoked while disabled.
+# ─────────────────────────────────────────────────────────────────
+
+
+class PnlAnomalyDetected(_BaseEntry):
+    """Anomaly detected by v0.2 detection logic. v0.1 placeholder — no
+    emitter yet (cfg.pnl_anomaly.enabled defaults False)."""
+    type: Literal["pnl_anomaly_detected"]
+    anomaly_type: Literal["margin_drop", "location_underperform"]
+    target_id: str = Field(min_length=1, max_length=100)  # product_id or location_id
+    delta_pct: float
+    baseline_value: float
+    current_value: float
+    detail: str = Field(default="", max_length=500)
+
+
+class PnlAnomalyDeclined(_BaseEntry):
+    """SKILL invoked but cfg.pnl_anomaly.enabled = False; declined politely."""
+    type: Literal["pnl_anomaly_declined"]
+    requester_role: Literal["owner", "employee", "unknown"]
+    reason: Literal["agent_disabled", "no_pos_configured"]
+
+
 class InterLocationTransferProposed(_BaseEntry):
     """Agent #3 proposed an employee transfer between locations to cover a gap."""
     type: Literal["inter_location_transfer_proposed"]
@@ -2592,6 +2633,9 @@ LogEntry = Annotated[
         Annotated[ComplianceReminderSkipped, Tag("compliance_reminder_skipped")],
         Annotated[ComplianceReminderDeferred, Tag("compliance_reminder_deferred")],
         Annotated[ComplianceItemMarkedDone, Tag("compliance_item_marked_done")],
+        # PR-Agent22-v0.1 2026-05-04 — P&L Anomaly Detective scaffold
+        Annotated[PnlAnomalyDetected, Tag("pnl_anomaly_detected")],
+        Annotated[PnlAnomalyDeclined, Tag("pnl_anomaly_declined")],
         # Agent #2 Catering Lead
         Annotated[CateringLeadCreated, Tag("catering_lead_created")],
         Annotated[CateringLeadStatusChange, Tag("catering_lead_status_change")],
@@ -2742,6 +2786,8 @@ __all__ = [
     "ComplianceReminderAttempted", "ComplianceReminderSent",
     "ComplianceReminderFailed", "ComplianceReminderSkipped",
     "ComplianceReminderDeferred", "ComplianceItemMarkedDone",
+    # PR-Agent22-v0.1 — P&L Anomaly Detective
+    "PnlAnomalyConfig", "PnlAnomalyDetected", "PnlAnomalyDeclined",
     "CateringLeadCreated", "CateringLeadStatusChange", "CateringLeadRejected", "CateringQuoteDrafted",
     "CateringOwnerApprovalRequested", "CateringOwnerDecision", "CateringQuoteSent",
     # v0.3 catering audit classes
