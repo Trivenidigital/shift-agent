@@ -97,11 +97,13 @@ def haversine_drive_minutes(km: float) -> float:
 def geocode_address(address: str, timeout_sec: int) -> Optional[tuple[float, float]]:
     """Return (lat, lon) from Nominatim via maps_client.py search, or None.
 
-    HOTFIX 2026-05-04 (E2E-BUG-2): the actual maps_client.py CLI takes
-    address as a POSITIONAL arg, not `--query`. Earlier `--query --limit 1`
-    invocation never matched the CLI; mocked unit tests didn't catch it.
-    Verified shape: `maps_client.py search "Times Square"` returns
-    {"latitude": ..., "longitude": ..., ...} or {"error": "..."}.
+    HOTFIX 2026-05-04 v2 (E2E-BUG-2): verified against actual srilu
+    response. Real shape:
+      {"query": "X", "results": [{"lat": 29.7, "lon": -95.5, ...}, ...]}
+    Field names `lat`/`lon` (NOT `latitude`/`longitude` as v1 hotfix
+    incorrectly assumed); `results` is a list (NOT single object). The v1
+    hotfix only verified --help, not the actual response — a second drift
+    failure on the same script. Take the highest-importance match (first).
     """
     try:
         result = subprocess.run(
@@ -111,12 +113,12 @@ def geocode_address(address: str, timeout_sec: int) -> Optional[tuple[float, flo
         if result.returncode != 0:
             return None
         doc = json.loads(result.stdout)
-        # maps_client.search returns a single result (top match), not a list.
-        # Either {"latitude": X, "longitude": Y, ...} or {"error": "..."}.
-        if "error" in doc:
+        results = doc.get("results", [])
+        if not results:
             return None
-        lat = doc.get("latitude")
-        lon = doc.get("longitude")
+        first = results[0]
+        lat = first.get("lat")
+        lon = first.get("lon")
         if lat is None or lon is None:
             return None
         return float(lat), float(lon)
