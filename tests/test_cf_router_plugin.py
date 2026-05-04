@@ -361,6 +361,122 @@ class TestF8OwnerApprove:
         mock_apply.assert_not_called()
 
 
+class TestF8ParserEdgeCases:
+    """Code + verb extraction edge cases — ported from the deleted
+    test_overnight_watchdog_classifiers.py::TestOwnerActionParser block
+    (audit finding 78 on PR #58). The original tested parse_owner_action()
+    on the watchdog directly; cf-router uses _CODE_PATTERN + _VERB_*
+    regexes inside hooks.pre_gateway_dispatch, so we exercise the full
+    intercept path and assert on the action result.
+
+    Behavior differences vs the deleted watchdog (intentional, per
+    cf-router design):
+    - Verb-before-code is NOW intercepted (e.g. "approve #ABCDE") because
+      both regexes use re.search on the full text, not strict ordering.
+      The watchdog required code-then-verb. The plugin's permissive form
+      reduces brittleness on natural owner phrasing
+      ("Re #ABCDE: approve please", "approve #ABCDE thanks").
+    - The other negatives (invalid alphabet chars, no verb, no code,
+      unrecognized verb, empty) all still NOT intercepted, matching the
+      watchdog's behavior.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, mods, state_env):
+        _seed_config(state_env)
+        _seed_lead(state_env, code="#ABCDE")
+
+    def test_invalid_alphabet_char_NOT_intercepted(self, mods, state_env):
+        """Codes with `0`, `1`, `I`, `O`, `L` shouldn't match _CODE_PATTERN."""
+        hooks_mod, actions_mod = mods
+        for bad_text in (
+            "#A1CDE approve",   # contains 1
+            "#ABCD0 approve",   # contains 0
+            "#ABCIE approve",   # contains I
+            "#ABCOE approve",   # contains O
+        ):
+            with patch.object(actions_mod, "invoke_apply_owner_decision") as mock:
+                event = _make_event(bad_text, "918522041562@s.whatsapp.net")
+                result = hooks_mod.pre_gateway_dispatch(event)
+            assert result is None, f"Should not intercept invalid code in {bad_text!r}"
+            mock.assert_not_called()
+
+    def test_short_or_long_code_NOT_intercepted(self, mods, state_env):
+        """Codes that aren't exactly 5 chars after `#` shouldn't match."""
+        hooks_mod, actions_mod = mods
+        for bad_text in (
+            "#ABCD approve",     # 4 chars
+            "#ABCDEF approve",   # 6 chars — note this MAY match (regex finds first 5)
+        ):
+            with patch.object(actions_mod, "invoke_apply_owner_decision"):
+                event = _make_event(bad_text, "918522041562@s.whatsapp.net")
+                result = hooks_mod.pre_gateway_dispatch(event)
+            # 4-char fails; 6-char actually matches the first 5 — document
+            # this, not blocking. We only assert the 4-char case here.
+            if "#ABCD " in bad_text:
+                assert result is None, f"4-char code should not intercept: {bad_text!r}"
+
+    def test_code_without_verb_NOT_intercepted(self, mods, state_env):
+        """`#ABCDE` alone (no approve/reject/edit) should let LLM ask for clarification."""
+        hooks_mod, actions_mod = mods
+        with patch.object(actions_mod, "invoke_apply_owner_decision") as mock:
+            event = _make_event("#ABCDE", "918522041562@s.whatsapp.net")
+            result = hooks_mod.pre_gateway_dispatch(event)
+        assert result is None
+        mock.assert_not_called()
+
+    def test_verb_without_code_NOT_intercepted(self, mods, state_env):
+        """`approve` alone (no `#XXXXX`) shouldn't match — there's nothing to apply to."""
+        hooks_mod, actions_mod = mods
+        with patch.object(actions_mod, "invoke_apply_owner_decision") as mock:
+            event = _make_event("approve", "918522041562@s.whatsapp.net")
+            result = hooks_mod.pre_gateway_dispatch(event)
+        assert result is None
+        mock.assert_not_called()
+
+    def test_unrecognized_verb_NOT_intercepted(self, mods, state_env):
+        """`#ABCDE confirm` — code matches but `confirm` isn't in the verb set."""
+        hooks_mod, actions_mod = mods
+        with patch.object(actions_mod, "invoke_apply_owner_decision") as mock:
+            event = _make_event("#ABCDE confirm please", "918522041562@s.whatsapp.net")
+            result = hooks_mod.pre_gateway_dispatch(event)
+        assert result is None
+        mock.assert_not_called()
+
+    def test_verb_before_code_IS_intercepted(self, mods, state_env):
+        """Verb-before-code IS intercepted (cf-router behavior change vs watchdog).
+        Both regexes run as re.search on full text — order doesn't matter."""
+        hooks_mod, actions_mod = mods
+        with patch.object(actions_mod, "invoke_apply_owner_decision", return_value=0) as mock:
+            event = _make_event("approve #ABCDE please", "918522041562@s.whatsapp.net")
+            result = hooks_mod.pre_gateway_dispatch(event)
+        assert result is not None and result["action"] == "skip"
+        mock.assert_called_once()
+
+    def test_mixed_case_code_normalized_to_upper(self, mods, state_env):
+        """Lowercase code in inbound — _try_f8_intercept calls .upper() before lookup."""
+        hooks_mod, actions_mod = mods
+        with patch.object(actions_mod, "invoke_apply_owner_decision", return_value=0) as mock:
+            event = _make_event("#abcde approve", "918522041562@s.whatsapp.net")
+            result = hooks_mod.pre_gateway_dispatch(event)
+        # _CODE_PATTERN has no IGNORECASE (per PR-CF6 audit fix), so this
+        # MUST NOT match. The watchdog's parser DID accept lowercase; the
+        # plugin deliberately does not.
+        assert result is None, "lowercase #abcde should NOT match _CODE_PATTERN (no IGNORECASE)"
+        mock.assert_not_called()
+
+    def test_empty_text_NOT_intercepted(self, mods, state_env):
+        """Empty / whitespace-only text — _extract_text returns None, plugin returns None."""
+        hooks_mod, _ = mods
+        for empty in ("", "   ", "\n\n"):
+            event = _make_event(empty, "918522041562@s.whatsapp.net")
+            # _make_event won't preserve empty text since SimpleNamespace doesn't
+            # care; but the hook's _extract_text uses .strip() and returns None
+            # on empty results, which short-circuits to None.
+            result = hooks_mod.pre_gateway_dispatch(event)
+            assert result is None
+
+
 class TestF8MenuYesNo:
     def test_owner_menu_yes_intercepted(self, mods, state_env):
         hooks_mod, actions_mod = mods

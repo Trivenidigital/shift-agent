@@ -102,33 +102,72 @@ Total estimate: ~250 LOC. ~3-4 hours including review cycle.
 
 ## Rollback runbook (operator-facing)
 
-If the plugin misbehaves in production (silently dropping owner approvals, firing wrong subprocesses, blocking the gateway, etc.):
+> **Note (2026-05-04 canonical-cleanup):** the F8/F9 watchdog source files,
+> systemd units, and audit variants were **deleted** from the repo (see PR
+> #58 + tag `pre-srilu-cleanup-2026-05-04`). The "re-enable timers" step
+> from the original runbook no longer applies because the units don't ship
+> with new tarballs. There are now **two** rollback shapes depending on how
+> badly the plugin is misbehaving.
+
+### Rollback shape A — disable plugin, accept temporary loss of F8/F9 coverage
+
+If cf-router is firing wrong subprocesses or blocking the gateway, but the
+loss of F8/F9 owner-approval / sick-call coverage is acceptable for the
+duration of the incident (LLM still handles owner approvals normally —
+the plugin only short-circuits a small slice):
 
 ```bash
-# 1. Disable the plugin (remove from Hermes plugin dir)
+# 1. Remove the plugin
 sudo rm -rf /root/.hermes/plugins/cf-router
 
-# 2. Restart hermes-gateway so the plugin no longer loads
+# 2. Restart gateway so the plugin no longer loads
 sudo systemctl restart hermes-gateway
 
-# 3. Re-enable the legacy F8/F9 watchdog timers (they were disabled at deploy time
-#    by install_artifacts() when cf-router was installed)
-sudo systemctl enable --now catering-owner-action-watchdog.timer
-sudo systemctl enable --now shift-missed-dispatch-notifier.timer
+# 3. Verify cf-router is gone from plugin discovery (count drops by 1)
+sudo journalctl -u hermes-gateway --since "30 seconds ago" | grep "Plugin discovery"
 
-# 4. Verify both are running
-systemctl status catering-owner-action-watchdog.timer shift-missed-dispatch-notifier.timer
-
-# 5. (Optional) Audit verification — recent intercepts should stop appearing
+# 4. Confirm no more cf_router_intercepted entries
 tail -f /opt/shift-agent/logs/decisions.log | grep cf_router_intercepted
 ```
 
-Total revert time: under 30 seconds. The watchdog scripts and timers ship with every deploy and are only *disabled* (not deleted) when cf-router is present, so they are immediately re-armable.
+Total revert time: under 30 seconds. LLM handles owner #XXXXX commands
+the way it did before PR-CF6 (i.e. no deterministic intercept; relies on
+the LLM correctly invoking the apply-skill).
 
-## Cutover policy (avoiding F8/F9 dual-fire)
+### Rollback shape B — full pre-cleanup restore (re-install F8/F9 watchdogs)
 
-The plugin writes `cf_router_intercepted` audit entries; the F8/F9 watchdogs scan only for `dispatcher_routed` entries. If both are running simultaneously, the watchdogs would NOT see the plugin's intercept and would re-fire `apply-catering-owner-decision` (sending a duplicate quote to the customer) or emit a redundant Pushover.
+If you want the legacy watchdog safety net back AND the plugin removed:
 
-Therefore the deploy script **disables F8/F9 systemd timers at install time** when `/root/.hermes/plugins/cf-router/` is present (see `install_artifacts()` in `shift-agent-deploy.sh`). The plan's earlier "24h dual-run observation window" idea was unsafe and has been removed.
+```bash
+# 1. Local: check out pre-cleanup state into a worktree (don't disturb main)
+git worktree add /tmp/pre-cleanup pre-srilu-cleanup-2026-05-04
+cd /tmp/pre-cleanup
 
-If the operator needs to back out (see rollback runbook above), the timers are re-enabled and the watchdogs resume their old behavior.
+# 2. Build a tarball from the pre-cleanup tree
+bash tools/build-deploy-tarball.sh --skip-pytest
+
+# 3. Ship + deploy on srilu — the older deploy script re-installs the
+#    catering-owner-action-watchdog and shift-missed-dispatch-notifier
+#    .service files + tries to enable timers (which the cleanup deploy
+#    script no longer does)
+scp shift-agent-deploy.tgz root@srilu-vps:/tmp/
+ssh root@srilu-vps 'sudo tar xzf /tmp/shift-agent-deploy.tgz -C /opt/shift-agent/staging-new/ && sudo /usr/local/bin/shift-agent-deploy.sh'
+
+# 4. Manually remove the cf-router plugin to avoid dual-fire
+ssh root@srilu-vps 'sudo rm -rf /root/.hermes/plugins/cf-router && sudo systemctl restart hermes-gateway'
+```
+
+Use shape B only if shape A's coverage gap is unacceptable. In practice
+shape A should always be tried first.
+
+## Cutover policy (avoiding F8/F9 dual-fire — historical, no longer relevant)
+
+The plugin writes `cf_router_intercepted` audit entries; the F8/F9
+watchdogs scanned only for `dispatcher_routed` entries. If both ran
+simultaneously the watchdogs would re-fire the apply-script (duplicate
+quote to customer) or emit a redundant Pushover.
+
+The cutover used the deploy script's old watchdog-disable hook to prevent
+this. As of the 2026-05-04 canonical-cleanup the watchdog units no longer
+ship at all, so there's nothing to disable on a fresh install. Dual-fire
+is now structurally impossible on any post-cleanup deploy.
