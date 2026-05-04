@@ -167,19 +167,14 @@ install_artifacts() {
     systemctl daemon-reload 2>/dev/null || true
     systemctl enable --now prune-expense-receipts.timer 2>/dev/null || true
 
-    # PR-CF6: when cf-router plugin is present, disable the F8/F9 watchdog
-    # timers it replaces. The watchdogs scan for `dispatcher_routed` audit
-    # entries to decide whether to fire; the plugin writes
-    # `cf_router_intercepted` instead, so the watchdogs would not see the
-    # plugin's intercept and would re-fire the apply-script (double-quote
-    # to customer) or emit a duplicate Pushover alert. Keeping both running
-    # is unsafe — disable the legacy timers at deploy time.
-    if [ -d /root/.hermes/plugins/cf-router ]; then
-        for unit in catering-owner-action-watchdog.timer \
-                    shift-missed-dispatch-notifier.timer; do
-            systemctl disable --now "$unit" 2>/dev/null || true
-        done
-    fi
+    # 2026-05-04 canonical-cleanup: F8/F9 watchdog files were deleted from
+    # the repo (cf-router plugin took over their role in PR-CF6). The
+    # earlier "disable the legacy timers" hook here is obsolete because
+    # the units never get installed by this script anymore. If you're
+    # rolling back to a pre-cleanup tarball that re-installs the
+    # watchdogs, manually `systemctl disable --now ...timer ...service`
+    # for catering-owner-action-watchdog and shift-missed-dispatch-notifier
+    # — or apply this branch on top of the rollback to re-purge.
 }
 
 snapshot_staging() {

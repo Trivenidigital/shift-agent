@@ -156,9 +156,9 @@ if [ "$ACTUAL_BRIDGE_SHA" != "$PINNED_BRIDGE_SHA" ]; then
         echo "Either (a) Hermes upstream changed bridge.js, or (b) our patches were" >&2
         echo "re-applied with different output, or (c) bridge.js was manually edited." >&2
         echo "" >&2
-        echo "If intentional (e.g. you re-ran patch-bridge-filter.py with logic changes)," >&2
-        echo "update BRIDGE_POST_PATCH_SHA256 in tools/hermes-patch-baseline.txt and" >&2
-        echo "commit + ship a new tarball." >&2
+        echo "If intentional (e.g. you re-ran tools/patch-hermes.py against a new" >&2
+        echo "upstream Hermes), update BRIDGE_POST_PATCH_SHA256 in" >&2
+        echo "tools/hermes-patch-baseline.txt and commit + ship a new tarball." >&2
         exit 1
     fi
 fi
@@ -173,13 +173,12 @@ for f in "$RUN" "$WA" "$BR"; do
     grep -q "END shift-agent-sender-id" "$f" || fail "$f missing END shift-agent-sender-id marker"
 done
 
-# Bridge.js template-bypass patch (added by tools/patch-bridge-filter.py).
-# OBSOLETE in Hermes >= 0.12.0: the upstream chatter filter that this
-# patch extended was removed in 0.12.0, so the anchor `owner_bypass` no
-# longer exists in bridge.js and the patch is a no-op. We skip the marker
-# check when running against 0.12.0+ to avoid a false-fail; the deploy
-# tarball still ships the patch script so older Hermes installs (0.11.x
-# rollback targets) keep working.
+# Bridge.js template-bypass patch — OBSOLETE in Hermes >= 0.12.0 (the
+# upstream chatter filter the patch extended was removed). The patch
+# script (tools/patch-bridge-filter.py) was deleted in the 2026-05-04
+# canonical-cleanup; see git tag pre-srilu-cleanup-2026-05-04 if a
+# pre-0.12 rollback ever needs the patch back. The marker check below
+# only runs when the legacy chatter-filter symbols are still present.
 if grep -qE "owner_bypass|FILTER_OWNER_JID" "$BR" 2>/dev/null; then
     grep -q "BEGIN shift-agent-template-bypass" "$BR" || fail "$BR missing BEGIN shift-agent-template-bypass marker (Hermes <0.12.0 chatter filter present)"
     grep -q "END shift-agent-template-bypass" "$BR" || fail "$BR missing END shift-agent-template-bypass marker"

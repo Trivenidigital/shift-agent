@@ -232,7 +232,7 @@ ssh main-vps 'ls -la /opt/shift-agent/.env.pre-symlink-backup*'
 
 3. **`KEEP_TARBALLS=5`** in `shift-agent-deploy.sh`. Older deploys are deleted to bound disk usage. Tune via the script if needed.
 
-4. **Hermes version is not pinned by this script.** That's the next critical-tier item per `docs/hermes-alignment.md`. The bridge.js patches in `tools/patch-bridge-filter.py` will silently break on upstream Hermes upgrades until that's fixed.
+4. **Hermes version IS pinned now** via `tools/hermes-patch-baseline.txt` + `tools/check-shift-agent-patch.sh` — drift in Hermes commit hash, version, or bridge.js sha256 fail-closes the deploy. The legacy `tools/patch-bridge-filter.py` (template-bypass) was removed in the 2026-05-04 canonical-cleanup since the upstream chatter filter no longer exists in Hermes ≥ 0.12.0.
 
 5. **No VPS-side pytest gate.** Smoke test verifies installed scripts + Python module imports + config validation. It does NOT re-run the unit suite. Pytest runs as a gate in `build-deploy-tarball.sh` on the local side; if you skip it via `--skip-pytest`, you've skipped the gate.
 
