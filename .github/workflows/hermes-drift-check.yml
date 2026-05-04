@@ -1,0 +1,251 @@
+name: hermes-drift-check
+
+# Weekly drift detection for Hermes upstream. Does NOT weaken the deploy
+# gate (tools/check-shift-agent-patch.sh stays fail-closed); this just
+# catches us out when upstream has moved and dry-runs our patches against
+# the new tree so we know whether the next deploy will need
+# HERMES_PIN_OVERRIDE or just a baseline bump.
+#
+# Behavior summary:
+#   1. Fetch Hermes upstream HEAD + latest tag
+#   2. Compare commit hash with HERMES_COMMIT in tools/hermes-patch-baseline.txt
+#   3. If drift detected, dry-run tools/patch-hermes.py against the new tree
+#   4. Compute new bridge.js sha256 + run shift-agent pytest
+#   5. Open or update a tracking issue iff:
+#        - patches FAIL to apply (real signal: upstream broke our patches)
+#        - OR a new tagged release lands (informational: review release notes)
+#      Quiet on clean fast-forwards (patches apply + no new tag).
+#
+# Schedule: Mondays 09:00 UTC (early in the work week, US devs see the alert
+# before standup). Manual trigger via workflow_dispatch from the Actions UI.
+
+on:
+  schedule:
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: hermes-drift-check
+  cancel-in-progress: false
+
+jobs:
+  drift-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout shift-agent
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install runtime + test deps
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet pydantic pyyaml pytest
+
+      - name: Read pinned baseline
+        id: baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          source tools/hermes-patch-baseline.txt
+          echo "pinned_commit=$HERMES_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "pinned_version=$HERMES_VERSION" >> "$GITHUB_OUTPUT"
+          echo "pinned_bridge_sha=$BRIDGE_POST_PATCH_SHA256" >> "$GITHUB_OUTPUT"
+          echo "Pinned baseline: HERMES_COMMIT=$HERMES_COMMIT, HERMES_VERSION=$HERMES_VERSION"
+
+      - name: Clone Hermes upstream
+        id: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/NousResearch/hermes-agent.git "$RUNNER_TEMP/hermes-upstream"
+          cd "$RUNNER_TEMP/hermes-upstream"
+          current_commit=$(git rev-parse HEAD)
+          current_short=$(git rev-parse --short HEAD)
+          # Latest tag, if any
+          if latest_tag=$(git describe --tags --abbrev=0 2>/dev/null); then
+            :
+          else
+            latest_tag="(no tag)"
+          fi
+          echo "current_commit=$current_commit" >> "$GITHUB_OUTPUT"
+          echo "current_short=$current_short" >> "$GITHUB_OUTPUT"
+          echo "latest_tag=$latest_tag" >> "$GITHUB_OUTPUT"
+          echo "Upstream HEAD=$current_short, latest tag=$latest_tag"
+
+      - name: Compare against pin
+        id: compare
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.upstream.outputs.current_commit }}" = "${{ steps.baseline.outputs.pinned_commit }}" ]; then
+            echo "drift=none" >> "$GITHUB_OUTPUT"
+            echo "::notice::Hermes upstream HEAD matches pin (${{ steps.upstream.outputs.current_short }}); nothing to check."
+          else
+            echo "drift=detected" >> "$GITHUB_OUTPUT"
+            cd "$RUNNER_TEMP/hermes-upstream"
+            # Count + summarize commits since pin (gracefully handle force-push case)
+            if commits_since=$(git rev-list --count "${{ steps.baseline.outputs.pinned_commit }}..HEAD" 2>/dev/null); then
+              git log --no-merges --oneline -n 50 \
+                "${{ steps.baseline.outputs.pinned_commit }}..HEAD" 2>/dev/null > "$RUNNER_TEMP/commits.txt"
+            else
+              commits_since="?"
+              echo "(pinned commit not in upstream history — force-push or rebase suspected)" > "$RUNNER_TEMP/commits.txt"
+            fi
+            echo "commits_since=$commits_since" >> "$GITHUB_OUTPUT"
+            echo "Drift detected: $commits_since commits since pin"
+          fi
+
+      - name: Dry-run patch-hermes.py against upstream
+        if: steps.compare.outputs.drift == 'detected'
+        id: patch
+        shell: bash
+        env:
+          HERMES_HOME: ${{ runner.temp }}/hermes-upstream
+        run: |
+          # Don't fail the workflow if the patch script exits non-zero — we
+          # want to capture the result and report in the issue, not crash.
+          set +e
+          python3 tools/patch-hermes.py > "$RUNNER_TEMP/patch-out.log" 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "patch_status=success" >> "$GITHUB_OUTPUT"
+          else
+            echo "patch_status=failed" >> "$GITHUB_OUTPUT"
+          fi
+          # Compute new bridge.js sha256 (whether patches applied or not —
+          # if they failed, the file is unchanged from upstream which is
+          # also useful info)
+          if [ -f "$HERMES_HOME/scripts/whatsapp-bridge/bridge.js" ]; then
+            new_sha=$(sha256sum "$HERMES_HOME/scripts/whatsapp-bridge/bridge.js" | awk '{print $1}')
+            echo "new_bridge_sha=$new_sha" >> "$GITHUB_OUTPUT"
+          else
+            echo "new_bridge_sha=(bridge.js absent)" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Patch status: $(cat $GITHUB_OUTPUT | grep patch_status)"
+          tail -20 "$RUNNER_TEMP/patch-out.log"
+
+      - name: Run shift-agent pytest
+        if: steps.compare.outputs.drift == 'detected'
+        id: tests
+        shell: bash
+        run: |
+          set +e
+          python -m pytest tests/ -q > "$RUNNER_TEMP/pytest-out.log" 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "test_status=pass" >> "$GITHUB_OUTPUT"
+          else
+            echo "test_status=fail" >> "$GITHUB_OUTPUT"
+          fi
+          tail -10 "$RUNNER_TEMP/pytest-out.log"
+
+      - name: Decide whether to alert
+        if: steps.compare.outputs.drift == 'detected'
+        id: decide
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Alert iff:
+          #   - patches FAILED (real signal — upstream broke our integration)
+          #   - OR a tagged release lands since pin (informational, but
+          #     warrants human review of release notes)
+          # Quiet on clean fast-forwards (no patch break + no new tag).
+          alert=none
+          if [ "${{ steps.patch.outputs.patch_status }}" = "failed" ]; then
+            alert=patch-failed
+          elif [ "${{ steps.upstream.outputs.latest_tag }}" != "(no tag)" ] \
+               && [ "${{ steps.upstream.outputs.latest_tag }}" != "${{ steps.baseline.outputs.pinned_version }}" ] \
+               && [ "${{ steps.upstream.outputs.latest_tag }}" != "v${{ steps.baseline.outputs.pinned_version }}" ]; then
+            alert=tagged-release
+          fi
+          echo "alert=$alert" >> "$GITHUB_OUTPUT"
+          if [ "$alert" = "none" ]; then
+            echo "::notice::Patches applied cleanly + no new tagged release; skipping issue."
+          else
+            echo "Alert reason: $alert"
+          fi
+
+      - name: Open or update tracking issue
+        if: steps.decide.outputs.alert != 'none' && steps.decide.outputs.alert != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "**Detected by:** \`.github/workflows/hermes-drift-check.yml\` (weekly)"
+            echo "**Alert reason:** \`${{ steps.decide.outputs.alert }}\`"
+            echo "**Run:** $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo ""
+            echo "## Pin baseline"
+            echo "- HERMES_COMMIT: \`${{ steps.baseline.outputs.pinned_commit }}\`"
+            echo "- HERMES_VERSION: \`${{ steps.baseline.outputs.pinned_version }}\`"
+            echo "- BRIDGE_POST_PATCH_SHA256: \`${{ steps.baseline.outputs.pinned_bridge_sha }}\`"
+            echo ""
+            echo "## Upstream now"
+            echo "- HEAD commit: \`${{ steps.upstream.outputs.current_commit }}\`"
+            echo "- Latest tag: \`${{ steps.upstream.outputs.latest_tag }}\`"
+            echo "- Commits since pin: \`${{ steps.compare.outputs.commits_since }}\`"
+            echo ""
+            echo "## Patch dry-run (\`tools/patch-hermes.py\` against new tree)"
+            echo "- Status: \`${{ steps.patch.outputs.patch_status }}\`"
+            echo "- New bridge.js sha256: \`${{ steps.patch.outputs.new_bridge_sha }}\`"
+            echo ""
+            echo "<details><summary>patch output</summary>"
+            echo ""
+            echo '```'
+            tail -40 "$RUNNER_TEMP/patch-out.log" 2>/dev/null || echo "(no log)"
+            echo '```'
+            echo "</details>"
+            echo ""
+            echo "## Test suite (\`pytest tests/\`)"
+            echo "- Status: \`${{ steps.tests.outputs.test_status }}\`"
+            echo ""
+            echo "<details><summary>pytest tail</summary>"
+            echo ""
+            echo '```'
+            tail -20 "$RUNNER_TEMP/pytest-out.log" 2>/dev/null || echo "(no log)"
+            echo '```'
+            echo "</details>"
+            echo ""
+            echo "## Recent upstream commits (capped at 50)"
+            echo ""
+            echo '```'
+            cat "$RUNNER_TEMP/commits.txt" 2>/dev/null || echo "(no commits file)"
+            echo '```'
+            echo ""
+            echo "## How to ship the upgrade"
+            echo "1. Pull this commit on a test VPS and re-run \`tools/patch-hermes.py\` to verify patches still apply."
+            echo "2. Run the full test suite + smoke deploy on the test VPS."
+            echo "3. Update \`tools/hermes-patch-baseline.txt\` with:"
+            echo "   - \`HERMES_COMMIT=${{ steps.upstream.outputs.current_commit }}\`"
+            echo "   - \`HERMES_VERSION=${{ steps.upstream.outputs.latest_tag }}\` (strip leading \`v\` if present)"
+            echo "   - \`BRIDGE_POST_PATCH_SHA256=${{ steps.patch.outputs.new_bridge_sha }}\`"
+            echo "4. Open a PR with the baseline update + test/deploy results."
+            echo "5. After merge, deploy normally — gate will pass without \`HERMES_PIN_OVERRIDE\`."
+            echo ""
+            echo "_Auto-generated by .github/workflows/hermes-drift-check.yml. Close this issue when the baseline is updated; the next weekly run will re-open if drift recurs._"
+          } > "$RUNNER_TEMP/issue-body.md"
+
+          # Find existing open drift issue (idempotent: update rather than spam)
+          # Match by title prefix, not exact title (commit hash differs across runs)
+          existing=$(gh issue list --state open --search 'in:title "Hermes upstream drift detected"' \
+            --json number,title --jq '.[0].number' 2>/dev/null || echo "")
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file "$RUNNER_TEMP/issue-body.md"
+            echo "::notice::Updated existing tracking issue #$existing"
+          else
+            title="Hermes upstream drift detected (commit ${{ steps.upstream.outputs.current_short }})"
+            gh issue create --title "$title" --body-file "$RUNNER_TEMP/issue-body.md"
+          fi
