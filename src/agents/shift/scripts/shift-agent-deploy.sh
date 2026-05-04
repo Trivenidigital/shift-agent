@@ -60,10 +60,11 @@ install_artifacts() {
 
     # PR-CF6: Hermes plugins — cf-router + any future plugins under src/plugins/.
     # Loaded by hermes-gateway at startup from ~/.hermes/plugins/<name>/.
-    # Replaces F8/F9 custom watchdogs by intercepting at pre_gateway_dispatch.
-    # IMPORTANT: when cf-router is installed, the F8/F9 systemd timers must be
-    # disabled (see "stop_f8_f9_watchdogs" call below) to avoid dual-fire on
-    # the same inbound message.
+    # cf-router replaces the F8/F9 custom watchdogs by intercepting at
+    # pre_gateway_dispatch. The legacy watchdog .service / .timer / script
+    # files were deleted in the 2026-05-04 canonical-cleanup, so this script
+    # no longer installs them — see git tag pre-srilu-cleanup-2026-05-04 if
+    # a pre-cleanup rollback ever needs them back.
     if [ -d src/plugins ]; then
         mkdir -p /root/.hermes/plugins
         rsync -a --delete src/plugins/ /root/.hermes/plugins/

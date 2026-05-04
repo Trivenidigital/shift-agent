@@ -116,8 +116,3 @@ class TestCateringHeadcountExtraction:
         extracted = int(hc_signals[0].split(":")[1])
         assert extracted == expected_hc, f"Expected {expected_hc}, got {extracted}"
 
-
-# ============================================================================
-# F8 — catering owner-action watchdog: parse_owner_action()
-# ============================================================================
-
