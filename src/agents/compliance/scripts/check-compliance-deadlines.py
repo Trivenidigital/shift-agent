@@ -43,6 +43,8 @@ from typing import Optional
 sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
 
+import yaml  # noqa: E402
+
 from safe_io import (  # noqa: E402
     FileLock, atomic_write_json, ndjson_append, customer_now,
     safe_load_json, load_model, assert_local_disk,
@@ -87,6 +89,22 @@ RENDER_TEMPLATE_BIN = os.environ.get("SHIFT_AGENT_RENDER_TEMPLATE_BIN",
 # ─────────────────────────────────────────────────────────────────
 # Time helpers
 # ─────────────────────────────────────────────────────────────────
+
+def _load_config() -> Config:
+    """Load + validate config.yaml. Mirrors send-daily-brief:461-464 pattern.
+
+    HOTFIX 2026-05-04: was using load_model(CONFIG_PATH, Config) which calls
+    safe_load_json — that JSON-parses YAML and renames the file to .corrupt-
+    <epoch> on parse failure. Bricks the deploy. Use yaml.safe_load like
+    every other deployed script.
+    """
+    try:
+        cfg_dict = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+    except OSError as e:
+        sys.stderr.write(f"config not found at {CONFIG_PATH}: {e}\n")
+        raise
+    return Config.model_validate(cfg_dict)
+
 
 def _customer_now(tz_name: str) -> datetime:
     """Tz-aware datetime in customer tz, with SHIFT_AGENT_NOW_OVERRIDE for tests."""
@@ -466,7 +484,7 @@ def main() -> int:
     args = ap.parse_args()
 
     assert_local_disk(SENTINEL_PATH.parent)
-    cfg, _ = load_model(CONFIG_PATH, Config)
+    cfg = _load_config()
     if not cfg.compliance.enabled:
         _update_heartbeat(0, 0, 0)
         return EXIT_OK
