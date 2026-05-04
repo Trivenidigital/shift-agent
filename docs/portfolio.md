@@ -902,3 +902,224 @@ Agents 8 (Receiving & QA), 19 (Equipment & Maintenance), **23** (Order Status & 
 4. Update `MEMORY.md` portfolio status snapshot once #21 / #22 land in code.
 
 *Document status: v2 consolidated 2026-04-29. v1 spec preserved above for traceability — see `git log docs/portfolio.md` for diff.*
+
+---
+
+# Portfolio expansion v3 — 25-agent strategic reshape (2026-05-04)
+
+User-supplied portfolio reshape after the 2026-05-04 overnight closeout introduced 9 business-domain groupings + 16 net-new agents on top of the Solid 17 base. Gap analysis at `tasks/audits/portfolio-expansion-2026-05-04.md` is canonical; this section captures the placeholders for the new agents. **Numbering note:** existing agents keep historical 1-25 codebase numbers (referenced in SKILL.md, audit log type strings, commit messages); new agents take #26-#41 slots.
+
+## Domain reorganization (target view)
+
+| Domain | Agents (code-internal #) |
+|---|---|
+| Workforce & Scheduling | #1 Shift Agent (LIVE), #12 Hiring & Onboarding (scaffold), **NEW #26 Performance & Training Coach** |
+| Catering & High-Margin Revenue | #2 Catering Lead (LIVE infra, opt-in) + #10 Catering Followup (scaffold) [combined as "Catering Lead + Closer"], **NEW #27 Catering Equipment & Packaging Tracker** |
+| Inventory, Supply & Waste | #6 Inventory + #7 Supplier (scaffold) [combined as "Smart Reorder + Supplier Negotiator"], **NEW #28 Perishable Priority & Waste Reducer**, **NEW #29 Slow-Mover Liquidation** |
+| Kitchen & Order Operations (Big Gap — 0 existing) | **NEW #30 Order Accuracy Guardian** (HIGH PRIORITY), **NEW #31 Kitchen Load Balancer & ETA**, **NEW #32 Special Request Memory** |
+| Customer Experience & Loyalty (Big Gap — 0 existing) | **NEW #33 Loyalty & Punch-Card**, **NEW #34 Menu Suggestion & Upsell**, **NEW #35 Referral & Review Responder** |
+| Finance & Back-Office | #15 Cash & AR (scaffold), #21 Expense Bookkeeper (scaffold), #22 P&L Anomaly Detective (scaffold), **NEW #36 Credit Customer & Temple Account Manager** |
+| Multi-Location & Growth | #3 Multi-Location Coordinator (**LIVE v0.1** PR #62), **NEW #37 New Location Feasibility Scout** |
+| Marketing & Community | #11 Festival & Peak Prep (paper→scaffold pending), **NEW #38 Local Community Broadcast**, **NEW #39 Photo Menu Curator**, **NEW #40 Competitor Price Watcher** |
+| Compliance, Equipment & Owner Protection | #13 Compliance Calendar → **reframed as "Food Safety & Compliance Guardian" v0.2** (LIVE v0.1 PR #63), #16 Sales Tax Filing (scaffold; absorbed under broader Compliance Guardian), #19 Equipment & Maintenance (**scaffold** PR #66), **NEW #41 Owner Wellbeing & Burnout Guardian** (revival of retired #20) |
+
+## NEW agent specs (placeholders v0.0 — full specs land per build cycle)
+
+### Agent #26 — Performance & Training Coach
+
+**Purpose:** Gentle feedback, skill tracking, SOP quizzes via WhatsApp. Mirror existing Hiring agent's WhatsApp quiz substrate.
+
+**Hermes-first effort:** LOW–MEDIUM. JSON-on-disk skill matrix per employee + cron for quiz delivery. No external APIs.
+
+**Build complexity:** Low–Medium. Tractable in ~1 day per skills-roadmap.md substrate inventory.
+
+---
+
+### Agent #27 — Catering Equipment & Packaging Tracker
+
+**Purpose:** Track deposit collection + return reminders for catering equipment (chafers, hot-boxes, serving platters). Extends existing catering lead state.
+
+**Hermes-first effort:** LOW. Mirror compliance reminder pattern (Agent #13) with deposit-state machine.
+
+**Build complexity:** Low. Tractable in ~1 day.
+
+---
+
+### Agent #28 — Perishable Priority & Waste Reducer
+
+**Purpose:** Daily "use-first" list + near-expiry recipes/discounts. Reduces ethnic SMB waste from items like fresh paneer, naan dough, prepared chutneys.
+
+**Hermes-first effort:** MEDIUM. Requires POS data for sales velocity + inventory dates. **Gated on customer POS choice** (same as Agent #22).
+
+**Build complexity:** Medium. Defer until first POS-onboarded customer.
+
+---
+
+### Agent #29 — Slow-Mover Liquidation
+
+**Purpose:** Flags slow-moving stock; suggests bundling/discounts/donations.
+
+**Hermes-first effort:** MEDIUM. Same POS-depth gate as #28.
+
+**Build complexity:** Medium.
+
+---
+
+### Agent #30 — Order Accuracy Guardian (HIGH PRIORITY per user)
+
+**Purpose:** Cross-checks orders vs kitchen tickets BEFORE handover. Reduces wrong-order fixes that erode customer trust.
+
+**Hermes-first effort:** MEDIUM-HIGH. Requires KDS or POS order-state integration (same blocker class as Agent #23 Order Status — DEFERRED INDEFINITELY per portfolio.md "build only on customer demand" until first restaurant pilot has Clover/Square order pipeline).
+
+**Build complexity:** Medium-High. Cannot ship until customer onboards POS with order-state webhook.
+
+---
+
+### Agent #31 — Kitchen Load Balancer & ETA
+
+**Purpose:** Real-time busyness monitoring + accurate ETAs to customers (vs over-promising on standard 20-min defaults).
+
+**Hermes-first effort:** MEDIUM-HIGH. Same KDS/POS gate as #30.
+
+**Build complexity:** Medium-High.
+
+---
+
+### Agent #32 — Special Request Memory
+
+**Purpose:** Remembers no-onion / Jain / extra-spicy / no-cilantro preferences across orders. Surfaces to kitchen on each new order from the same customer.
+
+**Hermes-first effort:** LOW. Per-customer JSON state file keyed by phone or chat_id. CRM-lite. Substrate sufficient.
+
+**Build complexity:** Low. Tractable in ~1 day.
+
+---
+
+### Agent #33 — Loyalty & Punch-Card
+
+**Purpose:** WhatsApp-based points, auto-rewards, birthday offers. Ethnic SMBs frequently run informal punch-card programs already; this digitizes them.
+
+**Hermes-first effort:** LOW–MEDIUM. JSON state per customer + cron for birthdays + reward triggers. No external APIs.
+
+**Build complexity:** Low–Medium. Tractable in ~1 day.
+
+---
+
+### Agent #34 — Menu Suggestion & Upsell
+
+**Purpose:** Real-time personalized upsells during ordering ("you usually get fresh paneer with biriyani — add today?"). DIFFERENT from retired old-#24 Upsell which was POS-vendor-side; this one is owner-controlled WhatsApp-side.
+
+**Hermes-first effort:** MEDIUM. POS history + LLM. Gated on POS depth.
+
+**Build complexity:** Medium.
+
+---
+
+### Agent #35 — Referral & Review Responder
+
+**Purpose:** Manages referral program (track who referred whom, reward both) + auto-replies to Google Maps / Facebook reviews (after owner approval gate).
+
+**Hermes-first effort:** MEDIUM. Referral side is JSON state. Review side requires Google My Business API + Facebook Graph API. **Investigate `mcp/native-mcp` first per skills-roadmap.md** — community MCP servers may shrink the integration cost.
+
+**Build complexity:** Medium. Referral standalone is tractable; review-responder is gated on MCP availability + per-platform API access.
+
+---
+
+### Agent #36 — Credit Customer & Temple Account Manager
+
+**Purpose:** Monthly statements + gentle reminders for institutional accounts (temples, community organizations, regular caterers who pay net-30). Extends Agent #15 Cash & AR with the temple/community-org subtype which has different tone calibration than typical commercial AR.
+
+**Hermes-first effort:** LOW–MEDIUM. Extends existing CashArConfig with account-type field; reuses cadence + escalation logic. Tone templates differ.
+
+**Build complexity:** Low–Medium. Tractable in ~1 day after #15 Cash & AR ships.
+
+---
+
+### Agent #37 — New Location Feasibility Scout
+
+**Purpose:** Analyzes demographics/competition for expansion. Owner asks "should I open in Plano?" → agent returns demographics summary, competitor map, traffic estimates.
+
+**Hermes-first effort:** HIGH. Multiple external APIs (US Census, Google Places, traffic data). No single bundled skill covers this.
+
+**Build complexity:** High. Defer until clearly demanded.
+
+---
+
+### Agent #38 — Local Community Broadcast
+
+**Purpose:** Opt-in WhatsApp lists for specials and festivals. Owner manages opt-in list; agent fans out broadcast (respecting WhatsApp's broadcast-list limits + the existing 100/day outbound cap).
+
+**Hermes-first effort:** LOW. Opt-in list = JSON state file; broadcast = mirror Daily Brief send pattern. Existing safe_io.bridge_post handles the actual delivery.
+
+**Build complexity:** Low. Tractable in ~1 day.
+
+---
+
+### Agent #39 — Photo Menu Curator
+
+**Purpose:** Helps maintain/update food photos for online ordering platforms (DoorDash/UberEats menus, Google Business). Owner sends new dish photo → agent extracts metadata, suggests caption, queues for approval.
+
+**Hermes-first effort:** LOW–MEDIUM. Reuses existing Hermes vision substrate (same pipeline as parse_catering_inquiry image extraction). Storage is JSON+filesystem.
+
+**Build complexity:** Low–Medium. Tractable in ~1-2 days.
+
+---
+
+### Agent #40 — Competitor Price Watcher
+
+**Purpose:** Tracks key items at nearby competitors (online menus, third-party delivery prices). Surfaces drift to owner.
+
+**Hermes-first effort:** HIGH. Per-competitor scraping (different parser per restaurant chain). Brittle. Multiple legal-status questions (TOS).
+
+**Build complexity:** High. Defer.
+
+---
+
+### Agent #41 — Owner Wellbeing & Burnout Guardian (revived)
+
+**Purpose:** Weekly load summary (hours worked, decisions made, sleep gap) + quiet-hours rule (no notifications between owner-configured times unless critical). Was retired in 2026-04-29 consolidation as "folded into Daily Brief"; user re-promotes as standalone agent for visibility.
+
+**Hermes-first effort:** LOW. Weekly summary patches send-daily-brief; quiet-hours is a config flag + guard in notify_owner_with_fallback. No external APIs.
+
+**Build complexity:** Low. Tractable in ~1 day. **Highest-ROI tractable build** in the new portfolio per gap analysis.
+
+---
+
+## Status corrections vs user's mental model
+
+User's portfolio statements that need correction:
+- "**Catering Lead + Closer ✅ Live**" → infrastructure deployed (catering_dispatcher SKILL + parse_catering_inquiry + apply_catering_owner_decision all live on srilu); but `cfg.catering.enabled` is opt-in per customer.
+- "**Multi-Location Coordinator ✅ Scaffolded**" → STALE. Agent #3 v0.1 is **LIVE** (PR #62, deployed to srilu 2026-05-04). Customer closest-store query via `productivity/maps` is functional.
+- "**Equipment & Maintenance Agent (Backlog → New)**" → STALE. Agent #19 scaffold is **shipped** (PR #66, deployed 2026-05-04). The "Backlog → New" promotion happened earlier today.
+
+## Build-priority recommendation
+
+Per gap-analysis doc + Hermes-first discipline, **highest-ROI tractable next builds (no external blockers):**
+
+1. **#41 Owner Wellbeing & Burnout Guardian** — pure substrate; weekly Daily Brief patch + quiet-hours flag. ~1 day.
+2. **#32 Special Request Memory** — CRM-lite JSON state; matches existing patterns. ~1 day.
+3. **#33 Loyalty & Punch-Card** — JSON state + cron + WhatsApp. ~1 day.
+4. **#26 Performance & Training Coach** — mirror Hiring quiz substrate. ~1-2 days.
+5. **#38 Local Community Broadcast** — mirror Daily Brief send pattern. ~1 day.
+6. **#36 Credit Customer & Temple Account Manager** — extend Cash & AR scaffold. ~1 day.
+7. **#39 Photo Menu Curator** — reuse vision substrate. ~1-2 days.
+8. **#27 Catering Equipment & Packaging Tracker** — mirror Compliance reminder pattern. ~1 day.
+
+**Deferred (POS-gated):** #28, #29, #30 [HIGH PRIORITY but blocked], #31, #34.
+
+**Deferred (external API):** #35 [investigate MCP first], #37, #40.
+
+**Action item:** user authorization required for any build cycle. Per overnight closeout discipline, do not speculatively build any of these until customer demand or operator authorization. Recommended next overnight batch: #41 + #32 + #33 (3 small tractable agents, ~3 days total).
+
+---
+
+## Implementation status update — 2026-05-04 v3 (post-portfolio-expansion)
+
+- **5 LIVE in production**: #1 Shift, #3 Multi-Location, #4 Daily Brief, #5 EOD, #13 Compliance Calendar
+- **12 SCAFFOLDED opt-in**: #2 Catering, #6 Inventory, #7 Supplier, #9 Festival, #10 Catering Followup, #12 Hiring, #14 Employee Docs, #15 Cash & AR, #16 Sales Tax, #19 Equipment Maintenance, #21 Expense Bookkeeper, #22 P&L Anomaly Detective
+- **16 NEW (paper-spec, placeholders only)**: #26-#41 per the new domain reorganization
+- **5 BACKLOG**: #8 Receiving & QA, #11 Festival promoted-but-scaffold-pending, #23 Order Status, #24 Upsell (old retired #24, NOT user's #34), #25 Third-Party Delivery — all per portfolio.md "build only on customer demand"
+
+**Total agent slots:** 38 (5 live + 12 scaffolded + 16 paper-spec + 5 backlog).
+
+*Document status: v3 portfolio expansion 2026-05-04. v2 / v1 above retained for traceability.*
