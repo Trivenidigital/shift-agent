@@ -60,10 +60,11 @@ install_artifacts() {
 
     # PR-CF6: Hermes plugins — cf-router + any future plugins under src/plugins/.
     # Loaded by hermes-gateway at startup from ~/.hermes/plugins/<name>/.
-    # Replaces F8/F9 custom watchdogs by intercepting at pre_gateway_dispatch.
-    # IMPORTANT: when cf-router is installed, the F8/F9 systemd timers must be
-    # disabled (see "stop_f8_f9_watchdogs" call below) to avoid dual-fire on
-    # the same inbound message.
+    # cf-router replaces the F8/F9 custom watchdogs by intercepting at
+    # pre_gateway_dispatch. The legacy watchdog .service / .timer / script
+    # files were deleted in the 2026-05-04 canonical-cleanup, so this script
+    # no longer installs them — see git tag pre-srilu-cleanup-2026-05-04 if
+    # a pre-cleanup rollback ever needs them back.
     if [ -d src/plugins ]; then
         mkdir -p /root/.hermes/plugins
         rsync -a --delete src/plugins/ /root/.hermes/plugins/
@@ -167,19 +168,14 @@ install_artifacts() {
     systemctl daemon-reload 2>/dev/null || true
     systemctl enable --now prune-expense-receipts.timer 2>/dev/null || true
 
-    # PR-CF6: when cf-router plugin is present, disable the F8/F9 watchdog
-    # timers it replaces. The watchdogs scan for `dispatcher_routed` audit
-    # entries to decide whether to fire; the plugin writes
-    # `cf_router_intercepted` instead, so the watchdogs would not see the
-    # plugin's intercept and would re-fire the apply-script (double-quote
-    # to customer) or emit a duplicate Pushover alert. Keeping both running
-    # is unsafe — disable the legacy timers at deploy time.
-    if [ -d /root/.hermes/plugins/cf-router ]; then
-        for unit in catering-owner-action-watchdog.timer \
-                    shift-missed-dispatch-notifier.timer; do
-            systemctl disable --now "$unit" 2>/dev/null || true
-        done
-    fi
+    # 2026-05-04 canonical-cleanup: F8/F9 watchdog files were deleted from
+    # the repo (cf-router plugin took over their role in PR-CF6). The
+    # earlier "disable the legacy timers" hook here is obsolete because
+    # the units never get installed by this script anymore. If you're
+    # rolling back to a pre-cleanup tarball that re-installs the
+    # watchdogs, manually `systemctl disable --now ...timer ...service`
+    # for catering-owner-action-watchdog and shift-missed-dispatch-notifier
+    # — or apply this branch on top of the rollback to re-purge.
 }
 
 snapshot_staging() {

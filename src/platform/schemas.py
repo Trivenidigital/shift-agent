@@ -2277,77 +2277,6 @@ class StateFileMigrationOverridden(_BaseEntry):
     )
 
 
-class CateringOwnerActionWatchdogFired(_BaseEntry):
-    """F8 2026-05-01: catering-owner-action-watchdog detected a missed owner
-    `#XXXXX (approve|reject)` command and triggered the fallback
-    apply-catering-owner-decision invocation. Companion to
-    CateringOwnerActionWatchdogSuppressed.
-
-    Same root cause as F7 (Hermes WhatsApp lacks auto_skill binding) but on
-    the owner-side path. Approve fallback uses a deterministic minimal
-    quote text built from extracted headcount + event_date (truth-guard
-    compliant). Reject fallback passes through with reason="watchdog_owner_fallback".
-    """
-    type: Literal["catering_owner_action_watchdog_fired"]
-    chat_id: str = Field(min_length=1, max_length=200)
-    message_id: str = Field(min_length=1, max_length=200)
-    code: str = Field(pattern=r"^#[A-HJ-NP-Z2-9]{5}$")
-    action: Literal["approve", "reject"]
-    lead_id: str = Field(min_length=0, max_length=20)
-    success: bool
-    detail: str = Field(default="", max_length=2000)
-
-
-class ShiftMissedDispatchNotified(_BaseEntry):
-    """F9 2026-05-01: shift-missed-dispatch-notifier sent owner alert via
-    shift-agent-notify-owner (Pushover-first / WhatsApp-fallback) because
-    an employee inbound that looked sick-call-shaped never produced a
-    dispatcher_routed audit row. Owner now has visibility to act manually.
-
-    NOT auto-creation of a proposal — too risky overnight. Future work
-    can layer roster-lookup + create-proposal call on top of this signal.
-    """
-    type: Literal["shift_missed_dispatch_notified"]
-    chat_id: str = Field(min_length=1, max_length=200)
-    message_id: str = Field(min_length=1, max_length=200)
-    employee_id: str = Field(default="", max_length=20)
-    employee_name: str = Field(default="", max_length=200)
-    signals: list[str] = Field(default_factory=list, max_length=10)
-    success: bool
-    detail: str = Field(default="", max_length=2000)
-
-
-class ShiftMissedDispatchSuppressed(_BaseEntry):
-    """F9 2026-05-01: shift-missed-dispatch-notifier intentionally did NOT
-    notify. Reasons:
-    - non_employee_role: sender is owner/customer/unknown — outside scope
-    - text_unavailable: gateway.log had no matching inbound message line
-    - not_shift_signal: regex classifier saw no sick-call signals
-    """
-    type: Literal["shift_missed_dispatch_suppressed"]
-    chat_id: str = Field(min_length=1, max_length=200)
-    message_id: str = Field(min_length=1, max_length=200)
-    reason: Literal["non_employee_role", "text_unavailable", "not_shift_signal"]
-    detail: str = Field(default="", max_length=2000)
-
-
-class CateringOwnerActionWatchdogSuppressed(_BaseEntry):
-    """F8 2026-05-01: watchdog intentionally did NOT fire the fallback. Reasons:
-    - code_not_found: no lead with matching owner_approval_code
-    - lead_terminal_state: lead already CLOSED/REJECTED/etc.
-    - action_unsupported_by_watchdog: edit/wait need LLM-side handling
-    """
-    type: Literal["catering_owner_action_watchdog_suppressed"]
-    chat_id: str = Field(min_length=1, max_length=200)
-    message_id: str = Field(min_length=1, max_length=200)
-    code: str = Field(pattern=r"^#[A-HJ-NP-Z2-9]{5}$")
-    action: Literal["approve", "reject", "edit", "wait"]
-    reason: Literal[
-        "code_not_found", "lead_terminal_state", "action_unsupported_by_watchdog",
-    ]
-    detail: str = Field(default="", max_length=2000)
-
-
 class CateringQuoteRenderFailed(_BaseEntry):
     """v0.3 (review M2): emitted when apply-catering-owner-decision approve
     flow fails to render the customer quote (template KeyError, OSError,
@@ -2513,14 +2442,12 @@ LogEntry = Annotated[
         Annotated[StateFileMigrated, Tag("state_file_migrated")],
         Annotated[StateFileMigrationFailed, Tag("state_file_migration_failed")],
         Annotated[StateFileMigrationOverridden, Tag("state_file_migration_overridden")],
-        # PR-CF6 2026-05-03: cf-router Hermes plugin (replaces F8/F9 watchdogs)
+        # PR-CF6 2026-05-03: cf-router Hermes plugin (supersedes F8 + F9
+        # watchdogs; their audit variants were removed in the 2026-05-04
+        # canonical-cleanup pass — see git tag pre-srilu-cleanup-2026-05-04
+        # for the deleted CateringOwnerActionWatchdog* and
+        # ShiftMissedDispatch* class definitions if rollback ever needed).
         Annotated[CfRouterIntercepted, Tag("cf_router_intercepted")],
-        # F8 2026-05-01: owner-action watchdog (missed #XXXXX approve/reject recovery)
-        Annotated[CateringOwnerActionWatchdogFired, Tag("catering_owner_action_watchdog_fired")],
-        Annotated[CateringOwnerActionWatchdogSuppressed, Tag("catering_owner_action_watchdog_suppressed")],
-        # F9 2026-05-01: shift missed-dispatch notifier (employee sick-call alert path)
-        Annotated[ShiftMissedDispatchNotified, Tag("shift_missed_dispatch_notified")],
-        Annotated[ShiftMissedDispatchSuppressed, Tag("shift_missed_dispatch_suppressed")],
         # PR-D1: config load observability + operator reconcile audit
         Annotated[ConfigLoadFailed, Tag("config_load_failed")],
         Annotated[CateringLeadManuallyReconciled, Tag("catering_lead_manually_reconciled")],
@@ -2644,11 +2571,7 @@ __all__ = [
     "CateringDispatcherWatchdogFired", "CateringDispatcherWatchdogSuppressed",
     # PR-CF5 2026-05-03 (state-file migration)
     "StateFileMigrated", "StateFileMigrationFailed", "StateFileMigrationOverridden",
-    # PR-CF6 2026-05-03 (cf-router Hermes plugin)
+    # PR-CF6 2026-05-03 (cf-router Hermes plugin; supersedes F8 + F9)
     "CfRouterIntercepted",
-    # F8 2026-05-01 (catering owner-action watchdog)
-    "CateringOwnerActionWatchdogFired", "CateringOwnerActionWatchdogSuppressed",
-    # F9 2026-05-01 (shift missed-dispatch notifier)
-    "ShiftMissedDispatchNotified", "ShiftMissedDispatchSuppressed",
     "MenuUpdateProposed", "MenuUpdateApplied", "MenuUpdateRejected",
 ]
