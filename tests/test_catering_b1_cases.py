@@ -529,7 +529,9 @@ def test_c19_status_transitions_new_to_awaiting_owner_approval(env_dir, bridge_s
       invariant - script transitions atomically: NEW only exists pre-persist,
       AWAITING_OWNER_APPROVAL is what lands in leads.json. The v3.1 doc-spec
       bullet `lead["status"] == "NEW"` is reconciled via this lifecycle
-      shape - see C19 row in tasks/v3.1-b1-pytest-design.md.)
+      shape - see C19 row in the design doc archived at the
+      pre-tasks-cleanup-2026-05-04 git tag,
+      tasks/v3.1-b1-pytest-design.md.)
     - SECONDARY: audit log has CateringLeadStatusChange with from_status="NEW"
       and to_status="AWAITING_OWNER_APPROVAL". Audit-write is best-effort
       per HIGH-A from C10 review - degraded `print(stderr)` if missing

@@ -98,4 +98,5 @@ Sessions are 24h, JWT in HttpOnly+Secure+SameSite=Strict cookie. Sensitive actio
 - JWT secret rotation procedure (currently manual via .env edit + restart)
 - Bridge log noise: bridge.js patches to emit raw QR data string in addition to ANSI render
 
-See `tasks/frontend-design.md` for the full design + reviewer feedback log.
+Original design + reviewer feedback log were at `tasks/frontend-design.md` (archived in the 2026-05-04 bucket-C cleanup). Recover via the backup tag:
+`git show pre-tasks-cleanup-2026-05-04:tasks/frontend-design.md`. Current deferred items live in `tasks/cockpit-followups.md`.
