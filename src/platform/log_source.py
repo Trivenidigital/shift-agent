@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -88,6 +88,15 @@ class LogSource:
                     except ValueError:
                         stats.parse_failures += 1
                         continue
+                    # E2E-BUG-1 fix (2026-05-04): legacy entries written before
+                    # the v0.3 _BaseEntry tz-aware-only invariant landed may have
+                    # naive timestamps. The _BaseEntry validator auto-promotes
+                    # naive→UTC at READ time (schemas.py:1338-1359); mirror that
+                    # behavior here so the comparison `start_ts <= ts < end_ts`
+                    # never raises TypeError. A single naive entry in production
+                    # broke send-daily-brief + eod-reconcile until this fix.
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
                     if start_ts <= ts < end_ts:
                         entries.append(entry)
                         stats.entries_in_window += 1
