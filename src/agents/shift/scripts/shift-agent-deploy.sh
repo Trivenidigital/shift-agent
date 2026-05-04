@@ -155,6 +155,12 @@ install_artifacts() {
         chown -R shift-agent:shift-agent /root/.hermes/skills/
     fi
 
+    # Equipment & Maintenance (Agent #19) — scaffold-only v0.1
+    if [ -d src/agents/equipment_maintenance/skills ]; then
+        rsync -a src/agents/equipment_maintenance/skills/ /root/.hermes/skills/
+        chown -R shift-agent:shift-agent /root/.hermes/skills/
+    fi
+
     # Compliance Calendar (Agent #13)
     # PR-Agent13-v0.1 (2026-05-04): SKILLs include compliance_owner_query;
     # scripts include check-compliance-deadlines.py + mark-compliance-item-done.py;
