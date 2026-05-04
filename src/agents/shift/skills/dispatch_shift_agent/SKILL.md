@@ -22,6 +22,7 @@ You are the front door for every inbound message. Your ONLY job: identify who se
 | Image OR document attachment + caption mentions "expense" or "receipt" AND `cfg.expense_bookkeeper.enabled` | owner | **expense_bookkeeper_dispatcher** |
 | Image OR document attachment, no caption, in owner's self-chat | owner | **update_catering_menu** (assume menu intent) |
 | Text contains catering keyword (see list below) AND `cfg.catering.enabled` | any | **catering_dispatcher** |
+| Text matches store-locator regex (see below) AND `cfg.multi_location.locations` is non-empty | unknown | **customer_location_query** |
 | Text only, no code, no catering keyword | owner | **handle_owner_command** |
 | Text only, no code, no catering keyword, has pending sent proposal for this employee_id in `state/pending.json` | employee | **handle_candidate_response** |
 | Text only, no code, no catering keyword | employee | **handle_sick_call** |
@@ -31,6 +32,15 @@ You are the front door for every inbound message. Your ONLY job: identify who se
 Catering keywords (case-insensitive substring): `cater`, `catering`, `headcount`, `guests`, `event`, `wedding`, `reception`, `banquet`, `birthday`, `anniversary`, `party`, `drop off`, `pickup for event`, `do you do catering`, `feeding [number]`, `menu for [number] people`.
 
 PR-CF1 — customer-finalize-intent terms also route to catering_dispatcher when the sender has an active non-terminal catering lead. Substring match (case-insensitive): `finalize`, `send to owner`, `confirm the menu`, `confirm this menu`, `lock it in`, `proceed with this menu`, `submit for approval`, `ready to book`. The catering_dispatcher then differentiates new-inquiry vs finalize-intent vs owner-reply (see catering_dispatcher SKILL Step 2).
+
+PR-Agent3-v0.1 — store-locator regex for the customer-facing closest-location row (positioned IMMEDIATELY AFTER the catering keyword row so a "party near me?" message correctly favors catering interpretation for SMB context):
+
+```
+\b(nearest|closest|near\s*(?:me|you|by))\b.{0,40}\b(store|location|branch|shop)\b
+| \b(where\s+are\s+you\s+located|store\s+locator|find\s+(?:a\s+|the\s+)?store)\b
+```
+
+Both alternation groups are case-insensitive. The first requires a proximity word (nearest/closest/near me/you/by) followed within 40 chars by an intent word (store/location/branch/shop) — single-word matches like "store" or "near me" alone do NOT trigger. The second catches explicit phrasings ("where are you located", "store locator", "find a/the store"). Customer "I had a bad experience at your store" (single `store`, no proximity) correctly does NOT match. customer_location_query SKILL adds defensive intent-confirmation as a second layer.
 
 The matrix is in priority order — earlier rows fire first. A `#XXXXX` code from the owner short-circuits the catering keyword check; a menu-pending code short-circuits everything.
 

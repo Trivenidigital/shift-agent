@@ -126,10 +126,17 @@ install_artifacts() {
         install -m 644 src/agents/eod_reconcile/systemd/*.timer /etc/systemd/system/
     fi
 
-    # Multi-Location Coordinator (Agent #3) — SKILL-only in v0.1
+    # Multi-Location Coordinator (Agent #3)
+    # PR-Agent3-v0.1 (2026-05-04): SKILLs include the new
+    # customer_location_query (customer-facing); Phase 1 extension to
+    # multi_location_query (owner-facing); plus closest-location.py
+    # script that wraps the bundled productivity/maps skill.
     if [ -d src/agents/multi_location/skills ]; then
         rsync -a src/agents/multi_location/skills/ /root/.hermes/skills/
         chown -R shift-agent:shift-agent /root/.hermes/skills/
+    fi
+    if compgen -G "src/agents/multi_location/scripts/*" > /dev/null; then
+        install -m 755 src/agents/multi_location/scripts/* /usr/local/bin/
     fi
 
     # Catering Lead (Agent #2)
