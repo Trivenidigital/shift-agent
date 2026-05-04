@@ -256,19 +256,19 @@
   <!-- Hero -->
   <header class="hero">
     <div class="wrap">
-      <div class="mono eyebrow">Solid 17 · Consolidated 2026-04-29</div>
-      <h1>A portfolio for <em>ethnic SMB owners</em>,<br>seventeen agents — disciplined.</h1>
+      <div class="mono eyebrow">Portfolio v3 · 25-agent reshape · 2026-05-04</div>
+      <h1>A portfolio for <em>ethnic SMB owners</em>,<br>five live, twelve scaffolded, sixteen on the horizon.</h1>
       <p class="lede">
-        Seventeen specialized agents that share one platform — Hermes runtime, JSON-on-disk,
+        Specialized agents that share one platform — Hermes runtime, JSON-on-disk,
         per-customer VPS, single owner approval gate. Click any live agent to open its
         console; opt-in agents activate from <span class="ital">config.yaml</span>.
-        A backlog of five sits behind, built only on customer demand.
+        2026-05-04 reshape added 16 paper-spec agents in nine business domains — built only on customer demand.
       </p>
 
       <div class="status-row" id="status-row">
         <span class="status-pill live"><span class="dot"></span><span class="num" id="count-live">5</span><span>live</span></span>
         <span class="status-pill scaffold"><span class="dot"></span><span class="num" id="count-scaffold">12</span><span>scaffolded</span></span>
-        <span class="status-pill future"><span class="dot"></span><span class="num" id="count-future">5</span><span>backlog</span></span>
+        <span class="status-pill future"><span class="dot"></span><span class="num" id="count-future">21</span><span>paper-spec / backlog</span></span>
       </div>
     </div>
   </header>
@@ -357,12 +357,34 @@
       { tier: 2, num: 16, name: "Sales Tax Filing", purpose: "Multi-state filing deadlines (TX/MD/NC/SC/OH/VA), taxable-sales compilation, owner-reviewable filing packages.", state: "scaffold", state_detail: "Awaits POS sales data and per-state rule library." },
       { tier: 2, num: 22, name: "P&L Anomaly Detective", purpose: "Daily/weekly heartbeat across locations: flags \"biriyani margin dropped 8%\" or \"Pineville location underperforming.\" Suggests actions.", state: "scaffold", state_detail: "Tier-2 scaffold SHIPPED 2026-05-04 (PR #65) — config + 2 audit variants + dispatcher SKILL stub. Replaces retired #17 Unit Economics. Full anomaly-detection logic deferred to v0.2 gated on customer POS choice (Clover/Square/Toast). cfg.pnl_anomaly.enabled = false (opt-in)." },
 
-      // Backlog — On Customer Demand (5)
+      // Backlog — On Customer Demand (4 remaining + #19 promoted-to-scaffold)
       { tier: 3, num: 8, name: "Receiving & QA", purpose: "Shipment receipt vs. PO, damage logging via photo OCR.", state: "future", state_detail: "OCR + product matching is high complexity. Build only on customer demand." },
       { tier: 3, num: 19, name: "Equipment & Maintenance", purpose: "Repair history, vendor routing, preventive-maintenance calendar.", state: "scaffold", state_detail: "Tier-2 scaffold SHIPPED 2026-05-04 (PR #66) — config + 2 audit variants + dispatcher SKILL stub. Full per-vendor logic deferred to v0.2 (varies wildly by equipment type + location). cfg.equipment_maintenance.enabled = false (opt-in)." },
       { tier: 3, num: 23, name: "Order Status & Pickup", purpose: "Customers text \"where's my order?\" → kitchen status check + photo of ready bag with name/number callout.", state: "future", state_detail: "NEW backlog item. Requires KDS/POS integration depth not in current architecture — promote on first restaurant pilot." },
       { tier: 3, num: 24, name: "Upsell & Menu Personalizer", purpose: "Order-time add-on suggestions (\"add fresh paneer for $3?\") based on past orders + dietary prefs.", state: "future", state_detail: "NEW backlog item. Restaurant-only, requires deep POS or phone-AI integration; better delivered by POS vendor's own upsell tools." },
       { tier: 3, num: 25, name: "Third-Party Delivery Coordinator", purpose: "Monitor DoorDash/UberEats tablets, prevent double-cooking, auto-update status, reconcile fees.", state: "future", state_detail: "NEW backlog item. No consolidation API exists — \"tablet hell.\" Build cost gates this until paying customer demands it." },
+
+      // Portfolio expansion v3 — 16 NEW agents (paper-spec only) added 2026-05-04
+      // by user reshape into 9 business domains. Numbering #26-#41 to preserve
+      // historical 1-25 for shipped agents (referenced in SKILL.md, audit log
+      // type strings, commit messages). See docs/portfolio.md "Portfolio
+      // expansion v3" + tasks/audits/portfolio-expansion-2026-05-04.md.
+      { tier: 2, num: 26, name: "Performance & Training Coach", purpose: "Gentle feedback, skill tracking, SOP quizzes via WhatsApp. Mirrors existing Hiring agent quiz substrate.", state: "future", state_detail: "Paper-spec 2026-05-04. Build complexity: Low–Medium. Pure substrate; ~1-2 days. Build-priority #4 in expansion gap analysis." },
+      { tier: 2, num: 27, name: "Catering Equipment & Packaging Tracker", purpose: "Deposit collection + return reminders for catering equipment (chafers, hot-boxes, serving platters).", state: "future", state_detail: "Paper-spec 2026-05-04. Build complexity: Low. Mirror compliance reminder pattern; ~1 day." },
+      { tier: 3, num: 28, name: "Perishable Priority & Waste Reducer", purpose: "Daily \"use-first\" list + near-expiry recipes/discounts. Reduces ethnic SMB waste from fresh paneer, naan dough, prepared chutneys.", state: "future", state_detail: "Paper-spec 2026-05-04. POS-gated (sales velocity + inventory dates). Defer until first POS-onboarded customer." },
+      { tier: 3, num: 29, name: "Slow-Mover Liquidation", purpose: "Flags slow-moving stock; suggests bundling/discounts/donations.", state: "future", state_detail: "Paper-spec 2026-05-04. POS-gated. Defer." },
+      { tier: 1, num: 30, name: "Order Accuracy Guardian", purpose: "Cross-checks orders vs kitchen tickets BEFORE handover. Reduces wrong-order fixes that erode customer trust. HIGH PRIORITY per user.", state: "future", state_detail: "Paper-spec 2026-05-04. KDS/POS order-state-gated (same as #23). Cannot ship until customer onboards POS with order-state webhook. HIGH PRIORITY but BLOCKED." },
+      { tier: 2, num: 31, name: "Kitchen Load Balancer & ETA", purpose: "Real-time busyness monitoring + accurate ETAs to customers (vs over-promising on standard 20-min defaults).", state: "future", state_detail: "Paper-spec 2026-05-04. KDS/POS-gated. Defer." },
+      { tier: 2, num: 32, name: "Special Request Memory", purpose: "Remembers no-onion / Jain / extra-spicy / no-cilantro preferences across orders. Surfaces to kitchen on each new order from same customer.", state: "future", state_detail: "Paper-spec 2026-05-04. CRM-lite JSON state per customer. Build complexity: Low; ~1 day. Build-priority #2." },
+      { tier: 2, num: 33, name: "Loyalty & Punch-Card", purpose: "WhatsApp-based points, auto-rewards, birthday offers. Digitizes the informal punch-card programs ethnic SMBs already run.", state: "future", state_detail: "Paper-spec 2026-05-04. JSON state + cron + WhatsApp; no external APIs. ~1 day. Build-priority #3." },
+      { tier: 3, num: 34, name: "Menu Suggestion & Upsell", purpose: "Real-time personalized upsells during ordering (\"you usually get fresh paneer with biriyani — add today?\"). Owner-controlled WhatsApp-side, NOT POS-vendor's upsell.", state: "future", state_detail: "Paper-spec 2026-05-04. POS-gated (history + LLM). Different from retired #24 Upsell." },
+      { tier: 2, num: 35, name: "Referral & Review Responder", purpose: "Manages referral program (track who referred whom, reward both) + auto-replies to Google Maps / Facebook reviews after owner approval.", state: "future", state_detail: "Paper-spec 2026-05-04. Referral side tractable; review side gated on Google My Business + Facebook Graph APIs (investigate mcp/native-mcp first per skills-roadmap)." },
+      { tier: 2, num: 36, name: "Credit Customer & Temple Account Manager", purpose: "Monthly statements + gentle reminders for institutional accounts (temples, community organizations, regular caterers paying net-30).", state: "future", state_detail: "Paper-spec 2026-05-04. Extends Agent #15 Cash & AR with account-type subtype + tone calibration. Build complexity: Low–Medium; ~1 day after #15. Build-priority #6." },
+      { tier: 3, num: 37, name: "New Location Feasibility Scout", purpose: "Owner asks \"should I open in Plano?\" → demographics summary, competitor map, traffic estimates.", state: "future", state_detail: "Paper-spec 2026-05-04. Multi-API (Census + Google Places + traffic). Defer." },
+      { tier: 2, num: 38, name: "Local Community Broadcast", purpose: "Opt-in WhatsApp lists for specials and festivals. Owner manages opt-in; agent fans broadcast respecting WhatsApp limits + 100/day outbound cap.", state: "future", state_detail: "Paper-spec 2026-05-04. JSON opt-in list + mirror Daily Brief send pattern. ~1 day. Build-priority #5." },
+      { tier: 2, num: 39, name: "Photo Menu Curator", purpose: "Helps maintain/update food photos for online ordering platforms (DoorDash/UberEats menus, Google Business). Owner sends new dish photo → agent extracts metadata, suggests caption, queues for approval.", state: "future", state_detail: "Paper-spec 2026-05-04. Reuses parse_catering_inquiry image substrate. Build complexity: Low–Medium; ~1-2 days. Build-priority #7." },
+      { tier: 3, num: 40, name: "Competitor Price Watcher", purpose: "Tracks key items at nearby competitors (online menus, third-party delivery prices). Surfaces drift to owner.", state: "future", state_detail: "Paper-spec 2026-05-04. Per-competitor scraping (brittle, TOS-questionable). Defer indefinitely." },
+      { tier: 2, num: 41, name: "Owner Wellbeing & Burnout Guardian", purpose: "Weekly load summary (hours worked, decisions made, sleep gap) + quiet-hours rule (no notifications between owner-configured times unless critical).", state: "future", state_detail: "Paper-spec 2026-05-04. Revival of retired #20 (was folded into Daily Brief; user re-promoted as standalone). Pure substrate: weekly Daily Brief patch + quiet-hours config flag + guard in notify_owner_with_fallback. ~1 day. Build-priority #1 (highest-ROI tractable)." },
     ];
 
     function el(tag, opts) {
