@@ -38,6 +38,9 @@ from safe_io import (  # noqa: E402
     FileLock, atomic_write_json, ndjson_append, customer_now, customer_today_str,
     safe_load_json, load_model, assert_local_disk, flock,
     notify_owner_with_fallback, self_gate_window_state,
+    # Bridge POST + constants — extracted to safe_io 2026-05-04 (PR-Agent13 Commit 0).
+    bridge_post, validate_bridge_url,
+    BRIDGE_URL, BRIDGE_TIMEOUT_SEC, BRIDGE_RETRY_DELAY_SEC, ALLOW_REMOTE_BRIDGE,
 )
 from schemas import (  # noqa: E402
     Config, Roster, PendingStore,
@@ -66,9 +69,8 @@ RENDER_TEMPLATE_BIN = os.environ.get("SHIFT_AGENT_RENDER_TEMPLATE_BIN", "/usr/lo
 # now read by safe_io.notify_owner_with_fallback at its module-import time
 # inside the same subprocess (see env-var compat note in helper docstring).
 
-BRIDGE_URL = os.environ.get("HERMES_BRIDGE_URL", "http://127.0.0.1:3000/send")
-BRIDGE_TIMEOUT_SEC = int(os.environ.get("HERMES_BRIDGE_TIMEOUT_SEC", "10"))
-BRIDGE_RETRY_DELAY_SEC = 5.0
+# BRIDGE_URL, BRIDGE_TIMEOUT_SEC, BRIDGE_RETRY_DELAY_SEC, ALLOW_REMOTE_BRIDGE
+# all moved to safe_io 2026-05-04 (PR-Agent13 Commit 0); imported above.
 
 SELF_GATE_WINDOW_MIN = 15  # must match send-daily-brief.timer OnUnitActiveSec
 # Recovery window for orphaned BriefAttempted entries — set to catchup_window_minutes
@@ -76,8 +78,6 @@ SELF_GATE_WINDOW_MIN = 15  # must match send-daily-brief.timer OnUnitActiveSec
 # old 30-min cutoff but the brief actually succeeded.
 BRIEF_ATTEMPT_RECOVERY_WINDOW_MIN = 180
 
-# Bridge URL safety: refuse non-loopback unless explicit opt-in.
-ALLOW_REMOTE_BRIDGE = os.environ.get("HERMES_BRIDGE_ALLOW_REMOTE", "0") == "1"
 MAX_LOG_LINE_BYTES = 64 * 1024  # DoS guard for log iteration
 
 # Watchdog: detects "weekly routing-accuracy cron stopped firing" via the
@@ -361,58 +361,8 @@ def _render_brief_text(
     return template.format(**fields)
 
 
-def _validate_bridge_url(url: str) -> Optional[str]:
-    """Return error string if URL is unsafe; None if OK. Defends against
-    HERMES_BRIDGE_URL env var being repointed at an exfiltration target."""
-    from urllib.parse import urlparse
-    p = urlparse(url)
-    if p.scheme not in ("http", "https"):
-        return f"unsupported scheme: {p.scheme!r}"
-    if ALLOW_REMOTE_BRIDGE:
-        return None
-    host = (p.hostname or "").lower()
-    if host not in ("127.0.0.1", "localhost", "::1"):
-        return f"refusing non-loopback bridge URL: {host!r} (set HERMES_BRIDGE_ALLOW_REMOTE=1 to override)"
-    return None
-
-
-def _bridge_post(jid: str, message: str) -> tuple[bool, str, str, str]:
-    """POST to local bridge. Returns (success, message_id, error_str, status).
-
-    status ∈ {'sent', 'connect_failed', 'http_error', 'send_uncertain', 'unknown_error'}
-    The 'send_uncertain' state means the bridge ACCEPTED the request (2xx) but
-    the response body was malformed — message likely was delivered. Caller MUST
-    NOT auto-retry in this state (would cause duplicate brief).
-    """
-    bad = _validate_bridge_url(BRIDGE_URL)
-    if bad:
-        return False, "", bad, "connect_failed"
-    payload = json.dumps({"chatId": jid, "message": message}).encode("utf-8")
-    req = urllib.request.Request(
-        BRIDGE_URL,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=BRIDGE_TIMEOUT_SEC) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-            try:
-                doc = json.loads(body)
-            except json.JSONDecodeError:
-                # 2xx with bad body — bridge likely sent the message but we
-                # can't confirm. DO NOT RETRY (would duplicate).
-                return False, "", f"ack_parse_failed: {body[:200]}", "send_uncertain"
-            mid = doc.get("id") or doc.get("messageId") or ""
-            if not mid:
-                return False, "", f"empty_message_id: {body[:200]}", "send_uncertain"
-            return True, mid, "", "sent"
-    except urllib.error.HTTPError as e:
-        return False, "", f"HTTP {e.code}: {e.reason}", "http_error"
-    except urllib.error.URLError as e:
-        return False, "", f"URLError: {e.reason}", "connect_failed"
-    except Exception as e:
-        return False, "", f"{type(e).__name__}: {e}", "unknown_error"
+# _validate_bridge_url + _bridge_post moved to safe_io 2026-05-04 (PR-Agent13
+# Commit 0); imported above as validate_bridge_url + bridge_post.
 
 
 def _pushover_alert(title: str, message: str, priority: int = 1) -> bool:
@@ -659,13 +609,13 @@ def main() -> int:
 
     # Network call OUTSIDE the lock — bridge slowness must not block the lock.
     retry_count = 0
-    ok, msg_id, err, status = _bridge_post(cfg.owner.self_chat_jid, brief_text)
+    ok, msg_id, err, status = bridge_post(cfg.owner.self_chat_jid, brief_text)
     if not ok and status not in ("send_uncertain",):
         # Retry only on connect_failed / http_error / unknown_error.
         # Never retry on send_uncertain — bridge accepted but ack was unparseable;
         # message was likely delivered, retry would duplicate.
         time.sleep(BRIDGE_RETRY_DELAY_SEC)
-        ok, msg_id, err, status = _bridge_post(cfg.owner.self_chat_jid, brief_text)
+        ok, msg_id, err, status = bridge_post(cfg.owner.self_chat_jid, brief_text)
         retry_count = 1
 
     # Re-acquire lock briefly for the post-send log write — keeps the

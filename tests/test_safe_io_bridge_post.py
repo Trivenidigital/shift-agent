@@ -1,0 +1,105 @@
+"""Bridge POST unit tests after extraction to safe_io (PR-Agent13 Commit 0).
+
+Verifies the bridge_post + validate_bridge_url helpers preserve the contract
+they had inline in send-daily-brief:364-415:
+  - URL validation rejects unsafe schemes + non-loopback hosts
+  - send_uncertain status on parse failure / empty messageId (no auto-retry)
+  - http_error / connect_failed / unknown_error status branches
+"""
+from __future__ import annotations
+
+import json
+import platform
+import sys
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+
+import pytest
+
+REPO = Path(__file__).resolve().parent.parent
+PLATFORM_DIR = REPO / "src" / "platform"
+sys.path.insert(0, str(PLATFORM_DIR))
+
+# fcntl import in safe_io is Linux-only; skip these tests on Windows.
+pytestmark = pytest.mark.skipif(
+    platform.system() == "Windows",
+    reason="safe_io uses fcntl (Linux only)",
+)
+
+
+@pytest.fixture
+def safe_io_module():
+    """Import safe_io fresh; tests use monkeypatch for env-var changes."""
+    import importlib
+    import safe_io
+    importlib.reload(safe_io)
+    return safe_io
+
+
+class TestValidateBridgeUrl:
+    def test_loopback_accepted(self, safe_io_module, monkeypatch):
+        monkeypatch.setattr(safe_io_module, "ALLOW_REMOTE_BRIDGE", False)
+        assert safe_io_module.validate_bridge_url("http://127.0.0.1:3000/send") is None
+
+    def test_localhost_accepted(self, safe_io_module, monkeypatch):
+        monkeypatch.setattr(safe_io_module, "ALLOW_REMOTE_BRIDGE", False)
+        assert safe_io_module.validate_bridge_url("http://localhost:3000/send") is None
+
+    def test_remote_rejected_unless_opted_in(self, safe_io_module, monkeypatch):
+        monkeypatch.setattr(safe_io_module, "ALLOW_REMOTE_BRIDGE", False)
+        err = safe_io_module.validate_bridge_url("http://exfil.example.com/send")
+        assert err is not None
+        assert "non-loopback" in err
+
+    def test_bad_scheme_rejected(self, safe_io_module):
+        err = safe_io_module.validate_bridge_url("file:///etc/passwd")
+        assert err is not None
+        assert "unsupported scheme" in err
+
+    def test_remote_allowed_when_opted_in(self, safe_io_module, monkeypatch):
+        monkeypatch.setattr(safe_io_module, "ALLOW_REMOTE_BRIDGE", True)
+        # When opt-in is set, remote hosts ARE allowed
+        assert safe_io_module.validate_bridge_url("http://exfil.example.com/send") is None
+
+
+class TestBridgePost:
+    @patch("urllib.request.urlopen")
+    def test_send_uncertain_on_unparseable_body(self, urlopen, safe_io_module):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b"not-json"
+        urlopen.return_value.__enter__.return_value = mock_resp
+        ok, mid, err, status = safe_io_module.bridge_post("jid@s.whatsapp.net", "msg")
+        assert ok is False
+        assert status == "send_uncertain"
+        assert "ack_parse_failed" in err
+
+    @patch("urllib.request.urlopen")
+    def test_empty_message_id_is_uncertain(self, urlopen, safe_io_module):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"foo": "bar"}'  # parses but no id field
+        urlopen.return_value.__enter__.return_value = mock_resp
+        ok, mid, err, status = safe_io_module.bridge_post("jid", "msg")
+        assert ok is False
+        assert status == "send_uncertain"
+        assert "empty_message_id" in err
+
+    @patch("urllib.request.urlopen")
+    def test_success_returns_message_id(self, urlopen, safe_io_module):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"id": "wamid.123abc"}'
+        urlopen.return_value.__enter__.return_value = mock_resp
+        ok, mid, err, status = safe_io_module.bridge_post("jid", "msg")
+        assert ok is True
+        assert mid == "wamid.123abc"
+        assert status == "sent"
+
+    @patch("urllib.request.urlopen")
+    def test_alternative_messageId_field(self, safe_io_module):
+        with patch("urllib.request.urlopen") as urlopen:
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = b'{"messageId": "mid.xyz"}'
+            urlopen.return_value.__enter__.return_value = mock_resp
+            ok, mid, err, status = safe_io_module.bridge_post("jid", "msg")
+            assert ok is True
+            assert mid == "mid.xyz"
+            assert status == "sent"

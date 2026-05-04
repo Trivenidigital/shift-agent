@@ -559,3 +559,79 @@ def notify_owner_with_fallback(
             f"fallback_err={fallback_err!r}\n"
         )
     return False
+
+
+# ─────────────────────────────────────────────────────────────────
+# Hermes bridge POST (extracted from send-daily-brief 2026-05-04 PR-Agent13)
+# Used by send-daily-brief, check-compliance-deadlines, and any future
+# script that needs to POST a WhatsApp message to the local Hermes bridge.
+# ─────────────────────────────────────────────────────────────────
+
+import urllib.error  # noqa: E402
+import urllib.request  # noqa: E402
+
+# Bridge POST configuration — env-var-driven defaults captured at import time.
+# Same pattern as NOTIFY_OWNER_BIN; long-lived processes that monkeypatch
+# env vars after import would see stale defaults (not a concern for short-
+# lived script invocations).
+BRIDGE_URL = os.environ.get("HERMES_BRIDGE_URL", "http://127.0.0.1:3000/send")
+BRIDGE_TIMEOUT_SEC = int(os.environ.get("HERMES_BRIDGE_TIMEOUT_SEC", "10"))
+BRIDGE_RETRY_DELAY_SEC = 5.0
+ALLOW_REMOTE_BRIDGE = os.environ.get("HERMES_BRIDGE_ALLOW_REMOTE", "0") == "1"
+
+
+def validate_bridge_url(url: str) -> Optional[str]:
+    """Return error string if URL is unsafe; None if OK. Defends against
+    HERMES_BRIDGE_URL env var being repointed at an exfiltration target.
+
+    Public (no leading underscore) so unit tests can import without violating
+    encapsulation contract. Pure function — safe public API.
+    """
+    from urllib.parse import urlparse
+    p = urlparse(url)
+    if p.scheme not in ("http", "https"):
+        return f"unsupported scheme: {p.scheme!r}"
+    if ALLOW_REMOTE_BRIDGE:
+        return None
+    host = (p.hostname or "").lower()
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        return (
+            f"refusing non-loopback bridge URL: {host!r} "
+            f"(set HERMES_BRIDGE_ALLOW_REMOTE=1 to override)"
+        )
+    return None
+
+
+def bridge_post(jid: str, message: str) -> Tuple[bool, str, str, str]:
+    """POST to local Hermes bridge. Returns (success, message_id, error_str, status).
+
+    status ∈ {'sent', 'connect_failed', 'http_error', 'send_uncertain', 'unknown_error'}
+
+    'send_uncertain' = bridge ACCEPTED (2xx) but ack body unparseable; message
+    likely was delivered. Caller MUST NOT auto-retry (would duplicate).
+    """
+    bad = validate_bridge_url(BRIDGE_URL)
+    if bad:
+        return False, "", bad, "connect_failed"
+    payload = json.dumps({"chatId": jid, "message": message}).encode("utf-8")
+    req = urllib.request.Request(
+        BRIDGE_URL, data=payload,
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=BRIDGE_TIMEOUT_SEC) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            try:
+                doc = json.loads(body)
+            except json.JSONDecodeError:
+                return False, "", f"ack_parse_failed: {body[:200]}", "send_uncertain"
+            mid = doc.get("id") or doc.get("messageId") or ""
+            if not mid:
+                return False, "", f"empty_message_id: {body[:200]}", "send_uncertain"
+            return True, mid, "", "sent"
+    except urllib.error.HTTPError as e:
+        return False, "", f"HTTP {e.code}: {e.reason}", "http_error"
+    except urllib.error.URLError as e:
+        return False, "", f"URLError: {e.reason}", "connect_failed"
+    except Exception as e:
+        return False, "", f"{type(e).__name__}: {e}", "unknown_error"

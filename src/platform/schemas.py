@@ -14,10 +14,10 @@ Conventions:
 from __future__ import annotations
 from pydantic import (
     BaseModel, Field, ConfigDict, constr, model_validator, field_validator,
-    Tag, Discriminator,
+    Tag, Discriminator, HttpUrl,
 )
 from typing import Literal, Annotated, Union, Optional, Any, get_args
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 from zoneinfo import ZoneInfo
 import os
 import re
@@ -883,6 +883,10 @@ class ComplianceConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool = False
     advance_warning_days: list[int] = Field(default_factory=lambda: [30, 14, 7, 3, 1])
+    # Bounded catchup window for legal-consequence work. If a gate's ideal
+    # fire date passed by more than this many days, emit ComplianceReminderDeferred
+    # + Pushover and skip rather than spam an outdated reminder.
+    max_deferral_days: int = Field(default=7, ge=1, le=30)
 
     @field_validator("advance_warning_days")
     @classmethod
@@ -892,6 +896,64 @@ class ComplianceConfig(BaseModel):
         if any(d <= 0 for d in v):
             raise ValueError("advance_warning_days values must be positive")
         return sorted(set(v), reverse=True)
+
+
+# PR-Agent13-v0.1 2026-05-04: Compliance items file schema.
+# state/compliance-items.json is the mutable source of truth (operator-seeded
+# + mark-done-mutated). Lives outside cfg.compliance because safe_io has no
+# atomic_write_yaml — JSON is the only safely-mutable on-disk format.
+class ComplianceItem(BaseModel):
+    """Single recurring compliance deadline.
+
+    id pattern note (PR-Agent13-v0.1 review H2 — 2026-05-04): underscore-only
+    (no hyphen, no colon). The colon constraint is load-bearing — sentinel
+    keys are formatted `<item_id>:<gate_days>` (see ComplianceLastSentFile),
+    so id values containing `:` would corrupt key parsing. Hyphen forbidden
+    by convention only (compliance items are operator-typed, not slug-style;
+    underscore reads more naturally for "health_inspect_houston").
+    """
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(min_length=1, max_length=40, pattern=r"^[a-z0-9_]+$")
+    name: str = Field(min_length=1, max_length=100)
+    category: Literal[
+        "license_renewal", "tax_filing", "inspection",
+        "certification", "insurance", "other",
+    ]
+    renewal_date: date  # the NEXT occurrence
+    recurrence_days: int = Field(ge=0, le=3650)  # 0 = one-shot (deleted on mark-done)
+    location_id: Optional[str] = Field(default=None, max_length=40)
+    agency: Optional[str] = Field(default=None, max_length=200)
+    resource_url: Optional[HttpUrl] = None
+    notes: Optional[str] = Field(default=None, max_length=500)
+
+
+class ComplianceItemsFile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    schema_version: Literal[1] = 1
+    items: list[ComplianceItem] = Field(default_factory=list, max_length=200)
+
+
+class ComplianceLastSentFile(BaseModel):
+    """Sentinel state at state/compliance-last-sent.json.
+    Keys are '<item_id>:<gate_days>' (gate_days int as str: '30','14','7',
+    '3','1','0','-N'). Values are ISO date strings (YYYY-MM-DD) of the
+    last successful send for that (item, gate) pair.
+    """
+    model_config = ConfigDict(extra="forbid")
+    schema_version: Literal[1] = 1
+    last_sent: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_keys(self):
+        for k in self.last_sent:
+            try:
+                iid, gate_str = k.rsplit(":", 1)
+                int(gate_str)
+                if not iid:
+                    raise ValueError("empty item_id")
+            except (ValueError, IndexError) as e:
+                raise ValueError(f"sentinel key {k!r} bad format: {e}")
+        return self
 
 
 # Agent #14 — Employee Document Tracker (Low; pure date logic)
@@ -2341,6 +2403,85 @@ class MultiLocationClosestLookup(_BaseEntry):
     detail: str = Field(default="", max_length=2000)
 
 
+# ─────────────────────────────────────────────────────────────────
+# Compliance Calendar log entries (Agent #13 — PR-Agent13-v0.1 2026-05-04)
+# ─────────────────────────────────────────────────────────────────
+
+
+class ComplianceReminderAttempted(_BaseEntry):
+    """Idempotency anchor — written BEFORE bridge POST. Mirror of BriefAttempted.
+
+    On crash between bridge_post success and ComplianceReminderSent log write,
+    the next tick scans for orphan Attempted-without-Sent within the recovery
+    window and refuses to re-fire (operator manual-verify required).
+    """
+    type: Literal["compliance_reminder_attempted"]
+    item_id: str = Field(min_length=1, max_length=40)
+    item_name: str = Field(min_length=1, max_length=100)  # snapshot for forensics
+    days_until_renewal: int  # negative = overdue
+    gate_days: int = Field(ge=-3650, le=3650)  # 30/14/7/3/1/0/-N self-describing; bounded to match recurrence_days ceiling (Reviewer H3)
+    attempt_id: str = Field(min_length=1)  # uuid4
+    catchup_for_missed_gate: Optional[int] = None  # gate_days value being caught up
+
+
+class ComplianceReminderSent(_BaseEntry):
+    """Written AFTER bridge 200 + non-empty messageId."""
+    type: Literal["compliance_reminder_sent"]
+    item_id: str = Field(min_length=1, max_length=40)
+    days_until_renewal: int
+    gate_days: int = Field(ge=-3650, le=3650)
+    attempt_id: str = Field(min_length=1)  # links to ComplianceReminderAttempted
+    outbound_message_id: str = Field(min_length=1)
+
+
+class ComplianceReminderFailed(_BaseEntry):
+    """Bridge unreachable / non-2xx after retry / send_uncertain."""
+    type: Literal["compliance_reminder_failed"]
+    item_id: str = Field(min_length=1, max_length=40)
+    days_until_renewal: int
+    gate_days: int = Field(ge=-3650, le=3650)
+    attempt_id: str = Field(min_length=1)
+    error: str  # no length cap (matches OutboundSendFailed pattern)
+    retry_count: int = Field(ge=0)
+
+
+class ComplianceReminderSkipped(_BaseEntry):
+    """Skipped due to orphan-attempted detection (Layer 3 idempotency).
+    Operator must manually verify the prior attempt in WhatsApp before
+    next tick will fire."""
+    type: Literal["compliance_reminder_skipped"]
+    item_id: str = Field(min_length=1, max_length=40)
+    gate_days: int = Field(ge=-3650, le=3650)
+    reason: Literal["orphan_attempted_in_window"]
+    orphan_attempt_id: str = Field(min_length=1)
+
+
+class ComplianceReminderDeferred(_BaseEntry):
+    """Gate window passed (>cfg.compliance.max_deferral_days late).
+    Operator gets Pushover; we give up on this gate to avoid spamming
+    for stale-gate work."""
+    type: Literal["compliance_reminder_deferred"]
+    item_id: str = Field(min_length=1, max_length=40)
+    days_until_renewal: int
+    gate_days: int = Field(ge=-3650, le=3650)
+    days_since_ideal_fire: int  # how late the gate was
+    operator_pushover_sent: bool  # whether the Pushover delivery succeeded
+
+
+class ComplianceItemMarkedDone(_BaseEntry):
+    """Owner marked item done; state file mutated.
+    sentinel_keys_pruned: how many sentinel entries with prefix '<item_id>:'
+    were dropped (one-shot deletion clears all gates; recurring renewal
+    advances renewal_date — sentinel for current cycle stays until pruned
+    naturally at next tick's GC)."""
+    type: Literal["compliance_item_marked_done"]
+    item_id: str = Field(min_length=1, max_length=40)
+    completed_renewal_date: date
+    next_renewal_date: Optional[date] = None  # None for recurrence_days=0 (item deleted)
+    actor: Literal["owner", "operator", "system"]
+    sentinel_keys_pruned: int = Field(ge=0)
+
+
 class InterLocationTransferProposed(_BaseEntry):
     """Agent #3 proposed an employee transfer between locations to cover a gap."""
     type: Literal["inter_location_transfer_proposed"]
@@ -2444,6 +2585,13 @@ LogEntry = Annotated[
         Annotated[InterLocationTransferProposed, Tag("inter_location_transfer_proposed")],
         # PR-Agent3-v0.1 2026-05-04
         Annotated[MultiLocationClosestLookup, Tag("multi_location_closest_lookup")],
+        # PR-Agent13-v0.1 2026-05-04 — Compliance Calendar
+        Annotated[ComplianceReminderAttempted, Tag("compliance_reminder_attempted")],
+        Annotated[ComplianceReminderSent, Tag("compliance_reminder_sent")],
+        Annotated[ComplianceReminderFailed, Tag("compliance_reminder_failed")],
+        Annotated[ComplianceReminderSkipped, Tag("compliance_reminder_skipped")],
+        Annotated[ComplianceReminderDeferred, Tag("compliance_reminder_deferred")],
+        Annotated[ComplianceItemMarkedDone, Tag("compliance_item_marked_done")],
         # Agent #2 Catering Lead
         Annotated[CateringLeadCreated, Tag("catering_lead_created")],
         Annotated[CateringLeadStatusChange, Tag("catering_lead_status_change")],
@@ -2589,6 +2737,11 @@ __all__ = [
     "CrossLocationQuery", "InterLocationTransferProposed",
     # PR-Agent3-v0.1 2026-05-04
     "MultiLocationClosestLookup",
+    # PR-Agent13-v0.1 — Compliance Calendar
+    "ComplianceItem", "ComplianceItemsFile", "ComplianceLastSentFile",
+    "ComplianceReminderAttempted", "ComplianceReminderSent",
+    "ComplianceReminderFailed", "ComplianceReminderSkipped",
+    "ComplianceReminderDeferred", "ComplianceItemMarkedDone",
     "CateringLeadCreated", "CateringLeadStatusChange", "CateringLeadRejected", "CateringQuoteDrafted",
     "CateringOwnerApprovalRequested", "CateringOwnerDecision", "CateringQuoteSent",
     # v0.3 catering audit classes
