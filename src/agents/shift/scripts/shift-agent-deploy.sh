@@ -60,16 +60,27 @@ install_artifacts() {
 
     # PR-CF6: Hermes plugins — cf-router + any future plugins under src/plugins/.
     # Loaded by hermes-gateway at startup from ~/.hermes/plugins/<name>/.
-    # cf-router replaces the F8/F9 custom watchdogs by intercepting at
+    # cf-router replaces the F8/F9 custom watchdogs (PR-CF6) and the F7
+    # catering-dispatcher-watchdog (PR-CF7) by intercepting at
     # pre_gateway_dispatch. The legacy watchdog .service / .timer / script
-    # files were deleted in the 2026-05-04 canonical-cleanup, so this script
-    # no longer installs them — see git tag pre-srilu-cleanup-2026-05-04 if
-    # a pre-cleanup rollback ever needs them back.
+    # files were deleted in the 2026-05-04 canonical-cleanup; see git tags
+    # pre-srilu-cleanup-2026-05-04 (F8/F9) and pre-cf7-cleanup-2026-05-04
+    # (F7) if a pre-cleanup rollback ever needs them back.
     if [ -d src/plugins ]; then
         mkdir -p /root/.hermes/plugins
         rsync -a --delete src/plugins/ /root/.hermes/plugins/
         chown -R shift-agent:shift-agent /root/.hermes/plugins/
     fi
+
+    # PR-CF7 (2026-05-04): F7 catering-dispatcher-watchdog migrated into
+    # cf-router plugin's F7 path. Disable + stop the legacy systemd unit
+    # if it's still running on this VPS (idempotent — `systemctl stop` /
+    # `disable` are no-ops if the unit is already absent).
+    systemctl stop catering-dispatcher-watchdog.service 2>/dev/null || true
+    systemctl disable catering-dispatcher-watchdog.service 2>/dev/null || true
+    rm -f /etc/systemd/system/catering-dispatcher-watchdog.service
+    rm -f /usr/local/bin/catering-dispatcher-watchdog
+    systemctl daemon-reload 2>/dev/null || true
 
     # logs dir — bootstrap target for prune-expense.log + similar systemd
     # StandardOutput=append: writers (systemd doesn't auto-mkdir parents).

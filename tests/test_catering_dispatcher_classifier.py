@@ -24,7 +24,11 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
-DISPATCHER_WATCHDOG = REPO / "src" / "agents" / "catering" / "scripts" / "catering-dispatcher-watchdog"
+# PR-CF7 (2026-05-04): the F7 catering-dispatcher-watchdog daemon was
+# migrated into the cf-router plugin's actions.py. The classifier function
+# (classify_catering) was ported verbatim with the same signature, so these
+# 26 regression tests retarget cleanly to the plugin location.
+PLUGIN_ACTIONS = REPO / "src" / "plugins" / "cf-router" / "actions.py"
 
 
 def _load(path: Path, mod_name: str):
@@ -34,7 +38,7 @@ def _load(path: Path, mod_name: str):
 
 @pytest.fixture(scope="module")
 def dispatcher_mod():
-    return _load(DISPATCHER_WATCHDOG, "_dispatcher_watchdog_test")
+    return _load(PLUGIN_ACTIONS, "_cf_router_actions_classifier_test")
 
 class TestCateringClassifierPositive:
     """Cases that MUST be classified as catering. If any of these regress to

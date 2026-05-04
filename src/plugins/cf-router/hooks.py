@@ -2,8 +2,9 @@
 
 `pre_gateway_dispatch` runs BEFORE the LLM sees the inbound message. We use
 this to bypass the LLM entirely for deterministic owner-approval and
-menu-decision flows (F8 replacement) and to fire alerts on detected
-sick-call patterns (F9 replacement).
+menu-decision flows (F8 replacement), to fire alerts on detected sick-call
+patterns (F9 replacement), and to schedule a 30s rescue check for missed
+catering inquiries (F7 replacement, PR-CF7).
 
 Hook signature (per Hermes gateway/run.py:4197+):
     pre_gateway_dispatch(event, gateway, session_store) -> dict | None
@@ -19,10 +20,26 @@ Multi-plugin: gateway iterates results; first action != "allow" wins.
 from __future__ import annotations
 
 import re
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 from . import actions
+
+# === F7 path config (PR-CF7) ===
+#
+# F7_ENABLED is the rollback hatch. To disable the F7 plugin path without
+# touching F8/F9, edit this file in place and restart hermes-gateway:
+#   sudo sed -i 's/^F7_ENABLED = True/F7_ENABLED = False/' \
+#     /root/.hermes/plugins/cf-router/hooks.py
+#   sudo systemctl restart hermes-gateway
+F7_ENABLED = True
+
+# 30s rescue window — matches the deployed F7 daemon's WATCHDOG_TIMEOUT_SECS.
+# After this delay the plugin checks the audit log for `dispatcher_routed`
+# and invokes create-catering-lead if missing.
+F7_WATCHDOG_TIMEOUT_SEC = 30
 
 # Owner-approval code regex — same alphabet as the deployed dispatcher
 # (`#[A-HJ-NP-Z2-9]{5}`, 28.6M-entry alphabet excluding I/O/0/1/L).
@@ -86,6 +103,18 @@ def pre_gateway_dispatch(event: Any, gateway: Any = None, session_store: Any = N
             _try_f9_alert(text, chat_id)
             # Always allow LLM to handle normally — F9 is alert-only
             return None
+
+        # F7 path (PR-CF7) — non-owner/non-employee + catering classifier
+        # → schedule a 30s rescue check. Plugin lets LLM handle the inquiry
+        # immediately; rescue only fires if the LLM misses (preserves F7's
+        # "rescue-only" semantic). Gated on F7_ENABLED for fast rollback.
+        if F7_ENABLED:
+            is_catering, signals = actions.classify_catering(text)
+            if is_catering:
+                message_id = _extract_message_id(event, chat_id)
+                _schedule_f7_rescue(text, chat_id, message_id, signals)
+                # Don't return skip — LLM still handles immediately; the
+                # Timer thread runs the rescue check 30s later.
 
         return None
 
@@ -242,3 +271,48 @@ def _extract_chat_id(event: Any) -> Optional[str]:
         if isinstance(nested, str) and nested:
             return nested
     return None
+
+
+def _extract_message_id(event: Any, chat_id: str) -> str:
+    """Defensive message_id extraction with deterministic fallback.
+
+    Hermes MessageEvent shape varies across adapters; not all expose a
+    native message_id. The CateringDispatcherWatchdog* audit variants
+    require min_length=1, so we ALWAYS produce a non-empty string. The
+    fallback mirrors the deployed F7 daemon's `bridge_notify_<chat>_<ms>`
+    pattern so historical audit-log greps continue to work.
+    """
+    for attr in ("message_id", "id", "msg_id"):
+        val = getattr(event, attr, None)
+        if isinstance(val, str) and val:
+            return val
+    # Nested via source (same shape as _extract_chat_id)
+    source = getattr(event, "source", None)
+    if source is not None:
+        for attr in ("message_id", "id", "msg_id"):
+            val = getattr(source, attr, None)
+            if isinstance(val, str) and val:
+                return val
+    return f"cf_router_f7_{chat_id}_{int(time.time() * 1000)}"
+
+
+def _schedule_f7_rescue(text: str, chat_id: str, message_id: str,
+                         signals: list[str]) -> None:
+    """Schedule the 30s delayed rescue check via threading.Timer.
+
+    Daemon-style thread (no asyncio coupling). The Timer dies if the
+    gateway process restarts during the 30s window — acceptable per
+    PR-CF7 plan §"Risks" #1; gateway restart implies new inbounds will
+    be handled fresh anyway.
+    """
+    ts_at_schedule = time.time()
+    timer = threading.Timer(
+        F7_WATCHDOG_TIMEOUT_SEC,
+        actions.f7_rescue_check,
+        args=(text, chat_id, message_id, signals, ts_at_schedule),
+    )
+    # Mark as daemon so the gateway process can exit cleanly without
+    # waiting for pending Timers (gracefully cancels in-flight rescues
+    # on shutdown rather than hanging the process).
+    timer.daemon = True
+    timer.start()
