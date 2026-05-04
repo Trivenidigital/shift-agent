@@ -271,10 +271,15 @@ Existing scaffold returns "not configured" when `multi_location.locations == []`
 # multi_location_query SKILLs return polite "not configured" replies.
 sudo systemctl restart hermes-gateway
 
-# Option B — Full code rollback via backup tag
-git checkout pre-agent-3-2026-05-04 -- src/agents/multi_location/ src/platform/schemas.py
-# Build + deploy normally. Audit rows already written get _UnknownLogEntry
-# passthrough; no schema migration needed.
+# Option B — Full deploy rollback via existing tarball mechanism
+# (NOT a git-tag dance — the deploy script already keeps the prior 5
+# tarballs in /opt/shift-agent/deploys/ for exactly this case.)
+ssh root@srilu-vps 'sudo /usr/local/bin/shift-agent-deploy list'
+# Pick the deploy tag that was the last known-good (pre-Agent-3)
+ssh root@srilu-vps 'sudo /usr/local/bin/shift-agent-deploy rollback deploy-<prev-tag>'
+# This re-extracts the prior tarball, re-runs install_artifacts(), restarts
+# services. Audit rows already written for multi_location_closest_lookup
+# get _UnknownLogEntry passthrough on the older code; no schema migration.
 
 # Option C — Disable customer_location_query routing only (keep owner path)
 # Edit dispatch_shift_agent/SKILL.md: remove or comment out the new routing

@@ -55,6 +55,16 @@ install_artifacts() {
     install -m 644 src/agents/shift/templates/* /opt/shift-agent/templates/
 
     # Skills → Hermes — Shift-Agent SKILL files
+    #
+    # ORDERING INVARIANT (DO NOT REORDER WITHOUT CARE):
+    # This `--delete` rsync MUST run BEFORE all per-agent skill rsyncs
+    # below (multi_location, catering, daily_brief, eod_reconcile,
+    # tier-2 stubs, expense_bookkeeper). Per-agent rsyncs are ADDITIVE
+    # (no `--delete`) and deposit their SKILL.md files INTO the same
+    # /root/.hermes/skills/ directory. If you move this Shift rsync to
+    # run AFTER the per-agent rsyncs (e.g. as a "cleanup pass"),
+    # `--delete` will silently wipe every per-agent skill that was just
+    # installed, leaving only Shift's own. Catastrophic + silent.
     rsync -a --delete src/agents/shift/skills/ /root/.hermes/skills/
     chown -R shift-agent:shift-agent /root/.hermes/skills/
 

@@ -32,7 +32,7 @@ restart the agent."
 Log a `cross_location_query` entry with `location_ids_resolved=[]` and
 `answer_summary="not_configured"`. Exit cleanly.
 
-**Phase 1 (PR-Agent3-v0.1, 2026-05-04):** With locations configured, resolve query against location list and answer from per-location roster + schedule files. Owner can ALSO ask "nearest store?" — invokes `closest-location.py` (same as customer-facing `customer_location_query` SKILL).
+**Phase 1 (PR-Agent3-v0.1, 2026-05-04):** With locations configured, resolve query against location list and answer from per-location roster + schedule files. Owner can ALSO ask "nearest store?" — invokes `closest-location.py` (same as customer-facing `customer_location_query` SKILL). Note: each `multi_location.locations[]` entry must have `latitude`/`longitude` populated for the closest-store path to work; locations without coordinates are skipped by the script (no per-location auto-geocoding in v0.1).
 
 **Phase 2 (v0.3):** Inter-location coverage transfers via `propose_inter_location_transfer` (separate skill, not this one).
 

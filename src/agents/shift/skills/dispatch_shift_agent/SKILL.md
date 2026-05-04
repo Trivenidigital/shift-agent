@@ -36,11 +36,11 @@ PR-CF1 — customer-finalize-intent terms also route to catering_dispatcher when
 PR-Agent3-v0.1 — store-locator regex for the customer-facing closest-location row (positioned IMMEDIATELY AFTER the catering keyword row so a "party near me?" message correctly favors catering interpretation for SMB context):
 
 ```
-\b(nearest|closest|near\s*(?:me|you|by))\b.{0,40}\b(store|location|branch|shop)\b
-| \b(where\s+are\s+you\s+located|store\s+locator|find\s+(?:a\s+|the\s+)?store)\b
+(?i)\b(nearest|closest|near\s*(?:me|you|by))\b.{0,40}\b(store|location|branch|shop)\b
+| (?i)\b(where\s+are\s+you\s+located|store\s+locator|find\s+(?:a\s+|the\s+)?store)\b
 ```
 
-Both alternation groups are case-insensitive. The first requires a proximity word (nearest/closest/near me/you/by) followed within 40 chars by an intent word (store/location/branch/shop) — single-word matches like "store" or "near me" alone do NOT trigger. The second catches explicit phrasings ("where are you located", "store locator", "find a/the store"). Customer "I had a bad experience at your store" (single `store`, no proximity) correctly does NOT match. customer_location_query SKILL adds defensive intent-confirmation as a second layer.
+Both alternation groups are case-insensitive (`(?i)` prefix on each — written explicitly so the LLM-interpreter doesn't have to infer the flag from prose). The first requires a proximity word (nearest/closest/near me/you/by) followed within 40 chars by an intent word (store/location/branch/shop) — single-word matches like "store" or "near me" alone do NOT trigger. The second catches explicit phrasings ("where are you located", "store locator", "find a/the store"). Customer "I had a bad experience at your store" (single `store`, no proximity) correctly does NOT match. customer_location_query SKILL adds defensive intent-confirmation as a second layer.
 
 The matrix is in priority order — earlier rows fire first. A `#XXXXX` code from the owner short-circuits the catering keyword check; a menu-pending code short-circuits everything.
 

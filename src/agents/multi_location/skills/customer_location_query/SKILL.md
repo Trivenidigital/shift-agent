@@ -32,14 +32,18 @@ You handle customer-facing store-locator inquiries. Your job is narrow:
 
 ## Hard rules
 
-- **Customer-facing only.** Sender role MUST be `unknown` (verified upstream by dispatcher's `identify-sender` check). Owner/employee should NEVER reach this SKILL — the dispatcher gates it. Defensive check: if for any reason this SKILL fires for an `owner` or `employee` sender, log a `decisions.log` warning row and exit (do not reply).
+- **Customer-facing only.** Sender role MUST be `unknown` (verified upstream by dispatcher's `identify-sender` check). Owner/employee should NEVER reach this SKILL — the dispatcher gates it. Defensive check: if for any reason this SKILL fires for an `owner` or `employee` sender, log a `multi_location_closest_lookup` audit row with `n_locations_returned=0`, `source="not_configured"`, and `detail="defensive_role_violation: skill received sender_role=<role> from dispatcher mis-routing"` (this gives the routing-reliability monitor a surface to count). Then exit silently without replying.
 - **NO roster/schedule/pending access.** This SKILL reads only `cfg.multi_location.locations[]`. Never expose staff schedules, lead data, or any state files.
-- **Empty locations → polite decline.** If `cfg.multi_location.locations == []` (or the script returns exit code 2), reply:
-  > "Sorry, store-locator info isn't available right now. Please call us at <cfg.owner.phone>."
+- **Empty locations → polite decline.** If `cfg.multi_location.locations == []` (or the script returns exit code 2), reply with one of two formats based on whether `cfg.owner.phone` is set to a real number:
+  - If `cfg.owner.phone` is set AND does NOT match the placeholder pattern (`+10000000000` / starts with `PLACEHOLDER` / empty string):
+    > "Sorry, store-locator info isn't available right now. Please call us at `<cfg.owner.phone>`."
+  - Otherwise (placeholder / unset):
+    > "Sorry, store-locator info isn't available right now. Please contact the store directly."
   Audit with `n_locations_returned=0`, `source="not_configured"`, `detail="config has no locations configured"`.
 - **NEVER invent locations.** If `closest-location.py` exit code 3 (all upstream services unreachable), reply with the polite decline above + audit `source="haversine_fallback"` is unreachable too — degrade gracefully.
 - **Maximum 3 locations in reply.** Keep the message short.
 - **Address is PII** — include `--address` only on the script call argv (subprocess), never in the final reply formatting beyond echoing what the customer typed, and never in audit rows.
+- **Customer lat/lon are PII at full precision** — if you populate `customer_lat`/`customer_lon` in the audit row (only valid when v0.2 location-pin ingest ships), ROUND to 2 decimal places (≈1km precision). Never log full 5+ decimal precision — that's neighborhood-fingerprinting territory.
 
 ## Decision flow
 
@@ -64,9 +68,8 @@ dispatcher_routed (sender_role=unknown, intent=closest_store) → this skill
 - Inter-location transfers — deferred to Phase 2.
 - Store hours overrides, holiday closures — read from `cfg.multi_location.locations[].hours` as configured; no dynamic logic.
 
-## Phase 0 (when locations are configured but operator hasn't migrated to v0.2)
+## Operator config requirement (v0.1)
 
-If `len(cfg.multi_location.locations) >= 1` but the entries lack `latitude`/`longitude`:
-- The `closest-location.py` script attempts to geocode `address_short` via Nominatim per location (slow but acceptable for ≤9 locations)
-- Audit `source` will likely be `osrm` if all geocodes succeed; `haversine_fallback` if any geocode fails
-- v0.2 PR (or operator config update) populates `latitude`/`longitude` to skip the per-location fallback
+Each `cfg.multi_location.locations[]` entry MUST have `latitude` and `longitude` populated for the customer-facing closest-store SKILL to return useful results. Locations without coordinates are silently SKIPPED by `closest-location.py` (recorded in the script's `errors[]` field but never auto-geocoded — per-location Nominatim geocoding would multiply customer-facing latency by N locations).
+
+If ALL configured locations lack coordinates, the script returns exit-3 (all upstream unreachable) and this SKILL responds with the polite "not available right now" decline above. Operators should populate `latitude`/`longitude` at config time (one-time `nominatim search` lookup per location).

@@ -89,6 +89,17 @@ else
     echo "⚠  cf-router plugin not installed — skipping plugin smoke check"
 fi
 
+# 2c. Agent #3 closest-location.py importable + CLI parses (PR-Agent3-v0.1)
+if [ -x /usr/local/bin/closest-location.py ]; then
+    if ! "$PY" /usr/local/bin/closest-location.py --help > /dev/null 2>&1; then
+        echo "FAIL: closest-location.py --help failed (Agent #3 v0.1)"
+        exit 1
+    fi
+    echo "✓ closest-location.py importable + CLI parses"
+else
+    echo "⚠  closest-location.py not installed — Agent #3 closest-store path will fail at first inbound"
+fi
+
 # 3. Config loads and validates
 if ! "$PY" -c "
 import sys, yaml

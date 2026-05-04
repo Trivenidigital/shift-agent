@@ -190,6 +190,12 @@ def main() -> int:
     if args.lat is not None and args.lon is None:
         sys.stderr.write("--lat requires --lon\n")
         return EXIT_INVALID_INPUT
+    if args.address and (args.lat is not None or args.lon is not None):
+        # argparse's mutually_exclusive_group only covers --address vs --lat;
+        # --lon is a standalone optional, so this combo silently used to
+        # work and ignore --lon. Reject explicitly to avoid the footgun.
+        sys.stderr.write("--address cannot be combined with --lat/--lon\n")
+        return EXIT_INVALID_INPUT
     top_n = max(1, min(args.top_n, 10))
 
     try:
@@ -209,10 +215,21 @@ def main() -> int:
             sys.stderr.write(f"could not geocode address: {args.address!r}\n")
             return EXIT_INVALID_INPUT
         customer_lat, customer_lon = coords
-        customer_input = {"address": args.address}
+        # PII safety: do NOT echo the customer's address into stdout. The
+        # SKILL.md instructs the LLM not to log the address to the audit
+        # row, but the LLM consumes this script's stdout as context — if
+        # we put the address here, the LLM may copy it into the audit row's
+        # free-text `detail` field despite the SKILL.md instruction.
+        customer_input = {"address_provided": True}
     else:
         customer_lat, customer_lon = args.lat, args.lon
-        customer_input = {"lat": args.lat, "lon": args.lon}
+        # Round to 2 decimal places (~1km precision) — enough to identify
+        # the customer's neighborhood for nearest-store math without
+        # logging fingerprinting-precision coordinates. PII reduction.
+        customer_input = {
+            "lat": round(args.lat, 2),
+            "lon": round(args.lon, 2),
+        }
 
     results, source, errors = compute_distances(
         customer_lat, customer_lon, locations, args.timeout_sec,

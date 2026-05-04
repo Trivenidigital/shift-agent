@@ -103,6 +103,21 @@ class TestLocationEntryDelta:
                 id="loc_x", name="x", timezone="Mars/FakeZone",
             )
 
+    def test_invalid_phone_rejected(self):
+        """E164Phone validator rejects non-E164 strings (PR-CF7 audit M11).
+        E164Phone had a documented Pydantic v1 silent-passthrough bug
+        (schemas.py P2-FIX); regression test on the new field guards it."""
+        with pytest.raises(ValidationError):
+            schemas.LocationEntry(
+                id="loc_x", name="x", timezone="UTC", phone="not-a-phone",
+            )
+
+    def test_valid_phone_accepted(self):
+        loc = schemas.LocationEntry(
+            id="loc_x", name="x", timezone="UTC", phone="+17135551234",
+        )
+        assert loc.phone == "+17135551234"
+
     def test_unique_ids_validator_preserved(self):
         """_unique_ids on MultiLocationConfig.locations remains active."""
         with pytest.raises(ValidationError):
