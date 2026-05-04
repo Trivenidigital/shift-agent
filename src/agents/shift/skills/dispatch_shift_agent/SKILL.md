@@ -22,6 +22,7 @@ You are the front door for every inbound message. Your ONLY job: identify who se
 | Image OR document attachment + caption mentions "expense" or "receipt" AND `cfg.expense_bookkeeper.enabled` | owner | **expense_bookkeeper_dispatcher** |
 | Image OR document attachment, no caption, in owner's self-chat | owner | **update_catering_menu** (assume menu intent) |
 | Text contains catering keyword (see list below) AND `cfg.catering.enabled` | any | **catering_dispatcher** |
+| Owner text matches compliance regex (see below) AND `cfg.compliance.enabled` | owner | **compliance_owner_query** |
 | Text matches store-locator regex (see below) AND `cfg.multi_location.locations` is non-empty | unknown | **customer_location_query** |
 | Text only, no code, no catering keyword | owner | **handle_owner_command** |
 | Text only, no code, no catering keyword, has pending sent proposal for this employee_id in `state/pending.json` | employee | **handle_candidate_response** |
@@ -41,6 +42,15 @@ PR-Agent3-v0.1 — store-locator regex for the customer-facing closest-location 
 ```
 
 Both alternation groups are case-insensitive (`(?i)` prefix on each — written explicitly so the LLM-interpreter doesn't have to infer the flag from prose). The first requires a proximity word (nearest/closest/near me/you/by) followed within 40 chars by an intent word (store/location/branch/shop) — single-word matches like "store" or "near me" alone do NOT trigger. The second catches explicit phrasings ("where are you located", "store locator", "find a/the store"). Customer "I had a bad experience at your store" (single `store`, no proximity) correctly does NOT match. customer_location_query SKILL adds defensive intent-confirmation as a second layer.
+
+PR-Agent13-v0.1 — compliance regex (case-insensitive, owner-only — gated by `sender_role=owner` AND `cfg.compliance.enabled`):
+
+```
+(?i)\b(compliance|deadline|inspection|license\s+renewal|tax\s+filing|servsafe)\b
+| (?i)\bmark\b.{0,40}\b(done|complete|completed|filed|submitted|renewed)\b.{0,80}\b(compliance|inspection|license|deadline|tax|servsafe)\b
+```
+
+The first alternation matches generic compliance keywords. The second matches mark-done intents with REQUIRED compliance-keyword colocation within 80 chars (defense against false positives like "marked her cake done" — Reviewer B-v1 M1 fix). The compliance row is positioned BEFORE handle_owner_command catch-all so owner queries about compliance route to compliance_owner_query rather than the generic owner handler. compliance_owner_query SKILL adds defensive role check as a second layer (in case dispatcher mis-routes).
 
 The matrix is in priority order — earlier rows fire first. A `#XXXXX` code from the owner short-circuits the catering keyword check; a menu-pending code short-circuits everything.
 

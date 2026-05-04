@@ -1,0 +1,15 @@
+[Unit]
+Description=Compliance Calendar daily timer (06:00 customer-local via service-level TZ env)
+Requires=check-compliance-deadlines.service
+
+[Timer]
+# Once a day at 06:00 customer-local. TZ comes from the service unit's
+# Environment=TZ= directive (templated by deploy from cfg.customer.timezone).
+# Persistent=true ensures VPS-rebooted-at-06:05 case fires once on boot.
+OnCalendar=*-*-* 06:00:00
+Persistent=true
+AccuracySec=10min
+Unit=check-compliance-deadlines.service
+
+[Install]
+WantedBy=timers.target

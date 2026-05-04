@@ -1,0 +1,8 @@
+⚕ *Compliance Reminder*
+────────────
+{name} — {days_until_text}
+
+Date: {renewal_date}
+Agency: {agency}{resource_line}{notes_line}
+
+Reply *mark {item_id} done* when complete.
