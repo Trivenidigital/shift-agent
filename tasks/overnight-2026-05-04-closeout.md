@@ -69,6 +69,13 @@ Portfolio.md explicitly marks these BACKLOG:
 
 ---
 
+## Status-surface refresh (this PR)
+
+- `web/portal/index.html`: counter updated `3 live + 14 scaffolded` → `5 live + 12 scaffolded`. Per-agent state cards refreshed for #3 (scaffold→live), #13 (scaffold→live), #19 (future→scaffold), #22 (scaffold-pending→scaffold).
+- `tasks/solid17-consolidation-plan.md`: DELETED. All work in that plan was executed across 2026-04-29 and 2026-05-04 sessions; git history preserves it. Recovery: `git show 28f49b8:tasks/solid17-consolidation-plan.md` (or any pre-2026-05-04-portal-refresh commit hash).
+- `docs/portfolio.md`: "Implementation status update — 2026-05-04" section already added in PR #66.
+- `MEMORY.md` + `memory/project_overnight_2026_05_04.md`: already updated in PR #66.
+
 ## Drift-rule self-checks
 
 - ✅ Read `docs/portfolio.md` (Agent 8 spec, Agent 19 spec, Agent 22 spec at line 793-822, Agent 23/24/25 BACKLOG entries with build-on-customer-demand caveats) before writing each defer rationale
