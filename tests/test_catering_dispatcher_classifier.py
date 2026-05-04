@@ -18,6 +18,7 @@ yet replace.
 """
 from __future__ import annotations
 
+import importlib.util
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
@@ -32,8 +33,17 @@ PLUGIN_ACTIONS = REPO / "src" / "plugins" / "cf-router" / "actions.py"
 
 
 def _load(path: Path, mod_name: str):
-    """Load a script with no .py extension into a module object."""
-    return SourceFileLoader(mod_name, str(path)).load_module()
+    """Load a .py file into a module object via the modern spec/exec API.
+    The pre-PR-CF7 loader used SourceFileLoader.load_module() (deprecated
+    since Python 3.4; emits DeprecationWarning) because the target was a
+    hyphen-named script with no .py extension. Now that the target is a
+    real .py file (plugin actions.py), we use the canonical
+    spec_from_loader → module_from_spec → exec_module triple."""
+    loader = SourceFileLoader(mod_name, str(path))
+    spec = importlib.util.spec_from_loader(mod_name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
 
 
 @pytest.fixture(scope="module")

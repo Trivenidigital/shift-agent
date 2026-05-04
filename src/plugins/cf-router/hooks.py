@@ -111,7 +111,7 @@ def pre_gateway_dispatch(event: Any, gateway: Any = None, session_store: Any = N
         if F7_ENABLED:
             is_catering, signals = actions.classify_catering(text)
             if is_catering:
-                message_id = _extract_message_id(event, chat_id)
+                message_id = _extract_message_id(event, chat_id, text)
                 _schedule_f7_rescue(text, chat_id, message_id, signals)
                 # Don't return skip — LLM still handles immediately; the
                 # Timer thread runs the rescue check 30s later.
@@ -273,14 +273,20 @@ def _extract_chat_id(event: Any) -> Optional[str]:
     return None
 
 
-def _extract_message_id(event: Any, chat_id: str) -> str:
+def _extract_message_id(event: Any, chat_id: str, text: str = "") -> str:
     """Defensive message_id extraction with deterministic fallback.
 
     Hermes MessageEvent shape varies across adapters; not all expose a
     native message_id. The CateringDispatcherWatchdog* audit variants
-    require min_length=1, so we ALWAYS produce a non-empty string. The
-    fallback mirrors the deployed F7 daemon's `bridge_notify_<chat>_<ms>`
-    pattern so historical audit-log greps continue to work.
+    require min_length=1, so we ALWAYS produce a non-empty string.
+
+    The fallback uses a content hash (chat_id + text) rather than a
+    timestamp. Multiple gateway instances processing the same inbound
+    will derive the SAME fallback — so the `(customer_phone, message_id)`
+    idempotency in `create-catering-lead` correctly deduplicates. Per
+    PR-CF7 reviewer M8: a timestamp-based fallback would produce
+    different message_ids per instance and break idempotency in the
+    multi-instance deploy edge case.
     """
     for attr in ("message_id", "id", "msg_id"):
         val = getattr(event, attr, None)
@@ -293,7 +299,10 @@ def _extract_message_id(event: Any, chat_id: str) -> str:
             val = getattr(source, attr, None)
             if isinstance(val, str) and val:
                 return val
-    return f"cf_router_f7_{chat_id}_{int(time.time() * 1000)}"
+    # Hash-based fallback (chat_id + text) — deterministic across instances
+    import hashlib
+    digest = hashlib.sha1(f"{chat_id}|{text}".encode("utf-8")).hexdigest()[:12]
+    return f"cf_router_f7_{chat_id}_{digest}"
 
 
 def _schedule_f7_rescue(text: str, chat_id: str, message_id: str,

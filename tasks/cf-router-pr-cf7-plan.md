@@ -10,7 +10,7 @@
 
 Migrate F7 (`catering-dispatcher-watchdog` daemon + `catering-dispatcher-watchdog.service` systemd unit) into the existing `cf-router` Hermes plugin (PR-CF6). Continues the F8/F9 pattern: replace custom watchdog daemons with `pre_gateway_dispatch` hooks. F7's specific wrinkle — a 30s rescue window after the LLM gets first-attempt — is handled by `threading.Timer` inside the plugin process.
 
-**Net change:** -177 LOC + 1 systemd unit + 1 long-running daemon process removed.
+**Net change (final, after PR-review fixes):** roughly -300 LOC of code/tests + 1 systemd unit + 1 long-running daemon process removed. Plan doc adds ~330 LOC of design content (doesn't ship). Original design v1 estimated -177 LOC; the actual delta is close because the audit-log-scan hardening (file-size snapshot + bounded reverse scan + upper-bound timestamp guard) added ~50 LOC vs the planned port, and the new smoke-test plugin-import check added ~30 LOC. Run `git diff --stat main..HEAD` for the authoritative numbers.
 
 ## Hermes-first checklist
 
@@ -224,7 +224,7 @@ The deployed F7 daemon sets `WATCHDOG_TIMEOUT_SECS=30` based on observation that
 
 - **No new measurement.** We have not re-quantified the LLM miss rate post-PR-CF6. The rescue is best-effort safety-net regardless of rate.
 - **Gateway-hang interaction.** docs/hermes-alignment.md Part 2 documents a known "gateway dispatcher reasoning hang" failure mode where the LLM never fires `dispatcher_routed` within ~minutes. In that scenario the F7 plugin would always rescue, potentially flooding the owner with auto-created leads. The deployed F7 daemon has the same exposure today; PR-CF7 does not change it. If operationally this becomes a problem, the next step is rate-limiting `f7_rescue_check` per chat_id (similar to the F9 5-minute Pushover throttle we already have in cf-router/actions.py).
-- **Recommendation:** ship at 30s unchanged; instrument the audit-row counter `dispatcher-accuracy-report --watchdog-rescue-rate` (already exists) over the first 7 days post-deploy; tune if the rescue rate exceeds ~10% of all customer inquiries.
+- **Recommendation:** ship at 30s unchanged; instrument the audit-row counter manually for the first 7 days post-deploy via `grep '"type":"catering_dispatcher_watchdog_fired"' /opt/shift-agent/logs/decisions.log | wc -l` (compared against the same period's `raw_inbound` count from `dispatcher-accuracy-report`); tune if the rescue rate exceeds ~10% of all customer inquiries. Adding a `--watchdog-rescue-rate` mode to `dispatcher-accuracy-report` is a separate follow-up — not currently implemented.
 
 ## Risks
 
@@ -271,21 +271,54 @@ If the F7 plugin path misbehaves on srilu:
 ```bash
 # Option A — Disable F7 plugin path only (keep F8/F9 working)
 # Edit /root/.hermes/plugins/cf-router/hooks.py: set F7_ENABLED = False at top
-# Restart hermes-gateway
+# Restart hermes-gateway. NOTE: This sed-edit will be OVERWRITTEN by the
+# next `shift-agent-deploy.sh` run (rsync replaces /root/.hermes/plugins/
+# from the new tarball). For a deploy that must survive across redeploys,
+# you need a follow-up PR adding `cf_router.f7_enabled` to config.yaml +
+# wiring the hook to read from there. For an immediate hotfix this is
+# sufficient — operators are not deploying mid-incident.
 sudo sed -i 's/^F7_ENABLED = True/F7_ENABLED = False/' /root/.hermes/plugins/cf-router/hooks.py
 sudo systemctl restart hermes-gateway
 
 # Option B — Full restore via backup tag (re-installs the F7 daemon + systemd unit)
+#
+# CRITICAL ORDERING: the operator must run the OLD tarball's
+# shift-agent-deploy.sh, NOT the currently-installed one. The current
+# script (this PR's version) has stop+disable+rm logic that would
+# immediately undo the daemon restoration. Three-step procedure:
+
+# 1. Build the pre-CF7 tarball locally
 git worktree add /tmp/pre-cf7 pre-cf7-cleanup-2026-05-04
 cd /tmp/pre-cf7
 bash tools/build-deploy-tarball.sh --skip-pytest
+
+# 2. Ship + EXTRACT (do NOT run the installed deploy yet)
 scp shift-agent-deploy.tgz root@srilu-vps:/tmp/
-ssh root@srilu-vps 'sudo tar xzf /tmp/shift-agent-deploy.tgz -C /opt/shift-agent/staging-new/ && sudo /usr/local/bin/shift-agent-deploy.sh'
-# Manually re-enable the systemd unit
+ssh root@srilu-vps 'sudo rm -rf /opt/shift-agent/staging-new/* && \
+                    sudo tar xzf /tmp/shift-agent-deploy.tgz -C /opt/shift-agent/staging-new/'
+
+# 3. Replace /usr/local/bin/shift-agent-deploy.sh with the OLD tarball's
+#    version BEFORE running it — this bootstraps the rollback to use the
+#    pre-CF7 deploy logic that does NOT delete the F7 daemon.
+ssh root@srilu-vps 'sudo install -m 755 \
+    /opt/shift-agent/staging-new/src/agents/shift/scripts/shift-agent-deploy.sh \
+    /usr/local/bin/shift-agent-deploy.sh && \
+    sudo /usr/local/bin/shift-agent-deploy.sh'
+
+# 4. Verify: the F7 daemon should now be enabled + active. If install_artifacts()
+#    in the OLD deploy script enables the timer automatically, no manual step;
+#    otherwise:
+ssh root@srilu-vps 'sudo systemctl status catering-dispatcher-watchdog.service'
+# (manual enable only if the OLD install_artifacts didn't auto-enable it)
 ssh root@srilu-vps 'sudo systemctl enable --now catering-dispatcher-watchdog.service'
+
+# 5. Disable cf-router's F7 path so it doesn't dual-fire alongside the daemon
+ssh root@srilu-vps 'sudo sed -i "s/^F7_ENABLED = True/F7_ENABLED = False/" \
+    /root/.hermes/plugins/cf-router/hooks.py && \
+    sudo systemctl restart hermes-gateway'
 ```
 
-Option A is the fast revert (under 30s). Option B is the full structural restore.
+Option A is the fast revert (under 30s) — sufficient for a hotfix when the operator can ship a fix tarball afterward. Option B is the full structural restore for the case where the plugin path itself is structurally broken AND the daemon must be brought back.
 
 ## Out of scope (future work)
 

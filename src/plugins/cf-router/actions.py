@@ -397,37 +397,73 @@ def classify_catering(text: str) -> tuple[bool, list[str]]:
 
 def find_dispatcher_routed_for(chat_id: str, since_ts: float) -> bool:
     """Check decisions.log for a `dispatcher_routed` entry matching chat_id
-    since `since_ts` (with F7_DISPATCHER_LOOKBACK_SEC clock-skew grace).
+    within the rescue window [since_ts - LOOKBACK, since_ts + WATCHDOG + LOOKBACK].
 
-    Mirrors the deployed F7 daemon's same-name function. Pure file read +
-    JSON parse — safe to call from a Timer thread (no asyncio).
+    Mirrors the deployed F7 daemon's same-name function with three reviewer-
+    requested hardenings:
+      1. Upper-bound timestamp guard (M7) — rejects future-dated rows that
+         would silently suppress real rescues. Without this, a manually
+         crafted or clock-drifted row arbitrarily in the future would
+         match.
+      2. File-size snapshot (H2) — bounds the read to bytes that existed
+         at scan-start. safe_io.ndjson_append doesn't acquire a read lock,
+         so concurrent appends could otherwise produce torn-line reads
+         that yield false negatives.
+      3. Reverse-iterate from end-of-file (M10) — old daemon scanned from
+         line 1 every call; on a multi-MB log this is O(N) per rescue.
+         The relevant entries are always recent (within ~30s), so we read
+         the last ~256 KiB in chronological order. Bounded by file size.
+
+    Pure file read + JSON parse — safe to call from a Timer thread.
     """
     if not LOG_PATH.exists():
         return False
     chat_lid_only = chat_id.split("@", 1)[0] if "@" in chat_id else chat_id
+    upper_bound_ts = since_ts + F7_WATCHDOG_TIMEOUT_SEC + F7_DISPATCHER_LOOKBACK_SEC
+    lower_bound_ts = since_ts - F7_DISPATCHER_LOOKBACK_SEC
+    # Read window: capped at 256 KiB from end-of-file, plenty for ~30s
+    # of typical traffic and small enough to keep Timer-thread time bounded.
+    READ_WINDOW_BYTES = 256 * 1024
     try:
-        with LOG_PATH.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or "dispatcher_routed" not in line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if entry.get("type") != "dispatcher_routed":
-                    continue
-                ts_str = entry.get("ts", "")
-                try:
-                    ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
-                except (ValueError, AttributeError):
-                    continue
-                if ts < since_ts - F7_DISPATCHER_LOOKBACK_SEC:
-                    continue
-                sender_lid = entry.get("sender_lid") or ""
-                sender_phone = entry.get("sender_phone") or ""
-                if chat_lid_only in sender_lid or chat_lid_only in (sender_phone or "").lstrip("+"):
-                    return True
+        size = LOG_PATH.stat().st_size
+        # H2 — pin the snapshot. Concurrent appends after this point are
+        # ignored, so we never read a partial line at the tail.
+        if size == 0:
+            return False
+        start = max(0, size - READ_WINDOW_BYTES)
+        with LOG_PATH.open("rb") as f:
+            f.seek(start)
+            buf = f.read(size - start)
+        # Drop the leading partial line if we did a mid-file seek (it may
+        # have started inside a previous record).
+        if start > 0:
+            nl = buf.find(b"\n")
+            if nl >= 0:
+                buf = buf[nl + 1:]
+        for raw_line in buf.split(b"\n"):
+            line = raw_line.strip()
+            if not line or b"dispatcher_routed" not in line:
+                continue
+            try:
+                entry = json.loads(line.decode("utf-8", errors="replace"))
+            except json.JSONDecodeError:
+                continue
+            if entry.get("type") != "dispatcher_routed":
+                continue
+            ts_str = entry.get("ts", "")
+            try:
+                ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
+            except (ValueError, AttributeError):
+                continue
+            if ts < lower_bound_ts:
+                continue
+            if ts > upper_bound_ts:
+                # M7 — silently-future row; reject as out of window
+                continue
+            sender_lid = entry.get("sender_lid") or ""
+            sender_phone = entry.get("sender_phone") or ""
+            if chat_lid_only in sender_lid or chat_lid_only in (sender_phone or "").lstrip("+"):
+                return True
     except OSError:
         pass
     return False
