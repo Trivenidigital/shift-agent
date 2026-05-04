@@ -997,6 +997,27 @@ class SalesTaxConfig(BaseModel):
         return sorted(set(v), reverse=True)
 
 
+# Agent #19 — Equipment & Maintenance (Tier-2 scaffold; PR-Agent19-v0.1 2026-05-04)
+# Niche, low frequency — mostly a calendar with structured intake when things
+# break. v0.1 ships scaffold only — full per-vendor integration deferred to
+# v0.2 (gated on customer's actual equipment + vendor list). See portfolio.md
+# Agent 19 spec.
+class EquipmentMaintenanceConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    advance_warning_days: list[int] = Field(default_factory=lambda: [30, 14, 7, 3, 1])
+    auto_route_to_vendor: bool = False  # v0.2; v0.1 always owner-mediated
+
+    @field_validator("advance_warning_days")
+    @classmethod
+    def _sorted_unique_positive(cls, v: list[int]) -> list[int]:
+        if not v:
+            raise ValueError("advance_warning_days must not be empty")
+        if any(d <= 0 for d in v):
+            raise ValueError("advance_warning_days values must be positive")
+        return sorted(set(v), reverse=True)
+
+
 # Agent #22 — P&L Anomaly Detective (Tier-2 scaffold; PR-Agent22-v0.1 2026-05-04)
 # Replaces retired Agent #17 Unit Economics. v0.1 ships scaffold only —
 # anomaly-detection logic + POS integration deferred to v0.2 (gated on
@@ -1228,6 +1249,7 @@ class Config(BaseModel):
     sales_tax: SalesTaxConfig = Field(default_factory=SalesTaxConfig)
     expense_bookkeeper: ExpenseBookkeeperConfig = Field(default_factory=ExpenseBookkeeperConfig)
     pnl_anomaly: PnlAnomalyConfig = Field(default_factory=PnlAnomalyConfig)
+    equipment_maintenance: EquipmentMaintenanceConfig = Field(default_factory=EquipmentMaintenanceConfig)
 
     def tz(self) -> ZoneInfo:
         return ZoneInfo(self.customer.timezone)
@@ -2523,6 +2545,29 @@ class PnlAnomalyDeclined(_BaseEntry):
     reason: Literal["agent_disabled", "no_pos_configured"]
 
 
+# ─────────────────────────────────────────────────────────────────
+# Equipment & Maintenance audit variants (Agent #19 — PR-Agent19-v0.1 2026-05-04)
+# v0.1 scaffold: full agent v0.2 deferred until customer equipment list onboarded.
+# ─────────────────────────────────────────────────────────────────
+
+
+class EquipmentIssueLogged(_BaseEntry):
+    """Staff reported equipment issue; structured intake (v0.2 emitter)."""
+    type: Literal["equipment_issue_logged"]
+    equipment_id: str = Field(min_length=1, max_length=80)
+    location_id: Optional[str] = Field(default=None, max_length=40)
+    issue_category: Literal["broken", "leaking", "noisy", "preventive_due", "other"]
+    severity: Literal["low", "medium", "high", "critical"]
+    detail: str = Field(default="", max_length=500)
+
+
+class EquipmentMaintenanceDeclined(_BaseEntry):
+    """SKILL invoked but cfg.equipment_maintenance.enabled = False."""
+    type: Literal["equipment_maintenance_declined"]
+    requester_role: Literal["owner", "employee", "unknown"]
+    reason: Literal["agent_disabled"]
+
+
 class InterLocationTransferProposed(_BaseEntry):
     """Agent #3 proposed an employee transfer between locations to cover a gap."""
     type: Literal["inter_location_transfer_proposed"]
@@ -2636,6 +2681,9 @@ LogEntry = Annotated[
         # PR-Agent22-v0.1 2026-05-04 — P&L Anomaly Detective scaffold
         Annotated[PnlAnomalyDetected, Tag("pnl_anomaly_detected")],
         Annotated[PnlAnomalyDeclined, Tag("pnl_anomaly_declined")],
+        # PR-Agent19-v0.1 2026-05-04 — Equipment & Maintenance scaffold
+        Annotated[EquipmentIssueLogged, Tag("equipment_issue_logged")],
+        Annotated[EquipmentMaintenanceDeclined, Tag("equipment_maintenance_declined")],
         # Agent #2 Catering Lead
         Annotated[CateringLeadCreated, Tag("catering_lead_created")],
         Annotated[CateringLeadStatusChange, Tag("catering_lead_status_change")],
@@ -2788,6 +2836,9 @@ __all__ = [
     "ComplianceReminderDeferred", "ComplianceItemMarkedDone",
     # PR-Agent22-v0.1 — P&L Anomaly Detective
     "PnlAnomalyConfig", "PnlAnomalyDetected", "PnlAnomalyDeclined",
+    # PR-Agent19-v0.1 — Equipment & Maintenance scaffold
+    "EquipmentMaintenanceConfig", "EquipmentIssueLogged",
+    "EquipmentMaintenanceDeclined",
     "CateringLeadCreated", "CateringLeadStatusChange", "CateringLeadRejected", "CateringQuoteDrafted",
     "CateringOwnerApprovalRequested", "CateringOwnerDecision", "CateringQuoteSent",
     # v0.3 catering audit classes

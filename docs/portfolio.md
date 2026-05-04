@@ -882,6 +882,14 @@ Agents 8 (Receiving & QA), 19 (Equipment & Maintenance), **23** (Order Status & 
 - 1 Tier-promoted, scaffold pending: #11 Festival & Peak Prep (was Tier-3 deferred)
 - 5 Paper specs only (backlog): #8, #19, #23, #24, #25
 
+**Implementation status update — 2026-05-04:**
+- **Agent #3 Multi-Location Coordinator v0.1** SHIPPED + DEPLOYED (PR #62) — customer closest-store query via productivity/maps + owner Phase 1 query.
+- **Agent #13 Compliance Calendar v0.1** SHIPPED + DEPLOYED (PR #63 + hotfix #64) — daily reminder cron with 3-layer idempotency + bounded catch-up + owner mark-done SKILL.
+- **Agent #21 Expense Bookkeeper** scaffold already shipped earlier; QBO write-API integration DEFERRED pending QBO sandbox creds (operator action; see `tasks/overnight-2026-05-04-closeout.md`).
+- **Agent #22 P&L Anomaly Detective** Tier-2 SCAFFOLD shipped (PR #65) — full anomaly logic deferred to v0.2 gated on customer POS choice.
+- **Agent #19 Equipment Maintenance** Tier-2 SCAFFOLD shipped (this PR) — full per-vendor logic deferred to v0.2.
+- **Agents #8 / #23 / #24 / #25** remain BACKLOG per their own portfolio entries (build only on customer demand). Honest Hermes-first defer documented in `tasks/overnight-2026-05-04-closeout.md`.
+
 **Portal:** `http://46.62.206.192:8080/portal/` reflects this consolidated view as of 2026-04-29.
 
 ---
