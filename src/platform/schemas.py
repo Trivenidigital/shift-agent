@@ -787,6 +787,18 @@ class LocationEntry(BaseModel):
     owner_jid: str = ""                        # optional per-location owner (defaults to global)
     address_short: str = ""                    # e.g. "Jacksonville, FL"
 
+    # ───── PR-Agent3-v0.1 (2026-05-04) — geo + delivery-radius fields ─────
+    # All optional / defaulted so existing customer configs that don't
+    # populate them continue to validate. Used by closest-location.py
+    # (productivity/maps OSRM wrapper) and reserved for v0.2 service-area
+    # validation. service_radius_minutes is unused in v0.1; kept now so
+    # the v0.2 PR doesn't need a second migration.
+    latitude: Optional[float] = Field(default=None, ge=-90.0, le=90.0)
+    longitude: Optional[float] = Field(default=None, ge=-180.0, le=180.0)
+    phone: Optional[E164Phone] = None
+    hours: Optional[str] = Field(default=None, max_length=200)
+    service_radius_minutes: float = Field(default=30.0, ge=0.0, le=240.0)
+
     @field_validator("timezone")
     @classmethod
     def _valid_tz(cls, v: str) -> str:
@@ -2307,6 +2319,28 @@ class CrossLocationQuery(_BaseEntry):
     answer_summary: str = ""
 
 
+class MultiLocationClosestLookup(_BaseEntry):
+    """PR-Agent3-v0.1: a customer (sender_role=unknown) asked for the
+    nearest store; closest-location.py returned top-N by drive minutes.
+
+    Address is NOT stored (PII concern — would land in plain-text
+    decisions.log). Only operationally relevant fields persisted:
+    chat_id, customer geo (only when supplied as lat/lon, NOT geocoded
+    from address text), nearest location id, drive minutes, n returned,
+    and the routing source ('osrm' for live, 'haversine_fallback' for
+    OSRM-down degraded mode, 'not_configured' when locations is empty).
+    """
+    type: Literal["multi_location_closest_lookup"]
+    chat_id: str = Field(min_length=1, max_length=200)
+    customer_lat: Optional[float] = None
+    customer_lon: Optional[float] = None
+    nearest_location_id: Optional[str] = Field(default=None, max_length=40)
+    nearest_drive_minutes: Optional[float] = None
+    n_locations_returned: int = Field(ge=0, le=50)
+    source: Literal["osrm", "haversine_fallback", "not_configured"] = "osrm"
+    detail: str = Field(default="", max_length=2000)
+
+
 class InterLocationTransferProposed(_BaseEntry):
     """Agent #3 proposed an employee transfer between locations to cover a gap."""
     type: Literal["inter_location_transfer_proposed"]
@@ -2408,6 +2442,8 @@ LogEntry = Annotated[
         # Agent #3 Multi-Location Coordinator
         Annotated[CrossLocationQuery, Tag("cross_location_query")],
         Annotated[InterLocationTransferProposed, Tag("inter_location_transfer_proposed")],
+        # PR-Agent3-v0.1 2026-05-04
+        Annotated[MultiLocationClosestLookup, Tag("multi_location_closest_lookup")],
         # Agent #2 Catering Lead
         Annotated[CateringLeadCreated, Tag("catering_lead_created")],
         Annotated[CateringLeadStatusChange, Tag("catering_lead_status_change")],
@@ -2551,6 +2587,8 @@ __all__ = [
     "BriefAttempted", "BriefSent", "BriefSendFailed", "BriefSkipped",
     "EodSnapshot", "EodPushoverSent", "EodSkipped",
     "CrossLocationQuery", "InterLocationTransferProposed",
+    # PR-Agent3-v0.1 2026-05-04
+    "MultiLocationClosestLookup",
     "CateringLeadCreated", "CateringLeadStatusChange", "CateringLeadRejected", "CateringQuoteDrafted",
     "CateringOwnerApprovalRequested", "CateringOwnerDecision", "CateringQuoteSent",
     # v0.3 catering audit classes

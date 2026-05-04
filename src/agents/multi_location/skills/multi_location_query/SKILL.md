@@ -32,20 +32,44 @@ restart the agent."
 Log a `cross_location_query` entry with `location_ids_resolved=[]` and
 `answer_summary="not_configured"`. Exit cleanly.
 
-**Phase 1 (v0.2):** With locations configured, resolve query against location list and answer from per-location roster + schedule files.
+**Phase 1 (PR-Agent3-v0.1, 2026-05-04):** With locations configured, resolve query against location list and answer from per-location roster + schedule files. Owner can ALSO ask "nearest store?" — invokes `closest-location.py` (same as customer-facing `customer_location_query` SKILL). Note: each `multi_location.locations[]` entry must have `latitude`/`longitude` populated for the closest-store path to work; locations without coordinates are skipped by the script (no per-location auto-geocoding in v0.1).
 
 **Phase 2 (v0.3):** Inter-location coverage transfers via `propose_inter_location_transfer` (separate skill, not this one).
 
-## Decision flow
+## Decision flow (Phase 1)
 
 ```
 identify-sender → role=owner ?
   no  → return to dispatch_shift_agent (this skill is owner-only)
   yes → check cfg.multi_location.locations
         empty  → reply "not configured", log, exit
-        non-empty → parse query for location names → resolve to ids
-                    → read per-location data → answer → log → exit
+        non-empty:
+          → if text matches store-locator regex (nearest|closest store/location)
+              → invoke closest-location.py with owner's address (or ask)
+              → reply with top-3 (no '⚕ *Multi-Location Agent*' prefix needed
+                in self-chat)
+              → log multi_location_closest_lookup
+              → exit
+          → else (cross-location staff/inventory/schedule query):
+              → parse query for location names → resolve to ids via alias logic
+              → read per-location data:
+                  → if roster.json employees lack `location_id` field →
+                    DEGRADED MODE: return ALL employees with explicit caveat:
+                    "Multi-location data partitioning not yet configured for
+                    roster — showing all employees regardless of location.
+                    Add `location_id` to each roster entry to filter."
+                  → if employees have `location_id` → filter by resolved location
+              → answer → log cross_location_query → exit
 ```
+
+## Alias resolution (Phase 1)
+
+For text like "Houston" / "the Dallas store" / "loc_hou_01":
+
+1. Exact match against `cfg.multi_location.locations[].id` (case-sensitive)
+2. Substring match against `cfg.multi_location.locations[].name` (case-insensitive)
+3. If 0 matches → reply with the configured-locations list and ask which
+4. If >1 matches → reply with the candidates and ask which
 
 ## Output format (when locations configured)
 

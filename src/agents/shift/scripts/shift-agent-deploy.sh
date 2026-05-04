@@ -55,6 +55,16 @@ install_artifacts() {
     install -m 644 src/agents/shift/templates/* /opt/shift-agent/templates/
 
     # Skills → Hermes — Shift-Agent SKILL files
+    #
+    # ORDERING INVARIANT (DO NOT REORDER WITHOUT CARE):
+    # This `--delete` rsync MUST run BEFORE all per-agent skill rsyncs
+    # below (multi_location, catering, daily_brief, eod_reconcile,
+    # tier-2 stubs, expense_bookkeeper). Per-agent rsyncs are ADDITIVE
+    # (no `--delete`) and deposit their SKILL.md files INTO the same
+    # /root/.hermes/skills/ directory. If you move this Shift rsync to
+    # run AFTER the per-agent rsyncs (e.g. as a "cleanup pass"),
+    # `--delete` will silently wipe every per-agent skill that was just
+    # installed, leaving only Shift's own. Catastrophic + silent.
     rsync -a --delete src/agents/shift/skills/ /root/.hermes/skills/
     chown -R shift-agent:shift-agent /root/.hermes/skills/
 
@@ -126,10 +136,17 @@ install_artifacts() {
         install -m 644 src/agents/eod_reconcile/systemd/*.timer /etc/systemd/system/
     fi
 
-    # Multi-Location Coordinator (Agent #3) — SKILL-only in v0.1
+    # Multi-Location Coordinator (Agent #3)
+    # PR-Agent3-v0.1 (2026-05-04): SKILLs include the new
+    # customer_location_query (customer-facing); Phase 1 extension to
+    # multi_location_query (owner-facing); plus closest-location.py
+    # script that wraps the bundled productivity/maps skill.
     if [ -d src/agents/multi_location/skills ]; then
         rsync -a src/agents/multi_location/skills/ /root/.hermes/skills/
         chown -R shift-agent:shift-agent /root/.hermes/skills/
+    fi
+    if compgen -G "src/agents/multi_location/scripts/*" > /dev/null; then
+        install -m 755 src/agents/multi_location/scripts/* /usr/local/bin/
     fi
 
     # Catering Lead (Agent #2)
