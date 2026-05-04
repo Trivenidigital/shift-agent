@@ -186,9 +186,10 @@ class TestComplianceConfig:
     def test_defaults(self):
         c = schemas.ComplianceConfig()
         assert c.enabled is False
-        assert c.daily_brief_section_enabled is False
         assert c.max_deferral_days == 7
         assert c.advance_warning_days == [30, 14, 7, 3, 1]
+        # daily_brief_section_enabled removed in PR-review B1 fix; will land
+        # with the actual _aggregate_compliance integration in follow-up PR.
 
     def test_max_deferral_days_bounds(self):
         with pytest.raises(ValidationError):
@@ -369,12 +370,12 @@ class TestLogEntryDispatch:
 # ============================================================================
 
 class TestBriefSectionExtension:
-    def test_compliance_value_accepted(self):
-        # Must validate as part of cfg.daily_brief.sections list
-        c = schemas.DailyBriefConfig(sections=["yesterday", "compliance"])
-        assert "compliance" in c.sections
+    """PR-Agent13-v0.1 PR-review B1 fix: BriefSection extension reverted from
+    this PR (was dead schema with no consumer). Will land in follow-up PR
+    that ships the actual _aggregate_compliance helper in send-daily-brief.
+    Tests removed; these stubs document the deferral.
+    """
 
     def test_default_unchanged(self):
-        # Forward-compat: default does NOT include "compliance"
         c = schemas.DailyBriefConfig()
-        assert "compliance" not in c.sections
+        assert c.sections == ["yesterday", "today_outlook", "alerts"]

@@ -51,6 +51,13 @@ ITEMS_PATH = Path(os.environ.get("SHIFT_AGENT_COMPLIANCE_ITEMS_PATH",
                                   "/opt/shift-agent/state/compliance-items.json"))
 SENTINEL_PATH = Path(os.environ.get("SHIFT_AGENT_COMPLIANCE_SENTINEL_PATH",
                                      "/opt/shift-agent/state/compliance-last-sent.json"))
+# Sentinel lock — MUST match the path used by check-compliance-deadlines.py
+# (Reviewer 1 H1 fix: previously mark-done used items.json.lock for sentinel
+# mutation while check-deadlines used compliance-check.json.lock; different
+# locks meant last-writer-wins on sentinel race. Both scripts now share
+# compliance-check.json.lock for sentinel I/O.)
+SENTINEL_LOCK_PATH = Path(os.environ.get("SHIFT_AGENT_COMPLIANCE_LOCK_PATH",
+                                          "/opt/shift-agent/state/compliance-check.json.lock"))
 DECISIONS_LOG = Path(os.environ.get("SHIFT_AGENT_DECISIONS_LOG_PATH",
                                      "/opt/shift-agent/logs/decisions.log"))
 
@@ -108,18 +115,30 @@ def main() -> int:
         if not args.dry_run:
             atomic_write_json(ITEMS_PATH, f.model_dump(mode="json"))
 
-        # Sentinel GC: drop all <item_id>:* keys
+        # Sentinel GC: drop all <item_id>:* keys.
+        # Reviewer 1 H1 + Reviewer 2 H1 fix: sentinel mutation uses the SAME
+        # lock as check-compliance-deadlines.py (compliance-check.json.lock,
+        # NOT items.json.lock); also re-construct ComplianceLastSentFile via
+        # Pydantic before save so the model_validator re-runs against the
+        # post-mutation dict (in-place dict mutation bypasses model_validator).
         sentinel_keys_pruned = 0
         if SENTINEL_PATH.exists() and not args.dry_run:
             try:
-                sentinel, _ = load_model(SENTINEL_PATH, ComplianceLastSentFile)
-                prefix = f"{args.item_id}:"
-                to_drop = [k for k in sentinel.last_sent if k.startswith(prefix)]
-                for k in to_drop:
-                    del sentinel.last_sent[k]
-                if to_drop:
-                    atomic_write_json(SENTINEL_PATH, sentinel.model_dump(mode="json"))
-                sentinel_keys_pruned = len(to_drop)
+                with FileLock(SENTINEL_LOCK_PATH):
+                    sentinel, _ = load_model(SENTINEL_PATH, ComplianceLastSentFile)
+                    prefix = f"{args.item_id}:"
+                    to_drop = [k for k in sentinel.last_sent if k.startswith(prefix)]
+                    if to_drop:
+                        new_last_sent = {
+                            k: v for k, v in sentinel.last_sent.items()
+                            if not k.startswith(prefix)
+                        }
+                        # Re-construct (NOT in-place mutate) so model_validator re-runs
+                        new_sentinel = ComplianceLastSentFile(
+                            schema_version=1, last_sent=new_last_sent,
+                        )
+                        atomic_write_json(SENTINEL_PATH, new_sentinel.model_dump(mode="json"))
+                    sentinel_keys_pruned = len(to_drop)
             except Exception as e:
                 _emit_invariant("compliance_sentinel_prune_failed",
                                 f"could not prune sentinel for {args.item_id}: {e}")

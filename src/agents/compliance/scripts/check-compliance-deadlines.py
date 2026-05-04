@@ -148,8 +148,15 @@ def _load_sentinel() -> ComplianceLastSentFile:
 
 
 def _save_sentinel(s: ComplianceLastSentFile) -> None:
+    """Save sentinel. Re-constructs the model first so model_validator re-runs
+    against the (possibly in-place-mutated) last_sent dict — Reviewer 2 H1 fix.
+    """
     SENTINEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(SENTINEL_PATH, s.model_dump(mode="json"))
+    # Re-construct via Pydantic to re-fire the key-format validator.
+    revalidated = ComplianceLastSentFile(
+        schema_version=s.schema_version, last_sent=dict(s.last_sent),
+    )
+    atomic_write_json(SENTINEL_PATH, revalidated.model_dump(mode="json"))
 
 
 def _prune_sentinel(
@@ -261,7 +268,15 @@ def _build_candidates(
     gates = sorted(set(advance_warning_days), reverse=True) + [0]
     today_str = today.isoformat()
     for item in items:
+        # Reviewer 1 H2 fix: if item is overdue (renewal_date < today), skip
+        # the positive gates including gate=0 — the negative-gate "OVERDUE
+        # by N days" path covers it. Otherwise owner gets two messages on
+        # day-after-renewal: "DUE TODAY" (gate=0 catchup) AND "OVERDUE by 1".
+        days_overdue_check = (today - item.renewal_date).days
+        skip_positive_gates = days_overdue_check > 0
         for gate in gates:
+            if skip_positive_gates and gate >= 0:
+                continue
             ideal_fire = item.renewal_date - timedelta(days=gate)
             days_late = (today - ideal_fire).days
             if days_late < 0:

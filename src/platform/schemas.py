@@ -410,11 +410,7 @@ class OperationsConfig(BaseModel):
 
 
 # Daily Brief sub-config + section alias (Agent #4)
-# PR-Agent13-v0.1 2026-05-04: "compliance" added for Agent #13 integration.
-# Forward-compat: existing logs without "compliance" in sections_included
-# parse fine; old VPSes upgrading do NOT auto-render compliance section
-# (gated by cfg.daily_brief.sections AND cfg.compliance.daily_brief_section_enabled).
-BriefSection = Literal["yesterday", "today_outlook", "alerts", "compliance"]
+BriefSection = Literal["yesterday", "today_outlook", "alerts"]
 
 
 class DailyBriefConfig(BaseModel):
@@ -887,10 +883,6 @@ class ComplianceConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool = False
     advance_warning_days: list[int] = Field(default_factory=lambda: [30, 14, 7, 3, 1])
-    # PR-Agent13-v0.1 2026-05-04: runtime-render gate for daily-brief integration.
-    # Independent of cfg.daily_brief.sections — operator must enable BOTH for
-    # the compliance section to render in the morning brief.
-    daily_brief_section_enabled: bool = False
     # Bounded catchup window for legal-consequence work. If a gate's ideal
     # fire date passed by more than this many days, emit ComplianceReminderDeferred
     # + Pushover and skip rather than spam an outdated reminder.
@@ -911,7 +903,15 @@ class ComplianceConfig(BaseModel):
 # + mark-done-mutated). Lives outside cfg.compliance because safe_io has no
 # atomic_write_yaml — JSON is the only safely-mutable on-disk format.
 class ComplianceItem(BaseModel):
-    """Single recurring compliance deadline."""
+    """Single recurring compliance deadline.
+
+    id pattern note (PR-Agent13-v0.1 review H2 — 2026-05-04): underscore-only
+    (no hyphen, no colon). The colon constraint is load-bearing — sentinel
+    keys are formatted `<item_id>:<gate_days>` (see ComplianceLastSentFile),
+    so id values containing `:` would corrupt key parsing. Hyphen forbidden
+    by convention only (compliance items are operator-typed, not slug-style;
+    underscore reads more naturally for "health_inspect_houston").
+    """
     model_config = ConfigDict(extra="forbid")
     id: str = Field(min_length=1, max_length=40, pattern=r"^[a-z0-9_]+$")
     name: str = Field(min_length=1, max_length=100)
@@ -2419,7 +2419,7 @@ class ComplianceReminderAttempted(_BaseEntry):
     item_id: str = Field(min_length=1, max_length=40)
     item_name: str = Field(min_length=1, max_length=100)  # snapshot for forensics
     days_until_renewal: int  # negative = overdue
-    gate_days: int  # 30/14/7/3/1/0/-N — self-describing (matches advance_warning_days values + overdue)
+    gate_days: int = Field(ge=-3650, le=3650)  # 30/14/7/3/1/0/-N self-describing; bounded to match recurrence_days ceiling (Reviewer H3)
     attempt_id: str = Field(min_length=1)  # uuid4
     catchup_for_missed_gate: Optional[int] = None  # gate_days value being caught up
 
@@ -2429,7 +2429,7 @@ class ComplianceReminderSent(_BaseEntry):
     type: Literal["compliance_reminder_sent"]
     item_id: str = Field(min_length=1, max_length=40)
     days_until_renewal: int
-    gate_days: int
+    gate_days: int = Field(ge=-3650, le=3650)
     attempt_id: str = Field(min_length=1)  # links to ComplianceReminderAttempted
     outbound_message_id: str = Field(min_length=1)
 
@@ -2439,7 +2439,7 @@ class ComplianceReminderFailed(_BaseEntry):
     type: Literal["compliance_reminder_failed"]
     item_id: str = Field(min_length=1, max_length=40)
     days_until_renewal: int
-    gate_days: int
+    gate_days: int = Field(ge=-3650, le=3650)
     attempt_id: str = Field(min_length=1)
     error: str  # no length cap (matches OutboundSendFailed pattern)
     retry_count: int = Field(ge=0)
@@ -2451,7 +2451,7 @@ class ComplianceReminderSkipped(_BaseEntry):
     next tick will fire."""
     type: Literal["compliance_reminder_skipped"]
     item_id: str = Field(min_length=1, max_length=40)
-    gate_days: int
+    gate_days: int = Field(ge=-3650, le=3650)
     reason: Literal["orphan_attempted_in_window"]
     orphan_attempt_id: str = Field(min_length=1)
 
@@ -2463,7 +2463,7 @@ class ComplianceReminderDeferred(_BaseEntry):
     type: Literal["compliance_reminder_deferred"]
     item_id: str = Field(min_length=1, max_length=40)
     days_until_renewal: int
-    gate_days: int
+    gate_days: int = Field(ge=-3650, le=3650)
     days_since_ideal_fire: int  # how late the gate was
     operator_pushover_sent: bool  # whether the Pushover delivery succeeded
 
