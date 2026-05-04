@@ -37,6 +37,8 @@ from pathlib import Path
 sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
 
+import yaml  # noqa: E402
+
 from safe_io import (  # noqa: E402
     FileLock, atomic_write_json, customer_now, load_model, assert_local_disk,
 )
@@ -80,7 +82,14 @@ def main() -> int:
     args = ap.parse_args()
 
     assert_local_disk(ITEMS_PATH.parent)
-    cfg, _ = load_model(CONFIG_PATH, Config)
+    # HOTFIX 2026-05-04: yaml.safe_load not load_model (config.yaml is YAML
+    # not JSON; load_model corrupts the file on parse failure).
+    try:
+        cfg_dict = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+    except OSError as e:
+        sys.stderr.write(f"config not found at {CONFIG_PATH}: {e}\n")
+        return 2
+    cfg = Config.model_validate(cfg_dict)
     items_lock = Path(str(ITEMS_PATH) + ".lock")
 
     with FileLock(items_lock):
