@@ -149,6 +149,12 @@ install_artifacts() {
         install -m 755 src/agents/multi_location/scripts/* /usr/local/bin/
     fi
 
+    # P&L Anomaly Detective (Agent #22) — scaffold-only v0.1
+    if [ -d src/agents/pnl_anomaly/skills ]; then
+        rsync -a src/agents/pnl_anomaly/skills/ /root/.hermes/skills/
+        chown -R shift-agent:shift-agent /root/.hermes/skills/
+    fi
+
     # Compliance Calendar (Agent #13)
     # PR-Agent13-v0.1 (2026-05-04): SKILLs include compliance_owner_query;
     # scripts include check-compliance-deadlines.py + mark-compliance-item-done.py;
