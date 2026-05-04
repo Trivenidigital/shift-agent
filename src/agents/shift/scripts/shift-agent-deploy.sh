@@ -258,6 +258,19 @@ case "$ACTION" in
         # pre-CF5 tarball compatibility). Fail-closed otherwise.
         echo "=== state-file migration check ==="
         MIGRATOR="$STAGING/tools/migrate-state-files.py"
+        # Invoke with the Hermes venv Python so pydantic + safe_io + schemas
+        # imports resolve. The migrator's #!/usr/bin/env python3 shebang
+        # would land on system Python which lacks pydantic.
+        VENV_PY="/usr/local/lib/hermes-agent/venv/bin/python"
+        # Guard against missing Hermes venv — without this, every Python
+        # invocation below dies with "bash: ...: No such file or directory"
+        # instead of a clear diagnostic. Fail-closed, never silently skip.
+        if [ ! -x "$VENV_PY" ]; then
+            echo "ERROR: Hermes venv Python missing or not executable at $VENV_PY" >&2
+            echo "  The Hermes-agent install is incomplete — verify /usr/local/lib/hermes-agent/venv/" >&2
+            echo "  No state change has been made; refusing to continue deploy." >&2
+            exit 1
+        fi
         if [ ! -x "$MIGRATOR" ]; then
             if [ -f "$MIGRATOR" ]; then
                 echo "WARN: migrator exists but is not executable — permission problem? Skipping." >&2
@@ -265,7 +278,7 @@ case "$ACTION" in
                 echo "WARN: state-file migrator absent at $MIGRATOR — skipping (tarball is pre-CF5 vintage)" >&2
             fi
         else
-            "$MIGRATOR" --check
+            "$VENV_PY" "$MIGRATOR" --check
             CHECK_RC=$?
             case "$CHECK_RC" in
                 0)
@@ -273,7 +286,7 @@ case "$ACTION" in
                     ;;
                 1)
                     # Migrations needed (or malformed override) — try to apply
-                    if ! "$MIGRATOR" --apply; then
+                    if ! "$VENV_PY" "$MIGRATOR" --apply; then
                         echo "ERROR: state-file migration apply failed — refusing to install." >&2
                         echo "  See decisions.log for state_file_migration_failed audit row + runbook" >&2
                         echo "  in tasks/runbook-state-migration.md." >&2
@@ -387,8 +400,10 @@ case "$ACTION" in
         # Run the symbol-import checks against the just-installed binary (still
         # old service) — failure path rolls back without touching live traffic.
         # PR-D1 R3-H-Gate1: chained check-audit-helpers-symbols.
-        if ! /usr/local/bin/check-safe-io-symbols > /dev/null \
-              || ! /usr/local/bin/check-audit-helpers-symbols > /dev/null; then
+        # Both gate scripts use #!/usr/bin/env python3 (system Python, no
+        # pydantic). Invoke through the Hermes venv so schemas import works.
+        if ! "$VENV_PY" /usr/local/bin/check-safe-io-symbols > /dev/null \
+              || ! "$VENV_PY" /usr/local/bin/check-audit-helpers-symbols > /dev/null; then
             echo "FAIL: pre-restart import gate — refusing to restart hermes-gateway" >&2
             if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
                 "$0" rollback "$PREV_TAG"

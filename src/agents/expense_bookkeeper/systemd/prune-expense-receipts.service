@@ -1,6 +1,11 @@
 [Unit]
 Description=Agent #21 Expense Bookkeeper — prune expired receipts + expire stale leads
 After=network.target
+# Agent #21 ships disabled-default and uses an optional Expense-Bookkeeper-
+# specific venv at /opt/shift-agent/venv/. On VPS where Agent #21 is not
+# enabled (no venv created), the service silently no-ops on activation
+# instead of failing systemd-analyze verify.
+ConditionPathIsExecutable=/opt/shift-agent/venv/bin/python
 
 [Service]
 Type=oneshot

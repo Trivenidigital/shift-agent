@@ -58,9 +58,16 @@ PINNED_BRIDGE_SHA=$(_read_pin BRIDGE_POST_PATCH_SHA256)
 # 1. Hermes commit hash check (fail-closed, override-able)
 # ─────────────────────────────────────────────────────────────────
 
-# Hermes is a git checkout owned by shift-agent — read as that user to avoid
-# git's safe.directory protection.
-CURRENT_COMMIT=$(sudo -u shift-agent git -C "$H" rev-parse HEAD 2>/dev/null || echo "unknown")
+# Hermes is a git checkout. On srilu /root/.hermes/hermes-agent is a symlink
+# to /usr/local/lib/hermes-agent with a root-owned .git/, which trips git's
+# "dubious ownership" check when shift-agent runs git -C. Pass safe.directory
+# inline so any owner mapping works without per-VPS operator config. We also
+# resolve the symlink with `readlink -f` so safe.directory matches the real
+# path git complains about.
+H_REAL=$(readlink -f "$H" 2>/dev/null || echo "$H")
+CURRENT_COMMIT=$(sudo -u shift-agent git -c "safe.directory=$H_REAL" -C "$H" rev-parse HEAD 2>/dev/null \
+    || git -c "safe.directory=$H_REAL" -C "$H" rev-parse HEAD 2>/dev/null \
+    || echo "unknown")
 
 if [ "$CURRENT_COMMIT" != "$PINNED_COMMIT" ]; then
     if [ -n "${HERMES_PIN_OVERRIDE:-}" ]; then
@@ -166,9 +173,17 @@ for f in "$RUN" "$WA" "$BR"; do
     grep -q "END shift-agent-sender-id" "$f" || fail "$f missing END shift-agent-sender-id marker"
 done
 
-# Bridge.js also has the template-bypass patch (added by tools/patch-bridge-filter.py).
-grep -q "BEGIN shift-agent-template-bypass" "$BR" || fail "$BR missing BEGIN shift-agent-template-bypass marker"
-grep -q "END shift-agent-template-bypass" "$BR" || fail "$BR missing END shift-agent-template-bypass marker"
+# Bridge.js template-bypass patch (added by tools/patch-bridge-filter.py).
+# OBSOLETE in Hermes >= 0.12.0: the upstream chatter filter that this
+# patch extended was removed in 0.12.0, so the anchor `owner_bypass` no
+# longer exists in bridge.js and the patch is a no-op. We skip the marker
+# check when running against 0.12.0+ to avoid a false-fail; the deploy
+# tarball still ships the patch script so older Hermes installs (0.11.x
+# rollback targets) keep working.
+if grep -qE "owner_bypass|FILTER_OWNER_JID" "$BR" 2>/dev/null; then
+    grep -q "BEGIN shift-agent-template-bypass" "$BR" || fail "$BR missing BEGIN shift-agent-template-bypass marker (Hermes <0.12.0 chatter filter present)"
+    grep -q "END shift-agent-template-bypass" "$BR" || fail "$BR missing END shift-agent-template-bypass marker"
+fi
 
 # ─────────────────────────────────────────────────────────────────
 # 4. Anchor proximity — markers near expected upstream symbols

@@ -12,6 +12,13 @@
 #      changes deterministically. Capture the new sha256 + commit it.
 #
 # Fields are shell-sourceable (KEY=VALUE, no spaces).
-HERMES_COMMIT=6fdbf2f2d76cf37393e657bf37ceda3d84589200
-HERMES_VERSION=0.11.0
-BRIDGE_POST_PATCH_SHA256=fcfd69e9fa1380868e062458e893f2d79fbb4f8e9d8da15ba5164fd3e6fe1779
+#
+# 2026-05-03 re-baseline: bumped to Hermes 0.12.0 / c5b4c481 (verified clean
+# on srilu-vps after applying patch-hermes.py). The chatter-filter that
+# patch-bridge-filter.py used to extend was removed in 0.12.0, so the
+# template-bypass marker check is conditionally skipped for Hermes >= 0.12.0
+# (see check-shift-agent-patch.sh). bridge.js sha256 reflects sender-id
+# patches only (no template-bypass).
+HERMES_COMMIT=c5b4c481656634ff919b214a037b830077d3bbd1
+HERMES_VERSION=0.12.0
+BRIDGE_POST_PATCH_SHA256=13df08fbd2bb7cd282a87528318f0c60d15bf4260f45fcbe0dcf726d1ba757a6

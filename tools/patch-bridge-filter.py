@@ -32,6 +32,15 @@ def main() -> int:
         print("ALREADY PATCHED — no-op")
         return 0
     n = text.count(NEEDLE)
+    if n == 0:
+        # Hermes >= 0.12.0 removed the chatter filter entirely; the anchor
+        # `owner_bypass` no longer exists in bridge.js. The template-bypass
+        # patch is OBSOLETE for these versions — exit 0 so the deploy script
+        # treats it as a successful no-op rather than a failure. The
+        # check-shift-agent-patch.sh marker check is correspondingly skipped
+        # when the chatter-filter symbols are absent.
+        print("SKIP: chatter-filter anchor absent (Hermes >=0.12.0); patch is obsolete — no-op")
+        return 0
     if n != 1:
         print(f"FAIL: anchor 'owner_bypass' found {n} times — refusing patch", file=sys.stderr)
         return 1
