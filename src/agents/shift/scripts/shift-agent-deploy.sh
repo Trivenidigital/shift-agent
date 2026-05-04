@@ -262,6 +262,15 @@ case "$ACTION" in
         # imports resolve. The migrator's #!/usr/bin/env python3 shebang
         # would land on system Python which lacks pydantic.
         VENV_PY="/usr/local/lib/hermes-agent/venv/bin/python"
+        # Guard against missing Hermes venv — without this, every Python
+        # invocation below dies with "bash: ...: No such file or directory"
+        # instead of a clear diagnostic. Fail-closed, never silently skip.
+        if [ ! -x "$VENV_PY" ]; then
+            echo "ERROR: Hermes venv Python missing or not executable at $VENV_PY" >&2
+            echo "  The Hermes-agent install is incomplete — verify /usr/local/lib/hermes-agent/venv/" >&2
+            echo "  No state change has been made; refusing to continue deploy." >&2
+            exit 1
+        fi
         if [ ! -x "$MIGRATOR" ]; then
             if [ -f "$MIGRATOR" ]; then
                 echo "WARN: migrator exists but is not executable — permission problem? Skipping." >&2

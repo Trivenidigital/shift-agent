@@ -9,6 +9,11 @@ set -euo pipefail
 # Python (/usr/bin/python3) lacks pydantic, which would false-fail every
 # import probe below.
 PY="/usr/local/lib/hermes-agent/venv/bin/python"
+if [ ! -x "$PY" ]; then
+    echo "FAIL: Hermes venv Python missing or not executable at $PY" >&2
+    echo "  Hermes-agent install incomplete? Verify /usr/local/lib/hermes-agent/venv/" >&2
+    exit 1
+fi
 
 echo "=== Shift Agent smoke test ==="
 
@@ -36,7 +41,7 @@ echo "✓ All scripts present + executable"
 # 2. Python modules importable + safe_io chokepoint symbols present
 # Symbol list lives in src/platform/scripts/check-safe-io-symbols — single
 # source of truth shared with shift-agent-deploy.sh pre-restart gate.
-if ! $PY -c "
+if ! "$PY" -c "
 import sys
 sys.path.insert(0, '/opt/shift-agent')
 import schemas, safe_io, exit_codes
@@ -45,14 +50,18 @@ print('schema classes:', [c for c in dir(schemas) if not c.startswith('_')][:5])
     echo "FAIL: Python modules don't import"
     exit 1
 fi
-if ! /usr/local/bin/check-safe-io-symbols > /dev/null; then
+# Wrap check-safe-io-symbols in "$PY" for the same reason as the other
+# Python invocations: the script's #!/usr/bin/env python3 shebang would
+# land on system Python, which lacks pydantic. Works today only because
+# safe_io.py lazy-imports pydantic — guard against future changes.
+if ! "$PY" /usr/local/bin/check-safe-io-symbols > /dev/null; then
     echo "FAIL: safe_io chokepoint symbols missing — run check-safe-io-symbols for details"
     exit 1
 fi
 echo "✓ Python modules importable (incl. safe_io chokepoint symbols)"
 
 # 3. Config loads and validates
-if ! $PY -c "
+if ! "$PY" -c "
 import sys, yaml
 sys.path.insert(0, '/opt/shift-agent')
 from schemas import Config
@@ -67,7 +76,7 @@ echo "✓ config.yaml validates"
 
 # 4. Roster loads and validates (if present)
 if [ -f /opt/shift-agent/roster.json ]; then
-    if ! $PY -c "
+    if ! "$PY" -c "
 import sys, json
 sys.path.insert(0, '/opt/shift-agent')
 from schemas import Roster
@@ -85,7 +94,7 @@ fi
 
 # 5. identify-sender works on the owner's own phone
 # Use Python to parse YAML; bash+awk+tr quoting here is fragile.
-OWNER_PHONE=$($PY -c "
+OWNER_PHONE=$("$PY" -c "
 import yaml, sys
 try:
     with open('/opt/shift-agent/config.yaml') as f:
@@ -124,7 +133,7 @@ echo "✓ render-coverage-template works"
 # placeholder pattern: keys starting with "MUTED_..."). Used on dev VPS where
 # alerts are silenced. Real-credential VPS still get a real-channel probe
 # and fail-close on credential breakage.
-PUSHOVER_KEY=$($PY -c "
+PUSHOVER_KEY=$("$PY" -c "
 import sys, yaml; sys.path.insert(0, '/opt/shift-agent')
 with open('/opt/shift-agent/config.yaml') as f:
     cfg = yaml.safe_load(f) or {}
@@ -175,7 +184,14 @@ if ! systemd-analyze verify "${sd_verify_units[@]}" 2>/tmp/sd-verify.log; then
     # in section Y, ignoring" for directives unsupported by an older
     # systemd) and exits non-zero. Filter for actual ERROR-class lines
     # before fail-closing the smoke test; pure warnings are informational.
-    if grep -vE "Unknown key name|ignoring" /tmp/sd-verify.log | grep -qE "[Ee]rror|not executable|not found|[Ff]ailed"; then
+    #
+    # IMPORTANT: the warning pattern is "Unknown key name <X>, ignoring".
+    # Filter MUST be the AND of both tokens — `Unknown key name.*ignoring` —
+    # not the OR `Unknown key name|ignoring`. The OR form would silently
+    # drop legitimate error lines like "Failed to parse X, ignoring" or
+    # "Executable path not absolute, ignoring", letting real failures
+    # bypass the gate.
+    if grep -vE "Unknown key name.*ignoring" /tmp/sd-verify.log | grep -qE "[Ee]rror|not executable|not found|[Ff]ailed"; then
         echo "FAIL: systemd-analyze verify reported issues:" >&2
         cat /tmp/sd-verify.log >&2
         exit 1
