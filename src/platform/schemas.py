@@ -924,7 +924,9 @@ class SalesTaxConfig(BaseModel):
 
 
 # Agent #21 — Expense Bookkeeper (v0.1; mocked QBOClient interface)
-# See tasks/expense-bookkeeper-v01-design.md for full design.
+# Original design at tasks/expense-bookkeeper-v01-design.md was archived in
+# the 2026-05-04 bucket-C cleanup; recover via the backup tag if needed:
+#   git show pre-tasks-cleanup-2026-05-04:tasks/expense-bookkeeper-v01-design.md
 class ExpenseBookkeeperConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool = False
