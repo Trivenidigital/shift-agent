@@ -95,43 +95,54 @@ def haversine_drive_minutes(km: float) -> float:
 
 
 def geocode_address(address: str, timeout_sec: int) -> Optional[tuple[float, float]]:
-    """Return (lat, lon) from Nominatim via maps_client.py search, or None."""
+    """Return (lat, lon) from Nominatim via maps_client.py search, or None.
+
+    HOTFIX 2026-05-04 (E2E-BUG-2): the actual maps_client.py CLI takes
+    address as a POSITIONAL arg, not `--query`. Earlier `--query --limit 1`
+    invocation never matched the CLI; mocked unit tests didn't catch it.
+    Verified shape: `maps_client.py search "Times Square"` returns
+    {"latitude": ..., "longitude": ..., ...} or {"error": "..."}.
+    """
     try:
         result = subprocess.run(
-            [sys.executable, str(MAPS_CLIENT), "search", "--query", address, "--limit", "1"],
+            [sys.executable, str(MAPS_CLIENT), "search", address],
             capture_output=True, text=True, timeout=timeout_sec,
         )
         if result.returncode != 0:
             return None
         doc = json.loads(result.stdout)
-        if not doc.get("results"):
+        # maps_client.search returns a single result (top match), not a list.
+        # Either {"latitude": X, "longitude": Y, ...} or {"error": "..."}.
+        if "error" in doc:
             return None
-        first = doc["results"][0]
-        return float(first["latitude"]), float(first["longitude"])
+        lat = doc.get("latitude")
+        lon = doc.get("longitude")
+        if lat is None or lon is None:
+            return None
+        return float(lat), float(lon)
     except (subprocess.SubprocessError, json.JSONDecodeError, OSError, ValueError, KeyError):
         return None
 
 
 def osrm_distance(lat1: float, lon1: float, lat2: float, lon2: float,
                    timeout_sec: int) -> Optional[tuple[float, float]]:
-    """Return (distance_km, drive_minutes) via maps_client.py distance, or None."""
-    try:
-        result = subprocess.run(
-            [sys.executable, str(MAPS_CLIENT), "distance",
-             "--from-lat", str(lat1), "--from-lon", str(lon1),
-             "--to-lat", str(lat2), "--to-lon", str(lon2)],
-            capture_output=True, text=True, timeout=timeout_sec,
-        )
-        if result.returncode != 0:
-            return None
-        doc = json.loads(result.stdout)
-        km = float(doc.get("distance_km", 0))
-        minutes = float(doc.get("duration_minutes", 0))
-        if km <= 0 or minutes <= 0:
-            return None
-        return km, minutes
-    except (subprocess.SubprocessError, json.JSONDecodeError, OSError, ValueError, KeyError):
-        return None
+    """OSRM-via-maps_client is unavailable in v0.1.
+
+    HOTFIX 2026-05-04 (E2E-BUG-3): the actual maps_client.py distance
+    subcommand takes ADDRESSES (`distance "Origin Address" --to "Dest"`),
+    not lat/lon flags. Reverse-geocoding all 9 location coordinates per
+    inbound query is a 9-API-call slow path with rate-limit risk
+    (Nominatim caps at 1 req/s).
+
+    For v0.1: return None unconditionally so compute_distances falls back
+    to Haversine (urban-detour-factor 1.3 / urban-km-per-min 0.5). The
+    fallback is plenty accurate for "which of our N stores is closest?";
+    the OSRM-driving-time precision was nice-to-have.
+
+    v0.2 path: call OSRM HTTP directly (https://router.project-osrm.org/route/v1/driving/lon1,lat1;lon2,lat2)
+    or extend maps_client.py to accept lat/lon for distance.
+    """
+    return None  # always fall back to Haversine in v0.1
 
 
 def compute_distances(customer_lat: float, customer_lon: float,
