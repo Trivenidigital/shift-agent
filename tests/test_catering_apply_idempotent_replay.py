@@ -1,15 +1,25 @@
 """PR-D2 commit 4: retry-state-machine + idempotent_replay short-circuit.
 
-Static checks pin design v2 §4.6 behavior:
-- Matcher widened to AWAITING_OWNER_APPROVAL OR OWNER_APPROVED (approve only).
-- OWNER_EDITED NOT in the matcher (R2-H1 money-moving correctness fix).
+Static checks pin design v2 §4.6 behavior, updated for PR-CF1's
+CUSTOMER_FINALIZED status addition (the customer-finalize flow):
+
+- Approve-decision matcher accepts AWAITING_OWNER_APPROVAL,
+  CUSTOMER_FINALIZED (PR-CF1), and OWNER_APPROVED (retry self-heal).
+- OWNER_EDITED NOT in the approve matcher (R2-H1 money-moving fix).
+- Reject/edit matcher accepts AWAITING_OWNER_APPROVAL +
+  CUSTOMER_FINALIZED only — NO OWNER_APPROVED (retry-reject after
+  approve is undefined; correctly EXIT_NOT_FOUND).
 - Tail-scan for catering_quote_sent fires inside the FIRST LEADS_LOCK.
 - Idempotent_replay short-circuit: if quote_sent exists, advance status
   if still OWNER_APPROVED + emit recovery row + return EXIT_OK.
-- Reject/edit retry path keeps the deployed AWAITING_OWNER_APPROVAL matcher
-  (no widening for non-approve decisions).
+
+Source-text checks normalize whitespace so multi-line matcher formatting
+(deployed style) and single-line form both pass. We pin SEMANTIC
+invariants (which statuses are/aren't accepted) rather than exact
+formatting, which would drift on every refactor.
 """
 from __future__ import annotations
+import re
 from pathlib import Path
 
 import pytest
@@ -25,26 +35,68 @@ def script_text() -> str:
     return _APPLY_SCRIPT.read_text(encoding="utf-8")
 
 
-def test_approve_matcher_widened_to_owner_approved(script_text: str):
-    """Approve-decision matcher accepts AWAITING_OWNER_APPROVAL OR OWNER_APPROVED.
-    OWNER_APPROVED is the row 3+4 case (retry / self-heal)."""
-    # Look for the widened matcher inside the approve branch
-    assert 'l.status in ("AWAITING_OWNER_APPROVAL", "OWNER_APPROVED")' in script_text
+@pytest.fixture(scope="module")
+def script_normalized(script_text: str) -> str:
+    """Whitespace-normalized source: collapse runs of whitespace + comments
+    so multi-line matchers compare against single-line patterns."""
+    # Strip trailing # comments line-by-line, then collapse all whitespace
+    lines = []
+    for line in script_text.splitlines():
+        # Remove trailing '# ...' comment but preserve content before it
+        m = re.match(r"^(.*?)(?:\s+#.*)?$", line)
+        lines.append(m.group(1) if m else line)
+    joined = " ".join(lines)
+    return re.sub(r"\s+", " ", joined)
+
+
+def _approve_matcher(text: str) -> str:
+    """Extract the approve-branch matcher tuple as a normalized string."""
+    # Find the 'if args.decision == "approve":' block and grab its `l.status in (...)` tuple
+    m = re.search(
+        r'if args\.decision == "approve":.*?l\.status in \((.*?)\)\]',
+        text, re.DOTALL,
+    )
+    assert m is not None, "approve matcher not found in script"
+    return re.sub(r"\s+", " ", m.group(1)).strip().rstrip(",").strip()
+
+
+def _reject_edit_matcher(text: str) -> str:
+    """Extract the non-approve (else) branch matcher tuple."""
+    # Find the 'else:' that pairs with the approve-decision check
+    m = re.search(
+        r'if args\.decision == "approve":.*?else:.*?l\.status in \((.*?)\)\]',
+        text, re.DOTALL,
+    )
+    assert m is not None, "reject/edit matcher not found in script"
+    return re.sub(r"\s+", " ", m.group(1)).strip().rstrip(",").strip()
+
+
+def test_approve_matcher_includes_owner_approved(script_text: str):
+    """Approve matcher MUST accept OWNER_APPROVED (row 3+4: retry / self-heal)."""
+    matcher = _approve_matcher(script_text)
+    assert '"OWNER_APPROVED"' in matcher, f"OWNER_APPROVED missing from approve matcher: {matcher}"
+
+
+def test_approve_matcher_includes_awaiting_owner_approval(script_text: str):
+    """Approve matcher MUST accept AWAITING_OWNER_APPROVAL (legacy / --skip-finalize)."""
+    matcher = _approve_matcher(script_text)
+    assert '"AWAITING_OWNER_APPROVAL"' in matcher, f"AWAITING_OWNER_APPROVAL missing: {matcher}"
+
+
+def test_approve_matcher_includes_customer_finalized(script_text: str):
+    """PR-CF1: approve matcher MUST accept CUSTOMER_FINALIZED (the new
+    'ready to approve' state from the customer-finalize flow)."""
+    matcher = _approve_matcher(script_text)
+    assert '"CUSTOMER_FINALIZED"' in matcher, f"CUSTOMER_FINALIZED missing: {matcher}"
 
 
 def test_owner_edited_not_in_approve_matcher(script_text: str):
     """R2-H1 money-moving correctness: OWNER_EDITED must NOT be in the
     approve-retry matcher. Owner sent edit, retry-approve with same code
-    would ship un-edited quote to customer.
-
-    OWNER_EDITED IS expected to appear elsewhere in the file (e.g., in
-    decision_map["edit"]); we only check it's not in any approve-matcher
-    tuple. The matcher line must match exactly the design v2 §4.6 wording."""
-    matcher_line = 'l.status in ("AWAITING_OWNER_APPROVAL", "OWNER_APPROVED")'
-    assert matcher_line in script_text
-    # Forbidden 3-tuple variant
-    forbidden = 'l.status in ("AWAITING_OWNER_APPROVAL", "OWNER_APPROVED", "OWNER_EDITED")'
-    assert forbidden not in script_text
+    would ship un-edited quote to customer."""
+    matcher = _approve_matcher(script_text)
+    assert '"OWNER_EDITED"' not in matcher, \
+        f"OWNER_EDITED leaked into approve matcher (R2-H1 regression): {matcher}"
 
 
 def test_no_owner_edited_self_heal_branch(script_text: str):
@@ -55,11 +107,20 @@ def test_no_owner_edited_self_heal_branch(script_text: str):
     assert 'lead.status in ("OWNER_EDITED"' not in script_text
 
 
-def test_reject_edit_matcher_unchanged(script_text: str):
-    """Reject/edit decisions retain the deployed AWAITING_OWNER_APPROVAL-only
-    matcher. Retry-reject after approve = undefined; correctly EXIT_NOT_FOUND."""
-    # The else branch for non-approve uses the narrow matcher
-    assert 'l.status == "AWAITING_OWNER_APPROVAL"' in script_text
+def test_reject_edit_matcher_excludes_owner_approved(script_text: str):
+    """Reject/edit decisions must NOT accept OWNER_APPROVED. Retry-reject
+    after approve = undefined; the apply script should EXIT_NOT_FOUND."""
+    matcher = _reject_edit_matcher(script_text)
+    assert '"OWNER_APPROVED"' not in matcher, \
+        f"OWNER_APPROVED leaked into reject/edit matcher (semantic regression): {matcher}"
+
+
+def test_reject_edit_matcher_includes_awaiting_owner_approval(script_text: str):
+    """Reject/edit MUST still accept AWAITING_OWNER_APPROVAL (the canonical
+    pre-approval state)."""
+    matcher = _reject_edit_matcher(script_text)
+    assert '"AWAITING_OWNER_APPROVAL"' in matcher, \
+        f"AWAITING_OWNER_APPROVAL missing from reject/edit matcher: {matcher}"
 
 
 def test_quote_sent_tail_scan_inside_first_leadslock(script_text: str):
