@@ -100,6 +100,42 @@ else
     echo "⚠  closest-location.py not installed — Agent #3 closest-store path will fail at first inbound"
 fi
 
+# 2d. Agent #13 check-compliance-deadlines.py + mark-compliance-item-done.py
+# importable + CLI parses (PR-Agent13-v0.1)
+if [ -x /usr/local/bin/check-compliance-deadlines.py ]; then
+    if ! "$PY" /usr/local/bin/check-compliance-deadlines.py --help > /dev/null 2>&1; then
+        echo "FAIL: check-compliance-deadlines.py --help failed (Agent #13 v0.1)"
+        exit 1
+    fi
+    echo "✓ check-compliance-deadlines.py importable + CLI parses"
+    # Heartbeat freshness probe: < 28h since last tick (24h schedule + 4h slack
+    # for reboot/Persistent catchup) — Reviewer B-v2 H3 fix.
+    HB="/opt/shift-agent/state/compliance-last-cron-tick.json"
+    if [ -f "$HB" ]; then
+        last_tick=$("$PY" -c "import json; print(json.load(open('$HB'))['last_tick_utc'])" 2>/dev/null || echo "")
+        if [ -n "$last_tick" ]; then
+            age_h=$("$PY" -c "
+from datetime import datetime, timezone
+last = datetime.fromisoformat('$last_tick'.replace('Z', '+00:00'))
+delta = datetime.now(tz=timezone.utc) - last
+print(int(delta.total_seconds() / 3600))
+" 2>/dev/null || echo "999")
+            if [ "$age_h" -gt 28 ]; then
+                echo "⚠  compliance heartbeat is ${age_h}h old (>28h) — cron may have stopped"
+            else
+                echo "✓ compliance heartbeat fresh (${age_h}h old)"
+            fi
+        fi
+    fi
+fi
+if [ -x /usr/local/bin/mark-compliance-item-done.py ]; then
+    if ! "$PY" /usr/local/bin/mark-compliance-item-done.py --help > /dev/null 2>&1; then
+        echo "FAIL: mark-compliance-item-done.py --help failed (Agent #13 v0.1)"
+        exit 1
+    fi
+    echo "✓ mark-compliance-item-done.py importable + CLI parses"
+fi
+
 # 3. Config loads and validates
 if ! "$PY" -c "
 import sys, yaml

@@ -149,6 +149,39 @@ install_artifacts() {
         install -m 755 src/agents/multi_location/scripts/* /usr/local/bin/
     fi
 
+    # Compliance Calendar (Agent #13)
+    # PR-Agent13-v0.1 (2026-05-04): SKILLs include compliance_owner_query;
+    # scripts include check-compliance-deadlines.py + mark-compliance-item-done.py;
+    # template compliance_reminder.txt rendered via render-coverage-template;
+    # systemd .service has @CUSTOMER_TZ@ placeholder substituted from
+    # cfg.customer.timezone at install time (not yq — Reviewer A2-B1 fix:
+    # PyYAML is already a deploy dependency; yq is NOT installed on srilu).
+    if [ -d src/agents/compliance/skills ]; then
+        rsync -a src/agents/compliance/skills/ /root/.hermes/skills/
+        chown -R shift-agent:shift-agent /root/.hermes/skills/
+    fi
+    if compgen -G "src/agents/compliance/scripts/*" > /dev/null; then
+        install -m 755 src/agents/compliance/scripts/* /usr/local/bin/
+    fi
+    if compgen -G "src/agents/compliance/templates/*" > /dev/null; then
+        install -m 644 src/agents/compliance/templates/* /opt/shift-agent/templates/
+    fi
+    if compgen -G "src/agents/compliance/systemd/*.service" > /dev/null; then
+        # TZ templating: read cfg.customer.timezone via PyYAML (yq is not
+        # installed on srilu; PyYAML IS — already used by render-coverage-
+        # template + schemas validation). Default to America/New_York if
+        # config missing or unparseable (matches Triveni's reference customer).
+        customer_tz=$(python3 -c "import yaml; print(yaml.safe_load(open('/opt/shift-agent/config.yaml'))['customer']['timezone'])" 2>/dev/null || echo "America/New_York")
+        for svc_src in src/agents/compliance/systemd/*.service; do
+            svc_name=$(basename "$svc_src")
+            sed "s|@CUSTOMER_TZ@|${customer_tz}|g" "$svc_src" \
+                > "/etc/systemd/system/${svc_name}"
+        done
+    fi
+    if compgen -G "src/agents/compliance/systemd/*.timer" > /dev/null; then
+        install -m 644 src/agents/compliance/systemd/*.timer /etc/systemd/system/
+    fi
+
     # Catering Lead (Agent #2)
     if [ -d src/agents/catering/skills ]; then
         rsync -a src/agents/catering/skills/ /root/.hermes/skills/
@@ -195,6 +228,8 @@ install_artifacts() {
     systemctl enable --now send-routing-accuracy-summary.timer 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
     systemctl enable --now prune-expense-receipts.timer 2>/dev/null || true
+    # Agent #13 Compliance Calendar (PR-Agent13-v0.1)
+    systemctl enable --now check-compliance-deadlines.timer 2>/dev/null || true
 
     # 2026-05-04 canonical-cleanup: F8/F9 watchdog files were deleted from
     # the repo (cf-router plugin took over their role in PR-CF6). The
