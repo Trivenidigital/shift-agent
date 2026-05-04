@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -28,6 +29,7 @@ THROTTLE_PATH = Path("/opt/shift-agent/state/cf-router-throttle.json")
 APPLY_OWNER_DECISION_BIN = Path("/usr/local/bin/apply-catering-owner-decision")
 APPLY_MENU_UPDATE_BIN = Path("/usr/local/bin/apply-menu-update")
 NOTIFY_OWNER_BIN = Path("/usr/local/bin/shift-agent-notify-owner")
+CREATE_LEAD_BIN = Path("/usr/local/bin/create-catering-lead")  # F7 path
 
 PYTHON_BIN = Path("/usr/local/lib/hermes-agent/venv/bin/python")
 PLATFORM_DIR = Path("/opt/shift-agent")  # Where schemas.py lives
@@ -35,6 +37,9 @@ IDENTIFY_SENDER_BIN = Path("/usr/local/bin/identify-sender")
 
 SUBPROCESS_TIMEOUT_SEC = 30
 ALERT_THROTTLE_SEC = 300  # Suppress duplicate Pushover alerts within 5 min
+F7_DISPATCHER_LOOKBACK_SEC = 5  # Grace window when scanning audit log
+                                 # for dispatcher_routed (matches deployed F7
+                                 # daemon's `since_ts - 5` clock-skew tolerance)
 
 
 def _ensure_platform_path() -> None:
@@ -304,3 +309,323 @@ def audit_intercepted(reason: str, chat_id: str, code: Optional[str] = None,
         ndjson_append(LOG_PATH, entry.model_dump_json())
     except Exception as e:
         sys.stderr.write(f"cf-router: audit emit failed (non-fatal): {e}\n")
+
+
+# === F7 path: catering-dispatcher-watchdog (PR-CF7) ===
+#
+# Replaces the standalone `catering-dispatcher-watchdog` daemon
+# (~427 LOC + systemd unit) with a delayed-rescue path inside this plugin.
+# The classifier + threshold logic is ported verbatim from the deployed
+# daemon so the 26 classifier tests in tests/test_catering_dispatcher_classifier.py
+# continue to pin the regex behavior.
+
+# Conservative regex classifier — requires "catering" word OR (event/food+headcount).
+# Tighter than what an LLM would do, intentionally biased toward false negatives.
+_CATERING_PRIMARY = re.compile(r"\bcatering\b|\bcaterer\b", re.IGNORECASE)
+_HEADCOUNT_PATTERNS = [
+    re.compile(
+        r"(\d+)\s*(?:people|persons?|guests?|ppl|attendees?|heads?|"
+        r"meals?|plates?|covers?|settings?|members?|pax)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:for|of|serve|serving|feed|cater(?:ing)?\s+(?:to|for))\s+(\d+)\b", re.IGNORECASE),
+    re.compile(r"\b(\d+)\s+(?:vegetarian|veg|non[\s-]?veg|vegan|jain|halal|kosher)\b", re.IGNORECASE),
+]
+_EVENT_KEYWORDS = re.compile(
+    r"\b(?:event|reception|wedding|birthday|anniversary|graduation|baby\s*shower|"
+    r"engagement|housewarming|festival|gathering|party|celebration|function)\b",
+    re.IGNORECASE,
+)
+_FOOD_KEYWORDS = re.compile(
+    r"\b(?:menu|food|dinner|lunch|breakfast|buffet|biryani|veg(?:etarian)?|"
+    r"non[\s-]?veg|nonveg|halal|kosher|vegan|jain|spread|appetizers?)\b",
+    re.IGNORECASE,
+)
+_DELIVERY_KEYWORDS = re.compile(
+    r"\b(?:deliver(?:y|ed)?|pickup|drop[\s-]?off|setup)\b", re.IGNORECASE,
+)
+
+
+def classify_catering(text: str) -> tuple[bool, list[str]]:
+    """Return (is_catering, signals). Conservative: needs strong evidence.
+
+    Ported verbatim from the deployed F7 daemon. The 26 cases in
+    tests/test_catering_dispatcher_classifier.py pin the multi-signal
+    threshold (catering_keyword AND any-other) OR (headcount AND event)
+    OR (headcount AND food AND (delivery OR event)).
+    """
+    if not text or len(text) < 10:
+        return False, ["too_short"]
+
+    signals: list[str] = []
+    if _CATERING_PRIMARY.search(text):
+        signals.append("primary:catering")
+    for pat in _HEADCOUNT_PATTERNS:
+        m = pat.search(text)
+        if m:
+            try:
+                hc = int(m.group(1))
+                if 5 <= hc <= 10000:
+                    signals.append(f"headcount:{hc}")
+                    break
+            except (ValueError, IndexError):
+                pass
+    if _EVENT_KEYWORDS.search(text):
+        signals.append("event_keyword")
+    if _FOOD_KEYWORDS.search(text):
+        signals.append("food_keyword")
+    if _DELIVERY_KEYWORDS.search(text):
+        signals.append("delivery_keyword")
+
+    has_catering = any(s.startswith("primary:catering") for s in signals)
+    has_headcount = any(s.startswith("headcount:") for s in signals)
+    has_event = "event_keyword" in signals
+    has_food = "food_keyword" in signals
+    has_delivery = "delivery_keyword" in signals
+
+    is_catering = (
+        (has_catering and (has_headcount or has_event or has_food or has_delivery))
+        or (has_headcount and has_event)
+        or (has_headcount and has_food and (has_delivery or has_event))
+    )
+
+    if not is_catering:
+        signals.append("rejected:insufficient_evidence")
+
+    return is_catering, signals
+
+
+def find_dispatcher_routed_for(chat_id: str, since_ts: float) -> bool:
+    """Check decisions.log for a `dispatcher_routed` entry matching chat_id
+    within the rescue window [since_ts - LOOKBACK, since_ts + WATCHDOG + LOOKBACK].
+
+    Mirrors the deployed F7 daemon's same-name function with three reviewer-
+    requested hardenings:
+      1. Upper-bound timestamp guard (M7) — rejects future-dated rows that
+         would silently suppress real rescues. Without this, a manually
+         crafted or clock-drifted row arbitrarily in the future would
+         match.
+      2. File-size snapshot (H2) — bounds the read to bytes that existed
+         at scan-start. safe_io.ndjson_append doesn't acquire a read lock,
+         so concurrent appends could otherwise produce torn-line reads
+         that yield false negatives.
+      3. Reverse-iterate from end-of-file (M10) — old daemon scanned from
+         line 1 every call; on a multi-MB log this is O(N) per rescue.
+         The relevant entries are always recent (within ~30s), so we read
+         the last ~256 KiB in chronological order. Bounded by file size.
+
+    Pure file read + JSON parse — safe to call from a Timer thread.
+    """
+    if not LOG_PATH.exists():
+        return False
+    chat_lid_only = chat_id.split("@", 1)[0] if "@" in chat_id else chat_id
+    upper_bound_ts = since_ts + F7_WATCHDOG_TIMEOUT_SEC + F7_DISPATCHER_LOOKBACK_SEC
+    lower_bound_ts = since_ts - F7_DISPATCHER_LOOKBACK_SEC
+    # Read window: capped at 256 KiB from end-of-file, plenty for ~30s
+    # of typical traffic and small enough to keep Timer-thread time bounded.
+    READ_WINDOW_BYTES = 256 * 1024
+    try:
+        size = LOG_PATH.stat().st_size
+        # H2 — pin the snapshot. Concurrent appends after this point are
+        # ignored, so we never read a partial line at the tail.
+        if size == 0:
+            return False
+        start = max(0, size - READ_WINDOW_BYTES)
+        with LOG_PATH.open("rb") as f:
+            f.seek(start)
+            buf = f.read(size - start)
+        # Drop the leading partial line if we did a mid-file seek (it may
+        # have started inside a previous record).
+        if start > 0:
+            nl = buf.find(b"\n")
+            if nl >= 0:
+                buf = buf[nl + 1:]
+        for raw_line in buf.split(b"\n"):
+            line = raw_line.strip()
+            if not line or b"dispatcher_routed" not in line:
+                continue
+            try:
+                entry = json.loads(line.decode("utf-8", errors="replace"))
+            except json.JSONDecodeError:
+                continue
+            if entry.get("type") != "dispatcher_routed":
+                continue
+            ts_str = entry.get("ts", "")
+            try:
+                ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
+            except (ValueError, AttributeError):
+                continue
+            if ts < lower_bound_ts:
+                continue
+            if ts > upper_bound_ts:
+                # M7 — silently-future row; reject as out of window
+                continue
+            sender_lid = entry.get("sender_lid") or ""
+            sender_phone = entry.get("sender_phone") or ""
+            if chat_lid_only in sender_lid or chat_lid_only in (sender_phone or "").lstrip("+"):
+                return True
+    except OSError:
+        pass
+    return False
+
+
+def lid_to_phone_via_identify_sender(lid_or_jid: str) -> tuple[Optional[str], str]:
+    """Resolve a LID/JID to (phone_E164, role) via identify-sender subprocess.
+
+    Duplicates the deployed F7 daemon's helper rather than extending
+    is_owner_chat / is_employee_chat (which return bool); changing those
+    return types would risk PR-CF6's existing 31 tests.
+    """
+    try:
+        result = subprocess.run(
+            [str(IDENTIFY_SENDER_BIN), lid_or_jid],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return None, "unknown"
+        doc = json.loads(result.stdout)
+        return doc.get("phone_normalized"), doc.get("role", "unknown")
+    except (subprocess.SubprocessError, json.JSONDecodeError, OSError):
+        return None, "unknown"
+
+
+def trigger_create_catering_lead(
+    customer_phone: str, customer_name: str, raw_inquiry: str, message_id: str,
+) -> tuple[bool, str]:
+    """Invoke create-catering-lead with empty extracted fields (rescue path).
+
+    Returns (success, detail). Idempotency on (customer_phone, message_id)
+    is enforced by create-catering-lead itself (existing behavior).
+    """
+    fields_json = json.dumps({
+        "headcount": None,
+        "event_date": None,
+        "event_time": None,
+        "menu_preferences": [],
+        "off_menu_items": [],
+        "dietary_restrictions": [],
+        "delivery_or_pickup": "unknown",
+        "budget_hint_usd": None,
+        "notes": "(cf-router F7 rescue from missed-dispatch; LLM bypassed parse_catering_inquiry SKILL)",
+    })
+    try:
+        result = subprocess.run(
+            [
+                str(CREATE_LEAD_BIN),
+                "--customer-phone", customer_phone,
+                "--customer-name", customer_name,
+                "--raw-inquiry", raw_inquiry[:1000],
+                "--message-id", message_id,
+                "--fields-json", fields_json,
+            ],
+            capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_SEC,
+        )
+        if result.returncode == 0:
+            return True, result.stdout.strip()
+        return False, f"exit={result.returncode} stderr={result.stderr[:500]}"
+    except (subprocess.SubprocessError, OSError) as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+def audit_dispatcher_watchdog_fired(*, chat_id: str, message_id: str,
+                                     customer_phone: str, signals: list[str],
+                                     success: bool, detail: str = "") -> None:
+    """Emit `catering_dispatcher_watchdog_fired` row via safe_io chokepoint.
+    Same shape as the deployed F7 daemon — observability tooling unchanged.
+    """
+    try:
+        _ensure_platform_path()
+        from safe_io import ndjson_append  # type: ignore
+        from schemas import CateringDispatcherWatchdogFired  # type: ignore
+        entry = CateringDispatcherWatchdogFired(
+            type="catering_dispatcher_watchdog_fired",
+            ts=datetime.now(timezone.utc),
+            chat_id=chat_id,
+            message_id=message_id,
+            customer_phone=customer_phone,
+            signals=signals,
+            success=success,
+            detail=detail[:2000],
+        )
+        ndjson_append(LOG_PATH, entry.model_dump_json())
+    except Exception as e:
+        sys.stderr.write(f"cf-router F7: fired-audit emit failed (non-fatal): {e}\n")
+
+
+def audit_dispatcher_watchdog_suppressed(*, chat_id: str, message_id: str,
+                                          reason: str, detail: str = "") -> None:
+    """Emit `catering_dispatcher_watchdog_suppressed` row.
+
+    `reason` MUST be one of the schema's Literal values. After PR-CF7 only
+    `non_customer_role` and `lid_no_phone_resolution` are emitted by the
+    plugin (`text_unavailable` and `not_catering` are unreachable from
+    the plugin code path — see plan §"Audit-row reachability").
+    """
+    try:
+        _ensure_platform_path()
+        from safe_io import ndjson_append  # type: ignore
+        from schemas import CateringDispatcherWatchdogSuppressed  # type: ignore
+        entry = CateringDispatcherWatchdogSuppressed(
+            type="catering_dispatcher_watchdog_suppressed",
+            ts=datetime.now(timezone.utc),
+            chat_id=chat_id,
+            message_id=message_id,
+            reason=reason,  # type: ignore
+            detail=detail[:2000],
+        )
+        ndjson_append(LOG_PATH, entry.model_dump_json())
+    except Exception as e:
+        sys.stderr.write(f"cf-router F7: suppressed-audit emit failed (non-fatal): {e}\n")
+
+
+def f7_rescue_check(text: str, chat_id: str, message_id: str,
+                     signals: list[str], ts_at_schedule: float) -> None:
+    """Background-thread callback fired ~30s after pre_gateway_dispatch.
+
+    Mirrors process_inbound() in the deployed F7 daemon, minus the
+    text-availability check (plugin has text directly from the event).
+
+    Decision tree:
+      1. Did the LLM dispatch correctly? Audit-log scan for dispatcher_routed
+         within ts_at_schedule + grace → no rescue needed
+      2. Resolve sender role via identify-sender. Owner/employee → suppressed
+      3. Phone resolution required → suppressed if missing
+      4. Fire rescue: invoke create-catering-lead, audit fired
+
+    Best-effort: failures are logged to stderr, never raised (this runs
+    in a daemon thread; an exception would kill the thread silently).
+    """
+    try:
+        # 1. LLM handled it?
+        if find_dispatcher_routed_for(chat_id, ts_at_schedule):
+            return  # SKILL ran successfully — no rescue needed
+
+        # 2. Sender role check
+        phone, role = lid_to_phone_via_identify_sender(chat_id)
+        if role in {"owner", "employee"}:
+            audit_dispatcher_watchdog_suppressed(
+                chat_id=chat_id, message_id=message_id,
+                reason="non_customer_role", detail=f"role={role}",
+            )
+            return
+
+        # 3. Phone resolution required
+        if not phone:
+            audit_dispatcher_watchdog_suppressed(
+                chat_id=chat_id, message_id=message_id,
+                reason="lid_no_phone_resolution",
+                detail=f"signals={','.join(signals)} text_preview={text[:60]!r}",
+            )
+            return
+
+        # 4. Fire rescue
+        success, detail = trigger_create_catering_lead(
+            customer_phone=phone, customer_name="",
+            raw_inquiry=text, message_id=f"watchdog:{message_id}",
+        )
+        audit_dispatcher_watchdog_fired(
+            chat_id=chat_id, message_id=message_id, customer_phone=phone,
+            signals=signals, success=success, detail=detail[:2000],
+        )
+    except Exception as e:
+        sys.stderr.write(f"cf-router F7: rescue check crashed (non-fatal): {e}\n")

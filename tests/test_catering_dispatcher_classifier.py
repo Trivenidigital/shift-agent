@@ -18,23 +18,37 @@ yet replace.
 """
 from __future__ import annotations
 
+import importlib.util
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
-DISPATCHER_WATCHDOG = REPO / "src" / "agents" / "catering" / "scripts" / "catering-dispatcher-watchdog"
+# PR-CF7 (2026-05-04): the F7 catering-dispatcher-watchdog daemon was
+# migrated into the cf-router plugin's actions.py. The classifier function
+# (classify_catering) was ported verbatim with the same signature, so these
+# 26 regression tests retarget cleanly to the plugin location.
+PLUGIN_ACTIONS = REPO / "src" / "plugins" / "cf-router" / "actions.py"
 
 
 def _load(path: Path, mod_name: str):
-    """Load a script with no .py extension into a module object."""
-    return SourceFileLoader(mod_name, str(path)).load_module()
+    """Load a .py file into a module object via the modern spec/exec API.
+    The pre-PR-CF7 loader used SourceFileLoader.load_module() (deprecated
+    since Python 3.4; emits DeprecationWarning) because the target was a
+    hyphen-named script with no .py extension. Now that the target is a
+    real .py file (plugin actions.py), we use the canonical
+    spec_from_loader → module_from_spec → exec_module triple."""
+    loader = SourceFileLoader(mod_name, str(path))
+    spec = importlib.util.spec_from_loader(mod_name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
 
 
 @pytest.fixture(scope="module")
 def dispatcher_mod():
-    return _load(DISPATCHER_WATCHDOG, "_dispatcher_watchdog_test")
+    return _load(PLUGIN_ACTIONS, "_cf_router_actions_classifier_test")
 
 class TestCateringClassifierPositive:
     """Cases that MUST be classified as catering. If any of these regress to

@@ -60,6 +60,35 @@ if ! "$PY" /usr/local/bin/check-safe-io-symbols > /dev/null; then
 fi
 echo "✓ Python modules importable (incl. safe_io chokepoint symbols)"
 
+# 2b. cf-router plugin (PR-CF6 + PR-CF7) — verify the plugin's hooks +
+# actions modules import cleanly and the F7 classifier is reachable.
+# A syntax error or broken import in the plugin would otherwise pass
+# all other checks and only manifest at first inbound traffic.
+if [ -d /root/.hermes/plugins/cf-router ]; then
+    if ! "$PY" -c "
+import sys, importlib.util
+sys.path.insert(0, '/opt/shift-agent')
+spec_a = importlib.util.spec_from_file_location(
+    'cf_router_smoke_actions',
+    '/root/.hermes/plugins/cf-router/actions.py',
+)
+ma = importlib.util.module_from_spec(spec_a)
+spec_a.loader.exec_module(ma)
+# Sanity: classifier reachable + correct signature
+ok, signals = ma.classify_catering('catering for 50 people event next Saturday food delivered')
+assert ok is True, f'classifier regressed (positive case failed): signals={signals}'
+ok2, _ = ma.classify_catering('hi')
+assert ok2 is False, 'classifier regressed (too-short case)'
+print('cf-router plugin: actions.py importable + classify_catering OK')
+" > /dev/null; then
+        echo "FAIL: cf-router plugin actions.py broken — would silently fail at first inbound"
+        exit 1
+    fi
+    echo "✓ cf-router plugin importable + classifier sanity"
+else
+    echo "⚠  cf-router plugin not installed — skipping plugin smoke check"
+fi
+
 # 3. Config loads and validates
 if ! "$PY" -c "
 import sys, yaml

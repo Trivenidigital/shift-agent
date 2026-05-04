@@ -609,3 +609,266 @@ class TestRobustness:
 
         assert result is not None
         mock_apply.assert_called_once()
+
+
+# ============================================================================
+# F7 — catering-dispatcher-watchdog (PR-CF7)
+# ============================================================================
+
+class TestF7DispatcherWatchdog:
+    """Plugin-level tests for the F7 path (PR-CF7).
+
+    Strategy: monkey-patch `threading.Timer` so we can synchronously invoke
+    the rescue callback rather than waiting 30s. The classifier itself is
+    already pinned by the 26 cases in test_catering_dispatcher_classifier.py.
+    """
+
+    @pytest.fixture
+    def patched_timer(self, monkeypatch):
+        """Replace threading.Timer with a same-shape stub that fires the
+        callback IMMEDIATELY (no delay). Returns a list of (delay, fn, args)
+        tuples for assertion."""
+        calls = []
+
+        class _ImmediateTimer:
+            def __init__(self, interval, function, args=None, kwargs=None):
+                calls.append((interval, function, args or (), kwargs or {}))
+                self._function = function
+                self._args = args or ()
+                self._kwargs = kwargs or {}
+                self.daemon = False
+
+            def start(self):
+                # Fire immediately for test determinism
+                self._function(*self._args, **self._kwargs)
+
+        # Patch in BOTH the hooks module and threading itself (the hook
+        # imports `threading` at module scope, so threading.Timer must be
+        # the patched class when the hook references it)
+        import threading
+        monkeypatch.setattr(threading, "Timer", _ImmediateTimer)
+        return calls
+
+    def test_catering_inquiry_schedules_rescue(self, mods, state_env, patched_timer):
+        """Customer text matching catering classifier → Timer scheduled."""
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        # Mock the rescue check entirely so we just verify the schedule path
+        with patch.object(actions_mod, "f7_rescue_check") as mock_rescue:
+            event = _make_event(
+                "Hi, I'd like catering for 80 people next Saturday, food delivered by 7pm please",
+                "12025550199@s.whatsapp.net",
+            )
+            result = hooks_mod.pre_gateway_dispatch(event)
+
+        assert result is None  # F7 always lets LLM run; rescue is delayed
+        # The patched timer fires immediately — mock_rescue should have been called
+        mock_rescue.assert_called_once()
+        args = mock_rescue.call_args.args
+        # Args: (text, chat_id, message_id, signals, ts_at_schedule)
+        assert "catering" in args[0].lower()
+        assert args[1] == "12025550199@s.whatsapp.net"
+        assert isinstance(args[2], str) and len(args[2]) > 0  # message_id non-empty (Pydantic min_length=1)
+        assert isinstance(args[3], list) and len(args[3]) > 0  # signals
+        assert isinstance(args[4], float)  # ts_at_schedule
+
+    def test_non_catering_inquiry_NOT_scheduled(self, mods, state_env, patched_timer):
+        """Generic text → no F7 timer scheduled."""
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        with patch.object(actions_mod, "f7_rescue_check") as mock_rescue:
+            event = _make_event(
+                "Hi can you help me find a recipe for biryani?",
+                "12025550199@s.whatsapp.net",
+            )
+            result = hooks_mod.pre_gateway_dispatch(event)
+
+        assert result is None
+        mock_rescue.assert_not_called()
+
+    def test_F7_disabled_flag_skips_path(self, mods, state_env, patched_timer):
+        """When hooks_mod.F7_ENABLED = False, no rescue is scheduled even
+        for catering text. Verifies the rollback hatch."""
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        # Flip the flag (simulates the sed rollback)
+        original = hooks_mod.F7_ENABLED
+        hooks_mod.F7_ENABLED = False
+        try:
+            with patch.object(actions_mod, "f7_rescue_check") as mock_rescue:
+                event = _make_event(
+                    "catering inquiry for 100 people event Saturday, food delivered",
+                    "12025550199@s.whatsapp.net",
+                )
+                result = hooks_mod.pre_gateway_dispatch(event)
+            assert result is None
+            mock_rescue.assert_not_called()
+        finally:
+            hooks_mod.F7_ENABLED = original
+
+    def test_owner_chat_short_circuits_F7(self, mods, state_env, patched_timer):
+        """Owner self-chat with catering text → F8 path runs first; F7 is
+        gated by F8 returning a value or by the chain falling through. Owner
+        text without #XXXXX falls through to F7 — but owner is excluded by
+        the rescue's role check, NOT by the schedule."""
+        # The hook itself doesn't pre-check role; that's the rescue
+        # callback's job. So this test verifies the schedule still happens.
+        # The eventual rescue check will suppress.
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, owner_jid="918522041562@s.whatsapp.net")
+        with patch.object(actions_mod, "f7_rescue_check") as mock_rescue:
+            event = _make_event(
+                "Just thinking about catering for 100 people event Saturday, food",
+                "918522041562@s.whatsapp.net",
+            )
+            hooks_mod.pre_gateway_dispatch(event)
+        # Owner with no #XXXXX falls through F8, not sick-call so F9 skipped,
+        # then F7 schedules. That's correct — rescue check will then suppress
+        # via non_customer_role.
+        mock_rescue.assert_called_once()
+
+    def test_message_id_fallback_when_event_lacks_id(self, mods, state_env, patched_timer):
+        """Event without message_id attribute → fallback string is used.
+
+        Audit schemas require min_length=1 on message_id; the fallback
+        ensures we never pass an empty string. Mirrors the deployed F7
+        daemon's `bridge_notify_<chat>_<ms>` pattern.
+        """
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        with patch.object(actions_mod, "f7_rescue_check") as mock_rescue:
+            event = SimpleNamespace(
+                text="catering for 50 people wedding event next week, food delivered",
+                chat_id="12025550199@s.whatsapp.net",
+                # No message_id, id, or msg_id
+            )
+            hooks_mod.pre_gateway_dispatch(event)
+        message_id = mock_rescue.call_args.args[2]
+        assert message_id.startswith("cf_router_f7_")
+        assert "12025550199" in message_id
+
+    def test_message_id_passes_through_when_present(self, mods, state_env, patched_timer):
+        """Event with native message_id → that value is used (not fallback)."""
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        with patch.object(actions_mod, "f7_rescue_check") as mock_rescue:
+            event = SimpleNamespace(
+                text="catering for 50 people wedding event Saturday, food delivered",
+                chat_id="12025550199@s.whatsapp.net",
+                message_id="bridge_notify_real_id_123",
+            )
+            hooks_mod.pre_gateway_dispatch(event)
+        assert mock_rescue.call_args.args[2] == "bridge_notify_real_id_123"
+
+    def test_rescue_suppressed_when_dispatcher_routed_present(self, mods, state_env):
+        """Rescue check finds a recent dispatcher_routed audit row → no
+        rescue invocation, no audit row emitted (success path)."""
+        _hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        # Seed audit log with a matching dispatcher_routed entry
+        ts_now = time.time()
+        ts_iso = "2026-05-04T03:00:00+00:00"
+        row = {
+            "type": "dispatcher_routed",
+            "ts": ts_iso,
+            "sender_lid": "12025550199",
+            "sender_phone": "+12025550199",
+        }
+        state_env["log_path"].write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+        with patch.object(actions_mod, "trigger_create_catering_lead") as mock_trigger:
+            # Use a ts_at_schedule that's BEFORE the audit row's ts
+            from datetime import datetime, timezone
+            ts_audit = datetime.fromisoformat(ts_iso).timestamp()
+            actions_mod.f7_rescue_check(
+                text="catering inquiry text", chat_id="12025550199@s.whatsapp.net",
+                message_id="msg_123", signals=["primary:catering", "headcount:50"],
+                ts_at_schedule=ts_audit - 10,  # schedule 10s before the dispatch
+            )
+
+        # No rescue invocation, no rescue-fire audit row
+        mock_trigger.assert_not_called()
+
+    def test_rescue_suppressed_for_owner_role(self, mods, state_env):
+        """Sender role resolves to 'owner' → suppressed audit row, no rescue."""
+        _hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        # Mock identify-sender to return owner role
+        fake_run = SimpleNamespace(
+            returncode=0, stdout='{"role":"owner","phone_normalized":"+918522041562"}', stderr="",
+        )
+        with patch("subprocess.run", return_value=fake_run), \
+             patch.object(actions_mod, "trigger_create_catering_lead") as mock_trigger:
+            actions_mod.f7_rescue_check(
+                text="catering inquiry text", chat_id="918522041562@s.whatsapp.net",
+                message_id="msg_owner", signals=["primary:catering", "headcount:50"],
+                ts_at_schedule=time.time(),
+            )
+        mock_trigger.assert_not_called()
+        # Suppressed row written
+        rows = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
+        suppressed = [r for r in rows if r.get("type") == "catering_dispatcher_watchdog_suppressed"]
+        assert len(suppressed) == 1
+        assert suppressed[0]["reason"] == "non_customer_role"
+
+    def test_rescue_fires_for_customer_with_phone(self, mods, state_env):
+        """Customer sender + phone resolves + no dispatcher_routed →
+        invoke create-catering-lead, emit fired audit row."""
+        _hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        # Mock identify-sender → customer role + phone
+        fake_id_run = SimpleNamespace(
+            returncode=0, stdout='{"role":"customer","phone_normalized":"+12025550199"}', stderr="",
+        )
+        # Mock create-catering-lead success
+        fake_create_run = SimpleNamespace(returncode=0, stdout="lead_created L0099", stderr="")
+
+        call_log = []
+        def _fake_run(cmd, *args, **kwargs):
+            call_log.append(cmd[0] if isinstance(cmd, list) else cmd)
+            if "identify-sender" in str(cmd):
+                return fake_id_run
+            if "create-catering-lead" in str(cmd):
+                return fake_create_run
+            return SimpleNamespace(returncode=1, stdout="", stderr="unmocked")
+
+        with patch("subprocess.run", side_effect=_fake_run):
+            actions_mod.f7_rescue_check(
+                text="catering inquiry for 80 people event Saturday, food delivered",
+                chat_id="12025550199@s.whatsapp.net",
+                message_id="msg_customer",
+                signals=["primary:catering", "headcount:80", "event_keyword"],
+                ts_at_schedule=time.time(),
+            )
+
+        # create-catering-lead was invoked
+        assert any("create-catering-lead" in str(c) for c in call_log)
+        # Fired row written
+        rows = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
+        fired = [r for r in rows if r.get("type") == "catering_dispatcher_watchdog_fired"]
+        assert len(fired) == 1
+        assert fired[0]["customer_phone"] == "+12025550199"
+        assert fired[0]["success"] is True
+        assert "primary:catering" in fired[0]["signals"]
+
+    def test_rescue_suppressed_when_phone_unresolvable(self, mods, state_env):
+        """Customer role but identify-sender returns no phone → suppressed
+        with reason=lid_no_phone_resolution."""
+        _hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        fake_run = SimpleNamespace(
+            returncode=0, stdout='{"role":"customer","phone_normalized":null}', stderr="",
+        )
+        with patch("subprocess.run", return_value=fake_run), \
+             patch.object(actions_mod, "trigger_create_catering_lead") as mock_trigger:
+            actions_mod.f7_rescue_check(
+                text="catering for 50 people event Saturday food delivered",
+                chat_id="999999999999@lid", message_id="msg_lid",
+                signals=["primary:catering", "headcount:50", "event_keyword"],
+                ts_at_schedule=time.time(),
+            )
+        mock_trigger.assert_not_called()
+        rows = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
+        suppressed = [r for r in rows if r.get("type") == "catering_dispatcher_watchdog_suppressed"]
+        assert len(suppressed) == 1
+        assert suppressed[0]["reason"] == "lid_no_phone_resolution"
