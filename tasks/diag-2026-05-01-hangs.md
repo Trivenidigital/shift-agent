@@ -90,14 +90,14 @@ The hermes-alignment.md:115 entry mentions "Bridge also exited code -15 ~6 times
 | Cost-driven model swap will improve reliability | Partially false. It might mask the symptom by making the model retry less aggressively, but the underlying 401 will still corrupt vision-bearing inbound flows. |
 | Dispatcher-replay harness validates the swap | Still useful — but doesn't catch this issue because the harness will replay text-only `raw_inbound` entries, while the 401 only fires on image inputs. |
 
-## Recommended actions (NOT executed in this diagnosis pass)
+## Recommended actions
 
 In priority order:
 
-1. **Fix the vision auth issue.** Three approaches to try:
-   - (a) Change `auxiliary.vision.provider` from `openrouter` to `auto` and let Hermes resolve credentials from the main provider config. Test on srilu-vps first.
-   - (b) Add explicit `api_key: ${OPENROUTER_API_KEY}` to the `auxiliary.vision` block.
-   - (c) Inspect Hermes upstream `auxiliary_client.py:3708` request-construction path; this may be a Hermes-side bug worth filing upstream.
+1. **Fix the vision auth issue.** Three approaches considered:
+   - (a) **APPLIED 2026-05-05 18:05 UTC** — Changed `auxiliary.vision.provider` from `openrouter` to `auto` on srilu-vps. The `auto` chain calls `_try_openrouter()` which uses `os.getenv("OPENROUTER_API_KEY")` directly (verified the env var IS in `/proc/<gateway-pid>/environ` via systemd's `EnvironmentFile=/opt/shift-agent/.env`). Backup at `/root/.hermes/config.yaml.pre-vision-fix-20260505-180337`. **Verification: 0 `AuthenticationError` occurrences in journalctl since restart** (was 64 in last 2000 log lines pre-fix). Gateway active+running. Single-call observation deferred to next inbound image (gateway currently idle on srilu — same constraint as everything else, see P0). If 401 returns, fall back to (b) or (c).
+   - (b) Add explicit `api_key: ${OPENROUTER_API_KEY}` to the `auxiliary.vision` block. Not documented as a supported field in `cli-config.yaml.example` (only `provider`, `model`, `timeout`, `download_timeout`, `extra_body` are). Held in reserve.
+   - (c) Inspect Hermes upstream `auxiliary_client.py:3708` request-construction path; the explicit-provider code path at line 2057 calls `_try_openrouter()` same as auto chain, so the divergence between "explicit openrouter fails" vs "auto succeeds" is the bug here. May be worth a follow-up Hermes-upstream issue. Not blocking with (a) applied.
 
 2. **Add a vision-pipeline smoke test** to the deploy gate (already in `tasks/todo.md` P1: "Auxiliary vision pipeline test — synthetic image upload through the bridge stub, assert pending file gets created within N seconds"). Would have caught this regression at deploy time.
 
