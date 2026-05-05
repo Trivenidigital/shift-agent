@@ -64,7 +64,7 @@ NO_HANDLER_FOUND = "<no-handler-found>"
 #   2. Update fixtures + mock to reflect any new priority rules
 #   3. Update SKILL_MD_KNOWN_SHA256 below to the new hash
 #   4. Document the change in the commit message
-SKILL_MD_KNOWN_SHA256 = "1ec65d3ed6896e87549d1867355c88a544b3b67be9898f8915ad6bccdef11094"
+SKILL_MD_KNOWN_SHA256 = "dd3bbe89612f3d58ee2a91db273fdcc10f33693ca76c373b8765c09effc8ebee"
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -353,8 +353,10 @@ def mock_llm_priority_order(skill_md: str, input_payload: dict) -> tuple[str, st
     ):
         return ("→ handle_owner_command", "handle_owner_command")
 
-    # Priority 6: image/doc + owner + caption mentions "menu".
-    if media_type in {"image", "document"} and role == "owner" and "menu" in body_lower:
+    # Priority 6: image/doc + (owner OR employee) + caption mentions "menu".
+    # Employee menu-update enabled 2026-05-05 (multi-role authorization for
+    # delegated menu updates; expense remains owner-only at priority 7).
+    if media_type in {"image", "document"} and role in {"owner", "employee"} and "menu" in body_lower:
         return ("→ update_catering_menu", "update_catering_menu")
 
     # Priority 7: image/doc + owner + caption mentions "expense"/"receipt" + enabled.

@@ -18,7 +18,7 @@ You are the front door for every inbound message. Your ONLY job: identify who se
 | Text contains 5-char `#XXXXX` code matching a non-terminal row in `state/expense-bookkeeper/leads.json` AND `cfg.expense_bookkeeper.enabled` | owner | **expense_bookkeeper_dispatcher** |
 | Text matches `^undo E\d{4,}( force)?$` (case-insensitive) AND `cfg.expense_bookkeeper.enabled` | owner | **expense_bookkeeper_dispatcher** |
 | Text contains 5-char `#XXXXX` code matching a row in `state/pending.json` | owner | **handle_owner_command** |
-| Image OR document attachment + caption mentions "menu" | owner | **update_catering_menu** |
+| Image OR document attachment + caption mentions "menu" | owner OR employee | **update_catering_menu** |
 | Image OR document attachment + caption mentions "expense" or "receipt" AND `cfg.expense_bookkeeper.enabled` | owner | **expense_bookkeeper_dispatcher** |
 | Image OR document attachment, no caption, in owner's self-chat | owner | **update_catering_menu** (assume menu intent) |
 | Text contains catering keyword (see list below) AND `cfg.catering.enabled` | any | **catering_dispatcher** |
