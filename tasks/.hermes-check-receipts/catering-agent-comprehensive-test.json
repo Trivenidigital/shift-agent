@@ -1,0 +1,26 @@
+{
+  "topic": "catering-agent-comprehensive-test",
+  "task_text": "Comprehensive test plan for catering agent — case curation + targeted gap-filling tests on top of existing infrastructure (16 test files, ~4400 LOC, plus PRs #72/#73/#74 dispatcher-replay + parity harnesses already shipped). Surfaces gaps from 2026-05-03 / 2026-05-05 real-traffic testing: multi-role/dual-identity (employee-as-customer), privilege escalation (employee approving owner-only operations), multilingual / code-switched (Telugu/Hindi/Tamil), vision-auth regression smoke, expiry/stale-code edges.",
+  "completed_at": "2026-05-05T22:35:00Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 4,
+  "hermes_step_count": 11,
+  "files_to_read_first": [
+    "tests/test_catering_b1_cases.py",
+    "tests/test_catering_v02_scripts.py",
+    "src/agents/shift/skills/dispatch_shift_agent/SKILL.md",
+    "src/agents/catering/skills/parse_catering_inquiry/SKILL.md",
+    "src/agents/catering/skills/handle_catering_owner_approval/SKILL.md",
+    "src/agents/catering/skills/apply_catering_menu_decision/SKILL.md",
+    "src/agents/catering/scripts/create-catering-lead",
+    "src/agents/catering/scripts/apply-catering-owner-decision",
+    "src/agents/catering/scripts/lookup-prior-leads-by-phone",
+    "src/platform/schemas.py",
+    "src/platform/safe_io.py",
+    "docs/catering-edge-cases.md",
+    "docs/hermes-alignment.md"
+  ],
+  "build_plan_loc_estimate": 650,
+  "test_count_target": 15,
+  "scope_decision": "case curation + 4 targeted net-new test types (privilege escalation, multilingual, vision-auth regression smoke, expiry/stale-code); plan documents ~120 cases total across 11 flows (A-K) with ~70 already covered by existing tests; remaining gaps prioritized P0/P1/P2/P3 with build sequence as 4 commits totaling ~550-700 LOC"
+}
