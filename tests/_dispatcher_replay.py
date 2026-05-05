@@ -366,8 +366,14 @@ def mock_llm_priority_order(skill_md: str, input_payload: dict) -> tuple[str, st
     ):
         return ("→ expense_bookkeeper_dispatcher", "expense_bookkeeper_dispatcher")
 
-    # Priority 8: image/doc + owner + no caption (assume menu).
-    if media_type in {"image", "document"} and role == "owner" and not body.strip():
+    # Priority 8: image/doc + owner with no menu/expense keyword (assume menu).
+    # Note: body may contain the Hermes "[The user sent an image but I couldn't
+    # quite see it...]" marker even when there's no real caption — that's still
+    # priority 8 (image_only shape), not "text only". Priorities 6 and 7
+    # already returned if "menu" or "expense"/"receipt" was in the body, so by
+    # the time we reach here, any media-bearing message from owner falls
+    # through to assumed-menu intent.
+    if media_type in {"image", "document"} and role == "owner":
         return ("→ update_catering_menu (assumed)", "update_catering_menu")
 
     # Priority 9: catering keyword + catering enabled.
@@ -422,22 +428,184 @@ def mock_llm_priority_order(skill_md: str, input_payload: dict) -> tuple[str, st
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Real-LLM caller (placeholder — plumb in when ready to validate gpt-4o-mini)
+# Real-LLM caller (v0.2 — function-calling structured output)
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def openrouter_llm_caller(model_id: str, api_key: str) -> LLMCaller:
+# Tracked per-call cost storage. Real-LLM tests aggregate this across runs
+# so a CI/operator can see total $ spent. List of (model, fixture_id, cost_usd).
+_REAL_LLM_COST_LOG: list[tuple[str, str, float]] = []
+
+
+def get_real_llm_cost_log() -> list[tuple[str, str, float]]:
+    """Return all per-call cost records from real-LLM caller invocations."""
+    return list(_REAL_LLM_COST_LOG)
+
+
+def reset_real_llm_cost_log() -> None:
+    """Clear the cost log (use between test sessions)."""
+    _REAL_LLM_COST_LOG.clear()
+
+
+def _build_routing_tool() -> dict:
+    """OpenAI function-calling schema for the routing decision.
+
+    The model picks exactly one handler from KNOWN_HANDLERS via the
+    `handler` enum. This replaces the v0.1 free-text substring scan
+    (Reviewer-R2 documented-fragility — see parse_handler_from_response
+    docstring) with a structured-output contract the model can't drift
+    from.
+    """
+    return {
+        "type": "function",
+        "function": {
+            "name": "route_to_handler",
+            "description": (
+                "Pick exactly one downstream handler skill based on the "
+                "dispatch_shift_agent priority matrix. The matrix is in priority "
+                "order — earlier rows fire first. Walk top-to-bottom and pick "
+                "the first matching row's handler."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "handler": {
+                        "type": "string",
+                        "enum": sorted(KNOWN_HANDLERS),
+                        "description": "The downstream handler skill to invoke.",
+                    },
+                    "matched_priority": {
+                        "type": "integer",
+                        "description": (
+                            "1-based priority row number from the matrix that "
+                            "matched. Use 14 for unknown-sender decline."
+                        ),
+                    },
+                    "reasoning": {
+                        "type": "string",
+                        "description": (
+                            "One-sentence justification citing the matrix row "
+                            "that matched."
+                        ),
+                    },
+                },
+                "required": ["handler", "matched_priority"],
+            },
+        },
+    }
+
+
+def openrouter_llm_caller(
+    model_id: str,
+    api_key: str,
+    *,
+    base_url: str = "https://openrouter.ai/api/v1",
+    cheapest_provider: bool = True,
+    timeout_s: float = 60.0,
+) -> LLMCaller:
     """Build an LLMCaller that hits OpenRouter with the given model.
 
-    Not wired up in v0.1 — caller must provide the actual openai-Python-client
-    invocation. Kept as a placeholder so the integration point is obvious.
-    Stub raises NotImplementedError to make sure no test silently uses it.
+    Uses OpenAI function-calling for structured-output routing decisions.
+    The model is forced to call `route_to_handler` with a `handler` enum,
+    eliminating the free-text-scan fragility from v0.1.
+
+    Costs are recorded in _REAL_LLM_COST_LOG via OpenRouter's
+    `response.usage.cost` field (USD per call). Caller can access via
+    `get_real_llm_cost_log()` or `reset_real_llm_cost_log()`.
+
+    cheapest_provider=True passes `provider.sort: "price"` to honor the
+    cost-optimization config from P2.5 B (also production default on
+    srilu-vps). Set False for tests that want to compare specific
+    providers.
     """
+    try:
+        from openai import OpenAI
+    except ImportError as e:
+        raise ImportError(
+            "openrouter_llm_caller requires the `openai` Python package. "
+            "Install with: pip install openai"
+        ) from e
+
+    client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout_s)
+    tools = [_build_routing_tool()]
+    extra_body: dict = {}
+    if cheapest_provider:
+        extra_body["provider"] = {"sort": "price"}
+
     def _caller(skill_md: str, input_payload: dict) -> tuple[str, str]:
-        raise NotImplementedError(
-            "openrouter_llm_caller is a v0.2 task — wire up the openai-Python "
-            "client with model={!r}, base_url=https://openrouter.ai/api/v1, "
-            "and the dispatcher SKILL.md as the system prompt. Then parse the "
-            "response with parse_handler_from_response.".format(model_id)
+        # Build the user message: serialize the routing inputs the LLM needs.
+        # The dispatcher SKILL expects the v=1 sender block on line 1 + the
+        # message body — but we ALSO surface the parsed sender_block, identity,
+        # and state_files so the model doesn't have to re-parse + re-resolve
+        # via subprocess. This is consistent with how the production gateway
+        # invokes the SKILL: the deterministic helpers run first, then the
+        # SKILL is asked to make the routing decision given those results.
+        user_msg = (
+            "Inbound message context (validate-sender-block + identify-sender "
+            "outputs + state-file contents already provided):\n\n"
+            f"{json.dumps(input_payload, indent=2, ensure_ascii=False)}\n\n"
+            "Walk the routing matrix in priority order and call route_to_handler "
+            "with the first matching row's handler. Use handler "
+            f"'unknown_sender_declined' if no row matches. Available handlers: "
+            f"{sorted(KNOWN_HANDLERS)}."
         )
+
+        kwargs = {
+            "model": model_id,
+            "messages": [
+                {"role": "system", "content": skill_md},
+                {"role": "user", "content": user_msg},
+            ],
+            "tools": tools,
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "route_to_handler"},
+            },
+            "temperature": 0,  # deterministic routing decision
+        }
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+
+        try:
+            response = client.chat.completions.create(**kwargs)
+        except Exception as e:
+            return (f"ERROR: {type(e).__name__}: {e}", NO_HANDLER_FOUND)
+
+        # Cost tracking — OpenRouter returns usage.cost in USD
+        try:
+            cost = float(getattr(response.usage, "cost", 0.0) or 0.0)
+        except (AttributeError, TypeError, ValueError):
+            cost = 0.0
+        fixture_id = input_payload.get("_fixture_id_for_cost_tracking", "unknown")
+        _REAL_LLM_COST_LOG.append((model_id, fixture_id, cost))
+
+        # Parse the tool call
+        try:
+            tool_calls = response.choices[0].message.tool_calls or []
+            if not tool_calls:
+                # Model didn't call the tool — fall back to free-text scan
+                content = response.choices[0].message.content or ""
+                handler = parse_handler_from_response(content)
+                return (f"NO_TOOL_CALL: {content!r}", handler)
+
+            args_str = tool_calls[0].function.arguments
+            args = json.loads(args_str)
+            handler = args.get("handler", NO_HANDLER_FOUND)
+
+            # Validate handler is in our enum (model could theoretically
+            # hallucinate via JSON-mode-bypass; defensive check).
+            if handler not in KNOWN_HANDLERS:
+                return (
+                    f"INVALID_HANDLER: model returned {handler!r} (not in enum). "
+                    f"args={args!r}",
+                    NO_HANDLER_FOUND,
+                )
+
+            reasoning = args.get("reasoning", "")
+            priority = args.get("matched_priority", "?")
+            raw = f"priority={priority} → {handler} ({reasoning!r})"
+            return (raw, handler)
+        except (json.JSONDecodeError, AttributeError, IndexError) as e:
+            return (f"PARSE_ERROR: {type(e).__name__}: {e}", NO_HANDLER_FOUND)
+
     return _caller
