@@ -260,6 +260,47 @@ The "test step 4 on srilu via owner self-chat" plan had an unstated runtime-stat
 
 **Forward rule for similar plans:** before scoping any "validate via test traffic" workflow, list the message-path assumptions explicitly: which JID? `fromMe` true or false? Which filters does the message traverse before reaching the system under test? Verify each against runtime config / live logs before running. Bridge filters, dispatcher rules, audit-chain inserts, and approval-gateway state are all runtime-state surfaces that test plans implicitly depend on.
 
+### Postmortem — failed patch attempt 2026-05-05 21:51 UTC
+
+**Attempted:** drop the `recentlySentIds.has(msg.key.id)` half of the agent_echo filter at bridge.js:327, leaving only the `body.startsWith(REPLY_PREFIX)` check as loop guard.
+
+**Reasoning at design time (faulty):** "In self-chat mode, `formatOutgoingMessage` prepends REPLY_PREFIX to all bot outbound text → REPLY_PREFIX check catches all bot echoes → safe to drop recentlySentIds." This was based on reading the function source, not on inspecting actual runtime outbound payloads.
+
+**What actually happened:**
+
+1. Patch applied at 21:51 UTC; bridge.js sha256 `753cbcbd881a...4ef72`; gateway restarted, bridge mode self-chat preserved, syntax-check passed
+2. Operator (user) sent owner self-chat menu update test
+3. Bridge correctly forwarded owner inbound to gateway (patch worked at the inbound side — this part of the design was correct)
+4. Gateway processed, generated reply: *"The catering menu has been successfully updated with the new items and prices..."* (LLM-generated prose, no REPLY_PREFIX prefix)
+5. Bridge sent reply via WhatsApp; outbound text did **not** start with REPLY_PREFIX
+6. WhatsApp echoed bot's own outbound back to bridge as `fromMe: true` upsert event
+7. Patched filter checked `body.startsWith(REPLY_PREFIX)` — false (no prefix)
+8. Without `recentlySentIds` half, no other guard fired → bridge forwarded bot's own reply back to gateway as a new inbound
+9. Gateway processed it as a fresh menu-update inbound → generated another reply
+10. **Loop**. 4+ messages observed by operator within ~60 seconds before manual intervention
+
+**Why the assumption was wrong:** at least one of two conditions held at runtime:
+- `WHATSAPP_REPLY_PREFIX` env var is empty/unset (DEFAULT_REPLY_PREFIX path is bypassed because the env var is *defined as empty string*, not undefined; `process.env.WHATSAPP_REPLY_PREFIX === undefined` is false → empty REPLY_PREFIX), OR
+- A bot outbound code path bypasses `formatOutgoingMessage` (e.g., a SKILL doing direct bridge POST, or the agent's terminal-output-as-WhatsApp-reply path that may not go through the same formatter)
+
+Did not verify which at runtime. Either would invalidate the patch. **The pre-flight check was incomplete.**
+
+**Resolution:**
+- 21:59 UTC: bridge.js restored from backup `bridge.js.pre-self-chat-fix-20260505-215100` (filter back to original)
+- Gateway restarted; bridge in self-chat mode; agent_echo filter catching loops as designed
+- Loop messages stopped within seconds (in-flight LLM calls aborted with `Interrupted during API call`)
+
+**State now:** identical to pre-patch (P2.6 finding stands; owner self-chat blocked by recentlySentIds matching → that's the original behavior, accepted as the cost of preventing loops).
+
+**Lesson learned (escalated):** This is the third runtime-state-assumption failure today (R3 SQL UPDATE, agent_echo block at plan time, this patch postmortem). The "watch for >1/week" threshold in `memory/feedback_runtime_state_verification.md` is broken by ~7×. Discipline escalated from advisory to hard plan-time gate — see updated memory.
+
+**Blockers for any future patch attempt:**
+- Must inspect actual runtime outbound payload before assuming REPLY_PREFIX coverage
+- Must enumerate ALL bot outbound code paths (not just the bridge's HTTP send endpoint — also direct subprocess sends from SKILLs, terminal-output-as-reply, catering quote drafting, etc.)
+- Must test in a controlled environment where loops are containable (e.g., bot paired to a test number, not the production-receiving WhatsApp account)
+
+**Recommendation forward:** do not patch the bridge filter. Instead, pair a separate WhatsApp number to srilu (option B from the original P2.6 framing). Bot ≠ owner eliminates the ambiguity that motivated this filter in the first place; the filter becomes irrelevant for owner-as-customer testing.
+
 ## P3 — Platform / infrastructure cleanup
 
 See `docs/hermes-alignment.md` Part 2 for the silent-failure-ranked operational drift checklist. Items below cross-reference that doc; resolve there as the canonical tracker.
