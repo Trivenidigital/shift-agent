@@ -3,7 +3,7 @@
 Living checklist. Items grouped by priority; each completed item gets `✅` and a date.
 For history of *completed* multi-phase initiatives (platform extract, sender-id, agent #2/4/5, etc.), see git log + `tasks/all-phases-*.md`.
 
-Last updated: 2026-04-29 (Catering omnibus PR-A: hardening + lookup SKILL preamble; v0.4 deferred to PR-B with reviewer-flagged corrections)
+Last updated: 2026-05-05 (P2.5 model-strategy section added; B+step4 path captures ~95% of achievable savings; multi-profile A deferred with explicit triggers)
 
 ---
 
@@ -19,7 +19,12 @@ Reporter floor as of 2026-04-28: **0/26 (0%)** — all 26 entries are pre-fix sy
 
 ### Test pyramid investments
 
-- [ ] **Layer C — recorded replay** (medium effort, high value). Curate ~30 message fixtures from accumulated `decisions.log` (~2 weeks out) + JSONL post-mortems. Build a replay harness that runs fixtures against a containerized Hermes and asserts routing intent matches recorded baseline. The `dispatcher_routed` log entries make this self-curating.
+- ✅ **2026-05-05 — Layer C v0.1 — recorded replay harness (scaffold + synthetic fixtures)** — shipped in unstaged tree:
+  - `tests/_dispatcher_replay.py` (348 LOC) — `Fixture`/`ReplayResult` dataclasses, `load_fixtures()`, `load_dispatcher_skill()`, `parse_handler_from_response()` (longest-match handler extraction), `replay_one()`/`replay_all()`, `mock_llm_priority_order` (deterministic priority-walker), `mock_llm_returns_expected` (test-only), `openrouter_llm_caller` (placeholder for v0.2).
+  - `tests/test_dispatcher_replay.py` (143 LOC) — pytest harness; 19 passing tests + 8 skipped (parametrize over 20 slots, 12 fixtures). Self-consistency check: priority-order mock matches every fixture's expected_handler.
+  - `tests/fixtures/dispatcher_traffic.jsonl` — 12 synthetic fixtures covering matrix priorities 1, 2, 3, 4, 5, 6, 7, 9, 11, 13, 14 + one priority-trap regression case.
+  - `src/platform/scripts/extract-replay-fixtures` (167 LOC) — VPS-runnable script pairing `raw_inbound`+`dispatcher_routed` from decisions.log into fixture JSONL; emits notes that state_files/config are placeholders (audit log doesn't capture state at decision time, curator must fill in for priority-1-5 cases). Production audit log on srilu-vps currently has 0 raw_inbound entries (per memory: 0/26 floor) — synthetic fixtures carry the harness for now.
+  - **v0.2 deferred work:** wire up real `openrouter_llm_caller` (openai-Python client + OpenRouter base URL + parse with `parse_handler_from_response`); add `HERMES_REPLAY_MODEL` env-driven test variant; add cost-tracking decoration; grow synthetic fixture set to ~30 (cover priorities 8/10/12); pull real fixtures once production traffic flows. Real-LLM gating is what unblocks step 4 (default-model flip) per P2.5.
 - [ ] **Layer A — full E2E with real Kimi** (high cost, run rarely). 36-case smoke suite, ~$0.10–0.50/run, 3–6 min. Run pre-deploy and on any SKILL.md change. Build after Layer C is stable.
 - [ ] **Auxiliary vision pipeline test** — synthetic image upload through the bridge stub, assert pending file gets created within N seconds. Doesn't fit cleanly into A/B/C since failure mode is auth/wiring not LLM judgment. Standalone reliability test.
 
@@ -121,6 +126,72 @@ Genuinely net-new: tone-sample plumbing + `--quote-text` flag + small schema add
 - [ ] **Capture interesting routing pairs to fixtures file** as they arrive — start a `tests/fixtures/dispatcher_traffic.jsonl` with manually-curated entries from `decisions.log`. Seeds Layer C.
 - [ ] **Strengthen image+menu fallback** — currently Fix 3 in PR #14 catches misrouted image+menu in `handle_owner_command`. Audit other handlers for similar misroute paths once data shows where Kimi actually misroutes.
 
+## P2.5 — Model strategy & cost optimization (2026-05-05)
+
+**Context:** Discussion arc starting from a proposed model swap (k2-thinking → tiered split) culminated in a verified finding: per-skill model routing does NOT exist in Hermes 0.12.0 (see `~/.claude/projects/.../memory/reference_hermes_model_routing.md`). Available granularity is global default + task-type auxiliary overrides (Vision, STT/TTS, compression). Decision: capture ~95% of achievable savings via "B today + step 4 after dispatcher validation" — i.e., OpenRouter cheapest-provider routing now + flip global default to gpt-4o-mini after the Layer C dispatcher-replay harness validates parity. Multi-profile architecture (option A) deferred with explicit triggers below.
+
+**Cost math at 10-customer realistic mix (3 quiet + 5 mid + 2 active):**
+
+| Architecture | Monthly | Annualized | Δ vs current |
+|---|---|---|---|
+| All-Kimi-k2.5 (current default) | $461 | $5,535 | baseline |
+| All-gpt-4o-mini | $151 | $1,810 | −$3,725/yr |
+| A+B (multi-profile + OpenRouter cheapest) | $170 | $2,040 | −$3,495/yr |
+| **B-only (Kimi everywhere + OpenRouter cheapest)** | **$345** | **$4,140** | **−$1,395/yr** (turn on now) |
+
+**Drift-check tag:** `Hermes-native` for B (config-only) and step 4 (config-only). Multi-profile A is `extends-Hermes` (uses existing `hermes profile` capability without patching).
+
+**Hermes capability checklist (per CLAUDE.md):**
+
+| Step | Hermes? | Net-new? |
+|---|---|---|
+| Switch global default model | [Hermes] `hermes config set` | — |
+| OpenRouter cheapest-provider routing | [Hermes] OpenRouter passthrough already configured | ~5 LOC config |
+| `hermes profile` for multi-profile isolation | [Hermes] existing CLI capability | — |
+| Per-skill model override | [net-new] would need upstream Hermes change OR fork+patch | deferred — not built |
+| Dispatcher-replay harness for validation | [net-new] tracked separately as P1 Layer C | medium effort |
+
+### Now-ish — independent of dispatcher work
+
+- ✅ **2026-05-05 — Enable OpenRouter cheapest-provider routing on Kimi calls (B)** — added top-level `provider_routing: { sort: "price" }` block to `/root/.hermes/config.yaml` on srilu-vps. Verified: (a) Hermes 0.12.0 schema supports `provider_routing` per `cli-config.yaml.example` lines 42–60 + `gateway/run.py` reads it via `pr.get("sort")` etc.; (b) yaml parses cleanly; (c) `hermes config show` runs without error; (d) hermes-gateway service active+running post-restart with config loaded. Backup at `/root/.hermes/config.yaml.bak-20260505-022248`. Pre-deploy gateway-restart hit a transient chown race (gateway in restart-loop holding files); resolved by manual `chown -R shift-agent:shift-agent /root/.hermes` followed by `systemctl restart hermes-gateway`. Runtime cost-savings verification (does OpenRouter actually route to cheapest provider on each Kimi call?) requires inspecting subsequent API request traces — deferred to dispatcher-replay harness real-LLM mode (v0.2).
+
+### Sequenced — gated on dispatcher-replay harness completion
+
+- ✅ **2026-05-05 — Investigate 2026-05-01 dispatcher hangs** — full diagnosis in `tasks/diag-2026-05-01-hangs.md`. Root cause is NOT k2-thinking reasoning+tool-use interaction. The 320s/11-api-call/0-char-response signature is **vision auxiliary-client `401 AuthenticationError` ("Missing Authentication header") loops** in `/usr/local/lib/hermes-agent/agent/auxiliary_client.py:3708` triggering main-client tool-call thrashing. As of 2026-05-05, 64 occurrences of the 401 in last 2000 log lines on srilu-vps — issue is currently active. Switching the dispatcher model would NOT fix this. **New blocker for step 4 (default-model flip):** vision auth must be fixed first, OR step 4's quality validation must explicitly carve out image-bearing inputs as a separate test surface. See diag doc for three approach candidates (auto-provider, explicit api_key in aux block, upstream Hermes auxiliary-client fix).
+
+- [ ] **Fix vision auxiliary-client 401 (NEW, surfaced by diagnosis above)** — try (a) `auxiliary.vision.provider: "auto"`, OR (b) explicit `api_key: ${OPENROUTER_API_KEY}` in the aux block, OR (c) inspect Hermes auxiliary-client credential injection path. ~half-day to A/B the three approaches against srilu-vps and pick the cleanest. Companion test: existing P1 "Auxiliary vision pipeline test" — wire it as a deploy-gate smoke check so this regression class is caught at install time, not at first inbound image.
+
+- [ ] **Flip global default to gpt-4o-mini (step 4)** — after Layer C dispatcher-replay harness (P1) validates routing parity on 50–100 prod `raw_inbound` fixtures. Single config change: `hermes config set model.default openai/gpt-4o-mini` (verify on srilu-vps first, then bulk-deploy across fleet). Expected savings: ~$3,500/yr at current 10-customer mix; quality: gpt-4o-mini's tool-use is bulletproof on similar matrices (verified on Vizora MCP). **Pre-flip checklist:**
+  - (a) audit `dispatch_shift_agent/SKILL.md` for explicit priority-order framing + anti-shortcut wording (gpt-4o-mini is non-reasoning, will pattern-match shortcuts without explicit "follow priority order" framing)
+  - (b) replay-harness diff is acceptable (no routing decision regressions vs. Kimi baseline)
+  - (c) catering's `handle_catering_owner_approval` LLM-drafted-quote prose A/B'd on 5–10 real inquiries (truth-guard intact: headcount + ISO date + menu items match inquiry?)
+  - (d) EOD reconciliation gets explicit "show your math, then state the final number" prompting appended to the SKILL
+  - Mitigation if regression surfaces post-flip: revert is one config flip back; keep Kimi as `hermes fallback` for resilience during the soak window. ~1 day incl. validation.
+
+### Deferred — multi-profile architecture (option A)
+
+**Status (2026-05-05):** Technically buildable today via existing `hermes profile` capability (no patch needed). Operational tax: 2x systemd units, 2x process memory (~250MB → ~500MB resident; fine on CCX13), shared filesystem state via existing flock + `safe_io.atomic_write_json` conventions. Deferred because (a) B + step 4 captures ~95% of achievable savings, (b) reasoning-heavy agents that would benefit (pnl_anomaly, compliance, expense_bookkeeper full prod) aren't built yet, (c) operational tax not justified at 10-customer scale.
+
+**Architecture sketch when triggered:**
+- `hermes-gateway-rt` profile: gpt-4o-mini default; handles WhatsApp inbound dispatcher + real-time skill chains (high volume, latency-sensitive, ~85% of LLM calls).
+- `hermes-gateway-batch` profile: Kimi-k2.5 (with B = OpenRouter cheapest) OR claude-haiku-4.5 default; handles cron-triggered jobs — Daily Brief, EOD, future pnl_anomaly + expense_bookkeeper batch path (low volume, latency-tolerant, quality-sensitive, ~15% of LLM calls).
+- **Shared infrastructure:** WhatsApp bridge (Baileys), cf-router, watchdogs, project SKILL files (`src/agents/*/skills/*`), `/opt/shift-agent/state/`, NDJSON `decisions.log` via `safe_io.ndjson_append` chokepoint, approval-code namespace via `generate_unique_code` shared file under flock.
+- **Per-profile:** `~/.hermes-rt/` and `~/.hermes-batch/` (config + sessions + memory), separate gateway processes (systemd units), separate LLM provider clients.
+- **Routing rule:** WhatsApp inbound → RT profile (existing default path). Cron-triggered jobs (`systemctl start daily-brief.service`, etc.) → invoke batch profile binary explicitly via `HERMES_PROFILE=batch hermes ...`.
+
+**Trigger conditions — build A when ANY of these is true:**
+
+| Trigger | Why it matters |
+|---|---|
+| Customer count crosses ~30 | Cost gap >$1K/mo, payback <1 quarter on engineering effort |
+| First reasoning-heavy agent (pnl_anomaly / compliance / expense_bookkeeper full prod) scaffolded | Global-default tradeoff becomes unacceptable; A is the path to keep both quality (batch) and cost (real-time) |
+| Production quality incident traced to model-skill mismatch | Real evidence vs. theoretical optimization; e.g., Daily Brief misses anomaly that reasoning model would catch |
+| Hermes upstream adds per-skill auxiliary support (`auxiliary.<skill_name>`) | Adopt native; A becomes obsolete in favor of upstream-supported per-skill routing |
+
+**Estimated effort when triggered:** 3–5 days incl. systemd unit creation, env-symlink validation across both profiles (don't break the existing `.env` symlink gate from PR #18), dispatcher-replay harness rerun on both profiles, deploy-gate updates (`shift-agent-deploy.sh` needs to know about both gateway services), Pushover/cf-router integration with both profiles, runbook for failure modes (one profile down ≠ full outage; verify systemd unit independence).
+
+**Re-check trigger:** every alignment-doc audit pass (currently 2026-07-28). If Hermes upstream PR adds `auxiliary.<skill_name>` support, switch from "build A" to "adopt upstream native" and close this entry.
+
 ## P3 — Platform / infrastructure cleanup
 
 See `docs/hermes-alignment.md` Part 2 for the silent-failure-ranked operational drift checklist. Items below cross-reference that doc; resolve there as the canonical tracker.
@@ -130,6 +201,10 @@ See `docs/hermes-alignment.md` Part 2 for the silent-failure-ranked operational 
 - ✅ **2026-04-28** — Reconcile `shift-agent-deploy.sh` with actual VPS pattern (PR #16). Tarball-based deploy with snapshot-before-install, smoke gate, auto-rollback. End-to-end validated on VPS: deploy + rollback + rollforward + list. `tools/build-deploy-tarball.sh` runs pytest gate locally, captures `git rev-parse HEAD` into `.commit-hash`, ships ~116K tarball.
 - ✅ **2026-04-28** — Pin Hermes commit hash in deploy.sh (PR #17). 3-field baseline pin (`HERMES_COMMIT`, `HERMES_VERSION`, `BRIDGE_POST_PATCH_SHA256`) verified by `tools/check-shift-agent-patch.sh` as first deploy gate. Override path with `HERMES_PIN_OVERRIDE=<full-hash>` + `HERMES_PIN_OVERRIDE_REASON` both required, dual-channel audit (pin-overrides.log + log-decision-direct), all 4 validation paths exercised live on VPS: fail-closed on drift, override-accepts-current, override-rejects-wrong-hash, override-rejects-missing-reason.
 - ✅ **2026-04-28** — bridge.js patch inventory (subsumed by PR #17). Same gate covers `shift-agent-template-bypass` markers (added in PR #14, previously uncovered) + sha256 fingerprint of as-deployed bridge.js (catches in-version code drift + manual edits + partial patch reapplication).
+
+### Config.yaml shape gate (NEW 2026-05-05)
+
+- [ ] **Add `tools/check-config-yaml.sh` deploy-time gate** — currently `/root/.hermes/config.yaml` is operator-edited (model defaults, provider_routing, auxiliary overrides) with no shape assertion. The Hermes pin gate (PR #17) protects the binary; the .env symlink gate (PR #18) protects credentials; there's no equivalent for config.yaml. A future operator typo (e.g., `model.dafault: ...` instead of `default`) would silently fall back to whatever Hermes uses for missing-key default. Add a script that asserts presence + shape of expected blocks (`model.default`, `model.provider`, `auxiliary.vision.{provider,model}`, optionally `provider_routing.sort`); wire into `shift-agent-deploy.sh` after the Hermes pin gate. **Reviewer-R1 (Hermes-first review, 2026-05-05) — M2 finding.** ~half-day. Track in `docs/hermes-alignment.md` Part 2 Medium tier.
 
 ### Hermes pin follow-ups (low priority)
 
