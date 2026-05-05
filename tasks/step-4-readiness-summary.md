@@ -6,6 +6,20 @@
 **Tracker:** `tasks/todo.md` P2.5 step 4
 **Decision required from:** human operator (this doc is data + recommendation, not authorization)
 
+## Status update — 2026-05-05 SHIPPED
+
+**Operator authorized "SHIP" — applied on srilu-vps at 2026-05-05 20:35 UTC.**
+
+- `model.default`: `moonshotai/kimi-k2-thinking` → `openai/gpt-4o-mini`
+- `fallback_providers`: 1 entry (`moonshotai/kimi-k2-thinking` via OpenRouter) — soak-window safety net
+- Backup: `/root/.hermes/config.yaml.pre-step4-20260505-203536`
+- hermes-gateway service: active+running post-restart
+- Other config (B `provider_routing.sort=price`, vision-auth `auxiliary.vision.provider=auto`): preserved
+
+Soak window in progress; retirement of kimi fallback after ~30 clean days tracked in `tasks/todo.md` P2.5.
+
+---
+
 ## Bottom line
 
 **All four step-4 gates are closed.** Data unanimously supports flipping the default model. The decision is the operator's per the project's "Never auto-commit / authorize-before-act" rule.
