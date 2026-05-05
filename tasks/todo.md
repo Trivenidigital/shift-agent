@@ -173,7 +173,7 @@ Genuinely net-new: tone-sample plumbing + `--quote-text` flag + small schema add
 
 - [ ] **Step 4 fleet rollout (NEW 2026-05-05)** — after srilu-vps soak passes, replicate the same config change on the other VPSs (main-vps, any per-customer VPSs). Same approach: backup config.yaml, edit `model.default` to gpt-4o-mini + add fallback, restart hermes-gateway. ~10 min per VPS. No tarball deploy needed (config-only change).
 
-- [ ] **Owner-self-chat real-traffic test path BLOCKED by bridge.js agent_echo filter** (NEW 2026-05-05, surfaced during step-4 menu-update test) — when bot's WhatsApp account == owner's account (multi-device pairing), the bridge cannot distinguish "owner typed manually on phone" from "bot sent via API." Both produce `fromMe: true`. The bridge.js agent_echo filter (`recentlySentIds.has(msg.key.id)` + `body.startsWith(REPLY_PREFIX)` checks at `/usr/local/lib/hermes-agent/scripts/whatsapp-bridge/bridge.js`) drops ALL owner-typed messages as suspected loops. Confirmed on srilu-vps 2026-05-05: 8/8 owner-side menu-update test messages were ignored as agent_echo before reaching the gateway. **Step 4 (gpt-4o-mini) was untestable on this path** — gateway never received the inbound. Three resolution options: (a) pair bot to a separate WhatsApp number (bot ≠ owner, customer-facing flow becomes testable, owner manual-message path needs a different approach), (b) hot-patch bridge.js to disable agent_echo filter (risky — bot replies become reprocessable as inbound, real loop risk), (c) document as known limitation + use customer-side traffic for real-flow validation. The 2026-05-03 successful catering test (L0003) was customer-side (external chatId), not owner self-chat — confirming customer-side path works. **No fix in scope of step-4 work; tracked here for separate cycle.** Pre-existing issue, not caused by step 4.
+**See P2.6 for the structural finding** (owner self-chat blocked by agent_echo filter, gated on BSP). The earlier rough-draft inline note is superseded.
 
 - ✅ **2026-05-05 — Gate (d) EOD show-your-math prompting — N/A finding** — investigated and resolved as moot. `src/agents/eod_reconcile/scripts/eod-reconcile` is fully deterministic Python (counts events from decisions.log + pending.json, writes snapshot, sends Pushover summary). `src/agents/daily_brief/scripts/send-daily-brief` is also template-based ("`Render the brief by interpolating into the template (no LLM in v0.1).`"). No LLM in either path → no prompt to add show-your-math to. Original concern (gpt-4o-mini's multi-step arithmetic drift) doesn't apply because the production EOD path doesn't ask the model to do arithmetic. Step 4 checklist updated: gate (d) removed; only (c) catering prose A/B remains. Refocus, if needed: future agents that DO involve multi-step arithmetic (expense_bookkeeper RealQBOClient with tax rules per V02-4, or pnl_anomaly when scaffolded) can adopt show-your-math then.
 
@@ -200,6 +200,65 @@ Genuinely net-new: tone-sample plumbing + `--quote-text` flag + small schema add
 **Estimated effort when triggered:** 3–5 days incl. systemd unit creation, env-symlink validation across both profiles (don't break the existing `.env` symlink gate from PR #18), dispatcher-replay harness rerun on both profiles, deploy-gate updates (`shift-agent-deploy.sh` needs to know about both gateway services), Pushover/cf-router integration with both profiles, runbook for failure modes (one profile down ≠ full outage; verify systemd unit independence).
 
 **Re-check trigger:** every alignment-doc audit pass (currently 2026-07-28). If Hermes upstream PR adds `auxiliary.<skill_name>` support, switch from "build A" to "adopt upstream native" and close this entry.
+
+## P2.6 — Owner self-chat structurally blocked by agent_echo filter
+
+**Status:** Logged 2026-05-05. Resolution gated on BSP-backed number go-live.
+
+**Drift-check tag:** `extends-Hermes` — finding documents an upstream Hermes bridge.js behavior that interacts with the deployed multi-device WhatsApp pairing model. No code change in this section; gates ride on BSP timeline (separate workstream).
+
+### Finding
+
+The bridge's agent_echo filter (bridge.js, `fromMe: true && (REPLY_PREFIX match || recentlySentIds match)`) blocks every owner self-chat message from reaching the gateway. Path is always-blocked, not intermittent — confirmed against bridge logs on 2026-05-05.
+
+### Evidence
+
+- Bridge log entries `{"event":"ignored","reason":"agent_echo","chatId":"918522041562@s.whatsapp.net"}` for owner-side test messages
+- L0003 (5/3) trace previously cited as "owner self-chat that worked" was actually **customer-side**: `customer_phone +17329837841`, `chat_id 17329837841@s.whatsapp.net`, `role unknown`, `fromMe: false`. Bot's own JIDs are `918522041562@s.whatsapp.net` (IN number) + `211390371475536@lid`
+- Cache-pollution hypothesis (`recentlySentIds` filling over the day) is **rejected** — no successful owner self-chat trace exists in any window we have logs for
+
+### Path status
+
+| Path | Status |
+|---|---|
+| Customer-side traffic (external chatId, `fromMe: false`) | ✅ Validated end-to-end via L0003 on 5/3 — dispatcher + parse_catering_inquiry + create-catering-lead chain all ran clean |
+| Owner self-chat (own chatId, `fromMe: true`) | ❌ Structurally blocked since deployment |
+
+### Step 4 deployment status (qualified)
+
+Three separate statements that should not be conflated:
+
+1. **Deployed** on srilu — yes
+2. **Mechanically correct** (filter is upstream of step 4 logic, no behavior change from this finding) — yes
+3. **Validated under real traffic** — *partially*. Customer-side path validated via L0003. Owner-as-customer test path has never validated and won't until bot ≠ owner architecturally
+
+### Architectural fix
+
+BSP-backed number is the resolution path, not interim burner SIM:
+
+- BSP route is bot-only by design → bot ≠ owner → owner-as-customer testing unblocks naturally
+- Meta Business verification timeline (2–4 weeks) is shorter than the cost-benefit of pairing a separate WhatsApp account on srilu and re-doing QR + audit-chain config for an interim window
+- BSP verification paperwork is already in flight in parallel with design partner outreach
+
+Hot-patching bridge.js to disable agent_echo (option C from diagnostic) is **rejected** — risk of bot's own outbound replies being processed as inbound creates real loop potential on a production WhatsApp number, with rate-limit and BSP verification scrutiny consequences.
+
+### Re-validation gate
+
+Add as explicit checkpoint when BSP-backed number lands:
+
+> When BSP-backed number is paired on srilu/prod (bot ≠ owner), re-run step 4 validation using owner-as-customer test traffic. Treat that as the actual end-to-end validation moment for the owner-test path. Customer-side validation remains continuous via real catering inquiries — first inbound real inquiry post-BSP confirms customer-path is unbroken under new routing.
+
+### Re-evaluation triggers (kill / extend criteria)
+
+- **If BSP verification slips past 2026-06-15** (≈6 weeks from logging): revisit interim burner SIM (option B). Cost-benefit shifts when delay exceeds the architectural fix's natural timeline
+- **If a bug surfaces in step 4 under real customer traffic before BSP** that owner self-chat testing would have caught: priority escalates to P1, interim burner SIM gets greenlit immediately as test infrastructure
+- **If BSP verification fails** (paperwork rejection, business verification issue): close this finding by promoting interim burner SIM to permanent solution, re-scope as architecture decision
+
+### Connection to global discipline §9 (runtime-state verification)
+
+The "test step 4 on srilu via owner self-chat" plan had an unstated runtime-state assumption: that the bridge would forward owner messages to the gateway. That assumption was wrong, and the wrongness was structural (always-on filter), not transient. The plan still produced the right next action — bridge log diagnostic ran, root cause was identified in one session — but the underlying lesson is that test-traffic plans deserve the same runtime-state scrutiny as config-only probes.
+
+**Forward rule for similar plans:** before scoping any "validate via test traffic" workflow, list the message-path assumptions explicitly: which JID? `fromMe` true or false? Which filters does the message traverse before reaching the system under test? Verify each against runtime config / live logs before running. Bridge filters, dispatcher rules, audit-chain inserts, and approval-gateway state are all runtime-state surfaces that test plans implicitly depend on.
 
 ## P3 — Platform / infrastructure cleanup
 
