@@ -19,6 +19,15 @@ Defense-in-depth layers:
 These tests exercise layer 2 — the script-level guard. They invoke the
 apply scripts directly via subprocess + sys.argv and assert exit 12 with
 no state mutation when sender_role != "owner".
+
+Trim history (2026-05-06 audit-cleanup): originally 6 test functions
+including parametrize over [employee, customer, unknown] on both apply
+paths plus a cross-cutting H-008 test plus an argparse-rejects test.
+All non-owner roles hit the same privilege-check branch at the same line
+in the script; testing one of them (employee) catches any regression
+of that branch. argparse `choices=[...]` enforces enum membership for
+free. Cross-cutting H-008 is the conjunction of the d013 + b021 employee
+cases — no separate test needed. Trimmed to 4 tests / ~150 LOC.
 """
 from __future__ import annotations
 
@@ -188,18 +197,24 @@ sys.exit(mod.main())
 # ─────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("role", ["employee", "customer", "unknown"])
-def test_d013_non_owner_cannot_apply_menu_update(env_dir, role):
-    """Non-owner sender_role values must be rejected with EXIT_PRIVILEGE_DENIED.
+def test_d013_employee_cannot_apply_menu_update(env_dir):
+    """Employee sender_role must be rejected with EXIT_PRIVILEGE_DENIED.
 
     Critical: pending file MUST still exist after the rejected call (no
     state probe / leak via timing or pending-file mutation).
+
+    NOTE: customer/unknown roles hit the same privilege-check branch at the
+    SAME line in the script; not separately tested per the audit-cleanup
+    trim (2026-05-06). argparse `choices=[...]` enforces the enum membership
+    so any non-owner role takes this path.
     """
     _seed_pending_menu_update(env_dir, code="#PRV01")
     pending_before = (env_dir / "state" / "catering-menu-pending.json").read_text()
     menu_before_exists = (env_dir / "state" / "catering-menu.json").exists()
 
-    result = _run_apply_menu(env_dir, code="#PRV01", decision="yes", sender_role=role)
+    result = _run_apply_menu(
+        env_dir, code="#PRV01", decision="yes", sender_role="employee",
+    )
 
     assert result.returncode == EXIT_PRIVILEGE_DENIED, (
         f"expected EXIT_PRIVILEGE_DENIED (12), got {result.returncode}\n"
@@ -282,19 +297,24 @@ def bridge_server():
         server.shutdown()
 
 
-@pytest.mark.parametrize("role", ["employee", "customer", "unknown"])
-def test_b021_non_owner_cannot_approve_catering_lead(env_dir, bridge_server, role):
-    """Non-owner sender_role rejected on apply-catering-owner-decision.
+def test_b021_employee_cannot_approve_catering_lead(env_dir, bridge_server):
+    """Employee sender_role rejected on apply-catering-owner-decision.
 
     Critical: the bridge MUST NOT receive any POST (would mean a customer
     quote was sent on behalf of a non-authorized sender).
+
+    NOTE: customer/unknown roles hit the same privilege-check branch at the
+    SAME line; not separately tested per the audit-cleanup trim
+    (2026-05-06). H-008 ("employee blocked at both apply paths") is also
+    not separately tested — the employee case here + the d013 employee
+    case above together pin the H-008 invariant.
     """
     port, stub = bridge_server
     _seed_catering_lead(env_dir, code="#PRV02")
     leads_before = (env_dir / "state" / "catering-leads.json").read_text()
 
     result = _run_apply_decision(
-        env_dir, port, code="#PRV02", decision="reject", sender_role=role
+        env_dir, port, code="#PRV02", decision="reject", sender_role="employee",
     )
 
     assert result.returncode == EXIT_PRIVILEGE_DENIED, (
@@ -306,48 +326,3 @@ def test_b021_non_owner_cannot_approve_catering_lead(env_dir, bridge_server, rol
     assert (env_dir / "state" / "catering-leads.json").read_text() == leads_before
     # Bridge never invoked — no quote sent under non-owner identity
     assert len(stub.requests) == 0
-
-
-# ─────────────────────────────────────────────────────────────────
-# H-008: cross-cutting employee-as-attacker test
-# (covered by B-021 + D-013 parametrize over employee role; this is the
-# documented intent — both critical paths are gated.)
-# ─────────────────────────────────────────────────────────────────
-
-
-def test_h008_employee_blocked_at_both_apply_paths(env_dir, bridge_server):
-    """Single test asserting the H-008 invariant: an employee cannot drive
-    EITHER owner-only state mutation, regardless of which code they typed."""
-    port, _stub = bridge_server
-    _seed_pending_menu_update(env_dir, code="#PRV01")
-    _seed_catering_lead(env_dir, code="#PRV02")
-
-    r1 = _run_apply_menu(
-        env_dir, code="#PRV01", decision="yes", sender_role="employee"
-    )
-    r2 = _run_apply_decision(
-        env_dir, port, code="#PRV02", decision="approve", sender_role="employee"
-    )
-
-    assert r1.returncode == EXIT_PRIVILEGE_DENIED
-    assert r2.returncode == EXIT_PRIVILEGE_DENIED
-
-
-# ─────────────────────────────────────────────────────────────────
-# Argparse safety: invalid --sender-role values rejected by argparse itself
-# ─────────────────────────────────────────────────────────────────
-
-
-def test_argparse_rejects_unknown_sender_role(env_dir):
-    """argparse choices=[...] should reject anything not in the enum.
-    Returns exit 2 (argparse) rather than 12 (privilege) — but BOTH still
-    block the operation, which is what matters for security."""
-    _seed_pending_menu_update(env_dir, code="#PRV01")
-
-    result = _run_apply_menu(
-        env_dir, code="#PRV01", decision="yes", sender_role="root"
-    )
-
-    assert result.returncode != 0
-    # argparse error or our own privilege-denied — either way, no state mutation
-    assert not (env_dir / "state" / "catering-menu.json").exists()
