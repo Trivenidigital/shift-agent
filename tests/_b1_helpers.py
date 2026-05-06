@@ -178,10 +178,14 @@ def run_apply(
     edit_text: str = "",
     reason: str = "",
     menu_path: Optional[Path] = None,
+    sender_role: str = "owner",
 ):
     """Invoke apply-catering-owner-decision via importlib wrapper.
 
     menu_path: if set, overrides mod.MENU_PATH for the subprocess (used by C16/C17).
+    sender_role: passed through as --sender-role (privilege gate added by
+        commit 02afc22 — B-021/D-013/H-008). Defaults to "owner" so all
+        existing positive-path tests continue to pass.
 
     Pattern matches run_create: SourceFileLoader -> exec_module -> override
     paths (including MENU_PATH) -> sys.exit(mod.main()).
@@ -203,6 +207,7 @@ sys.argv = [
     "apply-catering-owner-decision",
     "--code", {code!r},
     "--decision", {decision!r},
+    "--sender-role", {sender_role!r},
 ] + {extra!r}
 
 loader = importlib.machinery.SourceFileLoader("acod", {str(APPLY)!r})
