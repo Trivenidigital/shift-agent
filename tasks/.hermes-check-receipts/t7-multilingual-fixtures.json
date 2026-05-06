@@ -1,0 +1,14 @@
+{
+  "topic": "t7-multilingual-fixtures",
+  "task_text": "t7-multilingual-fixtures — add 5 code-switched multilingual catering inquiry fixtures (Telugu/Hindi/Tamil mixed with English) to tests/fixtures/dispatcher_traffic.jsonl, exercising the existing dispatcher-replay harness for cases I-001/I-002/I-005/I-006 plus a Tamil bonus. Pure data curation, no helper changes, no schema changes. All fixtures contain at least one English catering keyword so the deterministic priority mock continues to pass.",
+  "completed_at": "2026-05-06T03:20:53Z",
+  "drift_check_tag": "Hermes-native",
+  "net_new_step_count": 1,
+  "hermes_step_count": 10,
+  "files_to_read_first": [
+    "tests/fixtures/dispatcher_traffic.jsonl",
+    "tests/_dispatcher_replay.py",
+    "tests/test_dispatcher_replay.py",
+    "src/agents/catering/skills/parse_catering_inquiry/SKILL.md"
+  ]
+}
