@@ -1,12 +1,18 @@
 # T7 — Multilingual catering-inquiry fixtures (plan)
 
-**Drift-check tag:** `Hermes-native`
+**Drift-check tag:** `extends-Hermes`
 
-Pure data curation. Append 5 multilingual JSONL rows to
-`tests/fixtures/dispatcher_traffic.jsonl`. The existing replay harness
-auto-loads any new row, validates schema, and routes via the existing
-priority-9 catering-keyword mock. No helper changes, no schema changes,
-no new test files, no new fixtures format.
+Originally planned as `Hermes-native` (pure JSONL data curation), but the
+PR also includes `tests/_dispatcher_replay.py` line 67 (hash) + lines
+322-332 (mock priority-1 owner-gating). That IS a substrate touch — the
+mock is test infrastructure that defines correct routing behavior. Per
+R3 review feedback on PR #77: aggregate scope = `extends-Hermes` to
+honestly reflect the substrate change, even though the substrate fix
+was a regression catch-up rather than a feature.
+
+Append 5 multilingual JSONL rows to `tests/fixtures/dispatcher_traffic.jsonl`.
+The existing replay harness auto-loads any new row, validates schema, and
+routes via the existing priority-9 catering-keyword mock.
 
 **Test-plan reference:** `tasks/catering-agent-comprehensive-test-plan.md`
 commit #4 of 4 (T7: multilingual fixtures — I-001, I-002, I-005, I-006,

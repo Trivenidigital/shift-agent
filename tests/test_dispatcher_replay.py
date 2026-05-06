@@ -66,8 +66,9 @@ from _dispatcher_replay import (  # noqa: E402
 
 # Minimum fixture count we expect. If the fixture file is truncated or
 # emptied, this assertion fails loud — preventing the "20 silent skips look
-# like a green run" failure mode.
-EXPECTED_MIN_FIXTURES = 10
+# like a green run" failure mode. Bumped 10 → 20 in PR #77 after T7
+# multilingual fixtures landed (current count: 21).
+EXPECTED_MIN_FIXTURES = 20
 
 
 # Load fixtures at module collection time so we can parametrize on actual
