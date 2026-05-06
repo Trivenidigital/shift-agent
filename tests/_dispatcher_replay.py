@@ -64,7 +64,7 @@ NO_HANDLER_FOUND = "<no-handler-found>"
 #   2. Update fixtures + mock to reflect any new priority rules
 #   3. Update SKILL_MD_KNOWN_SHA256 below to the new hash
 #   4. Document the change in the commit message
-SKILL_MD_KNOWN_SHA256 = "dd3bbe89612f3d58ee2a91db273fdcc10f33693ca76c373b8765c09effc8ebee"
+SKILL_MD_KNOWN_SHA256 = "2f01b2e948cc8731bb4aaedc759301424cd42e0f8072d85af536fd34b6cdc5e8"
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -317,8 +317,18 @@ def mock_llm_priority_order(skill_md: str, input_payload: dict) -> tuple[str, st
     code_match = re.search(r"#[A-HJ-NP-Z2-9]{5}", body)
     code = code_match.group(0) if code_match else None
 
-    # Priority 1: code matches catering-menu-pending.
-    if code and any(r.get("approval_code") == code for r in state.get("catering-menu-pending.json", [])):
+    # Priority 1: code matches catering-menu-pending — owner-only since
+    # commit 02afc22 (privilege-escalation guards). Pre-02afc22 this row
+    # was role-any; non-owner senders with a forwarded code now hit
+    # priority-9 catering-keyword fall-through (or an explicit deny).
+    if (
+        code
+        and role == "owner"
+        and any(
+            r.get("approval_code") == code
+            for r in state.get("catering-menu-pending.json", [])
+        )
+    ):
         return ("→ apply_catering_menu_decision", "apply_catering_menu_decision")
 
     # Priority 2: code matches non-terminal catering-leads + owner.
