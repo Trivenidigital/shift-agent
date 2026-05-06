@@ -234,6 +234,47 @@ install_artifacts() {
         install -m 644 src/agents/expense_bookkeeper/systemd/*.timer   /etc/systemd/system/ 2>/dev/null || true
     fi
 
+    # Deploy gate — required-SKILL presence check.
+    #
+    # Background (2026-05-05): an interactive Hermes session ran a curator
+    # consolidation that overwrote 11 individual project SKILLs with 5
+    # umbrella SKILLs (shift-agent-core, catering-management, etc.). The
+    # umbrellas inherited the curator's flat description without the
+    # "Always invoke this skill FIRST" forcing language that
+    # dispatch_shift_agent uses, so the LLM agent stopped invoking the
+    # dispatcher altogether and silently fell back to LLM-direct
+    # hallucination on inbounds. No audit-chain entries, no skill_invoked
+    # events — silent regression discovered only by manual end-to-end test.
+    #
+    # This gate fails the deploy if any project SKILL is absent post-rsync,
+    # so the regression cannot reach prod silently again.
+    local required_skills=(
+        dispatch_shift_agent handle_sick_call handle_owner_command
+        handle_candidate_response roster_lookup
+        catering_dispatcher parse_catering_inquiry
+        handle_catering_owner_approval handle_catering_menu_finalize
+        update_catering_menu apply_catering_menu_decision
+    )
+    local missing_skills=()
+    for skill in "${required_skills[@]}"; do
+        if [ ! -f "/root/.hermes/skills/${skill}/SKILL.md" ]; then
+            missing_skills+=("$skill")
+        fi
+    done
+    if [ ${#missing_skills[@]} -gt 0 ]; then
+        echo "FATAL: required project SKILLs missing post-rsync:" >&2
+        printf '  - %s\n' "${missing_skills[@]}" >&2
+        echo "" >&2
+        echo "This usually means /root/.hermes/skills/ contains umbrella SKILLs" >&2
+        echo "(shift-agent-core, catering-management, business-operations, etc.)" >&2
+        echo "from a curator consolidation that overrode the project SKILLs." >&2
+        echo "" >&2
+        echo "Inspect: ls /root/.hermes/skills/" >&2
+        echo "Recover: rm those umbrella dirs (back them up first), re-run deploy." >&2
+        return 1
+    fi
+    echo "✓ deploy gate: all ${#required_skills[@]} required project SKILLs present"
+
     # Enable + start cron timers
     systemctl enable --now send-daily-brief.timer 2>/dev/null || true
     systemctl enable --now eod-reconcile.timer 2>/dev/null || true
