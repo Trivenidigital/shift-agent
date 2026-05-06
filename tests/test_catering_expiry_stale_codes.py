@@ -122,16 +122,30 @@ def test_a018_second_inquiry_while_prior_awaiting_creates_new_lead(
         message_id="MSG_A018_SECOND",
     )
     assert r2.returncode == 0, f"second create failed: {r2.stderr}"
+    # Pin the new-lead branch (not the idempotent-replay branch). Both
+    # return rc=0; only the replay branch prints "idempotent_replay".
+    assert "idempotent_replay" not in r2.stdout, (
+        f"second create unexpectedly took replay branch: {r2.stdout}"
+    )
 
     leads_after_second = read_leads(env_dir)["leads"]
     assert len(leads_after_second) == 2
-    second_lead = leads_after_second[1]
+    # Look up by message_id rather than positional index — survives any
+    # future reordering of store.leads (e.g. sort-by-updated_at).
+    first_after = next(
+        l for l in leads_after_second
+        if l["original_message_id"] == "MSG_A018_FIRST"
+    )
+    second_lead = next(
+        l for l in leads_after_second
+        if l["original_message_id"] == "MSG_A018_SECOND"
+    )
     assert second_lead["lead_id"] != first_id
     assert second_lead["owner_approval_code"] != first_code
     assert second_lead["status"] == "AWAITING_OWNER_APPROVAL"
     # First lead untouched: same status, same approval code.
-    assert leads_after_second[0]["status"] == "AWAITING_OWNER_APPROVAL"
-    assert leads_after_second[0]["owner_approval_code"] == first_code
+    assert first_after["status"] == "AWAITING_OWNER_APPROVAL"
+    assert first_after["owner_approval_code"] == first_code
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -148,14 +162,18 @@ def test_b017a_apply_with_unknown_code_returns_not_found(env_dir, bridge_server)
     port, _ = bridge_server
     # Seed an unrelated lead so the leads file exists and is non-empty —
     # confirms the not-found path triggers on no-match, not on empty store.
+    # mk_lead's owner_approval_code defaults to None, so #GHST5 cannot
+    # collide with the seeded lead.
     seed_leads(env_dir, [mk_lead(
         lead_id="L0001", phone="+15550000111",
         created_at=datetime.now(tz=timezone.utc) - timedelta(hours=1),
     )])
 
-    # Code uses the script's actual alphabet ([A-HJKMNPQR-Z2-9]); a
-    # schema-invalid code would short-circuit before lookup with a
-    # different exit, making the test's intent ambiguous.
+    # Use a code from the deployed alphabet ([A-HJKMNPQR-Z2-9]) — matches
+    # what create-catering-lead would mint. Apply doesn't enforce the
+    # alphabet at arg-time (only the format `#XXXXX` length), but using
+    # a real-shape code keeps the test honest about what production
+    # behavior it pins.
     r = run_apply(env_dir, port, code="#GHST5", decision="reject")
     assert r.returncode == EXIT_NOT_FOUND, (
         f"expected EXIT_NOT_FOUND (4), got {r.returncode}\nstderr: {r.stderr}"
