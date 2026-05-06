@@ -31,16 +31,24 @@ there's no pending update right now."*
 ```
 /usr/local/bin/apply-menu-update \
   --code "<CODE>" \
-  --decision <yes|no>
+  --decision <yes|no> \
+  --sender-role "<owner|employee|customer|unknown>"
 ```
 
+`--sender-role` is the role resolved by `identify-sender` from the v=1 sender
+block at the top of the inbound. Pass it through verbatim — the script
+rejects with exit 12 (privilege denied) if it isn't `owner`. This is
+defense-in-depth against a screenshot-forwarded `#XXXXX` code that the
+dispatcher's role gate failed to catch (D-013).
+
 The script will:
-- On `yes`: archive the existing menu (if any) to
+- On `yes` + sender_role=owner: archive the existing menu (if any) to
   `/opt/shift-agent/state/catering-menu-archive/menu-vN-<ts>.json`,
   write the new menu to `/opt/shift-agent/state/catering-menu.json` with
   incremented version, log `MenuUpdateApplied`, clear the pending file.
-- On `no`: log `MenuUpdateRejected(reason="owner_no")`, clear the pending
-  file. Existing menu is unchanged.
+- On `no` + sender_role=owner: log `MenuUpdateRejected(reason="owner_no")`,
+  clear the pending file. Existing menu is unchanged.
+- On any sender_role != "owner": exit 12 (privilege denied), no state change.
 
 **Exit codes:**
 - 0: success
@@ -48,6 +56,7 @@ The script will:
 - 4: code not found among pending updates (no pending file, or different code)
 - 5: schema violation
 - 9: illegal transition (pending update has 0 items — refused to apply empty menu)
+- 12: privilege denied (sender_role != "owner") — tell sender they don't have permission for this
 
 ## Step 3 — Confirm to owner
 

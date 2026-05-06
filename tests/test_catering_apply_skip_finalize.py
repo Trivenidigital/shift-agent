@@ -155,6 +155,7 @@ def _run_apply(env_dir, bridge_port, *, decision="approve", skip_finalize=False,
         "apply-catering-owner-decision",
         "--code", "#ABCDE",
         "--decision", decision,
+        "--sender-role", "owner",
     ] + extra
     wrapper = f"""
 import sys, pathlib

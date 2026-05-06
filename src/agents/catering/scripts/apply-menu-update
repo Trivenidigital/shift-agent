@@ -42,6 +42,7 @@ from schemas import (  # noqa: E402
 from exit_codes import (  # noqa: E402
     EXIT_OK, EXIT_INVALID_INPUT, EXIT_NOT_FOUND,
     EXIT_SCHEMA_VIOLATION, EXIT_ILLEGAL_TRANSITION,
+    EXIT_PRIVILEGE_DENIED,
 )
 from audit_helpers import log_config_load_failed_best_effort  # noqa: E402
 from pydantic import TypeAdapter, ValidationError  # noqa: E402
@@ -67,7 +68,22 @@ def main() -> int:
     ap.add_argument("--code", required=True, help="confirmation code, e.g. #A3F2X")
     ap.add_argument("--decision", required=True, choices=["yes", "no", "expired"])
     ap.add_argument("--reason", default="")
+    ap.add_argument(
+        "--sender-role", required=True,
+        choices=["owner", "employee", "customer", "unknown"],
+        help="resolved sender role from identify-sender; must be 'owner' to mutate state. "
+             "Defense-in-depth against a screenshot-forwarded #XXXXX code that the "
+             "dispatcher's role-gate failed to catch upstream (D-013).",
+    )
     args = ap.parse_args()
+
+    # Privilege check: owner-only operation. Reject before any state read/lock
+    # so an attacker-controlled --code can't be probed against the pending file.
+    if args.sender_role != "owner":
+        sys.stderr.write(
+            f"privilege denied: menu update is owner-only, got sender_role={args.sender_role!r}\n"
+        )
+        return EXIT_PRIVILEGE_DENIED
 
     code = args.code.strip()
     if not code.startswith("#") or len(code) != 6:

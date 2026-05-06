@@ -13,7 +13,7 @@ You are the front door for every inbound message. Your ONLY job: identify who se
 
 | Message shape | Sender role | → Route to |
 |---|---|---|
-| Text contains 5-char `#XXXXX` code matching a row in `state/catering-menu-pending.json` | any | **apply_catering_menu_decision** |
+| Text contains 5-char `#XXXXX` code matching a row in `state/catering-menu-pending.json` | owner | **apply_catering_menu_decision** |
 | Text contains 5-char `#XXXXX` code matching a row in `state/catering-leads.json` (non-terminal) | owner | **handle_catering_owner_approval** |
 | Text contains 5-char `#XXXXX` code matching a non-terminal row in `state/expense-bookkeeper/leads.json` AND `cfg.expense_bookkeeper.enabled` | owner | **expense_bookkeeper_dispatcher** |
 | Text matches `^undo E\d{4,}( force)?$` (case-insensitive) AND `cfg.expense_bookkeeper.enabled` | owner | **expense_bookkeeper_dispatcher** |

@@ -167,7 +167,8 @@ sys.exit(mod.main())
     )
 
 
-def _run_apply(env_dir, bridge_port, code, decision, edit_text="", reason=""):
+def _run_apply(env_dir, bridge_port, code, decision, edit_text="", reason="",
+               sender_role="owner"):
     extra = []
     if edit_text:
         extra += ["--edit-text", edit_text]
@@ -179,6 +180,7 @@ sys.argv = [
     "apply-catering-owner-decision",
     "--code", {code!r},
     "--decision", {decision!r},
+    "--sender-role", {sender_role!r},
 ] + {extra!r}
 import pathlib
 import importlib.util

@@ -136,9 +136,16 @@ WhatsApp message would otherwise end in a literal newline. Review-fix M2:
 
 ```bash
 printf '%s' "$QUOTE_TEXT" | /usr/local/bin/apply-catering-owner-decision \
-    --code "$CODE" --decision approve --quote-text-stdin
+    --code "$CODE" --decision approve --quote-text-stdin \
+    --sender-role "<owner|employee|customer|unknown from sender block>"
 RC=$?
 ```
+
+`--sender-role` is the role resolved by `identify-sender` from the v=1 sender
+block at the top of the inbound. Pass it through verbatim — the script
+rejects with exit 12 (privilege denied) if it isn't `owner`. This is
+defense-in-depth against a screenshot-forwarded `#XXXXX` code an employee
+or customer might try to abuse (B-021).
 
 **PR-CF1 — owner-approve guard.** The apply-script REFUSES approve
 (EXIT_TRUTH_GUARD_FAILED, exit code 11) when the lead has no
@@ -151,7 +158,8 @@ re-invoke with `--skip-finalize`:
 
 ```bash
 printf '%s' "$QUOTE_TEXT" | /usr/local/bin/apply-catering-owner-decision \
-    --code "$CODE" --decision approve --quote-text-stdin --skip-finalize
+    --code "$CODE" --decision approve --quote-text-stdin \
+    --sender-role "<owner|employee|customer|unknown from sender block>" --skip-finalize
 RC=$?
 ```
 
@@ -165,7 +173,8 @@ For `reject` (no stdin):
 
 ```bash
 /usr/local/bin/apply-catering-owner-decision \
-    --code "$CODE" --decision reject --reason "<rejection reason>"
+    --code "$CODE" --decision reject --reason "<rejection reason>" \
+    --sender-role "<owner|employee|customer|unknown from sender block>"
 RC=$?
 ```
 
@@ -173,7 +182,8 @@ For `edit` (no stdin):
 
 ```bash
 /usr/local/bin/apply-catering-owner-decision \
-    --code "$CODE" --decision edit --edit-text "<edit body>"
+    --code "$CODE" --decision edit --edit-text "<edit body>" \
+    --sender-role "<owner|employee|customer|unknown from sender block>"
 RC=$?
 ```
 

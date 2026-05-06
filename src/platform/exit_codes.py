@@ -46,3 +46,11 @@ EXIT_ENVIRONMENT = 10
 # the SKILL can do. Caller must NOT auto-retry; the lead stays at
 # AWAITING_OWNER_APPROVAL pending a fresh owner-reply.
 EXIT_TRUTH_GUARD_FAILED = 11
+
+# 12 — privilege-denied: the --sender-role passed by the dispatcher does not
+# match the role required for this state-mutating operation. Owner-only
+# scripts (apply-menu-update, apply-catering-owner-decision) reject with this
+# code when called by an employee/customer/unknown sender. Defense-in-depth
+# against a screenshot-forwarded `#XXXXX` code that the dispatcher's
+# role-gate failed to catch upstream.
+EXIT_PRIVILEGE_DENIED = 12
