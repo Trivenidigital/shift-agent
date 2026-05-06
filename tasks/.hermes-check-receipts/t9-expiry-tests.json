@@ -1,0 +1,16 @@
+{
+  "topic": "t9-expiry-tests",
+  "task_text": "t9-expiry-tests — pytest cases A-018, B-017a, B-017b for catering apply-script lookup edge cases (stale codes + concurrent leads from same customer). Pure test curation, no new substrate. Reuses existing _b1_helpers.run_apply / run_create / mk_lead / seed_leads helpers.",
+  "completed_at": "2026-05-06T02:36:54Z",
+  "drift_check_tag": "Hermes-native",
+  "net_new_step_count": 1,
+  "hermes_step_count": 7,
+  "files_to_read_first": [
+    "src/agents/catering/scripts/apply-catering-owner-decision",
+    "src/agents/catering/scripts/create-catering-lead",
+    "src/platform/schemas.py",
+    "tests/_b1_helpers.py",
+    "tests/test_catering_b1_cases.py",
+    "tests/test_catering_v02_scripts.py"
+  ]
+}
