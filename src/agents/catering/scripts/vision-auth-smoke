@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""vision-auth-smoke — verify OpenRouter auth + vision-model reachability.
+
+Wired into shift-agent-deploy.sh as a post-install gate (D-015 from
+tasks/catering-agent-comprehensive-test-plan.md). Catches the regression
+class hit on 2026-05-05 where step-4 model swap left auxiliary.vision auth
+in a 401 state — silent until a real catering inbound triggered the flow.
+
+Sends a tiny text-only chat completion to the same OpenRouter endpoint that
+parse-menu-photo's _call_vision uses, with the same Authorization header
+shape and the same default model (openai/gpt-4o-mini, vision-capable).
+Mirrors the auth surface so any auth/key/model-availability regression in
+parse-menu-photo reproduces here too.
+
+Why text-only and not an image: OpenRouter's upstream providers (notably
+Azure) reject very small JPEGs/PNGs with image_parse_error before the auth
+check is even reached, masking the auth signal we want. The same Bearer
+token + same model endpoint exercises the same auth path either way.
+
+Exit codes:
+  0 — auth working (HTTP 200, choices[0].message.content non-empty)
+  1 — auth failure (401/403, missing or placeholder API key)
+  2 — transient failure (timeout, 5xx, 400, network error) — caller may retry
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+
+# Mirrors parse-menu-photo: same defaults, same env-override knobs.
+VISION_MODEL = os.environ.get("VISION_MODEL", "openai/gpt-4o-mini")
+OPENROUTER_URL = os.environ.get(
+    "OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions"
+)
+TIMEOUT_SEC = int(os.environ.get("VISION_AUTH_SMOKE_TIMEOUT_SEC", "20"))
+MAX_RETRIES = int(os.environ.get("VISION_AUTH_SMOKE_RETRIES", "2"))
+
+EXIT_OK = 0
+EXIT_AUTH_FAIL = 1
+EXIT_TRANSIENT = 2
+
+
+def _read_api_key() -> str:
+    """Read OPENROUTER_API_KEY from env, or from /opt/shift-agent/.env."""
+    key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    if key:
+        return key
+    env_path = os.environ.get("SHIFT_AGENT_ENV_PATH", "/opt/shift-agent/.env")
+    try:
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("OPENROUTER_API_KEY="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
+
+def _call_vision(api_key: str) -> tuple[int, str]:
+    """Returns (exit_code, message). Mirrors parse-menu-photo._call_vision auth surface."""
+    payload = {
+        "model": VISION_MODEL,
+        "messages": [{"role": "user", "content": "ok"}],
+        "max_tokens": 4,
+        "temperature": 0,
+    }
+    req = urllib.request.Request(
+        OPENROUTER_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/Trivenidigital/shift-agent",
+            "X-Title": "SMB-Agents Vision Auth Smoke",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_SEC) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+        doc = json.loads(body)
+        choices = doc.get("choices") or []
+        if not choices:
+            return EXIT_TRANSIENT, f"no choices in 200 response: {body[:200]}"
+        content = choices[0].get("message", {}).get("content", "")
+        if not content:
+            return EXIT_TRANSIENT, f"empty content in 200 response: {body[:200]}"
+        return EXIT_OK, f"ok ({len(content)} chars)"
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return EXIT_AUTH_FAIL, f"HTTP {e.code} (auth): {e.reason}"
+        if 500 <= e.code < 600:
+            return EXIT_TRANSIENT, f"HTTP {e.code} (server): {e.reason}"
+        return EXIT_TRANSIENT, f"HTTP {e.code}: {e.reason}"
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        return EXIT_TRANSIENT, f"network: {e}"
+    except (json.JSONDecodeError, ValueError) as e:
+        return EXIT_TRANSIENT, f"non-JSON response: {e}"
+
+
+def main() -> int:
+    api_key = _read_api_key()
+    if not api_key or api_key.lower() in ("placeholder", "your-api-key", "<key>"):
+        sys.stderr.write("OPENROUTER_API_KEY missing or placeholder\n")
+        return EXIT_AUTH_FAIL
+
+    last_msg = ""
+    for attempt in range(MAX_RETRIES + 1):
+        code, msg = _call_vision(api_key)
+        last_msg = msg
+        if code == EXIT_OK:
+            sys.stdout.write(f"vision-auth-smoke: {msg}\n")
+            return EXIT_OK
+        if code == EXIT_AUTH_FAIL:
+            sys.stderr.write(f"vision-auth-smoke: AUTH FAIL — {msg}\n")
+            return EXIT_AUTH_FAIL
+        # Transient: backoff and retry
+        if attempt < MAX_RETRIES:
+            sleep_sec = 2 ** attempt
+            sys.stderr.write(
+                f"vision-auth-smoke: transient ({msg}), retry {attempt+1}/{MAX_RETRIES} in {sleep_sec}s\n"
+            )
+            time.sleep(sleep_sec)
+
+    sys.stderr.write(f"vision-auth-smoke: TRANSIENT FAIL after {MAX_RETRIES} retries — {last_msg}\n")
+    return EXIT_TRANSIENT
+
+
+if __name__ == "__main__":
+    sys.exit(main())

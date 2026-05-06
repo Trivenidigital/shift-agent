@@ -275,6 +275,39 @@ install_artifacts() {
     fi
     echo "✓ deploy gate: all ${#required_skills[@]} required project SKILLs present"
 
+    # Vision-auth smoke gate (D-015) — fail-closed.
+    #
+    # Background (2026-05-05): step-4 model swap left auxiliary.vision in a
+    # 401 state on srilu. Silent until a real catering inbound triggered the
+    # flow and parse-menu-photo crashed with HTTP 401 from OpenRouter.
+    #
+    # The smoke fires a 1x1 JPEG at the same OpenRouter endpoint + same
+    # Authorization header shape that parse-menu-photo uses, with the same
+    # default model (openai/gpt-4o-mini). Exit codes:
+    #   0 — vision auth working
+    #   1 — auth failure (block deploy)
+    #   2 — transient (script already retried internally; block deploy too)
+    if [ -x /usr/local/bin/vision-auth-smoke ]; then
+        # Smoke reads /opt/shift-agent/.env itself (via SHIFT_AGENT_ENV_PATH
+        # or hardcoded default). We deliberately do NOT `source` the .env
+        # here — bash `set -a; .` chokes on values containing em-dashes or
+        # unquoted spaces (e.g. WHATSAPP_CANONICAL_REPLY="Thank you — ...").
+        if /usr/local/bin/vision-auth-smoke; then
+            echo "✓ deploy gate: vision auth smoke passed"
+        else
+            smoke_rc=$?
+            echo "FATAL: vision auth smoke failed (exit $smoke_rc)" >&2
+            echo "  Vision is core to the catering menu update flow." >&2
+            echo "  Likely causes:" >&2
+            echo "  - OPENROUTER_API_KEY missing/placeholder in /opt/shift-agent/.env" >&2
+            echo "  - auxiliary.vision misconfigured in /root/.hermes/config.yaml" >&2
+            echo "  - OpenRouter outage (exit 2 = transient — try again in a few minutes)" >&2
+            return 1
+        fi
+    else
+        echo "WARN: /usr/local/bin/vision-auth-smoke not installed — skipping vision-auth gate" >&2
+    fi
+
     # Enable + start cron timers
     systemctl enable --now send-daily-brief.timer 2>/dev/null || true
     systemctl enable --now eod-reconcile.timer 2>/dev/null || true
