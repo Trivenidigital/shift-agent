@@ -118,3 +118,10 @@ shift-agent-deploy.tgz
 .pending_check.txt
 .reconnect_check.txt
 .step_a_poll.txt
+
+# Catch-all for dot-prefix scratch .txt files at repo root (SSH output
+# captures via the two-step Windows pattern, ad-hoc diagnostics, debug
+# artifacts). 2026-05-06 audit cleanup — replaces the per-prefix lines
+# above for any future diagnostic session. Tracked .txt files (none
+# today) would need a !explicit-allow line if ever added.
+.[A-Za-z]*.txt
