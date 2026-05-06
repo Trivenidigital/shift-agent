@@ -119,9 +119,10 @@ shift-agent-deploy.tgz
 .reconnect_check.txt
 .step_a_poll.txt
 
-# Catch-all for dot-prefix scratch .txt files at repo root (SSH output
-# captures via the two-step Windows pattern, ad-hoc diagnostics, debug
-# artifacts). 2026-05-06 audit cleanup — replaces the per-prefix lines
-# above for any future diagnostic session. Tracked .txt files (none
-# today) would need a !explicit-allow line if ever added.
-.[A-Za-z]*.txt
+# Catch-all for dot-prefix scratch .txt files at the repo root (SSH
+# output captures via the two-step Windows pattern, ad-hoc diagnostics,
+# debug artifacts). 2026-05-06 audit cleanup — replaces the per-prefix
+# lines above for any future diagnostic session. Anchored with leading
+# / so subdir test fixtures (e.g. tests/fixtures/.golden_output.txt) are
+# NOT silently ignored.
+/.[A-Za-z]*.txt

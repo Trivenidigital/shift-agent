@@ -19,15 +19,6 @@ Defense-in-depth layers:
 These tests exercise layer 2 — the script-level guard. They invoke the
 apply scripts directly via subprocess + sys.argv and assert exit 12 with
 no state mutation when sender_role != "owner".
-
-Trim history (2026-05-06 audit-cleanup): originally 6 test functions
-including parametrize over [employee, customer, unknown] on both apply
-paths plus a cross-cutting H-008 test plus an argparse-rejects test.
-All non-owner roles hit the same privilege-check branch at the same line
-in the script; testing one of them (employee) catches any regression
-of that branch. argparse `choices=[...]` enforces enum membership for
-free. Cross-cutting H-008 is the conjunction of the d013 + b021 employee
-cases — no separate test needed. Trimmed to 4 tests / ~150 LOC.
 """
 from __future__ import annotations
 
