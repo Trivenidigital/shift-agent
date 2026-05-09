@@ -1,0 +1,15 @@
+{
+  "topic": "agent-41-owner-wellbeing-design",
+  "task_text": "agent-41-owner-wellbeing-design — design doc for the v0.1 plan with: full OwnerWellbeingConfig + OwnerNotificationSuppressed pydantic definitions including LogEntry union edit at schemas.py:2640+, helper function in_quiet_window(now_local, cfg) with cross-midnight + same-day branches, guard insertion point at shift-agent-notify-owner main() line ~146-156, 9 test cases with subprocess-invoke + Pushover HTTP stub pattern. No new substrate; pure code-level design specifying file:line for each change.",
+  "completed_at": "2026-05-09T16:12:34Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 5,
+  "hermes_step_count": 4,
+  "files_to_read_first": [
+    "src/agents/shift/scripts/shift-agent-notify-owner",
+    "src/platform/schemas.py",
+    "src/platform/safe_io.py",
+    "tests/test_notify_owner_with_fallback.py",
+    "tests/_b1_helpers.py"
+  ]
+}

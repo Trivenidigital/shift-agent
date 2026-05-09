@@ -1,0 +1,13 @@
+{
+  "topic": "agent-41-owner-wellbeing-v0-1",
+  "task_text": "agent-41-owner-wellbeing-v0.1 — quiet-hours guard at shift-agent-notify-owner chokepoint. Adds OwnerWellbeingConfig (enabled, quiet_start, quiet_end, quiet_days, critical_priority_threshold) to schemas.py + OwnerNotificationSuppressed audit variant + guard in main() that suppresses Pushover/WhatsApp delivery during quiet hours when priority < threshold. Tests cover in-window/out-window, cross-midnight, weekday filter, priority bypass. Weekly load summary patch deferred to v0.2. No external APIs, no new scripts, no SKILL changes — pure config + script-guard work.",
+  "completed_at": "2026-05-09T16:06:16Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 3,
+  "hermes_step_count": 7,
+  "files_to_read_first": [
+    "src/agents/shift/scripts/shift-agent-notify-owner",
+    "src/platform/schemas.py",
+    "src/platform/safe_io.py"
+  ]
+}
