@@ -94,6 +94,14 @@ LOCK_RETRY_ATTEMPTS = 3
 LOCK_RETRY_SLEEP_SEC = 1.0
 
 
+# Agent #32 v0.1: cap on most_recent_notes returned by lookup. The source
+# field (CateringLeadExtractedFields.notes) has no max_length, so we cap in
+# the lookup output to bound LLM-prompt context inflation. v0.2 reviewers
+# can tune; the named constant keeps the bound grep-discoverable in one
+# place (R1-PR-MEDIUM fixup from PR #79 review).
+MOST_RECENT_NOTES_MAX_CHARS = 500
+
+
 # Single source of truth for lookup_status enum. Importable so SKILL preamble
 # (and tests) can grep without copy-paste drift.
 LOOKUP_STATUS_OK = "ok"
@@ -111,6 +119,10 @@ def _empty_result(status: str) -> dict:
         "most_recent_status": None,
         "most_recent_event_date": None,
         "most_recent_dietary_restrictions": [],
+        # Agent #32 v0.1: empty-string mirrors the empty-list dietary convention.
+        # ok-branch caps at MOST_RECENT_NOTES_MAX_CHARS (CateringLeadExtractedFields.notes
+        # has no max_length, so we cap in the lookup return).
+        "most_recent_notes": "",
         "last_seen_days_ago": None,
     }
 
@@ -239,6 +251,11 @@ def lookup_prior_leads_by_phone(
         "most_recent_status": str(most_recent.status),
         "most_recent_event_date": most_recent.extracted.event_date,
         "most_recent_dietary_restrictions": list(most_recent.extracted.dietary_restrictions),
+        # Agent #32 v0.1: free-form prior notes for soft-prior context. Truncated
+        # at MOST_RECENT_NOTES_MAX_CHARS to bound LLM-prompt inflation (the
+        # source field has no max_length cap). The `or ""` guard is defensive
+        # against future-schema or hand-edited None values.
+        "most_recent_notes": (most_recent.extracted.notes or "")[:MOST_RECENT_NOTES_MAX_CHARS],
         "last_seen_days_ago": days_ago,
     }
 

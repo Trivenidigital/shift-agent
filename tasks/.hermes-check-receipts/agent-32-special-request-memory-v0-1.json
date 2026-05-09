@@ -1,0 +1,14 @@
+{
+  "topic": "agent-32-special-request-memory-v0-1",
+  "task_text": "agent-32-special-request-memory-v0-1 — CRM-lite per-customer preference store. Adds SpecialRequestMemoryConfig (default enabled=False) + CustomerPreference + SpecialRequestMemoryStore schemas + lookup-special-request read-only CLI script (mirrors lookup-prior-leads-by-phone exactly) + SpecialRequestLookup audit variant + integration into parse_catering_inquiry SKILL.md Step 0 (parallel call alongside lookup-prior-leads-by-phone, merges results into extraction priors). Write/update script + owner WhatsApp command deferred to v0.2 (operator hand-edits state file in v0.1; safe_io.atomic_write_json convention is documented but no project-side write script ships). Tests mirror existing lookup-prior-leads tests.",
+  "completed_at": "2026-05-09T17:14:42Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 4,
+  "hermes_step_count": 8,
+  "files_to_read_first": [
+    "src/agents/catering/scripts/lookup-prior-leads-by-phone",
+    "src/agents/catering/skills/parse_catering_inquiry/SKILL.md",
+    "src/platform/safe_io.py",
+    "src/platform/schemas.py"
+  ]
+}

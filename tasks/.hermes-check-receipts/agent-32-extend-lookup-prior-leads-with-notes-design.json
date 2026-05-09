@@ -1,0 +1,14 @@
+{
+  "topic": "agent-32-extend-lookup-prior-leads-with-notes-design",
+  "task_text": "agent-32-extend-lookup-prior-leads-with-notes-design — design doc for the v2 plan with: exact 5-LOC change at lookup-prior-leads-by-phone:_empty_result + ok-branch derivation, exact 10-LOC SKILL.md Step 0 prose patch including new Hard Rule against priors leaking back into Step 1 notes extraction, exact test additions (~30-40 LOC) extending existing test_lookup_prior_leads.py with 3-4 cases (most_recent_notes returned, empty when no leads, ignored on terminal-status, truncation/length), file:line specifics for each insertion. No new substrate; this is a pure extension of deployed pattern.",
+  "completed_at": "2026-05-09T20:02:51Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 3,
+  "hermes_step_count": 8,
+  "files_to_read_first": [
+    "src/agents/catering/scripts/lookup-prior-leads-by-phone",
+    "src/agents/catering/skills/parse_catering_inquiry/SKILL.md",
+    "src/platform/schemas.py",
+    "tests/test_lookup_prior_leads.py"
+  ]
+}
