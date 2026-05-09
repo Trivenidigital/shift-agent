@@ -35,8 +35,8 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 sys.path.insert(0, "/opt/shift-agent")
-from safe_io import customer_now, FileLock  # noqa: E402
-from schemas import Config  # noqa: E402
+from safe_io import customer_now, FileLock, ndjson_append  # noqa: E402
+from schemas import Config, OwnerNotificationSuppressed, OwnerWellbeingConfig  # noqa: E402
 from exit_codes import EXIT_OK, EXIT_DEPENDENCY_DOWN, EXIT_SCHEMA_VIOLATION  # noqa: E402
 import yaml
 
@@ -44,6 +44,11 @@ import yaml
 CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
 STATE_DIR = Path("/opt/shift-agent/state")
 NOTIFY_FAILED_LOG = STATE_DIR / "notify-failed.log"
+DECISIONS_LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+# Module-level constants — extracted so tests can monkey-patch via
+# `mod.PUSHOVER_URL = stub_url` after importlib.exec_module (R1-M5 design fix).
+PUSHOVER_URL = "https://api.pushover.net/1/messages.json"
+WHATSAPP_BRIDGE_URL = "http://127.0.0.1:3000/send"
 
 
 def load_config() -> Config:
@@ -68,7 +73,7 @@ def pushover_send(cfg: Config, message: str, title: str, priority: int) -> tuple
     # P1-FIX: use urlencode for correct form-encoding (spaces, &, = in values)
     body = urllib.parse.urlencode(data).encode()
     req = urllib.request.Request(
-        "https://api.pushover.net/1/messages.json",
+        PUSHOVER_URL,
         data=body,
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
@@ -92,7 +97,7 @@ def whatsapp_fallback(cfg: Config, message: str) -> tuple[bool, str]:
         return False, "self_chat_jid not configured"
     data = json.dumps({"jid": self_chat_jid, "text": message}).encode()
     req = urllib.request.Request(
-        "http://127.0.0.1:3000/send",
+        WHATSAPP_BRIDGE_URL,
         data=data,
         headers={"Content-Type": "application/json"},
     )
@@ -113,6 +118,74 @@ def _redact(s: str) -> str:
         import re
         _SECRET_HINT_RE = re.compile(r"[a-z0-9]{30,}", re.IGNORECASE)
     return _SECRET_HINT_RE.sub("<REDACTED>", s or "")
+
+
+def _in_quiet_window(now_local: datetime, cfg: OwnerWellbeingConfig) -> bool:
+    """Pure helper: is now_local inside the configured quiet window?
+
+    Two branches:
+    - Same-day window (start < end, e.g. 13:00-15:00): suppressed iff
+      start <= now_time < end.
+    - Cross-midnight window (start > end, e.g. 22:00-06:00): suppressed iff
+      now_time >= start OR now_time < end.
+    - start == end is rejected at config-validation time (zero-width
+      window would silently never fire — see _reject_zero_width_window).
+
+    Boundary semantics: now == start → suppressed; now == end → NOT
+    suppressed (>= start, < end).
+
+    Lexicographic string compare on "HH:MM" is correct because the regex
+    `^([01]\\d|2[0-3]):[0-5]\\d$` enforces fixed-width 5-char zero-padded
+    ASCII. If that regex ever loosens, this comparison will silently
+    misorder times.
+
+    DST: wall-clock semantics intentional. On spring-forward, the
+    02:00-03:00 hour is skipped entirely; on fall-back the 01:00-02:00
+    hour repeats. Both physical clocks map to the same HH:MM local string
+    and produce the same suppression decision — desired for owner-facing
+    quiet hours.
+    """
+    weekday = now_local.strftime("%a").lower()  # "mon", "tue", ...
+    if weekday not in cfg.quiet_days:
+        return False
+    now_time = now_local.strftime("%H:%M")
+    start = cfg.quiet_start
+    end = cfg.quiet_end
+    if start < end:
+        # Same-day window
+        return start <= now_time < end
+    # Cross-midnight window (start > end is the only remaining case;
+    # start == end is rejected at config validation).
+    return now_time >= start or now_time < end
+
+
+def _apply_quiet_hours_guard(
+    cfg: Config, title: str, priority: int,
+) -> tuple[bool, OwnerNotificationSuppressed | None]:
+    """Return (suppress, audit_entry_or_None).
+
+    Short-circuit when cfg.owner_wellbeing.enabled is False (the default
+    state — guard is a no-op until the owner explicitly opts in).
+    """
+    ow = cfg.owner_wellbeing
+    if not ow.enabled:
+        return (False, None)
+    if priority >= ow.critical_priority_threshold:
+        return (False, None)
+    now_local = customer_now(cfg.customer.timezone)
+    if not _in_quiet_window(now_local, ow):
+        return (False, None)
+    entry = OwnerNotificationSuppressed(
+        type="owner_notification_suppressed",
+        ts=now_local,
+        title=title[:250],
+        priority=priority,
+        quiet_start=ow.quiet_start,
+        quiet_end=ow.quiet_end,
+        quiet_days=list(ow.quiet_days),
+        suppressed_at_local=now_local.strftime("%H:%M:%S"),
+    )
+    return (True, entry)
 
 
 def append_notify_failed(message: str, results: list[tuple[str, bool, str]]) -> None:
@@ -151,6 +224,29 @@ def main():
         return EXIT_SCHEMA_VIOLATION
 
     results: list[tuple[str, bool, str]] = []
+
+    # Agent #41 v0.1 quiet-hours guard. No-op when cfg.owner_wellbeing.enabled is False.
+    suppress, audit_entry = _apply_quiet_hours_guard(cfg, args.title, args.priority)
+    if suppress:
+        # Wrap ndjson_append in flock for inter-process safety. Multiple
+        # shift-agent-notify-owner processes can fire simultaneously
+        # (backup + health + watchdog) — O_APPEND alone is atomic only up to
+        # PIPE_BUF/4096 bytes; OwnerNotificationSuppressed rows can interleave.
+        # Mirrors send-daily-brief precedent.
+        try:
+            DECISIONS_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with FileLock(DECISIONS_LOG_PATH.with_suffix(".log.lock")):
+                ndjson_append(DECISIONS_LOG_PATH, audit_entry.model_dump_json())
+        except Exception as e:
+            # Audit failure must NOT prevent the success-skip return path —
+            # the alternative is "alert was suppressed AND lost" which is
+            # worse than "suppressed but no audit row." Pattern matches
+            # cf-router/actions.py audit-emit conventions.
+            print(
+                f"WARN: audit emit failed for owner_notification_suppressed: {e}",
+                file=sys.stderr,
+            )
+        return EXIT_OK
 
     # Primary: Pushover
     ok, detail = pushover_send(cfg, args.message, args.title, args.priority)

@@ -413,6 +413,58 @@ class OperationsConfig(BaseModel):
 BriefSection = Literal["yesterday", "today_outlook", "alerts"]
 
 
+# ─────────────────────────────────────────────────────────────────
+# Agent #41 Owner Wellbeing config (revived from retired #20)
+# ─────────────────────────────────────────────────────────────────
+
+OwnerWellbeingDay = Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+
+class OwnerWellbeingConfig(BaseModel):
+    """Quiet-hours rule (Agent #41 v0.1). Suppresses non-critical Pushover /
+    WhatsApp notifications during owner-configured quiet windows.
+
+    v0.2 will add weekly owner-load summary as a Daily Brief section.
+
+    Default enabled=False — opt-in per customer; matches Tier-2 scaffold
+    convention. When False, the guard is a no-op short-circuit at line 1
+    of _apply_quiet_hours_guard.
+    """
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    quiet_start: str = Field(default="22:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    quiet_end: str = Field(default="06:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    quiet_days: list[OwnerWellbeingDay] = Field(
+        default_factory=lambda: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+        min_length=1,
+    )
+    # priority < threshold → suppressed; priority >= threshold → always send.
+    # default 1: suppress -2/-1/0 (silent/quiet/normal); allow 1/2 (high/emergency).
+    critical_priority_threshold: int = Field(default=1, ge=-2, le=2)
+
+    @field_validator("quiet_start", "quiet_end")
+    @classmethod
+    def _validate_time_strptime(cls, v: str) -> str:
+        from datetime import datetime as _dt
+        _dt.strptime(v, "%H:%M")
+        return v
+
+    @model_validator(mode="after")
+    def _reject_zero_width_window(self) -> "OwnerWellbeingConfig":
+        """Zero-width window (start == end) silently never fires
+        (same-day branch returns start <= now < end = always False;
+        cross-midnight branch unreachable when start == end). Reject at
+        validation time so the operator gets a clear error instead of a
+        silent no-op."""
+        if self.enabled and self.quiet_start == self.quiet_end:
+            raise ValueError(
+                f"quiet_start == quiet_end ({self.quiet_start!r}) is a "
+                f"zero-width window — guard would never fire. Set distinct "
+                f"start and end times, or set enabled=False."
+            )
+        return self
+
+
 class DailyBriefConfig(BaseModel):
     """Owner-configurable morning brief settings (Agent #4)."""
     model_config = ConfigDict(extra="forbid")
@@ -1250,6 +1302,9 @@ class Config(BaseModel):
     expense_bookkeeper: ExpenseBookkeeperConfig = Field(default_factory=ExpenseBookkeeperConfig)
     pnl_anomaly: PnlAnomalyConfig = Field(default_factory=PnlAnomalyConfig)
     equipment_maintenance: EquipmentMaintenanceConfig = Field(default_factory=EquipmentMaintenanceConfig)
+    # Agent #41 Owner Wellbeing v0.1 — quiet-hours guard at notify-owner chokepoint.
+    # Default enabled=False (opt-in); revived from retired #20 per portfolio.md:1078.
+    owner_wellbeing: OwnerWellbeingConfig = Field(default_factory=OwnerWellbeingConfig)
 
     def tz(self) -> ZoneInfo:
         return ZoneInfo(self.customer.timezone)
@@ -1671,6 +1726,21 @@ class HealthCheckFailure(_BaseEntry):
     type: Literal["health_check_failure"]
     check: str
     detail: str
+
+
+class OwnerNotificationSuppressed(_BaseEntry):
+    """Quiet-hours guard suppressed a non-critical Pushover/WhatsApp send
+    (Agent #41 v0.1). Emitted by shift-agent-notify-owner before the
+    Pushover call when the priority is below the threshold AND now is
+    inside the configured quiet window. Exit code remains EXIT_OK
+    (success-skip semantics, mirrors BriefSkipped:already_sent)."""
+    type: Literal["owner_notification_suppressed"]
+    title: str = Field(max_length=250)
+    priority: int = Field(ge=-2, le=2)
+    quiet_start: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    quiet_end: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    quiet_days: list[str] = Field(min_length=1)
+    suppressed_at_local: str = Field(pattern=r"^\d{2}:\d{2}:\d{2}$")
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -2652,6 +2722,8 @@ LogEntry = Annotated[
         Annotated[UnknownSenderDeclined, Tag("unknown_sender_declined")],
         Annotated[InvariantViolation, Tag("invariant_violation")],
         Annotated[HealthCheckFailure, Tag("health_check_failure")],
+        # Agent #41 Owner Wellbeing v0.1
+        Annotated[OwnerNotificationSuppressed, Tag("owner_notification_suppressed")],
         # BEGIN shift-agent-sender-id
         Annotated[LidLearned, Tag("lid_learned")],
         # END shift-agent-sender-id
@@ -2784,6 +2856,7 @@ __all__ = [
     "E164Phone", "Role", "EmployeeId", "Employee", "PhoneAssignment", "ScheduleEntry", "Roster",
     "Config", "CustomerConfig", "OwnerConfig", "LimitsConfig", "AlertingConfig", "BackupConfig", "OperationsConfig",
     "DailyBriefConfig", "BriefSection",
+    "OwnerWellbeingConfig", "OwnerWellbeingDay", "OwnerNotificationSuppressed",
     "EodConfig",
     "LocationEntry", "MultiLocationConfig",
     "CateringConfig", "CateringLeadStatus", "CateringLeadExtractedFields",
