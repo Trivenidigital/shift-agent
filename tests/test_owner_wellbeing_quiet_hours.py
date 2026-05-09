@@ -294,7 +294,27 @@ def test_same_day_window_suppresses(env_dir, pushover_stub):
 
 
 # ─────────────────────────────────────────────────────────────────
-# 7. Boundary semantics — now == quiet_start (R2-M2)
+# 6b. Same-day OUTSIDE window — pins start <= now < end upper bound
+#     (R3-M2 fixup: prevents a bug that drops the upper bound from
+#      passing all current tests)
+# ─────────────────────────────────────────────────────────────────
+
+
+def test_same_day_outside_window_sends(env_dir, pushover_stub):
+    """Quiet 13:00-15:00 (same-day), now=16:00 → outside window → sends.
+    Pins the `< end` upper bound on the same-day branch."""
+    port, stub = pushover_stub
+    _override_owner_wellbeing(env_dir, quiet_start="13:00", quiet_end="15:00")
+    frozen = datetime(2026, 5, 12, 16, 0, 0, tzinfo=ZoneInfo("America/New_York"))
+    r = _run_notify(env_dir, port, priority=0, frozen_now=frozen)
+    assert r.returncode == EXIT_OK
+    assert len(stub.requests) == 1
+
+
+# ─────────────────────────────────────────────────────────────────
+# 7-8. Boundary semantics — now == quiet_start AND now == quiet_end
+#      (R2-M2 + R3-M1: pin both boundaries on the documented contract
+#       "now == start → suppressed; now == end → NOT suppressed")
 # ─────────────────────────────────────────────────────────────────
 
 
@@ -305,6 +325,20 @@ def test_boundary_at_quiet_start_suppressed(env_dir, pushover_stub):
     r = _run_notify(env_dir, port, priority=0, frozen_now=frozen)
     assert r.returncode == EXIT_OK
     assert len(stub.requests) == 0
+
+
+def test_boundary_at_quiet_end_not_suppressed(env_dir, pushover_stub):
+    """Quiet 22:00-06:00, now=06:00 sharp → NOT suppressed (< end).
+    Companion to test_boundary_at_quiet_start_suppressed — together they
+    pin both boundaries on the documented `>=` start, `<` end contract.
+    A future regression that flips `<` to `<=` on the end boundary
+    (silently extending quiet by one minute) would be caught only by
+    this test."""
+    port, stub = pushover_stub
+    frozen = datetime(2026, 5, 12, 6, 0, 0, tzinfo=ZoneInfo("America/New_York"))
+    r = _run_notify(env_dir, port, priority=0, frozen_now=frozen)
+    assert r.returncode == EXIT_OK
+    assert len(stub.requests) == 1, "06:00 sharp should NOT be suppressed (< end)"
 
 
 # ─────────────────────────────────────────────────────────────────

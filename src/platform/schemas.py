@@ -1304,7 +1304,7 @@ class Config(BaseModel):
     equipment_maintenance: EquipmentMaintenanceConfig = Field(default_factory=EquipmentMaintenanceConfig)
     # Agent #41 Owner Wellbeing v0.1 — quiet-hours guard at notify-owner chokepoint.
     # Default enabled=False (opt-in); revived from retired #20 per portfolio.md:1078.
-    owner_wellbeing: "OwnerWellbeingConfig" = Field(default_factory=lambda: OwnerWellbeingConfig())
+    owner_wellbeing: OwnerWellbeingConfig = Field(default_factory=OwnerWellbeingConfig)
 
     def tz(self) -> ZoneInfo:
         return ZoneInfo(self.customer.timezone)

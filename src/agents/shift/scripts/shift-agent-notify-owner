@@ -161,7 +161,7 @@ def _in_quiet_window(now_local: datetime, cfg: OwnerWellbeingConfig) -> bool:
 
 def _apply_quiet_hours_guard(
     cfg: Config, title: str, priority: int,
-) -> tuple[bool, "OwnerNotificationSuppressed | None"]:
+) -> tuple[bool, OwnerNotificationSuppressed | None]:
     """Return (suppress, audit_entry_or_None).
 
     Short-circuit when cfg.owner_wellbeing.enabled is False (the default
