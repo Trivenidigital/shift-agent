@@ -111,6 +111,10 @@ def _empty_result(status: str) -> dict:
         "most_recent_status": None,
         "most_recent_event_date": None,
         "most_recent_dietary_restrictions": [],
+        # Agent #32 v0.1: empty-string mirrors the empty-list dietary convention.
+        # ok-branch sets this to most_recent.extracted.notes truncated at 500 chars
+        # to bound LLM-prompt context inflation (schemas.py:605 has no max_length cap).
+        "most_recent_notes": "",
         "last_seen_days_ago": None,
     }
 
@@ -239,6 +243,11 @@ def lookup_prior_leads_by_phone(
         "most_recent_status": str(most_recent.status),
         "most_recent_event_date": most_recent.extracted.event_date,
         "most_recent_dietary_restrictions": list(most_recent.extracted.dietary_restrictions),
+        # Agent #32 v0.1: free-form prior notes for soft-prior context. Truncated
+        # at 500 chars to bound LLM-prompt inflation (schemas.py:605 has no
+        # max_length on extracted.notes). The `or ""` guard is defensive against
+        # future-schema or hand-edited None values.
+        "most_recent_notes": (most_recent.extracted.notes or "")[:500],
         "last_seen_days_ago": days_ago,
     }
 

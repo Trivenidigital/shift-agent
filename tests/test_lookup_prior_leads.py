@@ -34,10 +34,21 @@ SCRIPT_PATH = REPO_ROOT / "src" / "agents" / "catering" / "scripts" / "lookup-pr
 
 
 def _load_script():
-    """Load the script as a module via importlib (matches test_send_routing_accuracy_summary
-    pattern). Conftest puts src/platform on sys.path so safe_io/schemas/exit_codes
-    resolve."""
-    spec = importlib.util.spec_from_file_location("lookup_mod", SCRIPT_PATH)
+    """Load the script as a module via importlib. Conftest puts src/platform on
+    sys.path so safe_io/schemas/exit_codes resolve.
+
+    Agent #32 v0.1 fix: explicit SourceFileLoader is REQUIRED because
+    `spec_from_file_location` returns `None` for files without a recognized
+    extension (lookup-prior-leads-by-phone has no .py suffix), causing
+    `spec.loader.exec_module` to raise `AttributeError: 'NoneType' object
+    has no attribute 'loader'`. Same pattern the privilege-escalation tests
+    in tests/test_owner_wellbeing_quiet_hours.py use.
+    """
+    import importlib.machinery
+    loader = importlib.machinery.SourceFileLoader("lookup_mod", str(SCRIPT_PATH))
+    spec = importlib.util.spec_from_file_location(
+        "lookup_mod", str(SCRIPT_PATH), loader=loader,
+    )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -56,8 +67,13 @@ def _mk_lead(
     *, lead_id: str, phone: str, status: str = "AWAITING_OWNER_APPROVAL",
     created_at: datetime, event_date: str | None = None,
     dietary: list[str] | None = None,
+    notes: str = "",
 ) -> dict:
-    """Construct a minimal CateringLead dict matching the schema."""
+    """Construct a minimal CateringLead dict matching the schema.
+
+    notes (Agent #32 v0.1): passes through to extracted.notes for testing
+    most_recent_notes lookup behavior.
+    """
     return {
         "lead_id": lead_id,
         "status": status,
@@ -71,6 +87,7 @@ def _mk_lead(
             "headcount": 30,
             "event_date": event_date,
             "dietary_restrictions": dietary or [],
+            "notes": notes,
         },
         "quote_text": "",
         "quote_version": 0,
@@ -710,3 +727,99 @@ def test_pure_read_no_state_mutation_bytes_snapshot(env_dir):
     assert before_files == after_files, (
         f"lookup must not create sibling files; before={before_files} after={after_files}"
     )
+
+
+# ────────────────────────────────────────────────────────────────────
+# Agent #32 v0.1 — most_recent_notes soft-prior field
+# (option-A pivot: extends this lookup rather than building a parallel
+# SpecialRequestMemoryStore. Plan: tasks/agent-32-extend-lookup-prior-leads-with-notes-plan.md)
+# ────────────────────────────────────────────────────────────────────
+
+
+def test_most_recent_notes_returned_for_recent_lead(env_dir):
+    """most_recent_notes follows the most-recent lead by created_at, not list order."""
+    _seed_leads(env_dir, [
+        _mk_lead(lead_id="L0001", phone="+15555550100",
+                 created_at=datetime(2026, 4, 1, 12, tzinfo=timezone.utc),
+                 status="CLOSED", notes="old note"),
+        _mk_lead(lead_id="L0002", phone="+15555550100",
+                 created_at=datetime(2026, 5, 1, 12, tzinfo=timezone.utc),
+                 status="AWAITING_OWNER_APPROVAL",
+                 notes="wants extra-spicy + no-onion"),
+    ])
+    mod = _load_script()
+    result = mod.lookup_prior_leads_by_phone(
+        "+15555550100",
+        leads_path=env_dir / "state" / "catering-leads.json",
+    )
+    assert result["lookup_status"] == "ok"
+    assert result["most_recent_notes"] == "wants extra-spicy + no-onion"
+
+
+def test_most_recent_notes_empty_when_lead_has_no_notes(env_dir):
+    """Behavior pin: empty notes return as empty string, not None / not missing key."""
+    _seed_leads(env_dir, [
+        _mk_lead(lead_id="L0001", phone="+15555550100",
+                 created_at=datetime(2026, 5, 1, 12, tzinfo=timezone.utc)),
+    ])
+    mod = _load_script()
+    result = mod.lookup_prior_leads_by_phone(
+        "+15555550100",
+        leads_path=env_dir / "state" / "catering-leads.json",
+    )
+    assert result["lookup_status"] == "ok"
+    assert result["most_recent_notes"] == ""
+
+
+def test_most_recent_notes_empty_when_no_match(env_dir):
+    """_empty_result path includes the new field as empty string (covers no_match,
+    missing_file, lock_timeout, io_error). Catches missing-key bug in _empty_result."""
+    _seed_leads(env_dir, [
+        _mk_lead(lead_id="L0001", phone="+15555550999",  # different phone
+                 created_at=datetime(2026, 5, 1, 12, tzinfo=timezone.utc),
+                 notes="different customer's note"),
+    ])
+    mod = _load_script()
+    result = mod.lookup_prior_leads_by_phone(
+        "+15555550100",
+        leads_path=env_dir / "state" / "catering-leads.json",
+    )
+    assert result["lookup_status"] == "no_match"
+    assert result["most_recent_notes"] == ""
+
+
+def test_most_recent_notes_returned_for_terminal_status_lead(env_dir):
+    """v0.1 design pin: most_recent_notes follows the most-recent lead regardless
+    of status. Symmetric with most_recent_status itself surfacing terminals."""
+    _seed_leads(env_dir, [
+        _mk_lead(lead_id="L0001", phone="+15555550100",
+                 created_at=datetime(2026, 5, 1, 12, tzinfo=timezone.utc),
+                 status="STALE", notes="had asked for jain food"),
+    ])
+    mod = _load_script()
+    result = mod.lookup_prior_leads_by_phone(
+        "+15555550100",
+        leads_path=env_dir / "state" / "catering-leads.json",
+    )
+    assert result["lookup_status"] == "ok"
+    assert result["most_recent_status"] == "STALE"
+    assert result["most_recent_notes"] == "had asked for jain food"
+
+
+def test_most_recent_notes_truncated_at_500_chars(env_dir):
+    """R1-MEDIUM design fix: source field has no max_length cap, so the lookup
+    output truncates at 500 to bound LLM-prompt context inflation."""
+    long_note = "x" * 2000
+    _seed_leads(env_dir, [
+        _mk_lead(lead_id="L0001", phone="+15555550100",
+                 created_at=datetime(2026, 5, 1, 12, tzinfo=timezone.utc),
+                 notes=long_note),
+    ])
+    mod = _load_script()
+    result = mod.lookup_prior_leads_by_phone(
+        "+15555550100",
+        leads_path=env_dir / "state" / "catering-leads.json",
+    )
+    assert result["lookup_status"] == "ok"
+    assert len(result["most_recent_notes"]) == 500
+    assert result["most_recent_notes"] == "x" * 500

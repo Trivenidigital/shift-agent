@@ -85,7 +85,7 @@ The script prints a JSON dict to stdout. Parse it. Read `lookup_status`:
 
 | `lookup_status` | What it means | What to do |
 |---|---|---|
-| `ok` | Phone matched ≥1 prior lead | Use `most_recent_status`, `last_seen_days_ago`, `most_recent_dietary_restrictions` as **soft priors** for Step 1 extraction (e.g., if current message omits dietary but prior had `vegetarian`, you MAY default to vegetarian — never override explicit current-message content). DO NOT echo any prior detail to the customer. |
+| `ok` | Phone matched ≥1 prior lead | Use `most_recent_status`, `last_seen_days_ago`, `most_recent_dietary_restrictions`, AND `most_recent_notes` (Agent #32 v0.1) as **soft priors** for Step 1 extraction (e.g., if current message omits dietary but prior had `vegetarian`, you MAY default to vegetarian — never override explicit current-message content; if prior `most_recent_notes` says "extra-spicy preference" you MAY treat that as soft context for ambiguous current-message language like "make it like usual"). DO NOT echo any prior detail to the customer. |
 | `no_match` | Phone unknown — first-time customer | Standard new-inquiry flow. |
 | `missing_file` | Leads store not yet present (clean install) | Standard new-inquiry flow. |
 | `lock_timeout` | Writer is mid-update; lookup couldn't acquire lock in 3s | Standard new-inquiry flow. Do NOT retry. |
@@ -96,6 +96,15 @@ The script prints a JSON dict to stdout. Parse it. Read `lookup_status`:
 `last_seen_days_ago`, `most_recent_status`, `most_recent_dietary_restrictions`)
 are extraction priors only. They MUST NEVER appear in any string sent to the
 customer or written to `--raw-inquiry`. They never leave this SKILL's reasoning.
+
+**Hard rule (Agent #32 v0.1 addition):** `most_recent_notes` is for Step 1's
+extraction CONTEXT only. The LLM MUST NOT echo any portion of
+`most_recent_notes` back into its Step 1 extraction output's `notes` field
+— that would persist priors to lead state via `--raw-inquiry`, violating
+the leak-guard rule above. If the prior says "regular customer prefers
+extra-spicy", that may shape your understanding of "we want it like
+usual" in the new message, but does NOT appear in the new lead's `notes`
+field. The new lead's `notes` reflects ONLY what THIS message says.
 
 The acknowledgment in Step 3 stays standard regardless of `lookup_status`. Do
 NOT differentiate the customer-facing acknowledgment based on prior records —

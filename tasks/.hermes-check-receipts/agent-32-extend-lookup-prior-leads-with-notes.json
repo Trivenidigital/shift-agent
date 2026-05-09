@@ -1,0 +1,14 @@
+{
+  "topic": "agent-32-extend-lookup-prior-leads-with-notes",
+  "task_text": "agent-32-extend-lookup-prior-leads-with-notes — pivot of Agent #32 v0.1 per plan-review findings (option A). Instead of building a parallel SpecialRequestMemoryStore + new lookup-special-request script (480 LOC), extend the deployed lookup-prior-leads-by-phone to also surface most_recent_notes from the most-recent non-terminal CateringLead, and patch parse_catering_inquiry SKILL.md Step 0 to consume it as a soft-prior alongside dietary inheritance. ~50 LOC total (5 LOC script change + 10 LOC SKILL prose + 30-40 LOC test additions). No new schema, no new audit variant, no new config flag. Honors Hermes-first: existing substrate handles the v0.1 capability; full agent-shape (own state store + write path + dispatcher row) deferred to v0.2 when a real consumer (Order Accuracy #30 or Kitchen Load Balancer #31) materializes.",
+  "completed_at": "2026-05-09T19:59:17Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 2,
+  "hermes_step_count": 9,
+  "files_to_read_first": [
+    "src/agents/catering/scripts/lookup-prior-leads-by-phone",
+    "src/agents/catering/skills/parse_catering_inquiry/SKILL.md",
+    "src/platform/schemas.py",
+    "tests/test_lookup_prior_leads.py"
+  ]
+}
