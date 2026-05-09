@@ -92,10 +92,11 @@ The script prints a JSON dict to stdout. Parse it. Read `lookup_status`:
 | `corrupt` / `io_error` | State unreadable (alert path) | Standard new-inquiry flow. Script exits non-zero + emits stderr; operator gets visibility via journald. |
 | any other status / stdout not parseable as JSON / script exited unexpectedly | Treat as unavailable | Proceed to Step 1 with no priors. Do NOT retry. Do NOT mention to the customer. |
 
-**Hard rule:** the four prior-customer fields (`prior_lead_count`,
-`last_seen_days_ago`, `most_recent_status`, `most_recent_dietary_restrictions`)
-are extraction priors only. They MUST NEVER appear in any string sent to the
-customer or written to `--raw-inquiry`. They never leave this SKILL's reasoning.
+**Hard rule:** the five prior-customer fields (`prior_lead_count`,
+`last_seen_days_ago`, `most_recent_status`, `most_recent_dietary_restrictions`,
+`most_recent_notes`) are extraction priors only. They MUST NEVER appear in
+any string sent to the customer or written to `--raw-inquiry`. They never
+leave this SKILL's reasoning.
 
 **Hard rule (Agent #32 v0.1 addition):** `most_recent_notes` is for Step 1's
 extraction CONTEXT only. The LLM MUST NOT echo any portion of

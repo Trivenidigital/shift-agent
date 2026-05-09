@@ -808,7 +808,8 @@ def test_most_recent_notes_returned_for_terminal_status_lead(env_dir):
 
 def test_most_recent_notes_truncated_at_500_chars(env_dir):
     """R1-MEDIUM design fix: source field has no max_length cap, so the lookup
-    output truncates at 500 to bound LLM-prompt context inflation."""
+    output truncates at MOST_RECENT_NOTES_MAX_CHARS (500) to bound LLM-prompt
+    context inflation."""
     long_note = "x" * 2000
     _seed_leads(env_dir, [
         _mk_lead(lead_id="L0001", phone="+15555550100",
@@ -823,3 +824,60 @@ def test_most_recent_notes_truncated_at_500_chars(env_dir):
     assert result["lookup_status"] == "ok"
     assert len(result["most_recent_notes"]) == 500
     assert result["most_recent_notes"] == "x" * 500
+
+
+@pytest.mark.parametrize("note_length,expected_length", [
+    (499, 499),  # under cap → unchanged
+    (500, 500),  # at cap → unchanged
+    (501, 500),  # one-over → truncated to cap
+    (2000, 500),  # well-over → truncated to cap
+])
+def test_most_recent_notes_truncation_boundary(env_dir, note_length, expected_length):
+    """R3-M3 fixup: pin the off-by-one direction at the truncation boundary.
+    Catches `[:499]` or `[:501]` regressions that the n=2000 fixture alone
+    would not. Mirrors the existing test_last_seen_days_ago_truncation_boundary
+    parametrization style."""
+    note = "x" * note_length
+    _seed_leads(env_dir, [
+        _mk_lead(lead_id="L0001", phone="+15555550100",
+                 created_at=datetime(2026, 5, 1, 12, tzinfo=timezone.utc),
+                 notes=note),
+    ])
+    mod = _load_script()
+    result = mod.lookup_prior_leads_by_phone(
+        "+15555550100",
+        leads_path=env_dir / "state" / "catering-leads.json",
+    )
+    assert len(result["most_recent_notes"]) == expected_length
+
+
+def test_most_recent_notes_picks_highest_created_at_when_recent_inserted_first(env_dir):
+    """R3-M2 fixup: regression guard for "drop reverse=True" or
+    "iterate-and-return-last-non-empty" bugs. Insert leads with the
+    most-recent-by-created_at FIRST in the list AND with notes; an older
+    lead later in insertion order has different notes. A bug that returns
+    the last-iterated-with-notes (rather than highest-created_at-with-notes)
+    would fail this test. Mirrors the existing
+    test_most_recent_is_highest_created_at_not_first_in_list pattern for
+    the new field."""
+    phone = "+15555550100"
+    _seed_leads(env_dir, [
+        # NEWEST FIRST in insertion order
+        _mk_lead(lead_id="L001", phone=phone,
+                 created_at=datetime(2026, 5, 15, tzinfo=timezone.utc),
+                 status="AWAITING_OWNER_APPROVAL",
+                 notes="newest-by-date NOTES"),
+        # OLDER LATER in insertion order
+        _mk_lead(lead_id="L002", phone=phone,
+                 created_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+                 status="CLOSED",
+                 notes="older-by-date NOTES"),
+    ])
+    mod = _load_script()
+    result = mod.lookup_prior_leads_by_phone(
+        phone,
+        leads_path=env_dir / "state" / "catering-leads.json",
+    )
+    assert result["prior_lead_count"] == 2
+    # MUST match L001 (highest created_at), NOT L002 (later in insertion order)
+    assert result["most_recent_notes"] == "newest-by-date NOTES"
