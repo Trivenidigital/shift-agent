@@ -201,6 +201,22 @@ Genuinely net-new: tone-sample plumbing + `--quote-text` flag + small schema add
 
 **Re-check trigger:** every alignment-doc audit pass (currently 2026-07-28). If Hermes upstream PR adds `auxiliary.<skill_name>` support, switch from "build A" to "adopt upstream native" and close this entry.
 
+### Credit-burn defense (2026-05-08 audit deferrals)
+
+**Context:** Vizora burned all OpenRouter credits to $0 on 2026-05-06 via three compounding failures: (1) `hard_stop_enabled: false` letting tool-error loops accumulate per-turn, (2) `max_tokens` defaulting to 16,384 per call, (3) 5-min cron on a low-event LLM skill firing 288×/day. SMB-Agents audit on 2026-05-08 (full report at `tasks/audits/credit-burn-audit-2026-05-08.md`) confirmed:
+
+- F1 (loop) ✓ NOT PRESENT — Hermes session caps `max_tool_calls: 50`, `max_turns: 60`, `delegation.max_iterations: 50` in `/root/.hermes/config.yaml`. Hard ceiling per session = 50 tool calls.
+- F2 (16K tokens) ⚠️ GAP EXISTS BUT MITIGATED — Hermes `chat_completions` transport passes `params.get("max_tokens")` which is `None` when not set; OpenRouter falls back to model default. **Mitigated today** by low call volume (~25 LLM fires/day, lifetime spend $7.78, daily $0.00003). Worst-case at current volume = $0.24/day.
+- F3 (5-min cron) ✓ NOT PRESENT — no LLM-calling 5-min cron. Daily-brief / EOD are date-gated (296 `brief_skipped` vs 5 `brief_sent` in last 24h prove gating works).
+
+**Two deferred items, captured here for revisit:**
+
+- [ ] **R1 — Add `max_tokens` cap to Hermes config (closes F2)**. Edit `/root/.hermes/config.yaml`'s `agent:` section to add `max_tokens: 4096` (sensible default for routing/dispatch; matches `parse-menu-photo`'s explicit `max_tokens: 8192` for vision extraction). One-line config change. **Re-check trigger:** any of (a) catering inquiry volume scales >10/day, (b) new LLM-calling agent ships (pnl_anomaly, compliance full prod, expense_bookkeeper RealQBOClient), (c) `usage_daily` from OpenRouter key check exceeds $0.10/day for 3 consecutive days, or (d) any Hermes upgrade past 0.12.0 (re-verify the default behavior didn't change). Latent gap: also `src/agents/expense_bookkeeper/scripts/extract-receipt` lines 320 + 360 have no `max_tokens` in payload — fix in same commit. Effort: ~10 min config + 5 min script edit + deploy verify.
+
+- [ ] **R3 — OpenRouter daily-spend alarm (closes ALL credit-burn modes via independent backstop)**. Set up an OpenRouter dashboard email alert at $X/day threshold AND/OR add a periodic `usage_daily` health check from `shift-agent-health-check.sh` that emits a `decisions.log` warning if daily spend > $1. The dashboard alarm is 5-min UI work; the in-audit-chain version is ~30 min. **Re-check trigger:** same as R1 — defer until volume scales OR a new LLM-heavy agent ships. **Why both R1 and R3:** R1 is a per-call cap (prevents runaway), R3 is a spend-floor alarm (catches anything R1 misses, including model-pricing changes or new agents that bypass the global cap).
+
+**Why deferred:** today's volume + lifetime spend ($0.00003/day, $7.78 lifetime) is orders of magnitude below the danger zone. Adding caps now is good hygiene but not urgent. Re-visit triggers above are the discipline gate — don't let "low volume today" become "still no cap when traffic 10×s."
+
 ## P2.6 — Owner self-chat structurally blocked by agent_echo filter
 
 **Status:** Logged 2026-05-05. Resolution gated on BSP-backed number go-live.
