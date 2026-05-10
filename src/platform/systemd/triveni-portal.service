@@ -11,7 +11,10 @@ Group=shift-agent
 ExecStart=/usr/bin/python3 -m http.server 8080 --directory /opt/triveni/portal --bind 0.0.0.0
 Restart=on-failure
 RestartSec=30
-StartLimitBurst=3
+# PR-#81-R1-M1: dropped StartLimitBurst=3. With RestartSec=30 and default
+# StartLimitIntervalSec=10s, restarts are 30s apart — never within the
+# burst window — so the cap was a functional no-op. Operators monitor
+# `journalctl -u triveni-portal.service -p warning` for retry-loop signal.
 StandardOutput=append:/opt/shift-agent/logs/triveni-portal.log
 StandardError=append:/opt/shift-agent/logs/triveni-portal.log
 

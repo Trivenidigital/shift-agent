@@ -51,16 +51,20 @@ echo "=== Pre-flight (local) ==="
 echo "✓ local files present"
 
 echo "=== Pre-flight (remote port :$PORT availability) ==="
-# R2-M2 design fix: pre-flight check before installing.
-# `ss -tln | grep ":$PORT "` matches a literal ":<PORT> " in the LISTEN list.
-# If something else owns :$PORT, abort clearly instead of installing into a
-# guaranteed-fail-loop.
-if ssh "$TARGET" "ss -tln 2>/dev/null | grep -q \":$PORT \" && ! systemctl is-active --quiet triveni-portal.service"; then
-    echo "FATAL: port :$PORT on $TARGET is already in use by something other than triveni-portal.service"
+# R2-M2 + PR-#81-R1-M2 fix: stop the service first, then check the port.
+# Stopping unconditionally guarantees the only listener we'll see on :$PORT
+# is a foreign one (not our own service). The original check
+# `(grep :PORT) && !is-active` had a phantom-edge case: when the service was
+# `active` AND a stray python3 ALSO held :PORT, the check passed but
+# `restart` later would race against the phantom and fail to bind. Stopping
+# first makes the port-check authoritative.
+ssh "$TARGET" "systemctl stop triveni-portal.service 2>/dev/null || true"
+if ssh "$TARGET" "ss -tln 2>/dev/null | grep -q \":$PORT \""; then
+    echo "FATAL: port :$PORT on $TARGET is held by a process other than triveni-portal.service"
     ssh "$TARGET" "ss -tlnp 2>/dev/null | grep \":$PORT \"" || true
     exit 2
 fi
-echo "✓ port :$PORT free (or already owned by triveni-portal.service)"
+echo "✓ port :$PORT free"
 
 echo "=== scp to $TARGET ==="
 scp -q "$HTML_LOCAL" "$TARGET:/tmp/triveni-portal-index.html"
@@ -83,10 +87,12 @@ systemctl daemon-reload
 # silently skip restart if the service was already enabled.
 systemctl enable triveni-portal.service
 systemctl restart triveni-portal.service
-rm -f /tmp/triveni-portal-index.html /tmp/triveni-portal.service
 # R1-M3 design fix: separate command, not in echo $() — so set -e fires if
 # is-active returns non-zero (failed/inactive).
+# PR-#81-R1-M3 fix: confirm active BEFORE rm-ing staged files so a failed
+# deploy leaves /tmp/triveni-portal-* in place for forensic inspection.
 systemctl is-active --quiet triveni-portal.service
+rm -f /tmp/triveni-portal-index.html /tmp/triveni-portal.service
 echo "✓ installed + restarted; service active"
 REMOTE
 
