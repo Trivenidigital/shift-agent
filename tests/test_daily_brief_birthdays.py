@@ -318,9 +318,14 @@ def test_record_birthday_rejects_invalid_phone(env_dir):
 # ─────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("illegal_md", ["02-30", "02-31", "04-31", "06-31", "09-31", "11-31"])
+@pytest.mark.parametrize("illegal_md", [
+    "02-30", "02-31", "04-31", "06-31", "09-31", "11-31",
+    # R3-N1 PR review fix: month-boundary regex coverage. Pins regex
+    # against future "simplification" to e.g. r"\d{2}-\d{2}".
+    "00-01", "13-01", "01-00", "01-32",
+])
 def test_customer_birthday_rejects_invalid_calendar_date(illegal_md):
-    """_validate_calendar_date rejects illegal MM-DDs the regex would otherwise allow."""
+    """_validate_calendar_date + regex reject illegal MM-DDs."""
     sys.path.insert(0, str(PLATFORM_DIR))
     from schemas import CustomerBirthday  # noqa: E402
     with pytest.raises(ValidationError):

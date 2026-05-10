@@ -430,7 +430,7 @@ class LoyaltyConfig(BaseModel):
 # Per-customer birthday record (Agent #33 v0.1).
 class CustomerBirthday(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    customer_phone: "E164Phone"
+    customer_phone: E164Phone
     display_name: str = Field(min_length=1, max_length=100)
     # MM-DD only (no year — many customers don't share or won't update accurately).
     birthday: str = Field(pattern=r"^(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$")
@@ -441,8 +441,7 @@ class CustomerBirthday(BaseModel):
         """Regex pattern allows 02-30, 04-31, etc. Reject illegal dates by
         attempting to parse with a leap-year pivot (2024) so 02-29 is
         accepted as a legitimate leap-day birthday (R2-B2 fix from PR review)."""
-        from datetime import datetime as _dt
-        _dt.strptime(f"2024-{v}", "%Y-%m-%d")
+        datetime.strptime(f"2024-{v}", "%Y-%m-%d")
         return v
 
 
@@ -1850,7 +1849,7 @@ class CustomerBirthdayRecorded(_BaseEntry):
     """Audit emitted by record-customer-birthday after a successful upsert.
     operation: "created" if phone wasn't in store, "updated" if it was."""
     type: Literal["customer_birthday_recorded"]
-    customer_phone: str
+    customer_phone: E164Phone   # R2-M1 PR review fix: canonical-form discipline matches CateringLeadCreated
     display_name: str = Field(min_length=1, max_length=100)
     birthday: str = Field(pattern=r"^(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$")
     operation: Literal["created", "updated"]

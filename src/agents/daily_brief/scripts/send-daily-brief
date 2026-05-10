@@ -401,7 +401,11 @@ def _render_brief_text(
     if "birthdays" in cfg.daily_brief.sections:
         today_local = _customer_now(cfg.customer.timezone)
         birthdays_today = _aggregate_birthdays(today_local)
-        birthdays_block = f"\n*Birthdays today:* {_render_birthdays(birthdays_today)}"
+        # R2-M2 PR review fix: \n\n matches the blank-line spacing between
+        # peer sections (see template: yesterday → today_outlook → alerts each
+        # separated by blank lines). \n alone visually attaches birthdays
+        # to the alerts line.
+        birthdays_block = f"\n\n*Birthdays today:* {_render_birthdays(birthdays_today)}"
     else:
         birthdays_block = ""
 
