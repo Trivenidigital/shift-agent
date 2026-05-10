@@ -1,0 +1,13 @@
+{
+  "topic": "portal-migration-srilu-design",
+  "task_text": "portal-migration-srilu-design — v2 design after plan-review BLOCKER+MEDIUMs. Pivot from \"patch shift-agent-deploy.sh\" to \"separate tools/deploy-portal.sh standalone script.\" Eliminates agent-deploy coupling per R1-M1. Final shape: tools/deploy-portal.sh (NEW, ~50 LOC: scp + install + systemctl) + src/platform/systemd/triveni-portal.service (NEW, ~25 LOC with fixed ReadWritePaths + ProtectHome=read-only). No changes to shift-agent-deploy.sh or build-deploy-tarball.sh. Portal updates decouple entirely from agent deploys.",
+  "completed_at": "2026-05-10T16:16:19Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 4,
+  "hermes_step_count": 8,
+  "files_to_read_first": [
+    "src/platform/systemd/hermes-gateway.service",
+    "src/agents/daily_brief/systemd/send-daily-brief.service",
+    "tools/build-deploy-tarball.sh"
+  ]
+}
