@@ -257,7 +257,7 @@
   <header class="hero">
     <div class="wrap">
       <div class="mono eyebrow">Portfolio v3 · 25-agent reshape · 2026-05-04</div>
-      <h1>A portfolio for <em>ethnic SMB owners</em>,<br>five live, twelve scaffolded, sixteen on the horizon.</h1>
+      <h1>A portfolio for <em>ethnic SMB owners</em>,<br>five live, sixteen scaffolded, seventeen on the horizon.</h1>
       <p class="lede">
         Specialized agents that share one platform — Hermes runtime, JSON-on-disk,
         per-customer VPS, single owner approval gate. Click any live agent to open its
@@ -267,8 +267,8 @@
 
       <div class="status-row" id="status-row">
         <span class="status-pill live"><span class="dot"></span><span class="num" id="count-live">5</span><span>live</span></span>
-        <span class="status-pill scaffold"><span class="dot"></span><span class="num" id="count-scaffold">12</span><span>scaffolded</span></span>
-        <span class="status-pill future"><span class="dot"></span><span class="num" id="count-future">21</span><span>paper-spec / backlog</span></span>
+        <span class="status-pill scaffold"><span class="dot"></span><span class="num" id="count-scaffold">16</span><span>scaffolded</span></span>
+        <span class="status-pill future"><span class="dot"></span><span class="num" id="count-future">17</span><span>paper-spec / backlog</span></span>
       </div>
     </div>
   </header>
@@ -375,8 +375,8 @@
       { tier: 3, num: 29, name: "Slow-Mover Liquidation", purpose: "Flags slow-moving stock; suggests bundling/discounts/donations.", state: "future", state_detail: "Paper-spec 2026-05-04. POS-gated. Defer." },
       { tier: 1, num: 30, name: "Order Accuracy Guardian", purpose: "Cross-checks orders vs kitchen tickets BEFORE handover. Reduces wrong-order fixes that erode customer trust. HIGH PRIORITY per user.", state: "future", state_detail: "Paper-spec 2026-05-04. KDS/POS order-state-gated (same as #23). Cannot ship until customer onboards POS with order-state webhook. HIGH PRIORITY but BLOCKED." },
       { tier: 2, num: 31, name: "Kitchen Load Balancer & ETA", purpose: "Real-time busyness monitoring + accurate ETAs to customers (vs over-promising on standard 20-min defaults).", state: "future", state_detail: "Paper-spec 2026-05-04. KDS/POS-gated. Defer." },
-      { tier: 2, num: 32, name: "Special Request Memory", purpose: "Remembers no-onion / Jain / extra-spicy / no-cilantro preferences across orders. Surfaces to kitchen on each new order from same customer.", state: "future", state_detail: "Paper-spec 2026-05-04. CRM-lite JSON state per customer. Build complexity: Low; ~1 day. Build-priority #2." },
-      { tier: 2, num: 33, name: "Loyalty & Punch-Card", purpose: "WhatsApp-based points, auto-rewards, birthday offers. Digitizes the informal punch-card programs ethnic SMBs already run.", state: "future", state_detail: "Paper-spec 2026-05-04. JSON state + cron + WhatsApp; no external APIs. ~1 day. Build-priority #3." },
+      { tier: 2, num: 32, name: "Special Request Memory", purpose: "Remembers no-onion / Jain / extra-spicy / no-cilantro preferences across orders. Surfaces to kitchen on each new order from same customer.", state: "scaffold", state_detail: "v0.1 LIVE 2026-05-09 (PR #79, option-A pivot). Extends lookup-prior-leads-by-phone with most_recent_notes (~50 LOC) — surfaces prior catering-lead notes as soft-prior in parse_catering_inquiry Step 0. v0.2 roadmap: standalone state store + write CLI + WhatsApp owner-command (gated on Order Accuracy #30 / Kitchen Load Balancer #31 maturing — both POS-blocked)." },
+      { tier: 2, num: 33, name: "Loyalty & Punch-Card", purpose: "WhatsApp-based points, auto-rewards, birthday offers. Digitizes the informal punch-card programs ethnic SMBs already run.", state: "scaffold", state_detail: "v0.1 LIVE 2026-05-10 (PR #80, option-C pivot). Birthday reminders ship as a new opt-in BriefSection in Daily Brief + record-customer-birthday CLI for operator state-init. ~330 LOC including 24 tests with calendar-aware MM-DD validator (rejects 02-30, accepts leap-day 02-29). v0.2 roadmap: WhatsApp owner-command for adding birthdays, punch-card / points / auto-rewards, auto-customer-facing greeting." },
       { tier: 3, num: 34, name: "Menu Suggestion & Upsell", purpose: "Real-time personalized upsells during ordering (\"you usually get fresh paneer with biriyani — add today?\"). Owner-controlled WhatsApp-side, NOT POS-vendor's upsell.", state: "future", state_detail: "Paper-spec 2026-05-04. POS-gated (history + LLM). Different from retired #24 Upsell." },
       { tier: 2, num: 35, name: "Referral & Review Responder", purpose: "Manages referral program (track who referred whom, reward both) + auto-replies to Google Maps / Facebook reviews after owner approval.", state: "future", state_detail: "Paper-spec 2026-05-04. Referral side tractable; review side gated on Google My Business + Facebook Graph APIs (investigate mcp/native-mcp first per skills-roadmap)." },
       { tier: 2, num: 36, name: "Credit Customer & Temple Account Manager", purpose: "Monthly statements + gentle reminders for institutional accounts (temples, community organizations, regular caterers paying net-30).", state: "future", state_detail: "Paper-spec 2026-05-04. Extends Agent #15 Cash & AR with account-type subtype + tone calibration. Build complexity: Low–Medium; ~1 day after #15. Build-priority #6." },
@@ -384,7 +384,7 @@
       { tier: 2, num: 38, name: "Local Community Broadcast", purpose: "Opt-in WhatsApp lists for specials and festivals. Owner manages opt-in; agent fans broadcast respecting WhatsApp limits + 100/day outbound cap.", state: "future", state_detail: "Paper-spec 2026-05-04. JSON opt-in list + mirror Daily Brief send pattern. ~1 day. Build-priority #5." },
       { tier: 2, num: 39, name: "Photo Menu Curator", purpose: "Helps maintain/update food photos for online ordering platforms (DoorDash/UberEats menus, Google Business). Owner sends new dish photo → agent extracts metadata, suggests caption, queues for approval.", state: "future", state_detail: "Paper-spec 2026-05-04. Reuses parse_catering_inquiry image substrate. Build complexity: Low–Medium; ~1-2 days. Build-priority #7." },
       { tier: 3, num: 40, name: "Competitor Price Watcher", purpose: "Tracks key items at nearby competitors (online menus, third-party delivery prices). Surfaces drift to owner.", state: "future", state_detail: "Paper-spec 2026-05-04. Per-competitor scraping (brittle, TOS-questionable). Defer indefinitely." },
-      { tier: 2, num: 41, name: "Owner Wellbeing & Burnout Guardian", purpose: "Weekly load summary (hours worked, decisions made, sleep gap) + quiet-hours rule (no notifications between owner-configured times unless critical).", state: "future", state_detail: "Paper-spec 2026-05-04. Revival of retired #20 (was folded into Daily Brief; user re-promoted as standalone). Pure substrate: weekly Daily Brief patch + quiet-hours config flag + guard in notify_owner_with_fallback. ~1 day. Build-priority #1 (highest-ROI tractable)." },
+      { tier: 2, num: 41, name: "Owner Wellbeing & Burnout Guardian", purpose: "Weekly load summary (hours worked, decisions made, sleep gap) + quiet-hours rule (no notifications between owner-configured times unless critical).", state: "scaffold", state_detail: "v0.1 LIVE 2026-05-09 (PR #78). Quiet-hours guard at shift-agent-notify-owner chokepoint — suppresses Pushover/WhatsApp non-critical sends during owner-configured quiet windows (cross-midnight aware, weekday filter, priority threshold). 14 tests including DST wall-clock semantics + boundary cases. cfg.owner_wellbeing.enabled = false (opt-in). v0.2 roadmap: weekly owner-load summary BriefSection (hours worked / decisions made / sleep gap)." },
     ];
 
     function el(tag, opts) {
