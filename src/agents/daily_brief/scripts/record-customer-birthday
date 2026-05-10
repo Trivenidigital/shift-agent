@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""record-customer-birthday — operator-callable CLI to upsert a customer
+birthday into state/customer-birthdays.json (Agent #33 v0.1).
+
+v0.1: operator runs this from the VPS during onboarding or as customers
+share birthdays. v0.2 will add a SKILL + dispatcher row for owner WhatsApp
+command path (`add birthday +1xxx 03/15 Suresh Patel`).
+
+Invocation:
+    /usr/local/bin/record-customer-birthday \\
+      --phone "+15555550100" \\
+      --name "Suresh Patel" \\
+      --birthday "03-15"
+
+Upsert semantics: if customer_phone already exists in the store, the entry
+is replaced (operation="updated"). Otherwise appended (operation="created").
+
+Exit codes:
+    0 — recorded (created or updated)
+    2 — invalid input (pydantic validation: bad phone, illegal date, etc.)
+    5 — schema corruption / OS error on the store
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
+
+from safe_io import (  # noqa: E402
+    FileLock, atomic_write_json, ndjson_append, load_model, customer_now,
+)
+from schemas import (  # noqa: E402
+    CustomerBirthday, CustomerBirthdayStore, CustomerBirthdayRecorded,
+    Config,
+)
+from exit_codes import (  # noqa: E402
+    EXIT_OK, EXIT_INVALID_INPUT, EXIT_SCHEMA_VIOLATION,
+)
+from pydantic import ValidationError  # noqa: E402
+
+CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
+BIRTHDAYS_PATH = Path("/opt/shift-agent/state/customer-birthdays.json")
+BIRTHDAYS_LOCK = Path(str(BIRTHDAYS_PATH) + ".lock")
+LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+
+
+def _resolve_now() -> datetime:
+    """Best-effort: load Config and return tz-aware now in customer tz.
+    Falls back to UTC on any config-load failure (matches the
+    lookup-prior-leads-by-phone _load_config_now pattern)."""
+    try:
+        import yaml
+        cfg = Config.model_validate(yaml.safe_load(CONFIG_PATH.read_text()))
+        return customer_now(cfg.customer.timezone)
+    except Exception:
+        return datetime.now(tz=timezone.utc)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description="Upsert a customer birthday for Agent #33 v0.1 reminders.",
+    )
+    ap.add_argument("--phone", required=True, help="E.164 customer phone, e.g. +15555550100")
+    ap.add_argument("--name", required=True, help="Display name for the brief output")
+    ap.add_argument("--birthday", required=True, help="MM-DD format, e.g. 03-15")
+    args = ap.parse_args()
+
+    # Validate inputs via pydantic. _validate_calendar_date rejects 02-30 etc.
+    try:
+        new_record = CustomerBirthday(
+            customer_phone=args.phone,
+            display_name=args.name,
+            birthday=args.birthday,
+        )
+    except ValidationError as e:
+        sys.stderr.write(f"input validation failed: {e}\n")
+        return EXIT_INVALID_INPUT
+
+    # Lock + read + upsert + atomic write + audit (mirrors create-catering-lead).
+    BIRTHDAYS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with FileLock(BIRTHDAYS_LOCK):
+        try:
+            store, status = load_model(
+                BIRTHDAYS_PATH, CustomerBirthdayStore,
+                default=CustomerBirthdayStore(),
+            )
+            # Accept ok/missing/empty (initial state uses default empty store).
+            # Only fail on corrupt/oserror — those need operator triage.
+            if status.startswith("corrupt") or status.startswith("oserror"):
+                sys.stderr.write(f"failed to load birthdays store: status={status!r}\n")
+                return EXIT_SCHEMA_VIOLATION
+        except Exception as e:
+            sys.stderr.write(f"failed to load birthdays store: {e}\n")
+            return EXIT_SCHEMA_VIOLATION
+
+        # Upsert: replace if phone exists, else append.
+        existing_idx = next(
+            (i for i, c in enumerate(store.customers)
+             if c.customer_phone == new_record.customer_phone),
+            None,
+        )
+        if existing_idx is not None:
+            store.customers[existing_idx] = new_record
+            operation = "updated"
+        else:
+            store.customers.append(new_record)
+            operation = "created"
+
+        atomic_write_json(BIRTHDAYS_PATH, store)
+
+        # Best-effort audit (matches catering convention — audit failure does
+        # NOT roll back the state-write that already succeeded).
+        try:
+            entry = CustomerBirthdayRecorded(
+                type="customer_birthday_recorded",
+                ts=_resolve_now(),
+                customer_phone=new_record.customer_phone,
+                display_name=new_record.display_name,
+                birthday=new_record.birthday,
+                operation=operation,
+            )
+            ndjson_append(LOG_PATH, entry.model_dump_json())
+        except Exception as e:
+            sys.stderr.write(f"WARN: audit emit failed: {e}\n")
+
+    print(
+        f"{operation} birthday for {new_record.customer_phone} "
+        f"({new_record.display_name}, {new_record.birthday})"
+    )
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

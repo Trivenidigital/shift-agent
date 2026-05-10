@@ -217,6 +217,51 @@ Genuinely net-new: tone-sample plumbing + `--quote-text` flag + small schema add
 
 **Why deferred:** today's volume + lifetime spend ($0.00003/day, $7.78 lifetime) is orders of magnitude below the danger zone. Adding caps now is good hygiene but not urgent. Re-visit triggers above are the discipline gate — don't let "low volume today" become "still no cap when traffic 10×s."
 
+### Agent #33 Loyalty v0.2 follow-ups (2026-05-10 — v0.1 birthday-only shipped)
+
+**Context:** Agent #33 v0.1 shipped birthday reminders only (Daily Brief
+section + record-customer-birthday CLI script per option-C plan-review pivot).
+The full Loyalty & Punch-Card vision is staged across these v0.2/v0.3 items.
+
+- [ ] **v0.2 — WhatsApp owner-command for adding birthdays**. Wraps the existing
+  `record-customer-birthday` CLI in a SKILL + dispatcher row so owner can text
+  `add birthday +1xxx 03/15 Suresh Patel` instead of SSH-calling the CLI.
+  Per `feedback_dont_overengineer_llm_intent.md`: let Hermes classify intent
+  (no regex whitelist). Trigger: customer demand for owner-friendly UX OR a
+  customer onboarding cycle where SSH-only feels operationally too thin.
+
+- [ ] **v0.2 — Punch-card / points schema + visit counter + reward triggers.**
+  The full "Loyalty" surface per portfolio.md:998. Adds `LoyaltyPoints` schema,
+  visit-counting from `CateringLead` history (or POS integration when #30/#31
+  ship), reward-trigger thresholds (e.g., 10 visits → free dessert). Trigger:
+  customer asks for a digital punch-card.
+
+- [ ] **v0.2 — Auto-customer-facing birthday greeting**. Daily-brief cron
+  fires the existing logic; in v0.2 also send a WhatsApp greeting to the
+  customer directly (with outbound-cap accounting via existing send-counter
+  + opt-out flag stored on `CustomerBirthday`). Trigger: owner asks for
+  hands-off greeting workflow.
+
+- [ ] **v0.3 — Year-aware "turning N" extension.** Add optional `year` field
+  to `CustomerBirthday`; render "Suresh Patel turning 35 (+1xxx)". Skip until
+  a customer asks; many customers don't share or won't update accurately.
+
+- [ ] **Test-helper factor-up (cross-cutting)**. Third occurrence of importlib
+  `SourceFileLoader` + `sys.modules` pre-load pattern in this PR (after #41
+  + #32). Per #32 retro lesson #3: factor `_load_script(name, path)` +
+  `preload_platform_modules(platform_dir)` to a shared `tests/_test_helpers.py`
+  (or extend `tests/conftest.py`). Currently 4 call sites duplicate the
+  pattern (`_b1_helpers.py`, `test_owner_wellbeing_quiet_hours.py`,
+  `test_lookup_prior_leads.py`, `test_daily_brief_birthdays.py`). Estimated
+  ~50 LOC helper + ~10 LOC change per call site = ~90 LOC refactor PR.
+  **Trigger: another agent-build session that needs the same pattern.**
+
+- [ ] **Default-sections opt-in vs explicit-opt-in policy** for new BriefSection
+  values. v0.1 chose explicit opt-in (operator must add `"birthdays"` to
+  `cfg.daily_brief.sections`). Re-evaluate when v0.2 lands more sections —
+  may want a per-section default that ships enabled-by-default for low-noise
+  ones.
+
 ## P2.6 — Owner self-chat structurally blocked by agent_echo filter
 
 **Status:** Logged 2026-05-05. Resolution gated on BSP-backed number go-live.
