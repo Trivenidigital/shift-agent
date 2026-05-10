@@ -1,0 +1,14 @@
+{
+  "topic": "agent-33-loyalty-birthday-daily-brief-v0-1",
+  "task_text": "agent-33-loyalty-birthday-daily-brief-v0-1 — minimum viable v0.1 of Agent #33 (Loyalty & Punch-Card). Scoped to birthday reminders only as a new \"birthdays\" BriefSection in send-daily-brief. Adds CustomerBirthday + CustomerBirthdayStore schemas (operator hand-edits state file in v0.1; no project-side write script) + extends BriefSection Literal with \"birthdays\" + adds _aggregate_birthdays + _render_birthdays helpers + template patch + tests. Follows the option-A discipline from #32 retro: extends existing Daily Brief substrate rather than building a parallel cron + WhatsApp chokepoint. Punch-card / points / auto-rewards / owner WhatsApp commands deferred to v0.2.",
+  "completed_at": "2026-05-10T01:44:14Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 4,
+  "hermes_step_count": 8,
+  "files_to_read_first": [
+    "src/agents/daily_brief/scripts/send-daily-brief",
+    "src/agents/daily_brief/templates/daily_brief.txt",
+    "src/platform/schemas.py",
+    "tests/test_send_daily_brief.py"
+  ]
+}

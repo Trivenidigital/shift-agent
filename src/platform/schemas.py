@@ -410,7 +410,47 @@ class OperationsConfig(BaseModel):
 
 
 # Daily Brief sub-config + section alias (Agent #4)
-BriefSection = Literal["yesterday", "today_outlook", "alerts"]
+# "birthdays" added Agent #33 v0.1 — opt-in via cfg.daily_brief.sections; the
+# default factory at DailyBriefConfig.sections does NOT include it (preserved
+# unchanged so existing customers' briefs are unaffected until owner explicitly
+# opts in).
+BriefSection = Literal["yesterday", "today_outlook", "alerts", "birthdays"]
+
+
+# Agent #33 Loyalty config (Tier-2 scaffold). v0.1 covers birthday reminders
+# only (Daily Brief section + record-customer-birthday CLI). v0.2 will add
+# punch-card / points / WhatsApp owner-command / auto-greeting per
+# tasks/todo.md follow-up.
+class LoyaltyConfig(BaseModel):
+    """Agent #33 Tier-2 scaffold; default off. Opt-in per customer."""
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+
+
+# Per-customer birthday record (Agent #33 v0.1).
+class CustomerBirthday(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    customer_phone: "E164Phone"
+    display_name: str = Field(min_length=1, max_length=100)
+    # MM-DD only (no year — many customers don't share or won't update accurately).
+    birthday: str = Field(pattern=r"^(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$")
+
+    @field_validator("birthday")
+    @classmethod
+    def _validate_calendar_date(cls, v: str) -> str:
+        """Regex pattern allows 02-30, 04-31, etc. Reject illegal dates by
+        attempting to parse with a leap-year pivot (2024) so 02-29 is
+        accepted as a legitimate leap-day birthday (R2-B2 fix from PR review)."""
+        from datetime import datetime as _dt
+        _dt.strptime(f"2024-{v}", "%Y-%m-%d")
+        return v
+
+
+class CustomerBirthdayStore(BaseModel):
+    """Outer container for state/customer-birthdays.json."""
+    model_config = ConfigDict(extra="forbid")
+    customers: list[CustomerBirthday] = Field(default_factory=list)
+    schema_version: Literal[1] = 1   # R2-B1 fix: pinned for migration discipline
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -1302,6 +1342,9 @@ class Config(BaseModel):
     expense_bookkeeper: ExpenseBookkeeperConfig = Field(default_factory=ExpenseBookkeeperConfig)
     pnl_anomaly: PnlAnomalyConfig = Field(default_factory=PnlAnomalyConfig)
     equipment_maintenance: EquipmentMaintenanceConfig = Field(default_factory=EquipmentMaintenanceConfig)
+    # Agent #33 Loyalty v0.1 — birthday reminders + record-customer-birthday CLI.
+    # Default enabled=False; opt-in per customer.
+    loyalty: LoyaltyConfig = Field(default_factory=LoyaltyConfig)
     # Agent #41 Owner Wellbeing v0.1 — quiet-hours guard at notify-owner chokepoint.
     # Default enabled=False (opt-in); revived from retired #20 per portfolio.md:1078.
     owner_wellbeing: OwnerWellbeingConfig = Field(default_factory=OwnerWellbeingConfig)
@@ -1800,6 +1843,17 @@ class BriefSkipped(_BaseEntry):
         "dependency_down",
         "send_uncertain",  # crash between send and log; manual verification needed
     ]
+
+
+# Agent #33 Loyalty v0.1 — birthday-store mutation audit
+class CustomerBirthdayRecorded(_BaseEntry):
+    """Audit emitted by record-customer-birthday after a successful upsert.
+    operation: "created" if phone wasn't in store, "updated" if it was."""
+    type: Literal["customer_birthday_recorded"]
+    customer_phone: str
+    display_name: str = Field(min_length=1, max_length=100)
+    birthday: str = Field(pattern=r"^(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$")
+    operation: Literal["created", "updated"]
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -2734,6 +2788,8 @@ LogEntry = Annotated[
         Annotated[BriefSent, Tag("brief_sent")],
         Annotated[BriefSendFailed, Tag("brief_send_failed")],
         Annotated[BriefSkipped, Tag("brief_skipped")],
+        # Agent #33 Loyalty v0.1 (birthday store mutations)
+        Annotated[CustomerBirthdayRecorded, Tag("customer_birthday_recorded")],
         # Agent #5 EOD Reconciliation
         Annotated[EodSnapshot, Tag("eod_snapshot")],
         Annotated[EodPushoverSent, Tag("eod_pushover_sent")],
@@ -2857,6 +2913,8 @@ __all__ = [
     "Config", "CustomerConfig", "OwnerConfig", "LimitsConfig", "AlertingConfig", "BackupConfig", "OperationsConfig",
     "DailyBriefConfig", "BriefSection",
     "OwnerWellbeingConfig", "OwnerWellbeingDay", "OwnerNotificationSuppressed",
+    "LoyaltyConfig", "CustomerBirthday", "CustomerBirthdayStore",
+    "CustomerBirthdayRecorded",
     "EodConfig",
     "LocationEntry", "MultiLocationConfig",
     "CateringConfig", "CateringLeadStatus", "CateringLeadExtractedFields",

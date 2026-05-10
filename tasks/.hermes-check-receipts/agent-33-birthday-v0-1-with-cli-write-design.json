@@ -1,0 +1,15 @@
+{
+  "topic": "agent-33-birthday-v0-1-with-cli-write-design",
+  "task_text": "agent-33-birthday-v0-1-with-cli-write-design — design doc for option C v0.1: exact code-level specs for CustomerBirthday + CustomerBirthdayStore + LoyaltyConfig + CustomerBirthdayRecorded + BriefSection extension at schemas.py with file:line insertion points; _aggregate_birthdays + _render_birthdays helpers in send-daily-brief; template patch; record-customer-birthday CLI script mirroring create-catering-lead's lock+atomic-write pattern; 10 test cases (6 unit + 4 subprocess). All R2 plan-review BLOCKERs addressed (Literal[1] schema_version pin, MM-DD field_validator for valid dates via datetime.strptime, CLI script eliminates the hand-edit race).",
+  "completed_at": "2026-05-10T14:45:40Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 5,
+  "hermes_step_count": 7,
+  "files_to_read_first": [
+    "src/agents/daily_brief/scripts/send-daily-brief",
+    "src/agents/catering/scripts/create-catering-lead",
+    "src/platform/schemas.py",
+    "src/platform/safe_io.py",
+    "tests/test_daily_brief_script.py"
+  ]
+}

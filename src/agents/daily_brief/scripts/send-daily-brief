@@ -45,6 +45,7 @@ from safe_io import (  # noqa: E402
 from schemas import (  # noqa: E402
     Config, Roster, PendingStore,
     BriefAttempted, BriefSent, BriefSendFailed, BriefSkipped,
+    CustomerBirthdayStore,
 )
 from log_source import get_log_sources  # noqa: E402
 from exit_codes import (  # noqa: E402
@@ -62,6 +63,7 @@ ROSTER_PATH = Path(os.environ.get("SHIFT_AGENT_ROSTER_PATH", "/opt/shift-agent/r
 PENDING_PATH = Path(os.environ.get("SHIFT_AGENT_PENDING_PATH", "/opt/shift-agent/state/pending.json"))
 DECISIONS_LOG = Path(os.environ.get("SHIFT_AGENT_DECISIONS_LOG_PATH", "/opt/shift-agent/logs/decisions.log"))
 SENTINEL_PATH = Path(os.environ.get("SHIFT_AGENT_BRIEF_SENTINEL_PATH", "/opt/shift-agent/state/last-brief-sent.json"))
+BIRTHDAYS_PATH = Path(os.environ.get("SHIFT_AGENT_BIRTHDAYS_PATH", "/opt/shift-agent/state/customer-birthdays.json"))
 DISABLED_FLAG = Path(os.environ.get("SHIFT_AGENT_DISABLED_FLAG", "/opt/shift-agent/state/disabled.flag"))
 TEMPLATES_DIR = Path(os.environ.get("SHIFT_AGENT_TEMPLATES_DIR", "/opt/shift-agent/templates"))
 RENDER_TEMPLATE_BIN = os.environ.get("SHIFT_AGENT_RENDER_TEMPLATE_BIN", "/usr/local/bin/render-coverage-template")
@@ -288,6 +290,47 @@ def _aggregate_today(cfg: Config) -> tuple[dict, bool]:
     return out, degraded
 
 
+def _aggregate_birthdays(today_local: datetime) -> list[dict]:
+    """Agent #33 v0.1: returns list of {phone, name} dicts for customers
+    whose birthday matches today_local's MM-DD. Falls open on missing/
+    corrupt file — returns [], emits stderr WARN. Matches
+    _aggregate_yesterday's degraded-mode philosophy.
+
+    Caller MUST gate on 'birthdays' in cfg.daily_brief.sections; this
+    helper does not check the section opt-in itself.
+    """
+    if not BIRTHDAYS_PATH.exists():
+        return []
+    try:
+        store, status = load_model(
+            BIRTHDAYS_PATH, CustomerBirthdayStore,
+            default=CustomerBirthdayStore(),
+        )
+        if not status.startswith("ok"):
+            sys.stderr.write(
+                f"WARN: customer-birthdays.json status={status!r}; "
+                f"birthdays section degraded\n"
+            )
+            return []
+    except Exception as e:
+        sys.stderr.write(f"WARN: birthday load failed: {e}; section degraded\n")
+        return []
+    today_md = today_local.strftime("%m-%d")
+    return [
+        {"phone": c.customer_phone, "name": c.display_name}
+        for c in store.customers
+        if c.birthday == today_md
+    ]
+
+
+def _render_birthdays(birthdays_today: list[dict]) -> str:
+    """Single-line summary. 'None today.' if empty; else
+    'Suresh Patel (+15555550100), Priya Reddy (+15555550101)'."""
+    if not birthdays_today:
+        return "None today."
+    return ", ".join(f"{b['name']} ({b['phone']})" for b in birthdays_today)
+
+
 def _render_yesterday(counts: dict) -> str:
     """Format yesterday counts as a single-line bullet summary."""
     sc = counts["sick_calls"]
@@ -350,6 +393,18 @@ def _render_brief_text(
     if degraded:
         header = "WARNING: DEGRADED BRIEF — some data sources unavailable. Outlook + alerts may be incomplete.\n\n"
     catchup_note = f" (catch-up: {catchup_minutes_late} min late)" if catchup_minutes_late > 0 else ""
+
+    # Agent #33 v0.1: conditional render. Only include the birthdays line if
+    # the section is in cfg.daily_brief.sections (R1-B1 fix from PR review —
+    # prevents permanent "Birthdays today: None today." line for customers
+    # who haven't opted in).
+    if "birthdays" in cfg.daily_brief.sections:
+        today_local = _customer_now(cfg.customer.timezone)
+        birthdays_today = _aggregate_birthdays(today_local)
+        birthdays_block = f"\n*Birthdays today:* {_render_birthdays(birthdays_today)}"
+    else:
+        birthdays_block = ""
+
     fields = {
         "header": header,
         "brief_date": today_str,
@@ -357,6 +412,7 @@ def _render_brief_text(
         "yesterday_summary": _render_yesterday(yesterday_counts),
         "today_outlook": _render_today(today_data),
         "alerts_summary": _render_alerts(yesterday_counts, today_data),
+        "birthdays_block": birthdays_block,
     }
     return template.format(**fields)
 

@@ -1,0 +1,15 @@
+{
+  "topic": "agent-33-birthday-v0-1-with-cli-write",
+  "task_text": "agent-33-birthday-v0-1-with-cli-write — Agent #33 v0.1 (Loyalty & Punch-Card minimum viable). Option C pivot per user 2026-05-10 + plan-review BLOCKERs. Combines: (1) read-side birthday section in send-daily-brief (BriefSection extension + helpers + template patch + schemas), (2) operator-facing record-customer-birthday CLI write script (lock-aware atomic_write_json, no LLM/dispatcher integration), (3) all R2 plan-review BLOCKERs fixed (Literal[1] schema_version pin, MM-DD field_validator for valid dates, race resolved by CLI script using safe_io.atomic_write_json), (4) LoyaltyConfig as Tier-2 scaffold (default enabled=False) plugged into Config properly. WhatsApp owner-command integration + punch-card/points + auto-greeting deferred to v0.2; tracking items added to tasks/todo.md.",
+  "completed_at": "2026-05-10T14:42:50Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 6,
+  "hermes_step_count": 9,
+  "files_to_read_first": [
+    "src/agents/daily_brief/scripts/send-daily-brief",
+    "src/agents/daily_brief/templates/daily_brief.txt",
+    "src/platform/schemas.py",
+    "src/agents/catering/scripts/create-catering-lead",
+    "tests/test_daily_brief_script.py"
+  ]
+}
