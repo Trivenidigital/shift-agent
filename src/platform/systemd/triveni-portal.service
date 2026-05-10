@@ -1,0 +1,35 @@
+[Unit]
+Description=Triveni SMB-Agents Portfolio Portal (static HTML)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/opt/triveni/portal/index.html
+
+[Service]
+Type=simple
+User=shift-agent
+Group=shift-agent
+ExecStart=/usr/bin/python3 -m http.server 8080 --directory /opt/triveni/portal --bind 0.0.0.0
+Restart=on-failure
+RestartSec=30
+# PR-#81-R1-M1: dropped StartLimitBurst=3. With RestartSec=30 and default
+# StartLimitIntervalSec=10s, restarts are 30s apart — never within the
+# burst window — so the cap was a functional no-op. Operators monitor
+# `journalctl -u triveni-portal.service -p warning` for retry-loop signal.
+StandardOutput=append:/opt/shift-agent/logs/triveni-portal.log
+StandardError=append:/opt/shift-agent/logs/triveni-portal.log
+
+# Security hardening (mirrors hermes-gateway.service convention).
+# R2-B1 fix from design review: ReadWritePaths required for StandardOutput
+# append target. Without it, ProtectSystem=strict mounts /opt read-only and
+# the service fails at startup with EROFS on triveni-portal.log.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/shift-agent/logs
+# R2-M1 fix: read-only matches deployed convention. ProtectHome=true would
+# hide /root even with explicit ReadWritePaths exception (see comment in
+# hermes-gateway.service:33-34).
+ProtectHome=read-only
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,13 @@
+{
+  "topic": "portal-migration-srilu",
+  "task_text": "portal-migration-srilu — migrate static SMB-Agents portfolio portal from main-vps (nginx :8080 /portal/) to srilu (python http.server :8080). Single static HTML file under /opt/triveni/portal/ + systemd unit + deploy script extension. New URL: http://89.167.116.187:8080/. main-vps portal stays running until srilu deploy is verified (slowly-decommission pattern). Per option-A discipline: minimum viable substrate (python stdlib http.server) — avoids installing nginx on multi-tenant box. No new schema, no LLM, no audit chain.",
+  "completed_at": "2026-05-10T16:11:17Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 3,
+  "hermes_step_count": 7,
+  "files_to_read_first": [
+    "src/agents/shift/scripts/shift-agent-deploy.sh",
+    "src/agents/daily_brief/systemd/send-daily-brief.service",
+    "web/portal/index.html"
+  ]
+}
