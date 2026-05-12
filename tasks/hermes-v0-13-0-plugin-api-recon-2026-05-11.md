@@ -593,3 +593,50 @@ Whichever branch we take, the durable artifact is this doc + the file references
 - plugins.py register_hook: line 603
 - plugins.py invoke_hook: line 1198, 1306
 - cf-router/__init__.py register: matches API exactly
+
+---
+
+## Retro — 2026-05-12 (PR-CF1d merge-day)
+
+Paired entries: discipline applied / error it caught. Captured while session context is fresh. Missteps included alongside wins because a retro that only captures wins is a victory lap — the calibration value is in seeing where process caught an error that confidence alone would not have.
+
+### What worked
+
+**schemas.py read before patching cf-router**
+*Caught:* The `Literal[...]` union in `CfRouterIntercepted.reason` needed two new variants (`f7_primary_new_inquiry`, `f7_primary_followup_suppressed`) before any audit-emit call would succeed. Precedent earlier in this session was the `cross_dispatch_to_catering` rejection — same Pydantic discriminated-union failure mode, same fix shape. Without the read, Commit 0 would have been missing and every F7 primary fire would have raised at audit time, silently degrading to an unaudited code path.
+
+**v0.13.0 plugin API recon before acting on rollback impulse**
+*Caught:* The initial instinct was to roll back to v0.12.0 when the gateway behavior shifted. Reading the v0.13.0 plugin-API surface revealed the behavior was a deliberate API change, not a regression — the same outcome (catering loop working again) was reachable forward at lower cost than rolling back, investigating from scratch in a fresh session, and arriving at the same forward fix anyway. This doc is the durable artifact that path produced.
+
+**Reviewer split along orthogonal vectors (structural + strategic)**
+*Caught:* Two independent findings the same reviewer would not have surfaced. Structural reviewer caught the `TestF7DispatcherWatchdog` test breakage from removed-but-still-referenced helpers — a code-correctness issue. Strategic reviewer caught the Branch B amendment-drop data-integrity gap — a semantic issue invisible at the code level because the code was working as designed. Same-vector reviewers would have converged on the test break and missed the semantic gap.
+
+**Single-variable test isolation with atomic restore (e004.lid null + restore)**
+*Caught:* During F7 primary-mode testing with Bangaru, `identify-sender` correctly resolved his LID to e004 Anjali Iyer (employee role), bypassing the customer-path code under test. Rather than rewrite the test to mock the roster, the roster entry was temporarily nulled and atomically restored, keeping the single-variable-change property of the experiment. Without that discipline, the test would have passed for the wrong reason — and the "customer-name hallucination" diagnosis would have stood unfalsified.
+
+### What needed correcting
+
+**Initial rollback recommendation (falsified by the recon)**
+*Corrected by:* Operator pause + recon-before-action. The rollback would have "worked" in the sense that v0.12.0 behavior was known, but it would have cost a session of investigation and arrived at the same forward path. *Lesson:* Rollback is a hypothesis about regression. Verify the hypothesis before paying for it — when the impulse is "revert to the known-good state," that's the moment to check the new state isn't deliberately new.
+
+**Model-flip hypothesis surviving a 51-hour timeline gap because we wanted it true**
+*Corrected by:* The engineer's tightened-correlation analysis. Both of our instincts read the timeline as supporting the hypothesis; the discipline of correlating event timestamps to model-class boundaries revealed the gap was not what the hypothesis predicted. The hypothesis was attractive — it explained observed behavior with a single lever — and that attraction masked a timeline mismatch we both glossed. *Lesson:* Single-lever hypotheses for multi-actor systems deserve extra skepticism, not less. Their explanatory simplicity is exactly what makes the falsifying detail easy to skip.
+
+**"Kimi correctly extracts names" sub-claim**
+*Corrected by:* Phase 12 live test + `identify-sender` output inspection. The sub-claim was load-bearing for the model-capability narrative: if Kimi extracted "Anjali Iyer" from a Bangaru-Srini conversation, that was either hallucination or genuine extraction skill. The actual finding — that `identify-sender` legitimately resolved Bangaru's LID to e004 Anjali Iyer via roster — was a third category neither hypothesis covered. *Lesson:* Sub-claims inside a larger narrative are where errors hide. The narrative's correctness shifts based on them; verify them individually, not by their fit to the narrative.
+
+**"Go to sleep / next session" framing in a 9am working session**
+*Corrected by:* Operator pushback on the framing itself. Not a technical miss — a calibration miss about the session's actual state. The framing defaulted to wind-down cues that didn't match the operator's clock or energy, and was producing wrong choices about what to defer vs. what to ship today. *Lesson:* Operator pushback on framing is signal, not stylistic preference. The framing was driving downstream scoping decisions.
+
+---
+
+The pattern across the four corrections: each was a place where confidence in the prior conclusion was high and the corrective signal was subtle. The disciplines that caught them (recon-before-action, timeline correlation, sub-claim verification, framing pushback) are most valuable exactly when they feel most optional.
+
+### Procedural template for the next cf-router intercept type (F10 / F11 / ...)
+
+1. Read deployed `schemas.py` + grep for the `LogEntry` Literal variants you'll touch — extend in Commit 0 before any plugin work
+2. Run a recon doc on whichever Hermes API surface you're about to use — the recon doc is reusable across PRs; the rollback impulse is not
+3. Dispatch reviewers on orthogonal vectors (structural + strategic minimum), not the same vector with different prompts
+4. When a test bypasses the code path you want to exercise, change one environment variable atomically — don't mock around it
+5. When a hypothesis explains everything with a single lever, treat its simplicity as a falsifiability signal, not a confirmation signal
+6. Verify sub-claims individually before stacking them into a narrative
