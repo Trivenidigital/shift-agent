@@ -163,25 +163,45 @@ def invoke_apply_owner_decision(code: str, decision: str,
     """Invoke apply-catering-owner-decision; returns exit code.
 
     For `approve`: caller passes the lead dict (snapshot from
-    find_catering_lead_by_code). The lead's quote_text (F14-drafted
-    proposal) is piped via --quote-text-stdin. Callers must NOT
-    re-read LEADS_PATH — TOCTOU mitigation.
-    For `reject`: passes --reason "owner_reject_via_cf_router".
-    Lead dict is ignored on reject.
+    find_catering_lead_by_code). Quote source priority:
+      1. If lead has a real (non-legacy) quote_text: pipe via --quote-text-stdin
+      2. Else if lead has selected_items (CUSTOMER_FINALIZED): use
+         --quote-from-lead-state for server-side rendering (PR-CF1c 2026-05-12)
+      3. Else return 2 so the LLM can handle
+    For `reject`: passes --reason "owner_reject_via_cf_router". Lead dict ignored.
+
+    Always passes --sender-role owner (PR-CF1c bugfix: required arg was
+    previously omitted, causing every cf-router approve invocation to fail
+    with EXIT_INVALID_INPUT before reaching the quote-text logic).
     """
     try:
         env = {**os.environ, "PYTHONPATH": str(PLATFORM_DIR)}
+        # PR-CF1c bugfix: --sender-role owner is required by the script's
+        # privilege check. cf-router intercepts owner self-chat messages so
+        # the role is implicit; pass it explicitly.
         cmd = [str(PYTHON_BIN), str(APPLY_OWNER_DECISION_BIN),
-               "--code", code, "--decision", decision]
+               "--code", code, "--decision", decision,
+               "--sender-role", "owner"]
         stdin_text: Optional[str] = None
         if decision == "approve":
             if lead is None:
                 return 4  # EXIT_NOT_FOUND — caller forgot to pass lead
-            stdin_text = lead.get("quote_text", "")
-            if not stdin_text or stdin_text.startswith("<legacy"):
-                # No drafted quote available — let LLM handle
+            legacy_quote = lead.get("quote_text", "")
+            has_real_quote = (
+                legacy_quote
+                and not legacy_quote.startswith("<legacy")
+            )
+            if has_real_quote:
+                # Path 1: real LLM-drafted quote in lead — pipe via stdin (legacy F14 path)
+                stdin_text = legacy_quote
+                cmd.append("--quote-text-stdin")
+            elif lead.get("selected_items"):
+                # Path 2 (PR-CF1c): customer finalized; render server-side from lead state
+                cmd.append("--quote-from-lead-state")
+                # No stdin; the script renders the quote itself
+            else:
+                # Path 3: no quote source — let LLM handle (return non-zero)
                 return 2  # EXIT_INVALID_INPUT
-            cmd.append("--quote-text-stdin")
         elif decision == "reject":
             cmd.extend(["--reason", "owner_reject_via_cf_router"])
         result = subprocess.run(

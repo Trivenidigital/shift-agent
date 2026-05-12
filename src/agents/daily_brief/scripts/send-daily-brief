@@ -378,6 +378,64 @@ def _render_alerts(yesterday: dict, today: dict) -> str:
     return "; ".join(alerts) + "."
 
 
+def _render_catering(now_local: datetime) -> str:
+    """PR-CF1c-A 2026-05-12: catering pipeline summary for the daily brief.
+
+    HARD RULES (mirror parse_catering_inquiry/SKILL.md):
+      - NEVER include $ totals or per-item pricing — pricing is owner-only,
+        out-of-band via the #XXXXX approve flow
+      - NEVER include customer names — cosmetic hallucination risk per the
+        2026-05-11 customer-name-hallucination finding (recon doc §Bugs)
+      - Counts + lead_ids + owner_approval_codes only
+
+    Returns an empty string when there are no leads at all (lets the caller
+    omit the block cleanly).
+    """
+    leads_path = Path("/opt/shift-agent/state/catering-leads.json")
+    if not leads_path.exists():
+        return ""
+    try:
+        data = json.loads(leads_path.read_text(encoding="utf-8"))
+        leads = data.get("leads", []) or []
+    except Exception:
+        return "*Catering pipeline:* leads file unreadable."
+
+    if not leads:
+        return ""
+
+    window_start = now_local - timedelta(hours=24)
+    new_24h = 0
+    for l in leads:
+        created_at = l.get("created_at", "")
+        try:
+            ts = datetime.fromisoformat(created_at)
+            if ts >= window_start:
+                new_24h += 1
+        except (ValueError, TypeError):
+            continue
+
+    awaiting_finalize = [l for l in leads if l.get("status") == "AWAITING_OWNER_APPROVAL"]
+    finalized = [l for l in leads if l.get("status") == "CUSTOMER_FINALIZED"]
+    sent_to_customer = [l for l in leads if l.get("status") == "SENT_TO_CUSTOMER"]
+
+    pipeline_total = len(awaiting_finalize) + len(finalized) + len(sent_to_customer)
+
+    lines = ["*Catering pipeline:*"]
+    lines.append(f"  • New leads (24h): {new_24h}")
+    lines.append(f"  • Awaiting customer finalize: {len(awaiting_finalize)}")
+
+    if finalized:
+        codes = ", ".join(l.get("owner_approval_code", "?") for l in finalized)
+        lines.append(f"  • Awaiting your approve ({codes}): {len(finalized)}")
+    else:
+        lines.append(f"  • Awaiting your approve: 0")
+
+    lines.append(f"  • Quotes sent to customers: {len(sent_to_customer)}")
+    lines.append(f"  • Active pipeline total: {pipeline_total}")
+
+    return "\n".join(lines)
+
+
 def _render_brief_text(
     cfg: Config,
     today_str: str,
@@ -409,6 +467,16 @@ def _render_brief_text(
     else:
         birthdays_block = ""
 
+    # PR-CF1c-A 2026-05-12: catering pipeline section. Gated on
+    # cfg.catering.enabled (which we already require for the catering flow
+    # to operate at all). Empty string when no leads exist.
+    if cfg.catering.enabled:
+        today_local = _customer_now(cfg.customer.timezone)
+        catering_summary = _render_catering(today_local)
+        catering_block = f"\n\n{catering_summary}" if catering_summary else ""
+    else:
+        catering_block = ""
+
     fields = {
         "header": header,
         "brief_date": today_str,
@@ -417,6 +485,7 @@ def _render_brief_text(
         "today_outlook": _render_today(today_data),
         "alerts_summary": _render_alerts(yesterday_counts, today_data),
         "birthdays_block": birthdays_block,
+        "catering_block": catering_block,
     }
     return template.format(**fields)
 

@@ -1,9 +1,86 @@
 ---
 name: handle_catering_menu_finalize
-description: Use when a CUSTOMER (not the owner) signals readiness to finalize the catering menu they've been brainstorming with the agent. Trigger phrases include "send to owner for approval", "yes finalize", "looks good let's confirm", "I'm ready to proceed", "submit this menu", "let's go ahead", "yes please send it". Looks up the active catering lead via lookup-prior-leads-by-phone, extracts the items the customer agreed to during brainstorm, and invokes /usr/local/bin/finalize-catering-menu. Owner sees the customer-curated menu card and approves separately with #XXXXX approve.
+description: MANDATORY handler invoked when a CUSTOMER (not the owner) signals readiness to finalize their catering inquiry. Trigger phrases include "send to owner for approval", "yes finalize", "Finalize Proposal LXXXX", "looks good let's confirm", "I'm ready to proceed", "submit this menu", "let's go ahead", "yes please send it". The agent MUST use the `terminal` tool to invoke /usr/local/bin/finalize-catering-menu with --auto-default flag. NEVER ask the customer for item selections. NEVER compose a reply. NEVER quote prices. The script writes the server-side default basket to lead state, transitions to CUSTOMER_FINALIZED, and sends the owner an approval card.
 ---
 
-# Handle Catering Menu Finalize (Agent #2 — PR-CF1)
+# Handle Catering Menu Finalize (Agent #2 — PR-CF1b 2026-05-12)
+
+## STRICT MODEL INSTRUCTIONS — FOLLOW EXACTLY
+
+You are a deterministic finalize handler. Your job is **tool invocation, not improvisation**. You **MUST** use the `terminal` tool to invoke `/usr/local/bin/finalize-catering-menu` with the `--auto-default` flag. Do not extract menu items from conversation history. Do not ask clarifying questions. Do not compose a customer-facing reply.
+
+### Mandatory tool-call sequence
+
+1. **FIRST — extract the lead_id from the customer's message** (use the `terminal` tool):
+   The customer's "Finalize Proposal LXXXX" message contains the lead_id literal. Extract it via grep:
+   ```
+   echo '<message_text>' | grep -oE 'L[0-9]{4,}' | head -1
+   ```
+   If no `LXXXX` pattern found: customer is finalizing ambiguously without naming a lead — STOP. Do not invoke finalize-catering-menu. Output nothing.
+
+2. **SECOND — look up that lead's approval code** (use the `terminal` tool):
+   ```
+   jq -r --arg lid "<extracted_lead_id>" '.leads[] | select(.lead_id==$lid and (.status=="AWAITING_OWNER_APPROVAL" or .status=="CUSTOMER_FINALIZED" or .status=="OWNER_EDITED")) | .owner_approval_code' /opt/shift-agent/state/catering-leads.json
+   ```
+   This returns the `owner_approval_code` (e.g. `#NJSHS`) for the active lead. If empty: the lead doesn't exist or is in a terminal state — STOP. Output nothing.
+
+   Why look up by `lead_id` rather than `customer_phone`: the customer literally named the lead in their message ("Finalize Proposal L0005"), and `customer_phone` for LID-only senders is currently persisted as `+<lid_digits>` (a known cosmetic bug — see `tasks/hermes-v0-13-0-plugin-api-recon-2026-05-11.md`). Lookup by `lead_id` is robust against this.
+
+3. **THIRD — invoke finalize-catering-menu with --auto-default** (use the `terminal` tool):
+   ```
+   /usr/local/bin/finalize-catering-menu \
+     --code "<owner_approval_code from step 2>" \
+     --customer-message-id "<inbound_message_id>" \
+     --auto-default
+   ```
+   The script builds a server-side default basket (first 5 available menu items, qty=1 each), server-recomputes the total, persists `selected_items` + `quote_total_usd` to the lead, transitions status to `CUSTOMER_FINALIZED`, and sends the owner an approval card with `#XXXXX approve` instructions.
+
+4. **FOURTH — done.** Exit code 0 = success. Output nothing further. The owner will see the approval card; the owner-side `#XXXXX approve` flow takes over from there.
+
+### FORBIDDEN ACTIONS
+
+- ❌ NEVER ask the customer for menu items, dietary preferences, or any other information. The auto-default basket exists precisely so no LLM-side conversation is required.
+- ❌ NEVER quote a price, share the total, or describe what was selected. Pricing is owner-only; the owner approves the basket via #XXXXX flow.
+- ❌ NEVER compose a customer-facing reply via `send_message`. The script's owner-card path is the only outbound here.
+- ❌ NEVER hallucinate "Proposal #1", "Proposal #2", "Proposal #3" or invent menu options. The menu is `/opt/shift-agent/state/catering-menu.json` — never invent items.
+- ❌ NEVER use `--selected-items-json` or `--quote-total-usd` flags without explicit user-side selection (which under v0.1 doesn't exist yet — always use `--auto-default`).
+- ❌ NEVER ask "clarifying questions" before finalizing. Past-version SKILL behavior allowed this; v2 explicitly forbids it because clarifying questions violate the parse_catering_inquiry HARD RULES too.
+
+### Few-Shot Example
+
+Inbound message from customer (Bangaru, LID-only sender):
+```
+[shift-agent-sender v=1 platform=whatsapp phone=null lid="201975216009469@lid" fromMe=false chat_id="201975216009469@lid"]
+Finalize Proposal L0005
+```
+
+Inputs from `catering_dispatcher`:
+- sender_phone: `null`
+- sender_lid: `201975216009469@lid`
+- message_text: `Finalize Proposal L0005`
+- message_id: `<wa_msg_id>`
+
+**Step 1 — terminal call** (extract lead_id from message):
+```
+echo 'Finalize Proposal L0005' | grep -oE 'L[0-9]{4,}' | head -1
+```
+→ `L0005`
+
+**Step 2 — terminal call** (look up the lead's owner_approval_code by lead_id):
+```
+jq -r --arg lid "L0005" '.leads[] | select(.lead_id==$lid and (.status=="AWAITING_OWNER_APPROVAL" or .status=="CUSTOMER_FINALIZED" or .status=="OWNER_EDITED")) | .owner_approval_code' /opt/shift-agent/state/catering-leads.json
+```
+→ `#NJSHS`
+
+**Step 3 — terminal call** (invoke script with --auto-default):
+```
+/usr/local/bin/finalize-catering-menu --code "#NJSHS" --customer-message-id "<wa_msg_id>" --auto-default
+```
+→ Exit 0. Lead L0005 status transitions `AWAITING_OWNER_APPROVAL` → `CUSTOMER_FINALIZED`. Owner approval card resent to owner self-chat with the server-default basket.
+
+**Step 4 — done.** No further action.
+
+---
 
 The customer has been brainstorming menu options with you and has now
 signaled readiness to lock in their selections. Your job: extract the

@@ -1,0 +1,14 @@
+[Unit]
+Description=Catering pattern report timer (nightly at 02:00 local, off-hours)
+Requires=catering-pattern-report.service
+
+[Timer]
+# Nightly at 02:00 local time. OnCalendar respects the system TZ (TZ env is
+# customer-local on shift-agent VPSes per the existing convention).
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+AccuracySec=5min
+Unit=catering-pattern-report.service
+
+[Install]
+WantedBy=timers.target

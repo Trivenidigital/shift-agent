@@ -138,6 +138,33 @@ def _normalize_quote_text(s: str) -> str:
     return out[:_QUOTE_OUTPUT_CAP_CHARS]
 
 
+def _render_quote_from_lead_state(lead) -> str:
+    """PR-CF1c 2026-05-12: render a default quote text from lead state alone.
+
+    Mirrors finalize-catering-menu's --auto-default shape — server-authoritative,
+    no LLM composition, no hallucination surface. Same body shape used in the
+    one-shot manual verification on L0005 (see tasks/hermes-v0-13-0-plugin-api-
+    recon-2026-05-11.md Phase 9 §"verbatim jq spec"). The _truth_guard_check
+    that follows this rendering will pass naturally because the rendered text
+    contains the lead's headcount and event_date by construction.
+    """
+    customer_name = lead.customer_name or "(unknown)"
+    customer_phone = lead.customer_phone or "(unknown)"
+    items_lines: list[str] = []
+    for it in (lead.selected_items or []):
+        items_lines.append(f"- {it.name} x{it.qty} @ ${it.price_usd}")
+    items_block = "\n".join(items_lines) if items_lines else "- (no items selected)"
+    total = lead.quote_total_usd or 0
+    event_date = (lead.extracted.event_date if lead.extracted else None) or "(TBD)"
+    headcount = (lead.extracted.headcount if lead.extracted else None) or 0
+    return (
+        f"Quote for {lead.lead_id} ({customer_name} / {customer_phone}):\n"
+        f"{items_block}\n\n"
+        f"Total: ${total}\n"
+        f"Event: {event_date} | Headcount: {headcount}"
+    )
+
+
 def _truth_guard_check(quote_text: str, lead) -> tuple[bool, str]:
     """PR-B v3 — minimum sanity check on LLM-drafted quote.
 
@@ -323,10 +350,21 @@ def main() -> int:
     ap.add_argument(
         "--quote-text-stdin", action="store_true",
         help="PR-B v3: read drafted customer quote text from stdin (required "
-             "for decision=approve). Replaces the previous template-render path "
-             "and the argv-based --quote-text (which was a shell-escape RCE "
-             "surface). Stdin is read up to 8KB; final text capped at 4KB; "
-             "output is normalize-stripped and capped at 600 chars.",
+             "for decision=approve UNLESS --quote-from-lead-state is set). "
+             "Replaces the previous template-render path and the argv-based "
+             "--quote-text (which was a shell-escape RCE surface). Stdin is "
+             "read up to 8KB; final text capped at 4KB; output is "
+             "normalize-stripped and capped at 600 chars.",
+    )
+    ap.add_argument(
+        "--quote-from-lead-state", action="store_true",
+        help="PR-CF1c 2026-05-12: render quote text server-side from the lead's "
+             "selected_items + extracted fields (mirror of finalize-catering-menu's "
+             "--auto-default shape). When set, --quote-text-stdin is NOT required "
+             "for decision=approve. Designed for cf-router F8 path which has no "
+             "LLM-composed quote text to pipe via stdin. Requires the lead to be "
+             "in CUSTOMER_FINALIZED (or later) state with selected_items populated; "
+             "otherwise returns EXIT_INVALID_INPUT.",
     )
     ap.add_argument(
         "--skip-finalize", action="store_true",
@@ -584,33 +622,50 @@ def main() -> int:
             # template path). Truth-guard checks headcount integer + ISO event_date
             # are present in drafted prose; normalize strips control/format Unicode
             # + markdown delimiters + caps length.
-            if not args.quote_text_stdin:
-                _emit_quote_skill_failed_best_effort(
-                    lead.lead_id, code, "missing_quote_text",
-                    "--quote-text-stdin flag not provided in approve decision",
-                )
-                sys.stderr.write(
-                    "PR-B v3: --quote-text-stdin required for decision=approve\n"
-                )
-                return EXIT_INVALID_INPUT
-            raw_quote = sys.stdin.read(_QUOTE_STDIN_READ_CAP)
-            if len(raw_quote.encode("utf-8")) > _QUOTE_TEXT_MAX_BYTES:
-                _emit_quote_skill_failed_best_effort(
-                    lead.lead_id, code, "missing_quote_text",
-                    f"stdin payload {len(raw_quote.encode('utf-8'))}B exceeds "
-                    f"{_QUOTE_TEXT_MAX_BYTES}B cap",
-                )
-                sys.stderr.write(
-                    f"PR-B v3: stdin > {_QUOTE_TEXT_MAX_BYTES}B; refusing\n"
-                )
-                return EXIT_INVALID_INPUT
-            if not raw_quote.strip():
-                _emit_quote_skill_failed_best_effort(
-                    lead.lead_id, code, "missing_quote_text",
-                    "stdin empty / whitespace-only",
-                )
-                sys.stderr.write("PR-B v3: stdin empty\n")
-                return EXIT_INVALID_INPUT
+            # PR-CF1c 2026-05-12: --quote-from-lead-state renders server-side
+            # from lead state and bypasses the stdin requirement.
+            if args.quote_from_lead_state:
+                if not lead.selected_items:
+                    _emit_quote_skill_failed_best_effort(
+                        lead.lead_id, code, "missing_quote_text",
+                        "--quote-from-lead-state set but lead has no selected_items "
+                        "(customer hasn't finalized yet)",
+                    )
+                    sys.stderr.write(
+                        "PR-CF1c: --quote-from-lead-state requires CUSTOMER_FINALIZED "
+                        "lead with non-empty selected_items\n"
+                    )
+                    return EXIT_INVALID_INPUT
+                raw_quote = _render_quote_from_lead_state(lead)
+            else:
+                if not args.quote_text_stdin:
+                    _emit_quote_skill_failed_best_effort(
+                        lead.lead_id, code, "missing_quote_text",
+                        "--quote-text-stdin flag not provided in approve decision",
+                    )
+                    sys.stderr.write(
+                        "PR-B v3: --quote-text-stdin required for decision=approve "
+                        "(or pass --quote-from-lead-state for server-rendered)\n"
+                    )
+                    return EXIT_INVALID_INPUT
+                raw_quote = sys.stdin.read(_QUOTE_STDIN_READ_CAP)
+                if len(raw_quote.encode("utf-8")) > _QUOTE_TEXT_MAX_BYTES:
+                    _emit_quote_skill_failed_best_effort(
+                        lead.lead_id, code, "missing_quote_text",
+                        f"stdin payload {len(raw_quote.encode('utf-8'))}B exceeds "
+                        f"{_QUOTE_TEXT_MAX_BYTES}B cap",
+                    )
+                    sys.stderr.write(
+                        f"PR-B v3: stdin > {_QUOTE_TEXT_MAX_BYTES}B; refusing\n"
+                    )
+                    return EXIT_INVALID_INPUT
+                if not raw_quote.strip():
+                    _emit_quote_skill_failed_best_effort(
+                        lead.lead_id, code, "missing_quote_text",
+                        "stdin empty / whitespace-only",
+                    )
+                    sys.stderr.write("PR-B v3: stdin empty\n")
+                    return EXIT_INVALID_INPUT
             quote_text = _normalize_quote_text(raw_quote)
             passed, fail_detail = _truth_guard_check(quote_text, lead)
             if not passed:

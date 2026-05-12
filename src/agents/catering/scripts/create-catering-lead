@@ -631,7 +631,21 @@ def main() -> int:
     # template (filtered by dietary). This is the reply the customer sees IMMEDIATELY,
     # before any owner approval. Owner involvement is reserved for the FINAL priced
     # quote (handle_catering_owner_approval flow), not the initial proposal.
-    customer_jid = f"{args.customer_phone.lstrip('+')}@s.whatsapp.net"
+    #
+    # F14-LID 2026-05-11: args.customer_phone may be raw input from upstream SKILLs —
+    # either a +E.164 phone OR a bare LID ("<digits>@lid") when the v=1 sender block
+    # had phone=null. Persistence-side Pydantic normalization strips @lid, but this
+    # F14 JID builder runs on the RAW args value pre-normalization. Without the
+    # detection below, LID input produces a malformed "<digits>@lid@s.whatsapp.net"
+    # JID and the customer never receives the proposal. Bug reproduced 2026-05-11
+    # on L0004; fix documented in tasks/hermes-v0-13-0-plugin-api-recon-2026-05-11.md.
+    _cp = str(args.customer_phone).lstrip('+').strip()
+    if _cp.endswith('@lid'):
+        customer_jid = _cp                          # LID-only: bridge accepts "<digits>@lid" directly
+    elif '@' in _cp:
+        customer_jid = _cp                          # defensive: already a complete JID, pass through
+    else:
+        customer_jid = f"{_cp}@s.whatsapp.net"      # standard phone path
     proposal_text = _render_proposal(lead_id, args.customer_name, extracted)
     proposal_ok, proposal_mid_or_err = _bridge_post(customer_jid, proposal_text)
     if proposal_ok:

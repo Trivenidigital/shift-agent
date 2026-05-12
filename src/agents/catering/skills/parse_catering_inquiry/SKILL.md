@@ -1,9 +1,75 @@
 ---
 name: parse_catering_inquiry
-description: Use when catering_dispatcher determines this is a NEW catering inquiry from a customer. Extract structured fields (event_date, headcount, menu, dietary, contact) from the free-text inquiry, call /usr/local/bin/create-catering-lead to write state and trigger the owner approval flow. The script handles the customer acknowledgment automatically.
+description: MANDATORY handler invoked by catering_dispatcher for NEW customer catering inquiries. The agent MUST use the `terminal` tool to invoke /usr/local/bin/lookup-prior-leads-by-phone (Step 0) and /usr/local/bin/create-catering-lead (Step 2). The create-catering-lead script writes the lead row, mints the owner approval code, and sends the customer acknowledgment automatically. NEVER reply to the customer via send_message — the script does that. NEVER skip the create-catering-lead call — without it no lead exists, no #XXXXX code is generated, and the owner approval loop has nothing to approve.
 ---
 
 # Parse Catering Inquiry (Agent #2 — v0.4 / F10)
+
+## STRICT MODEL INSTRUCTIONS — FOLLOW EXACTLY
+
+You are a deterministic extractor + state writer. Your job is **tool invocation, not conversation**. You **MUST** use the `terminal` tool to invoke the shell scripts below. The create-catering-lead script handles BOTH the lead write AND the customer acknowledgment — your job is just to call it correctly.
+
+### Mandatory tool-call sequence
+
+1. **FIRST — lookup prior leads** (use the `terminal` tool):
+   ```
+   /usr/local/bin/lookup-prior-leads-by-phone --customer-phone "<sender_phone>"
+   ```
+   Parse the JSON output; use prior-lead fields as **soft extraction priors** only (never echo to customer).
+
+2. **SECOND — extract structured fields** from `message_text` (see Step 1 below for the JSON schema). Set unknown fields to `null`. Do NOT guess.
+
+3. **THIRD — invoke create-catering-lead** (use the `terminal` tool — this is the actual work; without it no lead is created):
+   ```
+   /usr/local/bin/create-catering-lead \
+     --customer-phone "<sender_phone>" \
+     --customer-name "<sender_name OR empty string>" \
+     --raw-inquiry "<message_text — first 1000 chars>" \
+     --message-id "<inbound message_id>" \
+     --fields-json '<the JSON dict from step 2>'
+   ```
+   The script writes the lead row, mints the `#XXXXX` approval code, sends the owner-approval card to the owner's self-chat, AND sends the customer acknowledgment automatically. Exit 0 = done.
+
+4. **FOURTH — done** (only if step 3 returned exit 0). Output nothing further. NEVER call `send_message` to the customer — the script handled it.
+
+### FORBIDDEN ACTIONS
+
+- ❌ NEVER reply to the customer via `send_message`. The create-catering-lead script sends the canonical acknowledgment with the bridge `template_bypass` prefix. Any text you write bypasses the bridge filter and leaks system internals.
+- ❌ NEVER ask the customer for any information (phone, name, date, headcount). The customer's phone is already in `sender_phone`. Missing extracted fields stay `null`.
+- ❌ NEVER skip the create-catering-lead call. Without it no lead exists in `state/catering-leads.json`, no `#XXXXX` code is generated, no owner approval card is sent — the catering loop is broken.
+- ❌ NEVER compose a polite "I'll get back to you" message in natural language. The script handles all customer-facing text.
+- ❌ NEVER call `skill_manage` to create new skills.
+- ❌ NEVER mix shift-agent text ("Got it, take care, we'll handle the shift") into catering chats — that's a SKILL-mixing error.
+
+### Few-Shot Example
+
+Inputs from catering_dispatcher:
+- sender_phone: `null`
+- sender_lid: `201975216009469@lid`
+- sender_name: `""`
+- message_text: `Bro! I need catering help for my cousin's wedding on May 28, total guests 200`
+- message_id: `<id>`
+
+**Step 1 — terminal call:**
+```
+/usr/local/bin/lookup-prior-leads-by-phone --customer-phone "201975216009469@lid"
+```
+→ `{"lookup_status": "no_match", ...}`
+
+**Step 2 — extract fields:**
+```json
+{"headcount": 200, "event_date": "2026-05-28", "event_time": null, "menu_preferences": [], "off_menu_items": [], "dietary_restrictions": [], "delivery_or_pickup": "unknown", "budget_hint_usd": null, "notes": "cousin's wedding"}
+```
+
+**Step 3 — terminal call:**
+```
+/usr/local/bin/create-catering-lead --customer-phone "201975216009469@lid" --customer-name "" --raw-inquiry "Bro! I need catering help for my cousin's wedding on May 28, total guests 200" --message-id "<id>" --fields-json '{"headcount":200,"event_date":"2026-05-28","event_time":null,"menu_preferences":[],"off_menu_items":[],"dietary_restrictions":[],"delivery_or_pickup":"unknown","budget_hint_usd":null,"notes":"cousin'\''s wedding"}'
+```
+→ Exit 0. Lead L0004 created. Owner approval card sent with `#XXXXX` code. Customer ack sent.
+
+**Step 4 — done.** Output nothing.
+
+---
 
 You receive a free-text catering inquiry. Extract whatever structured fields
 the customer provided. Pass them to the deterministic state writer. The

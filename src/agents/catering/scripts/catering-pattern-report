@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""catering-pattern-report — scan decisions.log + leads for LLM extraction bugs.
+
+PR-CF1c-B 2026-05-12. Mirrors dispatcher-accuracy-report's observability
+shape. Reads `catering_lead_created` audit entries within --days, cross-
+references each lead's `customer_name` against `raw_inquiry`, and appends
+structured operator-facing notes to `/opt/shift-agent/lessons/catering.md`
+when a hallucination is detected.
+
+Hallucination heuristic v0.1 (intentionally narrow):
+  - `customer_name` is non-empty (LLM populated it)
+  - AND no token of `customer_name` (length >= 3, lowercased) appears as a
+    substring of `raw_inquiry.lower()`
+  → LLM invented a name that wasn't in the message body.
+
+This is exactly the failure mode L0004 + L0005 hit on 2026-05-11 — both
+persisted with `customer_name: "Anjali Iyer"` when neither inquiry mentioned
+that name.
+
+Lessons file is append-only operator notes. NOT Hermes memory (avoids
+Curator interaction per `feedback_curator_silent_regression.md`). The
+operator (human) reads this file manually when tightening SKILL rules.
+
+Usage:
+  catering-pattern-report                  # last 24h
+  catering-pattern-report --days 7         # last 7 days
+  catering-pattern-report --dry-run        # print findings, don't append
+
+Exit codes:
+  0 — scan completed (regardless of findings; observability, not a gate)
+  2 — bad input or unreadable state files
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+DEFAULT_LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+DEFAULT_LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
+DEFAULT_LESSONS_PATH = Path("/opt/shift-agent/lessons/catering.md")
+
+MIN_TOKEN_LEN = 3  # ignore "a", "an", "Sr", etc. when matching
+
+
+def _parse_ts(s: str) -> datetime:
+    """Parse ISO-8601 timestamp; assume UTC if naive.
+
+    decisions.log entries mix tz-aware (`-04:00`, `Z` via fromisoformat) and
+    occasional tz-naive forms across scripts; normalize to tz-aware UTC so
+    comparisons against `since` (which is tz-aware) don't TypeError.
+    """
+    dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _load_entries(log_path: Path, since: datetime) -> list[dict[str, Any]]:
+    """Return decisions.log entries with ts >= since. Skips non-JSON lines silently."""
+    if not log_path.exists():
+        return []
+    out: list[dict[str, Any]] = []
+    with log_path.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            ts_raw = entry.get("ts")
+            if not ts_raw:
+                continue
+            try:
+                ts = _parse_ts(ts_raw)
+            except (ValueError, TypeError):
+                continue
+            if ts >= since:
+                out.append(entry)
+    return out
+
+
+def _load_leads(leads_path: Path) -> dict[str, dict[str, Any]]:
+    """Return {lead_id: lead_dict} or empty dict on missing/unreadable."""
+    if not leads_path.exists():
+        return {}
+    try:
+        data = json.loads(leads_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return {l.get("lead_id"): l for l in data.get("leads", []) if l.get("lead_id")}
+
+
+def _is_name_hallucinated(customer_name: str, raw_inquiry: str) -> bool:
+    """True if customer_name has no >=3-char token appearing in raw_inquiry."""
+    if not customer_name or not raw_inquiry:
+        return False
+    inquiry_lower = raw_inquiry.lower()
+    tokens = [
+        t.lower() for t in re.split(r"\s+", customer_name)
+        if len(t) >= MIN_TOKEN_LEN
+    ]
+    if not tokens:
+        return False
+    return not any(t in inquiry_lower for t in tokens)
+
+
+def _scan(
+    log_path: Path,
+    leads_path: Path,
+    since: datetime,
+) -> list[dict[str, Any]]:
+    """Return list of hallucination findings, each with lead_id + name + inquiry snippet."""
+    entries = _load_entries(log_path, since)
+    leads = _load_leads(leads_path)
+    findings: list[dict[str, Any]] = []
+    for e in entries:
+        if e.get("type") != "catering_lead_created":
+            continue
+        lead_id = e.get("lead_id")
+        if not lead_id or lead_id not in leads:
+            continue
+        lead = leads[lead_id]
+        customer_name = (lead.get("customer_name") or "").strip()
+        raw_inquiry = lead.get("raw_inquiry") or ""
+        if _is_name_hallucinated(customer_name, raw_inquiry):
+            findings.append({
+                "lead_id": lead_id,
+                "created_at": e.get("ts"),
+                "persisted_name": customer_name,
+                "raw_inquiry_snippet": raw_inquiry[:160],
+            })
+    return findings
+
+
+def _format_lesson(findings: list[dict[str, Any]], now: datetime) -> str:
+    """Render findings into markdown for the lessons file."""
+    date_str = now.date().isoformat()
+    lines = [
+        f"## {date_str} — Customer-name hallucination scan",
+        f"_Scanned at {now.isoformat()}; {len(findings)} finding(s)._",
+        "",
+    ]
+    for f in findings:
+        lines.append(f"### Lead {f['lead_id']} (created {f['created_at']})")
+        lines.append(f"- **Persisted customer_name:** `{f['persisted_name']}`")
+        lines.append(f"- **Raw inquiry snippet:** `{f['raw_inquiry_snippet']}`")
+        lines.append(
+            "- **Heuristic:** no >=3-char token of `customer_name` appears in "
+            "`raw_inquiry` — LLM invented a name that wasn't in the message."
+        )
+        lines.append("")
+    lines.append("---")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--days", type=int, default=1, help="Lookback window in days (default 1)")
+    ap.add_argument("--log", type=Path, default=DEFAULT_LOG_PATH)
+    ap.add_argument("--leads", type=Path, default=DEFAULT_LEADS_PATH)
+    ap.add_argument("--lessons", type=Path, default=DEFAULT_LESSONS_PATH)
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Print findings to stdout, don't append to lessons file.")
+    args = ap.parse_args()
+
+    if args.days < 1 or args.days > 365:
+        sys.stderr.write(f"--days must be 1..365; got {args.days}\n")
+        return 2
+    if not args.log.exists():
+        sys.stderr.write(f"log not found: {args.log}\n")
+        return 2
+
+    now = datetime.now(timezone.utc).astimezone()
+    since = now - timedelta(days=args.days)
+    findings = _scan(args.log, args.leads, since)
+
+    if not findings:
+        print(f"catering-pattern-report: 0 findings in last {args.days}d. No-op.")
+        return 0
+
+    lesson_md = _format_lesson(findings, now)
+
+    if args.dry_run:
+        print(lesson_md)
+        return 0
+
+    args.lessons.parent.mkdir(parents=True, exist_ok=True)
+    if not args.lessons.exists():
+        # Bootstrap the file with a header
+        args.lessons.write_text(
+            "# Catering Agent — operator lessons\n\n"
+            "Auto-appended by `catering-pattern-report` (operator-facing notes; "
+            "NOT Hermes memory, NOT a SKILL file). Read this when tightening "
+            "SKILL hard rules or extractor leashes.\n\n",
+            encoding="utf-8",
+        )
+    with args.lessons.open("a", encoding="utf-8") as fh:
+        fh.write(lesson_md)
+
+    print(f"catering-pattern-report: {len(findings)} finding(s) appended to {args.lessons}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
