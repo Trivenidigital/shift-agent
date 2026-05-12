@@ -392,23 +392,76 @@ def _emit_quote_mismatch_audit(
         sys.stderr.write(f"audit emit (mismatch) failed (non-fatal): {e}\n")
 
 
+def _build_default_basket(
+    menu_index: dict[str, int],
+) -> tuple[list[CateringSelectedItem], int]:
+    """PR-CF1b 2026-05-12: default basket for `--auto-default` mode.
+
+    Intentionally minimal heuristic for the v0.1 customer-finalize loop:
+    pick the first 5 available menu items with non-zero price, qty=1 each,
+    total = sum of unit prices. No headcount scaling — owner refines via
+    cockpit or approval-card edits. This unblocks E2E customer-finalize →
+    owner-approve testing without requiring the upstream SKILL to extract
+    explicit item selections from free-text conversation (which the May 3
+    "interactive Kimi" run achieved only by hallucinating fake proposals
+    and violating every HARD RULE in parse_catering_inquiry).
+
+    Future iterations can replace this with category-aware,
+    headcount-scaled, or dietary-tag-filtered baskets — see
+    tasks/hermes-v0-13-0-plugin-api-recon-2026-05-11.md §Tomorrow.
+    """
+    items: list[CateringSelectedItem] = []
+    total = 0
+    for name, price in menu_index.items():
+        if len(items) >= 5:
+            break
+        if price <= 0:
+            continue
+        items.append(CateringSelectedItem(name=name, qty=1, price_usd=price))
+        total += price
+    if not items:
+        sys.stderr.write("auto-default: no usable items in menu (all unavailable or zero-priced)\n")
+        sys.exit(EXIT_INVALID_INPUT)
+    return items, total
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--code", required=True)
     parser.add_argument("--customer-message-id", required=True)
-    parser.add_argument("--selected-items-json", required=True)
-    parser.add_argument("--quote-total-usd", required=True, type=int)
+    # PR-CF1b 2026-05-12: --selected-items-json and --quote-total-usd are no
+    # longer required when --auto-default is set. The script builds the
+    # basket server-side via _build_default_basket().
+    parser.add_argument("--selected-items-json", required=False, default=None)
+    parser.add_argument("--quote-total-usd", required=False, default=None, type=int)
+    parser.add_argument(
+        "--auto-default", action="store_true",
+        help="Server-side default basket (PR-CF1b). Ignores --selected-items-json "
+             "and --quote-total-usd if set; picks a representative basket from "
+             "catering-menu.json instead.",
+    )
     args = parser.parse_args()
 
     # Cache config once
     cfg = _load_config()
     now = customer_now(cfg.customer.timezone)
 
-    # Step 1: pure input validation (no I/O, no lock)
-    items, llm_total = _validate_inputs(args)
-
-    # Step 2: load menu (no lock; menu is read-mostly)
+    # Step 2 (menu load) MOVED UP — auto-default branch needs the menu BEFORE
+    # building items. For the existing manual-selection path it makes no
+    # difference (read-mostly, no lock).
     menu_index = _load_menu_index()
+
+    # Step 1: input validation (auto-default vs. manual-selection branches)
+    if args.auto_default:
+        items, llm_total = _build_default_basket(menu_index)
+    else:
+        if not args.selected_items_json or args.quote_total_usd is None:
+            sys.stderr.write(
+                "--selected-items-json and --quote-total-usd are required "
+                "unless --auto-default is set\n"
+            )
+            sys.exit(EXIT_INVALID_INPUT)
+        items, llm_total = _validate_inputs(args)
 
     # Step 3: cross-check + recompute (no lock)
     server_total, price_drift = _cross_check_and_recompute(items, menu_index)

@@ -6,4 +6,4 @@
 
 *Today's outlook:* {today_outlook}
 
-*Needs your attention:* {alerts_summary}{birthdays_block}
+*Needs your attention:* {alerts_summary}{birthdays_block}{catering_block}

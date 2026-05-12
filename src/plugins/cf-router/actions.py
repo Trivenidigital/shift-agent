@@ -34,6 +34,7 @@ CREATE_LEAD_BIN = Path("/usr/local/bin/create-catering-lead")  # F7 path
 PYTHON_BIN = Path("/usr/local/lib/hermes-agent/venv/bin/python")
 PLATFORM_DIR = Path("/opt/shift-agent")  # Where schemas.py lives
 IDENTIFY_SENDER_BIN = Path("/usr/local/bin/identify-sender")
+SEND_CATERING_ACK_BIN = Path("/usr/local/bin/send-catering-ack")
 
 SUBPROCESS_TIMEOUT_SEC = 30
 ALERT_THROTTLE_SEC = 300  # Suppress duplicate Pushover alerts within 5 min
@@ -141,6 +142,114 @@ def find_catering_lead_by_code(code: str) -> Optional[dict]:
         return None
 
 
+def send_canonical_followup_reply(chat_id: str, lead_id: str) -> bool:
+    """Send the UX-mitigation reply on F7 primary-mode followup-suppressed paths.
+
+    PR-CF1d 2026-05-12. When cf-router F7 primary-mode detects an active
+    lead for the sender (Branch B of the F7 path), the LLM is bypassed —
+    which means the customer's follow-up gets no reply unless this helper
+    fires. Without it, a customer asking "what's the status?" gets total
+    silence and assumes the bot is dead.
+
+    Uses the existing send-catering-ack subprocess (which already prepends
+    the canonical "⚕ Catering Agent" bridge prefix and handles both
+    @s.whatsapp.net and @lid JID formats). Mirrors the F6 customer-ack
+    pattern create-catering-lead uses on initial inquiry.
+
+    HARD RULES compliance: this template is hard-coded — no LLM composition,
+    no prices, no menu items, no fabricated promises. Just a status pointer
+    and an invitation to reply for changes.
+
+    Returns True on send success, False otherwise. Failures are non-fatal
+    (caller still writes the suppressed audit row and returns skip).
+    """
+    template = (
+        f"Your inquiry {lead_id} is with the owner for review. "
+        f"They'll send a final quote within 24 hours. "
+        f"Reply here if you need to adjust the inquiry."
+    )
+    try:
+        result = subprocess.run(
+            [
+                str(SEND_CATERING_ACK_BIN),
+                "--customer-jid", chat_id,
+                "--message-text", template,
+                "--lead-id", lead_id,
+            ],
+            capture_output=True, text=True,
+            timeout=SUBPROCESS_TIMEOUT_SEC,
+        )
+        return result.returncode == 0
+    except (subprocess.SubprocessError, OSError):
+        return False
+
+
+def find_active_catering_lead_by_sender(
+    phone: Optional[str], chat_id: Optional[str],
+) -> Optional[dict]:
+    """Look up a non-terminal catering lead by sender identity (phone OR LID).
+
+    PR-CF1d 2026-05-12. Used by cf-router F7 primary-mode to detect whether
+    a customer already has an open lead — if yes, suppress the inbound
+    (Branch B) to prevent multi-lead-creation under customer pressure (the
+    Phase 11 failure mode where Kimi created L0007..L0010 from one customer
+    thread by violating HARD RULES with fabricated proposals + per-person
+    price quotes).
+
+    Sender identity is fuzzy across our state files due to the LID-only-
+    customer_phone cosmetic bug (see tasks/hermes-v0-13-0-plugin-api-recon-
+    2026-05-11.md §Bugs). Match priority:
+      1. `phone` (E.164) matches `customer_phone`
+      2. `chat_id` ends with @lid AND its full string matches `customer_lid`
+      3. `chat_id` ends with @lid AND `customer_phone` equals f"+{lid_digits}"
+         (legacy LID-as-fake-phone persistence — the actual deployed shape
+         in L0004..L0010 as of 2026-05-12)
+
+    Non-terminal set: ACTIONABLE_LEAD_STATUSES (shared with
+    find_catering_lead_by_code; includes OWNER_APPROVED to cover the brief
+    transient state between owner-approve and quote-sent). Returns the
+    most-recent matching lead (sorted by created_at desc), or None.
+    """
+    if not phone and not chat_id:
+        return None
+
+    # Extract LID digits if chat_id is @lid-formatted (for priority 3 match)
+    lid_digits: Optional[str] = None
+    if chat_id and chat_id.endswith("@lid"):
+        digits_part = chat_id[: -len("@lid")]
+        if digits_part.isdigit():
+            lid_digits = digits_part
+
+    try:
+        with LEADS_PATH.open() as f:
+            store = json.load(f)
+        matches: list[dict] = []
+        for lead in store.get("leads", []):
+            if lead.get("status") not in ACTIONABLE_LEAD_STATUSES:
+                continue
+            cp = lead.get("customer_phone")
+            cl = lead.get("customer_lid")
+            # Priority 1: E.164 phone match
+            if phone and cp == phone:
+                matches.append(lead)
+                continue
+            # Priority 2: LID direct match
+            if chat_id and cl == chat_id:
+                matches.append(lead)
+                continue
+            # Priority 3: LID-as-fake-phone legacy match (most common today)
+            if lid_digits and cp == f"+{lid_digits}":
+                matches.append(lead)
+                continue
+        if not matches:
+            return None
+        # Most-recent by created_at (ISO-8601 lexically sortable)
+        matches.sort(key=lambda l: l.get("created_at", ""), reverse=True)
+        return matches[0]
+    except Exception:
+        return None
+
+
 def find_menu_pending_by_code(code: str) -> Optional[dict]:
     """Look up the pending menu update if its confirmation_code matches.
 
@@ -163,25 +272,45 @@ def invoke_apply_owner_decision(code: str, decision: str,
     """Invoke apply-catering-owner-decision; returns exit code.
 
     For `approve`: caller passes the lead dict (snapshot from
-    find_catering_lead_by_code). The lead's quote_text (F14-drafted
-    proposal) is piped via --quote-text-stdin. Callers must NOT
-    re-read LEADS_PATH — TOCTOU mitigation.
-    For `reject`: passes --reason "owner_reject_via_cf_router".
-    Lead dict is ignored on reject.
+    find_catering_lead_by_code). Quote source priority:
+      1. If lead has a real (non-legacy) quote_text: pipe via --quote-text-stdin
+      2. Else if lead has selected_items (CUSTOMER_FINALIZED): use
+         --quote-from-lead-state for server-side rendering (PR-CF1c 2026-05-12)
+      3. Else return 2 so the LLM can handle
+    For `reject`: passes --reason "owner_reject_via_cf_router". Lead dict ignored.
+
+    Always passes --sender-role owner (PR-CF1c bugfix: required arg was
+    previously omitted, causing every cf-router approve invocation to fail
+    with EXIT_INVALID_INPUT before reaching the quote-text logic).
     """
     try:
         env = {**os.environ, "PYTHONPATH": str(PLATFORM_DIR)}
+        # PR-CF1c bugfix: --sender-role owner is required by the script's
+        # privilege check. cf-router intercepts owner self-chat messages so
+        # the role is implicit; pass it explicitly.
         cmd = [str(PYTHON_BIN), str(APPLY_OWNER_DECISION_BIN),
-               "--code", code, "--decision", decision]
+               "--code", code, "--decision", decision,
+               "--sender-role", "owner"]
         stdin_text: Optional[str] = None
         if decision == "approve":
             if lead is None:
                 return 4  # EXIT_NOT_FOUND — caller forgot to pass lead
-            stdin_text = lead.get("quote_text", "")
-            if not stdin_text or stdin_text.startswith("<legacy"):
-                # No drafted quote available — let LLM handle
+            legacy_quote = lead.get("quote_text", "")
+            has_real_quote = (
+                legacy_quote
+                and not legacy_quote.startswith("<legacy")
+            )
+            if has_real_quote:
+                # Path 1: real LLM-drafted quote in lead — pipe via stdin (legacy F14 path)
+                stdin_text = legacy_quote
+                cmd.append("--quote-text-stdin")
+            elif lead.get("selected_items"):
+                # Path 2 (PR-CF1c): customer finalized; render server-side from lead state
+                cmd.append("--quote-from-lead-state")
+                # No stdin; the script renders the quote itself
+            else:
+                # Path 3: no quote source — let LLM handle (return non-zero)
                 return 2  # EXIT_INVALID_INPUT
-            cmd.append("--quote-text-stdin")
         elif decision == "reject":
             cmd.extend(["--reason", "owner_reject_via_cf_router"])
         result = subprocess.run(
@@ -491,13 +620,28 @@ def lid_to_phone_via_identify_sender(lid_or_jid: str) -> tuple[Optional[str], st
 
 def trigger_create_catering_lead(
     customer_phone: str, customer_name: str, raw_inquiry: str, message_id: str,
+    extracted_fields: Optional[dict] = None,
 ) -> tuple[bool, str]:
-    """Invoke create-catering-lead with empty extracted fields (rescue path).
+    """Invoke create-catering-lead.
+
+    `extracted_fields` (PR-CF1d Commit 4 2026-05-12): optional dict to merge
+    into the default all-null fields_json. Used by F7 primary-mode to forward
+    classify_catering's headcount signal (and any future signal extraction)
+    so the persisted lead carries structured data the owner can see in the
+    approval card and daily brief, instead of every cf-router-created lead
+    having headcount=null. Closes the UX-regression flagged at PR review:
+    rule-following is preserved, but the regex IS already extracting
+    headcount as a side-effect — passing it forward is plumbing, not new
+    extraction logic.
+
+    Defaults preserve the prior rescue-path behavior (all None / empty);
+    callers from outside F7 primary-mode (e.g. legacy rescue path tests)
+    don't need to pass extracted_fields.
 
     Returns (success, detail). Idempotency on (customer_phone, message_id)
     is enforced by create-catering-lead itself (existing behavior).
     """
-    fields_json = json.dumps({
+    fields: dict = {
         "headcount": None,
         "event_date": None,
         "event_time": None,
@@ -507,7 +651,10 @@ def trigger_create_catering_lead(
         "delivery_or_pickup": "unknown",
         "budget_hint_usd": None,
         "notes": "(cf-router F7 rescue from missed-dispatch; LLM bypassed parse_catering_inquiry SKILL)",
-    })
+    }
+    if extracted_fields:
+        fields.update(extracted_fields)
+    fields_json = json.dumps(fields)
     try:
         result = subprocess.run(
             [

@@ -1,0 +1,20 @@
+[Unit]
+Description=Catering pattern report - nightly LLM-extraction-bug scan (PR-CF1c-B)
+After=network-online.target
+Wants=network-online.target
+ConditionPathIsExecutable=/usr/local/bin/catering-pattern-report
+ConditionPathExists=/opt/shift-agent/state/catering-leads.json
+
+[Service]
+Type=oneshot
+User=shift-agent
+Group=shift-agent
+EnvironmentFile=/opt/shift-agent/.env
+Environment=HOME=/opt/shift-agent
+ExecStart=/usr/local/bin/catering-pattern-report --days 1
+StandardOutput=append:/opt/shift-agent/logs/catering-pattern-report.log
+StandardError=append:/opt/shift-agent/logs/catering-pattern-report.log
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/shift-agent
