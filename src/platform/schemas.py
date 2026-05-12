@@ -2477,6 +2477,17 @@ class CfRouterIntercepted(_BaseEntry):
         update; plugin invoked apply-menu-update
       - f9_sick_call_alert — sick-call regex pattern detected from employee
         sender; plugin fired Pushover P2 to owner; LLM still ran normally
+      - f7_primary_new_inquiry — PR-CF1d 2026-05-12: customer sent a
+        catering-keyword inbound with NO active lead; plugin invoked
+        create-catering-lead directly with customer_name=""; LLM bypassed.
+        Replaces the prior F7 rescue-mode after Phase 11 adversarial test
+        showed LLM violates HARD RULES under customer pressure.
+      - f7_primary_followup_suppressed — PR-CF1d 2026-05-12: customer sent
+        a catering-keyword or finalize-intent message AND already has a
+        non-terminal lead (status in {AWAITING_OWNER_APPROVAL,
+        CUSTOMER_FINALIZED, OWNER_EDITED}); plugin suppressed the follow-up
+        to prevent multi-lead-creation bug + LLM proposal-invention; LLM
+        bypassed. Optionally a canonical "owner is reviewing" reply is sent.
       - error — plugin caught an unexpected error during interception
         attempt; LLM still ran normally (plugin returns None on error)
 
@@ -2488,7 +2499,10 @@ class CfRouterIntercepted(_BaseEntry):
     reason: Literal[
         "f8_owner_approve", "f8_owner_reject",
         "f8_menu_yes", "f8_menu_no",
-        "f9_sick_call_alert", "error",
+        "f9_sick_call_alert",
+        "f7_primary_new_inquiry",          # PR-CF1d 2026-05-12
+        "f7_primary_followup_suppressed",  # PR-CF1d 2026-05-12
+        "error",
     ]
     chat_id: str = Field(min_length=1, max_length=200)
     code: Optional[str] = Field(default=None, max_length=10)
