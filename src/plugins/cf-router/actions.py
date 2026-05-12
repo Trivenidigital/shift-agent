@@ -141,6 +141,72 @@ def find_catering_lead_by_code(code: str) -> Optional[dict]:
         return None
 
 
+def find_active_catering_lead_by_sender(
+    phone: Optional[str], chat_id: Optional[str],
+) -> Optional[dict]:
+    """Look up a non-terminal catering lead by sender identity (phone OR LID).
+
+    PR-CF1d 2026-05-12. Used by cf-router F7 primary-mode to detect whether
+    a customer already has an open lead — if yes, suppress the inbound
+    (Branch B) to prevent multi-lead-creation under customer pressure (the
+    Phase 11 failure mode where Kimi created L0007..L0010 from one customer
+    thread by violating HARD RULES with fabricated proposals + per-person
+    price quotes).
+
+    Sender identity is fuzzy across our state files due to the LID-only-
+    customer_phone cosmetic bug (see tasks/hermes-v0-13-0-plugin-api-recon-
+    2026-05-11.md §Bugs). Match priority:
+      1. `phone` (E.164) matches `customer_phone`
+      2. `chat_id` ends with @lid AND its full string matches `customer_lid`
+      3. `chat_id` ends with @lid AND `customer_phone` equals f"+{lid_digits}"
+         (legacy LID-as-fake-phone persistence — the actual deployed shape
+         in L0004..L0010 as of 2026-05-12)
+
+    Non-terminal set: ACTIONABLE_LEAD_STATUSES (shared with
+    find_catering_lead_by_code; includes OWNER_APPROVED to cover the brief
+    transient state between owner-approve and quote-sent). Returns the
+    most-recent matching lead (sorted by created_at desc), or None.
+    """
+    if not phone and not chat_id:
+        return None
+
+    # Extract LID digits if chat_id is @lid-formatted (for priority 3 match)
+    lid_digits: Optional[str] = None
+    if chat_id and chat_id.endswith("@lid"):
+        digits_part = chat_id[: -len("@lid")]
+        if digits_part.isdigit():
+            lid_digits = digits_part
+
+    try:
+        with LEADS_PATH.open() as f:
+            store = json.load(f)
+        matches: list[dict] = []
+        for lead in store.get("leads", []):
+            if lead.get("status") not in ACTIONABLE_LEAD_STATUSES:
+                continue
+            cp = lead.get("customer_phone")
+            cl = lead.get("customer_lid")
+            # Priority 1: E.164 phone match
+            if phone and cp == phone:
+                matches.append(lead)
+                continue
+            # Priority 2: LID direct match
+            if chat_id and cl == chat_id:
+                matches.append(lead)
+                continue
+            # Priority 3: LID-as-fake-phone legacy match (most common today)
+            if lid_digits and cp == f"+{lid_digits}":
+                matches.append(lead)
+                continue
+        if not matches:
+            return None
+        # Most-recent by created_at (ISO-8601 lexically sortable)
+        matches.sort(key=lambda l: l.get("created_at", ""), reverse=True)
+        return matches[0]
+    except Exception:
+        return None
+
+
 def find_menu_pending_by_code(code: str) -> Optional[dict]:
     """Look up the pending menu update if its confirmation_code matches.
 

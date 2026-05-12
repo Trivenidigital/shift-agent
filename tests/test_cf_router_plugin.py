@@ -872,3 +872,135 @@ class TestF7DispatcherWatchdog:
         suppressed = [r for r in rows if r.get("type") == "catering_dispatcher_watchdog_suppressed"]
         assert len(suppressed) == 1
         assert suppressed[0]["reason"] == "lid_no_phone_resolution"
+
+
+# === PR-CF1d 2026-05-12: F7 primary-mode helpers ===
+
+def _seed_leads_multi(state_env, leads):
+    """Write a multi-lead state file. Each entry in `leads` is a dict with
+    overrides for the lead schema; defaults fill the rest."""
+    default = {
+        "lead_id": "L0000",
+        "owner_approval_code": "#AAAAA",
+        "status": "AWAITING_OWNER_APPROVAL",
+        "customer_phone": "+19045550199",
+        "customer_lid": None,
+        "customer_name": "",
+        "raw_inquiry": "x",
+        "original_message_id": "x",
+        "created_at": "2026-05-03T10:00:00-04:00",
+        "updated_at": "2026-05-03T10:00:00-04:00",
+        "extracted": {
+            "headcount": 50, "event_date": "2026-06-15", "event_time": None,
+            "menu_preferences": [], "off_menu_items": [],
+            "dietary_restrictions": [], "delivery_or_pickup": "delivery",
+            "budget_hint_usd": None, "notes": "",
+        },
+        "quote_text": "<legacy>", "quote_version": 0,
+        "customer_replied": False,
+    }
+    rows = [{**default, **overrides} for overrides in leads]
+    state_env["leads_path"].write_text(json.dumps({
+        "leads": rows,
+        "next_lead_seq": len(rows) + 1,
+    }), encoding="utf-8")
+
+
+class TestFindActiveCateringLeadBySender:
+    """PR-CF1d Commit 1: cf-router F7 primary-mode active-lead lookup."""
+
+    def test_no_match_when_no_leads(self, mods, state_env):
+        _, actions_mod = mods
+        _seed_leads_multi(state_env, [])
+        assert actions_mod.find_active_catering_lead_by_sender(
+            phone="+17329837841", chat_id="17329837841@s.whatsapp.net",
+        ) is None
+
+    def test_match_by_phone(self, mods, state_env):
+        """Priority 1: E.164 phone exact-match on customer_phone."""
+        _, actions_mod = mods
+        _seed_leads_multi(state_env, [
+            {"lead_id": "L0001", "customer_phone": "+17329837841"},
+        ])
+        result = actions_mod.find_active_catering_lead_by_sender(
+            phone="+17329837841", chat_id=None,
+        )
+        assert result is not None
+        assert result["lead_id"] == "L0001"
+
+    def test_match_by_lid_direct(self, mods, state_env):
+        """Priority 2: customer_lid exact-match (post-bugfix shape)."""
+        _, actions_mod = mods
+        _seed_leads_multi(state_env, [
+            {"lead_id": "L0002",
+             "customer_phone": None,
+             "customer_lid": "201975216009469@lid"},
+        ])
+        result = actions_mod.find_active_catering_lead_by_sender(
+            phone=None, chat_id="201975216009469@lid",
+        )
+        assert result is not None
+        assert result["lead_id"] == "L0002"
+
+    def test_match_by_lid_as_fake_phone(self, mods, state_env):
+        """Priority 3: LID-digits-as-+phone legacy shape (the actual
+        deployed shape in L0004..L0010 as of 2026-05-12)."""
+        _, actions_mod = mods
+        _seed_leads_multi(state_env, [
+            {"lead_id": "L0003",
+             "customer_phone": "+201975216009469",
+             "customer_lid": None},
+        ])
+        result = actions_mod.find_active_catering_lead_by_sender(
+            phone=None, chat_id="201975216009469@lid",
+        )
+        assert result is not None
+        assert result["lead_id"] == "L0003"
+
+    def test_no_match_when_lead_terminal(self, mods, state_env):
+        """Terminal-status leads (SENT_TO_CUSTOMER, OWNER_REJECTED, CLOSED,
+        STALE) must not match — they're outside ACTIONABLE_LEAD_STATUSES."""
+        _, actions_mod = mods
+        _seed_leads_multi(state_env, [
+            {"lead_id": "L0004",
+             "customer_phone": "+17329837841",
+             "status": "SENT_TO_CUSTOMER"},
+            {"lead_id": "L0005",
+             "customer_phone": "+17329837841",
+             "status": "OWNER_REJECTED"},
+        ])
+        assert actions_mod.find_active_catering_lead_by_sender(
+            phone="+17329837841", chat_id=None,
+        ) is None
+
+    def test_returns_most_recent_when_multiple_active(self, mods, state_env):
+        """When more than one ACTIONABLE_LEAD_STATUS match the sender,
+        return the most-recent by created_at (helps customer continue with
+        their latest inquiry, not a stale one)."""
+        _, actions_mod = mods
+        _seed_leads_multi(state_env, [
+            {"lead_id": "L0006",
+             "customer_phone": "+17329837841",
+             "created_at": "2026-05-01T10:00:00-04:00"},
+            {"lead_id": "L0007",
+             "customer_phone": "+17329837841",
+             "created_at": "2026-05-10T10:00:00-04:00"},
+            {"lead_id": "L0008",
+             "customer_phone": "+17329837841",
+             "created_at": "2026-05-05T10:00:00-04:00"},
+        ])
+        result = actions_mod.find_active_catering_lead_by_sender(
+            phone="+17329837841", chat_id=None,
+        )
+        assert result is not None
+        assert result["lead_id"] == "L0007"
+
+    def test_returns_none_when_both_inputs_empty(self, mods, state_env):
+        """Defensive: no phone, no chat_id → no possible match."""
+        _, actions_mod = mods
+        _seed_leads_multi(state_env, [
+            {"lead_id": "L0009"},
+        ])
+        assert actions_mod.find_active_catering_lead_by_sender(
+            phone=None, chat_id=None,
+        ) is None
