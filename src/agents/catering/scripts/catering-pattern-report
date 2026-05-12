@@ -7,15 +7,21 @@ references each lead's `customer_name` against `raw_inquiry`, and appends
 structured operator-facing notes to `/opt/shift-agent/lessons/catering.md`
 when a hallucination is detected.
 
-Hallucination heuristic v0.1 (intentionally narrow):
+Hallucination heuristic v0.2 (2026-05-12 PM, post-PR-CF1d retro):
   - `customer_name` is non-empty (LLM populated it)
+  - AND `customer_name` is NOT a known roster name (employee/owner) —
+    roster lookups produce names not present in raw_inquiry text and are
+    legitimate, not hallucinations
   - AND no token of `customer_name` (length >= 3, lowercased) appears as a
     substring of `raw_inquiry.lower()`
-  → LLM invented a name that wasn't in the message body.
+  → LLM invented a name that wasn't in the message body OR a roster entry.
 
-This is exactly the failure mode L0004 + L0005 hit on 2026-05-11 — both
-persisted with `customer_name: "Anjali Iyer"` when neither inquiry mentioned
-that name.
+The roster-lookup carve-out closes the v0.1 false-positive class identified
+during PR-CF1d Phase 12: Bangaru's LID `201975216009469@lid` is roster-
+mapped to e004 Anjali Iyer, so every catering lead Bangaru creates
+persists `customer_name="Anjali Iyer"` legitimately — the prior heuristic
+flagged each one as a hallucination. See `tasks/hermes-v0-13-0-plugin-api-
+recon-2026-05-11.md` §"Customer-name hallucination — corrected 2026-05-12 PM".
 
 Lessons file is append-only operator notes. NOT Hermes memory (avoids
 Curator interaction per `feedback_curator_silent_regression.md`). The
@@ -43,8 +49,46 @@ from typing import Any
 DEFAULT_LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
 DEFAULT_LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
 DEFAULT_LESSONS_PATH = Path("/opt/shift-agent/lessons/catering.md")
+DEFAULT_ROSTER_PATH = Path("/opt/shift-agent/roster.json")
 
 MIN_TOKEN_LEN = 3  # ignore "a", "an", "Sr", etc. when matching
+
+
+def _load_roster_names(roster_path: Path) -> set[str]:
+    """Return set of lowercased employee/owner names from roster.json.
+
+    Used to suppress false-positives: when `identify-sender` resolves a LID
+    to a roster entry, the lead persists with the roster name, which by
+    construction is NOT in the inquiry text. Without this carve-out the
+    v0.1 heuristic flagged every LID-only sender with a roster entry.
+
+    Returns empty set on missing/unreadable file → degrades to v0.1
+    behavior (text-match-only) rather than crashing the report.
+    """
+    if not roster_path.exists():
+        return set()
+    try:
+        data = json.loads(roster_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return set()
+    names: set[str] = set()
+    employees = data.get("employees") or []
+    if not isinstance(employees, list):
+        employees = []
+    for emp in employees:
+        if not isinstance(emp, dict):
+            continue
+        name = (emp.get("name") or "").strip().lower()
+        if name:
+            names.add(name)
+        nickname = (emp.get("nickname") or "").strip().lower()
+        if nickname:
+            names.add(nickname)
+    owner = data.get("owner") or {}
+    owner_name = (owner.get("name") or "").strip().lower() if isinstance(owner, dict) else ""
+    if owner_name:
+        names.add(owner_name)
+    return names
 
 
 def _parse_ts(s: str) -> datetime:
@@ -97,9 +141,20 @@ def _load_leads(leads_path: Path) -> dict[str, dict[str, Any]]:
     return {l.get("lead_id"): l for l in data.get("leads", []) if l.get("lead_id")}
 
 
-def _is_name_hallucinated(customer_name: str, raw_inquiry: str) -> bool:
-    """True if customer_name has no >=3-char token appearing in raw_inquiry."""
+def _is_name_hallucinated(
+    customer_name: str,
+    raw_inquiry: str,
+    roster_names: set[str] | None = None,
+) -> bool:
+    """True if customer_name appears LLM-invented (not in roster, not in inquiry).
+
+    Carve-out: if customer_name matches a roster entry (case-insensitive
+    full-name match), the name came from a legitimate `identify-sender`
+    lookup, not from LLM extraction — do not flag.
+    """
     if not customer_name or not raw_inquiry:
+        return False
+    if roster_names and customer_name.strip().lower() in roster_names:
         return False
     inquiry_lower = raw_inquiry.lower()
     tokens = [
@@ -115,11 +170,20 @@ def _scan(
     log_path: Path,
     leads_path: Path,
     since: datetime,
-) -> list[dict[str, Any]]:
-    """Return list of hallucination findings, each with lead_id + name + inquiry snippet."""
+    roster_path: Path = DEFAULT_ROSTER_PATH,
+) -> tuple[list[dict[str, Any]], int]:
+    """Return (findings, suppressed_count).
+
+    `suppressed_count` is the number of leads whose `customer_name` matched a
+    roster entry — i.e. the v0.1 false-positive class we now silently filter.
+    Surfaced in the operator-facing print line so "0 findings" is
+    distinguishable from "0 findings (3 suppressed)".
+    """
     entries = _load_entries(log_path, since)
     leads = _load_leads(leads_path)
+    roster_names = _load_roster_names(roster_path)
     findings: list[dict[str, Any]] = []
+    suppressed = 0
     for e in entries:
         if e.get("type") != "catering_lead_created":
             continue
@@ -129,14 +193,19 @@ def _scan(
         lead = leads[lead_id]
         customer_name = (lead.get("customer_name") or "").strip()
         raw_inquiry = lead.get("raw_inquiry") or ""
-        if _is_name_hallucinated(customer_name, raw_inquiry):
+        if not customer_name or not raw_inquiry:
+            continue
+        if roster_names and customer_name.lower() in roster_names:
+            suppressed += 1
+            continue
+        if _is_name_hallucinated(customer_name, raw_inquiry, roster_names):
             findings.append({
                 "lead_id": lead_id,
                 "created_at": e.get("ts"),
                 "persisted_name": customer_name,
                 "raw_inquiry_snippet": raw_inquiry[:160],
             })
-    return findings
+    return findings, suppressed
 
 
 def _format_lesson(findings: list[dict[str, Any]], now: datetime) -> str:
@@ -152,8 +221,9 @@ def _format_lesson(findings: list[dict[str, Any]], now: datetime) -> str:
         lines.append(f"- **Persisted customer_name:** `{f['persisted_name']}`")
         lines.append(f"- **Raw inquiry snippet:** `{f['raw_inquiry_snippet']}`")
         lines.append(
-            "- **Heuristic:** no >=3-char token of `customer_name` appears in "
-            "`raw_inquiry` — LLM invented a name that wasn't in the message."
+            "- **Heuristic:** `customer_name` did not match any roster entry "
+            "AND no >=3-char token appears in `raw_inquiry` — likely LLM-"
+            "invented name (not a legitimate `identify-sender` lookup)."
         )
         lines.append("")
     lines.append("---")
@@ -166,6 +236,9 @@ def main() -> int:
     ap.add_argument("--days", type=int, default=1, help="Lookback window in days (default 1)")
     ap.add_argument("--log", type=Path, default=DEFAULT_LOG_PATH)
     ap.add_argument("--leads", type=Path, default=DEFAULT_LEADS_PATH)
+    ap.add_argument("--roster", type=Path, default=DEFAULT_ROSTER_PATH,
+                    help="Roster file consulted to suppress false-positives "
+                         "when customer_name came from identify-sender lookup.")
     ap.add_argument("--lessons", type=Path, default=DEFAULT_LESSONS_PATH)
     ap.add_argument("--dry-run", action="store_true",
                     help="Print findings to stdout, don't append to lessons file.")
@@ -180,10 +253,15 @@ def main() -> int:
 
     now = datetime.now(timezone.utc).astimezone()
     since = now - timedelta(days=args.days)
-    findings = _scan(args.log, args.leads, since)
+    findings, suppressed = _scan(args.log, args.leads, since, args.roster)
+
+    suppressed_note = f" ({suppressed} suppressed by roster lookup)" if suppressed else ""
 
     if not findings:
-        print(f"catering-pattern-report: 0 findings in last {args.days}d. No-op.")
+        print(
+            f"catering-pattern-report: 0 findings in last {args.days}d"
+            f"{suppressed_note}. No-op."
+        )
         return 0
 
     lesson_md = _format_lesson(findings, now)
@@ -205,7 +283,10 @@ def main() -> int:
     with args.lessons.open("a", encoding="utf-8") as fh:
         fh.write(lesson_md)
 
-    print(f"catering-pattern-report: {len(findings)} finding(s) appended to {args.lessons}")
+    print(
+        f"catering-pattern-report: {len(findings)} finding(s) appended to "
+        f"{args.lessons}{suppressed_note}"
+    )
     return 0
 
 
