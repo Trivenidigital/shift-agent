@@ -140,9 +140,11 @@ def pre_gateway_dispatch(event: Any, gateway: Any = None, session_store: Any = N
         # with the TestF7DispatcherWatchdog suite; they are NO LONGER wired
         # into pre_gateway_dispatch. Cleanup deferred to a follow-up PR.
         if F7_ENABLED:
-            is_catering, _signals = actions.classify_catering(text)
+            is_catering, signals = actions.classify_catering(text)
             if is_catering:
-                f7_result = _try_f7_primary_intercept(text, chat_id, event)
+                f7_result = _try_f7_primary_intercept(
+                    text, chat_id, event, signals=signals,
+                )
                 if f7_result is not None:
                     return f7_result
 
@@ -230,11 +232,34 @@ def _try_f8_intercept(text: str, chat_id: str) -> Optional[dict]:
     return None
 
 
-def _try_f7_primary_intercept(text: str, chat_id: str, event: Any) -> Optional[dict]:
+def _parse_headcount_from_signals(signals: list[str]) -> Optional[int]:
+    """Extract the int from a `headcount:N` signal emitted by classify_catering.
+
+    PR-CF1d Commit 4 2026-05-12. classify_catering's regex set already finds
+    headcount and emits it as a signal (e.g. "headcount:80"); this helper
+    parses that out so F7 primary can forward it into the lead's
+    extracted_fields. Returns None if no headcount signal is present or
+    parsing fails. Defensive against malformed signals.
+    """
+    for sig in signals or []:
+        if isinstance(sig, str) and sig.startswith("headcount:"):
+            try:
+                return int(sig.split(":", 1)[1])
+            except (ValueError, IndexError):
+                return None
+    return None
+
+
+def _try_f7_primary_intercept(
+    text: str, chat_id: str, event: Any,
+    signals: Optional[list[str]] = None,
+) -> Optional[dict]:
     """F7 PRIMARY-MODE intercept (PR-CF1d 2026-05-12).
 
     Caller has already confirmed `classify_catering(text)` is True and
-    cf-router is gated on F7_ENABLED.
+    cf-router is gated on F7_ENABLED. `signals` is the classify_catering
+    output list — used to forward structured signals (like headcount)
+    into the persisted lead's extracted_fields (Commit 4).
 
     Returns:
       {"action": "skip", "reason": ...} — plugin handled, LLM bypassed
@@ -265,11 +290,20 @@ def _try_f7_primary_intercept(text: str, chat_id: str, event: Any) -> Optional[d
         else:
             # Defensive: shouldn't happen since chat_id is non-empty per caller
             return None
+        # PR-CF1d Commit 4: forward classify_catering's headcount signal so
+        # the lead carries structured data, not all-nulls. Closes the UX
+        # regression where owner approval cards + daily brief showed
+        # headcount=null for every cf-router-created lead.
+        extracted: Optional[dict] = None
+        headcount = _parse_headcount_from_signals(signals or [])
+        if headcount is not None:
+            extracted = {"headcount": headcount}
         ok, detail = actions.trigger_create_catering_lead(
             customer_phone=customer_phone_arg,
             customer_name="",
             raw_inquiry=text,
             message_id=message_id,
+            extracted_fields=extracted,
         )
         actions.audit_intercepted(
             reason="f7_primary_new_inquiry", chat_id=chat_id,

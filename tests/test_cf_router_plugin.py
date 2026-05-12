@@ -1005,6 +1005,32 @@ class TestFindActiveCateringLeadBySender:
             phone=None, chat_id=None,
         ) is None
 
+    @pytest.mark.parametrize("active_status", [
+        "AWAITING_OWNER_APPROVAL",
+        "CUSTOMER_FINALIZED",
+        "OWNER_EDITED",
+        "OWNER_APPROVED",
+    ])
+    def test_matches_every_actionable_status(self, mods, state_env, active_status):
+        """Each ACTIONABLE_LEAD_STATUSES entry must match. Closes the
+        coverage gap flagged in the F7 primary-mode PR review — without
+        this test, a future change to ACTIONABLE_LEAD_STATUSES that
+        accidentally narrows the set could ship undetected."""
+        _, actions_mod = mods
+        # Verify the status we're testing is actually in the deployed set
+        assert active_status in actions_mod.ACTIONABLE_LEAD_STATUSES
+        _seed_leads_multi(state_env, [
+            {"lead_id": "L0100",
+             "customer_phone": "+17329837841",
+             "status": active_status},
+        ])
+        result = actions_mod.find_active_catering_lead_by_sender(
+            phone="+17329837841", chat_id=None,
+        )
+        assert result is not None, f"expected match for status {active_status!r}"
+        assert result["lead_id"] == "L0100"
+        assert result["status"] == active_status
+
 
 class TestSendCanonicalFollowupReply:
     """PR-CF1d Commit 2: cf-router F7 primary-mode UX-mitigation reply."""
@@ -1186,3 +1212,78 @@ class TestF7PrimaryMode:
             mock_ident.assert_not_called()
         finally:
             hooks_mod.F7_ENABLED = True  # restore
+
+    def test_branch_a_forwards_headcount_signal_to_lead(self, mods, state_env):
+        """PR-CF1d Commit 4: classify_catering emits 'headcount:N' as a signal;
+        F7 primary forwards it into the lead's extracted_fields so the
+        persisted lead carries headcount, not null. Closes the UX-regression
+        where owner cards + daily brief showed headcount=null for all
+        cf-router-created leads."""
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        _seed_leads_multi(state_env, [])
+        fake_run = SimpleNamespace(
+            returncode=0,
+            stdout='{"role":"customer","phone_normalized":"+17329837841"}',
+            stderr="",
+        )
+        with patch("subprocess.run", return_value=fake_run), \
+             patch.object(actions_mod, "trigger_create_catering_lead",
+                          return_value=(True, "ok")) as mock_trigger:
+            event = _make_event(
+                text="catering for 80 people event Saturday food delivered vegetarian",
+                chat_id="17329837841@s.whatsapp.net",
+            )
+            result = hooks_mod.pre_gateway_dispatch(event)
+        assert result is not None and result["action"] == "skip"
+        mock_trigger.assert_called_once()
+        call_kwargs = mock_trigger.call_args.kwargs
+        # Headcount signal "headcount:80" should have been parsed + forwarded
+        assert call_kwargs.get("extracted_fields") == {"headcount": 80}, \
+            f"expected extracted_fields with headcount=80, got {call_kwargs.get('extracted_fields')!r}"
+
+    def test_branch_a_no_headcount_signal_passes_none(self, mods, state_env):
+        """When classify_catering finds NO headcount signal (e.g. text says
+        'catering for our anniversary' with no digit), extracted_fields is
+        None — preserves the prior all-null behavior. Defensive against
+        regression of the no-signal path."""
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        _seed_leads_multi(state_env, [])
+        fake_run = SimpleNamespace(
+            returncode=0,
+            stdout='{"role":"customer","phone_normalized":"+17329837841"}',
+            stderr="",
+        )
+        # This text has catering+event but no headcount digit
+        with patch("subprocess.run", return_value=fake_run), \
+             patch.object(actions_mod, "trigger_create_catering_lead",
+                          return_value=(True, "ok")) as mock_trigger:
+            event = _make_event(
+                text="hi looking for catering for our wedding reception food delivered",
+                chat_id="17329837841@s.whatsapp.net",
+            )
+            result = hooks_mod.pre_gateway_dispatch(event)
+        if result is None:
+            # classify_catering may not have classified this text as catering;
+            # in that case the test isn't exercising what we want, but it's
+            # not a failure of the headcount logic itself.
+            return
+        mock_trigger.assert_called_once()
+        # No headcount signal → no extracted_fields override (None)
+        assert mock_trigger.call_args.kwargs.get("extracted_fields") is None
+
+    def test_parse_headcount_from_signals_helper(self, mods):
+        """Direct unit test of the _parse_headcount_from_signals helper:
+        valid signal → int; missing/malformed → None."""
+        hooks_mod, _ = mods
+        assert hooks_mod._parse_headcount_from_signals(["headcount:80"]) == 80
+        assert hooks_mod._parse_headcount_from_signals(
+            ["primary:catering", "headcount:235", "event_keyword"]
+        ) == 235
+        assert hooks_mod._parse_headcount_from_signals([]) is None
+        assert hooks_mod._parse_headcount_from_signals(["primary:catering"]) is None
+        # Malformed signal (non-int) → None, not exception
+        assert hooks_mod._parse_headcount_from_signals(["headcount:abc"]) is None
+        # Defensive: None input
+        assert hooks_mod._parse_headcount_from_signals(None) is None

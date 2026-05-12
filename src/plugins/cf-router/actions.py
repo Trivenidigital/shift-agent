@@ -620,13 +620,28 @@ def lid_to_phone_via_identify_sender(lid_or_jid: str) -> tuple[Optional[str], st
 
 def trigger_create_catering_lead(
     customer_phone: str, customer_name: str, raw_inquiry: str, message_id: str,
+    extracted_fields: Optional[dict] = None,
 ) -> tuple[bool, str]:
-    """Invoke create-catering-lead with empty extracted fields (rescue path).
+    """Invoke create-catering-lead.
+
+    `extracted_fields` (PR-CF1d Commit 4 2026-05-12): optional dict to merge
+    into the default all-null fields_json. Used by F7 primary-mode to forward
+    classify_catering's headcount signal (and any future signal extraction)
+    so the persisted lead carries structured data the owner can see in the
+    approval card and daily brief, instead of every cf-router-created lead
+    having headcount=null. Closes the UX-regression flagged at PR review:
+    rule-following is preserved, but the regex IS already extracting
+    headcount as a side-effect — passing it forward is plumbing, not new
+    extraction logic.
+
+    Defaults preserve the prior rescue-path behavior (all None / empty);
+    callers from outside F7 primary-mode (e.g. legacy rescue path tests)
+    don't need to pass extracted_fields.
 
     Returns (success, detail). Idempotency on (customer_phone, message_id)
     is enforced by create-catering-lead itself (existing behavior).
     """
-    fields_json = json.dumps({
+    fields: dict = {
         "headcount": None,
         "event_date": None,
         "event_time": None,
@@ -636,7 +651,10 @@ def trigger_create_catering_lead(
         "delivery_or_pickup": "unknown",
         "budget_hint_usd": None,
         "notes": "(cf-router F7 rescue from missed-dispatch; LLM bypassed parse_catering_inquiry SKILL)",
-    })
+    }
+    if extracted_fields:
+        fields.update(extracted_fields)
+    fields_json = json.dumps(fields)
     try:
         result = subprocess.run(
             [
