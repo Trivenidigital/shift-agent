@@ -649,28 +649,11 @@ class TestF7DispatcherWatchdog:
         monkeypatch.setattr(threading, "Timer", _ImmediateTimer)
         return calls
 
-    def test_catering_inquiry_schedules_rescue(self, mods, state_env, patched_timer):
-        """Customer text matching catering classifier → Timer scheduled."""
-        hooks_mod, actions_mod = mods
-        _seed_config(state_env)
-        # Mock the rescue check entirely so we just verify the schedule path
-        with patch.object(actions_mod, "f7_rescue_check") as mock_rescue:
-            event = _make_event(
-                "Hi, I'd like catering for 80 people next Saturday, food delivered by 7pm please",
-                "12025550199@s.whatsapp.net",
-            )
-            result = hooks_mod.pre_gateway_dispatch(event)
-
-        assert result is None  # F7 always lets LLM run; rescue is delayed
-        # The patched timer fires immediately — mock_rescue should have been called
-        mock_rescue.assert_called_once()
-        args = mock_rescue.call_args.args
-        # Args: (text, chat_id, message_id, signals, ts_at_schedule)
-        assert "catering" in args[0].lower()
-        assert args[1] == "12025550199@s.whatsapp.net"
-        assert isinstance(args[2], str) and len(args[2]) > 0  # message_id non-empty (Pydantic min_length=1)
-        assert isinstance(args[3], list) and len(args[3]) > 0  # signals
-        assert isinstance(args[4], float)  # ts_at_schedule
+    # test_catering_inquiry_schedules_rescue REMOVED 2026-05-12 (PR-CF1d Commit 5).
+    # The "rescue is scheduled when classifier matches" behavior no longer exists —
+    # primary-mode invokes create-catering-lead directly inside pre_gateway_dispatch.
+    # The replacement assertion ("F7 primary fires Branch A for customer-side catering
+    # inquiry") lives in TestF7PrimaryMode.test_branch_a_new_inquiry_creates_lead_and_skips_llm.
 
     def test_non_catering_inquiry_NOT_scheduled(self, mods, state_env, patched_timer):
         """Generic text → no F7 timer scheduled."""
@@ -706,26 +689,12 @@ class TestF7DispatcherWatchdog:
         finally:
             hooks_mod.F7_ENABLED = original
 
-    def test_owner_chat_short_circuits_F7(self, mods, state_env, patched_timer):
-        """Owner self-chat with catering text → F8 path runs first; F7 is
-        gated by F8 returning a value or by the chain falling through. Owner
-        text without #XXXXX falls through to F7 — but owner is excluded by
-        the rescue's role check, NOT by the schedule."""
-        # The hook itself doesn't pre-check role; that's the rescue
-        # callback's job. So this test verifies the schedule still happens.
-        # The eventual rescue check will suppress.
-        hooks_mod, actions_mod = mods
-        _seed_config(state_env, owner_jid="918522041562@s.whatsapp.net")
-        with patch.object(actions_mod, "f7_rescue_check") as mock_rescue:
-            event = _make_event(
-                "Just thinking about catering for 100 people event Saturday, food",
-                "918522041562@s.whatsapp.net",
-            )
-            hooks_mod.pre_gateway_dispatch(event)
-        # Owner with no #XXXXX falls through F8, not sick-call so F9 skipped,
-        # then F7 schedules. That's correct — rescue check will then suppress
-        # via non_customer_role.
-        mock_rescue.assert_called_once()
+    # test_owner_chat_short_circuits_F7 REMOVED 2026-05-12 (PR-CF1d Commit 5).
+    # Was asserting that the rescue Timer was scheduled even for owner-chat
+    # traffic, and the rescue callback would then suppress via the role check.
+    # Primary-mode short-circuits the owner case earlier (inside
+    # _try_f7_primary_intercept's role check) and never schedules a Timer.
+    # Replacement assertion lives in TestF7PrimaryMode.test_owner_role_bypasses_f7_primary.
 
     def test_message_id_fallback_when_event_lacks_id(self, mods, state_env, patched_timer):
         """Event without message_id attribute → fallback string is used.
@@ -733,32 +702,47 @@ class TestF7DispatcherWatchdog:
         Audit schemas require min_length=1 on message_id; the fallback
         ensures we never pass an empty string. Mirrors the deployed F7
         daemon's `bridge_notify_<chat>_<ms>` pattern.
+
+        PR-CF1d Commit 5: rewritten to test `_extract_message_id` directly
+        (helper-level unit test) instead of asserting via mock_rescue.call_args.
+        Primary-mode no longer schedules the rescue Timer from
+        pre_gateway_dispatch, so the prior mock-args-based assertion is
+        infeasible. The helper's contract is unchanged.
         """
-        hooks_mod, actions_mod = mods
-        _seed_config(state_env)
-        with patch.object(actions_mod, "f7_rescue_check") as mock_rescue:
-            event = SimpleNamespace(
-                text="catering for 50 people wedding event next week, food delivered",
-                chat_id="12025550199@s.whatsapp.net",
-                # No message_id, id, or msg_id
-            )
-            hooks_mod.pre_gateway_dispatch(event)
-        message_id = mock_rescue.call_args.args[2]
+        hooks_mod, _actions_mod = mods
+        event = SimpleNamespace(
+            text="catering for 50 people wedding event next week, food delivered",
+            chat_id="12025550199@s.whatsapp.net",
+            # No message_id, id, or msg_id
+        )
+        message_id = hooks_mod._extract_message_id(
+            event,
+            chat_id="12025550199@s.whatsapp.net",
+            text="catering for 50 people wedding event next week, food delivered",
+        )
         assert message_id.startswith("cf_router_f7_")
         assert "12025550199" in message_id
+        # Audit schema requires min_length=1
+        assert len(message_id) >= 1
 
     def test_message_id_passes_through_when_present(self, mods, state_env, patched_timer):
-        """Event with native message_id → that value is used (not fallback)."""
-        hooks_mod, actions_mod = mods
-        _seed_config(state_env)
-        with patch.object(actions_mod, "f7_rescue_check") as mock_rescue:
-            event = SimpleNamespace(
-                text="catering for 50 people wedding event Saturday, food delivered",
-                chat_id="12025550199@s.whatsapp.net",
-                message_id="bridge_notify_real_id_123",
-            )
-            hooks_mod.pre_gateway_dispatch(event)
-        assert mock_rescue.call_args.args[2] == "bridge_notify_real_id_123"
+        """Event with native message_id → that value is used (not fallback).
+
+        PR-CF1d Commit 5: rewritten to test `_extract_message_id` directly,
+        same rationale as test_message_id_fallback_when_event_lacks_id above.
+        """
+        hooks_mod, _actions_mod = mods
+        event = SimpleNamespace(
+            text="catering for 50 people wedding event next week, food delivered",
+            chat_id="12025550199@s.whatsapp.net",
+            message_id="3EB0PassThrough123",
+        )
+        message_id = hooks_mod._extract_message_id(
+            event,
+            chat_id="12025550199@s.whatsapp.net",
+            text="catering for 50 people wedding event next week, food delivered",
+        )
+        assert message_id == "3EB0PassThrough123"
 
     def test_rescue_suppressed_when_dispatcher_routed_present(self, mods, state_env):
         """Rescue check finds a recent dispatcher_routed audit row → no

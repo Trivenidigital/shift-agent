@@ -398,11 +398,23 @@ But `create-catering-lead` sends a **menu sample** (a price list of available it
 
 **Product decision required tomorrow.** None of (a)–(d) are tonight-shippable.
 
-### Customer-name hallucination — persistent and concerning
+### Customer-name "hallucination" — corrected 2026-05-12 PM (was NOT a hallucination)
 
-L0005 (like L0004) was persisted with `customer_name: "Anjali Iyer"` — Bangaru's actual contact name is Srini. Kimi's `parse_catering_inquiry` extractor hallucinated a name when the inbound message body had none. Shows on owner approval card (`From: Anjali Iyer (201975216009469@lid)`). Same hallucination twice = consistent failure mode, not a fluke. Needs:
-- SKILL hard rule: "Pass empty string for --customer-name if message body has no explicit name. Never hallucinate."
-- Possibly extractor-side validator that rejects names not literally present in message_text.
+**Retroactive correction.** During PR-CF1d Phase 12 live testing, `identify-sender` revealed that the roster.json on srilu maps Bangaru's LID `201975216009469@lid` to employee `e004 Anjali Iyer` (entry added 2026-05-05 per the `roster.json.pre-friend-20260505-233101` backup timestamp). The "hallucination" diagnosis above was wrong: Kimi's `parse_catering_inquiry` SKILL chain correctly invoked `identify-sender`, which legitimately returned `{"role": "employee", "name": "Anjali Iyer", "phone_normalized": "+19045550104", "lid": "201975216009469@lid"}`, and persisted that name. The repeated "Anjali Iyer" across L0004, L0005, L0006, L0007 was a legitimate roster lookup, not LLM invention.
+
+**The load-bearing principle for future work:** _Roster lookups produce names that are not present in the inquiry text. Heuristics or pattern checks that assume `customer_name` and `raw_inquiry` share lexical tokens will produce false positives for any LID-only sender with a roster entry._
+
+This invalidates two prior decisions in this session:
+
+1. **`catering-pattern-report` has a false-positive class.** The heuristic at `src/agents/catering/scripts/catering-pattern-report` flags any lead whose `customer_name` has no token in `raw_inquiry` as a hallucination. For roster-resolved senders, this fires false. The lessons file `/opt/shift-agent/lessons/catering.md` already contains FP entries for L0004 and L0005. Fix queued as a separate follow-up PR: the heuristic must consult `roster.json` before flagging — if the persisted `customer_name` matches a roster employee record (by name OR by `(lid OR phone)` lookup), suppress the flag.
+
+2. **The "Kimi correctly extracts names" sub-claim weakens.** The model-capability finding earlier in this session (Phase 1-3 model comparison) leaned partly on "Kimi correctly extracts names where gpt-4o-mini hallucinates." That sub-claim was actually "Kimi correctly persists roster lookups." Different finding, similar conclusion (Kimi engages SKILL chain; gpt-4o-mini doesn't), but a softer data point than the recon doc originally implied. The architectural argument for cf-router F7 primary-mode stands on its other evidence (Phase 6 gpt-4o-mini zero-terminal-calls; Phase 11 Kimi-under-pressure HARD RULES violations on prices + multi-lead-creation, neither of which depend on the name-extraction point).
+
+**What remains a real bug** (separate from name-extraction): cf-router F7 primary-mode now passes `customer_name=""` to `create-catering-lead`. This sidesteps the roster lookup entirely, which is fine for true non-roster customers but means: a customer who IS in the roster (employee testing the bot, supplier with prior employee status, etc.) gets blank-name leads under F7 primary even though their roster entry has a name. This is acceptable v0.1 behavior — F7 primary is the deterministic-customer-inquiry path, and customer-name lookup is owner-refinable via the approval card — but worth flagging.
+
+### post-approve quote generation: `catering_quote_skill_failed`
+
+Surfaced earlier on L0004 owner-approval attempt. Skill failed; lead never reached APPROVED state via this path. Separate bug from finalize gap. Needs investigation in a future session.
 
 ### post-approve quote generation: `catering_quote_skill_failed`
 

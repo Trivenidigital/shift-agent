@@ -317,6 +317,23 @@ def _try_f7_primary_intercept(
                 "reason": "cf-router F7 primary: catering inquiry routed deterministically"}
 
     # Branch B — active lead exists → suppress follow-up, optionally reply.
+    #
+    # KNOWN GAP (documented at PR-CF1d review, 2026-05-12): follow-up content
+    # is dropped silently. If a customer sends an amendment (e.g. "actually
+    # 280 people not 235", "switch to vegetarian only", "move the date to
+    # July 19th"), the canonical reply is sent but the amendment text is
+    # not parsed or attached to the lead. Owner then approves against the
+    # ORIGINAL lead state. The customer sees "Your inquiry is with the
+    # owner" and reasonably assumes their correction was received. The
+    # owner approves 235 guests when the customer expected 280. This is a
+    # data-integrity gap, not just a UX issue.
+    #
+    # Cheapest fix is a second regex pass on `text` here for amendment
+    # signals (headcount/date/dietary), invoking a future `amend-catering-
+    # lead` script that merges the new extracted fields into the existing
+    # lead and re-issues the owner card. Track via amendment-drop
+    # complaints from operators; cf. tasks/cf-router-f7-primary-mode-
+    # plan.md §"Risks + rollback" and the PR-CF1d reviewer feedback.
     lead_id = active_lead.get("lead_id", "?")
     approval_code = active_lead.get("owner_approval_code") or ""
     if F7_PRIMARY_FOLLOWUP_REPLY:
