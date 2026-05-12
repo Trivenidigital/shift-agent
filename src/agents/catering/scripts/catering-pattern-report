@@ -72,10 +72,18 @@ def _load_roster_names(roster_path: Path) -> set[str]:
     except (json.JSONDecodeError, OSError):
         return set()
     names: set[str] = set()
-    for emp in data.get("employees", []) or []:
+    employees = data.get("employees") or []
+    if not isinstance(employees, list):
+        employees = []
+    for emp in employees:
+        if not isinstance(emp, dict):
+            continue
         name = (emp.get("name") or "").strip().lower()
         if name:
             names.add(name)
+        nickname = (emp.get("nickname") or "").strip().lower()
+        if nickname:
+            names.add(nickname)
     owner = data.get("owner") or {}
     owner_name = (owner.get("name") or "").strip().lower() if isinstance(owner, dict) else ""
     if owner_name:
@@ -163,12 +171,19 @@ def _scan(
     leads_path: Path,
     since: datetime,
     roster_path: Path = DEFAULT_ROSTER_PATH,
-) -> list[dict[str, Any]]:
-    """Return list of hallucination findings, each with lead_id + name + inquiry snippet."""
+) -> tuple[list[dict[str, Any]], int]:
+    """Return (findings, suppressed_count).
+
+    `suppressed_count` is the number of leads whose `customer_name` matched a
+    roster entry — i.e. the v0.1 false-positive class we now silently filter.
+    Surfaced in the operator-facing print line so "0 findings" is
+    distinguishable from "0 findings (3 suppressed)".
+    """
     entries = _load_entries(log_path, since)
     leads = _load_leads(leads_path)
     roster_names = _load_roster_names(roster_path)
     findings: list[dict[str, Any]] = []
+    suppressed = 0
     for e in entries:
         if e.get("type") != "catering_lead_created":
             continue
@@ -178,6 +193,11 @@ def _scan(
         lead = leads[lead_id]
         customer_name = (lead.get("customer_name") or "").strip()
         raw_inquiry = lead.get("raw_inquiry") or ""
+        if not customer_name or not raw_inquiry:
+            continue
+        if roster_names and customer_name.lower() in roster_names:
+            suppressed += 1
+            continue
         if _is_name_hallucinated(customer_name, raw_inquiry, roster_names):
             findings.append({
                 "lead_id": lead_id,
@@ -185,7 +205,7 @@ def _scan(
                 "persisted_name": customer_name,
                 "raw_inquiry_snippet": raw_inquiry[:160],
             })
-    return findings
+    return findings, suppressed
 
 
 def _format_lesson(findings: list[dict[str, Any]], now: datetime) -> str:
@@ -201,8 +221,9 @@ def _format_lesson(findings: list[dict[str, Any]], now: datetime) -> str:
         lines.append(f"- **Persisted customer_name:** `{f['persisted_name']}`")
         lines.append(f"- **Raw inquiry snippet:** `{f['raw_inquiry_snippet']}`")
         lines.append(
-            "- **Heuristic:** no >=3-char token of `customer_name` appears in "
-            "`raw_inquiry` — LLM invented a name that wasn't in the message."
+            "- **Heuristic:** `customer_name` did not match any roster entry "
+            "AND no >=3-char token appears in `raw_inquiry` — likely LLM-"
+            "invented name (not a legitimate `identify-sender` lookup)."
         )
         lines.append("")
     lines.append("---")
@@ -232,10 +253,15 @@ def main() -> int:
 
     now = datetime.now(timezone.utc).astimezone()
     since = now - timedelta(days=args.days)
-    findings = _scan(args.log, args.leads, since, args.roster)
+    findings, suppressed = _scan(args.log, args.leads, since, args.roster)
+
+    suppressed_note = f" ({suppressed} suppressed by roster lookup)" if suppressed else ""
 
     if not findings:
-        print(f"catering-pattern-report: 0 findings in last {args.days}d. No-op.")
+        print(
+            f"catering-pattern-report: 0 findings in last {args.days}d"
+            f"{suppressed_note}. No-op."
+        )
         return 0
 
     lesson_md = _format_lesson(findings, now)
@@ -257,7 +283,10 @@ def main() -> int:
     with args.lessons.open("a", encoding="utf-8") as fh:
         fh.write(lesson_md)
 
-    print(f"catering-pattern-report: {len(findings)} finding(s) appended to {args.lessons}")
+    print(
+        f"catering-pattern-report: {len(findings)} finding(s) appended to "
+        f"{args.lessons}{suppressed_note}"
+    )
     return 0
 
 
