@@ -1004,3 +1004,56 @@ class TestFindActiveCateringLeadBySender:
         assert actions_mod.find_active_catering_lead_by_sender(
             phone=None, chat_id=None,
         ) is None
+
+
+class TestSendCanonicalFollowupReply:
+    """PR-CF1d Commit 2: cf-router F7 primary-mode UX-mitigation reply."""
+
+    def test_invokes_send_catering_ack_subprocess(self, mods):
+        """Verify the helper passes the right args to send-catering-ack:
+        --customer-jid, --message-text (hard-coded template, no LLM), --lead-id."""
+        _, actions_mod = mods
+        fake_run = SimpleNamespace(returncode=0, stdout="ok", stderr="")
+        with patch("subprocess.run", return_value=fake_run) as mock_run:
+            ok = actions_mod.send_canonical_followup_reply(
+                chat_id="201975216009469@lid", lead_id="L0011",
+            )
+        assert ok is True
+        mock_run.assert_called_once()
+        args, kwargs = mock_run.call_args
+        cmd = args[0]
+        assert str(actions_mod.SEND_CATERING_ACK_BIN) in cmd[0]
+        assert "--customer-jid" in cmd
+        assert "201975216009469@lid" in cmd
+        assert "--message-text" in cmd
+        # Locate the message body argument
+        msg_idx = cmd.index("--message-text") + 1
+        body = cmd[msg_idx]
+        # HARD RULES compliance — template must NOT contain $ or per-person pricing
+        assert "$" not in body, f"template leaked $: {body}"
+        assert "per person" not in body.lower(), f"template leaked per-person price: {body}"
+        # Must reference the lead_id so the customer knows what's being reviewed
+        assert "L0011" in body
+        assert "--lead-id" in cmd
+        assert "L0011" in cmd
+
+    def test_returns_false_on_subprocess_failure(self, mods):
+        """Non-zero exit code from send-catering-ack → helper returns False
+        (caller still records the suppressed audit row and skips the LLM)."""
+        _, actions_mod = mods
+        fake_run = SimpleNamespace(returncode=2, stdout="", stderr="bridge unreachable")
+        with patch("subprocess.run", return_value=fake_run):
+            ok = actions_mod.send_canonical_followup_reply(
+                chat_id="201975216009469@lid", lead_id="L0011",
+            )
+        assert ok is False
+
+    def test_returns_false_on_subprocess_exception(self, mods):
+        """Subprocess exception (timeout, OSError) → helper returns False
+        without raising. Failure is non-fatal at the caller."""
+        _, actions_mod = mods
+        with patch("subprocess.run", side_effect=OSError("kaboom")):
+            ok = actions_mod.send_canonical_followup_reply(
+                chat_id="201975216009469@lid", lead_id="L0011",
+            )
+        assert ok is False

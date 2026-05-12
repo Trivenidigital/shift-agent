@@ -34,6 +34,7 @@ CREATE_LEAD_BIN = Path("/usr/local/bin/create-catering-lead")  # F7 path
 PYTHON_BIN = Path("/usr/local/lib/hermes-agent/venv/bin/python")
 PLATFORM_DIR = Path("/opt/shift-agent")  # Where schemas.py lives
 IDENTIFY_SENDER_BIN = Path("/usr/local/bin/identify-sender")
+SEND_CATERING_ACK_BIN = Path("/usr/local/bin/send-catering-ack")
 
 SUBPROCESS_TIMEOUT_SEC = 30
 ALERT_THROTTLE_SEC = 300  # Suppress duplicate Pushover alerts within 5 min
@@ -139,6 +140,48 @@ def find_catering_lead_by_code(code: str) -> Optional[dict]:
         return None
     except Exception:
         return None
+
+
+def send_canonical_followup_reply(chat_id: str, lead_id: str) -> bool:
+    """Send the UX-mitigation reply on F7 primary-mode followup-suppressed paths.
+
+    PR-CF1d 2026-05-12. When cf-router F7 primary-mode detects an active
+    lead for the sender (Branch B of the F7 path), the LLM is bypassed —
+    which means the customer's follow-up gets no reply unless this helper
+    fires. Without it, a customer asking "what's the status?" gets total
+    silence and assumes the bot is dead.
+
+    Uses the existing send-catering-ack subprocess (which already prepends
+    the canonical "⚕ Catering Agent" bridge prefix and handles both
+    @s.whatsapp.net and @lid JID formats). Mirrors the F6 customer-ack
+    pattern create-catering-lead uses on initial inquiry.
+
+    HARD RULES compliance: this template is hard-coded — no LLM composition,
+    no prices, no menu items, no fabricated promises. Just a status pointer
+    and an invitation to reply for changes.
+
+    Returns True on send success, False otherwise. Failures are non-fatal
+    (caller still writes the suppressed audit row and returns skip).
+    """
+    template = (
+        f"Your inquiry {lead_id} is with the owner for review. "
+        f"They'll send a final quote within 24 hours. "
+        f"Reply here if you need to adjust the inquiry."
+    )
+    try:
+        result = subprocess.run(
+            [
+                str(SEND_CATERING_ACK_BIN),
+                "--customer-jid", chat_id,
+                "--message-text", template,
+                "--lead-id", lead_id,
+            ],
+            capture_output=True, text=True,
+            timeout=SUBPROCESS_TIMEOUT_SEC,
+        )
+        return result.returncode == 0
+    except (subprocess.SubprocessError, OSError):
+        return False
 
 
 def find_active_catering_lead_by_sender(
