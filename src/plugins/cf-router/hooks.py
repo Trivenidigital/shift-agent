@@ -27,7 +27,7 @@ from typing import Any, Optional
 
 from . import actions
 
-# === F7 path config (PR-CF7) ===
+# === F7 path config (PR-CF7 → PR-CF1d primary-mode 2026-05-12) ===
 #
 # F7_ENABLED is the rollback hatch. To disable the F7 plugin path without
 # touching F8/F9, edit this file in place and restart hermes-gateway:
@@ -36,9 +36,25 @@ from . import actions
 #   sudo systemctl restart hermes-gateway
 F7_ENABLED = True
 
+# PR-CF1d 2026-05-12: F7 is now PRIMARY-MODE. cf-router intercepts catering
+# customer inquiries INSIDE pre_gateway_dispatch and invokes
+# create-catering-lead directly. LLM never sees the inbound. Replaces the
+# prior rescue-mode after Phase 11 adversarial test reproduced May 3 HARD
+# RULES violations (Kimi composed fabricated proposals + per-person prices
+# under customer pressure).
+#
+# F7_PRIMARY_FOLLOWUP_REPLY: controls whether Branch B (customer has active
+# lead → suppress follow-up) sends a canonical UX-mitigation reply. With it
+# True, the customer gets a hard-coded "your inquiry is with the owner"
+# pointer. With it False, the follow-up is silently suppressed (the bot
+# appears unresponsive to status questions).
+F7_PRIMARY_FOLLOWUP_REPLY = True
+
 # 30s rescue window — matches the deployed F7 daemon's WATCHDOG_TIMEOUT_SECS.
-# After this delay the plugin checks the audit log for `dispatcher_routed`
-# and invokes create-catering-lead if missing.
+# PRESERVED (not removed) for backwards-compat with TestF7DispatcherWatchdog,
+# but no longer wired into pre_gateway_dispatch. f7_rescue_check() +
+# _schedule_f7_rescue() remain callable directly. Cleanup deferred to a
+# follow-up PR after F7 primary-mode soaks in production.
 F7_WATCHDOG_TIMEOUT_SEC = 30
 
 # Owner-approval code regex — same alphabet as the deployed dispatcher
@@ -104,17 +120,31 @@ def pre_gateway_dispatch(event: Any, gateway: Any = None, session_store: Any = N
             # Always allow LLM to handle normally — F9 is alert-only
             return None
 
-        # F7 path (PR-CF7) — non-owner/non-employee + catering classifier
-        # → schedule a 30s rescue check. Plugin lets LLM handle the inquiry
-        # immediately; rescue only fires if the LLM misses (preserves F7's
-        # "rescue-only" semantic). Gated on F7_ENABLED for fast rollback.
+        # F7 PRIMARY-MODE (PR-CF1d 2026-05-12) — non-owner/non-employee +
+        # catering classifier → intercept inside pre_gateway_dispatch and
+        # bypass LLM entirely. Promoted from rescue-mode after Phase 11
+        # adversarial test reproduced May 3 failure mode (Kimi violated
+        # HARD RULES under customer pressure: composed proposals, fabricated
+        # per-person prices, multi-lead creation, attempted skill_manage +
+        # memory writes).
+        #
+        # Two branches inside _try_f7_primary_intercept:
+        #   A — no active lead: invoke create-catering-lead deterministically
+        #       with customer_name="" (kills the "Anjali Iyer" hallucination
+        #       class); return skip
+        #   B — active lead exists: optionally send canonical UX-mitigation
+        #       reply; return skip (prevents multi-lead-creation bug)
+        #
+        # Rescue-mode helpers (_schedule_f7_rescue, actions.f7_rescue_check,
+        # F7_WATCHDOG_TIMEOUT_SEC) remain in this module for backwards-compat
+        # with the TestF7DispatcherWatchdog suite; they are NO LONGER wired
+        # into pre_gateway_dispatch. Cleanup deferred to a follow-up PR.
         if F7_ENABLED:
-            is_catering, signals = actions.classify_catering(text)
+            is_catering, _signals = actions.classify_catering(text)
             if is_catering:
-                message_id = _extract_message_id(event, chat_id, text)
-                _schedule_f7_rescue(text, chat_id, message_id, signals)
-                # Don't return skip — LLM still handles immediately; the
-                # Timer thread runs the rescue check 30s later.
+                f7_result = _try_f7_primary_intercept(text, chat_id, event)
+                if f7_result is not None:
+                    return f7_result
 
         return None
 
@@ -198,6 +228,72 @@ def _try_f8_intercept(text: str, chat_id: str) -> Optional[dict]:
     # Code didn't match any open lead/pending — let LLM handle (might be
     # a stale reference; LLM can tell the owner)
     return None
+
+
+def _try_f7_primary_intercept(text: str, chat_id: str, event: Any) -> Optional[dict]:
+    """F7 PRIMARY-MODE intercept (PR-CF1d 2026-05-12).
+
+    Caller has already confirmed `classify_catering(text)` is True and
+    cf-router is gated on F7_ENABLED.
+
+    Returns:
+      {"action": "skip", "reason": ...} — plugin handled, LLM bypassed
+      None                              — sender is owner/employee (F8/F9
+                                          territory), or create-catering-lead
+                                          returned non-zero (let LLM see the
+                                          inbound for recovery)
+    """
+    message_id = _extract_message_id(event, chat_id, text)
+    phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
+    if role in {"owner", "employee"}:
+        # Owner/employee catering keywords are F8/F9 territory; F7 primary
+        # only intercepts genuine customer-side inquiries.
+        return None
+
+    active_lead = actions.find_active_catering_lead_by_sender(phone, chat_id)
+
+    if active_lead is None:
+        # Branch A — new inquiry → create lead deterministically, skip LLM.
+        # `customer_name=""` kills the L0004-L0007 "Anjali Iyer" hallucination
+        # class (regex-based extractor can't invent names from training data).
+        if phone:
+            customer_phone_arg = phone
+        elif chat_id.endswith("@lid"):
+            # Legacy LID-as-fake-phone shape (matches the persisted
+            # customer_phone field on L0004-L0010)
+            customer_phone_arg = "+" + chat_id[: -len("@lid")]
+        else:
+            # Defensive: shouldn't happen since chat_id is non-empty per caller
+            return None
+        ok, detail = actions.trigger_create_catering_lead(
+            customer_phone=customer_phone_arg,
+            customer_name="",
+            raw_inquiry=text,
+            message_id=message_id,
+        )
+        actions.audit_intercepted(
+            reason="f7_primary_new_inquiry", chat_id=chat_id,
+            subprocess_rc=0 if ok else 2, detail=detail[:500],
+        )
+        if not ok:
+            # Lead creation failed (idempotency replay, bridge unreachable,
+            # validation error). Let LLM see the inbound; owner can intervene.
+            return None
+        return {"action": "skip",
+                "reason": "cf-router F7 primary: catering inquiry routed deterministically"}
+
+    # Branch B — active lead exists → suppress follow-up, optionally reply.
+    lead_id = active_lead.get("lead_id", "?")
+    approval_code = active_lead.get("owner_approval_code") or ""
+    if F7_PRIMARY_FOLLOWUP_REPLY:
+        actions.send_canonical_followup_reply(chat_id, lead_id)
+    actions.audit_intercepted(
+        reason="f7_primary_followup_suppressed", chat_id=chat_id,
+        code=approval_code,
+        detail=f"active {lead_id} status={active_lead.get('status')}; LLM bypassed",
+    )
+    return {"action": "skip",
+            "reason": f"cf-router F7 primary: follow-up to active {lead_id} suppressed"}
 
 
 def _build_skip_or_passthrough(*, rc: int, chat_id: str, code: str,

@@ -1057,3 +1057,132 @@ class TestSendCanonicalFollowupReply:
                 chat_id="201975216009469@lid", lead_id="L0011",
             )
         assert ok is False
+
+
+class TestF7PrimaryMode:
+    """PR-CF1d Commit 3: cf-router F7 primary-mode end-to-end paths.
+
+    Replaces the prior rescue-mode pre_gateway_dispatch wiring. F7 now
+    intercepts catering customer inbounds AT pre_gateway_dispatch and
+    bypasses the LLM entirely. Branch A creates a lead deterministically;
+    Branch B suppresses follow-ups against existing active leads.
+    """
+
+    def test_branch_a_new_inquiry_creates_lead_and_skips_llm(self, mods, state_env):
+        """Customer-side catering inquiry with no active lead → cf-router
+        invokes create-catering-lead via trigger_create_catering_lead +
+        returns skip. Audit row reason=f7_primary_new_inquiry."""
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        _seed_leads_multi(state_env, [])  # no existing leads
+        # identify-sender returns customer (non-owner, non-employee)
+        fake_run = SimpleNamespace(
+            returncode=0,
+            stdout='{"role":"customer","phone_normalized":"+17329837841"}',
+            stderr="",
+        )
+        with patch("subprocess.run", return_value=fake_run), \
+             patch.object(actions_mod, "trigger_create_catering_lead",
+                          return_value=(True, "lead_created")) as mock_trigger:
+            event = _make_event(
+                text="catering for 50 people event Saturday food delivered",
+                chat_id="17329837841@s.whatsapp.net",
+            )
+            result = hooks_mod.pre_gateway_dispatch(event)
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router F7 primary: catering inquiry routed deterministically",
+        }
+        mock_trigger.assert_called_once()
+        call_kwargs = mock_trigger.call_args.kwargs
+        # HARD RULES: customer_name MUST be empty string (kills hallucination)
+        assert call_kwargs["customer_name"] == ""
+        # Lead created audit
+        rows = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
+        audits = [r for r in rows if r.get("type") == "cf_router_intercepted"]
+        assert len(audits) == 1
+        assert audits[0]["reason"] == "f7_primary_new_inquiry"
+        assert audits[0]["subprocess_rc"] == 0
+
+    def test_branch_b_active_lead_suppresses_with_canonical_reply(self, mods, state_env):
+        """Customer-side catering inquiry with active lead → cf-router skips
+        without creating a new lead. With F7_PRIMARY_FOLLOWUP_REPLY=True,
+        send_canonical_followup_reply is invoked. Audit
+        reason=f7_primary_followup_suppressed."""
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        _seed_leads_multi(state_env, [
+            {"lead_id": "L0011", "owner_approval_code": "#ABCDE",
+             "customer_phone": "+17329837841",
+             "status": "AWAITING_OWNER_APPROVAL"},
+        ])
+        fake_run = SimpleNamespace(
+            returncode=0,
+            stdout='{"role":"customer","phone_normalized":"+17329837841"}',
+            stderr="",
+        )
+        # Ensure F7_PRIMARY_FOLLOWUP_REPLY is True for this test
+        hooks_mod.F7_PRIMARY_FOLLOWUP_REPLY = True
+        with patch("subprocess.run", return_value=fake_run), \
+             patch.object(actions_mod, "trigger_create_catering_lead") as mock_trigger, \
+             patch.object(actions_mod, "send_canonical_followup_reply",
+                          return_value=True) as mock_reply:
+            event = _make_event(
+                text="catering for 50 people event Saturday food delivered",
+                chat_id="17329837841@s.whatsapp.net",
+            )
+            result = hooks_mod.pre_gateway_dispatch(event)
+        assert result is not None
+        assert result["action"] == "skip"
+        assert "follow-up to active L0011 suppressed" in result["reason"]
+        # No new lead created
+        mock_trigger.assert_not_called()
+        # Canonical follow-up reply sent
+        mock_reply.assert_called_once_with("17329837841@s.whatsapp.net", "L0011")
+        # Suppressed audit row
+        rows = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
+        audits = [r for r in rows if r.get("type") == "cf_router_intercepted"]
+        assert len(audits) == 1
+        assert audits[0]["reason"] == "f7_primary_followup_suppressed"
+
+    def test_owner_role_bypasses_f7_primary(self, mods, state_env):
+        """Owner-side catering keyword → F8 territory, not F7. F7 returns
+        None (no intercept) so the rest of pre_gateway_dispatch can run."""
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        _seed_leads_multi(state_env, [])
+        # Owner-chat: is_owner_chat() returns True, so F7 never gets called
+        # (the F8 check happens before F7). Verify by patching is_owner_chat
+        # to True.
+        with patch.object(actions_mod, "is_owner_chat", return_value=True), \
+             patch.object(actions_mod, "trigger_create_catering_lead") as mock_trigger:
+            event = _make_event(
+                text="catering for 50 people event Saturday food delivered",
+                chat_id="918522041562@s.whatsapp.net",
+            )
+            result = hooks_mod.pre_gateway_dispatch(event)
+        # is_owner_chat=True + no #XXXXX code in text → _try_f8_intercept
+        # returns None; F7 path also not entered (sender resolves as owner).
+        # Net result: pre_gateway_dispatch returns None (let LLM handle).
+        assert result is None
+        mock_trigger.assert_not_called()
+
+    def test_f7_disabled_short_circuits(self, mods, state_env):
+        """F7_ENABLED=False → catering keyword has no effect; LLM still runs."""
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        _seed_leads_multi(state_env, [])
+        hooks_mod.F7_ENABLED = False
+        try:
+            with patch.object(actions_mod, "trigger_create_catering_lead") as mock_trigger, \
+                 patch.object(actions_mod, "lid_to_phone_via_identify_sender") as mock_ident:
+                event = _make_event(
+                    text="catering for 50 people event Saturday food delivered",
+                    chat_id="17329837841@s.whatsapp.net",
+                )
+                result = hooks_mod.pre_gateway_dispatch(event)
+            assert result is None
+            mock_trigger.assert_not_called()
+            mock_ident.assert_not_called()
+        finally:
+            hooks_mod.F7_ENABLED = True  # restore
