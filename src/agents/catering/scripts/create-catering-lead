@@ -6,12 +6,24 @@ been classified as catering and key fields have been extracted. This script
 is deterministic — it writes state and sends the owner approval card.
 
 Usage:
+  # Canonical invocation — pass JSON via stdin (handles arbitrary chars including ' " $ ` \n):
   create-catering-lead \\
     --customer-phone "+19045551234" \\
     --customer-name "Priya Reddy" \\
     --raw-inquiry "Need catering for 50 people June 15 wedding reception" \\
     --message-id "3EB0F1A2E9" \\
-    --fields-json '{"headcount": 50, "event_date": "2026-06-15", "menu_preferences": ["vegetarian"]}'
+    --fields-json - <<'JSON'
+  {"headcount": 50, "event_date": "2026-06-15", "menu_preferences": ["vegetarian"], "notes": "cousin's wedding"}
+  JSON
+
+  # Legacy form (still supported; AVOID if any field may contain ' " $ ` or other shell metachars):
+  #   --fields-json '{"headcount": 50, ...}'
+
+Stdin sentinel: `--fields-json -` (or `--fields-json /dev/stdin`) reads the
+JSON dict from stdin. This is the bulletproof path against shell-quoting
+bugs — apostrophes in customer text ("Cousin's inquiry") collapse the
+single-quoted form and trigger bash EOF errors that no LLM consistently
+escapes correctly.
 
 Idempotent on (customer_phone, message_id) — replays of the same inbound
 event are a no-op (returns the existing lead's id+code).
@@ -454,8 +466,19 @@ def main() -> int:
     ap.add_argument("--raw-inquiry", required=True)
     ap.add_argument("--message-id", required=True, help="Meta WhatsApp message id (idempotency key)")
     ap.add_argument("--fields-json", required=True,
-                    help='JSON dict matching CateringLeadExtractedFields')
+                    help=("JSON dict matching CateringLeadExtractedFields. "
+                          "Pass - or /dev/stdin to read from stdin "
+                          "(use stdin form when JSON may contain shell "
+                          "metacharacters such as apostrophes or quotes)."))
     args = ap.parse_args()
+
+    # Stdin sentinel — bulletproof path for JSON containing shell metachars
+    # (apostrophes, double quotes, $, backticks, newlines). Prefer this over
+    # `--fields-json '{"...":"..."}'` because no LLM consistently escapes
+    # bare apostrophes in user-generated text and the resulting bash EOF
+    # errors trigger runaway retry loops (observed 2026-05-13 incident).
+    if args.fields_json in ("-", "/dev/stdin"):
+        args.fields_json = sys.stdin.read()
 
     # Load config
     try:

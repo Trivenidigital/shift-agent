@@ -19,15 +19,20 @@ You are a deterministic extractor + state writer. Your job is **tool invocation,
 
 2. **SECOND — extract structured fields** from `message_text` (see Step 1 below for the JSON schema). Set unknown fields to `null`. Do NOT guess.
 
-3. **THIRD — invoke create-catering-lead** (use the `terminal` tool — this is the actual work; without it no lead is created):
+3. **THIRD — invoke create-catering-lead** (use the `terminal` tool — this is the actual work; without it no lead is created).
+
+   **Always use the stdin-heredoc form** — it handles arbitrary characters in customer text (apostrophes, quotes, `$`, backticks, newlines) without any escaping. Building the JSON as a single-quoted argument is a known runaway-loop trigger because bare apostrophes in user text like `"Cousin's inquiry"` close the outer quote prematurely.
    ```
    /usr/local/bin/create-catering-lead \
      --customer-phone "<sender_phone>" \
      --customer-name "<sender_name OR empty string>" \
      --raw-inquiry "<message_text — first 1000 chars>" \
      --message-id "<inbound message_id>" \
-     --fields-json '<the JSON dict from step 2>'
+     --fields-json - <<'JSON'
+   <the JSON dict from step 2, exactly as extracted — no escaping needed>
+   JSON
    ```
+   The heredoc delimiter `'JSON'` (with the apostrophes around `JSON` in the opening line) means bash treats the body as a literal string with NO expansion and NO quote interpretation. Drop the JSON in exactly as the extractor produced it.
    The script writes the lead row, mints the `#XXXXX` approval code, sends the owner-approval card to the owner's self-chat, AND sends the customer acknowledgment automatically. Exit 0 = done.
 
 4. **FOURTH — done** (only if step 3 returned exit 0). Output nothing further. NEVER call `send_message` to the customer — the script handled it.
@@ -61,10 +66,18 @@ Inputs from catering_dispatcher:
 {"headcount": 200, "event_date": "2026-05-28", "event_time": null, "menu_preferences": [], "off_menu_items": [], "dietary_restrictions": [], "delivery_or_pickup": "unknown", "budget_hint_usd": null, "notes": "cousin's wedding"}
 ```
 
-**Step 3 — terminal call:**
+**Step 3 — terminal call (stdin-heredoc form, the canonical pattern):**
 ```
-/usr/local/bin/create-catering-lead --customer-phone "201975216009469@lid" --customer-name "" --raw-inquiry "Bro! I need catering help for my cousin's wedding on May 28, total guests 200" --message-id "<id>" --fields-json '{"headcount":200,"event_date":"2026-05-28","event_time":null,"menu_preferences":[],"off_menu_items":[],"dietary_restrictions":[],"delivery_or_pickup":"unknown","budget_hint_usd":null,"notes":"cousin'\''s wedding"}'
+/usr/local/bin/create-catering-lead \
+  --customer-phone "201975216009469@lid" \
+  --customer-name "" \
+  --raw-inquiry "Bro! I need catering help for my cousin's wedding on May 28, total guests 200" \
+  --message-id "<id>" \
+  --fields-json - <<'JSON'
+{"headcount":200,"event_date":"2026-05-28","event_time":null,"menu_preferences":[],"off_menu_items":[],"dietary_restrictions":[],"delivery_or_pickup":"unknown","budget_hint_usd":null,"notes":"cousin's wedding"}
+JSON
 ```
+Note: `"cousin's wedding"` has a bare apostrophe and that's fine — the `<<'JSON'` heredoc with quoted delimiter is opaque to bash. No escaping required.
 → Exit 0. Lead L0004 created. Owner approval card sent with `#XXXXX` code. Customer ack sent.
 
 **Step 4 — done.** Output nothing.
@@ -214,7 +227,7 @@ Output: `{"headcount": null, "event_date": null, "event_time": null, "menu_prefe
 
 ## Step 2 — Call create-catering-lead
 
-Pass the extracted JSON + the inbound metadata to the state writer:
+Pass the extracted JSON + the inbound metadata to the state writer. **Use the stdin-heredoc form** — it bypasses all shell-quoting hazards (apostrophes in customer text, e.g. `"Cousin's inquiry"`, would otherwise break a `--fields-json '{...}'` argument and trigger a runaway retry loop):
 
 ```
 /usr/local/bin/create-catering-lead \
@@ -222,8 +235,12 @@ Pass the extracted JSON + the inbound metadata to the state writer:
   --customer-name "<sender_name OR empty string>" \
   --raw-inquiry "<message_text — first 1000 chars>" \
   --message-id "<inbound message_id>" \
-  --fields-json '<the JSON dict above>'
+  --fields-json - <<'JSON'
+<the JSON dict from Step 1, exactly as extracted — no escaping needed>
+JSON
 ```
+
+The `<<'JSON'` opener (apostrophes around the delimiter) makes bash treat the heredoc body literally — no parameter expansion, no quote interpretation, no special-character escaping. Copy the JSON in as-is.
 
 The script will:
 1. Validate the JSON against the Pydantic schema (rejects negative headcount, bad date, etc.)
