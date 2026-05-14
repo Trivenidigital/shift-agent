@@ -414,7 +414,10 @@ class OperationsConfig(BaseModel):
 # default factory at DailyBriefConfig.sections does NOT include it (preserved
 # unchanged so existing customers' briefs are unaffected until owner explicitly
 # opts in).
-BriefSection = Literal["yesterday", "today_outlook", "alerts", "birthdays"]
+BriefSection = Literal[
+    "yesterday", "today_outlook", "alerts", "birthdays",
+    "catering_learning",
+]
 
 
 # Agent #33 Loyalty config (Tier-2 scaffold). v0.1 covers birthday reminders
@@ -853,6 +856,41 @@ class CateringProposalStore(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     next_sequence: int = Field(default=1, ge=1)
     sets: list[CateringProposalSet] = Field(default_factory=list)
+
+
+CateringLearningSource = Literal["catering-pattern-report"]
+
+
+class CateringLearningProposalHealth(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    sent: int = Field(default=0, ge=0)
+    selected: int = Field(default=0, ge=0)
+    send_failed: int = Field(default=0, ge=0)
+    select_failed: int = Field(default=0, ge=0)
+
+
+class CateringLearningSummary(BaseModel):
+    """Counts-only catering learning summary for owner-facing brief rendering.
+
+    Deliberately excludes raw/sanitized off-menu text. Those fields originate
+    from LLM-extracted free text and can contain PII or price/payment terms.
+    """
+    model_config = ConfigDict(extra="forbid")
+    schema_version: Literal[1] = 1
+    source: CateringLearningSource = "catering-pattern-report"
+    generated_at: datetime
+    window_days: int = Field(ge=1, le=365)
+    proposal_health: CateringLearningProposalHealth = Field(
+        default_factory=CateringLearningProposalHealth,
+    )
+    off_menu_request_count: int = Field(default=0, ge=0)
+    leads_with_off_menu_count: int = Field(default=0, ge=0)
+    active_missing_info_count: int = Field(default=0, ge=0)
+    menu_updated_at: Optional[datetime] = None
+    menu_freshness_days: Optional[int] = Field(default=None, ge=0)
+    degraded_sources: list[Literal["leads", "proposals", "menu"]] = Field(
+        default_factory=list, max_length=3,
+    )
 
 
 # Catering menu (Agent #2 v0.2 — photo-upload menu management)
@@ -3040,6 +3078,8 @@ __all__ = [
     "CateringLead", "CateringLeadStore",
     "CateringProposalStatus", "CateringProposalTier",
     "CateringProposalOption", "CateringProposalSet", "CateringProposalStore",
+    "CateringLearningSource", "CateringLearningProposalHealth",
+    "CateringLearningSummary",
     "is_catering_terminal", "CATERING_TERMINAL_STATUSES",
     # v0.3 status-machine + helpers
     "CATERING_TRANSITIONS", "is_catering_transition_allowed",

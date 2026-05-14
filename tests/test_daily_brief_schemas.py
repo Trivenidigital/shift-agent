@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from schemas import (
     Config, DailyBriefConfig, BriefSection,
     BriefAttempted, BriefSent, BriefSendFailed, BriefSkipped,
+    CateringLearningProposalHealth, CateringLearningSummary,
 )
 from datetime import datetime, timezone
 
@@ -50,6 +51,13 @@ def test_daily_brief_sections_min_length_one():
     with pytest.raises(ValidationError):
         DailyBriefConfig(sections=[])
     DailyBriefConfig(sections=["alerts"])
+
+
+def test_daily_brief_catering_learning_section_opt_in_only():
+    cfg = DailyBriefConfig()
+    assert "catering_learning" not in cfg.sections
+    enabled = DailyBriefConfig(sections=["catering_learning"])
+    assert enabled.sections == ["catering_learning"]
 
 
 def test_daily_brief_catchup_bounds():
@@ -132,6 +140,38 @@ def test_brief_skipped_reason_literal():
     for bad in ["no_activity", "outside_window", "random"]:
         with pytest.raises(ValidationError):
             BriefSkipped(type="brief_skipped", ts=now, brief_date="2026-04-28", reason=bad)
+
+
+def test_catering_learning_summary_schema_validators():
+    now = datetime.now(tz=timezone.utc)
+    summary = CateringLearningSummary(
+        generated_at=now,
+        window_days=30,
+        proposal_health=CateringLearningProposalHealth(
+            sent=2, selected=1, send_failed=0, select_failed=1,
+        ),
+        off_menu_request_count=4,
+        leads_with_off_menu_count=3,
+        active_missing_info_count=1,
+        menu_updated_at=now,
+        menu_freshness_days=0,
+        degraded_sources=["menu"],
+    )
+    assert summary.source == "catering-pattern-report"
+    assert summary.off_menu_request_count == 4
+
+    with pytest.raises(ValidationError):
+        CateringLearningSummary(
+            generated_at=now,
+            window_days=30,
+            off_menu_request_count=-1,
+        )
+    with pytest.raises(ValidationError):
+        CateringLearningSummary(
+            generated_at=now,
+            window_days=30,
+            unexpected=True,
+        )
 
 
 def test_config_backward_compat_no_daily_brief():

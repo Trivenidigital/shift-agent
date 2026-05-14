@@ -12,6 +12,8 @@ from __future__ import annotations
 import importlib.machinery
 import importlib.util
 import json
+import platform
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -234,3 +236,210 @@ def test_scan_counts_multiple_suppressions(tmp_path: Path, now: datetime) -> Non
     findings, suppressed = mod._scan(log_path, leads_path, now - timedelta(days=1), roster_path)
     assert findings == []
     assert suppressed == 3
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Counts-only catering learning summary
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def _learning_lead(
+    lead_id: str,
+    *,
+    created_at: datetime,
+    status: str = "NEW",
+    headcount: int | None = 50,
+    event_date: str | None = "2026-07-12",
+    off_menu_items: list[str] | None = None,
+) -> dict:
+    return {
+        "lead_id": lead_id,
+        "status": status,
+        "customer_phone": "+15555550100",
+        "customer_name": "Priya Private",
+        "raw_inquiry": "Need catering at 123 Main Street for $2500",
+        "original_message_id": f"msg_{lead_id}",
+        "created_at": created_at.isoformat(),
+        "updated_at": created_at.isoformat(),
+        "extracted": {
+            "headcount": headcount,
+            "event_date": event_date,
+            "event_time": None,
+            "menu_preferences": [],
+            "off_menu_items": off_menu_items or [],
+            "dietary_restrictions": [],
+            "delivery_or_pickup": "unknown",
+            "budget_hint_usd": None,
+            "notes": "",
+        },
+        "quote_text": "",
+        "quote_version": 0,
+        "owner_approval_code": None,
+        "customer_replied": False,
+    }
+
+
+def _proposal_set(
+    proposal_set_id: str,
+    *,
+    status: str,
+    created_at: datetime,
+    sent_at: datetime | None = None,
+    outbound_message_id: str = "",
+) -> dict:
+    return {
+        "proposal_set_id": proposal_set_id,
+        "lead_id": "L9001",
+        "status": status,
+        "created_at": created_at.isoformat(),
+        "sent_at": sent_at.isoformat() if sent_at else None,
+        "outbound_message_id": outbound_message_id,
+        "source_message_id": f"src_{proposal_set_id}",
+        "request_text": "Priya wants option 2 for 2500 bucks",
+        "options": [
+            {"option_id": "1", "style_key": "balanced_mixed", "tier": "balanced",
+             "item_names": ["Idly"]},
+            {"option_id": "2", "style_key": "premium_mixed", "tier": "premium",
+             "item_names": ["Dosa"]},
+        ],
+    }
+
+
+def test_learning_summary_counts_off_menu_without_persisting_text(tmp_path: Path, now: datetime) -> None:
+    leads = [
+        _learning_lead(
+            "L9001",
+            created_at=now - timedelta(days=2),
+            off_menu_items=[
+                "Priya special",
+                "123 Main Street",
+                "$2500 deposit",
+                "Butter Chicken",
+            ],
+        ),
+        _learning_lead(
+            "L9002",
+            created_at=now - timedelta(days=40),
+            off_menu_items=["Old item"],
+        ),
+    ]
+    leads_path = tmp_path / "leads.json"
+    _write_json(leads_path, {"leads": leads})
+    proposals_path = tmp_path / "proposals.json"
+    _write_json(proposals_path, {"sets": []})
+    menu_path = tmp_path / "menu.json"
+    _write_json(menu_path, {"updated_at": (now - timedelta(days=5)).isoformat(), "items": []})
+
+    summary = mod._build_learning_summary(
+        leads_path, proposals_path, menu_path, now, 30,
+    )
+
+    assert summary.off_menu_request_count == 4
+    assert summary.leads_with_off_menu_count == 1
+    dumped = summary.model_dump_json()
+    assert "Priya" not in dumped
+    assert "Main Street" not in dumped
+    assert "2500" not in dumped
+    assert "Butter Chicken" not in dumped
+    assert summary.menu_freshness_days == 5
+
+
+def test_learning_summary_counts_proposal_buckets_and_ignores_old(tmp_path: Path, now: datetime) -> None:
+    _write_json(tmp_path / "leads.json", {"leads": []})
+    sent_at = now - timedelta(days=1)
+    _write_json(tmp_path / "proposals.json", {
+        "sets": [
+            _proposal_set(
+                "CPS-L9001-000001",
+                status="SENT",
+                created_at=sent_at,
+                sent_at=sent_at,
+                outbound_message_id="wamid.sent",
+            ),
+            _proposal_set("CPS-L9001-000002", status="SUPERSEDED", created_at=sent_at),
+            _proposal_set("CPS-L9001-000003", status="SELECTED", created_at=sent_at),
+            _proposal_set("CPS-L9001-000004", status="SEND_FAILED", created_at=sent_at),
+            _proposal_set("CPS-L9001-000005", status="SELECT_FAILED", created_at=sent_at),
+            _proposal_set(
+                "CPS-L9001-000006",
+                status="SENT",
+                created_at=now - timedelta(days=60),
+                sent_at=now - timedelta(days=60),
+                outbound_message_id="wamid.old",
+            ),
+        ],
+    })
+    _write_json(tmp_path / "menu.json", {"updated_at": now.isoformat(), "items": []})
+
+    summary = mod._build_learning_summary(
+        tmp_path / "leads.json", tmp_path / "proposals.json", tmp_path / "menu.json",
+        now, 30,
+    )
+
+    assert summary.proposal_health.sent == 2
+    assert summary.proposal_health.selected == 1
+    assert summary.proposal_health.send_failed == 1
+    assert summary.proposal_health.select_failed == 1
+
+
+def test_learning_summary_degrades_on_bad_sources(tmp_path: Path, now: datetime) -> None:
+    (tmp_path / "leads.json").write_text("not json", encoding="utf-8")
+    (tmp_path / "proposals.json").write_text("not json", encoding="utf-8")
+    (tmp_path / "menu.json").write_text("not json", encoding="utf-8")
+
+    summary = mod._build_learning_summary(
+        tmp_path / "leads.json", tmp_path / "proposals.json", tmp_path / "menu.json",
+        now, 30,
+    )
+
+    assert set(summary.degraded_sources) == {"leads", "proposals", "menu"}
+    assert summary.off_menu_request_count == 0
+    assert summary.proposal_health.sent == 0
+
+
+def test_learning_summary_lock_derives_from_actual_output_path(tmp_path: Path) -> None:
+    out = tmp_path / "custom-summary.json"
+    assert mod._learning_summary_lock_path(out) == Path(str(out) + ".lock")
+    explicit = tmp_path / "explicit.lock"
+    assert mod._learning_summary_lock_path(out, explicit) == explicit
+
+
+@pytest.mark.skipif(
+    platform.system() == "Windows",
+    reason="main() write path imports safe_io/FileLock (fcntl)",
+)
+def test_main_writes_learning_sidecar_even_with_no_findings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log_path = tmp_path / "decisions.log"
+    log_path.write_text("", encoding="utf-8")
+    leads_path = tmp_path / "leads.json"
+    _write_json(leads_path, {"leads": []})
+    proposals_path = tmp_path / "proposals.json"
+    _write_json(proposals_path, {"sets": []})
+    menu_path = tmp_path / "menu.json"
+    _write_json(menu_path, {"updated_at": datetime.now(tz=timezone.utc).isoformat(), "items": []})
+    summary_path = tmp_path / "state" / "learning.json"
+    lessons_path = tmp_path / "lessons.md"
+
+    monkeypatch.setattr(sys, "argv", [
+        "catering-pattern-report",
+        "--log", str(log_path),
+        "--leads", str(leads_path),
+        "--proposals", str(proposals_path),
+        "--menu", str(menu_path),
+        "--learning-summary", str(summary_path),
+        "--lessons", str(lessons_path),
+    ])
+
+    assert mod.main() == 0
+    written = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert written["source"] == "catering-pattern-report"
+    assert Path(str(summary_path) + ".lock").exists()
+    assert not lessons_path.exists()

@@ -220,6 +220,33 @@ Expected audit:
 - `brief_attempted`
 - `brief_sent`
 
+### 11. Optional Catering Learning Summary
+
+This section is opt-in. It is safe to deploy while disabled because
+`daily_brief.sections` does not include `catering_learning` by default.
+
+First generate and inspect the counts-only sidecar as the service user:
+
+```bash
+ssh main-vps 'sudo -u shift-agent /usr/local/bin/catering-pattern-report --dry-run --learning-days 30' > .ssh_catering_learning_dry_run.txt 2>&1
+```
+
+If the dry-run output is safe, write the sidecar:
+
+```bash
+ssh main-vps 'sudo -u shift-agent /usr/local/bin/catering-pattern-report --learning-days 30' > .ssh_catering_learning_write.txt 2>&1
+```
+
+Expected state:
+
+- `/opt/shift-agent/state/catering-learning-summary.json` exists.
+- The file contains only counts, freshness, and degraded-source names.
+- It does not contain customer names, phone numbers, raw inquiry text,
+  addresses, prices, payment terms, or raw off-menu item text.
+
+Only after reviewing the dry-run output should the operator add
+`catering_learning` to `daily_brief.sections`.
+
 ## Evidence Pull
 
 After each live test, pull a narrow audit slice:

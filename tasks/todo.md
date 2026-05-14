@@ -31,6 +31,26 @@ Plan: `docs/superpowers/plans/2026-05-14-production-pilot-shift-catering-daily-b
 
 Current runtime status from deploy `deploy-20260514-170739-f4ce14db`: gateway active, WhatsApp bridge connected, timers active, roster valid, 6 active employees, 23 scheduled shifts, catering menu valid, 78 available menu items. Readiness gate is blocked only on placeholder customer identity.
 
+## Active - Catering self-learning rails (2026-05-14)
+
+**Drift-check tag:** extends-Hermes
+
+Hermes-first summary: reuse existing catering state, `catering-pattern-report.timer`, and Daily Brief delivery. Net-new scope is limited to a counts-only `catering-learning-summary.json` sidecar plus opt-in Daily Brief rendering. Runtime learning remains state/report-only; code/SKILL changes still require PR/review/deploy.
+
+Plan: `docs/superpowers/plans/2026-05-14-catering-100-autonomy-self-learning-plan.md`
+Design: `docs/superpowers/specs/2026-05-14-catering-self-learning-rails-design.md`
+
+- [x] Write plan for the 100% catering autonomy destination and first safe self-learning slice.
+- [x] Run 2-agent plan review and apply scope/safety fixes.
+- [x] Write design for counts-only catering learning sidecar and opt-in Daily Brief readout.
+- [x] Run 2-agent design review and apply privacy/runtime fixes.
+- [x] Implement local schema, pattern-report, Daily Brief, and focused tests.
+- [ ] Create PR and run 3 parallel reviewers.
+- [ ] Fix PR-review findings.
+- [ ] Merge and deploy to `main-vps`.
+- [ ] Run `sudo -u shift-agent /usr/local/bin/catering-pattern-report --dry-run --learning-days 30` on VPS and review output.
+- [ ] Enable `daily_brief.sections += ["catering_learning"]` only after dry-run output is reviewed.
+
 ## P0 — Live verification (passive, blocked on real customer traffic)
 
 Reporter floor as of 2026-04-28: **0/26 (0%)** — all 26 entries are pre-fix synthetic test injections; no real Kimi-routed inbound since dispatcher schema deployed. Floor will move once real traffic starts. Trigger: send any test message to self-chat to validate the pipeline end-to-end.
