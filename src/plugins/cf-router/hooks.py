@@ -50,6 +50,10 @@ F7_ENABLED = True
 # appears unresponsive to status questions).
 F7_PRIMARY_FOLLOWUP_REPLY = True
 
+# Task 6 proposal branch flag. Default off preserves Branch B's pinned
+# suppression behavior until the proposal workflow is explicitly enabled.
+F7_PROPOSAL_BRANCH_ENABLED = False
+
 # 30s rescue window — matches the deployed F7 daemon's WATCHDOG_TIMEOUT_SECS.
 # PRESERVED (not removed) for backwards-compat with TestF7DispatcherWatchdog,
 # but no longer wired into pre_gateway_dispatch. f7_rescue_check() +
@@ -120,7 +124,7 @@ def pre_gateway_dispatch(event: Any, gateway: Any = None, session_store: Any = N
             # Always allow LLM to handle normally — F9 is alert-only
             return None
 
-        # F7 PRIMARY-MODE (PR-CF1d 2026-05-12) — non-owner/non-employee +
+        # F7 PRIMARY-MODE (PR-CF1d 2026-05-12) — non-owner +
         # catering classifier → intercept inside pre_gateway_dispatch and
         # bypass LLM entirely. Promoted from rescue-mode after Phase 11
         # adversarial test reproduced May 3 failure mode (Kimi violated
@@ -141,9 +145,14 @@ def pre_gateway_dispatch(event: Any, gateway: Any = None, session_store: Any = N
         # into pre_gateway_dispatch. Cleanup deferred to a follow-up PR.
         if F7_ENABLED:
             is_catering, signals = actions.classify_catering(text)
-            if is_catering:
+            proposal_workflow = (
+                actions.is_proposal_selection(text)
+                or actions.is_proposal_request(text)
+            )
+            if is_catering or _has_f7_followup_signal(signals) or proposal_workflow:
                 f7_result = _try_f7_primary_intercept(
                     text, chat_id, event, signals=signals,
+                    allow_new_lead=is_catering,
                 )
                 if f7_result is not None:
                     return f7_result
@@ -250,34 +259,55 @@ def _parse_headcount_from_signals(signals: list[str]) -> Optional[int]:
     return None
 
 
+def _has_f7_followup_signal(signals: list[str]) -> bool:
+    """Return True when weak catering signals are enough for Branch B only.
+
+    New-inquiry lead creation remains gated by `classify_catering=True`.
+    Once an active lead exists for the sender, menu/event/food/headcount
+    references should reach Branch B even if they are too weak to create a
+    brand-new lead.
+    """
+    for sig in signals or []:
+        if sig in {"food_keyword", "event_keyword", "delivery_keyword"}:
+            return True
+        if isinstance(sig, str) and (
+            sig.startswith("headcount:") or sig.startswith("primary:catering")
+        ):
+            return True
+    return False
+
+
 def _try_f7_primary_intercept(
     text: str, chat_id: str, event: Any,
     signals: Optional[list[str]] = None,
+    allow_new_lead: bool = True,
 ) -> Optional[dict]:
     """F7 PRIMARY-MODE intercept (PR-CF1d 2026-05-12).
 
-    Caller has already confirmed `classify_catering(text)` is True and
-    cf-router is gated on F7_ENABLED. `signals` is the classify_catering
-    output list — used to forward structured signals (like headcount)
-    into the persisted lead's extracted_fields (Commit 4).
+    Caller has already confirmed either `classify_catering(text)` is True
+    or weak follow-up signals exist for Branch B. `allow_new_lead` is True
+    only for full new-inquiry classification; weak follow-up signals may
+    suppress against an existing active lead but must not create one.
 
     Returns:
       {"action": "skip", "reason": ...} — plugin handled, LLM bypassed
-      None                              — sender is owner/employee (F8/F9
-                                          territory), or create-catering-lead
+      None                              — sender is owner (F8 territory),
+                                          or create-catering-lead
                                           returned non-zero (let LLM see the
                                           inbound for recovery)
     """
     message_id = _extract_message_id(event, chat_id, text)
     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
-    if role in {"owner", "employee"}:
-        # Owner/employee catering keywords are F8/F9 territory; F7 primary
-        # only intercepts genuine customer-side inquiries.
+    if role == "owner":
+        # Owner catering keywords are F8 territory. Employee-origin catering
+        # can still be a private/family customer-side inquiry.
         return None
 
     active_lead = actions.find_active_catering_lead_by_sender(phone, chat_id)
 
     if active_lead is None:
+        if not allow_new_lead:
+            return None
         # Branch A — new inquiry → create lead deterministically, skip LLM.
         # `customer_name=""` kills the L0004-L0007 "Anjali Iyer" hallucination
         # class (regex-based extractor can't invent names from training data).
@@ -336,6 +366,25 @@ def _try_f7_primary_intercept(
     # plan.md §"Risks + rollback" and the PR-CF1d reviewer feedback.
     lead_id = active_lead.get("lead_id", "?")
     approval_code = active_lead.get("owner_approval_code") or ""
+
+    if F7_PROPOSAL_BRANCH_ENABLED and actions.is_proposal_selection(text):
+        if actions.find_selectable_proposal_set(lead_id):
+            rc = actions.invoke_select_catering_proposal(
+                lead_id, chat_id, message_id, text,
+            )
+            actions.audit_intercepted(
+                reason="f7_proposal_selection", chat_id=chat_id,
+                code=approval_code, subprocess_rc=rc,
+                detail=f"active {lead_id}; selection handled by cf-router",
+            )
+            if rc in {0, 2, 4, 6, 11}:
+                return {"action": "skip",
+                        "reason": f"cf-router F7 proposal selection for {lead_id}"}
+            return None
+
+    if F7_PROPOSAL_BRANCH_ENABLED and actions.is_proposal_request(text):
+        return None
+
     if F7_PRIMARY_FOLLOWUP_REPLY:
         actions.send_canonical_followup_reply(chat_id, lead_id)
     actions.audit_intercepted(

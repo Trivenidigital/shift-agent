@@ -2,14 +2,18 @@
 """dispatcher-accuracy-report — measure dispatcher routing reliability.
 
 Reads decisions.log and pairs each raw_inbound entry with its corresponding
-dispatcher_routed entry (or unknown_sender_declined for declined senders).
+dispatcher-equivalent routing decision: dispatcher_routed, cf-router proposal
+selection intercepts, or unknown_sender_declined for declined senders.
 Unpaired raw_inbound entries mean Kimi pattern-matched message content and
 skipped the dispatch_shift_agent SKILL — the exact failure mode the JSONL
 post-mortem surfaced before this script existed.
 
 Pairing rules:
   1. raw_inbound + dispatcher_routed match by message_id (preferred, exact)
-  2. raw_inbound + unknown_sender_declined match by sender_phone or sender_lid
+  2. raw_inbound + cf_router_intercepted(reason=f7_proposal_selection) match
+     by sender identity within PAIR_WINDOW_SECONDS (dispatcher-equivalent
+     cf-router path)
+  3. raw_inbound + unknown_sender_declined match by sender_phone or sender_lid
      within PAIR_WINDOW_SECONDS (fallback, fuzzy — declines may not carry
      message_id)
 
@@ -41,6 +45,36 @@ PAIR_WINDOW_SECONDS = 10
 def _parse_ts(s: str) -> datetime:
     """ISO-8601 with timezone. decisions.log entries always carry tz."""
     return datetime.fromisoformat(s)
+
+
+def _chat_id_prefix(value: Any) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    return value.split("@", 1)[0]
+
+
+def _normalize_phone_like(value: Any) -> str | None:
+    prefix = _chat_id_prefix(value)
+    if not prefix:
+        return None
+    return prefix.lstrip("+")
+
+
+def _identity_matches(inbound: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    inbound_lid = inbound.get("sender_lid")
+    candidate_lids = {candidate.get("sender_lid"), candidate.get("chat_id")}
+    if inbound_lid and inbound_lid in candidate_lids:
+        return True
+
+    inbound_phone = _normalize_phone_like(inbound.get("sender_phone"))
+    if not inbound_phone:
+        return False
+
+    candidate_phones = {
+        _normalize_phone_like(candidate.get("sender_phone")),
+        _normalize_phone_like(candidate.get("chat_id")),
+    }
+    return inbound_phone in (candidate_phones - {None})
 
 
 def load_entries(
@@ -82,10 +116,15 @@ def pair_inbounds(
     """Group entries by type and match each raw_inbound to its routing decision.
 
     Returns (paired, unpaired). Each paired tuple is (inbound, match, kind)
-    where kind is 'dispatcher_routed' or 'unknown_sender_declined'.
+    where kind is 'dispatcher_routed', 'cf_router_intercepted', or
+    'unknown_sender_declined'.
     """
     inbounds = [e for e in entries if e.get("type") == "raw_inbound"]
     routed = [e for e in entries if e.get("type") == "dispatcher_routed"]
+    cf_proposal_selection = [
+        e for e in entries
+        if e.get("type") == "cf_router_intercepted" and e.get("reason") == "f7_proposal_selection"
+    ]
     declined = [e for e in entries if e.get("type") == "unknown_sender_declined"]
 
     routed_by_mid = {e.get("message_id"): e for e in routed if e.get("message_id")}
@@ -106,19 +145,24 @@ def pair_inbounds(
             unpaired.append(inb)
             continue
 
-        decline_match = None
-        for d in declined:
-            try:
-                d_ts = _parse_ts(d.get("ts", ""))
-            except (ValueError, TypeError):
-                continue
-            if abs((d_ts - inb_ts).total_seconds()) > pair_window_seconds:
-                continue
-            phone_match = d.get("sender_phone") and d.get("sender_phone") == inb.get("sender_phone")
-            lid_match = d.get("sender_lid") and d.get("sender_lid") == inb.get("sender_lid")
-            if phone_match or lid_match:
-                decline_match = d
-                break
+        def find_fuzzy_identity_match(candidates: list[dict]) -> dict | None:
+            for candidate in candidates:
+                try:
+                    candidate_ts = _parse_ts(candidate.get("ts", ""))
+                except (ValueError, TypeError):
+                    continue
+                if abs((candidate_ts - inb_ts).total_seconds()) > pair_window_seconds:
+                    continue
+                if _identity_matches(inb, candidate):
+                    return candidate
+            return None
+
+        cf_match = find_fuzzy_identity_match(cf_proposal_selection)
+        if cf_match:
+            paired.append((inb, cf_match, "cf_router_intercepted"))
+            continue
+
+        decline_match = find_fuzzy_identity_match(declined)
 
         if decline_match:
             paired.append((inb, decline_match, "unknown_sender_declined"))
@@ -156,14 +200,17 @@ def format_text_report(
     role_counts: dict[str, int] = defaultdict(int)
     skill_counts: dict[str, int] = defaultdict(int)
     declined_count = 0
+    cf_proposal_selection_count = 0
 
     for _inb, match, kind in paired:
         if kind == "dispatcher_routed":
             shape_counts[match.get("message_shape", "?")] += 1
             role_counts[match.get("sender_role", "?")] += 1
             skill_counts[match.get("routed_to_skill", "?")] += 1
-        else:
+        elif kind == "unknown_sender_declined":
             declined_count += 1
+        elif kind == "cf_router_intercepted":
+            cf_proposal_selection_count += 1
 
     if shape_counts:
         lines.append("Routed by message_shape:")
@@ -185,6 +232,10 @@ def format_text_report(
 
     if declined_count:
         lines.append(f"Declined unknown senders: {declined_count}")
+        lines.append("")
+
+    if cf_proposal_selection_count:
+        lines.append(f"CF router proposal selections: {cf_proposal_selection_count}")
         lines.append("")
 
     if unpaired:
@@ -212,13 +263,16 @@ def format_json_report(
     role_counts: dict[str, int] = defaultdict(int)
     skill_counts: dict[str, int] = defaultdict(int)
     declined_count = 0
+    cf_proposal_selection_count = 0
     for _inb, match, kind in paired:
         if kind == "dispatcher_routed":
             shape_counts[match.get("message_shape", "?")] += 1
             role_counts[match.get("sender_role", "?")] += 1
             skill_counts[match.get("routed_to_skill", "?")] += 1
-        else:
+        elif kind == "unknown_sender_declined":
             declined_count += 1
+        elif kind == "cf_router_intercepted":
+            cf_proposal_selection_count += 1
 
     return json.dumps(
         {
@@ -227,6 +281,7 @@ def format_json_report(
             "paired_count": len(paired),
             "unpaired_count": len(unpaired),
             "declined_count": declined_count,
+            "cf_router_proposal_selection_count": cf_proposal_selection_count,
             "coverage_pct": _coverage_pct(len(paired), total),
             "by_message_shape": dict(shape_counts),
             "by_sender_role": dict(role_counts),

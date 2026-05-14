@@ -798,6 +798,63 @@ class CateringLeadStore(BaseModel):
     leads: list[CateringLead] = Field(default_factory=list)
 
 
+CateringProposalStatus = Literal[
+    "DRAFT", "SENT", "SEND_FAILED", "SUPERSEDED",
+    "SELECTING", "SELECTED", "SELECTED_OWNER_CARD_FAILED", "SELECT_FAILED",
+]
+
+CateringProposalTier = Literal["classic", "balanced", "premium"]
+
+
+class CateringProposalOption(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    option_id: str = Field(pattern=r"^[1-3]$")
+    style_key: str = Field(min_length=1, max_length=80)
+    tier: CateringProposalTier
+    item_names: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(
+        min_length=1, max_length=20
+    )
+
+
+class CateringProposalSet(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    proposal_set_id: str = Field(pattern=r"^CPS-L[0-9]{4,}-[0-9]{6}$")
+    lead_id: str = Field(pattern=r"^L[0-9]{4,}$")
+    status: CateringProposalStatus
+    created_at: datetime
+    sent_at: Optional[datetime] = None
+    outbound_message_id: str = ""
+    source_message_id: str = Field(min_length=1, max_length=200)
+    request_text: str = Field(default="", max_length=1000)
+    options: list[CateringProposalOption] = Field(min_length=2, max_length=3)
+    selected_option_id: Optional[str] = Field(default=None, pattern=r"^[1-3]$")
+    failure_reason: str = Field(default="", max_length=200)
+
+    @model_validator(mode="after")
+    def _validate_proposal_set(self) -> "CateringProposalSet":
+        option_ids = [option.option_id for option in self.options]
+        option_id_set = set(option_ids)
+        if len(option_ids) != len(option_id_set):
+            raise ValueError("proposal set option_id values must be unique")
+        if (
+            self.selected_option_id is not None
+            and self.selected_option_id not in option_id_set
+        ):
+            raise ValueError("selected_option_id must reference an existing option")
+        if self.status == "SENT" and not self.outbound_message_id.strip():
+            raise ValueError("SENT proposal set requires outbound_message_id")
+        if self.status == "SENT" and self.sent_at is None:
+            raise ValueError("SENT proposal set requires sent_at")
+        return self
+
+
+class CateringProposalStore(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    schema_version: int = Field(default=1, ge=1)
+    next_sequence: int = Field(default=1, ge=1)
+    sets: list[CateringProposalSet] = Field(default_factory=list)
+
+
 # Catering menu (Agent #2 v0.2 — photo-upload menu management)
 DietaryTag = Literal[
     "veg", "non-veg", "vegan", "jain", "halal", "kosher",
@@ -2128,6 +2185,46 @@ class CateringQuoteSent(_BaseEntry):
     outbound_message_id: str = Field(min_length=1)
 
 
+class CateringProposalsGenerated(_BaseEntry):
+    type: Literal["catering_proposals_generated"]
+    lead_id: str = Field(min_length=1)
+    proposal_set_id: str = Field(min_length=1)
+    option_count: int = Field(ge=2, le=3)
+    outbound_message_id: str = Field(min_length=1)
+
+
+class CateringProposalGenerationFailed(_BaseEntry):
+    type: Literal["catering_proposal_generation_failed"]
+    lead_id: str = Field(min_length=1)
+    proposal_set_id: str = ""
+    reason: Literal[
+        "unknown_menu_item", "forbidden_customer_text", "bridge_unreachable",
+        "lead_not_found", "menu_missing", "invalid_options",
+    ]
+    detail: str = Field(default="", max_length=2000)
+
+
+class CateringProposalSelected(_BaseEntry):
+    type: Literal["catering_proposal_selected"]
+    lead_id: str = Field(min_length=1)
+    proposal_set_id: str = Field(min_length=1)
+    option_id: str = Field(pattern=r"^[1-3]$")
+    customer_message_id: str = Field(min_length=1, max_length=200)
+    finalize_exit_code: int = Field(ge=0)
+
+
+class CateringProposalSelectionFailed(_BaseEntry):
+    type: Literal["catering_proposal_selection_failed"]
+    lead_id: str = Field(min_length=1)
+    proposal_set_id: str = ""
+    reason: Literal[
+        "no_sent_proposal", "ambiguous_selection", "invalid_selection",
+        "lead_not_found", "finalize_exit_2", "finalize_exit_4",
+        "finalize_exit_11", "finalize_exit_other",
+    ]
+    detail: str = Field(default="", max_length=2000)
+
+
 # v0.3 NEW audit classes — idempotency anchors + state-transition coverage
 
 class CateringQuoteAttempted(_BaseEntry):
@@ -2502,6 +2599,7 @@ class CfRouterIntercepted(_BaseEntry):
         "f9_sick_call_alert",
         "f7_primary_new_inquiry",          # PR-CF1d 2026-05-12
         "f7_primary_followup_suppressed",  # PR-CF1d 2026-05-12
+        "f7_proposal_selection",
         "error",
     ]
     chat_id: str = Field(min_length=1, max_length=200)
@@ -2833,6 +2931,10 @@ LogEntry = Annotated[
         Annotated[CateringOwnerApprovalRequested, Tag("catering_owner_approval_requested")],
         Annotated[CateringOwnerDecision, Tag("catering_owner_decision")],
         Annotated[CateringQuoteSent, Tag("catering_quote_sent")],
+        Annotated[CateringProposalsGenerated, Tag("catering_proposals_generated")],
+        Annotated[CateringProposalGenerationFailed, Tag("catering_proposal_generation_failed")],
+        Annotated[CateringProposalSelected, Tag("catering_proposal_selected")],
+        Annotated[CateringProposalSelectionFailed, Tag("catering_proposal_selection_failed")],
         # v0.3: idempotency anchors + state-transition coverage
         Annotated[CateringQuoteAttempted, Tag("catering_quote_attempted")],
         Annotated[CateringOwnerApprovalCardAttempted, Tag("catering_owner_approval_card_attempted")],
@@ -2932,6 +3034,8 @@ __all__ = [
     "LocationEntry", "MultiLocationConfig",
     "CateringConfig", "CateringLeadStatus", "CateringLeadExtractedFields",
     "CateringLead", "CateringLeadStore",
+    "CateringProposalStatus", "CateringProposalTier",
+    "CateringProposalOption", "CateringProposalSet", "CateringProposalStore",
     "is_catering_terminal", "CATERING_TERMINAL_STATUSES",
     # v0.3 status-machine + helpers
     "CATERING_TRANSITIONS", "is_catering_transition_allowed",
@@ -2985,6 +3089,8 @@ __all__ = [
     "EquipmentMaintenanceDeclined",
     "CateringLeadCreated", "CateringLeadStatusChange", "CateringLeadRejected", "CateringQuoteDrafted",
     "CateringOwnerApprovalRequested", "CateringOwnerDecision", "CateringQuoteSent",
+    "CateringProposalsGenerated", "CateringProposalGenerationFailed",
+    "CateringProposalSelected", "CateringProposalSelectionFailed",
     # v0.3 catering audit classes
     "CateringQuoteAttempted", "CateringOwnerApprovalCardAttempted",
     "CateringOwnerApprovalCardFailed", "CateringOwnerApprovalCardSkipped",

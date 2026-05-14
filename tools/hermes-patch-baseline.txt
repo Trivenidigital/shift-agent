@@ -13,12 +13,11 @@
 #
 # Fields are shell-sourceable (KEY=VALUE, no spaces).
 #
-# 2026-05-03 re-baseline: bumped to Hermes 0.12.0 / c5b4c481 (verified clean
-# on srilu-vps after applying patch-hermes.py). The chatter-filter that
-# patch-bridge-filter.py used to extend was removed in 0.12.0, so the
-# template-bypass marker check is conditionally skipped for Hermes >= 0.12.0
-# (see check-shift-agent-patch.sh). bridge.js sha256 reflects sender-id
-# patches only (no template-bypass).
-HERMES_COMMIT=c5b4c481656634ff919b214a037b830077d3bbd1
-HERMES_VERSION=0.12.0
-BRIDGE_POST_PATCH_SHA256=13df08fbd2bb7cd282a87528318f0c60d15bf4260f45fcbe0dcf726d1ba757a6
+# 2026-05-14 re-baseline: live Hermes had advanced to 486b692d during the
+# catering autonomous-proposals deploy. Verified patch-hermes.py against a
+# copied tree, applied sender-id markers live, and captured the post-patch
+# bridge.js sha256 below. Hermes' module version currently reports unknown;
+# commit hash remains the authoritative pin.
+HERMES_COMMIT=486b692ddd801f8f665d3fff023149fb1cb6509e
+HERMES_VERSION=unknown
+BRIDGE_POST_PATCH_SHA256=a223b5e432aaac4b4ee764577acf98baaf8c87b35505c530d9c48210cb609d24

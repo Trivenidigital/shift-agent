@@ -21,6 +21,7 @@ from typing import Optional
 # Deployed-system paths (mutable for tests)
 CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
 LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
+PROPOSALS_PATH = Path("/opt/shift-agent/state/catering-proposals.json")
 MENU_PENDING_PATH = Path("/opt/shift-agent/state/catering-menu-pending.json")
 ROSTER_PATH = Path("/opt/shift-agent/roster.json")
 LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
@@ -30,6 +31,7 @@ APPLY_OWNER_DECISION_BIN = Path("/usr/local/bin/apply-catering-owner-decision")
 APPLY_MENU_UPDATE_BIN = Path("/usr/local/bin/apply-menu-update")
 NOTIFY_OWNER_BIN = Path("/usr/local/bin/shift-agent-notify-owner")
 CREATE_LEAD_BIN = Path("/usr/local/bin/create-catering-lead")  # F7 path
+SELECT_CATERING_PROPOSAL_BIN = Path("/usr/local/bin/select-catering-proposal")
 
 PYTHON_BIN = Path("/usr/local/lib/hermes-agent/venv/bin/python")
 PLATFORM_DIR = Path("/opt/shift-agent")  # Where schemas.py lives
@@ -341,6 +343,29 @@ def invoke_apply_menu_update(code: str, decision: str) -> int:
         return 1
 
 
+def invoke_select_catering_proposal(lead_id: str, chat_id: str, message_id: str,
+                                    text: str) -> int:
+    """Invoke select-catering-proposal; returns exit code."""
+    try:
+        result = subprocess.run(
+            [
+                str(PYTHON_BIN),
+                str(SELECT_CATERING_PROPOSAL_BIN),
+                "--lead-id", lead_id,
+                "--customer-jid", chat_id,
+                "--customer-message-id", message_id,
+                "--selection-text", text,
+            ],
+            capture_output=True, text=True,
+            env=os.environ.copy(), timeout=SUBPROCESS_TIMEOUT_SEC,
+        )
+        return result.returncode
+    except subprocess.TimeoutExpired:
+        return 124
+    except Exception:
+        return 1
+
+
 def fire_pushover_alert(title: str, body: str, priority: int = 2) -> None:
     """Fire a Pushover alert via the deployed shift-agent-notify-owner script.
 
@@ -473,6 +498,108 @@ _FOOD_KEYWORDS = re.compile(
 _DELIVERY_KEYWORDS = re.compile(
     r"\b(?:deliver(?:y|ed)?|pickup|drop[\s-]?off|setup)\b", re.IGNORECASE,
 )
+
+_PROPOSAL_REQUEST_VERB = re.compile(
+    r"\b(?:send|share|show|give|create|make|prepare|draft|suggest|propose|"
+    r"build|generate|want|wants|wanted|need|needs|needed|like|likes|"
+    r"request|requests)\b",
+    re.IGNORECASE,
+)
+_PROPOSAL_REQUEST_OBJECT = re.compile(
+    r"\b(?:proposal menus?|menu proposals?|proposal|proposals|"
+    r"menu options?|options?)\b",
+    re.IGNORECASE,
+)
+_PROPOSAL_PASSIVE_WAIT = re.compile(
+    r"\b(?:will\s+wait|waiting|wait\s+for|want\s+to\s+wait|"
+    r"no\s+need\s+to\s+send|not\s+yet)\b|^\s*any\s+update\??\s*$",
+    re.IGNORECASE,
+)
+_PROPOSAL_ACTION_VERB = r"(?:choose|chose|select|selected|pick|picked|take|taking|use|go\s+with|proceed\s+with|confirm|finalize)"
+_PROPOSAL_SELECTION_NUMBERED = re.compile(
+    rf"\b{_PROPOSAL_ACTION_VERB}\b.{{0,40}}\b(?:(?:option|proposal|menu)\s*)?#?\s*[1-3]\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_PROPOSAL_SELECTION_BARE_NUMBERED = re.compile(
+    r"^\s*(?:(?:option|proposal|menu)\s*)?#?\s*[1-3]\s*$",
+    re.IGNORECASE,
+)
+_PROPOSAL_SELECTION_NAMED = re.compile(
+    rf"\b{_PROPOSAL_ACTION_VERB}\b.{{0,40}}\b(?:premium|balanced|classic)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def is_proposal_request(text: str) -> bool:
+    """Return True for actionable proposal/menu-option requests.
+
+    Requires a request verb within 80 characters before a proposal object.
+    Passive status texts such as "will wait for two menu proposals" are not
+    requests when the whole text is passive/status.
+    """
+    normalized = " ".join((text or "").split())
+    if not normalized:
+        return False
+    if _PROPOSAL_PASSIVE_WAIT.search(normalized):
+        return False
+    for obj in _PROPOSAL_REQUEST_OBJECT.finditer(normalized):
+        window = normalized[max(0, obj.start() - 80):obj.start()]
+        if _PROPOSAL_REQUEST_VERB.search(window):
+            return True
+    return False
+
+
+def is_proposal_selection(text: str) -> bool:
+    """Return True for customer selections from a sent proposal set."""
+    normalized = " ".join((text or "").split())
+    if not normalized:
+        return False
+    return bool(
+        _PROPOSAL_SELECTION_NUMBERED.search(normalized)
+        or _PROPOSAL_SELECTION_BARE_NUMBERED.search(normalized)
+        or _PROPOSAL_SELECTION_NAMED.search(normalized)
+    )
+
+
+def find_selectable_proposal_set(lead_id: str) -> Optional[dict]:
+    """Return latest proposal row only when it is selectable."""
+    if not lead_id:
+        return None
+    try:
+        with PROPOSALS_PATH.open(encoding="utf-8") as f:
+            state = json.load(f)
+        sets = state.get("sets", [])
+        if not isinstance(sets, list):
+            return None
+        matches = [
+            row for row in sets
+            if isinstance(row, dict)
+            and row.get("lead_id") == lead_id
+        ]
+        if not matches:
+            return None
+        latest = max(matches, key=lambda row: _proposal_set_sequence(row))
+        if latest.get("status") != "SENT":
+            return None
+        if not str(latest.get("outbound_message_id") or "").strip():
+            return None
+        return latest
+    except Exception:
+        return None
+
+
+_PROPOSAL_SET_SEQUENCE_SUFFIX = re.compile(r"-(\d+)$")
+
+
+def _proposal_set_sequence(row: dict) -> int:
+    proposal_set_id = str(row.get("proposal_set_id") or "")
+    match = _PROPOSAL_SET_SEQUENCE_SUFFIX.search(proposal_set_id)
+    if not match:
+        return -1
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return -1
 
 
 def classify_catering(text: str) -> tuple[bool, list[str]]:
@@ -735,7 +862,7 @@ def f7_rescue_check(text: str, chat_id: str, message_id: str,
     Decision tree:
       1. Did the LLM dispatch correctly? Audit-log scan for dispatcher_routed
          within ts_at_schedule + grace → no rescue needed
-      2. Resolve sender role via identify-sender. Owner/employee → suppressed
+      2. Resolve sender role via identify-sender. Owner → suppressed
       3. Phone resolution required → suppressed if missing
       4. Fire rescue: invoke create-catering-lead, audit fired
 
@@ -749,7 +876,7 @@ def f7_rescue_check(text: str, chat_id: str, message_id: str,
 
         # 2. Sender role check
         phone, role = lid_to_phone_via_identify_sender(chat_id)
-        if role in {"owner", "employee"}:
+        if role == "owner":
             audit_dispatcher_watchdog_suppressed(
                 chat_id=chat_id, message_id=message_id,
                 reason="non_customer_role", detail=f"role={role}",

@@ -1,0 +1,384 @@
+#!/usr/bin/env python3
+"""create-catering-proposal-options - deterministic catering proposal sender."""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
+
+from pydantic import TypeAdapter, ValidationError  # noqa: E402
+
+from exit_codes import EXIT_DEPENDENCY_DOWN, EXIT_INVALID_INPUT, EXIT_NOT_FOUND, EXIT_OK  # noqa: E402
+from safe_io import (  # noqa: E402
+    FileLock,
+    assert_load_status_clean,
+    atomic_write_json,
+    load_model,
+    ndjson_append,
+)
+from schemas import (  # noqa: E402
+    CateringLeadStore,
+    CateringProposalGenerationFailed,
+    CateringProposalOption,
+    CateringProposalSet,
+    CateringProposalStore,
+    CateringProposalsGenerated,
+    Menu,
+    MenuItem,
+)
+
+PROPOSALS_PATH = Path("/opt/shift-agent/state/catering-proposals.json")
+PROPOSALS_LOCK = Path("/opt/shift-agent/state/catering-proposals.json.lock")
+LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
+LEADS_LOCK = Path("/opt/shift-agent/state/catering-leads.json.lock")
+MENU_PATH = Path("/opt/shift-agent/state/catering-menu.json")
+LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+LOG_LOCK = Path("/opt/shift-agent/logs/decisions.log.lock")
+NOTIFY_OWNER_BIN = Path("/usr/local/bin/shift-agent-notify-owner")
+BRIDGE_URL = "http://127.0.0.1:3000/send"
+BRIDGE_TIMEOUT = 10
+BRIDGE_PREFIX = "\u2695 *Catering Agent*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+NO_PRICE_RE = re.compile(r"""
+    \$\s*\d+
+  | \b\d+(?:\.\d{1,2})?\s*(?:usd|dollars?|bucks)\b
+  | \b\d+(?:\.\d{1,2})?\s*(?:/|per\s+)(?:person|plate|guest|head|pax)\b
+  | \b(?:price|priced|pricing|cost|costs|rate|rates|fee|fees|charge|charges)\b
+  | \b(?:deposit|payment|pay|paid|venmo|zelle|cash\s*app|cashapp|credit\s*card|invoice)\b
+  | \b(?:book|booking|booked|confirmed|confirmation)\b
+""", re.IGNORECASE | re.VERBOSE)
+
+OPTION_TITLES = {
+    "balanced_mixed": "Option {n}: Balanced Veg and Non-Veg Menu",
+    "premium_mixed": "Option {n}: Premium Celebration Menu",
+    "classic_family": "Option {n}: Classic Family Favorites",
+}
+CATEGORY_ORDER = [
+    "package",
+    "appetizer",
+    "soup",
+    "salad",
+    "main",
+    "side",
+    "dessert",
+    "beverage",
+    "special",
+]
+
+
+def _now() -> datetime:
+    return datetime.now(tz=timezone.utc)
+
+
+def _allowed_option_count(request_text: str) -> int:
+    return 3 if re.search(r"\b(three|3)\b", request_text, re.I) else 2
+
+
+def _assert_no_forbidden_customer_text(text: str) -> None:
+    match = NO_PRICE_RE.search(text)
+    if match:
+        raise ValueError(f"forbidden customer text matched: {match.group(0)!r}")
+
+
+def _read_options(options_json: str) -> list[CateringProposalOption]:
+    if options_json == "-":
+        options_json = sys.stdin.read()
+    try:
+        raw = json.loads(options_json)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"options-json not valid JSON: {e}") from e
+    if not isinstance(raw, list):
+        raise ValueError("options-json must be a list")
+    try:
+        return [CateringProposalOption.model_validate(item) for item in raw]
+    except ValidationError as e:
+        raise ValueError(f"options validation failed: {e}") from e
+
+
+def _load_lead(lead_id: str):
+    with FileLock(LEADS_LOCK):
+        store, status = load_model(LEADS_PATH, CateringLeadStore, default=CateringLeadStore())
+        assert_load_status_clean(LEADS_PATH, status, context="proposal-options lead load")
+        return next((lead for lead in store.leads if lead.lead_id == lead_id), None)
+
+
+def _load_menu_items() -> dict[str, MenuItem]:
+    menu, status = load_model(MENU_PATH, Menu)
+    assert_load_status_clean(MENU_PATH, status, context="proposal-options menu load")
+    return {item.name: item for item in menu.items if item.available}
+
+
+def _render_option(option: CateringProposalOption, menu_items: dict[str, MenuItem], n: int) -> str:
+    by_category: dict[str, list[str]] = {}
+    for name in option.item_names:
+        item = menu_items.get(name)
+        if item is None:
+            raise KeyError(name)
+        by_category.setdefault(item.category, []).append(item.name)
+
+    title_template = OPTION_TITLES.get(option.style_key, "Option {n}: Catering Menu Option")
+    lines = [f"*{title_template.format(n=n)}*"]
+    for category in CATEGORY_ORDER:
+        names = by_category.get(category)
+        if not names:
+            continue
+        label = category.replace("_", " ").title()
+        lines.append(f"{label}:")
+        lines.extend(f"- {name}" for name in names)
+    return "\n".join(lines)
+
+
+def _render_body(options: list[CateringProposalOption], menu_items: dict[str, MenuItem]) -> str:
+    rendered = [_render_option(option, menu_items, i) for i, option in enumerate(options, start=1)]
+    body = BRIDGE_PREFIX + "\n\n".join(rendered)
+    _assert_no_forbidden_customer_text(body)
+    return body
+
+
+def _bridge_post(jid: str, message: str) -> tuple[bool, str]:
+    payload = json.dumps({"chatId": jid, "message": message}).encode("utf-8")
+    req = urllib.request.Request(
+        BRIDGE_URL,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=BRIDGE_TIMEOUT) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            doc = json.loads(body)
+            message_id = doc.get("id") or doc.get("messageId") or ""
+            if not message_id:
+                return False, f"empty message id: {body[:200]}"
+            return True, message_id
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError) as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+def _append_audit(entry) -> None:
+    adapter = TypeAdapter(type(entry))
+    with FileLock(LOG_LOCK):
+        ndjson_append(LOG_PATH, adapter.dump_json(entry).decode("utf-8"))
+
+
+def _audit_failure(lead_id: str, reason: str, detail: str = "", proposal_set_id: str = "") -> None:
+    _append_audit(
+        CateringProposalGenerationFailed(
+            type="catering_proposal_generation_failed",
+            ts=_now(),
+            lead_id=lead_id,
+            proposal_set_id=proposal_set_id,
+            reason=reason,
+            detail=detail[:2000],
+        )
+    )
+
+
+def _notify_owner_generation_failed(
+    lead_id: str,
+    reason: str,
+    detail: str = "",
+    proposal_set_id: str = "",
+) -> None:
+    message = (
+        f"lead_id={lead_id} proposal_set_id={proposal_set_id or '(none)'} "
+        f"proposal generation failed: {reason}. {detail[:500]}"
+    )
+    try:
+        subprocess.run(
+            [
+                str(NOTIFY_OWNER_BIN),
+                "--priority",
+                "2",
+                "--title",
+                "Catering proposal generation failed",
+                message,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception as e:  # noqa: BLE001 - alerting is best-effort
+        sys.stderr.write(f"WARN: shift-agent-notify-owner failed (non-fatal): {type(e).__name__}: {e}\n")
+
+
+def _fail_generation(
+    lead_id: str,
+    reason: str,
+    detail: str = "",
+    proposal_set_id: str = "",
+) -> None:
+    _audit_failure(lead_id, reason, detail, proposal_set_id)
+    _notify_owner_generation_failed(lead_id, reason, detail, proposal_set_id)
+
+
+def _create_draft(
+    *,
+    lead_id: str,
+    source_message_id: str,
+    request_text: str,
+    options: list[CateringProposalOption],
+) -> str:
+    with FileLock(PROPOSALS_LOCK):
+        store, status = load_model(
+            PROPOSALS_PATH,
+            CateringProposalStore,
+            default=CateringProposalStore(),
+        )
+        assert_load_status_clean(PROPOSALS_PATH, status, context="proposal-options draft load")
+        proposal_set_id = f"CPS-{lead_id}-{store.next_sequence:06d}"
+        store.next_sequence += 1
+        store.sets.append(
+            CateringProposalSet(
+                proposal_set_id=proposal_set_id,
+                lead_id=lead_id,
+                status="DRAFT",
+                created_at=_now(),
+                source_message_id=source_message_id,
+                request_text=request_text[:1000],
+                options=options,
+            )
+        )
+        atomic_write_json(PROPOSALS_PATH, store)
+        return proposal_set_id
+
+
+def _mark_send_failed(proposal_set_id: str, reason: str) -> None:
+    with FileLock(PROPOSALS_LOCK):
+        store, status = load_model(PROPOSALS_PATH, CateringProposalStore, default=CateringProposalStore())
+        assert_load_status_clean(PROPOSALS_PATH, status, context="proposal-options fail load")
+        target = next(row for row in store.sets if row.proposal_set_id == proposal_set_id)
+        target.status = "SEND_FAILED"
+        target.failure_reason = reason[:200]
+        target.outbound_message_id = ""
+        atomic_write_json(PROPOSALS_PATH, store)
+
+
+def _proposal_sequence(proposal_set_id: str) -> int:
+    match = re.search(r"-(\d{6})$", proposal_set_id)
+    return int(match.group(1)) if match else -1
+
+
+def _mark_sent_and_supersede(lead_id: str, proposal_set_id: str, outbound_message_id: str) -> None:
+    sent_at = _now()
+    with FileLock(PROPOSALS_LOCK):
+        store, status = load_model(PROPOSALS_PATH, CateringProposalStore, default=CateringProposalStore())
+        assert_load_status_clean(PROPOSALS_PATH, status, context="proposal-options sent load")
+        target = next(row for row in store.sets if row.proposal_set_id == proposal_set_id)
+        target_sequence = _proposal_sequence(target.proposal_set_id)
+        has_later_sent = any(
+            row.lead_id == lead_id
+            and row.status == "SENT"
+            and _proposal_sequence(row.proposal_set_id) > target_sequence
+            for row in store.sets
+        )
+        for row in store.sets:
+            if (
+                row.lead_id == lead_id
+                and row.status == "SENT"
+                and row.proposal_set_id != proposal_set_id
+                and _proposal_sequence(row.proposal_set_id) < target_sequence
+            ):
+                row.status = "SUPERSEDED"
+        target.status = "SUPERSEDED" if has_later_sent else "SENT"
+        target.sent_at = sent_at
+        target.outbound_message_id = outbound_message_id
+        target.failure_reason = ""
+        atomic_write_json(PROPOSALS_PATH, store)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--lead-id", required=True)
+    parser.add_argument("--customer-jid", required=True)
+    parser.add_argument("--source-message-id", required=True)
+    parser.add_argument("--request-text", required=True)
+    parser.add_argument("--options-json", required=True)
+    args = parser.parse_args()
+
+    try:
+        lead = _load_lead(args.lead_id)
+    except Exception as e:
+        sys.stderr.write(f"lead load failed: {e}\n")
+        return EXIT_NOT_FOUND
+    if lead is None:
+        _fail_generation(args.lead_id, "lead_not_found", "lead not found")
+        sys.stderr.write(f"lead {args.lead_id} not found\n")
+        return EXIT_NOT_FOUND
+
+    try:
+        menu_items = _load_menu_items()
+    except Exception as e:
+        _fail_generation(args.lead_id, "menu_missing", str(e))
+        sys.stderr.write(f"menu load failed: {e}\n")
+        return EXIT_NOT_FOUND
+
+    try:
+        options = _read_options(args.options_json)
+        allowed = _allowed_option_count(args.request_text)
+        if len(options) != allowed:
+            raise ValueError(f"{len(options)} options supplied; expected exactly {allowed}")
+        body = _render_body(options, menu_items)
+    except KeyError as e:
+        _fail_generation(args.lead_id, "unknown_menu_item", str(e))
+        sys.stderr.write(f"unknown menu item: {e}\n")
+        return EXIT_INVALID_INPUT
+    except ValueError as e:
+        reason = "forbidden_customer_text" if "forbidden customer text" in str(e) else "invalid_options"
+        _fail_generation(args.lead_id, reason, str(e))
+        sys.stderr.write(f"{reason}: {e}\n")
+        return EXIT_INVALID_INPUT
+
+    try:
+        proposal_set_id = _create_draft(
+            lead_id=args.lead_id,
+            source_message_id=args.source_message_id,
+            request_text=args.request_text,
+            options=options,
+        )
+    except ValueError as e:
+        _fail_generation(args.lead_id, "invalid_options", str(e))
+        sys.stderr.write(f"invalid_options: {e}\n")
+        return EXIT_INVALID_INPUT
+
+    ok, message_id_or_error = _bridge_post(args.customer_jid, body)
+    if not ok:
+        _mark_send_failed(proposal_set_id, message_id_or_error)
+        _fail_generation(args.lead_id, "bridge_unreachable", message_id_or_error, proposal_set_id)
+        print(json.dumps({"proposal_set_id": proposal_set_id, "sent": False}))
+        return EXIT_DEPENDENCY_DOWN
+
+    _mark_sent_and_supersede(args.lead_id, proposal_set_id, message_id_or_error)
+    _append_audit(
+        CateringProposalsGenerated(
+            type="catering_proposals_generated",
+            ts=_now(),
+            lead_id=args.lead_id,
+            proposal_set_id=proposal_set_id,
+            option_count=len(options),
+            outbound_message_id=message_id_or_error,
+        )
+    )
+    print(
+        json.dumps(
+            {
+                "proposal_set_id": proposal_set_id,
+                "sent": True,
+                "outbound_message_id": message_id_or_error,
+            }
+        )
+    )
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -232,6 +232,13 @@ DEFAULT_MENU = [
 ]
 
 
+def test_owner_card_labels_total_as_internal_estimate():
+    template = (TEMPLATES_DIR / "catering_finalized_menu_to_owner.txt").read_text(encoding="utf-8")
+    assert "Internal estimate from current menu item prices" in template
+    script_text = SCRIPT.read_text(encoding="utf-8")
+    assert "Internal estimate from current menu item prices" in script_text
+
+
 # ============================================================================
 # Happy paths
 # ============================================================================

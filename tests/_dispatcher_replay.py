@@ -64,7 +64,7 @@ NO_HANDLER_FOUND = "<no-handler-found>"
 #   2. Update fixtures + mock to reflect any new priority rules
 #   3. Update SKILL_MD_KNOWN_SHA256 below to the new hash
 #   4. Document the change in the commit message
-SKILL_MD_KNOWN_SHA256 = "2f01b2e948cc8731bb4aaedc759301424cd42e0f8072d85af536fd34b6cdc5e8"
+SKILL_MD_KNOWN_SHA256 = "63b25556b5f8458e214cc7a54f82ff08ed133f031a29200bd653342c709ed5dd"
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -396,6 +396,92 @@ def mock_llm_priority_order(skill_md: str, input_payload: dict) -> tuple[str, st
     )
     if config.get("catering.enabled") and any(kw in body_lower for kw in catering_keywords):
         return ("→ catering_dispatcher", "catering_dispatcher")
+
+    # PR-CF1 / PR-CF2 addendum: non-owner senders with an active catering
+    # lead route finalize intent and proposal request/selection follow-ups
+    # to the catering sub-dispatcher. Bare proposal words are intentionally
+    # not part of the global catering keyword row.
+    def _has_active_lead_for_sender() -> bool:
+        phone = identity.get("phone_normalized") or sender_block.get("phone")
+        chat_id = sender_block.get("chat_id")
+        lid_digits = None
+        if isinstance(chat_id, str) and chat_id.endswith("@lid"):
+            maybe_digits = chat_id[:-len("@lid")]
+            if maybe_digits.isdigit():
+                lid_digits = maybe_digits
+        actionable = {
+            "AWAITING_OWNER_APPROVAL", "CUSTOMER_FINALIZED",
+            "OWNER_EDITED", "OWNER_APPROVED",
+        }
+        for lead in state.get("catering-leads.json", []):
+            if lead.get("status") not in actionable:
+                continue
+            if phone and lead.get("customer_phone") == phone:
+                return True
+            if chat_id and lead.get("customer_lid") == chat_id:
+                return True
+            if lid_digits and lead.get("customer_phone") == f"+{lid_digits}":
+                return True
+        return False
+
+    finalize_terms = (
+        "finalize", "send to owner", "confirm the menu", "confirm this menu",
+        "lock it in", "proceed with this menu", "submit for approval",
+        "ready to book",
+    )
+    proposal_passive_wait = re.compile(
+        r"\b(?:will\s+wait|waiting|wait\s+for|want\s+to\s+wait|"
+        r"no\s+need\s+to\s+send|not\s+yet)\b|^\s*any\s+update\??\s*$",
+        re.IGNORECASE,
+    )
+    proposal_request_verb = re.compile(
+        r"\b(?:send|share|show|give|create|make|prepare|draft|suggest|propose|"
+        r"build|generate|want|wants|wanted|need|needs|needed|like|likes|"
+        r"request|requests)\b",
+        re.IGNORECASE,
+    )
+    proposal_request_object = re.compile(
+        r"\b(?:proposal menus?|menu proposals?|proposal|proposals|"
+        r"menu options?|options?)\b",
+        re.IGNORECASE,
+    )
+    proposal_action_verb = (
+        r"(?:choose|chose|select|selected|pick|picked|take|taking|use|"
+        r"go\s+with|proceed\s+with|confirm|finalize)"
+    )
+    proposal_selection_numbered = re.compile(
+        rf"\b{proposal_action_verb}\b.{{0,40}}\b(?:(?:option|proposal|menu)\s*)?#?\s*[1-3]\b",
+        re.IGNORECASE | re.DOTALL,
+    )
+    proposal_selection_bare_numbered = re.compile(
+        r"^\s*(?:(?:option|proposal|menu)\s*)?#?\s*[1-3]\s*$",
+        re.IGNORECASE,
+    )
+    proposal_selection_named = re.compile(
+        rf"\b{proposal_action_verb}\b.{{0,40}}\b(?:premium|balanced|classic)\b",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    normalized_body = " ".join(body.split())
+    proposal_request = False
+    if normalized_body and not proposal_passive_wait.search(normalized_body):
+        for obj in proposal_request_object.finditer(normalized_body):
+            window = normalized_body[max(0, obj.start() - 80):obj.start()]
+            if proposal_request_verb.search(window):
+                proposal_request = True
+                break
+    proposal_selection = bool(
+        proposal_selection_numbered.search(normalized_body)
+        or proposal_selection_bare_numbered.search(normalized_body)
+        or proposal_selection_named.search(normalized_body)
+    )
+    customer_finalize_intent = any(term in body_lower for term in finalize_terms)
+    if (
+        role != "owner"
+        and _has_active_lead_for_sender()
+        and (customer_finalize_intent or proposal_request or proposal_selection)
+    ):
+        return ("active lead follow-up -> catering_dispatcher", "catering_dispatcher")
 
     # Priority 10: compliance regex + owner + enabled.
     if role == "owner" and config.get("compliance.enabled"):

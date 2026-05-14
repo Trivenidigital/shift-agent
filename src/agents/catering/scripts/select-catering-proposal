@@ -1,0 +1,590 @@
+#!/usr/bin/env python3
+"""select-catering-proposal - customer option selection for catering proposals."""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
+
+from pydantic import TypeAdapter  # noqa: E402
+
+from exit_codes import EXIT_DEPENDENCY_DOWN, EXIT_INVALID_INPUT, EXIT_NOT_FOUND, EXIT_OK  # noqa: E402
+from safe_io import FileLock, assert_load_status_clean, atomic_write_json, load_model, ndjson_append  # noqa: E402
+from schemas import (  # noqa: E402
+    CateringLeadStore,
+    CateringProposalOption,
+    CateringProposalSelected,
+    CateringProposalSelectionFailed,
+    CateringProposalSet,
+    CateringProposalStore,
+    CateringSelectedItem,
+    Menu,
+    MenuItem,
+)
+
+PROPOSALS_PATH = Path("/opt/shift-agent/state/catering-proposals.json")
+PROPOSALS_LOCK = Path("/opt/shift-agent/state/catering-proposals.json.lock")
+LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
+LEADS_LOCK = Path("/opt/shift-agent/state/catering-leads.json.lock")
+MENU_PATH = Path("/opt/shift-agent/state/catering-menu.json")
+LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+LOG_LOCK = Path("/opt/shift-agent/logs/decisions.log.lock")
+FINALIZE_BIN = Path("/usr/local/bin/finalize-catering-menu")
+NOTIFY_OWNER_BIN = Path("/usr/local/bin/shift-agent-notify-owner")
+PYTHON_BIN = Path("/usr/local/lib/hermes-agent/venv/bin/python")
+BRIDGE_URL = "http://127.0.0.1:3000/send"
+BRIDGE_TIMEOUT = 10
+BRIDGE_PREFIX = "\u2695 *Catering Agent*\n------------\n"
+
+OPTION_RE = re.compile(r"(?i)(?:option|proposal|menu)?\s*#?\s*([1-3])\b")
+ACTION_OPTION_RE = re.compile(
+    r"(?i)\b(?:go with|choose|select|take|pick|finalize|confirm|lock in|proceed with|we'?ll take|i'?ll take|she'?ll take)\b.{0,40}\b(?:option|proposal|menu)?\s*#?\s*([1-3])\b"
+)
+TIER_RE = re.compile(r"(?i)\b(premium|balanced|classic)\b")
+
+
+class MenuSelectionError(ValueError):
+    """Raised when proposal items cannot be resolved against the current menu."""
+
+
+@dataclass(frozen=True)
+class SelectionFinalizeResult:
+    proposal_set_id: str
+    option_id: str
+    finalize_exit_code: int
+    options: list[CateringProposalOption]
+
+
+@dataclass(frozen=True)
+class SelectionClaim:
+    proposal_set_id: str
+    option_id: str
+    selected_items: list[dict]
+    quote_total_usd: int
+    options: list[CateringProposalOption]
+
+
+@dataclass(frozen=True)
+class SelectionClaimFailure:
+    proposal_set_id: str
+    reason: str
+    detail: str
+    options: list[CateringProposalOption]
+    exit_code: int
+
+
+def _now() -> datetime:
+    return datetime.now(tz=timezone.utc)
+
+
+def _proposal_sequence(row: CateringProposalSet) -> int:
+    match = re.search(r"-(\d{6})$", row.proposal_set_id)
+    return int(match.group(1)) if match else -1
+
+
+def _append_audit(entry) -> None:
+    adapter = TypeAdapter(type(entry))
+    with FileLock(LOG_LOCK):
+        ndjson_append(LOG_PATH, adapter.dump_json(entry).decode("utf-8"))
+
+
+def _audit_selected(lead_id: str, proposal_set_id: str, option_id: str, customer_message_id: str, rc: int) -> None:
+    _append_audit(
+        CateringProposalSelected(
+            type="catering_proposal_selected",
+            ts=_now(),
+            lead_id=lead_id,
+            proposal_set_id=proposal_set_id,
+            option_id=option_id,
+            customer_message_id=customer_message_id,
+            finalize_exit_code=rc,
+        )
+    )
+
+
+def _audit_failed(lead_id: str, reason: str, detail: str = "", proposal_set_id: str = "") -> None:
+    _append_audit(
+        CateringProposalSelectionFailed(
+            type="catering_proposal_selection_failed",
+            ts=_now(),
+            lead_id=lead_id,
+            proposal_set_id=proposal_set_id,
+            reason=reason,
+            detail=detail[:2000],
+        )
+    )
+
+
+def _bridge_post(jid: str, message: str) -> tuple[bool, str]:
+    payload = json.dumps({"chatId": jid, "message": message}).encode("utf-8")
+    req = urllib.request.Request(
+        BRIDGE_URL,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=BRIDGE_TIMEOUT) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            doc = json.loads(body)
+            message_id = doc.get("id") or doc.get("messageId") or ""
+            if not message_id:
+                return False, f"empty message id: {body[:200]}"
+            return True, message_id
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError) as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+def _resolve_selection(text: str, options: list[CateringProposalOption]) -> tuple[str | None, str]:
+    """Resolve customer text to a proposal option id, or return a failure reason."""
+    action = ACTION_OPTION_RE.search(text or "")
+    if action:
+        wanted = action.group(1)
+        if any(option.option_id == wanted for option in options):
+            return wanted, "option_number"
+        return None, "invalid_selection"
+
+    bare = OPTION_RE.fullmatch((text or "").strip())
+    if bare:
+        wanted = bare.group(1)
+        if any(option.option_id == wanted for option in options):
+            return wanted, "option_number"
+        return None, "invalid_selection"
+
+    tier = TIER_RE.search(text or "")
+    if tier:
+        wanted_tier = tier.group(1).lower()
+        matches = [option for option in options if option.tier == wanted_tier]
+        if len(matches) == 1:
+            return matches[0].option_id, "tier_alias"
+        if len(matches) > 1:
+            return None, "ambiguous_selection"
+        return None, "invalid_selection"
+
+    return None, "invalid_selection"
+
+
+def _latest_proposal_for_lead(lead_id: str) -> CateringProposalSet | None:
+    with FileLock(PROPOSALS_LOCK):
+        store, status = load_model(PROPOSALS_PATH, CateringProposalStore, default=CateringProposalStore())
+        assert_load_status_clean(PROPOSALS_PATH, status, context="proposal-selection load")
+        matches = [row for row in store.sets if row.lead_id == lead_id]
+        if not matches:
+            return None
+        latest = max(matches, key=_proposal_sequence)
+        if latest.status != "SENT" or not latest.outbound_message_id.strip():
+            return None
+        return latest
+
+
+def _load_owner_code(lead_id: str) -> str | None:
+    with FileLock(LEADS_LOCK):
+        store, status = load_model(LEADS_PATH, CateringLeadStore, default=CateringLeadStore())
+        assert_load_status_clean(LEADS_PATH, status, context="proposal-selection lead load")
+        lead = next((row for row in store.leads if row.lead_id == lead_id), None)
+        if lead is None or not (lead.owner_approval_code or "").strip():
+            return None
+        return lead.owner_approval_code
+
+
+def _current_menu_items_by_name() -> dict[str, MenuItem]:
+    try:
+        menu, status = load_model(MENU_PATH, Menu)
+        assert_load_status_clean(MENU_PATH, status, context="proposal-selection menu load")
+    except Exception as e:
+        raise MenuSelectionError(f"menu load failed: {type(e).__name__}: {e}") from e
+    return {item.name: item for item in menu.items}
+
+
+def _selected_items(option: CateringProposalOption) -> tuple[list[dict], int]:
+    menu_items = _current_menu_items_by_name()
+    selected: list[CateringSelectedItem] = []
+    total = 0
+    for name in option.item_names:
+        menu_item = menu_items.get(name)
+        if menu_item is None:
+            raise MenuSelectionError(f"missing menu item: {name}")
+        if not menu_item.available:
+            raise MenuSelectionError(f"unavailable menu item: {name}")
+        if menu_item.price_usd is None:
+            raise MenuSelectionError(f"missing price for menu item: {name}")
+        price = int(round(menu_item.price_usd))
+        item = CateringSelectedItem(name=name, qty=1, price_usd=price)
+        selected.append(item)
+        total += item.qty * item.price_usd
+    return [item.model_dump() for item in selected], total
+
+
+def _clarification_text(options: list[CateringProposalOption]) -> str:
+    lines = [
+        "Please reply with the option number you want:",
+        *[f"Option {option.option_id}: {option.tier.title()}" for option in options],
+    ]
+    return BRIDGE_PREFIX + "\n".join(lines)
+
+
+def _ack_text(option_id: str) -> str:
+    return (
+        BRIDGE_PREFIX
+        + f"Got it - your Option {option_id} selection is saved for owner approval. "
+        "Final pricing comes after owner review."
+    )
+
+
+def _option_list_text(options: list[CateringProposalOption]) -> str:
+    labels = [f"Option {option.option_id}" for option in options]
+    if len(labels) <= 1:
+        return labels[0] if labels else "an available option"
+    if len(labels) == 2:
+        return f"{labels[0]} or {labels[1]}"
+    return f"{', '.join(labels[:-1])}, or {labels[-1]}"
+
+
+def _failed_text(options: list[CateringProposalOption]) -> str:
+    return BRIDGE_PREFIX + f"I could not lock that option in. Please reply with {_option_list_text(options)}."
+
+
+def _no_active_proposal_text() -> str:
+    return (
+        BRIDGE_PREFIX
+        + "I could not find an active proposal to select. Please ask for new menu options."
+    )
+
+
+SUPERSEDING_PROPOSAL_STATUSES = {
+    "DRAFT",
+    "SENT",
+    "SELECTING",
+    "SELECTED",
+    "SELECTED_OWNER_CARD_FAILED",
+    "SELECT_FAILED",
+}
+
+
+def _claim_selection(
+    *,
+    lead_id: str,
+    proposal_set_id: str,
+    option_id: str,
+    customer_message_id: str,
+) -> SelectionClaim | SelectionClaimFailure:
+    with FileLock(PROPOSALS_LOCK):
+        store, load_status = load_model(PROPOSALS_PATH, CateringProposalStore, default=CateringProposalStore())
+        assert_load_status_clean(PROPOSALS_PATH, load_status, context="proposal-selection claim")
+        target = next((row for row in store.sets if row.proposal_set_id == proposal_set_id), None)
+        if target is None:
+            return SelectionClaimFailure(
+                proposal_set_id=proposal_set_id,
+                reason="no_sent_proposal",
+                detail=f"proposal set {proposal_set_id} no longer exists",
+                options=[],
+                exit_code=EXIT_NOT_FOUND,
+            )
+        if target.status != "SENT":
+            return SelectionClaimFailure(
+                proposal_set_id=proposal_set_id,
+                reason="no_sent_proposal",
+                detail=f"proposal set {proposal_set_id} status is {target.status}, not SENT",
+                options=target.options,
+                exit_code=EXIT_NOT_FOUND,
+            )
+        if not target.outbound_message_id.strip():
+            return SelectionClaimFailure(
+                proposal_set_id=proposal_set_id,
+                reason="no_sent_proposal",
+                detail=f"proposal set {proposal_set_id} has no outbound_message_id",
+                options=target.options,
+                exit_code=EXIT_NOT_FOUND,
+            )
+
+        target_sequence = _proposal_sequence(target)
+        superseding = [
+            row
+            for row in store.sets
+            if row.lead_id == lead_id
+            and _proposal_sequence(row) > target_sequence
+            and row.status in SUPERSEDING_PROPOSAL_STATUSES
+        ]
+        if superseding:
+            latest = max(superseding, key=_proposal_sequence)
+            return SelectionClaimFailure(
+                proposal_set_id=proposal_set_id,
+                reason="no_sent_proposal",
+                detail=(
+                    f"proposal set {proposal_set_id} is superseded by "
+                    f"{latest.proposal_set_id} status {latest.status}"
+                ),
+                options=target.options,
+                exit_code=EXIT_NOT_FOUND,
+            )
+
+        selected_option = next((option for option in target.options if option.option_id == option_id), None)
+        if selected_option is None:
+            return SelectionClaimFailure(
+                proposal_set_id=proposal_set_id,
+                reason="invalid_selection",
+                detail=f"option {option_id} is not present on proposal set {proposal_set_id}",
+                options=target.options,
+                exit_code=EXIT_INVALID_INPUT,
+            )
+        try:
+            selected_items, total = _selected_items(selected_option)
+        except MenuSelectionError as e:
+            return SelectionClaimFailure(
+                proposal_set_id=proposal_set_id,
+                reason="invalid_selection",
+                detail=str(e),
+                options=target.options,
+                exit_code=EXIT_INVALID_INPUT,
+            )
+
+        target.status = "SELECTING"
+        target.selected_option_id = option_id
+        target.failure_reason = f"selecting:{customer_message_id}"[:200]
+        atomic_write_json(PROPOSALS_PATH, store)
+        return SelectionClaim(
+            proposal_set_id=proposal_set_id,
+            option_id=option_id,
+            selected_items=selected_items,
+            quote_total_usd=total,
+            options=target.options,
+        )
+
+
+def _finish_selection(
+    lead_id: str,
+    proposal_set_id: str,
+    option_id: str,
+    finalize_rc: int,
+) -> SelectionFinalizeResult | SelectionClaimFailure:
+    with FileLock(PROPOSALS_LOCK):
+        store, load_status = load_model(PROPOSALS_PATH, CateringProposalStore, default=CateringProposalStore())
+        assert_load_status_clean(PROPOSALS_PATH, load_status, context="proposal-selection finish")
+        target = next((row for row in store.sets if row.proposal_set_id == proposal_set_id), None)
+        if target is None:
+            return SelectionClaimFailure(
+                proposal_set_id=proposal_set_id,
+                reason="no_sent_proposal",
+                detail=f"proposal set {proposal_set_id} disappeared after finalize",
+                options=[],
+                exit_code=EXIT_NOT_FOUND,
+            )
+        if target.status != "SELECTING" or target.selected_option_id != option_id:
+            return SelectionClaimFailure(
+                proposal_set_id=proposal_set_id,
+                reason="no_sent_proposal",
+                detail=(
+                    f"proposal set {proposal_set_id} changed during finalize: "
+                    f"status={target.status} selected_option_id={target.selected_option_id}"
+                ),
+                options=target.options,
+                exit_code=EXIT_NOT_FOUND,
+            )
+        target_sequence = _proposal_sequence(target)
+        superseding = [
+            row
+            for row in store.sets
+            if row.lead_id == lead_id
+            and _proposal_sequence(row) > target_sequence
+            and row.status in SUPERSEDING_PROPOSAL_STATUSES
+        ]
+        if superseding:
+            latest = max(superseding, key=_proposal_sequence)
+            target.status = "SELECT_FAILED"
+            target.selected_option_id = None
+            target.failure_reason = f"superseded by {latest.proposal_set_id}"[:200]
+            atomic_write_json(PROPOSALS_PATH, store)
+            return SelectionClaimFailure(
+                proposal_set_id=proposal_set_id,
+                reason="no_sent_proposal",
+                detail=(
+                    f"proposal set {proposal_set_id} was superseded during finalize by "
+                    f"{latest.proposal_set_id} status {latest.status}"
+                ),
+                options=target.options,
+                exit_code=EXIT_NOT_FOUND,
+            )
+        if finalize_rc in {EXIT_OK, EXIT_DEPENDENCY_DOWN}:
+            target.status = "SELECTED" if finalize_rc == EXIT_OK else "SELECTED_OWNER_CARD_FAILED"
+            target.selected_option_id = option_id
+        else:
+            target.status = "SELECT_FAILED"
+            target.selected_option_id = None
+        target.failure_reason = "" if finalize_rc in {EXIT_OK, EXIT_DEPENDENCY_DOWN} else f"finalize_exit_{finalize_rc}"
+        atomic_write_json(PROPOSALS_PATH, store)
+        return SelectionFinalizeResult(
+            proposal_set_id=proposal_set_id,
+            option_id=option_id,
+            finalize_exit_code=finalize_rc,
+            options=target.options,
+        )
+
+
+def _fail_claim_after_finalize_exception(
+    proposal_set_id: str,
+    option_id: str,
+    detail: str,
+) -> list[CateringProposalOption]:
+    with FileLock(PROPOSALS_LOCK):
+        store, load_status = load_model(PROPOSALS_PATH, CateringProposalStore, default=CateringProposalStore())
+        assert_load_status_clean(PROPOSALS_PATH, load_status, context="proposal-selection exception cleanup")
+        target = next((row for row in store.sets if row.proposal_set_id == proposal_set_id), None)
+        if target is None:
+            return []
+        options = target.options
+        if target.status == "SELECTING" and target.selected_option_id == option_id:
+            target.status = "SELECT_FAILED"
+            target.selected_option_id = None
+            target.failure_reason = detail[:200]
+            atomic_write_json(PROPOSALS_PATH, store)
+        return options
+
+
+def _finalize(code: str, customer_message_id: str, selected_items: list[dict], total: int) -> int:
+    cmd = [
+        str(PYTHON_BIN),
+        str(FINALIZE_BIN),
+        "--code",
+        code,
+        "--customer-message-id",
+        customer_message_id,
+        "--selected-items-json",
+        json.dumps(selected_items),
+        "--quote-total-usd",
+        str(total),
+    ]
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=60).returncode
+
+
+def _notify_owner_card_failed(lead_id: str, proposal_set_id: str, option_id: str) -> None:
+    message = (
+        f"lead_id={lead_id} proposal_set_id={proposal_set_id} option {option_id} "
+        "was selected, but finalize-catering-menu could not deliver the owner card."
+    )
+    try:
+        subprocess.run(
+            [
+                str(NOTIFY_OWNER_BIN),
+                "--priority",
+                "2",
+                "--title",
+                "Catering proposal owner card failed",
+                message,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception as e:  # noqa: BLE001 - alerting is best-effort
+        sys.stderr.write(f"WARN: shift-agent-notify-owner failed (non-fatal): {type(e).__name__}: {e}\n")
+
+
+def _failure_reason_for_finalize(rc: int) -> str:
+    if rc in {2, 4, 11}:
+        return f"finalize_exit_{rc}"
+    return "finalize_exit_other"
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--lead-id", required=True)
+    parser.add_argument("--customer-jid", required=True)
+    parser.add_argument("--customer-message-id", required=True)
+    parser.add_argument("--selection-text", required=True)
+    args = parser.parse_args()
+
+    try:
+        proposal = _latest_proposal_for_lead(args.lead_id)
+    except Exception as e:
+        sys.stderr.write(f"proposal load failed: {e}\n")
+        _audit_failed(args.lead_id, "no_sent_proposal", str(e))
+        _bridge_post(args.customer_jid, _no_active_proposal_text())
+        return EXIT_NOT_FOUND
+    if proposal is None:
+        _audit_failed(args.lead_id, "no_sent_proposal", "latest proposal is not SENT")
+        _bridge_post(args.customer_jid, _no_active_proposal_text())
+        return EXIT_NOT_FOUND
+
+    option_id, reason = _resolve_selection(args.selection_text, proposal.options)
+    if option_id is None:
+        _bridge_post(args.customer_jid, _clarification_text(proposal.options))
+        _audit_failed(args.lead_id, reason, args.selection_text, proposal.proposal_set_id)
+        return EXIT_INVALID_INPUT
+
+    try:
+        code = _load_owner_code(args.lead_id)
+    except Exception as e:
+        sys.stderr.write(f"lead load failed: {e}\n")
+        _audit_failed(args.lead_id, "lead_not_found", str(e), proposal.proposal_set_id)
+        _bridge_post(args.customer_jid, _no_active_proposal_text())
+        return EXIT_NOT_FOUND
+    if code is None:
+        _audit_failed(args.lead_id, "lead_not_found", "lead missing owner_approval_code", proposal.proposal_set_id)
+        _bridge_post(args.customer_jid, _no_active_proposal_text())
+        return EXIT_NOT_FOUND
+
+    try:
+        claim = _claim_selection(
+            lead_id=args.lead_id,
+            proposal_set_id=proposal.proposal_set_id,
+            option_id=option_id,
+            customer_message_id=args.customer_message_id,
+        )
+    except Exception as e:
+        sys.stderr.write(f"proposal selection claim failed: {e}\n")
+        _audit_failed(args.lead_id, "no_sent_proposal", str(e), proposal.proposal_set_id)
+        _bridge_post(args.customer_jid, _no_active_proposal_text())
+        return EXIT_NOT_FOUND
+
+    if isinstance(claim, SelectionClaimFailure):
+        _bridge_post(args.customer_jid, _failed_text(claim.options) if claim.options else _no_active_proposal_text())
+        _audit_failed(args.lead_id, claim.reason, claim.detail, claim.proposal_set_id)
+        return claim.exit_code
+
+    try:
+        finalize_rc = _finalize(code, args.customer_message_id, claim.selected_items, claim.quote_total_usd)
+    except Exception as e:
+        detail = f"{type(e).__name__}: {e}"
+        options = _fail_claim_after_finalize_exception(claim.proposal_set_id, claim.option_id, detail)
+        _bridge_post(args.customer_jid, _failed_text(options or claim.options))
+        _audit_failed(args.lead_id, "finalize_exit_other", detail, claim.proposal_set_id)
+        return EXIT_DEPENDENCY_DOWN
+
+    result = _finish_selection(args.lead_id, claim.proposal_set_id, claim.option_id, finalize_rc)
+    if isinstance(result, SelectionClaimFailure):
+        _bridge_post(args.customer_jid, _failed_text(result.options) if result.options else _no_active_proposal_text())
+        _audit_failed(args.lead_id, result.reason, result.detail, result.proposal_set_id)
+        return result.exit_code
+
+    finalize_rc = result.finalize_exit_code
+
+    if finalize_rc in {EXIT_OK, EXIT_DEPENDENCY_DOWN}:
+        _audit_selected(args.lead_id, result.proposal_set_id, result.option_id, args.customer_message_id, finalize_rc)
+        if finalize_rc == EXIT_DEPENDENCY_DOWN:
+            _notify_owner_card_failed(args.lead_id, result.proposal_set_id, result.option_id)
+        _bridge_post(args.customer_jid, _ack_text(result.option_id))
+        return finalize_rc
+
+    _audit_failed(
+        args.lead_id,
+        _failure_reason_for_finalize(finalize_rc),
+        f"finalize exited {finalize_rc}",
+        result.proposal_set_id,
+    )
+    _bridge_post(args.customer_jid, _failed_text(result.options))
+    return finalize_rc if finalize_rc in {2, 4, 11} else EXIT_INVALID_INPUT
+
+
+if __name__ == "__main__":
+    sys.exit(main())

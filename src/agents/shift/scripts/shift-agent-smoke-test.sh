@@ -33,7 +33,9 @@ for script in \
     /usr/local/bin/shift-agent-health-check.sh \
     /usr/local/bin/shift-agent-reconcile.py \
     /usr/local/bin/send-routing-accuracy-summary \
-    /usr/local/bin/lookup-prior-leads-by-phone ; do
+    /usr/local/bin/lookup-prior-leads-by-phone \
+    /usr/local/bin/create-catering-proposal-options \
+    /usr/local/bin/select-catering-proposal ; do
     [ -x "$script" ] || { echo "FAIL: $script missing or not executable"; exit 1; }
 done
 echo "✓ All scripts present + executable"
@@ -65,6 +67,17 @@ echo "✓ Python modules importable (incl. safe_io chokepoint symbols)"
 # A syntax error or broken import in the plugin would otherwise pass
 # all other checks and only manifest at first inbound traffic.
 if [ -d /root/.hermes/plugins/cf-router ]; then
+    if ! "$PY" - <<'PY' > /dev/null; then
+from pathlib import Path
+for p in [
+    Path('/root/.hermes/plugins/cf-router/actions.py'),
+    Path('/root/.hermes/plugins/cf-router/hooks.py'),
+]:
+    compile(p.read_text(), str(p), 'exec')
+PY
+        echo "FAIL: cf-router plugin actions.py/hooks.py compile check failed"
+        exit 1
+    fi
     if ! "$PY" -c "
 import sys, importlib.util
 sys.path.insert(0, '/opt/shift-agent')
@@ -84,7 +97,7 @@ print('cf-router plugin: actions.py importable + classify_catering OK')
         echo "FAIL: cf-router plugin actions.py broken — would silently fail at first inbound"
         exit 1
     fi
-    echo "✓ cf-router plugin importable + classifier sanity"
+    echo "✓ cf-router plugin compiles + actions importable + classifier sanity"
 else
     echo "⚠  cf-router plugin not installed — skipping plugin smoke check"
 fi
@@ -135,6 +148,13 @@ if [ -x /usr/local/bin/mark-compliance-item-done.py ]; then
     fi
     echo "✓ mark-compliance-item-done.py importable + CLI parses"
 fi
+
+# 2e. Creative Catering Proposals (Task 8)
+test -f /root/.hermes/skills/creative_catering_proposals/SKILL.md || {
+    echo "FAIL: creative_catering_proposals SKILL.md missing" >&2
+    exit 1
+}
+echo "✓ creative_catering_proposals SKILL present"
 
 # 3. Config loads and validates
 if ! "$PY" -c "

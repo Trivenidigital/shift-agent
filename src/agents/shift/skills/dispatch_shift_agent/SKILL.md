@@ -102,6 +102,13 @@ Catering keywords (case-insensitive substring): `cater`, `catering`, `headcount`
 
 PR-CF1 — customer-finalize-intent terms also route to catering_dispatcher when the sender has an active non-terminal catering lead. Substring match (case-insensitive): `finalize`, `send to owner`, `confirm the menu`, `confirm this menu`, `lock it in`, `proceed with this menu`, `submit for approval`, `ready to book`. The catering_dispatcher then differentiates new-inquiry vs finalize-intent vs owner-reply (see catering_dispatcher SKILL Step 2).
 
+PR-CF2 — proposal request/selection terms also route to catering_dispatcher only
+when the sender is non-owner and has an active non-terminal catering lead. Do
+not add bare proposal words to the global Catering keywords row. Under this
+active-lead condition, route proposal-request or proposal-selection classifier
+matches to `catering_dispatcher`; that sub-dispatcher decides whether to invoke
+`creative_catering_proposals` or `select-catering-proposal`.
+
 PR-Agent3-v0.1 — store-locator regex for the customer-facing closest-location row (positioned IMMEDIATELY AFTER the catering keyword row so a "party near me?" message correctly favors catering interpretation for SMB context):
 
 ```

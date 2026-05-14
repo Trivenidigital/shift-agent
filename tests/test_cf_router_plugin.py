@@ -85,6 +85,7 @@ def state_env(tmp_path):
         "log_path": logs / "decisions.log",
         "config_path": tmp_path / "config.yaml",
         "leads_path": state / "catering-leads.json",
+        "proposals_path": state / "catering-proposals.json",
         "menu_pending_path": state / "catering-menu-pending.json",
         "roster_path": tmp_path / "roster.json",
         "throttle_path": state / "cf-router-throttle.json",
@@ -97,6 +98,7 @@ def mods(state_env):
     hooks_mod, actions_mod = _load_plugin_modules()
     actions_mod.CONFIG_PATH = state_env["config_path"]
     actions_mod.LEADS_PATH = state_env["leads_path"]
+    actions_mod.PROPOSALS_PATH = state_env["proposals_path"]
     actions_mod.MENU_PENDING_PATH = state_env["menu_pending_path"]
     actions_mod.ROSTER_PATH = state_env["roster_path"]
     actions_mod.LOG_PATH = state_env["log_path"]
@@ -835,6 +837,40 @@ class TestF7DispatcherWatchdog:
         assert fired[0]["success"] is True
         assert "primary:catering" in fired[0]["signals"]
 
+    def test_rescue_fires_for_employee_private_catering_with_phone(self, mods, state_env):
+        """Employee sender can still be a private customer-side catering lead."""
+        _hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        fake_id_run = SimpleNamespace(
+            returncode=0, stdout='{"role":"employee","phone_normalized":"+19045550104"}', stderr="",
+        )
+        fake_create_run = SimpleNamespace(returncode=0, stdout="lead_created L0101", stderr="")
+
+        call_log = []
+
+        def _fake_run(cmd, *args, **kwargs):
+            call_log.append(cmd[0] if isinstance(cmd, list) else cmd)
+            if "identify-sender" in str(cmd):
+                return fake_id_run
+            if "create-catering-lead" in str(cmd):
+                return fake_create_run
+            return SimpleNamespace(returncode=1, stdout="", stderr="unmocked")
+
+        with patch("subprocess.run", side_effect=_fake_run):
+            actions_mod.f7_rescue_check(
+                text="This is a catering inquiry for my cousin's wedding on July 12 for 80 people",
+                chat_id="201975216009469@lid",
+                message_id="msg_employee_customer",
+                signals=["primary:catering", "headcount:80", "event_keyword"],
+                ts_at_schedule=time.time(),
+            )
+
+        assert any("create-catering-lead" in str(c) for c in call_log)
+        rows = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
+        fired = [r for r in rows if r.get("type") == "catering_dispatcher_watchdog_fired"]
+        assert len(fired) == 1
+        assert fired[0]["customer_phone"] == "+19045550104"
+
     def test_rescue_suppressed_when_phone_unresolvable(self, mods, state_env):
         """Customer role but identify-sender returns no phone → suppressed
         with reason=lid_no_phone_resolution."""
@@ -887,6 +923,30 @@ def _seed_leads_multi(state_env, leads):
     state_env["leads_path"].write_text(json.dumps({
         "leads": rows,
         "next_lead_seq": len(rows) + 1,
+    }), encoding="utf-8")
+
+
+def _seed_sent_proposal_set(state_env, lead_id="L0001"):
+    state_env["proposals_path"].write_text(json.dumps({
+        "sets": [{
+            "proposal_set_id": f"CPS-{lead_id}-000001",
+            "lead_id": lead_id,
+            "status": "SENT",
+            "sent_at": "2026-04-30T10:01:00-04:00",
+            "outbound_message_id": "wamid.proposal.1",
+            "options": [
+                {"option_id": "1", "title": "Classic"},
+                {"option_id": "2", "title": "Premium"},
+            ],
+        }],
+        "next_set_seq": 2,
+    }), encoding="utf-8")
+
+
+def _seed_proposal_sets(state_env, sets):
+    state_env["proposals_path"].write_text(json.dumps({
+        "sets": sets,
+        "next_set_seq": len(sets) + 1,
     }), encoding="utf-8")
 
 
@@ -1016,6 +1076,48 @@ class TestFindActiveCateringLeadBySender:
         assert result["status"] == active_status
 
 
+class TestF7ProposalHelpers:
+    def test_find_selectable_proposal_set_uses_latest_sequence_not_latest_sent(self, mods, state_env):
+        _, actions_mod = mods
+        _seed_proposal_sets(state_env, [
+            {
+                "proposal_set_id": "CPS-L0001-000001",
+                "lead_id": "L0001",
+                "status": "SENT",
+                "sent_at": "2026-04-30T10:01:00-04:00",
+                "outbound_message_id": "wamid.proposal.1",
+            },
+            {
+                "proposal_set_id": "CPS-L0001-000002",
+                "lead_id": "L0001",
+                "status": "SEND_FAILED",
+                "sent_at": "2026-04-30T10:02:00-04:00",
+                "outbound_message_id": "",
+            },
+        ])
+
+        assert actions_mod.find_selectable_proposal_set("L0001") is None
+
+    @pytest.mark.parametrize("text", [
+        "can you revise option 2?",
+        "I don't like option 2",
+    ])
+    def test_selection_classifier_rejects_non_selection_mentions(self, mods, text):
+        _, actions_mod = mods
+
+        assert actions_mod.is_proposal_selection(text) is False
+
+    @pytest.mark.parametrize("text", [
+        "I want to wait for two menu proposals",
+        "No need to send proposals yet, we will wait",
+        "any update",
+    ])
+    def test_proposal_request_rejects_passive_wait_or_status_text(self, mods, text):
+        _, actions_mod = mods
+
+        assert actions_mod.is_proposal_request(text) is False
+
+
 class TestSendCanonicalFollowupReply:
     """PR-CF1d Commit 2: cf-router F7 primary-mode UX-mitigation reply."""
 
@@ -1114,6 +1216,38 @@ class TestF7PrimaryMode:
         assert audits[0]["reason"] == "f7_primary_new_inquiry"
         assert audits[0]["subprocess_rc"] == 0
 
+    def test_branch_a_employee_private_catering_inquiry_creates_lead(self, mods, state_env):
+        """Employee identity can still be customer-side for a private event.
+
+        Owner remains control-plane, but an employee may ask for catering for
+        their own/family/friend event. This regression pins the live 2026-05-13
+        failure where employee e004's cousin-wedding inquiry fell through to
+        the generic LLM instead of deterministic lead creation.
+        """
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        _seed_leads_multi(state_env, [])
+        fake_run = SimpleNamespace(
+            returncode=0,
+            stdout='{"role":"employee","phone_normalized":"+19045550104"}',
+            stderr="",
+        )
+        with patch("subprocess.run", return_value=fake_run), \
+             patch.object(actions_mod, "trigger_create_catering_lead",
+                          return_value=(True, "lead_created")) as mock_trigger:
+            event = _make_event(
+                text="This is a catering inquiry for my cousin's wedding on July 12 for 80 people",
+                chat_id="201975216009469@lid",
+            )
+            result = hooks_mod.pre_gateway_dispatch(event)
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router F7 primary: catering inquiry routed deterministically",
+        }
+        mock_trigger.assert_called_once()
+        assert mock_trigger.call_args.kwargs["customer_phone"] == "+19045550104"
+
     def test_branch_b_active_lead_suppresses_with_canonical_reply(self, mods, state_env):
         """Customer-side catering inquiry with active lead → cf-router skips
         without creating a new lead. With F7_PRIMARY_FOLLOWUP_REPLY=True,
@@ -1154,6 +1288,249 @@ class TestF7PrimaryMode:
         audits = [r for r in rows if r.get("type") == "cf_router_intercepted"]
         assert len(audits) == 1
         assert audits[0]["reason"] == "f7_primary_followup_suppressed"
+
+    def test_proposal_branch_disabled_keeps_existing_suppression(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        hooks_mod.F7_PROPOSAL_BRANCH_ENABLED = False
+        _seed_config(state_env)
+        _seed_leads_multi(state_env, [
+            {"lead_id": "L0001", "owner_approval_code": "#ABCDE",
+             "customer_phone": "+19045550104",
+             "status": "AWAITING_OWNER_APPROVAL"},
+        ])
+
+        with patch.object(actions_mod, "is_owner_chat", return_value=False), \
+             patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+19045550104", "customer")), \
+             patch.object(actions_mod, "send_canonical_followup_reply",
+                          return_value=True):
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    text="She wants one mixed option and one premium option.",
+                    chat_id="201975216009469@lid",
+                ),
+            )
+
+        assert result is not None
+        assert result["action"] == "skip"
+        assert "follow-up" in result["reason"]
+
+    def test_proposal_request_actionable_allows_dispatch_when_flag_enabled(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        hooks_mod.F7_PROPOSAL_BRANCH_ENABLED = True
+        _seed_config(state_env)
+        _seed_leads_multi(state_env, [
+            {"lead_id": "L0001", "owner_approval_code": "#ABCDE",
+             "customer_phone": "+19045550104",
+             "status": "AWAITING_OWNER_APPROVAL"},
+        ])
+
+        with patch.object(actions_mod, "is_owner_chat", return_value=False), \
+             patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+19045550104", "customer")), \
+             patch.object(actions_mod, "send_canonical_followup_reply") as mock_reply:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    text="She wants one mixed option and one premium option.",
+                    chat_id="201975216009469@lid",
+                ),
+            )
+
+        assert result is None
+        mock_reply.assert_not_called()
+
+    def test_passive_wait_still_suppresses_when_flag_enabled(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        hooks_mod.F7_PROPOSAL_BRANCH_ENABLED = True
+        _seed_config(state_env)
+        _seed_leads_multi(state_env, [
+            {"lead_id": "L0001", "owner_approval_code": "#ABCDE",
+             "customer_phone": "+19045550104",
+             "status": "AWAITING_OWNER_APPROVAL"},
+        ])
+
+        with patch.object(actions_mod, "is_owner_chat", return_value=False), \
+             patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+19045550104", "customer")), \
+             patch.object(actions_mod, "send_canonical_followup_reply",
+                          return_value=True):
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    text="Will wait for two menu proposals. Thank you!",
+                    chat_id="201975216009469@lid",
+                ),
+            )
+
+        assert result is not None
+        assert result["action"] == "skip"
+
+    def test_selection_intercepts_outside_catering_classifier(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        hooks_mod.F7_PROPOSAL_BRANCH_ENABLED = True
+        _seed_config(state_env)
+        _seed_leads_multi(state_env, [
+            {"lead_id": "L0001", "owner_approval_code": "#ABCDE",
+             "customer_phone": "+19045550104",
+             "status": "AWAITING_OWNER_APPROVAL"},
+        ])
+        _seed_sent_proposal_set(state_env, lead_id="L0001")
+
+        with patch.object(actions_mod, "is_owner_chat", return_value=False), \
+             patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+19045550104", "customer")), \
+             patch.object(actions_mod, "invoke_select_catering_proposal",
+                          return_value=0) as mock_select:
+            result = hooks_mod.pre_gateway_dispatch(
+                SimpleNamespace(
+                    text="go with option 2",
+                    chat_id="201975216009469@lid",
+                    message_id="msg-select-1",
+                ),
+            )
+
+        assert result is not None
+        assert result["action"] == "skip"
+        mock_select.assert_called_once_with(
+            "L0001",
+            "201975216009469@lid",
+            "msg-select-1",
+            "go with option 2",
+        )
+        rows = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
+        audits = [r for r in rows if r.get("type") == "cf_router_intercepted"]
+        assert len(audits) == 1
+        assert audits[0]["reason"] == "f7_proposal_selection"
+        assert audits[0]["subprocess_rc"] == 0
+
+    def test_selection_invoke_nonzero_falls_back_to_llm(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        hooks_mod.F7_PROPOSAL_BRANCH_ENABLED = True
+        _seed_config(state_env)
+        _seed_leads_multi(state_env, [
+            {"lead_id": "L0001", "owner_approval_code": "#ABCDE",
+             "customer_phone": "+19045550104",
+             "status": "AWAITING_OWNER_APPROVAL"},
+        ])
+        _seed_sent_proposal_set(state_env, lead_id="L0001")
+
+        with patch.object(actions_mod, "is_owner_chat", return_value=False), \
+             patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+19045550104", "customer")), \
+             patch.object(actions_mod, "invoke_select_catering_proposal",
+                          return_value=7):
+            result = hooks_mod.pre_gateway_dispatch(
+                SimpleNamespace(
+                    text="go with option 2",
+                    chat_id="201975216009469@lid",
+                    message_id="msg-select-fail",
+                ),
+            )
+
+        assert result is None
+        rows = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
+        audits = [r for r in rows if r.get("type") == "cf_router_intercepted"]
+        assert len(audits) == 1
+        assert audits[0]["reason"] == "f7_proposal_selection"
+        assert audits[0]["subprocess_rc"] == 7
+
+    @pytest.mark.parametrize("handled_rc", [2, 4, 6, 11])
+    def test_selection_handled_exit_codes_skip_llm(self, mods, state_env, handled_rc):
+        hooks_mod, actions_mod = mods
+        hooks_mod.F7_PROPOSAL_BRANCH_ENABLED = True
+        _seed_config(state_env)
+        _seed_leads_multi(state_env, [
+            {"lead_id": "L0001", "owner_approval_code": "#ABCDE",
+             "customer_phone": "+19045550104",
+             "status": "AWAITING_OWNER_APPROVAL"},
+        ])
+        _seed_sent_proposal_set(state_env, lead_id="L0001")
+
+        with patch.object(actions_mod, "is_owner_chat", return_value=False), \
+             patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+19045550104", "customer")), \
+             patch.object(actions_mod, "invoke_select_catering_proposal",
+                          return_value=handled_rc):
+            result = hooks_mod.pre_gateway_dispatch(
+                SimpleNamespace(
+                    text="go with option 2",
+                    chat_id="201975216009469@lid",
+                    message_id="msg-select-handled",
+                ),
+            )
+
+        assert result is not None
+        assert result["action"] == "skip"
+        rows = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
+        audits = [r for r in rows if r.get("type") == "cf_router_intercepted"]
+        assert len(audits) == 1
+        assert audits[0]["reason"] == "f7_proposal_selection"
+        assert audits[0]["subprocess_rc"] == handled_rc
+
+    @pytest.mark.parametrize("text", [
+        "Bro any update! She want to see two proposal menus mixing both non-veg and veg options. She will choose the best one from your two proposals.",
+        "Will wait for two menu proposals. Thank you!",
+    ])
+    def test_branch_b_active_lead_suppresses_weak_menu_followups(self, mods, state_env, text):
+        """Active-lead follow-ups should not need new-inquiry-level evidence.
+
+        Live 2026-05-13 regression: employee/customer follow-ups about menu
+        proposals emitted only `food_keyword`, missed Branch B, and fell
+        through to the generic LLM. Once an active lead exists for the sender,
+        menu/proposal food signals are enough to use the canonical follow-up
+        path.
+        """
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        _seed_leads_multi(state_env, [
+            {"lead_id": "L0014", "owner_approval_code": "#K6VPD",
+             "customer_phone": "+19045550104",
+             "status": "AWAITING_OWNER_APPROVAL"},
+        ])
+        fake_run = SimpleNamespace(
+            returncode=0,
+            stdout='{"role":"employee","phone_normalized":"+19045550104"}',
+            stderr="",
+        )
+        hooks_mod.F7_PRIMARY_FOLLOWUP_REPLY = True
+        with patch("subprocess.run", return_value=fake_run), \
+             patch.object(actions_mod, "trigger_create_catering_lead") as mock_trigger, \
+             patch.object(actions_mod, "send_canonical_followup_reply",
+                          return_value=True) as mock_reply:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(text=text, chat_id="201975216009469@lid"),
+            )
+
+        assert result is not None
+        assert result["action"] == "skip"
+        assert "follow-up to active L0014 suppressed" in result["reason"]
+        mock_trigger.assert_not_called()
+        mock_reply.assert_called_once_with("201975216009469@lid", "L0014")
+        rows = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
+        audits = [r for r in rows if r.get("type") == "cf_router_intercepted"]
+        assert len(audits) == 1
+        assert audits[0]["reason"] == "f7_primary_followup_suppressed"
+
+    def test_weak_menu_text_without_active_lead_does_not_create_new_lead(self, mods, state_env):
+        """Weak follow-up signals only apply when an active lead already exists."""
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        _seed_leads_multi(state_env, [])
+        fake_run = SimpleNamespace(
+            returncode=0,
+            stdout='{"role":"customer","phone_normalized":"+17329837841"}',
+            stderr="",
+        )
+        with patch("subprocess.run", return_value=fake_run), \
+             patch.object(actions_mod, "trigger_create_catering_lead") as mock_trigger:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    text="Will wait for two menu proposals. Thank you!",
+                    chat_id="17329837841@s.whatsapp.net",
+                ),
+            )
+
+        assert result is None
+        mock_trigger.assert_not_called()
 
     def test_owner_role_bypasses_f7_primary(self, mods, state_env):
         """Owner-side catering keyword → F8 territory, not F7. F7 returns

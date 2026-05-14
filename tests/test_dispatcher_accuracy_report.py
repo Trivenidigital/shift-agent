@@ -119,6 +119,59 @@ def test_unknown_sender_declined_pairs_by_lid(now):
     assert paired[0][2] == "unknown_sender_declined"
 
 
+def test_cf_router_proposal_selection_pairs_like_dispatcher_routed(now):
+    rows = [
+        {"type": "raw_inbound", "ts": _ts(now), "message_id": "m-prop", "sender_lid": "201@lid"},
+        {
+            "type": "cf_router_intercepted",
+            "ts": _ts(now, 1),
+            "reason": "f7_proposal_selection",
+            "chat_id": "201@lid",
+            "subprocess_rc": 0,
+        },
+    ]
+    paired, unpaired = mod.pair_inbounds(rows)
+    assert len(paired) == 1
+    assert unpaired == []
+    assert paired[0][2] == "cf_router_intercepted"
+
+
+def test_cf_router_proposal_selection_pairs_phone_jid_like_dispatcher_routed(now):
+    rows = [
+        {"type": "raw_inbound", "ts": _ts(now), "message_id": "m-phone",
+         "sender_phone": "+15551234567"},
+        {
+            "type": "cf_router_intercepted",
+            "ts": _ts(now, 1),
+            "reason": "f7_proposal_selection",
+            "chat_id": "15551234567@s.whatsapp.net",
+            "subprocess_rc": 0,
+        },
+    ]
+    paired, unpaired = mod.pair_inbounds(rows)
+    assert len(paired) == 1
+    assert unpaired == []
+    assert paired[0][2] == "cf_router_intercepted"
+
+
+def test_non_proposal_cf_router_intercept_does_not_pair(now):
+    rows = [
+        {"type": "raw_inbound", "ts": _ts(now), "message_id": "m-status",
+         "sender_phone": "+15551234567"},
+        {
+            "type": "cf_router_intercepted",
+            "ts": _ts(now, 1),
+            "reason": "status_check",
+            "chat_id": "15551234567@s.whatsapp.net",
+            "subprocess_rc": 0,
+        },
+    ]
+    paired, unpaired = mod.pair_inbounds(rows)
+    assert paired == []
+    assert len(unpaired) == 1
+    assert unpaired[0]["message_id"] == "m-status"
+
+
 def test_orphan_dispatcher_routed_does_not_appear_in_either_list(now):
     """A dispatcher_routed with no preceding raw_inbound is ignored — the
     report counts inbounds, not routing decisions."""

@@ -10,7 +10,8 @@ Dietary: {dietary}
 Selected menu ({item_count} items):
 {items_section}
 
-Customer-confirmed total: ${quote_total_usd}
+Internal estimate from current menu item prices: ${quote_total_usd}
+Review/edit before approving the final customer quote.
 {price_drift_note}
 
 To approve and send the priced quote to the customer:

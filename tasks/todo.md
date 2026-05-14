@@ -475,6 +475,9 @@ This is a future-process decision; not worth retrofitting prior PRs, but worth a
 
 ## Recently completed (this week)
 
+- ✅ 2026-05-13 — **cf-router employee-private catering fix** — Hermes-first/drift check: reused the live `cf-router` plugin F7 primary path rather than adding a new skill. Root cause was the role gate suppressing `employee` after catering intent was already classified. Fixed primary + dormant rescue helper to suppress only `owner`; added regression coverage for employee/private/family catering inquiries. Hotfixed on `main-vps`; `hermes-gateway` active and WhatsApp bridge `/health` reports connected.
+- ✅ 2026-05-13 — **cf-router active-lead weak follow-up fix** — follow-ups like “two proposal menus / non-veg / veg” emitted only weak food/menu signals and missed Branch B because active-lead lookup was gated behind the stricter new-inquiry classifier. Fixed F7 so weak catering signals can suppress/reply against an existing active lead, while still refusing to create a new lead from weak text alone. Hotfixed on `main-vps`; live probe against `L0014` now returns `f7_primary_followup_suppressed`.
+
 - ✅ 2026-04-29 — **PR #34: Expense Bookkeeper YAML-loaded-as-JSON regression fix** — three scripts (`extract-receipt`, `apply-expense-decision`, `prune-and-expire-expenses.py`) called `safe_io.load_model(CONFIG_PATH, Config)` on `config.yaml`. `load_model` → `safe_load_json` → `json.loads(yaml_content)` → `JSONDecodeError` → file rename-quarantined to `config.yaml.corrupt-<epoch>`. Smoke gate failed (config missing) → deploy auto-rollback. Fix: new `safe_io.load_yaml_model` chokepoint helper using `yaml.safe_load`, no auto-rename, explicit raise. Migrated 3 callsites. 7 unit tests including no-rename regression guard. Discovered during PR-A deploy. Lighter pipeline (Plan→Build→PR→3 reviews) per matrix.
 - ✅ 2026-04-29 — **PR-A: catering omnibus** — `feat/catering-omnibus-pra`. 7 commits: (1) `safe_io.assert_load_status_clean` helper for writer load chokepoints; (2) oserror surfacing in `apply-catering-owner-decision` + `create-catering-lead` (silent-failure-hunter NEW-1) + post-bridge state-loss strict-status check; (3) `safe_io.try_acquire_filelock_with_retry` (raise-on-exhaustion `LockUnavailable` — no bool footgun); (4) lookup-script lock-target migration to unified `.lock` sibling (NEW-5) + cross-script convention assertion test; (5) `parse_catering_inquiry/SKILL.md` Step 0 invokes lookup script with R4 design-review fixes (Hard rule + MUST framing, default-row for unparseable output, no privacy-leak phrasing, sender_phone provenance documented) — v3.1 C02 RUNNABLE end-to-end + 8 SKILL static tests; (6) smoke-gate import roundtrip for new safe_io chokepoint symbols; (7) backlog hygiene + PR-B + follow-up entries. Full Plan→5-agent-review→Design→5-agent-review→Build pipeline. v0.4 LLM-drafted quote split to PR-B follow-up cycle with 12 reviewer-flagged corrections.
 - ✅ 2026-04-29 — PR #32: expense-bookkeeper audit-fix (4 bugs — 1 HIGH dispatcher routing, 1 MED whitespace validator on `sender_phone`+`original_message_id`, 2 LOW). Full ceremony: audit → plan v1.1 → 5-agent plan review → design folded → 5-agent design review → build → PR → 5-agent PR review → merge → deploy gate (auto-rolled-back on pre-existing config.yaml provisioning gap, feature stays opt-in so no behavior delta). 168/168 tests on PR head; 317/317 on merged main. 8 v0.2 follow-ups documented in `tasks/expense-bookkeeper-v02-followups.md` (now backlog P3.5).
@@ -498,3 +501,34 @@ This is a future-process decision; not worth retrofitting prior PRs, but worth a
 - ✅ 2026-04-28 — Platform extract: `src/platform/` + `src/agents/<name>/` repo layout (PR #11)
 - ✅ 2026-04-27 — Sender-id context (Phase A→D, LID injection + lid-learn cron)
 - ✅ 2026-04-27 — Owner cockpit Phase 2 + Phase 3 deployed at http://46.62.206.192:9001/ui
+## Active - Catering autonomous proposal flow (2026-05-13)
+
+- [x] Confirm policy: no customer-facing pricing, deposits, payment instructions, or booking confirmation before final owner approval.
+- [x] Run drift/Hermes-first review: reuse existing catering lead/menu/finalize/owner-approval primitives; source-control and constrain the live VPS `creative-catering-proposals` skill instead of greenfield chat logic.
+- [x] Write design spec: `docs/superpowers/specs/2026-05-13-catering-autonomous-proposals-design.md`.
+- [x] Incorporate Reviewer 1 spec feedback: proposal lock/lifecycle, bridge-failure non-selectability, finalize `--code`, finalize exit handling, and prose grounding.
+- [x] Incorporate Reviewer 2 spec feedback: reachable selection routing, pinned-test disambiguation, dispatcher matrices, no-price regex, owner-card estimate label, audit-union/reporting, and rollout flag.
+- [x] User review of written spec.
+- [x] Implementation plan after spec approval: `docs/superpowers/plans/2026-05-13-catering-autonomous-proposals-implementation-plan.md`.
+- [x] TDD implementation. (completed locally on `codex/catering-autonomous-proposals`; no commit/stage/deploy yet)
+- [x] Local focused tests. Windows host verification:
+  - `python -m pytest tests/test_catering_proposal_schemas.py tests/test_catering_proposal_skill_md.py tests/test_cf_router_plugin.py tests/test_dispatcher_accuracy_report.py tests/test_dispatcher_replay.py tests/test_repo_invariants.py -q` -> `68 passed, 80 skipped`.
+  - `python -m py_compile` on proposal scripts, finalize script, cf-router, dispatcher report, and replay harness -> passed.
+  - Git Bash `bash -n` on deploy/smoke scripts -> passed.
+  - `git diff --check` -> passed with line-ending warnings only.
+  - Full `python -m pytest -q` -> `7 failed, 741 passed, 598 skipped`; failures are known unrelated Windows/static baseline issues (`test_pr_b_v3_static.py` substring false positive on `_render_quote_from_lead_state`; web backend imports Linux-only `fcntl` through `safe_io` on Windows).
+- [x] Linux/VPS script tests for `tests/test_create_catering_proposal_options.py`, `tests/test_select_catering_proposal.py`, and `tests/test_catering_finalize_menu.py` before deploy. VPS verification: `65 passed, 24 warnings`.
+- [x] Tarball deploy to `main-vps` with proposal branch initially disabled, then enabled after verification. Gateway active, bridge connected, health check rc=0, `F7_PROPOSAL_BRANCH_ENABLED = True`.
+- [ ] Live WhatsApp smoke: proposal request for active catering lead, then customer selection of option number, then owner approval gate.
+
+Review results:
+- Final implementation review found four issues; all fixed:
+  - cf-router now skips LLM for handled proposal-selection exits `{0,2,4,6,11}`.
+  - `select-catering-proposal` no longer holds `PROPOSALS_LOCK` while invoking `finalize-catering-menu`; it claims under lock, finalizes unlocked, then rechecks superseding proposal sets before marking selected.
+  - proposal generation now requires exactly two options by default or exactly three only when requested; schema/audit option counts enforce `2..3`.
+  - generation failures now audit and best-effort alert the owner, including schema-level invalid options.
+- Final focused re-review reported no blockers after the stale-selection and schema-invalid alert fixes.
+- Deploy notes:
+  - Hermes pin gate correctly blocked first deploy: live Hermes was `486b692d...`, repo baseline `c5b4c481...`, and sender-id markers were absent after migration. Trial-patched a copy first, then applied `tools/patch-hermes.py` live with backup `/opt/shift-agent/deploys/hermes-pre-proposal-senderpatch-20260514-010345.tgz`.
+  - `.env` symlink gate correctly blocked next deploy. `/opt/shift-agent/.env` and `/root/.hermes/.env` were byte-identical, so `migrate-env-to-symlink.sh` ran safely and left backup `/opt/shift-agent/.env.pre-symlink-backup`.
+  - Manual plugin rsync was needed after deploy because live `cf-router/hooks.py` lagged staging. Removed pycache created by manual compile so `hermes-gateway` ExecStartPre chown succeeded. Final restart active with bridge port 3000 listening.

@@ -255,6 +255,9 @@ install_artifacts() {
         handle_catering_owner_approval handle_catering_menu_finalize
         update_catering_menu apply_catering_menu_decision
     )
+    # Rollback compatibility: creative_catering_proposals is enforced by
+    # post-restart smoke for forward deploys, but old rollback tarballs may
+    # predate that SKILL and must still be installable before restart.
     local missing_skills=()
     for skill in "${required_skills[@]}"; do
         if [ ! -f "/root/.hermes/skills/${skill}/SKILL.md" ]; then
@@ -539,6 +542,35 @@ case "$ACTION" in
         fi
 
         install_artifacts "$STAGING"
+
+        # Pre-restart cf-router compile gate: hooks.py is imported by the
+        # gateway at startup, so a syntax error can make systemctl restart
+        # fail before the post-restart smoke/rollback path gets control.
+        if ! "$VENV_PY" - <<'PY' > /dev/null; then
+from pathlib import Path
+for p in [
+    Path('/root/.hermes/plugins/cf-router/actions.py'),
+    Path('/root/.hermes/plugins/cf-router/hooks.py'),
+]:
+    compile(p.read_text(), str(p), 'exec')
+PY
+            echo "FAIL: pre-restart cf-router compile gate - refusing to restart hermes-gateway" >&2
+            if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                "$0" rollback "$PREV_TAG"
+                # Evict the broken tarball from the rotation so next deploy
+                # doesn't surface it as a candidate rollback target.
+                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+            else
+                /usr/local/bin/shift-agent-notify-owner \
+                    --title "Deploy FAILED at pre-restart cf-router compile gate, no prior tarball" \
+                    --priority 2 \
+                    "Deploy $NEW_TAG failed pre-restart cf-router actions/hooks compile check. New files installed but service still on OLD code (gateway not yet restarted). No prior tarball to roll back to - SSH immediately." 2>/dev/null || true
+                # Evict the broken tarball from the rotation so it isn't surfaced
+                # as a rollback candidate on the next deploy.
+                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+            fi
+            exit 1
+        fi
 
         # Pre-restart import gate: a missing safe_io OR audit_helpers chokepoint
         # symbol means traffic hits new code BEFORE smoke fires post-restart.
