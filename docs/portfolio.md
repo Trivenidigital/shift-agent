@@ -445,7 +445,7 @@ This document is a *planning surface*, not a build commitment. Specs at this sta
 
 **Integration points:**
 - Talks to: Compliance Calendar Agent (form deadlines), Shift Agent (when employee becomes schedulable)
-- External: e-signature service for forms (DocuSign/HelloSign or equivalent)
+- External: e-signature service for forms. Credential mode note (2026-05-14): review DocuSign MCP/vendor connector first; custom raw e-sign API only after connector review fails.
 
 **Key risks:**
 - Compliance paperwork errors are legally consequential — agent must never advise on legal matters, only facilitate forms
@@ -545,7 +545,7 @@ This document is a *planning surface*, not a build commitment. Specs at this sta
 
 **Integration points:**
 - Talks to: Catering Lead Agent (invoice creation), Daily Brief Agent (AR aging summary)
-- External: Payment processor (Stripe, Square, Razorpay) for reconciliation; QuickBooks for sync (Phase 2+)
+- External: Payment processor (Stripe, Square, Razorpay) for reconciliation; QuickBooks for sync (Phase 2+). Credential mode note (2026-05-14): evaluate Stripe MCP, Square MCP, PayPal MCP, and Intuit QuickBooks Online MCP before raw custom API work; Zelle/Cash App/Venmo/Razorpay remain rail-specific connected-mode surfaces.
 
 **Key risks:**
 - Wrong reminder to wrong customer = relationship damage
@@ -754,28 +754,28 @@ This document is a *planning surface*, not a build commitment. Specs at this sta
 
 **Integration points:**
 - Talks to: Agent #15 Cash & AR (catering deposits reconcile here), Agent #4 Daily Brief (weekly expense summary)
-- External: QuickBooks Online API, OCR (cloud or local), photo intake via WhatsApp
+- External: QuickBooks Online API or Intuit QuickBooks Online MCP, OCR (cloud or local), photo intake via WhatsApp. Credential mode note (2026-05-14): vendor MCP or vetted MCP first; custom raw QBO API only after connector review fails.
 
 **Key risks:**
 - Mis-classification of personal as business (or vice versa) has tax consequences — owner approval gate is the safety net
 - OCR accuracy on crumpled receipts is genuinely poor — agent must surface uncertainty, not guess
-- QuickBooks API friction (auth, rate limits, account-list drift) is real engineering cost
+- QuickBooks connector friction (OAuth, scopes, token storage, rate limits, account-list drift, sandbox/production approval) is real engineering cost whether via MCP or raw API.
 
-**Build complexity:** Medium. OCR + LLM categorization is well-bounded. QuickBooks integration is the slow part. Phase 0 stub is trivial; Phase 1 build is ~3–4 weeks of *net-new* work — Hermes substrate (dispatch, audit, approval codes, vision input pipeline mirroring Catering's `parse-menu-photo`) carries an estimated ~80% of the lift.
+**Build complexity:** Medium. OCR + LLM categorization is well-bounded. QuickBooks integration is the slow part. Phase 0 stub is trivial; Phase 1 build must first review Intuit QuickBooks Online MCP and then scope only the residual net-new work. Hermes substrate (dispatch, audit, approval codes, vision input pipeline mirroring Catering's `parse-menu-photo`) carries an estimated ~80% of the lift.
 
 **Why priority build:** Highest-ROI new agent in the consolidation review. Commingled cards is universal pain; visible weekly value to owner; first agent with a *hard-dollar* ROI lever (potentially reduces accountant fees by $200–300/mo, unlike the leverage agents whose value is "saved time and stress").
 
 **Build gating (added 2026-04-29 per Stage 1 decision doc; revised 2026-04-29 r2 after Catering menu E2E test + Hermes-first rule installation):** v0.1 implementation is gate-released on **two** investigations:
 
 1. **Customer-discovery behavioural commitment.** Two questions to 2–3 design-partner owners ("walk me through how you handle a receipt today" + "would you actually use this 5×/day"), then a behavioural test: get 1+ owner to commit to a 2-week prototype trial running ≥5 receipts/day. Intent ≠ retention; behaviour reveals it. Also surface the hard-dollar question: "what does your accountant charge to clean up receipts each month?"
-2. **QBO API ground-truthing.** Read current Intuit Developer documentation. Confirm: OAuth flow + write-permission scope + attachment support + rate limits + sandbox/production approval timing + accountant-side webhooks (so agent knows if a record was edited downstream) + multi-company scenarios (some owners have separate QBO files per LLC). Half-day, prevents a "we can't actually do that" moment 4 weeks into the build.
+2. **QBO connector ground-truthing.** Review the Intuit QuickBooks Online MCP server first, then read current Intuit Developer documentation for any residual raw API needs. Confirm: OAuth flow + write-permission scope + attachment support + rate limits + sandbox/production approval timing + accountant-side webhooks (so agent knows if a record was edited downstream) + multi-company scenarios (some owners have separate QBO files per LLC). Half-day, prevents a "we can't actually do that" moment 4 weeks into the build.
 
 **Retired gate:** ~~OCR viability test~~ — removed 2026-04-29 r2 after Catering's menu pipeline tested **end-to-end in production** (owner sends menu image to WhatsApp → Hermes extracts → structured menu created → customer-facing reply). Receipt-specific extractor edge cases (faded thermal, handwritten supplier receipts, multi-language code-switching) move to v0.1 hardening tasks during build, not a pre-build investigation. The OCR surface is proven.
 
 **Hermes carries the entire source-in → vision-extract → structured-out → response-out loop** — verified E2E in Catering 2026-04-29. For Expense Bookkeeper this directly transfers, with no new infrastructure: WhatsApp media inbound + routing, vision extraction with structured JSON output, skill chaining, `decisions.log` audit chain, `#XXXXX` approval codes with 4h proposal TTL + dead-man escalation (Catering template), `sender_role` identity check, multi-channel response, LLM gateway. The original "four architectural surfaces" framing in the Stage 1 doc treated this loop as new infrastructure; per the Hermes-first rule (see project `CLAUDE.md`), it is substrate.
 
 **Genuinely net-new engineering surfaces (the only ones requiring real investment):**
-- **External write API (QBO):** OAuth flow + token storage + write-scope API client. ~1–1.5 weeks. Unfamiliar but well-trodden engineering.
+- **External QBO connector:** review/use Intuit QuickBooks Online MCP if it passes source/scope review; custom OAuth/token/write-scope API client is residual work only if MCP is insufficient.
 - **Money-moving UX discipline:** code+amount approval format (`#A47C2 $234.50` so owners can't pattern-match-YES on the wrong receipt), perceptual-hash dedup (not byte-hash — same receipt photographed twice has different bytes), per-amount cockpit-vs-WhatsApp threshold (>$X routes to web review with line-item breakdown), 24h reversibility window. ~1 week. Hermes provides the primitives (audit + approval codes); the *discipline* must still be designed deliberately. This is the hardest remaining product risk.
 - **Receipt extractor schema + classifier + chart-of-accounts mapper:** skill-level work, mirrors Catering's `parse-menu-photo`. ~3–5 days.
 - **Edge-case hardening + safety + reversibility logic:** ~3–5 days.
@@ -1019,7 +1019,7 @@ User-supplied portfolio reshape after the 2026-05-04 overnight closeout introduc
 
 **Purpose:** Manages referral program (track who referred whom, reward both) + auto-replies to Google Maps / Facebook reviews (after owner approval gate).
 
-**Hermes-first effort:** MEDIUM. Referral side is JSON state. Review side requires Google My Business API + Facebook Graph API. **Investigate `mcp/native-mcp` first per skills-roadmap.md** — community MCP servers may shrink the integration cost.
+**Hermes-first effort:** MEDIUM. Referral side is JSON state. Review side requires Google Business Profile / Facebook review access. **Investigate `mcp/native-mcp`, Yelp MCP, Google Maps/Business Profile options, and platform APIs first per skills-roadmap.md**; custom raw API work comes only after connector review fails.
 
 **Build complexity:** Medium. Referral standalone is tractable; review-responder is gated on MCP availability + per-platform API access.
 

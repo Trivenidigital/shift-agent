@@ -522,6 +522,44 @@ This is a future-process decision; not worth retrofitting prior PRs, but worth a
 - [x] Tarball deploy to `main-vps` with proposal branch initially disabled, then enabled after verification. Gateway active, bridge connected, health check rc=0, `F7_PROPOSAL_BRANCH_ENABLED = True`.
 - [ ] Live WhatsApp smoke: proposal request for active catering lead, then customer selection of option number, then owner approval gate.
 
+## Active - Credential-minimized Hermes mode (2026-05-14)
+
+- [x] Review current repo drift rules, `tasks/lessons.md`, deploy smoke, deploy script, existing skills roadmap, and portfolio docs.
+- [x] Run live VPS Hermes inventory for installed/enabled skills/plugins and credential presence by name only.
+- [x] Perform market research across Hermes built-ins, Awesome Hermes, Self-Evolution Kit, vendor MCP servers, iPaaS MCP, no-key messaging, local LLM/OCR/maps alternatives, and manual-export workflows.
+- [x] Write plan: `tasks/credential-minimized-hermes-mode-plan-2026-05-14.md`.
+- [x] Run two parallel plan reviews and fold findings into the plan.
+  - Fixed: readiness is additive and must not downgrade OpenRouter/Pushover/runtime gates.
+  - Fixed: strict foundation check moves pre-install/pre-restart so rollback is not used for external Hermes install drift.
+  - Fixed: matrix must be deployable under `src/platform/` and carry freshness/source/maturity fields.
+  - Fixed: POS market coverage now includes Clover and customer-POS triage, not Square-only.
+- [x] Write design spec with CLI/data/deploy/test contract: `docs/superpowers/specs/2026-05-14-credential-minimized-hermes-mode-design.md`.
+- [x] Run two parallel design reviews and fold findings into the design.
+  - Fixed: pre-install strict gate checks only external Hermes foundation skills; repo-installed `cf-router` validates after plugin install/pre-restart.
+  - Fixed: CLI must use staged import path before `/opt/shift-agent`.
+  - Fixed: subprocess tests use `sys.executable` for Windows.
+  - Fixed: connector rows carry freshness windows and richer maturity/auth status; stale rows surface in output.
+  - Fixed: docs updates must surgically amend stale QBO/payments/e-sign/review API claims.
+- [x] Build readiness matrix + `credential-minimized-readiness` CLI + deploy smoke integration.
+- [x] Update roadmap/portfolio/no-key analysis docs with current market research.
+  - CLI/module: `src/platform/credential_readiness.py` + `src/platform/scripts/credential-minimized-readiness`.
+  - Deploy: pre-install strict foundation gate, post-install/pre-restart `cf-router` enabled-state gate, smoke-test non-blocking report.
+  - Docs: QBO/payments/e-sign/reviews updated to vendor MCP/vetted MCP first, custom raw API only after connector review fails.
+  - Focused verification: `python -m pytest tests/test_credential_readiness.py tests/test_repo_invariants.py tests/test_tarball_includes_summary_artifacts.py -q` -> `18 passed, 2 skipped`.
+  - Syntax verification: `python -m py_compile src\platform\credential_readiness.py`; Git Bash `bash -n` on deploy and smoke scripts; `git diff --check` -> all passed.
+  - Full Windows host suite: `python -m pytest -q` -> `7 failed, 758 passed, 606 skipped`; failures match pre-existing baseline recorded above (`test_pr_b_v3_static.py` substring false positive and web backend `safe_io` import of Linux-only `fcntl` on Windows).
+- [ ] Open PR, run three parallel implementation reviews, fix findings, merge, and deploy.
+  - PR #86 opened from `codex/credential-minimized-hermes-mode`.
+  - Three implementation-review vectors dispatched: code/test mechanics, deploy/runtime/security, Hermes-first/market claims.
+  - Fixed review findings:
+    - CLI wrapper now preserves staged module precedence before `/opt/shift-agent`.
+    - Connector readiness now reports `partial_env` for incomplete credential sets and recognizes connector-specific env names.
+    - `cf-router` validation now compiles/imports read-only, checks `pre_gateway_dispatch`, avoids `__pycache__`, and treats `plugins.disabled` as a deny-list.
+    - Roadmap/plan/no-key docs no longer call connector-backed surfaces guaranteed custom gaps or say `cf-router` is part of strict external foundation mode.
+    - Re-review fix: QBO complete readiness now requires refresh token/environment as documented by Intuit MCP; Venmo API/OAuth row now cites PayPal/Braintree Venmo developer docs.
+    - Re-review fix: strict foundation report no longer imports live `cf-router`; post-install `--validate-plugin cf-router` still does. Rollback to older tarballs now removes the new readiness binary/module.
+  - Review-fix verification: `python -m pytest tests/test_credential_readiness.py tests/test_repo_invariants.py tests/test_tarball_includes_summary_artifacts.py -q` -> `20 passed, 2 skipped`; Python byte-compile for module + wrapper, Git Bash `bash -n` on deploy/smoke, and `git diff --check` -> all passed.
+
 Review results:
 - Final implementation review found four issues; all fixed:
   - cf-router now skips LLM for handled proposal-selection exits `{0,2,4,6,11}`.

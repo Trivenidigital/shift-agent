@@ -62,6 +62,14 @@ if ! "$PY" /usr/local/bin/check-safe-io-symbols > /dev/null; then
 fi
 echo "✓ Python modules importable (incl. safe_io chokepoint symbols)"
 
+# 2a. Credential-minimized readiness report. Informational only: the strict
+# external-foundation gate runs pre-install in shift-agent-deploy.sh, where a
+# missing Hermes bundled skill can abort before app state changes. Post-restart
+# smoke must not be the first strict check for external Hermes install state.
+if [ -x /usr/local/bin/credential-minimized-readiness ]; then
+    "$PY" /usr/local/bin/credential-minimized-readiness --format text || true
+fi
+
 # 2b. cf-router plugin (PR-CF6 + PR-CF7) — verify the plugin's hooks +
 # actions modules import cleanly and the F7 classifier is reachable.
 # A syntax error or broken import in the plugin would otherwise pass
