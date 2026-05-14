@@ -26,7 +26,7 @@ Plan: `docs/superpowers/plans/2026-05-14-production-pilot-shift-catering-daily-b
 - [x] Deploy to `main-vps`.
 - [x] Runtime verification: readiness gate installed, bridge connected, gateway active, timers firing.
 - [ ] Seed real customer identity in `/opt/shift-agent/config.yaml`: replace placeholder `customer.name` and `customer.location_id`.
-- [ ] Rerun `pilot-readiness-check --text`; expected result after seeding is READY.
+- [ ] Rerun `/usr/local/lib/hermes-agent/venv/bin/python /usr/local/bin/pilot-readiness-check --text`; expected result after seeding is READY.
 - [ ] Live WhatsApp smoke script from `docs/runbooks/production-pilot-shift-catering-daily-brief.md`.
 
 Current runtime status from deploy `deploy-20260514-170739-f4ce14db`: gateway active, WhatsApp bridge connected, timers active, roster valid, 6 active employees, 23 scheduled shifts, catering menu valid, 78 available menu items. Readiness gate is blocked only on placeholder customer identity.
@@ -45,10 +45,10 @@ Design: `docs/superpowers/specs/2026-05-14-catering-self-learning-rails-design.m
 - [x] Write design for counts-only catering learning sidecar and opt-in Daily Brief readout.
 - [x] Run 2-agent design review and apply privacy/runtime fixes.
 - [x] Implement local schema, pattern-report, Daily Brief, and focused tests.
-- [ ] Create PR and run 3 parallel reviewers.
-- [ ] Fix PR-review findings.
+- [x] Create PR and run 3 parallel reviewers.
+- [x] Fix PR-review findings: opt-in no-leads warning, broader privacy regression tests, catering timer install/enable, Hermes-venv runtime execution, and missing-log degraded sidecar.
 - [ ] Merge and deploy to `main-vps`.
-- [ ] Run `sudo -u shift-agent /usr/local/bin/catering-pattern-report --dry-run --learning-days 30` on VPS and review output.
+- [ ] Run `sudo -u shift-agent /usr/local/lib/hermes-agent/venv/bin/python /usr/local/bin/catering-pattern-report --dry-run --learning-days 30` on VPS and review output.
 - [ ] Enable `daily_brief.sections += ["catering_learning"]` only after dry-run output is reviewed.
 
 ## P0 — Live verification (passive, blocked on real customer traffic)

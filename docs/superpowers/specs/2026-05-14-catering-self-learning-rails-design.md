@@ -356,12 +356,12 @@ Add `tests/test_daily_brief_catering_learning.py`:
 1. Deploy with `catering_learning` absent from `daily_brief.sections`.
 2. Run:
    ```bash
-   sudo -u shift-agent /usr/local/bin/catering-pattern-report --dry-run --learning-days 30
+   sudo -u shift-agent /usr/local/lib/hermes-agent/venv/bin/python /usr/local/bin/catering-pattern-report --dry-run --learning-days 30
    ```
    and inspect the learning summary JSON.
 3. Run:
    ```bash
-   sudo -u shift-agent /usr/local/bin/catering-pattern-report --learning-days 30
+   sudo -u shift-agent /usr/local/lib/hermes-agent/venv/bin/python /usr/local/bin/catering-pattern-report --learning-days 30
    ```
    to write the sidecar.
 4. Temporarily test the Daily Brief in dry-run with a config copy that includes

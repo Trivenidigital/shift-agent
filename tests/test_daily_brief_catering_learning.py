@@ -143,9 +143,14 @@ def test_catering_learning_renders_counts_when_enabled(tmp_path: Path) -> None:
 
     assert "Proposals (30d): 3 sent, 1 selected, 0 send failed, 1 select failed" in rendered
     assert "Off-menu asks: 4 request(s) across 2 lead(s)" in rendered
-    assert "Priya" not in rendered
-    assert "123 Main" not in rendered
-    assert "$2500" not in rendered
+    forbidden_fragments = [
+        "Priya", "Srini", "9876543210", "123 Main", "Pineville",
+        "$2500", "35 per head", "deposit", "Venmo", "request_text",
+        "raw_inquiry", "Priya special", "Butter_Chicken", "*premium*",
+        "\u200b",
+    ]
+    for fragment in forbidden_fragments:
+        assert fragment not in rendered
 
 
 def test_catering_learning_missing_summary_warns_when_enabled(tmp_path: Path) -> None:
@@ -157,6 +162,47 @@ def test_catering_learning_missing_summary_warns_when_enabled(tmp_path: Path) ->
     rendered = _render(mod, _cfg(sections=["catering_learning"]))
 
     assert "Learning summary unavailable; check catering-pattern-report.timer" in rendered
+
+
+def test_catering_learning_missing_leads_still_renders_learning(tmp_path: Path) -> None:
+    now = datetime(2026, 5, 14, 12, tzinfo=timezone.utc)
+    _seed_summary(tmp_path, now)
+    mod = _load_send_brief(tmp_path)
+    mod._customer_now = lambda tz: now
+
+    rendered = _render(mod, _cfg(sections=["catering_learning"]))
+
+    assert "Leads file unavailable" in rendered
+    assert "Proposals (30d): 3 sent, 1 selected, 0 send failed, 1 select failed" in rendered
+
+
+def test_catering_learning_empty_leads_still_warns_on_missing_summary(tmp_path: Path) -> None:
+    now = datetime(2026, 5, 14, 12, tzinfo=timezone.utc)
+    path = tmp_path / "state" / "catering-leads.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"leads": []}), encoding="utf-8")
+    mod = _load_send_brief(tmp_path)
+    mod._customer_now = lambda tz: now
+
+    rendered = _render(mod, _cfg(sections=["catering_learning"]))
+
+    assert "No leads on file" in rendered
+    assert "Learning summary unavailable; check catering-pattern-report.timer" in rendered
+
+
+def test_catering_learning_unreadable_leads_still_renders_learning(tmp_path: Path) -> None:
+    now = datetime(2026, 5, 14, 12, tzinfo=timezone.utc)
+    path = tmp_path / "state" / "catering-leads.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("not json", encoding="utf-8")
+    _seed_summary(tmp_path, now)
+    mod = _load_send_brief(tmp_path)
+    mod._customer_now = lambda tz: now
+
+    rendered = _render(mod, _cfg(sections=["catering_learning"]))
+
+    assert "leads file unreadable" in rendered
+    assert "Proposals (30d): 3 sent, 1 selected, 0 send failed, 1 select failed" in rendered
 
 
 def test_catering_learning_stale_summary_warns(tmp_path: Path) -> None:

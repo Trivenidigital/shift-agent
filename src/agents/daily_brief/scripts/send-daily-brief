@@ -461,16 +461,27 @@ def _render_catering(now_local: datetime, include_learning: bool = False) -> str
     Returns an empty string when there are no leads at all (lets the caller
     omit the block cleanly).
     """
+    def _append_learning(lines: list[str]) -> str:
+        if include_learning:
+            learning_summary = _render_catering_learning(now_local)
+            if learning_summary:
+                lines.append(learning_summary)
+        return "\n".join(lines)
+
     leads_path = CATERING_LEADS_PATH
     if not leads_path.exists():
+        if include_learning:
+            return _append_learning(["*Catering pipeline:*", "  - Leads file unavailable."])
         return ""
     try:
         data = json.loads(leads_path.read_text(encoding="utf-8"))
         leads = data.get("leads", []) or []
     except Exception:
-        return "*Catering pipeline:* leads file unreadable."
+        return _append_learning(["*Catering pipeline:* leads file unreadable."])
 
     if not leads:
+        if include_learning:
+            return _append_learning(["*Catering pipeline:*", "  - No leads on file."])
         return ""
 
     window_start = now_local - timedelta(hours=24)
@@ -502,12 +513,7 @@ def _render_catering(now_local: datetime, include_learning: bool = False) -> str
 
     lines.append(f"  • Quotes sent to customers: {len(sent_to_customer)}")
     lines.append(f"  • Active pipeline total: {pipeline_total}")
-    if include_learning:
-        learning_summary = _render_catering_learning(now_local)
-        if learning_summary:
-            lines.append(learning_summary)
-
-    return "\n".join(lines)
+    return _append_learning(lines)
 
 
 def _render_brief_text(

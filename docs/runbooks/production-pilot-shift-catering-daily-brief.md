@@ -8,7 +8,8 @@ owner self-chat.
 
 ## Preconditions
 
-- `pilot-readiness-check --text` has no `FAIL` rows.
+- `/usr/local/lib/hermes-agent/venv/bin/python /usr/local/bin/pilot-readiness-check --text`
+  has no `FAIL` rows.
 - `hermes-gateway` is active.
 - WhatsApp bridge health endpoint returns `{"status":"connected"}`.
 - `shift-agent-tail-logger.timer`, `shift-agent-health.timer`,
@@ -23,7 +24,7 @@ Use the Windows SSH two-step pattern from AGENTS.md. Redirect SSH output to a
 file first, then read the file.
 
 ```bash
-ssh main-vps 'pilot-readiness-check --text' > .ssh_pilot_readiness.txt 2>&1
+ssh main-vps '/usr/local/lib/hermes-agent/venv/bin/python /usr/local/bin/pilot-readiness-check --text' > .ssh_pilot_readiness.txt 2>&1
 ```
 
 ```bash
@@ -228,13 +229,13 @@ This section is opt-in. It is safe to deploy while disabled because
 First generate and inspect the counts-only sidecar as the service user:
 
 ```bash
-ssh main-vps 'sudo -u shift-agent /usr/local/bin/catering-pattern-report --dry-run --learning-days 30' > .ssh_catering_learning_dry_run.txt 2>&1
+ssh main-vps 'sudo -u shift-agent /usr/local/lib/hermes-agent/venv/bin/python /usr/local/bin/catering-pattern-report --dry-run --learning-days 30' > .ssh_catering_learning_dry_run.txt 2>&1
 ```
 
 If the dry-run output is safe, write the sidecar:
 
 ```bash
-ssh main-vps 'sudo -u shift-agent /usr/local/bin/catering-pattern-report --learning-days 30' > .ssh_catering_learning_write.txt 2>&1
+ssh main-vps 'sudo -u shift-agent /usr/local/lib/hermes-agent/venv/bin/python /usr/local/bin/catering-pattern-report --learning-days 30' > .ssh_catering_learning_write.txt 2>&1
 ```
 
 Expected state:

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/local/lib/hermes-agent/venv/bin/python
 """pilot-readiness-check - production pilot gate for the first 3 WhatsApp agents.
 
 This is an onboarding/readiness check, not a generic health check. Runtime

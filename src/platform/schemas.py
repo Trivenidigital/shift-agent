@@ -888,8 +888,8 @@ class CateringLearningSummary(BaseModel):
     active_missing_info_count: int = Field(default=0, ge=0)
     menu_updated_at: Optional[datetime] = None
     menu_freshness_days: Optional[int] = Field(default=None, ge=0)
-    degraded_sources: list[Literal["leads", "proposals", "menu"]] = Field(
-        default_factory=list, max_length=3,
+    degraded_sources: list[Literal["log", "leads", "proposals", "menu"]] = Field(
+        default_factory=list, max_length=4,
     )
 
 

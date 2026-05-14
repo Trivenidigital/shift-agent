@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/local/lib/hermes-agent/venv/bin/python
 """catering-pattern-report — scan decisions.log + leads for LLM extraction bugs.
 
 PR-CF1c-B 2026-05-12. Mirrors dispatcher-accuracy-report's observability
@@ -412,13 +412,16 @@ def main() -> int:
     if args.learning_days < 1 or args.learning_days > 365:
         sys.stderr.write(f"--learning-days must be 1..365; got {args.learning_days}\n")
         return 2
-    if not args.log.exists():
-        sys.stderr.write(f"log not found: {args.log}\n")
-        return 2
-
     now = datetime.now(timezone.utc).astimezone()
     since = now - timedelta(days=args.days)
-    findings, suppressed = _scan(args.log, args.leads, since, args.roster)
+    log_missing = not args.log.exists()
+    if log_missing:
+        sys.stderr.write(
+            f"WARN: log not found: {args.log}; skipping hallucination scan\n",
+        )
+        findings, suppressed = [], 0
+    else:
+        findings, suppressed = _scan(args.log, args.leads, since, args.roster)
     learning_summary = None
     if not args.skip_learning_summary:
         learning_summary = _build_learning_summary(
@@ -428,6 +431,8 @@ def main() -> int:
             now,
             args.learning_days,
         )
+        if log_missing and "log" not in learning_summary.degraded_sources:
+            learning_summary.degraded_sources.append("log")
         if not args.dry_run:
             _write_learning_summary(
                 args.learning_summary,

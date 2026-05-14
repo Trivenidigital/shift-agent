@@ -317,8 +317,13 @@ def test_learning_summary_counts_off_menu_without_persisting_text(tmp_path: Path
             created_at=now - timedelta(days=2),
             off_menu_items=[
                 "Priya special",
+                "Srini family menu",
+                "+1 987 654 3210",
                 "123 Main Street",
+                "Pineville NC",
                 "$2500 deposit",
+                "35 per head",
+                "Butter_Chicken *premium*\u200b",
                 "Butter Chicken",
             ],
         ),
@@ -339,13 +344,16 @@ def test_learning_summary_counts_off_menu_without_persisting_text(tmp_path: Path
         leads_path, proposals_path, menu_path, now, 30,
     )
 
-    assert summary.off_menu_request_count == 4
+    assert summary.off_menu_request_count == 9
     assert summary.leads_with_off_menu_count == 1
     dumped = summary.model_dump_json()
-    assert "Priya" not in dumped
-    assert "Main Street" not in dumped
-    assert "2500" not in dumped
-    assert "Butter Chicken" not in dumped
+    forbidden_fragments = [
+        "Priya", "Srini", "987", "Main Street", "Pineville", "2500",
+        "35 per head", "deposit", "Butter_Chicken", "premium",
+        "Butter Chicken", "Need catering", "request_text",
+    ]
+    for fragment in forbidden_fragments:
+        assert fragment not in dumped
     assert summary.menu_freshness_days == 5
 
 
@@ -443,3 +451,35 @@ def test_main_writes_learning_sidecar_even_with_no_findings(
     assert written["source"] == "catering-pattern-report"
     assert Path(str(summary_path) + ".lock").exists()
     assert not lessons_path.exists()
+
+
+@pytest.mark.skipif(
+    platform.system() == "Windows",
+    reason="main() write path imports safe_io/FileLock (fcntl)",
+)
+def test_main_writes_degraded_learning_sidecar_when_log_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leads_path = tmp_path / "leads.json"
+    _write_json(leads_path, {"leads": []})
+    proposals_path = tmp_path / "proposals.json"
+    _write_json(proposals_path, {"sets": []})
+    menu_path = tmp_path / "menu.json"
+    _write_json(menu_path, {"updated_at": datetime.now(tz=timezone.utc).isoformat(), "items": []})
+    summary_path = tmp_path / "state" / "learning.json"
+    lessons_path = tmp_path / "lessons.md"
+
+    monkeypatch.setattr(sys, "argv", [
+        "catering-pattern-report",
+        "--log", str(tmp_path / "missing-decisions.log"),
+        "--leads", str(leads_path),
+        "--proposals", str(proposals_path),
+        "--menu", str(menu_path),
+        "--learning-summary", str(summary_path),
+        "--lessons", str(lessons_path),
+    ])
+
+    assert mod.main() == 0
+    written = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert "log" in written["degraded_sources"]

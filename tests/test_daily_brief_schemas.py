@@ -155,7 +155,7 @@ def test_catering_learning_summary_schema_validators():
         active_missing_info_count=1,
         menu_updated_at=now,
         menu_freshness_days=0,
-        degraded_sources=["menu"],
+        degraded_sources=["log", "menu"],
     )
     assert summary.source == "catering-pattern-report"
     assert summary.off_menu_request_count == 4

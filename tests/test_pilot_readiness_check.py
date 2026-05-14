@@ -13,6 +13,9 @@ REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "src" / "agents" / "shift" / "scripts" / "pilot-readiness-check"
 DEPLOY_SCRIPT = REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh"
 SMOKE_SCRIPT = REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-smoke-test.sh"
+CATERING_PATTERN_SERVICE = (
+    REPO / "src" / "agents" / "catering" / "systemd" / "catering-pattern-report.service"
+)
 
 
 def _write_json(path: Path, obj: dict) -> None:
@@ -215,6 +218,26 @@ def test_disabled_daily_brief_blocks_control_tower(tmp_path: Path):
 def test_deploy_removes_stale_pilot_readiness_binary_on_rollback():
     text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
     assert "rm -f /usr/local/bin/pilot-readiness-check" in text
+
+
+def test_deploy_installs_and_enables_catering_pattern_timer():
+    text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    assert "src/agents/catering/systemd/*.service" in text
+    assert "src/agents/catering/systemd/*.timer" in text
+    assert "systemctl enable --now catering-pattern-report.timer" in text
+
+
+def test_smoke_requires_catering_pattern_timer_enabled_and_valid():
+    text = SMOKE_SCRIPT.read_text(encoding="utf-8")
+    assert "catering-pattern-report.timer" in text
+    assert "/etc/systemd/system/catering-pattern-report.service" in text
+    assert "/etc/systemd/system/catering-pattern-report.timer" in text
+
+
+def test_catering_pattern_service_uses_hermes_python_and_runs_without_lead_condition():
+    text = CATERING_PATTERN_SERVICE.read_text(encoding="utf-8")
+    assert "ExecStart=/usr/local/lib/hermes-agent/venv/bin/python /usr/local/bin/catering-pattern-report" in text
+    assert "ConditionPathExists=/opt/shift-agent/state/catering-leads.json" not in text
 
 
 def test_smoke_reports_pilot_readiness_non_blocking():
