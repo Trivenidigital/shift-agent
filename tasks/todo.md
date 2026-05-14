@@ -7,6 +7,50 @@ Last updated: 2026-05-05 (post-PR #72 backlog refresh — 5 follow-ups added: fi
 
 ---
 
+## Active - Production pilot: Shift + Catering + Daily Brief (2026-05-14)
+
+**Drift-check tag:** extends-Hermes
+
+Hermes-first summary: reuse the deployed WhatsApp gateway, `dispatch_shift_agent`, `cf-router`, shift coverage scripts, catering menu/proposal scripts, and `send-daily-brief` timer. Net-new scope is limited to a deterministic pilot readiness gate, menu-update authority wording consistency, and a WhatsApp smoke runbook.
+
+Plan: `docs/superpowers/plans/2026-05-14-production-pilot-shift-catering-daily-brief.md`
+
+- [x] Confirm first production pilot bundle: Shift Agent + Catering Agent + Daily Brief Agent.
+- [x] Drift/Hermes-first grounding: read dispatcher, catering/menu skills, shift sick-call skill, daily brief script/schema, readiness matrix, live VPS timers/config, and installed Hermes skills/plugins.
+- [x] Create implementation branch: `codex/productionize-shift-catering-brief`.
+- [x] Write implementation plan with runtime-state grounding and Hermes-first analysis.
+- [x] TDD: add `pilot-readiness-check` script for real-customer onboarding gates.
+- [x] Tighten catering menu update authority contract so upload/apply permissions match dispatcher behavior.
+- [x] Write the three-agent WhatsApp production smoke runbook.
+- [x] Local focused verification.
+- [x] Deploy to `main-vps`.
+- [x] Runtime verification: readiness gate installed, bridge connected, gateway active, timers firing.
+- [ ] Seed real customer identity in `/opt/shift-agent/config.yaml`: replace placeholder `customer.name` and `customer.location_id`.
+- [ ] Rerun `/usr/local/lib/hermes-agent/venv/bin/python /usr/local/bin/pilot-readiness-check --text`; expected result after seeding is READY.
+- [ ] Live WhatsApp smoke script from `docs/runbooks/production-pilot-shift-catering-daily-brief.md`.
+
+Current runtime status from deploy `deploy-20260514-170739-f4ce14db`: gateway active, WhatsApp bridge connected, timers active, roster valid, 6 active employees, 23 scheduled shifts, catering menu valid, 78 available menu items. Readiness gate is blocked only on placeholder customer identity.
+
+## Active - Catering self-learning rails (2026-05-14)
+
+**Drift-check tag:** extends-Hermes
+
+Hermes-first summary: reuse existing catering state, `catering-pattern-report.timer`, and Daily Brief delivery. Net-new scope is limited to a counts-only `catering-learning-summary.json` sidecar plus opt-in Daily Brief rendering. Runtime learning remains state/report-only; code/SKILL changes still require PR/review/deploy.
+
+Plan: `docs/superpowers/plans/2026-05-14-catering-100-autonomy-self-learning-plan.md`
+Design: `docs/superpowers/specs/2026-05-14-catering-self-learning-rails-design.md`
+
+- [x] Write plan for the 100% catering autonomy destination and first safe self-learning slice.
+- [x] Run 2-agent plan review and apply scope/safety fixes.
+- [x] Write design for counts-only catering learning sidecar and opt-in Daily Brief readout.
+- [x] Run 2-agent design review and apply privacy/runtime fixes.
+- [x] Implement local schema, pattern-report, Daily Brief, and focused tests.
+- [x] Create PR and run 3 parallel reviewers.
+- [x] Fix PR-review findings: opt-in no-leads warning, broader privacy regression tests, catering timer install/enable, Hermes-venv runtime execution, and missing-log degraded sidecar.
+- [ ] Merge and deploy to `main-vps`.
+- [ ] Run `sudo -u shift-agent /usr/local/lib/hermes-agent/venv/bin/python /usr/local/bin/catering-pattern-report --dry-run --learning-days 30` on VPS and review output.
+- [ ] Enable `daily_brief.sections += ["catering_learning"]` only after dry-run output is reviewed.
+
 ## P0 — Live verification (passive, blocked on real customer traffic)
 
 Reporter floor as of 2026-04-28: **0/26 (0%)** — all 26 entries are pre-fix synthetic test injections; no real Kimi-routed inbound since dispatcher schema deployed. Floor will move once real traffic starts. Trigger: send any test message to self-chat to validate the pipeline end-to-end.
@@ -520,7 +564,7 @@ This is a future-process decision; not worth retrofitting prior PRs, but worth a
   - Full `python -m pytest -q` -> `7 failed, 741 passed, 598 skipped`; failures are known unrelated Windows/static baseline issues (`test_pr_b_v3_static.py` substring false positive on `_render_quote_from_lead_state`; web backend imports Linux-only `fcntl` through `safe_io` on Windows).
 - [x] Linux/VPS script tests for `tests/test_create_catering_proposal_options.py`, `tests/test_select_catering_proposal.py`, and `tests/test_catering_finalize_menu.py` before deploy. VPS verification: `65 passed, 24 warnings`.
 - [x] Tarball deploy to `main-vps` with proposal branch initially disabled, then enabled after verification. Gateway active, bridge connected, health check rc=0, `F7_PROPOSAL_BRANCH_ENABLED = True`.
-- [ ] Live WhatsApp smoke: proposal request for active catering lead, then customer selection of option number, then owner approval gate.
+- [ ] Live WhatsApp smoke: proposal request for active catering lead, then customer selection of option number, then owner approval gate. Fold into the production pilot smoke script after customer identity is seeded.
 
 ## Active - Credential-minimized Hermes mode (2026-05-14)
 
@@ -548,7 +592,7 @@ This is a future-process decision; not worth retrofitting prior PRs, but worth a
   - Focused verification: `python -m pytest tests/test_credential_readiness.py tests/test_repo_invariants.py tests/test_tarball_includes_summary_artifacts.py -q` -> `18 passed, 2 skipped`.
   - Syntax verification: `python -m py_compile src\platform\credential_readiness.py`; Git Bash `bash -n` on deploy and smoke scripts; `git diff --check` -> all passed.
   - Full Windows host suite: `python -m pytest -q` -> `7 failed, 758 passed, 606 skipped`; failures match pre-existing baseline recorded above (`test_pr_b_v3_static.py` substring false positive and web backend `safe_io` import of Linux-only `fcntl` on Windows).
-- [ ] Open PR, run three parallel implementation reviews, fix findings, merge, and deploy.
+- [x] Open PR, run three parallel implementation reviews, fix findings, merge, and deploy.
   - PR #86 opened from `codex/credential-minimized-hermes-mode`.
   - Three implementation-review vectors dispatched: code/test mechanics, deploy/runtime/security, Hermes-first/market claims.
   - Fixed review findings:
@@ -571,3 +615,4 @@ Review results:
   - Hermes pin gate correctly blocked first deploy: live Hermes was `486b692d...`, repo baseline `c5b4c481...`, and sender-id markers were absent after migration. Trial-patched a copy first, then applied `tools/patch-hermes.py` live with backup `/opt/shift-agent/deploys/hermes-pre-proposal-senderpatch-20260514-010345.tgz`.
   - `.env` symlink gate correctly blocked next deploy. `/opt/shift-agent/.env` and `/root/.hermes/.env` were byte-identical, so `migrate-env-to-symlink.sh` ran safely and left backup `/opt/shift-agent/.env.pre-symlink-backup`.
   - Manual plugin rsync was needed after deploy because live `cf-router/hooks.py` lagged staging. Removed pycache created by manual compile so `hermes-gateway` ExecStartPre chown succeeded. Final restart active with bridge port 3000 listening.
+  - PR #86 was merged to `main` and deployed as `deploy-20260514-162731-f4ce14db`.

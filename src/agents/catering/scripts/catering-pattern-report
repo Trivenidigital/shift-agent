@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/local/lib/hermes-agent/venv/bin/python
 """catering-pattern-report — scan decisions.log + leads for LLM extraction bugs.
 
 PR-CF1c-B 2026-05-12. Mirrors dispatcher-accuracy-report's observability
@@ -46,12 +46,38 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
+
+from pydantic import ValidationError  # noqa: E402
+
+from schemas import (  # noqa: E402
+    CateringLeadStore,
+    CateringLearningProposalHealth,
+    CateringLearningSummary,
+    CateringProposalStore,
+    Menu,
+)
+
 DEFAULT_LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
 DEFAULT_LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
+DEFAULT_PROPOSALS_PATH = Path("/opt/shift-agent/state/catering-proposals.json")
+DEFAULT_MENU_PATH = Path("/opt/shift-agent/state/catering-menu.json")
 DEFAULT_LESSONS_PATH = Path("/opt/shift-agent/lessons/catering.md")
 DEFAULT_ROSTER_PATH = Path("/opt/shift-agent/roster.json")
+DEFAULT_LEARNING_SUMMARY_PATH = Path("/opt/shift-agent/state/catering-learning-summary.json")
+DEFAULT_LEARNING_DAYS = 30
 
 MIN_TOKEN_LEN = 3  # ignore "a", "an", "Sr", etc. when matching
+ACTIVE_LEAD_STATUSES = {
+    "NEW",
+    "EXTRACTING",
+    "AWAITING_OWNER_APPROVAL",
+    "CUSTOMER_FINALIZED",
+    "OWNER_APPROVED",
+    "OWNER_EDITED",
+    "SENT_TO_CUSTOMER",
+}
 
 
 def _load_roster_names(roster_path: Path) -> set[str]:
@@ -139,6 +165,134 @@ def _load_leads(leads_path: Path) -> dict[str, dict[str, Any]]:
     except (json.JSONDecodeError, OSError):
         return {}
     return {l.get("lead_id"): l for l in data.get("leads", []) if l.get("lead_id")}
+
+
+def _normalize_aware(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _load_model_for_learning(
+    path: Path,
+    model_cls: Any,
+    *,
+    default: Any,
+    degraded_sources: list[str],
+    source_name: str,
+    missing_degrades: bool,
+) -> Any:
+    if not path.exists():
+        if missing_degrades and source_name not in degraded_sources:
+            degraded_sources.append(source_name)
+        return default
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return model_cls.model_validate(raw)
+    except (json.JSONDecodeError, OSError, ValidationError, ValueError):
+        if source_name not in degraded_sources:
+            degraded_sources.append(source_name)
+        return default
+
+
+def _build_learning_summary(
+    leads_path: Path,
+    proposals_path: Path,
+    menu_path: Path,
+    now: datetime,
+    window_days: int,
+) -> CateringLearningSummary:
+    now = _normalize_aware(now)
+    window_start = now - timedelta(days=window_days)
+    degraded_sources: list[str] = []
+
+    leads_store = _load_model_for_learning(
+        leads_path,
+        CateringLeadStore,
+        default=CateringLeadStore(),
+        degraded_sources=degraded_sources,
+        source_name="leads",
+        missing_degrades=True,
+    )
+    proposal_store = _load_model_for_learning(
+        proposals_path,
+        CateringProposalStore,
+        default=CateringProposalStore(),
+        degraded_sources=degraded_sources,
+        source_name="proposals",
+        missing_degrades=False,
+    )
+    menu = _load_model_for_learning(
+        menu_path,
+        Menu,
+        default=None,
+        degraded_sources=degraded_sources,
+        source_name="menu",
+        missing_degrades=True,
+    )
+
+    off_menu_request_count = 0
+    leads_with_off_menu_count = 0
+    active_missing_info_count = 0
+    for lead in leads_store.leads:
+        created_at = _normalize_aware(lead.created_at)
+        off_menu_items = list(lead.extracted.off_menu_items or [])
+        if created_at >= window_start and off_menu_items:
+            off_menu_request_count += len(off_menu_items)
+            leads_with_off_menu_count += 1
+        if str(lead.status) in ACTIVE_LEAD_STATUSES:
+            if lead.extracted.headcount is None or lead.extracted.event_date is None:
+                active_missing_info_count += 1
+
+    health = CateringLearningProposalHealth()
+    for proposal_set in proposal_store.sets:
+        created_at = _normalize_aware(proposal_set.created_at)
+        if created_at < window_start:
+            continue
+        status = str(proposal_set.status)
+        if status in {"SENT", "SUPERSEDED"}:
+            health.sent += 1
+        elif status == "SELECTED":
+            health.selected += 1
+        elif status == "SEND_FAILED":
+            health.send_failed += 1
+        elif status in {"SELECT_FAILED", "SELECTED_OWNER_CARD_FAILED"}:
+            health.select_failed += 1
+
+    menu_updated_at = None
+    menu_freshness_days = None
+    if menu is not None:
+        menu_updated_at = _normalize_aware(menu.updated_at)
+        menu_freshness_days = max(0, (now - menu_updated_at).days)
+
+    return CateringLearningSummary(
+        generated_at=now,
+        window_days=window_days,
+        proposal_health=health,
+        off_menu_request_count=off_menu_request_count,
+        leads_with_off_menu_count=leads_with_off_menu_count,
+        active_missing_info_count=active_missing_info_count,
+        menu_updated_at=menu_updated_at,
+        menu_freshness_days=menu_freshness_days,
+        degraded_sources=degraded_sources,
+    )
+
+
+def _learning_summary_lock_path(summary_path: Path, explicit_lock: Path | None = None) -> Path:
+    if explicit_lock is not None:
+        return explicit_lock
+    return Path(str(summary_path) + ".lock")
+
+
+def _write_learning_summary(
+    summary_path: Path,
+    lock_path: Path,
+    summary: CateringLearningSummary,
+) -> None:
+    from safe_io import FileLock, atomic_write_json  # noqa: E402
+
+    with FileLock(lock_path):
+        atomic_write_json(summary_path, summary)
 
 
 def _is_name_hallucinated(
@@ -236,10 +390,18 @@ def main() -> int:
     ap.add_argument("--days", type=int, default=1, help="Lookback window in days (default 1)")
     ap.add_argument("--log", type=Path, default=DEFAULT_LOG_PATH)
     ap.add_argument("--leads", type=Path, default=DEFAULT_LEADS_PATH)
+    ap.add_argument("--proposals", type=Path, default=DEFAULT_PROPOSALS_PATH)
+    ap.add_argument("--menu", type=Path, default=DEFAULT_MENU_PATH)
     ap.add_argument("--roster", type=Path, default=DEFAULT_ROSTER_PATH,
                     help="Roster file consulted to suppress false-positives "
                          "when customer_name came from identify-sender lookup.")
     ap.add_argument("--lessons", type=Path, default=DEFAULT_LESSONS_PATH)
+    ap.add_argument("--learning-summary", type=Path, default=DEFAULT_LEARNING_SUMMARY_PATH)
+    ap.add_argument("--learning-summary-lock", type=Path, default=None)
+    ap.add_argument("--learning-days", type=int, default=DEFAULT_LEARNING_DAYS,
+                    help="Lookback window in days for counts-only learning summary.")
+    ap.add_argument("--skip-learning-summary", action="store_true",
+                    help="Do not generate/write catering-learning-summary.json.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Print findings to stdout, don't append to lessons file.")
     args = ap.parse_args()
@@ -247,13 +409,38 @@ def main() -> int:
     if args.days < 1 or args.days > 365:
         sys.stderr.write(f"--days must be 1..365; got {args.days}\n")
         return 2
-    if not args.log.exists():
-        sys.stderr.write(f"log not found: {args.log}\n")
+    if args.learning_days < 1 or args.learning_days > 365:
+        sys.stderr.write(f"--learning-days must be 1..365; got {args.learning_days}\n")
         return 2
-
     now = datetime.now(timezone.utc).astimezone()
     since = now - timedelta(days=args.days)
-    findings, suppressed = _scan(args.log, args.leads, since, args.roster)
+    log_missing = not args.log.exists()
+    if log_missing:
+        sys.stderr.write(
+            f"WARN: log not found: {args.log}; skipping hallucination scan\n",
+        )
+        findings, suppressed = [], 0
+    else:
+        findings, suppressed = _scan(args.log, args.leads, since, args.roster)
+    learning_summary = None
+    if not args.skip_learning_summary:
+        learning_summary = _build_learning_summary(
+            args.leads,
+            args.proposals,
+            args.menu,
+            now,
+            args.learning_days,
+        )
+        if log_missing and "log" not in learning_summary.degraded_sources:
+            learning_summary.degraded_sources.append("log")
+        if not args.dry_run:
+            _write_learning_summary(
+                args.learning_summary,
+                _learning_summary_lock_path(
+                    args.learning_summary, args.learning_summary_lock,
+                ),
+                learning_summary,
+            )
 
     suppressed_note = f" ({suppressed} suppressed by roster lookup)" if suppressed else ""
 
@@ -262,12 +449,16 @@ def main() -> int:
             f"catering-pattern-report: 0 findings in last {args.days}d"
             f"{suppressed_note}. No-op."
         )
+        if args.dry_run and learning_summary is not None:
+            print(learning_summary.model_dump_json(indent=2))
         return 0
 
     lesson_md = _format_lesson(findings, now)
 
     if args.dry_run:
         print(lesson_md)
+        if learning_summary is not None:
+            print(learning_summary.model_dump_json(indent=2))
         return 0
 
     args.lessons.parent.mkdir(parents=True, exist_ok=True)

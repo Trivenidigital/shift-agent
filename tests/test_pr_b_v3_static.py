@@ -7,6 +7,7 @@ runtime (Linux-only because safe_io imports fcntl).
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -36,7 +37,7 @@ def test_template_machinery_deleted(apply_src):
     """
     # Function definitions
     for fn in ["_render_quote", "_format_menu_section", "_load_menu_filtered"]:
-        assert f"def {fn}" not in apply_src, \
+        assert not re.search(rf"^\s*def\s+{re.escape(fn)}\s*\(", apply_src, re.MULTILINE), \
             f"function {fn} should be deleted in PR-B v3 commit 2"
     # Constant assignments at module level
     for const in ["MENU_ITEMS_IN_QUOTE", "TEMPLATE_DIR"]:

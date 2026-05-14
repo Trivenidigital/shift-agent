@@ -43,6 +43,9 @@ install_artifacts() {
     if [ ! -f src/platform/scripts/credential-minimized-readiness ]; then
         rm -f /usr/local/bin/credential-minimized-readiness
     fi
+    if [ ! -f src/agents/shift/scripts/pilot-readiness-check ]; then
+        rm -f /usr/local/bin/pilot-readiness-check
+    fi
 
     # Python modules — flat layout at /opt/shift-agent/ matches scripts' sys.path
     install -m 644 src/platform/schemas.py /opt/shift-agent/schemas.py
@@ -218,6 +221,12 @@ install_artifacts() {
     if compgen -G "src/agents/catering/templates/*" > /dev/null; then
         install -m 644 src/agents/catering/templates/* /opt/shift-agent/templates/
     fi
+    if compgen -G "src/agents/catering/systemd/*.service" > /dev/null; then
+        install -m 644 src/agents/catering/systemd/*.service /etc/systemd/system/
+    fi
+    if compgen -G "src/agents/catering/systemd/*.timer" > /dev/null; then
+        install -m 644 src/agents/catering/systemd/*.timer /etc/systemd/system/
+    fi
     install -d -o shift-agent -g shift-agent /opt/shift-agent/state/catering-menu-archive 2>/dev/null || true
 
     # Tier 2 agents — SKILL-only stubs
@@ -324,11 +333,18 @@ install_artifacts() {
         echo "WARN: /usr/local/bin/vision-auth-smoke not installed — skipping vision-auth gate" >&2
     fi
 
-    # Enable + start cron timers
+    # Enable + start cron timers. Run daemon-reload after all per-agent units
+    # are installed so fresh tarball deploys can start newly added timers.
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable --now shift-agent-tail-logger.timer 2>/dev/null || true
+    systemctl enable --now shift-agent-health.timer 2>/dev/null || true
+    systemctl enable --now shift-agent-health-watchdog.timer 2>/dev/null || true
+    systemctl enable --now shift-agent-backup.timer 2>/dev/null || true
+    systemctl enable --now shift-agent-fsck.timer 2>/dev/null || true
     systemctl enable --now send-daily-brief.timer 2>/dev/null || true
+    systemctl enable --now catering-pattern-report.timer 2>/dev/null || true
     systemctl enable --now eod-reconcile.timer 2>/dev/null || true
     systemctl enable --now send-routing-accuracy-summary.timer 2>/dev/null || true
-    systemctl daemon-reload 2>/dev/null || true
     systemctl enable --now prune-expense-receipts.timer 2>/dev/null || true
     # Agent #13 Compliance Calendar (PR-Agent13-v0.1)
     systemctl enable --now check-compliance-deadlines.timer 2>/dev/null || true

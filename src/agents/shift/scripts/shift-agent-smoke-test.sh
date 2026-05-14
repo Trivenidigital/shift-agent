@@ -70,6 +70,13 @@ if [ -x /usr/local/bin/credential-minimized-readiness ]; then
     "$PY" /usr/local/bin/credential-minimized-readiness --format text || true
 fi
 
+# 2a.1 Production-pilot readiness report. Informational only: customer
+# onboarding data can intentionally be absent on rehearsal VPSes. This surfaces
+# the blocking rows without making every non-onboarded deploy fail.
+if [ -x /usr/local/bin/pilot-readiness-check ]; then
+    "$PY" /usr/local/bin/pilot-readiness-check --text || true
+fi
+
 # 2b. cf-router plugin (PR-CF6 + PR-CF7) — verify the plugin's hooks +
 # actions modules import cleanly and the F7 classifier is reachable.
 # A syntax error or broken import in the plugin would otherwise pass
@@ -256,7 +263,16 @@ else
 fi
 
 # 8. systemd units enabled
-for unit in hermes-gateway shift-agent-tail-logger.timer shift-agent-health.timer send-routing-accuracy-summary.timer; do
+for unit in \
+    hermes-gateway \
+    shift-agent-tail-logger.timer \
+    shift-agent-health.timer \
+    shift-agent-health-watchdog.timer \
+    shift-agent-backup.timer \
+    shift-agent-fsck.timer \
+    send-daily-brief.timer \
+    catering-pattern-report.timer \
+    send-routing-accuracy-summary.timer; do
     if ! systemctl is-enabled --quiet "$unit"; then
         echo "FAIL: $unit not enabled"
         exit 1
@@ -266,6 +282,10 @@ echo "✓ systemd units enabled"
 
 # 9. systemd unit syntax (catches typos before timer fires)
 sd_verify_units=(
+    /etc/systemd/system/catering-pattern-report.service
+    /etc/systemd/system/catering-pattern-report.timer
+    /etc/systemd/system/send-daily-brief.service
+    /etc/systemd/system/send-daily-brief.timer
     /etc/systemd/system/send-routing-accuracy-summary.service
     /etc/systemd/system/send-routing-accuracy-summary.timer
     /etc/systemd/system/send-routing-accuracy-summary-failure.service

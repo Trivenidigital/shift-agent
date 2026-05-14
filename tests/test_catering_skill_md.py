@@ -17,6 +17,9 @@ from pathlib import Path
 SKILL_PATH = (Path(__file__).resolve().parent.parent /
               "src" / "agents" / "catering" / "skills" /
               "parse_catering_inquiry" / "SKILL.md")
+UPDATE_MENU_SKILL = (Path(__file__).resolve().parent.parent /
+                     "src" / "agents" / "catering" / "skills" /
+                     "update_catering_menu" / "SKILL.md")
 LOOKUP_SCRIPT = (Path(__file__).resolve().parent.parent /
                  "src" / "agents" / "catering" / "scripts" /
                  "lookup-prior-leads-by-phone")
@@ -125,3 +128,14 @@ def test_skill_documents_sender_phone_provenance():
         "validate-sender-block; use VERBATIM) so contributors can't drift to "
         "deriving phone from message body"
     )
+
+
+def test_update_menu_skill_distinguishes_source_submitter_from_owner_apply():
+    """Dispatcher allows owner OR employee menu-source upload. The SKILL must
+    not contradict that, but applying the extracted menu must stay owner-only."""
+    text = UPDATE_MENU_SKILL.read_text(encoding="utf-8")
+    lowered = text.lower()
+    assert "owner or verified employee" in lowered
+    assert "only the owner can apply" in lowered
+    assert "never apply the menu without the owner's explicit yes" in lowered
+    assert "only the owner can update the menu" not in lowered

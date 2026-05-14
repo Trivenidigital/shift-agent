@@ -46,6 +46,7 @@ from schemas import (  # noqa: E402
     Config, Roster, PendingStore,
     BriefAttempted, BriefSent, BriefSendFailed, BriefSkipped,
     CustomerBirthdayStore,
+    CateringLearningSummary,
 )
 from log_source import get_log_sources  # noqa: E402
 from exit_codes import (  # noqa: E402
@@ -64,6 +65,11 @@ PENDING_PATH = Path(os.environ.get("SHIFT_AGENT_PENDING_PATH", "/opt/shift-agent
 DECISIONS_LOG = Path(os.environ.get("SHIFT_AGENT_DECISIONS_LOG_PATH", "/opt/shift-agent/logs/decisions.log"))
 SENTINEL_PATH = Path(os.environ.get("SHIFT_AGENT_BRIEF_SENTINEL_PATH", "/opt/shift-agent/state/last-brief-sent.json"))
 BIRTHDAYS_PATH = Path(os.environ.get("SHIFT_AGENT_BIRTHDAYS_PATH", "/opt/shift-agent/state/customer-birthdays.json"))
+CATERING_LEADS_PATH = Path(os.environ.get("SHIFT_AGENT_CATERING_LEADS_PATH", "/opt/shift-agent/state/catering-leads.json"))
+CATERING_LEARNING_SUMMARY_PATH = Path(os.environ.get(
+    "SHIFT_AGENT_CATERING_LEARNING_SUMMARY_PATH",
+    "/opt/shift-agent/state/catering-learning-summary.json",
+))
 DISABLED_FLAG = Path(os.environ.get("SHIFT_AGENT_DISABLED_FLAG", "/opt/shift-agent/state/disabled.flag"))
 TEMPLATES_DIR = Path(os.environ.get("SHIFT_AGENT_TEMPLATES_DIR", "/opt/shift-agent/templates"))
 RENDER_TEMPLATE_BIN = os.environ.get("SHIFT_AGENT_RENDER_TEMPLATE_BIN", "/usr/local/bin/render-coverage-template")
@@ -88,6 +94,7 @@ WATCHDOG_PATH = Path("/opt/shift-agent/state/routing-summary-last-run.json")
 WATCHDOG_TIMER_UNIT = Path("/etc/systemd/system/send-routing-accuracy-summary.timer")
 WATCHDOG_STALE_DAYS = 10
 WATCHDOG_TS_KEY = "ts"
+CATERING_LEARNING_STALE_HOURS = 48
 
 _LOG_ADAPTER_ATTEMPTED = TypeAdapter(BriefAttempted)
 _LOG_ADAPTER_SENT = TypeAdapter(BriefSent)
@@ -378,7 +385,70 @@ def _render_alerts(yesterday: dict, today: dict) -> str:
     return "; ".join(alerts) + "."
 
 
-def _render_catering(now_local: datetime) -> str:
+def _load_catering_learning_summary() -> Optional[CateringLearningSummary]:
+    if not CATERING_LEARNING_SUMMARY_PATH.exists():
+        return None
+    raw, status = safe_load_json(CATERING_LEARNING_SUMMARY_PATH, default=None)
+    if status != "ok":
+        sys.stderr.write(
+            f"WARN: catering-learning-summary.json status={status!r}; "
+            "catering learning section degraded\n"
+        )
+        return None
+    try:
+        return CateringLearningSummary.model_validate(raw)
+    except Exception as e:
+        sys.stderr.write(
+            f"WARN: catering-learning-summary.json schema invalid: {e}; "
+            "catering learning section degraded\n"
+        )
+        return None
+
+
+def _render_catering_learning(now_local: datetime) -> str:
+    try:
+        summary = _load_catering_learning_summary()
+        if summary is None:
+            return "  - Learning summary unavailable; check catering-pattern-report.timer"
+
+        generated_at = summary.generated_at
+        if generated_at.tzinfo is None:
+            generated_at = generated_at.replace(tzinfo=timezone.utc)
+        if now_local.tzinfo is None:
+            now_local = now_local.replace(tzinfo=timezone.utc)
+        age = now_local - generated_at
+        if age > timedelta(hours=CATERING_LEARNING_STALE_HOURS):
+            return "  - Learning summary stale (>48h); check catering-pattern-report.timer"
+
+        health = summary.proposal_health
+        lines = [
+            (
+                f"  - Proposals ({summary.window_days}d): {health.sent} sent, "
+                f"{health.selected} selected, {health.send_failed} send failed, "
+                f"{health.select_failed} select failed"
+            ),
+            (
+                f"  - Off-menu asks: {summary.off_menu_request_count} request(s) "
+                f"across {summary.leads_with_off_menu_count} lead(s)"
+            ),
+            f"  - Missing basics: {summary.active_missing_info_count} active lead(s)",
+        ]
+        if summary.menu_freshness_days is None:
+            lines.append("  - Menu freshness: unknown")
+        else:
+            lines.append(f"  - Menu freshness: updated {summary.menu_freshness_days}d ago")
+        if summary.degraded_sources:
+            lines.append(
+                "  - Learning summary degraded: "
+                + ", ".join(sorted(summary.degraded_sources))
+            )
+        return "\n".join(lines)
+    except Exception as e:
+        sys.stderr.write(f"WARN: catering learning render failed: {e}\n")
+        return "  - Learning summary degraded; check catering-pattern-report.timer"
+
+
+def _render_catering(now_local: datetime, include_learning: bool = False) -> str:
     """PR-CF1c-A 2026-05-12: catering pipeline summary for the daily brief.
 
     HARD RULES (mirror parse_catering_inquiry/SKILL.md):
@@ -391,16 +461,27 @@ def _render_catering(now_local: datetime) -> str:
     Returns an empty string when there are no leads at all (lets the caller
     omit the block cleanly).
     """
-    leads_path = Path("/opt/shift-agent/state/catering-leads.json")
+    def _append_learning(lines: list[str]) -> str:
+        if include_learning:
+            learning_summary = _render_catering_learning(now_local)
+            if learning_summary:
+                lines.append(learning_summary)
+        return "\n".join(lines)
+
+    leads_path = CATERING_LEADS_PATH
     if not leads_path.exists():
+        if include_learning:
+            return _append_learning(["*Catering pipeline:*", "  - Leads file unavailable."])
         return ""
     try:
         data = json.loads(leads_path.read_text(encoding="utf-8"))
         leads = data.get("leads", []) or []
     except Exception:
-        return "*Catering pipeline:* leads file unreadable."
+        return _append_learning(["*Catering pipeline:* leads file unreadable."])
 
     if not leads:
+        if include_learning:
+            return _append_learning(["*Catering pipeline:*", "  - No leads on file."])
         return ""
 
     window_start = now_local - timedelta(hours=24)
@@ -432,8 +513,7 @@ def _render_catering(now_local: datetime) -> str:
 
     lines.append(f"  • Quotes sent to customers: {len(sent_to_customer)}")
     lines.append(f"  • Active pipeline total: {pipeline_total}")
-
-    return "\n".join(lines)
+    return _append_learning(lines)
 
 
 def _render_brief_text(
@@ -472,7 +552,8 @@ def _render_brief_text(
     # to operate at all). Empty string when no leads exist.
     if cfg.catering.enabled:
         today_local = _customer_now(cfg.customer.timezone)
-        catering_summary = _render_catering(today_local)
+        include_learning = "catering_learning" in cfg.daily_brief.sections
+        catering_summary = _render_catering(today_local, include_learning=include_learning)
         catering_block = f"\n\n{catering_summary}" if catering_summary else ""
     else:
         catering_block = ""

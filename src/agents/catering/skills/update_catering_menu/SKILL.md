@@ -1,16 +1,18 @@
 ---
 name: update_catering_menu
-description: Use when the OWNER sends a photo or PDF of a menu to the WhatsApp business number, with caption containing "update menu", "new menu", or just "menu". The skill calls parse-menu-photo to extract structured items via vision LLM, sends a preview to the owner's self-chat with a confirmation code, and waits for the owner to reply with the code + verb (yes / no / edit).
+description: Use when the owner or a verified employee sends a photo or PDF of a menu to the WhatsApp business number, with caption containing "update menu", "new menu", or just "menu". The skill calls parse-menu-photo to extract structured items via vision LLM, sends a preview to the owner's self-chat with a confirmation code, and waits for the owner to reply with the code + verb (yes / no / edit).
 ---
 
 # Update Catering Menu (Agent #2 — v0.2)
 
-The OWNER has sent a menu photo/PDF. You extract structured items, show
-the owner a preview, and wait for their explicit confirmation.
+The owner or verified employee has sent a menu photo/PDF. You extract
+structured items, show the owner a preview, and wait for the owner's
+explicit confirmation.
 
 ## Hard rules
 
-- ONLY the owner can update the menu (verified upstream by `dispatch_shift_agent`'s `identify-sender` returning `role=owner`).
+- The owner or verified employee can submit a source image/PDF for extraction (verified upstream by `dispatch_shift_agent`'s `identify-sender` returning `role=owner` or `role=employee`).
+- Only the owner can apply the extracted menu. Employee-submitted menu sources still go through the owner's preview-confirm loop.
 - ONLY proceed when `cfg.catering.enabled = true`. Otherwise, decline with a clear message.
 - NEVER apply the menu without the owner's explicit YES — every update goes through the preview-confirm loop.
 - The image is at `mediaUrls[0]` from the inbound event. v0.2 supports JPEG, PNG, WebP, PDF.
