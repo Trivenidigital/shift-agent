@@ -25,11 +25,13 @@ Plan: `docs/superpowers/plans/2026-05-14-production-pilot-shift-catering-daily-b
 - [x] Local focused verification.
 - [x] Deploy to `main-vps`.
 - [x] Runtime verification: readiness gate installed, bridge connected, gateway active, timers firing.
-- [ ] Seed real customer identity in `/opt/shift-agent/config.yaml`: replace placeholder `customer.name` and `customer.location_id`.
-- [ ] Rerun `/usr/local/lib/hermes-agent/venv/bin/python /usr/local/bin/pilot-readiness-check --text`; expected result after seeding is READY.
+- [x] Seed real customer identity in `/opt/shift-agent/config.yaml`: `customer.name=Triveni`, `customer.location_id=loc_pineville_01`.
+- [x] Correct live roster location metadata from `Triveni Jacksonville (TEST)` / `loc_jax_01` to `Triveni Pineville` / `loc_pineville_01`.
+- [x] Rerun `/usr/local/lib/hermes-agent/venv/bin/python /usr/local/bin/pilot-readiness-check --text`; result is READY (13 passed, 0 failed).
 - [ ] Live WhatsApp smoke script from `docs/runbooks/production-pilot-shift-catering-daily-brief.md`.
+- [ ] Tighten `pilot-readiness-check` to require `config.customer.location_id == roster.location.id` and reject roster location names containing test/placeholder labels; live config had a hidden Jacksonville test label that the placeholder-only gate did not catch.
 
-Current runtime status from deploy `deploy-20260514-170739-f4ce14db`: gateway active, WhatsApp bridge connected, timers active, roster valid, 6 active employees, 23 scheduled shifts, catering menu valid, 78 available menu items. Readiness gate is blocked only on placeholder customer identity.
+Current runtime status after deploy `deploy-20260514-203430-bb243517` + identity patch `20260514T212446Z`: gateway active, WhatsApp bridge connected, timers active, roster valid, 6 active employees, 23 scheduled shifts, catering menu valid, 78 available menu items, Daily Brief catering learning enabled, and pilot readiness is READY.
 
 ## Active - Catering self-learning rails (2026-05-14)
 
