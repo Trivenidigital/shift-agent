@@ -549,6 +549,14 @@ This is a future-process decision; not worth retrofitting prior PRs, but worth a
   - Syntax verification: `python -m py_compile src\platform\credential_readiness.py`; Git Bash `bash -n` on deploy and smoke scripts; `git diff --check` -> all passed.
   - Full Windows host suite: `python -m pytest -q` -> `7 failed, 758 passed, 606 skipped`; failures match pre-existing baseline recorded above (`test_pr_b_v3_static.py` substring false positive and web backend `safe_io` import of Linux-only `fcntl` on Windows).
 - [ ] Open PR, run three parallel implementation reviews, fix findings, merge, and deploy.
+  - PR #86 opened from `codex/credential-minimized-hermes-mode`.
+  - Three implementation-review vectors dispatched: code/test mechanics, deploy/runtime/security, Hermes-first/market claims.
+  - Fixed review findings:
+    - CLI wrapper now preserves staged module precedence before `/opt/shift-agent`.
+    - Connector readiness now reports `partial_env` for incomplete credential sets and recognizes connector-specific env names.
+    - `cf-router` validation now compiles/imports read-only, checks `pre_gateway_dispatch`, avoids `__pycache__`, and treats `plugins.disabled` as a deny-list.
+    - Roadmap/plan/no-key docs no longer call connector-backed surfaces guaranteed custom gaps or say `cf-router` is part of strict external foundation mode.
+  - Review-fix verification: `python -m pytest tests/test_credential_readiness.py tests/test_repo_invariants.py tests/test_tarball_includes_summary_artifacts.py -q` -> `19 passed, 2 skipped`; Python byte-compile for module + wrapper, Git Bash `bash -n` on deploy/smoke, and `git diff --check` -> all passed.
 
 Review results:
 - Final implementation review found four issues; all fixed:

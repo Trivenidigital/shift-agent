@@ -146,17 +146,17 @@ It must:
   - `/usr/local/lib/hermes-agent/skills/<category>/<name>/SKILL.md` as the bundled fallback root for official Hermes skills.
   - repo-local `src/agents/**/skills/<name>/SKILL.md` only for local/dev reporting.
 - Verify no-key foundation skills: `productivity/maps`, `productivity/ocr-and-documents`, `mcp/native-mcp`.
-- Verify project plugin baseline: `cf-router` directory exists, Python modules compile, and `/root/.hermes/config.yaml` lists it under `plugins.enabled`.
+- Report project plugin baseline separately: `cf-router` directory exists, Python modules compile/import read-only, `/root/.hermes/config.yaml` lists it under `plugins.enabled`, and `plugins.disabled` does not include it.
 - Report credential presence by class/name/status only: set/unset/muted/placeholder. Never emit value, path, basename, prefix, or sample.
 - Report WhatsApp channel readiness separately from skill readiness. A disconnected bridge is not a missing-skill failure, but a WhatsApp-first deployment must not be called green while the bridge is disconnected.
 - Summarize per-agent readiness: no-key-ready, manual-export, connected-required.
-- Exit non-zero in strict foundation mode only for missing no-key foundation requirements or missing/disabled `cf-router`.
+- Exit non-zero in strict foundation mode only for missing external no-key foundation requirements. `cf-router` failures exit non-zero only when the caller passes `--validate-plugin cf-router`, because deploy installs that repo plugin before the pre-restart check.
 
 This CLI is additive. It must not replace or weaken existing runtime-critical gates such as `vision-auth-smoke`, Pushover/alert checks, config validation, env symlink integrity, or bridge health checks.
 
 ### Phase 4 - Deploy Integration
 
-Wire a strict foundation readiness gate into deploy before app artifacts are installed and before `hermes-gateway` is restarted. Missing foundation skills/plugins are external Hermes install state; app rollback cannot repair them, so this gate must abort with no state change rather than trip post-restart rollback.
+Wire a strict foundation readiness gate into deploy before app artifacts are installed and before `hermes-gateway` is restarted. Missing foundation skills are external Hermes install state; app rollback cannot repair them, so this gate must abort with no state change rather than trip post-restart rollback.
 
 Keep the post-restart smoke test behavior-focused. It may call the readiness CLI in non-strict/report mode, but it must not be the first strict check for external Hermes install state.
 
@@ -165,7 +165,7 @@ Strict foundation failures:
 - Missing `productivity/maps`
 - Missing `productivity/ocr-and-documents`
 - Missing `mcp/native-mcp`
-- Missing/enabled drift for `cf-router`
+- `cf-router` is handled by the separate post-install/pre-restart plugin gate, including enabled/disabled drift.
 
 Connected-mode missing credentials should be reported as informational, not deploy-blocking. Existing required runtime credentials remain governed by their existing fail-closed checks.
 

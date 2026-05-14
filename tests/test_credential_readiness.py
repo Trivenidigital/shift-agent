@@ -31,14 +31,15 @@ def _make_foundation(tmp_path: Path) -> tuple[Path, Path]:
     return hermes_home, install_root
 
 
-def _make_cf_router(tmp_path: Path, enabled: bool = True) -> tuple[Path, Path]:
+def _make_cf_router(tmp_path: Path, enabled: bool = True, disabled: bool = False) -> tuple[Path, Path]:
     hermes_home = tmp_path / "home" / ".hermes"
     plugin = hermes_home / "plugins" / "cf-router"
     _touch(plugin / "actions.py", "def classify_catering(text):\n    return False, []\n")
-    _touch(plugin / "hooks.py", "HOOKS = []\n")
+    _touch(plugin / "hooks.py", "def pre_gateway_dispatch(event, gateway, session_store):\n    return None\n")
     enabled_block = "    - cf-router\n" if enabled else ""
+    disabled_block = "  disabled:\n    - cf-router\n" if disabled else ""
     config = hermes_home / "config.yaml"
-    _touch(config, "plugins:\n  enabled:\n" + enabled_block)
+    _touch(config, "plugins:\n  enabled:\n" + enabled_block + disabled_block)
     return hermes_home, config
 
 
@@ -112,6 +113,9 @@ def test_validate_cf_router_requires_directory_compile_and_config_enablement(tmp
     )
     assert result["status"] == "present"
     assert result["enabled"] is True
+    assert result["disabled"] is False
+    assert result["imports_ok"] is True
+    assert not (hermes_home / "plugins" / "cf-router" / "__pycache__").exists()
 
     hermes_home_disabled, config_disabled = _make_cf_router(tmp_path / "disabled", enabled=False)
     result_disabled = cr.validate_cf_router(
@@ -121,6 +125,29 @@ def test_validate_cf_router_requires_directory_compile_and_config_enablement(tmp
     )
     assert result_disabled["status"] == "disabled"
     assert result_disabled["enabled"] is False
+
+    hermes_home_deny, config_deny = _make_cf_router(tmp_path / "deny", enabled=True, disabled=True)
+    result_deny = cr.validate_cf_router(
+        hermes_home=hermes_home_deny,
+        config_path=config_deny,
+        strict=True,
+    )
+    assert result_deny["status"] == "disabled"
+    assert result_deny["enabled"] is True
+    assert result_deny["disabled"] is True
+
+    hermes_home_import, config_import = _make_cf_router(tmp_path / "import-fail", enabled=True)
+    (hermes_home_import / "plugins" / "cf-router" / "hooks.py").write_text(
+        "from . import missing_module\n",
+        encoding="utf-8",
+    )
+    result_import = cr.validate_cf_router(
+        hermes_home=hermes_home_import,
+        config_path=config_import,
+        strict=True,
+    )
+    assert result_import["status"] == "import_failed"
+    assert result_import["imports_ok"] is False
 
 
 def test_credential_report_never_leaks_values_paths_or_prefixes(tmp_path: Path):
@@ -196,6 +223,47 @@ def test_connected_candidates_are_candidate_only_not_false_unset(tmp_path: Path)
     assert qbo["configured_status"] == "candidate_only"
 
 
+def test_connector_status_distinguishes_partial_and_complete_env_sets(tmp_path: Path):
+    partial_env = tmp_path / ".partial.env"
+    partial_env.write_text("QUICKBOOKS_CLIENT_ID=id-only\nPAYPAL_ACCESS_TOKEN=token-only\n", encoding="utf-8")
+    partial_report = cr.build_report(
+        cr.ReadinessOptions(
+            hermes_home=tmp_path / ".hermes",
+            hermes_install_root=tmp_path / "install",
+            env_paths=(partial_env,),
+            today=cr.parse_date("2026-05-14"),
+        )
+    )
+    partial = {row["name"]: row["configured_status"] for row in partial_report["connectors"]}
+    assert partial["Intuit QuickBooks Online MCP"] == "partial_env"
+    assert partial["PayPal MCP Server"] == "partial_env"
+
+    complete_env = tmp_path / ".complete.env"
+    complete_env.write_text(
+        "\n".join(
+            [
+                "QUICKBOOKS_CLIENT_ID=id",
+                "QUICKBOOKS_CLIENT_SECRET=secret",
+                "QUICKBOOKS_REALM_ID=realm",
+                "PAYPAL_ACCESS_TOKEN=token",
+                "PAYPAL_CLIENT_ID=client",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    complete_report = cr.build_report(
+        cr.ReadinessOptions(
+            hermes_home=tmp_path / ".hermes",
+            hermes_install_root=tmp_path / "install",
+            env_paths=(complete_env,),
+            today=cr.parse_date("2026-05-14"),
+        )
+    )
+    complete = {row["name"]: row["configured_status"] for row in complete_report["connectors"]}
+    assert complete["Intuit QuickBooks Online MCP"] == "env_present"
+    assert complete["PayPal MCP Server"] == "env_present"
+
+
 def test_json_output_shape_is_stable(tmp_path: Path):
     hermes_home, install_root = _make_foundation(tmp_path)
     report = cr.build_report(
@@ -220,12 +288,15 @@ def test_json_output_shape_is_stable(tmp_path: Path):
 def test_staging_script_runs_with_staged_module_before_install(tmp_path: Path):
     if not SCRIPT.exists():
         pytest.fail(f"script missing at {SCRIPT}")
+    script_text = SCRIPT.read_text(encoding="utf-8")
+    assert "sys.path[:0] = roots" in script_text
+    assert "sys.path.insert(0" not in script_text
 
     stage = tmp_path / "staging-new"
     staged_script = stage / "src" / "platform" / "scripts" / SCRIPT.name
     staged_module = stage / "src" / "platform" / "credential_readiness.py"
     staged_script.parent.mkdir(parents=True)
-    staged_script.write_text(SCRIPT.read_text(encoding="utf-8"), encoding="utf-8")
+    staged_script.write_text(script_text, encoding="utf-8")
     staged_module.write_text(
         "def main(argv=None):\n"
         "    print('STAGED_MODULE_USED')\n"

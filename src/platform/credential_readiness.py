@@ -7,10 +7,11 @@ other /opt/shift-agent module.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
-import py_compile
 import re
 import sys
+import types
 import urllib.request
 from dataclasses import dataclass, asdict
 from datetime import UTC, date, datetime
@@ -339,7 +340,7 @@ CONNECTOR_CANDIDATES: tuple[ConnectorCandidate, ...] = (
         notes="Honest no-business-API mode for finance/POS analysis.",
     ),
     ConnectorCandidate(
-        name="Delivery marketplace APIs",
+        name="DoorDash Drive/Marketplace API",
         domain="delivery_marketplace",
         source_url="https://developer.doordash.com/",
         credential_class="oauth",
@@ -349,7 +350,47 @@ CONNECTOR_CANDIDATES: tuple[ConnectorCandidate, ...] = (
         deployment_status="candidate",
         last_verified="2026-05-14",
         freshness_days=30,
-        notes="DoorDash/UberEats/Grubhub remain connected/custom surfaces.",
+        notes="Connected/custom delivery surface; partner access required.",
+    ),
+    ConnectorCandidate(
+        name="Uber Eats Marketplace API",
+        domain="delivery_marketplace",
+        source_url="https://developer.uber.com/docs/eats/introduction",
+        credential_class="oauth",
+        maturity="vendor",
+        market_state="requires_approval",
+        auth_modes=("local_oauth", "managed_oauth"),
+        deployment_status="candidate",
+        last_verified="2026-05-14",
+        freshness_days=30,
+        notes="Store, menu, and order APIs require written approval for many scopes.",
+    ),
+    ConnectorCandidate(
+        name="Grubhub restaurant integration APIs",
+        domain="delivery_marketplace",
+        source_url="https://get.grubhub.com/products/tech-integrations/",
+        credential_class="oauth",
+        maturity="vendor",
+        market_state="partner_program",
+        auth_modes=("local_oauth", "managed_oauth"),
+        deployment_status="candidate",
+        last_verified="2026-05-14",
+        freshness_days=30,
+        notes="Partner integration surface; not a public no-key path.",
+    ),
+    ConnectorCandidate(
+        name="Bank feed/Open Banking APIs",
+        domain="bank_feed",
+        source_url="https://plaid.com/docs/api/products/transactions/",
+        credential_class="oauth",
+        maturity="vendor",
+        market_state="stable",
+        auth_modes=("local_oauth", "restricted_api_key"),
+        deployment_status="candidate",
+        last_verified="2026-05-14",
+        freshness_days=30,
+        notes="Bank transaction sync requires provider credentials and institution linking.",
+        env_names=("PLAID_CLIENT_ID", "PLAID_SECRET"),
     ),
     ConnectorCandidate(
         name="Tax filing provider/state portals",
@@ -365,17 +406,56 @@ CONNECTOR_CANDIDATES: tuple[ConnectorCandidate, ...] = (
         notes="Reminder/checklist only unless customer authorizes filing integration.",
     ),
     ConnectorCandidate(
-        name="Zelle/Cash App/Venmo/Razorpay rails",
+        name="Zelle business rail",
         domain="payment_rails",
-        source_url="https://stripe.com/docs/payments",
+        source_url="https://www.zelle.com/support/im-small-business-using-zelle",
         credential_class="write_rail",
-        maturity="unknown",
-        market_state="unknown",
+        maturity="vendor",
+        market_state="bank_dependent",
+        auth_modes=("manual_export",),
+        deployment_status="candidate",
+        last_verified="2026-05-14",
+        freshness_days=30,
+        notes="Business availability and limits are bank-dependent; treat as manual/export unless bank API exists.",
+    ),
+    ConnectorCandidate(
+        name="Cash App Pay API",
+        domain="payment_rails",
+        source_url="https://developers.cash.app/",
+        credential_class="write_rail",
+        maturity="vendor",
+        market_state="stable",
+        auth_modes=("restricted_api_key", "oauth"),
+        deployment_status="candidate",
+        last_verified="2026-05-14",
+        freshness_days=30,
+        notes="Cash App Pay integration path; not a generic Cash App account API.",
+    ),
+    ConnectorCandidate(
+        name="Venmo business profile / PayPal Venmo integration",
+        domain="payment_rails",
+        source_url="https://venmo.com/docs",
+        credential_class="write_rail",
+        maturity="vendor",
+        market_state="stable",
         auth_modes=("manual_export", "restricted_api_key", "oauth"),
         deployment_status="candidate",
         last_verified="2026-05-14",
         freshness_days=30,
-        notes="Track as payment category; do not automate money movement without owner approval.",
+        notes="Use PayPal/Braintree/Venmo-approved path where available; no autonomous money movement.",
+    ),
+    ConnectorCandidate(
+        name="Razorpay Payments API",
+        domain="payment_rails",
+        source_url="https://razorpay.com/docs/api/",
+        credential_class="write_rail",
+        maturity="vendor",
+        market_state="stable",
+        auth_modes=("restricted_api_key", "oauth"),
+        deployment_status="candidate",
+        last_verified="2026-05-14",
+        freshness_days=30,
+        notes="India payment gateway API; requires Razorpay credentials and payment approval discipline.",
     ),
     ConnectorCandidate(
         name="Payroll/time-clock/e-verify/background checks",
@@ -422,7 +502,7 @@ CONNECTOR_CANDIDATES: tuple[ConnectorCandidate, ...] = (
 
 AGENT_CAPABILITIES: tuple[AgentCapability, ...] = (
     AgentCapability(1, "Shift Agent", "no_key_ready", "WhatsApp sick-call intake with local roster/schedule.", "Sheets/CSV roster import.", "Google Calendar/Sheets.", ("productivity/google-workspace",), ("handle_sick_call", "roster_lookup"), ("Google Workspace",), "workspace oauth only if chosen", "coverage/outbound candidate messages", "Do not require Google for local roster mode."),
-    AgentCapability(2, "Catering Lead Agent", "no_key_ready", "WhatsApp inquiry/menu/proposal flow with local menu and owner approval.", "Owner uploads menus/photos/docs.", "Payment/POS/CRM connectors.", ("productivity/ocr-and-documents",), ("catering_dispatcher", "parse_catering_inquiry"), ("Stripe MCP", "Square MCP Server", "Zelle/Cash App/Venmo/Razorpay rails"), "payments/POS only in connected mode", "final quote/pricing/payment", "No pre-approval prices or booking confirmation."),
+    AgentCapability(2, "Catering Lead Agent", "no_key_ready", "WhatsApp inquiry/menu/proposal flow with local menu and owner approval.", "Owner uploads menus/photos/docs.", "Payment/POS/CRM connectors.", ("productivity/ocr-and-documents",), ("catering_dispatcher", "parse_catering_inquiry"), ("Stripe MCP", "Square MCP Server", "Zelle business rail", "Cash App Pay API", "Venmo business profile / PayPal Venmo integration", "Razorpay Payments API"), "payments/POS only in connected mode", "final quote/pricing/payment", "No pre-approval prices or booking confirmation."),
     AgentCapability(3, "Multi-Location Coordinator", "no_key_ready", "Local location config plus maps fallback.", "CSV location data.", "POS/inventory across stores.", ("productivity/maps",), ("multi_location_query",), ("Google Maps Grounding Lite MCP", "Square MCP Server", "Clover API/MCP candidate"), "connected POS only for live stock", "transfers", "Do not promise live inventory without POS."),
     AgentCapability(4, "Daily Brief Agent", "no_key_ready", "Read local logs/state and send WhatsApp brief.", "Manual CSV summaries.", "Gmail/Calendar/Sheets connected brief.", ("productivity/google-workspace",), ("send_daily_brief",), ("Google Workspace",), "workspace oauth optional", "none for read-only brief", "Do not invent metrics absent logs."),
     AgentCapability(5, "EOD Reconciliation", "manual_export", "Local event summary and manual register input.", "Register/POS CSV upload.", "Clover/Square/Toast POS.", (), ("eod_reconcile",), ("Square MCP Server", "Clover API/MCP candidate", "Toast POS API", "Manual QBO/POS CSV export"), "POS credentials for automation", "discrepancy resolution", "Do not claim automated POS reconciliation before POS onboarding."),
@@ -435,7 +515,7 @@ AGENT_CAPABILITIES: tuple[AgentCapability, ...] = (
     AgentCapability(12, "Hiring & Onboarding", "manual_export", "WhatsApp intake and local checklist.", "Manual documents upload.", "Drive/e-sign/background checks.", ("productivity/google-workspace", "productivity/ocr-and-documents"), ("hiring_dispatcher",), ("Google Workspace", "DocuSign MCP Connector", "Payroll/time-clock/e-verify/background checks"), "workspace/esign/workforce oauth", "offers/legal docs", "No automated legal signing."),
     AgentCapability(13, "Compliance Calendar", "no_key_ready", "Local compliance JSON and timers.", "Manual license/deadline import.", "Calendar/agency portals.", ("productivity/google-workspace",), ("compliance_owner_query",), ("Google Workspace", "Tax filing provider/state portals"), "agency/calendar optional", "filings", "No tax/legal filing without authorization."),
     AgentCapability(14, "Employee Document Tracker", "manual_export", "Local docs and OCR reminders.", "Manual folder uploads.", "Drive/e-verify/payroll.", ("productivity/google-workspace", "productivity/ocr-and-documents"), ("employee_docs_dispatcher",), ("Google Workspace", "Payroll/time-clock/e-verify/background checks"), "workforce oauth", "legal submissions", "No storing documents in unprotected shared paths."),
-    AgentCapability(15, "Cash & AR Agent", "connected_required", "Manual ledger reminders only.", "Invoice/payment CSV upload.", "Stripe/Square/PayPal/QBO/bank.", (), ("cash_ar_dispatcher",), ("Stripe MCP", "Square MCP Server", "PayPal MCP Server", "Zelle/Cash App/Venmo/Razorpay rails", "Intuit QuickBooks Online MCP"), "payment/accounting rails", "all reminders and money actions", "No automated collections or payment movement."),
+    AgentCapability(15, "Cash & AR Agent", "connected_required", "Manual ledger reminders only.", "Invoice/payment CSV upload.", "Stripe/Square/PayPal/QBO/bank.", (), ("cash_ar_dispatcher",), ("Stripe MCP", "Square MCP Server", "PayPal MCP Server", "Zelle business rail", "Cash App Pay API", "Venmo business profile / PayPal Venmo integration", "Razorpay Payments API", "Bank feed/Open Banking APIs", "Intuit QuickBooks Online MCP"), "payment/accounting rails", "all reminders and money actions", "No automated collections or payment movement."),
     AgentCapability(16, "Sales Tax Filing", "connected_required", "Reminder/checklist only.", "POS/tax report uploads.", "State/tax provider filing.", (), ("sales_tax_dispatcher",), ("Tax filing provider/state portals", "Manual QBO/POS CSV export"), "tax portal/provider credentials", "all filings", "No autonomous tax filing."),
     AgentCapability(17, "Unit Economics", "retired_or_folded", "Retired; use #22.", "N/A.", "N/A.", (), (), ("Manual QBO/POS CSV export",), "N/A", "N/A", "Do not rebuild unless revived."),
     AgentCapability(18, "Customer Complaint", "retired_or_folded", "Folded into #9 and #4.", "Manual review paste.", "Review APIs.", (), (), ("Google Business Profile/Facebook reviews", "Yelp MCP"), "review oauth optional", "public replies", "No standalone agent build."),
@@ -445,7 +525,7 @@ AGENT_CAPABILITIES: tuple[AgentCapability, ...] = (
     AgentCapability(22, "P&L Anomaly Detective", "manual_export", "Manual CSV/P&L anomaly checks.", "QBO/POS exports.", "QBO/POS connected read.", ("productivity/airtable",), ("pnl_anomaly_dispatcher",), ("Intuit QuickBooks Online MCP", "Square MCP Server", "Clover API/MCP candidate", "Manual QBO/POS CSV export"), "accounting/POS oauth", "no auto action", "No live P&L without data source."),
     AgentCapability(23, "Order Status & Pickup", "connected_required", "Manual board only.", "Manual order status upload.", "POS/KDS order state.", (), (), ("Square MCP Server", "Toast POS API", "Clover API/MCP candidate"), "POS/KDS oauth", "customer status sends", "Do not promise live ETA without POS/KDS."),
     AgentCapability(24, "Upsell & Menu Personalizer", "manual_export", "Local menu and chat context.", "Manual sales history upload.", "POS/cart/loyalty data.", (), (), ("Square MCP Server", "Google Business Profile/Facebook reviews"), "POS/loyalty oauth", "customer upsells", "No dark-pattern upsells."),
-    AgentCapability(25, "Third-Party Delivery Coordinator", "connected_required", "Manual escalation/checklist only.", "Manual tablet reports.", "Delivery marketplace APIs/iPaaS.", (), (), ("Delivery marketplace APIs", "Pipedream MCP"), "marketplace oauth/partner", "order intervention", "No screen-scraping money/order actions by default."),
+    AgentCapability(25, "Third-Party Delivery Coordinator", "connected_required", "Manual escalation/checklist only.", "Manual tablet reports.", "Delivery marketplace APIs/iPaaS.", (), (), ("DoorDash Drive/Marketplace API", "Uber Eats Marketplace API", "Grubhub restaurant integration APIs", "Pipedream MCP"), "marketplace oauth/partner", "order intervention", "No screen-scraping money/order actions by default."),
     AgentCapability(26, "Performance & Training Coach", "manual_export", "Audit-log coaching summaries.", "Manual POS/time-clock exports.", "POS/LMS/time-clock.", (), (), ("Payroll/time-clock/e-verify/background checks", "Square MCP Server"), "workforce/POS oauth", "disciplinary messages", "No punitive automation."),
     AgentCapability(27, "Catering Equipment & Packaging Tracker", "no_key_ready", "Local packaging inventory tied to catering events.", "Manual supplier counts.", "Supplier reorder.", (), (), ("Supplier portal/EDI integrations",), "supplier oauth optional", "orders", "No auto reorder."),
     AgentCapability(28, "Perishable Priority & Waste Reducer", "manual_export", "Manual expiry/photo counts.", "Waste/POS CSV upload.", "Inventory/POS velocity.", ("productivity/ocr-and-documents",), (), ("Square MCP Server", "Clover API/MCP candidate", "Manual QBO/POS CSV export"), "POS/inventory oauth", "discount/disposal decisions", "No auto disposal/markdown."),
@@ -456,7 +536,7 @@ AGENT_CAPABILITIES: tuple[AgentCapability, ...] = (
     AgentCapability(33, "Loyalty & Punch-Card", "manual_export", "Local phone ledger and WhatsApp reminders.", "Manual purchase uploads.", "POS/loyalty platform.", (), (), ("Square MCP Server", "Clover API/MCP candidate"), "POS oauth", "reward issuance", "No reward fraud-prone auto credits."),
     AgentCapability(34, "Menu Suggestion & Upsell", "manual_export", "Local menu plus current chat.", "Manual item popularity.", "POS/cart history.", (), (), ("Square MCP Server",), "POS/cart oauth", "customer upsells", "No unapproved price claims."),
     AgentCapability(35, "Referral & Review Responder", "manual_export", "Local referral ledger and pasted reviews.", "Manual review exports.", "Google/Facebook/Yelp APIs.", (), (), ("Google Business Profile/Facebook reviews", "Yelp MCP"), "review platform oauth/api", "public replies/rewards", "No public replies without approval."),
-    AgentCapability(36, "Credit Customer & Temple Account", "manual_export", "Local ledger and WhatsApp statements.", "QBO/bank exports.", "QBO/bank/payment reconciliation.", (), (), ("Intuit QuickBooks Online MCP", "Zelle/Cash App/Venmo/Razorpay rails"), "accounting/payment oauth", "statements/collections", "No money movement."),
+    AgentCapability(36, "Credit Customer & Temple Account", "manual_export", "Local ledger and WhatsApp statements.", "QBO/bank exports.", "QBO/bank/payment reconciliation.", (), (), ("Intuit QuickBooks Online MCP", "Bank feed/Open Banking APIs", "Zelle business rail", "Cash App Pay API", "Venmo business profile / PayPal Venmo integration", "Razorpay Payments API"), "accounting/payment oauth", "statements/collections", "No money movement."),
     AgentCapability(37, "New Location Feasibility Scout", "manual_export", "Public web/maps plus local notes.", "Manual demographic docs.", "Paid datasets/maps APIs.", ("productivity/maps",), (), ("Google Maps Grounding Lite MCP", "Yelp MCP"), "paid data/api optional", "investment recommendations", "No final site recommendation as fact."),
     AgentCapability(38, "Local Community Broadcast", "connected_required", "Tiny owner-approved WhatsApp sends only.", "Manual contact list.", "Bulk SMS/email/WhatsApp providers.", (), (), ("Infobip MCP", "Pipedream MCP"), "messaging provider oauth/api", "all broadcasts", "No bulk messaging without compliance review."),
     AgentCapability(39, "Photo Menu Curator", "no_key_ready", "WhatsApp photos plus local menu state.", "Manual menu photos.", "Cloud vision optional.", ("productivity/ocr-and-documents",), (), ("Google Workspace",), "cloud storage optional", "menu publication", "No invented menu details."),
@@ -474,9 +554,22 @@ CREDENTIAL_REQUIREMENTS: tuple[CredentialRequirement, ...] = (
     CredentialRequirement("STRIPE_SECRET_KEY", "write_rail", "Stripe connected mode."),
     CredentialRequirement("SQUARE_ACCESS_TOKEN", "write_rail", "Square connected mode."),
     CredentialRequirement("QUICKBOOKS_CLIENT_ID", "oauth", "QBO connected mode."),
+    CredentialRequirement("QUICKBOOKS_CLIENT_SECRET", "oauth", "QBO connected mode."),
+    CredentialRequirement("QUICKBOOKS_REALM_ID", "oauth", "QBO connected mode."),
+    CredentialRequirement("PAYPAL_ACCESS_TOKEN", "write_rail", "PayPal connected mode."),
+    CredentialRequirement("PAYPAL_CLIENT_ID", "write_rail", "PayPal connected mode."),
+    CredentialRequirement("CLOVER_CLIENT_ID", "oauth", "Clover connected mode."),
+    CredentialRequirement("CLOVER_CLIENT_SECRET", "oauth", "Clover connected mode."),
+    CredentialRequirement("TOAST_CLIENT_ID", "oauth", "Toast connected mode."),
+    CredentialRequirement("TOAST_CLIENT_SECRET", "oauth", "Toast connected mode."),
     CredentialRequirement("DOCUSIGN_CLIENT_ID", "oauth", "DocuSign connected mode."),
+    CredentialRequirement("DOCUSIGN_CLIENT_SECRET", "oauth", "DocuSign connected mode."),
     CredentialRequirement("INFOBIP_API_KEY", "api_key", "Infobip connected mode."),
     CredentialRequirement("YELP_API_KEY", "api_key", "Yelp connected mode."),
+    CredentialRequirement("GOOGLE_MAPS_API_KEY", "api_key", "Google Maps connected mode."),
+    CredentialRequirement("FACEBOOK_APP_ID", "oauth", "Facebook reviews connected mode."),
+    CredentialRequirement("PLAID_CLIENT_ID", "oauth", "Bank feed connected mode."),
+    CredentialRequirement("PLAID_SECRET", "oauth", "Bank feed connected mode."),
 )
 
 
@@ -567,27 +660,36 @@ def _credential_status(value: str | None) -> str:
     return "env_present"
 
 
-def inspect_credentials(env_paths: Sequence[Path]) -> list[dict]:
-    values = _read_env(env_paths)
+def _env_statuses(env_paths: Sequence[Path]) -> dict[str, str]:
+    return {name: _credential_status(value) for name, value in _read_env(env_paths).items()}
+
+
+def inspect_credentials(env_paths: Sequence[Path], env_statuses: dict[str, str] | None = None) -> list[dict]:
+    statuses = env_statuses if env_statuses is not None else _env_statuses(env_paths)
     rows: list[dict] = []
     for req in CREDENTIAL_REQUIREMENTS:
         rows.append(
             {
                 "name": req.name,
                 "class": req.credential_class,
-                "status": _credential_status(values.get(req.name)),
+                "status": statuses.get(req.name, "unset"),
                 "notes": req.notes,
             }
         )
     return rows
 
 
-def _connector_configured_status(candidate: ConnectorCandidate, credentials: list[dict], hermes_home: Path) -> str:
-    credential_by_name = {row["name"]: row["status"] for row in credentials}
+def _connector_configured_status(
+    candidate: ConnectorCandidate,
+    env_statuses: dict[str, str],
+    hermes_home: Path,
+) -> str:
     if candidate.env_names:
-        statuses = [credential_by_name.get(name, "unset") for name in candidate.env_names]
-        if any(status == "env_present" for status in statuses):
+        statuses = [env_statuses.get(name, "unset") for name in candidate.env_names]
+        if all(status == "env_present" for status in statuses):
             return "env_present"
+        if any(status == "env_present" for status in statuses):
+            return "partial_env"
         if any(status == "placeholder" for status in statuses):
             return "placeholder"
         if any(status == "muted" for status in statuses):
@@ -600,25 +702,12 @@ def _connector_configured_status(candidate: ConnectorCandidate, credentials: lis
     return "not_probed"
 
 
-def parse_plugins_enabled_text(text: str) -> list[str]:
-    try:
-        import yaml  # type: ignore
-
-        data = yaml.safe_load(text) or {}
-        plugins = data.get("plugins") if isinstance(data, dict) else None
-        enabled = plugins.get("enabled") if isinstance(plugins, dict) else None
-        if isinstance(enabled, list):
-            return [str(item) for item in enabled]
-        if isinstance(enabled, str):
-            return [enabled]
-    except Exception:
-        pass
-
-    enabled: list[str] = []
+def _parse_plugin_list_fallback(text: str, key: str) -> list[str]:
+    values: list[str] = []
     in_plugins = False
-    in_enabled = False
+    in_target = False
     plugins_indent = 0
-    enabled_indent = 0
+    target_indent = 0
     for raw in text.splitlines():
         if not raw.strip() or raw.lstrip().startswith("#"):
             continue
@@ -626,32 +715,94 @@ def parse_plugins_enabled_text(text: str) -> list[str]:
         stripped = raw.strip()
         if stripped == "plugins:":
             in_plugins = True
-            in_enabled = False
+            in_target = False
             plugins_indent = indent
             continue
         if in_plugins and indent <= plugins_indent and not stripped.startswith("-"):
             in_plugins = False
-            in_enabled = False
-        if in_plugins and stripped.startswith("enabled:"):
-            in_enabled = True
-            enabled_indent = indent
+            in_target = False
+        if in_plugins and stripped.startswith(f"{key}:"):
+            in_target = True
+            target_indent = indent
             rest = stripped.split(":", 1)[1].strip()
             if rest.startswith("[") and rest.endswith("]"):
-                enabled.extend(
+                values.extend(
                     item.strip().strip('"').strip("'")
                     for item in rest.strip("[]").split(",")
                     if item.strip()
                 )
             elif rest:
-                enabled.append(rest.strip('"').strip("'"))
+                values.append(rest.strip('"').strip("'"))
             continue
-        if in_enabled:
-            if indent <= enabled_indent and not stripped.startswith("-"):
-                in_enabled = False
+        if in_target:
+            if indent <= target_indent and not stripped.startswith("-"):
+                in_target = False
                 continue
             if stripped.startswith("-"):
-                enabled.append(stripped[1:].strip().strip('"').strip("'"))
-    return enabled
+                values.append(stripped[1:].strip().strip('"').strip("'"))
+    return values
+
+
+def parse_plugins_state_text(text: str) -> dict[str, list[str]]:
+    try:
+        import yaml  # type: ignore
+
+        data = yaml.safe_load(text) or {}
+        plugins = data.get("plugins") if isinstance(data, dict) else None
+        enabled = plugins.get("enabled") if isinstance(plugins, dict) else None
+        disabled = plugins.get("disabled") if isinstance(plugins, dict) else None
+        return {
+            "enabled": [str(item) for item in enabled] if isinstance(enabled, list) else ([enabled] if isinstance(enabled, str) else []),
+            "disabled": [str(item) for item in disabled] if isinstance(disabled, list) else ([disabled] if isinstance(disabled, str) else []),
+        }
+    except Exception:
+        pass
+
+    return {
+        "enabled": _parse_plugin_list_fallback(text, "enabled"),
+        "disabled": _parse_plugin_list_fallback(text, "disabled"),
+    }
+
+
+def parse_plugins_enabled_text(text: str) -> list[str]:
+    return parse_plugins_state_text(text)["enabled"]
+
+
+def _compile_source_only(path: Path) -> None:
+    compile(path.read_text(encoding="utf-8"), str(path), "exec")
+
+
+def _import_cf_router_readonly(plugin_root: Path) -> tuple[bool, str]:
+    package_name = "_credential_readiness_cf_router"
+    module_names = [package_name, f"{package_name}.actions", f"{package_name}.hooks"]
+    previous_modules = {name: sys.modules.get(name) for name in module_names}
+    previous_dont_write = sys.dont_write_bytecode
+    try:
+        sys.dont_write_bytecode = True
+        package = types.ModuleType(package_name)
+        package.__path__ = [str(plugin_root)]  # type: ignore[attr-defined]
+        sys.modules[package_name] = package
+        for short_name in ("actions", "hooks"):
+            module_name = f"{package_name}.{short_name}"
+            spec = importlib.util.spec_from_file_location(module_name, plugin_root / f"{short_name}.py")
+            if spec is None or spec.loader is None:
+                return False, f"spec_missing:{short_name}"
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            spec.loader.exec_module(module)
+        hooks = sys.modules[f"{package_name}.hooks"]
+        if not callable(getattr(hooks, "pre_gateway_dispatch", None)):
+            return False, "missing_hook:pre_gateway_dispatch"
+        return True, ""
+    except Exception as exc:
+        return False, f"import_failed:{exc.__class__.__name__}"
+    finally:
+        sys.dont_write_bytecode = previous_dont_write
+        for name, module in previous_modules.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
 
 
 def validate_cf_router(*, hermes_home: Path, config_path: Path, strict: bool = False) -> dict:
@@ -660,7 +811,9 @@ def validate_cf_router(*, hermes_home: Path, config_path: Path, strict: bool = F
         "name": "cf-router",
         "status": "missing",
         "enabled": False,
+        "disabled": False,
         "modules_compile": False,
+        "imports_ok": False,
         "detail": "",
     }
     if not plugin_root.exists():
@@ -670,21 +823,35 @@ def validate_cf_router(*, hermes_home: Path, config_path: Path, strict: bool = F
     compile_targets = (plugin_root / "actions.py", plugin_root / "hooks.py")
     try:
         for target in compile_targets:
-            py_compile.compile(str(target), doraise=True)
+            _compile_source_only(target)
         result["modules_compile"] = True
     except Exception as exc:
         result["status"] = "compile_failed"
         result["detail"] = exc.__class__.__name__
         return result
 
+    imports_ok, import_detail = _import_cf_router_readonly(plugin_root)
+    result["imports_ok"] = imports_ok
+    if not imports_ok:
+        result["status"] = "import_failed"
+        result["detail"] = import_detail
+        return result
+
     try:
-        enabled = parse_plugins_enabled_text(config_path.read_text(encoding="utf-8"))
+        plugin_state = parse_plugins_state_text(config_path.read_text(encoding="utf-8"))
     except OSError as exc:
         result["status"] = "unknown"
         result["detail"] = f"config_unreadable:{exc.__class__.__name__}"
         return result
 
+    enabled = plugin_state["enabled"]
+    disabled = plugin_state["disabled"]
     result["enabled"] = "cf-router" in enabled
+    result["disabled"] = "cf-router" in disabled
+    if result["disabled"]:
+        result["status"] = "disabled"
+        result["detail"] = "plugins.disabled includes cf-router"
+        return result
     if result["enabled"]:
         result["status"] = "present"
     else:
@@ -699,11 +866,11 @@ def connector_freshness(candidate: ConnectorCandidate, *, today: date | None = N
     return "fresh" if (current - verified).days <= candidate.freshness_days else "stale"
 
 
-def _connector_rows(credentials: list[dict], hermes_home: Path, today: date) -> list[dict]:
+def _connector_rows(env_statuses: dict[str, str], hermes_home: Path, today: date) -> list[dict]:
     rows: list[dict] = []
     for candidate in CONNECTOR_CANDIDATES:
         row = asdict(candidate)
-        row["configured_status"] = _connector_configured_status(candidate, credentials, hermes_home)
+        row["configured_status"] = _connector_configured_status(candidate, env_statuses, hermes_home)
         row["freshness"] = connector_freshness(candidate, today=today)
         rows.append(row)
     return rows
@@ -738,8 +905,9 @@ def build_report(options: ReadinessOptions) -> dict:
         for req in FOUNDATION_SKILLS
     ]
     strict_ok = all(row["status"] == "present" for row in foundation)
-    credentials = inspect_credentials(options.env_paths)
-    connectors = _connector_rows(credentials, options.hermes_home, today)
+    env_statuses = _env_statuses(options.env_paths)
+    credentials = inspect_credentials(options.env_paths, env_statuses=env_statuses)
+    connectors = _connector_rows(env_statuses, options.hermes_home, today)
     plugin = validate_cf_router(
         hermes_home=options.hermes_home,
         config_path=options.config_path,

@@ -94,25 +94,25 @@ These cover **6 of 17 prioritized agents** at near-zero setup cost. Each saves s
 | **#19 Equipment Maintenance** | `farmos-equipment` (OpenClaw) | Farm-equipment-specific; **minimal fit** for restaurant equipment (Hobart, True, Manitowoc all need custom) |
 | **#23 Order Status** | (none) | Bespoke — needs POS integration |
 | **#24 Upsell** | (none) | Bespoke prompt engineering |
-| **#25 Third-Party Delivery** | (none) | DoorDash/UberEats/GrubHub all require custom OAuth + webhook code; no Hermes skill exists |
+| **#25 Third-Party Delivery** | Vendor/API candidates, no no-key Hermes skill | DoorDash, Uber Eats, and Grubhub expose partner/integration surfaces, but all remain connected-mode and approval/allowlist dependent |
 
 ---
 
-## Confirmed gaps — agents that MUST build custom
+## Connector-dependent and confirmed custom gaps
 
-These agents have **zero suitable Hermes/OpenClaw/community skill** in any of the 4 sources surveyed. Future Hermes-first checklists for these agents can skip the research step and proceed directly to net-new estimate:
+These agents do not have enough no-key Hermes substrate to be called autonomous. Do not skip research: review vendor MCP/API candidates first, then estimate custom code only for the residue that connectors cannot cover.
 
 | Agent | Gap | Custom-LOC estimate (rough) |
 |---|---|---|
 | **#11 Festival & Event Outreach** | No Hindu/Indian regional festival calendar skill | ~150 LOC (hardcoded calendar JSON OR Calendarific API) |
-| **#15 Cash & AR Agent** | Stripe/Square/PayPal have credible MCP/vendor candidates; Venmo/Zelle/Cash App/Razorpay remain rail-specific | Review MCP/vendor connector first; custom only after connector review fails |
+| **#15 Cash & AR Agent** | Stripe/Square/PayPal have credible MCP/vendor candidates; Venmo, Zelle, Cash App, Razorpay, and bank-feed providers remain rail/source-specific | Review MCP/vendor connector first; custom only after connector review fails |
 | **#16 Sales Tax Filing** | No state/county tax skills anywhere | ~500 LOC per state (custom scraping or commercial API) |
 | **#21 Expense Bookkeeper** | Intuit QuickBooks Online MCP candidate now exists | Review Intuit MCP + approval guardrails before custom QBO OAuth/write API |
-| **#23 Order Status / #25 Third-Party Delivery** | No DoorDash/UberEats/GrubHub skills | ~300 LOC each, OAuth + webhook |
+| **#23 Order Status / #25 Third-Party Delivery** | POS/KDS and delivery partner APIs exist, but no credential-free Hermes skill covers them | Review Toast/Square/Clover/DoorDash/Uber Eats/Grubhub/Pipedream first; custom OAuth/webhook work only after connector review fails |
 | **#19 Equipment Maintenance** | Only farm-equipment skill exists; no restaurant equipment vendor APIs | Custom per-vendor (Hobart/True/Manitowoc), low priority |
 | **#12 Hiring & Onboarding e-sign step** | DocuSign MCP candidate now exists | Review DocuSign MCP before raw custom e-sign integration |
 
-**Total custom LOC for confirmed gaps: ~2,300+ across 7 agent-features.** This is genuine net-new engineering that no skill ecosystem coverage can shrink.
+**Prior custom LOC estimate is stale.** Treat the old ~2,300+ LOC figure as an upper-bound placeholder from before the connector sweep. Re-estimate per agent after the vendor MCP/API review.
 
 ---
 
@@ -130,7 +130,7 @@ These agents have **zero suitable Hermes/OpenClaw/community skill** in any of th
 ## Strategic recommendations
 
 ### This week (immediate)
-1. **Install the 5 productivity skills on srilu**: `google-workspace`, `maps`, `airtable`, `ocr-and-documents`, `notion`. Zero-cost; unblocks #6, #7, #12, #13, #14 scaffolding.
+1. **Verify the 5 productivity skills on each target VPS**: `google-workspace`, `maps`, `airtable`, `ocr-and-documents`, `notion`. `main-vps` already has these installed/enabled as of 2026-05-14; new customer VPSs still need the check before scaffolding #6, #7, #12, #13, #14.
 2. **Confirm Triveni's POS system**. If Clover, install `clovercli` for ~150 LOC saved on #5 EOD Reconciliation. If anything else, add to gap list.
 3. **Update CLAUDE.md Hermes-first section** to mention the 5 productivity skills + MCP escape hatch — so future per-step `[Hermes]/[net-new]` checklists check those FIRST.
 

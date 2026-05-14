@@ -66,7 +66,7 @@ Research update: the May 3 `tasks/skills-roadmap.md` conclusion that QBO/Stripe/
 | DocuSign | DocuSign MCP connector | DocuSign account/OAuth/client config | Strong candidate for e-sign/onboarding once approval guards exist. |
 | Infobip | Infobip remote MCP servers | OAuth 2.1 or API key | Strong multi-channel fallback; not no-token. |
 | Pipedream | Pipedream MCP | Pipedream-managed OAuth | Broad fallback when no vendor MCP exists; adds platform dependency. |
-| DoorDash/UberEats/Grubhub | no credible vendor-official MCP found | partner APIs/iPaaS likely | Keep as integration-required. |
+| DoorDash/UberEats/Grubhub | no no-key Hermes skill found; vendor/partner API surfaces exist | DoorDash developer API, Uber Eats Marketplace API, Grubhub partner integrations, or iPaaS | Keep as integration-required and allowlist/credential-gated. |
 | Tax filing | no credible official MCP found | state/provider credentials | Keep as reminder/checklist unless authorized integration exists. |
 
 No-key/no-bot-token alternatives researched:
@@ -112,7 +112,7 @@ Legend:
 | #12 Hiring & Onboarding | B/C | WhatsApp intake + local docs/checklists | Google Drive, job boards, e-sign, background checks |
 | #13 Compliance Calendar | A/B | Local compliance-items JSON + timers + WhatsApp owner actions | Agency portals / filing APIs |
 | #14 Employee Document Tracker | B/C | Local folders + OCR + reminders | Google Drive, I-9/e-verify, e-sign |
-| #15 Cash & AR | C | Manual ledger summaries can be local | Stripe/Square/PayPal/Venmo/Zelle/bank writes |
+| #15 Cash & AR | C | Manual ledger summaries can be local | Stripe/Square/PayPal, rail-specific Venmo/Zelle/Cash App/Razorpay, and bank-feed/Open Banking credentials |
 | #16 Sales Tax Filing | C | Reminder/checklist only can be local | State filing portals/APIs and POS tax data |
 | #17 Unit Economics | D | Retired; use #22 | Deep recipe/POS/COGS integration if revived |
 | #18 Customer Complaint | D/A | Folded into #9 + #4; WhatsApp triage works | Review-site APIs if external |
@@ -122,7 +122,7 @@ Legend:
 | #22 P&L Anomaly | B/C | CSV/manual-export anomaly checks | POS/QBO live data |
 | #23 Order Status & Pickup | C | Manual board only | POS/KDS/order-system live status |
 | #24 Upsell & Menu Personalizer | B/C | Local menu + customer notes | POS/loyalty/order-history integration |
-| #25 Third-Party Delivery Coordinator | C | Manual escalation only | DoorDash/UberEats/GrubHub credentials/webhooks |
+| #25 Third-Party Delivery Coordinator | C | Manual escalation only | DoorDash/Uber Eats/Grubhub partner credentials/webhooks or iPaaS |
 | #26 Performance & Training Coach | B/C | Audit/log based coaching | POS/LMS/time-clock integrations |
 | #27 Catering Equipment & Packaging Tracker | A/B | Local packaging inventory + catering event state | Supplier ordering APIs |
 | #28 Perishable Priority & Waste Reducer | B/C | Manual expiry/photo counts | POS/inventory velocity data |
