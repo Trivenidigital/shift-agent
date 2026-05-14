@@ -140,6 +140,25 @@ def _run(config_path: Path, roster_path: Path, state_dir: Path) -> subprocess.Co
     )
 
 
+def _run_text(config_path: Path, roster_path: Path, state_dir: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--config",
+            str(config_path),
+            "--roster",
+            str(roster_path),
+            "--state-dir",
+            str(state_dir),
+            "--text",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
 def _report(result: subprocess.CompletedProcess[str]) -> dict:
     assert result.stderr == ""
     return json.loads(result.stdout)
@@ -175,6 +194,118 @@ def test_placeholder_customer_blocks_production(tmp_path: Path):
     messages = [c["message"] for c in _report(result)["checks"] if c["status"] == "fail"]
     assert "customer.name is placeholder" in messages
     assert "customer.location_id is placeholder" in messages
+
+
+def test_roster_location_id_must_match_config_customer_location_id(tmp_path: Path):
+    roster = _base_roster()
+    roster["location"]["id"] = "loc_jacksonville_test"
+    roster["location"]["name"] = "Triveni Pineville"
+    config_path, roster_path, state_dir = _arrange(
+        tmp_path, config=_base_config(), roster=roster, menu=_base_menu()
+    )
+
+    result = _run(config_path, roster_path, state_dir)
+
+    assert result.returncode == 1
+    messages = [c["message"] for c in _report(result)["checks"] if c["status"] == "fail"]
+    assert any(msg.startswith("roster.location.id does not match customer.location_id") for msg in messages)
+
+
+def test_roster_location_name_must_not_contain_test_label(tmp_path: Path):
+    roster = _base_roster()
+    roster["location"]["name"] = "Triveni Jacksonville (TEST)"
+    config_path, roster_path, state_dir = _arrange(
+        tmp_path, config=_base_config(), roster=roster, menu=_base_menu()
+    )
+
+    result = _run(config_path, roster_path, state_dir)
+
+    assert result.returncode == 1
+    messages = [c["message"] for c in _report(result)["checks"] if c["status"] == "fail"]
+    assert "roster.location contains test/placeholder label" in messages
+
+
+def test_roster_location_id_must_not_contain_test_label_even_when_it_matches_config(tmp_path: Path):
+    cfg = _base_config()
+    cfg["customer"]["location_id"] = "loc_jacksonville_test"
+    roster = _base_roster()
+    roster["location"]["id"] = "loc_jacksonville_test"
+    roster["location"]["name"] = "Triveni Pineville"
+    config_path, roster_path, state_dir = _arrange(
+        tmp_path, config=cfg, roster=roster, menu=_base_menu()
+    )
+
+    result = _run(config_path, roster_path, state_dir)
+
+    assert result.returncode == 1
+    messages = [c["message"] for c in _report(result)["checks"] if c["status"] == "fail"]
+    assert "roster.location contains test/placeholder label" in messages
+
+
+def test_roster_location_name_must_match_meaningful_location_id_token(tmp_path: Path):
+    roster = _base_roster()
+    roster["location"]["id"] = "loc_pineville_01"
+    roster["location"]["name"] = "Triveni Jacksonville"
+    config_path, roster_path, state_dir = _arrange(
+        tmp_path, config=_base_config(), roster=roster, menu=_base_menu()
+    )
+
+    result = _run(config_path, roster_path, state_dir)
+
+    assert result.returncode == 1
+    messages = [c["message"] for c in _report(result)["checks"] if c["status"] == "fail"]
+    assert "roster.location.name does not match customer.location_id token" in messages
+
+
+def test_roster_location_null_and_non_string_metadata_blocks_without_traceback(tmp_path: Path):
+    roster = _base_roster()
+    roster["location"]["id"] = 123
+    roster["location"]["name"] = None
+    config_path, roster_path, state_dir = _arrange(
+        tmp_path, config=_base_config(), roster=roster, menu=_base_menu()
+    )
+
+    result = _run(config_path, roster_path, state_dir)
+
+    assert result.returncode == 1
+    assert result.stderr == ""
+    messages = [c["message"] for c in _report(result)["checks"] if c["status"] == "fail"]
+    assert any(msg.startswith("roster.location.id does not match customer.location_id") for msg in messages)
+    assert "roster.location contains test/placeholder label" in messages
+
+
+def test_roster_location_match_not_reported_pass_when_config_invalid(tmp_path: Path):
+    config_path, roster_path, state_dir = _arrange(
+        tmp_path, config={"schema_version": 1}, roster=_base_roster(), menu=_base_menu()
+    )
+
+    result = _run(config_path, roster_path, state_dir)
+
+    assert result.returncode == 1
+    checks = _report(result)["checks"]
+    assert any(c["id"] == "config.schema" and c["status"] == "fail" for c in checks)
+    assert any(
+        c["id"] == "roster.location_id_match"
+        and c["status"] == "fail"
+        and c["message"] == "roster.location.id not compared because config invalid"
+        for c in checks
+    )
+
+
+def test_text_output_includes_roster_location_failures(tmp_path: Path):
+    roster = _base_roster()
+    roster["location"]["id"] = "loc_jacksonville_test"
+    roster["location"]["name"] = "Triveni Jacksonville (TEST)"
+    config_path, roster_path, state_dir = _arrange(
+        tmp_path, config=_base_config(), roster=roster, menu=_base_menu()
+    )
+
+    result = _run_text(config_path, roster_path, state_dir)
+
+    assert result.returncode == 1
+    assert result.stderr == ""
+    assert "FAIL roster.location_id_match: roster.location.id does not match customer.location_id" in result.stdout
+    assert "FAIL roster.location_label: roster.location contains test/placeholder label" in result.stdout
 
 
 def test_missing_roster_blocks_shift_agent(tmp_path: Path):

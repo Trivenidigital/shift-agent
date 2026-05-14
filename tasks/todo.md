@@ -3,9 +3,33 @@
 Living checklist. Items grouped by priority; each completed item gets `✅` and a date.
 For history of *completed* multi-phase initiatives (platform extract, sender-id, agent #2/4/5, etc.), see git log + `tasks/all-phases-*.md`.
 
-Last updated: 2026-05-05 (post-PR #72 backlog refresh — 5 follow-ups added: first-traffic verification of provider_routing, audit_pairing.py factor-out, replay harness v0.2, SKILL.md hash manifest, stale config-backup cleanup, --yolo CLI mismatch)
+Last updated: 2026-05-14 (Hermes SMB operating-layer roadmap added; prior note: post-PR #72 backlog refresh added first-traffic verification of provider_routing, audit_pairing.py factor-out, replay harness v0.2, SKILL.md hash manifest, stale config-backup cleanup, --yolo CLI mismatch)
 
 ---
+
+## Active - Hermes SMB operating layer strategy (2026-05-14)
+
+**Drift-check tag:** extends-Hermes
+
+Hermes-first summary: reuse Hermes gateway, skills, memory, cron, delegation, profiles, Kanban, installed productivity skills, `mcp/native-mcp`, and the deployed Shift/Catering/Daily Brief pilot. Net-new scope is product strategy, role structure, backlog ordering, and narrow vertical business loops that Hermes does not already provide.
+
+Roadmap: `tasks/hermes-smb-operating-layer-roadmap-2026-05-14.md`
+
+- [x] Market research synthesis: Hermes Agent substrate, Paperclip control-plane pattern, SMB AI adoption signals, MCP/action-tool risk, and existing SMB-Agents roadmap.
+- [x] Capture strategic thesis: external product is an AI operations desk for ethnic SMBs; internal execution may use AI-company roles.
+- [x] Write phased roadmap with Hermes-first analysis and source links.
+- [x] Add active backlog section to `tasks/todo.md`.
+- [ ] Phase 1 pilot proof: complete live WhatsApp smoke from `docs/runbooks/production-pilot-shift-catering-daily-brief.md` and capture evidence.
+- [x] Phase 1 readiness hardening: tighten `pilot-readiness-check` so config customer location and roster location must agree, reject test/placeholder roster labels, and block stale real labels when the location-id token is absent from the roster location name.
+- [ ] Phase 2 candidate selection: choose the first low-risk customer-facing expansion loop after pilot smoke. Current recommendation: Special Request Memory.
+- [x] Phase 3 internal operating model: draft role cards for SMB Ops CEO, Hermes Engineer, Hermes Tester, Integration Scout, Customer Success Agent, Market/Content Agent, and Safety/Governance Agent.
+- [ ] Phase 3 tooling choice: decide whether to start with lightweight repo/Codex role prompts, Hermes profiles plus Kanban, Paperclip, or a hybrid.
+- [x] Phase 4 connector queue: define focused connector-review queue for QBO, POS, payments, reviews, and e-sign before estimating custom API work.
+- [x] Phase 5 eval loop: define initial golden scenario/eval backlog for catering, shift, Daily Brief, menu update, and future Special Request Memory.
+- [x] Phase 6 GTM spine: draft category, wedge, promise, proof path, differentiator, and first demo story.
+- [ ] Phase 6 GTM proof: create owner-facing positioning and demo script only after pilot smoke evidence is captured.
+
+Current recommendation: finish the pilot proof first, then build Special Request Memory as the first Phase 2 loop. It is Hermes-native, low-risk, high-delight, and reinforces the "operations desk that remembers your business" story.
 
 ## Active - Production pilot: Shift + Catering + Daily Brief (2026-05-14)
 
@@ -29,7 +53,7 @@ Plan: `docs/superpowers/plans/2026-05-14-production-pilot-shift-catering-daily-b
 - [x] Correct live roster location metadata from `Triveni Jacksonville (TEST)` / `loc_jax_01` to `Triveni Pineville` / `loc_pineville_01`.
 - [x] Rerun `/usr/local/lib/hermes-agent/venv/bin/python /usr/local/bin/pilot-readiness-check --text`; result is READY (13 passed, 0 failed).
 - [ ] Live WhatsApp smoke script from `docs/runbooks/production-pilot-shift-catering-daily-brief.md`.
-- [ ] Tighten `pilot-readiness-check` to require `config.customer.location_id == roster.location.id` and reject roster location names containing test/placeholder labels; live config had a hidden Jacksonville test label that the placeholder-only gate did not catch.
+- [x] Tighten `pilot-readiness-check` to require `config.customer.location_id == roster.location.id`, reject roster location names containing test/placeholder labels, and require meaningful location-id tokens such as `pineville` to appear in `roster.location.name`; local regression tests cover location-id mismatch, stale real name, id/name test labels, invalid-config comparison semantics, non-string/null location metadata, and text output.
 
 Current runtime status after deploy `deploy-20260514-203430-bb243517` + identity patch `20260514T212446Z`: gateway active, WhatsApp bridge connected, timers active, roster valid, 6 active employees, 23 scheduled shifts, catering menu valid, 78 available menu items, Daily Brief catering learning enabled, and pilot readiness is READY.
 

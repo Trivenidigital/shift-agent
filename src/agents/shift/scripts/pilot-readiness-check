@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -85,6 +86,32 @@ def _is_placeholder(value: str | None) -> bool:
     )
 
 
+_PLACEHOLDER_LABEL_RE = re.compile(
+    r"(^|[^a-z0-9])(placeholder|todo|test|dummy|sample|rehearsal)([^a-z0-9]|$)",
+    re.IGNORECASE,
+)
+_LOCATION_ID_SKIP_TOKENS = {"loc", "location", "store", "site", "branch"}
+
+
+def _location_value(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _contains_placeholder_label(value: Any) -> bool:
+    normalized = _location_value(value).lower()
+    if normalized == "":
+        return True
+    return _PLACEHOLDER_LABEL_RE.search(normalized) is not None
+
+
+def _meaningful_location_id_tokens(value: Any) -> list[str]:
+    normalized = _location_value(value).lower()
+    tokens = re.findall(r"[a-z]+", normalized)
+    return [token for token in tokens if len(token) >= 4 and token not in _LOCATION_ID_SKIP_TOKENS]
+
+
 def _check_config(path: Path, checks: Checks) -> Config | None:
     raw, err = _read_yaml(path)
     if err:
@@ -135,7 +162,7 @@ def _check_config(path: Path, checks: Checks) -> Config | None:
     return cfg
 
 
-def _check_roster(path: Path, checks: Checks) -> None:
+def _check_roster(path: Path, checks: Checks, cfg: Config | None) -> None:
     raw, err = _read_json(path)
     if err:
         checks.fail("roster.exists", "roster.json missing" if err == "roster.json missing" else err)
@@ -146,6 +173,40 @@ def _check_roster(path: Path, checks: Checks) -> None:
         checks.fail("roster.schema", err)
         return
     checks.pass_("roster.schema", "roster.json validates")
+
+    roster_location = roster.location if isinstance(roster.location, dict) else {}
+    roster_location_id_raw = roster_location.get("id")
+    roster_location_name_raw = roster_location.get("name")
+    roster_location_id = _location_value(roster_location_id_raw)
+    roster_location_name = _location_value(roster_location_name_raw)
+
+    if cfg is None:
+        checks.fail("roster.location_id_match", "roster.location.id not compared because config invalid")
+    elif roster_location_id != cfg.customer.location_id:
+        checks.fail(
+            "roster.location_id_match",
+            (
+                "roster.location.id does not match customer.location_id "
+                f"(roster={roster_location_id!r}, config={cfg.customer.location_id!r})"
+            ),
+        )
+    else:
+        checks.pass_("roster.location_id_match", "roster.location.id matches customer.location_id")
+
+    id_tokens = _meaningful_location_id_tokens(roster_location_id)
+    roster_name_normalized = roster_location_name.lower()
+    if id_tokens and not any(token in roster_name_normalized for token in id_tokens):
+        checks.fail("roster.location_name_match", "roster.location.name does not match customer.location_id token")
+    elif id_tokens:
+        checks.pass_("roster.location_name_match", "roster.location.name matches customer.location_id token")
+
+    if (
+        _contains_placeholder_label(roster_location_id_raw)
+        or _contains_placeholder_label(roster_location_name_raw)
+    ):
+        checks.fail("roster.location_label", "roster.location contains test/placeholder label")
+    else:
+        checks.pass_("roster.location_label", "roster.location label is production")
 
     active = [emp for emp in roster.employees if emp.status == "active"]
     if len(active) < 2:
@@ -182,8 +243,8 @@ def _check_menu(state_dir: Path, checks: Checks) -> None:
 
 def build_report(config_path: Path, roster_path: Path, state_dir: Path) -> dict[str, Any]:
     checks = Checks()
-    _check_config(config_path, checks)
-    _check_roster(roster_path, checks)
+    cfg = _check_config(config_path, checks)
+    _check_roster(roster_path, checks, cfg)
     _check_menu(state_dir, checks)
 
     failed = checks.failed
