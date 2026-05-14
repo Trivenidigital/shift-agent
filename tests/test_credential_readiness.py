@@ -104,6 +104,35 @@ def test_strict_foundation_ignores_missing_repo_installed_cf_router(tmp_path: Pa
     assert report["plugin"]["status"] in {"missing", "unknown"}
 
 
+def test_strict_foundation_report_does_not_import_live_cf_router(tmp_path: Path):
+    hermes_home, install_root = _make_foundation(tmp_path)
+    plugin = hermes_home / "plugins" / "cf-router"
+    marker = tmp_path / "import-side-effect"
+    _touch(plugin / "actions.py", "def classify_catering(text):\n    return False, []\n")
+    _touch(
+        plugin / "hooks.py",
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('imported')\n"
+        "def pre_gateway_dispatch(event, gateway, session_store):\n    return None\n",
+    )
+    config = hermes_home / "config.yaml"
+    _touch(config, "plugins:\n  enabled:\n    - cf-router\n")
+
+    report = cr.build_report(
+        cr.ReadinessOptions(
+            hermes_home=hermes_home,
+            hermes_install_root=install_root,
+            strict_foundation=True,
+            config_path=config,
+            today=cr.parse_date("2026-05-14"),
+        )
+    )
+
+    assert report["strict_foundation_ok"] is True
+    assert report["plugin"]["status"] == "present"
+    assert report["plugin"]["imports_ok"] is False
+    assert not marker.exists()
+
+
 def test_validate_cf_router_requires_directory_compile_and_config_enablement(tmp_path: Path):
     hermes_home, config = _make_cf_router(tmp_path, enabled=True)
     result = cr.validate_cf_router(
@@ -244,7 +273,9 @@ def test_connector_status_distinguishes_partial_and_complete_env_sets(tmp_path: 
             [
                 "QUICKBOOKS_CLIENT_ID=id",
                 "QUICKBOOKS_CLIENT_SECRET=secret",
+                "QUICKBOOKS_REFRESH_TOKEN=refresh",
                 "QUICKBOOKS_REALM_ID=realm",
+                "QUICKBOOKS_ENVIRONMENT=sandbox",
                 "PAYPAL_ACCESS_TOKEN=token",
                 "PAYPAL_CLIENT_ID=client",
             ]
@@ -394,6 +425,8 @@ def test_deploy_installs_credential_readiness_module_and_runs_staging_gate_befor
     deploy = REPO_ROOT / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh"
     text = deploy.read_text(encoding="utf-8")
     assert "src/platform/credential_readiness.py" in text
+    assert "rm -f /usr/local/bin/credential-minimized-readiness" in text
+    assert "rm -f /opt/shift-agent/credential_readiness.py" in text
     assert '[ -f "$STAGING/src/platform/scripts/credential-minimized-readiness" ]' in text
     gate = '"$VENV_PY" "$STAGING/src/platform/scripts/credential-minimized-readiness"'
     assert gate in text

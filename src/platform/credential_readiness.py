@@ -142,7 +142,13 @@ CONNECTOR_CANDIDATES: tuple[ConnectorCandidate, ...] = (
         last_verified="2026-05-14",
         freshness_days=30,
         notes="Prefer before custom QBO API; writes need owner approval.",
-        env_names=("QUICKBOOKS_CLIENT_ID", "QUICKBOOKS_CLIENT_SECRET", "QUICKBOOKS_REALM_ID"),
+        env_names=(
+            "QUICKBOOKS_CLIENT_ID",
+            "QUICKBOOKS_CLIENT_SECRET",
+            "QUICKBOOKS_REFRESH_TOKEN",
+            "QUICKBOOKS_REALM_ID",
+            "QUICKBOOKS_ENVIRONMENT",
+        ),
     ),
     ConnectorCandidate(
         name="Stripe MCP",
@@ -434,7 +440,7 @@ CONNECTOR_CANDIDATES: tuple[ConnectorCandidate, ...] = (
     ConnectorCandidate(
         name="Venmo business profile / PayPal Venmo integration",
         domain="payment_rails",
-        source_url="https://venmo.com/docs",
+        source_url="https://developer.paypal.com/braintree/articles/guides/payment-methods/venmo/",
         credential_class="write_rail",
         maturity="vendor",
         market_state="stable",
@@ -555,7 +561,9 @@ CREDENTIAL_REQUIREMENTS: tuple[CredentialRequirement, ...] = (
     CredentialRequirement("SQUARE_ACCESS_TOKEN", "write_rail", "Square connected mode."),
     CredentialRequirement("QUICKBOOKS_CLIENT_ID", "oauth", "QBO connected mode."),
     CredentialRequirement("QUICKBOOKS_CLIENT_SECRET", "oauth", "QBO connected mode."),
+    CredentialRequirement("QUICKBOOKS_REFRESH_TOKEN", "oauth", "QBO connected mode."),
     CredentialRequirement("QUICKBOOKS_REALM_ID", "oauth", "QBO connected mode."),
+    CredentialRequirement("QUICKBOOKS_ENVIRONMENT", "oauth", "QBO connected mode."),
     CredentialRequirement("PAYPAL_ACCESS_TOKEN", "write_rail", "PayPal connected mode."),
     CredentialRequirement("PAYPAL_CLIENT_ID", "write_rail", "PayPal connected mode."),
     CredentialRequirement("CLOVER_CLIENT_ID", "oauth", "Clover connected mode."),
@@ -830,12 +838,13 @@ def validate_cf_router(*, hermes_home: Path, config_path: Path, strict: bool = F
         result["detail"] = exc.__class__.__name__
         return result
 
-    imports_ok, import_detail = _import_cf_router_readonly(plugin_root)
-    result["imports_ok"] = imports_ok
-    if not imports_ok:
-        result["status"] = "import_failed"
-        result["detail"] = import_detail
-        return result
+    if strict:
+        imports_ok, import_detail = _import_cf_router_readonly(plugin_root)
+        result["imports_ok"] = imports_ok
+        if not imports_ok:
+            result["status"] = "import_failed"
+            result["detail"] = import_detail
+            return result
 
     try:
         plugin_state = parse_plugins_state_text(config_path.read_text(encoding="utf-8"))

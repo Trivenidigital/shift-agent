@@ -37,6 +37,12 @@ install_artifacts() {
     # + Shift-Agent-specific (shift-agent-*, send-coverage-message, etc.).
     install -m 755 src/platform/scripts/* /usr/local/bin/
     install -m 755 src/agents/shift/scripts/* /usr/local/bin/
+    # Rollback hygiene for files introduced after older tarballs. If a
+    # rollback target predates this readiness CLI, remove the previously
+    # installed copy instead of leaving residue outside the tarball surface.
+    if [ ! -f src/platform/scripts/credential-minimized-readiness ]; then
+        rm -f /usr/local/bin/credential-minimized-readiness
+    fi
 
     # Python modules — flat layout at /opt/shift-agent/ matches scripts' sys.path
     install -m 644 src/platform/schemas.py /opt/shift-agent/schemas.py
@@ -53,6 +59,8 @@ install_artifacts() {
     # compatibility with tarballs that predate this module.
     if [ -f src/platform/credential_readiness.py ]; then
         install -m 644 src/platform/credential_readiness.py /opt/shift-agent/credential_readiness.py
+    else
+        rm -f /opt/shift-agent/credential_readiness.py
     fi
 
     # Templates — Shift-Agent message templates (idempotent: shared dir filled by multiple agents below)

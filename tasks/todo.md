@@ -556,7 +556,9 @@ This is a future-process decision; not worth retrofitting prior PRs, but worth a
     - Connector readiness now reports `partial_env` for incomplete credential sets and recognizes connector-specific env names.
     - `cf-router` validation now compiles/imports read-only, checks `pre_gateway_dispatch`, avoids `__pycache__`, and treats `plugins.disabled` as a deny-list.
     - Roadmap/plan/no-key docs no longer call connector-backed surfaces guaranteed custom gaps or say `cf-router` is part of strict external foundation mode.
-  - Review-fix verification: `python -m pytest tests/test_credential_readiness.py tests/test_repo_invariants.py tests/test_tarball_includes_summary_artifacts.py -q` -> `19 passed, 2 skipped`; Python byte-compile for module + wrapper, Git Bash `bash -n` on deploy/smoke, and `git diff --check` -> all passed.
+    - Re-review fix: QBO complete readiness now requires refresh token/environment as documented by Intuit MCP; Venmo API/OAuth row now cites PayPal/Braintree Venmo developer docs.
+    - Re-review fix: strict foundation report no longer imports live `cf-router`; post-install `--validate-plugin cf-router` still does. Rollback to older tarballs now removes the new readiness binary/module.
+  - Review-fix verification: `python -m pytest tests/test_credential_readiness.py tests/test_repo_invariants.py tests/test_tarball_includes_summary_artifacts.py -q` -> `20 passed, 2 skipped`; Python byte-compile for module + wrapper, Git Bash `bash -n` on deploy/smoke, and `git diff --check` -> all passed.
 
 Review results:
 - Final implementation review found four issues; all fixed:
