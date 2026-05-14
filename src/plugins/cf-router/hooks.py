@@ -277,6 +277,51 @@ def _has_f7_followup_signal(signals: list[str]) -> bool:
     return False
 
 
+def _should_start_new_lead_over_active(active_lead: dict, signals: list[str]) -> bool:
+    """Return True when a strong new inquiry should not attach to old state."""
+    if active_lead.get("status") not in {"CUSTOMER_FINALIZED", "OWNER_APPROVED"}:
+        return False
+    has_primary = any(sig.startswith("primary:catering") for sig in signals or [])
+    has_headcount = any(sig.startswith("headcount:") for sig in signals or [])
+    has_event = "event_keyword" in (signals or [])
+    has_delivery = "delivery_keyword" in (signals or [])
+    return has_primary and (has_headcount or has_event or has_delivery)
+
+
+def _create_catering_lead_from_inbound(
+    *, text: str, chat_id: str, message_id: str, signals: list[str],
+    phone: Optional[str],
+) -> Optional[dict]:
+    """Invoke create-catering-lead for the deterministic F7 Branch A path."""
+    if phone:
+        customer_phone_arg = phone
+    elif chat_id.endswith("@lid"):
+        customer_phone_arg = "+" + chat_id[: -len("@lid")]
+    else:
+        return None
+
+    extracted: Optional[dict] = None
+    headcount = _parse_headcount_from_signals(signals or [])
+    if headcount is not None:
+        extracted = {"headcount": headcount}
+
+    ok, detail = actions.trigger_create_catering_lead(
+        customer_phone=customer_phone_arg,
+        customer_name="",
+        raw_inquiry=text,
+        message_id=message_id,
+        extracted_fields=extracted,
+    )
+    actions.audit_intercepted(
+        reason="f7_primary_new_inquiry", chat_id=chat_id,
+        subprocess_rc=0 if ok else 2, detail=detail[:500],
+    )
+    if not ok:
+        return None
+    return {"action": "skip",
+            "reason": "cf-router F7 primary: catering inquiry routed deterministically"}
+
+
 def _try_f7_primary_intercept(
     text: str, chat_id: str, event: Any,
     signals: Optional[list[str]] = None,
@@ -311,40 +356,10 @@ def _try_f7_primary_intercept(
         # Branch A — new inquiry → create lead deterministically, skip LLM.
         # `customer_name=""` kills the L0004-L0007 "Anjali Iyer" hallucination
         # class (regex-based extractor can't invent names from training data).
-        if phone:
-            customer_phone_arg = phone
-        elif chat_id.endswith("@lid"):
-            # Legacy LID-as-fake-phone shape (matches the persisted
-            # customer_phone field on L0004-L0010)
-            customer_phone_arg = "+" + chat_id[: -len("@lid")]
-        else:
-            # Defensive: shouldn't happen since chat_id is non-empty per caller
-            return None
-        # PR-CF1d Commit 4: forward classify_catering's headcount signal so
-        # the lead carries structured data, not all-nulls. Closes the UX
-        # regression where owner approval cards + daily brief showed
-        # headcount=null for every cf-router-created lead.
-        extracted: Optional[dict] = None
-        headcount = _parse_headcount_from_signals(signals or [])
-        if headcount is not None:
-            extracted = {"headcount": headcount}
-        ok, detail = actions.trigger_create_catering_lead(
-            customer_phone=customer_phone_arg,
-            customer_name="",
-            raw_inquiry=text,
-            message_id=message_id,
-            extracted_fields=extracted,
+        return _create_catering_lead_from_inbound(
+            text=text, chat_id=chat_id, message_id=message_id,
+            signals=signals or [], phone=phone,
         )
-        actions.audit_intercepted(
-            reason="f7_primary_new_inquiry", chat_id=chat_id,
-            subprocess_rc=0 if ok else 2, detail=detail[:500],
-        )
-        if not ok:
-            # Lead creation failed (idempotency replay, bridge unreachable,
-            # validation error). Let LLM see the inbound; owner can intervene.
-            return None
-        return {"action": "skip",
-                "reason": "cf-router F7 primary: catering inquiry routed deterministically"}
 
     # Branch B — active lead exists → suppress follow-up, optionally reply.
     #
@@ -366,6 +381,14 @@ def _try_f7_primary_intercept(
     # plan.md §"Risks + rollback" and the PR-CF1d reviewer feedback.
     lead_id = active_lead.get("lead_id", "?")
     approval_code = active_lead.get("owner_approval_code") or ""
+
+    if allow_new_lead and _should_start_new_lead_over_active(active_lead, signals or []):
+        result = _create_catering_lead_from_inbound(
+            text=text, chat_id=chat_id, message_id=message_id,
+            signals=signals or [], phone=phone,
+        )
+        if result is not None:
+            return result
 
     if F7_PROPOSAL_BRANCH_ENABLED and actions.is_proposal_selection(text):
         if actions.find_selectable_proposal_set(lead_id):
