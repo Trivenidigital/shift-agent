@@ -31,6 +31,7 @@ APPLY_OWNER_DECISION_BIN = Path("/usr/local/bin/apply-catering-owner-decision")
 APPLY_MENU_UPDATE_BIN = Path("/usr/local/bin/apply-menu-update")
 NOTIFY_OWNER_BIN = Path("/usr/local/bin/shift-agent-notify-owner")
 CREATE_LEAD_BIN = Path("/usr/local/bin/create-catering-lead")  # F7 path
+CREATE_CATERING_PROPOSALS_BIN = Path("/usr/local/bin/create-catering-proposal-options")
 SELECT_CATERING_PROPOSAL_BIN = Path("/usr/local/bin/select-catering-proposal")
 
 PYTHON_BIN = Path("/usr/local/lib/hermes-agent/venv/bin/python")
@@ -366,6 +367,30 @@ def invoke_select_catering_proposal(lead_id: str, chat_id: str, message_id: str,
         return 1
 
 
+def invoke_create_catering_proposals(lead_id: str, chat_id: str, message_id: str,
+                                     text: str) -> int:
+    """Invoke create-catering-proposal-options in deterministic menu mode."""
+    try:
+        result = subprocess.run(
+            [
+                str(PYTHON_BIN),
+                str(CREATE_CATERING_PROPOSALS_BIN),
+                "--lead-id", lead_id,
+                "--customer-jid", chat_id,
+                "--source-message-id", message_id,
+                "--request-text", text,
+                "--auto-generate-from-menu",
+            ],
+            capture_output=True, text=True,
+            env=os.environ.copy(), timeout=SUBPROCESS_TIMEOUT_SEC,
+        )
+        return result.returncode
+    except subprocess.TimeoutExpired:
+        return 124
+    except Exception:
+        return 1
+
+
 def fire_pushover_alert(title: str, body: str, priority: int = 2) -> None:
     """Fire a Pushover alert via the deployed shift-agent-notify-owner script.
 
@@ -512,7 +537,7 @@ _PROPOSAL_REQUEST_OBJECT = re.compile(
 )
 _PROPOSAL_PASSIVE_WAIT = re.compile(
     r"\b(?:will\s+wait|waiting|wait\s+for|want\s+to\s+wait|"
-    r"no\s+need\s+to\s+send|not\s+yet)\b|^\s*any\s+update\??\s*$",
+    r"no\s+need\s+to\s+send|not\s+yet|any\s+update)\b",
     re.IGNORECASE,
 )
 _PROPOSAL_ACTION_VERB = r"(?:choose|chose|select|selected|pick|picked|take|taking|use|go\s+with|proceed\s+with|confirm|finalize)"

@@ -1315,7 +1315,7 @@ class TestF7PrimaryMode:
         assert result["action"] == "skip"
         assert "follow-up" in result["reason"]
 
-    def test_proposal_request_actionable_allows_dispatch_when_flag_enabled(self, mods, state_env):
+    def test_proposal_request_actionable_invokes_script_when_flag_enabled(self, mods, state_env):
         hooks_mod, actions_mod = mods
         hooks_mod.F7_PROPOSAL_BRANCH_ENABLED = True
         _seed_config(state_env)
@@ -1328,16 +1328,66 @@ class TestF7PrimaryMode:
         with patch.object(actions_mod, "is_owner_chat", return_value=False), \
              patch.object(actions_mod, "lid_to_phone_via_identify_sender",
                           return_value=("+19045550104", "customer")), \
+             patch.object(actions_mod, "invoke_create_catering_proposals",
+                          return_value=0) as mock_create, \
              patch.object(actions_mod, "send_canonical_followup_reply") as mock_reply:
             result = hooks_mod.pre_gateway_dispatch(
-                _make_event(
+                SimpleNamespace(
                     text="She wants one mixed option and one premium option.",
                     chat_id="201975216009469@lid",
+                    message_id="msg-proposal-request-1",
                 ),
             )
 
-        assert result is None
+        assert result is not None
+        assert result["action"] == "skip"
+        assert "proposal request" in result["reason"]
+        mock_create.assert_called_once_with(
+            "L0001",
+            "201975216009469@lid",
+            "msg-proposal-request-1",
+            "She wants one mixed option and one premium option.",
+        )
         mock_reply.assert_not_called()
+        rows = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
+        audits = [r for r in rows if r.get("type") == "cf_router_intercepted"]
+        assert len(audits) == 1
+        assert audits[0]["reason"] == "f7_proposal_request"
+        assert audits[0]["subprocess_rc"] == 0
+
+    @pytest.mark.parametrize("handled_rc", [2, 4, 6, 11])
+    def test_proposal_request_handled_exit_codes_skip_llm(self, mods, state_env, handled_rc):
+        hooks_mod, actions_mod = mods
+        hooks_mod.F7_PROPOSAL_BRANCH_ENABLED = True
+        _seed_config(state_env)
+        _seed_leads_multi(state_env, [
+            {"lead_id": "L0001", "owner_approval_code": "#ABCDE",
+             "customer_phone": "+19045550104",
+             "status": "AWAITING_OWNER_APPROVAL"},
+        ])
+
+        with patch.object(actions_mod, "is_owner_chat", return_value=False), \
+             patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+19045550104", "customer")), \
+             patch.object(actions_mod, "invoke_create_catering_proposals",
+                          return_value=handled_rc), \
+             patch.object(actions_mod, "send_canonical_followup_reply") as mock_reply:
+            result = hooks_mod.pre_gateway_dispatch(
+                SimpleNamespace(
+                    text="Please send two proposal menus for my cousin's wedding.",
+                    chat_id="201975216009469@lid",
+                    message_id="msg-proposal-request-fail",
+                ),
+            )
+
+        assert result is not None
+        assert result["action"] == "skip"
+        mock_reply.assert_not_called()
+        rows = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
+        audits = [r for r in rows if r.get("type") == "cf_router_intercepted"]
+        assert len(audits) == 1
+        assert audits[0]["reason"] == "f7_proposal_request"
+        assert audits[0]["subprocess_rc"] == handled_rc
 
     def test_passive_wait_still_suppresses_when_flag_enabled(self, mods, state_env):
         hooks_mod, actions_mod = mods

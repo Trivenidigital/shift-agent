@@ -2585,6 +2585,9 @@ class CfRouterIntercepted(_BaseEntry):
         CUSTOMER_FINALIZED, OWNER_EDITED}); plugin suppressed the follow-up
         to prevent multi-lead-creation bug + LLM proposal-invention; LLM
         bypassed. Optionally a canonical "owner is reviewing" reply is sent.
+      - f7_proposal_request — active customer lead asked for proposal/menu
+        options; plugin invoked create-catering-proposal-options in
+        deterministic menu-grounded mode; LLM bypassed.
       - error — plugin caught an unexpected error during interception
         attempt; LLM still ran normally (plugin returns None on error)
 
@@ -2599,6 +2602,7 @@ class CfRouterIntercepted(_BaseEntry):
         "f9_sick_call_alert",
         "f7_primary_new_inquiry",          # PR-CF1d 2026-05-12
         "f7_primary_followup_suppressed",  # PR-CF1d 2026-05-12
+        "f7_proposal_request",
         "f7_proposal_selection",
         "error",
     ]

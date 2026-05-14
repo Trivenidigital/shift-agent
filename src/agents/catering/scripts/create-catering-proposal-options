@@ -103,6 +103,93 @@ def _read_options(options_json: str) -> list[CateringProposalOption]:
         raise ValueError(f"options validation failed: {e}") from e
 
 
+_NON_VEG_NAME_RE = re.compile(
+    r"\b(?:chicken|mutton|goat|lamb|fish|shrimp|prawn|egg|beef|turkey|keema|apollo)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_non_veg(item: MenuItem) -> bool:
+    tags = {str(tag).lower() for tag in item.dietary_tags}
+    return "non-veg" in tags or "nonveg" in tags or bool(_NON_VEG_NAME_RE.search(item.name))
+
+
+def _items_in_categories(items: list[MenuItem], categories: tuple[str, ...]) -> list[MenuItem]:
+    category_set = set(categories)
+    return [item for item in items if item.category in category_set]
+
+
+def _append_unique(target: list[str], items: list[MenuItem], *, limit: int) -> None:
+    for item in items:
+        if len(target) >= limit:
+            return
+        if item.name not in target:
+            target.append(item.name)
+
+
+def _auto_option_items(menu_items: dict[str, MenuItem], *, style_key: str) -> list[str]:
+    available = list(menu_items.values())
+    if not available:
+        raise ValueError("menu has no available items")
+
+    veg_items = [item for item in available if not _is_non_veg(item)]
+    non_veg_items = [item for item in available if _is_non_veg(item)]
+    selected: list[str] = []
+
+    if style_key == "balanced_mixed":
+        _append_unique(
+            selected,
+            _items_in_categories(veg_items, ("appetizer", "main", "side", "package")),
+            limit=3,
+        )
+        _append_unique(
+            selected,
+            _items_in_categories(non_veg_items, ("appetizer", "main", "package")),
+            limit=5,
+        )
+        _append_unique(selected, _items_in_categories(veg_items, ("dessert", "beverage")), limit=6)
+    elif style_key == "premium_mixed":
+        _append_unique(
+            selected,
+            _items_in_categories(non_veg_items, ("special", "main", "appetizer", "package")),
+            limit=4,
+        )
+        _append_unique(
+            selected,
+            _items_in_categories(veg_items, ("special", "main", "appetizer", "package")),
+            limit=6,
+        )
+        _append_unique(selected, _items_in_categories(available, ("dessert",)), limit=7)
+    else:
+        _append_unique(selected, _items_in_categories(available, ("package", "main", "side", "dessert")), limit=6)
+
+    _append_unique(selected, available, limit=8)
+    return selected
+
+
+def _auto_generate_options(
+    menu_items: dict[str, MenuItem],
+    request_text: str,
+) -> list[CateringProposalOption]:
+    templates = [
+        ("balanced_mixed", "balanced"),
+        ("premium_mixed", "premium"),
+        ("classic_family", "classic"),
+    ]
+    allowed = _allowed_option_count(request_text)
+    options = []
+    for idx, (style_key, tier) in enumerate(templates[:allowed], start=1):
+        options.append(
+            CateringProposalOption(
+                option_id=str(idx),
+                style_key=style_key,
+                tier=tier,
+                item_names=_auto_option_items(menu_items, style_key=style_key),
+            )
+        )
+    return options
+
+
 def _load_lead(lead_id: str):
     with FileLock(LEADS_LOCK):
         store, status = load_model(LEADS_PATH, CateringLeadStore, default=CateringLeadStore())
@@ -302,7 +389,8 @@ def main() -> int:
     parser.add_argument("--customer-jid", required=True)
     parser.add_argument("--source-message-id", required=True)
     parser.add_argument("--request-text", required=True)
-    parser.add_argument("--options-json", required=True)
+    parser.add_argument("--options-json")
+    parser.add_argument("--auto-generate-from-menu", action="store_true")
     args = parser.parse_args()
 
     try:
@@ -323,7 +411,14 @@ def main() -> int:
         return EXIT_NOT_FOUND
 
     try:
-        options = _read_options(args.options_json)
+        if args.auto_generate_from_menu and args.options_json:
+            raise ValueError("--options-json cannot be combined with --auto-generate-from-menu")
+        if args.auto_generate_from_menu:
+            options = _auto_generate_options(menu_items, args.request_text)
+        elif args.options_json:
+            options = _read_options(args.options_json)
+        else:
+            raise ValueError("--options-json is required unless --auto-generate-from-menu is set")
         allowed = _allowed_option_count(args.request_text)
         if len(options) != allowed:
             raise ValueError(f"{len(options)} options supplied; expected exactly {allowed}")

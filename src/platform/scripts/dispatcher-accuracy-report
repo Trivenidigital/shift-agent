@@ -3,16 +3,16 @@
 
 Reads decisions.log and pairs each raw_inbound entry with its corresponding
 dispatcher-equivalent routing decision: dispatcher_routed, cf-router proposal
-selection intercepts, or unknown_sender_declined for declined senders.
+request/selection intercepts, or unknown_sender_declined for declined senders.
 Unpaired raw_inbound entries mean Kimi pattern-matched message content and
 skipped the dispatch_shift_agent SKILL — the exact failure mode the JSONL
 post-mortem surfaced before this script existed.
 
 Pairing rules:
   1. raw_inbound + dispatcher_routed match by message_id (preferred, exact)
-  2. raw_inbound + cf_router_intercepted(reason=f7_proposal_selection) match
-     by sender identity within PAIR_WINDOW_SECONDS (dispatcher-equivalent
-     cf-router path)
+  2. raw_inbound + cf_router_intercepted(reason=f7_proposal_request or
+     f7_proposal_selection) match by sender identity within
+     PAIR_WINDOW_SECONDS (dispatcher-equivalent cf-router path)
   3. raw_inbound + unknown_sender_declined match by sender_phone or sender_lid
      within PAIR_WINDOW_SECONDS (fallback, fuzzy — declines may not carry
      message_id)
@@ -121,9 +121,10 @@ def pair_inbounds(
     """
     inbounds = [e for e in entries if e.get("type") == "raw_inbound"]
     routed = [e for e in entries if e.get("type") == "dispatcher_routed"]
-    cf_proposal_selection = [
+    cf_proposal_intercepts = [
         e for e in entries
-        if e.get("type") == "cf_router_intercepted" and e.get("reason") == "f7_proposal_selection"
+        if e.get("type") == "cf_router_intercepted"
+        and e.get("reason") in {"f7_proposal_request", "f7_proposal_selection"}
     ]
     declined = [e for e in entries if e.get("type") == "unknown_sender_declined"]
 
@@ -157,7 +158,7 @@ def pair_inbounds(
                     return candidate
             return None
 
-        cf_match = find_fuzzy_identity_match(cf_proposal_selection)
+        cf_match = find_fuzzy_identity_match(cf_proposal_intercepts)
         if cf_match:
             paired.append((inb, cf_match, "cf_router_intercepted"))
             continue

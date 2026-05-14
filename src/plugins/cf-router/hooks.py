@@ -52,7 +52,7 @@ F7_PRIMARY_FOLLOWUP_REPLY = True
 
 # Task 6 proposal branch flag. Default off preserves Branch B's pinned
 # suppression behavior until the proposal workflow is explicitly enabled.
-F7_PROPOSAL_BRANCH_ENABLED = False
+F7_PROPOSAL_BRANCH_ENABLED = True
 
 # 30s rescue window — matches the deployed F7 daemon's WATCHDOG_TIMEOUT_SECS.
 # PRESERVED (not removed) for backwards-compat with TestF7DispatcherWatchdog,
@@ -383,6 +383,17 @@ def _try_f7_primary_intercept(
             return None
 
     if F7_PROPOSAL_BRANCH_ENABLED and actions.is_proposal_request(text):
+        rc = actions.invoke_create_catering_proposals(
+            lead_id, chat_id, message_id, text,
+        )
+        actions.audit_intercepted(
+            reason="f7_proposal_request", chat_id=chat_id,
+            code=approval_code, subprocess_rc=rc,
+            detail=f"active {lead_id}; proposal request handled by cf-router",
+        )
+        if rc in {0, 2, 4, 6, 11}:
+            return {"action": "skip",
+                    "reason": f"cf-router F7 proposal request for {lead_id}"}
         return None
 
     if F7_PRIMARY_FOLLOWUP_REPLY:

@@ -154,6 +154,24 @@ def test_cf_router_proposal_selection_pairs_phone_jid_like_dispatcher_routed(now
     assert paired[0][2] == "cf_router_intercepted"
 
 
+def test_cf_router_proposal_request_pairs_like_dispatcher_routed(now):
+    rows = [
+        {"type": "raw_inbound", "ts": _ts(now), "message_id": "m-prop-request",
+         "sender_lid": "201@lid"},
+        {
+            "type": "cf_router_intercepted",
+            "ts": _ts(now, 1),
+            "reason": "f7_proposal_request",
+            "chat_id": "201@lid",
+            "subprocess_rc": 0,
+        },
+    ]
+    paired, unpaired = mod.pair_inbounds(rows)
+    assert len(paired) == 1
+    assert unpaired == []
+    assert paired[0][2] == "cf_router_intercepted"
+
+
 def test_non_proposal_cf_router_intercept_does_not_pair(now):
     rows = [
         {"type": "raw_inbound", "ts": _ts(now), "message_id": "m-status",

@@ -200,8 +200,14 @@ def _options(count: int = 2):
     return opts[:count]
 
 
-def _run_script(env_dir: Path, bridge_port: int, *, options=None, request_text="please send two options"):
-    options_json = json.dumps(options if options is not None else _options())
+def _run_script(
+    env_dir: Path,
+    bridge_port: int,
+    *,
+    options=None,
+    request_text="please send two options",
+    auto_generate: bool = False,
+):
     sys_argv = [
         "create-catering-proposal-options",
         "--lead-id",
@@ -212,9 +218,12 @@ def _run_script(env_dir: Path, bridge_port: int, *, options=None, request_text="
         "msg_src_001",
         "--request-text",
         request_text,
-        "--options-json",
-        options_json,
     ]
+    if auto_generate:
+        sys_argv.append("--auto-generate-from-menu")
+    else:
+        options_json = json.dumps(options if options is not None else _options())
+        sys_argv.extend(["--options-json", options_json])
     wrapper = f"""
 import io, json, pathlib, sys
 sys.argv = {sys_argv!r}
@@ -336,6 +345,51 @@ def test_generates_sent_proposal_set_and_bridge_message(bridge_server, env_dir):
     assert "Option 2: Premium Celebration Menu" in body
     generated = [row for row in _read_audit(env_dir) if row["type"] == "catering_proposals_generated"]
     assert generated[0]["proposal_set_id"] == "CPS-L0014-000001"
+
+
+def test_auto_generates_two_grounded_options_from_menu(bridge_server, env_dir):
+    port, stub = bridge_server
+    _seed_lead(env_dir)
+    _seed_menu(env_dir)
+
+    result, parsed = _run_script(
+        env_dir,
+        port,
+        request_text="Please send two proposal menus: one balanced mixed veg/non-veg option and one premium option.",
+        auto_generate=True,
+    )
+
+    assert parsed["rc"] == 0, result.stderr
+    store = _read_store(env_dir)
+    sent = [s for s in store["sets"] if s["status"] == "SENT"]
+    assert len(sent) == 1
+    assert len(sent[0]["options"]) == 2
+    item_names = {name for option in sent[0]["options"] for name in option["item_names"]}
+    assert item_names <= {item["name"] for item in DEFAULT_MENU}
+    assert "Chicken Biryani" in item_names
+    assert "Aloo Paratha" in item_names
+    body = stub.requests[0]["message"]
+    assert "Option 1: Balanced Veg and Non-Veg Menu" in body
+    assert "Option 2: Premium Celebration Menu" in body
+    assert "$" not in body
+    assert "price" not in body.lower()
+
+
+def test_auto_generation_allows_three_only_when_requested(bridge_server, env_dir):
+    port, _ = bridge_server
+    _seed_lead(env_dir)
+    _seed_menu(env_dir)
+
+    result, parsed = _run_script(
+        env_dir,
+        port,
+        request_text="Please send 3 proposal menus.",
+        auto_generate=True,
+    )
+
+    assert parsed["rc"] == 0, result.stderr
+    sent = [s for s in _read_store(env_dir)["sets"] if s["status"] == "SENT"]
+    assert len(sent[0]["options"]) == 3
 
 
 def test_unknown_item_fails_closed_without_bridge_send(bridge_server, env_dir):
