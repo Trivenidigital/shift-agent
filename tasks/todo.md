@@ -47,9 +47,11 @@ Design: `docs/superpowers/specs/2026-05-14-catering-self-learning-rails-design.m
 - [x] Implement local schema, pattern-report, Daily Brief, and focused tests.
 - [x] Create PR and run 3 parallel reviewers.
 - [x] Fix PR-review findings: opt-in no-leads warning, broader privacy regression tests, catering timer install/enable, Hermes-venv runtime execution, and missing-log degraded sidecar.
-- [ ] Merge and deploy to `main-vps`.
-- [ ] Run `sudo -u shift-agent /usr/local/lib/hermes-agent/venv/bin/python /usr/local/bin/catering-pattern-report --dry-run --learning-days 30` on VPS and review output.
-- [ ] Enable `daily_brief.sections += ["catering_learning"]` only after dry-run output is reviewed.
+- [x] Merge PR #87 to `main`.
+- [x] Deploy to `main-vps` as `deploy-20260514-203430-bb243517`; deploy smoke passed.
+- [x] Run `sudo -u shift-agent /usr/local/lib/hermes-agent/venv/bin/python /usr/local/bin/catering-pattern-report --dry-run --learning-days 30` on VPS and review output.
+- [x] Enable `daily_brief.sections += ["catering_learning"]` after dry-run review.
+- [x] Runtime dry-run Daily Brief with learning enabled: learning section rendered counts only; no raw customer text or prices.
 
 ## P0 — Live verification (passive, blocked on real customer traffic)
 
