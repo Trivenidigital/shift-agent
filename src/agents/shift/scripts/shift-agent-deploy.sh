@@ -49,6 +49,11 @@ install_artifacts() {
     # check-audit-helpers-symbols imports this module; missing here =
     # forced rollback on every deploy.
     install -m 644 src/platform/audit_helpers.py /opt/shift-agent/audit_helpers.py
+    # Credential-minimized readiness matrix/report. Guarded for rollback
+    # compatibility with tarballs that predate this module.
+    if [ -f src/platform/credential_readiness.py ]; then
+        install -m 644 src/platform/credential_readiness.py /opt/shift-agent/credential_readiness.py
+    fi
 
     # Templates — Shift-Agent message templates (idempotent: shared dir filled by multiple agents below)
     install -d /opt/shift-agent/templates
@@ -399,6 +404,35 @@ case "$ACTION" in
             exit 1
         fi
 
+        # Hermes venv Python is used by deploy gates that need project/runtime
+        # dependencies. Define it before the first Python gate so pre-install
+        # checks can run without relying on system Python.
+        VENV_PY="/usr/local/lib/hermes-agent/venv/bin/python"
+        if [ ! -x "$VENV_PY" ]; then
+            echo "ERROR: Hermes venv Python missing or not executable at $VENV_PY" >&2
+            echo "  The Hermes-agent install is incomplete - verify /usr/local/lib/hermes-agent/venv/" >&2
+            echo "  No state change has been made; refusing to continue deploy." >&2
+            exit 1
+        fi
+
+        # Credential-minimized Hermes foundation gate - external Hermes install
+        # state only. This runs BEFORE state-file migration and artifact install
+        # because app rollback cannot repair missing bundled Hermes skills.
+        # Repo-installed cf-router is intentionally NOT validated here; deploy
+        # can repair that plugin during install_artifacts(), and the strict
+        # plugin check runs after install but before gateway restart.
+        echo "=== Credential-minimized Hermes foundation gate ==="
+        if [ -f "$STAGING/src/platform/scripts/credential-minimized-readiness" ]; then
+            if ! "$VENV_PY" "$STAGING/src/platform/scripts/credential-minimized-readiness" \
+                    --strict-foundation --format text; then
+                echo "ERROR: credential-minimized foundation gate failed - refusing to install." >&2
+                echo "  No state change has been made. Restore/install missing Hermes foundation skills first." >&2
+                exit 1
+            fi
+        else
+            echo "WARN: credential-minimized-readiness absent from staging - skipping foundation gate (rollback compatibility)" >&2
+        fi
+
         # PR-CF5 2026-05-03: state-file migration gate. Brings legacy state
         # files (e.g. {date, sent_count} send-counter.json) up to current
         # Pydantic schemas before the new code starts reading them. Bootstrap-
@@ -409,16 +443,6 @@ case "$ACTION" in
         # Invoke with the Hermes venv Python so pydantic + safe_io + schemas
         # imports resolve. The migrator's #!/usr/bin/env python3 shebang
         # would land on system Python which lacks pydantic.
-        VENV_PY="/usr/local/lib/hermes-agent/venv/bin/python"
-        # Guard against missing Hermes venv — without this, every Python
-        # invocation below dies with "bash: ...: No such file or directory"
-        # instead of a clear diagnostic. Fail-closed, never silently skip.
-        if [ ! -x "$VENV_PY" ]; then
-            echo "ERROR: Hermes venv Python missing or not executable at $VENV_PY" >&2
-            echo "  The Hermes-agent install is incomplete — verify /usr/local/lib/hermes-agent/venv/" >&2
-            echo "  No state change has been made; refusing to continue deploy." >&2
-            exit 1
-        fi
         if [ ! -x "$MIGRATOR" ]; then
             if [ -f "$MIGRATOR" ]; then
                 echo "WARN: migrator exists but is not executable — permission problem? Skipping." >&2
@@ -570,6 +594,28 @@ PY
                 rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
             fi
             exit 1
+        fi
+
+        # Pre-restart cf-router enabled-state gate. Unlike external Hermes
+        # foundation skills, cf-router is repo-installed by install_artifacts(),
+        # so validate it only after the staged plugin has been rsynced into
+        # /root/.hermes/plugins and before hermes-gateway can import it.
+        if [ -x /usr/local/bin/credential-minimized-readiness ]; then
+            if ! "$VENV_PY" /usr/local/bin/credential-minimized-readiness \
+                    --validate-plugin cf-router --format text > /dev/null; then
+                echo "FAIL: pre-restart cf-router readiness gate - refusing to restart hermes-gateway" >&2
+                if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                    "$0" rollback "$PREV_TAG"
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                else
+                    /usr/local/bin/shift-agent-notify-owner \
+                        --title "Deploy FAILED at pre-restart cf-router readiness gate, no prior tarball" \
+                        --priority 2 \
+                        "Deploy $NEW_TAG failed pre-restart cf-router enabled-state check. New files installed but service still on OLD code (gateway not yet restarted). No prior tarball to roll back to - SSH immediately." 2>/dev/null || true
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                fi
+                exit 1
+            fi
         fi
 
         # Pre-restart import gate: a missing safe_io OR audit_helpers chokepoint

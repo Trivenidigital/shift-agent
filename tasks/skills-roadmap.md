@@ -12,9 +12,9 @@
 
 1. **The "671 Hermes skills" headline is misleading for SMB use cases** — fewer than 1% are SMB business integrations. Ecosystem skews heavily to dev tools, AI/ML ops, creative, and crypto.
 2. **5 productivity skills cover 6 of our 17 prioritized agents** at near-zero effort. Install proactively.
-3. **Hermes-first principle holds for ingestion (in-side); does NOT hold for write-side commercial APIs (out-side).** Confirmed gaps for QBO, Stripe/Square/PayPal, DocuSign, festival calendars, state tax filing.
-4. **MCP is the strategic escape hatch** for missing integrations — `mcp/native-mcp` bridges to ~8,600+ MCP servers, likely path for QBO/Stripe gaps.
-5. **Existing Stage 1 estimate for #21 Expense Bookkeeper (~400 LOC custom QBO write) is validated** — no QBO skill exists in any of the 4 sources surveyed.
+3. **Hermes-first principle holds for ingestion (in-side); write-side commercial APIs still require credentials, but the connector market moved.** QBO, Stripe, Square, PayPal, Airtable, Notion, and DocuSign now have credible MCP/vendor connector candidates. DoorDash/UberEats/Grubhub and tax filing remain connected/custom surfaces.
+4. **MCP is the strategic escape hatch** for missing integrations — `mcp/native-mcp` bridges to external MCP servers. Default posture as of 2026-05-14: vendor MCP or vetted MCP first, custom raw API only after connector review fails.
+5. **Existing Stage 1 estimate for #21 Expense Bookkeeper must be re-scoped** — Hermes still does not ship a QBO business skill, but the Intuit QuickBooks Online MCP server should be reviewed before raw custom QBO API work.
 
 ---
 
@@ -62,7 +62,7 @@ These cover **6 of 17 prioritized agents** at near-zero setup cost. Each saves s
 | **#4 Daily Brief** (LIVE) | `productivity/google-workspace` (Gmail) | Official | OAuth send/read with HTML, threading, labels | PARTIAL (~80 LOC for email channel fallback) | Currently sends WhatsApp; google-workspace adds email backup |
 | **#4 Daily Brief** | `email/himalaya` | Official | IMAP/SMTP, lighter than google-workspace | PARTIAL alternative | Works with any IMAP/SMTP, no OAuth |
 | **#5 EOD Reconciliation** (LIVE) | `clovercli` (OpenClaw) | OpenClaw | Clover POS API — inventory, orders, payments, employees, discounts, analytics | PARTIAL (~150 LOC) — only if customer uses Clover | Verify migration cleanness; conditional on POS choice. **Action**: confirm Triveni's POS system. |
-| **#21 Expense Bookkeeper** | (no QBO skill exists anywhere) | — | — | **GAP — must build custom (~400 LOC)** | The `bookkeeper` meta-skill writes to **Xero** (different product), requires paid Maton + DeepRead, "Suspicious"-flagged by VirusTotal. **Validates Stage 1 estimate.** |
+| **#21 Expense Bookkeeper** | Intuit QuickBooks Online MCP candidate + `mcp/native-mcp`; `productivity/ocr-and-documents` for receipt/PDF intake | Vendor MCP + official Hermes | QBO write/read candidate plus Hermes OCR substrate | **CONNECTED — review MCP before custom raw API** | The old `bookkeeper` meta-skill remains a trap (Xero, paid deps, suspicious flag), but Intuit's QBO MCP changes the build order. |
 | **#21 Expense Bookkeeper** | `productivity/ocr-and-documents` (marker-pdf) | Official | PDF receipt extraction, 90+ languages, table support | PARTIAL (~50 LOC saved; complements Hermes vision for non-image PDF receipts) | Hermes vision already handles image receipts |
 | **#21 Expense Bookkeeper** | `documents-ai` (Veryfi, OpenClaw) | OpenClaw | Real-time receipt OCR + structured extraction (commercial) | PARTIAL — paid alternative | Only if Hermes vision accuracy proves insufficient at scale |
 | **#22 P&L Anomaly Detective** | `data-science/jupyter-live-kernel` | Official | Iterative Python via live Jupyter kernel for variance analysis | PARTIAL — useful for development/exploration, not runtime detection | Runtime variance detection is bespoke statistics |
@@ -78,10 +78,10 @@ These cover **6 of 17 prioritized agents** at near-zero setup cost. Each saves s
 | **#9 VIP Customer Agent** | (none found for sentiment) | — | — | NO — sentiment via Hermes LLM gateway prompt is sufficient | OpenClaw `sentiment-priority-scorer` is real-estate-specific, too narrow |
 | **#10 Catering Follow-up** | `productivity/google-workspace` (Gmail), `email/himalaya` | Official | Email follow-up template send | PARTIAL (~50 LOC if email channel needed alongside WhatsApp) | WhatsApp-first is the deployed pattern |
 | **#11 Festival & Event Outreach** | (none found) | — | — | **GAP — must build custom** | NO Hindu/regional/Diwali/festival calendar skill exists in any source. Only `islamic-skills` (prayer times). Hardcode or use external API like Calendarific |
-| **#12 Hiring & Onboarding** | `productivity/google-workspace` (Drive, Sheets, Docs) | Official | Resume storage in Drive, applicant tracker in Sheets | PARTIAL (~100 LOC) | E-sign step: NO DocuSign/HelloSign/PandaDoc skill anywhere — full custom build for offer letter signing |
+| **#12 Hiring & Onboarding** | `productivity/google-workspace` (Drive, Sheets, Docs) + DocuSign MCP candidate | Official + vendor MCP | Resume storage in Drive, applicant tracker in Sheets, e-sign candidate | PARTIAL | E-sign is still connected-mode and approval-gated; review DocuSign MCP before raw custom e-sign work. |
 | **#13 Compliance Calendar** | `productivity/google-workspace` (Calendar) | Official | Recurring calendar events for license renewals, health inspections, sales tax filings | YES (~120 LOC) | Combined with Hermes cron, gives full reminder loop natively |
 | **#14 Employee Document Tracker** | `productivity/google-workspace` (Drive), `productivity/ocr-and-documents` | Official | Drive storage + OCR for I-9, W-4 expiry extraction | YES (~150 LOC) | Drive search by MIME type + folders for per-employee filing |
-| **#15 Cash & AR Agent** | (no Stripe/Square/PayPal/Venmo standalone skill exists) | — | — | **GAP — must build custom (~300 LOC for Stripe write)** | The `bookkeeper` meta-skill REFERENCES `stripe-api` but those are proprietary Maton-gateway calls, not real Hermes skills |
+| **#15 Cash & AR Agent** | Stripe MCP, Square MCP, PayPal MCP candidates via `mcp/native-mcp` | Vendor MCP | Payment/reconciliation candidates | **CONNECTED — MCP/vendor connector first** | Venmo/Zelle/Cash App/Razorpay remain rail-specific; money-moving actions require owner approval and scoped credentials. |
 | **#16 Sales Tax Filing** | (none found) | — | — | **GAP — must build custom** | No state/county tax-filing skill exists anywhere. Custom build with state-specific APIs (TX Comptroller, NC DOR, etc.) required |
 | **#17 Unit Economics** | `productivity/airtable`, `data-science/jupyter-live-kernel` | Official | Airtable for cost data; Jupyter for ad-hoc P&L analysis | PARTIAL (~100 LOC) | Better candidate: leverage existing platform schemas + simple aggregations |
 | **#20 Owner Wellbeing** | (none found) | — | — | NO — sentiment + wellbeing checks via Hermes LLM gateway prompt sufficient | No wellness skill in any catalog |
@@ -105,12 +105,12 @@ These agents have **zero suitable Hermes/OpenClaw/community skill** in any of th
 | Agent | Gap | Custom-LOC estimate (rough) |
 |---|---|---|
 | **#11 Festival & Event Outreach** | No Hindu/Indian regional festival calendar skill | ~150 LOC (hardcoded calendar JSON OR Calendarific API) |
-| **#15 Cash & AR Agent** | No standalone Stripe/Square/PayPal/Venmo/Zelle skill | ~300+ LOC for Stripe write (OAuth + webhook + audit) |
+| **#15 Cash & AR Agent** | Stripe/Square/PayPal have credible MCP/vendor candidates; Venmo/Zelle/Cash App/Razorpay remain rail-specific | Review MCP/vendor connector first; custom only after connector review fails |
 | **#16 Sales Tax Filing** | No state/county tax skills anywhere | ~500 LOC per state (custom scraping or commercial API) |
-| **#21 Expense Bookkeeper** | No QuickBooks Online skill in ANY source | **~400 LOC** for QBO OAuth + write API (validates Stage 1 estimate) |
+| **#21 Expense Bookkeeper** | Intuit QuickBooks Online MCP candidate now exists | Review Intuit MCP + approval guardrails before custom QBO OAuth/write API |
 | **#23 Order Status / #25 Third-Party Delivery** | No DoorDash/UberEats/GrubHub skills | ~300 LOC each, OAuth + webhook |
 | **#19 Equipment Maintenance** | Only farm-equipment skill exists; no restaurant equipment vendor APIs | Custom per-vendor (Hobart/True/Manitowoc), low priority |
-| **#12 Hiring & Onboarding e-sign step** | No DocuSign/HelloSign/PandaDoc/Adobe Sign skill anywhere | ~200 LOC per-vendor or use third-party e-sign service |
+| **#12 Hiring & Onboarding e-sign step** | DocuSign MCP candidate now exists | Review DocuSign MCP before raw custom e-sign integration |
 
 **Total custom LOC for confirmed gaps: ~2,300+ across 7 agent-features.** This is genuine net-new engineering that no skill ecosystem coverage can shrink.
 
@@ -135,8 +135,8 @@ These agents have **zero suitable Hermes/OpenClaw/community skill** in any of th
 3. **Update CLAUDE.md Hermes-first section** to mention the 5 productivity skills + MCP escape hatch — so future per-step `[Hermes]/[net-new]` checklists check those FIRST.
 
 ### Before #21 Expense Bookkeeper build
-4. **Investigate QBO MCP servers**. Several community MCP servers cover QuickBooks. Install `mcp/native-mcp` and route through; this could shrink the ~400 LOC custom estimate to ~100 LOC of MCP wiring.
-5. **Same for #15 Cash & AR (Stripe MCP)** — check if maintained Stripe MCP server exists before greenfield build.
+4. **Review Intuit QBO MCP before #21 writeback.** Install/use `mcp/native-mcp` only after source/scopes are reviewed; owner approval remains mandatory before writes.
+5. **Same for #15 Cash & AR.** Stripe, Square, and PayPal have credible vendor MCP candidates; payment rails remain connected-mode with strict owner approval and audit.
 
 ### Process
 6. **Document gaps in `docs/portfolio.md`** per-agent (this PR does that).
@@ -149,13 +149,13 @@ These agents have **zero suitable Hermes/OpenClaw/community skill** in any of th
 
 1. **The Hermes-first principle still holds** — but with refinement:
    - **In-side / ingestion** (sources, vision, structured output, audit, approvals): Hermes substrate covers ~95%. Default to using it.
-   - **Out-side / write to commercial APIs** (QBO, Stripe, DocuSign, payroll, tax filings): ecosystem coverage is <1%. Default to expecting custom work; investigate MCP servers as the escape hatch.
+   - **Out-side / write to commercial APIs** (QBO, Stripe, Square, PayPal, DocuSign, payroll, tax filings): ecosystem coverage is now connector-dependent. Default to vendor MCP or vetted MCP first; expect custom work only when connector review fails or when the target system has no credible connector.
 
-2. **The Stage 1 estimate for Agent #21 (~400 LOC for QBO write) is validated** — there is no existing skill to leverage. The "4 → 1.5 net-new surfaces" narrative still holds because Hermes covers the in-side fully; ecosystem skills do not shrink the out-side work.
+2. **The Stage 1 estimate for Agent #21 (~400 LOC for QBO write) is now stale.** Hermes still covers the in-side fully, but Intuit QuickBooks Online MCP means the out-side must be re-estimated after connector review.
 
 3. **Quick wins are real**: installing the 5 productivity skills covers substrate work for 6 of 17 prioritized agents at near-zero effort and saves ~1,200 LOC. Should be installed proactively before scaffolding #6, #7, #12, #13, #14.
 
-4. **MCP is the strategic answer for missing integrations**. Rather than waiting for Hermes-native QBO/Stripe/DocuSign skills, install `mcp/native-mcp` and consume any of the 8,600+ existing MCP servers. This is likely the lowest-effort path to filling the SMB integration gap going forward.
+4. **MCP is the strategic answer for missing integrations**. Rather than waiting for Hermes-native QBO/Stripe/Square/PayPal/DocuSign skills, review vendor/vetted MCP servers through `mcp/native-mcp`. This is likely the lowest-effort path to filling the SMB integration gap going forward, but it does not remove OAuth/API credentials.
 
 5. **The awesome-list ecosystem (2.3k stars on `0xNyk/awesome-hermes-agent`) has zero SMB coverage**. Future research time is better spent on the official hub + targeted MCP search than browsing community lists.
 
