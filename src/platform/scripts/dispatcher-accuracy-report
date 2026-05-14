@@ -43,8 +43,15 @@ PAIR_WINDOW_SECONDS = 10
 
 
 def _parse_ts(s: str) -> datetime:
-    """ISO-8601 with timezone. decisions.log entries always carry tz."""
-    return datetime.fromisoformat(s)
+    """ISO-8601 timestamp normalized to a timezone-aware value.
+
+    Older audit rows can be offset-naive. Treat them as UTC so one legacy
+    row cannot crash the monitoring report for an otherwise valid window.
+    """
+    ts = datetime.fromisoformat(s)
+    if ts.tzinfo is None:
+        return ts.replace(tzinfo=timezone.utc)
+    return ts
 
 
 def _chat_id_prefix(value: Any) -> str | None:

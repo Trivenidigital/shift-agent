@@ -305,6 +305,22 @@ def test_load_entries_filters_by_since_and_until(tmp_path, now):
     assert ids == ["now"]
 
 
+def test_load_entries_handles_legacy_naive_timestamps(tmp_path, now):
+    log = tmp_path / "decisions.log"
+    _write_log(log, [
+        {"type": "menu_update_applied", "ts": "2026-04-28T11:59:00"},
+        {"type": "raw_inbound", "ts": _ts(now), "message_id": "now"},
+    ])
+
+    entries = mod.load_entries(
+        log,
+        since=now - timedelta(minutes=5),
+        until=now + timedelta(minutes=5),
+    )
+
+    assert [e["type"] for e in entries] == ["menu_update_applied", "raw_inbound"]
+
+
 def test_load_entries_skips_malformed_lines(tmp_path, now):
     log = tmp_path / "decisions.log"
     log.write_text(
