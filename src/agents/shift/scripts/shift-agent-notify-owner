@@ -95,7 +95,7 @@ def whatsapp_fallback(cfg: Config, message: str) -> tuple[bool, str]:
     self_chat_jid = cfg.owner.self_chat_jid
     if not self_chat_jid:
         return False, "self_chat_jid not configured"
-    data = json.dumps({"jid": self_chat_jid, "text": message}).encode()
+    data = json.dumps({"chatId": self_chat_jid, "message": message}).encode()
     req = urllib.request.Request(
         WHATSAPP_BRIDGE_URL,
         data=data,
