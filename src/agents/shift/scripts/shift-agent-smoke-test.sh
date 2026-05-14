@@ -70,6 +70,13 @@ if [ -x /usr/local/bin/credential-minimized-readiness ]; then
     "$PY" /usr/local/bin/credential-minimized-readiness --format text || true
 fi
 
+# 2a.1 Production-pilot readiness report. Informational only: customer
+# onboarding data can intentionally be absent on rehearsal VPSes. This surfaces
+# the blocking rows without making every non-onboarded deploy fail.
+if [ -x /usr/local/bin/pilot-readiness-check ]; then
+    "$PY" /usr/local/bin/pilot-readiness-check --text || true
+fi
+
 # 2b. cf-router plugin (PR-CF6 + PR-CF7) — verify the plugin's hooks +
 # actions modules import cleanly and the F7 classifier is reachable.
 # A syntax error or broken import in the plugin would otherwise pass

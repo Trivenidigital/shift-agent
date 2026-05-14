@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+"""pilot-readiness-check - production pilot gate for the first 3 WhatsApp agents.
+
+This is an onboarding/readiness check, not a generic health check. Runtime
+service health is still covered by shift-agent-smoke-test and systemd timers.
+This gate answers: "Does this customer VPS have enough customer-owned state for
+Shift + Catering + Daily Brief to be piloted without rehearsal placeholders?"
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+try:
+    _SRC = Path(__file__).resolve().parents[3]
+    if (_SRC / "platform" / "schemas.py").exists():
+        sys.path.insert(0, str(_SRC / "platform"))
+        sys.path.insert(0, str(_SRC))
+except Exception:
+    pass
+
+sys.path.insert(0, "/opt/shift-agent")
+
+import yaml  # noqa: E402
+from pydantic import ValidationError  # noqa: E402
+from schemas import Config, Menu, Roster  # noqa: E402
+
+
+EXIT_READY = 0
+EXIT_BLOCKED = 1
+
+
+class Checks:
+    def __init__(self) -> None:
+        self.rows: list[dict[str, str]] = []
+
+    def pass_(self, check_id: str, message: str) -> None:
+        self.rows.append({"id": check_id, "status": "pass", "severity": "p0", "message": message})
+
+    def fail(self, check_id: str, message: str) -> None:
+        self.rows.append({"id": check_id, "status": "fail", "severity": "p0", "message": message})
+
+    @property
+    def failed(self) -> int:
+        return sum(1 for row in self.rows if row["status"] == "fail")
+
+
+def _read_yaml(path: Path) -> tuple[Any | None, str | None]:
+    if not path.exists():
+        return None, f"{path.name} missing"
+    try:
+        return yaml.safe_load(path.read_text(encoding="utf-8")), None
+    except Exception as exc:
+        return None, f"{path.name} unreadable: {exc.__class__.__name__}: {exc}"
+
+
+def _read_json(path: Path) -> tuple[Any | None, str | None]:
+    if not path.exists():
+        return None, f"{path.name} missing"
+    try:
+        return json.loads(path.read_text(encoding="utf-8")), None
+    except Exception as exc:
+        return None, f"{path.name} unreadable: {exc.__class__.__name__}: {exc}"
+
+
+def _validate_model(model: type[Any], raw: Any, label: str) -> tuple[Any | None, str | None]:
+    try:
+        return model.model_validate(raw), None
+    except ValidationError as exc:
+        return None, f"{label} schema invalid: {exc.errors()[0]['msg']}"
+
+
+def _is_placeholder(value: str | None) -> bool:
+    if value is None:
+        return True
+    normalized = value.strip().lower()
+    return (
+        normalized == ""
+        or normalized.startswith("placeholder")
+        or normalized.startswith("todo")
+        or normalized in {"test", "test customer", "customer name", "loc_id"}
+    )
+
+
+def _check_config(path: Path, checks: Checks) -> Config | None:
+    raw, err = _read_yaml(path)
+    if err:
+        checks.fail("config.exists", err)
+        return None
+
+    cfg, err = _validate_model(Config, raw, "config.yaml")
+    if err:
+        checks.fail("config.schema", err)
+        return None
+    checks.pass_("config.schema", "config.yaml validates")
+
+    if _is_placeholder(cfg.customer.name):
+        checks.fail("customer.name", "customer.name is placeholder")
+    else:
+        checks.pass_("customer.name", "customer.name set")
+
+    if _is_placeholder(cfg.customer.location_id):
+        checks.fail("customer.location_id", "customer.location_id is placeholder")
+    else:
+        checks.pass_("customer.location_id", "customer.location_id set")
+
+    if _is_placeholder(cfg.owner.phone):
+        checks.fail("owner.phone", "owner.phone missing")
+    else:
+        checks.pass_("owner.phone", "owner.phone set")
+
+    if _is_placeholder(cfg.owner.self_chat_jid):
+        checks.fail("owner.self_chat_jid", "owner.self_chat_jid missing")
+    else:
+        checks.pass_("owner.self_chat_jid", "owner.self_chat_jid set")
+
+    if not cfg.catering.enabled:
+        checks.fail("catering.enabled", "catering.enabled is false")
+    else:
+        checks.pass_("catering.enabled", "catering enabled")
+
+    if not cfg.daily_brief.enabled:
+        checks.fail("daily_brief.enabled", "daily_brief.enabled is false")
+    else:
+        checks.pass_("daily_brief.enabled", "daily brief enabled")
+
+    if "alerts" not in cfg.daily_brief.sections:
+        checks.fail("daily_brief.sections", "daily_brief.sections missing alerts")
+    else:
+        checks.pass_("daily_brief.sections", "daily brief includes alerts")
+
+    return cfg
+
+
+def _check_roster(path: Path, checks: Checks) -> None:
+    raw, err = _read_json(path)
+    if err:
+        checks.fail("roster.exists", "roster.json missing" if err == "roster.json missing" else err)
+        return
+
+    roster, err = _validate_model(Roster, raw, "roster.json")
+    if err:
+        checks.fail("roster.schema", err)
+        return
+    checks.pass_("roster.schema", "roster.json validates")
+
+    active = [emp for emp in roster.employees if emp.status == "active"]
+    if len(active) < 2:
+        checks.fail("roster.active_employees", "roster needs at least 2 active employees")
+    else:
+        checks.pass_("roster.active_employees", f"{len(active)} active employees")
+
+    scheduled = sum(len(entries) for entries in roster.schedule.values())
+    if scheduled == 0:
+        checks.fail("roster.schedule", "roster schedule is empty")
+    else:
+        checks.pass_("roster.schedule", f"{scheduled} scheduled shifts")
+
+
+def _check_menu(state_dir: Path, checks: Checks) -> None:
+    path = state_dir / "catering-menu.json"
+    raw, err = _read_json(path)
+    if err:
+        checks.fail("catering.menu.exists", "catering-menu.json missing" if err == "catering-menu.json missing" else err)
+        return
+
+    menu, err = _validate_model(Menu, raw, "catering-menu.json")
+    if err:
+        checks.fail("catering.menu.schema", err)
+        return
+    checks.pass_("catering.menu.schema", "catering-menu.json validates")
+
+    available = [item for item in menu.items if item.available]
+    if len(available) < 3:
+        checks.fail("catering.menu.items", "catering-menu.json needs at least 3 available items")
+    else:
+        checks.pass_("catering.menu.items", f"{len(available)} available menu items")
+
+
+def build_report(config_path: Path, roster_path: Path, state_dir: Path) -> dict[str, Any]:
+    checks = Checks()
+    _check_config(config_path, checks)
+    _check_roster(roster_path, checks)
+    _check_menu(state_dir, checks)
+
+    failed = checks.failed
+    return {
+        "status": "ready" if failed == 0 else "blocked",
+        "summary": {
+            "total": len(checks.rows),
+            "failed": failed,
+            "passed": len(checks.rows) - failed,
+        },
+        "checks": checks.rows,
+    }
+
+
+def render_text(report: dict[str, Any]) -> str:
+    lines = [
+        f"Production pilot readiness: {report['status'].upper()}",
+        f"Passed: {report['summary']['passed']}  Failed: {report['summary']['failed']}",
+        "",
+    ]
+    for row in report["checks"]:
+        marker = "OK" if row["status"] == "pass" else "FAIL"
+        lines.append(f"{marker} {row['id']}: {row['message']}")
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=Path, default=Path("/opt/shift-agent/config.yaml"))
+    parser.add_argument("--roster", type=Path, default=Path("/opt/shift-agent/roster.json"))
+    parser.add_argument("--state-dir", type=Path, default=Path("/opt/shift-agent/state"))
+    parser.add_argument("--text", action="store_true", help="render human-readable output")
+    args = parser.parse_args(argv)
+
+    report = build_report(args.config, args.roster, args.state_dir)
+    if args.text:
+        print(render_text(report))
+    else:
+        print(json.dumps(report, sort_keys=True))
+    return EXIT_READY if report["status"] == "ready" else EXIT_BLOCKED
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -43,6 +43,9 @@ install_artifacts() {
     if [ ! -f src/platform/scripts/credential-minimized-readiness ]; then
         rm -f /usr/local/bin/credential-minimized-readiness
     fi
+    if [ ! -f src/agents/shift/scripts/pilot-readiness-check ]; then
+        rm -f /usr/local/bin/pilot-readiness-check
+    fi
 
     # Python modules — flat layout at /opt/shift-agent/ matches scripts' sys.path
     install -m 644 src/platform/schemas.py /opt/shift-agent/schemas.py

@@ -11,3 +11,13 @@
 - Do not treat `employee` sender identity as "never a customer." Employees can submit legitimate catering inquiries for their own/family/friend events. Owner identity remains control-plane; employee identity can still enter customer-side catering when intent is clear.
 - For active catering leads, do not require a follow-up message to independently satisfy the new-inquiry classifier. Weak menu/proposal/food/event signals can be enough to route to the existing lead's follow-up branch; otherwise status/menu follow-ups fall into the generic LLM.
 - For SSH on Windows, always use the two-step redirect/read pattern; never rely on inline SSH stdout.
+
+## 2026-05-14 — Production pilot posture
+
+- First production pilot bundle is **Shift Agent + Catering Agent + Daily Brief Agent**. Do not start by adding a greenfield third agent; Daily Brief is the owner control tower that makes Shift/Catering operable.
+- Production readiness must be enforced by a deterministic gate, not by memory. Use `/usr/local/bin/pilot-readiness-check --text` before saying a customer VPS is ready for the first three-agent pilot.
+- Current `main-vps` readiness after deploy `deploy-20260514-170739-f4ce14db`: gateway active, WhatsApp bridge connected, timers active, roster valid, catering menu valid with 78 available items. Blocking rows are only `customer.name` and `customer.location_id` placeholders.
+- For catering menu updates, verified owner OR verified employee may submit a menu image/PDF source, but only the owner may apply the extracted menu with the confirmation code. Preserve that split in future dispatcher/SKILL changes.
+- Self-learning/evolution rule for production: live agents may learn state and memory (menus, LIDs, customer notes, lead history, roster facts) but must not mutate code, SKILLs, prompts, or deploy config in prod. Skill/code evolution goes through traces/evals, tests, review, PR, and tarball deploy.
+- For a 3-4 day customer ask, treat this as a production pilot with explicit smoke evidence, not broad GA. Use `docs/runbooks/production-pilot-shift-catering-daily-brief.md` as the acceptance script.
+- Commit before deploy whenever possible. The 2026-05-14 pilot gate was deployed from an uncommitted working tree, so the deploy tag uses the previous HEAD hash; future production deploys should commit first for traceability unless the user explicitly asks for an emergency hot deploy.
