@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
@@ -11,13 +12,24 @@ import sys
 SRC_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(SRC_ROOT / "platform"))
+sys.path.insert(0, str(SRC_ROOT))
 
-from schemas import FlyerAssetsDelivered, FlyerDeliveryFailed, FlyerProjectStore  # noqa: E402
-from safe_io import bridge_send_media, ndjson_append  # noqa: E402
+from schemas import FlyerAssetsDelivered, FlyerDeliveryFailed, FlyerProjectStore, is_flyer_transition_allowed  # noqa: E402
+from safe_io import FileLock, atomic_write_text, bridge_send_media, ndjson_append  # noqa: E402
+try:
+    from flyer_render import validate_text_manifest_file  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.render import validate_text_manifest_file  # noqa: E402
 
 
 STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
 LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+FINAL_KIND_TO_FORMAT = {
+    "final_whatsapp_image": "whatsapp_image",
+    "final_instagram_post": "instagram_post",
+    "final_instagram_story": "instagram_story",
+    "final_printable_pdf": "printable_pdf",
+}
 
 
 def main() -> int:
@@ -28,18 +40,39 @@ def main() -> int:
     p.add_argument("--log-path", default=str(LOG_PATH))
     p.add_argument("--asset", action="append", default=[])
     p.add_argument("--caption", default="Your final flyer package is ready.")
+    p.add_argument("--allow-unverified-asset", action="store_true")
+    p.add_argument("--break-glass-reason", default="")
+    p.add_argument("--dry-run-bridge", action="store_true")
     args = p.parse_args()
 
     assets = [Path(asset) for asset in args.asset]
     project = None
     project_assets = []
+    project_snapshot = None
+    state_path = Path(args.state_path)
     if args.project_id:
-        store = FlyerProjectStore.model_validate(json.loads(Path(args.state_path).read_text(encoding="utf-8")))
+        store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
         project = next((p for p in store.projects if p.project_id == args.project_id), None)
         if project is None:
             raise SystemExit(f"project not found: {args.project_id}")
+        if project.status != "finalizing_assets":
+            raise SystemExit(f"project must be finalizing_assets before delivery, got {project.status}")
+        if len(project.final_asset_ids) != 4:
+            raise SystemExit(f"project must have 4 final assets before delivery, got {len(project.final_asset_ids)}")
         by_id = {asset.asset_id: asset for asset in project.assets}
-        project_assets = [by_id[asset_id] for asset_id in project.final_asset_ids if asset_id in by_id]
+        missing_ids = [asset_id for asset_id in project.final_asset_ids if asset_id not in by_id]
+        if missing_ids:
+            raise SystemExit("missing final assets: " + ",".join(missing_ids))
+        project_assets = [by_id[asset_id] for asset_id in project.final_asset_ids]
+        kinds = {asset.kind for asset in project_assets}
+        expected_kinds = set(FINAL_KIND_TO_FORMAT)
+        if kinds != expected_kinds:
+            raise SystemExit(f"final asset kinds mismatch: {sorted(kinds)}")
+        project_snapshot = {
+            "version": project.version,
+            "status": project.status,
+            "final_asset_ids": list(project.final_asset_ids),
+        }
         assets.extend(Path(asset.path) for asset in project_assets)
     if not assets:
         raise SystemExit("no assets to send; pass --asset or --project-id")
@@ -47,8 +80,54 @@ def main() -> int:
     failures = []
     outbound_ids = []
     log_path = Path(args.log_path)
+    if args.allow_unverified_asset:
+        if project is not None:
+            raise SystemExit("--allow-unverified-asset is only for direct operator --asset sends")
+        if os.environ.get("FLYER_TEXT_QA_BREAK_GLASS") != "1":
+            raise SystemExit("break-glass requires FLYER_TEXT_QA_BREAK_GLASS=1")
+        if not args.break_glass_reason.strip():
+            raise SystemExit("break-glass requires --break-glass-reason")
+        root = Path(os.environ.get("FLYER_STATE_ROOT", "/opt/shift-agent/state/flyer")).resolve()
+        for asset in assets:
+            try:
+                asset.resolve().relative_to(root)
+            except ValueError:
+                raise SystemExit(f"break-glass asset outside Flyer state root: {asset}")
+        print(json.dumps({
+            "warning": "unverified_flyer_asset_break_glass",
+            "reason": args.break_glass_reason.strip(),
+            "asset_count": len(assets),
+        }))
+    else:
+        expected_formats = {
+            str(Path(asset.path)): FINAL_KIND_TO_FORMAT.get(asset.kind, "")
+            for asset in project_assets
+        }
+        for asset in assets:
+            result = validate_text_manifest_file(
+                asset,
+                project_id=project.project_id if project is not None else None,
+                project_version=project.version if project is not None else None,
+                output_format=expected_formats.get(str(asset)) or None,
+            )
+            if not result.ok:
+                if project is not None:
+                    ndjson_append(log_path, FlyerDeliveryFailed(
+                        type="flyer_delivery_failed",
+                        ts=datetime.now(timezone.utc),
+                        project_id=project.project_id,
+                        customer_phone=project.customer_phone,
+                        asset_id=asset.name,
+                        status=0,
+                        error="text_qa_failed: " + "; ".join(result.blockers),
+                    ).model_dump_json())
+                print(json.dumps({"text_qa_failed": str(asset), "blockers": result.blockers}))
+                return 2
     for asset in assets:
-        ok, mid, err, status = bridge_send_media(args.jid, asset, caption=args.caption)
+        if args.dry_run_bridge:
+            ok, mid, err, status = True, f"dry-run:{asset.name}", "", 200
+        else:
+            ok, mid, err, status = bridge_send_media(args.jid, asset, caption=args.caption)
         if not ok:
             failures.append({"asset": str(asset), "status": status, "error": err})
             if project is not None:
@@ -64,9 +143,38 @@ def main() -> int:
         else:
             outbound_ids.append(mid)
     if failures:
-        print(json.dumps({"failures": failures}))
+        print(json.dumps({"failures": failures, "sent_before_failure": outbound_ids}))
         return 2
     if project is not None:
+        with FileLock(Path(str(state_path) + ".lock")):
+            store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
+            for idx, existing in enumerate(store.projects):
+                if existing.project_id == project.project_id:
+                    if (
+                        project_snapshot is None
+                        or existing.version != project_snapshot["version"]
+                        or existing.status != project_snapshot["status"]
+                        or list(existing.final_asset_ids) != project_snapshot["final_asset_ids"]
+                    ):
+                        ndjson_append(log_path, FlyerDeliveryFailed(
+                            type="flyer_delivery_failed",
+                            ts=datetime.now(timezone.utc),
+                            project_id=project.project_id,
+                            customer_phone=project.customer_phone,
+                            asset_id="final_package",
+                            status=0,
+                            error="project changed during delivery; sent_message_ids=" + ",".join(outbound_ids),
+                        ).model_dump_json())
+                        print(json.dumps({"failure": "project_changed_during_delivery", "sent_before_failure": outbound_ids}))
+                        return 2
+                    if not is_flyer_transition_allowed(existing.status, "delivered"):
+                        raise SystemExit(f"invalid transition {existing.status}->delivered")
+                    store.projects[idx] = existing.model_copy(update={
+                        "status": "delivered",
+                        "updated_at": datetime.now(timezone.utc),
+                    })
+                    atomic_write_text(state_path, store.model_dump_json(indent=2))
+                    break
         ndjson_append(log_path, FlyerAssetsDelivered(
             type="flyer_assets_delivered",
             ts=datetime.now(timezone.utc),

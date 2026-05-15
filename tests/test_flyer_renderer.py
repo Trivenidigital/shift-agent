@@ -17,9 +17,11 @@ from agents.flyer.render import (  # noqa: E402
     _image_prompt,
     apply_critical_text_overlay,
     build_asset_manifest,
+    collect_text_facts,
     inspect_rendered_asset,
     render_concept_previews,
     render_final_package,
+    validate_text_manifest_file,
 )
 from schemas import FlyerAsset, FlyerConcept, FlyerProject, FlyerRequestFields  # noqa: E402
 
@@ -64,6 +66,119 @@ def test_render_concept_previews_creates_one_png_by_default(tmp_path):
         assert spec.path.stat().st_size > 1000
         assert spec.width == 1080
         assert spec.height == 1350
+        assert validate_text_manifest_file(
+            spec.path,
+            project_id=project.project_id,
+            project_version=project.version,
+            output_format="concept_preview",
+        ).ok is True
+
+
+def test_text_manifest_rejects_stale_project_version_and_hash(tmp_path):
+    project = _complete_project()
+    spec = render_concept_previews(project, tmp_path)[0]
+    assert validate_text_manifest_file(spec.path, project_id="F0001", project_version=1).ok is True
+    stale = validate_text_manifest_file(spec.path, project_id="F0001", project_version=2)
+    assert stale.ok is False
+    assert "text manifest project version mismatch" in stale.blockers
+
+    spec.path.write_bytes(spec.path.read_bytes() + b"stale")
+    changed = validate_text_manifest_file(spec.path, project_id="F0001", project_version=1)
+    assert changed.ok is False
+    assert "text manifest artifact hash mismatch" in changed.blockers
+
+
+def test_text_manifest_invalid_shape_fails_closed(tmp_path):
+    project = _complete_project()
+    spec = render_concept_previews(project, tmp_path)[0]
+    sidecar = Path(f"{spec.path}.text.json")
+    doc = json.loads(sidecar.read_text(encoding="utf-8"))
+    doc["expected_facts"] = ["bad"]
+    sidecar.write_text(json.dumps(doc), encoding="utf-8")
+
+    result = validate_text_manifest_file(spec.path, project_id="F0001", project_version=1)
+
+    assert result.ok is False
+    assert "text manifest invalid expected fact entry" in result.blockers
+
+
+def test_collect_text_facts_keeps_revised_price_phone_location_and_schedule():
+    project = _complete_project()
+    fields = FlyerRequestFields(
+        event_or_business_name="Thursday Dosa Night Special",
+        venue_or_location="Lakshmi's Kitchen",
+        contact_info="+1 980 200 5022",
+        notes="Starts from 5 PM every Thursday. Non-veg combo $16.99; Veg combo $12.99",
+    )
+    project = project.model_copy(update={"fields": fields})
+    facts = {fact.fact_id: fact.text for fact in collect_text_facts(project)}
+    assert facts["title"] == "Thursday Dosa Night Special"
+    assert facts["schedule"].startswith("Starts from 5 PM")
+    assert facts["location"] == "Lakshmi's Kitchen"
+    assert facts["contact"] == "+1 980 200 5022"
+    assert "$16.99" in facts["detail_001"]
+    assert "$12.99" in facts["detail_002"]
+
+
+def test_collect_text_facts_suppresses_old_phone_from_notes_after_revision():
+    project = _complete_project()
+    fields = FlyerRequestFields(
+        event_or_business_name="Dosa Night",
+        venue_or_location="Lakshmi's Kitchen",
+        contact_info="+1 980 200 5022",
+        notes="Phone: +1 904 555 0123; Non-veg combo $16.99",
+    )
+    project = project.model_copy(update={"fields": fields})
+
+    rendered_text = "\n".join(fact.text for fact in collect_text_facts(project))
+
+    assert "+1 980 200 5022" in rendered_text
+    assert "+1 904 555 0123" not in rendered_text
+
+
+def test_collect_text_facts_accepts_ten_item_menu_and_daily_schedule():
+    fields = FlyerRequestFields(
+        event_or_business_name="Daily Lunch Specials",
+        contact_info="+1 704 324 3322",
+        notes="Daily lunch buffet 11 AM-3 PM. " + "; ".join(
+            f"Item {idx} ${idx}.99" for idx in range(1, 11)
+        ),
+    )
+    project = _complete_project().model_copy(update={"fields": fields})
+    facts = {fact.fact_id: fact.text for fact in collect_text_facts(project)}
+
+    assert facts["schedule"].startswith("Daily lunch buffet")
+    assert facts["detail_010"] == "Item 10 $10.99"
+
+
+def test_render_concept_previews_accepts_ten_item_menu(tmp_path):
+    fields = FlyerRequestFields(
+        event_or_business_name="Daily Lunch Specials",
+        contact_info="+1 704 324 3322",
+        notes="Daily lunch buffet 11 AM-3 PM. " + "; ".join(
+            f"Item {idx} ${idx}.99" for idx in range(1, 11)
+        ),
+    )
+    project = _complete_project().model_copy(update={"fields": fields})
+
+    specs = render_concept_previews(project, tmp_path)
+
+    assert specs[0].path.exists()
+    assert validate_text_manifest_file(specs[0].path, project_id=project.project_id, project_version=project.version).ok
+
+
+def test_renderer_fails_if_title_cannot_fit_without_truncation(tmp_path):
+    fields = _complete_project().fields.model_copy(update={
+        "event_or_business_name": " ".join(["VeryLongFestivalName"] * 16),
+    })
+    project = _complete_project().model_copy(update={"fields": fields})
+
+    try:
+        render_concept_previews(project, tmp_path)
+    except FlyerRenderError as e:
+        assert "critical text facts do not fit" in str(e)
+    else:
+        raise AssertionError("expected long title to fail instead of silently truncating")
 
 
 def test_inspect_rendered_asset_rejects_blank_or_wrong_size_png(tmp_path):
@@ -125,6 +240,12 @@ def test_render_final_package_creates_expected_formats(tmp_path):
     for spec in specs:
         assert spec.path.exists()
         assert spec.path.stat().st_size > 1000
+        assert validate_text_manifest_file(
+            spec.path,
+            project_id=project.project_id,
+            project_version=project.version,
+            output_format=spec.output_format,
+        ).ok is True
 
 
 def test_renderer_blocks_missing_required_fields(tmp_path):

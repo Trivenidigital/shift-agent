@@ -1126,6 +1126,10 @@ def send_flyer_concept_previews(chat_id: str, project_id: str) -> tuple[bool, st
     except Exception as e:
         return False, "", f"safe_io_import_failed: {type(e).__name__}: {e}"
     try:
+        from flyer_render import validate_text_manifest_file  # type: ignore
+    except Exception as e:
+        return False, "", f"flyer_render_import_failed: {type(e).__name__}: {e}"
+    try:
         store = json.loads(FLYER_PROJECTS_PATH.read_text(encoding="utf-8"))
         project = next((p for p in store.get("projects", []) if p.get("project_id") == project_id), None)
     except Exception as e:
@@ -1138,6 +1142,14 @@ def send_flyer_concept_previews(chat_id: str, project_id: str) -> tuple[bool, st
         asset = assets.get(concept.get("preview_asset_id"))
         if not asset:
             continue
+        qa = validate_text_manifest_file(
+            asset.get("path", ""),
+            project_id=project_id,
+            project_version=project.get("version"),
+            output_format="concept_preview",
+        )
+        if not qa.ok:
+            return False, "", "text_qa_failed: " + "; ".join(qa.blockers)
         caption = (
             f"{concept.get('concept_id')}: {concept.get('title')}\n"
             f"{concept.get('style_summary')}\n\n"

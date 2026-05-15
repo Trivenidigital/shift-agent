@@ -91,7 +91,7 @@ echo "✓ Python modules importable (incl. safe_io chokepoint symbols)"
 # external-foundation gate runs pre-install in shift-agent-deploy.sh, where a
 # missing Hermes bundled skill can abort before app state changes. Post-restart
 # smoke must not be the first strict check for external Hermes install state.
-if ! sudo -u shift-agent "$PY" /usr/local/bin/smoke-flyer-quality > /dev/null; then
+if ! sudo -u shift-agent "$PY" /usr/local/bin/smoke-flyer-quality --final-package > /dev/null; then
     echo "FAIL: Flyer quality deterministic smoke failed"
     exit 1
 fi
