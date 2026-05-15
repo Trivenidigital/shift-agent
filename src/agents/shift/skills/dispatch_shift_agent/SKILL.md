@@ -86,9 +86,11 @@ You are the front door for every inbound message. Your ONLY job: identify who se
 | Text contains 5-char `#XXXXX` code matching a non-terminal row in `state/expense-bookkeeper/leads.json` AND `cfg.expense_bookkeeper.enabled` | owner | **expense_bookkeeper_dispatcher** |
 | Text matches `^undo E\d{4,}( force)?$` (case-insensitive) AND `cfg.expense_bookkeeper.enabled` | owner | **expense_bookkeeper_dispatcher** |
 | Text contains 5-char `#XXXXX` code matching a row in `state/pending.json` | owner | **handle_owner_command** |
+| Any text/image/document from a sender with an active non-completed row in `state/flyer/projects.json` AND `cfg.flyer.enabled` | any | **flyer_dispatcher** |
 | Image OR document attachment + caption mentions "menu" | owner OR employee | **update_catering_menu** |
 | Image OR document attachment + caption mentions "expense" or "receipt" AND `cfg.expense_bookkeeper.enabled` | owner | **expense_bookkeeper_dispatcher** |
 | Image OR document attachment, no caption, in owner's self-chat | owner | **update_catering_menu** (assume menu intent) |
+| Text contains flyer intent keyword (see list below) AND `cfg.flyer.enabled` | any | **flyer_dispatcher** |
 | Text contains catering keyword (see list below) AND `cfg.catering.enabled` | any | **catering_dispatcher** |
 | Owner text matches compliance regex (see below) AND `cfg.compliance.enabled` | owner | **compliance_owner_query** |
 | Text matches store-locator regex (see below) AND `cfg.multi_location.locations` is non-empty | unknown | **customer_location_query** |
@@ -99,6 +101,8 @@ You are the front door for every inbound message. Your ONLY job: identify who se
 | Anything | error (state file load failed) | invoke `shift-agent-notify-owner "State file load failed"` then STOP |
 
 Catering keywords (case-insensitive substring): `cater`, `catering`, `headcount`, `guests`, `event`, `wedding`, `reception`, `banquet`, `birthday`, `anniversary`, `party`, `drop off`, `pickup for event`, `do you do catering`, `feeding [number]`, `menu for [number] people`.
+
+Flyer intent keywords (case-insensitive substring or phrase): `flyer`, `flier`, `poster`, `banner`, `invite`, `invitation`, `social post`, `instagram post`, `instagram story`, `ig post`, `ig story`, `graphic`, `design flyer`, `design poster`, `make a flyer`, `create a flyer`. This row is intentionally before Catering because "Need flyer for wedding event" contains broad Catering words but is a design request. Do NOT route generic "Need catering for event" to Flyer unless a flyer/design keyword is present or the sender already has an active flyer project.
 
 PR-CF1 — customer-finalize-intent terms also route to catering_dispatcher when the sender has an active non-terminal catering lead. Substring match (case-insensitive): `finalize`, `send to owner`, `confirm the menu`, `confirm this menu`, `lock it in`, `proceed with this menu`, `submit for approval`, `ready to book`. The catering_dispatcher then differentiates new-inquiry vs finalize-intent vs owner-reply (see catering_dispatcher SKILL Step 2).
 

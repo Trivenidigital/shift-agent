@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""Manage Flyer Studio account status, activation, and quota."""
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+import sys
+
+SRC_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(SRC_ROOT / "platform"))
+sys.path.insert(0, str(SRC_ROOT))
+
+try:
+    from agents.flyer.account import (  # type: ignore  # noqa: E402
+        activate_customer,
+        finalize_usage,
+        handle_account_command,
+        release_quota,
+        reserve_quota,
+    )
+except ModuleNotFoundError:
+    from flyer_account import (  # type: ignore  # noqa: E402
+        activate_customer,
+        finalize_usage,
+        handle_account_command,
+        release_quota,
+        reserve_quota,
+    )
+from schemas import Config, FlyerPlanTier  # noqa: E402
+try:
+    from safe_io import FileLock, atomic_write_text, load_yaml_model  # type: ignore  # noqa: E402
+except ModuleNotFoundError:  # Windows unit-test fallback; VPS uses safe_io.
+    class FileLock:  # type: ignore[no-redef]
+        def __init__(self, _path: Path) -> None:
+            pass
+
+        def __enter__(self) -> "FileLock":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    def atomic_write_text(path: Path, text: str) -> None:  # type: ignore[no-redef]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def load_yaml_model(path: Path, model):  # type: ignore[no-redef]
+        import yaml  # type: ignore
+        return model.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")) or {})
+
+
+STATE_PATH = Path("/opt/shift-agent/state/flyer/customers.json")
+CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
+AUDIT_LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+
+
+def _load_flyer_config(path: Path) -> tuple[list[FlyerPlanTier], str, str]:
+    try:
+        cfg = load_yaml_model(path, Config)
+        return cfg.flyer.plan_tiers, cfg.flyer.payment_provider, cfg.flyer.payment_checkout_url_template
+    except Exception:
+        return FlyerPlanTier.default_tiers(), "manual", ""
+
+
+def _emit(result) -> int:
+    print(json.dumps({
+        "ok": result.ok,
+        "handled": result.handled,
+        "reply_text": result.reply_text,
+        "customer_id": result.customer_id,
+        "status": result.status,
+        "quota_allowed": result.quota_allowed,
+        "detail": result.detail,
+    }))
+    return 0 if result.ok else 2
+
+
+def main() -> int:
+    p = argparse.ArgumentParser()
+    mode = p.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--command-text", default="")
+    mode.add_argument("--activate-customer", default="")
+    mode.add_argument("--reserve-quota", action="store_true")
+    mode.add_argument("--finalize-usage", action="store_true")
+    mode.add_argument("--release-quota", action="store_true")
+    p.add_argument("--sender-phone", default="")
+    p.add_argument("--sender-role", default="")
+    p.add_argument("--chat-id", default="")
+    p.add_argument("--project-id", default="")
+    p.add_argument("--message-id", default="")
+    p.add_argument("--customer-phone", default="")
+    p.add_argument("--provider", default="manual")
+    p.add_argument("--payment-reference", default="")
+    p.add_argument("--expected-plan", default="")
+    p.add_argument("--amount-cents", type=int, default=None)
+    p.add_argument("--currency", default="USD")
+    p.add_argument("--state-path", default=str(STATE_PATH))
+    p.add_argument("--config-path", default=str(CONFIG_PATH))
+    p.add_argument("--audit-log-path", default=str(AUDIT_LOG_PATH))
+    args = p.parse_args()
+
+    state_path = Path(args.state_path)
+    audit_path = Path(args.audit_log_path) if args.audit_log_path else None
+    tiers, provider, checkout_template = _load_flyer_config(Path(args.config_path))
+    with FileLock(Path(str(state_path) + ".lock")):
+        try:
+            if args.command_text:
+                result = handle_account_command(
+                    state_path=state_path,
+                    sender_phone=args.sender_phone or None,
+                    sender_role=args.sender_role,
+                    chat_id=args.chat_id,
+                    text=args.command_text,
+                    plan_tiers=tiers,
+                    payment_provider=provider,
+                    payment_checkout_url_template=checkout_template,
+                    audit_log_path=audit_path,
+                )
+            elif args.activate_customer:
+                result = activate_customer(
+                    state_path=state_path,
+                    customer_id=args.activate_customer,
+                    provider=args.provider,
+                    payment_reference=args.payment_reference,
+                    expected_plan=args.expected_plan,
+                    amount_cents=args.amount_cents,
+                    currency=args.currency,
+                    plan_tiers=tiers,
+                    audit_log_path=audit_path,
+                )
+            else:
+                kwargs = {
+                    "state_path": state_path,
+                    "customer_phone": args.customer_phone,
+                    "project_id": args.project_id,
+                    "message_id": args.message_id,
+                    "plan_tiers": tiers,
+                    "audit_log_path": audit_path,
+                }
+                if args.reserve_quota:
+                    result = reserve_quota(**kwargs)
+                elif args.finalize_usage:
+                    result = finalize_usage(**kwargs)
+                else:
+                    result = release_quota(**kwargs)
+            if state_path.exists():
+                atomic_write_text(state_path, state_path.read_text(encoding="utf-8"))
+        except Exception as e:  # noqa: BLE001 - CLI returns structured error.
+            print(json.dumps({
+                "ok": False,
+                "handled": True,
+                "reply_text": "",
+                "customer_id": "",
+                "status": "",
+                "quota_allowed": False,
+                "detail": f"{type(e).__name__}: {e}",
+            }))
+            return 2
+    return _emit(result)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

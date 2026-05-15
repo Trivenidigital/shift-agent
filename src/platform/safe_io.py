@@ -635,3 +635,70 @@ def bridge_post(jid: str, message: str) -> Tuple[bool, str, str, str]:
         return False, "", f"URLError: {e.reason}", "connect_failed"
     except Exception as e:
         return False, "", f"{type(e).__name__}: {e}", "unknown_error"
+
+
+def bridge_media_url() -> str:
+    """Return the companion /send-media URL for the configured text bridge."""
+    if BRIDGE_URL.endswith("/send"):
+        return BRIDGE_URL[:-len("/send")] + "/send-media"
+    return BRIDGE_URL.rstrip("/") + "/send-media"
+
+
+def bridge_send_media(
+    jid: str,
+    file_path: Path | str,
+    *,
+    media_type: str = "",
+    caption: str = "",
+    file_name: str = "",
+) -> Tuple[bool, str, str, str]:
+    """POST a media file to the local Hermes bridge /send-media endpoint.
+
+    Returns (success, message_id, error_str, status).
+    status values mirror bridge_post where possible, plus missing_file.
+    """
+    path = Path(file_path)
+    if not path.exists() or not path.is_file():
+        return False, "", f"missing media file: {path}", "missing_file"
+
+    url = bridge_media_url()
+    bad = validate_bridge_url(url)
+    if bad:
+        return False, "", bad, "connect_failed"
+
+    payload_doc = {
+        "chatId": jid,
+        "filePath": str(path),
+    }
+    if media_type:
+        payload_doc["mediaType"] = media_type
+    if caption:
+        payload_doc["caption"] = caption
+    if file_name:
+        payload_doc["fileName"] = file_name
+
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload_doc).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=BRIDGE_TIMEOUT_SEC) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            try:
+                doc = json.loads(body)
+            except json.JSONDecodeError:
+                return False, "", f"ack_parse_failed: {body[:200]}", "send_uncertain"
+            mid = doc.get("id") or doc.get("messageId") or ""
+            if not mid:
+                return False, "", f"empty_message_id: {body[:200]}", "send_uncertain"
+            if doc.get("success") is False:
+                return False, "", f"bridge_send_failed: {body[:200]}", "http_error"
+            return True, mid, "", "sent"
+    except urllib.error.HTTPError as e:
+        return False, "", f"HTTP {e.code}: {e.reason}", "http_error"
+    except urllib.error.URLError as e:
+        return False, "", f"URLError: {e.reason}", "connect_failed"
+    except Exception as e:
+        return False, "", f"{type(e).__name__}: {e}", "unknown_error"

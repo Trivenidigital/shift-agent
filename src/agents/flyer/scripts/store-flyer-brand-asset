@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+"""Store or replace Flyer Studio customer logo/template media."""
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+import sys
+
+SRC_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(SRC_ROOT / "platform"))
+sys.path.insert(0, str(SRC_ROOT))
+
+try:
+    from agents.flyer.onboarding import store_brand_asset  # type: ignore  # noqa: E402
+except ModuleNotFoundError:
+    from flyer_onboarding import store_brand_asset  # type: ignore  # noqa: E402
+try:
+    from safe_io import FileLock, atomic_write_text  # type: ignore  # noqa: E402
+except ModuleNotFoundError:
+    class FileLock:  # type: ignore[no-redef]
+        def __init__(self, _path: Path) -> None:
+            pass
+
+        def __enter__(self) -> "FileLock":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    def atomic_write_text(path: Path, text: str) -> None:  # type: ignore[no-redef]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+
+STATE_PATH = Path("/opt/shift-agent/state/flyer/customers.json")
+
+
+def main() -> int:
+    p = argparse.ArgumentParser()
+    p.add_argument("--chat-id", required=True)
+    p.add_argument("--sender-phone", default="")
+    p.add_argument("--sender-role", default="")
+    p.add_argument("--message-id", required=True)
+    p.add_argument("--media-path", required=True)
+    p.add_argument("--text", default="")
+    p.add_argument("--state-path", default=str(STATE_PATH))
+    args = p.parse_args()
+
+    state_path = Path(args.state_path)
+    with FileLock(Path(str(state_path) + ".lock")):
+        result = store_brand_asset(
+            state_path=state_path,
+            chat_id=args.chat_id,
+            sender_phone=args.sender_phone or None,
+            message_id=args.message_id,
+            media_path=Path(args.media_path),
+            text=args.text,
+            sender_role=args.sender_role,
+        )
+        if state_path.exists():
+            atomic_write_text(state_path, state_path.read_text(encoding="utf-8"))
+
+    print(json.dumps({
+        "handled": result.handled,
+        "reply_text": result.reply_text,
+        "next_status": result.next_status,
+        "customer_id": result.customer_id,
+    }))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

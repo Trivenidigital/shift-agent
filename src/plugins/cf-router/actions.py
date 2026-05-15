@@ -23,6 +23,8 @@ CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
 LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
 PROPOSALS_PATH = Path("/opt/shift-agent/state/catering-proposals.json")
 MENU_PENDING_PATH = Path("/opt/shift-agent/state/catering-menu-pending.json")
+FLYER_PROJECTS_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
+FLYER_CUSTOMERS_PATH = Path("/opt/shift-agent/state/flyer/customers.json")
 ROSTER_PATH = Path("/opt/shift-agent/roster.json")
 LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
 THROTTLE_PATH = Path("/opt/shift-agent/state/cf-router-throttle.json")
@@ -33,6 +35,10 @@ NOTIFY_OWNER_BIN = Path("/usr/local/bin/shift-agent-notify-owner")
 CREATE_LEAD_BIN = Path("/usr/local/bin/create-catering-lead")  # F7 path
 CREATE_CATERING_PROPOSALS_BIN = Path("/usr/local/bin/create-catering-proposal-options")
 SELECT_CATERING_PROPOSAL_BIN = Path("/usr/local/bin/select-catering-proposal")
+CREATE_FLYER_PROJECT_BIN = Path("/usr/local/bin/create-flyer-project")
+HANDLE_FLYER_ONBOARDING_BIN = Path("/usr/local/bin/handle-flyer-onboarding")
+STORE_FLYER_BRAND_ASSET_BIN = Path("/usr/local/bin/store-flyer-brand-asset")
+MANAGE_FLYER_ACCOUNT_BIN = Path("/usr/local/bin/manage-flyer-account")
 
 PYTHON_BIN = Path("/usr/local/lib/hermes-agent/venv/bin/python")
 PLATFORM_DIR = Path("/opt/shift-agent")  # Where schemas.py lives
@@ -40,6 +46,7 @@ IDENTIFY_SENDER_BIN = Path("/usr/local/bin/identify-sender")
 SEND_CATERING_ACK_BIN = Path("/usr/local/bin/send-catering-ack")
 
 SUBPROCESS_TIMEOUT_SEC = 30
+FLYER_RENDER_TIMEOUT_SEC = 900
 ALERT_THROTTLE_SEC = 300  # Suppress duplicate Pushover alerts within 5 min
 F7_DISPATCHER_LOOKBACK_SEC = 5  # Grace window when scanning audit log
                                  # for dispatcher_routed (matches deployed F7
@@ -523,6 +530,38 @@ _FOOD_KEYWORDS = re.compile(
 _DELIVERY_KEYWORDS = re.compile(
     r"\b(?:deliver(?:y|ed)?|pickup|drop[\s-]?off|setup)\b", re.IGNORECASE,
 )
+_FLYER_INTENT = re.compile(
+    r"\b(?:"
+    r"flyer|flyers|flier|fliers|poster|posters|banner|banners|"
+    r"invite|invites|invitation|invitations|"
+    r"social\s+post|instagram\s+(?:post|story)|ig\s+(?:post|story)|"
+    r"graphic|creative|"
+    r"(?:design|make|create|generate|build)\s+(?:a\s+|an\s+)?"
+    r"(?:flyer|flier|poster|banner|invite|invitation|social\s+post|"
+    r"instagram\s+(?:post|story)|ig\s+(?:post|story)|graphic)"
+    r")\b",
+    re.IGNORECASE,
+)
+_NEW_FLYER_REQUEST = re.compile(
+    r"\b(?:need|create|creare|make|generate|design|build)\s+"
+    r"(?:a\s+|an\s+)?(?:flyer|flier|poster|banner|creative|graphic)\b"
+    r"|\b(?:flyer|flier|poster|banner)\s+for\b",
+    re.IGNORECASE,
+)
+_MEDIA_TEMPLATE_EDIT = re.compile(
+    r"\b(?:dosa|idly|menu|special|combo|price|prices?|item|items|breakfast|"
+    r"lunch|dinner|offer|deal|thursday|friday|saturday|sunday)\b",
+    re.IGNORECASE,
+)
+_CURRENT_BRAND_UPLOAD = re.compile(
+    r"\b(?:logo|brand|font|color|colour|palette)\b",
+    re.IGNORECASE,
+)
+_WRONG_FLYER_CORRECTION = re.compile(
+    r"\b(?:wrong|different|not\s+what|responded\s+with|instead\s+of|"
+    r"looks\s+completely\s+different)\b.*\b(?:dosa|breakfast|menu|special|flyer|flier|poster)\b",
+    re.IGNORECASE,
+)
 
 _PROPOSAL_REQUEST_VERB = re.compile(
     r"\b(?:send|share|show|give|create|make|prepare|draft|suggest|propose|"
@@ -674,6 +713,496 @@ def classify_catering(text: str) -> tuple[bool, list[str]]:
         signals.append("rejected:insufficient_evidence")
 
     return is_catering, signals
+
+
+def classify_flyer_intent(text: str) -> tuple[bool, list[str]]:
+    """Return True for explicit flyer/design requests.
+
+    This classifier is intentionally narrower than the agent's LLM intake.
+    cf-router only needs enough certainty to avoid stealing flyer work into
+    Catering F7 primary-mode when messages mention food, events, or festivals.
+    """
+    if not text or len(text) < 4:
+        return False, ["too_short"]
+    if _FLYER_INTENT.search(text):
+        return True, ["flyer_intent"]
+    return False, ["rejected:no_flyer_intent"]
+
+
+def is_flyer_onboarding_intent(text: str) -> bool:
+    """Return True for explicit Flyer Studio registration/account setup text."""
+    return bool(re.search(
+        r"\b(register|sign\s*up|signup|onboard|setup|set\s+up|flyer account|flyer studio|plan)\b",
+        text or "",
+        flags=re.IGNORECASE,
+    ))
+
+
+def should_start_new_flyer_over_active(text: str, *, has_media: bool = False) -> bool:
+    """Return True when inbound content should not attach to old flyer state.
+
+    Active projects still own approval, concept selection, and natural revision
+    notes. Explicit create/need flyer requests and media-backed menu/template
+    edits are new work orders; routing them as revisions causes stale flyer
+    projects to swallow unrelated customer jobs.
+    """
+    body = " ".join((text or "").split())
+    if not body:
+        return False
+    if _NEW_FLYER_REQUEST.search(body):
+        return True
+    if _WRONG_FLYER_CORRECTION.search(body):
+        return True
+    if has_media and not _CURRENT_BRAND_UPLOAD.search(body):
+        return bool(_MEDIA_TEMPLATE_EDIT.search(body))
+    return False
+
+
+def flyer_project_has_required_fields(project: dict) -> bool:
+    fields = project.get("fields") or {}
+    notes = f"{fields.get('notes') or ''} {project.get('raw_request') or ''}".lower()
+    assets = project.get("assets") or []
+
+    def has(name: str) -> bool:
+        return bool(str(fields.get(name) or "").strip())
+
+    has_reference_asset = any(
+        isinstance(asset, dict) and asset.get("kind") == "reference_image"
+        for asset in assets
+    )
+    has_template_reference = has_reference_asset or any(
+        marker in notes
+        for marker in ("uploaded template", "uploaded reference", "reference image")
+    )
+    has_price_list = (
+        "$" in notes
+        or any(
+            marker in notes
+            for marker in (
+                "menu item", "menu items", "items", "price", "combo",
+                "/piece", "/lb", "tray", "special", "offer", "deal",
+            )
+        )
+    )
+    has_recurring = any(
+        marker in notes
+        for marker in (
+            "weekend", "saturday", "sunday", "daily", "weekday",
+            "weekdays", "every ", "starts from", "start from",
+        )
+    )
+    if has_template_reference:
+        return has("event_or_business_name")
+    if has_price_list:
+        return has("event_or_business_name") and has("contact_info")
+    required = ["event_or_business_name", "event_time", "venue_or_location", "contact_info"]
+    if not has_recurring:
+        required.insert(1, "event_date")
+    return all(has(name) for name in required)
+
+
+def is_flyer_enabled() -> bool:
+    """Return cfg.flyer.enabled from config.yaml; false on missing config."""
+    try:
+        import yaml  # type: ignore
+        with CONFIG_PATH.open(encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        return bool((cfg.get("flyer") or {}).get("enabled"))
+    except Exception:
+        return False
+
+
+def find_active_flyer_project_by_sender(phone: Optional[str], chat_id: str) -> Optional[dict]:
+    """Look up a non-terminal flyer project by sender phone.
+
+    Flyer projects currently store canonical customer_phone. LID senders are
+    mapped to phone by the caller via identify-sender before invoking this.
+    """
+    if not phone or not FLYER_PROJECTS_PATH.exists():
+        return None
+    terminal = {"delivered", "completed"}
+    try:
+        with FLYER_PROJECTS_PATH.open(encoding="utf-8") as f:
+            store = json.load(f)
+        projects = store.get("projects", [])
+        if not isinstance(projects, list):
+            return None
+        matches = [
+            row for row in projects
+            if isinstance(row, dict)
+            and row.get("customer_phone") == phone
+            and row.get("status") not in terminal
+        ]
+        if not matches:
+            return None
+        return max(matches, key=lambda row: str(row.get("updated_at") or row.get("created_at") or ""))
+    except Exception:
+        return None
+
+
+def _canonical_phone(phone: Optional[str]) -> Optional[str]:
+    if not phone:
+        return None
+    digits = re.sub(r"\D", "", phone.split("@", 1)[0])
+    if len(digits) == 10:
+        return "+1" + digits
+    if len(digits) == 11 and digits.startswith("1"):
+        return "+" + digits
+    if 10 <= len(digits) <= 15:
+        return "+" + digits
+    return None
+
+
+def find_flyer_customer_by_sender(phone: Optional[str], chat_id: str) -> Optional[dict]:
+    """Return registered Flyer customer for this sender, if any."""
+    canonical = _canonical_phone(phone)
+    if not canonical and chat_id.endswith("@s.whatsapp.net"):
+        canonical = _canonical_phone(chat_id.split("@", 1)[0])
+    if not canonical or not FLYER_CUSTOMERS_PATH.exists():
+        return None
+    try:
+        store = json.loads(FLYER_CUSTOMERS_PATH.read_text(encoding="utf-8"))
+        matches = []
+        for customer in store.get("customers", []):
+            numbers = set(customer.get("authorized_request_numbers") or [])
+            business_whatsapp = customer.get("business_whatsapp_number")
+            if business_whatsapp:
+                numbers.add(business_whatsapp)
+            onboarded_by = customer.get("onboarded_by_phone")
+            if onboarded_by:
+                numbers.add(onboarded_by)
+            if canonical in numbers:
+                matches.append(customer)
+        return matches[0] if len(matches) == 1 else None
+    except Exception:
+        return None
+
+
+def is_flyer_account_command(text: str) -> bool:
+    return bool(re.search(
+        r"^\s*(status|plan status|help|add (authorized )?(number|auth)|add authorized number|"
+        r"remove authorized number|remove number|update phone|update business phone|"
+        r"update whatsapp|update business whatsapp|change plan|confirm update)\b",
+        text or "",
+        flags=re.IGNORECASE,
+    ))
+
+
+def trigger_flyer_account_command(
+    *,
+    chat_id: str,
+    sender_phone: Optional[str],
+    sender_role: str,
+    text: str,
+) -> tuple[bool, str, Optional[dict]]:
+    try:
+        cmd = [
+            str(PYTHON_BIN),
+            str(MANAGE_FLYER_ACCOUNT_BIN),
+            "--command-text", text or "",
+            "--sender-role", sender_role or "",
+            "--chat-id", chat_id,
+        ]
+        if sender_phone:
+            cmd.extend(["--sender-phone", sender_phone])
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_SEC)
+    except (subprocess.SubprocessError, OSError) as e:
+        return False, f"{type(e).__name__}: {e}", None
+    detail = (result.stdout or result.stderr or "").strip()
+    if result.returncode != 0:
+        return False, f"exit={result.returncode} {detail[:500]}", None
+    try:
+        doc = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return False, f"account_json_parse_failed: {detail[:500]}", None
+    return True, detail[:500], doc
+
+
+def _trigger_flyer_quota(
+    mode: str,
+    *,
+    customer_phone: str,
+    project_id: str,
+    message_id: str,
+) -> tuple[bool, str, Optional[dict]]:
+    try:
+        cmd = [
+            str(PYTHON_BIN),
+            str(MANAGE_FLYER_ACCOUNT_BIN),
+            mode,
+            "--customer-phone", customer_phone,
+            "--project-id", project_id,
+            "--message-id", message_id,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_SEC)
+    except (subprocess.SubprocessError, OSError) as e:
+        return False, f"{type(e).__name__}: {e}", None
+    detail = (result.stdout or result.stderr or "").strip()
+    if result.returncode != 0:
+        return False, f"exit={result.returncode} {detail[:500]}", None
+    try:
+        doc = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return False, f"quota_json_parse_failed: {detail[:500]}", None
+    return True, detail[:500], doc
+
+
+def trigger_flyer_reserve_quota(*, customer_phone: str, project_id: str, message_id: str) -> tuple[bool, str, Optional[dict]]:
+    return _trigger_flyer_quota("--reserve-quota", customer_phone=customer_phone, project_id=project_id, message_id=message_id)
+
+
+def trigger_flyer_finalize_usage(*, customer_phone: str, project_id: str, message_id: str) -> tuple[bool, str, Optional[dict]]:
+    return _trigger_flyer_quota("--finalize-usage", customer_phone=customer_phone, project_id=project_id, message_id=message_id)
+
+
+def trigger_flyer_release_quota(*, customer_phone: str, project_id: str, message_id: str) -> tuple[bool, str, Optional[dict]]:
+    return _trigger_flyer_quota("--release-quota", customer_phone=customer_phone, project_id=project_id, message_id=message_id)
+
+
+def trigger_flyer_onboarding(
+    *,
+    chat_id: str,
+    sender_phone: Optional[str],
+    message_id: str,
+    text: str,
+) -> tuple[bool, str, Optional[dict]]:
+    """Invoke handle-flyer-onboarding and return (ok, detail, result)."""
+    try:
+        cmd = [
+            str(PYTHON_BIN),
+            str(HANDLE_FLYER_ONBOARDING_BIN),
+            "--chat-id", chat_id,
+            "--message-id", message_id,
+            "--text", text,
+        ]
+        if sender_phone:
+            cmd.extend(["--sender-phone", sender_phone])
+        result = subprocess.run(
+            cmd,
+            capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_SEC,
+        )
+    except (subprocess.SubprocessError, OSError) as e:
+        return False, f"{type(e).__name__}: {e}", None
+    detail = (result.stdout or result.stderr or "").strip()
+    if result.returncode != 0:
+        return False, f"exit={result.returncode} {detail[:500]}", None
+    try:
+        doc = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return False, f"onboarding_json_parse_failed: {detail[:500]}", None
+    return True, detail[:500], doc
+
+
+def trigger_store_flyer_brand_asset(
+    *,
+    chat_id: str,
+    sender_phone: Optional[str],
+    message_id: str,
+    media_path: str,
+    text: str,
+    sender_role: str = "",
+) -> tuple[bool, str, Optional[dict]]:
+    """Invoke store-flyer-brand-asset and return (ok, detail, result)."""
+    try:
+        cmd = [
+            str(PYTHON_BIN),
+            str(STORE_FLYER_BRAND_ASSET_BIN),
+            "--chat-id", chat_id,
+            "--message-id", message_id,
+            "--media-path", media_path,
+            "--text", text or "",
+            "--sender-role", sender_role or "",
+        ]
+        if sender_phone:
+            cmd.extend(["--sender-phone", sender_phone])
+        result = subprocess.run(
+            cmd,
+            capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_SEC,
+        )
+    except (subprocess.SubprocessError, OSError) as e:
+        return False, f"{type(e).__name__}: {e}", None
+    detail = (result.stdout or result.stderr or "").strip()
+    if result.returncode != 0:
+        return False, f"exit={result.returncode} {detail[:500]}", None
+    try:
+        doc = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return False, f"brand_asset_json_parse_failed: {detail[:500]}", None
+    return True, detail[:500], doc
+
+
+def trigger_create_flyer_project(
+    *,
+    customer_phone: str,
+    raw_request: str,
+    message_id: str,
+    reference_media_path: str = "",
+) -> tuple[bool, str, Optional[dict]]:
+    """Invoke create-flyer-project and return (ok, detail, project)."""
+    try:
+        cmd = [
+            str(PYTHON_BIN),
+            str(CREATE_FLYER_PROJECT_BIN),
+            "--customer-phone", customer_phone,
+            "--message-id", message_id,
+            "--raw-request", raw_request,
+        ]
+        if reference_media_path:
+            cmd.extend(["--reference-media-path", reference_media_path])
+        result = subprocess.run(
+            cmd,
+            capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_SEC,
+        )
+    except (subprocess.SubprocessError, OSError) as e:
+        return False, f"{type(e).__name__}: {e}", None
+    detail = (result.stdout or result.stderr or "").strip()
+    if result.returncode != 0:
+        return False, f"exit={result.returncode} {detail[:500]}", None
+    try:
+        project = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return False, f"project_json_parse_failed: {detail[:500]}", None
+    return True, detail[:500], project
+
+
+def send_flyer_intake_ack(chat_id: str, project_id: str) -> tuple[bool, str, str]:
+    """Send the deterministic Flyer Studio intake acknowledgement."""
+    _ensure_platform_path()
+    try:
+        from safe_io import bridge_post  # type: ignore
+    except Exception as e:
+        return False, "", f"safe_io_import_failed: {type(e).__name__}: {e}"
+    message = (
+        "Flyer Studio\n"
+        "------------\n"
+        f"Got it. I created flyer project {project_id}. "
+        "I have the request and will prepare design concepts. "
+        "Reply here with a logo or photos if you want them included."
+    )
+    ok, message_id, err, status = bridge_post(chat_id, message)
+    if ok:
+        return True, message_id, ""
+    return False, message_id, f"{status}: {err}"
+
+
+def send_flyer_processing_ack(chat_id: str, project_id: str) -> tuple[bool, str, str]:
+    """Immediately acknowledge a complete flyer request before image generation."""
+    _ensure_platform_path()
+    try:
+        from safe_io import bridge_post  # type: ignore
+    except Exception as e:
+        return False, "", f"safe_io_import_failed: {type(e).__name__}: {e}"
+    message = (
+        "Flyer Studio\n"
+        "------------\n"
+        f"Request processing. I created flyer project {project_id} and am creating the design now. "
+        "Reply here if you need to add a logo or changes."
+    )
+    ok, message_id, err, status = bridge_post(chat_id, message)
+    if ok:
+        return True, message_id, ""
+    return False, message_id, f"{status}: {err}"
+
+
+def trigger_generate_flyer_concepts(project_id: str) -> tuple[bool, str]:
+    try:
+        result = subprocess.run(
+            [str(PYTHON_BIN), "/usr/local/bin/generate-flyer-concepts", "--project-id", project_id],
+            capture_output=True, text=True, timeout=FLYER_RENDER_TIMEOUT_SEC,
+        )
+    except (subprocess.SubprocessError, OSError) as e:
+        return False, f"{type(e).__name__}: {e}"
+    detail = (result.stdout or result.stderr or "").strip()
+    if result.returncode != 0:
+        return False, f"exit={result.returncode} {detail[:500]}"
+    return True, detail[:500]
+
+
+def send_flyer_concept_previews(chat_id: str, project_id: str) -> tuple[bool, str, str]:
+    """Send the generated concept preview and approval instructions."""
+    _ensure_platform_path()
+    try:
+        from safe_io import bridge_post, bridge_send_media  # type: ignore
+    except Exception as e:
+        return False, "", f"safe_io_import_failed: {type(e).__name__}: {e}"
+    try:
+        store = json.loads(FLYER_PROJECTS_PATH.read_text(encoding="utf-8"))
+        project = next((p for p in store.get("projects", []) if p.get("project_id") == project_id), None)
+    except Exception as e:
+        return False, "", f"project_load_failed: {type(e).__name__}: {e}"
+    if not project:
+        return False, "", f"project_not_found: {project_id}"
+    assets = {asset.get("asset_id"): asset for asset in project.get("assets", [])}
+    outbound_ids: list[str] = []
+    for concept in project.get("concepts", []):
+        asset = assets.get(concept.get("preview_asset_id"))
+        if not asset:
+            continue
+        caption = (
+            f"{concept.get('concept_id')}: {concept.get('title')}\n"
+            f"{concept.get('style_summary')}\n\n"
+            "Reply APPROVE or reply with changes."
+        )
+        ok, mid, err, status = bridge_send_media(chat_id, asset.get("path", ""), caption=caption)
+        if not ok:
+            return False, "", f"{status}: {err}"
+        outbound_ids.append(mid)
+    if not outbound_ids:
+        return False, "", "no concept previews to send"
+    ok, mid, err, status = bridge_post(
+        chat_id,
+        "Reply APPROVE to receive final files, or reply with changes.",
+    )
+    if ok:
+        outbound_ids.append(mid)
+    else:
+        return False, ",".join(outbound_ids), f"{status}: {err}"
+    return True, ",".join(outbound_ids), ""
+
+
+def send_flyer_text(chat_id: str, message: str) -> tuple[bool, str, str]:
+    _ensure_platform_path()
+    try:
+        from safe_io import bridge_post  # type: ignore
+    except Exception as e:
+        return False, "", f"safe_io_import_failed: {type(e).__name__}: {e}"
+    ok, mid, err, status = bridge_post(chat_id, message)
+    if ok:
+        return True, mid, ""
+    return False, mid, f"{status}: {err}"
+
+
+def invoke_update_flyer_project(project_id: str, *args: str) -> tuple[bool, str]:
+    try:
+        result = subprocess.run(
+            [str(PYTHON_BIN), "/usr/local/bin/update-flyer-project", "--project-id", project_id, *args],
+            capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_SEC,
+        )
+    except (subprocess.SubprocessError, OSError) as e:
+        return False, f"{type(e).__name__}: {e}"
+    detail = (result.stdout or result.stderr or "").strip()
+    if result.returncode != 0:
+        return False, f"exit={result.returncode} {detail[:500]}"
+    return True, detail[:500]
+
+
+def finalize_and_send_flyer(chat_id: str, project_id: str, message_id: str) -> tuple[bool, str]:
+    steps = [
+        [str(PYTHON_BIN), "/usr/local/bin/update-flyer-project", "--project-id", project_id, "--approve-message-id", message_id],
+        [str(PYTHON_BIN), "/usr/local/bin/finalize-flyer-assets", "--project-id", project_id, "--approved-message-id", message_id],
+        [str(PYTHON_BIN), "/usr/local/bin/send-flyer-package", "--jid", chat_id, "--project-id", project_id],
+    ]
+    details: list[str] = []
+    for cmd in steps:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=FLYER_RENDER_TIMEOUT_SEC)
+        except (subprocess.SubprocessError, OSError) as e:
+            return False, f"{cmd[0]}: {type(e).__name__}: {e}"
+        detail = (result.stdout or result.stderr or "").strip()
+        details.append(detail[:200])
+        if result.returncode != 0:
+            return False, f"{cmd[0]} exit={result.returncode}: {detail[:500]}"
+    return True, " | ".join(details)
 
 
 def find_dispatcher_routed_for(chat_id: str, since_ts: float) -> bool:

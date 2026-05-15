@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 import os
 import re
 import sys
+from pathlib import Path
 
 # v0.3 catering hardening — single source of truth for code-generation alphabet.
 # Excludes I, O, 0, 1, L (visually confusing chars). Used by ProposalCode,
@@ -631,6 +632,597 @@ class CateringConfig(BaseModel):
     deposit_pct: float = Field(default=0.25, ge=0.0, le=1.0)
     stale_after_hours: int = Field(default=14 * 24, ge=1)  # 14 days default
     # Per-customer pricing knobs land in v0.2 (would otherwise bloat config).
+
+
+FlyerWorkflowStatus = Literal[
+    "intake_started",
+    "collecting_required_info",
+    "awaiting_assets",
+    "generating_concepts",
+    "awaiting_concept_selection",
+    "revising_design",
+    "awaiting_final_approval",
+    "finalizing_assets",
+    "delivered",
+    "completed",
+]
+
+FlyerOnboardingStatus = Literal[
+    "collecting_business_name",
+    "collecting_business_address",
+    "collecting_public_phone",
+    "collecting_business_whatsapp",
+    "collecting_authorized_request_number",
+    "collecting_business_profile",
+    "choosing_plan",
+    "confirming_summary",
+    "payment_pending",
+    "active",
+]
+
+FlyerOutputFormat = Literal[
+    "whatsapp_image",
+    "instagram_post",
+    "instagram_story",
+    "printable_pdf",
+]
+
+FlyerImageQuality = Literal["low", "medium", "high"]
+FlyerAssetKind = Literal[
+    "logo",
+    "reference_image",
+    "concept_preview",
+    "final_whatsapp_image",
+    "final_instagram_post",
+    "final_instagram_story",
+    "final_printable_pdf",
+]
+
+FLYER_TRANSITIONS: dict[FlyerWorkflowStatus, set[FlyerWorkflowStatus]] = {
+    "intake_started": {"collecting_required_info"},
+    "collecting_required_info": {"awaiting_assets", "generating_concepts"},
+    "awaiting_assets": {"generating_concepts"},
+    "generating_concepts": {"awaiting_concept_selection", "awaiting_final_approval"},
+    "awaiting_concept_selection": {"revising_design"},
+    "revising_design": {"generating_concepts", "awaiting_final_approval"},
+    "awaiting_final_approval": {"finalizing_assets", "revising_design"},
+    "finalizing_assets": {"delivered"},
+    "delivered": {"completed"},
+    "completed": set(),
+}
+
+
+def is_flyer_transition_allowed(from_s: str, to_s: str) -> bool:
+    return to_s in FLYER_TRANSITIONS.get(from_s, set())  # type: ignore[arg-type]
+
+
+class FlyerConfig(BaseModel):
+    """Hermes Flyer Studio settings. Default off; opt-in per customer."""
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    conversation_model: str = Field(default="default_hermes_gateway", min_length=1, max_length=120)
+    prompt_model: str = Field(default="default_hermes_gateway", min_length=1, max_length=120)
+    draft_image_model: str = Field(default="gpt-image-1-mini", min_length=1, max_length=120)
+    draft_image_quality: FlyerImageQuality = "low"
+    final_image_model: str = Field(default="gpt-image-1.5", min_length=1, max_length=120)
+    final_image_quality: FlyerImageQuality = "medium"
+    concept_count: int = Field(default=1, ge=1, le=3)
+    max_revision_rounds: int = Field(default=6, ge=1, le=20)
+    payment_provider: Literal["manual", "stripe", "razorpay", "other"] = "manual"
+    payment_checkout_url_template: str = Field(default="", max_length=1000)
+    plan_tiers: list["FlyerPlanTier"] = Field(default_factory=lambda: FlyerPlanTier.default_tiers(), min_length=1, max_length=10)
+    final_formats: list[FlyerOutputFormat] = Field(
+        default_factory=lambda: [
+            "whatsapp_image",
+            "instagram_post",
+            "instagram_story",
+            "printable_pdf",
+        ],
+        min_length=1,
+        max_length=4,
+    )
+
+
+class FlyerPlanTier(BaseModel):
+    """Config-driven flyer subscription tier."""
+    model_config = ConfigDict(extra="forbid")
+    plan_id: str = Field(min_length=1, max_length=40, pattern=r"^[a-z0-9_-]+$")
+    label: str = Field(min_length=1, max_length=120)
+    monthly_price_usd: float = Field(ge=0)
+    monthly_price_cents: Optional[int] = Field(default=None, ge=0)
+    included_flyers: Optional[int] = Field(default=None, ge=1)
+    currency: str = Field(default="USD", min_length=3, max_length=3)
+    description: str = Field(default="", max_length=300)
+
+    def price_cents(self) -> int:
+        if self.monthly_price_cents is not None:
+            return self.monthly_price_cents
+        return int(round(self.monthly_price_usd * 100))
+
+    @classmethod
+    def default_tiers(cls) -> list["FlyerPlanTier"]:
+        return [
+            cls(
+                plan_id="starter",
+                label="Starter",
+                monthly_price_usd=49.99,
+                monthly_price_cents=4999,
+                included_flyers=30,
+                description="30 flyers per month",
+            ),
+            cls(
+                plan_id="growth",
+                label="Growth",
+                monthly_price_usd=69.99,
+                monthly_price_cents=6999,
+                included_flyers=60,
+                description="60 flyers per month",
+            ),
+            cls(
+                plan_id="unlimited",
+                label="Unlimited",
+                monthly_price_usd=199.00,
+                monthly_price_cents=19900,
+                included_flyers=None,
+                description="Unlimited flyers per month",
+            ),
+        ]
+
+
+class FlyerBrandAsset(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    asset_id: str = Field(pattern=r"^B\d{4,}$")
+    kind: Literal["logo", "template"]
+    path: str = Field(min_length=1, max_length=500)
+    mime_type: str = Field(min_length=1, max_length=120)
+    sha256: str = Field(pattern=r"^[a-fA-F0-9]{64}$")
+    original_message_id: str = Field(min_length=1, max_length=200)
+    received_at: datetime
+    active: bool = True
+    notes: str = Field(default="", max_length=500)
+
+    @field_validator("path")
+    @classmethod
+    def _path_under_flyer_state(cls, v: str) -> str:
+        if ".." in Path(v).parts:
+            raise ValueError("brand asset path must not contain traversal")
+        root = os.environ.get("FLYER_STATE_ROOT", "/opt/shift-agent/state/flyer/")
+        try:
+            path_resolved = Path(v).resolve()
+            root_resolved = Path(root).resolve()
+            path_resolved.relative_to(root_resolved)
+        except ValueError:
+            raise ValueError(f"brand asset path must be under {root}")
+        return v
+
+
+class FlyerUsageEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reservation_id: str = Field(min_length=1, max_length=120)
+    project_id: str = Field(pattern=r"^F\d{4,}$")
+    customer_id: str = Field(pattern=r"^CUST\d{4,}$")
+    kind: Literal["reserved", "used", "released"]
+    count: int = Field(default=1, ge=1, le=1)
+    recorded_at: datetime
+    message_id: str = Field(min_length=1, max_length=200)
+
+
+class FlyerPaymentRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    provider: Literal["manual", "stripe", "razorpay", "other"]
+    payment_reference: str = Field(min_length=1, max_length=200)
+    plan_id: str = Field(min_length=1, max_length=40)
+    amount_cents: Optional[int] = Field(default=None, ge=0)
+    currency: str = Field(default="USD", min_length=3, max_length=3)
+    recorded_at: datetime
+
+
+class FlyerCustomerProfile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    customer_id: str = Field(pattern=r"^CUST\d{4,}$")
+    business_name: str = Field(min_length=1, max_length=160)
+    business_address: str = Field(min_length=1, max_length=300)
+    primary_chat_id: str = Field(default="", max_length=200)
+    onboarded_by_phone: Optional[E164Phone] = None
+    public_phone: E164Phone
+    business_whatsapp_number: E164Phone
+    authorized_request_numbers: list[E164Phone] = Field(default_factory=list, min_length=1, max_length=20)
+    business_category: str = Field(default="", max_length=120)
+    preferred_language: Literal["en", "te", "hi", "es", "mixed", "other"] = "en"
+    plan_id: str = Field(min_length=1, max_length=40)
+    status: Literal["payment_pending", "active", "suspended", "cancelled"] = "payment_pending"
+    created_at: datetime
+    updated_at: datetime
+    activated_at: Optional[datetime] = None
+    plan_started_at: Optional[datetime] = None
+    current_period_start: Optional[datetime] = None
+    current_period_end: Optional[datetime] = None
+    monthly_flyers_used: int = Field(default=0, ge=0)
+    billing_provider: Literal["manual", "stripe", "razorpay", "other"] = "manual"
+    payment_reference: str = Field(default="", max_length=200)
+    payment_amount_cents: Optional[int] = Field(default=None, ge=0)
+    payment_currency: str = Field(default="USD", min_length=3, max_length=3)
+    payment_checkout_url: str = Field(default="", max_length=1000)
+    pending_plan_id: str = Field(default="", max_length=40)
+    pending_plan_checkout_url: str = Field(default="", max_length=1000)
+    pending_plan_requested_at: Optional[datetime] = None
+    pending_account_command: str = Field(default="", max_length=80)
+    pending_account_value: str = Field(default="", max_length=300)
+    pending_account_requested_by: Optional[E164Phone] = None
+    pending_account_requested_at: Optional[datetime] = None
+    notes: str = Field(default="", max_length=1000)
+    brand_assets: list[FlyerBrandAsset] = Field(default_factory=list, max_length=50)
+    payment_records: list[FlyerPaymentRecord] = Field(default_factory=list, max_length=500)
+    usage_events: list[FlyerUsageEvent] = Field(default_factory=list, max_length=5000)
+
+    def is_authorized_sender(self, phone: Optional[str]) -> bool:
+        if not phone:
+            return False
+        try:
+            canonical = E164Phone.from_any(phone, country_code="US")
+        except ValueError:
+            return False
+        return canonical == self.business_whatsapp_number or canonical in self.authorized_request_numbers
+
+    def routable_phones(self) -> set[str]:
+        phones: set[str] = {str(self.business_whatsapp_number), *[str(phone) for phone in self.authorized_request_numbers]}
+        if self.onboarded_by_phone:
+            phones.add(str(self.onboarded_by_phone))
+        return phones
+
+    def owned_phone_numbers(self) -> set[str]:
+        phones = set(self.routable_phones())
+        phones.add(str(self.public_phone))
+        return phones
+
+    def is_account_admin(self, phone: Optional[str], chat_id: str = "", sender_role: str = "") -> bool:
+        del chat_id
+        if sender_role == "owner":
+            return True
+        if not phone:
+            return False
+        try:
+            canonical = E164Phone.from_any(phone, country_code="US")
+        except ValueError:
+            return False
+        return canonical == self.business_whatsapp_number or (
+            self.onboarded_by_phone is not None and canonical == self.onboarded_by_phone
+        )
+
+    def included_flyer_limit(self, plan_tiers: list["FlyerPlanTier"]) -> Optional[int]:
+        for tier in plan_tiers:
+            if tier.plan_id == self.plan_id:
+                return tier.included_flyers
+        return None
+
+    def usage_count_for_current_period(self) -> int:
+        start = self.current_period_start
+        end = self.current_period_end
+        latest: dict[str, FlyerUsageEvent] = {}
+        for event in self.usage_events:
+            if start and event.recorded_at < start:
+                continue
+            if end and event.recorded_at >= end:
+                continue
+            previous = latest.get(event.reservation_id)
+            if previous is None or event.recorded_at >= previous.recorded_at:
+                latest[event.reservation_id] = event
+        return sum(event.count for event in latest.values() if event.kind in {"reserved", "used"})
+
+    def quota_remaining(self, plan_tiers: list["FlyerPlanTier"]) -> Optional[int]:
+        limit = self.included_flyer_limit(plan_tiers)
+        if limit is None:
+            return None
+        return max(0, limit - self.usage_count_for_current_period())
+
+    def can_create_flyer(self, plan_tiers: list["FlyerPlanTier"]) -> bool:
+        remaining = self.quota_remaining(plan_tiers)
+        return remaining is None or remaining > 0
+
+
+class FlyerOnboardingSession(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    chat_id: str = Field(min_length=1, max_length=200)
+    sender_phone: Optional[E164Phone] = None
+    status: FlyerOnboardingStatus
+    started_at: datetime
+    updated_at: datetime
+    last_message_id: str = Field(default="", max_length=200)
+    business_name: str = Field(default="", max_length=160)
+    business_address: str = Field(default="", max_length=300)
+    public_phone: Optional[E164Phone] = None
+    business_whatsapp_number: Optional[E164Phone] = None
+    authorized_request_number: Optional[E164Phone] = None
+    business_category: str = Field(default="", max_length=120)
+    preferred_language: Literal["en", "te", "hi", "es", "mixed", "other"] = "en"
+    plan_id: str = Field(default="", max_length=40)
+    customer_id: str = Field(default="", max_length=40)
+    pending_brand_assets: list[FlyerBrandAsset] = Field(default_factory=list, max_length=20)
+
+
+class FlyerCustomerStore(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    schema_version: int = Field(default=1, ge=1)
+    next_customer_sequence: int = Field(default=1, ge=1)
+    next_brand_asset_sequence: int = Field(default=1, ge=1)
+    customers: list[FlyerCustomerProfile] = Field(default_factory=list, max_length=5000)
+    onboarding_sessions: list[FlyerOnboardingSession] = Field(default_factory=list, max_length=5000)
+
+    def find_customer_by_phone(self, phone: Optional[str]) -> Optional[FlyerCustomerProfile]:
+        if not phone:
+            return None
+        try:
+            canonical = E164Phone.from_any(phone, country_code="US")
+        except ValueError:
+            return None
+        matches = [customer for customer in self.customers if str(canonical) in customer.routable_phones()]
+        return matches[0] if len(matches) == 1 else None
+
+    def customer_ids_for_phone(self, phone: Optional[str], *, exclude_customer_id: str = "") -> list[str]:
+        if not phone:
+            return []
+        try:
+            canonical = E164Phone.from_any(phone, country_code="US")
+        except ValueError:
+            return []
+        return [
+            customer.customer_id
+            for customer in self.customers
+            if customer.customer_id != exclude_customer_id and str(canonical) in customer.owned_phone_numbers()
+        ]
+
+    def find_customer_by_id(self, customer_id: str) -> Optional[FlyerCustomerProfile]:
+        for customer in self.customers:
+            if customer.customer_id == customer_id:
+                return customer
+        return None
+
+    def find_session(self, chat_id: str, phone: Optional[str]) -> Optional[FlyerOnboardingSession]:
+        canonical: Optional[str] = None
+        if phone:
+            try:
+                canonical = E164Phone.from_any(phone, country_code="US")
+            except ValueError:
+                canonical = None
+        if canonical:
+            for session in self.onboarding_sessions:
+                if session.sender_phone == canonical:
+                    return session
+            return None
+        for session in self.onboarding_sessions:
+            if session.sender_phone is None and session.chat_id == chat_id:
+                return session
+        return None
+
+    def new_customer(
+        self,
+        *,
+        business_name: str,
+        business_address: str,
+        public_phone: str,
+        business_whatsapp_number: str,
+        authorized_request_number: str,
+        business_category: str,
+        preferred_language: str,
+        plan_id: str,
+        now: datetime,
+        billing_provider: str = "manual",
+        payment_checkout_url: str = "",
+        primary_chat_id: str = "",
+        onboarded_by_phone: Optional[str] = None,
+    ) -> FlyerCustomerProfile:
+        language = preferred_language if preferred_language in {"en", "te", "hi", "es", "mixed", "other"} else "en"
+        provider = billing_provider if billing_provider in {"manual", "stripe", "razorpay", "other"} else "manual"
+        candidate_phones = [
+            public_phone,
+            business_whatsapp_number,
+            authorized_request_number,
+            *([onboarded_by_phone] if onboarded_by_phone else []),
+        ]
+        conflicts: set[str] = set()
+        for phone in candidate_phones:
+            conflicts.update(self.customer_ids_for_phone(phone))
+        if conflicts:
+            raise ValueError(f"phone number already belongs to customer: {', '.join(sorted(conflicts))}")
+        customer = FlyerCustomerProfile(
+            customer_id=f"CUST{self.next_customer_sequence:04d}",
+            business_name=business_name,
+            business_address=business_address,
+            primary_chat_id=primary_chat_id,
+            onboarded_by_phone=E164Phone.from_any(onboarded_by_phone, country_code="US") if onboarded_by_phone else None,
+            public_phone=E164Phone.from_any(public_phone, country_code="US"),
+            business_whatsapp_number=E164Phone.from_any(business_whatsapp_number, country_code="US"),
+            authorized_request_numbers=[E164Phone.from_any(authorized_request_number, country_code="US")],
+            business_category=business_category,
+            preferred_language=language,  # type: ignore[arg-type]
+            plan_id=plan_id,
+            status="payment_pending",
+            created_at=now,
+            updated_at=now,
+            billing_provider=provider,  # type: ignore[arg-type]
+            payment_checkout_url=payment_checkout_url,
+        )
+        self.next_customer_sequence += 1
+        return customer
+
+
+class FlyerRequestFields(BaseModel):
+    """LLM-extracted flyer requirements. Extras are ignored by design."""
+    model_config = ConfigDict(extra="ignore")
+    event_or_business_name: Optional[str] = Field(default=None, min_length=1, max_length=160)
+    event_date: Optional[str] = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    event_time: Optional[str] = Field(default=None, max_length=80)
+    venue_or_location: Optional[str] = Field(default=None, min_length=1, max_length=240)
+    contact_info: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    preferred_language: Literal["en", "te", "hi", "es", "mixed", "other"] = "en"
+    style_preference: str = Field(default="", max_length=500)
+    output_formats: list[FlyerOutputFormat] = Field(default_factory=list, max_length=4)
+    notes: str = Field(default="", max_length=2000)
+
+    @field_validator("event_date")
+    @classmethod
+    def _validate_calendar_date(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        try:
+            datetime.fromisoformat(v).date()
+        except ValueError as e:
+            raise ValueError(f"event_date must be a valid ISO date: {v!r} ({e})") from e
+        return v
+
+    def missing_required_fields(self) -> list[str]:
+        if self._has_template_reference():
+            return [name for name in ["event_or_business_name"] if not (getattr(self, name) or "").strip()]
+        if self._has_price_list_or_menu():
+            return [
+                name for name in ["event_or_business_name", "contact_info"]
+                if not (getattr(self, name) or "").strip()
+            ]
+        required = [
+            "event_or_business_name",
+            "event_time",
+            "venue_or_location",
+            "contact_info",
+        ]
+        if not self._has_recurring_schedule():
+            required.insert(1, "event_date")
+        return [name for name in required if not (getattr(self, name) or "").strip()]
+
+    def _has_recurring_schedule(self) -> bool:
+        text = f"{self.notes} {self.style_preference}".lower()
+        return any(
+            marker in text
+            for marker in (
+                "weekend",
+                "saturday",
+                "sunday",
+                "daily",
+                "weekday",
+                "weekdays",
+                "every ",
+                "starts from",
+                "start from",
+            )
+        )
+
+    def _has_price_list_or_menu(self) -> bool:
+        text = f"{self.notes} {self.style_preference}".lower()
+        return "$" in text or any(
+            marker in text
+            for marker in (
+                "menu item",
+                "menu items",
+                "items",
+                "price",
+                "combo",
+                "/piece",
+                "/lb",
+                "tray",
+                "special",
+                "offer",
+                "deal",
+            )
+        )
+
+    def _has_template_reference(self) -> bool:
+        text = f"{self.notes} {self.style_preference}".lower()
+        return any(
+            marker in text
+            for marker in ("uploaded template", "uploaded reference", "reference image")
+        )
+
+
+class FlyerAsset(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    asset_id: str = Field(pattern=r"^A\d{4,}$")
+    kind: FlyerAssetKind
+    source: Literal["whatsapp", "generated", "rendered", "uploaded"]
+    path: str = Field(min_length=1, max_length=500)
+    mime_type: str = Field(min_length=1, max_length=120)
+    sha256: str = Field(pattern=r"^[a-fA-F0-9]{64}$")
+    original_message_id: str = Field(default="", max_length=200)
+    received_at: datetime
+
+    @field_validator("path")
+    @classmethod
+    def _path_under_flyer_state(cls, v: str) -> str:
+        if ".." in Path(v).parts:
+            raise ValueError("asset path must not contain traversal")
+        root = os.environ.get("FLYER_STATE_ROOT", "/opt/shift-agent/state/flyer/")
+        try:
+            path_resolved = Path(v).resolve()
+            root_resolved = Path(root).resolve()
+            path_resolved.relative_to(root_resolved)
+        except ValueError:
+            raise ValueError(f"asset path must be under {root}")
+        return v
+
+
+class FlyerConcept(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    concept_id: str = Field(pattern=r"^C[1-3]$")
+    title: str = Field(min_length=1, max_length=120)
+    style_summary: str = Field(min_length=1, max_length=500)
+    preview_asset_id: str = Field(pattern=r"^A\d{4,}$")
+    prompt: str = Field(default="", max_length=4000)
+    created_at: datetime
+    selected_at: Optional[datetime] = None
+
+
+class FlyerRevision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    revision_id: str = Field(pattern=r"^R\d{3,}$")
+    message_id: str = Field(min_length=1, max_length=200)
+    requested_at: datetime
+    request_text: str = Field(min_length=1, max_length=2000)
+    applied: bool = False
+    resulting_version: Optional[int] = Field(default=None, ge=1)
+
+
+class FlyerBrandKit(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    customer_phone: E164Phone
+    logos: list[FlyerAsset] = Field(default_factory=list, max_length=10)
+    colors: list[Annotated[str, Field(pattern=r"^#[0-9a-fA-F]{6}$")]] = Field(default_factory=list, max_length=10)
+    fonts: list[Annotated[str, Field(min_length=1, max_length=120)]] = Field(default_factory=list, max_length=10)
+    recurring_contact_info: str = Field(default="", max_length=500)
+    preferred_language: Literal["en", "te", "hi", "es", "mixed", "other"] = "en"
+    prior_style_notes: str = Field(default="", max_length=2000)
+    updated_at: Optional[datetime] = None
+
+
+class FlyerProject(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project_id: str = Field(pattern=r"^F\d{4,}$")
+    status: FlyerWorkflowStatus
+    customer_phone: E164Phone
+    created_at: datetime
+    updated_at: datetime
+    original_message_id: str = Field(min_length=1, max_length=200)
+    raw_request: str = Field(min_length=1, max_length=2000)
+    fields: FlyerRequestFields = Field(default_factory=FlyerRequestFields)
+    assets: list[FlyerAsset] = Field(default_factory=list, max_length=50)
+    concepts: list[FlyerConcept] = Field(default_factory=list, max_length=3)
+    selected_concept_id: Optional[str] = Field(default=None, pattern=r"^C[1-3]$")
+    revisions: list[FlyerRevision] = Field(default_factory=list, max_length=50)
+    version: int = Field(default=1, ge=1)
+    final_asset_ids: list[str] = Field(default_factory=list, max_length=4)
+    approved_message_id: str = Field(default="", max_length=200)
+
+    @model_validator(mode="after")
+    def _selected_concept_must_exist(self) -> "FlyerProject":
+        if self.selected_concept_id:
+            concept_ids = {concept.concept_id for concept in self.concepts}
+            if self.selected_concept_id not in concept_ids:
+                raise ValueError("selected_concept_id must reference an existing concept")
+        return self
+
+
+class FlyerProjectStore(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    schema_version: int = Field(default=1, ge=1)
+    next_sequence: int = Field(default=1, ge=1)
+    projects: list[FlyerProject] = Field(default_factory=list)
 
 
 class CateringLeadExtractedFields(BaseModel):
@@ -1423,6 +2015,7 @@ class Config(BaseModel):
     eod: EodConfig = Field(default_factory=EodConfig)
     multi_location: MultiLocationConfig = Field(default_factory=MultiLocationConfig)
     catering: CateringConfig = Field(default_factory=CateringConfig)
+    flyer: FlyerConfig = Field(default_factory=FlyerConfig)
     # Tier 2 agents (all default enabled=False; opt-in per customer)
     inventory: InventoryConfig = Field(default_factory=InventoryConfig)
     supplier: SupplierConfig = Field(default_factory=SupplierConfig)
@@ -2129,6 +2722,86 @@ class ExpenseOrphanDetected(_BaseEntry):
 # ─────────────────────────────────────────────────────────────────
 
 
+class FlyerProjectCreated(_BaseEntry):
+    type: Literal["flyer_project_created"]
+    project_id: str = Field(pattern=r"^F\d{4,}$")
+    customer_phone: E164Phone
+    original_message_id: str = Field(min_length=1, max_length=200)
+
+
+class FlyerStatusChange(_BaseEntry):
+    type: Literal["flyer_status_change"]
+    project_id: str = Field(pattern=r"^F\d{4,}$")
+    from_status: FlyerWorkflowStatus
+    to_status: FlyerWorkflowStatus
+    actor: Literal["system", "customer", "operator"]
+    reason: str = Field(default="", max_length=500)
+
+
+class FlyerAssetsDelivered(_BaseEntry):
+    type: Literal["flyer_assets_delivered"]
+    project_id: str = Field(pattern=r"^F\d{4,}$")
+    customer_phone: E164Phone
+    asset_ids: list[str] = Field(min_length=1, max_length=10)
+    outbound_message_ids: list[str] = Field(default_factory=list, max_length=10)
+
+
+class FlyerDeliveryFailed(_BaseEntry):
+    type: Literal["flyer_delivery_failed"]
+    project_id: str = Field(pattern=r"^F\d{4,}$")
+    customer_phone: E164Phone
+    asset_id: str = Field(min_length=1, max_length=80)
+    status: str = Field(min_length=1, max_length=80)
+    error: str = Field(default="", max_length=1000)
+
+
+class FlyerCustomerCreated(_BaseEntry):
+    type: Literal["flyer_customer_created"]
+    customer_id: str = Field(pattern=r"^CUST\d{4,}$")
+    business_name: str = Field(min_length=1, max_length=160)
+    plan_id: str = Field(min_length=1, max_length=40)
+    primary_chat_id: str = Field(default="", max_length=200)
+
+
+class FlyerCustomerActivated(_BaseEntry):
+    type: Literal["flyer_customer_activated"]
+    customer_id: str = Field(pattern=r"^CUST\d{4,}$")
+    plan_id: str = Field(min_length=1, max_length=40)
+    provider: Literal["manual", "stripe", "razorpay", "other"]
+    payment_reference: str = Field(min_length=1, max_length=200)
+    payment_amount_cents: Optional[int] = Field(default=None, ge=0)
+    payment_currency: str = Field(default="USD", min_length=3, max_length=3)
+    idempotent_replay: bool = False
+
+
+class FlyerAccountUpdated(_BaseEntry):
+    type: Literal["flyer_account_updated"]
+    customer_id: str = Field(pattern=r"^CUST\d{4,}$")
+    command: str = Field(min_length=1, max_length=80)
+    actor_phone: Optional[E164Phone] = None
+    actor_role: str = Field(default="", max_length=40)
+    allowed: bool
+    reason: str = Field(default="", max_length=500)
+
+
+class FlyerUsageRecorded(_BaseEntry):
+    type: Literal["flyer_usage_recorded"]
+    customer_id: str = Field(pattern=r"^CUST\d{4,}$")
+    project_id: str = Field(pattern=r"^F\d{4,}$")
+    reservation_id: str = Field(min_length=1, max_length=120)
+    kind: Literal["reserved", "used", "released"]
+    usage_count: int = Field(default=0, ge=0)
+
+
+class FlyerQuotaBlocked(_BaseEntry):
+    type: Literal["flyer_quota_blocked"]
+    customer_id: str = Field(pattern=r"^CUST\d{4,}$")
+    project_id: str = Field(pattern=r"^F\d{4,}$")
+    plan_id: str = Field(min_length=1, max_length=40)
+    usage_count: int = Field(default=0, ge=0)
+    limit: int = Field(ge=1)
+
+
 class CateringLeadCreated(_BaseEntry):
     type: Literal["catering_lead_created"]
     lead_id: str = Field(min_length=1)
@@ -2642,6 +3315,8 @@ class CfRouterIntercepted(_BaseEntry):
         "f7_primary_followup_suppressed",  # PR-CF1d 2026-05-12
         "f7_proposal_request",
         "f7_proposal_selection",
+        "flyer_primary_project_created",
+        "flyer_primary_failed",
         "error",
     ]
     chat_id: str = Field(min_length=1, max_length=200)
@@ -3031,6 +3706,16 @@ LogEntry = Annotated[
         Annotated[ExpenseReceiptPruned, Tag("expense_receipt_pruned")],
         Annotated[ExpenseNonOwnerUndoDeclined, Tag("expense_non_owner_undo_declined")],
         Annotated[ExpenseOrphanDetected, Tag("expense_orphan_detected")],
+        # Hermes Flyer Studio
+        Annotated[FlyerProjectCreated, Tag("flyer_project_created")],
+        Annotated[FlyerStatusChange, Tag("flyer_status_change")],
+        Annotated[FlyerAssetsDelivered, Tag("flyer_assets_delivered")],
+        Annotated[FlyerDeliveryFailed, Tag("flyer_delivery_failed")],
+        Annotated[FlyerCustomerCreated, Tag("flyer_customer_created")],
+        Annotated[FlyerCustomerActivated, Tag("flyer_customer_activated")],
+        Annotated[FlyerAccountUpdated, Tag("flyer_account_updated")],
+        Annotated[FlyerUsageRecorded, Tag("flyer_usage_recorded")],
+        Annotated[FlyerQuotaBlocked, Tag("flyer_quota_blocked")],
         # PR-D1 forward-compat shim — UNKNOWN tags route here
         Annotated[_UnknownLogEntry, Tag("_unknown_")],
     ],
@@ -3081,6 +3766,11 @@ __all__ = [
     "CateringLearningSource", "CateringLearningProposalHealth",
     "CateringLearningSummary",
     "is_catering_terminal", "CATERING_TERMINAL_STATUSES",
+    "FlyerConfig", "FlyerWorkflowStatus", "FlyerOnboardingStatus", "FlyerOutputFormat", "FlyerImageQuality",
+    "FlyerAssetKind", "FLYER_TRANSITIONS", "is_flyer_transition_allowed",
+    "FlyerPlanTier", "FlyerBrandAsset", "FlyerUsageEvent", "FlyerPaymentRecord", "FlyerCustomerProfile", "FlyerOnboardingSession", "FlyerCustomerStore",
+    "FlyerRequestFields", "FlyerAsset", "FlyerConcept", "FlyerRevision",
+    "FlyerBrandKit", "FlyerProject", "FlyerProjectStore",
     # v0.3 status-machine + helpers
     "CATERING_TRANSITIONS", "is_catering_transition_allowed",
     "assert_rejection_reason_complete",
@@ -3104,6 +3794,10 @@ __all__ = [
     "ExpenseReversalRequested", "ExpenseReversed",
     "ExpenseReceiptPruned", "ExpenseNonOwnerUndoDeclined",
     "ExpenseOrphanDetected",
+    "FlyerProjectCreated", "FlyerStatusChange",
+    "FlyerAssetsDelivered", "FlyerDeliveryFailed",
+    "FlyerCustomerCreated", "FlyerCustomerActivated", "FlyerAccountUpdated",
+    "FlyerUsageRecorded", "FlyerQuotaBlocked",
     "Proposal", "ProposalId", "ProposalCode",
     "AwaitingProposal", "ApprovedProposal", "ReconcilingProposal", "SentProposal",
     "SendFailedProposal", "AcceptedProposal", "DeclinedProposal", "DeniedByOwnerProposal",

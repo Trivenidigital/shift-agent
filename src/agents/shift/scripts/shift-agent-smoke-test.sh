@@ -35,10 +35,30 @@ for script in \
     /usr/local/bin/send-routing-accuracy-summary \
     /usr/local/bin/lookup-prior-leads-by-phone \
     /usr/local/bin/create-catering-proposal-options \
-    /usr/local/bin/select-catering-proposal ; do
+    /usr/local/bin/select-catering-proposal \
+    /usr/local/bin/create-flyer-project \
+    /usr/local/bin/update-flyer-project \
+    /usr/local/bin/generate-flyer-concepts \
+    /usr/local/bin/finalize-flyer-assets \
+    /usr/local/bin/handle-flyer-onboarding \
+    /usr/local/bin/store-flyer-brand-asset \
+    /usr/local/bin/manage-flyer-account \
+    /usr/local/bin/send-flyer-package ; do
     [ -x "$script" ] || { echo "FAIL: $script missing or not executable"; exit 1; }
 done
 echo "✓ All scripts present + executable"
+
+BRIDGE_JS="/root/.hermes/hermes-agent/scripts/whatsapp-bridge/bridge.js"
+if [ -f "$BRIDGE_JS" ]; then
+    grep -q "app.post('/send-media'" "$BRIDGE_JS" || {
+        echo "FAIL: WhatsApp bridge missing /send-media endpoint required for Flyer Studio delivery"
+        exit 1
+    }
+    echo "✓ WhatsApp bridge exposes /send-media"
+else
+    echo "FAIL: WhatsApp bridge source not found at $BRIDGE_JS"
+    exit 1
+fi
 
 # 2. Python modules importable + safe_io chokepoint symbols present
 # Symbol list lives in src/platform/scripts/check-safe-io-symbols — single
@@ -47,6 +67,9 @@ if ! "$PY" -c "
 import sys
 sys.path.insert(0, '/opt/shift-agent')
 import schemas, safe_io, exit_codes
+import flyer_render
+import flyer_onboarding
+import flyer_account
 print('schema classes:', [c for c in dir(schemas) if not c.startswith('_')][:5])
 " > /dev/null; then
     echo "FAIL: Python modules don't import"
@@ -107,7 +130,11 @@ ok, signals = ma.classify_catering('catering for 50 people event next Saturday f
 assert ok is True, f'classifier regressed (positive case failed): signals={signals}'
 ok2, _ = ma.classify_catering('hi')
 assert ok2 is False, 'classifier regressed (too-short case)'
-print('cf-router plugin: actions.py importable + classify_catering OK')
+flyer_ok, flyer_signals = ma.classify_flyer_intent('Need flyer for Ugadi Specials with food style')
+assert flyer_ok is True, f'flyer classifier regressed: signals={flyer_signals}'
+generic_flyer_ok, _ = ma.classify_flyer_intent('Need catering for 80 people event Saturday food delivered')
+assert generic_flyer_ok is False, 'flyer classifier stole generic catering'
+print('cf-router plugin: actions.py importable + classifiers OK')
 " > /dev/null; then
         echo "FAIL: cf-router plugin actions.py broken — would silently fail at first inbound"
         exit 1

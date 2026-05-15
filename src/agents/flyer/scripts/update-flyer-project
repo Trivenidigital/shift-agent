@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""Update Flyer Studio project fields or status."""
+from __future__ import annotations
+
+import argparse
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+import sys
+
+SRC_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(SRC_ROOT / "platform"))
+
+from schemas import (  # noqa: E402
+    FlyerProjectStore,
+    FlyerRequestFields,
+    FlyerRevision,
+    is_flyer_transition_allowed,
+)
+from safe_io import FileLock, atomic_write_text  # noqa: E402
+
+
+MONTHS = {
+    "jan": 1, "january": 1,
+    "feb": 2, "february": 2,
+    "mar": 3, "march": 3,
+    "apr": 4, "april": 4,
+    "may": 5,
+    "jun": 6, "june": 6,
+    "jul": 7, "july": 7,
+    "aug": 8, "august": 8,
+    "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10,
+    "nov": 11, "november": 11,
+    "dec": 12, "december": 12,
+}
+
+
+def extract_revision_field_updates(project, text: str) -> dict[str, str]:
+    import re
+
+    updates: dict[str, str] = {}
+    body = " ".join((text or "").split())
+    lower = body.lower()
+    current_date = project.fields.event_date or ""
+    month_day = re.search(
+        r"\b(?:change|move|set|update)?\s*(?:the\s*)?date\s*(?:from\s+[a-z]+\s+\d{1,2}\s+)?(?:to|as|=|:)?\s*"
+        r"(?P<month>jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(?P<day>\d{1,2})\b",
+        lower,
+    )
+    day_only = re.search(
+        r"\b(?:change|move|set|update)?\s*(?:the\s*)?date\s*(?:from\s+[a-z]+\s+\d{1,2}\s+)?(?:to|as|=|:)?\s*(?P<day>\d{1,2})(?:st|nd|rd|th)?\b",
+        lower,
+    )
+    if month_day and current_date:
+        year = int(current_date[:4])
+        month = MONTHS[month_day.group("month")]
+        day = int(month_day.group("day"))
+        updates["event_date"] = datetime(year, month, day).date().isoformat()
+    elif day_only and current_date:
+        year, month, _old_day = [int(part) for part in current_date.split("-")]
+        day = int(day_only.group("day"))
+        updates["event_date"] = datetime(year, month, day).date().isoformat()
+
+    time_match = re.search(
+        r"\b(?:time\s*)?(?:from\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s+)?(?:to|as|=|:)\s*"
+        r"(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<ampm>am|pm)\b",
+        lower,
+    )
+    if time_match:
+        hour = int(time_match.group("hour"))
+        minute = int(time_match.group("minute") or "0")
+        ampm = time_match.group("ampm")
+        if ampm == "pm" and hour != 12:
+            hour += 12
+        if ampm == "am" and hour == 12:
+            hour = 0
+        updates["event_time"] = f"{hour:02d}:{minute:02d}"
+    return updates
+
+
+STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
+
+
+def main() -> int:
+    p = argparse.ArgumentParser()
+    p.add_argument("--project-id", required=True)
+    p.add_argument("--fields-json", default="")
+    p.add_argument("--status", default="")
+    p.add_argument("--select-concept", choices=["C1", "C2", "C3"], default="")
+    p.add_argument("--revision-text", default="")
+    p.add_argument("--message-id", default="")
+    p.add_argument("--approve-message-id", default="")
+    p.add_argument("--state-path", default=str(STATE_PATH))
+    args = p.parse_args()
+
+    state_path = Path(args.state_path)
+    with FileLock(Path(str(state_path) + ".lock")):
+        store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
+        for idx, project in enumerate(store.projects):
+            if project.project_id != args.project_id:
+                continue
+            updated = project
+            if args.fields_json:
+                fields = project.fields.model_copy(update=FlyerRequestFields.model_validate_json(args.fields_json).model_dump(exclude_none=True))
+                updated = updated.model_copy(update={"fields": fields})
+            if args.status:
+                if not is_flyer_transition_allowed(updated.status, args.status):
+                    raise SystemExit(f"invalid transition {updated.status}->{args.status}")
+                updated = updated.model_copy(update={"status": args.status})
+            if args.select_concept:
+                concept_ids = {c.concept_id for c in updated.concepts}
+                if args.select_concept not in concept_ids:
+                    raise SystemExit(f"concept not found on project: {args.select_concept}")
+                if not is_flyer_transition_allowed(updated.status, "revising_design"):
+                    raise SystemExit(f"invalid transition {updated.status}->revising_design")
+                now = datetime.now(timezone.utc)
+                concepts = [
+                    c.model_copy(update={"selected_at": now}) if c.concept_id == args.select_concept else c
+                    for c in updated.concepts
+                ]
+                updated = updated.model_copy(update={
+                    "selected_concept_id": args.select_concept,
+                    "concepts": concepts,
+                    "status": "revising_design",
+                })
+            if args.revision_text:
+                if not args.message_id:
+                    raise SystemExit("--message-id is required with --revision-text")
+                target_status = "revising_design"
+                if updated.status != target_status:
+                    if not is_flyer_transition_allowed(updated.status, target_status):
+                        raise SystemExit(f"invalid transition {updated.status}->{target_status}")
+                    updated = updated.model_copy(update={"status": target_status})
+                revision = FlyerRevision(
+                    revision_id=f"R{len(updated.revisions) + 1:03d}",
+                    message_id=args.message_id,
+                    requested_at=datetime.now(timezone.utc),
+                    request_text=args.revision_text,
+                    applied=False,
+                )
+                field_updates = extract_revision_field_updates(updated, args.revision_text)
+                if field_updates:
+                    fields = updated.fields.model_copy(update=field_updates)
+                    updated = updated.model_copy(update={
+                        "fields": fields,
+                    })
+                updated = updated.model_copy(update={
+                    "concepts": [],
+                    "selected_concept_id": None,
+                    "final_asset_ids": [],
+                })
+                updated = updated.model_copy(update={
+                    "revisions": [*updated.revisions, revision],
+                    "version": updated.version + 1,
+                })
+            if args.approve_message_id:
+                unapplied = [r.revision_id for r in updated.revisions if not r.applied]
+                if unapplied:
+                    raise SystemExit(f"cannot approve with unapplied revisions: {','.join(unapplied)}")
+                if updated.status == "revising_design" and not updated.concepts:
+                    raise SystemExit("cannot approve while revised design has not been regenerated")
+                if not is_flyer_transition_allowed(updated.status, "awaiting_final_approval"):
+                    if updated.status != "awaiting_final_approval":
+                        raise SystemExit(f"project must be awaiting_final_approval before approval, got {updated.status}")
+                if not is_flyer_transition_allowed("awaiting_final_approval", "finalizing_assets"):
+                    raise SystemExit("schema transition awaiting_final_approval->finalizing_assets is unavailable")
+                updated = updated.model_copy(update={
+                    "status": "finalizing_assets",
+                    "approved_message_id": args.approve_message_id,
+                })
+            updated = updated.model_copy(update={"updated_at": datetime.now(timezone.utc)})
+            store.projects[idx] = updated
+            atomic_write_text(state_path, store.model_dump_json(indent=2))
+            print(updated.model_dump_json())
+            return 0
+    raise SystemExit(f"project not found: {args.project_id}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

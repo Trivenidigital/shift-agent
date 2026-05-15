@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""Finalize Flyer Studio assets after exact customer APPROVE."""
+from __future__ import annotations
+
+import argparse
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+import sys
+
+SRC_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(SRC_ROOT / "platform"))
+
+from schemas import Config, FlyerProjectStore  # noqa: E402
+from safe_io import FileLock, atomic_write_text, load_yaml_model  # noqa: E402
+try:
+    from flyer_render import build_asset_manifest, next_asset_number, render_final_package  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.render import build_asset_manifest, next_asset_number, render_final_package  # noqa: E402
+
+
+STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
+FINAL_DIR = Path("/opt/shift-agent/state/flyer/finals")
+CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
+
+
+def main() -> int:
+    p = argparse.ArgumentParser()
+    p.add_argument("--project-id", required=True)
+    p.add_argument("--approved-message-id", required=True)
+    p.add_argument("--state-path", default=str(STATE_PATH))
+    p.add_argument("--final-dir", default=str(FINAL_DIR))
+    p.add_argument("--config-path", default=str(CONFIG_PATH))
+    args = p.parse_args()
+
+    state_path = Path(args.state_path)
+    cfg = load_yaml_model(Path(args.config_path), Config)
+    with FileLock(Path(str(state_path) + ".lock")):
+        store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
+        for idx, project in enumerate(store.projects):
+            if project.project_id != args.project_id:
+                continue
+            now = datetime.now(timezone.utc)
+            if project.status != "finalizing_assets":
+                raise SystemExit(f"project must be finalizing_assets, got {project.status}")
+            specs = render_final_package(
+                project,
+                Path(args.final_dir),
+                model=cfg.flyer.final_image_model,
+                quality=cfg.flyer.final_image_quality,
+            )
+            assets = build_asset_manifest(
+                specs,
+                first_asset_number=next_asset_number(project),
+                source="rendered",
+                original_message_id=args.approved_message_id,
+            )
+            store.projects[idx] = project.model_copy(update={
+                "status": "delivered",
+                "approved_message_id": args.approved_message_id,
+                "assets": [*project.assets, *assets],
+                "final_asset_ids": [asset.asset_id for asset in assets],
+                "updated_at": now,
+            })
+            atomic_write_text(state_path, store.model_dump_json(indent=2))
+            print(json.dumps({"project_id": args.project_id, "final_asset_count": 4}))
+            return 0
+    raise SystemExit(f"project not found: {args.project_id}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

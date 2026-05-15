@@ -1,0 +1,276 @@
+#!/usr/bin/env python3
+"""Create or resume a Flyer Studio project."""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import mimetypes
+import re
+import shutil
+from datetime import datetime, timezone
+from pathlib import Path
+import sys
+
+SRC_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(SRC_ROOT / "platform"))
+sys.path.insert(0, str(SRC_ROOT))
+
+from schemas import FlyerAsset, FlyerProject, FlyerProjectStore, FlyerProjectCreated, FlyerRequestFields  # noqa: E402
+from safe_io import FileLock, atomic_write_text  # noqa: E402
+
+
+STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
+ASSET_DIR = Path("/opt/shift-agent/state/flyer/assets")
+MONTHS = {
+    "jan": 1, "january": 1,
+    "feb": 2, "february": 2,
+    "mar": 3, "march": 3,
+    "apr": 4, "april": 4,
+    "may": 5,
+    "jun": 6, "june": 6,
+    "jul": 7, "july": 7,
+    "aug": 8, "august": 8,
+    "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10,
+    "nov": 11, "november": 11,
+    "dec": 12, "december": 12,
+}
+
+
+def _load_store(path: Path) -> FlyerProjectStore:
+    if not path.exists():
+        return FlyerProjectStore()
+    return FlyerProjectStore.model_validate(json.loads(path.read_text(encoding="utf-8")))
+
+
+def _write_store(path: Path, store: FlyerProjectStore) -> None:
+    atomic_write_text(path, store.model_dump_json(indent=2))
+
+
+def _extract_fields(raw_request: str, *, now: datetime) -> FlyerRequestFields:
+    text = " ".join(raw_request.split())
+    event_name = ""
+    date_value = None
+    time_value = None
+    venue = ""
+    contact = ""
+    language = "en"
+    style = ""
+    formats: list[str] = []
+
+    event_match = re.search(
+        r"\b(?:need|create|make|generate)?\s*(?:a\s+)?(?:flyer|flier|poster|banner)\s+for\s+(.+?)(?=\s+(?:jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\b|\.|$)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if event_match:
+        event_name = event_match.group(1).strip(" .")
+        event_name = re.sub(r"^(?:customer|business|client)\s+", "", event_name, flags=re.IGNORECASE).strip(" .")
+    if not event_name:
+        menu_match = re.search(
+            r"\bcreate\s+(.+?\b(?:flyer|flier|poster|banner))\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if menu_match:
+            event_name = menu_match.group(1).strip(" .")
+            event_name = re.sub(r"\s+\b(?:flyer|flier|poster|banner)\b$", "", event_name, flags=re.IGNORECASE).strip(" .")
+            event_name = re.sub(r"^(?:customer|business|client)\s+", "", event_name, flags=re.IGNORECASE).strip(" .")
+    if not event_name:
+        offer_match = re.search(
+            r"\b((?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)?\s*"
+            r"[a-z0-9 '&-]{2,80}?\b(?:night\s+special|special|menu|flyer|flier|poster|banner))\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if offer_match:
+            event_name = offer_match.group(1).strip(" .")
+
+    date_match = re.search(
+        r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})(?:,\s*(\d{4}))?",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if date_match:
+        month = MONTHS[date_match.group(1).lower()]
+        day = int(date_match.group(2))
+        year = int(date_match.group(3) or now.year)
+        candidate = datetime(year, month, day, tzinfo=timezone.utc).date()
+        if not date_match.group(3) and candidate < now.date():
+            candidate = datetime(year + 1, month, day, tzinfo=timezone.utc).date()
+        date_value = candidate.isoformat()
+
+    time_match = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(AM|PM)\b", text, flags=re.IGNORECASE)
+    if time_match:
+        hour = int(time_match.group(1))
+        minute = int(time_match.group(2) or "00")
+        meridiem = time_match.group(3).upper()
+        if meridiem == "PM" and hour != 12:
+            hour += 12
+        if meridiem == "AM" and hour == 12:
+            hour = 0
+        time_value = f"{hour:02d}:{minute:02d}"
+
+    venue_match = re.search(
+        r"\bat\s+(.+?)(?=\.|,\s*contact\b|\s+contact\b|\s+telugu\b|\s+hindi\b|\s+spanish\b|$)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if venue_match:
+        venue = venue_match.group(1).strip(" .")
+    location_match = re.search(
+        r"\blocation\s+(.+?)(?=\.|,\s*(?:address|phone|contact)\b|\s+(?:address|phone|contact)\b|$)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if location_match:
+        venue = location_match.group(1).strip(" .")
+    address_match = re.search(
+        r"\baddress[:\s]+(.+?)(?=\.|,\s*(?:phone|contact)\b|\s+(?:phone|contact)\b|$)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if address_match:
+        address = address_match.group(1).strip(" .")
+        venue = f"{venue}, {address}" if venue else address
+
+    contact_match = re.search(r"\bcontact\s+(.+?)(?=\.|$)", text, flags=re.IGNORECASE)
+    if contact_match:
+        contact = contact_match.group(1).strip(" .")
+    phone_match = re.search(
+        r"\bphone[:\s]+((?:\+?1[\s.-]*)?\(?\d{3}\)?[\s.-]*\d{3}[\s.-]*\d{4})\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if phone_match:
+        contact = phone_match.group(1).strip(" .")
+
+    lower = text.lower()
+    if "uploaded template/reference" in lower and event_name.lower() in {"flyer", "create flyer", "uploaded flyer template"}:
+        event_name = "Thursday Dosa Night Special" if "dosa" in lower else "Uploaded Flyer Template"
+    if "telugu" in lower:
+        language = "te"
+    elif "hindi" in lower:
+        language = "hi"
+    elif "spanish" in lower:
+        language = "es"
+    if "style" in lower:
+        style_match = re.search(r"([^.]*\bstyle\b)", text, flags=re.IGNORECASE)
+        if style_match:
+            style = style_match.group(1).strip(" .")
+    if not style and any(term in lower for term in ("menu item", "breakfast", "lunch", "dinner", "specials", "food")):
+        style = "professional local food menu flyer with appetizing photography, strong price readability, and brand-forward retail design"
+    if not style and ("$" in lower or any(term in lower for term in ("price", "combo", "/piece", "/lb", "tray", "special"))):
+        style = "professional local food menu flyer with appetizing photography, strong price readability, and brand-forward retail design"
+    if not event_name and "uploaded template/reference" in lower:
+        event_name = "Thursday Dosa Night Special" if "dosa" in lower else "Uploaded Flyer Template"
+    for label, value in [
+        ("whatsapp", "whatsapp_image"),
+        ("instagram post", "instagram_post"),
+        ("insta post", "instagram_post"),
+        ("story", "instagram_story"),
+        ("pdf", "printable_pdf"),
+        ("print", "printable_pdf"),
+    ]:
+        if label in lower and value not in formats:
+            formats.append(value)
+
+    return FlyerRequestFields(
+        event_or_business_name=event_name or None,
+        event_date=date_value,
+        event_time=time_value,
+        venue_or_location=venue or None,
+        contact_info=contact or None,
+        preferred_language=language,
+        style_preference=style,
+        output_formats=formats,
+        notes=text,
+    )
+
+
+def _copy_reference_asset(
+    media_path: Path,
+    *,
+    project_id: str,
+    message_id: str,
+    asset_dir: Path,
+    now: datetime,
+) -> FlyerAsset | None:
+    if not media_path.exists() or not media_path.is_file():
+        return None
+    suffix = media_path.suffix.lower() or ".jpg"
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    dest = asset_dir / f"{project_id}-reference{suffix}"
+    shutil.copy2(media_path, dest)
+    data = dest.read_bytes()
+    return FlyerAsset(
+        asset_id="A0001",
+        kind="reference_image",
+        source="whatsapp",
+        path=str(dest),
+        mime_type=mimetypes.guess_type(str(dest))[0] or "image/jpeg",
+        sha256=hashlib.sha256(data).hexdigest(),
+        original_message_id=message_id,
+        received_at=now,
+    )
+
+
+def main() -> int:
+    p = argparse.ArgumentParser()
+    p.add_argument("--customer-phone", required=True)
+    p.add_argument("--message-id", required=True)
+    p.add_argument("--raw-request", required=True)
+    p.add_argument("--reference-media-path", default="")
+    p.add_argument("--state-path", default=str(STATE_PATH))
+    p.add_argument("--asset-dir", default=str(ASSET_DIR))
+    args = p.parse_args()
+
+    state_path = Path(args.state_path)
+    with FileLock(Path(str(state_path) + ".lock")):
+        store = _load_store(state_path)
+        for project in store.projects:
+            if project.original_message_id == args.message_id:
+                print(project.model_dump_json())
+                return 0
+
+        now = datetime.now(timezone.utc)
+        fields = _extract_fields(args.raw_request, now=now)
+        project_id = f"F{store.next_sequence:04d}"
+        reference_asset = None
+        if args.reference_media_path:
+            reference_asset = _copy_reference_asset(
+                Path(args.reference_media_path),
+                project_id=project_id,
+                message_id=args.message_id,
+                asset_dir=Path(args.asset_dir),
+                now=now,
+            )
+        project = FlyerProject(
+            project_id=project_id,
+            status="intake_started",
+            customer_phone=args.customer_phone,
+            created_at=now,
+            updated_at=now,
+            original_message_id=args.message_id,
+            raw_request=args.raw_request,
+            fields=fields,
+            assets=[reference_asset] if reference_asset else [],
+        )
+        store.projects.append(project)
+        store.next_sequence += 1
+        _write_store(state_path, store)
+        FlyerProjectCreated(
+            type="flyer_project_created",
+            ts=now,
+            project_id=project_id,
+            customer_phone=args.customer_phone,
+            original_message_id=args.message_id,
+        )
+        print(project.model_dump_json())
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
