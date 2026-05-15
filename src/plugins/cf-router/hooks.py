@@ -162,7 +162,8 @@ def pre_gateway_dispatch(event: Any, gateway: Any = None, session_store: Any = N
             if flyer_result is not None:
                 return flyer_result
             is_catering_probe, _catering_probe_signals = actions.classify_catering(text)
-            if not is_catering_probe:
+            is_flyer_probe, _flyer_probe_signals = actions.classify_flyer_intent(text)
+            if not is_catering_probe and (is_flyer_probe or actions.is_flyer_onboarding_intent(text)):
                 onboarding_result = _try_flyer_onboarding_intercept(text, chat_id, event)
                 if onboarding_result is not None:
                     return onboarding_result
@@ -293,13 +294,7 @@ def _try_flyer_primary_intercept(
     """
     message_id = _extract_message_id(event, chat_id, text)
     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
-    if not phone and chat_id.endswith("@lid"):
-        phone = "+" + chat_id[: -len("@lid")]
     if not phone:
-        actions.audit_intercepted(
-            reason="flyer_primary_failed", chat_id=chat_id,
-            subprocess_rc=2, detail="missing customer phone for flyer project",
-        )
         return None
 
     active_project = None if force_new else actions.find_active_flyer_project_by_sender(phone, chat_id)
@@ -424,8 +419,8 @@ def _try_flyer_account_intercept(text: str, chat_id: str, event: Any) -> Optiona
         return None
     message_id = _extract_message_id(event, chat_id, text)
     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
-    if not phone and chat_id.endswith("@lid"):
-        phone = "+" + chat_id[: -len("@lid")]
+    if not phone:
+        return None
     customer = actions.find_flyer_customer_by_sender(phone, chat_id)
     if customer is None:
         return None
@@ -473,8 +468,8 @@ def _try_flyer_onboarding_intercept(text: str, chat_id: str, event: Any) -> Opti
     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
     if role == "owner":
         return None
-    if not phone and chat_id.endswith("@lid"):
-        phone = "+" + chat_id[: -len("@lid")]
+    if not phone:
+        return None
     customer = actions.find_flyer_customer_by_sender(phone, chat_id)
     if customer and customer.get("status") == "active":
         return None
@@ -512,8 +507,6 @@ def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_
     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
     if role == "owner":
         return None
-    if not phone and chat_id.endswith("@lid"):
-        phone = "+" + chat_id[: -len("@lid")]
     if not phone:
         return None
 
@@ -536,6 +529,7 @@ def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_
         message_id=message_id,
         media_path=media_path,
         text=text,
+        sender_role=role,
     )
     if not ok or not result:
         actions.audit_intercepted(
@@ -582,8 +576,8 @@ def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_
 def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any) -> Optional[dict]:
     message_id = _extract_message_id(event, chat_id, text)
     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
-    if not phone and chat_id.endswith("@lid"):
-        phone = "+" + chat_id[: -len("@lid")]
+    if not phone:
+        return None
     active_project = actions.find_active_flyer_project_by_sender(phone, chat_id)
     if active_project is None:
         return None

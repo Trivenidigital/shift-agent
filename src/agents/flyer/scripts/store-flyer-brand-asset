@@ -41,6 +41,7 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--chat-id", required=True)
     p.add_argument("--sender-phone", default="")
+    p.add_argument("--sender-role", default="")
     p.add_argument("--message-id", required=True)
     p.add_argument("--media-path", required=True)
     p.add_argument("--text", default="")
@@ -56,6 +57,7 @@ def main() -> int:
             message_id=args.message_id,
             media_path=Path(args.media_path),
             text=args.text,
+            sender_role=args.sender_role,
         )
         if state_path.exists():
             atomic_write_text(state_path, state_path.read_text(encoding="utf-8"))

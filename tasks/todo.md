@@ -74,10 +74,10 @@ Plan: `docs/superpowers/plans/2026-05-15-flyer-onboarding-phase1.md`
 - [x] Get design reviewed by two parallel agents.
 - [x] Fix design review findings: phone-based admin authorization, explicit activation target, integer payment cents, global payment-reference uniqueness, latest-state quota reservations, quota before active-project resume, and expanded deploy smoke.
 - [x] Build schema, onboarding confirmation, activation, quota, and account-command implementation.
-- [x] Run local focused tests and script syntax checks: `python -m py_compile ...` passed; `python -m pytest` focused Flyer/cf-router suite passed (62 tests).
-- [ ] Create PR for Phase 1.
-- [ ] Get PR reviewed by three parallel agents.
-- [ ] Fix PR review findings.
+- [x] Run local focused tests and script syntax checks: `python -m py_compile ...` passed; `python -m pytest` focused Flyer/cf-router suite passed (63 tests).
+- [x] Create PR for Phase 1: https://github.com/Trivenidigital/shift-agent/pull/89
+- [x] Get PR reviewed by three parallel agents.
+- [x] Fix PR review findings: fail-closed sender identity for Flyer paths, ambiguous phone collision checks, immutable payment-reference history, exact plan cents/currency validation, admin-only saved brand-kit replacement, Hermes-venv subprocess execution, bridge `/send-media` deploy/smoke gates, rollback cleanup for Flyer artifacts, and onboarding catch-all gating.
 - [ ] Merge Phase 1 PR.
 - [ ] Deploy Phase 1 to `main-vps`.
 - [ ] Run production smoke: onboarding confirmation -> payment activation -> status command -> quota check -> one flyer request.

@@ -15,11 +15,19 @@ from schemas import (
     FlyerCustomerActivated,
     FlyerCustomerProfile,
     FlyerCustomerStore,
+    FlyerPaymentRecord,
     FlyerPlanTier,
     FlyerQuotaBlocked,
     FlyerUsageEvent,
     FlyerUsageRecorded,
 )
+
+try:
+    from safe_io import atomic_write_text  # type: ignore
+except ModuleNotFoundError:
+    def atomic_write_text(path: Path, text: str) -> None:  # type: ignore[no-redef]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
 
 
 @dataclass(frozen=True)
@@ -54,7 +62,7 @@ def load_customer_store(path: Path) -> FlyerCustomerStore:
 
 def write_customer_store(path: Path, store: FlyerCustomerStore) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+    atomic_write_text(path, store.model_dump_json(indent=2))
 
 
 def is_account_command(text: str) -> bool:
@@ -152,16 +160,27 @@ def handle_account_command(
             customer.status,
         )
 
-    updated, reply, reason = _apply_account_update(
-        customer,
-        command,
-        value,
-        tiers=tiers,
-        payment_provider=payment_provider,
-        payment_checkout_url_template=payment_checkout_url_template,
-        now=now,
-        chat_id=chat_id,
-    )
+    try:
+        updated, reply, reason = _apply_account_update(
+            store,
+            customer,
+            command,
+            value,
+            tiers=tiers,
+            payment_provider=payment_provider,
+            payment_checkout_url_template=payment_checkout_url_template,
+            now=now,
+            chat_id=chat_id,
+        )
+    except ValueError as e:
+        return AccountResult(
+            True,
+            True,
+            f"Flyer Studio\n------------\nI could not apply that account update: {e}",
+            customer.customer_id,
+            customer.status,
+            detail="account_update_invalid",
+        )
     _replace_customer(store, updated)
     write_customer_store(state_path, store)
     _audit_account_update(
@@ -191,7 +210,8 @@ def activate_customer(
 ) -> AccountResult:
     now = now or datetime.now(timezone.utc)
     tiers = plan_tiers or FlyerPlanTier.default_tiers()
-    provider = provider if provider in {"manual", "stripe", "razorpay", "other"} else "manual"
+    if provider not in {"manual", "stripe", "razorpay", "other"}:
+        return AccountResult(False, True, "", customer_id, detail="invalid_provider")
     currency = (currency or "USD").upper()
     if not payment_reference.strip():
         return AccountResult(False, True, "", customer_id, detail="payment_reference_required")
@@ -205,12 +225,24 @@ def activate_customer(
         return AccountResult(False, True, "", customer_id, detail="customer_not_found")
 
     for other in store.customers:
-        if other.payment_reference == payment_reference and other.billing_provider == provider:
+        records = list(other.payment_records)
+        if other.payment_reference:
+            records.append(FlyerPaymentRecord(
+                provider=other.billing_provider,
+                payment_reference=other.payment_reference,
+                plan_id=other.plan_id,
+                amount_cents=other.payment_amount_cents,
+                currency=other.payment_currency,
+                recorded_at=other.activated_at or other.updated_at,
+            ))
+        for record in records:
+            if record.provider != provider or record.payment_reference != payment_reference:
+                continue
             same = (
                 other.customer_id == customer.customer_id
-                and other.plan_id == expected_plan
-                and other.payment_amount_cents == amount_cents
-                and other.payment_currency == currency
+                and record.plan_id == expected_plan
+                and record.amount_cents == amount_cents
+                and record.currency == currency
             )
             if same:
                 _audit_activation(audit_log_path, other, provider, payment_reference, amount_cents, currency, idempotent=True)
@@ -234,7 +266,9 @@ def activate_customer(
     tier = _find_tier(target_plan, tiers)
     if tier is None:
         return AccountResult(False, True, "", customer.customer_id, customer.status, detail="unknown_plan")
-    expected_cents = int(round(tier.monthly_price_usd * 100))
+    if currency != tier.currency:
+        return AccountResult(False, True, "", customer.customer_id, customer.status, detail="currency_mismatch")
+    expected_cents = tier.price_cents()
     if provider != "manual" and amount_cents != expected_cents:
         return AccountResult(False, True, "", customer.customer_id, customer.status, detail="amount_mismatch")
     period_start = now
@@ -252,6 +286,17 @@ def activate_customer(
         "payment_amount_cents": amount_cents,
         "payment_currency": currency,
         "payment_checkout_url": "",
+        "payment_records": [
+            *customer.payment_records,
+            FlyerPaymentRecord(
+                provider=provider,  # type: ignore[arg-type]
+                payment_reference=payment_reference,
+                plan_id=target_plan,
+                amount_cents=amount_cents,
+                currency=currency,
+                recorded_at=now,
+            ),
+        ],
         "updated_at": now,
     }
     if clearing_pending:
@@ -397,16 +442,27 @@ def _confirm_pending_update(**kwargs: object) -> AccountResult:
         return AccountResult(True, True, "Flyer Studio\n------------\nOnly the business WhatsApp number or account owner can confirm this update.", customer.customer_id, customer.status)
     if customer.pending_account_requested_by and _phone_or_none(sender_phone) != customer.pending_account_requested_by:
         return AccountResult(True, True, "Flyer Studio\n------------\nPlease confirm from the same admin number that requested this update.", customer.customer_id, customer.status)
-    updated, reply, reason = _apply_account_update(
-        customer,
-        customer.pending_account_command,
-        customer.pending_account_value,
-        tiers=kwargs["tiers"],  # type: ignore[arg-type]
-        payment_provider=kwargs["payment_provider"],  # type: ignore[arg-type]
-        payment_checkout_url_template=kwargs["payment_checkout_url_template"],  # type: ignore[arg-type]
-        now=kwargs["now"],  # type: ignore[arg-type]
-        chat_id=chat_id,
-    )
+    try:
+        updated, reply, reason = _apply_account_update(
+            store,
+            customer,
+            customer.pending_account_command,
+            customer.pending_account_value,
+            tiers=kwargs["tiers"],  # type: ignore[arg-type]
+            payment_provider=kwargs["payment_provider"],  # type: ignore[arg-type]
+            payment_checkout_url_template=kwargs["payment_checkout_url_template"],  # type: ignore[arg-type]
+            now=kwargs["now"],  # type: ignore[arg-type]
+            chat_id=chat_id,
+        )
+    except ValueError as e:
+        return AccountResult(
+            True,
+            True,
+            f"Flyer Studio\n------------\nI could not apply that account update: {e}",
+            customer.customer_id,
+            customer.status,
+            detail="account_update_invalid",
+        )
     updated = updated.model_copy(update={
         "pending_account_command": "",
         "pending_account_value": "",
@@ -428,6 +484,7 @@ def _confirm_pending_update(**kwargs: object) -> AccountResult:
 
 
 def _apply_account_update(
+    store: FlyerCustomerStore,
     customer: FlyerCustomerProfile,
     command: str,
     value: str,
@@ -440,6 +497,7 @@ def _apply_account_update(
 ) -> tuple[FlyerCustomerProfile, str, str]:
     if command == "add_authorized":
         phone = E164Phone.from_any(value, country_code="US")
+        _ensure_phone_available(store, phone, customer.customer_id)
         numbers = list(customer.authorized_request_numbers)
         if phone not in numbers:
             numbers.append(phone)
@@ -452,9 +510,11 @@ def _apply_account_update(
         return customer.model_copy(update={"authorized_request_numbers": numbers, "updated_at": now}), "Flyer Studio\n------------\nAuthorized request number removed.", "authorized_removed"
     if command == "update_phone":
         phone = E164Phone.from_any(value, country_code="US")
+        _ensure_phone_available(store, phone, customer.customer_id)
         return customer.model_copy(update={"public_phone": phone, "updated_at": now}), "Flyer Studio\n------------\nPublic flyer phone updated.", "public_phone_updated"
     if command == "update_whatsapp":
         phone = E164Phone.from_any(value, country_code="US")
+        _ensure_phone_available(store, phone, customer.customer_id)
         numbers = list(customer.authorized_request_numbers)
         if phone not in numbers:
             numbers.append(phone)
@@ -553,6 +613,12 @@ def _replace_customer(store: FlyerCustomerStore, customer: FlyerCustomerProfile)
 
 def _find_tier(plan_id: str, tiers: list[FlyerPlanTier]) -> Optional[FlyerPlanTier]:
     return next((tier for tier in tiers if tier.plan_id == plan_id), None)
+
+
+def _ensure_phone_available(store: FlyerCustomerStore, phone: str, current_customer_id: str) -> None:
+    conflicts = store.customer_ids_for_phone(phone, exclude_customer_id=current_customer_id)
+    if conflicts:
+        raise ValueError(f"phone number already belongs to customer {', '.join(sorted(conflicts))}")
 
 
 def _parse_plan_choice(text: str, tiers: list[FlyerPlanTier]) -> str:

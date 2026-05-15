@@ -729,6 +729,15 @@ def classify_flyer_intent(text: str) -> tuple[bool, list[str]]:
     return False, ["rejected:no_flyer_intent"]
 
 
+def is_flyer_onboarding_intent(text: str) -> bool:
+    """Return True for explicit Flyer Studio registration/account setup text."""
+    return bool(re.search(
+        r"\b(register|sign\s*up|signup|onboard|setup|set\s+up|flyer account|flyer studio|plan)\b",
+        text or "",
+        flags=re.IGNORECASE,
+    ))
+
+
 def should_start_new_flyer_over_active(text: str, *, has_media: bool = False) -> bool:
     """Return True when inbound content should not attach to old flyer state.
 
@@ -853,6 +862,7 @@ def find_flyer_customer_by_sender(phone: Optional[str], chat_id: str) -> Optiona
         return None
     try:
         store = json.loads(FLYER_CUSTOMERS_PATH.read_text(encoding="utf-8"))
+        matches = []
         for customer in store.get("customers", []):
             numbers = set(customer.get("authorized_request_numbers") or [])
             business_whatsapp = customer.get("business_whatsapp_number")
@@ -862,8 +872,8 @@ def find_flyer_customer_by_sender(phone: Optional[str], chat_id: str) -> Optiona
             if onboarded_by:
                 numbers.add(onboarded_by)
             if canonical in numbers:
-                return customer
-        return None
+                matches.append(customer)
+        return matches[0] if len(matches) == 1 else None
     except Exception:
         return None
 
@@ -990,6 +1000,7 @@ def trigger_store_flyer_brand_asset(
     message_id: str,
     media_path: str,
     text: str,
+    sender_role: str = "",
 ) -> tuple[bool, str, Optional[dict]]:
     """Invoke store-flyer-brand-asset and return (ok, detail, result)."""
     try:
@@ -1000,6 +1011,7 @@ def trigger_store_flyer_brand_asset(
             "--message-id", message_id,
             "--media-path", media_path,
             "--text", text or "",
+            "--sender-role", sender_role or "",
         ]
         if sender_phone:
             cmd.extend(["--sender-phone", sender_phone])
@@ -1029,6 +1041,7 @@ def trigger_create_flyer_project(
     """Invoke create-flyer-project and return (ok, detail, project)."""
     try:
         cmd = [
+            str(PYTHON_BIN),
             str(CREATE_FLYER_PROJECT_BIN),
             "--customer-phone", customer_phone,
             "--message-id", message_id,
@@ -1094,7 +1107,7 @@ def send_flyer_processing_ack(chat_id: str, project_id: str) -> tuple[bool, str,
 def trigger_generate_flyer_concepts(project_id: str) -> tuple[bool, str]:
     try:
         result = subprocess.run(
-            ["/usr/local/bin/generate-flyer-concepts", "--project-id", project_id],
+            [str(PYTHON_BIN), "/usr/local/bin/generate-flyer-concepts", "--project-id", project_id],
             capture_output=True, text=True, timeout=FLYER_RENDER_TIMEOUT_SEC,
         )
     except (subprocess.SubprocessError, OSError) as e:
@@ -1162,7 +1175,7 @@ def send_flyer_text(chat_id: str, message: str) -> tuple[bool, str, str]:
 def invoke_update_flyer_project(project_id: str, *args: str) -> tuple[bool, str]:
     try:
         result = subprocess.run(
-            ["/usr/local/bin/update-flyer-project", "--project-id", project_id, *args],
+            [str(PYTHON_BIN), "/usr/local/bin/update-flyer-project", "--project-id", project_id, *args],
             capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_SEC,
         )
     except (subprocess.SubprocessError, OSError) as e:
@@ -1175,9 +1188,9 @@ def invoke_update_flyer_project(project_id: str, *args: str) -> tuple[bool, str]
 
 def finalize_and_send_flyer(chat_id: str, project_id: str, message_id: str) -> tuple[bool, str]:
     steps = [
-        ["/usr/local/bin/update-flyer-project", "--project-id", project_id, "--approve-message-id", message_id],
-        ["/usr/local/bin/finalize-flyer-assets", "--project-id", project_id, "--approved-message-id", message_id],
-        ["/usr/local/bin/send-flyer-package", "--jid", chat_id, "--project-id", project_id],
+        [str(PYTHON_BIN), "/usr/local/bin/update-flyer-project", "--project-id", project_id, "--approve-message-id", message_id],
+        [str(PYTHON_BIN), "/usr/local/bin/finalize-flyer-assets", "--project-id", project_id, "--approved-message-id", message_id],
+        [str(PYTHON_BIN), "/usr/local/bin/send-flyer-package", "--jid", chat_id, "--project-id", project_id],
     ]
     details: list[str] = []
     for cmd in steps:

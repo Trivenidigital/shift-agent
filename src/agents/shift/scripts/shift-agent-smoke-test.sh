@@ -48,6 +48,18 @@ for script in \
 done
 echo "✓ All scripts present + executable"
 
+BRIDGE_JS="/root/.hermes/hermes-agent/scripts/whatsapp-bridge/bridge.js"
+if [ -f "$BRIDGE_JS" ]; then
+    grep -q "app.post('/send-media'" "$BRIDGE_JS" || {
+        echo "FAIL: WhatsApp bridge missing /send-media endpoint required for Flyer Studio delivery"
+        exit 1
+    }
+    echo "✓ WhatsApp bridge exposes /send-media"
+else
+    echo "FAIL: WhatsApp bridge source not found at $BRIDGE_JS"
+    exit 1
+fi
+
 # 2. Python modules importable + safe_io chokepoint symbols present
 # Symbol list lives in src/platform/scripts/check-safe-io-symbols — single
 # source of truth shared with shift-agent-deploy.sh pre-restart gate.

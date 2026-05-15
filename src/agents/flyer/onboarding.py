@@ -19,6 +19,13 @@ from schemas import (
     FlyerPlanTier,
 )
 
+try:
+    from safe_io import atomic_write_text  # type: ignore
+except ModuleNotFoundError:
+    def atomic_write_text(path: Path, text: str) -> None:  # type: ignore[no-redef]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
 
 @dataclass(frozen=True)
 class OnboardingResult:
@@ -37,7 +44,7 @@ def load_customer_store(path: Path) -> FlyerCustomerStore:
 
 def write_customer_store(path: Path, store: FlyerCustomerStore) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+    atomic_write_text(path, store.model_dump_json(indent=2))
 
 
 def handle_onboarding_message(
@@ -116,21 +123,31 @@ def handle_onboarding_message(
     customer_id = ""
     customer_created = False
     if session.status == "payment_pending":
-        customer = store.new_customer(
-            business_name=session.business_name,
-            business_address=session.business_address,
-            public_phone=str(session.public_phone or ""),
-            business_whatsapp_number=str(session.business_whatsapp_number or ""),
-            authorized_request_number=str(session.authorized_request_number or ""),
-            business_category=session.business_category,
-            preferred_language=session.preferred_language,
-            plan_id=session.plan_id,
-            now=now,
-            billing_provider=payment_provider,
-            payment_checkout_url="",
-            primary_chat_id=chat_id,
-            onboarded_by_phone=sender_phone,
-        )
+        try:
+            customer = store.new_customer(
+                business_name=session.business_name,
+                business_address=session.business_address,
+                public_phone=str(session.public_phone or ""),
+                business_whatsapp_number=str(session.business_whatsapp_number or ""),
+                authorized_request_number=str(session.authorized_request_number or ""),
+                business_category=session.business_category,
+                preferred_language=session.preferred_language,
+                plan_id=session.plan_id,
+                now=now,
+                billing_provider=payment_provider,
+                payment_checkout_url="",
+                primary_chat_id=chat_id,
+                onboarded_by_phone=sender_phone,
+            )
+        except ValueError as e:
+            session = session.model_copy(update={"status": "confirming_summary", "updated_at": now})
+            _replace_session(store, session)
+            write_customer_store(state_path, store)
+            return OnboardingResult(
+                True,
+                f"Flyer Studio\n------------\nI could not finish registration: {e}\n\nReply EDIT WHATSAPP or EDIT AUTHORIZED with a different number.",
+                session.status,
+            )
         customer = customer.model_copy(update={"brand_assets": session.pending_brand_assets})
         customer = customer.model_copy(update={
             "payment_checkout_url": _checkout_url(
@@ -163,6 +180,7 @@ def store_brand_asset(
     message_id: str,
     media_path: Path,
     text: str,
+    sender_role: str = "",
     now: Optional[datetime] = None,
 ) -> OnboardingResult:
     """Store or replace a customer logo/template from WhatsApp media."""
@@ -171,22 +189,29 @@ def store_brand_asset(
     if not media_path.exists() or not media_path.is_file():
         raise ValueError(f"media file not found: {media_path}")
     kind = _brand_asset_kind(text, media_path)
-    asset = _copy_brand_asset(
-        store=store,
-        state_path=state_path,
-        media_path=media_path,
-        kind=kind,
-        message_id=message_id,
-        now=now,
-        notes=text,
-        owner_key=_asset_owner_key(store, chat_id, sender_phone),
-    )
 
     session = store.find_session(chat_id, sender_phone)
     customer = store.find_customer_by_phone(sender_phone)
     if customer is None and session and session.customer_id:
         customer = next((row for row in store.customers if row.customer_id == session.customer_id), None)
     if customer is not None:
+        if not customer.is_account_admin(sender_phone, chat_id, sender_role):
+            return OnboardingResult(
+                True,
+                "Flyer Studio\n------------\nOnly the business WhatsApp number or account owner can replace saved logos/templates for this account.",
+                "brand_asset_admin_required",
+                customer.customer_id,
+            )
+        asset = _copy_brand_asset(
+            store=store,
+            state_path=state_path,
+            media_path=media_path,
+            kind=kind,
+            message_id=message_id,
+            now=now,
+            notes=text,
+            owner_key=customer.customer_id,
+        )
         updated = []
         for existing in customer.brand_assets:
             if existing.kind == kind and existing.active:
@@ -216,6 +241,16 @@ def store_brand_asset(
             updated_at=now,
             last_message_id=message_id,
         )
+    asset = _copy_brand_asset(
+        store=store,
+        state_path=state_path,
+        media_path=media_path,
+        kind=kind,
+        message_id=message_id,
+        now=now,
+        notes=text,
+        owner_key=_asset_owner_key(store, chat_id, sender_phone),
+    )
     pending = []
     for existing in session.pending_brand_assets:
         if existing.kind == kind and existing.active:

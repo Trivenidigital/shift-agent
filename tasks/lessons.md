@@ -38,3 +38,7 @@
 - Active Flyer projects must not swallow explicit new flyer work. If a sender has an old awaiting-approval project, route "need/create flyer..." and media-backed menu/template edits as new projects, not as revisions to stale state.
 - Uploaded flyer/template images need project-level reference assets when the sender is not onboarded yet. Customer brand storage alone is not enough, because unauthenticated/pending senders may not have an active customer profile for the renderer to read.
 - Menu and price-list flyers can be complete without event date/time/venue. For product lists with prices and a contact number, generate the flyer instead of waiting for event fields that do not exist.
+- Do not synthesize E.164 phone numbers from `@lid` values in Flyer routing. If `identify-sender` cannot resolve a phone/LID mapping, fail closed rather than creating account, quota, or project state under a fabricated identity.
+- For money-adjacent onboarding, make payment references immutable history, not just "latest scalar on customer." A reused Stripe/Razorpay/manual reference must remain blocked even after plan changes.
+- Account scripts that read Pydantic schemas must run through the Hermes venv in cf-router and smoke/deploy paths. Direct shebang execution can accidentally use system Python and fail only in production.
+- Saved logo/template replacement is an account-admin action. Authorized flyer requesters can request flyers, but permanent brand-kit changes need the business WhatsApp/onboarding admin or explicit owner role.

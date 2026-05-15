@@ -236,15 +236,31 @@ install_artifacts() {
     fi
     if [ -f src/agents/flyer/render.py ]; then
         install -m 644 src/agents/flyer/render.py /opt/shift-agent/flyer_render.py
+    else
+        rm -f /opt/shift-agent/flyer_render.py
     fi
     if [ -f src/agents/flyer/onboarding.py ]; then
         install -m 644 src/agents/flyer/onboarding.py /opt/shift-agent/flyer_onboarding.py
+    else
+        rm -f /opt/shift-agent/flyer_onboarding.py
     fi
     if [ -f src/agents/flyer/account.py ]; then
         install -m 644 src/agents/flyer/account.py /opt/shift-agent/flyer_account.py
+    else
+        rm -f /opt/shift-agent/flyer_account.py
     fi
     if [ -d src/agents/flyer/scripts ] && compgen -G "src/agents/flyer/scripts/*" > /dev/null; then
         install -m 755 src/agents/flyer/scripts/* /usr/local/bin/
+    else
+        rm -f \
+            /usr/local/bin/create-flyer-project \
+            /usr/local/bin/update-flyer-project \
+            /usr/local/bin/generate-flyer-concepts \
+            /usr/local/bin/finalize-flyer-assets \
+            /usr/local/bin/handle-flyer-onboarding \
+            /usr/local/bin/store-flyer-brand-asset \
+            /usr/local/bin/manage-flyer-account \
+            /usr/local/bin/send-flyer-package
     fi
     install -d -o shift-agent -g shift-agent -m 0700 /opt/shift-agent/state/flyer 2>/dev/null || true
     install -d -o shift-agent -g shift-agent -m 0700 /opt/shift-agent/state/flyer/assets 2>/dev/null || true

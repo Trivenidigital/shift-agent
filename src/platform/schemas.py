@@ -729,9 +729,15 @@ class FlyerPlanTier(BaseModel):
     plan_id: str = Field(min_length=1, max_length=40, pattern=r"^[a-z0-9_-]+$")
     label: str = Field(min_length=1, max_length=120)
     monthly_price_usd: float = Field(ge=0)
+    monthly_price_cents: Optional[int] = Field(default=None, ge=0)
     included_flyers: Optional[int] = Field(default=None, ge=1)
     currency: str = Field(default="USD", min_length=3, max_length=3)
     description: str = Field(default="", max_length=300)
+
+    def price_cents(self) -> int:
+        if self.monthly_price_cents is not None:
+            return self.monthly_price_cents
+        return int(round(self.monthly_price_usd * 100))
 
     @classmethod
     def default_tiers(cls) -> list["FlyerPlanTier"]:
@@ -740,6 +746,7 @@ class FlyerPlanTier(BaseModel):
                 plan_id="starter",
                 label="Starter",
                 monthly_price_usd=49.99,
+                monthly_price_cents=4999,
                 included_flyers=30,
                 description="30 flyers per month",
             ),
@@ -747,6 +754,7 @@ class FlyerPlanTier(BaseModel):
                 plan_id="growth",
                 label="Growth",
                 monthly_price_usd=69.99,
+                monthly_price_cents=6999,
                 included_flyers=60,
                 description="60 flyers per month",
             ),
@@ -754,6 +762,7 @@ class FlyerPlanTier(BaseModel):
                 plan_id="unlimited",
                 label="Unlimited",
                 monthly_price_usd=199.00,
+                monthly_price_cents=19900,
                 included_flyers=None,
                 description="Unlimited flyers per month",
             ),
@@ -798,6 +807,16 @@ class FlyerUsageEvent(BaseModel):
     message_id: str = Field(min_length=1, max_length=200)
 
 
+class FlyerPaymentRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    provider: Literal["manual", "stripe", "razorpay", "other"]
+    payment_reference: str = Field(min_length=1, max_length=200)
+    plan_id: str = Field(min_length=1, max_length=40)
+    amount_cents: Optional[int] = Field(default=None, ge=0)
+    currency: str = Field(default="USD", min_length=3, max_length=3)
+    recorded_at: datetime
+
+
 class FlyerCustomerProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
     customer_id: str = Field(pattern=r"^CUST\d{4,}$")
@@ -833,6 +852,7 @@ class FlyerCustomerProfile(BaseModel):
     pending_account_requested_at: Optional[datetime] = None
     notes: str = Field(default="", max_length=1000)
     brand_assets: list[FlyerBrandAsset] = Field(default_factory=list, max_length=50)
+    payment_records: list[FlyerPaymentRecord] = Field(default_factory=list, max_length=500)
     usage_events: list[FlyerUsageEvent] = Field(default_factory=list, max_length=5000)
 
     def is_authorized_sender(self, phone: Optional[str]) -> bool:
@@ -843,6 +863,17 @@ class FlyerCustomerProfile(BaseModel):
         except ValueError:
             return False
         return canonical == self.business_whatsapp_number or canonical in self.authorized_request_numbers
+
+    def routable_phones(self) -> set[str]:
+        phones: set[str] = {str(self.business_whatsapp_number), *[str(phone) for phone in self.authorized_request_numbers]}
+        if self.onboarded_by_phone:
+            phones.add(str(self.onboarded_by_phone))
+        return phones
+
+    def owned_phone_numbers(self) -> set[str]:
+        phones = set(self.routable_phones())
+        phones.add(str(self.public_phone))
+        return phones
 
     def is_account_admin(self, phone: Optional[str], chat_id: str = "", sender_role: str = "") -> bool:
         del chat_id
@@ -920,10 +951,25 @@ class FlyerCustomerStore(BaseModel):
     def find_customer_by_phone(self, phone: Optional[str]) -> Optional[FlyerCustomerProfile]:
         if not phone:
             return None
-        for customer in self.customers:
-            if customer.is_authorized_sender(phone):
-                return customer
-        return None
+        try:
+            canonical = E164Phone.from_any(phone, country_code="US")
+        except ValueError:
+            return None
+        matches = [customer for customer in self.customers if str(canonical) in customer.routable_phones()]
+        return matches[0] if len(matches) == 1 else None
+
+    def customer_ids_for_phone(self, phone: Optional[str], *, exclude_customer_id: str = "") -> list[str]:
+        if not phone:
+            return []
+        try:
+            canonical = E164Phone.from_any(phone, country_code="US")
+        except ValueError:
+            return []
+        return [
+            customer.customer_id
+            for customer in self.customers
+            if customer.customer_id != exclude_customer_id and str(canonical) in customer.owned_phone_numbers()
+        ]
 
     def find_customer_by_id(self, customer_id: str) -> Optional[FlyerCustomerProfile]:
         for customer in self.customers:
@@ -938,10 +984,13 @@ class FlyerCustomerStore(BaseModel):
                 canonical = E164Phone.from_any(phone, country_code="US")
             except ValueError:
                 canonical = None
+        if canonical:
+            for session in self.onboarding_sessions:
+                if session.sender_phone == canonical:
+                    return session
+            return None
         for session in self.onboarding_sessions:
-            if session.chat_id == chat_id:
-                return session
-            if canonical and session.sender_phone == canonical:
+            if session.sender_phone is None and session.chat_id == chat_id:
                 return session
         return None
 
@@ -964,6 +1013,17 @@ class FlyerCustomerStore(BaseModel):
     ) -> FlyerCustomerProfile:
         language = preferred_language if preferred_language in {"en", "te", "hi", "es", "mixed", "other"} else "en"
         provider = billing_provider if billing_provider in {"manual", "stripe", "razorpay", "other"} else "manual"
+        candidate_phones = [
+            public_phone,
+            business_whatsapp_number,
+            authorized_request_number,
+            *([onboarded_by_phone] if onboarded_by_phone else []),
+        ]
+        conflicts: set[str] = set()
+        for phone in candidate_phones:
+            conflicts.update(self.customer_ids_for_phone(phone))
+        if conflicts:
+            raise ValueError(f"phone number already belongs to customer: {', '.join(sorted(conflicts))}")
         customer = FlyerCustomerProfile(
             customer_id=f"CUST{self.next_customer_sequence:04d}",
             business_name=business_name,
@@ -3708,7 +3768,7 @@ __all__ = [
     "is_catering_terminal", "CATERING_TERMINAL_STATUSES",
     "FlyerConfig", "FlyerWorkflowStatus", "FlyerOnboardingStatus", "FlyerOutputFormat", "FlyerImageQuality",
     "FlyerAssetKind", "FLYER_TRANSITIONS", "is_flyer_transition_allowed",
-    "FlyerPlanTier", "FlyerBrandAsset", "FlyerUsageEvent", "FlyerCustomerProfile", "FlyerOnboardingSession", "FlyerCustomerStore",
+    "FlyerPlanTier", "FlyerBrandAsset", "FlyerUsageEvent", "FlyerPaymentRecord", "FlyerCustomerProfile", "FlyerOnboardingSession", "FlyerCustomerStore",
     "FlyerRequestFields", "FlyerAsset", "FlyerConcept", "FlyerRevision",
     "FlyerBrandKit", "FlyerProject", "FlyerProjectStore",
     # v0.3 status-machine + helpers

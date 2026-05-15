@@ -178,8 +178,8 @@ def test_registered_customer_can_replace_logo_any_time(tmp_path, monkeypatch):
 
     store_brand_asset(
         state_path=state_path,
-        chat_id="19045550104@s.whatsapp.net",
-        sender_phone="+19045550104",
+        chat_id="17043243322@s.whatsapp.net",
+        sender_phone="+17043243322",
         message_id="logo1",
         media_path=first_logo,
         text="logo",
@@ -187,8 +187,8 @@ def test_registered_customer_can_replace_logo_any_time(tmp_path, monkeypatch):
     )
     store_brand_asset(
         state_path=state_path,
-        chat_id="19045550104@s.whatsapp.net",
-        sender_phone="+19045550104",
+        chat_id="17043243322@s.whatsapp.net",
+        sender_phone="+17043243322",
         message_id="logo2",
         media_path=second_logo,
         text="replace logo",
@@ -200,6 +200,41 @@ def test_registered_customer_can_replace_logo_any_time(tmp_path, monkeypatch):
     assert len(logo_assets) == 2
     assert [asset.active for asset in logo_assets] == [False, True]
     assert Path(logo_assets[-1].path).read_bytes() == b"second"
+
+
+def test_non_admin_cannot_replace_saved_brand_asset(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 15, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    store.customers.append(store.new_customer(
+        business_name="Triveni",
+        business_address="300 S Polk St",
+        public_phone="+17043243322",
+        business_whatsapp_number="+17043243322",
+        authorized_request_number="+19045550104",
+        business_category="restaurant",
+        preferred_language="en",
+        plan_id="starter",
+        now=now,
+    ).model_copy(update={"status": "active"}))
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+    logo = tmp_path / "logo.png"
+    logo.write_bytes(b"logo")
+
+    denied = store_brand_asset(
+        state_path=state_path,
+        chat_id="19045550104@s.whatsapp.net",
+        sender_phone="+19045550104",
+        message_id="logo1",
+        media_path=logo,
+        text="replace logo",
+        now=now,
+    )
+
+    updated = FlyerCustomerStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
+    assert denied.next_status == "brand_asset_admin_required"
+    assert updated.customers[0].brand_assets == []
 
 
 def test_menu_or_price_image_upload_is_classified_as_template(tmp_path, monkeypatch):
@@ -224,8 +259,8 @@ def test_menu_or_price_image_upload_is_classified_as_template(tmp_path, monkeypa
 
     store_brand_asset(
         state_path=state_path,
-        chat_id="19045550104@s.whatsapp.net",
-        sender_phone="+19045550104",
+        chat_id="17043243322@s.whatsapp.net",
+        sender_phone="+17043243322",
         message_id="template1",
         media_path=media_path,
         text="change non-veg combo price from $14.99 to $16.99",
