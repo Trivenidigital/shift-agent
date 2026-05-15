@@ -229,6 +229,28 @@ install_artifacts() {
     fi
     install -d -o shift-agent -g shift-agent /opt/shift-agent/state/catering-menu-archive 2>/dev/null || true
 
+    # Hermes Flyer Studio (WhatsApp flyer design workflow)
+    if [ -d src/agents/flyer/skills ]; then
+        rsync -a src/agents/flyer/skills/ /root/.hermes/skills/
+        chown -R shift-agent:shift-agent /root/.hermes/skills/
+    fi
+    if [ -f src/agents/flyer/render.py ]; then
+        install -m 644 src/agents/flyer/render.py /opt/shift-agent/flyer_render.py
+    fi
+    if [ -f src/agents/flyer/onboarding.py ]; then
+        install -m 644 src/agents/flyer/onboarding.py /opt/shift-agent/flyer_onboarding.py
+    fi
+    if [ -f src/agents/flyer/account.py ]; then
+        install -m 644 src/agents/flyer/account.py /opt/shift-agent/flyer_account.py
+    fi
+    if [ -d src/agents/flyer/scripts ] && compgen -G "src/agents/flyer/scripts/*" > /dev/null; then
+        install -m 755 src/agents/flyer/scripts/* /usr/local/bin/
+    fi
+    install -d -o shift-agent -g shift-agent -m 0700 /opt/shift-agent/state/flyer 2>/dev/null || true
+    install -d -o shift-agent -g shift-agent -m 0700 /opt/shift-agent/state/flyer/assets 2>/dev/null || true
+    install -d -o shift-agent -g shift-agent -m 0700 /opt/shift-agent/state/flyer/finals 2>/dev/null || true
+    chown -R shift-agent:shift-agent /opt/shift-agent/state/flyer 2>/dev/null || true
+
     # Tier 2 agents — SKILL-only stubs
     for tier2_agent in inventory supplier vip catering_followup hiring compliance employee_docs cash_ar sales_tax; do
         if [ -d "src/agents/${tier2_agent}/skills" ]; then
@@ -277,6 +299,9 @@ install_artifacts() {
         handle_catering_owner_approval handle_catering_menu_finalize
         update_catering_menu apply_catering_menu_decision
     )
+    if [ -d src/agents/flyer/skills ]; then
+        required_skills+=(flyer_dispatcher flyer_intake flyer_generation)
+    fi
     # Rollback compatibility: creative_catering_proposals is enforced by
     # post-restart smoke for forward deploys, but old rollback tarballs may
     # predate that SKILL and must still be installable before restart.

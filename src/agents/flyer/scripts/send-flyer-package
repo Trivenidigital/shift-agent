@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Send finalized flyer assets through the Hermes WhatsApp bridge."""
+from __future__ import annotations
+
+import argparse
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+import sys
+
+SRC_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(SRC_ROOT / "platform"))
+
+from schemas import FlyerAssetsDelivered, FlyerDeliveryFailed, FlyerProjectStore  # noqa: E402
+from safe_io import bridge_send_media, ndjson_append  # noqa: E402
+
+
+STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
+LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+
+
+def main() -> int:
+    p = argparse.ArgumentParser()
+    p.add_argument("--jid", required=True)
+    p.add_argument("--project-id", default="")
+    p.add_argument("--state-path", default=str(STATE_PATH))
+    p.add_argument("--log-path", default=str(LOG_PATH))
+    p.add_argument("--asset", action="append", default=[])
+    p.add_argument("--caption", default="Your final flyer package is ready.")
+    args = p.parse_args()
+
+    assets = [Path(asset) for asset in args.asset]
+    project = None
+    project_assets = []
+    if args.project_id:
+        store = FlyerProjectStore.model_validate(json.loads(Path(args.state_path).read_text(encoding="utf-8")))
+        project = next((p for p in store.projects if p.project_id == args.project_id), None)
+        if project is None:
+            raise SystemExit(f"project not found: {args.project_id}")
+        by_id = {asset.asset_id: asset for asset in project.assets}
+        project_assets = [by_id[asset_id] for asset_id in project.final_asset_ids if asset_id in by_id]
+        assets.extend(Path(asset.path) for asset in project_assets)
+    if not assets:
+        raise SystemExit("no assets to send; pass --asset or --project-id")
+
+    failures = []
+    outbound_ids = []
+    log_path = Path(args.log_path)
+    for asset in assets:
+        ok, mid, err, status = bridge_send_media(args.jid, asset, caption=args.caption)
+        if not ok:
+            failures.append({"asset": str(asset), "status": status, "error": err})
+            if project is not None:
+                ndjson_append(log_path, FlyerDeliveryFailed(
+                    type="flyer_delivery_failed",
+                    ts=datetime.now(timezone.utc),
+                    project_id=project.project_id,
+                    customer_phone=project.customer_phone,
+                    asset_id=asset.name,
+                    status=status,
+                    error=err,
+                ).model_dump_json())
+        else:
+            outbound_ids.append(mid)
+    if failures:
+        print(json.dumps({"failures": failures}))
+        return 2
+    if project is not None:
+        ndjson_append(log_path, FlyerAssetsDelivered(
+            type="flyer_assets_delivered",
+            ts=datetime.now(timezone.utc),
+            project_id=project.project_id,
+            customer_phone=project.customer_phone,
+            asset_ids=[asset.asset_id for asset in project_assets],
+            outbound_message_ids=outbound_ids,
+        ).model_dump_json())
+    print(json.dumps({"sent": len(assets), "message_ids": outbound_ids}))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

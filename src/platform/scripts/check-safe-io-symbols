@@ -27,6 +27,7 @@ REQUIRED_SYMBOLS = (
     "try_acquire_filelock_with_retry",
     "LockUnavailable",
     "load_yaml_model",
+    "bridge_send_media",
 )
 
 

@@ -130,3 +130,26 @@ class TestCateringHeadcountExtraction:
         extracted = int(hc_signals[0].split(":")[1])
         assert extracted == expected_hc, f"Expected {expected_hc}, got {extracted}"
 
+
+class TestFlyerIntentClassifier:
+    """Regression guard for cf-router's flyer bypass before F7 Catering."""
+
+    @pytest.mark.parametrize("text", [
+        "Need flyer for Ugadi Specials March 29 11 AM",
+        "Create an Instagram post and story for Bathukamma",
+        "Make a poster for the temple event",
+        "Need WhatsApp banner for weekend food specials",
+    ])
+    def test_must_classify_flyer_intent(self, dispatcher_mod, text):
+        is_flyer, signals = dispatcher_mod.classify_flyer_intent(text)
+        assert is_flyer, f"FALSE NEGATIVE on {text!r}; signals={signals}"
+
+    @pytest.mark.parametrize("text", [
+        "Need catering for 80 people event Saturday food delivered",
+        "Can you send two proposal menus?",
+        "food for 100 guests at wedding",
+        "Boss I am sick today",
+    ])
+    def test_must_not_classify_generic_catering_as_flyer(self, dispatcher_mod, text):
+        is_flyer, signals = dispatcher_mod.classify_flyer_intent(text)
+        assert not is_flyer, f"FALSE POSITIVE on {text!r}; signals={signals}"

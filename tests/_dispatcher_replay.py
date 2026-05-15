@@ -64,7 +64,7 @@ NO_HANDLER_FOUND = "<no-handler-found>"
 #   2. Update fixtures + mock to reflect any new priority rules
 #   3. Update SKILL_MD_KNOWN_SHA256 below to the new hash
 #   4. Document the change in the commit message
-SKILL_MD_KNOWN_SHA256 = "63b25556b5f8458e214cc7a54f82ff08ed133f031a29200bd653342c709ed5dd"
+SKILL_MD_KNOWN_SHA256 = "01e6bc46b767d4b30f5a2b6cf6fd975dbdae2d829461a25f55d46eb07a30d14b"
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -177,6 +177,7 @@ KNOWN_HANDLERS = frozenset({
     "expense_bookkeeper_dispatcher",
     "handle_owner_command",
     "update_catering_menu",
+    "flyer_dispatcher",
     "catering_dispatcher",
     "compliance_owner_query",
     "customer_location_query",
@@ -363,6 +364,26 @@ def mock_llm_priority_order(skill_md: str, input_payload: dict) -> tuple[str, st
     ):
         return ("→ handle_owner_command", "handle_owner_command")
 
+    def _has_active_flyer_project_for_sender() -> bool:
+        phone = identity.get("phone_normalized") or sender_block.get("phone")
+        chat_id = sender_block.get("chat_id")
+        active_statuses = {
+            "intake_started", "collecting_required_info", "awaiting_assets",
+            "generating_concepts", "awaiting_concept_selection",
+            "revising_design", "awaiting_final_approval", "finalizing_assets",
+        }
+        for project in state.get("flyer/projects.json", []):
+            if project.get("status") not in active_statuses:
+                continue
+            if phone and project.get("customer_phone") == phone:
+                return True
+            if chat_id and project.get("customer_jid") == chat_id:
+                return True
+        return False
+
+    if config.get("flyer.enabled") and _has_active_flyer_project_for_sender():
+        return ("active flyer project -> flyer_dispatcher", "flyer_dispatcher")
+
     # Priority 6: image/doc + (owner OR employee) + caption mentions "menu".
     # Employee menu-update enabled 2026-05-05 (multi-role authorization for
     # delegated menu updates; expense remains owner-only at priority 7).
@@ -387,6 +408,15 @@ def mock_llm_priority_order(skill_md: str, input_payload: dict) -> tuple[str, st
     # through to assumed-menu intent.
     if media_type in {"image", "document"} and role == "owner":
         return ("→ update_catering_menu (assumed)", "update_catering_menu")
+
+    flyer_keywords = (
+        "flyer", "flier", "poster", "banner", "invite", "invitation",
+        "social post", "instagram post", "instagram story", "ig post",
+        "ig story", "graphic", "design flyer", "design poster",
+        "make a flyer", "create a flyer",
+    )
+    if config.get("flyer.enabled") and any(kw in body_lower for kw in flyer_keywords):
+        return ("-> flyer_dispatcher", "flyer_dispatcher")
 
     # Priority 9: catering keyword + catering enabled.
     catering_keywords = (

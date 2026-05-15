@@ -31,6 +31,57 @@ Roadmap: `tasks/hermes-smb-operating-layer-roadmap-2026-05-14.md`
 
 Current recommendation: finish the pilot proof first, then build Special Request Memory as the first Phase 2 loop. It is Hermes-native, low-risk, high-delight, and reinforces the "operations desk that remembers your business" story.
 
+## Active - Hermes Flyer Studio Agent (2026-05-15)
+
+**Drift-check tag:** extends-Hermes
+
+Hermes-first summary: reuse Hermes WhatsApp ingress, `dispatch_shift_agent`, sender validation, image cache, skill dispatch, JSON state, NDJSON audit chain, and the bridge `/send-media` endpoint. Checked live installed Hermes skills plus official Hermes skill/image docs and awesome-hermes-agent; no purpose-built flyer workflow exists. Net-new scope is the flyer state machine, brand-kit memory, revision/version history, deterministic final asset packaging, media delivery helper, and flyer-specific QA.
+
+- [x] Add Flyer Agent schemas: config, request fields, brand kit, assets, concepts, revisions, project store, exact workflow-state transitions, and audit entries.
+- [x] Add WhatsApp media delivery helper for the existing bridge `/send-media` endpoint.
+- [x] Add Flyer Agent SKILLs for dispatch, intake, generation/revision guidance, final approval, and delivery.
+- [x] Add Flyer Agent scripts for project create/update, concept generation, finalization, quality checks, and package delivery scaffold.
+- [x] Wire flyer intent and active-project messages into `dispatch_shift_agent` without stealing generic catering/event traffic.
+- [x] Add deployment/smoke coverage for flyer skills, scripts, state directories, and media delivery prerequisites.
+- [x] Add tests for schemas, state transitions, scripts, media helper, dispatcher routing, and SKILL static contracts.
+- [x] Verify locally with focused pytest and syntax checks before deployment planning.
+- [x] Production hardening: deterministic Pillow renderer creates real concept previews plus WhatsApp, Instagram post/story, and PDF final assets.
+- [x] Runtime smoke on `main-vps`: project create -> field update -> concept PNGs -> selection -> approval -> final PNG/PDF assets.
+- [x] Deploy to `main-vps` as `deploy-20260515-004633-f6dfaac0`; deploy smoke passed and Hermes gateway remained active.
+- [x] Production font/runtime readiness: installed `python3-pil` and `fonts-noto-core` on `main-vps`; Telugu smoke rendered PNG/PDF assets with Noto font files present.
+- [x] Enable live Flyer Agent config on `main-vps` with deterministic-renderer draft/final settings for near-zero-cost smoke.
+- [x] Live end-to-end low-cost smoke: prompt -> project F0002 -> 3 concepts -> approval -> 4 final assets -> WhatsApp `/send-media` delivery; audit `flyer_assets_delivered` recorded 4 outbound message IDs.
+- [x] Fix live WhatsApp misroute where cf-router F7 treated explicit flyer messages as Catering follow-ups when the sender had an active catering lead.
+- [x] Redeploy cf-router flyer-priority guard and verify the exact Ugadi flyer prompt clears cf-router and routes to Flyer in dispatcher replay.
+- [x] Add deterministic cf-router Flyer primary-mode so explicit flyer WhatsApp requests do not depend on the brittle generic LLM dispatcher.
+- [ ] Production-quality image generation smoke: configure a real image-output model for Flyer Studio concepts/finals, run a live Ugadi flyer request, and compare the delivered visual quality against the deterministic renderer.
+- [x] Credit optimization: switch Flyer Studio default from three generated concepts to one best generated design, with WhatsApp copy `Reply APPROVE or reply with changes.`
+
+### Phase 1 - WhatsApp Customer Onboarding And Paid Readiness (2026-05-15)
+
+**Drift-check tag:** extends-Hermes
+
+Hermes-first summary: reuse Hermes WhatsApp ingress, sender identity, cf-router, JSON state, bridge text/media delivery, deployed Flyer workflow scripts, and config-driven plan tiers. Net-new scope is narrow account lifecycle logic: confirmation, activation, quotas, account commands, and payment-provider handoff metadata.
+
+Plan: `docs/superpowers/plans/2026-05-15-flyer-onboarding-phase1.md`
+
+- [x] Create Phase 1 branch `codex/flyer-onboarding-phase1`.
+- [x] Ground in deployed Flyer schemas, onboarding, cf-router, dispatcher, tests, safe_io, and deploy smoke patterns.
+- [x] Write Phase 1 implementation plan with drift and Hermes-first analysis.
+- [x] Get Phase 1 plan reviewed by two parallel agents.
+- [x] Fix plan review findings: admin-only mutations, durable audit, idempotent activation, quota reserve/finalize/release, payment-pending command placement, connector-first Phase 2 posture.
+- [x] Write Phase 1 design doc.
+- [x] Get design reviewed by two parallel agents.
+- [x] Fix design review findings: phone-based admin authorization, explicit activation target, integer payment cents, global payment-reference uniqueness, latest-state quota reservations, quota before active-project resume, and expanded deploy smoke.
+- [x] Build schema, onboarding confirmation, activation, quota, and account-command implementation.
+- [x] Run local focused tests and script syntax checks: `python -m py_compile ...` passed; `python -m pytest` focused Flyer/cf-router suite passed (62 tests).
+- [ ] Create PR for Phase 1.
+- [ ] Get PR reviewed by three parallel agents.
+- [ ] Fix PR review findings.
+- [ ] Merge Phase 1 PR.
+- [ ] Deploy Phase 1 to `main-vps`.
+- [ ] Run production smoke: onboarding confirmation -> payment activation -> status command -> quota check -> one flyer request.
+
 ## Active - Production pilot: Shift + Catering + Daily Brief (2026-05-14)
 
 **Drift-check tag:** extends-Hermes
@@ -644,3 +695,33 @@ Review results:
   - `.env` symlink gate correctly blocked next deploy. `/opt/shift-agent/.env` and `/root/.hermes/.env` were byte-identical, so `migrate-env-to-symlink.sh` ran safely and left backup `/opt/shift-agent/.env.pre-symlink-backup`.
   - Manual plugin rsync was needed after deploy because live `cf-router/hooks.py` lagged staging. Removed pycache created by manual compile so `hermes-gateway` ExecStartPre chown succeeded. Final restart active with bridge port 3000 listening.
   - PR #86 was merged to `main` and deployed as `deploy-20260514-162731-f4ce14db`.
+
+## Active - Flyer Studio WhatsApp customer onboarding (2026-05-15)
+
+- [x] Grounding: reuse cf-router pre-gateway WhatsApp interception, existing Flyer state directory, JSON-on-disk state, and bridge text delivery. No web app surface.
+- [x] Design decision: new non-catering sender starts a WhatsApp registration wizard before flyer creation; active registered authorized numbers pass through to normal flyer routing; active flyer projects always take precedence.
+- [x] Required onboarding fields: business name, business address, public business phone, business WhatsApp number, authorized flyer request number, business type, preferred flyer language, and monthly plan.
+- [x] Plan tiers are config-driven via `FlyerConfig.plan_tiers`, defaulting to `$49.99/30`, `$69.99/60`, `$199/unlimited`; store only `plan_id` on customers so future price edits do not rewrite customer history.
+- [x] Payment readiness: customer enters `payment_pending` with provider/url fields ready for Stripe, Razorpay, or manual payment-link integration.
+- [x] Build: `src/agents/flyer/onboarding.py`, `src/agents/flyer/scripts/handle-flyer-onboarding`, Flyer customer schemas, cf-router onboarding intercept, and deploy smoke inclusion.
+- [x] Verification: `python -m pytest tests/test_flyer_onboarding.py tests/test_flyer_scripts_static.py tests/test_flyer_schemas.py tests/test_flyer_agent_static.py tests/test_flyer_renderer.py tests/test_flyer_workflow.py -q` -> `41 passed`.
+- [x] Syntax verification: `python -m py_compile src/agents/flyer/onboarding.py src/agents/flyer/scripts/handle-flyer-onboarding src/plugins/cf-router/actions.py src/plugins/cf-router/hooks.py src/platform/schemas.py` -> passed.
+- [x] Deploy to `main-vps` as `deploy-20260515-051124-f6dfaac0`; deploy smoke passed. First attempt exposed the known deploy-script self-overwrite gap for new install rules, so the new module was pre-placed from staging and the deploy was rerun successfully.
+- [x] VPS temp-state smoke: completed WhatsApp onboarding flow through `payment_pending` without writing to the real customer registry; verified `CUST0001`, `growth` plan, business WhatsApp, authorized request number, and payment-pending status in `/tmp/flyer-onboarding-smoke.json`, then removed the temp file.
+- [x] Extend onboarding with logo/template capture: customers can upload logos/templates during onboarding, during an active flyer request, or later as replacements.
+- [x] Brand assets are stored under managed flyer state, preserve history, and make the latest upload of each kind active while deactivating the prior active asset.
+- [x] Flyer generation now reads the active customer logo/template assets and includes them in the generation prompt plus image-reference content where supported by the provider.
+- [x] Verification: `python -m pytest tests/test_flyer_onboarding.py tests/test_flyer_renderer.py tests/test_flyer_scripts_static.py tests/test_flyer_agent_static.py tests/test_flyer_schemas.py tests/test_flyer_workflow.py -q` -> `45 passed`.
+- [x] Syntax verification: `python -m py_compile src/agents/flyer/onboarding.py src/agents/flyer/scripts/handle-flyer-onboarding src/agents/flyer/scripts/store-flyer-brand-asset src/agents/flyer/render.py src/plugins/cf-router/actions.py src/plugins/cf-router/hooks.py src/platform/schemas.py` -> passed.
+- [x] Deploy to `main-vps` as `deploy-20260515-135242-f6dfaac0`; smoke passed.
+- [x] VPS temp-state brand asset smoke: uploaded logo during onboarding, completed signup, uploaded replacement logo from same signup thread, verified old logo inactive, new logo active, and temp files removed.
+- [x] Fix live Flyer routing regression: explicit new flyer requests, media-backed menu/template edits, and wrong-flyer correction messages now start new work instead of attaching to stale active projects.
+- [x] Add project-level uploaded reference images so a template sent by a non-onboarded sender is available to the renderer immediately, not only after customer brand registration.
+- [x] Allow menu/price-list flyers such as Lakshmi's Kitchen to generate without event date/time/venue when business name, priced items, and contact are present.
+- [x] Verification: `python -m pytest tests/test_cf_router_flyer_routing.py tests/test_flyer_schemas.py tests/test_flyer_renderer.py tests/test_flyer_onboarding.py tests/test_flyer_scripts_static.py -q` -> `47 passed`; script/cf-router byte-compile passed.
+- [x] Deploy to `main-vps` as `deploy-20260515-144411-f6dfaac0`; deploy smoke and pilot readiness passed.
+- [x] VPS route smoke: Lakshmi price-list project has no missing fields; uploaded-template project stores `reference_image`; router returns new-work=true for explicit flyer, media price-change, and wrong-flyer correction, and false for logo replacement.
+- [x] Live repair: created and sent Lakshmi's Kitchen project `F0007` preview to WhatsApp. Original Thursday Dosa image was not retained in Hermes image cache, so exact template repair requires resending the image after the routing fix.
+- [x] Live recovery after user sent approved expanded Lakshmi item list: router correctly created fresh `F0008`; first generation was interrupted by provider/bridge reset, then manually regenerated, approved, finalized, and sent 4-file package through WhatsApp.
+- [x] Retired superseded `F0007` draft to `completed` so a later `APPROVE` cannot send the older Lakshmi item list.
+- [x] Retired stale `F0006` Weekend Breakfast project to `completed` so it can no longer absorb future generic replies or approvals.

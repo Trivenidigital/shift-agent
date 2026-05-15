@@ -87,6 +87,7 @@ def state_env(tmp_path):
         "leads_path": state / "catering-leads.json",
         "proposals_path": state / "catering-proposals.json",
         "menu_pending_path": state / "catering-menu-pending.json",
+        "flyer_projects_path": state / "flyer" / "projects.json",
         "roster_path": tmp_path / "roster.json",
         "throttle_path": state / "cf-router-throttle.json",
     }
@@ -100,6 +101,7 @@ def mods(state_env):
     actions_mod.LEADS_PATH = state_env["leads_path"]
     actions_mod.PROPOSALS_PATH = state_env["proposals_path"]
     actions_mod.MENU_PENDING_PATH = state_env["menu_pending_path"]
+    actions_mod.FLYER_PROJECTS_PATH = state_env["flyer_projects_path"]
     actions_mod.ROSTER_PATH = state_env["roster_path"]
     actions_mod.LOG_PATH = state_env["log_path"]
     actions_mod.THROTTLE_PATH = state_env["throttle_path"]
@@ -109,9 +111,10 @@ def mods(state_env):
     return hooks_mod, actions_mod
 
 
-def _seed_config(state_env, owner_jid="918522041562@s.whatsapp.net"):
+def _seed_config(state_env, owner_jid="918522041562@s.whatsapp.net", flyer_enabled=False):
+    flyer_block = "flyer:\n  enabled: true\n" if flyer_enabled else ""
     state_env["config_path"].write_text(
-        f"owner:\n  self_chat_jid: {owner_jid}\n", encoding="utf-8",
+        f"owner:\n  self_chat_jid: {owner_jid}\n{flyer_block}", encoding="utf-8",
     )
 
 
@@ -152,6 +155,15 @@ def _seed_menu_pending(state_env, code="#YDW6J"):
                               "notes": "", "serves": None}],
         "parser_notes": "",
     }), encoding="utf-8")
+
+
+def _seed_flyer_projects(state_env, projects):
+    path = state_env["flyer_projects_path"]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"schema_version": 1, "next_sequence": 2, "projects": projects}),
+        encoding="utf-8",
+    )
 
 
 def _seed_roster(state_env, employee_phone="+19045550101"):
@@ -1288,6 +1300,151 @@ class TestF7PrimaryMode:
         audits = [r for r in rows if r.get("type") == "cf_router_intercepted"]
         assert len(audits) == 1
         assert audits[0]["reason"] == "f7_primary_followup_suppressed"
+
+    def test_explicit_flyer_intent_creates_flyer_project_even_with_active_catering_lead(self, mods, state_env):
+        """Flyer requests should use deterministic Flyer primary-mode."""
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+        _seed_leads_multi(state_env, [
+            {"lead_id": "L0015", "owner_approval_code": "#GEMAZ",
+             "customer_phone": "+19045550104",
+             "status": "AWAITING_OWNER_APPROVAL"},
+        ])
+
+        with patch.object(actions_mod, "trigger_create_catering_lead") as mock_trigger, \
+             patch.object(actions_mod, "send_canonical_followup_reply") as mock_reply, \
+             patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+19045550104", "employee")), \
+             patch.object(actions_mod, "trigger_create_flyer_project",
+                          return_value=(True, "created", {"project_id": "F0003"})) as mock_flyer, \
+             patch.object(actions_mod, "send_flyer_intake_ack",
+                          return_value=(True, "msg-flyer-ack", "")) as mock_ack:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    text=(
+                        "Need flyer for Ugadi Specials March 29 11 AM at Triveni Pineville. "
+                        "Contact +1 904 555 0123. Telugu festive food specials style. "
+                        "Need WhatsApp, Instagram post, story, printable PDF."
+                    ),
+                    chat_id="201975216009469@lid",
+                ),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router flyer primary: project F0003 created",
+        }
+        mock_trigger.assert_not_called()
+        mock_reply.assert_not_called()
+        mock_flyer.assert_called_once()
+        assert mock_flyer.call_args.kwargs["customer_phone"] == "+19045550104"
+        mock_ack.assert_called_once_with("201975216009469@lid", "F0003")
+        rows = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
+        audits = [r for r in rows if r.get("type") == "cf_router_intercepted"]
+        assert len(audits) == 1
+        assert audits[0]["reason"] == "flyer_primary_project_created"
+
+    def test_active_flyer_project_bypasses_f7_food_revision_text(self, mods, state_env):
+        """Food/layout revision text belongs to Flyer when a flyer project is active."""
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+        _seed_leads_multi(state_env, [
+            {"lead_id": "L0015", "owner_approval_code": "#GEMAZ",
+             "customer_phone": "+19045550104",
+             "status": "AWAITING_OWNER_APPROVAL"},
+        ])
+        _seed_flyer_projects(state_env, [
+            {
+                "project_id": "F0003",
+                "status": "revising_design",
+                "customer_phone": "+19045550104",
+                "created_at": "2026-05-15T01:00:00Z",
+                "updated_at": "2026-05-15T01:05:00Z",
+                "original_message_id": "msg-flyer-1",
+                "raw_request": "Need flyer for Ugadi Specials",
+                "fields": {},
+                "assets": [],
+                "concepts": [],
+                "selected_concept_id": None,
+                "revisions": [],
+                "version": 1,
+                "final_asset_ids": [],
+                "approved_message_id": "",
+            },
+        ])
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+19045550104", "customer")), \
+             patch.object(actions_mod, "trigger_create_catering_lead") as mock_trigger, \
+             patch.object(actions_mod, "send_canonical_followup_reply") as mock_reply:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    text="make the food photo bigger and Telugu title brighter",
+                    chat_id="201975216009469@lid",
+                ),
+            )
+
+        assert result is None
+        mock_trigger.assert_not_called()
+        mock_reply.assert_not_called()
+        assert not state_env["log_path"].exists()
+
+    def test_explicit_flyer_intent_starts_new_work_over_active_project(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+        _seed_leads_multi(state_env, [])
+        _seed_flyer_projects(state_env, [
+            {
+                "project_id": "F0003",
+                "status": "intake_started",
+                "customer_phone": "+19045550104",
+                "updated_at": "2026-05-15T01:43:39Z",
+            },
+        ])
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+19045550104", "employee")), \
+             patch.object(actions_mod, "trigger_create_flyer_project",
+                          return_value=(True, "created", {"project_id": "F0004", "fields": {}})) as mock_create, \
+             patch.object(actions_mod, "send_flyer_intake_ack",
+                          return_value=(True, "msg-new", "")) as mock_ack:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    text="Need flyer for Ugadi Specials March 29",
+                    chat_id="201975216009469@lid",
+                ),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router flyer primary: project F0004 created",
+        }
+        mock_create.assert_called_once()
+        mock_ack.assert_called_once_with("201975216009469@lid", "F0004")
+
+    def test_flyer_enabled_does_not_block_generic_catering(self, mods, state_env):
+        """The flyer bypass is narrow; real catering still uses F7."""
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+        _seed_leads_multi(state_env, [])
+        fake_run = SimpleNamespace(
+            returncode=0,
+            stdout='{"role":"customer","phone_normalized":"+17329837841"}',
+            stderr="",
+        )
+        with patch("subprocess.run", return_value=fake_run), \
+             patch.object(actions_mod, "trigger_create_catering_lead",
+                          return_value=(True, "lead_created")) as mock_trigger:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    text="Need catering for 80 people event Saturday food delivered",
+                    chat_id="17329837841@s.whatsapp.net",
+                ),
+            )
+
+        assert result is not None
+        assert result["action"] == "skip"
+        mock_trigger.assert_called_once()
 
     def test_proposal_branch_disabled_keeps_existing_suppression(self, mods, state_env):
         hooks_mod, actions_mod = mods
