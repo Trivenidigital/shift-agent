@@ -56,11 +56,11 @@ PALETTES = {
 }
 
 FONT_CANDIDATES = [
-    "/usr/share/fonts/truetype/noto/NotoSansTelugu-Regular.ttf",
-    "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
-    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansTelugu-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
     "C:/Windows/Fonts/Nirmala.ttf",
     "C:/Windows/Fonts/segoeui.ttf",
     "C:/Windows/Fonts/arial.ttf",
@@ -94,8 +94,15 @@ def _load_pillow():
         return None
 
 
-def _font(ImageFont, size: int, *, bold: bool = False):
+def _has_telugu(text: str) -> bool:
+    return any("\u0c00" <= ch <= "\u0c7f" for ch in text or "")
+
+
+def _font(ImageFont, size: int, *, bold: bool = False, text: str = ""):
     candidates = list(FONT_CANDIDATES)
+    if _has_telugu(text):
+        candidates.insert(0, "C:/Windows/Fonts/Nirmala.ttf")
+        candidates.insert(0, "/usr/share/fonts/truetype/noto/NotoSansTelugu-Regular.ttf")
     if bold:
         candidates.insert(0, "C:/Windows/Fonts/arialbd.ttf")
         candidates.insert(0, "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
@@ -395,12 +402,10 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
         panel_h = min(int(height * 0.44), max(int(height * 0.22), 58 + len(_critical_lines(project)) * max(24, int(width * 0.024))))
         y0 = height - panel_h - margin
         draw.rounded_rectangle((margin, y0, width - margin, height - margin), radius=18, fill=(12, 16, 24, 218), outline=(255, 196, 58, 240), width=3)
-        title_font = _font(ImageFont, max(30, int(width * 0.045)), bold=True)
-        body_font = _font(ImageFont, max(20, int(width * 0.025)))
         y = y0 + int(margin * 0.75)
         lines = _critical_lines(project)
         for idx, line in enumerate(lines):
-            font = title_font if idx == 0 else body_font
+            font = _font(ImageFont, max(30, int(width * 0.045)), bold=True, text=line) if idx == 0 else _font(ImageFont, max(20, int(width * 0.025)), text=line)
             fill = (255, 214, 79, 255) if idx == 0 else (255, 255, 255, 245)
             wrapped = _wrap(draw, line, font, width - margin * 3)
             for wrapped_line in wrapped[:2 if idx == 0 else 1]:
@@ -417,8 +422,11 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 spec=json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 src=Path(spec["source"]); target=Path(spec["target"]); size=tuple(spec["size"]); lines=spec["lines"]
-def font(sz,bold=False):
-    c=["/usr/share/fonts/truetype/noto/NotoSansTelugu-Regular.ttf","/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf","/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
+def has_telugu(text):
+    return any("\\u0c00" <= ch <= "\\u0c7f" for ch in text or "")
+def font(sz,bold=False,text=""):
+    c=["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf","/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf","/usr/share/fonts/truetype/noto/NotoSansTelugu-Regular.ttf","/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf"]
+    if has_telugu(text): c.insert(0,"/usr/share/fonts/truetype/noto/NotoSansTelugu-Regular.ttf")
     if bold: c.insert(0,"/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
     for p in c:
         try:
@@ -440,10 +448,9 @@ with Image.open(src) as img:
     panel_h=min(int(height*.44),max(int(height*.22),58+len(lines)*max(24,int(width*.024))))
     y0=height-panel_h-margin
     draw.rounded_rectangle((margin,y0,width-margin,height-margin), radius=18, fill=(12,16,24,218), outline=(255,196,58,240), width=3)
-    title_font=font(max(30,int(width*.045)), True); body_font=font(max(20,int(width*.025)))
     y=y0+int(margin*.75)
     for idx,line in enumerate(lines):
-        f=title_font if idx==0 else body_font; fill=(255,214,79,255) if idx==0 else (255,255,255,245)
+        f=font(max(30,int(width*.045)), True, line) if idx==0 else font(max(20,int(width*.025)), False, line); fill=(255,214,79,255) if idx==0 else (255,255,255,245)
         for wrapped in wrap(draw,line,f,width-margin*3)[:2 if idx==0 else 1]:
             if y+f.size > height-margin:
                 raise SystemExit("critical text overlay does not fit")
