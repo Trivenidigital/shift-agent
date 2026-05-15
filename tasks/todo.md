@@ -100,7 +100,7 @@ Plan: `docs/superpowers/plans/2026-05-15-flyer-quality-phase2.md`
 - [x] Run focused local verification and script syntax checks: Flyer pytest suite `66 passed`, `py_compile` clean, `git diff --check` clean, and local deterministic `smoke-flyer-quality` returned `{"ok": true}`.
 - [x] Create PR for Phase 2: https://github.com/Trivenidigital/shift-agent/pull/90
 - [x] Get PR reviewed by three parallel agents and apply findings: sanitized model prompt, system-Pillow overlay/PDF fallback, no deadlocking unresolved revisions, small revision-result envelope for router parsing, safer title parsing, and per-project generation lock.
-- [ ] Merge Phase 2 to `main`.
+- [x] Merge Phase 2 PR #90 to `main` at `c64d299`.
 - [ ] Deploy Phase 2 to `main-vps`, run deploy smoke, and record deterministic/real-model smoke results.
 
 ## Active - Production pilot: Shift + Catering + Daily Brief (2026-05-14)
