@@ -121,8 +121,8 @@ Plan: `docs/superpowers/plans/2026-05-15-flyer-text-qa-phase3.md`
 - [x] Run focused local verification and script syntax checks: `py_compile` clean, `git diff --check` clean, deterministic `smoke-flyer-quality --final-package` returned `{"ok": true}`, and focused Flyer/cf-router pytest suite passed (81 tests).
 - [x] Create PR for Phase 3: https://github.com/Trivenidigital/shift-agent/pull/91
 - [x] Get PR reviewed by three parallel agents and apply findings: prevent manifest certification of truncated deterministic text, suppress stale old phone details from revised notes, support daily/weekday/every schedules plus 10-item menus, fail malformed manifests closed, enforce final package status/kinds/output formats, add send CAS before `delivered`, and cover dry-run send state transition in smoke.
-- [ ] Merge Phase 3 PR and deploy to `main-vps`.
-- [ ] Run deterministic deploy smoke and one guarded real-model smoke artifact review.
+- [x] Merge Phase 3 PR #91 to `main` at `ea2720e`.
+- [x] Deploy Phase 3 to `main-vps` as `deploy-20260515-233720-ea2720ed`; deploy smoke passed, pilot readiness remained READY (16 passed), deterministic `smoke-flyer-quality --final-package` passed with dry-run final send delivered, and guarded real-model smoke passed with `openai/gpt-5.4-image-2` high quality plus text QA for concept and all four final assets at `/opt/shift-agent/state/flyer/quality-smoke-phase3-real-20260515-233720`.
 
 ## Active - Production pilot: Shift + Catering + Daily Brief (2026-05-14)
 
