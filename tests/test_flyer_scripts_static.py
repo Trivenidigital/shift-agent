@@ -24,10 +24,21 @@ def test_scripts_use_atomic_writes_and_locks():
 
 def test_delivery_script_can_send_by_project_id():
     text = (SCRIPTS / "send-flyer-package").read_text(encoding="utf-8")
+    finalize = (SCRIPTS / "finalize-flyer-assets").read_text(encoding="utf-8")
     assert "--project-id" in text
+    assert "validate_text_manifest_file" in text
+    assert "--allow-unverified-asset" in text
+    assert "--dry-run-bridge" in text
+    assert "FLYER_TEXT_QA_BREAK_GLASS" in text
+    assert "project.status != \"finalizing_assets\"" in text
+    assert "FINAL_KIND_TO_FORMAT" in text
+    assert "output_format=expected_formats.get(str(asset)) or None" in text
+    assert "project_changed_during_delivery" in text
     assert "FlyerAssetsDelivered" in text
     assert "FlyerDeliveryFailed" in text
     assert ".model_dump_json()" in text
+    assert '"status": "delivered"' in text
+    assert '"status": "delivered"' not in finalize
 
 
 def test_update_script_supports_selection_revision_and_approval():
@@ -49,6 +60,7 @@ def test_generation_defaults_to_one_selected_concept_for_credit_control():
     assert '"selected_concept_id": "C1" if one_shot else None' in script
     assert "Reply APPROVE or reply with changes." in actions
     assert "Reply 1, 2, or 3 to choose" not in actions
+    assert "validate_text_manifest_file" in actions
 
 
 def test_flyer_complete_requests_send_processing_ack_before_generation():
@@ -131,12 +143,16 @@ def test_phase2_quality_smoke_and_workflow_deploy_contracts():
 
     assert "--real-model" in smoke_cli
     assert "--allow-spend" in smoke_cli
+    assert "--final-package" in smoke_cli
+    assert "--dry-run-bridge" in smoke_cli
+    assert "send_dry_run" in smoke_cli
+    assert "validate_text_manifest_file" in smoke_cli
     assert "FLYER_STATE_ROOT" in smoke_cli
     assert "json.dumps" in smoke_cli
     assert "flyer_workflow" in update
     assert "src/agents/flyer/workflow.py /opt/shift-agent/flyer_workflow.py" in deploy
     assert "/usr/local/bin/smoke-flyer-quality" in smoke
-    assert "sudo -u shift-agent" in smoke and "smoke-flyer-quality" in smoke
+    assert "sudo -u shift-agent" in smoke and "smoke-flyer-quality --final-package" in smoke
     assert "rm -f /usr/local/bin/smoke-flyer-quality" in deploy
     assert "rm -f /opt/shift-agent/flyer_workflow.py" in deploy
     assert "import flyer_workflow" in smoke

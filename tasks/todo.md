@@ -103,6 +103,27 @@ Plan: `docs/superpowers/plans/2026-05-15-flyer-quality-phase2.md`
 - [x] Merge Phase 2 PR #90 to `main` at `c64d299`.
 - [x] Deploy Phase 2 to `main-vps` as `deploy-20260515-205337-5e2e1690`; deploy smoke passed, deterministic Flyer quality smoke passed, and one real-model smoke passed with `openai/gpt-5.4-image-2` high quality (`1080x1350`, 1.85 MB, variance 506) at `/opt/shift-agent/state/flyer/quality-smoke-20260515-205337/assets/F9001-C1-preview.png`.
 
+### Phase 3 - Flyer Text QA, Revision Proof, And Send Gate (2026-05-15)
+
+**Drift-check tag:** extends-Hermes
+
+Hermes-first summary: reuse Hermes WhatsApp ingress/delivery, existing Flyer renderer, server-side critical-text compositor, JSON project state, and deploy smoke. Net-new scope is a deterministic exact-fact manifest and final-package gate so revised customer facts cannot be silently omitted or replaced by stale model/template text.
+
+Plan: `docs/superpowers/plans/2026-05-15-flyer-text-qa-phase3.md`
+
+- [x] Create Phase 3 branch `codex/flyer-text-qa-phase3`.
+- [x] Ground in deployed Flyer renderer, finalization script, smoke CLI, deploy installer, Phase 2 design, and active backlog.
+- [x] Write Phase 3 implementation plan with drift and Hermes-first analysis.
+- [x] Get Phase 3 plan reviewed by two parallel agents and apply findings: gate preview sends and final sends, cover deterministic renderer, store expected-vs-rendered facts, bind manifests to project version/selected concept/output, and persist PDF sidecars.
+- [x] Write Phase 3 design doc.
+- [x] Get Phase 3 design reviewed by two parallel agents and apply findings: exact fact-id/text equality, fail on omitted/truncated facts, move terminal delivered state to successful send, run final-package QA in deploy smoke, and tighten break-glass direct asset sends.
+- [x] Build deterministic text QA manifest, final package gate, deploy install, and smoke output.
+- [x] Run focused local verification and script syntax checks: `py_compile` clean, `git diff --check` clean, deterministic `smoke-flyer-quality --final-package` returned `{"ok": true}`, and focused Flyer/cf-router pytest suite passed (81 tests).
+- [x] Create PR for Phase 3: https://github.com/Trivenidigital/shift-agent/pull/91
+- [x] Get PR reviewed by three parallel agents and apply findings: prevent manifest certification of truncated deterministic text, suppress stale old phone details from revised notes, support daily/weekday/every schedules plus 10-item menus, fail malformed manifests closed, enforce final package status/kinds/output formats, add send CAS before `delivered`, and cover dry-run send state transition in smoke.
+- [ ] Merge Phase 3 PR and deploy to `main-vps`.
+- [ ] Run deterministic deploy smoke and one guarded real-model smoke artifact review.
+
 ## Active - Production pilot: Shift + Catering + Daily Brief (2026-05-14)
 
 **Drift-check tag:** extends-Hermes

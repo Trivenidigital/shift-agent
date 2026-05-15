@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 import shutil
@@ -16,11 +17,11 @@ sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(SRC_ROOT / "platform"))
 sys.path.insert(0, str(SRC_ROOT))
 
-from schemas import Config, FlyerProject, FlyerRequestFields  # noqa: E402
+from schemas import Config, FlyerConcept, FlyerProject, FlyerProjectStore, FlyerRequestFields  # noqa: E402
 try:
-    from flyer_render import inspect_rendered_asset, render_concept_previews  # type: ignore  # noqa: E402
+    from flyer_render import build_asset_manifest, inspect_rendered_asset, render_concept_previews, render_final_package, validate_text_manifest_file  # type: ignore  # noqa: E402
 except ImportError:
-    from agents.flyer.render import inspect_rendered_asset, render_concept_previews  # noqa: E402
+    from agents.flyer.render import build_asset_manifest, inspect_rendered_asset, render_concept_previews, render_final_package, validate_text_manifest_file  # noqa: E402
 
 
 def _project() -> FlyerProject:
@@ -58,6 +59,7 @@ def main() -> int:
     parser.add_argument("--real-model", action="store_true")
     parser.add_argument("--allow-spend", action="store_true")
     parser.add_argument("--keep-output", action="store_true")
+    parser.add_argument("--final-package", action="store_true")
     args = parser.parse_args()
 
     if args.real_model and not args.allow_spend:
@@ -80,19 +82,125 @@ def main() -> int:
         spend_mode = "real-model"
 
     try:
-        specs = render_concept_previews(_project(), asset_dir, model=model, quality=quality, concept_count=1)
+        project = _project()
+        specs = render_concept_previews(project, asset_dir, model=model, quality=quality, concept_count=1)
         diagnostics = []
         ok = True
         for spec in specs:
             report = inspect_rendered_asset(spec.path, expected_width=spec.width, expected_height=spec.height, mime_type="image/png")
+            text_report = validate_text_manifest_file(
+                spec.path,
+                project_id=project.project_id,
+                project_version=project.version,
+                output_format=spec.output_format,
+            )
             diagnostics.append({
                 "path": str(spec.path),
                 "width": report.width,
                 "height": report.height,
                 "size_bytes": report.size_bytes,
                 "blockers": report.blockers,
+                "text_qa": {"ok": text_report.ok, "blockers": text_report.blockers},
             })
-            ok = ok and report.ok
+            ok = ok and report.ok and text_report.ok
+        final_diagnostics = []
+        send_dry_run = {"ok": True}
+        stale_sidecar_check = {"ok": True}
+        if args.final_package:
+            preview_assets = build_asset_manifest(specs, first_asset_number=1, source="rendered", original_message_id="smoke-quality")
+            concepts = [
+                FlyerConcept(
+                    concept_id="C1",
+                    title="Best Design",
+                    style_summary="Smoke concept",
+                    preview_asset_id=preview_assets[0].asset_id,
+                    prompt=project.raw_request,
+                    created_at=datetime.now(timezone.utc),
+                    selected_at=datetime.now(timezone.utc),
+                )
+            ]
+            project = project.model_copy(update={
+                "assets": preview_assets,
+                "concepts": concepts,
+                "selected_concept_id": "C1",
+                "status": "finalizing_assets",
+            })
+            final_specs = render_final_package(project, temp_root / "finals", model=model, quality=quality)
+            for spec in final_specs:
+                mime = "application/pdf" if spec.path.suffix.lower() == ".pdf" else "image/png"
+                report = inspect_rendered_asset(spec.path, expected_width=spec.width, expected_height=spec.height, mime_type=mime)
+                text_report = validate_text_manifest_file(
+                    spec.path,
+                    project_id=project.project_id,
+                    project_version=project.version,
+                    output_format=spec.output_format,
+                )
+                final_diagnostics.append({
+                    "path": str(spec.path),
+                    "size_bytes": report.size_bytes,
+                    "blockers": report.blockers,
+                    "text_qa": {"ok": text_report.ok, "blockers": text_report.blockers},
+                })
+                ok = ok and report.ok and text_report.ok
+            final_assets = build_asset_manifest(
+                final_specs,
+                first_asset_number=len(preview_assets) + 1,
+                source="rendered",
+                original_message_id="smoke-quality-approve",
+            )
+            project = project.model_copy(update={
+                "assets": [*preview_assets, *final_assets],
+                "final_asset_ids": [asset.asset_id for asset in final_assets],
+            })
+            state_path = temp_root / "projects.json"
+            log_path = temp_root / "decisions.log"
+            state_path.write_text(FlyerProjectStore(projects=[project]).model_dump_json(indent=2), encoding="utf-8")
+            send_script = Path(__file__).with_name("send-flyer-package")
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(send_script),
+                    "--jid", "smoke@s.whatsapp.net",
+                    "--project-id", project.project_id,
+                    "--state-path", str(state_path),
+                    "--log-path", str(log_path),
+                    "--dry-run-bridge",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            delivered_store = FlyerProjectStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+            delivered = delivered_store.projects[0].status == "delivered"
+            send_dry_run = {
+                "ok": proc.returncode == 0 and delivered and log_path.exists(),
+                "returncode": proc.returncode,
+                "stdout": (proc.stdout or "").strip()[:500],
+                "stderr": (proc.stderr or "").strip()[:500],
+                "delivered": delivered,
+            }
+            if proc.returncode != 0 and "No module named 'fcntl'" in (proc.stderr or ""):
+                send_dry_run = {
+                    "ok": True,
+                    "skipped": "safe_io_fcntl_unavailable_on_windows",
+                    "returncode": proc.returncode,
+                    "stderr": (proc.stderr or "").strip()[:500],
+                    "delivered": delivered,
+                }
+            ok = ok and bool(send_dry_run["ok"])
+            stale_target = final_specs[0].path
+            sidecar = Path(f"{stale_target}.text.json")
+            doc = json.loads(sidecar.read_text(encoding="utf-8"))
+            doc["project_version"] = doc["project_version"] + 1
+            sidecar.write_text(json.dumps(doc), encoding="utf-8")
+            stale = validate_text_manifest_file(
+                stale_target,
+                project_id=project.project_id,
+                project_version=project.version,
+                output_format=final_specs[0].output_format,
+            )
+            stale_sidecar_check = {"ok": not stale.ok, "blockers": stale.blockers}
+            ok = ok and not stale.ok
         print(json.dumps({
             "ok": ok,
             "mode": spend_mode,
@@ -101,6 +209,9 @@ def main() -> int:
             "concept_count": len(specs),
             "output_dir": str(temp_root),
             "assets": diagnostics,
+            "final_assets": final_diagnostics,
+            "send_dry_run": send_dry_run,
+            "stale_sidecar_check": stale_sidecar_check,
         }))
         return 0 if ok else 1
     finally:

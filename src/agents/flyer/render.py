@@ -49,6 +49,21 @@ class RenderedAssetQuality:
     size_bytes: int = 0
 
 
+@dataclass(frozen=True)
+class FlyerTextFact:
+    fact_id: str
+    label: str
+    text: str
+
+
+@dataclass(frozen=True)
+class FlyerTextQuality:
+    ok: bool
+    blockers: list[str]
+    warnings: list[str]
+    sidecar_path: Path
+
+
 PALETTES = {
     "C1": {"bg": [252, 244, 226], "primary": [130, 28, 42], "accent": [237, 171, 44], "ink": [39, 39, 39], "soft": [255, 255, 255]},
     "C2": {"bg": [238, 248, 246], "primary": [0, 106, 103], "accent": [230, 91, 63], "ink": [25, 43, 47], "soft": [255, 255, 255]},
@@ -78,6 +93,9 @@ def _customers_path() -> Path:
 
 CUSTOMERS_PATH = Path("/opt/shift-agent/state/flyer/customers.json")
 DETERMINISTIC_MODEL_NAMES = {"", "deterministic-renderer", "pillow", "local-pillow"}
+TEXT_MANIFEST_SCHEMA_VERSION = 1
+MAX_DETAIL_FACTS = 10
+MAX_TEXT_FACTS = 16
 
 
 def _require_ready(project: FlyerProject) -> None:
@@ -197,18 +215,263 @@ def _schedule_hint(project: FlyerProject) -> str:
     if not text:
         return ""
     schedule_match = re.search(
-        r"((?:starts?|starting)\s+from\s+.+?(?:saturday|sunday|weekend).+?)(?:\.|$)",
+        r"((?:starts?|starting)\s+from\s+.+?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend).+?)(?:\.|$)",
         text,
         flags=re.IGNORECASE,
     )
     if schedule_match:
         return schedule_match.group(1).strip(" .")
+    recurring_match = re.search(
+        r"((?:daily|weekdays?|weekends?|every\s+[a-z]+|mon(?:day)?\s*-\s*fri(?:day)?).{0,80})(?:\.|$)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if recurring_match:
+        return recurring_match.group(1).strip(" .")
     weekend_match = re.search(
-        r"(.{0,80}(?:saturday|sunday|weekend).{0,80})(?:\.|$)",
+        r"(.{0,80}(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend).{0,80})(?:\.|$)",
         text,
         flags=re.IGNORECASE,
     )
     return weekend_match.group(1).strip(" .") if weekend_match else ""
+
+
+def _normalize_fact_text(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip()).casefold()
+
+
+def _text_manifest_path(path: Path | str) -> Path:
+    return Path(f"{Path(path)}.text.json")
+
+
+def _clean_fact_text(text: str, *, max_len: int = 180) -> str:
+    clean = re.sub(r"\s+", " ", (text or "").strip(" ."))
+    if len(clean) > max_len:
+        raise FlyerRenderError("critical text facts do not fit")
+    return clean
+
+
+def _price_or_phone_clause(text: str) -> bool:
+    return bool(
+        re.search(r"\$\s*\d+(?:\.\d{1,2})?", text)
+        or re.search(r"\b\d+(?:\.\d{1,2})?\s*/\s*(?:piece|pc|lb|pcs)\b", text, flags=re.IGNORECASE)
+        or re.search(r"\+?\d[\d\s().-]{7,}\d", text)
+    )
+
+
+def _digits(text: str) -> str:
+    return re.sub(r"\D+", "", text or "")
+
+
+def _phones_in_text(text: str) -> list[str]:
+    return [
+        _digits(match.group(0))
+        for match in re.finditer(r"\+?\d[\d\s().-]{7,}\d", text or "")
+    ]
+
+
+def _detail_clauses(project: FlyerProject) -> list[str]:
+    details = (project.fields.notes or project.raw_request or "").strip()
+    if not details:
+        return []
+    compact = re.sub(r"\s+", " ", details)
+    clauses = [part.strip(" .") for part in re.split(r";|\n|•|-{2,}|(?<=\.)\s+", compact) if part.strip(" .")]
+    selected: list[str] = []
+    seen: set[str] = set()
+    current_contact_digits = _digits(project.fields.contact_info or "")
+    for clause in clauses:
+        if not _price_or_phone_clause(clause):
+            continue
+        phones = _phones_in_text(clause)
+        if phones and current_contact_digits and all(phone != current_contact_digits for phone in phones):
+            continue
+        normalized = _normalize_fact_text(clause)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        selected.append(_clean_fact_text(clause))
+    if len(selected) > MAX_DETAIL_FACTS:
+        raise FlyerRenderError("critical text facts do not fit")
+    return selected
+
+
+def collect_text_facts(project: FlyerProject) -> list[FlyerTextFact]:
+    facts: list[FlyerTextFact] = []
+
+    def add(fact_id: str, label: str, text: str) -> None:
+        clean = _clean_fact_text(text)
+        if clean:
+            facts.append(FlyerTextFact(fact_id=fact_id, label=label, text=clean))
+
+    add("title", "Title", project.fields.event_or_business_name or "Flyer")
+    schedule = _schedule_hint(project)
+    if project.fields.event_date:
+        add("date", "Date", project.fields.event_date)
+    elif schedule:
+        add("schedule", "Schedule", schedule)
+    if project.fields.event_time:
+        add("time", "Time", project.fields.event_time)
+    if project.fields.venue_or_location:
+        add("location", "Location", project.fields.venue_or_location)
+    if project.fields.contact_info:
+        add("contact", "Contact", project.fields.contact_info)
+    for idx, clause in enumerate(_detail_clauses(project), start=1):
+        add(f"detail_{idx:03d}", "Detail", clause)
+    if len(facts) > MAX_TEXT_FACTS:
+        raise FlyerRenderError("critical text facts do not fit")
+    fact_ids = [fact.fact_id for fact in facts]
+    if len(fact_ids) != len(set(fact_ids)):
+        raise FlyerRenderError("duplicate critical text fact ids")
+    return facts
+
+
+def _fact_lines(project: FlyerProject) -> list[str]:
+    lines: list[str] = []
+    for fact in collect_text_facts(project):
+        if fact.fact_id == "title":
+            lines.append(fact.text)
+        else:
+            lines.append(f"{fact.label}: {fact.text}")
+    return lines
+
+
+def _facts_for_manifest(facts: list[FlyerTextFact]) -> list[dict[str, str]]:
+    return [
+        {
+            "fact_id": fact.fact_id,
+            "label": fact.label,
+            "text": fact.text,
+            "normalized_text": _normalize_fact_text(fact.text),
+        }
+        for fact in facts
+    ]
+
+
+def write_text_manifest(
+    project: FlyerProject,
+    artifact_path: Path | str,
+    *,
+    output_format: str,
+    selected_concept_id: str = "",
+    source_path: Path | str | None = None,
+) -> Path:
+    artifact = Path(artifact_path)
+    expected = collect_text_facts(project)
+    rendered = list(expected)
+    missing: list[str] = []
+    expected_by_id = {fact.fact_id: fact for fact in expected}
+    rendered_by_id: dict[str, FlyerTextFact] = {}
+    duplicate_ids: list[str] = []
+    for fact in rendered:
+        if fact.fact_id in rendered_by_id:
+            duplicate_ids.append(fact.fact_id)
+        rendered_by_id[fact.fact_id] = fact
+    for fact_id, fact in expected_by_id.items():
+        rendered_fact = rendered_by_id.get(fact_id)
+        if rendered_fact is None:
+            missing.append(fact_id)
+            continue
+        if _normalize_fact_text(rendered_fact.text) != _normalize_fact_text(fact.text):
+            missing.append(fact_id)
+    blockers = []
+    if missing:
+        blockers.append("missing critical text facts: " + ", ".join(sorted(set(missing))))
+    if duplicate_ids:
+        blockers.append("duplicate critical text fact ids: " + ", ".join(sorted(set(duplicate_ids))))
+    manifest = {
+        "schema_version": TEXT_MANIFEST_SCHEMA_VERSION,
+        "project_id": project.project_id,
+        "project_version": project.version,
+        "selected_concept_id": selected_concept_id or project.selected_concept_id or "",
+        "output_format": output_format,
+        "artifact_path": str(artifact),
+        "artifact_sha256": _sha256(artifact) if artifact.exists() else "",
+        "source_sha256": _sha256(Path(source_path)) if source_path and Path(source_path).exists() else "",
+        "expected_facts": _facts_for_manifest(expected),
+        "rendered_facts": _facts_for_manifest(rendered),
+        "missing_fact_labels": sorted(set(missing)),
+        "warnings": [],
+        "ok": not blockers,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    sidecar = _text_manifest_path(artifact)
+    sidecar.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    result = validate_text_manifest_file(
+        artifact,
+        project_id=project.project_id,
+        project_version=project.version,
+        output_format=output_format,
+    )
+    if not result.ok:
+        raise FlyerRenderError(f"text manifest validation failed: {result.blockers}")
+    return sidecar
+
+
+def validate_text_manifest_file(
+    artifact_path: Path | str,
+    *,
+    project_id: str | None = None,
+    project_version: int | None = None,
+    output_format: str | None = None,
+) -> FlyerTextQuality:
+    artifact = Path(artifact_path)
+    sidecar = _text_manifest_path(artifact)
+    blockers: list[str] = []
+    warnings: list[str] = []
+    if not artifact.exists():
+        blockers.append("artifact missing")
+    if not sidecar.exists():
+        blockers.append("text manifest missing")
+        return FlyerTextQuality(False, blockers, warnings, sidecar)
+    try:
+        manifest = json.loads(sidecar.read_text(encoding="utf-8"))
+    except Exception as e:
+        return FlyerTextQuality(False, [f"text manifest unreadable: {e}"], warnings, sidecar)
+    if manifest.get("schema_version") != TEXT_MANIFEST_SCHEMA_VERSION:
+        blockers.append("text manifest schema mismatch")
+    if project_id is not None and manifest.get("project_id") != project_id:
+        blockers.append("text manifest project mismatch")
+    if project_version is not None and manifest.get("project_version") != project_version:
+        blockers.append("text manifest project version mismatch")
+    if output_format is not None and manifest.get("output_format") != output_format:
+        blockers.append("text manifest output format mismatch")
+    if artifact.exists() and manifest.get("artifact_sha256") != _sha256(artifact):
+        blockers.append("text manifest artifact hash mismatch")
+    expected = manifest.get("expected_facts") or []
+    rendered = manifest.get("rendered_facts") or []
+    if not isinstance(expected, list) or not isinstance(rendered, list):
+        blockers.append("text manifest facts must be lists")
+        expected = []
+        rendered = []
+    rendered_by_id: dict[str, dict] = {}
+    duplicates: set[str] = set()
+    for fact in rendered:
+        if not isinstance(fact, dict):
+            blockers.append("text manifest invalid rendered fact entry")
+            continue
+        fact_id = str(fact.get("fact_id", ""))
+        if fact_id in rendered_by_id:
+            duplicates.add(fact_id)
+        rendered_by_id[fact_id] = fact
+    if duplicates:
+        blockers.append("duplicate rendered fact ids: " + ", ".join(sorted(duplicates)))
+    for fact in expected:
+        if not isinstance(fact, dict):
+            blockers.append("text manifest invalid expected fact entry")
+            continue
+        fact_id = str(fact.get("fact_id", ""))
+        rendered_fact = rendered_by_id.get(fact_id)
+        if rendered_fact is None:
+            blockers.append(f"missing rendered fact: {fact_id}")
+            continue
+        if rendered_fact.get("normalized_text") != fact.get("normalized_text"):
+            blockers.append(f"rendered fact text mismatch: {fact_id}")
+    missing = manifest.get("missing_fact_labels") or []
+    if missing:
+        blockers.append("manifest reports missing facts: " + ", ".join(str(item) for item in missing))
+    if manifest.get("ok") is not True:
+        blockers.append("manifest not ok")
+    return FlyerTextQuality(not blockers, blockers, warnings, sidecar)
 
 
 def _brand_asset_prompt(project: FlyerProject) -> str:
@@ -362,26 +625,7 @@ def inspect_rendered_asset(path: Path | str, *, expected_width: int, expected_he
 
 
 def _critical_lines(project: FlyerProject) -> list[str]:
-    lines = [project.fields.event_or_business_name or "Flyer"]
-    schedule = _schedule_hint(project)
-    if project.fields.event_date:
-        lines.append(f"Date: {project.fields.event_date}")
-    elif schedule:
-        lines.append(f"Schedule: {schedule}")
-    if project.fields.event_time:
-        lines.append(f"Time: {project.fields.event_time}")
-    if project.fields.venue_or_location:
-        lines.append(f"Location: {project.fields.venue_or_location}")
-    if project.fields.contact_info:
-        lines.append(f"Contact: {project.fields.contact_info}")
-    details = (project.fields.notes or project.raw_request or "").strip()
-    if details:
-        compact = re.sub(r"\s+", " ", details)
-        for part in re.split(r";|\n", compact)[:5]:
-            part = part.strip(" .")
-            if part and part not in lines:
-                lines.append(part[:120])
-    return lines[:7]
+    return _fact_lines(project)
 
 
 def apply_critical_text_overlay(project: FlyerProject, source: Path | str, target: Path | str, *, size: tuple[int, int], output_format: str) -> None:
@@ -399,16 +643,16 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
         draw = ImageDraw.Draw(img, "RGBA")
         width, height = size
         margin = max(24, int(width * 0.035))
-        panel_h = min(int(height * 0.44), max(int(height * 0.22), 58 + len(_critical_lines(project)) * max(24, int(width * 0.024))))
+        panel_h = min(int(height * 0.60), max(int(height * 0.24), 58 + len(_critical_lines(project)) * max(30, int(width * 0.032))))
         y0 = height - panel_h - margin
         draw.rounded_rectangle((margin, y0, width - margin, height - margin), radius=18, fill=(12, 16, 24, 218), outline=(255, 196, 58, 240), width=3)
         y = y0 + int(margin * 0.75)
         lines = _critical_lines(project)
         for idx, line in enumerate(lines):
-            font = _font(ImageFont, max(30, int(width * 0.045)), bold=True, text=line) if idx == 0 else _font(ImageFont, max(20, int(width * 0.025)), text=line)
+            font = _font(ImageFont, max(30, int(width * 0.043)), bold=True, text=line) if idx == 0 else _font(ImageFont, max(17, int(width * 0.021)), text=line)
             fill = (255, 214, 79, 255) if idx == 0 else (255, 255, 255, 245)
             wrapped = _wrap(draw, line, font, width - margin * 3)
-            for wrapped_line in wrapped[:2 if idx == 0 else 1]:
+            for wrapped_line in wrapped:
                 if y + font.size > height - margin:
                     raise FlyerRenderError("critical text overlay does not fit")
                 draw.text((margin + 18, y), wrapped_line, font=font, fill=fill)
@@ -445,13 +689,13 @@ with Image.open(src) as img:
     img=img.convert("RGB")
     if img.size != size: img=img.resize(size)
     draw=ImageDraw.Draw(img,"RGBA"); width,height=size; margin=max(24,int(width*.035))
-    panel_h=min(int(height*.44),max(int(height*.22),58+len(lines)*max(24,int(width*.024))))
+    panel_h=min(int(height*.60),max(int(height*.24),58+len(lines)*max(30,int(width*.032))))
     y0=height-panel_h-margin
     draw.rounded_rectangle((margin,y0,width-margin,height-margin), radius=18, fill=(12,16,24,218), outline=(255,196,58,240), width=3)
     y=y0+int(margin*.75)
     for idx,line in enumerate(lines):
-        f=font(max(30,int(width*.045)), True, line) if idx==0 else font(max(20,int(width*.025)), False, line); fill=(255,214,79,255) if idx==0 else (255,255,255,245)
-        for wrapped in wrap(draw,line,f,width-margin*3)[:2 if idx==0 else 1]:
+        f=font(max(30,int(width*.043)), True, line) if idx==0 else font(max(17,int(width*.021)), False, line); fill=(255,214,79,255) if idx==0 else (255,255,255,245)
+        for wrapped in wrap(draw,line,f,width-margin*3):
             if y+f.size > height-margin:
                 raise SystemExit("critical text overlay does not fit")
             draw.text((margin+18,y), wrapped, font=f, fill=fill)
@@ -638,9 +882,9 @@ def _draw_flyer_pil(project: FlyerProject, *, concept_id: str, size: tuple[int, 
     img = Image.new("RGB", size, tuple(palette["bg"]))
     draw = ImageDraw.Draw(img)
     margin = int(width * 0.07)
-    title_font = _font(ImageFont, max(46, int(width * 0.074)), bold=True)
-    subtitle_font = _font(ImageFont, max(28, int(width * 0.038)), bold=True)
-    small_font = _font(ImageFont, max(20, int(width * 0.024)))
+    title_font = _font(ImageFont, max(38, int(width * 0.060)), bold=True)
+    subtitle_font = _font(ImageFont, max(14, int(width * 0.017)), bold=True)
+    small_font = _font(ImageFont, max(11, int(width * 0.012)))
 
     draw.rectangle((0, 0, width, int(height * 0.19)), fill=tuple(palette["primary"]))
     draw.rectangle((0, int(height * 0.19), width, int(height * 0.205)), fill=tuple(palette["accent"]))
@@ -654,7 +898,9 @@ def _draw_flyer_pil(project: FlyerProject, *, concept_id: str, size: tuple[int, 
     draw.text((margin, int(height * 0.045)), language_label.upper(), font=small_font, fill=tuple(palette["soft"]))
 
     y = int(height * 0.245)
-    for line in _wrap(draw, project.fields.event_or_business_name or "", title_font, width - margin * 2)[:3]:
+    for line in _wrap(draw, project.fields.event_or_business_name or "", title_font, width - margin * 2):
+        if y + title_font.size > int(height * 0.45):
+            raise FlyerRenderError("critical text facts do not fit")
         draw.text((margin, y), line, font=title_font, fill=tuple(palette["primary"]))
         y += int(title_font.size * 1.08)
     if project.fields.style_preference:
@@ -662,23 +908,26 @@ def _draw_flyer_pil(project: FlyerProject, *, concept_id: str, size: tuple[int, 
             draw.text((margin, y + 8), line, font=small_font, fill=tuple(palette["ink"]))
             y += int(small_font.size * 1.2)
 
-    card_top = max(y + 28, int(height * 0.48))
-    card_bottom = int(height * 0.82)
+    card_top = max(y + 22, int(height * 0.40))
+    card_bottom = height - int(margin * 1.45)
     draw.rounded_rectangle((margin, card_top, width - margin, card_bottom), radius=18, fill=tuple(palette["soft"]), outline=tuple(palette["accent"]), width=4)
     facts = [
-        ("DATE", project.fields.event_date or ""),
-        ("TIME", project.fields.event_time or ""),
-        ("VENUE", project.fields.venue_or_location or ""),
-        ("CONTACT", project.fields.contact_info or ""),
+        (fact.label.upper(), fact.text)
+        for fact in collect_text_facts(project)
+        if fact.fact_id != "title"
     ]
     fy = card_top + 36
     for label, value in facts:
+        if fy + small_font.size + subtitle_font.size > card_bottom - 14:
+            raise FlyerRenderError("critical text facts do not fit")
         draw.text((margin + 34, fy), label, font=small_font, fill=tuple(palette["accent"]))
-        fy += int(small_font.size * 1.15)
-        for line in _wrap(draw, value, subtitle_font, width - margin * 2 - 68)[:2]:
+        fy += int(small_font.size * 0.95)
+        for line in _wrap(draw, value, subtitle_font, width - margin * 2 - 68):
+            if fy + subtitle_font.size > card_bottom - 14:
+                raise FlyerRenderError("critical text facts do not fit")
             draw.text((margin + 34, fy), line, font=subtitle_font, fill=tuple(palette["ink"]))
-            fy += int(subtitle_font.size * 1.18)
-        fy += 10
+            fy += int(subtitle_font.size * 1.05)
+        fy += 4
 
     footer = "Send APPROVE to finalize - Hermes Flyer Studio"
     bbox = draw.textbbox((0, 0), footer, font=small_font)
@@ -724,24 +973,30 @@ def wrap(text, f, maxw):
         else: lines.append(cur); cur=w
     if cur: lines.append(cur)
     return lines
-w,h=size; m=int(w*.07); tf=font(max(46,int(w*.074)),True); sf=font(max(28,int(w*.038)),True); sm=font(max(20,int(w*.024)))
+w,h=size; m=int(w*.07); tf=font(max(38,int(w*.060)),True); sf=font(max(14,int(w*.017)),True); sm=font(max(11,int(w*.012)))
 draw.rectangle((0,0,w,int(h*.19)), fill=tuple(palette["primary"])); draw.rectangle((0,int(h*.19),w,int(h*.205)), fill=tuple(palette["accent"]))
 for i in range(9):
     cx=int(w*(.08+i*.105)); cy=int(h*.16); r=int(w*.025); draw.ellipse((cx-r,cy-r,cx+r,cy+r), fill=tuple(palette["accent"]))
 draw.text((m,int(h*.045)), spec["language"].upper(), font=sm, fill=tuple(palette["soft"]))
 y=int(h*.245)
-for line in wrap(spec["title"], tf, w-m*2)[:3]:
+for line in wrap(spec["title"], tf, w-m*2):
+    if y+tf.size > int(h*.45):
+        raise SystemExit("critical text facts do not fit")
     draw.text((m,y), line, font=tf, fill=tuple(palette["primary"])); y += int(tf.size*1.08)
 for line in wrap(spec.get("style",""), sm, w-m*2)[:2]:
     draw.text((m,y+8), line, font=sm, fill=tuple(palette["ink"])); y += int(sm.size*1.2)
-top=max(y+28,int(h*.48)); bottom=int(h*.82)
+top=max(y+22,int(h*.40)); bottom=h-int(m*1.45)
 draw.rounded_rectangle((m,top,w-m,bottom), radius=18, fill=tuple(palette["soft"]), outline=tuple(palette["accent"]), width=4)
 fy=top+36
 for label,value in spec["facts"]:
-    draw.text((m+34,fy), label, font=sm, fill=tuple(palette["accent"])); fy += int(sm.size*1.15)
-    for line in wrap(value, sf, w-m*2-68)[:2]:
-        draw.text((m+34,fy), line, font=sf, fill=tuple(palette["ink"])); fy += int(sf.size*1.18)
-    fy += 10
+    if fy+sm.size+sf.size > bottom-14:
+        raise SystemExit("critical text facts do not fit")
+    draw.text((m+34,fy), label, font=sm, fill=tuple(palette["accent"])); fy += int(sm.size*.95)
+    for line in wrap(value, sf, w-m*2-68):
+        if fy+sf.size > bottom-14:
+            raise SystemExit("critical text facts do not fit")
+        draw.text((m+34,fy), line, font=sf, fill=tuple(palette["ink"])); fy += int(sf.size*1.05)
+    fy += 4
 footer="Send APPROVE to finalize - Hermes Flyer Studio"; box=draw.textbbox((0,0),footer,font=sm)
 draw.text(((w-(box[2]-box[0]))//2,h-m), footer, font=sm, fill=tuple(palette["ink"]))
 if spec["format"]=="PDF": img.save(out,"PDF",resolution=150.0)
@@ -763,10 +1018,9 @@ def _render_with_system_pillow(project: FlyerProject, path: Path, *, concept_id:
         "title": project.fields.event_or_business_name or "",
         "style": project.fields.style_preference,
         "facts": [
-            ["DATE", project.fields.event_date or ""],
-            ["TIME", project.fields.event_time or ""],
-            ["VENUE", project.fields.venue_or_location or ""],
-            ["CONTACT", project.fields.contact_info or ""],
+            [fact.label.upper(), fact.text]
+            for fact in collect_text_facts(project)
+            if fact.fact_id != "title"
         ],
     }
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False) as fh:
@@ -816,6 +1070,7 @@ def render_concept_previews(project: FlyerProject, output_dir: Path | str, *, mo
         quality_report = inspect_rendered_asset(path, expected_width=1080, expected_height=1350, mime_type="image/png")
         if not quality_report.ok:
             raise FlyerRenderError(f"rendered concept failed quality check: {quality_report.blockers}")
+        write_text_manifest(project, path, output_format="concept_preview", selected_concept_id=concept_id, source_path=_raw_background_path(path))
         specs.append(RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview", width=1080, height=1350, concept_id=concept_id))
     return specs
 
@@ -843,10 +1098,12 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
     for output_format, kind, size in formats:
         suffix = "pdf" if size is None else "png"
         path = output_dir / f"{project.project_id}-{output_format}.{suffix}"
+        source_for_manifest: Path | None = None
         if selected_preview is not None and model.strip().lower() not in DETERMINISTIC_MODEL_NAMES:
             source = _raw_background_path(selected_preview)
             if not source.exists():
                 source = selected_preview
+            source_for_manifest = source
             if size is None:
                 temp_png = path.with_suffix(".overlay-source.png")
                 overlaid_png = path.with_suffix(".overlaid.png")
@@ -866,6 +1123,7 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
         quality_report = inspect_rendered_asset(path, expected_width=width, expected_height=height, mime_type="application/pdf" if size is None else "image/png")
         if not quality_report.ok:
             raise FlyerRenderError(f"rendered final failed quality check: {quality_report.blockers}")
+        write_text_manifest(project, path, output_format=output_format, selected_concept_id=concept_id, source_path=source_for_manifest)
         specs.append(RenderedAssetSpec(path=path, kind=kind, output_format=output_format, width=width, height=height, concept_id=concept_id))
     return specs
 

@@ -57,7 +57,7 @@ def main() -> int:
                 original_message_id=args.approved_message_id,
             )
             store.projects[idx] = project.model_copy(update={
-                "status": "delivered",
+                "status": "finalizing_assets",
                 "approved_message_id": args.approved_message_id,
                 "assets": [*project.assets, *assets],
                 "final_asset_ids": [asset.asset_id for asset in assets],
