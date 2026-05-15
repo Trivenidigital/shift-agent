@@ -101,7 +101,7 @@ Plan: `docs/superpowers/plans/2026-05-15-flyer-quality-phase2.md`
 - [x] Create PR for Phase 2: https://github.com/Trivenidigital/shift-agent/pull/90
 - [x] Get PR reviewed by three parallel agents and apply findings: sanitized model prompt, system-Pillow overlay/PDF fallback, no deadlocking unresolved revisions, small revision-result envelope for router parsing, safer title parsing, and per-project generation lock.
 - [x] Merge Phase 2 PR #90 to `main` at `c64d299`.
-- [ ] Deploy Phase 2 to `main-vps`, run deploy smoke, and record deterministic/real-model smoke results.
+- [x] Deploy Phase 2 to `main-vps` as `deploy-20260515-205337-5e2e1690`; deploy smoke passed, deterministic Flyer quality smoke passed, and one real-model smoke passed with `openai/gpt-5.4-image-2` high quality (`1080x1350`, 1.85 MB, variance 506) at `/opt/shift-agent/state/flyer/quality-smoke-20260515-205337/assets/F9001-C1-preview.png`.
 
 ## Active - Production pilot: Shift + Catering + Daily Brief (2026-05-14)
 
