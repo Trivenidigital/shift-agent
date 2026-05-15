@@ -98,7 +98,7 @@ Plan: `docs/superpowers/plans/2026-05-15-flyer-quality-phase2.md`
 - [x] Get Phase 2 design reviewed by two parallel agents and apply findings: raw model backgrounds before overlays, no model-owned critical text, schema-compatible `resulting_version` revision marker, temp-root isolation, per-binary cleanup, no long OpenRouter calls under `FileLock`, and WhatsApp clarification for unresolved revisions.
 - [x] Build render-quality inspection, reference/template prompt hardening, revision patch extraction, and quality smoke CLI.
 - [x] Run focused local verification and script syntax checks: Flyer pytest suite `66 passed`, `py_compile` clean, `git diff --check` clean, and local deterministic `smoke-flyer-quality` returned `{"ok": true}`.
-- [ ] Create PR for Phase 2.
+- [x] Create PR for Phase 2: https://github.com/Trivenidigital/shift-agent/pull/90
 - [ ] Get PR reviewed by three parallel agents and apply findings.
 - [ ] Merge Phase 2 to `main`.
 - [ ] Deploy Phase 2 to `main-vps`, run deploy smoke, and record deterministic/real-model smoke results.
