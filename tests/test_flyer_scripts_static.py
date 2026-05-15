@@ -140,6 +140,7 @@ def test_phase2_quality_smoke_and_workflow_deploy_contracts():
     assert "rm -f /usr/local/bin/smoke-flyer-quality" in deploy
     assert "rm -f /opt/shift-agent/flyer_workflow.py" in deploy
     assert "import flyer_workflow" in smoke
+    assert f".{{args.project_id}}.generate.lock" in generate
 
 
 def test_generation_does_not_hold_file_lock_during_render():
@@ -153,5 +154,9 @@ def test_generation_does_not_hold_file_lock_during_render():
 
 def test_active_revision_failure_gets_clarification_not_false_noted_message():
     hooks = (REPO / "src" / "plugins" / "cf-router" / "hooks.py").read_text(encoding="utf-8")
+    update = (SCRIPTS / "update-flyer-project").read_text(encoding="utf-8")
     assert "revision_requires_clarification" in hooks
     assert "I need one clarification before regenerating" in hooks
+    assert '"revision_requires_clarification": revision_requires_clarification' in update
+    assert '"project_id": updated.project_id' in update
+    assert "Do not persist an unapplied no-op revision" in update

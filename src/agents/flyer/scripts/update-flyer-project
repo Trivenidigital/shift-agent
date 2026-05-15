@@ -86,8 +86,7 @@ def main() -> int:
                     applied=False,
                 )
                 patch = extract_revision_patch(updated, args.revision_text)
-                if patch.ambiguous:
-                    revision = revision.model_copy(update={"request_text": f"{args.revision_text}\n[unresolved: {patch.unresolved_reason}]"})
+                revision_requires_clarification = patch.ambiguous or (not patch.changed and not patch.visual_only)
                 if patch.field_updates or patch.notes_update is not None:
                     field_update = dict(patch.field_updates)
                     if patch.notes_update is not None:
@@ -105,10 +104,17 @@ def main() -> int:
                     "selected_concept_id": None,
                     "final_asset_ids": [],
                 })
-                updated = updated.model_copy(update={
-                    "revisions": [*updated.revisions, revision],
-                    "version": updated.version + 1,
-                })
+                if revision_requires_clarification:
+                    # Do not persist an unapplied no-op revision: it would block
+                    # approval with no normal path to become applied.
+                    updated = updated.model_copy(update={
+                        "version": updated.version + 1,
+                    })
+                else:
+                    updated = updated.model_copy(update={
+                        "revisions": [*updated.revisions, revision],
+                        "version": updated.version + 1,
+                    })
             if args.approve_message_id:
                 unapplied = [r.revision_id for r in updated.revisions if not r.applied]
                 if unapplied:
@@ -129,8 +135,12 @@ def main() -> int:
             atomic_write_text(state_path, store.model_dump_json(indent=2))
             payload = json.loads(updated.model_dump_json())
             if args.revision_text:
-                payload["revision_patch"] = patch.to_dict()
-                payload["revision_requires_clarification"] = patch.ambiguous or (not patch.changed and not patch.visual_only)
+                payload = {
+                    "project_id": updated.project_id,
+                    "version": updated.version,
+                    "revision_patch": patch.to_dict(),
+                    "revision_requires_clarification": revision_requires_clarification,
+                }
             print(json.dumps(payload))
             return 0
     raise SystemExit(f"project not found: {args.project_id}")

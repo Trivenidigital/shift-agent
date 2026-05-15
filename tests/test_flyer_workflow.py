@@ -145,3 +145,14 @@ def test_extract_revision_patch_flags_old_text_not_found():
     assert patch.changed is False
     assert patch.ambiguous is True
     assert "not found" in patch.unresolved_reason
+
+
+def test_location_from_to_revision_does_not_change_title():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Weekend Breakfast",
+        contact_info="+1 704 324 3322",
+        venue_or_location="Triveni Pineville",
+        notes="Breakfast menu",
+    ))
+    patch = extract_revision_patch(project, "In the flyer, change location from Triveni Pineville to Lakshmi's Kitchen.")
+    assert patch.field_updates == {"venue_or_location": "Lakshmi's Kitchen"}

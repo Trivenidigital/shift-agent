@@ -147,7 +147,8 @@ def test_image_prompt_uses_schedule_instead_of_blank_date_for_recurring_offer():
     })
     project = project.model_copy(update={"fields": fields})
     prompt = _image_prompt(project, concept_id="C1", output_format="whatsapp_image", size=(1080, 1350))
-    assert "Schedule: Starts from 8 AM on both Saturday and Sunday" in prompt
+    assert "Starts from 8 AM" not in prompt
+    assert "Saturday and Sunday" in prompt
     assert "Date: " not in prompt
 
 
@@ -160,10 +161,24 @@ def test_image_prompt_skips_blank_optional_fields_for_price_list():
     )
     project = project.model_copy(update={"fields": fields})
     prompt = _image_prompt(project, concept_id="C1", output_format="whatsapp_image", size=(1080, 1350))
-    assert "Contact: +1 9802005022" in prompt
+    assert "+1 9802005022" not in prompt
     assert "Date: " not in prompt
     assert "Time: " not in prompt
     assert "Venue: " not in prompt
+
+
+def test_image_prompt_sanitizes_exact_customer_facts_from_model_context():
+    project = _complete_project()
+    fields = project.fields.model_copy(update={
+        "notes": "Non-veg combo $14.99. Call +1 904 555 0123 on 2026-10-10.",
+    })
+    project = project.model_copy(update={"fields": fields})
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+    assert "$14.99" not in prompt
+    assert "+1 904 555 0123" not in prompt
+    assert "2026-10-10" not in prompt
+    assert "[price]" in prompt
+    assert "[phone]" in prompt
 
 
 def test_image_prompt_includes_customer_brand_assets(tmp_path, monkeypatch):
@@ -303,8 +318,8 @@ def test_openrouter_image_renderer_posts_modalities_and_writes_data_url(tmp_path
     assert requests[0][2]["modalities"] == ["image", "text"]
     assert requests[0][2]["image_config"]["aspect_ratio"] == "4:5"
     prompt = requests[0][2]["messages"][0]["content"]
-    assert "Menu/details to include when relevant" in prompt
-    assert "Idly (3 PCS) - $7.99" in prompt
+    assert "Menu/offer context for imagery only, sanitized" in prompt
+    assert "$7.99" not in prompt
     assert "recurring schedule" in prompt
     assert specs[0].path.read_bytes().startswith(b"\x89PNG")
 

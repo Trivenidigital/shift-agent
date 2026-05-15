@@ -195,18 +195,20 @@ def extract_revision_patch(project: FlyerProject, text: str) -> RevisionPatchRes
         updates["event_time"] = f"{hour:02d}:{minute:02d}"
 
     title_match = re.search(
-        r"(?:should\s+be|make\s+it|change\s+(?:title|offer|flyer)?\s*(?:from\s+.+?\s+)?to)\s+(?P<new>[^.]+?),?\s+not\s+(?P<old>[^.]+)",
+        r"(?:title|offer|headline|flyer\s+title)\s*(?:should\s+be|=|:|to)\s+(?P<new>[^.]+?),?\s+not\s+(?P<old>[^.]+)",
         body,
         flags=re.IGNORECASE,
     )
     if not title_match:
-        title_match = re.search(r"from\s+(?P<old>[^.]+?)\s+to\s+(?P<new>[^.]+?)(?:\.|$)", body, flags=re.IGNORECASE)
+        title_match = re.search(r"(?:title|offer|headline)\s+from\s+(?P<old>[^.]+?)\s+to\s+(?P<new>[^.]+?)(?:\.|$)", body, flags=re.IGNORECASE)
+    if not title_match:
+        title_match = re.search(r"this\s+should\s+be\s+(?P<new>[^.]+?),?\s+not\s+(?P<old>[^.]+)", body, flags=re.IGNORECASE)
     if title_match:
         old = title_match.group("old").strip(" .\"'")
         new = title_match.group("new").strip(" .\"'")
         if old and new and (project.fields.event_or_business_name or "").lower() == old.lower():
             updates["event_or_business_name"] = new
-        elif new and ("title" in lower or "flyer" in lower or "should be" in lower):
+        elif new and ("title" in lower or "offer" in lower or "headline" in lower or "this should be" in lower):
             updates["event_or_business_name"] = new
 
     phone = _extract_phone(body)

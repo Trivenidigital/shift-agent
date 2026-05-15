@@ -48,60 +48,66 @@ def main() -> int:
     if project is None:
         raise SystemExit(f"project not found: {args.project_id}")
 
-    specs = render_concept_previews(
-        project,
-        Path(args.asset_dir),
-        model=cfg.flyer.draft_image_model,
-        quality=cfg.flyer.draft_image_quality,
-        concept_count=cfg.flyer.concept_count,
-    )
-
-    with FileLock(Path(str(state_path) + ".lock")):
-        store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
-        current = store.projects[snapshot_idx]
-        if current.project_id != args.project_id or current.version != snapshot_version:
-            raise SystemExit("project changed while rendering; refusing to overwrite newer flyer state")
-        now = datetime.now(timezone.utc)
-        assets = build_asset_manifest(
-            specs,
-            first_asset_number=next_asset_number(current),
-            source="rendered",
-            original_message_id=current.original_message_id,
+    asset_dir = Path(args.asset_dir)
+    with FileLock(asset_dir / f".{args.project_id}.generate.lock"):
+        specs = render_concept_previews(
+            project,
+            asset_dir,
+            model=cfg.flyer.draft_image_model,
+            quality=cfg.flyer.draft_image_quality,
+            concept_count=cfg.flyer.concept_count,
         )
-        concept_meta = [
-            ("C1", "Best Design", "Best-quality flyer direction for this request"),
-            ("C2", "Cultural Celebration", "Warm regional motifs with clean type"),
-            ("C3", "Modern Social", "Instagram-first layout with crisp hierarchy"),
-        ]
-        concepts = [
-            FlyerConcept(
-                concept_id=concept_id,
-                title=title,
-                style_summary=summary,
-                preview_asset_id=asset.asset_id,
-                prompt=current.raw_request,
-                created_at=now,
+
+        with FileLock(Path(str(state_path) + ".lock")):
+            store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
+            current = store.projects[snapshot_idx]
+            if current.project_id != args.project_id or current.version != snapshot_version:
+                for spec in specs:
+                    spec.path.unlink(missing_ok=True)
+                    raw = spec.path.with_name(f"{spec.path.stem}.raw.png")
+                    raw.unlink(missing_ok=True)
+                raise SystemExit("project changed while rendering; refusing to overwrite newer flyer state")
+            now = datetime.now(timezone.utc)
+            assets = build_asset_manifest(
+                specs,
+                first_asset_number=next_asset_number(current),
+                source="rendered",
+                original_message_id=current.original_message_id,
             )
-            for asset, (concept_id, title, summary) in zip(assets, concept_meta)
-        ]
-        one_shot = len(concepts) == 1
-        revisions = [
-            revision.model_copy(update={"applied": True})
-            if (not revision.applied and revision.resulting_version == current.version)
-            else revision
-            for revision in current.revisions
-        ]
-        store.projects[snapshot_idx] = current.model_copy(update={
-            "status": "awaiting_final_approval" if one_shot else "awaiting_concept_selection",
-            "concepts": concepts,
-            "selected_concept_id": "C1" if one_shot else None,
-            "assets": [*current.assets, *assets],
-            "revisions": revisions,
-            "updated_at": now,
-        })
-        atomic_write_text(state_path, store.model_dump_json(indent=2))
-        print(json.dumps({"project_id": args.project_id, "concept_count": len(concepts)}))
-        return 0
+            concept_meta = [
+                ("C1", "Best Design", "Best-quality flyer direction for this request"),
+                ("C2", "Cultural Celebration", "Warm regional motifs with clean type"),
+                ("C3", "Modern Social", "Instagram-first layout with crisp hierarchy"),
+            ]
+            concepts = [
+                FlyerConcept(
+                    concept_id=concept_id,
+                    title=title,
+                    style_summary=summary,
+                    preview_asset_id=asset.asset_id,
+                    prompt=current.raw_request,
+                    created_at=now,
+                )
+                for asset, (concept_id, title, summary) in zip(assets, concept_meta)
+            ]
+            one_shot = len(concepts) == 1
+            revisions = [
+                revision.model_copy(update={"applied": True})
+                if (not revision.applied and revision.resulting_version == current.version)
+                else revision
+                for revision in current.revisions
+            ]
+            store.projects[snapshot_idx] = current.model_copy(update={
+                "status": "awaiting_final_approval" if one_shot else "awaiting_concept_selection",
+                "concepts": concepts,
+                "selected_concept_id": "C1" if one_shot else None,
+                "assets": [*current.assets, *assets],
+                "revisions": revisions,
+                "updated_at": now,
+            })
+            atomic_write_text(state_path, store.model_dump_json(indent=2))
+            print(json.dumps({"project_id": args.project_id, "concept_count": len(concepts)}))
+            return 0
 
 
 if __name__ == "__main__":
