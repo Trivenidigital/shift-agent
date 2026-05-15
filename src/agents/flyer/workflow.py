@@ -46,6 +46,28 @@ class FlyerQualityResult:
     warnings: list[str]
 
 
+@dataclass(frozen=True)
+class RevisionPatchResult:
+    field_updates: dict[str, str]
+    notes_update: str | None = None
+    raw_request_update: str | None = None
+    changed: bool = False
+    visual_only: bool = False
+    ambiguous: bool = False
+    unresolved_reason: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "field_updates": self.field_updates,
+            "notes_update": self.notes_update,
+            "raw_request_update": self.raw_request_update,
+            "changed": self.changed,
+            "visual_only": self.visual_only,
+            "ambiguous": self.ambiguous,
+            "unresolved_reason": self.unresolved_reason,
+        }
+
+
 def build_missing_info_prompt(missing: list[str], *, preferred_language: str = "en") -> str:
     labels = [FIELD_LABELS.get(name, name.replace("_", " ")) for name in missing]
     language = LANGUAGE_NAMES.get(preferred_language, "the preferred language")
@@ -96,12 +118,47 @@ MONTHS = {
 }
 
 
-def extract_revision_field_updates(project: FlyerProject, text: str) -> dict[str, str]:
+def _replace_once_or_flag(source: str, old: str, new: str) -> tuple[str, str]:
+    if not source:
+        return source, "not found"
+    count = source.lower().count(old.lower())
+    if count == 0:
+        return source, "not found"
+    if count > 1:
+        return source, "appears multiple times"
+    return re.sub(re.escape(old), new, source, count=1, flags=re.IGNORECASE), ""
+
+
+def _extract_phone(text: str) -> str:
+    phone = re.search(r"(?:phone|contact|number)\D{0,30}(\+?\d[\d\s().-]{7,}\d)", text, re.IGNORECASE)
+    if not phone:
+        return ""
+    raw = " ".join(phone.group(1).replace("(", "").replace(")", "").split())
+    if not raw.startswith("+") and "+" in text[max(0, phone.start(1) - 5):phone.start(1) + 2]:
+        raw = "+" + raw
+    return raw
+
+
+def _is_visual_only_revision(text: str) -> bool:
+    lower = text.lower()
+    visual_markers = (
+        "make it", "color", "colour", "bigger", "smaller", "brighter",
+        "darker", "use the logo", "use logo", "template", "photo", "image",
+        "more festive", "less crowded", "font", "layout", "background",
+    )
+    critical_markers = ("date", "time", "phone", "contact", "price", "$", "location", "venue", "address", "not ", "from ")
+    return any(marker in lower for marker in visual_markers) and not any(marker in lower for marker in critical_markers)
+
+
+def extract_revision_patch(project: FlyerProject, text: str) -> RevisionPatchResult:
     """Extract high-confidence structured field edits from revision text."""
     updates: dict[str, str] = {}
     body = " ".join((text or "").split())
     lower = body.lower()
     current_date = project.fields.event_date or ""
+    notes_update: str | None = None
+    raw_request_update: str | None = None
+    unresolved: list[str] = []
 
     month_day = re.search(
         r"\b(?:change|move|set|update)?\s*(?:the\s*)?date\s*(?:from\s+[a-z]+\s+\d{1,2}\s+)?(?:to|as|=|:)?\s*"
@@ -137,4 +194,68 @@ def extract_revision_field_updates(project: FlyerProject, text: str) -> dict[str
             hour = 0
         updates["event_time"] = f"{hour:02d}:{minute:02d}"
 
-    return updates
+    title_match = re.search(
+        r"(?:title|offer|headline|flyer\s+title)\s*(?:should\s+be|=|:|to)\s+(?P<new>[^.]+?),?\s+not\s+(?P<old>[^.]+)",
+        body,
+        flags=re.IGNORECASE,
+    )
+    if not title_match:
+        title_match = re.search(r"(?:title|offer|headline)\s+from\s+(?P<old>[^.]+?)\s+to\s+(?P<new>[^.]+?)(?:\.|$)", body, flags=re.IGNORECASE)
+    if not title_match:
+        title_match = re.search(r"this\s+should\s+be\s+(?P<new>[^.]+?),?\s+not\s+(?P<old>[^.]+)", body, flags=re.IGNORECASE)
+    if title_match:
+        old = title_match.group("old").strip(" .\"'")
+        new = title_match.group("new").strip(" .\"'")
+        if old and new and (project.fields.event_or_business_name or "").lower() == old.lower():
+            updates["event_or_business_name"] = new
+        elif new and ("title" in lower or "offer" in lower or "headline" in lower or "this should be" in lower):
+            updates["event_or_business_name"] = new
+
+    phone = _extract_phone(body)
+    if phone:
+        updates["contact_info"] = phone
+
+    venue_match = re.search(
+        r"(?:change|update|set)?\s*(?:venue|location|address)\s*(?:from\s+.+?\s+)?(?:to|as|=|:)\s*(?P<venue>[^.]+)",
+        body,
+        flags=re.IGNORECASE,
+    )
+    if venue_match:
+        updates["venue_or_location"] = venue_match.group("venue").strip(" .")
+
+    price_match = re.search(
+        r"(?:change|update|set)?[^.]{0,80}?(?:price|combo|item)?[^.]{0,80}?\bfrom\s+\$?(?P<old>\d+(?:\.\d{2})?)\s+to\s+\$?(?P<new>\d+(?:\.\d{2})?)",
+        body,
+        flags=re.IGNORECASE,
+    )
+    if price_match:
+        old_price = f"${price_match.group('old')}"
+        new_price = f"${price_match.group('new')}"
+        candidate_notes = project.fields.notes or ""
+        replaced_notes, reason = _replace_once_or_flag(candidate_notes, old_price, new_price)
+        if reason:
+            candidate_raw = project.raw_request or ""
+            replaced_raw, raw_reason = _replace_once_or_flag(candidate_raw, old_price, new_price)
+            if raw_reason:
+                unresolved.append(f"price {old_price} {reason if reason != 'not found' else 'not found in flyer details'}")
+            else:
+                raw_request_update = replaced_raw
+        else:
+            notes_update = replaced_notes
+
+    changed = bool(updates) or notes_update is not None or raw_request_update is not None
+    visual_only = _is_visual_only_revision(body)
+    ambiguous = bool(unresolved)
+    return RevisionPatchResult(
+        field_updates=updates,
+        notes_update=notes_update,
+        raw_request_update=raw_request_update,
+        changed=changed,
+        visual_only=visual_only,
+        ambiguous=ambiguous,
+        unresolved_reason="; ".join(unresolved),
+    )
+
+
+def extract_revision_field_updates(project: FlyerProject, text: str) -> dict[str, str]:
+    return extract_revision_patch(project, text).field_updates

@@ -660,9 +660,22 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any) -> 
             "--revision-text", body,
             "--message-id", message_id,
         )
+        revision_requires_clarification = False
+        clarification_reason = ""
+        try:
+            import json
+            update_doc = json.loads(detail)
+            patch = update_doc.get("revision_patch") or {}
+            revision_requires_clarification = bool(update_doc.get("revision_requires_clarification"))
+            clarification_reason = str(patch.get("unresolved_reason") or "I could not match that change to the current flyer details.")
+        except Exception:
+            revision_requires_clarification = not ok
+            clarification_reason = detail[:180] or "I could not apply that revision."
         active_after = actions.find_active_flyer_project_by_sender(phone, chat_id) or {}
         needs_regen = not active_after.get("concepts")
-        if ok and needs_regen:
+        if revision_requires_clarification:
+            ack_message = f"I need one clarification before regenerating: {clarification_reason}. Please send the exact item or text to change."
+        elif ok and needs_regen:
             ack_message = "Revision applied to the flyer details. I am regenerating the design now."
         else:
             ack_message = "Revision noted. I will keep it with this flyer project. Reply APPROVE when ready for final files."
@@ -670,7 +683,7 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any) -> 
             chat_id,
             ack_message,
         )
-        if ok and needs_regen:
+        if ok and needs_regen and not revision_requires_clarification:
             gen_ok, gen_detail = actions.trigger_generate_flyer_concepts(project_id)
             if gen_ok:
                 preview_ok, preview_mid, preview_err = actions.send_flyer_concept_previews(chat_id, project_id)
@@ -684,7 +697,7 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any) -> 
         actions.audit_intercepted(
             reason="flyer_primary_project_created" if ok else "flyer_primary_failed",
             chat_id=chat_id, subprocess_rc=0 if ok and ack_ok else 2,
-            detail=f"project_id={project_id}; revision=true; update={detail[:250]}; ack_message_id={mid}; ack_error={err}",
+            detail=f"project_id={project_id}; revision=true; revision_requires_clarification={revision_requires_clarification}; update={detail[:250]}; ack_message_id={mid}; ack_error={err}",
         )
         return {"action": "skip",
                 "reason": f"cf-router flyer active: revision captured for {project_id}"}

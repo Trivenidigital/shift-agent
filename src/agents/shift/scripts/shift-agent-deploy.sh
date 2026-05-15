@@ -239,6 +239,11 @@ install_artifacts() {
     else
         rm -f /opt/shift-agent/flyer_render.py
     fi
+    if [ -f src/agents/flyer/workflow.py ]; then
+        install -m 644 src/agents/flyer/workflow.py /opt/shift-agent/flyer_workflow.py
+    else
+        rm -f /opt/shift-agent/flyer_workflow.py
+    fi
     if [ -f src/agents/flyer/onboarding.py ]; then
         install -m 644 src/agents/flyer/onboarding.py /opt/shift-agent/flyer_onboarding.py
     else
@@ -251,6 +256,23 @@ install_artifacts() {
     fi
     if [ -d src/agents/flyer/scripts ] && compgen -G "src/agents/flyer/scripts/*" > /dev/null; then
         install -m 755 src/agents/flyer/scripts/* /usr/local/bin/
+        for flyer_binary in \
+            create-flyer-project \
+            update-flyer-project \
+            generate-flyer-concepts \
+            finalize-flyer-assets \
+            handle-flyer-onboarding \
+            store-flyer-brand-asset \
+            manage-flyer-account \
+            send-flyer-package \
+            smoke-flyer-quality; do
+            if [ ! -f "src/agents/flyer/scripts/${flyer_binary}" ]; then
+                rm -f "/usr/local/bin/${flyer_binary}"
+            fi
+        done
+        # Per-binary stale cleanup for rollback tarballs that still contain a
+        # Flyer scripts directory but predate this specific Phase 2 CLI.
+        [ -f src/agents/flyer/scripts/smoke-flyer-quality ] || rm -f /usr/local/bin/smoke-flyer-quality
     else
         rm -f \
             /usr/local/bin/create-flyer-project \
@@ -260,7 +282,8 @@ install_artifacts() {
             /usr/local/bin/handle-flyer-onboarding \
             /usr/local/bin/store-flyer-brand-asset \
             /usr/local/bin/manage-flyer-account \
-            /usr/local/bin/send-flyer-package
+            /usr/local/bin/send-flyer-package \
+            /usr/local/bin/smoke-flyer-quality
     fi
     install -d -o shift-agent -g shift-agent -m 0700 /opt/shift-agent/state/flyer 2>/dev/null || true
     install -d -o shift-agent -g shift-agent -m 0700 /opt/shift-agent/state/flyer/assets 2>/dev/null || true

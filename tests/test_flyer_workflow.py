@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src" / "platfor
 from agents.flyer.workflow import (  # noqa: E402
     FLYER_INTENT_RE,
     build_missing_info_prompt,
+    extract_revision_patch,
     extract_revision_field_updates,
     next_status_for_project,
     quality_check_project,
@@ -98,3 +99,60 @@ def test_extract_revision_field_updates_handles_date_and_time_change():
         "event_date": "2026-10-18",
         "event_time": "16:00",
     }
+
+
+def test_extract_revision_patch_handles_price_title_phone_and_venue_changes():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Weekend Breakfast",
+        contact_info="+1 704 324 3322",
+        venue_or_location="Triveni Pineville",
+        notes="Thursday Dosa Night Special. Non-veg combo $14.99. Phone: +1 704 324 3322. Location: Triveni Pineville",
+    ))
+    patch = extract_revision_patch(
+        project,
+        "This should be Thursday Dosa Night Special, not Weekend Breakfast. "
+        "Change non-veg combo price from $14.99 to $16.99. "
+        "Phone should be +1 980 200 5022. Change location to Lakshmi's Kitchen.",
+    )
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert patch.field_updates["event_or_business_name"] == "Thursday Dosa Night Special"
+    assert patch.field_updates["contact_info"] == "+1 980 200 5022"
+    assert patch.field_updates["venue_or_location"] == "Lakshmi's Kitchen"
+    assert "$16.99" in patch.notes_update
+    assert "$14.99" not in patch.notes_update
+
+
+def test_extract_revision_patch_flags_repeated_price_ambiguity():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Dosa Night",
+        contact_info="+1 704 324 3322",
+        notes="Veg combo $14.99. Non-veg combo $14.99.",
+    ))
+    patch = extract_revision_patch(project, "Change price from $14.99 to $16.99.")
+    assert patch.changed is False
+    assert patch.ambiguous is True
+    assert "appears multiple times" in patch.unresolved_reason
+
+
+def test_extract_revision_patch_flags_old_text_not_found():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Dosa Night",
+        contact_info="+1 704 324 3322",
+        notes="Veg combo $12.99.",
+    ))
+    patch = extract_revision_patch(project, "Change price from $14.99 to $16.99.")
+    assert patch.changed is False
+    assert patch.ambiguous is True
+    assert "not found" in patch.unresolved_reason
+
+
+def test_location_from_to_revision_does_not_change_title():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Weekend Breakfast",
+        contact_info="+1 704 324 3322",
+        venue_or_location="Triveni Pineville",
+        notes="Breakfast menu",
+    ))
+    patch = extract_revision_patch(project, "In the flyer, change location from Triveni Pineville to Lakshmi's Kitchen.")
+    assert patch.field_updates == {"venue_or_location": "Lakshmi's Kitchen"}

@@ -43,6 +43,7 @@ for script in \
     /usr/local/bin/handle-flyer-onboarding \
     /usr/local/bin/store-flyer-brand-asset \
     /usr/local/bin/manage-flyer-account \
+    /usr/local/bin/smoke-flyer-quality \
     /usr/local/bin/send-flyer-package ; do
     [ -x "$script" ] || { echo "FAIL: $script missing or not executable"; exit 1; }
 done
@@ -68,6 +69,7 @@ import sys
 sys.path.insert(0, '/opt/shift-agent')
 import schemas, safe_io, exit_codes
 import flyer_render
+import flyer_workflow
 import flyer_onboarding
 import flyer_account
 print('schema classes:', [c for c in dir(schemas) if not c.startswith('_')][:5])
@@ -89,6 +91,12 @@ echo "✓ Python modules importable (incl. safe_io chokepoint symbols)"
 # external-foundation gate runs pre-install in shift-agent-deploy.sh, where a
 # missing Hermes bundled skill can abort before app state changes. Post-restart
 # smoke must not be the first strict check for external Hermes install state.
+if ! sudo -u shift-agent "$PY" /usr/local/bin/smoke-flyer-quality > /dev/null; then
+    echo "FAIL: Flyer quality deterministic smoke failed"
+    exit 1
+fi
+echo "Flyer quality deterministic smoke passed"
+
 if [ -x /usr/local/bin/credential-minimized-readiness ]; then
     "$PY" /usr/local/bin/credential-minimized-readiness --format text || true
 fi

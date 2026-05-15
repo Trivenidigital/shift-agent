@@ -39,6 +39,16 @@ class RenderedAssetSpec:
     concept_id: str = ""
 
 
+@dataclass(frozen=True)
+class RenderedAssetQuality:
+    ok: bool
+    blockers: list[str]
+    warnings: list[str]
+    width: int | None = None
+    height: int | None = None
+    size_bytes: int = 0
+
+
 PALETTES = {
     "C1": {"bg": [252, 244, 226], "primary": [130, 28, 42], "accent": [237, 171, 44], "ink": [39, 39, 39], "soft": [255, 255, 255]},
     "C2": {"bg": [238, 248, 246], "primary": [0, 106, 103], "accent": [230, 91, 63], "ink": [25, 43, 47], "soft": [255, 255, 255]},
@@ -58,6 +68,14 @@ FONT_CANDIDATES = [
 
 OPENROUTER_IMAGE_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_TIMEOUT_SEC = 180
+def _flyer_state_root() -> Path:
+    return Path(os.environ.get("FLYER_STATE_ROOT", "/opt/shift-agent/state/flyer/"))
+
+
+def _customers_path() -> Path:
+    return _flyer_state_root() / "customers.json"
+
+
 CUSTOMERS_PATH = Path("/opt/shift-agent/state/flyer/customers.json")
 DETERMINISTIC_MODEL_NAMES = {"", "deterministic-renderer", "pillow", "local-pillow"}
 
@@ -159,6 +177,14 @@ def _telugu_hint(project: FlyerProject) -> str:
     return " ".join(hints)
 
 
+def _sanitize_visual_context(text: str) -> str:
+    text = re.sub(r"\+?\d[\d\s().-]{7,}\d", "[phone]", text or "")
+    text = re.sub(r"\$\s*\d+(?:\.\d{2})?", "[price]", text)
+    text = re.sub(r"\b\d{1,4}(?:[-/:]\d{1,4}){1,2}\b", "[date/time]", text)
+    text = re.sub(r"\b\d+(?:\.\d+)?\b", "[number]", text)
+    return text[:700]
+
+
 def _schedule_hint(project: FlyerProject) -> str:
     text = project.fields.notes.strip() or project.raw_request.strip()
     if not text:
@@ -183,16 +209,22 @@ def _brand_asset_prompt(project: FlyerProject) -> str:
     if not active_assets:
         return "- none"
     return "\n".join(
-        f"- {asset.kind}: {asset.asset_id} ({Path(asset.path).name}) notes={getattr(asset, 'notes', '') or 'none'}"
+        f"- {asset.kind}: {asset.asset_id} ({Path(asset.path).name}) notes={_sanitize_visual_context(getattr(asset, 'notes', '') or 'none')}"
         for asset in active_assets[-4:]
     )
 
 
 def _active_brand_assets(project: FlyerProject):
-    if not CUSTOMERS_PATH.exists():
+    if "FLYER_CUSTOMERS_PATH" in os.environ:
+        customers_path = Path(os.environ["FLYER_CUSTOMERS_PATH"])
+    elif "FLYER_STATE_ROOT" in os.environ:
+        customers_path = _customers_path()
+    else:
+        customers_path = CUSTOMERS_PATH
+    if not customers_path.exists():
         return []
     try:
-        store = FlyerCustomerStore.model_validate(json.loads(CUSTOMERS_PATH.read_text(encoding="utf-8")))
+        store = FlyerCustomerStore.model_validate(json.loads(customers_path.read_text(encoding="utf-8")))
     except Exception:
         return []
     customer = store.find_customer_by_phone(str(project.customer_phone))
@@ -211,7 +243,10 @@ def _project_reference_assets(project: FlyerProject):
 def _image_message_content(project: FlyerProject, *, concept_id: str, output_format: str, size: tuple[int, int] | None):
     prompt = _image_prompt(project, concept_id=concept_id, output_format=output_format, size=size)
     parts: list[dict] = [{"type": "text", "text": prompt}]
-    for asset in [*_active_brand_assets(project), *_project_reference_assets(project)][-2:]:
+    brand_assets = _active_brand_assets(project)
+    refs = _project_reference_assets(project)
+    selected_assets = [*brand_assets[-1:], *refs[-1:]] if refs else [*brand_assets[-2:]]
+    for asset in selected_assets:
         path = Path(asset.path)
         mime = asset.mime_type or mimetypes.guess_type(str(path))[0] or "image/png"
         if not mime.startswith("image/"):
@@ -227,49 +262,221 @@ def _image_prompt(project: FlyerProject, *, concept_id: str, output_format: str,
         "C2": "warm cultural celebration flyer, South Indian festival motifs, elegant food spread, refined community-event look",
         "C3": "modern social-media creative, crisp editorial layout, bright festive palette, restaurant-quality promotional design",
     }
-    facts = [f"Title: {project.fields.event_or_business_name or 'Event Specials'}"]
-    if project.fields.event_date:
-        facts.append(f"Date: {project.fields.event_date}")
-    elif _schedule_hint(project):
-        facts.append(f"Schedule: {_schedule_hint(project)}")
-    if project.fields.event_time:
-        facts.append(f"Time: {project.fields.event_time}")
-    if project.fields.venue_or_location:
-        facts.append(f"Venue: {project.fields.venue_or_location}")
-    if project.fields.contact_info:
-        facts.append(f"Contact: {project.fields.contact_info}")
     details = project.fields.notes.strip() or project.raw_request.strip()
     revisions = [r.request_text for r in project.revisions[-4:]]
     revision_block = "\n".join(f"- {r}" for r in revisions) if revisions else "- none"
-    return f"""Create a professional SMB flyer/poster image for WhatsApp delivery.
+    reference_instruction = _reference_preservation_instruction(project)
+    sanitized_style = _sanitize_visual_context(project.fields.style_preference or "festive, clean, professional")
+    return f"""Create a professional SMB flyer/poster visual background for WhatsApp delivery.
 
 Design direction: {style_by_concept.get(concept_id, style_by_concept["C1"])}.
-Customer style notes: {project.fields.style_preference or "festive, clean, professional"}.
+Customer style notes: {sanitized_style}.
 Output format: {output_format}; aspect ratio {_aspect_ratio(size)}.
 
-Critical text to include exactly:
-{chr(10).join(facts)}
+Visual context only, sanitized. Do not render readable words, numbers, dates, prices, addresses, phone numbers, or flyer copy:
+- theme/category: {_sanitize_visual_context(project.fields.event_or_business_name or project.raw_request or "local SMB promotion")}
+- style: {sanitized_style}
 
-Menu/details to include when relevant:
-{details or "- none"}
+Menu/offer context for imagery only, sanitized:
+{_sanitize_visual_context(details) or "- none"}
 
 Customer brand assets to honor:
 {_brand_asset_prompt(project)}
 
 Revision notes to honor:
-{revision_block}
+{_sanitize_visual_context(revision_block)}
+
+Reference/template policy:
+{reference_instruction}
 
 Quality bar:
 - Looks like a paid local marketing designer made it, not a generic template.
 - Strong hierarchy, appetizing food visuals, festival warmth, no empty beige space.
 - High contrast and readable on a phone screen.
-- Keep spelling, phone number, date, time, and venue exact.
+- Leave clean space for a server-rendered facts panel; do not render readable dates, phone numbers, prices, venue text, QR codes, title copy, or placeholder copy anywhere.
 - If customer brand assets are listed, preserve the business identity and use the active logo/template as the visual reference.
-- If an uploaded reference image/template is attached, preserve its core offer, layout intent, and visual identity; apply requested text/price edits exactly.
+- If an uploaded reference image/template is attached, preserve its visual identity and offer category but neutralize stale readable facts where possible; exact text is handled by the compositor.
 - If there is no one-time date, present the recurring schedule clearly instead of inventing a date.
 - Avoid QR codes, fake logos, watermarks, unreadable microtext, and placeholder glyph boxes.
 {_telugu_hint(project)}
 """
+
+
+def _reference_preservation_instruction(project: FlyerProject) -> str:
+    if not [*_active_brand_assets(project), *_project_reference_assets(project)]:
+        return "- none"
+    return (
+        "- Use the attached image/logo/template as source of truth for visual identity.\n"
+        "- Do not redesign from scratch.\n"
+        "- Preserve business/logo identity, layout feel, cuisine/event category, and visual mood.\n"
+        "- Latest revision facts override older text. Do not keep stale readable prices, dates, phone numbers, or addresses."
+    )
+
+
+def inspect_rendered_asset(path: Path | str, *, expected_width: int, expected_height: int, mime_type: str) -> RenderedAssetQuality:
+    path = Path(path)
+    blockers: list[str] = []
+    warnings: list[str] = []
+    if not path.exists():
+        return RenderedAssetQuality(False, ["missing"], warnings)
+    size_bytes = path.stat().st_size
+    min_size = 500 if mime_type == "application/pdf" else 1000
+    if size_bytes < min_size:
+        blockers.append(f"tiny file: {size_bytes} bytes")
+    if mime_type == "application/pdf":
+        try:
+            header = path.read_bytes()[:4]
+        except OSError as e:
+            blockers.append(f"unreadable pdf: {e}")
+            header = b""
+        if header != b"%PDF":
+            blockers.append("pdf header missing")
+        return RenderedAssetQuality(not blockers, blockers, warnings, expected_width, expected_height, size_bytes)
+    pil = _load_pillow()
+    if pil is None:
+        warnings.append("pillow unavailable; skipped pixel inspection")
+        return RenderedAssetQuality(not blockers, blockers, warnings, None, None, size_bytes)
+    Image, _ImageDraw, _ImageFont = pil
+    try:
+        with Image.open(path) as img:
+            width, height = img.size
+            if (width, height) != (expected_width, expected_height):
+                blockers.append(f"dimensions {width}x{height} != {expected_width}x{expected_height}")
+            sample = img.convert("RGB").resize((32, 32))
+            colors = sample.getcolors(maxcolors=4096) or []
+            extrema = sample.getextrema()
+            variance = sum(channel[1] - channel[0] for channel in extrema)
+            if len(colors) < 4 or variance < 20:
+                blockers.append("blank or low-variance image")
+            return RenderedAssetQuality(not blockers, blockers, warnings, width, height, size_bytes)
+    except Exception as e:
+        blockers.append(f"image open failed: {e}")
+        return RenderedAssetQuality(False, blockers, warnings, None, None, size_bytes)
+
+
+def _critical_lines(project: FlyerProject) -> list[str]:
+    lines = [project.fields.event_or_business_name or "Flyer"]
+    schedule = _schedule_hint(project)
+    if project.fields.event_date:
+        lines.append(f"Date: {project.fields.event_date}")
+    elif schedule:
+        lines.append(f"Schedule: {schedule}")
+    if project.fields.event_time:
+        lines.append(f"Time: {project.fields.event_time}")
+    if project.fields.venue_or_location:
+        lines.append(f"Location: {project.fields.venue_or_location}")
+    if project.fields.contact_info:
+        lines.append(f"Contact: {project.fields.contact_info}")
+    details = (project.fields.notes or project.raw_request or "").strip()
+    if details:
+        compact = re.sub(r"\s+", " ", details)
+        for part in re.split(r";|\n", compact)[:5]:
+            part = part.strip(" .")
+            if part and part not in lines:
+                lines.append(part[:120])
+    return lines[:7]
+
+
+def apply_critical_text_overlay(project: FlyerProject, source: Path | str, target: Path | str, *, size: tuple[int, int], output_format: str) -> None:
+    pil = _load_pillow()
+    if pil is None:
+        raise FlyerRenderError("Pillow is required for critical text overlay")
+    Image, ImageDraw, ImageFont = pil
+    source = Path(source)
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with Image.open(source) as img:
+        img = img.convert("RGB")
+        if img.size != size:
+            img = img.resize(size)
+        draw = ImageDraw.Draw(img, "RGBA")
+        width, height = size
+        margin = max(24, int(width * 0.035))
+        panel_h = min(int(height * 0.44), max(int(height * 0.22), 58 + len(_critical_lines(project)) * max(24, int(width * 0.024))))
+        y0 = height - panel_h - margin
+        draw.rounded_rectangle((margin, y0, width - margin, height - margin), radius=18, fill=(12, 16, 24, 218), outline=(255, 196, 58, 240), width=3)
+        title_font = _font(ImageFont, max(30, int(width * 0.045)), bold=True)
+        body_font = _font(ImageFont, max(20, int(width * 0.025)))
+        y = y0 + int(margin * 0.75)
+        lines = _critical_lines(project)
+        for idx, line in enumerate(lines):
+            font = title_font if idx == 0 else body_font
+            fill = (255, 214, 79, 255) if idx == 0 else (255, 255, 255, 245)
+            wrapped = _wrap(draw, line, font, width - margin * 3)
+            for wrapped_line in wrapped[:2 if idx == 0 else 1]:
+                if y + font.size > height - margin:
+                    raise FlyerRenderError("critical text overlay does not fit")
+                draw.text((margin + 18, y), wrapped_line, font=font, fill=fill)
+                y += int(font.size * 1.18)
+        img.save(target, format="PNG", optimize=True)
+
+
+OVERLAY_RENDERER = r'''
+import json, re, sys
+from pathlib import Path
+from PIL import Image, ImageDraw, ImageFont
+spec=json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+src=Path(spec["source"]); target=Path(spec["target"]); size=tuple(spec["size"]); lines=spec["lines"]
+def font(sz,bold=False):
+    c=["/usr/share/fonts/truetype/noto/NotoSansTelugu-Regular.ttf","/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf","/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
+    if bold: c.insert(0,"/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+    for p in c:
+        try:
+            if Path(p).exists(): return ImageFont.truetype(p, sz)
+        except OSError: pass
+    return ImageFont.load_default()
+def wrap(draw,text,f,maxw):
+    words=(text or "").split(); out=[]; cur=""
+    for w in words:
+        cand=(cur+" "+w).strip(); box=draw.textbbox((0,0),cand,font=f)
+        if box[2]-box[0] <= maxw or not cur: cur=cand
+        else: out.append(cur); cur=w
+    if cur: out.append(cur)
+    return out
+with Image.open(src) as img:
+    img=img.convert("RGB")
+    if img.size != size: img=img.resize(size)
+    draw=ImageDraw.Draw(img,"RGBA"); width,height=size; margin=max(24,int(width*.035))
+    panel_h=min(int(height*.44),max(int(height*.22),58+len(lines)*max(24,int(width*.024))))
+    y0=height-panel_h-margin
+    draw.rounded_rectangle((margin,y0,width-margin,height-margin), radius=18, fill=(12,16,24,218), outline=(255,196,58,240), width=3)
+    title_font=font(max(30,int(width*.045)), True); body_font=font(max(20,int(width*.025)))
+    y=y0+int(margin*.75)
+    for idx,line in enumerate(lines):
+        f=title_font if idx==0 else body_font; fill=(255,214,79,255) if idx==0 else (255,255,255,245)
+        for wrapped in wrap(draw,line,f,width-margin*3)[:2 if idx==0 else 1]:
+            if y+f.size > height-margin:
+                raise SystemExit("critical text overlay does not fit")
+            draw.text((margin+18,y), wrapped, font=f, fill=fill)
+            y += int(f.size*1.18)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    img.save(target, format="PNG", optimize=True)
+'''
+
+
+def _apply_critical_text_overlay(project: FlyerProject, source: Path | str, target: Path | str, *, size: tuple[int, int], output_format: str) -> None:
+    try:
+        apply_critical_text_overlay(project, source, target, size=size, output_format=output_format)
+        return
+    except FlyerRenderError as e:
+        if "Pillow is required" not in str(e) or not Path("/usr/bin/python3").exists():
+            raise
+    spec = {
+        "source": str(source),
+        "target": str(target),
+        "size": list(size),
+        "output_format": output_format,
+        "lines": _critical_lines(project),
+    }
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False) as fh:
+        json.dump(spec, fh)
+        spec_path = fh.name
+    try:
+        proc = subprocess.run(["/usr/bin/python3", "-c", OVERLAY_RENDERER, spec_path], capture_output=True, text=True, timeout=60)
+        if proc.returncode != 0:
+            raise FlyerRenderError(f"critical text overlay failed: {proc.stderr.strip() or proc.stdout.strip()}")
+    finally:
+        Path(spec_path).unlink(missing_ok=True)
 
 
 def _decode_data_url(data_url: str) -> bytes:
@@ -345,6 +552,12 @@ def _write_generated_image(raw: bytes, path: Path, *, size: tuple[int, int] | No
             tmp_path.unlink(missing_ok=True)
     else:
         path.write_bytes(raw)
+
+
+def _raw_background_path(path: Path) -> Path:
+    if path.suffix.lower() == ".png":
+        return path.with_name(f"{path.stem}.raw.png")
+    return path.with_name(f"{path.stem}.raw-background.png")
 
 
 EXPORT_FROM_SOURCE_RENDERER = r'''
@@ -570,7 +783,21 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
         _render(project, path, concept_id=concept_id, size=size)
         return
     raw = _openrouter_image_bytes(project, concept_id=concept_id, output_format=output_format, size=size, model=model, quality=quality)
-    _write_generated_image(raw, path, size=size)
+    if size is None:
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as raw_fh:
+            raw_fh.write(raw)
+            raw_path = Path(raw_fh.name)
+        overlaid = path.with_suffix(".overlay.png")
+        try:
+            _apply_critical_text_overlay(project, raw_path, overlaid, size=(1275, 1650), output_format=output_format)
+            _export_from_source_image(overlaid, path, size=None)
+        finally:
+            raw_path.unlink(missing_ok=True)
+            overlaid.unlink(missing_ok=True)
+        return
+    raw_path = _raw_background_path(path)
+    _write_generated_image(raw, raw_path, size=size)
+    _apply_critical_text_overlay(project, raw_path, path, size=size, output_format=output_format)
 
 
 def render_concept_previews(project: FlyerProject, output_dir: Path | str, *, model: str = "deterministic-renderer", quality: str = "low", concept_count: int = 1) -> list[RenderedAssetSpec]:
@@ -579,6 +806,9 @@ def render_concept_previews(project: FlyerProject, output_dir: Path | str, *, mo
     for concept_id in ("C1", "C2", "C3")[:concept_count]:
         path = output_dir / f"{project.project_id}-{concept_id}-preview.png"
         _render_model(project, path, concept_id=concept_id, output_format="concept_preview", size=(1080, 1350), model=model, quality=quality)
+        quality_report = inspect_rendered_asset(path, expected_width=1080, expected_height=1350, mime_type="image/png")
+        if not quality_report.ok:
+            raise FlyerRenderError(f"rendered concept failed quality check: {quality_report.blockers}")
         specs.append(RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview", width=1080, height=1350, concept_id=concept_id))
     return specs
 
@@ -593,7 +823,8 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
             asset = next((a for a in project.assets if a.asset_id == concept.preview_asset_id), None)
             if asset is not None:
                 candidate = Path(asset.path)
-                if candidate.exists() and candidate.stat().st_size > 1000:
+                quality_report = inspect_rendered_asset(candidate, expected_width=1080, expected_height=1350, mime_type="image/png")
+                if quality_report.ok:
                     selected_preview = candidate
     formats: list[tuple[FlyerOutputFormat, str, tuple[int, int] | None]] = [
         ("whatsapp_image", "final_whatsapp_image", (1080, 1350)),
@@ -606,10 +837,28 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
         suffix = "pdf" if size is None else "png"
         path = output_dir / f"{project.project_id}-{output_format}.{suffix}"
         if selected_preview is not None and model.strip().lower() not in DETERMINISTIC_MODEL_NAMES:
-            _export_from_source_image(selected_preview, path, size=size)
+            source = _raw_background_path(selected_preview)
+            if not source.exists():
+                source = selected_preview
+            if size is None:
+                temp_png = path.with_suffix(".overlay-source.png")
+                overlaid_png = path.with_suffix(".overlaid.png")
+                _export_from_source_image(source, temp_png, size=(1275, 1650))
+                _apply_critical_text_overlay(project, temp_png, overlaid_png, size=(1275, 1650), output_format=output_format)
+                _export_from_source_image(overlaid_png, path, size=None)
+                temp_png.unlink(missing_ok=True)
+                overlaid_png.unlink(missing_ok=True)
+            else:
+                temp_png = path.with_suffix(".overlay-source.png")
+                _export_from_source_image(source, temp_png, size=size)
+                _apply_critical_text_overlay(project, temp_png, path, size=size, output_format=output_format)
+                temp_png.unlink(missing_ok=True)
         else:
             _render_model(project, path, concept_id=concept_id, output_format=output_format, size=size, model=model, quality=quality)
         width, height = size or (1275, 1650)
+        quality_report = inspect_rendered_asset(path, expected_width=width, expected_height=height, mime_type="application/pdf" if size is None else "image/png")
+        if not quality_report.ok:
+            raise FlyerRenderError(f"rendered final failed quality check: {quality_report.blockers}")
         specs.append(RenderedAssetSpec(path=path, kind=kind, output_format=output_format, width=width, height=height, concept_id=concept_id))
     return specs
 
