@@ -78,9 +78,9 @@ Plan: `docs/superpowers/plans/2026-05-15-flyer-onboarding-phase1.md`
 - [x] Create PR for Phase 1: https://github.com/Trivenidigital/shift-agent/pull/89
 - [x] Get PR reviewed by three parallel agents.
 - [x] Fix PR review findings: fail-closed sender identity for Flyer paths, ambiguous phone collision checks, immutable payment-reference history, exact plan cents/currency validation, admin-only saved brand-kit replacement, Hermes-venv subprocess execution, bridge `/send-media` deploy/smoke gates, rollback cleanup for Flyer artifacts, and onboarding catch-all gating.
-- [ ] Merge Phase 1 PR.
-- [ ] Deploy Phase 1 to `main-vps`.
-- [ ] Run production smoke: onboarding confirmation -> payment activation -> status command -> quota check -> one flyer request.
+- [x] Merge Phase 1 PR #89 to `main` at `bddf0d0`.
+- [x] Deploy Phase 1 to `main-vps` as `deploy-20260515-180102-bddf0d07`; first attempt auto-rolled back because the old installed deploy script lacked the new Flyer account install rule, rerun via the staging deploy script succeeded.
+- [x] Run production smoke: onboarding confirmation -> payment activation -> idempotent activation replay -> status command -> non-admin mutation denial -> quota check -> one flyer project create. Result: `{"ok": true, "customer_id": "CUST0001", "activation": "active", "quota_blocked": true, "project_create": true}`.
 
 ## Active - Production pilot: Shift + Catering + Daily Brief (2026-05-14)
 
