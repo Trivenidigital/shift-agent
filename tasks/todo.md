@@ -82,6 +82,27 @@ Plan: `docs/superpowers/plans/2026-05-15-flyer-onboarding-phase1.md`
 - [x] Deploy Phase 1 to `main-vps` as `deploy-20260515-180102-bddf0d07`; first attempt auto-rolled back because the old installed deploy script lacked the new Flyer account install rule, rerun via the staging deploy script succeeded.
 - [x] Run production smoke: onboarding confirmation -> payment activation -> idempotent activation replay -> status command -> non-admin mutation denial -> quota check -> one flyer project create. Result: `{"ok": true, "customer_id": "CUST0001", "activation": "active", "quota_blocked": true, "project_create": true}`.
 
+### Phase 2 - Flyer Quality, Revision Fidelity, And Production Smoke (2026-05-15)
+
+**Drift-check tag:** extends-Hermes
+
+Hermes-first summary: reuse the deployed Flyer WhatsApp flow, JSON state, media delivery, OpenRouter-backed renderer, and Hermes bridge. Net-new scope is narrow quality hardening: asset inspection, stronger reference/template prompt policy, structured revision patching, and an isolated smoke CLI.
+
+Plan: `docs/superpowers/plans/2026-05-15-flyer-quality-phase2.md`
+
+- [x] Create Phase 2 branch `codex/flyer-quality-phase2`.
+- [x] Ground in deployed Flyer renderer, workflow, updater, deploy scripts, live config, and Hermes runtime capabilities.
+- [x] Write Phase 2 implementation plan with drift and Hermes-first analysis.
+- [x] Get Phase 2 plan reviewed by two parallel agents and apply findings: add deployed `flyer_workflow.py`, isolated non-root quality smoke, `--allow-spend` real-model guard, server-side critical-text overlay, and stricter revision-applied semantics.
+- [x] Write Phase 2 design doc.
+- [x] Get Phase 2 design reviewed by two parallel agents and apply findings: raw model backgrounds before overlays, no model-owned critical text, schema-compatible `resulting_version` revision marker, temp-root isolation, per-binary cleanup, no long OpenRouter calls under `FileLock`, and WhatsApp clarification for unresolved revisions.
+- [x] Build render-quality inspection, reference/template prompt hardening, revision patch extraction, and quality smoke CLI.
+- [x] Run focused local verification and script syntax checks: Flyer pytest suite `66 passed`, `py_compile` clean, `git diff --check` clean, and local deterministic `smoke-flyer-quality` returned `{"ok": true}`.
+- [ ] Create PR for Phase 2.
+- [ ] Get PR reviewed by three parallel agents and apply findings.
+- [ ] Merge Phase 2 to `main`.
+- [ ] Deploy Phase 2 to `main-vps`, run deploy smoke, and record deterministic/real-model smoke results.
+
 ## Active - Production pilot: Shift + Catering + Daily Brief (2026-05-14)
 
 **Drift-check tag:** extends-Hermes

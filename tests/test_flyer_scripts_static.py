@@ -120,3 +120,38 @@ def test_revision_clears_selected_design_and_blocks_unapplied_approval():
     assert "cannot approve while revised design has not been regenerated" in script
     assert "approve_regenerated=true" in hooks
     assert "if path.exists() and path.stat().st_size > 1000" not in render
+
+
+def test_phase2_quality_smoke_and_workflow_deploy_contracts():
+    smoke_cli = (SCRIPTS / "smoke-flyer-quality").read_text(encoding="utf-8")
+    deploy = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh").read_text(encoding="utf-8")
+    smoke = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-smoke-test.sh").read_text(encoding="utf-8")
+    update = (SCRIPTS / "update-flyer-project").read_text(encoding="utf-8")
+    generate = (SCRIPTS / "generate-flyer-concepts").read_text(encoding="utf-8")
+
+    assert "--real-model" in smoke_cli
+    assert "--allow-spend" in smoke_cli
+    assert "FLYER_STATE_ROOT" in smoke_cli
+    assert "json.dumps" in smoke_cli
+    assert "flyer_workflow" in update
+    assert "src/agents/flyer/workflow.py /opt/shift-agent/flyer_workflow.py" in deploy
+    assert "/usr/local/bin/smoke-flyer-quality" in smoke
+    assert "sudo -u shift-agent" in smoke and "smoke-flyer-quality" in smoke
+    assert "rm -f /usr/local/bin/smoke-flyer-quality" in deploy
+    assert "rm -f /opt/shift-agent/flyer_workflow.py" in deploy
+    assert "import flyer_workflow" in smoke
+
+
+def test_generation_does_not_hold_file_lock_during_render():
+    generate = (SCRIPTS / "generate-flyer-concepts").read_text(encoding="utf-8")
+    first_lock_start = generate.index("with FileLock")
+    first_lock_end = generate.index("specs = render_concept_previews")
+    assert first_lock_end > first_lock_start
+    lock_block = generate[first_lock_start:first_lock_end]
+    assert "render_concept_previews(" not in lock_block
+
+
+def test_active_revision_failure_gets_clarification_not_false_noted_message():
+    hooks = (REPO / "src" / "plugins" / "cf-router" / "hooks.py").read_text(encoding="utf-8")
+    assert "revision_requires_clarification" in hooks
+    assert "I need one clarification before regenerating" in hooks

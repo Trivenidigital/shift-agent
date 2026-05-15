@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 import base64
+import io
 import json
 import sys
 
@@ -14,7 +15,9 @@ from agents.flyer.render import (  # noqa: E402
     FlyerRenderError,
     _image_message_content,
     _image_prompt,
+    apply_critical_text_overlay,
     build_asset_manifest,
+    inspect_rendered_asset,
     render_concept_previews,
     render_final_package,
 )
@@ -42,6 +45,15 @@ def _complete_project() -> FlyerProject:
     )
 
 
+def _png_bytes(size=(1080, 1350), color=(240, 120, 40)) -> bytes:
+    from PIL import Image
+
+    img = Image.new("RGB", size, color)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def test_render_concept_previews_creates_one_png_by_default(tmp_path):
     project = _complete_project()
     specs = render_concept_previews(project, tmp_path)
@@ -52,6 +64,50 @@ def test_render_concept_previews_creates_one_png_by_default(tmp_path):
         assert spec.path.stat().st_size > 1000
         assert spec.width == 1080
         assert spec.height == 1350
+
+
+def test_inspect_rendered_asset_rejects_blank_or_wrong_size_png(tmp_path):
+    from PIL import Image
+
+    good = tmp_path / "good.png"
+    render_concept_previews(_complete_project(), tmp_path)
+    good = tmp_path / "F0001-C1-preview.png"
+    result = inspect_rendered_asset(good, expected_width=1080, expected_height=1350, mime_type="image/png")
+    assert result.ok is True
+
+    blank = tmp_path / "blank.png"
+    Image.new("RGB", (1080, 1350), (255, 255, 255)).save(blank)
+    blank_result = inspect_rendered_asset(blank, expected_width=1080, expected_height=1350, mime_type="image/png")
+    assert blank_result.ok is False
+    assert any("blank" in item or "variance" in item for item in blank_result.blockers)
+
+    wrong = tmp_path / "wrong.png"
+    Image.new("RGB", (200, 200), (255, 0, 0)).save(wrong)
+    wrong_result = inspect_rendered_asset(wrong, expected_width=1080, expected_height=1350, mime_type="image/png")
+    assert wrong_result.ok is False
+    assert any("dimensions" in item for item in wrong_result.blockers)
+
+
+def test_apply_critical_text_overlay_changes_model_background_pixels(tmp_path):
+    from PIL import Image, ImageChops
+
+    source = tmp_path / "model.png"
+    target = tmp_path / "overlay.png"
+    Image.new("RGB", (1080, 1350), (30, 90, 120)).save(source)
+
+    apply_critical_text_overlay(
+        _complete_project(),
+        source,
+        target,
+        size=(1080, 1350),
+        output_format="concept_preview",
+    )
+
+    before = Image.open(source).convert("RGB")
+    after = Image.open(target).convert("RGB")
+    diff = ImageChops.difference(before, after)
+    assert diff.getbbox() is not None
+    assert inspect_rendered_asset(target, expected_width=1080, expected_height=1350, mime_type="image/png").ok is True
 
 
 def test_render_final_package_creates_expected_formats(tmp_path):
@@ -182,6 +238,7 @@ def test_project_reference_image_is_sent_to_image_model(tmp_path, monkeypatch):
     assert content[0]["type"] == "text"
     assert content[1]["type"] == "image_url"
     assert "reference_image: A0001" in content[0]["text"]
+    assert "do not redesign from scratch" in content[0]["text"].lower()
 
 
 def test_render_concept_previews_can_still_render_three_when_configured(tmp_path):
@@ -219,7 +276,7 @@ def test_openrouter_image_renderer_posts_modalities_and_writes_data_url(tmp_path
 
     class _Resp:
         def __enter__(self):
-            png = base64.b64encode(b"\x89PNG\r\n\x1a\nfake").decode("ascii")
+            png = base64.b64encode(_png_bytes()).decode("ascii")
             body = {"choices": [{"message": {"images": [{"image_url": {"url": f"data:image/png;base64,{png}"}}]}}]}
             self._body = json.dumps(body).encode("utf-8")
             return self

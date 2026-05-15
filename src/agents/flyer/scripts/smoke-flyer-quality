@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+"""Isolated quality smoke for Hermes Flyer Studio rendering."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+import shutil
+import sys
+import tempfile
+
+SRC_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(SRC_ROOT / "platform"))
+sys.path.insert(0, str(SRC_ROOT))
+
+from schemas import Config, FlyerProject, FlyerRequestFields  # noqa: E402
+try:
+    from flyer_render import inspect_rendered_asset, render_concept_previews  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.render import inspect_rendered_asset, render_concept_previews  # noqa: E402
+
+
+def _project() -> FlyerProject:
+    return FlyerProject(
+        project_id="F9001",
+        status="generating_concepts",
+        customer_phone="+19045550123",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        original_message_id="smoke-quality",
+        raw_request="Need flyer for Thursday Dosa Night Special. Non-veg combo $16.99. Contact +1 704 324 3322.",
+        fields=FlyerRequestFields(
+            event_or_business_name="Thursday Dosa Night Special",
+            contact_info="+1 704 324 3322",
+            venue_or_location="Triveni Pineville",
+            notes="Veg dosas, non-veg dosas, kids combo. Non-veg combo $16.99.",
+            style_preference="premium Indian restaurant special, polished food photography",
+        ),
+    )
+
+
+def _load_config(path: Path) -> Config:
+    try:
+        from safe_io import load_yaml_model  # type: ignore
+        return load_yaml_model(path, Config)
+    except ModuleNotFoundError:
+        import yaml
+        return Config.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")) or {})
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output-dir", default="")
+    parser.add_argument("--config-path", default="/opt/shift-agent/config.yaml")
+    parser.add_argument("--real-model", action="store_true")
+    parser.add_argument("--allow-spend", action="store_true")
+    parser.add_argument("--keep-output", action="store_true")
+    args = parser.parse_args()
+
+    if args.real_model and not args.allow_spend:
+        print(json.dumps({"ok": False, "error": "--real-model requires --allow-spend"}))
+        return 2
+
+    temp_root = Path(args.output_dir) if args.output_dir else Path(tempfile.mkdtemp(prefix="flyer-quality-smoke-"))
+    temp_root.mkdir(parents=True, exist_ok=True)
+    os.environ["FLYER_STATE_ROOT"] = str(temp_root)
+    asset_dir = temp_root / "assets"
+    asset_dir.mkdir(parents=True, exist_ok=True)
+
+    model = "deterministic-renderer"
+    quality = "low"
+    spend_mode = "none"
+    if args.real_model:
+        cfg = _load_config(Path(args.config_path))
+        model = cfg.flyer.draft_image_model
+        quality = cfg.flyer.draft_image_quality
+        spend_mode = "real-model"
+
+    try:
+        specs = render_concept_previews(_project(), asset_dir, model=model, quality=quality, concept_count=1)
+        diagnostics = []
+        ok = True
+        for spec in specs:
+            report = inspect_rendered_asset(spec.path, expected_width=spec.width, expected_height=spec.height, mime_type="image/png")
+            diagnostics.append({
+                "path": str(spec.path),
+                "width": report.width,
+                "height": report.height,
+                "size_bytes": report.size_bytes,
+                "blockers": report.blockers,
+            })
+            ok = ok and report.ok
+        print(json.dumps({
+            "ok": ok,
+            "mode": spend_mode,
+            "model": model,
+            "quality": quality,
+            "concept_count": len(specs),
+            "output_dir": str(temp_root),
+            "assets": diagnostics,
+        }))
+        return 0 if ok else 1
+    finally:
+        if not args.keep_output and not args.output_dir:
+            shutil.rmtree(temp_root, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
