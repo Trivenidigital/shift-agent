@@ -181,6 +181,60 @@ def test_image_prompt_sanitizes_exact_customer_facts_from_model_context():
     assert "[phone]" in prompt
 
 
+def test_image_prompt_sanitizes_style_and_brand_asset_notes(tmp_path, monkeypatch):
+    customers_path = tmp_path / "customers.json"
+    logo = tmp_path / "brand_assets" / "CUST0001" / "B0001.png"
+    logo.parent.mkdir(parents=True)
+    logo.write_bytes(b"logo bytes")
+    customers_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_customer_sequence": 2,
+        "next_brand_asset_sequence": 2,
+        "customers": [{
+            "customer_id": "CUST0001",
+            "business_name": "Triveni",
+            "business_address": "300 S Polk St",
+            "public_phone": "+17043243322",
+            "business_whatsapp_number": "+17043243322",
+            "authorized_request_numbers": ["+19045550123"],
+            "business_category": "restaurant",
+            "preferred_language": "en",
+            "plan_id": "starter",
+            "status": "active",
+            "created_at": "2026-05-15T00:00:00Z",
+            "updated_at": "2026-05-15T00:00:00Z",
+            "billing_provider": "manual",
+            "payment_checkout_url": "",
+            "notes": "",
+            "brand_assets": [{
+                "asset_id": "B0001",
+                "kind": "logo",
+                "path": str(logo),
+                "mime_type": "image/png",
+                "sha256": "a" * 64,
+                "original_message_id": "logo1",
+                "received_at": "2026-05-15T00:00:00Z",
+                "active": True,
+                "notes": "old price $14.99 phone +1 222 333 4444 date 2026-10-10"
+            }]
+        }],
+        "onboarding_sessions": []
+    }), encoding="utf-8")
+    monkeypatch.setattr("agents.flyer.render.CUSTOMERS_PATH", customers_path)
+    project = _complete_project()
+    project = project.model_copy(update={
+        "fields": project.fields.model_copy(update={
+            "style_preference": "premium $14.99 +1 222 333 4444 2026-10-10",
+        })
+    })
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+
+    assert "$14.99" not in prompt
+    assert "+1 222 333 4444" not in prompt
+    assert "2026-10-10" not in prompt
+
+
 def test_image_prompt_includes_customer_brand_assets(tmp_path, monkeypatch):
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     customers_path = tmp_path / "customers.json"

@@ -209,7 +209,7 @@ def _brand_asset_prompt(project: FlyerProject) -> str:
     if not active_assets:
         return "- none"
     return "\n".join(
-        f"- {asset.kind}: {asset.asset_id} ({Path(asset.path).name}) notes={getattr(asset, 'notes', '') or 'none'}"
+        f"- {asset.kind}: {asset.asset_id} ({Path(asset.path).name}) notes={_sanitize_visual_context(getattr(asset, 'notes', '') or 'none')}"
         for asset in active_assets[-4:]
     )
 
@@ -266,15 +266,16 @@ def _image_prompt(project: FlyerProject, *, concept_id: str, output_format: str,
     revisions = [r.request_text for r in project.revisions[-4:]]
     revision_block = "\n".join(f"- {r}" for r in revisions) if revisions else "- none"
     reference_instruction = _reference_preservation_instruction(project)
+    sanitized_style = _sanitize_visual_context(project.fields.style_preference or "festive, clean, professional")
     return f"""Create a professional SMB flyer/poster visual background for WhatsApp delivery.
 
 Design direction: {style_by_concept.get(concept_id, style_by_concept["C1"])}.
-Customer style notes: {project.fields.style_preference or "festive, clean, professional"}.
+Customer style notes: {sanitized_style}.
 Output format: {output_format}; aspect ratio {_aspect_ratio(size)}.
 
 Visual context only, sanitized. Do not render readable words, numbers, dates, prices, addresses, phone numbers, or flyer copy:
 - theme/category: {_sanitize_visual_context(project.fields.event_or_business_name or project.raw_request or "local SMB promotion")}
-- style: {_sanitize_visual_context(project.fields.style_preference or "festive, clean, professional")}
+- style: {sanitized_style}
 
 Menu/offer context for imagery only, sanitized:
 {_sanitize_visual_context(details) or "- none"}
