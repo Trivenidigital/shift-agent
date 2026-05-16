@@ -82,3 +82,9 @@ def test_account_commands_are_detected_before_revision_routing_static_contract()
     assert "trigger_flyer_reserve_quota" in hooks
     assert "trigger_flyer_finalize_usage" in hooks
     assert "trigger_flyer_release_quota" in hooks
+
+
+def test_free_trial_phrase_starts_flyer_onboarding():
+    actions = _load_actions()
+
+    assert actions.is_flyer_onboarding_intent("START FREE TRIAL - I want to try Flyer Studio") is True

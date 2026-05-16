@@ -20,6 +20,7 @@ from schemas import FlyerCustomerStore, FlyerOnboardingSession, FlyerPlanTier, F
 def test_flyer_plan_tiers_are_data_driven_defaults():
     tiers = FlyerPlanTier.default_tiers()
     assert [(t.plan_id, t.monthly_price_usd, t.included_flyers) for t in tiers] == [
+        ("trial", 0.00, 3),
         ("starter", 49.99, 30),
         ("growth", 69.99, 60),
         ("unlimited", 199.00, None),
@@ -50,7 +51,7 @@ def test_onboarding_collects_required_business_and_plan_fields(tmp_path):
         ("m5", "+1 704 324 3322", "collecting_authorized_request_number", "authorized flyer request number"),
         ("m6", "+1 904 555 0104", "collecting_business_profile", "business type"),
         ("m7", "Indian grocery and food court, English", "choosing_plan", "choose a plan"),
-        ("m8", "2", "confirming_summary", "confirm"),
+        ("m8", "3", "confirming_summary", "confirm"),
         ("m9", "CONFIRM", "payment_pending", "payment"),
     ]
     for message_id, text, expected_status, expected_reply in flow:
@@ -76,6 +77,98 @@ def test_onboarding_collects_required_business_and_plan_fields(tmp_path):
     assert customer.status == "payment_pending"
     assert customer.primary_chat_id == "19045550123@s.whatsapp.net"
     assert customer.onboarded_by_phone == "+19045550123"
+
+
+def test_free_trial_onboarding_skips_paid_plan_choice_and_activates_trial(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 16, tzinfo=timezone.utc)
+
+    first = handle_onboarding_message(
+        state_path=state_path,
+        chat_id="19045550155@s.whatsapp.net",
+        sender_phone="+19045550155",
+        message_id="trial-1",
+        text="START FREE TRIAL - I want to try Flyer Studio",
+        now=now,
+    )
+    assert first.handled is True
+    assert first.next_status == "collecting_business_name"
+    assert "3 free sample flyers" in first.reply_text
+
+    flow = [
+        ("trial-2", "Lakshmi Kitchen", "collecting_business_address", "business address"),
+        ("trial-3", "123 Main St, Pineville, NC", "collecting_public_phone", "public business phone"),
+        ("trial-4", "+1 704 555 0199", "collecting_business_whatsapp", "business WhatsApp number"),
+        ("trial-5", "+1 704 555 0199", "collecting_authorized_request_number", "authorized flyer request number"),
+        ("trial-6", "+1 904 555 0188", "collecting_business_profile", "business type"),
+        ("trial-7", "Indian restaurant, English", "confirming_summary", "confirm"),
+        ("trial-8", "CONFIRM", "trial", "3 free sample flyers"),
+    ]
+    for message_id, text, expected_status, expected_reply in flow:
+        result = handle_onboarding_message(
+            state_path=state_path,
+            chat_id="19045550155@s.whatsapp.net",
+            sender_phone="+19045550155",
+            message_id=message_id,
+            text=text,
+            now=now,
+        )
+        assert result.handled is True
+        assert result.next_status == expected_status
+        assert expected_reply.lower() in result.reply_text.lower()
+
+    store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    customer = store.customers[0]
+    assert customer.plan_id == "trial"
+    assert customer.status == "trial"
+    assert customer.quota_remaining(FlyerPlanTier.default_tiers()) == 3
+
+
+def test_trial_quota_blocks_fourth_flyer_and_prompts_upgrade(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 16, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    customer = store.new_customer(
+        business_name="Lakshmi Kitchen",
+        business_address="123 Main St",
+        public_phone="+17045550199",
+        business_whatsapp_number="+17045550199",
+        authorized_request_number="+19045550188",
+        business_category="restaurant",
+        preferred_language="en",
+        plan_id="trial",
+        now=now,
+    ).model_copy(update={
+        "status": "trial",
+        "current_period_start": now,
+        "current_period_end": now.replace(month=6),
+        "usage_events": [
+            FlyerUsageEvent(
+                reservation_id=f"CUST0001:F000{i}",
+                project_id=f"F000{i}",
+                customer_id="CUST0001",
+                kind="used",
+                recorded_at=now,
+                message_id=f"m{i}",
+            )
+            for i in range(1, 4)
+        ],
+    })
+    store.customers.append(customer)
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    result = reserve_quota(
+        state_path=state_path,
+        customer_phone="+19045550188",
+        project_id="F0004",
+        message_id="m4",
+        now=now,
+    )
+
+    assert result.handled is True
+    assert result.quota_allowed is False
+    assert "free trial" in result.reply_text.lower()
+    assert "upgrade" in result.reply_text.lower()
 
 
 def test_registered_authorized_number_does_not_restart_onboarding(tmp_path):
@@ -133,7 +226,7 @@ def test_brand_assets_uploaded_during_onboarding_transfer_to_customer(tmp_path, 
         ("m5", "+1 704 324 3322"),
         ("m6", "+1 904 555 0104"),
         ("m7", "Indian grocery and food court, English"),
-        ("m8", "1"),
+        ("m8", "2"),
         ("m9", "CONFIRM"),
     ]:
         handle_onboarding_message(
@@ -296,7 +389,7 @@ def test_payment_pending_signup_thread_can_replace_logo_after_plan_choice(tmp_pa
         ("m5", "7043243322"),
         ("m6", "9045550104"),
         ("m7", "restaurant, English"),
-        ("m8", "1"),
+        ("m8", "2"),
         ("m9", "CONFIRM"),
     ]:
         handle_onboarding_message(
@@ -363,7 +456,7 @@ def test_confirmation_summary_supports_direct_edits(tmp_path):
         ("m5", "7043243322"),
         ("m6", "9045550104"),
         ("m7", "restaurant, English"),
-        ("m8", "1"),
+        ("m8", "2"),
         ("m9", "EDIT NAME: New Name"),
         ("m10", "CONFIRM"),
     ]:

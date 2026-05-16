@@ -129,6 +129,42 @@ def test_onboarding_is_whatsapp_native_and_plan_config_driven():
     assert hooks.index("_try_flyer_active_project_intercept") < hooks.index("_try_flyer_onboarding_intercept")
 
 
+def test_flyer_launch_marketing_pack_exists_and_has_trial_ctas():
+    pack = (REPO / "docs" / "marketing" / "flyer-studio-launch-funnel.md").read_text(encoding="utf-8")
+    sales_flyer = (REPO / "docs" / "marketing" / "flyer-studio-sales-flyer.html").read_text(encoding="utf-8")
+    required = [
+        "Send a WhatsApp message. Get a professional flyer back.",
+        "3 free sample flyers",
+        "Try 3 flyers free on WhatsApp",
+        "wa.me",
+        "$49.99",
+        "$69.99",
+        "$199",
+        "restaurants",
+        "temples",
+        "salons",
+        "tutors",
+        "realtors",
+        "opt-in",
+        "STOP",
+    ]
+    for phrase in required:
+        assert phrase in pack
+    for phrase in [
+        "Hermes Flyer Studio",
+        "Try 3 flyers free",
+        "Restaurant Special",
+        "Temple Event",
+        "Salon Promo",
+        "Tutor Class",
+        "Realtor Open House",
+        "$49.99",
+        "$69.99",
+        "$199",
+    ]:
+        assert phrase in sales_flyer
+
+
 def test_account_script_supports_activation_quota_and_commands():
     script = (SCRIPTS / "manage-flyer-account").read_text(encoding="utf-8")
     assert "--command-text" in script

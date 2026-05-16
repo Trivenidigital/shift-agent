@@ -657,6 +657,7 @@ FlyerOnboardingStatus = Literal[
     "choosing_plan",
     "confirming_summary",
     "payment_pending",
+    "trial",
     "active",
 ]
 
@@ -743,6 +744,14 @@ class FlyerPlanTier(BaseModel):
     @classmethod
     def default_tiers(cls) -> list["FlyerPlanTier"]:
         return [
+            cls(
+                plan_id="trial",
+                label="Free Trial",
+                monthly_price_usd=0.00,
+                monthly_price_cents=0,
+                included_flyers=3,
+                description="3 free sample flyers",
+            ),
             cls(
                 plan_id="starter",
                 label="Starter",
@@ -831,7 +840,7 @@ class FlyerCustomerProfile(BaseModel):
     business_category: str = Field(default="", max_length=120)
     preferred_language: Literal["en", "te", "hi", "es", "mixed", "other"] = "en"
     plan_id: str = Field(min_length=1, max_length=40)
-    status: Literal["payment_pending", "active", "suspended", "cancelled"] = "payment_pending"
+    status: Literal["payment_pending", "trial", "active", "suspended", "cancelled"] = "payment_pending"
     created_at: datetime
     updated_at: datetime
     activated_at: Optional[datetime] = None

@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hermes Flyer Studio</title>
+  <style>
+    :root {
+      --ink: #141414;
+      --muted: #565656;
+      --paper: #fffaf1;
+      --saffron: #f7a51b;
+      --green: #2f7d4b;
+      --red: #b7353b;
+      --blue: #245a8d;
+      --line: rgba(20, 20, 20, 0.14);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: #ece7dc;
+      color: var(--ink);
+      font-family: Inter, Arial, sans-serif;
+    }
+
+    .sheet {
+      width: 1080px;
+      min-height: 1350px;
+      margin: 0 auto;
+      padding: 58px;
+      background:
+        linear-gradient(135deg, rgba(247, 165, 27, 0.15), transparent 34%),
+        linear-gradient(315deg, rgba(47, 125, 75, 0.14), transparent 38%),
+        var(--paper);
+      border: 1px solid var(--line);
+    }
+
+    .top {
+      display: grid;
+      grid-template-columns: 1.05fr 0.95fr;
+      gap: 38px;
+      align-items: start;
+    }
+
+    .brand {
+      color: var(--green);
+      font-size: 28px;
+      font-weight: 800;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 22px 0 18px;
+      font-size: 70px;
+      line-height: 0.96;
+      letter-spacing: 0;
+      max-width: 560px;
+    }
+
+    .sub {
+      margin: 0 0 28px;
+      color: var(--muted);
+      font-size: 27px;
+      line-height: 1.32;
+      max-width: 590px;
+    }
+
+    .cta-row {
+      display: flex;
+      gap: 18px;
+      align-items: center;
+      margin-top: 22px;
+    }
+
+    .qr {
+      width: 142px;
+      height: 142px;
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 6px;
+      padding: 12px;
+      background: #fff;
+      border: 3px solid var(--ink);
+    }
+
+    .qr span { background: var(--ink); }
+
+    .cta-copy {
+      font-size: 27px;
+      font-weight: 800;
+      line-height: 1.2;
+    }
+
+    .cta-copy small {
+      display: block;
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 17px;
+      font-weight: 700;
+    }
+
+    .phone {
+      border: 4px solid #1b1b1b;
+      border-radius: 36px;
+      background: #f8f8f8;
+      padding: 22px;
+      box-shadow: 0 20px 42px rgba(0, 0, 0, 0.18);
+    }
+
+    .phone-head {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      padding-bottom: 18px;
+      border-bottom: 1px solid var(--line);
+      font-size: 18px;
+      font-weight: 800;
+    }
+
+    .dot {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--green);
+    }
+
+    .bubble {
+      margin: 18px 0;
+      padding: 18px 20px;
+      border-radius: 8px;
+      font-size: 20px;
+      line-height: 1.28;
+    }
+
+    .incoming { background: #e1f3dd; margin-left: 56px; }
+    .outgoing { background: #fff; margin-right: 56px; border: 1px solid var(--line); }
+
+    .samples {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 20px;
+      margin-top: 52px;
+    }
+
+    .sample {
+      min-height: 250px;
+      padding: 20px;
+      color: #fff;
+      border-radius: 8px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.22);
+    }
+
+    .sample h2 {
+      margin: 0;
+      font-size: 32px;
+      line-height: 1.02;
+      letter-spacing: 0;
+    }
+
+    .sample p {
+      margin: 12px 0 0;
+      font-size: 17px;
+      line-height: 1.25;
+      font-weight: 700;
+    }
+
+    .sample .tag {
+      align-self: flex-start;
+      padding: 8px 12px;
+      background: rgba(255, 255, 255, 0.18);
+      border: 1px solid rgba(255, 255, 255, 0.28);
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+
+    .restaurant { background: linear-gradient(145deg, #8f1f2d, #ef8b21); }
+    .temple { background: linear-gradient(145deg, #234b7a, #d39a20); }
+    .salon { background: linear-gradient(145deg, #222, #b7353b); }
+    .tutor { background: linear-gradient(145deg, #245a8d, #2f7d4b); }
+    .realtor { background: linear-gradient(145deg, #263238, #607d8b); }
+    .foodtruck { background: linear-gradient(145deg, #2f7d4b, #f7a51b); }
+
+    .proof {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      margin-top: 42px;
+    }
+
+    .proof div {
+      min-height: 104px;
+      padding: 18px;
+      background: rgba(255, 255, 255, 0.72);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      font-size: 18px;
+      font-weight: 800;
+      line-height: 1.25;
+    }
+
+    .pricing {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 18px;
+      margin-top: 42px;
+      padding-top: 28px;
+      border-top: 2px solid var(--line);
+    }
+
+    .plan {
+      padding: 22px;
+      background: #fff;
+      border: 2px solid var(--line);
+      border-radius: 8px;
+    }
+
+    .plan strong {
+      display: block;
+      font-size: 31px;
+      color: var(--red);
+    }
+
+    .plan span {
+      display: block;
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    .footer {
+      margin-top: 38px;
+      display: flex;
+      justify-content: space-between;
+      gap: 28px;
+      color: var(--muted);
+      font-size: 19px;
+      font-weight: 700;
+      line-height: 1.3;
+    }
+
+    @media print {
+      body { background: #fff; }
+      .sheet { margin: 0; width: 100%; border: 0; }
+    }
+  </style>
+</head>
+<body>
+  <main class="sheet">
+    <section class="top">
+      <div>
+        <div class="brand">Hermes Flyer Studio</div>
+        <h1>Send a WhatsApp message. Get a professional flyer back.</h1>
+        <p class="sub">For restaurants, temples, salons, tutors, realtors, food trucks, and local organizers who need beautiful promotions fast.</p>
+        <div class="cta-row">
+          <div class="qr" aria-label="QR code placeholder">
+            <span></span><span></span><span></span><i></i><span></span>
+            <span></span><i></i><span></span><i></i><span></span>
+            <span></span><span></span><i></i><span></span><i></i>
+            <i></i><span></span><i></i><span></span><span></span>
+            <span></span><i></i><span></span><i></i><span></span>
+          </div>
+          <div class="cta-copy">
+            Try 3 flyers free
+            <small>Scan or tap the WhatsApp link. No design app needed.</small>
+          </div>
+        </div>
+      </div>
+      <div class="phone">
+        <div class="phone-head"><span class="dot"></span> WhatsApp Flyer Agent</div>
+        <div class="bubble incoming">Need flyer for Thursday Dosa Night. Add logo, prices, phone, and Instagram format.</div>
+        <div class="bubble outgoing">Got it. I am creating a professional flyer. Reply with changes or APPROVE.</div>
+        <div class="bubble incoming">Make it more festive and keep the price big.</div>
+        <div class="bubble outgoing">Done. Final package: WhatsApp image, Instagram post, story, and printable PDF.</div>
+      </div>
+    </section>
+
+    <section class="samples" aria-label="Sample flyer gallery">
+      <article class="sample restaurant"><span class="tag">Restaurant Special</span><div><h2>Dosa Night</h2><p>Menu, price, logo, WhatsApp-ready</p></div></article>
+      <article class="sample temple"><span class="tag">Temple Event</span><div><h2>Festival Dinner</h2><p>Community details, regional language, print PDF</p></div></article>
+      <article class="sample salon"><span class="tag">Salon Promo</span><div><h2>Bridal Week</h2><p>Offer-first design for local customers</p></div></article>
+      <article class="sample tutor"><span class="tag">Tutor Class</span><div><h2>SAT Batch</h2><p>Clean schedule, contact, and signup CTA</p></div></article>
+      <article class="sample realtor"><span class="tag">Realtor Open House</span><div><h2>Open House</h2><p>Address, time, contact, social format</p></div></article>
+      <article class="sample foodtruck"><span class="tag">Food Truck</span><div><h2>Weekend Pop-Up</h2><p>Route, menu, and daily special</p></div></article>
+    </section>
+
+    <section class="proof">
+      <div>Logo and templates remembered</div>
+      <div>Natural WhatsApp revisions</div>
+      <div>Telugu, Hindi, Spanish support</div>
+      <div>WhatsApp, Instagram, story, PDF</div>
+    </section>
+
+    <section class="pricing">
+      <div class="plan"><strong>$49.99</strong><span>30 flyers/month</span></div>
+      <div class="plan"><strong>$69.99</strong><span>60 flyers/month</span></div>
+      <div class="plan"><strong>$199</strong><span>Unlimited/month</span></div>
+    </section>
+
+    <footer class="footer">
+      <div>Built for busy owners who sell through WhatsApp every day.</div>
+      <div>Start free: wa.me/&lt;AGENT_NUMBER&gt;?text=START%20FREE%20TRIAL</div>
+    </footer>
+  </main>
+</body>
+</html>

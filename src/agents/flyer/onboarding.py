@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import calendar
 import hashlib
 import json
 import mimetypes
@@ -68,8 +69,8 @@ def handle_onboarding_message(
     tiers = plan_tiers or FlyerPlanTier.default_tiers()
     store = load_customer_store(state_path)
     customer = store.find_customer_by_phone(sender_phone)
-    if customer and customer.status == "active":
-        return OnboardingResult(False, "", "active", customer.customer_id)
+    if customer and customer.status in {"active", "trial"}:
+        return OnboardingResult(False, "", customer.status, customer.customer_id)
     if customer and customer.status == "payment_pending":
         return OnboardingResult(
             True,
@@ -89,6 +90,7 @@ def handle_onboarding_message(
                 existing.customer_id,
             )
     if session is None or session.status in {"payment_pending", "active"}:
+        trial_requested = _is_trial_start(text)
         session = FlyerOnboardingSession(
             chat_id=chat_id,
             sender_phone=_phone_or_none(sender_phone),
@@ -96,6 +98,7 @@ def handle_onboarding_message(
             started_at=now,
             updated_at=now,
             last_message_id=message_id,
+            plan_id="trial" if trial_requested else "",
         )
         store.onboarding_sessions = [
             s for s in store.onboarding_sessions
@@ -103,7 +106,7 @@ def handle_onboarding_message(
         ]
         store.onboarding_sessions.append(session)
         write_customer_store(state_path, store)
-        return OnboardingResult(True, _welcome_reply(tiers), session.status)
+        return OnboardingResult(True, _welcome_reply(tiers, trial_requested=trial_requested), session.status)
 
     special = _handle_session_control(session, text=" ".join((text or "").split()), now=now, tiers=tiers)
     if special is not None:
@@ -122,7 +125,7 @@ def handle_onboarding_message(
     _replace_session(store, session)
     customer_id = ""
     customer_created = False
-    if session.status == "payment_pending":
+    if session.status in {"payment_pending", "trial"}:
         try:
             customer = store.new_customer(
                 business_name=session.business_name,
@@ -149,6 +152,14 @@ def handle_onboarding_message(
                 session.status,
             )
         customer = customer.model_copy(update={"brand_assets": session.pending_brand_assets})
+        if session.plan_id == "trial":
+            customer = customer.model_copy(update={
+                "status": "trial",
+                "activated_at": now,
+                "plan_started_at": now,
+                "current_period_start": now,
+                "current_period_end": _add_one_month(now),
+            })
         customer = customer.model_copy(update={
             "payment_checkout_url": _checkout_url(
                 template=payment_checkout_url_template,
@@ -160,7 +171,7 @@ def handle_onboarding_message(
         store.customers.append(customer)
         customer_id = customer.customer_id
         customer_created = True
-        session = session.model_copy(update={"status": "payment_pending", "updated_at": now, "customer_id": customer.customer_id})
+        session = session.model_copy(update={"status": customer.status, "updated_at": now, "customer_id": customer.customer_id})
         _replace_session(store, session)
     write_customer_store(state_path, store)
     return OnboardingResult(
@@ -298,7 +309,8 @@ def _advance_session(
         update.update({"authorized_request_number": _parse_phone(text), "status": "collecting_business_profile"})
     elif status == "collecting_business_profile":
         category, language = _parse_profile_text(text)
-        update.update({"business_category": category, "preferred_language": language, "status": "choosing_plan"})
+        next_status = "confirming_summary" if session.plan_id else "choosing_plan"
+        update.update({"business_category": category, "preferred_language": language, "status": next_status})
     elif status == "choosing_plan":
         update.update({"plan_id": _parse_plan_choice(text, tiers), "status": "confirming_summary"})
     elif status == "confirming_summary":
@@ -306,7 +318,7 @@ def _advance_session(
         if edit_update:
             update.update(edit_update)
         elif text.strip().upper() == "CONFIRM":
-            update.update({"status": "payment_pending"})
+            update.update({"status": "trial" if session.plan_id == "trial" else "payment_pending"})
         else:
             raise ValueError("Reply CONFIRM to finish registration, or send EDIT FIELD: value.")
     return session.model_copy(update=update)
@@ -388,22 +400,27 @@ def _reply_for_session(
     if session.status == "payment_pending":
         customer = next((c for c in store.customers if c.customer_id == customer_id), None)
         return _payment_reply(customer_id, session.plan_id, customer.payment_checkout_url if customer else "")
+    if session.status == "trial":
+        return _trial_active_reply(customer_id)
     return _welcome_reply(tiers)
 
 
-def _welcome_reply(tiers: list[FlyerPlanTier]) -> str:
+def _welcome_reply(tiers: list[FlyerPlanTier], *, trial_requested: bool = False) -> str:
+    trial_line = "Your free trial includes 3 free sample flyers.\n\n" if trial_requested else ""
     return (
         "Flyer Studio\n------------\n"
         "Welcome. I can set up your flyer account here on WhatsApp.\n\n"
+        f"{trial_line}"
         f"{_plan_lines(tiers)}\n\n"
         "First, what is your business name?"
     )
 
 
 def _plans_reply(tiers: list[FlyerPlanTier]) -> str:
+    choices = ", ".join(str(i) for i in range(1, len(tiers) + 1))
     return (
         "Flyer Studio\n------------\n"
-        "Choose a plan by replying 1, 2, or 3:\n\n"
+        f"Choose a plan by replying {choices}:\n\n"
         f"{_plan_lines(tiers)}"
     )
 
@@ -419,6 +436,14 @@ def _payment_reply(customer_id: str, plan_id: str, checkout_url: str) -> str:
         f"Registration saved as {customer_id} on the {plan_id} plan.\n"
         f"{payment_line}\n\n"
         "After payment is confirmed, this WhatsApp number can request flyers."
+    )
+
+
+def _trial_active_reply(customer_id: str) -> str:
+    return (
+        "Flyer Studio\n------------\n"
+        f"Free trial active for {customer_id}. You have 3 free sample flyers.\n"
+        "Send your first flyer request now. After each sample, I will show the paid onboarding link and plans."
     )
 
 
@@ -498,7 +523,8 @@ def _parse_plan_choice(text: str, tiers: list[FlyerPlanTier]) -> str:
     for tier in tiers:
         if cleaned in {tier.plan_id.lower(), tier.label.lower()}:
             return tier.plan_id
-    raise ValueError("Please choose a plan by replying 1, 2, or 3.")
+    choices = ", ".join(str(i) for i in range(1, len(tiers) + 1))
+    raise ValueError(f"Please choose a plan by replying {choices}.")
 
 
 def _parse_confirmation_edit(text: str, tiers: list[FlyerPlanTier]) -> dict[str, object]:
@@ -529,6 +555,17 @@ def _checkout_url(*, template: str, customer_id: str, plan_id: str, chat_id: str
     if not template:
         return ""
     return template.format(customer_id=customer_id, plan_id=plan_id, chat_id=chat_id)
+
+
+def _is_trial_start(text: str) -> bool:
+    return bool(re.search(r"\b(free\s+trial|start\s+trial|try\s+free|3\s+free)\b", text or "", flags=re.IGNORECASE))
+
+
+def _add_one_month(dt: datetime) -> datetime:
+    year = dt.year + (1 if dt.month == 12 else 0)
+    month = 1 if dt.month == 12 else dt.month + 1
+    day = min(dt.day, calendar.monthrange(year, month)[1])
+    return dt.replace(year=year, month=month, day=day)
 
 
 def _brand_asset_kind(text: str, media_path: Path) -> str:
