@@ -34,6 +34,10 @@ def test_delivery_script_can_send_by_project_id():
     assert "FINAL_KIND_TO_FORMAT" in text
     assert "output_format=expected_formats.get(str(asset)) or None" in text
     assert "project_changed_during_delivery" in text
+    assert "_record_asset_delivery" in text
+    assert "_pending_project_assets" in text
+    assert "delivery_status == \"uncertain\"" in text
+    assert 'status="sent"' in text
     assert "FlyerAssetsDelivered" in text
     assert "FlyerDeliveryFailed" in text
     assert ".model_dump_json()" in text

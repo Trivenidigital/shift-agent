@@ -1,0 +1,141 @@
+"""Retry-safety contracts for Flyer final package delivery."""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+import importlib.machinery
+import os
+import sys
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src" / "platform"))
+
+from schemas import FlyerAsset, FlyerProject, FlyerProjectStore, FlyerRequestFields  # noqa: E402
+
+
+SCRIPT_PATH = Path(__file__).resolve().parent.parent / "src" / "agents" / "flyer" / "scripts" / "send-flyer-package"
+
+
+def _load_script():
+    loader = importlib.machinery.SourceFileLoader("send_flyer_package_script", str(SCRIPT_PATH))
+    return loader.load_module()
+
+
+def _asset(asset_id: str, kind: str, path: str, *, status: str = "pending", mid: str = "") -> FlyerAsset:
+    return FlyerAsset(
+        asset_id=asset_id,
+        kind=kind,  # type: ignore[arg-type]
+        source="rendered",
+        path=path,
+        mime_type="application/pdf" if path.endswith(".pdf") else "image/png",
+        sha256="a" * 64,
+        original_message_id="approve-1",
+        received_at=datetime.now(timezone.utc),
+        delivery_status=status,  # type: ignore[arg-type]
+        outbound_message_id=mid,
+        delivered_at=datetime.now(timezone.utc) if status == "sent" else None,
+    )
+
+
+def _project(tmp_path: Path) -> FlyerProject:
+    kinds = [
+        ("A0001", "final_whatsapp_image", "wa.png"),
+        ("A0002", "final_instagram_post", "post.png"),
+        ("A0003", "final_instagram_story", "story.png"),
+        ("A0004", "final_printable_pdf", "print.pdf"),
+    ]
+    assets = []
+    for asset_id, kind, name in kinds:
+        path = tmp_path / name
+        path.write_bytes(b"asset")
+        assets.append(_asset(asset_id, kind, str(path)))
+    return FlyerProject(
+        project_id="F0001",
+        status="finalizing_assets",
+        customer_phone="+19045550123",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        original_message_id="request-1",
+        raw_request="Need flyer",
+        fields=FlyerRequestFields(
+            event_or_business_name="Daily Lunch Specials",
+            contact_info="+1 704 324 3322",
+            notes="Item 1 $1.99",
+        ),
+        assets=assets,
+        final_asset_ids=[asset.asset_id for asset in assets],
+    )
+
+
+def test_flyer_asset_delivery_fields_are_backward_compatible(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    asset = FlyerAsset(
+        asset_id="A0001",
+        kind="final_whatsapp_image",
+        source="rendered",
+        path=str(tmp_path / "wa.png"),
+        mime_type="image/png",
+        sha256="a" * 64,
+        received_at=datetime.now(timezone.utc),
+    )
+
+    assert asset.delivery_status == "pending"
+    assert asset.outbound_message_id == ""
+    assert asset.delivery_attempt_count == 0
+
+
+def test_delivery_retry_selects_only_unsent_assets(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    mod = _load_script()
+    project = _project(tmp_path)
+    sent_asset = project.assets[0].model_copy(update={
+        "delivery_status": "sent",
+        "outbound_message_id": "wamid.sent.1",
+        "delivered_at": datetime.now(timezone.utc),
+        "delivery_attempt_count": 1,
+    })
+    project = project.model_copy(update={"assets": [sent_asset, *project.assets[1:]]})
+
+    pending = mod._pending_project_assets(project)
+
+    assert [asset.asset_id for asset in pending] == ["A0002", "A0003", "A0004"]
+
+
+def test_record_asset_delivery_persists_success_immediately(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    mod = _load_script()
+    project = _project(tmp_path)
+    state_path = tmp_path / "projects.json"
+    state_path.write_text(FlyerProjectStore(projects=[project]).model_dump_json(indent=2), encoding="utf-8")
+
+    updated = mod._record_asset_delivery(
+        state_path,
+        project.project_id,
+        "A0001",
+        status="sent",
+        outbound_message_id="dry-run:wa.png",
+        error="",
+    )
+
+    asset = next(a for a in updated.assets if a.asset_id == "A0001")
+    assert asset.delivery_status == "sent"
+    assert asset.outbound_message_id == "dry-run:wa.png"
+    assert asset.delivery_attempt_count == 1
+    persisted = FlyerProjectStore.model_validate_json(state_path.read_text(encoding="utf-8")).projects[0]
+    assert next(a for a in persisted.assets if a.asset_id == "A0001").delivery_status == "sent"
+
+
+def test_uncertain_delivery_blocks_blind_retry(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    mod = _load_script()
+    project = _project(tmp_path)
+    uncertain_asset = project.assets[0].model_copy(update={
+        "delivery_status": "uncertain",
+        "delivery_error": "ack_parse_failed",
+        "delivery_attempt_count": 1,
+    })
+    project = project.model_copy(update={"assets": [uncertain_asset, *project.assets[1:]]})
+
+    with pytest.raises(SystemExit, match="uncertain delivery"):
+        mod._pending_project_assets(project)
