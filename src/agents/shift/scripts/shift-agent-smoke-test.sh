@@ -43,6 +43,7 @@ for script in \
     /usr/local/bin/handle-flyer-onboarding \
     /usr/local/bin/store-flyer-brand-asset \
     /usr/local/bin/manage-flyer-account \
+    /usr/local/bin/flyer-delivery-report \
     /usr/local/bin/smoke-flyer-quality \
     /usr/local/bin/send-flyer-package ; do
     [ -x "$script" ] || { echo "FAIL: $script missing or not executable"; exit 1; }
@@ -96,6 +97,12 @@ if ! sudo -u shift-agent "$PY" /usr/local/bin/smoke-flyer-quality --final-packag
     exit 1
 fi
 echo "Flyer quality deterministic smoke passed"
+
+if ! sudo -u shift-agent "$PY" /usr/local/bin/flyer-delivery-report --json > /dev/null; then
+    echo "FAIL: Flyer delivery report failed"
+    exit 1
+fi
+echo "Flyer delivery report smoke passed"
 
 if [ -x /usr/local/bin/credential-minimized-readiness ]; then
     "$PY" /usr/local/bin/credential-minimized-readiness --format text || true

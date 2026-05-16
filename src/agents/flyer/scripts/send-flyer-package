@@ -74,6 +74,31 @@ def _pending_project_assets(project):
     return [asset for asset in project_assets if asset.delivery_status != "sent"]
 
 
+def audit_uncertain_delivery_block(log_path: Path, project, uncertain_assets, ndjson_append) -> None:
+    for asset in uncertain_assets:
+        ndjson_append(log_path, FlyerDeliveryFailed(
+            type="flyer_delivery_failed",
+            ts=datetime.now(timezone.utc),
+            project_id=project.project_id,
+            customer_phone=project.customer_phone,
+            asset_id=asset.asset_id,
+            status="uncertain",
+            error="blocked retry: " + (asset.delivery_error or "delivery status uncertain"),
+        ).model_dump_json())
+
+
+def _pending_project_assets_or_audit_block(project, log_path: Path, ndjson_append):
+    project_assets = _resolve_project_assets(project)
+    uncertain_assets = [asset for asset in project_assets if asset.delivery_status == "uncertain"]
+    if uncertain_assets:
+        audit_uncertain_delivery_block(log_path, project, uncertain_assets, ndjson_append)
+        raise SystemExit(
+            "uncertain delivery requires operator reconciliation before retry: "
+            + ",".join(asset.asset_id for asset in uncertain_assets)
+        )
+    return [asset for asset in project_assets if asset.delivery_status != "sent"]
+
+
 def _record_asset_delivery(
     state_path: Path,
     project_id: str,
@@ -127,15 +152,17 @@ def main() -> int:
     assets = [Path(asset) for asset in args.asset]
     project = None
     project_assets = []
+    pending_project_assets = []
     project_snapshot = None
     state_path = Path(args.state_path)
+    log_path = Path(args.log_path)
     if args.project_id:
         store = _load_store(state_path)
         project = next((p for p in store.projects if p.project_id == args.project_id), None)
         if project is None:
             raise SystemExit(f"project not found: {args.project_id}")
         project_assets = _resolve_project_assets(project)
-        pending_project_assets = _pending_project_assets(project)
+        pending_project_assets = _pending_project_assets_or_audit_block(project, log_path, ndjson_append)
         project_snapshot = {
             "version": project.version,
             "status": project.status,
@@ -147,7 +174,6 @@ def main() -> int:
 
     failures = []
     outbound_ids = []
-    log_path = Path(args.log_path)
     if args.allow_unverified_asset:
         if project is not None:
             raise SystemExit("--allow-unverified-asset is only for direct operator --asset sends")
@@ -169,7 +195,7 @@ def main() -> int:
     else:
         expected_formats = {
             str(Path(asset.path)): FINAL_KIND_TO_FORMAT.get(asset.kind, "")
-            for asset in _pending_project_assets(project) if project is not None
+            for asset in pending_project_assets if project is not None
         }
         for asset in assets:
             result = validate_text_manifest_file(
@@ -191,7 +217,7 @@ def main() -> int:
                     ).model_dump_json())
                 print(json.dumps({"text_qa_failed": str(asset), "blockers": result.blockers}))
                 return 2
-    path_to_project_asset = {str(Path(asset.path)): asset for asset in _pending_project_assets(project)} if project is not None else {}
+    path_to_project_asset = {str(Path(asset.path)): asset for asset in pending_project_assets} if project is not None else {}
     for asset in assets:
         if args.dry_run_bridge:
             ok, mid, err, status = True, f"dry-run:{asset.name}", "", 200

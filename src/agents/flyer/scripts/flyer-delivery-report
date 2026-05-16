@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""Report Flyer final-package delivery state without sending media."""
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+import sys
+
+SRC_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(SRC_ROOT / "platform"))
+sys.path.insert(0, str(SRC_ROOT))
+
+from schemas import FlyerProjectStore  # noqa: E402
+
+
+STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
+FINAL_ASSET_KINDS = {
+    "final_whatsapp_image",
+    "final_instagram_post",
+    "final_instagram_story",
+    "final_printable_pdf",
+}
+
+
+def _load_store(state_path: Path) -> FlyerProjectStore:
+    if not state_path.exists():
+        return FlyerProjectStore()
+    return FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
+
+
+def _final_assets(project):
+    ids = set(project.final_asset_ids)
+    return [
+        asset for asset in project.assets
+        if asset.asset_id in ids or asset.kind in FINAL_ASSET_KINDS
+    ]
+
+
+def build_delivery_report(store: FlyerProjectStore) -> dict:
+    issues = []
+    failed_assets = 0
+    uncertain_assets = 0
+    pending_assets = 0
+    ready_to_retry_projects = 0
+    blocked_projects = 0
+
+    for project in store.projects:
+        assets = _final_assets(project)
+        if not assets:
+            continue
+        failed = [asset.asset_id for asset in assets if asset.delivery_status == "failed"]
+        uncertain = [asset.asset_id for asset in assets if asset.delivery_status == "uncertain"]
+        pending = [asset.asset_id for asset in assets if asset.delivery_status == "pending"]
+        sent = [asset.asset_id for asset in assets if asset.delivery_status == "sent"]
+        if not (failed or uncertain or pending):
+            continue
+
+        failed_assets += len(failed)
+        uncertain_assets += len(uncertain)
+        pending_assets += len(pending)
+        if uncertain:
+            blocked_projects += 1
+        elif project.status == "finalizing_assets" and (failed or pending):
+            ready_to_retry_projects += 1
+
+        issues.append({
+            "project_id": project.project_id,
+            "customer_phone": str(project.customer_phone),
+            "status": project.status,
+            "version": project.version,
+            "sent_asset_ids": sent,
+            "failed_asset_ids": failed,
+            "uncertain_asset_ids": uncertain,
+            "pending_asset_ids": pending,
+            "action": "operator_reconcile_uncertain_delivery" if uncertain else "retry_send_flyer_package",
+        })
+
+    return {
+        "ok": len(issues) == 0,
+        "projects_total": len(store.projects),
+        "issues_total": len(issues),
+        "blocked_projects": blocked_projects,
+        "ready_to_retry_projects": ready_to_retry_projects,
+        "failed_assets": failed_assets,
+        "uncertain_assets": uncertain_assets,
+        "pending_assets": pending_assets,
+        "issues": issues,
+    }
+
+
+def _format_text(report: dict) -> str:
+    lines = [
+        "Flyer Delivery Report",
+        "---------------------",
+        f"Projects: {report['projects_total']}",
+        f"Issues: {report['issues_total']}",
+        f"Blocked projects: {report['blocked_projects']}",
+        f"Ready to retry: {report['ready_to_retry_projects']}",
+        f"Failed assets: {report['failed_assets']}",
+        f"Uncertain assets: {report['uncertain_assets']}",
+        f"Pending assets: {report['pending_assets']}",
+    ]
+    for issue in report["issues"]:
+        lines.append("")
+        lines.append(f"{issue['project_id']} ({issue['status']}) -> {issue['action']}")
+        if issue["uncertain_asset_ids"]:
+            lines.append("  uncertain: " + ", ".join(issue["uncertain_asset_ids"]))
+        if issue["failed_asset_ids"]:
+            lines.append("  failed: " + ", ".join(issue["failed_asset_ids"]))
+        if issue["pending_asset_ids"]:
+            lines.append("  pending: " + ", ".join(issue["pending_asset_ids"]))
+    return "\n".join(lines)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Report Flyer final delivery state.")
+    parser.add_argument("--state-path", default=str(STATE_PATH))
+    parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    parser.add_argument("--fail-on-issues", action="store_true", help="Exit 2 when any delivery issue exists.")
+    args = parser.parse_args()
+
+    report = build_delivery_report(_load_store(Path(args.state_path)))
+    if args.json:
+        print(json.dumps(report))
+    else:
+        print(_format_text(report))
+    return 2 if args.fail_on_issues and report["issues_total"] else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

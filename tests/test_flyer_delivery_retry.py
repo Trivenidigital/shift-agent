@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 import importlib.machinery
-import os
+import json
 import sys
 
 import pytest
@@ -15,10 +15,16 @@ from schemas import FlyerAsset, FlyerProject, FlyerProjectStore, FlyerRequestFie
 
 
 SCRIPT_PATH = Path(__file__).resolve().parent.parent / "src" / "agents" / "flyer" / "scripts" / "send-flyer-package"
+REPORT_SCRIPT_PATH = Path(__file__).resolve().parent.parent / "src" / "agents" / "flyer" / "scripts" / "flyer-delivery-report"
 
 
 def _load_script():
     loader = importlib.machinery.SourceFileLoader("send_flyer_package_script", str(SCRIPT_PATH))
+    return loader.load_module()
+
+
+def _load_report_script():
+    loader = importlib.machinery.SourceFileLoader("flyer_delivery_report_script", str(REPORT_SCRIPT_PATH))
     return loader.load_module()
 
 
@@ -139,3 +145,96 @@ def test_uncertain_delivery_blocks_blind_retry(tmp_path, monkeypatch):
 
     with pytest.raises(SystemExit, match="uncertain delivery"):
         mod._pending_project_assets(project)
+
+
+def test_uncertain_delivery_block_is_audited_before_retry_exits(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    mod = _load_script()
+    project = _project(tmp_path)
+    project = project.model_copy(update={
+        "assets": [
+            project.assets[0].model_copy(update={
+                "delivery_status": "uncertain",
+                "delivery_error": "ack_parse_failed",
+                "delivery_attempt_count": 1,
+            }),
+            *project.assets[1:],
+        ]
+    })
+    state_path = tmp_path / "projects.json"
+    log_path = tmp_path / "decisions.log"
+    state_path.write_text(FlyerProjectStore(projects=[project]).model_dump_json(indent=2), encoding="utf-8")
+
+    class DummyLock:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def fake_ndjson_append(path: Path, line: str) -> None:
+        with Path(path).open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+
+    monkeypatch.setattr(
+        mod,
+        "_load_runtime_io",
+        lambda: (DummyLock, lambda path, text: Path(path).write_text(text, encoding="utf-8"), None, fake_ndjson_append),
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "send-flyer-package",
+        "--jid", "15551234567@c.us",
+        "--project-id", project.project_id,
+        "--state-path", str(state_path),
+        "--log-path", str(log_path),
+    ])
+
+    with pytest.raises(SystemExit, match="uncertain delivery"):
+        mod.main()
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert rows == [{
+        "type": "flyer_delivery_failed",
+        "ts": rows[0]["ts"],
+        "project_id": project.project_id,
+        "customer_phone": "+19045550123",
+        "asset_id": "A0001",
+        "status": "uncertain",
+        "error": "blocked retry: ack_parse_failed",
+    }]
+
+
+def test_delivery_report_summarizes_actionable_project_status(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    mod = _load_report_script()
+    project = _project(tmp_path)
+    project = project.model_copy(update={
+        "assets": [
+            project.assets[0].model_copy(update={"delivery_status": "sent", "outbound_message_id": "wamid.1"}),
+            project.assets[1].model_copy(update={"delivery_status": "failed", "delivery_error": "bridge down"}),
+            project.assets[2].model_copy(update={"delivery_status": "uncertain", "delivery_error": "ack_parse_failed"}),
+            project.assets[3],
+        ]
+    })
+    delivered = project.model_copy(update={
+        "project_id": "F0002",
+        "status": "delivered",
+        "assets": [asset.model_copy(update={"delivery_status": "sent", "outbound_message_id": f"wamid.{asset.asset_id}"}) for asset in project.assets],
+    })
+    store = FlyerProjectStore(projects=[project, delivered])
+
+    report = mod.build_delivery_report(store)
+
+    assert report["projects_total"] == 2
+    assert report["blocked_projects"] == 1
+    assert report["ready_to_retry_projects"] == 0
+    assert report["failed_assets"] == 1
+    assert report["uncertain_assets"] == 1
+    assert report["pending_assets"] == 1
+    assert report["issues"][0]["project_id"] == "F0001"
+    assert report["issues"][0]["uncertain_asset_ids"] == ["A0003"]
+    assert report["issues"][0]["failed_asset_ids"] == ["A0002"]
+    assert report["issues"][0]["pending_asset_ids"] == ["A0004"]
