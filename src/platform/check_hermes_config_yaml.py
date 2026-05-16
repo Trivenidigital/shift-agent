@@ -24,7 +24,23 @@ import yaml  # part of the Hermes venv — verified via `hermes doctor` 2026-05-
 
 DEFAULT_CONFIG_PATH = Path("/root/.hermes/config.yaml")
 
-ALLOWED_VISION_PROVIDERS = ("auto", "openai", "openrouter", "anthropic")
+# Common auxiliary-vision provider values. Hermes accepts a growing set
+# including `auto`, `main`, `openrouter`, `nous`, `codex`, `openai`, `anthropic`,
+# `gemini`, `deepseek`, `xai-oauth`, `minimax-oauth`, `ollama-cloud`,
+# `azure-foundry`, and others — plus custom `base_url` overrides. Treat the
+# value check as ADVISORY (WARN-not-FAIL) so customer VPSes using less-common
+# providers aren't blocked; the type check below still fails closed on
+# null/int/list shape errors. Maintenance: update from
+# https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/configuration.md
+# when Hermes adds new providers — additions here only narrow the WARN noise,
+# not gate behavior.
+COMMON_VISION_PROVIDERS = (
+    "auto", "main",
+    "openrouter", "nous", "codex",
+    "openai", "anthropic", "gemini", "deepseek", "xai", "xai-oauth",
+    "minimax-oauth", "ollama-cloud", "azure-foundry", "gmi",
+    "qwen-oauth", "kimi-coding", "google-gemini-cli",
+)
 ALLOWED_PROVIDER_ROUTING_SORT = ("price", "latency", "throughput")
 KNOWN_MODEL_SUBKEYS = ("default", "provider", "base_url", "context_length", "max_tokens")
 KNOWN_AUXILIARY_SUBKEYS = ("vision",)
@@ -185,12 +201,26 @@ def check_config(config_path: Path, baseline_path: Path, *, baseline_required: b
                     result.unknown_subkeys.append({"parent": "auxiliary.vision", "key": str(k)})
             vp = vision.get("provider")
             if vp is not None:
-                if not isinstance(vp, str) or vp not in ALLOWED_VISION_PROVIDERS:
+                # Type check is fail-closed (catches null/int/list).
+                if not isinstance(vp, str) or vp == "":
                     result.wrong_shape.append({
                         "field": "auxiliary.vision.provider",
                         "got": type(vp).__name__ + " (value redacted)",
-                        "want": f"one of {ALLOWED_VISION_PROVIDERS}",
+                        "want": "non-empty string (provider name)",
                     })
+                # Value check is ADVISORY (Hermes provider list is broad and
+                # growing — strict whitelist would reject legitimate configs
+                # using `main`, `nous`, `codex`, `gemini`, custom base_url, etc).
+                # Value redacted in the WARN to match the security posture on
+                # other fields; operator can `hermes config get` or grep
+                # config.yaml directly to inspect what they typed.
+                elif vp not in COMMON_VISION_PROVIDERS:
+                    result.advisory_warnings.append(
+                        f"auxiliary.vision.provider value (redacted) is not in the "
+                        f"common-providers hint set (advisory only; may be a typo OR "
+                        f"a less-common provider). See Hermes config docs for the "
+                        f"current valid set."
+                    )
             vm = vision.get("model")
             if vm is not None:
                 if not isinstance(vm, str) or vm == "":

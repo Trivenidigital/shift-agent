@@ -129,16 +129,68 @@ model:
 
 
 # ─────────────────────────────────────────────────────────────────
-# C5 — auxiliary.vision.provider: invalid value
+# C5 — auxiliary.vision.provider: uncommon value (advisory, NOT fail).
+# Relaxed from strict-whitelist to advisory after the PR-99 post-merge
+# finding that Hermes accepts 14+ providers (main, nous, codex, gemini,
+# deepseek, etc.) plus custom base_url — strict whitelist would false-
+# positive on valid configs.
 # ─────────────────────────────────────────────────────────────────
-def test_c5_vision_provider_invalid(tmp_path):
+def test_c5_vision_provider_uncommon_is_advisory(tmp_path):
     p = _write_yaml(tmp_path, """\
 model:
   default: openai/gpt-4o-mini
   provider: openrouter
 auxiliary:
   vision:
-    provider: invalidvendor
+    provider: somerareprovider
+    model: foo/bar
+""")
+    r = _run(p)
+    # Advisory only — gate passes
+    assert r.returncode == 0, f"stderr={r.stderr}"
+    env = _envelope(r.stdout)
+    assert env["ok"] is True
+    # But emit an advisory WARN so the operator can confirm it isn't a typo
+    assert any("auxiliary.vision.provider" in w for w in env["advisory_warnings"])
+
+
+# ─────────────────────────────────────────────────────────────────
+# C5b — auxiliary.vision.provider: known valid value (`main`) passes silently.
+# Confirms the relaxation closes the regression reported on PR #99
+# (a valid `provider: main` was being rejected).
+# ─────────────────────────────────────────────────────────────────
+def test_c5b_vision_provider_main_is_valid(tmp_path):
+    p = _write_yaml(tmp_path, """\
+model:
+  default: openai/gpt-4o-mini
+  provider: openrouter
+auxiliary:
+  vision:
+    provider: main
+    model: openai/gpt-4o-mini
+""")
+    r = _run(p)
+    assert r.returncode == 0, f"stderr={r.stderr}"
+    env = _envelope(r.stdout)
+    assert env["ok"] is True
+    # `main` is in the common-providers hint set — no advisory either
+    assert not any("auxiliary.vision.provider" in w for w in env["advisory_warnings"])
+
+
+# ─────────────────────────────────────────────────────────────────
+# C5c — auxiliary.vision.provider: wrong TYPE still fails closed.
+# Confirms the relaxation didn't dilute the fail-closed posture on
+# null/int/list — those are still real shape violations Hermes can't
+# silently handle.
+# ─────────────────────────────────────────────────────────────────
+def test_c5c_vision_provider_wrong_type_fails(tmp_path):
+    p = _write_yaml(tmp_path, """\
+model:
+  default: openai/gpt-4o-mini
+  provider: openrouter
+auxiliary:
+  vision:
+    provider: 42
     model: foo/bar
 """)
     r = _run(p)
