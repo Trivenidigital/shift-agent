@@ -78,15 +78,17 @@
     .qr {
       width: 142px;
       height: 142px;
-      display: grid;
-      grid-template-columns: repeat(5, 1fr);
-      gap: 6px;
       padding: 12px;
       background: #fff;
       border: 3px solid var(--ink);
     }
 
-    .qr span { background: var(--ink); }
+    .qr img {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
 
     .cta-copy {
       font-size: 27px;
@@ -262,12 +264,8 @@
         <h1>Send a WhatsApp message. Get a professional flyer back.</h1>
         <p class="sub">For restaurants, temples, salons, tutors, realtors, food trucks, and local organizers who need beautiful promotions fast.</p>
         <div class="cta-row">
-          <div class="qr" aria-label="QR code placeholder">
-            <span></span><span></span><span></span><i></i><span></span>
-            <span></span><i></i><span></span><i></i><span></span>
-            <span></span><span></span><i></i><span></span><i></i>
-            <i></i><span></span><i></i><span></span><span></span>
-            <span></span><i></i><span></span><i></i><span></span>
+          <div class="qr" aria-label="Free trial WhatsApp QR code">
+            <img src="flyer-studio-trial-qr.png" alt="Try Hermes Flyer Studio free trial on WhatsApp">
           </div>
           <div class="cta-copy">
             Try 3 flyers free
@@ -308,7 +306,7 @@
 
     <footer class="footer">
       <div>Built for busy owners who sell through WhatsApp every day.</div>
-      <div>Start free: wa.me/&lt;AGENT_NUMBER&gt;?text=START%20FREE%20TRIAL</div>
+      <div>Start free: wa.me/918522041562?text=START%20FREE%20TRIAL</div>
     </footer>
   </main>
 </body>

@@ -189,6 +189,9 @@ Plan: `docs/superpowers/plans/2026-05-16-flyer-launch-funnel-phase5.md`
 - [x] Add `START FREE TRIAL` WhatsApp onboarding path that skips paid plan choice and activates trial immediately after confirmation.
 - [x] Enforce hard trial quota through the existing reserve/finalize usage path, blocking the fourth new flyer request with an upgrade CTA.
 - [x] Add marketing launch pack with WhatsApp-safe copy, sample-gallery guidance, free-trial link, plan pricing, upsell prompts, and opt-in posture.
+- [x] Launch polish: replace marketing placeholders with the live `wa.me/918522041562` trial link and add a scannable trial QR PNG.
+- [x] Launch polish: add a high-quality HTML sample gallery for restaurant, temple, salon, tutor, realtor, and food-truck examples.
+- [x] Launch polish: automatically send trial upsell prompts after final sample delivery, using remaining trial quota to choose the message.
 
 ## Active - Production pilot: Shift + Catering + Daily Brief (2026-05-14)
 

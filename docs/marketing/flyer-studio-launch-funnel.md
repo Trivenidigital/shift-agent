@@ -14,7 +14,7 @@ Try 3 flyers free on WhatsApp.
 
 CTA:
 
-`https://wa.me/<AGENT_NUMBER>?text=START%20FREE%20TRIAL%20-%20I%20want%20to%20try%20Flyer%20Studio`
+`https://wa.me/918522041562?text=START%20FREE%20TRIAL%20-%20I%20want%20to%20try%20Flyer%20Studio`
 
 QR label:
 
@@ -72,7 +72,7 @@ We built Hermes Flyer Studio: you send a WhatsApp message like "Need flyer for w
 No design app. No back-and-forth with freelancers. Just message, revise, approve, and share.
 
 You can try 3 free sample flyers here:
-<FREE_TRIAL_WA_LINK>
+https://wa.me/918522041562?text=START%20FREE%20TRIAL%20-%20I%20want%20to%20try%20Flyer%20Studio
 
 Plans after trial:
 $49.99/month for 30 flyers
@@ -87,7 +87,7 @@ Most small businesses need flyers every week, but design takes too much time.
 
 Hermes Flyer Studio turns WhatsApp into a flyer team. Send the request, add logo or menu photo, ask for changes in plain language, and get final files ready for WhatsApp, Instagram, and print.
 
-Try 3 flyers free: <FREE_TRIAL_WA_LINK>
+Try 3 flyers free: https://wa.me/918522041562?text=START%20FREE%20TRIAL%20-%20I%20want%20to%20try%20Flyer%20Studio
 
 ## Social Post Caption
 
@@ -95,25 +95,25 @@ Need a flyer for tonight's special, festival, class, open house, or weekend even
 
 Just WhatsApp the request. Hermes Flyer Studio creates a professional flyer, handles revisions, checks the details, and sends final files back.
 
-Try 3 flyers free on WhatsApp: <FREE_TRIAL_WA_LINK>
+Try 3 flyers free on WhatsApp: https://wa.me/918522041562?text=START%20FREE%20TRIAL%20-%20I%20want%20to%20try%20Flyer%20Studio
 
 ## Trial Delivery Upsell Prompts
 
 After first sample:
 
-Your first sample flyer is ready. You have 2 free sample flyers left. Upgrade anytime: <ONBOARDING_OR_PAYMENT_LINK>
+Your first sample flyer is ready. You have 2 free sample flyers left. Upgrade anytime: https://wa.me/918522041562?text=START%20FREE%20TRIAL%20-%20I%20want%20to%20try%20Flyer%20Studio
 
 After second sample:
 
-Second sample done. You have 1 free sample flyer left. Paid plans start at $49.99/month for 30 flyers: <ONBOARDING_OR_PAYMENT_LINK>
+Second sample done. You have 1 free sample flyer left. Paid plans start at $49.99/month for 30 flyers: https://wa.me/918522041562?text=START%20FREE%20TRIAL%20-%20I%20want%20to%20try%20Flyer%20Studio
 
 After third sample:
 
-Your 3 free sample flyers are complete. To keep creating flyers, choose a plan: $49.99/month for 30, $69.99/month for 60, or $199/month unlimited. Start here: <ONBOARDING_OR_PAYMENT_LINK>
+Your 3 free sample flyers are complete. To keep creating flyers, choose a plan: $49.99/month for 30, $69.99/month for 60, or $199/month unlimited. Start here: https://wa.me/918522041562?text=START%20FREE%20TRIAL%20-%20I%20want%20to%20try%20Flyer%20Studio
 
 Blocked 4th request:
 
-Your free trial has used 3/3 sample flyers. Upgrade now to keep creating professional flyers: <ONBOARDING_OR_PAYMENT_LINK>
+Your free trial has used 3/3 sample flyers. Upgrade now to keep creating professional flyers: https://wa.me/918522041562?text=START%20FREE%20TRIAL%20-%20I%20want%20to%20try%20Flyer%20Studio
 
 ## Compliance Posture
 

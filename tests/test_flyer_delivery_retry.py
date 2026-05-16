@@ -11,7 +11,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src" / "platform"))
 
-from schemas import FlyerAsset, FlyerProject, FlyerProjectStore, FlyerRequestFields  # noqa: E402
+from schemas import FlyerAsset, FlyerCustomerStore, FlyerProject, FlyerProjectStore, FlyerRequestFields, FlyerUsageEvent  # noqa: E402
 
 
 SCRIPT_PATH = Path(__file__).resolve().parent.parent / "src" / "agents" / "flyer" / "scripts" / "send-flyer-package"
@@ -182,7 +182,13 @@ def test_uncertain_delivery_block_is_audited_before_retry_exits(tmp_path, monkey
     monkeypatch.setattr(
         mod,
         "_load_runtime_io",
-        lambda: (DummyLock, lambda path, text: Path(path).write_text(text, encoding="utf-8"), None, fake_ndjson_append),
+        lambda: (
+            DummyLock,
+            lambda path, text: Path(path).write_text(text, encoding="utf-8"),
+            None,
+            None,
+            fake_ndjson_append,
+        ),
     )
     monkeypatch.setattr(sys, "argv", [
         "send-flyer-package",
@@ -253,3 +259,57 @@ def test_delivery_report_ignores_legacy_delivered_assets_without_delivery_fields
     assert report["ok"] is True
     assert report["issues_total"] == 0
     assert report["pending_assets"] == 0
+
+
+def test_trial_delivery_upsell_message_tracks_remaining_samples(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    mod = _load_script()
+    now = datetime.now(timezone.utc)
+    store = FlyerCustomerStore()
+    customer = store.new_customer(
+        business_name="Lakshmi Kitchen",
+        business_address="123 Main St",
+        public_phone="+17045550199",
+        business_whatsapp_number="+17045550199",
+        authorized_request_number="+19045550188",
+        business_category="restaurant",
+        preferred_language="en",
+        plan_id="trial",
+        now=now,
+    ).model_copy(update={
+        "status": "trial",
+        "current_period_start": now.replace(day=1),
+        "current_period_end": now.replace(month=now.month + 1 if now.month < 12 else 12),
+        "usage_events": [FlyerUsageEvent(
+            reservation_id="CUST0001:F0001",
+            project_id="F0001",
+            customer_id="CUST0001",
+            kind="used",
+            count=1,
+            recorded_at=now,
+            message_id="m1",
+        )],
+    })
+
+    first = mod._trial_upsell_message(customer)
+    assert "2 free sample flyers left" in first
+    assert "https://wa.me/918522041562" in first
+
+    used_events = []
+    for index in range(1, 4):
+        reservation_id = f"CUST0001:F000{index}"
+        used_events.append({
+            "reservation_id": reservation_id,
+            "project_id": f"F000{index}",
+            "customer_id": "CUST0001",
+            "kind": "used",
+            "count": 1,
+            "recorded_at": now.isoformat(),
+            "message_id": f"m{index}",
+        })
+    customer = FlyerCustomerStore.model_validate({
+        "customers": [customer.model_dump(mode="json") | {"usage_events": used_events}]
+    }).customers[0]
+    third = mod._trial_upsell_message(customer)
+    assert "3 free sample flyers are complete" in third
+    assert "$49.99/month" in third
