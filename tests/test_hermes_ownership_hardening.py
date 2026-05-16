@@ -25,6 +25,8 @@ def test_permissions_preflight_targets_runtime_paths_and_quarantines_stale_backu
     assert "config.yaml.bak-*" in text
     assert "verify_readable_as_service_user \"$HERMES_HOME/config.yaml\"" in text
     assert "verify_executable_as_service_user \"$HERMES_HOME/hermes-agent/venv/bin/python\"" in text
+    assert "verify_executable_if_exists \"$HERMES_HOME/node/bin/node\"" in text
+    assert "Node is optional" in text
 
 
 def test_deploy_and_smoke_include_permissions_preflight():

@@ -49,6 +49,13 @@ verify_executable_as_service_user() {
     as_service_user test -x "$path" || die "$SERVICE_USER cannot execute $path"
 }
 
+verify_executable_if_exists() {
+    local path="$1"
+    if [ -e "$path" ]; then
+        test -x "$path" || die "$path exists but is not executable"
+    fi
+}
+
 [ "$(id -u)" = "0" ] || die "must run as root"
 [ -d "$HERMES_HOME" ] || die "missing Hermes home: $HERMES_HOME"
 
@@ -77,6 +84,9 @@ chown_tree_if_exists "$BACKUP_QUARANTINE"
 verify_readable_as_service_user "$HERMES_HOME/config.yaml"
 verify_readable_as_service_user "$HERMES_HOME/.env"
 verify_executable_as_service_user "$HERMES_HOME/hermes-agent/venv/bin/python"
-verify_executable_as_service_user "$HERMES_HOME/node/bin/node"
+# Node is optional here. Some Hermes installs use a bundled
+# /root/.hermes/node/bin/node, while current main-vps does not have that path
+# and the gateway still starts correctly via the runtime PATH/system install.
+verify_executable_if_exists "$HERMES_HOME/node/bin/node"
 
 echo "OK: Hermes runtime permissions verified for $SERVICE_USER"
