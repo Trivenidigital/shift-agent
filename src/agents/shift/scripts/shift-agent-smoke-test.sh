@@ -29,6 +29,7 @@ for script in \
     /usr/local/bin/shift-agent-notify-owner \
     /usr/local/bin/shift-agent-disable \
     /usr/local/bin/shift-agent-enable \
+    /usr/local/bin/shift-agent-hermes-permissions \
     /usr/local/bin/shift-agent-tail-logger.py \
     /usr/local/bin/shift-agent-health-check.sh \
     /usr/local/bin/shift-agent-reconcile.py \
@@ -49,6 +50,12 @@ for script in \
     [ -x "$script" ] || { echo "FAIL: $script missing or not executable"; exit 1; }
 done
 echo "✓ All scripts present + executable"
+
+if ! /usr/local/bin/shift-agent-hermes-permissions > /dev/null; then
+    echo "FAIL: Hermes runtime permissions preflight failed"
+    exit 1
+fi
+echo "✓ Hermes runtime permissions verified"
 
 BRIDGE_JS="/root/.hermes/hermes-agent/scripts/whatsapp-bridge/bridge.js"
 if [ -f "$BRIDGE_JS" ]; then

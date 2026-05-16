@@ -16,9 +16,10 @@ Environment=HERMES_HOME=/root/.hermes
 Environment=PATH=/root/.hermes/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EnvironmentFile=/opt/shift-agent/.env
 
-# Idempotent ownership guard — Baileys rotates keys mid-session; if anything ever ran as root
-# and wrote into /root/.hermes, this ensures shift-agent can still read on next start.
-ExecStartPre=/bin/chown -R shift-agent:shift-agent /root/.hermes
+# Targeted permissions guard. Runs with elevated privileges even though the
+# gateway itself runs as shift-agent. Avoid broad recursive chown of all
+# /root/.hermes because stale operator backup files can block gateway startup.
+ExecStartPre=+/usr/local/bin/shift-agent-hermes-permissions
 
 ExecStart=/root/.hermes/hermes-agent/venv/bin/python -m hermes_cli.main gateway run --replace
 Restart=on-failure

@@ -57,6 +57,18 @@ Hermes-first summary: reuse Hermes WhatsApp ingress, `dispatch_shift_agent`, sen
 - [ ] Production-quality image generation smoke: configure a real image-output model for Flyer Studio concepts/finals, run a live Ugadi flyer request, and compare the delivered visual quality against the deterministic renderer.
 - [x] Credit optimization: switch Flyer Studio default from three generated concepts to one best generated design, with WhatsApp copy `Reply APPROVE or reply with changes.`
 
+### Infrastructure Hardening - Hermes Runtime Ownership (2026-05-16)
+
+**Drift-check tag:** extends-Hermes
+
+Hermes-first summary: reuse existing `hermes-gateway.service`, tarball deploy, smoke test, and `/root/.hermes` runtime layout. Net-new scope is a targeted permissions preflight replacing the brittle recursive service-start `chown` that can block gateway startup on stale operator backup files.
+
+- [x] Create branch `codex/hermes-ownership-hardening`.
+- [x] TDD red tests for service ExecStartPre, permissions preflight script, and deploy/smoke wiring.
+- [x] Replace broad `/bin/chown -R shift-agent:shift-agent /root/.hermes` startup guard with targeted `shift-agent-hermes-permissions`.
+- [x] Add deploy pre-restart gate and smoke coverage for Hermes runtime permissions.
+- [ ] Run focused verification, merge, and deploy to `main-vps`.
+
 ### Phase 1 - WhatsApp Customer Onboarding And Paid Readiness (2026-05-15)
 
 **Drift-check tag:** extends-Hermes
