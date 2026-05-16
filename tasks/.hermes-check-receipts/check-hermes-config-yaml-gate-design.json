@@ -1,0 +1,19 @@
+{
+  "topic": "check-hermes-config-yaml-gate-design",
+  "task_text": "check-hermes-config-yaml-gate-design — concrete CLI + JSON-envelope + override + audit + deploy-integration + test contract",
+  "completed_at": "2026-05-16T19:05:46Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 12,
+  "hermes_step_count": 5,
+  "files_to_read_first": [
+    "tools/check-shift-agent-patch.sh",
+    "tools/check-env-drift.sh",
+    "src/agents/shift/scripts/shift-agent-deploy.sh",
+    "src/agents/shift/scripts/shift-agent-smoke-test.sh",
+    "src/platform/credential_readiness.py",
+    "src/platform/scripts/credential-minimized-readiness",
+    "tests/test_safe_io_load_status.py",
+    "tests/test_catering_v02_scripts.py",
+    "docs/hermes-alignment.md"
+  ]
+}

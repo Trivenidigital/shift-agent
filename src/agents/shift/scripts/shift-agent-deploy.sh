@@ -46,6 +46,9 @@ install_artifacts() {
     if [ ! -f src/agents/shift/scripts/pilot-readiness-check ]; then
         rm -f /usr/local/bin/pilot-readiness-check
     fi
+    if [ ! -f src/platform/scripts/check-hermes-config-yaml ]; then
+        rm -f /usr/local/bin/check-hermes-config-yaml
+    fi
 
     # Python modules — flat layout at /opt/shift-agent/ matches scripts' sys.path
     install -m 644 src/platform/schemas.py /opt/shift-agent/schemas.py
@@ -64,6 +67,13 @@ install_artifacts() {
         install -m 644 src/platform/credential_readiness.py /opt/shift-agent/credential_readiness.py
     else
         rm -f /opt/shift-agent/credential_readiness.py
+    fi
+    # Hermes config.yaml shape gate module. Guarded for rollback compatibility
+    # with tarballs that predate this module.
+    if [ -f src/platform/check_hermes_config_yaml.py ]; then
+        install -m 644 src/platform/check_hermes_config_yaml.py /opt/shift-agent/check_hermes_config_yaml.py
+    else
+        rm -f /opt/shift-agent/check_hermes_config_yaml.py
     fi
 
     # Templates — Shift-Agent message templates (idempotent: shared dir filled by multiple agents below)
@@ -505,6 +515,32 @@ case "$ACTION" in
             exit 1
         fi
 
+        # ─────────────────────────────────────────────────────────────────
+        # Hermes config.yaml shape gate (M2 silent-failure closure)
+        # ─────────────────────────────────────────────────────────────────
+        # Asserts shift-agent-load-bearing fields in /root/.hermes/config.yaml.
+        # Fail-closed BEFORE any state change.
+        # Override: HERMES_CONFIG_GATE_OVERRIDE_FIELD + ..._REASON (both required).
+        #
+        # ORDERING: this MUST precede credential-minimized foundation gate
+        # because credential_readiness.validate_cf_router() reads config.yaml for
+        # the plugins:* section. A YAML parse error there silently produces a
+        # misleading "cf-router disabled" foundation-gate failure; running this
+        # gate first surfaces the actual problem.
+        if [ ! -x "$STAGING/tools/check-hermes-config-yaml.sh" ]; then
+            echo "ERROR: $STAGING/tools/check-hermes-config-yaml.sh not found or not executable." >&2
+            echo "  Either the tarball is malformed or a refactor moved the script." >&2
+            echo "  Refusing to deploy without the config-yaml gate." >&2
+            exit 1
+        fi
+        echo "=== Hermes config.yaml shape gate ==="
+        if ! VENV_PY="$VENV_PY" BASELINE_FILE="$STAGING/tools/hermes-config-yaml-baseline.txt" \
+                "$STAGING/tools/check-hermes-config-yaml.sh" /root/.hermes/config.yaml; then
+            echo "ERROR: Hermes config.yaml shape gate failed — refusing to install." >&2
+            echo "  No state change has been made. See gate output above for affected fields." >&2
+            exit 1
+        fi
+
         # Credential-minimized Hermes foundation gate - external Hermes install
         # state only. This runs BEFORE state-file migration and artifact install
         # because app rollback cannot repair missing bundled Hermes skills.
@@ -806,6 +842,31 @@ PY
         # Restore source tree to staging-new
         rm -rf "$STAGING/src" "$STAGING/.commit-hash"
         tar xzf "$TARBALL" -C "$STAGING/"
+
+        # Hermes config.yaml shape gate on rollback path. Asymmetric posture
+        # from the deploy action: WARN-skip-when-missing IS appropriate here
+        # because rollback tarballs may legitimately predate the gate (deploy
+        # tarballs do not — they're always freshly built from current repo).
+        # Without this, a broken /root/.hermes/config.yaml (operator manually
+        # edited after the prior deploy) would only be caught by smoke AFTER
+        # gateway is restarted with the degraded config.
+        VENV_PY="${VENV_PY:-/usr/local/lib/hermes-agent/venv/bin/python}"
+        if [ -x "$STAGING/tools/check-hermes-config-yaml.sh" ]; then
+            echo "=== Hermes config.yaml shape gate (rollback) ==="
+            if ! VENV_PY="$VENV_PY" BASELINE_FILE="$STAGING/tools/hermes-config-yaml-baseline.txt" \
+                    "$STAGING/tools/check-hermes-config-yaml.sh" /root/.hermes/config.yaml; then
+                echo "ERROR: rollback config.yaml gate failed — config is broken." >&2
+                echo "  This rollback would result in service restart against broken config." >&2
+                echo "  To force rollback: set HERMES_CONFIG_GATE_OVERRIDE_FIELD + ..._REASON." >&2
+                /usr/local/bin/shift-agent-notify-owner \
+                    --priority 2 \
+                    --title "Rollback BLOCKED by config.yaml gate" \
+                    "Rollback to $TARGET refused: /root/.hermes/config.yaml has shape issues. SSH to triage." 2>/dev/null || true
+                exit 1
+            fi
+        else
+            echo "WARN: rollback tarball lacks config-yaml gate — proceeding (pre-merge tarball compat)" >&2
+        fi
 
         # Re-install from restored staging
         install_artifacts "$STAGING"
