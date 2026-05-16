@@ -52,7 +52,10 @@ def build_delivery_report(store: FlyerProjectStore) -> dict:
             continue
         failed = [asset.asset_id for asset in assets if asset.delivery_status == "failed"]
         uncertain = [asset.asset_id for asset in assets if asset.delivery_status == "uncertain"]
-        pending = [asset.asset_id for asset in assets if asset.delivery_status == "pending"]
+        pending = [
+            asset.asset_id for asset in assets
+            if project.status == "finalizing_assets" and asset.delivery_status == "pending"
+        ]
         sent = [asset.asset_id for asset in assets if asset.delivery_status == "sent"]
         if not (failed or uncertain or pending):
             continue
