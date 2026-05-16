@@ -152,7 +152,12 @@ Hermes-first summary: reuse existing Flyer JSON state, `FlyerAsset.delivery_stat
 - [x] Add `flyer-delivery-report` CLI to summarize blocked/failed/pending deliveries without sending media.
 - [x] Emit an audit row when a project retry is blocked by uncertain asset delivery.
 - [x] Install the report in deploy, add smoke coverage, and update stale rollback cleanup.
-- [ ] Run focused verification, merge, and deploy to `main-vps`.
+- [x] Run focused verification, merge, and deploy to `main-vps`.
+  - PR #93 merged to `main` as `0ed759a`; PR #94 fixed legacy delivered-project report compatibility and merged as `058218c`.
+  - Deployed `deploy-20260516-150309-058218c1` after clearing a pre-existing `/root/.hermes` ownership restart issue with `chown -R shift-agent:shift-agent /root/.hermes`.
+  - Production smoke passed: `smoke-flyer-quality --final-package` returned `ok=true`, `send_dry_run.delivered=true`, and `all_final_assets_sent=true`.
+  - `flyer-delivery-report --json` on live state returned `ok=true`, `issues_total=0`, `blocked_projects=0`, `failed_assets=0`, `uncertain_assets=0`, and `pending_assets=0`.
+  - Gateway health after deploy: `active`, bridge health `{"status":"connected","queueLength":0}`.
 
 ## Active - Production pilot: Shift + Catering + Daily Brief (2026-05-14)
 
