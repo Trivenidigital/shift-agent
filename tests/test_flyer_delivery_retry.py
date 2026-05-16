@@ -238,3 +238,18 @@ def test_delivery_report_summarizes_actionable_project_status(tmp_path, monkeypa
     assert report["issues"][0]["uncertain_asset_ids"] == ["A0003"]
     assert report["issues"][0]["failed_asset_ids"] == ["A0002"]
     assert report["issues"][0]["pending_asset_ids"] == ["A0004"]
+
+
+def test_delivery_report_ignores_legacy_delivered_assets_without_delivery_fields(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    mod = _load_report_script()
+    legacy_delivered = _project(tmp_path).model_copy(update={
+        "status": "delivered",
+        "updated_at": datetime.now(timezone.utc),
+    })
+
+    report = mod.build_delivery_report(FlyerProjectStore(projects=[legacy_delivered]))
+
+    assert report["ok"] is True
+    assert report["issues_total"] == 0
+    assert report["pending_assets"] == 0
