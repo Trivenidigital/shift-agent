@@ -58,6 +58,43 @@ def test_delivery_report_installed_and_smoked_for_operator_visibility():
     assert "uncertain_asset_ids" in report
 
 
+def test_flyer_campaign_cta_script_installed_and_smoked():
+    deploy = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh").read_text(encoding="utf-8")
+    smoke = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-smoke-test.sh").read_text(encoding="utf-8")
+    symbols = (REPO / "src" / "platform" / "scripts" / "check-safe-io-symbols").read_text(encoding="utf-8")
+    patcher = (REPO / "tools" / "patch-hermes.py").read_text(encoding="utf-8")
+    script = (SCRIPTS / "send-flyer-campaign").read_text(encoding="utf-8")
+
+    assert "send-flyer-campaign" in deploy
+    assert "send-flyer-campaign" in smoke
+    assert "bridge_send_cta" in symbols
+    assert "app.post('/send-cta'" in smoke
+    assert "BEGIN shift-agent-cta-buttons" in patcher
+    assert "app.post('/send-cta'" in patcher
+    assert "bridge_send_cta" in script
+    assert "bridge_send_media" in script
+    assert "Start Free Trial" in script
+    assert "Act Now! Save Time and Money" in script
+    assert "DEFAULT_START_TRIAL_MESSAGE" in script
+    assert "DEFAULT_ACT_NOW_MESSAGE" in script
+    assert "Help me create a beautiful flyer for my business" in script
+    assert "I want to set up Flyer Studio for my business" in script
+    assert "--start-trial-message" in script
+    assert "--act-now-message" in script
+    assert '"message": args.start_trial_message' in script
+    assert '"message": args.act_now_message' in script
+    assert '"url":' not in script
+    assert "URL buttons are intentionally not used" in script
+    assert "media_message_id" in script
+    assert "cta_message_id" in script
+    assert "quick_reply" in patcher
+    assert "nativeFlowMessage" in patcher
+    assert "interactiveResponseMessage" in patcher
+    assert "buttonsResponseMessage" in patcher
+    assert "cta_url" not in patcher
+    assert "relayMessage" in patcher
+
+
 def test_update_script_supports_selection_revision_and_approval():
     text = (SCRIPTS / "update-flyer-project").read_text(encoding="utf-8")
     assert "--select-concept" in text

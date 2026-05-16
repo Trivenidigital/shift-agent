@@ -644,6 +644,13 @@ def bridge_media_url() -> str:
     return BRIDGE_URL.rstrip("/") + "/send-media"
 
 
+def bridge_cta_url() -> str:
+    """Return the companion /send-cta URL for interactive CTA messages."""
+    if BRIDGE_URL.endswith("/send"):
+        return BRIDGE_URL[:-len("/send")] + "/send-cta"
+    return BRIDGE_URL.rstrip("/") + "/send-cta"
+
+
 def bridge_send_media(
     jid: str,
     file_path: Path | str,
@@ -695,6 +702,80 @@ def bridge_send_media(
                 return False, "", f"empty_message_id: {body[:200]}", "send_uncertain"
             if doc.get("success") is False:
                 return False, "", f"bridge_send_failed: {body[:200]}", "http_error"
+            return True, mid, "", "sent"
+    except urllib.error.HTTPError as e:
+        return False, "", f"HTTP {e.code}: {e.reason}", "http_error"
+    except urllib.error.URLError as e:
+        return False, "", f"URLError: {e.reason}", "connect_failed"
+    except Exception as e:
+        return False, "", f"{type(e).__name__}: {e}", "unknown_error"
+
+
+def bridge_send_cta(
+    jid: str,
+    *,
+    body: str,
+    buttons: list[dict[str, str]],
+    footer: str = "",
+    media_path: Path | str | None = None,
+    media_type: str = "",
+) -> Tuple[bool, str, str, str]:
+    """POST an interactive reply-button message to the local Hermes bridge /send-cta.
+
+    Returns (success, message_id, error_str, status).
+    status values mirror bridge_post where possible, plus invalid_payload.
+
+    The bridge renders button labels and owns the reply payload, so callers can
+    keep customer-visible text clean while still offering one-tap chat actions.
+    """
+    if not body.strip():
+        return False, "", "CTA body is required", "invalid_payload"
+    if not buttons:
+        return False, "", "at least one CTA button is required", "invalid_payload"
+
+    cleaned_buttons: list[dict[str, str]] = []
+    for button in buttons:
+        label = str(button.get("label", "")).strip()
+        message = str(button.get("message", "")).strip()
+        if not label or not message:
+            return False, "", "CTA buttons require label and message", "invalid_payload"
+        cleaned_buttons.append({"label": label[:60], "message": message[:300]})
+
+    url = bridge_cta_url()
+    bad = validate_bridge_url(url)
+    if bad:
+        return False, "", bad, "connect_failed"
+
+    payload_doc: dict[str, Any] = {
+        "chatId": jid,
+        "body": body,
+        "buttons": cleaned_buttons,
+    }
+    if footer:
+        payload_doc["footer"] = footer
+    if media_path is not None and str(media_path):
+        payload_doc["mediaPath"] = str(media_path)
+    if media_type:
+        payload_doc["mediaType"] = media_type
+
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload_doc).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=BRIDGE_TIMEOUT_SEC) as resp:
+            ack_body = resp.read().decode("utf-8", errors="replace")
+            try:
+                doc = json.loads(ack_body)
+            except json.JSONDecodeError:
+                return False, "", f"ack_parse_failed: {ack_body[:200]}", "send_uncertain"
+            mid = doc.get("id") or doc.get("messageId") or ""
+            if not mid:
+                return False, "", f"empty_message_id: {ack_body[:200]}", "send_uncertain"
+            if doc.get("success") is False:
+                return False, "", f"bridge_send_failed: {ack_body[:200]}", "http_error"
             return True, mid, "", "sent"
     except urllib.error.HTTPError as e:
         return False, "", f"HTTP {e.code}: {e.reason}", "http_error"

@@ -94,6 +94,8 @@ def test_free_trial_onboarding_skips_paid_plan_choice_and_activates_trial(tmp_pa
     assert first.handled is True
     assert first.next_status == "collecting_business_name"
     assert "3 free sample flyers" in first.reply_text
+    assert "let's create a beautiful flyer for your business" in first.reply_text.lower()
+    assert "set up your free trial first" in first.reply_text.lower()
 
     flow = [
         ("trial-2", "Lakshmi Kitchen", "collecting_business_address", "business address"),
@@ -122,6 +124,25 @@ def test_free_trial_onboarding_skips_paid_plan_choice_and_activates_trial(tmp_pa
     assert customer.plan_id == "trial"
     assert customer.status == "trial"
     assert customer.quota_remaining(FlyerPlanTier.default_tiers()) == 3
+
+
+def test_reply_button_trial_phrase_starts_free_trial_onboarding(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 16, tzinfo=timezone.utc)
+
+    first = handle_onboarding_message(
+        state_path=state_path,
+        chat_id="19045550156@s.whatsapp.net",
+        sender_phone="+19045550156",
+        message_id="trial-button-1",
+        text="Help me create a beautiful flyer for my business",
+        now=now,
+    )
+
+    assert first.handled is True
+    assert first.next_status == "collecting_business_name"
+    store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert store.onboarding_sessions[0].plan_id == "trial"
 
 
 def test_trial_quota_blocks_fourth_flyer_and_prompts_upgrade(tmp_path):

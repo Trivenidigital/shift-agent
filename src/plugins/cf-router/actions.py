@@ -732,7 +732,7 @@ def classify_flyer_intent(text: str) -> tuple[bool, list[str]]:
 def is_flyer_onboarding_intent(text: str) -> bool:
     """Return True for explicit Flyer Studio registration/account setup text."""
     return bool(re.search(
-        r"\b(register|sign\s*up|signup|onboard|setup|set\s+up|flyer account|flyer studio|plan|free\s+trial|start\s+trial|try\s+free)\b",
+        r"\b(register|sign\s*up|signup|onboard|setup|set\s+up|act\s+now|help\s+me\s+create\s+a\s+beautiful\s+flyer|flyer account|flyer studio|plan|free\s+trial|start\s+trial|try\s+free)\b",
         text or "",
         flags=re.IGNORECASE,
     ))
