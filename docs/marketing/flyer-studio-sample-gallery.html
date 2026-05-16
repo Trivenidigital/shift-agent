@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hermes Flyer Studio Sample Gallery</title>
+  <style>
+    :root {
+      --ink: #171514;
+      --paper: #fff8eb;
+      --muted: #615a52;
+      --gold: #f3aa22;
+      --leaf: #24724d;
+      --rose: #bf3348;
+      --blue: #235789;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #e8e2d6;
+      color: var(--ink);
+      font-family: Inter, Arial, sans-serif;
+    }
+    main {
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 44px;
+      background: var(--paper);
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      gap: 32px;
+      align-items: end;
+      margin-bottom: 34px;
+      border-bottom: 2px solid rgba(23, 21, 20, 0.15);
+      padding-bottom: 26px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 54px;
+      line-height: 1;
+      letter-spacing: 0;
+    }
+    .brand {
+      color: var(--leaf);
+      font-size: 19px;
+      font-weight: 900;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+    }
+    .cta {
+      text-align: right;
+      font-size: 24px;
+      line-height: 1.25;
+      font-weight: 900;
+      color: var(--rose);
+    }
+    .cta span {
+      display: block;
+      color: var(--muted);
+      font-size: 15px;
+      font-weight: 800;
+      margin-top: 8px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 28px;
+    }
+    .flyer {
+      min-height: 560px;
+      border-radius: 8px;
+      overflow: hidden;
+      color: #fff;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 28px;
+      border: 1px solid rgba(0, 0, 0, 0.16);
+      box-shadow: 0 20px 42px rgba(0, 0, 0, 0.14);
+    }
+    .flyer h2 {
+      margin: 0;
+      font-size: 50px;
+      line-height: 0.94;
+      letter-spacing: 0;
+    }
+    .flyer h3 {
+      margin: 14px 0 0;
+      font-size: 25px;
+      line-height: 1.1;
+      color: rgba(255, 255, 255, 0.86);
+    }
+    .pill {
+      display: inline-block;
+      padding: 9px 13px;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.18);
+      font-weight: 900;
+      text-transform: uppercase;
+      font-size: 13px;
+      margin-bottom: 18px;
+    }
+    .details {
+      display: grid;
+      gap: 10px;
+      margin-top: 28px;
+      font-size: 19px;
+      font-weight: 800;
+    }
+    .details div {
+      padding: 12px 14px;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.16);
+      border: 1px solid rgba(255, 255, 255, 0.18);
+    }
+    .restaurant { background: radial-gradient(circle at 80% 15%, #ffcf4a, transparent 18%), linear-gradient(145deg, #761926, #f47720); }
+    .temple { background: radial-gradient(circle at 80% 20%, #f6d05c, transparent 20%), linear-gradient(145deg, #152f59, #a46a17); }
+    .salon { background: radial-gradient(circle at 80% 20%, #ff7ca8, transparent 22%), linear-gradient(145deg, #201313, #a6253a); }
+    .tutor { background: radial-gradient(circle at 80% 20%, #9be0ff, transparent 22%), linear-gradient(145deg, #173f73, #24724d); }
+    .realtor { background: radial-gradient(circle at 75% 18%, #b6c9d6, transparent 22%), linear-gradient(145deg, #20272b, #58717d); }
+    .foodtruck { background: radial-gradient(circle at 82% 18%, #ffe27a, transparent 22%), linear-gradient(145deg, #14573a, #dc8622); }
+    footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 28px;
+      margin-top: 34px;
+      padding-top: 24px;
+      border-top: 2px solid rgba(23, 21, 20, 0.15);
+      color: var(--muted);
+      font-weight: 800;
+      font-size: 18px;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <div class="brand">Hermes Flyer Studio</div>
+        <h1>High-quality sample gallery</h1>
+      </div>
+      <div class="cta">Try 3 flyers free<span>wa.me/918522041562?text=START FREE TRIAL</span></div>
+    </header>
+    <section class="grid">
+      <article class="flyer restaurant">
+        <div><span class="pill">Restaurant Special</span><h2>Thursday Dosa Night</h2><h3>Triveni style menu promo</h3></div>
+        <div class="details"><div>Pick any 3 dosas for $12.99</div><div>6 PM to 10 PM</div><div>WhatsApp, Instagram, PDF</div></div>
+      </article>
+      <article class="flyer temple">
+        <div><span class="pill">Temple Event</span><h2>Ugadi Community Dinner</h2><h3>Festival invite with Telugu support</h3></div>
+        <div class="details"><div>Saturday 6 PM</div><div>Family-friendly celebration</div><div>Volunteer and donation CTA</div></div>
+      </article>
+      <article class="flyer salon">
+        <div><span class="pill">Salon Promo</span><h2>Bridal Glow Week</h2><h3>Premium local offer design</h3></div>
+        <div class="details"><div>Henna, facial, styling</div><div>Book on WhatsApp</div><div>Offer-first layout</div></div>
+      </article>
+      <article class="flyer tutor">
+        <div><span class="pill">Tutor Class</span><h2>Summer SAT Batch</h2><h3>Clean academic flyer</h3></div>
+        <div class="details"><div>Small-group coaching</div><div>Starts June 10</div><div>Parent-friendly details</div></div>
+      </article>
+      <article class="flyer realtor">
+        <div><span class="pill">Realtor Open House</span><h2>Open House Weekend</h2><h3>Modern listing promotion</h3></div>
+        <div class="details"><div>Saturday 1 PM to 4 PM</div><div>Address and contact CTA</div><div>Story and post formats</div></div>
+      </article>
+      <article class="flyer foodtruck">
+        <div><span class="pill">Food Truck</span><h2>Weekend Pop-Up</h2><h3>Route, menu, and daily special</h3></div>
+        <div class="details"><div>Lunch combo $9.99</div><div>South Charlotte route</div><div>Fast repeat promos</div></div>
+      </article>
+    </section>
+    <footer>
+      <div>$49.99 / 30 flyers &nbsp; | &nbsp; $69.99 / 60 flyers &nbsp; | &nbsp; $199 unlimited</div>
+      <div>Send a WhatsApp message. Get a professional flyer back.</div>
+    </footer>
+  </main>
+</body>
+</html>

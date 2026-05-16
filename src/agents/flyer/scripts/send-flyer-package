@@ -14,7 +14,7 @@ sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(SRC_ROOT / "platform"))
 sys.path.insert(0, str(SRC_ROOT))
 
-from schemas import FlyerAssetsDelivered, FlyerDeliveryFailed, FlyerProjectStore, is_flyer_transition_allowed  # noqa: E402
+from schemas import FlyerAssetsDelivered, FlyerCustomerStore, FlyerDeliveryFailed, FlyerPlanTier, FlyerProjectStore, is_flyer_transition_allowed  # noqa: E402
 try:
     from flyer_render import validate_text_manifest_file  # type: ignore  # noqa: E402
 except ImportError:
@@ -22,7 +22,9 @@ except ImportError:
 
 
 STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
+CUSTOMER_STATE_PATH = Path("/opt/shift-agent/state/flyer/customers.json")
 LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+TRIAL_UPGRADE_LINK = "https://wa.me/918522041562?text=START%20FREE%20TRIAL%20-%20I%20want%20to%20try%20Flyer%20Studio"
 FINAL_KIND_TO_FORMAT = {
     "final_whatsapp_image": "whatsapp_image",
     "final_instagram_post": "instagram_post",
@@ -32,8 +34,8 @@ FINAL_KIND_TO_FORMAT = {
 
 
 def _load_runtime_io():
-    from safe_io import FileLock, atomic_write_text, bridge_send_media, ndjson_append  # type: ignore
-    return FileLock, atomic_write_text, bridge_send_media, ndjson_append
+    from safe_io import FileLock, atomic_write_text, bridge_post, bridge_send_media, ndjson_append  # type: ignore
+    return FileLock, atomic_write_text, bridge_post, bridge_send_media, ndjson_append
 
 
 def _load_store(state_path: Path) -> FlyerProjectStore:
@@ -47,6 +49,44 @@ def _write_store(state_path: Path, store: FlyerProjectStore) -> None:
         state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
     else:
         atomic_write_text(state_path, store.model_dump_json(indent=2))
+
+
+def _load_customer_store(path: Path) -> FlyerCustomerStore:
+    if not path.exists():
+        return FlyerCustomerStore()
+    return FlyerCustomerStore.model_validate(json.loads(path.read_text(encoding="utf-8")))
+
+
+def _trial_upsell_message(customer) -> str:
+    remaining = customer.quota_remaining(FlyerPlanTier.default_tiers())
+    if remaining is None:
+        return ""
+    if remaining <= 0:
+        return (
+            "Flyer Studio\n------------\n"
+            "Your 3 free sample flyers are complete. To keep creating flyers, choose a plan: "
+            "$49.99/month for 30, $69.99/month for 60, or $199/month unlimited.\n"
+            f"Start here: {TRIAL_UPGRADE_LINK}"
+        )
+    if remaining == 1:
+        return (
+            "Flyer Studio\n------------\n"
+            "Second sample done. You have 1 free sample flyer left. "
+            f"Paid plans start at $49.99/month for 30 flyers: {TRIAL_UPGRADE_LINK}"
+        )
+    return (
+        "Flyer Studio\n------------\n"
+        f"Your sample flyer is ready. You have {remaining} free sample flyers left. "
+        f"Upgrade anytime: {TRIAL_UPGRADE_LINK}"
+    )
+
+
+def _trial_upsell_for_project(project, customer_state_path: Path) -> str:
+    store = _load_customer_store(customer_state_path)
+    customer = store.find_customer_by_phone(project.customer_phone)
+    if customer is None or customer.status != "trial":
+        return ""
+    return _trial_upsell_message(customer)
 
 
 def _resolve_project_assets(project):
@@ -140,6 +180,7 @@ def main() -> int:
     p.add_argument("--jid", required=True)
     p.add_argument("--project-id", default="")
     p.add_argument("--state-path", default=str(STATE_PATH))
+    p.add_argument("--customer-state-path", default=str(CUSTOMER_STATE_PATH))
     p.add_argument("--log-path", default=str(LOG_PATH))
     p.add_argument("--asset", action="append", default=[])
     p.add_argument("--caption", default="Your final flyer package is ready.")
@@ -147,7 +188,7 @@ def main() -> int:
     p.add_argument("--break-glass-reason", default="")
     p.add_argument("--dry-run-bridge", action="store_true")
     args = p.parse_args()
-    FileLock, atomic_write_text, bridge_send_media, ndjson_append = _load_runtime_io()
+    FileLock, atomic_write_text, bridge_post, bridge_send_media, ndjson_append = _load_runtime_io()
 
     assets = [Path(asset) for asset in args.asset]
     project = None
@@ -297,7 +338,25 @@ def main() -> int:
             asset_ids=[asset.asset_id for asset in project_assets],
             outbound_message_ids=outbound_ids,
         ).model_dump_json())
-    print(json.dumps({"sent": len(assets), "message_ids": outbound_ids}))
+    trial_upsell_message_id = ""
+    trial_upsell_error = ""
+    if project is not None:
+        message = _trial_upsell_for_project(project, Path(args.customer_state_path))
+        if message:
+            if args.dry_run_bridge:
+                trial_upsell_message_id = "dry-run:trial-upsell"
+            else:
+                ok, mid, err, _status = bridge_post(args.jid, message)
+                if ok:
+                    trial_upsell_message_id = mid
+                else:
+                    trial_upsell_error = err
+    print(json.dumps({
+        "sent": len(assets),
+        "message_ids": outbound_ids,
+        "trial_upsell_message_id": trial_upsell_message_id,
+        "trial_upsell_error": trial_upsell_error,
+    }))
     return 0
 
 

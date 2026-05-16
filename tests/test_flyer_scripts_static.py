@@ -132,11 +132,13 @@ def test_onboarding_is_whatsapp_native_and_plan_config_driven():
 def test_flyer_launch_marketing_pack_exists_and_has_trial_ctas():
     pack = (REPO / "docs" / "marketing" / "flyer-studio-launch-funnel.md").read_text(encoding="utf-8")
     sales_flyer = (REPO / "docs" / "marketing" / "flyer-studio-sales-flyer.html").read_text(encoding="utf-8")
+    gallery = (REPO / "docs" / "marketing" / "flyer-studio-sample-gallery.html").read_text(encoding="utf-8")
+    qr = REPO / "docs" / "marketing" / "flyer-studio-trial-qr.png"
     required = [
         "Send a WhatsApp message. Get a professional flyer back.",
         "3 free sample flyers",
         "Try 3 flyers free on WhatsApp",
-        "wa.me",
+        "https://wa.me/918522041562?text=START%20FREE%20TRIAL%20-%20I%20want%20to%20try%20Flyer%20Studio",
         "$49.99",
         "$69.99",
         "$199",
@@ -150,6 +152,10 @@ def test_flyer_launch_marketing_pack_exists_and_has_trial_ctas():
     ]
     for phrase in required:
         assert phrase in pack
+    assert "<AGENT_NUMBER>" not in pack
+    assert "<FREE_TRIAL_WA_LINK>" not in pack
+    assert qr.exists()
+    assert qr.stat().st_size > 1000
     for phrase in [
         "Hermes Flyer Studio",
         "Try 3 flyers free",
@@ -163,6 +169,7 @@ def test_flyer_launch_marketing_pack_exists_and_has_trial_ctas():
         "$199",
     ]:
         assert phrase in sales_flyer
+        assert phrase in gallery
 
 
 def test_account_script_supports_activation_quota_and_commands():
