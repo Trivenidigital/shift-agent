@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# shift-agent-hermes-permissions — targeted startup permission repair for Hermes.
+#
+# Runs as root from hermes-gateway.service ExecStartPre. The gateway itself runs
+# as shift-agent. Keep this targeted: a recursive chown of all /root/.hermes can
+# fail on stale operator backup files and prevent the gateway from starting.
+
+set -euo pipefail
+
+HERMES_HOME=${HERMES_HOME:-/root/.hermes}
+SERVICE_USER=${SHIFT_AGENT_USER:-shift-agent}
+SERVICE_GROUP=${SHIFT_AGENT_GROUP:-shift-agent}
+BACKUP_QUARANTINE=${HERMES_BACKUP_QUARANTINE:-/opt/shift-agent/state/hermes-config-backups}
+
+die() {
+    echo "FAIL: $*" >&2
+    exit 1
+}
+
+as_service_user() {
+    if command -v runuser >/dev/null 2>&1; then
+        runuser -u "$SERVICE_USER" -- "$@"
+    else
+        sudo -u "$SERVICE_USER" "$@"
+    fi
+}
+
+chown_if_exists() {
+    local path="$1"
+    if [ -e "$path" ]; then
+        chown "$SERVICE_USER:$SERVICE_GROUP" "$path"
+    fi
+}
+
+chown_tree_if_exists() {
+    local path="$1"
+    if [ -e "$path" ]; then
+        chown -R "$SERVICE_USER:$SERVICE_GROUP" "$path"
+    fi
+}
+
+verify_readable_as_service_user() {
+    local path="$1"
+    as_service_user test -r "$path" || die "$SERVICE_USER cannot read $path"
+}
+
+verify_executable_as_service_user() {
+    local path="$1"
+    as_service_user test -x "$path" || die "$SERVICE_USER cannot execute $path"
+}
+
+[ "$(id -u)" = "0" ] || die "must run as root"
+[ -d "$HERMES_HOME" ] || die "missing Hermes home: $HERMES_HOME"
+
+# Current runtime files/directories. These are load-bearing for service start.
+chown_if_exists "$HERMES_HOME"
+chown_if_exists "$HERMES_HOME/.env"
+chown_if_exists "$HERMES_HOME/config.yaml"
+
+for runtime_dir in skills plugins logs whatsapp; do
+    chown_tree_if_exists "$HERMES_HOME/$runtime_dir"
+done
+
+# Operator config backups are useful but not load-bearing. Move stale ones out
+# of HERMES_HOME so they cannot interfere with future startup permission repair.
+mkdir -p "$BACKUP_QUARANTINE"
+find "$HERMES_HOME" -maxdepth 1 -type f \
+    \( -name 'config.yaml.bak-*' \
+       -o -name 'config.yaml.*-bak' \
+       -o -name 'config.yaml.pre-*' \
+       -o -name 'config.yaml.with-*-bak' \) \
+    -mtime +7 -exec mv -n {} "$BACKUP_QUARANTINE/" \; 2>/dev/null || true
+chown_tree_if_exists "$BACKUP_QUARANTINE"
+
+# Strictly verify what the gateway needs. This keeps real permission breakage
+# fail-closed while making stale backups non-blocking.
+verify_readable_as_service_user "$HERMES_HOME/config.yaml"
+verify_readable_as_service_user "$HERMES_HOME/.env"
+verify_executable_as_service_user "$HERMES_HOME/hermes-agent/venv/bin/python"
+verify_executable_as_service_user "$HERMES_HOME/node/bin/node"
+
+echo "OK: Hermes runtime permissions verified for $SERVICE_USER"

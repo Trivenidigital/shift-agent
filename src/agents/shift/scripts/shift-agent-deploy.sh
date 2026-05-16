@@ -735,6 +735,25 @@ PY
             exit 1
         fi
 
+        # Hermes runtime permission gate: run the same targeted preflight that
+        # hermes-gateway.service runs at ExecStartPre. This catches ownership
+        # issues before restart and avoids the old broad recursive chown over
+        # all of /root/.hermes, which could be blocked by stale backup files.
+        if ! /usr/local/bin/shift-agent-hermes-permissions > /dev/null; then
+            echo "FAIL: Hermes runtime permissions gate — refusing to restart hermes-gateway" >&2
+            if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                "$0" rollback "$PREV_TAG"
+                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+            else
+                /usr/local/bin/shift-agent-notify-owner \
+                    --title "Deploy FAILED at Hermes permissions gate" \
+                    --priority 2 \
+                    "Deploy $NEW_TAG failed before gateway restart because Hermes runtime permissions are invalid. SSH immediately." 2>/dev/null || true
+                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+            fi
+            exit 1
+        fi
+
         # Restart services (in order: tail-logger first, gateway last)
         systemctl restart shift-agent-tail-logger.timer 2>/dev/null || true
         systemctl restart shift-agent-health.timer 2>/dev/null || true
