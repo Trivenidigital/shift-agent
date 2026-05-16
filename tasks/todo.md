@@ -136,7 +136,10 @@ Hermes-first summary: reuse existing Flyer JSON state, `FlyerAsset`, bridge `/se
 - [x] Add backwards-compatible delivery fields to `FlyerAsset`.
 - [x] Update `send-flyer-package` to persist each successful asset immediately, skip delivered assets on retry, and block/alert on uncertain sends.
 - [x] Extend smoke to assert all final assets are marked sent during dry-run delivery on Linux; local Windows smoke skips this path because `safe_io` requires `fcntl`.
-- [ ] Run focused verification, merge, and deploy to `main-vps`.
+- [x] Run focused verification, merge, and deploy to `main-vps`.
+  - PR #92 merged to `main` as `831e37f`.
+  - Deployed `deploy-20260516-141525-831e37fa`.
+  - Production final-package smoke passed with `send_dry_run.ok=true`, `delivered=true`, and `all_final_assets_sent=true`.
 
 ## Active - Production pilot: Shift + Catering + Daily Brief (2026-05-14)
 
