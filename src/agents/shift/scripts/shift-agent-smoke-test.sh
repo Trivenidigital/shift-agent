@@ -220,7 +220,7 @@ test -f /root/.hermes/skills/creative_catering_proposals/SKILL.md || {
 }
 echo "✓ creative_catering_proposals SKILL present"
 
-# 3. Config loads and validates
+# 3. Config loads and validates (shift-agent app config at /opt/shift-agent/config.yaml)
 if ! "$PY" -c "
 import sys, yaml
 sys.path.insert(0, '/opt/shift-agent')
@@ -233,6 +233,30 @@ print(f'config ok: customer={cfg.customer.name}, tz={cfg.customer.timezone}')
     exit 1
 fi
 echo "✓ config.yaml validates"
+
+# 3a. Hermes config.yaml shape gate (distinct surface: /root/.hermes/config.yaml).
+# Two stated purposes:
+#   (1) regression guard on the gate binary itself (catches install_artifacts drift)
+#   (2) second warning channel for WARN-level issues (unknown keys, sub-key typos)
+# Fail here triggers the existing smoke→auto-rollback path.
+#
+# FAIL-CLOSED on missing binary post-forward-deploy: deploy-side install
+# pipeline guarantees presence at /usr/local/bin/. Absence at smoke means
+# install_artifacts() drift — exactly the regression class this smoke step
+# exists to catch. (Rollback to a pre-merge tarball would run an OLDER smoke
+# script that doesn't have step 3a, so the asymmetry is self-consistent.)
+if [ ! -x /usr/local/bin/check-hermes-config-yaml ]; then
+    echo "FAIL: /usr/local/bin/check-hermes-config-yaml not installed — install_artifacts() regression"
+    exit 1
+fi
+# Helper emits text-to-stderr AND --json to stdout in single invocation.
+HERMES_CFG_JSON=$("$PY" /usr/local/bin/check-hermes-config-yaml --json /root/.hermes/config.yaml 2>/dev/null || true)
+if ! echo "$HERMES_CFG_JSON" | grep -q '"ok": true'; then
+    echo "FAIL: Hermes config.yaml shape gate (smoke-side) reported issues"
+    "$PY" /usr/local/bin/check-hermes-config-yaml /root/.hermes/config.yaml >&2 || true
+    exit 1
+fi
+echo "✓ Hermes config.yaml shape gate (smoke-side)"
 
 # 4. Roster loads and validates (if present)
 if [ -f /opt/shift-agent/roster.json ]; then

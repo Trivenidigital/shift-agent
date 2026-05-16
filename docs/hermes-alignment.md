@@ -97,6 +97,7 @@ A bug that breaks loudly is a 4am page; you fix it and move on. A bug that break
 |---|---|---|---|---|
 | `docs/platform-contract.md` with semver | Each new agent author re-discovers the platform surface by reading existing code; no breaking-change discipline | 1 day (enumerate `src/platform/*.py` public functions + log-entry types + script exit codes; tag v0.1) | gap | before agent #6 |
 | SKILL routing-rule conflict review pre-deploy | Two SKILLs with overlapping `description:` keywords cause Kimi to thrash between them; today caught only by post-mortem JSONL analysis | 2h (script that lists all SKILL descriptions + greps for routing-keyword overlap) | gap | nice-to-have |
+| **`/root/.hermes/config.yaml` shape gate** (M2 finding 2026-05-05) | Operator typo (e.g. `model.dafault: ...`) silently falls back to Hermes defaults; `hermes config check` / `hermes doctor` do not validate YAML shape (verified live 2026-05-16) | done — `tools/check-hermes-config-yaml.sh` + `src/platform/check_hermes_config_yaml.py` + `tools/hermes-config-yaml-baseline.txt` (32-key superset); wired into `shift-agent-deploy.sh` deploy + rollback paths and `shift-agent-smoke-test.sh`; two-variable override (`HERMES_CONFIG_GATE_OVERRIDE_FIELD` + `HERMES_CONFIG_GATE_OVERRIDE_REASON`) with attestation check; new `config_gate_override` LogEntry variant for audit | done 2026-05-16 | done |
 
 ### Low (already mitigated by recent work)
 

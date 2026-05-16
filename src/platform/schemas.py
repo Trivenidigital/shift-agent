@@ -2395,6 +2395,24 @@ class AgentStateChange(_BaseEntry):
     reason: str
 
 
+class ConfigGateOverride(_BaseEntry):
+    """Audit row: deploy-time `tools/check-hermes-config-yaml.sh` accepted an
+    operator-supplied two-variable override (FIELD + REASON). Bypasses the
+    gate for one deploy invocation; the underlying config issue must still be
+    fixed before the override variable is unset or the next deploy will
+    fail-close again.
+
+    Distinct from AgentStateChange because no agent's enabled-state changed; a
+    deploy-time gate was bypassed. dispatcher-accuracy-report and other audit
+    queries can grep this variant separately rather than seeing override
+    events conflated with actual agent enable/disable events.
+    """
+    type: Literal["config_gate_override"]
+    field: str  # operator-attested failing field (e.g. "model.default")
+    all_failures: str  # comma-joined list of ALL failing fields from JSON envelope
+    reason: str  # operator's free-text rationale
+
+
 class UnknownSenderDeclined(_BaseEntry):
     type: Literal["unknown_sender_declined"]
     # BEGIN shift-agent-sender-id (was: sender_phone required E164Phone)
@@ -3616,6 +3634,8 @@ LogEntry = Annotated[
         Annotated[OutboundCapExceeded, Tag("outbound_cap_exceeded")],
         Annotated[OutboundRefusedDisabled, Tag("outbound_refused_disabled")],
         Annotated[AgentStateChange, Tag("agent_state_change")],
+        # Hermes config.yaml shape gate override audit (M2 closure)
+        Annotated[ConfigGateOverride, Tag("config_gate_override")],
         Annotated[UnknownSenderDeclined, Tag("unknown_sender_declined")],
         Annotated[InvariantViolation, Tag("invariant_violation")],
         Annotated[HealthCheckFailure, Tag("health_check_failure")],
