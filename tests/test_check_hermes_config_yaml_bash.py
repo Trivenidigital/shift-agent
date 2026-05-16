@@ -72,16 +72,21 @@ def test_c12_valid_override_accepts(tmp_path):
 
 
 def test_c13_empty_reason_rejects(tmp_path):
-    """C13 — override with empty reason → exit 1 (incomplete)."""
+    """C13 — override with empty reason → exit 1 with explicit incomplete message.
+
+    Asserts the bash wrapper takes the "incomplete attestation" branch (not
+    the plain fail-closed branch). Catches regressions that remove the
+    explicit elif and let empty-REASON fall through to the no-override path.
+    """
     p = _write_yaml(tmp_path, _FAIL_FIXTURE)
     r = _run(p, env_extra={
         "HERMES_CONFIG_GATE_OVERRIDE_FIELD": "model.default",
         "HERMES_CONFIG_GATE_OVERRIDE_REASON": "",
     })
     assert r.returncode == 1
-    # Either rejected as incomplete OR rejected as plain fail-closed (both acceptable)
-    # because empty REASON is treated as not-set, so fall-through to plain fail.
-    assert "FAIL" in r.stderr
+    assert "incomplete" in r.stderr.lower(), (
+        f"Expected 'incomplete' substring in stderr (incomplete-attestation branch); got: {r.stderr}"
+    )
 
 
 def test_c14_attestation_mismatch_rejects(tmp_path):
@@ -96,13 +101,17 @@ def test_c14_attestation_mismatch_rejects(tmp_path):
 
 
 def test_c15_only_field_set_rejects(tmp_path):
-    """OVERRIDE_FIELD set but REASON unset → exit 1 (incomplete; both required)."""
+    """OVERRIDE_FIELD set but REASON unset → exit 1 with explicit incomplete message.
+
+    Asserts the bash wrapper hits the "incomplete" elif branch (not the plain
+    no-override fall-through). Catches regressions that drop the elif and let
+    field-only requests pass through silently.
+    """
     p = _write_yaml(tmp_path, _FAIL_FIXTURE)
-    # Unset REASON explicitly
+    # Set FIELD only; REASON inherited from os.environ (unset by default in test).
     env = {"HERMES_CONFIG_GATE_OVERRIDE_FIELD": "model.default"}
-    # Make sure REASON env var is not inherited
     r = _run(p, env_extra=env)
     assert r.returncode == 1
-    # Could be "incomplete" message OR plain fail-closed (REASON empty falls
-    # to the no-override branch). Either way, exit 1 with FAIL in stderr.
-    assert "FAIL" in r.stderr
+    assert "incomplete" in r.stderr.lower(), (
+        f"Expected 'incomplete' substring in stderr (incomplete-attestation branch); got: {r.stderr}"
+    )

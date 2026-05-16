@@ -26,12 +26,24 @@ DEFAULT_CONFIG_PATH = Path("/root/.hermes/config.yaml")
 
 ALLOWED_VISION_PROVIDERS = ("auto", "openai", "openrouter", "anthropic")
 ALLOWED_PROVIDER_ROUTING_SORT = ("price", "latency", "throughput")
+KNOWN_MODEL_SUBKEYS = ("default", "provider", "base_url", "context_length", "max_tokens")
 KNOWN_AUXILIARY_SUBKEYS = ("vision",)
 KNOWN_VISION_SUBKEYS = ("provider", "model")
+
+# Sanity cap on YAML file size. Live main-vps config is ~2 KB; 1 MiB is 500×
+# headroom and bounds memory exhaustion if an operator accidentally redirects
+# a large file into the config path.
+MAX_CONFIG_BYTES = 1_048_576
 
 
 @dataclass
 class GateResult:
+    """Structured result for the shape gate. Consumed via JSON envelope by the
+    bash wrapper and via dataclass attributes by tests. `ok` mirrors
+    `exit_code == 0` and is kept as a serialized field because smoke-test
+    grep + downstream audit consumers read it directly. `baseline_path`
+    field dropped — was never read by any consumer.
+    """
     ok: bool
     exit_code: int  # 0 clean, 1 fail-closed, 2 parse/io error
     error: str = ""
@@ -41,7 +53,6 @@ class GateResult:
     unknown_subkeys: list[dict[str, str]] = field(default_factory=list)
     advisory_warnings: list[str] = field(default_factory=list)
     config_path: str = ""
-    baseline_path: str = ""
 
 
 def load_baseline(baseline_path: Path) -> set[str]:
@@ -62,14 +73,27 @@ def load_baseline(baseline_path: Path) -> set[str]:
     return set()
 
 
-def check_config(config_path: Path, baseline_path: Path) -> GateResult:
-    """Inspect the Hermes config.yaml and return a GateResult."""
+def check_config(config_path: Path, baseline_path: Path, *, baseline_required: bool = False) -> GateResult:
+    """Inspect the Hermes config.yaml and return a GateResult.
+
+    When `baseline_required` is True (used when caller explicitly supplied
+    --baseline), a missing baseline file is a hard error rather than a
+    graceful skip. Prevents the silent-failure mode where a misplaced
+    baseline file disables unknown-top-level-key WARN enumeration.
+    """
     result = GateResult(
         ok=False,
         exit_code=2,
         config_path=str(config_path),
-        baseline_path=str(baseline_path),
     )
+
+    # 0. Baseline-required check (per PR-review P2-1: missing baseline silently
+    # disables WARN enumeration; treat as hard error when caller explicitly
+    # supplied a baseline path so deploy.sh can't silently skip top-level
+    # validation due to a packaging bug).
+    if baseline_required and not baseline_path.exists():
+        result.error = f"baseline file missing: {baseline_path}"
+        return result
 
     # 1. Pre-load existence check (Path.exists follows symlinks → catches
     # dangling symlinks since the target won't exist).
@@ -77,7 +101,18 @@ def check_config(config_path: Path, baseline_path: Path) -> GateResult:
         result.error = f"missing or unreadable: {config_path}"
         return result
 
-    # 2. Load + parse YAML
+    # 2. Size sanity cap (per PR-review P2-4: bound memory-exhaust if an
+    # operator accidentally redirects a large file into the config path).
+    try:
+        size = config_path.stat().st_size
+    except OSError as e:
+        result.error = f"OSError stat {config_path}: {e}"
+        return result
+    if size > MAX_CONFIG_BYTES:
+        result.error = f"config.yaml size {size} bytes exceeds sanity cap of {MAX_CONFIG_BYTES} bytes"
+        return result
+
+    # 3. Load + parse YAML
     try:
         raw = config_path.read_text(encoding="utf-8")
     except OSError as e:
@@ -91,33 +126,39 @@ def check_config(config_path: Path, baseline_path: Path) -> GateResult:
         result.error = f"could not parse YAML at {line_hint}"
         return result
 
-    # 3. None / non-mapping guard
+    # 4. None / non-mapping guard
     if not isinstance(doc, dict):
         result.error = "empty or non-mapping YAML"
         return result
 
-    # 4a. Required: model.default + model.provider
-    # SECURITY (D1-1): never echo raw config values in `wrong_shape.got` — only the
+    # 5a. Required: model.default + model.provider
+    # Security: never echo raw config values in `wrong_shape.got` — only the
     # Python type-name. Operator-typed strings could contain accidentally-pasted
     # secrets (e.g. an API key fat-fingered into model.default); the JSON envelope
     # is captured by the bash wrapper and rendered in deploy logs.
+    # Per PR-review P3-F8: also enumerate subkeys under model.* to catch typos
+    # like `model.dafault: openai/gpt-4o-mini` (paired with the missing-required
+    # entry, gives the operator both signals).
     model_block = doc.get("model")
     if not isinstance(model_block, dict):
         result.missing_required.append("model")
     else:
+        for k in model_block:
+            if k not in KNOWN_MODEL_SUBKEYS:
+                result.unknown_subkeys.append({"parent": "model", "key": str(k)})
         md = model_block.get("default")
         if md is None or md == "":
             result.missing_required.append("model.default")
         elif not isinstance(md, str):
             result.wrong_shape.append({
                 "field": "model.default",
-                "got": type(md).__name__,
+                "got": type(md).__name__ + " (value redacted)",
                 "want": "non-empty string",
             })
         elif "/" not in md:
             result.wrong_shape.append({
                 "field": "model.default",
-                "got": "str (value redacted - not <provider>/<model> shape)",
+                "got": "str (value redacted - missing '/')",
                 "want": "<provider>/<model> shape (must contain '/')",
             })
         mp = model_block.get("provider")
@@ -126,7 +167,7 @@ def check_config(config_path: Path, baseline_path: Path) -> GateResult:
         elif not isinstance(mp, str):
             result.wrong_shape.append({
                 "field": "model.provider",
-                "got": type(mp).__name__,
+                "got": type(mp).__name__ + " (value redacted)",
                 "want": "non-empty string",
             })
 
@@ -177,7 +218,7 @@ def check_config(config_path: Path, baseline_path: Path) -> GateResult:
             if k not in known_top:
                 result.unknown_top_level.append(str(k))
 
-    # 5. Compute exit_code + ok
+    # 6. Compute exit_code + ok
     if result.missing_required or result.wrong_shape:
         result.exit_code = 1
         result.ok = False
@@ -247,6 +288,13 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     config_path = Path(args.config_path)
+    # Per PR-review P2-1: when caller explicitly passes --baseline, a missing
+    # baseline file must be a hard error (silent skip of unknown-key WARN
+    # enumeration is exactly the failure mode the gate exists to prevent).
+    # When no --baseline supplied (e.g. fresh checkout running tests), keep
+    # the graceful-fallback behavior so tests don't need to write a baseline
+    # in every fixture.
+    baseline_required = args.baseline is not None
     if args.baseline:
         baseline_path = Path(args.baseline)
     else:
@@ -258,11 +306,12 @@ def main(argv: list[str] | None = None) -> int:
         ]
         baseline_path = next((c for c in candidates if c.exists()), candidates[0])
 
-    result = check_config(config_path, baseline_path)
+    result = check_config(config_path, baseline_path, baseline_required=baseline_required)
 
-    # Per D1-2: a single helper invocation emits BOTH human text (stderr) AND
-    # JSON envelope (stdout, when --json). Eliminates the v1 double-call TOCTOU
-    # window where the bash wrapper called the helper twice.
+    # Single helper invocation emits BOTH human text (stderr) AND JSON envelope
+    # (stdout, when --json). Eliminates the TOCTOU window where the bash wrapper
+    # would otherwise call the helper twice (config file could change between
+    # calls). See M2 closure rationale in PR #99.
     emit_text(result, sys.stderr)
     if args.json:
         emit_json(result, sys.stdout)

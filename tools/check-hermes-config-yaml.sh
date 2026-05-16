@@ -37,15 +37,12 @@ fail() { echo "FAIL: $1" >&2; exit 1; }
 warn() { echo "WARN: $1" >&2; }
 info() { echo "  $1" >&2; }
 
-# Invoke helper ONCE; helper emits BOTH JSON (stdout) AND text (stderr) per D1-2.
-# This eliminates the v1 double-invocation TOCTOU window where the config file
-# could change between JSON-call and text-call.
+# Invoke helper ONCE; helper emits BOTH JSON (stdout) AND text (stderr).
+# This eliminates the TOCTOU window where calling the helper twice would
+# let the config file change between JSON-call and text-call.
 # Capture stdout into $JSON; let stderr stream through to operator terminal.
-# Use `set +e` around the helper so we can capture both the output and the rc.
-set +e
-JSON=$("$VENV_PY" "$HELPER" --json --baseline "$BASELINE_FILE" "$CONFIG_PATH")
-HELPER_RC=$?
-set -e
+JSON=$("$VENV_PY" "$HELPER" --json --baseline "$BASELINE_FILE" "$CONFIG_PATH") || HELPER_RC=$?
+HELPER_RC="${HELPER_RC:-0}"
 
 if [ -z "$JSON" ]; then
     echo "FAIL: helper produced no JSON output (helper_rc=$HELPER_RC)" >&2
@@ -92,9 +89,13 @@ print('1' if sys.argv[2] in fields else '0')
                 info "  TO FIX PERMANENTLY: edit /root/.hermes/config.yaml,"
                 info "  then re-run this gate to confirm clean."
 
-                # Dual-channel audit. Per D1-6: log ALL failing fields, not just attested.
-                # Per D2-5: both channels use 2>/dev/null || true (disk-full = silent drop);
-                # matches check-shift-agent-patch.sh §audit precedent.
+                # Dual-channel audit. Log ALL failing fields, not just the
+                # attested one — operator may attest field A while field B was
+                # ALSO failing; the audit record captures the complete failure
+                # set. Both channels use `2>/dev/null || true` for disk-full
+                # tolerance (matches check-shift-agent-patch.sh §audit precedent;
+                # known limitation: if BOTH channels fail, the override is
+                # accepted silently).
                 TS=$(date -Iseconds)
                 OV_LOG=/opt/shift-agent/logs/config-gate-overrides.log
                 mkdir -p "$(dirname "$OV_LOG")" 2>/dev/null || true
@@ -109,7 +110,13 @@ print(','.join(f for f in fields if f))
                     "$TS" "$OVR_FIELD" "$ALL_FAILS" "$OVR_REASON" \
                     >> "$OV_LOG" 2>/dev/null || true
 
-                # Per D1-3: new ConfigGateOverride LogEntry variant (NOT AgentStateChange).
+                # Use ConfigGateOverride (not AgentStateChange) so
+                # dispatcher-accuracy-report queries don't conflate gate-overrides
+                # with agent enable/disable events. NOTE: on the very first
+                # deploy of this PR, log-decision-direct on disk uses the OLD
+                # schemas.py (no ConfigGateOverride variant yet — install_artifacts
+                # hasn't run); validation will fail and this channel silently
+                # drops to the plain-text fallback. Subsequent deploys are clean.
                 if [ -x /usr/local/bin/log-decision-direct ] && command -v "$VENV_PY" >/dev/null; then
                     ENTRY=$("$VENV_PY" -c "
 import json, sys

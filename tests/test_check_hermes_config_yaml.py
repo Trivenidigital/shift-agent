@@ -91,9 +91,9 @@ model:
 
 
 # ─────────────────────────────────────────────────────────────────
-# C3 — typo'd model.dafault: model.default still missing, "dafault" not a
-# known model-subkey but we don't enumerate model subkeys (only auxiliary).
-# So C3 surfaces the missing-required failure only.
+# C3 — typo'd model.dafault → BOTH the missing-required AND the unknown
+# subkey under model are surfaced. (After PR-review P3-F8 added model.*
+# subkey enumeration.)
 # ─────────────────────────────────────────────────────────────────
 def test_c3_typo_in_model_subkey(tmp_path):
     p = _write_yaml(tmp_path, """\
@@ -105,6 +105,11 @@ model:
     assert r.returncode == 1
     env = _envelope(r.stdout)
     assert "model.default" in env["missing_required"]
+    # Also flagged as unknown subkey under model (P3-F8 enumeration)
+    parents = [u["parent"] for u in env["unknown_subkeys"]]
+    keys = [u["key"] for u in env["unknown_subkeys"]]
+    assert "model" in parents
+    assert "dafault" in keys
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -242,7 +247,49 @@ def test_c11_dangling_symlink(tmp_path):
 
 
 # ─────────────────────────────────────────────────────────────────
-# Security: never echo raw config values in wrong_shape.got (D1-1)
+# C16 — size cap: file larger than 1 MiB → exit 2 (P2-4 closure)
+# ─────────────────────────────────────────────────────────────────
+def test_c16_size_cap_rejects_large_file(tmp_path):
+    p = tmp_path / "config.yaml"
+    # Write a 1.5 MiB YAML file. Content is "key: value" repeated — valid YAML
+    # in principle but exceeds the size sanity cap before parsing is attempted.
+    p.write_text("# " + ("x" * 1_500_000), encoding="utf-8")
+    r = _run(p)
+    assert r.returncode == 2
+    env = _envelope(r.stdout)
+    assert env["ok"] is False
+    assert "sanity cap" in env["error"].lower() or "exceeds" in env["error"].lower()
+
+
+# ─────────────────────────────────────────────────────────────────
+# C17 — explicit --baseline pointing at a missing file → exit 2
+# (P2-1 closure: silent disable of WARN enumeration prevented)
+# ─────────────────────────────────────────────────────────────────
+def test_c17_explicit_missing_baseline_rejects(tmp_path):
+    """Caller passed --baseline to an explicit path that doesn't exist.
+    Must fail-closed exit 2 rather than silently disabling unknown-key WARN.
+    """
+    p = _write_yaml(tmp_path, """\
+model:
+  default: openai/gpt-4o-mini
+  provider: openrouter
+""")
+    missing_baseline = tmp_path / "this-does-not-exist.txt"
+    env = {**os.environ}
+    r = subprocess.run(
+        [sys.executable, str(HELPER), "--json",
+         "--baseline", str(missing_baseline),
+         str(p)],
+        capture_output=True, text=True, env=env,
+    )
+    assert r.returncode == 2
+    res = json.loads(r.stdout)
+    assert res["ok"] is False
+    assert "baseline" in res["error"].lower() and "missing" in res["error"].lower()
+
+
+# ─────────────────────────────────────────────────────────────────
+# Security: never echo raw config values in wrong_shape.got
 # ─────────────────────────────────────────────────────────────────
 def test_security_no_raw_value_in_wrong_shape_got(tmp_path):
     """If an operator accidentally pastes an API key into model.default,
