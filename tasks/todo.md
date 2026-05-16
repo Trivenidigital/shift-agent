@@ -67,7 +67,11 @@ Hermes-first summary: reuse existing `hermes-gateway.service`, tarball deploy, s
 - [x] TDD red tests for service ExecStartPre, permissions preflight script, and deploy/smoke wiring.
 - [x] Replace broad `/bin/chown -R shift-agent:shift-agent /root/.hermes` startup guard with targeted `shift-agent-hermes-permissions`.
 - [x] Add deploy pre-restart gate and smoke coverage for Hermes runtime permissions.
-- [ ] Run focused verification, merge, and deploy to `main-vps`.
+- [x] Run focused verification, merge, and deploy to `main-vps`.
+  - PR #95 merged targeted runtime-permissions preflight as `147f887`; initial deploy correctly failed before gateway restart because `/root/.hermes/node/bin/node` is absent on `main-vps` even though the gateway is healthy, then rollback passed.
+  - PR #96 made the optional bundled Node path non-blocking while preserving strict checks for `config.yaml`, `.env`, and Hermes Python; merged as `1b3db0e`.
+  - Deployed `deploy-20260516-153945-1b3db0e3`; deploy smoke passed and now includes `Hermes runtime permissions verified`.
+  - Direct restart proof passed: `ExecStartPre=+/usr/local/bin/shift-agent-hermes-permissions`, preflight returned OK, `hermes-gateway` became `active`, and WhatsApp bridge health returned `{"status":"connected","queueLength":0}`.
 
 ### Phase 1 - WhatsApp Customer Onboarding And Paid Readiness (2026-05-15)
 
