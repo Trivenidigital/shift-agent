@@ -141,6 +141,19 @@ Hermes-first summary: reuse existing Flyer JSON state, `FlyerAsset`, bridge `/se
   - Deployed `deploy-20260516-141525-831e37fa`.
   - Production final-package smoke passed with `send_dry_run.ok=true`, `delivered=true`, and `all_final_assets_sent=true`.
 
+### Phase 4 - Flyer Ops Launch Hardening (2026-05-16)
+
+**Drift-check tag:** extends-Hermes
+
+Hermes-first summary: reuse existing Flyer JSON state, `FlyerAsset.delivery_status`, `send-flyer-package`, deploy smoke, and NDJSON audit entries. Net-new scope is a small operator report plus audit surfacing for blocked/uncertain package retries so paid-customer delivery failures are visible and actionable.
+
+- [x] Create branch `codex/flyer-ops-launch-hardening`.
+- [x] TDD red tests for delivery-status report output and deploy install/smoke coverage.
+- [x] Add `flyer-delivery-report` CLI to summarize blocked/failed/pending deliveries without sending media.
+- [x] Emit an audit row when a project retry is blocked by uncertain asset delivery.
+- [x] Install the report in deploy, add smoke coverage, and update stale rollback cleanup.
+- [ ] Run focused verification, merge, and deploy to `main-vps`.
+
 ## Active - Production pilot: Shift + Catering + Daily Brief (2026-05-14)
 
 **Drift-check tag:** extends-Hermes

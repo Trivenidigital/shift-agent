@@ -43,6 +43,19 @@ def test_delivery_script_can_send_by_project_id():
     assert ".model_dump_json()" in text
     assert '"status": "delivered"' in text
     assert '"status": "delivered"' not in finalize
+    assert "audit_uncertain_delivery_block" in text
+
+
+def test_delivery_report_installed_and_smoked_for_operator_visibility():
+    deploy = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh").read_text(encoding="utf-8")
+    smoke = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-smoke-test.sh").read_text(encoding="utf-8")
+    report = (SCRIPTS / "flyer-delivery-report").read_text(encoding="utf-8")
+
+    assert "flyer-delivery-report" in deploy
+    assert "flyer-delivery-report" in smoke
+    assert "build_delivery_report" in report
+    assert "--json" in report
+    assert "uncertain_asset_ids" in report
 
 
 def test_update_script_supports_selection_revision_and_approval():

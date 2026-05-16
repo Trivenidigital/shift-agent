@@ -265,6 +265,7 @@ install_artifacts() {
             store-flyer-brand-asset \
             manage-flyer-account \
             send-flyer-package \
+            flyer-delivery-report \
             smoke-flyer-quality; do
             if [ ! -f "src/agents/flyer/scripts/${flyer_binary}" ]; then
                 rm -f "/usr/local/bin/${flyer_binary}"
@@ -282,6 +283,7 @@ install_artifacts() {
             /usr/local/bin/handle-flyer-onboarding \
             /usr/local/bin/store-flyer-brand-asset \
             /usr/local/bin/manage-flyer-account \
+            /usr/local/bin/flyer-delivery-report \
             /usr/local/bin/send-flyer-package \
             /usr/local/bin/smoke-flyer-quality
     fi
