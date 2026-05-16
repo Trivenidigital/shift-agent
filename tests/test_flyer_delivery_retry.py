@@ -313,3 +313,13 @@ def test_trial_delivery_upsell_message_tracks_remaining_samples(tmp_path, monkey
     third = mod._trial_upsell_message(customer)
     assert "3 free sample flyers are complete" in third
     assert "$49.99/month" in third
+
+
+def test_trial_upsell_does_not_block_delivery_on_bad_customer_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    mod = _load_script()
+    project = _project(tmp_path).model_copy(update={"customer_phone": "+19045550188"})
+    customer_state = tmp_path / "customers.json"
+    customer_state.write_text("{not valid json", encoding="utf-8")
+
+    assert mod._trial_upsell_for_project(project, customer_state) == ""

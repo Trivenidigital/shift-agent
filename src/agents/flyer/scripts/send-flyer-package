@@ -82,7 +82,10 @@ def _trial_upsell_message(customer) -> str:
 
 
 def _trial_upsell_for_project(project, customer_state_path: Path) -> str:
-    store = _load_customer_store(customer_state_path)
+    try:
+        store = _load_customer_store(customer_state_path)
+    except Exception:
+        return ""
     customer = store.find_customer_by_phone(project.customer_phone)
     if customer is None or customer.status != "trial":
         return ""
