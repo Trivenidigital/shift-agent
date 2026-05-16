@@ -112,7 +112,7 @@ def handle_account_command(
             now=now,
             audit_log_path=audit_log_path,
         )
-    if customer.status != "active":
+    if customer.status not in {"active", "trial"}:
         return AccountResult(
             True,
             True,
@@ -357,7 +357,7 @@ def _usage_event(
     tiers = plan_tiers or FlyerPlanTier.default_tiers()
     store = load_customer_store(state_path)
     customer = store.find_customer_by_phone(customer_phone)
-    if customer is None or customer.status != "active":
+    if customer is None or customer.status not in {"active", "trial"}:
         return AccountResult(False, True, "", detail="active_customer_not_found")
     customer = _roll_period(customer, now)
     reservation_id = f"{customer.customer_id}:{project_id}"
@@ -540,18 +540,21 @@ def _status_reply(customer: FlyerCustomerProfile, tiers: list[FlyerPlanTier]) ->
     remaining = customer.quota_remaining(tiers)
     limit_text = "unlimited" if remaining is None else f"{remaining} remaining"
     pending = f"\nPending plan change: {customer.pending_plan_id}" if customer.pending_plan_id else ""
+    trial_cta = "\nTrial CTA: upgrade to Starter, Growth, or Unlimited to keep creating flyers." if customer.status == "trial" else ""
     return (
         "Flyer Studio\n------------\n"
         f"Account: {customer.customer_id}\n"
         f"Status: {customer.status}\n"
         f"Plan: {customer.plan_id}\n"
-        f"Usage this period: {used} used, {limit_text}.{pending}"
+        f"Usage this period: {used} used, {limit_text}.{pending}{trial_cta}"
     )
 
 
 def _help_reply(customer: FlyerCustomerProfile) -> str:
     if customer.status == "payment_pending":
         return "Flyer Studio\n------------\nYour registration is saved and waiting for payment confirmation. You can send STATUS, HELP, or upload a logo/template."
+    if customer.status == "trial":
+        return "Flyer Studio\n------------\nYour free trial includes 3 free sample flyers. Send a flyer request, STATUS, or CHANGE PLAN to upgrade."
     return "Flyer Studio\n------------\nSend a flyer request, STATUS, or HELP. Account admins can add numbers, update phone details, or request a plan change."
 
 
@@ -568,6 +571,12 @@ def _activation_reply(customer: FlyerCustomerProfile, tiers: list[FlyerPlanTier]
 def _quota_blocked_reply(customer: FlyerCustomerProfile, tiers: list[FlyerPlanTier]) -> str:
     used = customer.usage_count_for_current_period()
     limit = customer.included_flyer_limit(tiers) or used
+    if customer.status == "trial":
+        return (
+            "Flyer Studio\n------------\n"
+            f"Your free trial has used {used}/{limit} sample flyers. "
+            "Upgrade now to keep creating professional flyers: reply CHANGE PLAN STARTER, CHANGE PLAN GROWTH, or CHANGE PLAN UNLIMITED."
+        )
     return (
         "Flyer Studio\n------------\n"
         f"Your {customer.plan_id} plan has used {used}/{limit} flyers this month. "

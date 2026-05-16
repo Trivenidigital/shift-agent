@@ -53,6 +53,7 @@ def test_flyer_config_defaults_are_safe_and_cost_bounded():
     assert cfg.final_image_model == "gpt-image-1.5"
     assert cfg.final_image_quality == "medium"
     assert [(t.plan_id, t.monthly_price_usd, t.included_flyers) for t in cfg.plan_tiers] == [
+        ("trial", 0.00, 3),
         ("starter", 49.99, 30),
         ("growth", 69.99, 60),
         ("unlimited", 199.0, None),

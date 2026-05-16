@@ -175,6 +175,21 @@ Hermes-first summary: reuse existing Flyer JSON state, `FlyerAsset.delivery_stat
   - `flyer-delivery-report --json` on live state returned `ok=true`, `issues_total=0`, `blocked_projects=0`, `failed_assets=0`, `uncertain_assets=0`, and `pending_assets=0`.
   - Gateway health after deploy: `active`, bridge health `{"status":"connected","queueLength":0}`.
 
+### Phase 5 - Flyer Studio Launch Funnel (2026-05-16)
+
+**Drift-check tag:** extends-Hermes
+
+Hermes-first summary: reuse deployed Flyer account quotas, WhatsApp onboarding, cf-router, media delivery, and marketing/sample generation workflow. Net-new scope is a hard-limited free trial tier, click-to-WhatsApp trial entry copy, and launch collateral that avoids cold WhatsApp blasting.
+
+Plan: `docs/superpowers/plans/2026-05-16-flyer-launch-funnel-phase5.md`
+
+- [x] Create branch `codex/flyer-launch-funnel`.
+- [x] Write Phase 5 implementation plan with drift and Hermes-first analysis.
+- [x] Add default 3-sample `trial` tier and trial customer status.
+- [x] Add `START FREE TRIAL` WhatsApp onboarding path that skips paid plan choice and activates trial immediately after confirmation.
+- [x] Enforce hard trial quota through the existing reserve/finalize usage path, blocking the fourth new flyer request with an upgrade CTA.
+- [x] Add marketing launch pack with WhatsApp-safe copy, sample-gallery guidance, free-trial link, plan pricing, upsell prompts, and opt-in posture.
+
 ## Active - Production pilot: Shift + Catering + Daily Brief (2026-05-14)
 
 **Drift-check tag:** extends-Hermes
