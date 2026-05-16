@@ -124,6 +124,20 @@ Plan: `docs/superpowers/plans/2026-05-15-flyer-text-qa-phase3.md`
 - [x] Merge Phase 3 PR #91 to `main` at `ea2720e`.
 - [x] Deploy Phase 3 to `main-vps` as `deploy-20260515-233720-ea2720ed`; deploy smoke passed, pilot readiness remained READY (16 passed), deterministic `smoke-flyer-quality --final-package` passed with dry-run final send delivered, and guarded real-model smoke passed with `openai/gpt-5.4-image-2` high quality plus text QA for concept and all four final assets at `/opt/shift-agent/state/flyer/quality-smoke-phase3-real-20260515-233720`.
 
+### Phase 3.1 - Flyer Package Retry Safety (2026-05-16)
+
+**Drift-check tag:** extends-Hermes
+
+Hermes-first summary: reuse existing Flyer JSON state, `FlyerAsset`, bridge `/send-media`, NDJSON delivery audit, and Phase 3 text QA. Net-new scope is only per-final-asset delivery status so a retry after partial bridge failure sends the missing files instead of duplicating already-sent files.
+
+- [x] Create branch `codex/flyer-delivery-retry-state`.
+- [x] Root cause: `send-flyer-package` records outbound message IDs only after all four bridge sends succeed, so a failure after partial success leaves no durable per-asset proof and retries resend the already-delivered assets.
+- [x] TDD red tests for partial failure persistence, retry-only-missing behavior, and `send_uncertain` no blind retry.
+- [x] Add backwards-compatible delivery fields to `FlyerAsset`.
+- [x] Update `send-flyer-package` to persist each successful asset immediately, skip delivered assets on retry, and block/alert on uncertain sends.
+- [x] Extend smoke to assert all final assets are marked sent during dry-run delivery on Linux; local Windows smoke skips this path because `safe_io` requires `fcntl`.
+- [ ] Run focused verification, merge, and deploy to `main-vps`.
+
 ## Active - Production pilot: Shift + Catering + Daily Brief (2026-05-14)
 
 **Drift-check tag:** extends-Hermes

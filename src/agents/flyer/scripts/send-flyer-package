@@ -15,7 +15,6 @@ sys.path.insert(0, str(SRC_ROOT / "platform"))
 sys.path.insert(0, str(SRC_ROOT))
 
 from schemas import FlyerAssetsDelivered, FlyerDeliveryFailed, FlyerProjectStore, is_flyer_transition_allowed  # noqa: E402
-from safe_io import FileLock, atomic_write_text, bridge_send_media, ndjson_append  # noqa: E402
 try:
     from flyer_render import validate_text_manifest_file  # type: ignore  # noqa: E402
 except ImportError:
@@ -32,6 +31,85 @@ FINAL_KIND_TO_FORMAT = {
 }
 
 
+def _load_runtime_io():
+    from safe_io import FileLock, atomic_write_text, bridge_send_media, ndjson_append  # type: ignore
+    return FileLock, atomic_write_text, bridge_send_media, ndjson_append
+
+
+def _load_store(state_path: Path) -> FlyerProjectStore:
+    return FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
+
+
+def _write_store(state_path: Path, store: FlyerProjectStore) -> None:
+    try:
+        from safe_io import atomic_write_text  # type: ignore
+    except Exception:
+        state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+    else:
+        atomic_write_text(state_path, store.model_dump_json(indent=2))
+
+
+def _resolve_project_assets(project):
+    if project.status != "finalizing_assets":
+        raise SystemExit(f"project must be finalizing_assets before delivery, got {project.status}")
+    if len(project.final_asset_ids) != 4:
+        raise SystemExit(f"project must have 4 final assets before delivery, got {len(project.final_asset_ids)}")
+    by_id = {asset.asset_id: asset for asset in project.assets}
+    missing_ids = [asset_id for asset_id in project.final_asset_ids if asset_id not in by_id]
+    if missing_ids:
+        raise SystemExit("missing final assets: " + ",".join(missing_ids))
+    project_assets = [by_id[asset_id] for asset_id in project.final_asset_ids]
+    kinds = {asset.kind for asset in project_assets}
+    expected_kinds = set(FINAL_KIND_TO_FORMAT)
+    if kinds != expected_kinds:
+        raise SystemExit(f"final asset kinds mismatch: {sorted(kinds)}")
+    return project_assets
+
+
+def _pending_project_assets(project):
+    project_assets = _resolve_project_assets(project)
+    uncertain = [asset.asset_id for asset in project_assets if asset.delivery_status == "uncertain"]
+    if uncertain:
+        raise SystemExit("uncertain delivery requires operator reconciliation before retry: " + ",".join(uncertain))
+    return [asset for asset in project_assets if asset.delivery_status != "sent"]
+
+
+def _record_asset_delivery(
+    state_path: Path,
+    project_id: str,
+    asset_id: str,
+    *,
+    status: str,
+    outbound_message_id: str = "",
+    error: str = "",
+) :
+    store = _load_store(state_path)
+    now = datetime.now(timezone.utc)
+    for pidx, project in enumerate(store.projects):
+        if project.project_id != project_id:
+            continue
+        updated_assets = []
+        updated_project = project
+        for asset in project.assets:
+            if asset.asset_id != asset_id:
+                updated_assets.append(asset)
+                continue
+            update = {
+                "delivery_status": status,
+                "delivery_attempt_count": asset.delivery_attempt_count + 1,
+                "delivery_error": error,
+            }
+            if status == "sent":
+                update["outbound_message_id"] = outbound_message_id
+                update["delivered_at"] = now
+            updated_assets.append(asset.model_copy(update=update))
+        updated_project = project.model_copy(update={"assets": updated_assets, "updated_at": now})
+        store.projects[pidx] = updated_project
+        _write_store(state_path, store)
+        return updated_project
+    raise SystemExit(f"project not found: {project_id}")
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--jid", required=True)
@@ -44,6 +122,7 @@ def main() -> int:
     p.add_argument("--break-glass-reason", default="")
     p.add_argument("--dry-run-bridge", action="store_true")
     args = p.parse_args()
+    FileLock, atomic_write_text, bridge_send_media, ndjson_append = _load_runtime_io()
 
     assets = [Path(asset) for asset in args.asset]
     project = None
@@ -51,29 +130,18 @@ def main() -> int:
     project_snapshot = None
     state_path = Path(args.state_path)
     if args.project_id:
-        store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
+        store = _load_store(state_path)
         project = next((p for p in store.projects if p.project_id == args.project_id), None)
         if project is None:
             raise SystemExit(f"project not found: {args.project_id}")
-        if project.status != "finalizing_assets":
-            raise SystemExit(f"project must be finalizing_assets before delivery, got {project.status}")
-        if len(project.final_asset_ids) != 4:
-            raise SystemExit(f"project must have 4 final assets before delivery, got {len(project.final_asset_ids)}")
-        by_id = {asset.asset_id: asset for asset in project.assets}
-        missing_ids = [asset_id for asset_id in project.final_asset_ids if asset_id not in by_id]
-        if missing_ids:
-            raise SystemExit("missing final assets: " + ",".join(missing_ids))
-        project_assets = [by_id[asset_id] for asset_id in project.final_asset_ids]
-        kinds = {asset.kind for asset in project_assets}
-        expected_kinds = set(FINAL_KIND_TO_FORMAT)
-        if kinds != expected_kinds:
-            raise SystemExit(f"final asset kinds mismatch: {sorted(kinds)}")
+        project_assets = _resolve_project_assets(project)
+        pending_project_assets = _pending_project_assets(project)
         project_snapshot = {
             "version": project.version,
             "status": project.status,
             "final_asset_ids": list(project.final_asset_ids),
         }
-        assets.extend(Path(asset.path) for asset in project_assets)
+        assets.extend(Path(asset.path) for asset in pending_project_assets)
     if not assets:
         raise SystemExit("no assets to send; pass --asset or --project-id")
 
@@ -101,7 +169,7 @@ def main() -> int:
     else:
         expected_formats = {
             str(Path(asset.path)): FINAL_KIND_TO_FORMAT.get(asset.kind, "")
-            for asset in project_assets
+            for asset in _pending_project_assets(project) if project is not None
         }
         for asset in assets:
             result = validate_text_manifest_file(
@@ -123,12 +191,23 @@ def main() -> int:
                     ).model_dump_json())
                 print(json.dumps({"text_qa_failed": str(asset), "blockers": result.blockers}))
                 return 2
+    path_to_project_asset = {str(Path(asset.path)): asset for asset in _pending_project_assets(project)} if project is not None else {}
     for asset in assets:
         if args.dry_run_bridge:
             ok, mid, err, status = True, f"dry-run:{asset.name}", "", 200
         else:
             ok, mid, err, status = bridge_send_media(args.jid, asset, caption=args.caption)
         if not ok:
+            if project is not None and str(asset) in path_to_project_asset:
+                delivery_status = "uncertain" if status == "send_uncertain" else "failed"
+                _record_asset_delivery(
+                    state_path,
+                    project.project_id,
+                    path_to_project_asset[str(asset)].asset_id,
+                    status=delivery_status,
+                    outbound_message_id="",
+                    error=err,
+                )
             failures.append({"asset": str(asset), "status": status, "error": err})
             if project is not None:
                 ndjson_append(log_path, FlyerDeliveryFailed(
@@ -141,6 +220,15 @@ def main() -> int:
                     error=err,
                 ).model_dump_json())
         else:
+            if project is not None and str(asset) in path_to_project_asset:
+                _record_asset_delivery(
+                    state_path,
+                    project.project_id,
+                    path_to_project_asset[str(asset)].asset_id,
+                    status="sent",
+                    outbound_message_id=mid,
+                    error="",
+                )
             outbound_ids.append(mid)
     if failures:
         print(json.dumps({"failures": failures, "sent_before_failure": outbound_ids}))

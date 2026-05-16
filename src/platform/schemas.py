@@ -677,6 +677,7 @@ FlyerAssetKind = Literal[
     "final_instagram_story",
     "final_printable_pdf",
 ]
+FlyerAssetDeliveryStatus = Literal["pending", "sent", "failed", "uncertain"]
 
 FLYER_TRANSITIONS: dict[FlyerWorkflowStatus, set[FlyerWorkflowStatus]] = {
     "intake_started": {"collecting_required_info"},
@@ -1142,6 +1143,11 @@ class FlyerAsset(BaseModel):
     sha256: str = Field(pattern=r"^[a-fA-F0-9]{64}$")
     original_message_id: str = Field(default="", max_length=200)
     received_at: datetime
+    delivery_status: FlyerAssetDeliveryStatus = "pending"
+    outbound_message_id: str = Field(default="", max_length=200)
+    delivered_at: Optional[datetime] = None
+    delivery_attempt_count: int = Field(default=0, ge=0)
+    delivery_error: str = Field(default="", max_length=500)
 
     @field_validator("path")
     @classmethod

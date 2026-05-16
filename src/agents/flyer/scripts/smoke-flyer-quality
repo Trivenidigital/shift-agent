@@ -171,13 +171,20 @@ def main() -> int:
                 timeout=60,
             )
             delivered_store = FlyerProjectStore.model_validate_json(state_path.read_text(encoding="utf-8"))
-            delivered = delivered_store.projects[0].status == "delivered"
+            delivered_project = delivered_store.projects[0]
+            delivered = delivered_project.status == "delivered"
+            all_final_assets_sent = all(
+                asset.delivery_status == "sent" and asset.outbound_message_id
+                for asset in delivered_project.assets
+                if asset.asset_id in delivered_project.final_asset_ids
+            )
             send_dry_run = {
-                "ok": proc.returncode == 0 and delivered and log_path.exists(),
+                "ok": proc.returncode == 0 and delivered and all_final_assets_sent and log_path.exists(),
                 "returncode": proc.returncode,
                 "stdout": (proc.stdout or "").strip()[:500],
                 "stderr": (proc.stderr or "").strip()[:500],
                 "delivered": delivered,
+                "all_final_assets_sent": all_final_assets_sent,
             }
             if proc.returncode != 0 and "No module named 'fcntl'" in (proc.stderr or ""):
                 send_dry_run = {
