@@ -12,6 +12,7 @@ Required names (catering scripts depend on each):
 - assert_load_status_clean / LoadStatusError (PR #33 — oserror surfacing)
 - try_acquire_filelock_with_retry / LockUnavailable (PR #33 — lookup serialization)
 - load_yaml_model (PR #34 — YAML-loaded-as-JSON regression fix)
+- bridge_send_cta (Flyer Studio clickable CTA campaign messages)
 
 Adding a new chokepoint helper that catering depends on?  Add the name here
 AND a corresponding callsite test that exercises it.  Smoke gate auto-rolls-
@@ -28,6 +29,7 @@ REQUIRED_SYMBOLS = (
     "LockUnavailable",
     "load_yaml_model",
     "bridge_send_media",
+    "bridge_send_cta",
 )
 
 

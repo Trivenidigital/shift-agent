@@ -275,6 +275,7 @@ install_artifacts() {
             store-flyer-brand-asset \
             manage-flyer-account \
             send-flyer-package \
+            send-flyer-campaign \
             flyer-delivery-report \
             smoke-flyer-quality; do
             if [ ! -f "src/agents/flyer/scripts/${flyer_binary}" ]; then
@@ -294,12 +295,17 @@ install_artifacts() {
             /usr/local/bin/store-flyer-brand-asset \
             /usr/local/bin/manage-flyer-account \
             /usr/local/bin/flyer-delivery-report \
+            /usr/local/bin/send-flyer-campaign \
             /usr/local/bin/send-flyer-package \
             /usr/local/bin/smoke-flyer-quality
     fi
     install -d -o shift-agent -g shift-agent -m 0700 /opt/shift-agent/state/flyer 2>/dev/null || true
     install -d -o shift-agent -g shift-agent -m 0700 /opt/shift-agent/state/flyer/assets 2>/dev/null || true
     install -d -o shift-agent -g shift-agent -m 0700 /opt/shift-agent/state/flyer/finals 2>/dev/null || true
+    install -d -o shift-agent -g shift-agent -m 0700 /opt/shift-agent/state/flyer/marketing 2>/dev/null || true
+    if [ -f src/agents/flyer/assets/Flyer.png ]; then
+        install -m 0640 -o shift-agent -g shift-agent src/agents/flyer/assets/Flyer.png /opt/shift-agent/state/flyer/marketing/Flyer.png
+    fi
     chown -R shift-agent:shift-agent /opt/shift-agent/state/flyer 2>/dev/null || true
 
     # Tier 2 agents — SKILL-only stubs

@@ -88,3 +88,11 @@ def test_free_trial_phrase_starts_flyer_onboarding():
     actions = _load_actions()
 
     assert actions.is_flyer_onboarding_intent("START FREE TRIAL - I want to try Flyer Studio") is True
+
+
+def test_act_now_campaign_phrase_starts_flyer_onboarding():
+    actions = _load_actions()
+
+    assert actions.is_flyer_onboarding_intent("ACT NOW - Save Time and Money") is True
+    assert actions.is_flyer_onboarding_intent("I want to set up Flyer Studio for my business") is True
+    assert actions.is_flyer_onboarding_intent("Help me create a beautiful flyer for my business") is True

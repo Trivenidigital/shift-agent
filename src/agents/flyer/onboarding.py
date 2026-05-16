@@ -406,7 +406,13 @@ def _reply_for_session(
 
 
 def _welcome_reply(tiers: list[FlyerPlanTier], *, trial_requested: bool = False) -> str:
-    trial_line = "Your free trial includes 3 free sample flyers.\n\n" if trial_requested else ""
+    trial_line = (
+        "Absolutely, let's create a beautiful flyer for your business. "
+        "I will set up your free trial first so I can save your business details "
+        "and send the finished files here on WhatsApp.\n\n"
+        "Your free trial includes 3 free sample flyers.\n\n"
+        if trial_requested else ""
+    )
     return (
         "Flyer Studio\n------------\n"
         "Welcome. I can set up your flyer account here on WhatsApp.\n\n"
@@ -558,7 +564,11 @@ def _checkout_url(*, template: str, customer_id: str, plan_id: str, chat_id: str
 
 
 def _is_trial_start(text: str) -> bool:
-    return bool(re.search(r"\b(free\s+trial|start\s+trial|try\s+free|3\s+free)\b", text or "", flags=re.IGNORECASE))
+    return bool(re.search(
+        r"\b(free\s+trial|start\s+trial|try\s+free|3\s+free|help\s+me\s+create\s+a\s+beautiful\s+flyer)\b",
+        text or "",
+        flags=re.IGNORECASE,
+    ))
 
 
 def _add_one_month(dt: datetime) -> datetime:

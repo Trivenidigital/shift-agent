@@ -26,6 +26,8 @@ BR = H / "scripts" / "whatsapp-bridge" / "bridge.js"
 
 MARK_BEGIN = "BEGIN shift-agent-sender-id"
 MARK_END = "END shift-agent-sender-id"
+CTA_MARK_BEGIN = "BEGIN shift-agent-cta-buttons"
+BUTTON_RESPONSE_MARK_BEGIN = "BEGIN shift-agent-button-response-body"
 
 
 # ─── Patch payloads (Python files) ─────────────────────────────────────
@@ -196,8 +198,121 @@ function _shiftWriteLidCacheEntry(phone, lid) {
 '''
 
 
+BRIDGE_CTA_ENDPOINT = '''
+// BEGIN shift-agent-cta-buttons
+// Send an interactive quick-reply message. Used by Flyer Studio outreach so
+// customers can tap "Start Free Trial" or "Act Now" and send the matching
+// intent back into the WhatsApp chat without opening a URL dialog.
+function _shiftCtaPrivacyModeTs() {
+  return String(Math.floor(Date.now() / 1000) - 77980457);
+}
+
+function _shiftCtaBizNode() {
+  return {
+    tag: 'biz',
+    attrs: {
+      actual_actors: '2',
+      host_storage: '2',
+      privacy_mode_ts: _shiftCtaPrivacyModeTs(),
+    },
+    content: [
+      {
+        tag: 'interactive',
+        attrs: { type: 'native_flow', v: '1' },
+        content: [{ tag: 'native_flow', attrs: { v: '9', name: 'mixed' } }],
+      },
+      { tag: 'quality_control', attrs: { source_type: 'third_party' } },
+    ],
+  };
+}
+
+app.post('/send-cta', async (req, res) => {
+  if (!sock || connectionState !== 'connected') {
+    return res.status(503).json({ error: 'Not connected to WhatsApp' });
+  }
+
+  const { chatId, body, buttons, footer } = req.body;
+  if (!chatId || !body || !Array.isArray(buttons) || buttons.length === 0) {
+    return res.status(400).json({ error: 'chatId, body, and at least one button are required' });
+  }
+
+  const nativeFlowButtons = buttons.slice(0, 3).map((button) => ({
+    name: 'quick_reply',
+    buttonParamsJson: JSON.stringify({
+      display_text: String(button.label || '').slice(0, 60),
+      id: String(button.message || '').slice(0, 300),
+    }),
+  }));
+  if (nativeFlowButtons.some((button) => {
+    const params = JSON.parse(button.buttonParamsJson);
+    return !params.display_text || !params.id;
+  })) {
+    return res.status(400).json({ error: 'each CTA button requires label and message' });
+  }
+
+  try {
+    const interactiveMessage = proto.Message.InteractiveMessage.create({
+      body: proto.Message.InteractiveMessage.Body.create({ text: formatOutgoingMessage(body) }),
+      footer: proto.Message.InteractiveMessage.Footer.create({ text: footer || 'Flyer Studio' }),
+      nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
+        buttons: nativeFlowButtons.map((button) =>
+          proto.Message.InteractiveMessage.NativeFlowMessage.NativeFlowButton.create(button),
+        ),
+        messageParamsJson: '{}',
+        messageVersion: 1,
+      }),
+    });
+
+    const userJid = normalizeWhatsAppId(sock.user?.id || '');
+    const waMessage = generateWAMessageFromContent(chatId, { interactiveMessage }, { userJid });
+    const botNode = { tag: 'bot', attrs: { biz_bot: '1' } };
+    const additionalNodes = chatId.endsWith('@g.us')
+      ? [_shiftCtaBizNode()]
+      : [botNode, _shiftCtaBizNode()];
+
+    await sock.relayMessage(chatId, waMessage.message, {
+      messageId: waMessage.key.id,
+      additionalNodes,
+    });
+
+    if (waMessage?.key?.id) {
+      recentlySentIds.add(waMessage.key.id);
+      if (recentlySentIds.size > MAX_RECENT_IDS) {
+        recentlySentIds.delete(recentlySentIds.values().next().value);
+      }
+    }
+    res.json({ success: true, messageId: waMessage?.key?.id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+// END shift-agent-cta-buttons
+'''
+
+
+BRIDGE_BUTTON_RESPONSE_EXTRACT = '''
+      // BEGIN shift-agent-button-response-body
+      } else if (messageContent.buttonsResponseMessage?.selectedButtonId || messageContent.buttonsResponseMessage?.selectedDisplayText) {
+        body = messageContent.buttonsResponseMessage.selectedButtonId
+          || messageContent.buttonsResponseMessage.selectedDisplayText
+          || '';
+      } else if (messageContent.templateButtonReplyMessage?.selectedId || messageContent.templateButtonReplyMessage?.selectedDisplayText) {
+        body = messageContent.templateButtonReplyMessage.selectedId
+          || messageContent.templateButtonReplyMessage.selectedDisplayText
+          || '';
+      } else if (messageContent.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson) {
+        try {
+          const params = JSON.parse(messageContent.interactiveResponseMessage.nativeFlowResponseMessage.paramsJson || '{}');
+          body = String(params.id || params.response || params.display_text || '').trim();
+        } catch (err) {
+          body = messageContent.interactiveResponseMessage?.body?.text || '';
+        }
+      // END shift-agent-button-response-body
+'''
+
+
 def _has_marker(p: Path) -> bool:
-    return p.exists() and (MARK_BEGIN in p.read_text())
+    return p.exists() and (MARK_BEGIN in p.read_text(encoding="utf-8"))
 
 
 def _patch_whatsapp_py():
@@ -206,7 +321,7 @@ def _patch_whatsapp_py():
         return
     # Anchor: insert helpers near the top of the file, after imports.
     # We pick `from gateway.platforms.base import` as a stable late-import line.
-    text = WA.read_text()
+    text = WA.read_text(encoding="utf-8")
     anchor = re.search(r"^class .*Platform.*:", text, re.MULTILINE)
     if not anchor:
         sys.stderr.write(f"FAIL: cannot locate class anchor in {WA}\n")
@@ -214,7 +329,7 @@ def _patch_whatsapp_py():
     # Insert helpers right before the first class definition
     insert_at = anchor.start()
     new_text = text[:insert_at] + WHATSAPP_PY_HELPERS + "\n\n" + text[insert_at:]
-    WA.write_text(new_text)
+    WA.write_text(new_text, encoding="utf-8")
     print(f"  ✓ patched {WA}")
 
 
@@ -222,7 +337,7 @@ def _patch_run_py():
     if _has_marker(RUN):
         print(f"  ✓ {RUN} already patched")
         return
-    text = RUN.read_text()
+    text = RUN.read_text(encoding="utf-8")
 
     # Anchor 1: insert flag block after the standalone `import os` line.
     # Line-anchored regex so we don't match `import os.path` or `# import os`.
@@ -259,15 +374,17 @@ def _patch_run_py():
     # Insert BEFORE the anchor line (preserve line break)
     text = text[:anchor_match.start()] + RUN_PY_INJECT_BLOCK.lstrip("\n") + text[anchor_match.start():]
 
-    RUN.write_text(text)
+    RUN.write_text(text, encoding="utf-8")
     print(f"  ✓ patched {RUN}")
 
 
 def _patch_bridge_js():
     if _has_marker(BR):
-        print(f"  ✓ {BR} already patched")
+        print(f"  ✓ {BR} sender-id already patched")
+        _patch_bridge_cta_js()
         return
-    text = BR.read_text()
+    text = BR.read_text(encoding="utf-8")
+    text = _ensure_bridge_cta_imports(text)
 
     # Anchor 1: insert helpers after express.json() init.
     anchor = re.search(r"^app\.use\(express\.json\(\)\);", text, re.MULTILINE)
@@ -308,8 +425,66 @@ def _patch_bridge_js():
     )
     text = text[:m.start()] + wire + text[m.start():]
 
-    BR.write_text(text)
+    BR.write_text(text, encoding="utf-8")
     print(f"  ✓ patched {BR} (helpers + event-shape wiring)")
+    _patch_bridge_cta_js()
+
+
+def _patch_bridge_cta_js():
+    text = BR.read_text(encoding="utf-8")
+    text = _ensure_bridge_cta_imports(text)
+    text = _patch_bridge_button_response_body(text)
+    if CTA_MARK_BEGIN in text:
+        text = re.sub(
+            r"// BEGIN shift-agent-cta-buttons.*?// END shift-agent-cta-buttons\n?",
+            BRIDGE_CTA_ENDPOINT + "\n",
+            text,
+            count=1,
+            flags=re.DOTALL,
+        )
+    else:
+        anchor = re.search(r"^// Typing indicator", text, re.MULTILINE)
+        if not anchor:
+            sys.stderr.write(f"FAIL: cannot locate typing endpoint anchor in {BR}\n")
+            sys.exit(1)
+        text = text[:anchor.start()] + BRIDGE_CTA_ENDPOINT + "\n" + text[anchor.start():]
+    BR.write_text(text, encoding="utf-8")
+    print(f"  ✓ patched {BR} (CTA native-flow endpoint)")
+
+
+def _patch_bridge_button_response_body(text: str) -> str:
+    if BUTTON_RESPONSE_MARK_BEGIN in text:
+        return re.sub(
+            r"\s*// BEGIN shift-agent-button-response-body.*?// END shift-agent-button-response-body\n?",
+            "\n" + BRIDGE_BUTTON_RESPONSE_EXTRACT.rstrip("\n") + "\n",
+            text,
+            count=1,
+            flags=re.DOTALL,
+        )
+    anchor = "      } else if (messageContent.imageMessage) {"
+    if anchor not in text:
+        sys.stderr.write(f"FAIL: cannot locate image message body anchor in {BR}\n")
+        sys.exit(1)
+    return text.replace(anchor, BRIDGE_BUTTON_RESPONSE_EXTRACT + anchor, 1)
+
+
+def _ensure_bridge_cta_imports(text: str) -> str:
+    if "generateWAMessageFromContent" in text and "proto" in text:
+        return text
+    old = (
+        "import { makeWASocket, useMultiFileAuthState, DisconnectReason, "
+        "fetchLatestBaileysVersion, downloadMediaMessage } from "
+        "'@whiskeysockets/baileys';"
+    )
+    new = (
+        "import { makeWASocket, useMultiFileAuthState, DisconnectReason, "
+        "fetchLatestBaileysVersion, downloadMediaMessage, proto, "
+        "generateWAMessageFromContent } from '@whiskeysockets/baileys';"
+    )
+    if old not in text:
+        sys.stderr.write(f"FAIL: cannot locate Baileys import anchor in {BR}\n")
+        sys.exit(1)
+    return text.replace(old, new, 1)
 
 
 def main() -> int:

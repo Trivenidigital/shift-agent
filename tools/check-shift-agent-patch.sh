@@ -213,6 +213,9 @@ DIFF3=$(( BB > BA ? BB - BA : BA - BB ))
 # deploy if the pinned Hermes bridge lacks the companion endpoint used by
 # safe_io.bridge_send_media().
 grep -q "app.post('/send-media'" "$BR" || fail "$BR missing POST /send-media endpoint (flyer media delivery would silently fail)"
+grep -q "app.post('/send-cta'" "$BR" || fail "$BR missing POST /send-cta endpoint (flyer campaign buttons would silently disappear)"
+grep -q "quick_reply" "$BR" || fail "$BR /send-cta endpoint is not using WhatsApp quick replies"
+grep -q "buttonsResponseMessage" "$BR" || fail "$BR missing button-response inbound text extraction"
 
 # PR-CF6: cf-router plugin requires the pre_gateway_dispatch hook surface in
 # gateway/run.py. If Hermes upstream renames or removes the hook, the plugin's

@@ -56,6 +56,7 @@ Hermes-first summary: reuse Hermes WhatsApp ingress, `dispatch_shift_agent`, sen
 - [x] Add deterministic cf-router Flyer primary-mode so explicit flyer WhatsApp requests do not depend on the brittle generic LLM dispatcher.
 - [ ] Production-quality image generation smoke: configure a real image-output model for Flyer Studio concepts/finals, run a live Ugadi flyer request, and compare the delivered visual quality against the deterministic renderer.
 - [x] Credit optimization: switch Flyer Studio default from three generated concepts to one best generated design, with WhatsApp copy `Reply APPROVE or reply with changes.`
+- [x] Marketing CTA correction: split `Start Free Trial` and `Act Now! Save Time and Money` into distinct WhatsApp prefill intents, add router coverage for `ACT NOW`, and make the trial welcome copy start with a ready-to-create flyer prompt.
 
 ### Infrastructure Hardening - Hermes Runtime Ownership (2026-05-16)
 
@@ -192,6 +193,33 @@ Plan: `docs/superpowers/plans/2026-05-16-flyer-launch-funnel-phase5.md`
 - [x] Launch polish: replace marketing placeholders with the live `wa.me/918522041562` trial link and add a scannable trial QR PNG.
 - [x] Launch polish: add a high-quality HTML sample gallery for restaurant, temple, salon, tutor, realtor, and food-truck examples.
 - [x] Launch polish: automatically send trial upsell prompts after final sample delivery, using remaining trial quota to choose the message.
+
+### Phase 5.1 - Flyer Studio Clickable CTA Campaign Send (2026-05-16)
+
+**Drift-check tag:** extends-Hermes
+
+Hermes-first summary: reuse the existing WhatsApp bridge, `safe_io` loopback bridge validation, Flyer marketing image, and Flyer Studio trial link. Net-new scope is a small interactive CTA bridge endpoint plus a narrow campaign-send script so customer-facing outreach can show button labels instead of raw URLs.
+
+- [x] Add RED tests for a `/send-cta` bridge helper, Flyer campaign script contract, and bridge patch/smoke coverage.
+- [x] Add `safe_io.bridge_send_cta` with fail-closed URL validation and uncertain-send handling.
+- [x] Add `send-flyer-campaign` CLI to send `Flyer.png` plus clickable CTA labels without exposing raw URLs in the visible message.
+- [x] Extend Hermes bridge patching and deploy/smoke gates to require `/send-cta`.
+- [x] Run focused verification and document deployment/manual live-test steps.
+  - Local verification: `python -m pytest tests/test_flyer_scripts_static.py tests/test_safe_io_bridge_send_cta.py -q` -> 17 passed, 3 skipped on Windows; `python -m py_compile` for touched Python files passed; Git Bash `bash -n` for deploy/smoke/check scripts passed; `git diff --check` passed.
+  - Patcher smoke against a temp sender-id-patched bridge added `BEGIN shift-agent-cta-buttons` and `app.post('/send-cta')`.
+  - Live bridge patched on `main-vps`; new `bridge.js` sha256 `72953d3050313381eceb28e6813da4b161a0b2684f1948dac2ef301613749710`; gateway active and bridge health connected.
+  - Deployed to `main-vps` as `deploy-20260516-203356-ff848bb0`; smoke passed, including `/send-media` + `/send-cta`, Flyer deterministic quality smoke, delivery report, pilot readiness, config gates, and cf-router compile/import sanity.
+  - Sent Flyer Studio CTA campaign to `17329837841@s.whatsapp.net`; bridge returned `ok=true`, `status=sent`, `message_id=3EB0D4021D5F8341174A87`.
+- [x] Correct CTA semantics after live review: new sends use distinct URLs for `Start Free Trial` and `Act Now! Save Time and Money`, `ACT NOW` routes as onboarding intent, and free-trial onboarding opens with a ready-to-create flyer prompt.
+  - Local verification: focused CTA/onboarding tests first failed, then `python -m pytest tests/test_flyer_scripts_static.py tests/test_cf_router_flyer_routing.py tests/test_flyer_onboarding.py tests/test_safe_io_bridge_send_cta.py -q` -> 40 passed, 3 skipped.
+  - Deployed to `main-vps` as `deploy-20260516-205856-604fb6c0`; smoke passed.
+  - Live dry-run proof shows `Start Free Trial` prefills `START FREE TRIAL - Help me create a beautiful flyer for my business`, and `Act Now! Save Time and Money` prefills `ACT NOW - I want to set up Flyer Studio for my business`.
+- [x] Replace URL CTAs with WhatsApp quick-reply buttons after live click test showed URL dialogs instead of chat intent.
+  - Root cause: `/send-cta` used `cta_url`; WhatsApp opened link/dialog UI instead of producing inbound agent text.
+  - Fix: `/send-cta` now emits `quick_reply` buttons with reply payloads, and bridge inbound parsing maps button responses into normal text for cf-router.
+  - Local verification: `python -m pytest tests/test_flyer_scripts_static.py tests/test_cf_router_flyer_routing.py tests/test_flyer_onboarding.py tests/test_safe_io_bridge_send_cta.py -q` -> 41 passed, 3 skipped; Python compile, shell syntax, and diff check passed except existing baseline CRLF warning.
+  - Deployed to `main-vps` as `deploy-20260516-211553-604fb6c0`; smoke passed. Live bridge sha256 `de178b6fa6227f923f479ff2d34a3419b4a2e5f83bc5e5408137712cd25ed7ec`.
+  - Sent corrected campaign to `17329837841@s.whatsapp.net`; media id `3EB0349803A518A3D34C48`, CTA id `3EB0FB345147FA164645BE`.
 
 ## Active - Production pilot: Shift + Catering + Daily Brief (2026-05-14)
 

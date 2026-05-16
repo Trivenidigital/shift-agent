@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+"""Send a Flyer Studio marketing flyer with WhatsApp reply buttons.
+
+Customer-facing rule: URL buttons are intentionally not used. The labels are
+"Start Free Trial" and "Act Now! Save Time and Money"; tapping a button sends
+the matching reply message back into the chat for Flyer Studio routing.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "platform"))
+
+from safe_io import bridge_send_cta, bridge_send_media  # type: ignore  # noqa: E402
+
+
+DEFAULT_FLYER_PATH = Path("/opt/shift-agent/state/flyer/marketing/Flyer.png")
+DEFAULT_START_TRIAL_MESSAGE = "Help me create a beautiful flyer for my business"
+DEFAULT_ACT_NOW_MESSAGE = "I want to set up Flyer Studio for my business"
+DEFAULT_BODY = "Create beautiful marketing material for your business."
+
+
+def build_payload(args: argparse.Namespace) -> dict:
+    return {
+        "body": args.body,
+        "footer": args.footer,
+        "media_path": str(args.flyer_path),
+        "media_type": "image",
+        "buttons": [
+            {"label": "Start Free Trial", "message": args.start_trial_message},
+            {"label": "Act Now! Save Time and Money", "message": args.act_now_message},
+        ],
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Send Flyer Studio marketing image with WhatsApp reply buttons.",
+    )
+    parser.add_argument("--jid", required=True, help="WhatsApp chat JID, e.g. 17329837841@s.whatsapp.net")
+    parser.add_argument("--flyer-path", type=Path, default=DEFAULT_FLYER_PATH)
+    parser.add_argument("--start-trial-message", default=DEFAULT_START_TRIAL_MESSAGE)
+    parser.add_argument("--act-now-message", default=DEFAULT_ACT_NOW_MESSAGE)
+    parser.add_argument("--body", default=DEFAULT_BODY)
+    parser.add_argument("--footer", default="Flyer Studio")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args(argv)
+
+    payload = build_payload(args)
+    if args.dry_run:
+        print(json.dumps({"ok": True, "dry_run": True, "jid": args.jid, **payload}, indent=2))
+        return 0
+
+    flyer_path = Path(args.flyer_path)
+    if not flyer_path.exists() or not flyer_path.is_file():
+        sys.stderr.write(f"missing flyer image: {flyer_path}\n")
+        return 2
+
+    media_ok, media_message_id, media_err, media_status = bridge_send_media(
+        args.jid,
+        flyer_path,
+        media_type="image",
+        file_name="Flyer-Studio.png",
+    )
+    if not media_ok:
+        sys.stderr.write(f"send-flyer-campaign media failed ({media_status}): {media_err}\n")
+        return 1
+
+    ok, message_id, err, status = bridge_send_cta(
+        args.jid,
+        body=payload["body"],
+        footer=payload["footer"],
+        buttons=payload["buttons"],
+    )
+    if not ok:
+        sys.stderr.write(f"send-flyer-campaign failed ({status}): {err}\n")
+        return 1
+
+    print(json.dumps({
+        "ok": True,
+        "media_message_id": media_message_id,
+        "cta_message_id": message_id,
+        "status": status,
+    }, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

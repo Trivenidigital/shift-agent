@@ -45,6 +45,7 @@ for script in \
     /usr/local/bin/store-flyer-brand-asset \
     /usr/local/bin/manage-flyer-account \
     /usr/local/bin/flyer-delivery-report \
+    /usr/local/bin/send-flyer-campaign \
     /usr/local/bin/smoke-flyer-quality \
     /usr/local/bin/send-flyer-package ; do
     [ -x "$script" ] || { echo "FAIL: $script missing or not executable"; exit 1; }
@@ -63,7 +64,11 @@ if [ -f "$BRIDGE_JS" ]; then
         echo "FAIL: WhatsApp bridge missing /send-media endpoint required for Flyer Studio delivery"
         exit 1
     }
-    echo "✓ WhatsApp bridge exposes /send-media"
+    grep -q "app.post('/send-cta'" "$BRIDGE_JS" || {
+        echo "FAIL: WhatsApp bridge missing /send-cta endpoint required for Flyer Studio campaign CTAs"
+        exit 1
+    }
+    echo "✓ WhatsApp bridge exposes /send-media and /send-cta"
 else
     echo "FAIL: WhatsApp bridge source not found at $BRIDGE_JS"
     exit 1
