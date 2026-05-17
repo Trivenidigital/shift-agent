@@ -88,6 +88,7 @@ def state_env(tmp_path):
         "proposals_path": state / "catering-proposals.json",
         "menu_pending_path": state / "catering-menu-pending.json",
         "flyer_projects_path": state / "flyer" / "projects.json",
+        "flyer_customers_path": state / "flyer" / "customers.json",
         "roster_path": tmp_path / "roster.json",
         "throttle_path": state / "cf-router-throttle.json",
     }
@@ -102,6 +103,7 @@ def mods(state_env):
     actions_mod.PROPOSALS_PATH = state_env["proposals_path"]
     actions_mod.MENU_PENDING_PATH = state_env["menu_pending_path"]
     actions_mod.FLYER_PROJECTS_PATH = state_env["flyer_projects_path"]
+    actions_mod.FLYER_CUSTOMERS_PATH = state_env["flyer_customers_path"]
     actions_mod.ROSTER_PATH = state_env["roster_path"]
     actions_mod.LOG_PATH = state_env["log_path"]
     actions_mod.THROTTLE_PATH = state_env["throttle_path"]
@@ -162,6 +164,21 @@ def _seed_flyer_projects(state_env, projects):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps({"schema_version": 1, "next_sequence": 2, "projects": projects}),
+        encoding="utf-8",
+    )
+
+
+def _seed_flyer_customers(state_env, customers=None, onboarding_sessions=None):
+    path = state_env["flyer_customers_path"]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({
+            "schema_version": 1,
+            "next_customer_sequence": 1,
+            "next_brand_asset_sequence": 1,
+            "customers": customers or [],
+            "onboarding_sessions": onboarding_sessions or [],
+        }),
         encoding="utf-8",
     )
 
@@ -1421,6 +1438,481 @@ class TestF7PrimaryMode:
         }
         mock_create.assert_called_once()
         mock_ack.assert_called_once_with("201975216009469@lid", "F0004")
+
+    def test_flyer_campaign_start_trial_cta_prompts_existing_customer_without_project(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+        _seed_flyer_projects(state_env, [
+            {
+                "project_id": "F0003",
+                "status": "intake_started",
+                "customer_phone": "+19045550104",
+                "updated_at": "2026-05-15T01:43:39Z",
+            },
+        ])
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+19045550104", "employee")), \
+             patch.object(actions_mod, "find_flyer_customer_by_sender",
+                          return_value={"customer_id": "CUST0001", "status": "trial"}), \
+             patch.object(actions_mod, "trigger_create_flyer_project") as mock_create, \
+             patch.object(actions_mod, "trigger_flyer_onboarding") as mock_onboarding, \
+             patch.object(actions_mod, "send_flyer_text",
+                          return_value=(True, "msg-ready", "")) as mock_send:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    text="Help me create a beautiful flyer for my business",
+                    chat_id="201975216009469@lid",
+                ),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router flyer campaign CTA: ready_prompt",
+        }
+        mock_create.assert_not_called()
+        mock_onboarding.assert_not_called()
+        mock_send.assert_called_once()
+        assert "tell me what you want to promote" in mock_send.call_args.args[1].lower()
+
+    def test_flyer_campaign_cta_existing_customer_ignores_stale_onboarding_session(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+        _seed_flyer_customers(state_env, onboarding_sessions=[{
+            "chat_id": "201975216009469@lid",
+            "sender_phone": "+19045550104",
+            "status": "collecting_business_name",
+            "started_at": "2026-05-17T00:43:00Z",
+            "updated_at": "2026-05-17T00:43:00Z",
+            "last_message_id": "stale",
+            "plan_id": "trial",
+        }])
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+19045550104", "employee")), \
+             patch.object(actions_mod, "find_flyer_customer_by_sender",
+                          return_value={"customer_id": "CUST0001", "status": "trial", "business_name": "Lakshmis Kitchn"}), \
+             patch.object(actions_mod, "trigger_flyer_onboarding") as mock_onboarding, \
+             patch.object(actions_mod, "trigger_create_flyer_project") as mock_create, \
+             patch.object(actions_mod, "send_flyer_text",
+                          return_value=(True, "msg-ready", "")) as mock_send:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    text="Start Free Trial",
+                    chat_id="201975216009469@lid",
+                ),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router flyer campaign CTA: ready_prompt",
+        }
+        mock_onboarding.assert_not_called()
+        mock_create.assert_not_called()
+        assert "already set up" in mock_send.call_args.args[1].lower()
+
+    def test_flyer_campaign_act_now_existing_customer_gets_account_prompt(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+19045550104", "employee")), \
+             patch.object(actions_mod, "find_flyer_customer_by_sender",
+                          return_value={"customer_id": "CUST0001", "status": "active", "business_name": "Lakshmis Kitchn"}), \
+             patch.object(actions_mod, "trigger_flyer_onboarding") as mock_onboarding, \
+             patch.object(actions_mod, "trigger_create_flyer_project") as mock_create, \
+             patch.object(actions_mod, "send_flyer_text",
+                          return_value=(True, "msg-ready", "")) as mock_send:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    text="Act Now! Save Time and Money",
+                    chat_id="201975216009469@lid",
+                ),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router flyer campaign CTA: account_prompt",
+        }
+        mock_onboarding.assert_not_called()
+        mock_create.assert_not_called()
+        body = mock_send.call_args.args[1].lower()
+        assert "already set up" in body
+        assert "status" in body
+
+    def test_flyer_campaign_cta_payment_pending_does_not_restart_onboarding(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+19045550104", "employee")), \
+             patch.object(actions_mod, "find_flyer_customer_by_sender",
+                          return_value={"customer_id": "CUST0002", "status": "payment_pending", "business_name": "Lakshmi", "payment_checkout_url": "https://pay.example/cust"}), \
+             patch.object(actions_mod, "trigger_flyer_onboarding") as mock_onboarding, \
+             patch.object(actions_mod, "trigger_create_flyer_project") as mock_create, \
+             patch.object(actions_mod, "send_flyer_text",
+                          return_value=(True, "msg-payment", "")) as mock_send:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    text="Start Free Trial",
+                    chat_id="201975216009469@lid",
+                ),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router flyer campaign CTA: existing_payment_pending",
+        }
+        mock_onboarding.assert_not_called()
+        mock_create.assert_not_called()
+        assert "registration is already saved" in mock_send.call_args.args[1].lower()
+
+    def test_flyer_campaign_cta_suspended_customer_does_not_restart_onboarding(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+19045550104", "employee")), \
+             patch.object(actions_mod, "find_flyer_customer_by_sender",
+                          return_value={"customer_id": "CUST0003", "status": "suspended", "business_name": "Lakshmi"}), \
+             patch.object(actions_mod, "trigger_flyer_onboarding") as mock_onboarding, \
+             patch.object(actions_mod, "trigger_create_flyer_project") as mock_create, \
+             patch.object(actions_mod, "send_flyer_text",
+                          return_value=(True, "msg-suspended", "")) as mock_send:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    text="Act Now! Save Time and Money",
+                    chat_id="201975216009469@lid",
+                ),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router flyer campaign CTA: existing_suspended",
+        }
+        mock_onboarding.assert_not_called()
+        mock_create.assert_not_called()
+        assert "account is suspended" in mock_send.call_args.args[1].lower()
+
+    def test_flyer_campaign_cta_with_sender_block_prompts_existing_customer_without_project(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+        live_text = (
+            '[shift-agent-sender v=1 platform=whatsapp phone=null '
+            'lid="201975216009469@lid" fromMe=false chat_id="201975216009469@lid"]\n'
+            "Help me create a beautiful flyer for my business"
+        )
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+19045550104", "employee")), \
+             patch.object(actions_mod, "find_flyer_customer_by_sender",
+                          return_value={"customer_id": "CUST0001", "status": "trial"}), \
+             patch.object(actions_mod, "trigger_create_flyer_project") as mock_create, \
+             patch.object(actions_mod, "trigger_flyer_onboarding") as mock_onboarding, \
+             patch.object(actions_mod, "send_flyer_text",
+                          return_value=(True, "msg-ready", "")):
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    text=live_text,
+                    chat_id="201975216009469@lid",
+                ),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router flyer campaign CTA: ready_prompt",
+        }
+        mock_create.assert_not_called()
+        mock_onboarding.assert_not_called()
+
+    def test_flyer_campaign_start_trial_cta_starts_onboarding_for_new_sender(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+19045550199", "customer")), \
+             patch.object(actions_mod, "find_flyer_customer_by_sender",
+                          return_value=None), \
+             patch.object(actions_mod, "trigger_create_flyer_project") as mock_create, \
+             patch.object(actions_mod, "trigger_flyer_onboarding",
+                          return_value=(True, "onboarding", {
+                              "handled": True,
+                              "reply_text": "Flyer Studio\n------------\nAbsolutely, let's create a beautiful flyer.",
+                              "next_status": "collecting_business_name",
+                              "customer_id": "",
+                          })) as mock_onboarding, \
+             patch.object(actions_mod, "send_flyer_text",
+                          return_value=(True, "msg-onboard", "")):
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    text="Start Free Trial",
+                    chat_id="19995550199@s.whatsapp.net",
+                ),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router flyer onboarding: collecting_business_name",
+        }
+        mock_create.assert_not_called()
+        mock_onboarding.assert_called_once()
+
+    def test_flyer_campaign_act_now_cta_starts_setup_onboarding_for_new_sender(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+19045550199", "customer")), \
+             patch.object(actions_mod, "find_flyer_customer_by_sender",
+                          return_value=None), \
+             patch.object(actions_mod, "trigger_create_flyer_project") as mock_create, \
+             patch.object(actions_mod, "trigger_flyer_onboarding",
+                          return_value=(True, "onboarding", {
+                              "handled": True,
+                              "reply_text": "Flyer Studio\n------------\nWelcome. First, what is your business name?",
+                              "next_status": "collecting_business_name",
+                              "customer_id": "",
+                          })) as mock_onboarding, \
+             patch.object(actions_mod, "send_flyer_text",
+                          return_value=(True, "msg-onboard", "")):
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    text="Act Now! Save Time and Money",
+                    chat_id="19995550199@s.whatsapp.net",
+                ),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router flyer onboarding: collecting_business_name",
+        }
+        mock_create.assert_not_called()
+        mock_onboarding.assert_called_once()
+        assert mock_onboarding.call_args.kwargs["text"] == "Act Now! Save Time and Money"
+
+    def test_flyer_onboarding_field_reply_routes_back_to_onboarding(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+        _seed_flyer_customers(state_env, onboarding_sessions=[{
+            "chat_id": "201975216009469@lid",
+            "sender_phone": "+19045550104",
+            "status": "collecting_business_name",
+            "started_at": "2026-05-17T00:43:00Z",
+            "updated_at": "2026-05-17T00:43:00Z",
+            "last_message_id": "trial-start",
+            "plan_id": "trial",
+        }])
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+19045550104", "employee")), \
+             patch.object(actions_mod, "trigger_create_flyer_project") as mock_create, \
+             patch.object(actions_mod, "trigger_flyer_onboarding",
+                          return_value=(True, "onboarding", {
+                              "handled": True,
+                              "reply_text": "Flyer Studio\n------------\nPlease send the business name.\n\nWhat is your business name?",
+                              "next_status": "collecting_business_name",
+                              "customer_id": "",
+                          })) as mock_onboarding, \
+             patch.object(actions_mod, "send_flyer_text",
+                          return_value=(True, "msg-onboard", "")):
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    text="1",
+                    chat_id="201975216009469@lid",
+                ),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router flyer onboarding: collecting_business_name",
+        }
+        mock_create.assert_not_called()
+        mock_onboarding.assert_called_once()
+
+    def test_flyer_onboarding_owns_new_flyer_like_text_until_complete(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+        _seed_flyer_customers(state_env, onboarding_sessions=[{
+            "chat_id": "201975216009469@lid",
+            "sender_phone": "+19045550104",
+            "status": "collecting_business_name",
+            "started_at": "2026-05-17T00:43:00Z",
+            "updated_at": "2026-05-17T00:43:00Z",
+            "last_message_id": "trial-start",
+            "plan_id": "trial",
+        }])
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+19045550104", "employee")), \
+             patch.object(actions_mod, "trigger_create_flyer_project") as mock_create, \
+             patch.object(actions_mod, "trigger_flyer_onboarding",
+                          return_value=(True, "onboarding", {
+                              "handled": True,
+                              "reply_text": "Flyer Studio\n------------\nGreat. What is the business address?",
+                              "next_status": "collecting_business_address",
+                              "customer_id": "",
+                          })) as mock_onboarding, \
+             patch.object(actions_mod, "send_flyer_text",
+                          return_value=(True, "msg-onboard", "")):
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    text="Need flyer for my business",
+                    chat_id="201975216009469@lid",
+                ),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router flyer onboarding: collecting_business_address",
+        }
+        mock_create.assert_not_called()
+        mock_onboarding.assert_called_once()
+
+    def test_compound_confirm_finishes_onboarding_and_starts_flyer_request(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+        _seed_flyer_customers(state_env, onboarding_sessions=[{
+            "chat_id": "201975216009469@lid",
+            "sender_phone": "+19045550104",
+            "status": "confirming_summary",
+            "started_at": "2026-05-17T00:43:00Z",
+            "updated_at": "2026-05-17T00:43:00Z",
+            "last_message_id": "trial-summary",
+            "business_name": "Lakshmis Kitchn",
+            "business_address": "90 Brybar Dr St Johns FL",
+            "public_phone": "+17329837841",
+            "business_whatsapp_number": "+17329837841",
+            "authorized_request_number": "+17329837841",
+            "business_category": "Indian Restaurant",
+            "preferred_language": "te",
+            "plan_id": "trial",
+        }])
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+19045550104", "employee")), \
+             patch.object(actions_mod, "trigger_flyer_onboarding",
+                          return_value=(True, "onboarding", {
+                              "handled": True,
+                              "reply_text": "Flyer Studio\n------------\nFree trial active for CUST0001.",
+                              "next_status": "trial",
+                              "customer_id": "CUST0001",
+                          })) as mock_onboarding, \
+             patch.object(actions_mod, "send_flyer_text",
+                          return_value=(True, "msg-trial", "")) as mock_send_text, \
+             patch.object(actions_mod, "trigger_create_flyer_project",
+                          return_value=(True, "created", {"project_id": "F0012", "fields": {}})) as mock_create, \
+             patch.object(actions_mod, "send_flyer_intake_ack",
+                          return_value=(True, "msg-project", "")):
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    text=(
+                        "CONFIRM. Create a breakfast menu for tomorrow from 8 AM to 10 AM. "
+                        "Items to include in the flyer Idli - $4.99."
+                    ),
+                    chat_id="201975216009469@lid",
+                ),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router flyer primary: project F0012 created",
+        }
+        mock_onboarding.assert_called_once()
+        mock_send_text.assert_called_once()
+        mock_create.assert_called_once()
+        assert mock_create.call_args.kwargs["raw_request"].startswith("Create a breakfast menu")
+        assert "CONFIRM" not in mock_create.call_args.kwargs["raw_request"]
+
+    def test_registered_customer_generic_media_is_not_saved_as_logo(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+19045550104", "employee")), \
+             patch.object(actions_mod, "find_flyer_customer_by_sender",
+                          return_value={"customer_id": "CUST0001", "status": "trial"}), \
+             patch.object(actions_mod, "trigger_store_flyer_brand_asset") as mock_store:
+            result = hooks_mod.pre_gateway_dispatch(
+                SimpleNamespace(
+                    text="",
+                    chat_id="201975216009469@lid",
+                    media_path="/tmp/flyer-campaign-image.png",
+                ),
+            )
+
+        assert result is None
+        mock_store.assert_not_called()
+
+    def test_registered_customer_explicit_logo_media_is_saved(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+19045550104", "employee")), \
+             patch.object(actions_mod, "find_flyer_customer_by_sender",
+                          return_value={"customer_id": "CUST0001", "status": "trial"}), \
+             patch.object(actions_mod, "trigger_store_flyer_brand_asset",
+                          return_value=(True, "saved", {
+                              "reply_text": "Flyer Studio\n------------\nLogo saved.",
+                              "next_status": "brand_asset_saved",
+                              "customer_id": "CUST0001",
+                          })) as mock_store, \
+             patch.object(actions_mod, "send_flyer_text",
+                          return_value=(True, "msg-logo", "")):
+            result = hooks_mod.pre_gateway_dispatch(
+                SimpleNamespace(
+                    text="Use this logo",
+                    chat_id="201975216009469@lid",
+                    media_path="/tmp/logo.png",
+                ),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router flyer brand asset: brand_asset_saved",
+        }
+        mock_store.assert_called_once()
+
+    def test_intake_stage_project_reply_never_falls_to_generic_llm(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+        _seed_flyer_projects(state_env, [
+            {
+                "project_id": "F0011",
+                "status": "intake_started",
+                "customer_phone": "+19045550104",
+                "created_at": "2026-05-17T03:07:00Z",
+                "updated_at": "2026-05-17T03:07:00Z",
+                "original_message_id": "msg-flyer-1",
+                "raw_request": "Create breakfast menu",
+                "fields": {},
+                "assets": [],
+                "concepts": [],
+                "selected_concept_id": None,
+                "revisions": [],
+                "version": 1,
+                "final_asset_ids": [],
+                "approved_message_id": "",
+            },
+        ])
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+19045550104", "employee")), \
+             patch.object(actions_mod, "send_flyer_text",
+                          return_value=(True, "msg-intake", "")) as mock_send:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    text="7329837841",
+                    chat_id="201975216009469@lid",
+                ),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router flyer active: intake reply captured for F0011",
+        }
+        mock_send.assert_called_once()
+        assert "F0011" in mock_send.call_args.args[1]
 
     def test_flyer_enabled_does_not_block_generic_catering(self, mods, state_env):
         """The flyer bypass is narrow; real catering still uses F7."""

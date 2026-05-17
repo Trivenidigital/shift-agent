@@ -142,12 +142,19 @@ def test_router_starts_new_work_over_active_state_for_explicit_or_media_template
     actions = (REPO / "src" / "plugins" / "cf-router" / "actions.py").read_text(encoding="utf-8")
     hooks = (REPO / "src" / "plugins" / "cf-router" / "hooks.py").read_text(encoding="utf-8")
     assert "def should_start_new_flyer_over_active" in actions
+    assert "def flyer_campaign_cta_text" in actions
+    assert "def is_flyer_campaign_cta" in actions
+    assert "def find_flyer_onboarding_session_by_sender" in actions
+    assert "def _try_flyer_campaign_cta_intercept" in hooks
+    assert "def _try_flyer_existing_onboarding_intercept" in hooks
     assert "def flyer_project_has_required_fields" in actions
     assert "_NEW_FLYER_REQUEST" in actions
+    assert "_FLYER_CAMPAIGN_CTA" in actions
     assert "_MEDIA_TEMPLATE_EDIT" in actions
     assert "_WRONG_FLYER_CORRECTION" in actions
     assert "force_new=True" in hooks
-    assert hooks.index("should_start_new_flyer_over_active(text, has_media=bool(media_path))") < hooks.index("_try_flyer_brand_asset_intercept")
+    assert hooks.index("flyer_campaign_cta_text(text)") < hooks.index("should_start_new_flyer_over_active(text, has_media=bool(media_path))")
+    assert hooks.index("_try_flyer_brand_asset_intercept(text, chat_id, event, media_path)") < hooks.index("should_start_new_flyer_over_active(text, has_media=bool(media_path))")
 
 
 def test_onboarding_is_whatsapp_native_and_plan_config_driven():
@@ -163,6 +170,10 @@ def test_onboarding_is_whatsapp_native_and_plan_config_driven():
     assert "trigger_store_flyer_brand_asset" in actions
     assert "_try_flyer_brand_asset_intercept" in hooks
     assert "_try_flyer_onboarding_intercept" in hooks
+    assert "_try_flyer_existing_onboarding_intercept" in hooks
+    assert hooks.index("_try_flyer_brand_asset_intercept(text, chat_id, event, media_path)") < hooks.index("_try_flyer_existing_onboarding_intercept(text, chat_id, event)")
+    assert hooks.index("_try_flyer_existing_onboarding_intercept(text, chat_id, event)") < hooks.index("should_start_new_flyer_over_active(text, has_media=bool(media_path))")
+    assert hooks.index("_try_flyer_existing_onboarding_intercept(text, chat_id, event)") < hooks.index("_try_flyer_active_project_intercept")
     assert hooks.index("_try_flyer_active_project_intercept") < hooks.index("_try_flyer_onboarding_intercept")
 
 

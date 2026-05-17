@@ -17,6 +17,31 @@ from agents.flyer.onboarding import handle_onboarding_message, store_brand_asset
 from schemas import FlyerCustomerStore, FlyerOnboardingSession, FlyerPlanTier, FlyerUsageEvent  # noqa: E402
 
 
+def _trial_customer(*, customer_id: str, business_name: str, phone: str, now: datetime):
+    store = FlyerCustomerStore()
+    customer = store.new_customer(
+        business_name=business_name,
+        business_address="90 Brybar Dr, St Johns, FL",
+        public_phone=phone,
+        business_whatsapp_number=phone,
+        authorized_request_number=phone,
+        business_category="restaurant",
+        preferred_language="en",
+        plan_id="trial",
+        now=now,
+        primary_chat_id=f"{phone.replace('+', '')}@s.whatsapp.net",
+        onboarded_by_phone=phone,
+    )
+    return customer.model_copy(update={
+        "customer_id": customer_id,
+        "status": "trial",
+        "activated_at": now,
+        "plan_started_at": now,
+        "current_period_start": now,
+        "current_period_end": now.replace(month=now.month + 1),
+    })
+
+
 def test_flyer_plan_tiers_are_data_driven_defaults():
     tiers = FlyerPlanTier.default_tiers()
     assert [(t.plan_id, t.monthly_price_usd, t.included_flyers) for t in tiers] == [
@@ -43,6 +68,9 @@ def test_onboarding_collects_required_business_and_plan_fields(tmp_path):
     assert first.handled is True
     assert first.next_status == "collecting_business_name"
     assert "$49.99" in first.reply_text
+    assert "$199.00 - unlimited flyers/month (Unlimited)" in first.reply_text
+    assert "designer" in first.reply_text.lower()
+    assert "manual edit" in first.reply_text.lower()
 
     flow = [
         ("m2", "Triveni Pineville", "collecting_business_address", "business address"),
@@ -126,6 +154,257 @@ def test_free_trial_onboarding_skips_paid_plan_choice_and_activates_trial(tmp_pa
     assert customer.quota_remaining(FlyerPlanTier.default_tiers()) == 3
 
 
+def test_compound_confirm_finishes_trial_onboarding(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 17, tzinfo=timezone.utc)
+    chat_id = "17329837841@s.whatsapp.net"
+
+    first = handle_onboarding_message(
+        state_path=state_path,
+        chat_id=chat_id,
+        sender_phone="+17329837841",
+        message_id="trial-start",
+        text="Start Free Trial",
+        now=now,
+    )
+    assert first.next_status == "collecting_business_name"
+
+    for message_id, text in [
+        ("trial-1", "Lakshmis Kitchn"),
+        ("trial-2", "90 Brybar Dr St Johns FL"),
+        ("trial-3", "7329837841"),
+        ("trial-4", "7329837841"),
+        ("trial-5", "7329837841"),
+        ("trial-6", "Indian Restaurant, Telugu"),
+    ]:
+        handle_onboarding_message(
+            state_path=state_path,
+            chat_id=chat_id,
+            sender_phone="+17329837841",
+            message_id=message_id,
+            text=text,
+            now=now,
+        )
+
+    result = handle_onboarding_message(
+        state_path=state_path,
+        chat_id=chat_id,
+        sender_phone="+17329837841",
+        message_id="trial-confirm",
+        text=(
+            "CONFIRM. Create a breakfast menu for tomorrow from 8 AM to 10 AM. "
+            "Items to include in the flyer Idli - $4.99."
+        ),
+        now=now,
+    )
+
+    assert result.handled is True
+    assert result.next_status == "trial"
+    assert "Free trial active" in result.reply_text
+    store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert store.customers[0].status == "trial"
+
+
+def test_duplicate_confirm_for_same_sender_recovers_existing_trial_account(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 17, tzinfo=timezone.utc)
+    existing_customer = _trial_customer(
+        customer_id="CUST0001",
+        business_name="Lakshmis Kitchn",
+        phone="+17329837841",
+        now=now,
+    )
+    store = FlyerCustomerStore(
+        next_customer_sequence=2,
+        customers=[existing_customer],
+        onboarding_sessions=[FlyerOnboardingSession(
+            chat_id="17329837841@s.whatsapp.net",
+            sender_phone="+17329837841",
+            status="confirming_summary",
+            started_at=now,
+            updated_at=now,
+            last_message_id="summary",
+            business_name="Lakshmi's Kitchen",
+            business_address="90 Brybar FL",
+            public_phone="+17329837841",
+            business_whatsapp_number="+17329837841",
+            authorized_request_number="+17329837841",
+            business_category="English and Telugu",
+            preferred_language="te",
+            plan_id="trial",
+        )],
+    )
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    result = handle_onboarding_message(
+        state_path=state_path,
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        message_id="confirm-again",
+        text="CONFIRM",
+        now=now,
+    )
+
+    assert result.handled is True
+    assert result.next_status == "trial"
+    assert result.customer_id == "CUST0001"
+    assert "already set up" in result.reply_text.lower()
+    updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert len(updated.customers) == 1
+    assert updated.customers[0].customer_id == "CUST0001"
+    assert updated.onboarding_sessions == []
+
+
+def test_registered_trial_customer_with_stale_session_can_start_flyer_and_clears_session(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 17, tzinfo=timezone.utc)
+    existing_customer = _trial_customer(
+        customer_id="CUST0001",
+        business_name="Lakshmi's Kitchen",
+        phone="+17329837841",
+        now=now,
+    )
+    store = FlyerCustomerStore(
+        next_customer_sequence=2,
+        customers=[existing_customer],
+        onboarding_sessions=[FlyerOnboardingSession(
+            chat_id="17329837841@s.whatsapp.net",
+            sender_phone="+17329837841",
+            status="confirming_summary",
+            started_at=now,
+            updated_at=now,
+            last_message_id="summary",
+            business_name="Lakshmi's Kitchen",
+            business_address="90 Brybar FL",
+            public_phone="+17329837841",
+            business_whatsapp_number="+17329837841",
+            authorized_request_number="+17329837841",
+            business_category="restaurant",
+            preferred_language="en",
+            plan_id="trial",
+        )],
+    )
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    result = handle_onboarding_message(
+        state_path=state_path,
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        message_id="flyer-after-stale-session",
+        text="Create a breakfast menu flyer for tomorrow from 8 AM to 10 AM",
+        now=now,
+    )
+
+    assert result.handled is False
+    assert result.next_status == "trial"
+    updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert updated.onboarding_sessions == []
+
+
+def test_duplicate_confirm_for_same_sender_recovers_existing_payment_pending_account(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 17, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    customer = store.new_customer(
+        business_name="Lakshmi's Kitchen",
+        business_address="90 Brybar Dr, St Johns, FL",
+        public_phone="+17329837841",
+        business_whatsapp_number="+17329837841",
+        authorized_request_number="+17329837841",
+        business_category="restaurant",
+        preferred_language="en",
+        plan_id="starter",
+        now=now,
+        payment_checkout_url="https://pay.example/CUST0001",
+        primary_chat_id="17329837841@s.whatsapp.net",
+        onboarded_by_phone="+17329837841",
+    )
+    store.customers.append(customer)
+    store.next_customer_sequence = 2
+    store.onboarding_sessions.append(FlyerOnboardingSession(
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        status="confirming_summary",
+        started_at=now,
+        updated_at=now,
+        last_message_id="summary",
+        business_name="Lakshmi's Kitchen",
+        business_address="90 Brybar FL",
+        public_phone="+17329837841",
+        business_whatsapp_number="+17329837841",
+        authorized_request_number="+17329837841",
+        business_category="restaurant",
+        preferred_language="en",
+        plan_id="starter",
+    ))
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    result = handle_onboarding_message(
+        state_path=state_path,
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        message_id="confirm-again",
+        text="CONFIRM",
+        now=now,
+    )
+
+    assert result.handled is True
+    assert result.next_status == "payment_pending"
+    assert result.customer_id == "CUST0001"
+    assert "Registration saved as CUST0001" in result.reply_text
+    updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert len(updated.customers) == 1
+    assert updated.onboarding_sessions == []
+
+
+def test_duplicate_confirm_for_different_customer_stays_blocked(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 17, tzinfo=timezone.utc)
+    existing_customer = _trial_customer(
+        customer_id="CUST0001",
+        business_name="Other Business",
+        phone="+17329837841",
+        now=now,
+    )
+    store = FlyerCustomerStore(
+        next_customer_sequence=2,
+        customers=[existing_customer],
+        onboarding_sessions=[FlyerOnboardingSession(
+            chat_id="19045550199@s.whatsapp.net",
+            sender_phone="+19045550199",
+            status="confirming_summary",
+            started_at=now,
+            updated_at=now,
+            last_message_id="summary",
+            business_name="New Business",
+            business_address="100 Main St",
+            public_phone="+19045550199",
+            business_whatsapp_number="+17329837841",
+            authorized_request_number="+19045550199",
+            business_category="Retail",
+            preferred_language="en",
+            plan_id="trial",
+        )],
+    )
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    result = handle_onboarding_message(
+        state_path=state_path,
+        chat_id="19045550199@s.whatsapp.net",
+        sender_phone="+19045550199",
+        message_id="confirm-conflict",
+        text="CONFIRM",
+        now=now,
+    )
+
+    assert result.handled is True
+    assert result.next_status == "confirming_summary"
+    assert "belongs to another Flyer Studio account" in result.reply_text
+    updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert len(updated.customers) == 1
+    assert len(updated.onboarding_sessions) == 1
+
+
 def test_reply_button_trial_phrase_starts_free_trial_onboarding(tmp_path):
     state_path = tmp_path / "customers.json"
     now = datetime(2026, 5, 16, tzinfo=timezone.utc)
@@ -143,6 +422,107 @@ def test_reply_button_trial_phrase_starts_free_trial_onboarding(tmp_path):
     assert first.next_status == "collecting_business_name"
     store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
     assert store.onboarding_sessions[0].plan_id == "trial"
+
+
+def test_campaign_cta_restarts_stale_partial_onboarding_instead_of_parsing_as_phone(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 17, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    store.onboarding_sessions.append(FlyerOnboardingSession(
+        chat_id="201975216009469@lid",
+        sender_phone="+19045550104",
+        status="collecting_public_phone",
+        started_at=now,
+        updated_at=now,
+        last_message_id="old",
+        business_name="Old Name",
+        business_address="Old Address",
+    ))
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    result = handle_onboarding_message(
+        state_path=state_path,
+        chat_id="201975216009469@lid",
+        sender_phone="+19045550104",
+        message_id="trial-button-retry",
+        text="Help me create a beautiful flyer for my business",
+        now=now,
+    )
+
+    assert result.handled is True
+    assert result.next_status == "collecting_business_name"
+    assert "set up your free trial first" in result.reply_text.lower()
+    updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert updated.onboarding_sessions[0].status == "collecting_business_name"
+    assert updated.onboarding_sessions[0].plan_id == "trial"
+    assert updated.onboarding_sessions[0].business_name == ""
+    assert updated.onboarding_sessions[0].business_address == ""
+
+
+def test_act_now_campaign_cta_restarts_stale_partial_onboarding_without_trial_plan(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 17, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    store.onboarding_sessions.append(FlyerOnboardingSession(
+        chat_id="201975216009469@lid",
+        sender_phone="+19045550104",
+        status="collecting_public_phone",
+        started_at=now,
+        updated_at=now,
+        last_message_id="old",
+        plan_id="trial",
+        business_name="Old Name",
+        business_address="Old Address",
+    ))
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    result = handle_onboarding_message(
+        state_path=state_path,
+        chat_id="201975216009469@lid",
+        sender_phone="+19045550104",
+        message_id="act-now-retry",
+        text="I want to set up Flyer Studio for my business",
+        now=now,
+    )
+
+    assert result.handled is True
+    assert result.next_status == "collecting_business_name"
+    assert "what is your business name" in result.reply_text.lower()
+    updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert updated.onboarding_sessions[0].status == "collecting_business_name"
+    assert updated.onboarding_sessions[0].plan_id == ""
+    assert updated.onboarding_sessions[0].business_name == ""
+    assert updated.onboarding_sessions[0].business_address == ""
+
+
+def test_invalid_onboarding_field_reply_returns_prompt_instead_of_crashing(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 17, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    store.onboarding_sessions.append(FlyerOnboardingSession(
+        chat_id="201975216009469@lid",
+        sender_phone="+19045550104",
+        status="collecting_business_name",
+        started_at=now,
+        updated_at=now,
+        last_message_id="trial-start",
+        plan_id="trial",
+    ))
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    result = handle_onboarding_message(
+        state_path=state_path,
+        chat_id="201975216009469@lid",
+        sender_phone="+19045550104",
+        message_id="bad-name",
+        text="1",
+        now=now,
+    )
+
+    assert result.handled is True
+    assert result.next_status == "collecting_business_name"
+    assert "please send the business name" in result.reply_text.lower()
+    assert "what is your business name" in result.reply_text.lower()
 
 
 def test_trial_quota_blocks_fourth_flyer_and_prompts_upgrade(tmp_path):
