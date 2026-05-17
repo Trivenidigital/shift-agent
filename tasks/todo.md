@@ -61,6 +61,14 @@ Hermes-first summary: reuse Hermes WhatsApp ingress, `dispatch_shift_agent`, sen
 - [ ] Production-quality image generation smoke: configure a real image-output model for Flyer Studio concepts/finals, run a live Ugadi flyer request, and compare the delivered visual quality against the deterministic renderer.
 - [x] Credit optimization: switch Flyer Studio default from three generated concepts to one best generated design, with WhatsApp copy `Reply APPROVE or reply with changes.`
 - [x] Marketing CTA correction: split `Start Free Trial` and `Act Now! Save Time and Money` into distinct WhatsApp prefill intents, add router coverage for `ACT NOW`, and make the trial welcome copy start with a ready-to-create flyer prompt.
+- [ ] Free Trial flyer generation bug: live F0012 created after onboarding but stayed `intake_started` because project extraction required `contact_info` from the flyer text and did not hydrate the saved trial customer profile.
+  - Drift/Hermes-first check: reused existing Flyer onboarding account state, project script, cf-router primary path, quota path, and renderer. No new Hermes substrate or custom workflow is needed; net-new scope is filling missing project fields from the already-collected Flyer customer profile.
+  - [x] Isolate work in branch/worktree `codex/fix-flyer-free-trial-generation`.
+  - [x] Verify live state: F0012 request has breakfast menu/prices but `fields.contact_info=null`; customer `CUST0002` is trial-active with `public_phone=+19802005022`.
+  - [x] Add regression test for project creation hydrating missing contact/location from a trial customer profile.
+  - [x] Implement profile hydration in `create-flyer-project`.
+  - [x] Run focused verification and record result.
+  - Review: `python -m pytest tests\test_flyer_create_project.py tests\test_flyer_schemas.py tests\test_flyer_onboarding.py tests\test_cf_router_flyer_routing.py tests\test_flyer_scripts_static.py -q` -> 56 passed.
 
 ### Infrastructure Hardening - Hermes Runtime Ownership (2026-05-16)
 
