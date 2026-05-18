@@ -1159,7 +1159,7 @@ def _try_flyer_onboarding_intercept(text: str, chat_id: str, event: Any) -> Opti
 
 
 def _suppress_flyer_starter_brief(reply_text: str) -> str:
-    marker = "Here is a starter flyer request"
+    marker = actions.flyer_starter_brief_marker()
     if marker not in (reply_text or ""):
         return reply_text
     before, _sep, _after = reply_text.partition(marker)

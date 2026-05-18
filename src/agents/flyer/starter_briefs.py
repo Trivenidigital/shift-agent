@@ -14,6 +14,9 @@ class StarterBrief:
     ai_body: str = ""
 
 
+STARTER_BRIEF_MARKER = "Here is a starter flyer request"
+
+
 def _briefs() -> tuple[StarterBrief, ...]:
     return (
         StarterBrief(
@@ -165,6 +168,15 @@ def _normalize(text: str) -> str:
     return " ".join(re.sub(r"[^a-z0-9+ ]+", " ", (text or "").lower()).split())
 
 
+def _contains_keyword(normalized_text: str, normalized_keyword: str) -> bool:
+    if not normalized_keyword:
+        return False
+    return bool(re.search(
+        rf"(?<![a-z0-9]){re.escape(normalized_keyword)}(?![a-z0-9])",
+        normalized_text,
+    ))
+
+
 def all_starter_briefs() -> list[StarterBrief]:
     return list(_briefs())
 
@@ -179,7 +191,7 @@ def starter_brief_for_category(category: str) -> StarterBrief:
         score = 0
         for keyword in brief.keywords:
             key = _normalize(keyword)
-            if key and key in normalized:
+            if _contains_keyword(normalized, key):
                 score += max(2, len(key.split()) + 1)
         if score > best[0]:
             best = (score, brief)
@@ -195,7 +207,7 @@ def starter_brief_message(category: str, *, business_name: str = "") -> str:
     return (
         "Flyer Studio\n"
         "------------\n"
-        "Here is a starter flyer request.\n"
+        f"{STARTER_BRIEF_MARKER}.\n"
         f"{name_line}"
         "Edit anything below and send it back.\n\n"
         f"{body}\n\n"

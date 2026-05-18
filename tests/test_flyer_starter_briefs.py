@@ -25,6 +25,14 @@ def test_unknown_category_gets_local_business_brief():
     assert "Edit anything below" in starter_briefs.starter_brief_message("custom gifts and printing")
 
 
+def test_category_keywords_match_words_not_substrings():
+    restore = starter_briefs.starter_brief_for_category("restore and refinish studio")
+    cafeteria = starter_briefs.starter_brief_for_category("cafeteria consulting")
+
+    assert restore.category_id == "local_business"
+    assert cafeteria.category_id == "local_business"
+
+
 def test_all_starter_briefs_are_whatsapp_sized_customer_editable_and_public_safe():
     forbidden = ("Hermes", "system prompt", "developer instruction")
 

@@ -1049,10 +1049,13 @@ def flyer_starter_brief_reply(customer: dict) -> str:
             _ensure_platform_path()
             from flyer_starter_briefs import starter_brief_message  # type: ignore
         except Exception:
+            business_name = str(customer.get("business_name") or "").strip()
+            name_line = f"Business: {business_name}\n" if business_name else ""
             return (
                 "Flyer Studio\n"
                 "------------\n"
-                "Here is a starter flyer request.\n"
+                f"{flyer_starter_brief_marker()}.\n"
+                f"{name_line}"
                 "Edit anything below and send it back.\n\n"
                 "Create a professional flyer for my business.\n\n"
                 "Main heading:\nSpecial Offer\n\n"
@@ -1064,6 +1067,20 @@ def flyer_starter_brief_reply(customer: dict) -> str:
         str(customer.get("business_category") or ""),
         business_name=str(customer.get("business_name") or ""),
     )
+
+
+def flyer_starter_brief_marker() -> str:
+    try:
+        _ensure_local_src_path()
+        from agents.flyer.starter_briefs import STARTER_BRIEF_MARKER  # type: ignore
+        return str(STARTER_BRIEF_MARKER)
+    except Exception:
+        try:
+            _ensure_platform_path()
+            from flyer_starter_briefs import STARTER_BRIEF_MARKER  # type: ignore
+            return str(STARTER_BRIEF_MARKER)
+        except Exception:
+            return "Here is a starter flyer request"
 
 
 def flyer_customer_not_active_reply(customer: dict) -> str:

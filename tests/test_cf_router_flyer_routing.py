@@ -579,6 +579,40 @@ def test_compound_confirm_routes_trailing_request_without_starter_brief(monkeypa
     assert "Here is a starter flyer request" not in sent[0]
 
 
+def test_starter_suppression_uses_canonical_marker(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+
+    monkeypatch.setattr(actions, "flyer_starter_brief_marker", lambda: "CUSTOM STARTER MARKER")
+
+    reply = hooks._suppress_flyer_starter_brief(
+        "Flyer Studio\n------------\nReady.\n\nCUSTOM STARTER MARKER\nEdit this."
+    )
+
+    assert reply == "Flyer Studio\n------------\nReady.\n\nI will create the flyer request you included now."
+
+
+def test_starter_brief_fallback_preserves_business_name(monkeypatch):
+    import builtins
+
+    actions = _load_actions()
+    real_import = builtins.__import__
+
+    def fail_starter_import(name, *args, **kwargs):
+        if name in {"agents.flyer.starter_briefs", "flyer_starter_briefs"}:
+            raise ImportError("starter brief module unavailable")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fail_starter_import)
+
+    reply = actions.flyer_starter_brief_reply({
+        "business_name": "Demo Salon",
+        "business_category": "salon",
+    })
+
+    assert "Business: Demo Salon" in reply
+    assert "Here is a starter flyer request" in reply
+
+
 def test_unlimited_location_gate_blocks_other_location_copy():
     actions = _load_actions()
     customer = {
