@@ -52,6 +52,16 @@ Hermes-first summary: reuse Hermes WhatsApp ingress, `dispatch_shift_agent`, sen
   - [x] Create PR: https://github.com/Trivenidigital/shift-agent/pull/102
   - [x] Get PR reviewed by three parallel agents and apply findings.
     - Review fixes: kept starter briefs out of guided-mode collection, blocked vague starts for payment-pending/suspended/cancelled customers before project creation, made AI-powered heading selection phrase/token based, tightened service-business renderer copy away from food/festival defaults, and added instruction-leak text-manifest QA.
+- [ ] 2026-05-18 starter prompt timing/preferences: show category starter prompts only at helpful ready/vague moments, suppress repeated examples after first automatic send, and let customers turn sample prompts off/on for the business account.
+  - Drift-check tag: extends-Hermes
+  - Hermes-first analysis: reuse Flyer customer JSON state, `starter_briefs.py`, onboarding/intake ready flows, cf-router routing, and account-command audit path. Net-new scope is rollback-safe store-level preference metadata and deterministic opt-out/opt-in routing.
+  - [x] Create isolated worktree/branch `codex/flyer-starter-prompt-preferences`.
+  - [x] Write implementation plan: `docs/superpowers/plans/2026-05-18-flyer-starter-prompt-preferences.md`.
+  - [x] Get plan reviewed by two parallel agents and apply findings.
+    - Review fixes: avoid nested schema rollback hazard with top-level store maps, support LID-only preference commands, fail closed on account-command errors, normalize sender-block-wrapped commands, keep CTA retries concise, guard active-project states before vague-start starter prompts, clarify payment-pending CTA behavior, and make the account-wide preference explicit in copy.
+  - [ ] Write design doc and run two parallel design reviews.
+  - [ ] Build with focused tests.
+  - [ ] Create PR and run three parallel PR reviews.
 - [x] 2026-05-17 launch funnel reliability pass: fix compound `CONFIRM + flyer request`, broaden new-project detection for menu/marketing requests, prevent generic LLM fallback during active intake, require explicit media intent before saving brand assets, deploy, and send a fresh campaign message for user testing.
 - [ ] 2026-05-17 CTA idempotency and live-state repair: restore the accidentally cleared `+17329837841` Flyer customer, harden Start Free Trial / Act Now paths for new, in-progress, payment-pending, trial, and active customers, verify locally and on VPS, then resend the test campaign.
   - [x] Local bugfix: duplicate-phone `CONFIRM` from the same sender now resumes the existing Flyer account, clears the stale onboarding session, and keeps true cross-account duplicate blocking customer-safe.
