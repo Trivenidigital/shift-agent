@@ -12,7 +12,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src" / "platform"))
 
-from agents.flyer.account import activate_customer, handle_account_command, reserve_quota, finalize_usage  # noqa: E402
+from agents.flyer.account import _phone_or_none, activate_customer, handle_account_command, reserve_quota, finalize_usage  # noqa: E402
 from agents.flyer.intake import handle_intake_message  # noqa: E402
 from agents.flyer.onboarding import handle_onboarding_message, store_brand_asset  # noqa: E402
 from schemas import FlyerCustomerStore, FlyerOnboardingSession, FlyerPlanTier, FlyerUsageEvent  # noqa: E402
@@ -740,6 +740,7 @@ def test_trial_completion_suggests_business_category_starter_brief(tmp_path):
     assert "Here is a starter flyer request" in result.reply_text
     assert "Grow Your Business with Modern Marketing" in result.reply_text
     assert "Reply with your edited version" in result.reply_text
+    assert "don't show sample prompts" in result.reply_text
     updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
     assert updated.claim_starter_prompt_send(result.customer_id) is False
 
@@ -831,6 +832,7 @@ def test_text_mode_ready_includes_category_starter_brief(tmp_path):
     assert result.action == "text_ready"
     assert "Here is a starter flyer request" in result.reply_text
     assert "Grow Your Business with Modern Marketing" in result.reply_text
+    assert "don't show sample prompts" in result.reply_text
     updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
     assert updated.claim_starter_prompt_send(customer.customer_id) is False
 
@@ -1446,7 +1448,9 @@ def test_customer_can_turn_sample_prompts_off_and_on(tmp_path):
     state_path = tmp_path / "customers.json"
     now = datetime(2026, 5, 18, tzinfo=timezone.utc)
     customer = _trial_customer(customer_id="CUST0001", business_name="Demo Salon", phone="+17329837841", now=now)
-    state_path.write_text(FlyerCustomerStore(customers=[customer]).model_dump_json(), encoding="utf-8")
+    store = FlyerCustomerStore(customers=[customer])
+    assert store.claim_starter_prompt_send(customer.customer_id) is True
+    state_path.write_text(store.model_dump_json(), encoding="utf-8")
 
     off = handle_account_command(
         state_path=state_path,
@@ -1475,6 +1479,11 @@ def test_customer_can_turn_sample_prompts_off_and_on(tmp_path):
     updated_store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
     assert updated_store.starter_prompt_mode(customer.customer_id) == "auto"
     assert updated_store.claim_starter_prompt_send(customer.customer_id) is True
+
+
+def test_account_phone_normalizer_keeps_actor_phone_for_audit_and_pending_changes():
+    assert _phone_or_none("+1 732 983 7841") == "+17329837841"
+    assert _phone_or_none("not a phone") is None
 
 
 def test_lid_only_customer_can_turn_sample_prompts_off(tmp_path):

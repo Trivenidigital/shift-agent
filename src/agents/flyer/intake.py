@@ -393,7 +393,7 @@ def _text_mode_ready_reply(
         "Send your flyer request in one message. You can also attach an existing flyer, logo, menu, photos, or reference image."
     )
     if include_starter_brief and customer and customer.status in {"trial", "active"}:
-        reply = f"{reply}\n\n{starter_brief_message(customer.business_category, business_name=customer.business_name)}"
+        reply = f"{reply}\n\n{starter_brief_message(customer.business_category, business_name=customer.business_name, include_opt_out_hint=True)}"
     elif customer and customer.status in {"trial", "active"}:
         reply = f"{reply}\n\nReply with your edited version, or send your own flyer request."
     return reply

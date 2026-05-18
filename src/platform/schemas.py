@@ -1088,6 +1088,7 @@ class FlyerCustomerStore(BaseModel):
     def set_starter_prompt_mode(self, customer_id: str, mode: Literal["auto", "off"]) -> None:
         if mode == "auto":
             self.starter_prompt_preferences.pop(customer_id, None)
+            self.starter_prompt_sent_counts.pop(customer_id, None)
             return
         self.starter_prompt_preferences[customer_id] = mode
 
@@ -3616,6 +3617,12 @@ class CfRouterIntercepted(_BaseEntry):
         "flyer_location_blocked",
         "flyer_account_command",
         "flyer_account_failed",
+        "flyer_account_customer_not_found",
+        "flyer_account_unhandled",
+        "flyer_starter_brief",
+        "flyer_starter_preference_off",
+        "flyer_starter_already_sent",
+        "flyer_customer_not_active",
         "flyer_guest_order_started",
         "flyer_guest_order_failed",
         "error",

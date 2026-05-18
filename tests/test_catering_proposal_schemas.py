@@ -207,6 +207,12 @@ def test_cf_router_reason_accepts_proposal_selection():
     "flyer_location_blocked",
     "flyer_account_command",
     "flyer_account_failed",
+    "flyer_account_customer_not_found",
+    "flyer_account_unhandled",
+    "flyer_starter_brief",
+    "flyer_starter_preference_off",
+    "flyer_starter_already_sent",
+    "flyer_customer_not_active",
     "flyer_guest_order_started",
     "flyer_guest_order_failed",
 ])

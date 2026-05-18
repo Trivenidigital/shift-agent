@@ -719,7 +719,7 @@ def _trial_active_reply(
             "Send your first flyer request now. After each sample, I will show the paid onboarding link and plans."
         )
     if include_starter_brief and creation_mode != "guided" and customer and customer.status in {"trial", "active"}:
-        reply = f"{reply}\n\n{starter_brief_message(customer.business_category, business_name=customer.business_name)}"
+        reply = f"{reply}\n\n{starter_brief_message(customer.business_category, business_name=customer.business_name, include_opt_out_hint=True)}"
     return reply
 
 

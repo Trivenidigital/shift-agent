@@ -707,6 +707,10 @@ def _checkout_url(template: str, customer_id: str, plan_id: str, chat_id: str) -
 def _phone_or_none(text: Optional[str]) -> Optional[str]:
     if not text:
         return None
+    try:
+        return E164Phone.from_any(text, country_code="US")
+    except ValueError:
+        return None
 
 
 def _visible_message_text(text: str) -> str:
@@ -714,10 +718,6 @@ def _visible_message_text(text: str) -> str:
     if lines and lines[0].startswith("[shift-agent-sender "):
         return "\n".join(lines[1:]).strip()
     return (text or "").strip()
-    try:
-        return E164Phone.from_any(text, country_code="US")
-    except ValueError:
-        return None
 
 
 def _append_audit(path: Optional[Path], entry_json: str) -> None:
