@@ -44,11 +44,35 @@ class AccountResult:
 ACCOUNT_COMMAND_RE = re.compile(
     r"^\s*(?:"
     r"status|plan status|help|"
+    r"don'?t show sample prompts|do not show sample prompts|"
+    r"stop sample prompts|hide sample prompts|turn off sample prompts|disable sample prompts|"
+    r"stop showing examples|no sample prompts|no examples|"
+    r"don'?t show examples|hide examples|stop examples|"
+    r"show sample prompts again|enable sample prompts|turn on sample prompts|"
+    r"bring back sample prompts|show examples again|bring back examples|"
     r"add (?:authorized )?(?:number|auth)|add authorized number|"
     r"remove authorized number|remove number|"
     r"update phone|update business phone|"
     r"update whatsapp|update business whatsapp|"
     r"change plan|confirm update"
+    r")\b",
+    re.IGNORECASE,
+)
+
+STARTER_PROMPT_OFF_RE = re.compile(
+    r"^(?:"
+    r"don'?t show sample prompts|do not show sample prompts|"
+    r"stop sample prompts|hide sample prompts|turn off sample prompts|disable sample prompts|"
+    r"stop showing examples|no sample prompts|no examples|"
+    r"don'?t show examples|hide examples|stop examples"
+    r")\b",
+    re.IGNORECASE,
+)
+
+STARTER_PROMPT_ON_RE = re.compile(
+    r"^(?:"
+    r"show sample prompts again|enable sample prompts|turn on sample prompts|"
+    r"bring back sample prompts|show examples again|bring back examples"
     r")\b",
     re.IGNORECASE,
 )
@@ -66,7 +90,7 @@ def write_customer_store(path: Path, store: FlyerCustomerStore) -> None:
 
 
 def is_account_command(text: str) -> bool:
-    return bool(ACCOUNT_COMMAND_RE.search(text or ""))
+    return bool(ACCOUNT_COMMAND_RE.search(_visible_message_text(text)))
 
 
 def handle_account_command(
@@ -85,11 +109,43 @@ def handle_account_command(
     now = now or datetime.now(timezone.utc)
     tiers = plan_tiers or FlyerPlanTier.default_tiers()
     store = load_customer_store(state_path)
-    customer = store.find_customer_by_phone(sender_phone)
+    customer = store.find_customer_by_sender(sender_phone, chat_id)
     if customer is None:
         return AccountResult(False, False, "", detail="customer_not_found")
-    body = " ".join((text or "").split())
+    body = " ".join(_visible_message_text(text).split())
     lower = body.lower()
+    preference_mode: Optional[str] = None
+    if STARTER_PROMPT_OFF_RE.search(lower):
+        preference_mode = "off"
+    elif STARTER_PROMPT_ON_RE.search(lower):
+        preference_mode = "auto"
+    if preference_mode:
+        store.set_starter_prompt_mode(customer.customer_id, preference_mode)  # type: ignore[arg-type]
+        customer = customer.model_copy(update={"updated_at": now})
+        _replace_customer(store, customer)
+        write_customer_store(state_path, store)
+        _audit_account_update(
+            audit_log_path,
+            customer_id=customer.customer_id,
+            command="starter_prompt_mode",
+            actor_phone=sender_phone,
+            actor_role=sender_role,
+            allowed=True,
+            reason=f"starter_prompt_{preference_mode}",
+        )
+        if preference_mode == "off":
+            reply = (
+                "Flyer Studio\n------------\n"
+                "Sample prompts are off for this business account. "
+                'Reply "show sample prompts again" to turn them back on.'
+            )
+        else:
+            reply = (
+                "Flyer Studio\n------------\n"
+                "Sample prompts are on for this business account. "
+                "I will show one helpful example when it can save time."
+            )
+        return AccountResult(True, True, reply, customer.customer_id, customer.status)
     if lower in {"status", "plan status"}:
         customer = _roll_period(customer, now)
         customer = customer.model_copy(update={"monthly_flyers_used": customer.usage_count_for_current_period()})
@@ -193,6 +249,35 @@ def handle_account_command(
         reason=reason,
     )
     return AccountResult(True, True, reply, updated.customer_id, updated.status)
+
+
+def claim_starter_prompt_send(*, state_path: Path, customer_id: str) -> AccountResult:
+    store = load_customer_store(state_path)
+    customer = store.find_customer_by_id(customer_id)
+    if customer is None:
+        return AccountResult(False, True, "", customer_id, detail="customer_not_found")
+    claimed = store.claim_starter_prompt_send(customer_id)
+    if claimed:
+        write_customer_store(state_path, store)
+    return AccountResult(
+        True,
+        True,
+        "",
+        customer_id,
+        customer.status,
+        quota_allowed=claimed,
+        detail="claimed" if claimed else "not_claimed",
+    )
+
+
+def release_starter_prompt_claim(*, state_path: Path, customer_id: str) -> AccountResult:
+    store = load_customer_store(state_path)
+    customer = store.find_customer_by_id(customer_id)
+    if customer is None:
+        return AccountResult(False, True, "", customer_id, detail="customer_not_found")
+    store.release_starter_prompt_claim(customer_id)
+    write_customer_store(state_path, store)
+    return AccountResult(True, True, "", customer_id, customer.status, detail="released")
 
 
 def activate_customer(
@@ -655,6 +740,13 @@ def _phone_or_none(text: Optional[str]) -> Optional[str]:
         return E164Phone.from_any(text, country_code="US")
     except ValueError:
         return None
+
+
+def _visible_message_text(text: str) -> str:
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    if lines and lines[0].startswith("[shift-agent-sender "):
+        return "\n".join(lines[1:]).strip()
+    return (text or "").strip()
 
 
 def _append_audit(path: Optional[Path], entry_json: str) -> None:

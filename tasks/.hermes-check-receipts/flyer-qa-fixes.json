@@ -1,0 +1,23 @@
+{
+  "topic": "flyer-qa-fixes",
+  "task_text": "flyer-qa-fixes (PR-106 review follow-up: sync plan + design to final distinct-counter contract)",
+  "completed_at": "2026-05-18T23:25:00Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 6,
+  "hermes_step_count": 7,
+  "files_to_read_first": [
+    "src/agents/flyer/guest_order.py",
+    "src/platform/schemas.py",
+    "web/backend/app/routers/flyer.py",
+    "src/platform/scripts/dispatcher-accuracy-report",
+    "src/plugins/cf-router/actions.py",
+    "src/agents/flyer/render.py",
+    "src/platform/safe_io.py",
+    "tests/test_flyer_guest_order.py",
+    "tests/test_dispatcher_accuracy_report.py",
+    "web/backend/tests/test_flyer_admin.py",
+    "tests/test_flyer_renderer.py",
+    "tests/test_safe_io.py",
+    "web/frontend/src/sections/FlyerAdmin.tsx"
+  ]
+}

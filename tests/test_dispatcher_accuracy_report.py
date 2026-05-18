@@ -203,6 +203,103 @@ def test_orphan_dispatcher_routed_does_not_appear_in_either_list(now):
     assert len(unpaired) == 0
 
 
+def test_pair_inbounds_pairs_flyer_starter_brief(now):
+    """BUG-FLYER-QA-003b: flyer cf-router intercepts must pair against
+    raw_inbound. Pre-fix, only catering F7 reasons were whitelisted, so
+    every Flyer-routed inbound was counted as 'Kimi skipped dispatcher'."""
+    entries = [
+        {"type": "raw_inbound", "ts": _ts(now, 0), "message_id": "wa:fly1",
+         "sender_phone": "+15551234567", "input_message": "Create flyer"},
+        {"type": "cf_router_intercepted", "ts": _ts(now, 2),
+         "reason": "flyer_starter_brief",
+         "chat_id": "15551234567@s.whatsapp.net"},
+    ]
+    paired, unpaired = mod.pair_inbounds(entries)
+    assert len(paired) == 1
+    assert len(unpaired) == 0
+    _inb, _match, kind = paired[0]
+    assert kind == "cf_router_intercepted"
+
+
+def test_pair_inbounds_does_not_pair_flyer_failure_reasons(now):
+    """BUG-FLYER-QA-003b negative: *_failed reasons indicate the LLM still
+    ran, so they must NOT be treated as dispatcher-equivalent routes."""
+    entries = [
+        {"type": "raw_inbound", "ts": _ts(now, 0), "message_id": "wa:fly2",
+         "sender_phone": "+15551234567", "input_message": "broken"},
+        {"type": "cf_router_intercepted", "ts": _ts(now, 2),
+         "reason": "flyer_primary_failed",
+         "chat_id": "15551234567@s.whatsapp.net"},
+    ]
+    paired, unpaired = mod.pair_inbounds(entries)
+    assert len(paired) == 0
+    assert len(unpaired) == 1
+
+
+def test_json_report_legacy_key_keeps_f7_proposal_semantics(now):
+    """BUG-FLYER-QA-003b (P2 follow-up): the legacy
+    cf_router_proposal_selection_count key MUST keep its original meaning
+    (f7_proposal_request/selection only). The new cf_router_intercepted_count
+    is the broader total across catering + flyer dispatcher-equivalent
+    reasons. Conflating the two breaks dashboards that read the legacy key
+    expecting F7-specific counts."""
+    paired = [
+        (
+            {"type": "raw_inbound", "ts": _ts(now, 0), "message_id": "m1"},
+            {"type": "cf_router_intercepted", "reason": "flyer_starter_brief",
+             "chat_id": "15551234567@s.whatsapp.net"},
+            "cf_router_intercepted",
+        ),
+        (
+            {"type": "raw_inbound", "ts": _ts(now, 5), "message_id": "m2"},
+            {"type": "cf_router_intercepted", "reason": "f7_proposal_request",
+             "chat_id": "15551234567@s.whatsapp.net"},
+            "cf_router_intercepted",
+        ),
+        (
+            {"type": "raw_inbound", "ts": _ts(now, 10), "message_id": "m3"},
+            {"type": "cf_router_intercepted", "reason": "f7_proposal_selection",
+             "chat_id": "15551234567@s.whatsapp.net"},
+            "cf_router_intercepted",
+        ),
+        (
+            {"type": "raw_inbound", "ts": _ts(now, 15), "message_id": "m4"},
+            {"type": "cf_router_intercepted", "reason": "flyer_intake",
+             "chat_id": "15551234567@s.whatsapp.net"},
+            "cf_router_intercepted",
+        ),
+    ]
+    out = mod.format_json_report(
+        paired, unpaired=[],
+        since=now - timedelta(days=1), until=now,
+    )
+    parsed = json.loads(out)
+    # Legacy key: only the two F7 reasons (m2, m3).
+    assert parsed["cf_router_proposal_selection_count"] == 2
+    # New key: all four whitelisted cf-router intercepts.
+    assert parsed["cf_router_intercepted_count"] == 4
+
+
+def test_text_report_uses_intercepts_label_post_fix(now):
+    """BUG-FLYER-QA-003b: text-report label updated from 'CF router
+    proposal selections' to 'CF router intercepts' since the counter now
+    aggregates ALL whitelisted intercept reasons, not just F7 proposals."""
+    paired = [
+        (
+            {"type": "raw_inbound", "ts": _ts(now), "message_id": "m1"},
+            {"type": "cf_router_intercepted", "reason": "flyer_starter_brief",
+             "chat_id": "15551234567@s.whatsapp.net"},
+            "cf_router_intercepted",
+        ),
+    ]
+    out = mod.format_text_report(
+        paired, unpaired=[],
+        since=now - timedelta(days=1), until=now,
+    )
+    assert "CF router intercepts: 1" in out
+    assert "CF router proposal selections" not in out
+
+
 def test_mixed_traffic_realistic_scenario(now):
     """3 inbounds: 2 paired, 1 skipped — exact mix observed in production
     JSONL post-mortem (~57% first-attempt accuracy floor)."""

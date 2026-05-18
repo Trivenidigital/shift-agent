@@ -239,6 +239,112 @@ def test_reserved_guest_order_consumes_only_matching_project(tmp_path):
     assert used.status == "used"
 
 
+def test_consume_guest_order_idempotent_on_replay(tmp_path):
+    """BUG-FLYER-QA-001: a second consume_guest_order for the same project_id
+    must return idempotent success — same order_id and status as the first
+    call, no double-append to used_project_ids."""
+    state = tmp_path / "guest_orders.json"
+    now = datetime(2026, 5, 17, tzinfo=timezone.utc)
+    start_guest_order(
+        state_path=state, sender_phone="+17329837841",
+        chat_id="17329837841@s.whatsapp.net", message_id="cta-1", now=now,
+    )
+    activate_guest_order(
+        state_path=state, order_id="GUEST0001",
+        payment_reference="pi_idem_1", now=now,
+    )
+    reserve_guest_order(
+        state_path=state, sender_phone="+17329837841",
+        chat_id="17329837841@s.whatsapp.net", project_id="F0050", now=now,
+    )
+
+    first = consume_guest_order(
+        state_path=state, sender_phone="+17329837841",
+        chat_id="17329837841@s.whatsapp.net", project_id="F0050", now=now,
+    )
+    second = consume_guest_order(
+        state_path=state, sender_phone="+17329837841",
+        chat_id="17329837841@s.whatsapp.net", project_id="F0050", now=now,
+    )
+
+    assert first.ok is True
+    assert second.ok is True
+    assert second.detail == ""
+    assert second.reply_text == ""
+    assert second.order_id == first.order_id
+    assert second.status == first.status
+
+    store = load_guest_order_store(state)
+    order = store.find_order_by_id(first.order_id)
+    assert order is not None
+    assert order.used_project_ids == ["F0050"]  # not double-appended
+
+
+def test_consume_guest_order_replay_on_different_chat_id(tmp_path):
+    """BUG-FLYER-QA-001: cross-chat replay (sender comes back from a DM after
+    first consume happened in a group chat). The chat_id fallback in
+    _find_consumed_guest_order must resolve the prior consume."""
+    state = tmp_path / "guest_orders.json"
+    now = datetime(2026, 5, 17, tzinfo=timezone.utc)
+    start_guest_order(
+        state_path=state, sender_phone="+17329837841",
+        chat_id="17329837841@s.whatsapp.net", message_id="cta-2", now=now,
+    )
+    activate_guest_order(
+        state_path=state, order_id="GUEST0001",
+        payment_reference="pi_idem_2", now=now,
+    )
+    reserve_guest_order(
+        state_path=state, sender_phone="+17329837841",
+        chat_id="17329837841@s.whatsapp.net", project_id="F0060", now=now,
+    )
+
+    first = consume_guest_order(
+        state_path=state, sender_phone="+17329837841",
+        chat_id="17329837841@s.whatsapp.net", project_id="F0060", now=now,
+    )
+    second = consume_guest_order(
+        state_path=state, sender_phone="+17329837841",
+        chat_id="999999999@g.us",  # different chat
+        project_id="F0060", now=now,
+    )
+
+    assert first.ok is True
+    assert second.ok is True
+    assert second.order_id == first.order_id
+
+
+def test_consume_guest_order_replay_does_not_match_unrelated_project(tmp_path):
+    """BUG-FLYER-QA-001 negative: idempotent replay only fires for the
+    project_id that was actually consumed; a different project_id still
+    returns reserved_guest_order_not_found."""
+    state = tmp_path / "guest_orders.json"
+    now = datetime(2026, 5, 17, tzinfo=timezone.utc)
+    start_guest_order(
+        state_path=state, sender_phone="+17329837841",
+        chat_id="17329837841@s.whatsapp.net", message_id="cta-3", now=now,
+    )
+    activate_guest_order(
+        state_path=state, order_id="GUEST0001",
+        payment_reference="pi_idem_3", now=now,
+    )
+    reserve_guest_order(
+        state_path=state, sender_phone="+17329837841",
+        chat_id="17329837841@s.whatsapp.net", project_id="F0070", now=now,
+    )
+    consume_guest_order(
+        state_path=state, sender_phone="+17329837841",
+        chat_id="17329837841@s.whatsapp.net", project_id="F0070", now=now,
+    )
+
+    other = consume_guest_order(
+        state_path=state, sender_phone="+17329837841",
+        chat_id="17329837841@s.whatsapp.net", project_id="F0071", now=now,
+    )
+    assert other.ok is False
+    assert other.detail == "reserved_guest_order_not_found"
+
+
 def test_guest_order_cli_dry_flow(tmp_path):
     state = tmp_path / "guest_orders.json"
     script = Path(__file__).resolve().parent.parent / "src" / "agents" / "flyer" / "scripts" / "manage-flyer-guest-order"
@@ -309,6 +415,64 @@ def test_guest_order_cli_dry_flow(tmp_path):
         check=True,
     )
     assert '"status": "paid"' in release.stdout
+
+
+def test_guest_order_cli_consume_idempotent_on_replay(tmp_path):
+    """BUG-FLYER-QA-001 end-to-end: a second --consume for the same project_id
+    must exit 0 through the subprocess layer (not just in-process). This
+    catches regressions in the exit-code contract that the unit tests would
+    miss — the hook layer keys on subprocess.returncode."""
+    state = tmp_path / "guest_orders.json"
+    script = Path(__file__).resolve().parent.parent / "src" / "agents" / "flyer" / "scripts" / "manage-flyer-guest-order"
+    config = tmp_path / "missing.yaml"
+    common = ["--state-path", str(state), "--config-path", str(config)]
+
+    subprocess.run(
+        [sys.executable, str(script), "--start",
+         "--sender-phone", "+17329837841",
+         "--chat-id", "17329837841@s.whatsapp.net",
+         "--message-id", "cta-1", *common],
+        capture_output=True, text=True, check=True,
+    )
+    subprocess.run(
+        [sys.executable, str(script), "--activate",
+         "--order-id", "GUEST0001",
+         "--payment-reference", "manual-test", *common],
+        capture_output=True, text=True, check=True,
+    )
+    subprocess.run(
+        [sys.executable, str(script), "--reserve",
+         "--sender-phone", "+17329837841",
+         "--chat-id", "17329837841@s.whatsapp.net",
+         "--project-id", "F0090", *common],
+        capture_output=True, text=True, check=True,
+    )
+
+    first = subprocess.run(
+        [sys.executable, str(script), "--consume",
+         "--sender-phone", "+17329837841",
+         "--chat-id", "17329837841@s.whatsapp.net",
+         "--project-id", "F0090", *common],
+        capture_output=True, text=True,
+    )
+    assert first.returncode == 0
+    assert '"ok": true' in first.stdout
+    assert '"status": "used"' in first.stdout
+
+    # Replay: same project_id; before BUG-001 fix this exited 2 with
+    # detail=reserved_guest_order_not_found, which the hook layer treated
+    # as a failed consume.
+    second = subprocess.run(
+        [sys.executable, str(script), "--consume",
+         "--sender-phone", "+17329837841",
+         "--chat-id", "17329837841@s.whatsapp.net",
+         "--project-id", "F0090", *common],
+        capture_output=True, text=True,
+    )
+    assert second.returncode == 0, f"replay should exit 0, got rc={second.returncode}, stderr={second.stderr}"
+    assert '"ok": true' in second.stdout
+    assert '"status": "used"' in second.stdout
+    assert "reserved_guest_order_not_found" not in second.stdout
 
 
 def test_guest_order_cli_rejects_activation_without_payment_reference(tmp_path):

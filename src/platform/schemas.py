@@ -1060,6 +1060,8 @@ class FlyerCustomerStore(BaseModel):
     customers: list[FlyerCustomerProfile] = Field(default_factory=list, max_length=5000)
     onboarding_sessions: list[FlyerOnboardingSession] = Field(default_factory=list, max_length=5000)
     intake_sessions: list[FlyerIntakeSession] = Field(default_factory=list, max_length=5000)
+    starter_prompt_preferences: dict[str, Literal["auto", "off"]] = Field(default_factory=dict, max_length=5000)
+    starter_prompt_sent_counts: dict[str, int] = Field(default_factory=dict, max_length=5000)
 
     def find_customer_by_phone(self, phone: Optional[str]) -> Optional[FlyerCustomerProfile]:
         if not phone:
@@ -1070,6 +1072,41 @@ class FlyerCustomerStore(BaseModel):
             return None
         matches = [customer for customer in self.customers if str(canonical) in customer.routable_phones()]
         return matches[0] if len(matches) == 1 else None
+
+    def find_customer_by_sender(self, phone: Optional[str], chat_id: str) -> Optional[FlyerCustomerProfile]:
+        customer = self.find_customer_by_phone(phone)
+        if customer is not None:
+            return customer
+        if not chat_id:
+            return None
+        matches = [customer for customer in self.customers if customer.primary_chat_id == chat_id]
+        return matches[0] if len(matches) == 1 else None
+
+    def starter_prompt_mode(self, customer_id: str) -> Literal["auto", "off"]:
+        return self.starter_prompt_preferences.get(customer_id, "auto")
+
+    def set_starter_prompt_mode(self, customer_id: str, mode: Literal["auto", "off"]) -> None:
+        if mode == "auto":
+            self.starter_prompt_preferences.pop(customer_id, None)
+            self.starter_prompt_sent_counts.pop(customer_id, None)
+            return
+        self.starter_prompt_preferences[customer_id] = mode
+
+    def claim_starter_prompt_send(self, customer_id: str) -> bool:
+        if self.starter_prompt_mode(customer_id) == "off":
+            return False
+        current = int(self.starter_prompt_sent_counts.get(customer_id, 0) or 0)
+        if current > 0:
+            return False
+        self.starter_prompt_sent_counts[customer_id] = 1
+        return True
+
+    def release_starter_prompt_claim(self, customer_id: str) -> None:
+        current = int(self.starter_prompt_sent_counts.get(customer_id, 0) or 0)
+        if current <= 1:
+            self.starter_prompt_sent_counts.pop(customer_id, None)
+            return
+        self.starter_prompt_sent_counts[customer_id] = current - 1
 
     def customer_ids_for_phone(self, phone: Optional[str], *, exclude_customer_id: str = "") -> list[str]:
         if not phone:
@@ -3568,6 +3605,8 @@ class CfRouterIntercepted(_BaseEntry):
         "flyer_intake_failed",
         "flyer_onboarding",
         "flyer_onboarding_failed",
+        "flyer_starter_brief",
+        "flyer_customer_not_active",
         "flyer_quota_blocked",
         "flyer_brand_asset_saved",
         "flyer_brand_asset_failed",
@@ -3580,6 +3619,12 @@ class CfRouterIntercepted(_BaseEntry):
         "flyer_location_blocked",
         "flyer_account_command",
         "flyer_account_failed",
+        "flyer_account_customer_not_found",
+        "flyer_account_unhandled",
+        "flyer_starter_brief",
+        "flyer_starter_preference_off",
+        "flyer_starter_already_sent",
+        "flyer_customer_not_active",
         "flyer_guest_order_started",
         "flyer_guest_order_failed",
         "error",

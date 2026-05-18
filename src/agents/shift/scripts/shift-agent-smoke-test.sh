@@ -88,6 +88,7 @@ import flyer_render
 import flyer_workflow
 import flyer_onboarding
 import flyer_account
+import flyer_starter_briefs
 print('schema classes:', [c for c in dir(schemas) if not c.startswith('_')][:5])
 " > /dev/null; then
     echo "FAIL: Python modules don't import"

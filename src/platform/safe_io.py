@@ -231,12 +231,17 @@ def atomic_write_text(path: Path, content: str, mode: int = 0o600) -> None:
     finally:
         os.close(fd)
     os.replace(str(tmp), str(path))
-    # fsync parent directory so the rename entry is durable
-    dfd = os.open(str(path.parent), os.O_RDONLY)
-    try:
-        os.fsync(dfd)
-    finally:
-        os.close(dfd)
+    # fsync parent directory so the rename entry is durable (POSIX only;
+    # Windows does not allow os.open(dir, O_RDONLY) — it raises
+    # PermissionError. The file-descriptor fsync above already pushed the
+    # data to disk; the rename is durable enough for local dev/test on
+    # Windows, and the production VPS is always POSIX).
+    if os.name == "posix":
+        dfd = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
 
 
 def atomic_write_json(path: Path, obj: Any, mode: int = 0o640) -> None:

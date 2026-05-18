@@ -39,6 +39,50 @@ MONTHS = {
     "dec": 12, "december": 12,
 }
 
+FOOD_TERMS = (
+    "restaurant", "grocery", "food", "catering", "menu", "breakfast", "lunch",
+    "dinner", "biryani", "dosa", "idli", "idly", "buffet", "meal", "combo",
+    "kitchen", "bakery", "sweet", "sweets", "snack", "snacks",
+)
+SALON_TERMS = (
+    "salon", "hair", "haircut", "perm", "perms", "blowdry", "beauty",
+    "spa", "stylist", "barber", "nails", "makeup",
+)
+TAX_TERMS = ("tax", "bookkeeping", "accounting", "payroll", "filing", "cpa")
+CLEANING_TERMS = ("cleaning", "cleaner", "deep clean", "move-out", "maid")
+MARKETING_TERMS = ("marketing", "seo", "paid ads", "content creation", "social media")
+
+
+def _has_any(text: str, terms: tuple[str, ...]) -> bool:
+    lower = text.lower()
+    return any(term in lower for term in terms)
+
+
+def _style_for_request(text: str) -> str:
+    if _has_any(text, SALON_TERMS):
+        return "modern US salon and beauty studio promotion with clean upscale service-offer cards, hair-service photography, and category-safe styling"
+    if _has_any(text, TAX_TERMS):
+        return "clean professional US tax and bookkeeping services flyer with trust-forward typography, simple offer cards, and category-safe styling"
+    if _has_any(text, CLEANING_TERMS):
+        return "fresh local cleaning service flyer with bright home-service visuals, clear service offer cards, and category-safe styling"
+    if _has_any(text, MARKETING_TERMS):
+        return "modern digital marketing services flyer with crisp business visuals, clear service offer cards, and category-safe styling"
+    if _has_any(text, FOOD_TERMS):
+        return "professional local food menu flyer with appetizing photography, strong price readability, and brand-forward retail design"
+    if "$" in text or any(term in text.lower() for term in ("price", "offer", "deal", "services")):
+        return "neutral US local-business promotion with clear service offer cards, readable prices, and category-safe styling"
+    return ""
+
+
+def _strip_offer_from_business_name(name: str) -> str:
+    name = re.sub(
+        r"\s+\b(?:promoting|offering|featuring|advertising|announcing)\b.+$",
+        "",
+        name,
+        flags=re.IGNORECASE,
+    )
+    return name.strip(" .:-")
+
 
 def _load_store(path: Path) -> FlyerProjectStore:
     if not path.exists():
@@ -92,12 +136,12 @@ def _extract_fields(raw_request: str, *, now: datetime) -> FlyerRequestFields:
     formats: list[str] = []
 
     event_match = re.search(
-        r"\b(?:need|create|make|generate)?\s*(?:a\s+)?(?:flyer|flier|poster|banner)\s+for\s+(.+?)(?=\s+(?:jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\b|\.|$)",
+        r"\b(?:need|create|make|generate)?\s*(?:a\s+)?(?:flyer|flier|poster|banner)\s+for\s+(.+?)(?=\s+\b(?:promoting|offering|featuring|advertising|announcing)\b|\s+(?:jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\b|\.|$)",
         text,
         flags=re.IGNORECASE,
     )
     if event_match:
-        event_name = event_match.group(1).strip(" .")
+        event_name = _strip_offer_from_business_name(event_match.group(1).strip(" ."))
         event_name = re.sub(r"^(?:customer|business|client)\s+", "", event_name, flags=re.IGNORECASE).strip(" .")
     if not event_name:
         menu_match = re.search(
@@ -152,7 +196,7 @@ def _extract_fields(raw_request: str, *, now: datetime) -> FlyerRequestFields:
     if venue_match:
         venue = venue_match.group(1).strip(" .")
     location_match = re.search(
-        r"\blocation\s+(.+?)(?=\.|,\s*(?:address|phone|contact)\b|\s+(?:address|phone|contact)\b|$)",
+        r"\blocation[:\s]+(.+?)(?=\.|,\s*(?:address|phone|contact)\b|\s+(?:address|phone|contact)\b|$)",
         text,
         flags=re.IGNORECASE,
     )
@@ -167,7 +211,7 @@ def _extract_fields(raw_request: str, *, now: datetime) -> FlyerRequestFields:
         address = address_match.group(1).strip(" .")
         venue = f"{venue}, {address}" if venue else address
 
-    contact_match = re.search(r"\bcontact\s+(.+?)(?=\.|$)", text, flags=re.IGNORECASE)
+    contact_match = re.search(r"\bcontact[:\s]+(.+?)(?=\.|$)", text, flags=re.IGNORECASE)
     if contact_match:
         contact = contact_match.group(1).strip(" .")
     phone_match = re.search(
@@ -208,13 +252,17 @@ def _extract_fields(raw_request: str, *, now: datetime) -> FlyerRequestFields:
     elif "mixed" in lower or "multi-language" in lower or "multilingual" in lower:
         language = "mixed"
     if "style" in lower:
-        style_match = re.search(r"([^.]*\bstyle\b)", text, flags=re.IGNORECASE)
+        style_match = re.search(
+            r"\bstyle\s*:\s*(.+?)(?=\.|,\s*(?:location|address|phone|contact)\b|\s+(?:location|address|phone|contact)\b|$)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if not style_match:
+            style_match = re.search(r"([^.]*\bstyle\b)", text, flags=re.IGNORECASE)
         if style_match:
             style = style_match.group(1).strip(" .")
-    if not style and any(term in lower for term in ("menu item", "breakfast", "lunch", "dinner", "specials", "food")):
-        style = "professional local food menu flyer with appetizing photography, strong price readability, and brand-forward retail design"
-    if not style and ("$" in lower or any(term in lower for term in ("price", "combo", "/piece", "/lb", "tray", "special"))):
-        style = "professional local food menu flyer with appetizing photography, strong price readability, and brand-forward retail design"
+    if not style:
+        style = _style_for_request(text)
     if not event_name and "uploaded template/reference" in lower:
         event_name = ""
     for label, value in [

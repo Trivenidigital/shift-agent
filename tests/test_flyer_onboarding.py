@@ -12,7 +12,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src" / "platform"))
 
-from agents.flyer.account import activate_customer, handle_account_command, reserve_quota, finalize_usage  # noqa: E402
+from agents.flyer.account import _phone_or_none, activate_customer, handle_account_command, reserve_quota, finalize_usage  # noqa: E402
 from agents.flyer.intake import handle_intake_message  # noqa: E402
 from agents.flyer.onboarding import handle_onboarding_message, store_brand_asset  # noqa: E402
 from schemas import FlyerCustomerStore, FlyerOnboardingSession, FlyerPlanTier, FlyerUsageEvent  # noqa: E402
@@ -52,6 +52,36 @@ def test_flyer_plan_tiers_are_data_driven_defaults():
         ("unlimited", 199.00, None),
     ]
     assert all(t.currency == "USD" for t in tiers)
+
+
+def test_customer_store_default_keeps_starter_prompts_auto():
+    now = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    customer = _trial_customer(customer_id="CUST0001", business_name="Demo Salon", phone="+17329837841", now=now)
+    store = FlyerCustomerStore(customers=[customer])
+
+    assert store.starter_prompt_mode(customer.customer_id) == "auto"
+    assert store.claim_starter_prompt_send(customer.customer_id) is True
+
+
+def test_customer_store_claim_allows_only_one_auto_starter_prompt():
+    now = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    customer = _trial_customer(customer_id="CUST0001", business_name="Demo Salon", phone="+17329837841", now=now)
+    store = FlyerCustomerStore(customers=[customer])
+
+    assert store.claim_starter_prompt_send(customer.customer_id) is True
+    assert store.claim_starter_prompt_send(customer.customer_id) is False
+
+
+def test_customer_store_preference_top_level_is_rollback_safe():
+    now = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    customer = _trial_customer(customer_id="CUST0001", business_name="Demo Salon", phone="+17329837841", now=now)
+    raw = json.loads(FlyerCustomerStore(customers=[customer]).model_dump_json())
+    raw["starter_prompt_preferences"] = {"CUST0001": "off"}
+    raw["starter_prompt_sent_counts"] = {"CUST0001": 1}
+
+    store = FlyerCustomerStore.model_validate(raw)
+
+    assert store.starter_prompt_mode("CUST0001") == "off"
 
 
 def test_onboarding_collects_required_business_and_plan_fields(tmp_path):
@@ -204,6 +234,47 @@ def test_compound_confirm_finishes_trial_onboarding(tmp_path):
     assert "Free trial active" in result.reply_text
     store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
     assert store.customers[0].status == "trial"
+
+
+@pytest.mark.parametrize("text", [
+    "ok create flyer for weekend sale",
+    "yes create flyer for weekend sale",
+])
+def test_alias_compound_confirm_finishes_trial_without_starter(tmp_path, text):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    store.onboarding_sessions.append(FlyerOnboardingSession(
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        status="confirming_summary",
+        started_at=now,
+        updated_at=now,
+        last_message_id="summary",
+        business_name="Demo Salon",
+        business_address="90 Brybar Dr, St Johns, FL",
+        public_phone="+17329837841",
+        business_whatsapp_number="+17329837841",
+        authorized_request_number="+17329837841",
+        business_category="salon",
+        preferred_language="en",
+        plan_id="trial",
+    ))
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    result = handle_onboarding_message(
+        state_path=state_path,
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        message_id="confirm-alias",
+        text=text,
+        now=now,
+    )
+
+    updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert result.next_status == "trial"
+    assert updated.customers[0].status == "trial"
+    assert "Here is a starter flyer request" not in result.reply_text
 
 
 def test_duplicate_confirm_for_same_sender_recovers_existing_trial_account(tmp_path):
@@ -675,6 +746,184 @@ def test_onboarding_accepts_ok_proceed_as_confirmation(tmp_path):
     assert "Text Mode is ready" in result.reply_text
 
 
+def test_trial_completion_suggests_business_category_starter_brief(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    store.onboarding_sessions.append(FlyerOnboardingSession(
+        chat_id="158024815611933@lid",
+        sender_phone=None,
+        status="confirming_summary",
+        started_at=now,
+        updated_at=now,
+        last_message_id="summary",
+        business_name="Hisaku",
+        business_address="101 Kavitha Palace, KPHB, Hyderabad, Telangana 500085",
+        public_phone="+918985741562",
+        business_whatsapp_number="+918985741562",
+        authorized_request_number="+918985741562",
+        business_category="Digital Marketing",
+        preferred_language="en",
+        plan_id="trial",
+    ))
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    result = handle_onboarding_message(
+        state_path=state_path,
+        chat_id="158024815611933@lid",
+        sender_phone=None,
+        message_id="confirm",
+        text="CONFIRM",
+        now=now,
+    )
+
+    assert result.next_status == "trial"
+    assert "Here is a starter flyer request" in result.reply_text
+    assert "Grow Your Business with Modern Marketing" in result.reply_text
+    assert "Reply with your edited version" in result.reply_text
+    assert "don't show sample prompts" in result.reply_text
+    updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert updated.claim_starter_prompt_send(result.customer_id) is False
+
+
+def test_guided_trial_completion_does_not_append_full_starter_brief(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    store.onboarding_sessions.append(FlyerOnboardingSession(
+        chat_id="158024815611933@lid",
+        sender_phone=None,
+        status="confirming_summary",
+        started_at=now,
+        updated_at=now,
+        last_message_id="summary",
+        business_name="Hisaku",
+        business_address="101 Kavitha Palace, KPHB, Hyderabad, Telangana 500085",
+        public_phone="+918985741562",
+        business_whatsapp_number="+918985741562",
+        authorized_request_number="+918985741562",
+        business_category="Digital Marketing",
+        preferred_language="en",
+        plan_id="trial",
+        creation_mode="guided",
+    ))
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    result = handle_onboarding_message(
+        state_path=state_path,
+        chat_id="158024815611933@lid",
+        sender_phone=None,
+        message_id="confirm-guided",
+        text="CONFIRM",
+        now=now,
+    )
+
+    assert result.next_status == "trial"
+    assert "Guided Mode is ready" in result.reply_text
+    assert "Here is a starter flyer request" not in result.reply_text
+    updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert updated.intake_sessions[0].status == "guided_collecting_goal"
+    assert updated.claim_starter_prompt_send(result.customer_id) is True
+
+
+def test_text_mode_ready_includes_category_starter_brief(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    customer = _trial_customer(
+        customer_id="CUST0001",
+        business_name="Spark Growth",
+        phone="+17329837841",
+        now=now,
+    ).model_copy(update={"business_category": "digital marketing agency"})
+    store = FlyerCustomerStore(
+        next_customer_sequence=2,
+        customers=[customer],
+        intake_sessions=[],
+    )
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    start = handle_intake_message(
+        state_path=state_path,
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        message_id="start",
+        text="Create flyer",
+        start_source="new_flyer",
+        now=now,
+    )
+    assert start.action == "choose_language"
+    language = handle_intake_message(
+        state_path=state_path,
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        message_id="language",
+        text="English",
+        now=now,
+    )
+    assert language.action == "choose_mode"
+    result = handle_intake_message(
+        state_path=state_path,
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        message_id="mode",
+        text="2",
+        now=now,
+    )
+
+    assert result.action == "text_ready"
+    assert "Here is a starter flyer request" in result.reply_text
+    assert "Grow Your Business with Modern Marketing" in result.reply_text
+    assert "don't show sample prompts" in result.reply_text
+    updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert updated.claim_starter_prompt_send(customer.customer_id) is False
+
+
+def test_text_mode_ready_respects_starter_prompt_opt_out(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    customer = _trial_customer(
+        customer_id="CUST0001",
+        business_name="Demo Salon",
+        phone="+17329837841",
+        now=now,
+    ).model_copy(update={"business_category": "salon"})
+    store = FlyerCustomerStore(next_customer_sequence=2, customers=[customer])
+    store.set_starter_prompt_mode(customer.customer_id, "off")
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    start = handle_intake_message(
+        state_path=state_path,
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        message_id="start",
+        text="Create flyer",
+        start_source="new_flyer",
+        now=now,
+    )
+    assert start.action == "choose_language"
+    language = handle_intake_message(
+        state_path=state_path,
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        message_id="lang",
+        text="English",
+        now=now,
+    )
+    assert language.action == "choose_mode"
+    result = handle_intake_message(
+        state_path=state_path,
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        message_id="mode",
+        text="2",
+        now=now,
+    )
+
+    assert result.action == "text_ready"
+    assert "Here is a starter flyer request" not in result.reply_text
+    assert "Reply with your edited version" in result.reply_text
+
+
 def test_business_whatsapp_can_be_skipped_with_no_business_account(tmp_path):
     state_path = tmp_path / "customers.json"
     now = datetime(2026, 5, 18, tzinfo=timezone.utc)
@@ -742,6 +991,43 @@ def test_profile_language_english_overrides_initial_mixed_choice(tmp_path):
     assert updated.onboarding_sessions[0].business_category == "Digital Marketing"
     assert updated.onboarding_sessions[0].preferred_language == "en"
     assert "Profile: Digital Marketing, en" in result.reply_text
+
+
+def test_language_only_business_profile_reply_is_rejected(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    store.onboarding_sessions.append(FlyerOnboardingSession(
+        chat_id="74290284261595@lid",
+        sender_phone="+19803826497",
+        status="collecting_business_profile",
+        started_at=now,
+        updated_at=now,
+        last_message_id="authorized",
+        business_name="Chloe Hair Studio",
+        business_address="11111 Gainsborough Ct, Fairfax, VA 22030",
+        public_phone="+19803826497",
+        business_whatsapp_number="+19803826497",
+        authorized_request_number="+19803826497",
+        preferred_language="en",
+        plan_id="trial",
+    ))
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    result = handle_onboarding_message(
+        state_path=state_path,
+        chat_id="74290284261595@lid",
+        sender_phone="+19803826497",
+        message_id="profile-language-only",
+        text="English",
+        now=now,
+    )
+
+    updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert result.handled is True
+    assert result.next_status == "collecting_business_profile"
+    assert "business type" in result.reply_text.lower()
+    assert updated.onboarding_sessions[0].business_category == ""
 
 
 def test_trial_quota_blocks_fourth_flyer_and_prompts_upgrade(tmp_path):
@@ -1197,6 +1483,73 @@ def test_non_admin_cannot_mutate_account_but_can_status(tmp_path):
     )
     assert denied.ok is True
     assert "Only the business WhatsApp" in denied.reply_text
+
+
+def test_customer_can_turn_sample_prompts_off_and_on(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    customer = _trial_customer(customer_id="CUST0001", business_name="Demo Salon", phone="+17329837841", now=now)
+    store = FlyerCustomerStore(customers=[customer])
+    assert store.claim_starter_prompt_send(customer.customer_id) is True
+    state_path.write_text(store.model_dump_json(), encoding="utf-8")
+
+    off = handle_account_command(
+        state_path=state_path,
+        sender_phone="+17329837841",
+        sender_role="customer",
+        chat_id="17329837841@s.whatsapp.net",
+        text="don't show sample prompts",
+        now=now,
+    )
+
+    assert off.ok is True
+    assert "Sample prompts are off for this business account" in off.reply_text
+    updated_store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert updated_store.starter_prompt_mode(customer.customer_id) == "off"
+
+    on = handle_account_command(
+        state_path=state_path,
+        sender_phone="+17329837841",
+        sender_role="customer",
+        chat_id="17329837841@s.whatsapp.net",
+        text="show sample prompts again",
+        now=now,
+    )
+
+    assert on.ok is True
+    updated_store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert updated_store.starter_prompt_mode(customer.customer_id) == "auto"
+    assert updated_store.claim_starter_prompt_send(customer.customer_id) is True
+
+
+def test_account_phone_normalizer_keeps_actor_phone_for_audit_and_pending_changes():
+    assert _phone_or_none("+1 732 983 7841") == "+17329837841"
+    assert _phone_or_none("not a phone") is None
+
+
+def test_lid_only_customer_can_turn_sample_prompts_off(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    customer = _trial_customer(
+        customer_id="CUST0001",
+        business_name="Demo Salon",
+        phone="+17329837841",
+        now=now,
+    ).model_copy(update={"primary_chat_id": "201975216009469@lid"})
+    state_path.write_text(FlyerCustomerStore(customers=[customer]).model_dump_json(), encoding="utf-8")
+
+    result = handle_account_command(
+        state_path=state_path,
+        sender_phone=None,
+        sender_role="customer",
+        chat_id="201975216009469@lid",
+        text="[shift-agent-sender v=1 role=customer]\ndon't show sample prompts",
+        now=now,
+    )
+
+    assert result.ok is True
+    store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert store.starter_prompt_mode(customer.customer_id) == "off"
 
 
 def test_quota_counts_latest_reservation_state_once(tmp_path):

@@ -106,6 +106,27 @@ def test_intake_script_installed_for_language_and_guided_mode():
     assert "is_vague_flyer_start" in hooks
 
 
+def test_starter_briefs_module_installed_and_smoked():
+    deploy = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh").read_text(encoding="utf-8")
+    smoke = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-smoke-test.sh").read_text(encoding="utf-8")
+
+    assert "src/agents/flyer/starter_briefs.py" in deploy
+    assert "/opt/shift-agent/flyer_starter_briefs.py" in deploy
+    assert "flyer_starter_briefs" in smoke
+
+
+def test_starter_prompt_claims_use_locked_account_script():
+    script = (SCRIPTS / "manage-flyer-account").read_text(encoding="utf-8")
+    actions = (REPO / "src" / "plugins" / "cf-router" / "actions.py").read_text(encoding="utf-8")
+
+    assert "--claim-starter-prompt" in script
+    assert "--release-starter-prompt" in script
+    assert "with FileLock(Path(str(state_path) + \".lock\")):" in script
+    assert "_trigger_flyer_account_state" in actions
+    assert "--claim-starter-prompt" in actions
+    assert "--release-starter-prompt" in actions
+
+
 def test_flyer_campaign_cta_script_installed_and_smoked():
     deploy = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh").read_text(encoding="utf-8")
     smoke = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-smoke-test.sh").read_text(encoding="utf-8")

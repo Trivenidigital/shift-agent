@@ -17,6 +17,11 @@ from schemas import (
 )
 
 try:
+    from agents.flyer.starter_briefs import starter_brief_message  # type: ignore
+except ModuleNotFoundError:
+    from flyer_starter_briefs import starter_brief_message  # type: ignore
+
+try:
     from safe_io import atomic_write_text  # type: ignore
 except ModuleNotFoundError:
     def atomic_write_text(path: Path, text: str) -> None:  # type: ignore[no-redef]
@@ -157,6 +162,7 @@ def handle_intake_message(
                 source=session.source,
                 preferred_language=session.preferred_language,
                 creation_mode=mode,
+                customer_id=customer.customer_id if customer else "",
             )
         if session.source == "quick_flyer":
             store.discard_intake_session(session)
@@ -170,11 +176,20 @@ def handle_intake_message(
                 creation_mode=mode,
             )
         if mode == "text":
+            include_starter = bool(
+                customer
+                and customer.status in {"trial", "active"}
+                and store.claim_starter_prompt_send(customer.customer_id)
+            )
             store.discard_intake_session(session)
             write_customer_store(state_path, store)
             return IntakeResult(
                 True,
-                _text_mode_ready_reply(session.preferred_language),
+                _text_mode_ready_reply(
+                    session.preferred_language,
+                    customer=customer,
+                    include_starter_brief=include_starter,
+                ),
                 "text_ready",
                 source=session.source,
                 preferred_language=session.preferred_language,
@@ -364,13 +379,23 @@ def _mode_prompt(language: str, *, prefix: str = "") -> str:
     return "\n".join(lines)
 
 
-def _text_mode_ready_reply(language: str) -> str:
-    return (
+def _text_mode_ready_reply(
+    language: str,
+    *,
+    customer: Optional[FlyerCustomerProfile] = None,
+    include_starter_brief: bool = True,
+) -> str:
+    reply = (
         "Flyer Studio\n"
         "------------\n"
         f"Text Mode is ready in {language_label(language)}.\n\n"
         "Send your flyer request in one message. You can also attach an existing flyer, logo, menu, photos, or reference image."
     )
+    if include_starter_brief and customer and customer.status in {"trial", "active"}:
+        reply = f"{reply}\n\n{starter_brief_message(customer.business_category, business_name=customer.business_name, include_opt_out_hint=True)}"
+    elif customer and customer.status in {"trial", "active"}:
+        reply = f"{reply}\n\nReply with your edited version, or send your own flyer request."
+    return reply
 
 
 def _guided_goal_prompt(language: str) -> str:

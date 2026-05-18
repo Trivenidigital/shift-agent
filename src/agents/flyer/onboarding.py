@@ -24,6 +24,11 @@ from schemas import (
 )
 
 try:
+    from agents.flyer.starter_briefs import starter_brief_message  # type: ignore
+except ModuleNotFoundError:
+    from flyer_starter_briefs import starter_brief_message  # type: ignore
+
+try:
     from safe_io import atomic_write_text  # type: ignore
 except ModuleNotFoundError:
     def atomic_write_text(path: Path, text: str) -> None:  # type: ignore[no-redef]
@@ -169,6 +174,7 @@ def handle_onboarding_message(
     _replace_session(store, session)
     customer_id = ""
     customer_created = False
+    include_trial_starter_brief = True
     if session.status in {"payment_pending", "trial"}:
         try:
             customer = store.new_customer(
@@ -248,6 +254,7 @@ def handle_onboarding_message(
         session = session.model_copy(update={"status": customer.status, "updated_at": now, "customer_id": customer.customer_id})
         _replace_session(store, session)
         if customer.status == "trial" and session.creation_mode == "guided":
+            include_trial_starter_brief = False
             store.replace_intake_session(FlyerIntakeSession(
                 chat_id=chat_id,
                 sender_phone=_phone_or_none(sender_phone),
@@ -259,10 +266,21 @@ def handle_onboarding_message(
                 preferred_language=session.preferred_language,
                 creation_mode="guided",
             ))
+        elif customer.status == "trial":
+            include_trial_starter_brief = (
+                not _has_trailing_flyer_request_after_confirm(normalized_text)
+                and store.claim_starter_prompt_send(customer.customer_id)
+            )
     write_customer_store(state_path, store)
     return OnboardingResult(
         True,
-        _reply_for_session(session, tiers=tiers, customer_id=customer_id, store=store),
+        _reply_for_session(
+            session,
+            tiers=tiers,
+            customer_id=customer_id,
+            store=store,
+            include_starter_brief=include_trial_starter_brief,
+        ),
         session.status,
         customer_id,
         customer_created,
@@ -586,6 +604,7 @@ def _reply_for_session(
     tiers: list[FlyerPlanTier],
     customer_id: str,
     store: FlyerCustomerStore,
+    include_starter_brief: bool = True,
 ) -> str:
     if session.status == "collecting_business_address":
         return "Flyer Studio\n------------\nGreat. What is the business address?"
@@ -609,7 +628,14 @@ def _reply_for_session(
         customer = next((c for c in store.customers if c.customer_id == customer_id), None)
         return _payment_reply(customer_id, session.plan_id, customer.payment_checkout_url if customer else "")
     if session.status == "trial":
-        return _trial_active_reply(customer_id, creation_mode=session.creation_mode, language=session.preferred_language)
+        customer = next((c for c in store.customers if c.customer_id == customer_id), None)
+        return _trial_active_reply(
+            customer_id,
+            creation_mode=session.creation_mode,
+            language=session.preferred_language,
+            customer=customer,
+            include_starter_brief=include_starter_brief,
+        )
     return _welcome_reply(tiers)
 
 
@@ -653,27 +679,55 @@ def _payment_reply(customer_id: str, plan_id: str, checkout_url: str) -> str:
     )
 
 
-def _trial_active_reply(customer_id: str, *, creation_mode: str = "", language: str = "en") -> str:
+def _has_trailing_flyer_request_after_confirm(text: str) -> bool:
+    trailing = _trailing_text_after_compound_confirm(text)
+    return bool(re.search(r"\b(?:create|make|design|need|flyer|poster|banner)\b", trailing.lower()))
+
+
+def _trailing_text_after_compound_confirm(text: str) -> str:
+    body = " ".join((text or "").split())
+    match = re.match(
+        r"^\s*(?:confirm|ok|yes)\b(?:\s*[\.:,;!\-]\s*|\s+)(?P<trailing>.+)$",
+        body,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not match:
+        return ""
+    return match.group("trailing").strip()
+
+
+def _trial_active_reply(
+    customer_id: str,
+    *,
+    creation_mode: str = "",
+    language: str = "en",
+    customer: Optional[FlyerCustomerProfile] = None,
+    include_starter_brief: bool = True,
+) -> str:
     if creation_mode == "guided":
-        return (
+        reply = (
             "Flyer Studio\n------------\n"
             f"Free trial active for {customer_id}. You have 3 free sample flyers.\n\n"
             "Guided Mode is ready.\n"
             "First, what are you promoting? Example: weekend sale, breakfast specials, grand opening, class, service offer."
         )
-    if creation_mode == "text":
-        return (
+    elif creation_mode == "text":
+        reply = (
             "Flyer Studio\n------------\n"
             f"Free trial active for {customer_id}. You have 3 free sample flyers.\n\n"
             "Text Mode is ready. Send your first flyer request in one message. "
             "You can also attach an existing flyer, logo, menu, photos, or reference image."
         )
-    del language
-    return (
-        "Flyer Studio\n------------\n"
-        f"Free trial active for {customer_id}. You have 3 free sample flyers.\n"
-        "Send your first flyer request now. After each sample, I will show the paid onboarding link and plans."
-    )
+    else:
+        del language
+        reply = (
+            "Flyer Studio\n------------\n"
+            f"Free trial active for {customer_id}. You have 3 free sample flyers.\n"
+            "Send your first flyer request now. After each sample, I will show the paid onboarding link and plans."
+        )
+    if include_starter_brief and creation_mode != "guided" and customer and customer.status in {"trial", "active"}:
+        reply = f"{reply}\n\n{starter_brief_message(customer.business_category, business_name=customer.business_name, include_opt_out_hint=True)}"
+    return reply
 
 
 def _existing_account_ready_reply(customer: FlyerCustomerProfile) -> str:
@@ -802,7 +856,12 @@ def _parse_profile_text(text: str, *, default_language: str = "en") -> tuple[str
         flags=re.IGNORECASE,
     )
     category = re.sub(r"[,;]+", " ", category)
-    return (" ".join(category.split()) or text.strip() or "local business")[:120], language
+    category = " ".join(category.split())
+    if not category:
+        raise ValueError(
+            "Please include the business type, for example: Hair salon, English."
+        )
+    return category[:120], language
 
 
 def _parse_plan_choice(text: str, tiers: list[FlyerPlanTier]) -> str:
@@ -845,6 +904,8 @@ def _parse_confirmation_edit(text: str, tiers: list[FlyerPlanTier]) -> dict[str,
 def _is_confirm_reply(text: str) -> bool:
     body = " ".join((text or "").strip().lower().split())
     if body in {"confirm", "ok", "okay", "ok proceed", "proceed", "yes", "yes proceed", "y", "go ahead", "looks good"}:
+        return True
+    if _has_trailing_flyer_request_after_confirm(text):
         return True
     return bool(re.match(r"^\s*CONFIRM\b(?:\s*[\.:,;!\-]\s*|\s*$|\s+.+$)", text or "", flags=re.IGNORECASE | re.DOTALL))
 
