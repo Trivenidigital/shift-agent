@@ -351,4 +351,5 @@ def test_active_revision_failure_gets_clarification_not_false_noted_message():
     assert "I need one clarification before regenerating" in hooks
     assert '"revision_requires_clarification": revision_requires_clarification' in update
     assert '"project_id": updated.project_id' in update
-    assert "Do not persist an unapplied no-op revision" in update
+    assert "if revision_requires_clarification:" in update
+    assert "return 0" in update

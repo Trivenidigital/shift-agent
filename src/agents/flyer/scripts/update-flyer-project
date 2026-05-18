@@ -47,13 +47,18 @@ def main() -> int:
             if project.project_id != args.project_id:
                 continue
             updated = project
+            should_write = False
+            patch = None
+            revision_requires_clarification = False
             if args.fields_json:
                 fields = project.fields.model_copy(update=FlyerRequestFields.model_validate_json(args.fields_json).model_dump(exclude_none=True))
                 updated = updated.model_copy(update={"fields": fields})
+                should_write = True
             if args.status:
                 if not is_flyer_transition_allowed(updated.status, args.status):
                     raise SystemExit(f"invalid transition {updated.status}->{args.status}")
                 updated = updated.model_copy(update={"status": args.status})
+                should_write = True
             if args.select_concept:
                 concept_ids = {c.concept_id for c in updated.concepts}
                 if args.select_concept not in concept_ids:
@@ -70,6 +75,7 @@ def main() -> int:
                     "concepts": concepts,
                     "status": "revising_design",
                 })
+                should_write = True
             if args.revision_text:
                 if not args.message_id:
                     raise SystemExit("--message-id is required with --revision-text")
@@ -78,11 +84,21 @@ def main() -> int:
                     or "edit uploaded flyer/source artwork" in (updated.raw_request or "").lower()
                     or "authorized flyer/source artwork update" in (updated.raw_request or "").lower()
                 )
-                target_status = "revising_design"
-                if updated.status != target_status:
-                    if not is_flyer_transition_allowed(updated.status, target_status):
-                        raise SystemExit(f"invalid transition {updated.status}->{target_status}")
-                    updated = updated.model_copy(update={"status": target_status})
+                patch = extract_revision_patch(updated, args.revision_text)
+                revision_requires_clarification = patch.ambiguous or (not patch.changed and not patch.visual_only)
+                if revision_requires_clarification:
+                    payload = {
+                        "project_id": updated.project_id,
+                        "version": updated.version,
+                        "revision_patch": patch.to_dict(),
+                        "revision_requires_clarification": True,
+                    }
+                    if should_write:
+                        updated = updated.model_copy(update={"updated_at": datetime.now(timezone.utc)})
+                        store.projects[idx] = updated
+                        atomic_write_text(state_path, store.model_dump_json(indent=2))
+                    print(json.dumps(payload))
+                    return 0
                 revision = FlyerRevision(
                     revision_id=f"R{len(updated.revisions) + 1:03d}",
                     message_id=args.message_id,
@@ -90,43 +106,46 @@ def main() -> int:
                     request_text=args.revision_text,
                     applied=False,
                 )
-                patch = extract_revision_patch(updated, args.revision_text)
-                revision_requires_clarification = patch.ambiguous or (not patch.changed and not patch.visual_only)
-                if patch.field_updates or patch.notes_update is not None:
-                    field_update = dict(patch.field_updates)
-                    if patch.notes_update is not None:
-                        field_update["notes"] = patch.notes_update
-                    fields = updated.fields.model_copy(update=field_update)
+                if source_edit_request:
+                    raw_lines = [updated.raw_request.rstrip()]
+                    correction = f"Latest correction: {args.revision_text.strip()}"
+                    if correction.lower() not in updated.raw_request.lower():
+                        raw_lines.append(correction)
                     updated = updated.model_copy(update={
-                        "fields": fields,
-                    })
-                if patch.raw_request_update is not None:
-                    raw_request_update = patch.raw_request_update
-                    if source_edit_request and "source artwork" not in raw_request_update.lower():
-                        raw_request_update = (
-                            "Edit uploaded flyer/source artwork. Preserve the source flyer.\n"
-                            f"Original request: {updated.raw_request}\n"
-                            f"Latest correction: {raw_request_update}"
-                        )
-                    updated = updated.model_copy(update={"raw_request": raw_request_update})
-                if patch.changed or patch.visual_only:
-                    revision = revision.model_copy(update={"resulting_version": updated.version + 1})
-                updated = updated.model_copy(update={
-                    "concepts": [],
-                    "selected_concept_id": None,
-                    "final_asset_ids": [],
-                })
-                if revision_requires_clarification:
-                    # Do not persist an unapplied no-op revision: it would block
-                    # approval with no normal path to become applied.
-                    updated = updated.model_copy(update={
+                        "raw_request": "\n".join(line for line in raw_lines if line),
+                        "revisions": [
+                            *updated.revisions,
+                            revision.model_copy(update={"resulting_version": updated.version + 1}),
+                        ],
                         "version": updated.version + 1,
                     })
+                    should_write = True
                 else:
+                    target_status = "revising_design"
+                    if updated.status != target_status:
+                        if not is_flyer_transition_allowed(updated.status, target_status):
+                            raise SystemExit(f"invalid transition {updated.status}->{target_status}")
+                        updated = updated.model_copy(update={"status": target_status})
+                    if patch.field_updates or patch.notes_update is not None:
+                        field_update = dict(patch.field_updates)
+                        if patch.notes_update is not None:
+                            field_update["notes"] = patch.notes_update
+                        fields = updated.fields.model_copy(update=field_update)
+                        updated = updated.model_copy(update={
+                            "fields": fields,
+                        })
+                    if patch.raw_request_update is not None:
+                        updated = updated.model_copy(update={"raw_request": patch.raw_request_update})
+                    if patch.changed or patch.visual_only:
+                        revision = revision.model_copy(update={"resulting_version": updated.version + 1})
                     updated = updated.model_copy(update={
+                        "concepts": [],
+                        "selected_concept_id": None,
+                        "final_asset_ids": [],
                         "revisions": [*updated.revisions, revision],
                         "version": updated.version + 1,
                     })
+                    should_write = True
             if args.approve_message_id:
                 unapplied = [r.revision_id for r in updated.revisions if not r.applied]
                 if unapplied:
@@ -142,15 +161,17 @@ def main() -> int:
                     "status": "finalizing_assets",
                     "approved_message_id": args.approve_message_id,
                 })
-            updated = updated.model_copy(update={"updated_at": datetime.now(timezone.utc)})
-            store.projects[idx] = updated
-            atomic_write_text(state_path, store.model_dump_json(indent=2))
+                should_write = True
+            if should_write:
+                updated = updated.model_copy(update={"updated_at": datetime.now(timezone.utc)})
+                store.projects[idx] = updated
+                atomic_write_text(state_path, store.model_dump_json(indent=2))
             payload = json.loads(updated.model_dump_json())
             if args.revision_text:
                 payload = {
                     "project_id": updated.project_id,
                     "version": updated.version,
-                    "revision_patch": patch.to_dict(),
+                    "revision_patch": patch.to_dict() if patch is not None else {},
                     "revision_requires_clarification": revision_requires_clarification,
                 }
             print(json.dumps(payload))
