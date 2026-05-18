@@ -167,6 +167,84 @@ def test_extract_revision_patch_handles_menu_item_swap_without_clarification():
     assert "Do not include Tatte Idly" in patch.notes_update
 
 
+def test_extract_revision_patch_handles_extra_time_removal_and_item_add():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Weekend Breakfast Specials",
+        event_time="08:00",
+        venue_or_location="90 Brybar Dr",
+        contact_info="+1 732 983 7841",
+        notes="Weekend Breakfast Specials. Timings 8 AM to 11 AM. Extra 08:00 appears in the template.",
+    ))
+
+    patch = extract_revision_patch(project, "Remove that extra 08:00. Add Any Item for $9.99.")
+
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert 'Remove duplicate/extra time text "08:00"' in patch.notes_update
+    assert "Add menu item Any Item for $9.99" in patch.notes_update
+    assert 'Remove duplicate/extra time text "08:00"' in patch.raw_request_update
+
+
+def test_extract_revision_patch_handles_item_swap_with_price():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Weekend Breakfast Specials",
+        contact_info="+1 732 983 7841",
+        notes="Items: Poori $8.99, Kheema Dosa $12.99.",
+    ))
+
+    patch = extract_revision_patch(project, "Swap Kheema Dosa with Any Item for $9.99.")
+
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert "Replace menu item Kheema Dosa with Any Item for $9.99" in patch.notes_update
+    assert "Do not include Kheema Dosa" in patch.notes_update
+
+
+def test_extract_revision_patch_handles_remove_and_add_item_same_price():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Weekend Breakfast Specials",
+        contact_info="+1 732 983 7841",
+        notes="Items: Tatte Idly $8.99, Poori $8.99.",
+    ))
+
+    patch = extract_revision_patch(project, "Remove Tatte Idly and add Ghee Karam Idly same price.")
+
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert "Remove menu item Tatte Idly" in patch.notes_update
+    assert "Add menu item Ghee Karam Idly same price" in patch.notes_update
+
+
+def test_extract_revision_patch_handles_item_specific_price_to_new_price():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Weekend Breakfast Specials",
+        contact_info="+1 732 983 7841",
+        notes="Items: Poori with Chicken $14.99, Kheema Dosa $12.99, Vada $8.99.",
+    ))
+
+    patch = extract_revision_patch(project, "Change Kheema Dosa price to $9.99.")
+
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert "Kheema Dosa $9.99" in patch.notes_update
+    assert "Kheema Dosa $12.99" not in patch.notes_update
+    assert "Poori with Chicken $14.99" in patch.notes_update
+
+
+def test_extract_revision_patch_flags_item_specific_price_without_adjacent_price():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Weekend Breakfast Specials",
+        contact_info="+1 732 983 7841",
+        notes="Items: Kheema Dosa, Poori $8.99.",
+    ))
+
+    patch = extract_revision_patch(project, "Change Kheema Dosa price to $9.99.")
+
+    assert patch.changed is False
+    assert patch.ambiguous is True
+    assert "Kheema Dosa" in patch.unresolved_reason
+
+
 def test_location_from_to_revision_does_not_change_title():
     project = _project(FlyerRequestFields(
         event_or_business_name="Weekend Breakfast",

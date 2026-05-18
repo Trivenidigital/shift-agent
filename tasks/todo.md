@@ -978,3 +978,11 @@ Review results:
   - [x] Reserve subscription/guest access before long-running generation, release it on generation or preview-delivery failure, and finalize usage only after the preview was delivered.
   - [x] Mark source-edit manifests as `source_edit_integrity_only` so the system does not over-claim OCR/text QA for model-edited artwork.
   - Review: focused Flyer suite `131 passed`; backend cockpit tests `48 passed, 1 skipped`; frontend `npm run build` passed; `py_compile` passed; `git diff --check` returned only line-ending warnings. Three reviewer passes found and the branch fixed: auth bypass in cockpit service, source-edit classifier/durability gaps, partial-preview access release, and guest-order reservation idempotency. `tests/test_cf_router_plugin.py` is Linux-only and skipped on this Windows host.
+- [ ] Flyer edit-flow hardening follow-up (2026-05-18): rigorous testing found that source-preserving edits still have production gaps: missing `OPENAI_API_KEY` makes source edits fail, unclear revisions can clear active previews/finals, natural edit language is under-parsed, and manual edit queue copy promises more than the system can complete automatically.
+  - Drift-check tag: extends-Hermes
+  - Hermes-first analysis: reuse Hermes WhatsApp ingress, sender identity, media cache, JSON state, `safe_io`, audit, bridge delivery, Flyer quota/guest access, and admin cockpit. Net-new scope is only Flyer-specific edit classification, revision parsing/state safety, source-edit provider readiness, and operator-visible manual edit work.
+  - [x] Write implementation plan: `docs/superpowers/plans/2026-05-18-flyer-edit-flow-hardening.md`.
+  - [ ] Get implementation plan reviewed by two parallel agents.
+  - [ ] Write design spec and get it reviewed by two parallel agents.
+  - [ ] Build fixes with TDD and focused verification.
+  - [ ] Create PR and get three parallel review vectors before merge.
