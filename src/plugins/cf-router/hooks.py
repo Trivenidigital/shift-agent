@@ -910,6 +910,19 @@ def _preview_may_have_delivered(outbound_message_id: str, ack_err: str) -> bool:
     return bool(outbound_message_id) or "partial_delivery" in err or "send_uncertain" in err
 
 
+def _send_flyer_regeneration_failed_ack(chat_id: str, project_id: str) -> tuple[bool, str, str]:
+    return actions.send_flyer_text(
+        chat_id,
+        (
+            "Flyer Studio\n"
+            "------------\n"
+            f"I could not regenerate project {project_id} automatically just now.\n\n"
+            "I kept the edit request open for source-preserving follow-up instead of sending a mismatched flyer. "
+            "Please check back here shortly, or send one exact correction if anything else must change."
+        ),
+    )
+
+
 def _try_flyer_account_intercept(text: str, chat_id: str, event: Any) -> Optional[dict]:
     if not actions.is_flyer_account_command(text):
         return None
@@ -1460,7 +1473,19 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any) -> 
                 reason="flyer_primary_failed", chat_id=chat_id,
                 subprocess_rc=2, detail=f"project_id={project_id}; revision_regeneration_failed={gen_detail[:400]}",
             )
-            return None
+            fail_ack_ok, fail_mid, fail_err = _send_flyer_regeneration_failed_ack(chat_id, project_id)
+            actions.audit_intercepted(
+                reason="flyer_reference_exact_edit_queued" if fail_ack_ok else "flyer_primary_failed",
+                chat_id=chat_id,
+                subprocess_rc=0 if fail_ack_ok else 3,
+                detail=(
+                    f"project_id={project_id}; approve_regeneration_failed=true; "
+                    f"sender_role={role}; gen_detail={gen_detail[:300]}; "
+                    f"ack_message_id={fail_mid}; ack_error={fail_err[:300]}"
+                ),
+            )
+            return {"action": "skip",
+                    "reason": f"cf-router flyer active: regeneration failed for {project_id}"}
         if status == "revising_design":
             ok_status, status_detail = actions.invoke_update_flyer_project(project_id, "--status", "awaiting_final_approval")
             if not ok_status:
@@ -1509,6 +1534,7 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any) -> 
             chat_id,
             ack_message,
         )
+        regeneration_failed = False
         if ok and needs_regen and not revision_requires_clarification:
             gen_ok, gen_detail = actions.trigger_generate_flyer_concepts(project_id)
             if gen_ok:
@@ -1518,10 +1544,20 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any) -> 
                 if preview_err:
                     err = f"{err}; preview_error={preview_err}"
             else:
+                regeneration_failed = True
+                fail_ack_ok, fail_mid, fail_err = _send_flyer_regeneration_failed_ack(chat_id, project_id)
+                mid = ",".join(x for x in [mid, fail_mid] if x)
                 ack_ok = False
                 err = f"{err}; regeneration_failed={gen_detail[:300]}"
+                if fail_err:
+                    err = f"{err}; failure_ack_error={fail_err[:300]}"
+                if fail_ack_ok:
+                    err = f"{err}; failure_ack_sent=true"
         actions.audit_intercepted(
-            reason="flyer_primary_project_created" if ok else "flyer_primary_failed",
+            reason=(
+                "flyer_reference_exact_edit_queued"
+                if regeneration_failed else ("flyer_primary_project_created" if ok else "flyer_primary_failed")
+            ),
             chat_id=chat_id, subprocess_rc=0 if ok and ack_ok else 2,
             detail=f"project_id={project_id}; revision=true; revision_requires_clarification={revision_requires_clarification}; update={detail[:250]}; ack_message_id={mid}; ack_error={err}",
         )
