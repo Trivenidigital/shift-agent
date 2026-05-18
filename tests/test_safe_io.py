@@ -65,6 +65,7 @@ def test_atomic_write_text_skips_dir_fsync_when_os_name_not_posix(tmp_path, monk
     assert target.read_text(encoding="utf-8") == "hello"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX-only durability invariant; cannot exercise on Windows even with monkeypatched os.name")
 def test_atomic_write_text_fsyncs_parent_on_posix(tmp_path, monkeypatch):
     """BUG-FLYER-QA-005 regression guard: the POSIX durability invariant (fsync
     the parent directory after rename) must NOT be silently dropped. Track
