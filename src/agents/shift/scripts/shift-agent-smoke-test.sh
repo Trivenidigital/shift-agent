@@ -39,11 +39,14 @@ for script in \
     /usr/local/bin/select-catering-proposal \
     /usr/local/bin/create-flyer-project \
     /usr/local/bin/update-flyer-project \
+    /usr/local/bin/check-flyer-reference-scope \
     /usr/local/bin/generate-flyer-concepts \
     /usr/local/bin/finalize-flyer-assets \
     /usr/local/bin/handle-flyer-onboarding \
+    /usr/local/bin/handle-flyer-intake \
     /usr/local/bin/store-flyer-brand-asset \
     /usr/local/bin/manage-flyer-account \
+    /usr/local/bin/manage-flyer-guest-order \
     /usr/local/bin/flyer-delivery-report \
     /usr/local/bin/send-flyer-campaign \
     /usr/local/bin/smoke-flyer-quality \

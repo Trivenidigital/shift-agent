@@ -14,12 +14,19 @@ def test_scripts_use_atomic_writes_and_locks():
         "generate-flyer-concepts",
         "finalize-flyer-assets",
         "handle-flyer-onboarding",
+        "handle-flyer-intake",
         "store-flyer-brand-asset",
         "manage-flyer-account",
+        "manage-flyer-guest-order",
     ]:
         text = (SCRIPTS / name).read_text(encoding="utf-8")
         assert "FileLock" in text
-        assert "atomic_write_text" in text
+        if name == "manage-flyer-guest-order":
+            assert "start_guest_order" in text
+        elif name == "handle-flyer-intake":
+            assert "handle_intake_message" in text
+        else:
+            assert "atomic_write_text" in text
 
 
 def test_delivery_script_can_send_by_project_id():
@@ -58,6 +65,47 @@ def test_delivery_report_installed_and_smoked_for_operator_visibility():
     assert "uncertain_asset_ids" in report
 
 
+def test_guest_order_script_installed_for_quick_flyer_path():
+    deploy = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh").read_text(encoding="utf-8")
+    smoke = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-smoke-test.sh").read_text(encoding="utf-8")
+    script = (SCRIPTS / "manage-flyer-guest-order").read_text(encoding="utf-8")
+    actions = (REPO / "src" / "plugins" / "cf-router" / "actions.py").read_text(encoding="utf-8")
+    hooks = (REPO / "src" / "plugins" / "cf-router" / "hooks.py").read_text(encoding="utf-8")
+
+    assert "manage-flyer-guest-order" in deploy
+    assert "manage-flyer-guest-order" in smoke
+    assert "flyer_guest_order.py" in deploy
+    assert "--start" in script
+    assert "--activate" in script
+    assert "--reserve" in script
+    assert "--release" in script
+    assert "--consume" in script
+    assert "--find-paid" in script
+    assert "is_quick_flyer_campaign_cta" in actions
+    assert "trigger_start_flyer_guest_order" in actions
+    assert "trigger_reserve_flyer_guest_order" in actions
+    assert "trigger_release_flyer_guest_order" in actions
+    assert "trigger_consume_flyer_guest_order" in actions
+    assert "find_paid_flyer_guest_order" in actions
+    assert "quick_flyer_payment" in hooks
+
+
+def test_intake_script_installed_for_language_and_guided_mode():
+    deploy = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh").read_text(encoding="utf-8")
+    smoke = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-smoke-test.sh").read_text(encoding="utf-8")
+    script = (SCRIPTS / "handle-flyer-intake").read_text(encoding="utf-8")
+    actions = (REPO / "src" / "plugins" / "cf-router" / "actions.py").read_text(encoding="utf-8")
+    hooks = (REPO / "src" / "plugins" / "cf-router" / "hooks.py").read_text(encoding="utf-8")
+
+    assert "handle-flyer-intake" in deploy
+    assert "handle-flyer-intake" in smoke
+    assert "flyer_intake.py" in deploy
+    assert "handle_intake_message" in script
+    assert "trigger_flyer_intake" in actions
+    assert "_try_flyer_intake_intercept" in hooks
+    assert "is_vague_flyer_start" in hooks
+
+
 def test_flyer_campaign_cta_script_installed_and_smoked():
     deploy = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh").read_text(encoding="utf-8")
     smoke = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-smoke-test.sh").read_text(encoding="utf-8")
@@ -74,14 +122,18 @@ def test_flyer_campaign_cta_script_installed_and_smoked():
     assert "bridge_send_cta" in script
     assert "bridge_send_media" in script
     assert "Start Free Trial" in script
+    assert "Create One Flyer - $4" in script
     assert "Act Now! Save Time and Money" in script
     assert "DEFAULT_START_TRIAL_MESSAGE" in script
+    assert "DEFAULT_QUICK_FLYER_MESSAGE" in script
     assert "DEFAULT_ACT_NOW_MESSAGE" in script
     assert "Help me create a beautiful flyer for my business" in script
     assert "I want to set up Flyer Studio for my business" in script
     assert "--start-trial-message" in script
+    assert "--quick-flyer-message" in script
     assert "--act-now-message" in script
     assert '"message": args.start_trial_message' in script
+    assert '"message": args.quick_flyer_message' in script
     assert '"message": args.act_now_message' in script
     assert '"url":' not in script
     assert "URL buttons are intentionally not used" in script
@@ -122,6 +174,8 @@ def test_flyer_complete_requests_send_processing_ack_before_generation():
     hooks = (REPO / "src" / "plugins" / "cf-router" / "hooks.py").read_text(encoding="utf-8")
     assert "def send_flyer_processing_ack" in actions
     assert "Request processing." in actions
+    assert "5-6 minutes" in actions
+    assert "check back" in actions
     assert hooks.index("send_flyer_processing_ack(chat_id, project_id)") < hooks.index("trigger_generate_flyer_concepts(project_id)")
 
 
@@ -142,12 +196,30 @@ def test_router_starts_new_work_over_active_state_for_explicit_or_media_template
     actions = (REPO / "src" / "plugins" / "cf-router" / "actions.py").read_text(encoding="utf-8")
     hooks = (REPO / "src" / "plugins" / "cf-router" / "hooks.py").read_text(encoding="utf-8")
     assert "def should_start_new_flyer_over_active" in actions
+    assert "def flyer_campaign_cta_text" in actions
+    assert "def is_flyer_campaign_cta" in actions
+    assert "def find_flyer_onboarding_session_by_sender" in actions
+    assert "def _try_flyer_campaign_cta_intercept" in hooks
+    assert "def _try_flyer_existing_onboarding_intercept" in hooks
     assert "def flyer_project_has_required_fields" in actions
     assert "_NEW_FLYER_REQUEST" in actions
+    assert "_FLYER_CAMPAIGN_CTA" in actions
     assert "_MEDIA_TEMPLATE_EDIT" in actions
     assert "_WRONG_FLYER_CORRECTION" in actions
     assert "force_new=True" in hooks
-    assert hooks.index("should_start_new_flyer_over_active(text, has_media=bool(media_path))") < hooks.index("_try_flyer_brand_asset_intercept")
+    assert hooks.index("flyer_campaign_cta_text(text)") < hooks.index("should_start_new_flyer_over_active(text, has_media=bool(media_path))")
+    assert hooks.index("_try_flyer_brand_asset_intercept(text, chat_id, event, media_path)") < hooks.index("should_start_new_flyer_over_active(text, has_media=bool(media_path))")
+    assert "def _try_flyer_reference_scope_choice_intercept" in hooks
+    assert "def _try_flyer_reference_scope_authorization_intercept" in hooks
+    assert "save_flyer_reference_scope_pending" in hooks
+    assert "save_flyer_reference_authorization_pending" in hooks
+    assert "consume_flyer_reference_scope_choice" in actions
+    assert "consume_flyer_reference_authorization_reply" in actions
+    assert "Please resend the flyer request" not in hooks
+    assert "Authorized flyer/source artwork" in hooks
+    assert "manual_edit_required=True" in hooks
+    assert hooks.index("_try_flyer_reference_scope_choice_intercept(text, chat_id, event)") < hooks.index("_try_flyer_active_project_intercept(text, chat_id, event)")
+    assert hooks.index("_try_flyer_reference_scope_authorization_intercept(text, chat_id, event)") < hooks.index("_try_flyer_active_project_intercept(text, chat_id, event)")
 
 
 def test_onboarding_is_whatsapp_native_and_plan_config_driven():
@@ -163,6 +235,10 @@ def test_onboarding_is_whatsapp_native_and_plan_config_driven():
     assert "trigger_store_flyer_brand_asset" in actions
     assert "_try_flyer_brand_asset_intercept" in hooks
     assert "_try_flyer_onboarding_intercept" in hooks
+    assert "_try_flyer_existing_onboarding_intercept" in hooks
+    assert hooks.index("_try_flyer_brand_asset_intercept(text, chat_id, event, media_path)") < hooks.index("_try_flyer_existing_onboarding_intercept(text, chat_id, event)")
+    assert hooks.index("_try_flyer_existing_onboarding_intercept(text, chat_id, event)") < hooks.index("should_start_new_flyer_over_active(text, has_media=bool(media_path))")
+    assert hooks.index("_try_flyer_existing_onboarding_intercept(text, chat_id, event)") < hooks.index("_try_flyer_active_project_intercept")
     assert hooks.index("_try_flyer_active_project_intercept") < hooks.index("_try_flyer_onboarding_intercept")
 
 
@@ -249,11 +325,14 @@ def test_phase2_quality_smoke_and_workflow_deploy_contracts():
     assert "flyer_workflow" in update
     assert "src/agents/flyer/workflow.py /opt/shift-agent/flyer_workflow.py" in deploy
     assert "/usr/local/bin/smoke-flyer-quality" in smoke
+    assert "/usr/local/bin/check-flyer-reference-scope" in smoke
     assert "sudo -u shift-agent" in smoke and "smoke-flyer-quality --final-package" in smoke
     assert "rm -f /usr/local/bin/smoke-flyer-quality" in deploy
     assert "rm -f /opt/shift-agent/flyer_workflow.py" in deploy
     assert "import flyer_workflow" in smoke
     assert f".{{args.project_id}}.generate.lock" in generate
+    assert "source_edit_requested" in generate
+    assert "authorized flyer/source artwork update" in generate
 
 
 def test_generation_does_not_hold_file_lock_during_render():

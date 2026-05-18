@@ -5,6 +5,7 @@ Uses temp filesystem; doesn't actually call Pushover.
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 
 # Patch settings BEFORE importing auth
@@ -47,3 +48,69 @@ def test_otp_record_serialization(tmp_path):
     assert got.verify_attempts == 0
     store.clear()
     assert store.read() is None
+
+
+def test_audit_log_writes_json_string(monkeypatch, tmp_path):
+    from app import audit
+
+    captured: list[str] = []
+    monkeypatch.setattr(audit.settings, "cockpit_audit_log", tmp_path / "audit.log")
+    monkeypatch.setattr(audit.safe_io, "ndjson_append", lambda _path, line: captured.append(line))
+
+    audit.log("auth.test", details={"ok": True})
+
+    assert captured
+    assert isinstance(captured[0], str)
+    assert '"event":"auth.test"' in captured[0]
+
+
+def test_auth_bypass_request_sets_cookie(monkeypatch):
+    from fastapi import Response
+    from app.routers import auth as auth_router
+
+    class Owner:
+        phone = "+17329837841"
+
+    class Config:
+        owner = Owner()
+
+    monkeypatch.setattr(auth_router.settings, "auth_bypass_enabled", True)
+    monkeypatch.setattr(auth_router, "load_config", lambda: Config())
+    monkeypatch.setattr(auth_router, "audit_log", lambda *args, **kwargs: None)
+
+    class Client:
+        host = "127.0.0.1"
+
+    class Request:
+        client = Client()
+        headers = {}
+
+    response = Response()
+    import anyio
+
+    body = anyio.run(auth_router.request_otp, Request(), response)
+
+    assert body.token == "__bypass__"
+    assert "hjwt=" in response.headers["set-cookie"]
+
+
+def test_cockpit_service_does_not_ship_auth_bypass_enabled():
+    service = (Path(__file__).resolve().parents[2] / "deploy" / "shift-agent-cockpit.service").read_text(encoding="utf-8")
+
+    assert "COCKPIT_AUTH_BYPASS=true" not in service
+    assert "COCKPIT_COOKIE_SECURE=false" not in service
+
+
+def test_auth_bypass_counts_as_fresh_for_temporary_sensitive_actions(monkeypatch):
+    import anyio
+    from app import auth
+
+    async def fake_require_auth(_request):
+        return {"iat": 0, "sub": "+17329837841"}
+
+    monkeypatch.setattr(auth.settings, "auth_bypass_enabled", True)
+    monkeypatch.setattr(auth, "require_auth", fake_require_auth)
+
+    claims = anyio.run(auth.require_fresh_otp, object())
+
+    assert claims["sub"] == "+17329837841"

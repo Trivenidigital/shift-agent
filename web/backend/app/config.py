@@ -88,7 +88,14 @@ class Settings(BaseModel):
     jwt_algo: str = "HS256"
     jwt_ttl_hours: int = 24
     cookie_name: str = "hjwt"
-    cookie_secure: bool = True
+    cookie_secure: bool = Field(
+        default_factory=lambda: os.environ.get("COCKPIT_COOKIE_SECURE", "true").lower()
+        not in ("0", "false", "no")
+    )
+    auth_bypass_enabled: bool = Field(
+        default_factory=lambda: os.environ.get("COCKPIT_AUTH_BYPASS", "false").lower()
+        in ("1", "true", "yes")
+    )
     otp_ttl_seconds: int = 300
     otp_max_verify_attempts: int = 5
     otp_request_per_ip: tuple[int, int] = (3, 900)

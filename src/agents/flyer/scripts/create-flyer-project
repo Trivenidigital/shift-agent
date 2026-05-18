@@ -17,11 +17,12 @@ sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(SRC_ROOT / "platform"))
 sys.path.insert(0, str(SRC_ROOT))
 
-from schemas import FlyerAsset, FlyerProject, FlyerProjectStore, FlyerProjectCreated, FlyerRequestFields  # noqa: E402
+from schemas import FlyerAsset, FlyerCustomerStore, FlyerProject, FlyerProjectStore, FlyerProjectCreated, FlyerRequestFields  # noqa: E402
 from safe_io import FileLock, atomic_write_text  # noqa: E402
 
 
 STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
+CUSTOMERS_PATH = Path("/opt/shift-agent/state/flyer/customers.json")
 ASSET_DIR = Path("/opt/shift-agent/state/flyer/assets")
 MONTHS = {
     "jan": 1, "january": 1,
@@ -47,6 +48,36 @@ def _load_store(path: Path) -> FlyerProjectStore:
 
 def _write_store(path: Path, store: FlyerProjectStore) -> None:
     atomic_write_text(path, store.model_dump_json(indent=2))
+
+
+def _load_customer_store(path: Path) -> FlyerCustomerStore:
+    if not path.exists():
+        return FlyerCustomerStore()
+    return FlyerCustomerStore.model_validate(json.loads(path.read_text(encoding="utf-8")))
+
+
+def _hydrate_fields_from_customer(
+    fields: FlyerRequestFields,
+    *,
+    customer_phone: str,
+    customers_path: Path,
+) -> FlyerRequestFields:
+    """Fill missing flyer facts from the registered Flyer Studio account."""
+    customer = _load_customer_store(customers_path).find_customer_by_phone(customer_phone)
+    if customer is None or customer.status not in {"trial", "active"}:
+        return fields
+    updates: dict[str, object] = {}
+    if not (fields.event_or_business_name or "").strip():
+        updates["event_or_business_name"] = customer.business_name
+    if not (fields.venue_or_location or "").strip():
+        updates["venue_or_location"] = customer.business_address
+    if not (fields.contact_info or "").strip():
+        updates["contact_info"] = str(customer.public_phone)
+    if fields.preferred_language == "en" and customer.preferred_language != "en":
+        updates["preferred_language"] = customer.preferred_language
+    if not updates:
+        return fields
+    return fields.model_copy(update=updates)
 
 
 def _extract_fields(raw_request: str, *, now: datetime) -> FlyerRequestFields:
@@ -148,14 +179,34 @@ def _extract_fields(raw_request: str, *, now: datetime) -> FlyerRequestFields:
         contact = phone_match.group(1).strip(" .")
 
     lower = text.lower()
+    if lower.startswith("edit uploaded flyer/source artwork") and event_name.lower() in {
+        "edit uploaded flyer",
+        "uploaded flyer",
+        "uploaded flyer template",
+    }:
+        event_name = ""
     if "uploaded template/reference" in lower and event_name.lower() in {"flyer", "create flyer", "uploaded flyer template"}:
-        event_name = "Thursday Dosa Night Special" if "dosa" in lower else "Uploaded Flyer Template"
+        event_name = ""
     if "telugu" in lower:
         language = "te"
     elif "hindi" in lower:
         language = "hi"
+    elif "malayalam" in lower:
+        language = "ml"
+    elif "tamil" in lower:
+        language = "ta"
+    elif "kannada" in lower:
+        language = "kn"
+    elif "gujarati" in lower:
+        language = "gu"
+    elif "marathi" in lower:
+        language = "mr"
+    elif "punjabi" in lower:
+        language = "pa"
     elif "spanish" in lower:
         language = "es"
+    elif "mixed" in lower or "multi-language" in lower or "multilingual" in lower:
+        language = "mixed"
     if "style" in lower:
         style_match = re.search(r"([^.]*\bstyle\b)", text, flags=re.IGNORECASE)
         if style_match:
@@ -165,7 +216,7 @@ def _extract_fields(raw_request: str, *, now: datetime) -> FlyerRequestFields:
     if not style and ("$" in lower or any(term in lower for term in ("price", "combo", "/piece", "/lb", "tray", "special"))):
         style = "professional local food menu flyer with appetizing photography, strong price readability, and brand-forward retail design"
     if not event_name and "uploaded template/reference" in lower:
-        event_name = "Thursday Dosa Night Special" if "dosa" in lower else "Uploaded Flyer Template"
+        event_name = ""
     for label, value in [
         ("whatsapp", "whatsapp_image"),
         ("instagram post", "instagram_post"),
@@ -176,6 +227,8 @@ def _extract_fields(raw_request: str, *, now: datetime) -> FlyerRequestFields:
     ]:
         if label in lower and value not in formats:
             formats.append(value)
+
+    event_name = _normalize_event_name(event_name, text)
 
     return FlyerRequestFields(
         event_or_business_name=event_name or None,
@@ -188,6 +241,21 @@ def _extract_fields(raw_request: str, *, now: datetime) -> FlyerRequestFields:
         output_formats=formats,
         notes=text,
     )
+
+
+def _normalize_event_name(event_name: str, text: str) -> str:
+    name = re.sub(r"^\s*(?:a|an|the)\s+", "", (event_name or "").strip(" ."), flags=re.IGNORECASE)
+    lower_text = text.lower()
+    lower_name = name.lower()
+    has_recurring_days = bool(re.search(
+        r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend)s?\b",
+        lower_text,
+    ))
+    if "breakfast" in lower_text and (not name or lower_name in {"breakfast", "breakfast menu"}):
+        return "Weekend Breakfast Specials" if has_recurring_days else "Breakfast Specials"
+    if "menu" in lower_text and not name:
+        return "Menu Specials"
+    return name
 
 
 def _copy_reference_asset(
@@ -223,7 +291,9 @@ def main() -> int:
     p.add_argument("--message-id", required=True)
     p.add_argument("--raw-request", required=True)
     p.add_argument("--reference-media-path", default="")
+    p.add_argument("--manual-edit-required", action="store_true")
     p.add_argument("--state-path", default=str(STATE_PATH))
+    p.add_argument("--customer-state-path", default=str(CUSTOMERS_PATH))
     p.add_argument("--asset-dir", default=str(ASSET_DIR))
     args = p.parse_args()
 
@@ -236,7 +306,11 @@ def main() -> int:
                 return 0
 
         now = datetime.now(timezone.utc)
-        fields = _extract_fields(args.raw_request, now=now)
+        fields = _hydrate_fields_from_customer(
+            _extract_fields(args.raw_request, now=now),
+            customer_phone=args.customer_phone,
+            customers_path=Path(args.customer_state_path),
+        )
         project_id = f"F{store.next_sequence:04d}"
         reference_asset = None
         if args.reference_media_path:
@@ -249,7 +323,7 @@ def main() -> int:
             )
         project = FlyerProject(
             project_id=project_id,
-            status="intake_started",
+            status="manual_edit_required" if args.manual_edit_required else "intake_started",
             customer_phone=args.customer_phone,
             created_at=now,
             updated_at=now,

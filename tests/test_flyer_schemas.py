@@ -18,6 +18,8 @@ from schemas import (  # noqa: E402
     FlyerCustomerProfile,
     FlyerConcept,
     FlyerConfig,
+    FlyerGuestOrder,
+    FlyerGuestOrderStore,
     FlyerProject,
     FlyerProjectCreated,
     FlyerProjectStore,
@@ -52,6 +54,8 @@ def test_flyer_config_defaults_are_safe_and_cost_bounded():
     assert cfg.draft_image_quality == "low"
     assert cfg.final_image_model == "gpt-image-1.5"
     assert cfg.final_image_quality == "medium"
+    assert cfg.edit_image_model == "gpt-image-1"
+    assert cfg.edit_image_quality == "medium"
     assert [(t.plan_id, t.monthly_price_usd, t.included_flyers) for t in cfg.plan_tiers] == [
         ("trial", 0.00, 3),
         ("starter", 49.99, 30),
@@ -59,6 +63,8 @@ def test_flyer_config_defaults_are_safe_and_cost_bounded():
         ("unlimited", 199.0, None),
     ]
     assert cfg.payment_provider == "manual"
+    assert cfg.quick_flyer_price_cents == 400
+    assert cfg.quick_flyer_checkout_url_template == ""
     assert cfg.final_formats == [
         "whatsapp_image",
         "instagram_post",
@@ -81,6 +87,27 @@ def test_config_includes_flyer_default_disabled():
         "backup": {"gpg_recipient_email": "owner@example.com"},
     })
     assert cfg.flyer.enabled is False
+
+
+def test_guest_order_store_tracks_payment_first_one_off_order():
+    now = datetime.now(timezone.utc)
+    store = FlyerGuestOrderStore()
+    order = store.new_order(
+        sender_phone="+17329837841",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="cta-1",
+        now=now,
+        checkout_url="https://pay.example/GUEST0001",
+    )
+    store.orders.append(order)
+
+    assert order.order_id == "GUEST0001"
+    assert order.status == "pending_payment"
+    assert order.can_create_flyer() is False
+    paid = order.model_copy(update={"status": "paid", "paid_at": now, "updated_at": now})
+    assert paid.can_create_flyer() is True
+    assert store.find_open_order_by_sender("+17329837841", "17329837841@s.whatsapp.net").order_id == "GUEST0001"
+    assert FlyerGuestOrder.model_validate(paid.model_dump()).remaining() == 1
 
 
 def test_request_fields_track_required_info_and_missing_essentials():
@@ -120,6 +147,19 @@ def test_price_list_menu_flyer_does_not_require_event_date_time_or_venue():
     assert fields.missing_required_fields() == []
 
 
+def test_service_list_flyer_does_not_require_event_date_time_or_venue():
+    fields = FlyerRequestFields(
+        event_or_business_name="Marketing Services",
+        venue_or_location="101 Kavitha Palace, KPHB, Hyderabad, Telangana 500085",
+        contact_info="+918985741562",
+        notes=(
+            "Services: Social media marketing, Performance marketing, SEO, "
+            "AEO, GEO, AI Marketing, Content Creation, Paid Ads"
+        ),
+    )
+    assert fields.missing_required_fields() == []
+
+
 def test_uploaded_template_reference_can_generate_from_reference_image_only():
     fields = FlyerRequestFields(
         event_or_business_name="Thursday Dosa Night Special",
@@ -149,6 +189,8 @@ def test_project_state_machine_allows_only_expected_transitions():
         ("collecting_required_info", "awaiting_assets"),
         ("collecting_required_info", "generating_concepts"),
         ("awaiting_assets", "generating_concepts"),
+        ("manual_edit_required", "generating_concepts"),
+        ("manual_edit_required", "revising_design"),
         ("generating_concepts", "awaiting_concept_selection"),
         ("generating_concepts", "awaiting_final_approval"),
         ("awaiting_concept_selection", "revising_design"),
@@ -156,12 +198,15 @@ def test_project_state_machine_allows_only_expected_transitions():
         ("revising_design", "generating_concepts"),
         ("awaiting_final_approval", "finalizing_assets"),
         ("finalizing_assets", "delivered"),
+        ("delivered", "revising_design"),
         ("delivered", "completed"),
     ]
     for from_status, to_status in allowed:
         assert is_flyer_transition_allowed(from_status, to_status)
     assert not is_flyer_transition_allowed("awaiting_final_approval", "completed")
-    assert not is_flyer_transition_allowed("delivered", "revising_design")
+    assert not is_flyer_transition_allowed("manual_edit_required", "delivered")
+    assert not is_flyer_transition_allowed("manual_edit_required", "completed")
+    assert not is_flyer_transition_allowed("completed", "revising_design")
 
 
 def test_project_defaults_and_revision_cap():
@@ -316,6 +361,7 @@ def test_workflow_status_literal_contains_requested_states():
         "intake_started",
         "collecting_required_info",
         "awaiting_assets",
+        "manual_edit_required",
         "generating_concepts",
         "awaiting_concept_selection",
         "revising_design",

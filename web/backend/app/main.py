@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from . import audit as audit_mod
 from .config import get_settings
-from .routers import audit, auth, config, decisions, disclosures, health, pending, roster, safety, schedule, whatsapp
+from .routers import audit, auth, config, decisions, disclosures, flyer, health, pending, roster, safety, schedule, whatsapp
 
 settings = get_settings()
 
@@ -68,3 +68,4 @@ app.include_router(safety.router)
 app.include_router(whatsapp.router)
 app.include_router(disclosures.router)
 app.include_router(audit.router)
+app.include_router(flyer.router)

@@ -108,6 +108,21 @@ def test_delivery_retry_selects_only_unsent_assets(tmp_path, monkeypatch):
     assert [asset.asset_id for asset in pending] == ["A0002", "A0003", "A0004"]
 
 
+def test_final_asset_captions_label_each_customer_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    mod = _load_script()
+    project = _project(tmp_path)
+
+    labels = [mod._caption_for_asset(asset) for asset in project.assets]
+
+    assert labels == [
+        "WhatsApp flyer - ready to forward in WhatsApp.",
+        "Instagram post - square feed version.",
+        "Instagram story - vertical story/status version.",
+        "Printable PDF - best for printing or sharing as a document.",
+    ]
+
+
 def test_record_asset_delivery_persists_success_immediately(tmp_path, monkeypatch):
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     mod = _load_script()

@@ -43,6 +43,7 @@ ALLOWED_BINS: frozenset[str] = frozenset(
         "/usr/local/bin/shift-agent-enable",
         "/usr/local/bin/shift-agent-smoke-test.sh",
         "/usr/local/bin/shift-agent-notify-owner",
+        "/usr/local/bin/send-flyer-campaign",
     }
 )
 

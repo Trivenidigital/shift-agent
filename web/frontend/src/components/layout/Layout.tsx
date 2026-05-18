@@ -1,6 +1,6 @@
 import { type Section, useSection } from "@/hooks/useSection";
 import { cn } from "@/lib/cn";
-import { Activity, AlertTriangle, Calendar, ClipboardList, Cog, FileText, MessageSquare, Phone, ScrollText, ShieldCheck, Users } from "lucide-react";
+import { Activity, AlertTriangle, Calendar, ClipboardList, Cog, FileText, Megaphone, MessageSquare, Phone, ScrollText, ShieldCheck, Users } from "lucide-react";
 
 const NAV: { id: Section; label: string; icon: React.ComponentType<{ size?: number; className?: string }> }[] = [
   { id: "dashboard", label: "Dashboard", icon: Activity },
@@ -9,6 +9,7 @@ const NAV: { id: Section; label: string; icon: React.ComponentType<{ size?: numb
   { id: "pending", label: "Pending", icon: ClipboardList },
   { id: "decisions", label: "Decisions", icon: ScrollText },
   { id: "whatsapp", label: "WhatsApp", icon: Phone },
+  { id: "flyer", label: "Flyer Studio", icon: Megaphone },
   { id: "config", label: "Config", icon: Cog },
   { id: "safety", label: "Safety", icon: AlertTriangle },
   { id: "disclosures", label: "Disclosures", icon: ShieldCheck },

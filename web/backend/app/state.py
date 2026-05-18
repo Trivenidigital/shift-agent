@@ -33,6 +33,12 @@ from .config import get_settings  # noqa: E402
 settings = get_settings()
 
 
+def _unwrap_loaded(model):
+    if isinstance(model, tuple):
+        return model[0]
+    return model
+
+
 @contextmanager
 def roster_session() -> Iterator[tuple[Roster, "RosterCommitter"]]:
     """Load Roster under flock; caller mutates and explicitly commits.
@@ -45,7 +51,7 @@ def roster_session() -> Iterator[tuple[Roster, "RosterCommitter"]]:
     On exception: original file is preserved (no write).
     """
     with safe_io.flock(settings.roster_path):
-        roster = safe_io.load_model(settings.roster_path, Roster)
+        roster = _unwrap_loaded(safe_io.load_model(settings.roster_path, Roster))
         committer = RosterCommitter(roster)
         try:
             yield roster, committer
@@ -70,7 +76,7 @@ class RosterCommitter:
 
 
 def load_roster() -> Roster:
-    return safe_io.load_model(settings.roster_path, Roster)
+    return _unwrap_loaded(safe_io.load_model(settings.roster_path, Roster))
 
 
 def load_config() -> Config:
@@ -94,14 +100,14 @@ def save_config(cfg: Config) -> None:
 def load_pending() -> PendingStore:
     if not settings.pending_path.exists():
         return PendingStore(proposals={})
-    return safe_io.load_model(settings.pending_path, PendingStore)
+    return _unwrap_loaded(safe_io.load_model(settings.pending_path, PendingStore))
 
 
 def load_send_counter() -> SendCounter | None:
     if not settings.send_counter_path.exists():
         return None
     try:
-        return safe_io.load_model(settings.send_counter_path, SendCounter)
+        return _unwrap_loaded(safe_io.load_model(settings.send_counter_path, SendCounter))
     except Exception:
         return None
 

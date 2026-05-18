@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import calendar
+from difflib import SequenceMatcher
 import hashlib
 import json
 import mimetypes
@@ -15,7 +16,9 @@ from typing import Optional
 from schemas import (
     E164Phone,
     FlyerBrandAsset,
+    FlyerCustomerProfile,
     FlyerCustomerStore,
+    FlyerIntakeSession,
     FlyerOnboardingSession,
     FlyerPlanTier,
 )
@@ -68,10 +71,25 @@ def handle_onboarding_message(
     now = now or datetime.now(timezone.utc)
     tiers = plan_tiers or FlyerPlanTier.default_tiers()
     store = load_customer_store(state_path)
+    session = store.find_session(chat_id, sender_phone)
+    normalized_text = " ".join((text or "").split())
     customer = store.find_customer_by_phone(sender_phone)
     if customer and customer.status in {"active", "trial"}:
+        if session:
+            _discard_session(store, session)
+            write_customer_store(state_path, store)
+        if session and (_is_confirm_reply(normalized_text) or _is_onboarding_start(normalized_text)):
+            return OnboardingResult(
+                True,
+                _existing_account_ready_reply(customer),
+                customer.status,
+                customer.customer_id,
+            )
         return OnboardingResult(False, "", customer.status, customer.customer_id)
     if customer and customer.status == "payment_pending":
+        if session:
+            _discard_session(store, session)
+            write_customer_store(state_path, store)
         return OnboardingResult(
             True,
             _payment_reply(customer.customer_id, customer.plan_id, customer.payment_checkout_url),
@@ -79,7 +97,6 @@ def handle_onboarding_message(
             customer.customer_id,
         )
 
-    session = store.find_session(chat_id, sender_phone)
     if session and session.status == "payment_pending" and session.customer_id:
         existing = store.find_customer_by_id(session.customer_id)
         if existing:
@@ -108,20 +125,47 @@ def handle_onboarding_message(
         write_customer_store(state_path, store)
         return OnboardingResult(True, _welcome_reply(tiers, trial_requested=trial_requested), session.status)
 
-    special = _handle_session_control(session, text=" ".join((text or "").split()), now=now, tiers=tiers)
+    if _is_onboarding_start(normalized_text):
+        trial_requested = _is_trial_start(normalized_text)
+        session = FlyerOnboardingSession(
+            chat_id=session.chat_id,
+            sender_phone=session.sender_phone or _phone_or_none(sender_phone),
+            status="collecting_business_name",
+            started_at=now,
+            updated_at=now,
+            last_message_id=message_id,
+            plan_id="trial" if trial_requested else "",
+            pending_brand_assets=session.pending_brand_assets,
+        )
+        _replace_session(store, session)
+        write_customer_store(state_path, store)
+        return OnboardingResult(True, _welcome_reply(tiers, trial_requested=trial_requested), session.status)
+
+    special = _handle_session_control(session, text=normalized_text, now=now, tiers=tiers)
     if special is not None:
         session = special
     else:
-        session = _advance_session(
-            session=session,
-            text=" ".join((text or "").split()),
-            message_id=message_id,
-            now=now,
-            store=store,
-            tiers=tiers,
-            payment_provider=payment_provider,
-            payment_checkout_url_template=payment_checkout_url_template,
-        )
+        try:
+            session = _advance_session(
+                session=session,
+                text=normalized_text,
+                message_id=message_id,
+                now=now,
+                store=store,
+                tiers=tiers,
+                payment_provider=payment_provider,
+                payment_checkout_url_template=payment_checkout_url_template,
+            )
+        except ValueError as e:
+            session = session.model_copy(update={"last_message_id": message_id, "updated_at": now})
+            _replace_session(store, session)
+            write_customer_store(state_path, store)
+            return OnboardingResult(
+                True,
+                f"Flyer Studio\n------------\n{e}\n\n{_welcome_or_next_prompt(session)}",
+                session.status,
+                session.customer_id,
+            )
     _replace_session(store, session)
     customer_id = ""
     customer_created = False
@@ -142,13 +186,43 @@ def handle_onboarding_message(
                 primary_chat_id=chat_id,
                 onboarded_by_phone=sender_phone,
             )
-        except ValueError as e:
+        except ValueError:
+            existing = _find_same_sender_duplicate_customer(store, session, sender_phone, chat_id)
+            if existing is None:
+                existing = _find_named_duplicate_customer(store, session)
+            if existing and existing.status in {"active", "trial", "payment_pending"}:
+                if existing.status in {"active", "trial"}:
+                    _connect_recovered_sender(
+                        store=store,
+                        customer=existing,
+                        session=session,
+                        sender_phone=sender_phone,
+                        now=now,
+                    )
+                    existing = store.find_customer_by_id(existing.customer_id) or existing
+                _discard_session(store, session)
+                write_customer_store(state_path, store)
+                if existing.status == "payment_pending":
+                    return OnboardingResult(
+                        True,
+                        _payment_reply(existing.customer_id, existing.plan_id, existing.payment_checkout_url),
+                        existing.status,
+                        existing.customer_id,
+                    )
+                return OnboardingResult(
+                    True,
+                    _existing_account_ready_reply(existing),
+                    existing.status,
+                    existing.customer_id,
+                )
             session = session.model_copy(update={"status": "confirming_summary", "updated_at": now})
             _replace_session(store, session)
             write_customer_store(state_path, store)
             return OnboardingResult(
                 True,
-                f"Flyer Studio\n------------\nI could not finish registration: {e}\n\nReply EDIT WHATSAPP or EDIT AUTHORIZED with a different number.",
+                "Flyer Studio\n------------\n"
+                "That phone number belongs to another Flyer Studio account.\n\n"
+                "Reply EDIT WHATSAPP or EDIT AUTHORIZED with a different number.",
                 session.status,
             )
         customer = customer.model_copy(update={"brand_assets": session.pending_brand_assets})
@@ -173,6 +247,18 @@ def handle_onboarding_message(
         customer_created = True
         session = session.model_copy(update={"status": customer.status, "updated_at": now, "customer_id": customer.customer_id})
         _replace_session(store, session)
+        if customer.status == "trial" and session.creation_mode == "guided":
+            store.replace_intake_session(FlyerIntakeSession(
+                chat_id=chat_id,
+                sender_phone=_phone_or_none(sender_phone),
+                status="guided_collecting_goal",
+                source="new_flyer",
+                started_at=now,
+                updated_at=now,
+                last_message_id=message_id,
+                preferred_language=session.preferred_language,
+                creation_mode="guided",
+            ))
     write_customer_store(state_path, store)
     return OnboardingResult(
         True,
@@ -300,15 +386,18 @@ def _advance_session(
     if status == "collecting_business_name":
         update.update({"business_name": _require_text(text, "business name"), "status": "collecting_business_address"})
     elif status == "collecting_business_address":
-        update.update({"business_address": _require_text(text, "business address"), "status": "collecting_public_phone"})
+        update.update({"business_address": _parse_business_address(text), "status": "collecting_public_phone"})
     elif status == "collecting_public_phone":
         update.update({"public_phone": _parse_phone(text), "status": "collecting_business_whatsapp"})
     elif status == "collecting_business_whatsapp":
-        update.update({"business_whatsapp_number": _parse_phone(text), "status": "collecting_authorized_request_number"})
+        update.update({
+            "business_whatsapp_number": _parse_optional_phone(text, fallback=session.public_phone),
+            "status": "collecting_authorized_request_number",
+        })
     elif status == "collecting_authorized_request_number":
         update.update({"authorized_request_number": _parse_phone(text), "status": "collecting_business_profile"})
     elif status == "collecting_business_profile":
-        category, language = _parse_profile_text(text)
+        category, language = _parse_profile_text(text, default_language=session.preferred_language)
         next_status = "confirming_summary" if session.plan_id else "choosing_plan"
         update.update({"business_category": category, "preferred_language": language, "status": next_status})
     elif status == "choosing_plan":
@@ -317,7 +406,7 @@ def _advance_session(
         edit_update = _parse_confirmation_edit(text, tiers)
         if edit_update:
             update.update(edit_update)
-        elif text.strip().upper() == "CONFIRM":
+        elif _is_confirm_reply(text):
             update.update({"status": "trial" if session.plan_id == "trial" else "payment_pending"})
         else:
             raise ValueError("Reply CONFIRM to finish registration, or send EDIT FIELD: value.")
@@ -372,6 +461,125 @@ def _replace_session(store: FlyerCustomerStore, session: FlyerOnboardingSession)
     store.onboarding_sessions.append(session)
 
 
+def _discard_session(store: FlyerCustomerStore, session: FlyerOnboardingSession) -> None:
+    store.onboarding_sessions = [
+        s for s in store.onboarding_sessions
+        if s.chat_id != session.chat_id and s.sender_phone != session.sender_phone
+    ]
+
+
+def _find_same_sender_duplicate_customer(
+    store: FlyerCustomerStore,
+    session: FlyerOnboardingSession,
+    sender_phone: Optional[str],
+    chat_id: str,
+) -> Optional[FlyerCustomerProfile]:
+    sender = _phone_or_none(sender_phone)
+    session_phones = {
+        str(phone)
+        for phone in (
+            session.public_phone,
+            session.business_whatsapp_number,
+            session.authorized_request_number,
+            sender,
+        )
+        if phone
+    }
+    for customer in store.customers:
+        owned = customer.owned_phone_numbers()
+        same_sender = (sender and str(sender) in owned) or (
+            customer.primary_chat_id and customer.primary_chat_id == chat_id
+        )
+        if same_sender and session_phones.intersection(owned):
+            return customer
+    return None
+
+
+def _find_named_duplicate_customer(
+    store: FlyerCustomerStore,
+    session: FlyerOnboardingSession,
+) -> Optional[FlyerCustomerProfile]:
+    """Recover an already-onboarded business when a second sender retries setup.
+
+    This is intentionally narrower than "any duplicate phone": all duplicate
+    numbers in the pending session must point at one existing account, and the
+    business names must be close enough to be a human typo/variant. Otherwise a
+    stranger could type a real business phone and attach themselves.
+    """
+    session_phones = [
+        str(phone)
+        for phone in (
+            session.public_phone,
+            session.business_whatsapp_number,
+            session.authorized_request_number,
+        )
+        if phone
+    ]
+    conflict_ids: set[str] = set()
+    for phone in session_phones:
+        conflict_ids.update(store.customer_ids_for_phone(phone))
+    if len(conflict_ids) != 1:
+        return None
+    customer = store.find_customer_by_id(next(iter(conflict_ids)))
+    if customer is None:
+        return None
+    if not _business_names_match(session.business_name, customer.business_name):
+        return None
+    return customer
+
+
+def _business_names_match(left: str, right: str) -> bool:
+    l_norm = re.sub(r"[^a-z0-9]+", "", (left or "").lower())
+    r_norm = re.sub(r"[^a-z0-9]+", "", (right or "").lower())
+    if not l_norm or not r_norm:
+        return False
+    if l_norm in r_norm or r_norm in l_norm:
+        return True
+    return SequenceMatcher(None, l_norm, r_norm).ratio() >= 0.86
+
+
+def _connect_recovered_sender(
+    *,
+    store: FlyerCustomerStore,
+    customer: FlyerCustomerProfile,
+    session: FlyerOnboardingSession,
+    sender_phone: Optional[str],
+    now: datetime,
+) -> None:
+    updates: dict[str, object] = {"updated_at": now}
+    canonical_sender = _phone_or_none(sender_phone)
+    if canonical_sender and str(canonical_sender) not in customer.owned_phone_numbers():
+        updates["authorized_request_numbers"] = [
+            *customer.authorized_request_numbers,
+            E164Phone.from_any(canonical_sender, country_code="US"),
+        ]
+
+    pending_assets = list(session.pending_brand_assets)
+    if pending_assets:
+        existing_assets = list(customer.brand_assets)
+        existing_hashes = {asset.sha256 for asset in existing_assets}
+        merged_assets = existing_assets
+        for asset in pending_assets:
+            if asset.sha256 in existing_hashes:
+                continue
+            if asset.active:
+                merged_assets = [
+                    old.model_copy(update={"active": False})
+                    if old.kind == asset.kind and old.active else old
+                    for old in merged_assets
+                ]
+            merged_assets.append(asset)
+            existing_hashes.add(asset.sha256)
+        updates["brand_assets"] = merged_assets
+
+    if len(updates) == 1:
+        return
+    store.customers = [
+        row.model_copy(update=updates) if row.customer_id == customer.customer_id else row
+        for row in store.customers
+    ]
+
+
 def _reply_for_session(
     session: FlyerOnboardingSession,
     *,
@@ -401,7 +609,7 @@ def _reply_for_session(
         customer = next((c for c in store.customers if c.customer_id == customer_id), None)
         return _payment_reply(customer_id, session.plan_id, customer.payment_checkout_url if customer else "")
     if session.status == "trial":
-        return _trial_active_reply(customer_id)
+        return _trial_active_reply(customer_id, creation_mode=session.creation_mode, language=session.preferred_language)
     return _welcome_reply(tiers)
 
 
@@ -445,11 +653,35 @@ def _payment_reply(customer_id: str, plan_id: str, checkout_url: str) -> str:
     )
 
 
-def _trial_active_reply(customer_id: str) -> str:
+def _trial_active_reply(customer_id: str, *, creation_mode: str = "", language: str = "en") -> str:
+    if creation_mode == "guided":
+        return (
+            "Flyer Studio\n------------\n"
+            f"Free trial active for {customer_id}. You have 3 free sample flyers.\n\n"
+            "Guided Mode is ready.\n"
+            "First, what are you promoting? Example: weekend sale, breakfast specials, grand opening, class, service offer."
+        )
+    if creation_mode == "text":
+        return (
+            "Flyer Studio\n------------\n"
+            f"Free trial active for {customer_id}. You have 3 free sample flyers.\n\n"
+            "Text Mode is ready. Send your first flyer request in one message. "
+            "You can also attach an existing flyer, logo, menu, photos, or reference image."
+        )
+    del language
     return (
         "Flyer Studio\n------------\n"
         f"Free trial active for {customer_id}. You have 3 free sample flyers.\n"
         "Send your first flyer request now. After each sample, I will show the paid onboarding link and plans."
+    )
+
+
+def _existing_account_ready_reply(customer: FlyerCustomerProfile) -> str:
+    return (
+        "Flyer Studio\n------------\n"
+        f"This number is already set up for {customer.business_name}.\n\n"
+        "You can start creating a flyer now. Send your flyer request, for example:\n"
+        '"Create a breakfast menu flyer for tomorrow from 8 AM to 10 AM."'
     )
 
 
@@ -477,7 +709,10 @@ def _plan_lines(tiers: list[FlyerPlanTier]) -> str:
     lines = []
     for index, tier in enumerate(tiers, start=1):
         included = "unlimited flyers/month" if tier.included_flyers is None else f"{tier.included_flyers} flyers/month"
-        lines.append(f"{index}. ${tier.monthly_price_usd:.2f} - {included} ({tier.label})")
+        line = f"{index}. ${tier.monthly_price_usd:.2f} - {included} ({tier.label})"
+        if tier.included_flyers is None:
+            line += " - includes designer-assisted manual edits for custom requests."
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -486,6 +721,14 @@ def _parse_phone(text: str) -> str:
         return E164Phone.from_any(text, country_code="US")
     except ValueError as e:
         raise ValueError("Please send a valid phone number with country code, or a US 10-digit number.") from e
+
+
+def _parse_optional_phone(text: str, *, fallback: Optional[str]) -> str:
+    if _is_skip_optional_reply(text):
+        if fallback:
+            return str(fallback)
+        raise ValueError("Please send a valid phone number, or type SKIP after the public phone is saved.")
+    return _parse_phone(text)
 
 
 def _phone_or_none(text: Optional[str]) -> Optional[str]:
@@ -504,18 +747,60 @@ def _require_text(text: str, label: str) -> str:
     return cleaned[:300]
 
 
-def _parse_profile_text(text: str) -> tuple[str, str]:
+def _parse_business_address(text: str) -> str:
+    cleaned = _require_text(text, "business address")
+    lower = cleaned.lower()
+    has_digit = bool(re.search(r"\d", cleaned))
+    has_address_signal = bool(re.search(
+        r"\b(st|street|rd|road|dr|drive|ave|avenue|blvd|boulevard|ln|lane|ct|court|pl|place|"
+        r"pkwy|parkway|hwy|highway|suite|ste|unit|#|north|south|east|west|nc|sc|fl|tx|va|md|oh|ca|ny|nj)\b",
+        lower,
+    ))
+    if not has_digit and not has_address_signal:
+        raise ValueError("Please send the full business address, including street/city/state if available.")
+    return cleaned[:300]
+
+
+def _parse_profile_text(text: str, *, default_language: str = "en") -> tuple[str, str]:
     lower = text.lower()
-    language = "en"
-    if "telugu" in lower:
+    language = default_language if default_language in {"en", "te", "hi", "ml", "ta", "kn", "gu", "mr", "pa", "es", "mixed", "other"} else "en"
+    explicit_languages = [
+        name for name in (
+            "english", "telugu", "hindi", "malayalam", "tamil", "kannada",
+            "gujarati", "marathi", "punjabi", "spanish",
+        )
+        if name in lower
+    ]
+    if len(explicit_languages) > 1:
+        language = "mixed"
+    elif "english" in lower:
+        language = "en"
+    elif "telugu" in lower:
         language = "te"
     elif "hindi" in lower:
         language = "hi"
+    elif "malayalam" in lower:
+        language = "ml"
+    elif "tamil" in lower:
+        language = "ta"
+    elif "kannada" in lower:
+        language = "kn"
+    elif "gujarati" in lower:
+        language = "gu"
+    elif "marathi" in lower:
+        language = "mr"
+    elif "punjabi" in lower:
+        language = "pa"
     elif "spanish" in lower:
         language = "es"
     elif "mixed" in lower or "multi" in lower:
         language = "mixed"
-    category = re.sub(r"\b(english|telugu|hindi|spanish|mixed|language|languages|and)\b", "", text, flags=re.IGNORECASE)
+    category = re.sub(
+        r"\b(english|telugu|hindi|malayalam|tamil|kannada|gujarati|marathi|punjabi|spanish|mixed|language|languages|and)\b",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
     category = re.sub(r"[,;]+", " ", category)
     return (" ".join(category.split()) or text.strip() or "local business")[:120], language
 
@@ -542,7 +827,7 @@ def _parse_confirmation_edit(text: str, tiers: list[FlyerPlanTier]) -> dict[str,
     if field in {"name", "business", "business name"}:
         return {"business_name": _require_text(value, "business name")}
     if field in {"address", "business address"}:
-        return {"business_address": _require_text(value, "business address")}
+        return {"business_address": _parse_business_address(value)}
     if field in {"phone", "public phone", "flyer phone"}:
         return {"public_phone": _parse_phone(value)}
     if field in {"whatsapp", "business whatsapp"}:
@@ -557,6 +842,21 @@ def _parse_confirmation_edit(text: str, tiers: list[FlyerPlanTier]) -> dict[str,
     raise ValueError("Unknown edit field. Use EDIT NAME, ADDRESS, PHONE, WHATSAPP, AUTHORIZED, PROFILE, or PLAN.")
 
 
+def _is_confirm_reply(text: str) -> bool:
+    body = " ".join((text or "").strip().lower().split())
+    if body in {"confirm", "ok", "okay", "ok proceed", "proceed", "yes", "yes proceed", "y", "go ahead", "looks good"}:
+        return True
+    return bool(re.match(r"^\s*CONFIRM\b(?:\s*[\.:,;!\-]\s*|\s*$|\s+.+$)", text or "", flags=re.IGNORECASE | re.DOTALL))
+
+
+def _is_skip_optional_reply(text: str) -> bool:
+    body = " ".join((text or "").strip().lower().split())
+    return body in {
+        "no", "none", "skip", "no business account", "no business whatsapp",
+        "same", "same as public", "same as phone", "use same", "use public phone",
+    }
+
+
 def _checkout_url(*, template: str, customer_id: str, plan_id: str, chat_id: str) -> str:
     if not template:
         return ""
@@ -566,6 +866,20 @@ def _checkout_url(*, template: str, customer_id: str, plan_id: str, chat_id: str
 def _is_trial_start(text: str) -> bool:
     return bool(re.search(
         r"\b(free\s+trial|start\s+trial|try\s+free|3\s+free|help\s+me\s+create\s+a\s+beautiful\s+flyer)\b",
+        text or "",
+        flags=re.IGNORECASE,
+    ))
+
+
+def _is_onboarding_start(text: str) -> bool:
+    return bool(re.search(
+        r"\b("
+        r"free\s+trial|start\s+trial|try\s+free|3\s+free|"
+        r"help\s+me\s+create\s+a\s+beautiful\s+flyer|"
+        r"start\s+free\s+(?:trial|trail)|"
+        r"act\s+now!?\s+save\s+time\s+and\s+money|"
+        r"set\s+up\s+flyer\s+studio"
+        r")\b",
         text or "",
         flags=re.IGNORECASE,
     ))

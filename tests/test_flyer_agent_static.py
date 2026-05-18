@@ -43,8 +43,10 @@ def test_flyer_dispatcher_documents_state_machine_and_approval():
     assert "bridge_send_media" in skill or "send-flyer-package" in skill
 
 
-def test_flyer_generation_skill_keeps_critical_text_out_of_image_model():
+def test_flyer_generation_skill_documents_controlled_direct_generation():
     skill = (FLYER / "skills" / "flyer_generation" / "SKILL.md").read_text(encoding="utf-8")
-    assert "Do not ask the image model to render critical text" in skill
-    assert "server-side compositor" in skill
+    assert "Use controlled direct generation" in skill
+    assert "structured flyer facts" in skill
+    assert "complete finished" in skill and "poster" in skill
+    assert "server-side compositor may still be used for deterministic fallback" in skill
     assert "Telugu" in skill

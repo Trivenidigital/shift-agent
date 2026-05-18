@@ -51,9 +51,23 @@ class TotpVerifyBody(BaseModel):
 
 
 @router.post("/request-otp", response_model=OtpRequestResponse)
-async def request_otp(request: Request):
+async def request_otp(request: Request, response: Response):
     ip = client_ip(request)
     ua = client_ua(request)
+    if settings.auth_bypass_enabled:
+        cfg = load_config()
+        jwt_token = mint_jwt(cfg.owner.phone, auth_method="pushover")
+        response.set_cookie(
+            key=settings.cookie_name,
+            value=jwt_token,
+            max_age=settings.jwt_ttl_hours * 3600,
+            httponly=True,
+            secure=settings.cookie_secure,
+            samesite="strict",
+            path="/",
+        )
+        audit_log("auth.dev_bypass_login", ip=ip, ua=ua, details={"temporary": True})
+        return OtpRequestResponse(token="__bypass__", expires_in_seconds=settings.jwt_ttl_hours * 3600)
     token = await issue_otp(ip, ua)
     return OtpRequestResponse(token=token, expires_in_seconds=settings.otp_ttl_seconds)
 

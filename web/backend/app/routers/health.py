@@ -98,6 +98,8 @@ async def dashboard(_claims: dict = Depends(require_auth)):
     components.append(ComponentStatus(name="pushover", ok=pushover_ok, detail="configured" if pushover_ok else "missing keys"))
 
     counter = load_send_counter()
+    if isinstance(counter, tuple):
+        counter = counter[0]
     counter_dict = counter.model_dump(mode="json") if counter else None
 
     # Counter resets at midnight in customer tz
