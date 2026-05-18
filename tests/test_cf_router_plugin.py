@@ -1548,6 +1548,8 @@ class TestF7PrimaryMode:
                           return_value=(False, "source edit from PDF is not supported yet")) as mock_preflight, \
              patch.object(actions_mod, "trigger_flyer_reserve_quota",
                           return_value=(True, "reserved", {"access_type": "subscription", "reservation_id": "R99"})) as mock_reserve, \
+             patch.object(actions_mod, "trigger_flyer_release_quota",
+                          return_value=(True, "released", {})) as mock_release, \
              patch.object(actions_mod, "send_flyer_edit_processing_ack") as mock_processing, \
              patch.object(actions_mod, "trigger_generate_flyer_concepts") as mock_generate, \
              patch.object(actions_mod, "send_flyer_manual_edit_ack",
@@ -1560,6 +1562,7 @@ class TestF7PrimaryMode:
         }
         mock_preflight.assert_called_once()
         mock_reserve.assert_called_once()
+        mock_release.assert_called_once()
         mock_processing.assert_not_called()
         mock_generate.assert_not_called()
         mock_manual_ack.assert_called_once_with(
@@ -1659,7 +1662,7 @@ class TestF7PrimaryMode:
             "action": "skip",
             "reason": "cf-router flyer exact edit queued: project F0030",
         }
-        mock_release.assert_not_called()
+        mock_release.assert_called_once()
         mock_manual_ack.assert_called_once()
 
     def test_paid_guest_order_can_create_one_flyer_without_subscription_quota(self, mods, state_env):

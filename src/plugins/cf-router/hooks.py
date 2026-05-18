@@ -488,13 +488,15 @@ def _try_flyer_primary_intercept(
                 text,
                 reason=ready_detail,
             )
+            release_ok, release_detail = _release_flyer_access(access, chat_id, phone, project_id, message_id)
             actions.audit_intercepted(
                 reason="flyer_reference_exact_edit_queued",
                 chat_id=chat_id,
-                subprocess_rc=0 if ack_ok else 3,
+                subprocess_rc=0 if ack_ok and release_ok else 3,
                 detail=(
                     f"project_id={project_id}; sender_role={role}; "
                     f"source_edit_preflight_failed={ready_detail[:250]}; access={access}; "
+                    f"release_ok={release_ok}; release_detail={release_detail[:250]}; "
                     f"ack_message_id={outbound_message_id}; ack_error={ack_err[:300]}"
                 ),
             )
@@ -520,8 +522,12 @@ def _try_flyer_primary_intercept(
                 text,
                 reason=f"automatic edit generation failed: {gen_detail}",
             )
+            release_ok, release_detail = _release_flyer_access(access, chat_id, phone, project_id, message_id)
             outbound_message_id = ",".join(x for x in [proc_mid, manual_mid] if x)
-            ack_err = f"edit_generation_failed: {gen_detail}; ack_error={ack_err}"
+            ack_err = (
+                f"edit_generation_failed: {gen_detail}; "
+                f"release_ok={release_ok}; release_detail={release_detail[:250]}; ack_error={ack_err}"
+            )
             reason = f"cf-router flyer exact edit queued: project {project_id}"
         actions.audit_intercepted(
             reason="flyer_primary_project_created" if gen_ok else "flyer_reference_exact_edit_queued",
@@ -703,13 +709,15 @@ def _try_flyer_reference_scope_authorization_intercept(text: str, chat_id: str, 
                 raw_request,
                 reason=ready_detail,
             )
+            release_ok, release_detail = _release_flyer_access(access, chat_id, phone, project_id, message_id)
             actions.audit_intercepted(
                 reason="flyer_reference_exact_edit_queued",
                 chat_id=chat_id,
-                subprocess_rc=0 if ack_ok else 3,
+                subprocess_rc=0 if ack_ok and release_ok else 3,
                 detail=(
                     f"project_id={project_id}; sender_role={role}; source={source}; "
                     f"source_edit_preflight_failed={ready_detail[:250]}; access={access}; "
+                    f"release_ok={release_ok}; release_detail={release_detail[:250]}; "
                     f"ack_message_id={outbound_message_id}; ack_error={ack_err[:300]}"
                 ),
             )
@@ -733,8 +741,12 @@ def _try_flyer_reference_scope_authorization_intercept(text: str, chat_id: str, 
                 raw_request,
                 reason=f"automatic edit generation failed: {gen_detail}",
             )
+            release_ok, release_detail = _release_flyer_access(access, chat_id, phone, project_id, message_id)
             outbound_message_id = ",".join(x for x in [proc_mid, manual_mid] if x)
-            ack_err = f"edit_generation_failed: {gen_detail}; ack_error={ack_err}"
+            ack_err = (
+                f"edit_generation_failed: {gen_detail}; "
+                f"release_ok={release_ok}; release_detail={release_detail[:250]}; ack_error={ack_err}"
+            )
             reason = f"cf-router flyer reference scope authorized queued: project {project_id}"
             audit_reason = "flyer_reference_exact_edit_queued"
 

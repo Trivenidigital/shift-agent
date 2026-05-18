@@ -185,6 +185,22 @@ def test_extract_revision_patch_handles_extra_time_removal_and_item_add():
     assert 'Remove duplicate/extra time text "08:00"' in patch.raw_request_update
 
 
+def test_extract_revision_patch_does_not_parse_later_price_as_extra_time():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Weekend Breakfast Specials",
+        event_time="08:00",
+        venue_or_location="90 Brybar Dr",
+        contact_info="+1 732 983 7841",
+        notes="Weekend Breakfast Specials. Extra 08:00 appears in the template.",
+    ))
+
+    patch = extract_revision_patch(project, "Remove extra 08:00 and add Any Item for $9.99.")
+
+    assert patch.changed is True
+    assert 'Remove duplicate/extra time text "08:00"' in patch.notes_update
+    assert 'Remove duplicate/extra time text "9"' not in patch.notes_update
+
+
 def test_extract_revision_patch_handles_item_swap_with_price():
     project = _project(FlyerRequestFields(
         event_or_business_name="Weekend Breakfast Specials",

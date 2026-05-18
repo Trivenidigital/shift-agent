@@ -175,12 +175,14 @@ def _extract_item_swap(text: str) -> tuple[str, str]:
 
 
 def _extract_extra_time_instruction(text: str) -> str:
+    marker = re.search(r"\b(?:extra|duplicate)\b(?P<tail>[^.?!]*)", text, flags=re.IGNORECASE)
+    if not marker:
+        return ""
     match = re.search(
-        r"\b(?:remove|delete|exclude)\b[^.]{0,50}\b(?:extra|duplicate)\b[^.]{0,30}(?<![:\d])(?P<time>\d{1,2}(?::\d{2})?)\b",
-        text,
-        flags=re.IGNORECASE,
+        r"(?<![$\d])\b(?P<time>\d{1,2}(?::\d{2})?)\b(?!\.\d)",
+        marker.group("tail"),
     )
-    if not match:
+    if not match or not re.search(r"\b(?:remove|delete|exclude)\b", text[:marker.start()], flags=re.IGNORECASE):
         return ""
     return f'Remove duplicate/extra time text "{match.group("time")}" from the flyer.'
 

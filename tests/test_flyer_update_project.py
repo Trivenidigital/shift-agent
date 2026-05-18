@@ -208,3 +208,34 @@ def test_source_artwork_followup_after_preview_requires_regeneration(tmp_path, m
     assert persisted["final_asset_ids"] == []
     assert "Remove extra 08:00" in persisted["raw_request"]
     assert persisted["revisions"][0]["applied"] is False
+
+
+def test_source_artwork_followup_keeps_raw_request_within_schema_limit(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    module = _load_script(monkeypatch)
+    state_path = tmp_path / "projects.json"
+    long_raw = "Edit uploaded flyer/source artwork. Preserve the source flyer. " + ("Original text. " * 130)
+    state_path.write_text(
+        _project_store_json(
+            tmp_path,
+            status="manual_edit_required",
+            raw_request=long_raw[:1995],
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(sys, "argv", [
+        "update-flyer-project",
+        "--project-id", "F9001",
+        "--revision-text", "Remove extra 08:00 and add Any Item for $9.99.",
+        "--message-id", "m-long-followup",
+        "--state-path", str(state_path),
+    ])
+
+    assert module.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["revision_requires_clarification"] is False
+
+    reloaded = module.FlyerProjectStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert len(reloaded.projects[0].raw_request) <= 2000
+    assert "Latest correction:" in reloaded.projects[0].raw_request
