@@ -252,7 +252,13 @@ def _extract_fields(raw_request: str, *, now: datetime) -> FlyerRequestFields:
     elif "mixed" in lower or "multi-language" in lower or "multilingual" in lower:
         language = "mixed"
     if "style" in lower:
-        style_match = re.search(r"([^.]*\bstyle\b)", text, flags=re.IGNORECASE)
+        style_match = re.search(
+            r"\bstyle\s*:\s*(.+?)(?=\.|,\s*(?:location|address|phone|contact)\b|\s+(?:location|address|phone|contact)\b|$)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if not style_match:
+            style_match = re.search(r"([^.]*\bstyle\b)", text, flags=re.IGNORECASE)
         if style_match:
             style = style_match.group(1).strip(" .")
     if not style:
