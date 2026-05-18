@@ -43,8 +43,9 @@ Hermes-first summary: reuse Hermes WhatsApp ingress, `dispatch_shift_agent`, sen
   - [x] Write implementation plan: `docs/superpowers/plans/2026-05-18-flyer-business-starter-briefs.md`.
   - [x] Get plan reviewed by two parallel agents and apply findings.
     - Review fixes: added cf-router active/trial vague-start path, parser-validity tests for starter text -> project creation, stricter per-step `[Hermes]` / `[net-new]` checklist, explicit onboarding data-flow change, and softer customer-facing copy rules.
-  - [ ] Write design doc.
-  - [ ] Get design reviewed by two parallel agents and apply findings.
+  - [x] Write design doc: `docs/superpowers/specs/2026-05-18-flyer-business-starter-briefs-design.md`.
+  - [x] Get design reviewed by two parallel agents and apply findings.
+    - Review fixes: added explicit `trial`/`active` status guard, non-eligible status tests, compound `CONFIRM. Create ...` suppression, all-category starter text parser-validity coverage, customer-copy internal-term checks, and design-local Hermes domain table.
   - [ ] Build with TDD.
   - [ ] Run focused verification.
   - [ ] Create PR.

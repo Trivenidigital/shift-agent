@@ -165,14 +165,14 @@ Expected: all catalog tests pass.
 
 - [ ] **Step 5: Prove starter briefs can become valid project requests**
 
-Add tests in `tests/test_flyer_create_project.py` that call `starter_brief_for_category(...).body`, pass the body to `create-flyer-project` with a saved customer profile, and assert:
+Add tests in `tests/test_flyer_create_project.py` that iterate over `all_starter_briefs()`, pass each body to `create-flyer-project` with a saved customer profile, and assert:
 
 ```python
 assert module.FlyerProject.model_validate(project).fields.missing_required_fields() == []
 assert actions.flyer_project_has_required_fields(project)
 ```
 
-Cover at least `digital marketing agency`, `Indian restaurant`, and `grocery store`.
+Cover every catalog category, including the `local_business` fallback.
 
 - [ ] **Step 6: Verify parser GREEN**
 
@@ -248,15 +248,16 @@ customer = next((c for c in store.customers if c.customer_id == customer_id), No
 return _trial_active_reply(customer_id, creation_mode=session.creation_mode, language=session.preferred_language, customer=customer)
 ```
 
-Then update `_trial_active_reply` to accept `customer: FlyerCustomerProfile | None = None` and append `starter_brief_message(customer.business_category, business_name=customer.business_name)` only when appropriate.
+Then update `_trial_active_reply` to accept `customer: FlyerCustomerProfile | None = None` and `include_starter_brief: bool = True`, and append `starter_brief_message(customer.business_category, business_name=customer.business_name)` only when appropriate.
 
 Append the starter brief only when:
 
 - The customer is `trial` or `active`.
-- No compound trailing flyer request is being routed.
 - The reply is a ready/setup completion prompt.
 
 Do not append starter briefs to payment-pending replies.
+
+Compound-confirm suppression is handled in `cf-router`: when `_try_flyer_onboarding_intercept` detects trailing flyer text after `CONFIRM`, it must send a short ready acknowledgement without starter-brief text before routing the trailing request to `_try_flyer_primary_intercept`.
 
 - [ ] **Step 4: Verify GREEN**
 
@@ -297,6 +298,10 @@ assert created["called"] is False
 
 Also assert the sent text contains `Here is a starter flyer request`.
 
+Add parameterized negative tests for customers with `status` equal to `payment_pending`, `suspended`, and `cancelled`; those must not receive starter brief text.
+
+Add a compound-confirm test for `CONFIRM. Create ...`; assert project creation happens and the onboarding acknowledgement sent before project creation does not contain `Here is a starter flyer request`.
+
 - [ ] **Step 2: Run focused cf-router test and verify RED**
 
 Run: `python -m pytest tests/test_cf_router_flyer_routing.py::test_vague_flyer_start_for_active_customer_sends_starter_brief -q`
@@ -305,7 +310,7 @@ Expected: fail because current code calls `_try_flyer_primary_intercept`.
 
 - [ ] **Step 3: Implement cf-router starter branch**
 
-In the existing `actions.is_vague_flyer_start(...)` block, when `customer` exists and role is not owner:
+In the existing `actions.is_vague_flyer_start(...)` block, when `customer` exists, `customer.get("status") in {"trial", "active"}`, and role is not owner:
 
 ```python
 reply = actions.flyer_starter_brief_reply(customer)
