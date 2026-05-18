@@ -233,7 +233,13 @@ def format_text_report(
     role_counts: dict[str, int] = defaultdict(int)
     skill_counts: dict[str, int] = defaultdict(int)
     declined_count = 0
+    # Two counters with DISTINCT semantics so the legacy key keeps its
+    # original meaning. `cf_proposal_selection_count` counts only
+    # f7_proposal_request / f7_proposal_selection (the pre-2026-05-18
+    # whitelist). `cf_router_intercepted_count` is the new total across
+    # all dispatcher-equivalent cf-router intercepts (catering + flyer).
     cf_proposal_selection_count = 0
+    cf_router_intercepted_count = 0
 
     for _inb, match, kind in paired:
         if kind == "dispatcher_routed":
@@ -243,7 +249,9 @@ def format_text_report(
         elif kind == "unknown_sender_declined":
             declined_count += 1
         elif kind == "cf_router_intercepted":
-            cf_proposal_selection_count += 1
+            cf_router_intercepted_count += 1
+            if match.get("reason") in {"f7_proposal_request", "f7_proposal_selection"}:
+                cf_proposal_selection_count += 1
 
     if shape_counts:
         lines.append("Routed by message_shape:")
@@ -267,8 +275,8 @@ def format_text_report(
         lines.append(f"Declined unknown senders: {declined_count}")
         lines.append("")
 
-    if cf_proposal_selection_count:
-        lines.append(f"CF router intercepts: {cf_proposal_selection_count}")
+    if cf_router_intercepted_count:
+        lines.append(f"CF router intercepts: {cf_router_intercepted_count}")
         lines.append("")
 
     if unpaired:
@@ -296,7 +304,10 @@ def format_json_report(
     role_counts: dict[str, int] = defaultdict(int)
     skill_counts: dict[str, int] = defaultdict(int)
     declined_count = 0
+    # See format_text_report comment: legacy key keeps F7-only semantics;
+    # new key counts all dispatcher-equivalent cf-router intercepts.
     cf_proposal_selection_count = 0
+    cf_router_intercepted_count = 0
     for _inb, match, kind in paired:
         if kind == "dispatcher_routed":
             shape_counts[match.get("message_shape", "?")] += 1
@@ -305,7 +316,9 @@ def format_json_report(
         elif kind == "unknown_sender_declined":
             declined_count += 1
         elif kind == "cf_router_intercepted":
-            cf_proposal_selection_count += 1
+            cf_router_intercepted_count += 1
+            if match.get("reason") in {"f7_proposal_request", "f7_proposal_selection"}:
+                cf_proposal_selection_count += 1
 
     return json.dumps(
         {
@@ -315,7 +328,7 @@ def format_json_report(
             "unpaired_count": len(unpaired),
             "declined_count": declined_count,
             "cf_router_proposal_selection_count": cf_proposal_selection_count,
-            "cf_router_intercepted_count": cf_proposal_selection_count,
+            "cf_router_intercepted_count": cf_router_intercepted_count,
             "coverage_pct": _coverage_pct(len(paired), total),
             "by_message_shape": dict(shape_counts),
             "by_sender_role": dict(role_counts),

@@ -14,10 +14,21 @@ from pathlib import Path
 
 import pytest
 
-# safe_io uses fcntl (Unix-only). Skip the whole module on Windows so the rest
-# of the suite runs in local dev; the suite still runs on the Linux VPS where
-# flock is the whole point. importorskip works at collection time, before the
-# safe_io import below would explode.
+# safe_io is POSIX-only at runtime: fcntl.flock is the whole point of FileLock,
+# and Windows file-mode semantics make the 0o600 / 0o640 assertions
+# meaningless. Skip on actual Windows regardless of any fcntl stub that may
+# have leaked in from web/backend/tests/conftest.py (the cockpit conftest
+# injects a no-op fcntl stub so the cockpit code can import on Windows; that
+# stub is intentional for cockpit tests but would make these tests run with
+# fake locking and fail noisily). Gate on os.name so the skip is robust to
+# stub injection — importorskip("fcntl") alone would pass-through to the
+# stub and let these tests run.
+pytest.skip(
+    "safe_io tests are POSIX-only; the deployed VPS is Linux. "
+    "On Windows, even with the cockpit-conftest fcntl stub the flock-based "
+    "concurrency tests and 0o600 file-mode assertions cannot pass.",
+    allow_module_level=True,
+) if os.name != "posix" else None
 pytest.importorskip("fcntl")
 
 from safe_io import (

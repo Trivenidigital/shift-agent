@@ -204,9 +204,11 @@ def test_flyer_customers_caps_at_300_sorted_by_updated_at(tmp_path):
     # rows[0..299] correspond to indices 304..5; verify strict desc order
     for prev, curr in zip(rows, rows[1:]):
         assert prev["updated_at"] >= curr["updated_at"]
-    # Truncation metadata so the dashboard can show "showing 300 of 305"
-    # instead of silently disagreeing with /flyer/summary's total_customers.
+    # Pagination metadata so the dashboard can show "showing 1-300 of 305"
+    # and navigate to the next page rather than silently dropping rows.
     assert result["total"] == 305
+    assert result["offset"] == 0
+    assert result["limit"] == 300
     assert result["truncated"] is True
 
 
@@ -231,6 +233,70 @@ def test_flyer_customers_not_truncated_under_cap(tmp_path):
     assert len(result["customers"]) == 5
     assert result["total"] == 5
     assert result["truncated"] is False
+    assert result["offset"] == 0
+    assert result["limit"] == 300
+
+
+def test_flyer_customers_offset_returns_next_page(tmp_path):
+    """BUG-FLYER-QA-002 (P1 follow-up): rows beyond the first 300 must be
+    reachable via offset, otherwise the cap silently drops customers."""
+    from app.routers import flyer
+
+    settings = flyer.get_settings()
+    settings.state_dir = tmp_path / "state"
+
+    customers = []
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for i in range(305):
+        c = _customer(f"CUST{i:04d}", phone=f"+1555012{i:04d}")
+        c["created_at"] = base.isoformat()
+        c["updated_at"] = (base + timedelta(minutes=i)).isoformat()
+        customers.append(c)
+    _write_json(
+        settings.state_dir / "flyer" / "customers.json",
+        {"schema_version": 1, "next_customer_sequence": 306, "customers": customers},
+    )
+    _write_json(
+        settings.state_dir / "flyer" / "projects.json",
+        {"schema_version": 1, "next_project_sequence": 1, "projects": []},
+    )
+
+    page2 = asyncio.run(flyer.customers(query="", segment="", offset=300, limit=300, _=None))
+
+    # Sorted desc by updated_at; the newest 300 went to page 1 (indices
+    # 304..5), so page 2 contains the oldest 5 (indices 4..0).
+    assert len(page2["customers"]) == 5
+    assert page2["customers"][0]["customer_id"] == "CUST0004"
+    assert page2["customers"][-1]["customer_id"] == "CUST0000"
+    assert page2["total"] == 305
+    assert page2["offset"] == 300
+    assert page2["limit"] == 300
+    assert page2["truncated"] is False  # no rows beyond this page
+
+
+def test_flyer_customers_limit_clamped_to_300(tmp_path):
+    """BUG-FLYER-QA-002 (P1 follow-up): limit > 300 must clamp to 300 to
+    match the deployed `/projects` and `/guest-orders` ceiling."""
+    from app.routers import flyer
+
+    settings = flyer.get_settings()
+    settings.state_dir = tmp_path / "state"
+
+    customers = [_customer(f"CUST{i:04d}", phone=f"+1555013{i:04d}") for i in range(305)]
+    _write_json(
+        settings.state_dir / "flyer" / "customers.json",
+        {"schema_version": 1, "next_customer_sequence": 306, "customers": customers},
+    )
+    _write_json(
+        settings.state_dir / "flyer" / "projects.json",
+        {"schema_version": 1, "next_project_sequence": 1, "projects": []},
+    )
+
+    result = asyncio.run(flyer.customers(query="", segment="", offset=0, limit=10000, _=None))
+    assert len(result["customers"]) == 300
+    assert result["limit"] == 300
+    assert result["total"] == 305
+    assert result["truncated"] is True
 
 
 def test_campaign_target_parser_rejects_formula_and_dedupes():

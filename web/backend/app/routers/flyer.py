@@ -355,7 +355,19 @@ async def summary(_=Depends(require_auth)):
 
 
 @router.get("/customers")
-async def customers(query: str = "", segment: str = "", _=Depends(require_auth)):
+async def customers(
+    query: str = "",
+    segment: str = "",
+    offset: int = 0,
+    limit: int = 300,
+    _=Depends(require_auth),
+):
+    # BUG-FLYER-QA-002 (review follow-up): pagination via offset+limit so
+    # rows beyond the first page are reachable. limit is capped at 300 to
+    # match /projects and /guest-orders; offset/limit are clamped to
+    # non-negative to avoid Python list-slice weirdness.
+    offset = max(0, offset)
+    limit = max(1, min(300, limit))
     store = load_customer_store()
     projects = load_project_store()
     project_counts: dict[str, int] = {}
@@ -382,14 +394,20 @@ async def customers(query: str = "", segment: str = "", _=Depends(require_auth))
         if segment and row["category"] != segment:
             continue
         rows.append(row)
-    # BUG-FLYER-QA-002: cap + sort to match /projects and /guest-orders.
-    # Surface `total` + `truncated` so the operator UI can distinguish
-    # "showing 300" from "there are exactly 300" (otherwise the table
-    # silently diverges from the /summary stat once the fleet exceeds 300).
+    # BUG-FLYER-QA-002: cap + sort to match /projects and /guest-orders,
+    # plus offset/limit pagination so rows beyond the first page stay
+    # reachable. Surface `total` + `truncated` + `offset` + `limit` so the
+    # dashboard can show "showing X-Y of N" and navigate forward.
     rows.sort(key=lambda r: r.get("updated_at", ""), reverse=True)
     total = len(rows)
-    capped = rows[:300]
-    return {"customers": capped, "total": total, "truncated": total > len(capped)}
+    page = rows[offset:offset + limit]
+    return {
+        "customers": page,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "truncated": total > len(page) + offset,
+    }
 
 
 @router.get("/customers/{customer_id}")
