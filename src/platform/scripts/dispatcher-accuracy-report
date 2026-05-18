@@ -41,6 +41,31 @@ from typing import Any, Iterable
 DEFAULT_LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
 PAIR_WINDOW_SECONDS = 10
 
+# BUG-FLYER-QA-003b: all cf_router_intercepted reasons that represent a
+# successful dispatcher-equivalent route (i.e. the LLM was bypassed but a
+# script handled the inbound). Failure reasons (`*_failed`) and the bare
+# `error` reason are NOT dispatcher-equivalent — the LLM still ran in those
+# cases, so the raw_inbound should still be considered unpaired.
+CF_ROUTER_DISPATCHER_EQUIV_REASONS = frozenset({
+    # Catering F7 paths (pre-existing).
+    "f7_proposal_request",
+    "f7_proposal_selection",
+    # Flyer paths (added 2026-05-18). Order matches schemas.py for diffability.
+    "flyer_primary_project_created",
+    "flyer_intake_started",
+    "flyer_intake",
+    "flyer_onboarding",
+    "flyer_starter_brief",
+    "flyer_customer_not_active",
+    "flyer_quota_blocked",
+    "flyer_brand_asset_saved",
+    "flyer_reference_scope_blocked",
+    "flyer_reference_exact_edit_queued",
+    "flyer_location_blocked",
+    "flyer_account_command",
+    "flyer_guest_order_started",
+})
+
 
 def _parse_ts(s: str) -> datetime:
     """ISO-8601 timestamp normalized to a timezone-aware value.
@@ -131,7 +156,7 @@ def pair_inbounds(
     cf_proposal_intercepts = [
         e for e in entries
         if e.get("type") == "cf_router_intercepted"
-        and e.get("reason") in {"f7_proposal_request", "f7_proposal_selection"}
+        and e.get("reason") in CF_ROUTER_DISPATCHER_EQUIV_REASONS
     ]
     declined = [e for e in entries if e.get("type") == "unknown_sender_declined"]
 
@@ -243,7 +268,7 @@ def format_text_report(
         lines.append("")
 
     if cf_proposal_selection_count:
-        lines.append(f"CF router proposal selections: {cf_proposal_selection_count}")
+        lines.append(f"CF router intercepts: {cf_proposal_selection_count}")
         lines.append("")
 
     if unpaired:
@@ -290,6 +315,7 @@ def format_json_report(
             "unpaired_count": len(unpaired),
             "declined_count": declined_count,
             "cf_router_proposal_selection_count": cf_proposal_selection_count,
+            "cf_router_intercepted_count": cf_proposal_selection_count,
             "coverage_pct": _coverage_pct(len(paired), total),
             "by_message_shape": dict(shape_counts),
             "by_sender_role": dict(role_counts),
