@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import asyncio
 import json
 
 import pytest
@@ -164,6 +165,45 @@ def test_reset_trial_quota_releases_counted_usage(tmp_path):
     assert customer is not None
     assert customer.usage_count_for_current_period() == 0
     assert customer.quota_remaining(FlyerConfig().plan_tiers) == 3
+
+
+def test_flyer_customers_caps_at_300_sorted_by_updated_at(tmp_path):
+    """BUG-FLYER-QA-002: /flyer/customers must cap results at 300 and sort
+    by updated_at desc, matching /projects and /guest-orders.
+
+    Seeds 305 customers with strictly-increasing updated_at; the endpoint
+    must return exactly 300 rows, newest first.
+    """
+    from app.routers import flyer
+
+    settings = flyer.get_settings()
+    settings.state_dir = tmp_path / "state"
+
+    customers = []
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for i in range(305):
+        c = _customer(f"CUST{i:04d}", phone=f"+1555010{i:04d}")
+        c["created_at"] = base.isoformat()
+        c["updated_at"] = (base + timedelta(minutes=i)).isoformat()
+        customers.append(c)
+    _write_json(
+        settings.state_dir / "flyer" / "customers.json",
+        {"schema_version": 1, "next_customer_sequence": 306, "customers": customers},
+    )
+    _write_json(
+        settings.state_dir / "flyer" / "projects.json",
+        {"schema_version": 1, "next_project_sequence": 1, "projects": []},
+    )
+
+    result = asyncio.run(flyer.customers(query="", segment="", _=None))
+    rows = result["customers"]
+
+    assert len(rows) == 300
+    assert rows[0]["customer_id"] == "CUST0304"
+    assert rows[-1]["customer_id"] == "CUST0005"
+    # rows[0..299] correspond to indices 304..5; verify strict desc order
+    for prev, curr in zip(rows, rows[1:]):
+        assert prev["updated_at"] >= curr["updated_at"]
 
 
 def test_campaign_target_parser_rejects_formula_and_dedupes():

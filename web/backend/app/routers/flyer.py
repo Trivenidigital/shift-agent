@@ -382,7 +382,9 @@ async def customers(query: str = "", segment: str = "", _=Depends(require_auth))
         if segment and row["category"] != segment:
             continue
         rows.append(row)
-    return {"customers": rows}
+    # BUG-FLYER-QA-002: cap + sort to match /projects and /guest-orders.
+    rows.sort(key=lambda r: r.get("updated_at", ""), reverse=True)
+    return {"customers": rows[:300]}
 
 
 @router.get("/customers/{customer_id}")
