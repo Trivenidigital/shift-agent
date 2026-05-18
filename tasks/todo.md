@@ -982,7 +982,7 @@ Review results:
   - Drift-check tag: extends-Hermes
   - Hermes-first analysis: reuse Hermes WhatsApp ingress, sender identity, media cache, JSON state, `safe_io`, audit, bridge delivery, Flyer quota/guest access, and admin cockpit. Net-new scope is only Flyer-specific edit classification, revision parsing/state safety, source-edit provider readiness, and operator-visible manual edit work.
   - [x] Write implementation plan: `docs/superpowers/plans/2026-05-18-flyer-edit-flow-hardening.md`.
-  - [ ] Get implementation plan reviewed by two parallel agents.
-  - [ ] Write design spec and get it reviewed by two parallel agents.
-  - [ ] Build fixes with TDD and focused verification.
+  - [x] Get implementation plan reviewed by two parallel agents.
+  - [x] Write design spec and get it reviewed by two parallel agents.
+  - [x] Build fixes with TDD and focused verification.
   - [ ] Create PR and get three parallel review vectors before merge.
