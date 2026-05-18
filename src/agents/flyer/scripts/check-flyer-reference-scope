@@ -1,0 +1,273 @@
+#!/usr/bin/env python3
+"""Check whether an attached flyer/reference belongs to a Flyer account."""
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import mimetypes
+import os
+import re
+import sys
+import urllib.error
+import urllib.request
+from difflib import SequenceMatcher
+from pathlib import Path
+
+
+VISION_MODEL = os.environ.get("VISION_MODEL", "openai/gpt-4o-mini")
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_TIMEOUT_SEC = 45
+
+
+PROMPT_TEMPLATE = """You are checking whether an attached marketing flyer belongs to a specific business account.
+
+Account business name: {business_name}
+Account address: {business_address}
+Account phone numbers: {phones}
+Customer request text: {raw_request}
+
+Read the attached image/PDF. Return STRICT JSON only:
+{{
+  "visible_organization_names": ["business, organization, association, temple, school, or event owner names visible on the flyer"],
+  "visible_phone_numbers": ["phone numbers visible on the flyer"],
+  "visible_event_names": ["event names or titles visible on the flyer"],
+  "appears_related_to_account": true | false | null,
+  "confidence": "high" | "medium" | "low",
+  "reason": "short factual reason"
+}}
+
+Rules:
+- If the flyer visibly names the account business, its logo, address, or phone, set appears_related_to_account=true.
+- If the flyer visibly names another business/organization and not the account business, set appears_related_to_account=false.
+- If the flyer has no readable owner/entity info, set appears_related_to_account=null.
+- Do not infer relationship from cuisine, language, or theme alone.
+- Return only JSON. No markdown.
+"""
+
+
+def _read_key_from_env(path: str) -> str:
+    p = Path(path)
+    if not p.exists():
+        return ""
+    try:
+        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if line.startswith("OPENROUTER_API_KEY="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except OSError:
+        return ""
+    return ""
+
+
+def _api_key() -> str:
+    return (
+        os.environ.get("OPENROUTER_API_KEY", "")
+        or _read_key_from_env("/root/.hermes/.env")
+        or _read_key_from_env("/opt/shift-agent/.env")
+    )
+
+
+def _read_media(path: Path) -> tuple[str, str]:
+    if not path.exists() or not path.is_file():
+        raise FileNotFoundError(f"media file not found: {path}")
+    raw = path.read_bytes()
+    if not raw:
+        raise ValueError(f"media file is empty: {path}")
+    mime, _ = mimetypes.guess_type(str(path))
+    if not mime:
+        mime = "image/jpeg"
+    if not mime.startswith("image/") and mime != "application/pdf":
+        raise ValueError(f"unsupported media type {mime}")
+    return base64.b64encode(raw).decode("ascii"), mime
+
+
+def _norm_name(value: str) -> str:
+    words = re.findall(r"[a-z0-9]+", (value or "").lower())
+    noise = {
+        "the", "a", "an", "llc", "inc", "co", "company", "restaurant",
+        "kitchen", "kitchens", "cafe", "bakery", "express", "indian",
+    }
+    return "".join(word for word in words if word not in noise)
+
+
+def _names_match(left: str, right: str) -> bool:
+    l_norm = _norm_name(left)
+    r_norm = _norm_name(right)
+    if not l_norm or not r_norm:
+        return False
+    if l_norm in r_norm or r_norm in l_norm:
+        return True
+    return SequenceMatcher(None, l_norm, r_norm).ratio() >= 0.86
+
+
+def _digits(value: str) -> str:
+    return re.sub(r"\D", "", value or "")
+
+
+def _phone_matches(visible: list[str], account: list[str]) -> bool:
+    account_digits = [_digits(phone) for phone in account if _digits(phone)]
+    for found in visible:
+        found_digits = _digits(found)
+        if not found_digits:
+            continue
+        for acct in account_digits:
+            if found_digits.endswith(acct[-10:]) or acct.endswith(found_digits[-10:]):
+                return True
+    return False
+
+
+def decide_scope(
+    *,
+    business_name: str,
+    business_address: str,
+    account_phones: list[str],
+    raw_request: str,
+    extraction: dict,
+) -> dict:
+    visible_names = [str(x).strip() for x in extraction.get("visible_organization_names") or [] if str(x).strip()]
+    visible_phones = [str(x).strip() for x in extraction.get("visible_phone_numbers") or [] if str(x).strip()]
+    confidence = str(extraction.get("confidence") or "low").lower()
+
+    if any(_names_match(name, business_name) for name in visible_names) or _phone_matches(visible_phones, account_phones):
+        return {
+            "decision": "allow",
+            "reason": "reference_matches_account",
+            "visible_organization_names": visible_names,
+            "visible_phone_numbers": visible_phones,
+        }
+
+    if visible_names and confidence in {"high", "medium"}:
+        return {
+            "decision": "block",
+            "reason": "reference_appears_unrelated",
+            "reply_text": unrelated_reply(business_name, visible_names),
+            "visible_organization_names": visible_names,
+            "visible_phone_numbers": visible_phones,
+        }
+
+    if business_name and _names_match(raw_request, business_name):
+        return {
+            "decision": "allow",
+            "reason": "request_names_account_but_reference_unclear",
+            "visible_organization_names": visible_names,
+            "visible_phone_numbers": visible_phones,
+        }
+
+    return {
+        "decision": "clarify",
+        "reason": "reference_relationship_unclear",
+        "reply_text": unclear_reply(business_name),
+        "visible_organization_names": visible_names,
+        "visible_phone_numbers": visible_phones,
+    }
+
+
+def unrelated_reply(business_name: str, visible_names: list[str]) -> str:
+    account = business_name or "this business"
+    visible = ", ".join(visible_names[:2])
+    visible_line = f"\n\nI see this flyer appears to be for: {visible}." if visible else ""
+    source = visible_names[0] if visible_names else "the source business"
+    return (
+        "Flyer Studio\n"
+        "------------\n"
+        f"The flyer change you requested does not appear to be related to {account}.{visible_line}\n\n"
+        f"This account is set up to create marketing material for {account}. Please choose one path:\n\n"
+        f"1. If you own or are authorized to use this flyer: reply with how {source} is connected to {account}, "
+        f"and send the {account} logo/details to use.\n"
+        f"2. If this is only a reference: reply \"use as reference\" and Flyer Studio can create a new original "
+        f"{account} flyer with a similar menu structure, without copying {source} branding/layout exactly.\n\n"
+        "For a different business or organization, please use Create One Flyer - $4 or contact support."
+    )
+
+
+def unclear_reply(business_name: str) -> str:
+    account = business_name or "this business"
+    return (
+        "Flyer Studio\n"
+        "------------\n"
+        f"I could not confirm whether the attached flyer belongs to {account}.\n\n"
+        f"If you own or are authorized to use this flyer, reply with how it is connected to {account}, "
+        f"and send the {account} logo/details to use.\n"
+        f"If this is only a reference, reply \"use as reference\" and Flyer Studio can create a new original "
+        f"{account} flyer using it as inspiration without copying another business's branding/layout exactly.\n\n"
+        "For a different business or organization, please use Create One Flyer - $4 or contact support."
+    )
+
+
+def _call_vision(api_key: str, image_b64: str, mime: str, prompt: str) -> dict:
+    payload = {
+        "model": VISION_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{image_b64}"}},
+                ],
+            }
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.0,
+    }
+    req = urllib.request.Request(
+        OPENROUTER_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=OPENROUTER_TIMEOUT_SEC) as resp:
+        body = resp.read().decode("utf-8")
+    doc = json.loads(body)
+    content = doc["choices"][0]["message"]["content"]
+    return json.loads(content)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--media-path", required=True)
+    parser.add_argument("--business-name", required=True)
+    parser.add_argument("--business-address", default="")
+    parser.add_argument("--account-phone", action="append", default=[])
+    parser.add_argument("--raw-request", default="")
+    args = parser.parse_args()
+
+    key = _api_key()
+    if not key or "PLACEHOLDER" in key:
+        result = {
+            "decision": "clarify",
+            "reason": "vision_key_missing",
+            "reply_text": unclear_reply(args.business_name),
+        }
+        print(json.dumps(result, separators=(",", ":")))
+        return 0
+
+    try:
+        image_b64, mime = _read_media(Path(args.media_path))
+        prompt = PROMPT_TEMPLATE.format(
+            business_name=args.business_name,
+            business_address=args.business_address or "",
+            phones=", ".join(args.account_phone or []),
+            raw_request=args.raw_request or "",
+        )
+        extraction = _call_vision(key, image_b64, mime, prompt)
+        result = decide_scope(
+            business_name=args.business_name,
+            business_address=args.business_address or "",
+            account_phones=list(args.account_phone or []),
+            raw_request=args.raw_request or "",
+            extraction=extraction,
+        )
+        result["extraction"] = extraction
+    except (OSError, ValueError, json.JSONDecodeError, urllib.error.URLError, urllib.error.HTTPError) as exc:
+        result = {
+            "decision": "clarify",
+            "reason": f"scope_check_failed:{type(exc).__name__}",
+            "reply_text": unclear_reply(args.business_name),
+        }
+    print(json.dumps(result, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
