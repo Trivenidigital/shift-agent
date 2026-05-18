@@ -937,7 +937,11 @@ def is_vague_flyer_start(text: str, *, has_media: bool = False) -> bool:
 def extract_flyer_request_after_confirm(text: str) -> str:
     """Return a flyer brief trailing a compound onboarding CONFIRM reply."""
     body = flyer_visible_message_text(text)
-    match = re.match(r"^\s*CONFIRM\b(?:\s*[\.:,;!\-]\s*|\s+)(.+?)\s*$", body, flags=re.IGNORECASE | re.DOTALL)
+    match = re.match(
+        r"^\s*(?:confirm|ok|yes)\b(?:\s*[\.:,;!\-]\s*|\s+)(.+?)\s*$",
+        body,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
     if not match:
         return ""
     request = " ".join(match.group(1).split())
