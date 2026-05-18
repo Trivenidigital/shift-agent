@@ -113,7 +113,7 @@ The backend response shape becomes `{customers, total, offset, limit, truncated}
 **Files touched:** `src/platform/scripts/dispatcher-accuracy-report`.
 
 **Tests (`tests/test_dispatcher_accuracy_report.py`):**
-- Seed a `raw_inbound` + matching `cf_router_intercepted{reason="flyer_starter_brief"}` within the 10-s pairing window; assert paired_count == 1, unpaired_count == 0, JSON has `cf_router_intercepted_count == 1` AND legacy `cf_router_proposal_selection_count == 1`.
+- Seed a `raw_inbound` + matching `cf_router_intercepted{reason="flyer_starter_brief"}` within the 10-s pairing window; assert paired_count == 1, unpaired_count == 0, JSON has `cf_router_intercepted_count == 1` AND legacy `cf_router_proposal_selection_count == 0` (the legacy key is F7-only, so a flyer-reason intercept must not increment it).
 - Negative case: `cf_router_intercepted{reason="flyer_primary_failed"}` does NOT pair (failures are not "dispatcher routed" events).
 
 ### BUG-FLYER-QA-004 (P1) — Remove `Hermes` from customer-facing footer
