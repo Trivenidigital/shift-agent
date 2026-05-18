@@ -162,6 +162,7 @@ def handle_intake_message(
                 source=session.source,
                 preferred_language=session.preferred_language,
                 creation_mode=mode,
+                customer_id=customer.customer_id if customer else "",
             )
         if session.source == "quick_flyer":
             store.discard_intake_session(session)
@@ -194,8 +195,6 @@ def handle_intake_message(
                 preferred_language=session.preferred_language,
                 creation_mode=mode,
             )
-        if customer and customer.status in {"trial", "active"}:
-            store.claim_starter_prompt_send(customer.customer_id)
         session = session.model_copy(update={
             "creation_mode": "guided",
             "status": "guided_collecting_goal",

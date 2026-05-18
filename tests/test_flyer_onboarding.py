@@ -782,7 +782,7 @@ def test_guided_trial_completion_does_not_append_full_starter_brief(tmp_path):
     assert "Here is a starter flyer request" not in result.reply_text
     updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
     assert updated.intake_sessions[0].status == "guided_collecting_goal"
-    assert updated.claim_starter_prompt_send(result.customer_id) is False
+    assert updated.claim_starter_prompt_send(result.customer_id) is True
 
 
 def test_text_mode_ready_includes_category_starter_brief(tmp_path):

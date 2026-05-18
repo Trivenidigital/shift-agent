@@ -881,10 +881,13 @@ def _preview_may_have_delivered(outbound_message_id: str, ack_err: str) -> bool:
 def _try_flyer_account_intercept(text: str, chat_id: str, event: Any) -> Optional[dict]:
     if not actions.is_flyer_account_command(text):
         return None
+    is_preference_command = actions.is_flyer_starter_prompt_preference_command(text)
     message_id = _extract_message_id(event, chat_id, text)
     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
     customer = actions.find_flyer_customer_by_sender(phone, chat_id)
     if customer is None:
+        if not is_preference_command:
+            return None
         ack_ok, mid, err = actions.send_flyer_text(
             chat_id,
             "Flyer Studio\n------------\nI can change sample prompt settings after your Flyer Studio account is set up.",
@@ -912,12 +915,16 @@ def _try_flyer_account_intercept(text: str, chat_id: str, event: Any) -> Optiona
             subprocess_rc=2,
             detail=f"message_id={message_id}; {detail[:400]}",
         )
+        if not is_preference_command:
+            return None
         actions.send_flyer_text(
             chat_id,
             "Flyer Studio\n------------\nI could not update that setting right now. Please try again.",
         )
         return {"action": "skip", "reason": "cf-router flyer account command failed"}
     if not result.get("handled"):
+        if not is_preference_command:
+            return None
         actions.audit_intercepted(
             reason="flyer_account_unhandled",
             chat_id=chat_id,
@@ -1110,6 +1117,12 @@ def _try_flyer_intake_intercept(
     if not reply:
         return {"action": "skip", "reason": f"cf-router flyer intake: {action}"}
     ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+    _release_starter_claim_on_hard_send_failure(
+        reply,
+        str(result.get("customer_id") or ""),
+        ack_ok=ack_ok,
+        outbound_message_id=mid,
+    )
     actions.audit_intercepted(
         reason="flyer_intake",
         chat_id=chat_id,
@@ -1204,6 +1217,12 @@ def _try_flyer_onboarding_intercept(text: str, chat_id: str, event: Any) -> Opti
     if will_route_trailing:
         reply_text = _suppress_flyer_starter_brief(reply_text)
     ack_ok, mid, err = actions.send_flyer_text(chat_id, reply_text)
+    _release_starter_claim_on_hard_send_failure(
+        reply_text,
+        str(result.get("customer_id") or ""),
+        ack_ok=ack_ok,
+        outbound_message_id=mid,
+    )
     actions.audit_intercepted(
         reason="flyer_onboarding", chat_id=chat_id,
         subprocess_rc=0 if ack_ok else 3,
@@ -1220,6 +1239,20 @@ def _try_flyer_onboarding_intercept(text: str, chat_id: str, event: Any) -> Opti
             return project_result
     return {"action": "skip",
             "reason": f"cf-router flyer onboarding: {result.get('next_status')}"}
+
+
+def _release_starter_claim_on_hard_send_failure(
+    reply_text: str,
+    customer_id: str,
+    *,
+    ack_ok: bool,
+    outbound_message_id: str,
+) -> None:
+    if ack_ok or outbound_message_id or not customer_id:
+        return
+    if actions.flyer_starter_brief_marker() not in (reply_text or ""):
+        return
+    actions.release_flyer_starter_prompt_claim(customer_id)
 
 
 def _suppress_flyer_starter_brief(reply_text: str) -> str:

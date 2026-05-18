@@ -254,7 +254,6 @@ def handle_onboarding_message(
         session = session.model_copy(update={"status": customer.status, "updated_at": now, "customer_id": customer.customer_id})
         _replace_session(store, session)
         if customer.status == "trial" and session.creation_mode == "guided":
-            store.claim_starter_prompt_send(customer.customer_id)
             include_trial_starter_brief = False
             store.replace_intake_session(FlyerIntakeSession(
                 chat_id=chat_id,

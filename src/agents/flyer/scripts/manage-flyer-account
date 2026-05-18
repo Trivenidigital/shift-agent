@@ -17,7 +17,9 @@ try:
         activate_customer,
         finalize_usage,
         handle_account_command,
+        claim_starter_prompt_send,
         release_quota,
+        release_starter_prompt_claim,
         reserve_quota,
     )
 except ModuleNotFoundError:
@@ -25,7 +27,9 @@ except ModuleNotFoundError:
         activate_customer,
         finalize_usage,
         handle_account_command,
+        claim_starter_prompt_send,
         release_quota,
+        release_starter_prompt_claim,
         reserve_quota,
     )
 from schemas import Config, FlyerPlanTier  # noqa: E402
@@ -85,6 +89,8 @@ def main() -> int:
     mode.add_argument("--reserve-quota", action="store_true")
     mode.add_argument("--finalize-usage", action="store_true")
     mode.add_argument("--release-quota", action="store_true")
+    mode.add_argument("--claim-starter-prompt", default="")
+    mode.add_argument("--release-starter-prompt", default="")
     p.add_argument("--sender-phone", default="")
     p.add_argument("--sender-role", default="")
     p.add_argument("--chat-id", default="")
@@ -117,6 +123,16 @@ def main() -> int:
                     payment_provider=provider,
                     payment_checkout_url_template=checkout_template,
                     audit_log_path=audit_path,
+                )
+            elif args.claim_starter_prompt:
+                result = claim_starter_prompt_send(
+                    state_path=state_path,
+                    customer_id=args.claim_starter_prompt,
+                )
+            elif args.release_starter_prompt:
+                result = release_starter_prompt_claim(
+                    state_path=state_path,
+                    customer_id=args.release_starter_prompt,
                 )
             elif args.activate_customer:
                 result = activate_customer(

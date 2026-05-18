@@ -251,6 +251,35 @@ def handle_account_command(
     return AccountResult(True, True, reply, updated.customer_id, updated.status)
 
 
+def claim_starter_prompt_send(*, state_path: Path, customer_id: str) -> AccountResult:
+    store = load_customer_store(state_path)
+    customer = store.find_customer_by_id(customer_id)
+    if customer is None:
+        return AccountResult(False, True, "", customer_id, detail="customer_not_found")
+    claimed = store.claim_starter_prompt_send(customer_id)
+    if claimed:
+        write_customer_store(state_path, store)
+    return AccountResult(
+        True,
+        True,
+        "",
+        customer_id,
+        customer.status,
+        quota_allowed=claimed,
+        detail="claimed" if claimed else "not_claimed",
+    )
+
+
+def release_starter_prompt_claim(*, state_path: Path, customer_id: str) -> AccountResult:
+    store = load_customer_store(state_path)
+    customer = store.find_customer_by_id(customer_id)
+    if customer is None:
+        return AccountResult(False, True, "", customer_id, detail="customer_not_found")
+    store.release_starter_prompt_claim(customer_id)
+    write_customer_store(state_path, store)
+    return AccountResult(True, True, "", customer_id, customer.status, detail="released")
+
+
 def activate_customer(
     *,
     state_path: Path,

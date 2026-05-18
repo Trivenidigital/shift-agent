@@ -476,6 +476,9 @@ def test_sample_prompt_preference_text_is_account_command():
     assert actions.is_flyer_account_command("show sample prompts again")
     assert actions.is_flyer_account_command("[shift-agent-sender v=1 role=customer]\nstop showing examples")
     assert actions.is_flyer_account_command("no examples")
+    assert actions.is_flyer_starter_prompt_preference_command("don't show sample prompts")
+    assert actions.is_flyer_starter_prompt_preference_command("show sample prompts again")
+    assert not actions.is_flyer_starter_prompt_preference_command("status")
 
 
 def test_vague_flyer_start_for_active_customer_sends_starter_brief(monkeypatch):
@@ -760,6 +763,75 @@ def test_sample_prompt_preference_command_without_customer_does_not_fall_through
 
     assert result == {"action": "skip", "reason": "cf-router flyer account command customer not found"}
     assert "after your Flyer Studio account is set up" in sent[0]
+
+
+def test_broad_account_command_without_customer_falls_through(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: (None, "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: None)
+    monkeypatch.setattr(actions, "send_flyer_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not send account reply")))
+
+    assert hooks._try_flyer_account_intercept(
+        "status",
+        "201975216009469@lid",
+        SimpleNamespace(message_id="m-status"),
+    ) is None
+
+
+def test_onboarding_starter_claim_released_on_hard_send_failure(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    released = []
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: None)
+    monkeypatch.setattr(actions, "trigger_flyer_onboarding", lambda **_kwargs: (True, "", {
+        "handled": True,
+        "next_status": "trial",
+        "customer_id": "CUST0001",
+        "reply_text": "Flyer Studio\n------------\nHere is a starter flyer request.\nEdit anything below.",
+    }))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, _text: (False, "", "bridge down"))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+    monkeypatch.setattr(actions, "release_flyer_starter_prompt_claim", lambda customer_id: released.append(customer_id))
+
+    result = hooks._try_flyer_onboarding_intercept(
+        "CONFIRM",
+        "17329837841@s.whatsapp.net",
+        SimpleNamespace(message_id="m-confirm"),
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer onboarding: trial"}
+    assert released == ["CUST0001"]
+
+
+def test_intake_starter_claim_released_on_hard_send_failure(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    released = []
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(actions, "find_flyer_intake_session_by_sender", lambda _phone, _chat_id: {"status": "choosing_mode"})
+    monkeypatch.setattr(actions, "classify_flyer_intent", lambda _text: (False, []))
+    monkeypatch.setattr(actions, "should_start_new_flyer_over_active", lambda _text, has_media=False: False)
+    monkeypatch.setattr(actions, "trigger_flyer_intake", lambda **_kwargs: (True, "", {
+        "handled": True,
+        "action": "text_ready",
+        "customer_id": "CUST0001",
+        "reply_text": "Flyer Studio\n------------\nHere is a starter flyer request.\nEdit anything below.",
+    }))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, _text: (False, "", "bridge down"))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+    monkeypatch.setattr(actions, "release_flyer_starter_prompt_claim", lambda customer_id: released.append(customer_id))
+
+    result = hooks._try_flyer_intake_intercept(
+        "2",
+        "17329837841@s.whatsapp.net",
+        SimpleNamespace(message_id="m-mode"),
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer intake: text_ready"}
+    assert released == ["CUST0001"]
 
 
 def test_payment_pending_customer_campaign_cta_gets_payment_guidance(monkeypatch):

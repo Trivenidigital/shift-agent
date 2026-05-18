@@ -1208,40 +1208,10 @@ def _canonical_phone(phone: Optional[str]) -> Optional[str]:
     return None
 
 
-def _customer_state_atomic_writer() -> Callable[[Path, str], None]:
-    _ensure_platform_path()
-    try:
-        from safe_io import atomic_write_text  # type: ignore
-        return atomic_write_text
-    except Exception:
-        def _fallback(path: Path, content: str) -> None:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content, encoding="utf-8")
-        return _fallback
-
-
-@contextmanager
-def _customer_state_lock() -> Iterator[None]:
-    _ensure_platform_path()
-    try:
-        from safe_io import FileLock  # type: ignore
-    except Exception:
-        yield
-        return
-    with FileLock(Path(str(FLYER_CUSTOMERS_PATH) + ".lock")):
-        yield
-
-
 def _read_customer_state() -> dict:
     if not FLYER_CUSTOMERS_PATH.exists():
         return {}
     return json.loads(FLYER_CUSTOMERS_PATH.read_text(encoding="utf-8"))
-
-
-def _write_customer_state(store: dict) -> None:
-    FLYER_CUSTOMERS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(store, indent=2, sort_keys=True)
-    _customer_state_atomic_writer()(FLYER_CUSTOMERS_PATH, text)
 
 
 def _starter_prompt_metadata(store: dict, customer_id: str) -> dict:
@@ -1305,37 +1275,36 @@ def flyer_starter_prompt_already_sent(customer: dict) -> bool:
 def claim_flyer_starter_prompt_send(customer_id: str) -> bool:
     if not customer_id:
         return False
-    with _customer_state_lock():
-        try:
-            store = _read_customer_state()
-        except Exception:
-            return False
-        preferences = store.setdefault("starter_prompt_preferences", {})
-        sent_counts = store.setdefault("starter_prompt_sent_counts", {})
-        if str(preferences.get(customer_id) or "auto") == "off":
-            return False
-        if int(sent_counts.get(customer_id, 0) or 0) > 0:
-            return False
-        sent_counts[customer_id] = 1
-        _write_customer_state(store)
-        return True
+    ok, _detail, doc = _trigger_flyer_account_state(
+        "--claim-starter-prompt",
+        customer_id,
+    )
+    return bool(ok and doc and doc.get("quota_allowed"))
 
 
 def release_flyer_starter_prompt_claim(customer_id: str) -> None:
     if not customer_id:
         return
-    with _customer_state_lock():
-        try:
-            store = _read_customer_state()
-        except Exception:
-            return
-        sent_counts = store.setdefault("starter_prompt_sent_counts", {})
-        current = int(sent_counts.get(customer_id, 0) or 0)
-        if current <= 1:
-            sent_counts.pop(customer_id, None)
-        else:
-            sent_counts[customer_id] = current - 1
-        _write_customer_state(store)
+    _trigger_flyer_account_state("--release-starter-prompt", customer_id)
+
+
+def _trigger_flyer_account_state(flag: str, customer_id: str) -> tuple[bool, str, Optional[dict]]:
+    try:
+        result = subprocess.run(
+            [str(PYTHON_BIN), str(MANAGE_FLYER_ACCOUNT_BIN), flag, customer_id],
+            capture_output=True,
+            text=True,
+            timeout=SUBPROCESS_TIMEOUT_SEC,
+        )
+    except (subprocess.SubprocessError, OSError) as e:
+        return False, f"{type(e).__name__}: {e}", None
+    detail = (result.stdout or result.stderr or "").strip()
+    if result.returncode != 0:
+        return False, f"exit={result.returncode} {detail[:500]}", None
+    try:
+        return True, detail[:500], json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return False, f"account_state_json_parse_failed: {detail[:500]}", None
 
 
 def flyer_vague_request_clarification_reply(customer: dict) -> str:
@@ -1497,6 +1466,22 @@ def is_flyer_account_command(text: str) -> bool:
         r"add (authorized )?(number|auth)|add authorized number|"
         r"remove authorized number|remove number|update phone|update business phone|"
         r"update whatsapp|update business whatsapp|change plan|confirm update)\b",
+        body or "",
+        flags=re.IGNORECASE,
+    ))
+
+
+def is_flyer_starter_prompt_preference_command(text: str) -> bool:
+    body = flyer_visible_message_text(text)
+    return bool(re.search(
+        r"^\s*(?:"
+        r"don'?t show sample prompts|do not show sample prompts|stop sample prompts|"
+        r"hide sample prompts|turn off sample prompts|disable sample prompts|"
+        r"stop showing examples|no sample prompts|no examples|"
+        r"don'?t show examples|hide examples|stop examples|"
+        r"show sample prompts again|enable sample prompts|turn on sample prompts|"
+        r"bring back sample prompts|show examples again|bring back examples"
+        r")\b",
         body or "",
         flags=re.IGNORECASE,
     ))
