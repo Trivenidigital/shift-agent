@@ -422,6 +422,12 @@ def _menu_item_lines(project: FlyerProject) -> list[str]:
             continue
         seen.add(key)
         items.append(line)
+    if _context_has(_category_context(project), SALON_CATEGORY_TERMS) and "other hair services" in body.lower():
+        line = "Other hair services available"
+        key = _normalize_fact_text(line)
+        if key not in seen:
+            seen.add(key)
+            items.append(line)
     return items[:MAX_DETAIL_FACTS]
 
 
@@ -537,6 +543,7 @@ def _poster_layout_requirements(project: FlyerProject) -> str:
                 "- Build a complete local service-business poster for the stated service category.\n"
                 "- Use a clear brand masthead, large headline, service offer cards with prices, category-appropriate service imagery, and a footer for location/contact.\n"
                 "- Service offer cards must pair each service name and price together.\n"
+                "- If a service line is listed without a price, show it as a service label without a price, dash, or placeholder.\n"
                 "- Keep text large, high-contrast, and centered inside its designed panels; avoid tiny text blocks and generic lower-third captions.\n"
                 "- Keep the visual language category-safe for the stated business type; avoid restaurant/grocery and cultural-celebration styling unless the customer explicitly asks for it."
             )

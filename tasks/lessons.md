@@ -94,3 +94,4 @@
 - Flyer Studio admin CSV campaign upload must send through the CSV endpoint after preview. Previewing uploaded targets and then sending the pasted-text box is operator-hostile and can silently send an empty or stale campaign.
 - Flyer Studio JSON state updates that consume pending choices must hold one file lock across the full read-modify-write transaction and use `safe_io` atomic writers. A lock only around write, or a hand-rolled temp replace, still leaves TOCTOU windows.
 - Sub-threshold PR review findings should still be preserved in a scoped follow-up backlog instead of being lost after merge. Keep them separate from unrelated active backlog edits so deployment commits stay traceable.
+- Flyer Studio wrong-style output is rarely only a render prompt bug. Check parser fields, customer category capture, render policy, and QA blockers in that order; fixing style text alone can still ship poisoned project facts.

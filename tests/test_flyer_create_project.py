@@ -224,7 +224,7 @@ def test_create_project_parses_chloe_salon_service_request_without_prompt_leak(m
         (
             "Create flyer for Chloe Hair Studio promoting the $20 men haircut, "
             "$80 perms, and other hair services. Location: Virginia Beach, VA. "
-            "Contact: +1 757 555 0199"
+            "Contact: +1 757 555 0199. Style: modern US salon and beauty studio promotion."
         ),
         now=datetime(2026, 5, 18, tzinfo=timezone.utc),
     )
@@ -234,7 +234,7 @@ def test_create_project_parses_chloe_salon_service_request_without_prompt_leak(m
     assert fields.contact_info == "+1 757 555 0199"
     assert "food" not in fields.style_preference.lower()
     assert "menu" not in fields.style_preference.lower()
-    assert "salon" in fields.style_preference.lower()
+    assert fields.style_preference == "modern US salon and beauty studio promotion"
 
 
 def test_create_project_can_queue_exact_reference_edit_without_template_title(tmp_path, monkeypatch, capsys):

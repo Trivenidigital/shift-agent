@@ -1001,6 +1001,8 @@ def test_chloe_salon_prompt_is_not_food_or_festival_themed():
 
     assert "salon" in prompt.lower()
     assert "service offer cards" in prompt.lower()
+    assert "Other hair services available" in prompt
+    assert "without a price, show it as a service label" in prompt
     assert "ethnic grocery" not in prompt.lower()
     assert "south indian" not in prompt.lower()
     assert "marigold" not in prompt.lower()
