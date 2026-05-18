@@ -17,6 +17,11 @@ from schemas import (
 )
 
 try:
+    from agents.flyer.starter_briefs import starter_brief_message  # type: ignore
+except ModuleNotFoundError:
+    from flyer_starter_briefs import starter_brief_message  # type: ignore
+
+try:
     from safe_io import atomic_write_text  # type: ignore
 except ModuleNotFoundError:
     def atomic_write_text(path: Path, text: str) -> None:  # type: ignore[no-redef]
@@ -174,7 +179,7 @@ def handle_intake_message(
             write_customer_store(state_path, store)
             return IntakeResult(
                 True,
-                _text_mode_ready_reply(session.preferred_language),
+                _text_mode_ready_reply(session.preferred_language, customer=customer),
                 "text_ready",
                 source=session.source,
                 preferred_language=session.preferred_language,
@@ -364,13 +369,16 @@ def _mode_prompt(language: str, *, prefix: str = "") -> str:
     return "\n".join(lines)
 
 
-def _text_mode_ready_reply(language: str) -> str:
-    return (
+def _text_mode_ready_reply(language: str, *, customer: Optional[FlyerCustomerProfile] = None) -> str:
+    reply = (
         "Flyer Studio\n"
         "------------\n"
         f"Text Mode is ready in {language_label(language)}.\n\n"
         "Send your flyer request in one message. You can also attach an existing flyer, logo, menu, photos, or reference image."
     )
+    if customer and customer.status in {"trial", "active"}:
+        reply = f"{reply}\n\n{starter_brief_message(customer.business_category, business_name=customer.business_name)}"
+    return reply
 
 
 def _guided_goal_prompt(language: str) -> str:

@@ -82,6 +82,24 @@ PALETTES = {
     "C3": {"bg": [242, 241, 255], "primary": [54, 58, 122], "accent": [240, 111, 78], "ink": [30, 32, 50], "soft": [255, 255, 255]},
 }
 
+FOOD_CATEGORY_TERMS = {
+    "restaurant", "grocery", "food", "catering", "menu", "breakfast", "lunch",
+    "dinner", "kitchen", "bakery", "biryani", "dosa", "idli", "idly", "buffet",
+    "meal", "combo", "sweet", "sweets", "snack", "snacks",
+}
+SALON_CATEGORY_TERMS = {
+    "salon", "hair", "haircut", "perm", "perms", "blowdry", "beauty", "spa",
+    "stylist", "barber", "nails", "makeup",
+}
+TAX_CATEGORY_TERMS = {"tax", "bookkeeping", "accounting", "payroll", "filing", "cpa"}
+CLEANING_CATEGORY_TERMS = {"cleaning", "cleaner", "deep clean", "move-out", "maid"}
+MARKETING_CATEGORY_TERMS = {"marketing", "seo", "paid ads", "content creation", "social media"}
+INSTRUCTION_LEAK_PATTERNS = (
+    re.compile(r"\b(?:create|make|generate|need)\s+(?:a\s+)?(?:flyer|flier|poster|banner)\b", re.IGNORECASE),
+    re.compile(r"\b(?:flyer|flier|poster|banner)\s+for\b", re.IGNORECASE),
+    re.compile(r"\bpromoting\s+the\s+-?\s*\$\s*\d", re.IGNORECASE),
+)
+
 FONT_CANDIDATES = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -308,6 +326,29 @@ def _phones_in_text(text: str) -> list[str]:
     ]
 
 
+def _strip_request_instruction_prefix(text: str) -> str:
+    clean = re.sub(r"\s+", " ", text or "").strip()
+    clean = re.sub(
+        r"^\s*(?:hey!?\s*)?(?:please\s+)?(?:create|make|generate|need)\s+(?:a\s+)?(?:flyer|flier|poster|banner)\s+for\s+[^.;:]{2,100}?\s+\b(?:promoting|offering|featuring|advertising|announcing)\b\s+(?:the\s+)?",
+        "",
+        clean,
+        flags=re.IGNORECASE,
+    )
+    return clean.strip(" .")
+
+
+def _instruction_leak_blockers(facts: list[FlyerTextFact]) -> list[str]:
+    blockers: list[str] = []
+    for fact in facts:
+        for pattern in INSTRUCTION_LEAK_PATTERNS:
+            if pattern.search(fact.text or ""):
+                blockers.append(
+                    f"instruction text leaked into flyer copy: {fact.label}={fact.text}"
+                )
+                break
+    return blockers
+
+
 def _detail_clauses(project: FlyerProject) -> list[str]:
     details = (project.fields.notes or project.raw_request or "").strip()
     if not details:
@@ -340,14 +381,14 @@ def _menu_item_lines(project: FlyerProject) -> list[str]:
     text = (project.fields.notes or project.raw_request or "").strip()
     if not text:
         return []
-    body = text
+    body = _strip_request_instruction_prefix(text)
     match = re.search(
         r"\bitems?\b\s*(?:to include in the flyer\s*)?[\"“”']?(.+?)(?:[\"“”']?\s*\.\s*(?:timings?|time)\b|$)",
         text,
         flags=re.IGNORECASE,
     )
     if match:
-        body = match.group(1)
+        body = _strip_request_instruction_prefix(match.group(1))
     pairs = re.findall(
         r"([A-Za-z][A-Za-z '&/-]{1,60}?)\s*\$\s*(\d+(?:\.\d{1,2})?)",
         body,
@@ -356,6 +397,22 @@ def _menu_item_lines(project: FlyerProject) -> list[str]:
     seen: set[str] = set()
     for name, price in pairs:
         clean_name = re.sub(r"^\s*(?:and|,)\s*", "", name).strip(" ,.-\"'")
+        clean_name = re.sub(r"\s+", " ", clean_name)
+        if len(clean_name) < 2:
+            continue
+        line = f"{clean_name} ${price}"
+        key = _normalize_fact_text(line)
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(line)
+    price_first_pairs = re.findall(
+        r"\$\s*(\d+(?:\.\d{1,2})?)\s*([A-Za-z][A-Za-z '&/-]{1,60}?)(?=,|;|\.|\band\b|\$|$)",
+        body,
+        flags=re.IGNORECASE,
+    )
+    for price, name in price_first_pairs:
+        clean_name = re.sub(r"^\s*(?:and|the)\s+", "", name, flags=re.IGNORECASE).strip(" ,.-\"'")
         clean_name = re.sub(r"\s+", " ", clean_name)
         if len(clean_name) < 2:
             continue
@@ -475,6 +532,14 @@ def _poster_copy_block(project: FlyerProject) -> str:
 def _poster_layout_requirements(project: FlyerProject) -> str:
     plan = _poster_copy_plan(project)
     if plan.items:
+        if not _is_food_or_grocery_project(project):
+            return (
+                "- Build a complete local service-business poster for the stated service category.\n"
+                "- Use a clear brand masthead, large headline, service offer cards with prices, category-appropriate service imagery, and a footer for location/contact.\n"
+                "- Service offer cards must pair each service name and price together.\n"
+                "- Keep text large, high-contrast, and centered inside its designed panels; avoid tiny text blocks and generic lower-third captions.\n"
+                "- Keep the visual language category-safe for the stated business type; avoid restaurant/grocery and cultural-celebration styling unless the customer explicitly asks for it."
+            )
         return (
             "- Build a full restaurant/menu poster, not a background template.\n"
             "- Use a brand masthead at the top, a large high-impact promo title, item cards with food imagery and prices, and a footer for location/contact.\n"
@@ -562,6 +627,8 @@ def write_text_manifest(
         blockers.append("missing critical text facts: " + ", ".join(sorted(set(missing))))
     if duplicate_ids:
         blockers.append("duplicate critical text fact ids: " + ", ".join(sorted(set(duplicate_ids))))
+    blockers.extend(_instruction_leak_blockers(expected))
+    blockers.extend(_instruction_leak_blockers(rendered))
     manifest = {
         "schema_version": TEXT_MANIFEST_SCHEMA_VERSION,
         "project_id": project.project_id,
@@ -644,17 +711,33 @@ def validate_text_manifest_file(
         rendered_by_id[fact_id] = fact
     if duplicates:
         blockers.append("duplicate rendered fact ids: " + ", ".join(sorted(duplicates)))
+    expected_facts: list[FlyerTextFact] = []
+    rendered_facts: list[FlyerTextFact] = []
     for fact in expected:
         if not isinstance(fact, dict):
             blockers.append("text manifest invalid expected fact entry")
             continue
         fact_id = str(fact.get("fact_id", ""))
+        expected_facts.append(FlyerTextFact(
+            fact_id=fact_id,
+            label=str(fact.get("label", "")),
+            text=str(fact.get("text", "")),
+        ))
         rendered_fact = rendered_by_id.get(fact_id)
         if rendered_fact is None:
             blockers.append(f"missing rendered fact: {fact_id}")
             continue
         if rendered_fact.get("normalized_text") != fact.get("normalized_text"):
             blockers.append(f"rendered fact text mismatch: {fact_id}")
+    for fact in rendered:
+        if isinstance(fact, dict):
+            rendered_facts.append(FlyerTextFact(
+                fact_id=str(fact.get("fact_id", "")),
+                label=str(fact.get("label", "")),
+                text=str(fact.get("text", "")),
+            ))
+    blockers.extend(_instruction_leak_blockers(expected_facts))
+    blockers.extend(_instruction_leak_blockers(rendered_facts))
     missing = manifest.get("missing_fact_labels") or []
     if missing:
         blockers.append("manifest reports missing facts: " + ", ".join(str(item) for item in missing))
@@ -711,6 +794,70 @@ def _registered_business_name(project: FlyerProject) -> str:
     return customer.business_name.strip()
 
 
+def _registered_business_category(project: FlyerProject) -> str:
+    if "FLYER_CUSTOMERS_PATH" in os.environ:
+        customers_path = Path(os.environ["FLYER_CUSTOMERS_PATH"])
+    elif "FLYER_STATE_ROOT" in os.environ:
+        customers_path = _customers_path()
+    else:
+        customers_path = CUSTOMERS_PATH
+    if not customers_path.exists():
+        return ""
+    try:
+        store = FlyerCustomerStore.model_validate(json.loads(customers_path.read_text(encoding="utf-8")))
+    except Exception:
+        return ""
+    customer = store.find_customer_by_phone(str(project.customer_phone))
+    if not customer:
+        return ""
+    return customer.business_category.strip()
+
+
+def _category_context(project: FlyerProject) -> str:
+    return " ".join([
+        _registered_business_category(project),
+        project.fields.event_or_business_name or "",
+        project.fields.style_preference or "",
+        project.fields.notes or "",
+        project.raw_request or "",
+    ]).lower()
+
+
+def _context_has(context: str, terms: set[str]) -> bool:
+    return any(term in context for term in terms)
+
+
+def _is_food_or_grocery_project(project: FlyerProject) -> bool:
+    context = _category_context(project)
+    return _context_has(context, FOOD_CATEGORY_TERMS)
+
+
+def _design_direction(project: FlyerProject, concept_id: str) -> str:
+    context = _category_context(project)
+    if _context_has(context, SALON_CATEGORY_TERMS):
+        return "modern US salon and beauty studio promotion, upscale but approachable, clean service offer cards, hair-service photography, polished local-business branding"
+    if _context_has(context, TAX_CATEGORY_TERMS):
+        return "clean professional US tax and bookkeeping services flyer, trust-forward typography, simple offer cards, office-service visuals, no festival styling"
+    if _context_has(context, CLEANING_CATEGORY_TERMS):
+        return "fresh local cleaning service flyer, bright home-service visuals, clear service offer cards, modern US neighborhood-business design"
+    if _context_has(context, MARKETING_CATEGORY_TERMS):
+        return "modern digital marketing services flyer, crisp business visuals, clear service offer cards, contemporary agency layout"
+    if _is_food_or_grocery_project(project):
+        style_by_concept = {
+            "C1": "premium ethnic grocery or restaurant poster, bold food photography, tasteful retail hierarchy",
+            "C2": "warm cultural food promotion with regional motifs only when they fit the customer, elegant food spread, refined community-event look",
+            "C3": "modern social-media food creative, crisp editorial layout, bright promotional palette, restaurant-quality design",
+        }
+        return style_by_concept.get(concept_id, style_by_concept["C1"])
+    return "neutral US local-business promotional flyer, professional service imagery, clear offer cards, readable prices, category-safe styling"
+
+
+def _quality_bar(project: FlyerProject) -> str:
+    if _is_food_or_grocery_project(project):
+        return "- Strong hierarchy, appetizing food visuals when food is relevant, tasteful cultural warmth only when it fits the customer, no empty beige space."
+    return "- Strong hierarchy, category-appropriate service visuals, modern local-business polish, and category-safe styling unless a different theme is explicitly requested."
+
+
 def _project_reference_assets(project: FlyerProject):
     return [
         asset for asset in project.assets
@@ -735,18 +882,13 @@ def _image_message_content(project: FlyerProject, *, concept_id: str, output_for
 
 
 def _image_prompt(project: FlyerProject, *, concept_id: str, output_format: str, size: tuple[int, int] | None) -> str:
-    style_by_concept = {
-        "C1": "premium ethnic grocery poster, bold festive food photography, marigold and mango-leaf accents, polished retail hierarchy",
-        "C2": "warm cultural celebration flyer, South Indian festival motifs, elegant food spread, refined community-event look",
-        "C3": "modern social-media creative, crisp editorial layout, bright festive palette, restaurant-quality promotional design",
-    }
     revisions = [r.request_text for r in project.revisions[-4:]]
     revision_block = "\n".join(f"- {r}" for r in revisions) if revisions else "- none"
     reference_instruction = _reference_preservation_instruction(project)
     sanitized_style = _sanitize_visual_context(project.fields.style_preference or "festive, clean, professional")
     return f"""Create a complete, finished customer-ready poster flyer for WhatsApp delivery.
 
-Design direction: {style_by_concept.get(concept_id, style_by_concept["C1"])}.
+Design direction: {_design_direction(project, concept_id)}.
 Customer style notes: {sanitized_style}.
 Output format: {output_format}; aspect ratio {_aspect_ratio(size)}.
 
@@ -774,7 +916,7 @@ Reference/template policy:
 
 Quality bar:
 - Looks like a paid local marketing designer made it, not a generic template.
-- Strong hierarchy, appetizing food visuals, festival warmth, no empty beige space.
+{_quality_bar(project)}
 - High contrast and readable on a phone screen.
 - The final image must already contain the finished flyer text, menu item cards, prices, schedule, location, and contact when those facts are provided.
 - If customer brand assets are listed, preserve the business identity and use the active logo/template as the visual reference.

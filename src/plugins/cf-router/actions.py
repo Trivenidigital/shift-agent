@@ -68,6 +68,15 @@ def _ensure_platform_path() -> None:
         sys.path.insert(0, p)
 
 
+def _ensure_local_src_path() -> None:
+    """Allow local tests to import repo modules when plugin is loaded directly."""
+    src = Path(__file__).resolve().parents[2]
+    if (src / "agents").exists():
+        p = str(src)
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+
 # === Owner / employee identity ===
 
 def is_owner_chat(chat_id: str) -> bool:
@@ -1028,6 +1037,77 @@ def flyer_project_needs_missing_reference(project: dict) -> bool:
         )
     )
     return attachment_cue and extraction_cue
+
+
+def flyer_starter_brief_reply(customer: dict) -> str:
+    """Return a category starter brief for a Flyer customer."""
+    try:
+        _ensure_local_src_path()
+        from agents.flyer.starter_briefs import starter_brief_message  # type: ignore
+    except Exception:
+        try:
+            _ensure_platform_path()
+            from flyer_starter_briefs import starter_brief_message  # type: ignore
+        except Exception:
+            business_name = str(customer.get("business_name") or "").strip()
+            name_line = f"Business: {business_name}\n" if business_name else ""
+            return (
+                "Flyer Studio\n"
+                "------------\n"
+                f"{flyer_starter_brief_marker()}.\n"
+                f"{name_line}"
+                "Edit anything below and send it back.\n\n"
+                "Create a professional flyer for my business.\n\n"
+                "Main heading:\nSpecial Offer\n\n"
+                "Details:\nAdd what I am promoting, products or services, prices, dates, and contact details here.\n\n"
+                "Use my saved business name, address, phone, and logo.\n\n"
+                "Reply with your edited version, or replace it with your own flyer request."
+            )
+    return starter_brief_message(
+        str(customer.get("business_category") or ""),
+        business_name=str(customer.get("business_name") or ""),
+    )
+
+
+def flyer_starter_brief_marker() -> str:
+    try:
+        _ensure_local_src_path()
+        from agents.flyer.starter_briefs import STARTER_BRIEF_MARKER  # type: ignore
+        return str(STARTER_BRIEF_MARKER)
+    except Exception:
+        try:
+            _ensure_platform_path()
+            from flyer_starter_briefs import STARTER_BRIEF_MARKER  # type: ignore
+            return str(STARTER_BRIEF_MARKER)
+        except Exception:
+            return "Here is a starter flyer request"
+
+
+def flyer_customer_not_active_reply(customer: dict) -> str:
+    status = str(customer.get("status") or "").strip() or "not_active"
+    if status == "payment_pending":
+        return (
+            "Flyer Studio\n"
+            "------------\n"
+            "Your account is waiting for payment confirmation. I saved your account details, but flyer generation starts after activation."
+        )
+    if status == "suspended":
+        return (
+            "Flyer Studio\n"
+            "------------\n"
+            "This Flyer Studio account is suspended. Contact Support before creating a new flyer."
+        )
+    if status == "cancelled":
+        return (
+            "Flyer Studio\n"
+            "------------\n"
+            "This Flyer Studio account is cancelled. Contact Support or restart setup before creating a new flyer."
+        )
+    return (
+        "Flyer Studio\n"
+        "------------\n"
+        f"This Flyer Studio account is {status}. Contact Support before creating a new flyer."
+    )
 
 
 def flyer_project_missing_info_reply(project: dict) -> str:

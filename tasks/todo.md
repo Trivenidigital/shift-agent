@@ -37,6 +37,21 @@ Current recommendation: finish the pilot proof first, then build Special Request
 
 Hermes-first summary: reuse Hermes WhatsApp ingress, `dispatch_shift_agent`, sender validation, image cache, skill dispatch, JSON state, NDJSON audit chain, and the bridge `/send-media` endpoint. Checked live installed Hermes skills plus official Hermes skill/image docs and awesome-hermes-agent; no purpose-built flyer workflow exists. Net-new scope is the flyer state machine, brand-kit memory, revision/version history, deterministic final asset packaging, media delivery helper, and flyer-specific QA.
 
+- [ ] 2026-05-18 business-type starter briefs: store 10 editable sample flyer briefs keyed by customer business category, show the best brief after registration or before vague flyer creation, and let the user edit/submit it as the normal Flyer Studio request.
+  - Drift/Hermes-first check: reuse Flyer `business_category`, onboarding, intake sessions, project creation, renderer, WhatsApp delivery, live VPS `flyer_generation`/`dispatch_shift_agent` skills, and `cf-router`. Checked Hermes Skills Hub and awesome-hermes-agent; no purpose-built business-type flyer prompt catalog found. Net-new scope is a small local starter-brief catalog and reply integration.
+  - [x] Create branch `codex/flyer-starter-briefs`.
+  - [x] Write implementation plan: `docs/superpowers/plans/2026-05-18-flyer-business-starter-briefs.md`.
+  - [x] Get plan reviewed by two parallel agents and apply findings.
+    - Review fixes: added cf-router active/trial vague-start path, parser-validity tests for starter text -> project creation, stricter per-step `[Hermes]` / `[net-new]` checklist, explicit onboarding data-flow change, and softer customer-facing copy rules.
+  - [x] Write design doc: `docs/superpowers/specs/2026-05-18-flyer-business-starter-briefs-design.md`.
+  - [x] Get design reviewed by two parallel agents and apply findings.
+    - Review fixes: added explicit `trial`/`active` status guard, non-eligible status tests, compound `CONFIRM. Create ...` suppression, all-category starter text parser-validity coverage, customer-copy internal-term checks, and design-local Hermes domain table.
+  - [x] Build with TDD.
+  - [x] Run focused verification.
+    - Review: `python -m pytest tests/test_flyer_starter_briefs.py tests/test_flyer_onboarding.py tests/test_flyer_create_project.py tests/test_flyer_renderer.py tests/test_cf_router_flyer_routing.py tests/test_flyer_scripts_static.py -q` -> 148 passed. `python -m py_compile src\agents\flyer\starter_briefs.py src\agents\flyer\intake.py src\agents\flyer\onboarding.py src\agents\flyer\render.py src\plugins\cf-router\actions.py src\plugins\cf-router\hooks.py src\platform\schemas.py` -> passed. `git diff --check` -> passed.
+  - [x] Create PR: https://github.com/Trivenidigital/shift-agent/pull/102
+  - [x] Get PR reviewed by three parallel agents and apply findings.
+    - Review fixes: kept starter briefs out of guided-mode collection, blocked vague starts for payment-pending/suspended/cancelled customers before project creation, made AI-powered heading selection phrase/token based, tightened service-business renderer copy away from food/festival defaults, and added instruction-leak text-manifest QA.
 - [x] 2026-05-17 launch funnel reliability pass: fix compound `CONFIRM + flyer request`, broaden new-project detection for menu/marketing requests, prevent generic LLM fallback during active intake, require explicit media intent before saving brand assets, deploy, and send a fresh campaign message for user testing.
 - [ ] 2026-05-17 CTA idempotency and live-state repair: restore the accidentally cleared `+17329837841` Flyer customer, harden Start Free Trial / Act Now paths for new, in-progress, payment-pending, trial, and active customers, verify locally and on VPS, then resend the test campaign.
   - [x] Local bugfix: duplicate-phone `CONFIRM` from the same sender now resumes the existing Flyer account, clears the stale onboarding session, and keeps true cross-account duplicate blocking customer-safe.
