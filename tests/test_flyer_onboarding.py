@@ -236,6 +236,47 @@ def test_compound_confirm_finishes_trial_onboarding(tmp_path):
     assert store.customers[0].status == "trial"
 
 
+@pytest.mark.parametrize("text", [
+    "ok create flyer for weekend sale",
+    "yes create flyer for weekend sale",
+])
+def test_alias_compound_confirm_finishes_trial_without_starter(tmp_path, text):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    store.onboarding_sessions.append(FlyerOnboardingSession(
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        status="confirming_summary",
+        started_at=now,
+        updated_at=now,
+        last_message_id="summary",
+        business_name="Demo Salon",
+        business_address="90 Brybar Dr, St Johns, FL",
+        public_phone="+17329837841",
+        business_whatsapp_number="+17329837841",
+        authorized_request_number="+17329837841",
+        business_category="salon",
+        preferred_language="en",
+        plan_id="trial",
+    ))
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    result = handle_onboarding_message(
+        state_path=state_path,
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        message_id="confirm-alias",
+        text=text,
+        now=now,
+    )
+
+    updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert result.next_status == "trial"
+    assert updated.customers[0].status == "trial"
+    assert "Here is a starter flyer request" not in result.reply_text
+
+
 def test_duplicate_confirm_for_same_sender_recovers_existing_trial_account(tmp_path):
     state_path = tmp_path / "customers.json"
     now = datetime(2026, 5, 17, tzinfo=timezone.utc)

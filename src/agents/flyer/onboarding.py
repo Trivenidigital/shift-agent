@@ -680,12 +680,20 @@ def _payment_reply(customer_id: str, plan_id: str, checkout_url: str) -> str:
 
 
 def _has_trailing_flyer_request_after_confirm(text: str) -> bool:
-    body = " ".join((text or "").split()).lower()
-    match = re.match(r"^(?:confirm|yes|ok)\b(?P<trailing>.+)$", body)
+    trailing = _trailing_text_after_compound_confirm(text)
+    return bool(re.search(r"\b(?:create|make|design|need|flyer|poster|banner)\b", trailing.lower()))
+
+
+def _trailing_text_after_compound_confirm(text: str) -> str:
+    body = " ".join((text or "").split())
+    match = re.match(
+        r"^\s*(?:confirm|ok|yes)\b(?:\s*[\.:,;!\-]\s*|\s+)(?P<trailing>.+)$",
+        body,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
     if not match:
-        return False
-    trailing = match.group("trailing")
-    return bool(re.search(r"\b(?:create|make|design|need|flyer|poster|banner)\b", trailing))
+        return ""
+    return match.group("trailing").strip()
 
 
 def _trial_active_reply(
@@ -896,6 +904,8 @@ def _parse_confirmation_edit(text: str, tiers: list[FlyerPlanTier]) -> dict[str,
 def _is_confirm_reply(text: str) -> bool:
     body = " ".join((text or "").strip().lower().split())
     if body in {"confirm", "ok", "okay", "ok proceed", "proceed", "yes", "yes proceed", "y", "go ahead", "looks good"}:
+        return True
+    if _has_trailing_flyer_request_after_confirm(text):
         return True
     return bool(re.match(r"^\s*CONFIRM\b(?:\s*[\.:,;!\-]\s*|\s*$|\s+.+$)", text or "", flags=re.IGNORECASE | re.DOTALL))
 

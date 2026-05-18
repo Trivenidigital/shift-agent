@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 PLUGIN_DIR = REPO / "src" / "plugins" / "cf-router"
 
@@ -657,7 +659,21 @@ def test_vague_start_during_active_project_routes_to_project_not_starter(monkeyp
     assert result == {"action": "skip", "reason": "active project"}
 
 
-def test_compound_confirm_routes_trailing_request_without_starter_brief(monkeypatch):
+@pytest.mark.parametrize("text, expected", [
+    (
+        "CONFIRM. Create a flyer for weekend sale with 20% off.",
+        "Create a flyer for weekend sale with 20% off.",
+    ),
+    (
+        "ok create flyer for weekend sale",
+        "create flyer for weekend sale",
+    ),
+    (
+        "yes create flyer for weekend sale",
+        "create flyer for weekend sale",
+    ),
+])
+def test_compound_confirm_routes_trailing_request_without_starter_brief(monkeypatch, text, expected):
     hooks, actions = _load_plugin_modules()
     sent = []
     created = {}
@@ -679,13 +695,13 @@ def test_compound_confirm_routes_trailing_request_without_starter_brief(monkeypa
     monkeypatch.setattr(hooks, "_try_flyer_primary_intercept", lambda text, *_args, **_kwargs: created.update({"raw_request": text}) or {"action": "skip", "reason": "created"})
 
     result = hooks._try_flyer_onboarding_intercept(
-        "CONFIRM. Create a flyer for weekend sale with 20% off.",
+        text,
         "17329837841@s.whatsapp.net",
         {"message_id": "compound"},
     )
 
     assert result == {"action": "skip", "reason": "created"}
-    assert created["raw_request"] == "Create a flyer for weekend sale with 20% off."
+    assert created["raw_request"] == expected
     assert sent
     assert "Here is a starter flyer request" not in sent[0]
 
@@ -1478,4 +1494,10 @@ def test_extract_flyer_request_after_compound_confirm():
     assert actions.extract_flyer_request_after_confirm(
         "CONFIRM. Create a breakfast menu for tomorrow from 8 AM to 10 AM."
     ) == "Create a breakfast menu for tomorrow from 8 AM to 10 AM."
+    assert actions.extract_flyer_request_after_confirm(
+        "ok create flyer for weekend sale"
+    ) == "create flyer for weekend sale"
+    assert actions.extract_flyer_request_after_confirm(
+        "yes create flyer for weekend sale"
+    ) == "create flyer for weekend sale"
     assert actions.extract_flyer_request_after_confirm("CONFIRM") == ""
