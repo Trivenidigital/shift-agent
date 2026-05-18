@@ -1909,7 +1909,7 @@ def send_flyer_manual_edit_ack(
         return False, "", f"safe_io_import_failed: {type(e).__name__}: {e}"
     body = flyer_visible_message_text(request_text).strip()
     requested = f"\n\nRequested edit: {body}" if body else ""
-    queue_reason = f"\n\nWhy this is queued: {reason.strip()}" if reason.strip() else ""
+    queue_reason = "\n\nThis edit needs the source-preserving workflow, so it is in the operator edit queue." if reason.strip() else ""
     message = (
         "Flyer Studio\n"
         "------------\n"

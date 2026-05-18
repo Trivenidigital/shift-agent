@@ -174,3 +174,37 @@ def test_source_artwork_followup_stays_in_manual_edit_queue(tmp_path, monkeypatc
     assert persisted["final_asset_ids"] == ["A0003"]
     assert "Remove extra 08:00" in persisted["raw_request"]
     assert persisted["revisions"][0]["request_text"] == "Remove extra 08:00 and add Any Item for $9.99."
+
+
+def test_source_artwork_followup_after_preview_requires_regeneration(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    module = _load_script(monkeypatch)
+    state_path = tmp_path / "projects.json"
+    state_path.write_text(
+        _project_store_json(
+            tmp_path,
+            status="awaiting_final_approval",
+            raw_request="Edit uploaded flyer/source artwork. Preserve the source flyer.",
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(sys, "argv", [
+        "update-flyer-project",
+        "--project-id", "F9001",
+        "--revision-text", "Remove extra 08:00 and add Any Item for $9.99.",
+        "--message-id", "m-followup-after-preview",
+        "--state-path", str(state_path),
+    ])
+
+    assert module.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["revision_requires_clarification"] is False
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "revising_design"
+    assert persisted["concepts"] == []
+    assert persisted["selected_concept_id"] is None
+    assert persisted["final_asset_ids"] == []
+    assert "Remove extra 08:00" in persisted["raw_request"]
+    assert persisted["revisions"][0]["applied"] is False

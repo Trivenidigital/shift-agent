@@ -1392,7 +1392,7 @@ class TestF7PrimaryMode:
              patch.object(actions_mod, "send_flyer_processing_ack",
                           return_value=(True, "msg-processing", "")), \
              patch.object(actions_mod, "send_flyer_concept_previews",
-                          return_value=(False, "msg-preview", "bridge failed")), \
+                          return_value=(False, "", "bridge failed")), \
              patch.object(actions_mod, "trigger_flyer_finalize_usage") as mock_finalize, \
              patch.object(actions_mod, "trigger_flyer_release_quota",
                           return_value=(True, "released", {})) as mock_release:
@@ -1546,7 +1546,8 @@ class TestF7PrimaryMode:
                           })), \
              patch.object(actions_mod, "flyer_source_edit_preflight",
                           return_value=(False, "source edit from PDF is not supported yet")) as mock_preflight, \
-             patch.object(actions_mod, "trigger_flyer_reserve_quota") as mock_reserve, \
+             patch.object(actions_mod, "trigger_flyer_reserve_quota",
+                          return_value=(True, "reserved", {"access_type": "subscription", "reservation_id": "R99"})) as mock_reserve, \
              patch.object(actions_mod, "send_flyer_edit_processing_ack") as mock_processing, \
              patch.object(actions_mod, "trigger_generate_flyer_concepts") as mock_generate, \
              patch.object(actions_mod, "send_flyer_manual_edit_ack",
@@ -1558,7 +1559,7 @@ class TestF7PrimaryMode:
             "reason": "cf-router flyer exact edit queued: project F0099",
         }
         mock_preflight.assert_called_once()
-        mock_reserve.assert_not_called()
+        mock_reserve.assert_called_once()
         mock_processing.assert_not_called()
         mock_generate.assert_not_called()
         mock_manual_ack.assert_called_once_with(
@@ -1602,7 +1603,7 @@ class TestF7PrimaryMode:
              patch.object(actions_mod, "trigger_generate_flyer_concepts",
                           return_value=(True, "generated")), \
              patch.object(actions_mod, "send_flyer_concept_previews",
-                          return_value=(False, "msg-preview", "bridge send failed")), \
+                          return_value=(False, "", "bridge send failed")), \
              patch.object(actions_mod, "trigger_flyer_finalize_usage") as mock_finalize, \
              patch.object(actions_mod, "trigger_flyer_release_quota",
                           return_value=(True, "released", {})) as mock_release:
@@ -1658,7 +1659,7 @@ class TestF7PrimaryMode:
             "action": "skip",
             "reason": "cf-router flyer exact edit queued: project F0030",
         }
-        mock_release.assert_called_once()
+        mock_release.assert_not_called()
         mock_manual_ack.assert_called_once()
 
     def test_paid_guest_order_can_create_one_flyer_without_subscription_quota(self, mods, state_env):
@@ -1745,7 +1746,7 @@ class TestF7PrimaryMode:
              patch.object(actions_mod, "send_flyer_processing_ack",
                           return_value=(True, "msg-processing", "")), \
              patch.object(actions_mod, "send_flyer_concept_previews",
-                          return_value=(False, "msg-preview", "bridge failed")):
+                          return_value=(False, "", "bridge failed")):
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
                     text="Create a flyer for Quick Promo. Contact +1 732 983 7841. Offer $4 today.",

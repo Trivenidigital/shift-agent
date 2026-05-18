@@ -111,14 +111,24 @@ def main() -> int:
                     correction = f"Latest correction: {args.revision_text.strip()}"
                     if correction.lower() not in updated.raw_request.lower():
                         raw_lines.append(correction)
-                    updated = updated.model_copy(update={
+                    update_doc = {
                         "raw_request": "\n".join(line for line in raw_lines if line),
                         "revisions": [
                             *updated.revisions,
                             revision.model_copy(update={"resulting_version": updated.version + 1}),
                         ],
                         "version": updated.version + 1,
-                    })
+                    }
+                    if updated.status != "manual_edit_required":
+                        if not is_flyer_transition_allowed(updated.status, "revising_design"):
+                            raise SystemExit(f"invalid transition {updated.status}->revising_design")
+                        update_doc.update({
+                            "status": "revising_design",
+                            "concepts": [],
+                            "selected_concept_id": None,
+                            "final_asset_ids": [],
+                        })
+                    updated = updated.model_copy(update=update_doc)
                     should_write = True
                 else:
                     target_status = "revising_design"
