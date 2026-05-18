@@ -227,6 +227,117 @@ def test_reference_scope_pending_choice_consumes_option_two(tmp_path):
     ) is None
 
 
+def test_reference_scope_choice_transaction_holds_state_lock(monkeypatch):
+    actions = _load_actions()
+    held = {"value": False}
+    writes: list[dict] = []
+
+    class RecordingLock:
+        def __enter__(self):
+            held["value"] = True
+
+        def __exit__(self, *_args):
+            held["value"] = False
+
+    def fake_read(now=None):
+        assert held["value"] is True
+        return {
+            "schema_version": 1,
+            "pending": [{
+                "chat_id": "17329837841@s.whatsapp.net",
+                "sender_phone": "+17329837841",
+                "status": "awaiting_choice",
+                "raw_request": "Use this flyer",
+                "media_path": "/tmp/ref.jpg",
+                "expires_at": 9999999999,
+            }],
+        }
+
+    def fake_write(doc):
+        assert held["value"] is True
+        writes.append(doc)
+
+    monkeypatch.setattr(actions, "_reference_scope_state_lock", lambda: RecordingLock())
+    monkeypatch.setattr(actions, "_read_reference_scope_state", fake_read)
+    monkeypatch.setattr(actions, "_write_reference_scope_state", fake_write)
+
+    pending = actions.consume_flyer_reference_scope_choice(
+        "2",
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+    )
+
+    assert pending["choice"] == "use_reference"
+    assert writes == [{"schema_version": 1, "pending": []}]
+    assert held["value"] is False
+
+
+def test_reference_scope_authorization_reply_transaction_holds_state_lock(monkeypatch):
+    actions = _load_actions()
+    held = {"value": False}
+    writes: list[dict] = []
+
+    class RecordingLock:
+        def __enter__(self):
+            held["value"] = True
+
+        def __exit__(self, *_args):
+            held["value"] = False
+
+    def fake_read(now=None):
+        assert held["value"] is True
+        return {
+            "schema_version": 1,
+            "pending": [{
+                "chat_id": "201975216009469@lid",
+                "sender_phone": "+19045550104",
+                "status": "awaiting_authorization_details",
+                "authorization_note": "",
+                "raw_request": "Use this flyer",
+                "media_path": "/tmp/ref.jpg",
+                "expires_at": 9999999999,
+            }],
+        }
+
+    def fake_write(doc):
+        assert held["value"] is True
+        writes.append(doc)
+
+    monkeypatch.setattr(actions, "_reference_scope_state_lock", lambda: RecordingLock())
+    monkeypatch.setattr(actions, "_read_reference_scope_state", fake_read)
+    monkeypatch.setattr(actions, "_write_reference_scope_state", fake_write)
+
+    recorded = actions.consume_flyer_reference_authorization_reply(
+        "Sister business, same owner approved",
+        chat_id="201975216009469@lid",
+        sender_phone="+19045550104",
+    )
+
+    assert recorded["choice"] == "authorization_note_recorded"
+    assert writes[0]["pending"][0]["authorization_note"] == "Sister business, same owner approved"
+    assert held["value"] is False
+
+
+def test_reference_scope_state_writer_uses_safe_io_atomic_writer(monkeypatch, tmp_path):
+    actions = _load_actions()
+    writes: list[tuple[Path, str]] = []
+    actions.FLYER_REFERENCE_SCOPE_PATH = tmp_path / "reference_scope_pending.json"
+
+    def fake_atomic(path: Path, content: str) -> None:
+        writes.append((path, content))
+
+    monkeypatch.setattr(actions, "_reference_scope_atomic_writer", lambda: fake_atomic)
+
+    actions._write_reference_scope_state({"schema_version": 1, "pending": []})
+
+    assert writes == [
+        (
+            tmp_path / "reference_scope_pending.json",
+            '{"pending":[],"schema_version":1}',
+        )
+    ]
+
+
 def test_reference_scope_pending_choice_ignores_unrelated_short_reply(tmp_path):
     actions = _load_actions()
     actions.FLYER_REFERENCE_SCOPE_PATH = tmp_path / "reference_scope_pending.json"

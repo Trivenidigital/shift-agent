@@ -14,9 +14,10 @@ import re
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Iterator, Optional
 
 # Deployed-system paths (mutable for tests)
 CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
@@ -1688,9 +1689,33 @@ def _read_reference_scope_state(now: Optional[float] = None) -> dict:
 def _write_reference_scope_state(doc: dict) -> None:
     FLYER_REFERENCE_SCOPE_PATH.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(doc, separators=(",", ":"), sort_keys=True)
-    tmp = FLYER_REFERENCE_SCOPE_PATH.with_name(FLYER_REFERENCE_SCOPE_PATH.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(FLYER_REFERENCE_SCOPE_PATH)
+    atomic_write_text = _reference_scope_atomic_writer()
+    atomic_write_text(FLYER_REFERENCE_SCOPE_PATH, text)
+
+
+def _reference_scope_atomic_writer() -> Callable[[Path, str], None]:
+    _ensure_platform_path()
+    try:
+        from safe_io import atomic_write_text  # type: ignore
+        return atomic_write_text
+    except Exception:
+        # Windows unit-test fallback; production imports safe_io and uses fsync+replace.
+        def _fallback(path: Path, content: str) -> None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        return _fallback
+
+
+@contextmanager
+def _reference_scope_state_lock() -> Iterator[None]:
+    _ensure_platform_path()
+    try:
+        from safe_io import FileLock  # type: ignore
+    except Exception:
+        yield
+        return
+    with FileLock(Path(str(FLYER_REFERENCE_SCOPE_PATH) + ".lock")):
+        yield
 
 
 def save_flyer_reference_scope_pending(
@@ -1714,27 +1739,28 @@ def save_flyer_reference_scope_pending(
         for name in (scope.get("visible_organization_names") or [])
         if str(name).strip()
     ]
-    state = _read_reference_scope_state(now_ts)
-    pending = [
-        item for item in state.get("pending", [])
-        if item.get("chat_id") != chat_id and item.get("sender_phone") != sender_phone
-    ]
-    pending.append({
-        "chat_id": chat_id,
-        "sender_phone": sender_phone,
-        "customer": {
-            "business_name": str(customer.get("business_name") or ""),
-            "customer_id": str(customer.get("customer_id") or ""),
-        },
-        "raw_request": raw_request,
-        "media_path": media_path,
-        "source_organization": source_names[0] if source_names else "",
-        "status": status,
-        "authorization_note": authorization_note,
-        "created_at": now_ts,
-        "expires_at": now_ts + max(60, ttl_sec),
-    })
-    _write_reference_scope_state({"schema_version": 1, "pending": pending})
+    with _reference_scope_state_lock():
+        state = _read_reference_scope_state(now_ts)
+        pending = [
+            item for item in state.get("pending", [])
+            if item.get("chat_id") != chat_id and item.get("sender_phone") != sender_phone
+        ]
+        pending.append({
+            "chat_id": chat_id,
+            "sender_phone": sender_phone,
+            "customer": {
+                "business_name": str(customer.get("business_name") or ""),
+                "customer_id": str(customer.get("customer_id") or ""),
+            },
+            "raw_request": raw_request,
+            "media_path": media_path,
+            "source_organization": source_names[0] if source_names else "",
+            "status": status,
+            "authorization_note": authorization_note,
+            "created_at": now_ts,
+            "expires_at": now_ts + max(60, ttl_sec),
+        })
+        _write_reference_scope_state({"schema_version": 1, "pending": pending})
 
 
 def save_flyer_reference_authorization_pending(pending: dict, authorization_note: str = "") -> None:
@@ -1764,42 +1790,36 @@ def consume_flyer_reference_scope_choice(
     choice = _reference_scope_choice(text)
     if not choice:
         return None
-    state = _read_reference_scope_state()
-    pending = state.get("pending", [])
-    matched: Optional[dict] = None
-    remaining: list[dict] = []
-    for item in pending:
-        if str(item.get("status") or "awaiting_choice") != "awaiting_choice":
+    with _reference_scope_state_lock():
+        state = _read_reference_scope_state()
+        pending = state.get("pending", [])
+        matched: Optional[dict] = None
+        remaining: list[dict] = []
+        for item in pending:
+            if str(item.get("status") or "awaiting_choice") != "awaiting_choice":
+                remaining.append(item)
+                continue
+            same_chat = chat_id and item.get("chat_id") == chat_id
+            same_phone = sender_phone and item.get("sender_phone") == sender_phone
+            if matched is None and (same_chat or same_phone):
+                matched = dict(item)
+                continue
             remaining.append(item)
-            continue
-        same_chat = chat_id and item.get("chat_id") == chat_id
-        same_phone = sender_phone and item.get("sender_phone") == sender_phone
-        if matched is None and (same_chat or same_phone):
-            matched = dict(item)
-            continue
-        remaining.append(item)
-    if matched is None:
-        if remaining != pending:
-            _write_reference_scope_state({"schema_version": 1, "pending": remaining})
-        return None
-    _write_reference_scope_state({"schema_version": 1, "pending": remaining})
+        if matched is None:
+            if remaining != pending:
+                _write_reference_scope_state({"schema_version": 1, "pending": remaining})
+            return None
+        _write_reference_scope_state({"schema_version": 1, "pending": remaining})
     matched["choice"] = choice
     return matched
 
 
-def consume_flyer_reference_authorization_reply(
-    text: str,
+def _consume_flyer_reference_authorization_reply_locked(
+    body: str,
     *,
     chat_id: str,
     sender_phone: str,
 ) -> Optional[dict]:
-    """Handle the follow-up after option 1 without falling into revision parsing."""
-    body = " ".join(flyer_visible_message_text(text).split()).strip()
-    if not body:
-        return None
-    if _reference_scope_choice(body):
-        return None
-
     state = _read_reference_scope_state()
     pending = state.get("pending", [])
     matched: Optional[dict] = None
@@ -1829,6 +1849,27 @@ def consume_flyer_reference_authorization_reply(
     matched["choice"] = "authorization_note_recorded"
     matched["authorization_reply"] = body
     return matched
+
+
+def consume_flyer_reference_authorization_reply(
+    text: str,
+    *,
+    chat_id: str,
+    sender_phone: str,
+) -> Optional[dict]:
+    """Handle the follow-up after option 1 without falling into revision parsing."""
+    body = " ".join(flyer_visible_message_text(text).split()).strip()
+    if not body:
+        return None
+    if _reference_scope_choice(body):
+        return None
+
+    with _reference_scope_state_lock():
+        return _consume_flyer_reference_authorization_reply_locked(
+            body,
+            chat_id=chat_id,
+            sender_phone=sender_phone,
+        )
 
 
 def send_flyer_manual_edit_ack(chat_id: str, project_id: str, request_text: str = "") -> tuple[bool, str, str]:
