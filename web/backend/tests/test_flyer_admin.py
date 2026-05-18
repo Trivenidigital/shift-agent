@@ -204,6 +204,33 @@ def test_flyer_customers_caps_at_300_sorted_by_updated_at(tmp_path):
     # rows[0..299] correspond to indices 304..5; verify strict desc order
     for prev, curr in zip(rows, rows[1:]):
         assert prev["updated_at"] >= curr["updated_at"]
+    # Truncation metadata so the dashboard can show "showing 300 of 305"
+    # instead of silently disagreeing with /flyer/summary's total_customers.
+    assert result["total"] == 305
+    assert result["truncated"] is True
+
+
+def test_flyer_customers_not_truncated_under_cap(tmp_path):
+    """BUG-FLYER-QA-002 (review follow-up): under the 300-row cap the
+    `truncated` field must be False and `total` matches the row count."""
+    from app.routers import flyer
+
+    settings = flyer.get_settings()
+    settings.state_dir = tmp_path / "state"
+    customers = [_customer(f"CUST{i:04d}", phone=f"+1555011{i:04d}") for i in range(5)]
+    _write_json(
+        settings.state_dir / "flyer" / "customers.json",
+        {"schema_version": 1, "next_customer_sequence": 6, "customers": customers},
+    )
+    _write_json(
+        settings.state_dir / "flyer" / "projects.json",
+        {"schema_version": 1, "next_project_sequence": 1, "projects": []},
+    )
+
+    result = asyncio.run(flyer.customers(query="", segment="", _=None))
+    assert len(result["customers"]) == 5
+    assert result["total"] == 5
+    assert result["truncated"] is False
 
 
 def test_campaign_target_parser_rejects_formula_and_dedupes():

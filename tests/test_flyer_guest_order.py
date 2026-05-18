@@ -417,6 +417,64 @@ def test_guest_order_cli_dry_flow(tmp_path):
     assert '"status": "paid"' in release.stdout
 
 
+def test_guest_order_cli_consume_idempotent_on_replay(tmp_path):
+    """BUG-FLYER-QA-001 end-to-end: a second --consume for the same project_id
+    must exit 0 through the subprocess layer (not just in-process). This
+    catches regressions in the exit-code contract that the unit tests would
+    miss — the hook layer keys on subprocess.returncode."""
+    state = tmp_path / "guest_orders.json"
+    script = Path(__file__).resolve().parent.parent / "src" / "agents" / "flyer" / "scripts" / "manage-flyer-guest-order"
+    config = tmp_path / "missing.yaml"
+    common = ["--state-path", str(state), "--config-path", str(config)]
+
+    subprocess.run(
+        [sys.executable, str(script), "--start",
+         "--sender-phone", "+17329837841",
+         "--chat-id", "17329837841@s.whatsapp.net",
+         "--message-id", "cta-1", *common],
+        capture_output=True, text=True, check=True,
+    )
+    subprocess.run(
+        [sys.executable, str(script), "--activate",
+         "--order-id", "GUEST0001",
+         "--payment-reference", "manual-test", *common],
+        capture_output=True, text=True, check=True,
+    )
+    subprocess.run(
+        [sys.executable, str(script), "--reserve",
+         "--sender-phone", "+17329837841",
+         "--chat-id", "17329837841@s.whatsapp.net",
+         "--project-id", "F0090", *common],
+        capture_output=True, text=True, check=True,
+    )
+
+    first = subprocess.run(
+        [sys.executable, str(script), "--consume",
+         "--sender-phone", "+17329837841",
+         "--chat-id", "17329837841@s.whatsapp.net",
+         "--project-id", "F0090", *common],
+        capture_output=True, text=True,
+    )
+    assert first.returncode == 0
+    assert '"ok": true' in first.stdout
+    assert '"status": "used"' in first.stdout
+
+    # Replay: same project_id; before BUG-001 fix this exited 2 with
+    # detail=reserved_guest_order_not_found, which the hook layer treated
+    # as a failed consume.
+    second = subprocess.run(
+        [sys.executable, str(script), "--consume",
+         "--sender-phone", "+17329837841",
+         "--chat-id", "17329837841@s.whatsapp.net",
+         "--project-id", "F0090", *common],
+        capture_output=True, text=True,
+    )
+    assert second.returncode == 0, f"replay should exit 0, got rc={second.returncode}, stderr={second.stderr}"
+    assert '"ok": true' in second.stdout
+    assert '"status": "used"' in second.stdout
+    assert "reserved_guest_order_not_found" not in second.stdout
+
+
 def test_guest_order_cli_rejects_activation_without_payment_reference(tmp_path):
     state = tmp_path / "guest_orders.json"
     script = Path(__file__).resolve().parent.parent / "src" / "agents" / "flyer" / "scripts" / "manage-flyer-guest-order"

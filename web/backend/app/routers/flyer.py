@@ -383,8 +383,13 @@ async def customers(query: str = "", segment: str = "", _=Depends(require_auth))
             continue
         rows.append(row)
     # BUG-FLYER-QA-002: cap + sort to match /projects and /guest-orders.
+    # Surface `total` + `truncated` so the operator UI can distinguish
+    # "showing 300" from "there are exactly 300" (otherwise the table
+    # silently diverges from the /summary stat once the fleet exceeds 300).
     rows.sort(key=lambda r: r.get("updated_at", ""), reverse=True)
-    return {"customers": rows[:300]}
+    total = len(rows)
+    capped = rows[:300]
+    return {"customers": capped, "total": total, "truncated": total > len(capped)}
 
 
 @router.get("/customers/{customer_id}")
