@@ -174,6 +174,7 @@ def handle_onboarding_message(
     _replace_session(store, session)
     customer_id = ""
     customer_created = False
+    include_trial_starter_brief = True
     if session.status in {"payment_pending", "trial"}:
         try:
             customer = store.new_customer(
@@ -253,6 +254,7 @@ def handle_onboarding_message(
         session = session.model_copy(update={"status": customer.status, "updated_at": now, "customer_id": customer.customer_id})
         _replace_session(store, session)
         if customer.status == "trial" and session.creation_mode == "guided":
+            include_trial_starter_brief = False
             store.replace_intake_session(FlyerIntakeSession(
                 chat_id=chat_id,
                 sender_phone=_phone_or_none(sender_phone),
@@ -264,10 +266,21 @@ def handle_onboarding_message(
                 preferred_language=session.preferred_language,
                 creation_mode="guided",
             ))
+        elif customer.status == "trial":
+            include_trial_starter_brief = (
+                not _has_trailing_flyer_request_after_confirm(normalized_text)
+                and store.claim_starter_prompt_send(customer.customer_id)
+            )
     write_customer_store(state_path, store)
     return OnboardingResult(
         True,
-        _reply_for_session(session, tiers=tiers, customer_id=customer_id, store=store),
+        _reply_for_session(
+            session,
+            tiers=tiers,
+            customer_id=customer_id,
+            store=store,
+            include_starter_brief=include_trial_starter_brief,
+        ),
         session.status,
         customer_id,
         customer_created,
@@ -591,6 +604,7 @@ def _reply_for_session(
     tiers: list[FlyerPlanTier],
     customer_id: str,
     store: FlyerCustomerStore,
+    include_starter_brief: bool = True,
 ) -> str:
     if session.status == "collecting_business_address":
         return "Flyer Studio\n------------\nGreat. What is the business address?"
@@ -620,6 +634,7 @@ def _reply_for_session(
             creation_mode=session.creation_mode,
             language=session.preferred_language,
             customer=customer,
+            include_starter_brief=include_starter_brief,
         )
     return _welcome_reply(tiers)
 
@@ -664,6 +679,15 @@ def _payment_reply(customer_id: str, plan_id: str, checkout_url: str) -> str:
     )
 
 
+def _has_trailing_flyer_request_after_confirm(text: str) -> bool:
+    body = " ".join((text or "").split()).lower()
+    match = re.match(r"^(?:confirm|yes|ok)\b(?P<trailing>.+)$", body)
+    if not match:
+        return False
+    trailing = match.group("trailing")
+    return bool(re.search(r"\b(?:create|make|design|need|flyer|poster|banner)\b", trailing))
+
+
 def _trial_active_reply(
     customer_id: str,
     *,
@@ -694,7 +718,7 @@ def _trial_active_reply(
             "Send your first flyer request now. After each sample, I will show the paid onboarding link and plans."
         )
     if include_starter_brief and creation_mode != "guided" and customer and customer.status in {"trial", "active"}:
-        reply = f"{reply}\n\n{starter_brief_message(customer.business_category, business_name=customer.business_name)}"
+        reply = f"{reply}\n\n{starter_brief_message(customer.business_category, business_name=customer.business_name, include_opt_out_hint=True)}"
     return reply
 
 

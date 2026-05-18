@@ -52,6 +52,21 @@ Hermes-first summary: reuse Hermes WhatsApp ingress, `dispatch_shift_agent`, sen
   - [x] Create PR: https://github.com/Trivenidigital/shift-agent/pull/102
   - [x] Get PR reviewed by three parallel agents and apply findings.
     - Review fixes: kept starter briefs out of guided-mode collection, blocked vague starts for payment-pending/suspended/cancelled customers before project creation, made AI-powered heading selection phrase/token based, tightened service-business renderer copy away from food/festival defaults, and added instruction-leak text-manifest QA.
+- [ ] 2026-05-18 starter prompt timing/preferences: show category starter prompts only at helpful ready/vague moments, suppress repeated examples after first automatic send, and let customers turn sample prompts off/on for the business account.
+  - Drift-check tag: extends-Hermes
+  - Hermes-first analysis: reuse Flyer customer JSON state, `starter_briefs.py`, onboarding/intake ready flows, cf-router routing, and account-command audit path. Net-new scope is rollback-safe store-level preference metadata and deterministic opt-out/opt-in routing.
+  - [x] Create isolated worktree/branch `codex/flyer-starter-prompt-preferences`.
+  - [x] Write implementation plan: `docs/superpowers/plans/2026-05-18-flyer-starter-prompt-preferences.md`.
+  - [x] Get plan reviewed by two parallel agents and apply findings.
+    - Review fixes: avoid nested schema rollback hazard with top-level store maps, support LID-only preference commands, fail closed on account-command errors, normalize sender-block-wrapped commands, keep CTA retries concise, guard active-project states before vague-start starter prompts, clarify payment-pending CTA behavior, and make the account-wide preference explicit in copy.
+  - [x] Write design doc and run two parallel design reviews.
+    - Review fixes: recognized preference commands fail closed on all lookup/CLI paths, LID-only handling uses a store-level sender lookup, starter prompt send uses an atomic claim/release contract, transient metadata uses namespaced keys, payment-pending CTA handling is explicit, compound confirm suppresses starters, Guided Mode consumes auto-eligibility, and opt-out copy/aliases are account-wide.
+  - [x] Build with focused tests.
+    - Review: `python -m pytest tests/test_flyer_starter_briefs.py tests/test_flyer_onboarding.py tests/test_cf_router_flyer_routing.py tests/test_flyer_scripts_static.py -q` -> 123 passed. `python -m py_compile src\agents\flyer\starter_briefs.py src\agents\flyer\onboarding.py src\agents\flyer\intake.py src\agents\flyer\account.py src\plugins\cf-router\actions.py src\plugins\cf-router\hooks.py src\platform\schemas.py` -> passed. `git diff --check` -> passed.
+  - [x] Create PR and run three parallel PR reviews.
+    - PR: https://github.com/Trivenidigital/shift-agent/pull/105
+    - Review fixes: restored account phone normalization for audit/pending-change guards, added new cf-router reasons to the strict audit schema, reset starter sent-counts when customers opt back in, and included opt-out hints on every full starter prompt surface.
+    - Follow-up review fixes: guided-mode no longer consumes starter prompt entitlement without showing a starter; cf-router starter prompt claim/release now goes through the locked `manage-flyer-account` path; onboarding/intake release starter claims on hard send failure; broad account commands for unknown users fall through while preference commands still fail closed.
 - [x] 2026-05-17 launch funnel reliability pass: fix compound `CONFIRM + flyer request`, broaden new-project detection for menu/marketing requests, prevent generic LLM fallback during active intake, require explicit media intent before saving brand assets, deploy, and send a fresh campaign message for user testing.
 - [ ] 2026-05-17 CTA idempotency and live-state repair: restore the accidentally cleared `+17329837841` Flyer customer, harden Start Free Trial / Act Now paths for new, in-progress, payment-pending, trial, and active customers, verify locally and on VPS, then resend the test campaign.
   - [x] Local bugfix: duplicate-phone `CONFIRM` from the same sender now resumes the existing Flyer account, clears the stale onboarding session, and keeps true cross-account duplicate blocking customer-safe.

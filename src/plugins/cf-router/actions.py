@@ -1061,11 +1061,13 @@ def flyer_starter_brief_reply(customer: dict) -> str:
                 "Main heading:\nSpecial Offer\n\n"
                 "Details:\nAdd what I am promoting, products or services, prices, dates, and contact details here.\n\n"
                 "Use my saved business name, address, phone, and logo.\n\n"
+                'Tip: reply "don\'t show sample prompts" anytime to turn off future examples for this business account.\n\n'
                 "Reply with your edited version, or replace it with your own flyer request."
             )
     return starter_brief_message(
         str(customer.get("business_category") or ""),
         business_name=str(customer.get("business_name") or ""),
+        include_opt_out_hint=True,
     )
 
 
@@ -1206,6 +1208,28 @@ def _canonical_phone(phone: Optional[str]) -> Optional[str]:
     return None
 
 
+def _read_customer_state() -> dict:
+    if not FLYER_CUSTOMERS_PATH.exists():
+        return {}
+    return json.loads(FLYER_CUSTOMERS_PATH.read_text(encoding="utf-8"))
+
+
+def _starter_prompt_metadata(store: dict, customer_id: str) -> dict:
+    preferences = store.get("starter_prompt_preferences") or {}
+    sent_counts = store.get("starter_prompt_sent_counts") or {}
+    return {
+        "_starter_prompt_mode": str(preferences.get(customer_id) or "auto"),
+        "_starter_prompt_sent_count": int(sent_counts.get(customer_id, 0) or 0),
+    }
+
+
+def _with_starter_prompt_metadata(customer: dict, store: dict) -> dict:
+    customer_id = str(customer.get("customer_id") or "")
+    enriched = dict(customer)
+    enriched.update(_starter_prompt_metadata(store, customer_id))
+    return enriched
+
+
 def find_flyer_customer_by_sender(phone: Optional[str], chat_id: str) -> Optional[dict]:
     """Return registered Flyer customer for this sender, if any."""
     canonical = _canonical_phone(phone)
@@ -1214,13 +1238,13 @@ def find_flyer_customer_by_sender(phone: Optional[str], chat_id: str) -> Optiona
     if not FLYER_CUSTOMERS_PATH.exists():
         return None
     try:
-        store = json.loads(FLYER_CUSTOMERS_PATH.read_text(encoding="utf-8"))
+        store = _read_customer_state()
         if not canonical and chat_id:
             matches = [
                 customer for customer in store.get("customers", [])
                 if isinstance(customer, dict) and customer.get("primary_chat_id") == chat_id
             ]
-            return matches[0] if len(matches) == 1 else None
+            return _with_starter_prompt_metadata(matches[0], store) if len(matches) == 1 else None
         if not canonical:
             return None
         matches = []
@@ -1232,9 +1256,65 @@ def find_flyer_customer_by_sender(phone: Optional[str], chat_id: str) -> Optiona
                     numbers.add(value)
             if canonical in numbers:
                 matches.append(customer)
-        return matches[0] if len(matches) == 1 else None
+        return _with_starter_prompt_metadata(matches[0], store) if len(matches) == 1 else None
     except Exception:
         return None
+
+
+def flyer_starter_prompts_enabled(customer: dict) -> bool:
+    return str(customer.get("_starter_prompt_mode") or "auto") != "off"
+
+
+def flyer_starter_prompt_already_sent(customer: dict) -> bool:
+    try:
+        return int(customer.get("_starter_prompt_sent_count") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def claim_flyer_starter_prompt_send(customer_id: str) -> bool:
+    if not customer_id:
+        return False
+    ok, _detail, doc = _trigger_flyer_account_state(
+        "--claim-starter-prompt",
+        customer_id,
+    )
+    return bool(ok and doc and doc.get("quota_allowed"))
+
+
+def release_flyer_starter_prompt_claim(customer_id: str) -> None:
+    if not customer_id:
+        return
+    _trigger_flyer_account_state("--release-starter-prompt", customer_id)
+
+
+def _trigger_flyer_account_state(flag: str, customer_id: str) -> tuple[bool, str, Optional[dict]]:
+    try:
+        result = subprocess.run(
+            [str(PYTHON_BIN), str(MANAGE_FLYER_ACCOUNT_BIN), flag, customer_id],
+            capture_output=True,
+            text=True,
+            timeout=SUBPROCESS_TIMEOUT_SEC,
+        )
+    except (subprocess.SubprocessError, OSError) as e:
+        return False, f"{type(e).__name__}: {e}", None
+    detail = (result.stdout or result.stderr or "").strip()
+    if result.returncode != 0:
+        return False, f"exit={result.returncode} {detail[:500]}", None
+    try:
+        return True, detail[:500], json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return False, f"account_state_json_parse_failed: {detail[:500]}", None
+
+
+def flyer_vague_request_clarification_reply(customer: dict) -> str:
+    name = str(customer.get("business_name") or "your business").strip() or "your business"
+    return (
+        "Flyer Studio\n"
+        "------------\n"
+        f"I can help create a flyer for {name}. What should this flyer promote? "
+        "Please send the offer, event, product, or service details you want on it."
+    )
 
 
 def find_flyer_onboarding_session_by_sender(phone: Optional[str], chat_id: str) -> Optional[dict]:
@@ -1374,11 +1454,35 @@ def _location_matches_allowed(requested: str, allowed_labels: list[str]) -> bool
 
 
 def is_flyer_account_command(text: str) -> bool:
+    body = flyer_visible_message_text(text)
     return bool(re.search(
-        r"^\s*(status|plan status|help|add (authorized )?(number|auth)|add authorized number|"
+        r"^\s*(status|plan status|help|"
+        r"don'?t show sample prompts|do not show sample prompts|stop sample prompts|"
+        r"hide sample prompts|turn off sample prompts|disable sample prompts|"
+        r"stop showing examples|no sample prompts|no examples|"
+        r"don'?t show examples|hide examples|stop examples|"
+        r"show sample prompts again|enable sample prompts|turn on sample prompts|"
+        r"bring back sample prompts|show examples again|bring back examples|"
+        r"add (authorized )?(number|auth)|add authorized number|"
         r"remove authorized number|remove number|update phone|update business phone|"
         r"update whatsapp|update business whatsapp|change plan|confirm update)\b",
-        text or "",
+        body or "",
+        flags=re.IGNORECASE,
+    ))
+
+
+def is_flyer_starter_prompt_preference_command(text: str) -> bool:
+    body = flyer_visible_message_text(text)
+    return bool(re.search(
+        r"^\s*(?:"
+        r"don'?t show sample prompts|do not show sample prompts|stop sample prompts|"
+        r"hide sample prompts|turn off sample prompts|disable sample prompts|"
+        r"stop showing examples|no sample prompts|no examples|"
+        r"don'?t show examples|hide examples|stop examples|"
+        r"show sample prompts again|enable sample prompts|turn on sample prompts|"
+        r"bring back sample prompts|show examples again|bring back examples"
+        r")\b",
+        body or "",
         flags=re.IGNORECASE,
     ))
 
