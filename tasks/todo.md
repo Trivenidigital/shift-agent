@@ -59,7 +59,8 @@ Hermes-first summary: reuse Hermes WhatsApp ingress, `dispatch_shift_agent`, sen
   - [x] Write implementation plan: `docs/superpowers/plans/2026-05-18-flyer-starter-prompt-preferences.md`.
   - [x] Get plan reviewed by two parallel agents and apply findings.
     - Review fixes: avoid nested schema rollback hazard with top-level store maps, support LID-only preference commands, fail closed on account-command errors, normalize sender-block-wrapped commands, keep CTA retries concise, guard active-project states before vague-start starter prompts, clarify payment-pending CTA behavior, and make the account-wide preference explicit in copy.
-  - [ ] Write design doc and run two parallel design reviews.
+  - [x] Write design doc and run two parallel design reviews.
+    - Review fixes: recognized preference commands fail closed on all lookup/CLI paths, LID-only handling uses a store-level sender lookup, starter prompt send uses an atomic claim/release contract, transient metadata uses namespaced keys, payment-pending CTA handling is explicit, compound confirm suppresses starters, Guided Mode consumes auto-eligibility, and opt-out copy/aliases are account-wide.
   - [ ] Build with focused tests.
   - [ ] Create PR and run three parallel PR reviews.
 - [x] 2026-05-17 launch funnel reliability pass: fix compound `CONFIRM + flyer request`, broaden new-project detection for menu/marketing requests, prevent generic LLM fallback during active intake, require explicit media intent before saving brand assets, deploy, and send a fresh campaign message for user testing.

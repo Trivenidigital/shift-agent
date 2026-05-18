@@ -130,13 +130,13 @@ def test_customer_store_default_keeps_starter_prompts_auto():
     customer = _customer()
     store = FlyerCustomerStore(customers=[customer])
     assert store.starter_prompt_mode(customer.customer_id) == "auto"
-    assert store.should_auto_send_starter_prompt(customer.customer_id) is True
+    assert store.claim_starter_prompt_send(customer.customer_id) is True
 
-def test_customer_store_records_starter_prompt_sent_count():
+def test_customer_store_claim_allows_only_one_auto_starter_prompt():
     customer = _customer()
     store = FlyerCustomerStore(customers=[customer])
-    store.record_starter_prompt_sent(customer.customer_id)
-    assert store.should_auto_send_starter_prompt(customer.customer_id) is False
+    assert store.claim_starter_prompt_send(customer.customer_id) is True
+    assert store.claim_starter_prompt_send(customer.customer_id) is False
 
 def test_customer_store_preference_top_level_is_rollback_safe():
     raw = json.loads(FlyerCustomerStore(customers=[_customer()]).model_dump_json())
@@ -160,7 +160,7 @@ def test_starter_message_can_include_opt_out_hint():
 Run:
 
 ```powershell
-python -m pytest tests/test_flyer_starter_briefs.py tests/test_flyer_onboarding.py::test_customer_store_default_keeps_starter_prompts_auto tests/test_flyer_onboarding.py::test_customer_store_records_starter_prompt_sent_count tests/test_flyer_onboarding.py::test_customer_store_preference_top_level_is_rollback_safe -q
+python -m pytest tests/test_flyer_starter_briefs.py tests/test_flyer_onboarding.py::test_customer_store_default_keeps_starter_prompts_auto tests/test_flyer_onboarding.py::test_customer_store_claim_allows_only_one_auto_starter_prompt tests/test_flyer_onboarding.py::test_customer_store_preference_top_level_is_rollback_safe -q
 ```
 
 Expected: fails on missing store maps/methods or missing helper parameters.
@@ -176,16 +176,22 @@ starter_prompt_sent_counts: dict[str, int] = Field(default_factory=dict, max_len
 def starter_prompt_mode(self, customer_id: str) -> str:
     return self.starter_prompt_preferences.get(customer_id, "auto")
 
-def should_auto_send_starter_prompt(self, customer_id: str) -> bool:
-    return self.starter_prompt_mode(customer_id) != "off" and self.starter_prompt_sent_counts.get(customer_id, 0) <= 0
-
 def set_starter_prompt_mode(self, customer_id: str, mode: Literal["auto", "off"]) -> None:
     self.starter_prompt_preferences[customer_id] = mode
     if mode == "auto":
         self.starter_prompt_sent_counts[customer_id] = 0
 
-def record_starter_prompt_sent(self, customer_id: str) -> None:
+def claim_starter_prompt_send(self, customer_id: str) -> bool:
+    if self.starter_prompt_mode(customer_id) == "off":
+        return False
+    if self.starter_prompt_sent_counts.get(customer_id, 0) > 0:
+        return False
     self.starter_prompt_sent_counts[customer_id] = self.starter_prompt_sent_counts.get(customer_id, 0) + 1
+    return True
+
+def release_starter_prompt_claim(self, customer_id: str) -> None:
+    if self.starter_prompt_sent_counts.get(customer_id, 0) > 0:
+        self.starter_prompt_sent_counts[customer_id] -= 1
 ```
 
 Add to `starter_briefs.py`:
@@ -212,7 +218,7 @@ Append the hint only when `include_opt_out_hint` is true.
 Run:
 
 ```powershell
-python -m pytest tests/test_flyer_starter_briefs.py tests/test_flyer_onboarding.py::test_customer_store_default_keeps_starter_prompts_auto tests/test_flyer_onboarding.py::test_customer_store_records_starter_prompt_sent_count tests/test_flyer_onboarding.py::test_customer_store_preference_top_level_is_rollback_safe -q
+python -m pytest tests/test_flyer_starter_briefs.py tests/test_flyer_onboarding.py::test_customer_store_default_keeps_starter_prompts_auto tests/test_flyer_onboarding.py::test_customer_store_claim_allows_only_one_auto_starter_prompt tests/test_flyer_onboarding.py::test_customer_store_preference_top_level_is_rollback_safe -q
 ```
 
 Expected: pass.
@@ -433,7 +439,7 @@ def test_trial_completion_records_first_starter_prompt_sent(tmp_path):
 
     assert "Here is a starter flyer request" in result.reply_text
     store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
-    assert store.should_auto_send_starter_prompt(result.customer_id) is False
+    assert store.claim_starter_prompt_send(result.customer_id) is False
 ```
 
 - [ ] **Step 2: Run tests and verify failure**
@@ -463,7 +469,7 @@ if (
     reply = f"{reply}\n\n{starter_brief_message(..., include_opt_out_hint=True)}"
 ```
 
-When the starter prompt is appended in onboarding or Text Mode, call `store.record_starter_prompt_sent(customer.customer_id)` before writing the store. `_existing_account_ready_reply(customer)` must remain concise and must not append full starter prompt text.
+When onboarding or Text Mode is about to append a starter prompt, call `store.claim_starter_prompt_send(customer.customer_id)` while holding the customer store lock. Append the starter only when the claim returns true. If a setup flow enters Guided Mode, call the same claim helper without appending a full starter prompt so the guided questions consume first-use assistance. `_existing_account_ready_reply(customer)` must remain concise and must not append full starter prompt text.
 
 - [ ] **Step 4: Run onboarding/intake tests**
 
@@ -496,8 +502,8 @@ def test_vague_flyer_start_for_opted_out_customer_asks_short_clarification(monke
         "business_name": "Demo Salon",
         "business_category": "salon",
         "status": "trial",
-        "starter_prompt_mode": "off",
-        "starter_prompt_sent_count": 0,
+        "_starter_prompt_mode": "off",
+        "_starter_prompt_sent_count": 0,
     })
     monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
@@ -522,8 +528,8 @@ def test_vague_flyer_start_after_first_starter_asks_short_clarification(monkeypa
         "business_name": "Demo Salon",
         "business_category": "salon",
         "status": "trial",
-        "starter_prompt_mode": "auto",
-        "starter_prompt_sent_count": 1,
+        "_starter_prompt_mode": "auto",
+        "_starter_prompt_sent_count": 1,
     })
     monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
@@ -563,16 +569,16 @@ In `actions.py`, add:
 ```python
 def _starter_prompt_metadata(store: dict, customer_id: str) -> dict[str, object]:
     return {
-        "starter_prompt_mode": (store.get("starter_prompt_preferences") or {}).get(customer_id, "auto"),
-        "starter_prompt_sent_count": int((store.get("starter_prompt_sent_counts") or {}).get(customer_id, 0) or 0),
+        "_starter_prompt_mode": (store.get("starter_prompt_preferences") or {}).get(customer_id, "auto"),
+        "_starter_prompt_sent_count": int((store.get("starter_prompt_sent_counts") or {}).get(customer_id, 0) or 0),
     }
 
 def flyer_starter_prompts_enabled(customer: dict) -> bool:
-    return str(customer.get("starter_prompt_mode") or "auto").strip().lower() != "off"
+    return str(customer.get("_starter_prompt_mode") or "auto").strip().lower() != "off"
 
 def flyer_starter_prompt_already_sent(customer: dict) -> bool:
     try:
-        return int(customer.get("starter_prompt_sent_count") or 0) > 0
+        return int(customer.get("_starter_prompt_sent_count") or 0) > 0
     except (TypeError, ValueError):
         return False
 
@@ -584,17 +590,16 @@ def flyer_vague_request_clarification_reply(customer: dict) -> str:
     )
 ```
 
-Update `find_flyer_customer_by_sender` so returned customer dicts include `_starter_prompt_metadata(...)`. Add `record_flyer_starter_prompt_sent(customer_id)` that locks `FLYER_CUSTOMERS_PATH`, increments the top-level `starter_prompt_sent_counts[customer_id]`, and writes with `safe_io.atomic_write_text` fallback. This write must be best-effort but audited by the calling hook; failure must not crash message delivery.
+Update `find_flyer_customer_by_sender` so returned customer dicts include `_starter_prompt_metadata(...)` under transient namespaced keys only. Add `claim_flyer_starter_prompt_send(customer_id)` that locks `FLYER_CUSTOMERS_PATH`, re-reads state, verifies mode is not `off` and sent count is zero, increments `starter_prompt_sent_counts[customer_id]`, writes with `safe_io.atomic_write_text` fallback, and returns true. Add `release_flyer_starter_prompt_claim(customer_id)` for synchronous definite send failures.
 
 In `hooks.py`, move `_try_flyer_active_project_intercept(...)` before the vague-start starter/clarification branch. Then replace the active/trial vague branch with:
 
 ```python
 if customer and customer.get("status") in {"trial", "active"}:
-    if actions.flyer_starter_prompts_enabled(customer) and not actions.flyer_starter_prompt_already_sent(customer):
+    if actions.flyer_starter_prompts_enabled(customer) and not actions.flyer_starter_prompt_already_sent(customer) and actions.claim_flyer_starter_prompt_send(customer.get("customer_id") or ""):
         reply = actions.flyer_starter_brief_reply(customer)
         reason = "flyer_starter_brief"
         result_reason = "cf-router flyer starter brief sent"
-        actions.record_flyer_starter_prompt_sent(customer.get("customer_id") or "")
     else:
         reply = actions.flyer_vague_request_clarification_reply(customer)
         reason = "flyer_starter_clarification"
