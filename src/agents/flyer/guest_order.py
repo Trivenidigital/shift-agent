@@ -182,6 +182,18 @@ def consume_guest_order(
 ) -> GuestOrderResult:
     now = now or datetime.now(timezone.utc)
     store = load_guest_order_store(state_path)
+    # BUG-FLYER-QA-001: idempotent replay. After a successful first consume
+    # the order's status flips to 'used' or 'paid' and reserved_project_id is
+    # cleared, so _find_reserved_guest_order can no longer locate it. Match
+    # on used_project_ids first so a replay returns the same success tuple.
+    replayed = _find_consumed_guest_order(
+        store, sender_phone=sender_phone, chat_id=chat_id, project_id=project_id,
+    )
+    if replayed is not None:
+        return GuestOrderResult(
+            True, True, "",
+            replayed.order_id, replayed.status, replayed.payment_checkout_url,
+        )
     order = _find_reserved_guest_order(store, sender_phone=sender_phone, chat_id=chat_id, project_id=project_id)
     if order is None:
         return GuestOrderResult(False, True, "", detail="reserved_guest_order_not_found")
@@ -229,6 +241,50 @@ def _reply_for_order(order: FlyerGuestOrder) -> str:
 
 def _replace_order(store: FlyerGuestOrderStore, order: FlyerGuestOrder) -> None:
     store.orders = [order if existing.order_id == order.order_id else existing for existing in store.orders]
+
+
+def _find_consumed_guest_order(
+    store: FlyerGuestOrderStore,
+    *,
+    sender_phone: str,
+    chat_id: str,
+    project_id: str,
+) -> Optional[FlyerGuestOrder]:
+    """Return an order that already consumed `project_id` for this sender.
+
+    Used to make `consume_guest_order` idempotent on replay (BUG-FLYER-QA-001).
+    After a successful first consume the order's status becomes 'used' or 'paid'
+    and reserved_project_id is cleared, so `_find_reserved_guest_order` cannot
+    locate it on a retry. This helper matches on `project_id in used_project_ids`
+    instead, scoped to the same sender + chat (with a chat_id fallback that
+    mirrors `_find_reserved_guest_order` so cross-chat replays still resolve).
+
+    Excludes orders where `reserved_project_id == project_id AND
+    status == "reserved"` — those represent in-flight first consumes, not
+    replays. A freshly reserved order has empty `used_project_ids` so this
+    guard is redundant in practice; it stays as a defensive belt-and-braces.
+    """
+    try:
+        canonical = E164Phone.from_any(sender_phone, country_code="US")
+    except ValueError:
+        return None
+
+    def is_replay(order: FlyerGuestOrder) -> bool:
+        if project_id not in order.used_project_ids:
+            return False
+        if order.status == "reserved" and order.reserved_project_id == project_id:
+            return False
+        return order.sender_phone == canonical
+
+    matches = [
+        order for order in store.orders
+        if is_replay(order) and (not chat_id or order.chat_id == chat_id)
+    ]
+    if not matches and chat_id:
+        matches = [order for order in store.orders if is_replay(order)]
+    if not matches:
+        return None
+    return max(matches, key=lambda order: order.updated_at)
 
 
 def _find_reserved_guest_order(
