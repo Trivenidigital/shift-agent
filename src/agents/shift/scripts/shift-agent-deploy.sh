@@ -264,6 +264,11 @@ install_artifacts() {
     else
         rm -f /opt/shift-agent/flyer_intake.py
     fi
+    if [ -f src/agents/flyer/starter_briefs.py ]; then
+        install -m 644 src/agents/flyer/starter_briefs.py /opt/shift-agent/flyer_starter_briefs.py
+    else
+        rm -f /opt/shift-agent/flyer_starter_briefs.py
+    fi
     if [ -f src/agents/flyer/account.py ]; then
         install -m 644 src/agents/flyer/account.py /opt/shift-agent/flyer_account.py
     else

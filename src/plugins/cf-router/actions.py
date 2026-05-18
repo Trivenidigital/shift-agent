@@ -68,6 +68,15 @@ def _ensure_platform_path() -> None:
         sys.path.insert(0, p)
 
 
+def _ensure_local_src_path() -> None:
+    """Allow local tests to import repo modules when plugin is loaded directly."""
+    src = Path(__file__).resolve().parents[2]
+    if (src / "agents").exists():
+        p = str(src)
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+
 # === Owner / employee identity ===
 
 def is_owner_chat(chat_id: str) -> bool:
@@ -1028,6 +1037,33 @@ def flyer_project_needs_missing_reference(project: dict) -> bool:
         )
     )
     return attachment_cue and extraction_cue
+
+
+def flyer_starter_brief_reply(customer: dict) -> str:
+    """Return a category starter brief for a Flyer customer."""
+    try:
+        _ensure_local_src_path()
+        from agents.flyer.starter_briefs import starter_brief_message  # type: ignore
+    except Exception:
+        try:
+            _ensure_platform_path()
+            from flyer_starter_briefs import starter_brief_message  # type: ignore
+        except Exception:
+            return (
+                "Flyer Studio\n"
+                "------------\n"
+                "Here is a starter flyer request.\n"
+                "Edit anything below and send it back.\n\n"
+                "Create a professional flyer for my business.\n\n"
+                "Main heading:\nSpecial Offer\n\n"
+                "Details:\nAdd what I am promoting, products or services, prices, dates, and contact details here.\n\n"
+                "Use my saved business name, address, phone, and logo.\n\n"
+                "Reply with your edited version, or replace it with your own flyer request."
+            )
+    return starter_brief_message(
+        str(customer.get("business_category") or ""),
+        business_name=str(customer.get("business_name") or ""),
+    )
 
 
 def flyer_project_missing_info_reply(project: dict) -> str:

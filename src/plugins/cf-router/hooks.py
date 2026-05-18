@@ -181,7 +181,20 @@ def pre_gateway_dispatch(event: Any, gateway: Any = None, session_store: Any = N
                 phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
                 if role != "owner":
                     customer = actions.find_flyer_customer_by_sender(phone, chat_id)
-                    if customer:
+                    if customer and customer.get("status") in {"trial", "active"}:
+                        reply = actions.flyer_starter_brief_reply(customer)
+                        ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+                        actions.audit_intercepted(
+                            reason="flyer_starter_brief",
+                            chat_id=chat_id,
+                            subprocess_rc=0 if ack_ok else 3,
+                            detail=(
+                                f"customer_id={customer.get('customer_id') or ''}; sender_role={role}; "
+                                f"ack_message_id={mid}; ack_error={err[:300]}"
+                            ),
+                        )
+                        return {"action": "skip", "reason": "cf-router flyer starter brief sent"}
+                    elif customer:
                         flyer_result = _try_flyer_primary_intercept(
                             text, chat_id, event, force_new=True, media_path=media_path,
                         )
@@ -1110,7 +1123,16 @@ def _try_flyer_onboarding_intercept(text: str, chat_id: str, event: Any) -> Opti
         return {"action": "skip", "reason": "cf-router flyer onboarding failed"}
     if not result.get("handled"):
         return None
-    ack_ok, mid, err = actions.send_flyer_text(chat_id, result.get("reply_text") or "")
+    trailing_request = actions.extract_flyer_request_after_confirm(text)
+    will_route_trailing = (
+        result.get("next_status") in {"trial", "active"}
+        and trailing_request
+        and actions.should_start_new_flyer_over_active(trailing_request, has_media=False)
+    )
+    reply_text = result.get("reply_text") or ""
+    if will_route_trailing:
+        reply_text = _suppress_flyer_starter_brief(reply_text)
+    ack_ok, mid, err = actions.send_flyer_text(chat_id, reply_text)
     actions.audit_intercepted(
         reason="flyer_onboarding", chat_id=chat_id,
         subprocess_rc=0 if ack_ok else 3,
@@ -1119,12 +1141,7 @@ def _try_flyer_onboarding_intercept(text: str, chat_id: str, event: Any) -> Opti
             f"sender_role={role}; ack_message_id={mid}; ack_error={err[:300]}"
         ),
     )
-    trailing_request = actions.extract_flyer_request_after_confirm(text)
-    if (
-        result.get("next_status") in {"trial", "active"}
-        and trailing_request
-        and actions.should_start_new_flyer_over_active(trailing_request, has_media=False)
-    ):
+    if will_route_trailing:
         project_result = _try_flyer_primary_intercept(
             trailing_request, chat_id, event, force_new=True,
         )
@@ -1132,6 +1149,17 @@ def _try_flyer_onboarding_intercept(text: str, chat_id: str, event: Any) -> Opti
             return project_result
     return {"action": "skip",
             "reason": f"cf-router flyer onboarding: {result.get('next_status')}"}
+
+
+def _suppress_flyer_starter_brief(reply_text: str) -> str:
+    marker = "Here is a starter flyer request"
+    if marker not in (reply_text or ""):
+        return reply_text
+    before, _sep, _after = reply_text.partition(marker)
+    cleaned = before.rstrip()
+    if not cleaned:
+        cleaned = "Flyer Studio\n------------\nYour Flyer Studio account is ready."
+    return f"{cleaned}\n\nI will create the flyer request you included now."
 
 
 def _try_flyer_existing_onboarding_intercept(text: str, chat_id: str, event: Any) -> Optional[dict]:

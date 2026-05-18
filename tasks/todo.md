@@ -46,8 +46,9 @@ Hermes-first summary: reuse Hermes WhatsApp ingress, `dispatch_shift_agent`, sen
   - [x] Write design doc: `docs/superpowers/specs/2026-05-18-flyer-business-starter-briefs-design.md`.
   - [x] Get design reviewed by two parallel agents and apply findings.
     - Review fixes: added explicit `trial`/`active` status guard, non-eligible status tests, compound `CONFIRM. Create ...` suppression, all-category starter text parser-validity coverage, customer-copy internal-term checks, and design-local Hermes domain table.
-  - [ ] Build with TDD.
-  - [ ] Run focused verification.
+  - [x] Build with TDD.
+  - [x] Run focused verification.
+    - Review: `python -m pytest tests/test_flyer_starter_briefs.py tests/test_flyer_onboarding.py tests/test_flyer_create_project.py tests/test_flyer_renderer.py tests/test_cf_router_flyer_routing.py tests/test_flyer_scripts_static.py -q` -> 143 passed. `python -m py_compile src\agents\flyer\starter_briefs.py src\agents\flyer\intake.py src\agents\flyer\onboarding.py src\plugins\cf-router\actions.py src\plugins\cf-router\hooks.py src\platform\schemas.py` -> passed. `git diff --check` -> passed.
   - [ ] Create PR.
   - [ ] Get PR reviewed by three parallel agents and apply findings.
 - [x] 2026-05-17 launch funnel reliability pass: fix compound `CONFIRM + flyer request`, broaden new-project detection for menu/marketing requests, prevent generic LLM fallback during active intake, require explicit media intent before saving brand assets, deploy, and send a fresh campaign message for user testing.

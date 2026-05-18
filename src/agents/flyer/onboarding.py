@@ -24,6 +24,11 @@ from schemas import (
 )
 
 try:
+    from agents.flyer.starter_briefs import starter_brief_message  # type: ignore
+except ModuleNotFoundError:
+    from flyer_starter_briefs import starter_brief_message  # type: ignore
+
+try:
     from safe_io import atomic_write_text  # type: ignore
 except ModuleNotFoundError:
     def atomic_write_text(path: Path, text: str) -> None:  # type: ignore[no-redef]
@@ -609,7 +614,13 @@ def _reply_for_session(
         customer = next((c for c in store.customers if c.customer_id == customer_id), None)
         return _payment_reply(customer_id, session.plan_id, customer.payment_checkout_url if customer else "")
     if session.status == "trial":
-        return _trial_active_reply(customer_id, creation_mode=session.creation_mode, language=session.preferred_language)
+        customer = next((c for c in store.customers if c.customer_id == customer_id), None)
+        return _trial_active_reply(
+            customer_id,
+            creation_mode=session.creation_mode,
+            language=session.preferred_language,
+            customer=customer,
+        )
     return _welcome_reply(tiers)
 
 
@@ -653,27 +664,38 @@ def _payment_reply(customer_id: str, plan_id: str, checkout_url: str) -> str:
     )
 
 
-def _trial_active_reply(customer_id: str, *, creation_mode: str = "", language: str = "en") -> str:
+def _trial_active_reply(
+    customer_id: str,
+    *,
+    creation_mode: str = "",
+    language: str = "en",
+    customer: Optional[FlyerCustomerProfile] = None,
+    include_starter_brief: bool = True,
+) -> str:
     if creation_mode == "guided":
-        return (
+        reply = (
             "Flyer Studio\n------------\n"
             f"Free trial active for {customer_id}. You have 3 free sample flyers.\n\n"
             "Guided Mode is ready.\n"
             "First, what are you promoting? Example: weekend sale, breakfast specials, grand opening, class, service offer."
         )
-    if creation_mode == "text":
-        return (
+    elif creation_mode == "text":
+        reply = (
             "Flyer Studio\n------------\n"
             f"Free trial active for {customer_id}. You have 3 free sample flyers.\n\n"
             "Text Mode is ready. Send your first flyer request in one message. "
             "You can also attach an existing flyer, logo, menu, photos, or reference image."
         )
-    del language
-    return (
-        "Flyer Studio\n------------\n"
-        f"Free trial active for {customer_id}. You have 3 free sample flyers.\n"
-        "Send your first flyer request now. After each sample, I will show the paid onboarding link and plans."
-    )
+    else:
+        del language
+        reply = (
+            "Flyer Studio\n------------\n"
+            f"Free trial active for {customer_id}. You have 3 free sample flyers.\n"
+            "Send your first flyer request now. After each sample, I will show the paid onboarding link and plans."
+        )
+    if include_starter_brief and customer and customer.status in {"trial", "active"}:
+        reply = f"{reply}\n\n{starter_brief_message(customer.business_category, business_name=customer.business_name)}"
+    return reply
 
 
 def _existing_account_ready_reply(customer: FlyerCustomerProfile) -> str:
