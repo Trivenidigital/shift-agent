@@ -53,6 +53,52 @@ def test_atomic_write_text_uses_600_by_default(tmp_path):
     assert oct(t.stat().st_mode & 0o777) == "0o600"
 
 
+def test_atomic_write_text_skips_dir_fsync_when_os_name_not_posix(tmp_path, monkeypatch):
+    """BUG-FLYER-QA-005: Windows raises PermissionError when os.open is called on
+    a directory. The parent-directory fsync block must be gated on
+    os.name == 'posix'. This simulates Windows on Linux CI by monkeypatching
+    os.name; the test passes if no PermissionError leaks and the file content
+    is correct."""
+    monkeypatch.setattr(os, "name", "nt")
+    target = tmp_path / "x.txt"
+    atomic_write_text(target, "hello")
+    assert target.read_text(encoding="utf-8") == "hello"
+
+
+def test_atomic_write_text_fsyncs_parent_on_posix(tmp_path, monkeypatch):
+    """BUG-FLYER-QA-005 regression guard: the POSIX durability invariant (fsync
+    the parent directory after rename) must NOT be silently dropped. Track
+    os.open + os.fsync and assert at least one of the dir FDs we opened was
+    later fsynced. Catches accidental future removal of the dir-fsync call."""
+    monkeypatch.setattr(os, "name", "posix")
+    dir_fds: set[int] = set()
+    fsynced_fds: list[int] = []
+    real_open = os.open
+    real_fsync = os.fsync
+
+    def tracking_open(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        try:
+            if Path(path).is_dir():
+                dir_fds.add(fd)
+        except OSError:
+            pass
+        return fd
+
+    def tracking_fsync(fd):
+        fsynced_fds.append(fd)
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "open", tracking_open)
+    monkeypatch.setattr(os, "fsync", tracking_fsync)
+    target = tmp_path / "y.txt"
+    atomic_write_text(target, "world")
+    assert target.read_text(encoding="utf-8") == "world"
+    assert dir_fds, "atomic_write_text did not open the parent directory at all"
+    assert any(fd in fsynced_fds for fd in dir_fds), \
+        "parent-directory FD was opened but not fsynced"
+
+
 # ─── safe_load_json ───
 
 def test_safe_load_json_missing(tmp_path):
