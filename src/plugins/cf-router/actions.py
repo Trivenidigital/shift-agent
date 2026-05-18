@@ -9,6 +9,7 @@ Test override: set the module-level path constants before invoking hooks
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 import re
 import subprocess
@@ -1618,6 +1619,28 @@ def trigger_create_flyer_project(
     return True, detail[:500], project
 
 
+def flyer_source_edit_preflight(project: dict) -> tuple[bool, str]:
+    """Return whether source-preserving edit generation can run for project."""
+    assets = project.get("assets") or []
+    reference = next(
+        (asset for asset in reversed(assets) if (asset or {}).get("kind") == "reference_image"),
+        None,
+    )
+    if not reference:
+        return False, "source edit needs an uploaded reference image"
+    path = str((reference or {}).get("path") or "")
+    mime = str((reference or {}).get("mime_type") or mimetypes.guess_type(path)[0] or "")
+    if mime and not mime.startswith("image/"):
+        return False, f"source edit reference must be an image, got {mime}"
+    if path.lower().endswith(".pdf"):
+        return False, "source edit from PDF is not supported yet"
+    if path and not Path(path).exists():
+        return False, "source edit reference image is not available on this server"
+    if not os.environ.get("OPENAI_API_KEY"):
+        return False, "source edit provider is not configured"
+    return True, "ready"
+
+
 def trigger_check_flyer_reference_scope(
     *,
     customer: dict,
@@ -1872,7 +1895,12 @@ def consume_flyer_reference_authorization_reply(
         )
 
 
-def send_flyer_manual_edit_ack(chat_id: str, project_id: str, request_text: str = "") -> tuple[bool, str, str]:
+def send_flyer_manual_edit_ack(
+    chat_id: str,
+    project_id: str,
+    request_text: str = "",
+    reason: str = "",
+) -> tuple[bool, str, str]:
     """Acknowledge source-preserving flyer edits without auto-generating."""
     _ensure_platform_path()
     try:
@@ -1881,13 +1909,15 @@ def send_flyer_manual_edit_ack(chat_id: str, project_id: str, request_text: str 
         return False, "", f"safe_io_import_failed: {type(e).__name__}: {e}"
     body = flyer_visible_message_text(request_text).strip()
     requested = f"\n\nRequested edit: {body}" if body else ""
+    queue_reason = f"\n\nWhy this is queued: {reason.strip()}" if reason.strip() else ""
     message = (
         "Flyer Studio\n"
         "------------\n"
         f"I received your uploaded flyer and queued project {project_id} for a source-preserving edit."
         f"{requested}\n\n"
-        "I will not auto-generate a new flyer from scratch for this kind of request. "
-        "The correction should preserve the existing design and change only the requested text/artwork. "
+        "This should preserve the existing design and change only the requested text/artwork, "
+        "so I am holding it in the edit queue instead of generating a new flyer from scratch."
+        f"{queue_reason}\n\n"
         "I will send the updated flyer here once it is ready."
     )
     ok, message_id, err, status = bridge_post(chat_id, message)

@@ -171,13 +171,33 @@ def build_summary() -> dict[str, Any]:
     }
     for customer in customers.customers:
         segments[_customer_category(customer)] += 1
-    active_statuses = {"intake_started", "collecting_required_info", "awaiting_assets", "generating_concepts", "awaiting_final_approval", "revising_design", "finalizing_assets"}
+    now = _now()
+    active_statuses = {
+        "intake_started",
+        "collecting_required_info",
+        "awaiting_assets",
+        "manual_edit_required",
+        "generating_concepts",
+        "awaiting_final_approval",
+        "revising_design",
+        "finalizing_assets",
+    }
     stuck_statuses = {"intake_started", "collecting_required_info", "awaiting_assets"}
+    manual_edit_count = sum(1 for p in projects.projects if p.status == "manual_edit_required")
+    stuck_edit_count = 0
+    for project in projects.projects:
+        age_minutes = max(0, int((now - project.updated_at).total_seconds() // 60))
+        if project.status == "manual_edit_required" and age_minutes >= 30:
+            stuck_edit_count += 1
+        elif project.status == "revising_design" and not project.concepts and age_minutes >= 10:
+            stuck_edit_count += 1
     return {
         "segments": segments,
         "total_customers": len(customers.customers),
         "active_projects": sum(1 for p in projects.projects if p.status in active_statuses),
         "stuck_projects": sum(1 for p in projects.projects if p.status in stuck_statuses),
+        "manual_edit_count": manual_edit_count,
+        "stuck_edit_count": stuck_edit_count,
         "guest_orders": len(guests.orders),
         "campaign_asset": {
             "path": str(_marketing_flyer_path()),
@@ -415,13 +435,25 @@ async def reset_trial(customer_id: str, body: ReasonBody, request: Request, _=De
 async def projects(status: str = "", query: str = "", _=Depends(require_auth)):
     q = query.strip().lower()
     rows = []
+    now = _now()
     for project in load_project_store().projects:
         if status and project.status != status:
             continue
         haystack = f"{project.project_id} {project.customer_phone} {project.raw_request}".lower()
         if q and q not in haystack:
             continue
-        rows.append(project.model_dump(mode="json"))
+        row = project.model_dump(mode="json")
+        age_minutes = max(0, int((now - project.updated_at).total_seconds() // 60))
+        attention: list[str] = []
+        if project.status == "manual_edit_required":
+            attention.append("manual_edit_queue")
+            if age_minutes >= 30:
+                attention.append("manual_edit_stale")
+        if project.status == "revising_design" and not project.concepts and age_minutes >= 10:
+            attention.append("regeneration_stale")
+        row["age_minutes"] = age_minutes
+        row["attention"] = attention
+        rows.append(row)
     rows.sort(key=lambda p: p.get("updated_at", ""), reverse=True)
     return {"projects": rows[:300]}
 
