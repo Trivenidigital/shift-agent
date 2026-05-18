@@ -191,3 +191,31 @@ def test_cf_router_reason_accepts_proposal_selection():
         subprocess_rc=0,
     )
     assert row.reason == "f7_proposal_selection"
+
+
+@pytest.mark.parametrize("reason", [
+    "flyer_intake_started",
+    "flyer_intake",
+    "flyer_intake_failed",
+    "flyer_onboarding",
+    "flyer_onboarding_failed",
+    "flyer_quota_blocked",
+    "flyer_brand_asset_saved",
+    "flyer_brand_asset_failed",
+    "flyer_reference_scope_blocked",
+    "flyer_reference_exact_edit_queued",
+    "flyer_location_blocked",
+    "flyer_account_command",
+    "flyer_account_failed",
+    "flyer_guest_order_started",
+    "flyer_guest_order_failed",
+])
+def test_cf_router_reason_accepts_flyer_intercepts(reason):
+    row = CfRouterIntercepted(
+        type="cf_router_intercepted",
+        ts=_now(),
+        reason=reason,
+        chat_id="918985741562@s.whatsapp.net",
+        subprocess_rc=0,
+    )
+    assert row.reason == reason

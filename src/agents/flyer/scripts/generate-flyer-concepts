@@ -15,9 +15,9 @@ sys.path.insert(0, str(SRC_ROOT / "platform"))
 from schemas import Config, FlyerConcept, FlyerProjectStore  # noqa: E402
 from safe_io import FileLock, atomic_write_text, load_yaml_model  # noqa: E402
 try:
-    from flyer_render import build_asset_manifest, next_asset_number, render_concept_previews  # type: ignore  # noqa: E402
+    from flyer_render import build_asset_manifest, next_asset_number, render_concept_previews, render_source_edit_preview  # type: ignore  # noqa: E402
 except ImportError:
-    from agents.flyer.render import build_asset_manifest, next_asset_number, render_concept_previews  # noqa: E402
+    from agents.flyer.render import build_asset_manifest, next_asset_number, render_concept_previews, render_source_edit_preview  # noqa: E402
 
 
 STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
@@ -50,13 +50,28 @@ def main() -> int:
 
     asset_dir = Path(args.asset_dir)
     with FileLock(asset_dir / f".{args.project_id}.generate.lock"):
-        specs = render_concept_previews(
-            project,
-            asset_dir,
-            model=cfg.flyer.draft_image_model,
-            quality=cfg.flyer.draft_image_quality,
-            concept_count=cfg.flyer.concept_count,
+        source_edit_requested = (
+            project.status == "manual_edit_required"
+            or "edit uploaded flyer/source artwork" in (project.raw_request or "").lower()
+            or "authorized flyer/source artwork update" in (project.raw_request or "").lower()
         )
+        if source_edit_requested:
+            specs = [
+                render_source_edit_preview(
+                    project,
+                    asset_dir,
+                    model=cfg.flyer.edit_image_model,
+                    quality=cfg.flyer.edit_image_quality,
+                )
+            ]
+        else:
+            specs = render_concept_previews(
+                project,
+                asset_dir,
+                model=cfg.flyer.draft_image_model,
+                quality=cfg.flyer.draft_image_quality,
+                concept_count=cfg.flyer.concept_count,
+            )
 
         with FileLock(Path(str(state_path) + ".lock")):
             store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))

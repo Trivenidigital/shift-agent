@@ -31,6 +31,12 @@ FINAL_KIND_TO_FORMAT = {
     "final_instagram_story": "instagram_story",
     "final_printable_pdf": "printable_pdf",
 }
+FINAL_KIND_TO_CAPTION = {
+    "final_whatsapp_image": "WhatsApp flyer - ready to forward in WhatsApp.",
+    "final_instagram_post": "Instagram post - square feed version.",
+    "final_instagram_story": "Instagram story - vertical story/status version.",
+    "final_printable_pdf": "Printable PDF - best for printing or sharing as a document.",
+}
 
 
 def _load_runtime_io():
@@ -90,6 +96,10 @@ def _trial_upsell_for_project(project, customer_state_path: Path) -> str:
     if customer is None or customer.status != "trial":
         return ""
     return _trial_upsell_message(customer)
+
+
+def _caption_for_asset(asset, fallback: str = "") -> str:
+    return FINAL_KIND_TO_CAPTION.get(getattr(asset, "kind", ""), fallback or "Your final flyer package is ready.")
 
 
 def _resolve_project_assets(project):
@@ -266,7 +276,9 @@ def main() -> int:
         if args.dry_run_bridge:
             ok, mid, err, status = True, f"dry-run:{asset.name}", "", 200
         else:
-            ok, mid, err, status = bridge_send_media(args.jid, asset, caption=args.caption)
+            project_asset = path_to_project_asset.get(str(asset)) if project is not None else None
+            caption = _caption_for_asset(project_asset, args.caption) if project_asset is not None else args.caption
+            ok, mid, err, status = bridge_send_media(args.jid, asset, caption=caption)
         if not ok:
             if project is not None and str(asset) in path_to_project_asset:
                 delivery_status = "uncertain" if status == "send_uncertain" else "failed"

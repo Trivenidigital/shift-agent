@@ -73,6 +73,11 @@ def main() -> int:
             if args.revision_text:
                 if not args.message_id:
                     raise SystemExit("--message-id is required with --revision-text")
+                source_edit_request = (
+                    updated.status == "manual_edit_required"
+                    or "edit uploaded flyer/source artwork" in (updated.raw_request or "").lower()
+                    or "authorized flyer/source artwork update" in (updated.raw_request or "").lower()
+                )
                 target_status = "revising_design"
                 if updated.status != target_status:
                     if not is_flyer_transition_allowed(updated.status, target_status):
@@ -96,7 +101,14 @@ def main() -> int:
                         "fields": fields,
                     })
                 if patch.raw_request_update is not None:
-                    updated = updated.model_copy(update={"raw_request": patch.raw_request_update})
+                    raw_request_update = patch.raw_request_update
+                    if source_edit_request and "source artwork" not in raw_request_update.lower():
+                        raw_request_update = (
+                            "Edit uploaded flyer/source artwork. Preserve the source flyer.\n"
+                            f"Original request: {updated.raw_request}\n"
+                            f"Latest correction: {raw_request_update}"
+                        )
+                    updated = updated.model_copy(update={"raw_request": raw_request_update})
                 if patch.changed or patch.visual_only:
                     revision = revision.model_copy(update={"resulting_version": updated.version + 1})
                 updated = updated.model_copy(update={

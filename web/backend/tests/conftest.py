@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import sys
+import types
 from pathlib import Path
 
 # Set BEFORE any app.* import in any test
@@ -26,6 +27,17 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _SRC = _PROJECT_ROOT / "src"
 if _SRC.is_dir() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
+_PLATFORM = _SRC / "platform"
+if _PLATFORM.is_dir() and str(_PLATFORM) not in sys.path:
+    sys.path.insert(0, str(_PLATFORM))
+
+if os.name == "nt" and "fcntl" not in sys.modules:
+    fcntl_stub = types.ModuleType("fcntl")
+    fcntl_stub.LOCK_EX = 2
+    fcntl_stub.LOCK_UN = 8
+    fcntl_stub.LOCK_NB = 4
+    fcntl_stub.flock = lambda *_args, **_kwargs: None
+    sys.modules["fcntl"] = fcntl_stub
 
 import pytest  # noqa: E402
 

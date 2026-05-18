@@ -93,3 +93,109 @@ def test_create_project_hydrates_missing_contact_from_trial_customer(tmp_path, m
     assert project["fields"]["notes"].startswith("Create a flyer for breakfast menu")
     assert module.FlyerProject.model_validate(project).fields.missing_required_fields() == []
     assert project["fields"]["contact_info"] in projects_path.read_text(encoding="utf-8")
+
+
+def test_create_project_names_recurring_breakfast_specials_cleanly(tmp_path, monkeypatch, capsys):
+    module = _load_script(monkeypatch)
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    customers_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_customer_sequence": 2,
+        "customers": [{
+            "customer_id": "CUST0001",
+            "business_name": "Lakshmis Kitchn",
+            "business_address": "90 Brybar Dr St Johns FL",
+            "primary_chat_id": "201975216009469@lid",
+            "onboarded_by_phone": "+19045550104",
+            "public_phone": "+17329837841",
+            "business_whatsapp_number": "+17329837841",
+            "authorized_request_numbers": ["+17329837841", "+19045550104"],
+            "business_category": "Indian restaurant",
+            "preferred_language": "te",
+            "plan_id": "trial",
+            "status": "trial",
+            "created_at": datetime(2026, 5, 17, tzinfo=timezone.utc).isoformat(),
+            "updated_at": datetime(2026, 5, 17, tzinfo=timezone.utc).isoformat(),
+            "activated_at": datetime(2026, 5, 17, tzinfo=timezone.utc).isoformat(),
+            "monthly_flyers_used": 0,
+            "billing_provider": "manual",
+            "payment_currency": "USD",
+        }],
+        "onboarding_sessions": [],
+    }), encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+19045550104",
+        "--message-id", "m-breakfast-specials",
+        "--raw-request", (
+            'Create a breakfast flyer with these items "Poori with Chicken $14.99, '
+            'Kheema Dosa $12.99". Timings 8 AM to 11 AM. Thursday to Sunday.'
+        ),
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+
+    assert project["fields"]["event_or_business_name"] == "Weekend Breakfast Specials"
+    assert project["fields"]["contact_info"] == "+17329837841"
+
+
+def test_create_project_can_queue_exact_reference_edit_without_template_title(tmp_path, monkeypatch, capsys):
+    module = _load_script(monkeypatch)
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    reference = tmp_path / "source.jpg"
+    reference.write_bytes(b"fake image bytes")
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    customers_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_customer_sequence": 2,
+        "customers": [{
+            "customer_id": "CUST0001",
+            "business_name": "Lakshmis Kitchen",
+            "business_address": "90 Brybar Dr St Johns FL",
+            "primary_chat_id": "201975216009469@lid",
+            "onboarded_by_phone": "+19045550104",
+            "public_phone": "+17329837841",
+            "business_whatsapp_number": "+17329837841",
+            "authorized_request_numbers": ["+17329837841", "+19045550104"],
+            "business_category": "Indian restaurant",
+            "preferred_language": "en",
+            "plan_id": "trial",
+            "status": "trial",
+            "created_at": datetime(2026, 5, 17, tzinfo=timezone.utc).isoformat(),
+            "updated_at": datetime(2026, 5, 17, tzinfo=timezone.utc).isoformat(),
+            "activated_at": datetime(2026, 5, 17, tzinfo=timezone.utc).isoformat(),
+            "monthly_flyers_used": 0,
+            "billing_provider": "manual",
+            "payment_currency": "USD",
+        }],
+        "onboarding_sessions": [],
+    }), encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+19045550104",
+        "--message-id", "m-exact-edit",
+        "--raw-request", (
+            "Edit uploaded flyer/source artwork. Customer requested: "
+            "I'd like you to Remove that extra 08:00. Add Any Item for $9.99."
+        ),
+        "--reference-media-path", str(reference),
+        "--manual-edit-required",
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+        "--asset-dir", str(tmp_path / "assets"),
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+
+    assert project["status"] == "manual_edit_required"
+    assert project["fields"]["event_or_business_name"] == "Lakshmis Kitchen"
+    assert project["assets"][0]["kind"] == "reference_image"
+    assert "Uploaded Flyer Template" not in project["fields"]["event_or_business_name"]

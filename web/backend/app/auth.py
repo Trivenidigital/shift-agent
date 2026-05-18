@@ -291,6 +291,8 @@ async def require_fresh_otp(request: Request) -> dict[str, Any]:
     require_fresh_pushover_otp for those.
     """
     claims = await require_auth(request)
+    if settings.auth_bypass_enabled:
+        return claims
     issued_at = claims.get("iat", 0)
     if _now() - issued_at > 300:
         raise HTTPException(403, "Sensitive action requires fresh OTP — re-verify")

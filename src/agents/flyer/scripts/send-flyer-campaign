@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Send a Flyer Studio marketing flyer with WhatsApp reply buttons.
 
-Customer-facing rule: URL buttons are intentionally not used. The labels are
-"Start Free Trial" and "Act Now! Save Time and Money"; tapping a button sends
-the matching reply message back into the chat for Flyer Studio routing.
+Customer-facing rule: URL buttons are intentionally not used. Tapping a button
+sends the matching reply message back into the chat for Flyer Studio routing.
 """
 from __future__ import annotations
 
@@ -20,6 +19,7 @@ from safe_io import bridge_send_cta, bridge_send_media  # type: ignore  # noqa: 
 
 DEFAULT_FLYER_PATH = Path("/opt/shift-agent/state/flyer/marketing/Flyer.png")
 DEFAULT_START_TRIAL_MESSAGE = "Help me create a beautiful flyer for my business"
+DEFAULT_QUICK_FLYER_MESSAGE = "Create One Flyer - $4"
 DEFAULT_ACT_NOW_MESSAGE = "I want to set up Flyer Studio for my business"
 DEFAULT_BODY = "Create beautiful marketing material for your business."
 
@@ -32,6 +32,7 @@ def build_payload(args: argparse.Namespace) -> dict:
         "media_type": "image",
         "buttons": [
             {"label": "Start Free Trial", "message": args.start_trial_message},
+            {"label": "Create One Flyer - $4", "message": args.quick_flyer_message},
             {"label": "Act Now! Save Time and Money", "message": args.act_now_message},
         ],
     }
@@ -44,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--jid", required=True, help="WhatsApp chat JID, e.g. 17329837841@s.whatsapp.net")
     parser.add_argument("--flyer-path", type=Path, default=DEFAULT_FLYER_PATH)
     parser.add_argument("--start-trial-message", default=DEFAULT_START_TRIAL_MESSAGE)
+    parser.add_argument("--quick-flyer-message", default=DEFAULT_QUICK_FLYER_MESSAGE)
     parser.add_argument("--act-now-message", default=DEFAULT_ACT_NOW_MESSAGE)
     parser.add_argument("--body", default=DEFAULT_BODY)
     parser.add_argument("--footer", default="Flyer Studio")

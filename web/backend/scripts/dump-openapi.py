@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import types
 from pathlib import Path
 
 # Stub env BEFORE importing the app.
@@ -39,6 +40,17 @@ SRC = PROJECT_ROOT / "src"
 sys.path.insert(0, str(BACKEND_ROOT))
 if SRC.is_dir():
     sys.path.insert(0, str(SRC))
+    platform = SRC / "platform"
+    if platform.is_dir():
+        sys.path.insert(0, str(platform))
+
+if os.name == "nt" and "fcntl" not in sys.modules:
+    fcntl_stub = types.ModuleType("fcntl")
+    fcntl_stub.LOCK_EX = 2
+    fcntl_stub.LOCK_UN = 8
+    fcntl_stub.LOCK_NB = 4
+    fcntl_stub.flock = lambda *_args, **_kwargs: None
+    sys.modules["fcntl"] = fcntl_stub
 
 from app.main import app  # noqa: E402
 

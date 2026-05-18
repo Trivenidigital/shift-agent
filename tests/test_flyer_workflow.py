@@ -147,6 +147,26 @@ def test_extract_revision_patch_flags_old_text_not_found():
     assert "not found" in patch.unresolved_reason
 
 
+def test_extract_revision_patch_handles_menu_item_swap_without_clarification():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Weekend Breakfast Specials",
+        event_time="07:00",
+        venue_or_location="90 Brybar Dr",
+        contact_info="+1 732 983 7841",
+        notes="Exclude Thatte Idly from original flyer. Items: Idly, Dosa with Chicken Curry, Tatte Idly.",
+    ))
+    patch = extract_revision_patch(
+        project,
+        "Design looks great! But remove Thatte/Tatte Idly. Swap Tatte Idly with Ghee Karam Idly(same price).",
+    )
+
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert patch.unresolved_reason == ""
+    assert "Replace menu item Tatte Idly with Ghee Karam Idly" in patch.notes_update
+    assert "Do not include Tatte Idly" in patch.notes_update
+
+
 def test_location_from_to_revision_does_not_change_title():
     project = _project(FlyerRequestFields(
         event_or_business_name="Weekend Breakfast",

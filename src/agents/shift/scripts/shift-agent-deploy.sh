@@ -259,10 +259,20 @@ install_artifacts() {
     else
         rm -f /opt/shift-agent/flyer_onboarding.py
     fi
+    if [ -f src/agents/flyer/intake.py ]; then
+        install -m 644 src/agents/flyer/intake.py /opt/shift-agent/flyer_intake.py
+    else
+        rm -f /opt/shift-agent/flyer_intake.py
+    fi
     if [ -f src/agents/flyer/account.py ]; then
         install -m 644 src/agents/flyer/account.py /opt/shift-agent/flyer_account.py
     else
         rm -f /opt/shift-agent/flyer_account.py
+    fi
+    if [ -f src/agents/flyer/guest_order.py ]; then
+        install -m 644 src/agents/flyer/guest_order.py /opt/shift-agent/flyer_guest_order.py
+    else
+        rm -f /opt/shift-agent/flyer_guest_order.py
     fi
     if [ -d src/agents/flyer/scripts ] && compgen -G "src/agents/flyer/scripts/*" > /dev/null; then
         install -m 755 src/agents/flyer/scripts/* /usr/local/bin/
@@ -272,8 +282,11 @@ install_artifacts() {
             generate-flyer-concepts \
             finalize-flyer-assets \
             handle-flyer-onboarding \
+            handle-flyer-intake \
+            check-flyer-reference-scope \
             store-flyer-brand-asset \
             manage-flyer-account \
+            manage-flyer-guest-order \
             send-flyer-package \
             send-flyer-campaign \
             flyer-delivery-report \
@@ -292,8 +305,11 @@ install_artifacts() {
             /usr/local/bin/generate-flyer-concepts \
             /usr/local/bin/finalize-flyer-assets \
             /usr/local/bin/handle-flyer-onboarding \
+            /usr/local/bin/handle-flyer-intake \
+            /usr/local/bin/check-flyer-reference-scope \
             /usr/local/bin/store-flyer-brand-asset \
             /usr/local/bin/manage-flyer-account \
+            /usr/local/bin/manage-flyer-guest-order \
             /usr/local/bin/flyer-delivery-report \
             /usr/local/bin/send-flyer-campaign \
             /usr/local/bin/send-flyer-package \

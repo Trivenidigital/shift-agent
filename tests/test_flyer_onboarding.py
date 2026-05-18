@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src" / "platform"))
 
 from agents.flyer.account import activate_customer, handle_account_command, reserve_quota, finalize_usage  # noqa: E402
+from agents.flyer.intake import handle_intake_message  # noqa: E402
 from agents.flyer.onboarding import handle_onboarding_message, store_brand_asset  # noqa: E402
 from schemas import FlyerCustomerStore, FlyerOnboardingSession, FlyerPlanTier, FlyerUsageEvent  # noqa: E402
 
@@ -252,6 +253,56 @@ def test_duplicate_confirm_for_same_sender_recovers_existing_trial_account(tmp_p
     updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
     assert len(updated.customers) == 1
     assert updated.customers[0].customer_id == "CUST0001"
+    assert updated.onboarding_sessions == []
+
+
+def test_duplicate_confirm_for_same_business_connects_new_sender_and_clears_session(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 17, tzinfo=timezone.utc)
+    existing_customer = _trial_customer(
+        customer_id="CUST0001",
+        business_name="Lakshmis Kitchn",
+        phone="+17329837841",
+        now=now,
+    )
+    store = FlyerCustomerStore(
+        next_customer_sequence=2,
+        customers=[existing_customer],
+        onboarding_sessions=[FlyerOnboardingSession(
+            chat_id="201975216009469@lid",
+            sender_phone="+19045550104",
+            status="confirming_summary",
+            started_at=now,
+            updated_at=now,
+            last_message_id="summary",
+            business_name="Lakshmis Kitchen",
+            business_address="90 Brybar Dr",
+            public_phone="+17329837841",
+            business_whatsapp_number="+17329837841",
+            authorized_request_number="+17329837841",
+            business_category="English and Telugu",
+            preferred_language="te",
+            plan_id="trial",
+        )],
+    )
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    result = handle_onboarding_message(
+        state_path=state_path,
+        chat_id="201975216009469@lid",
+        sender_phone="+19045550104",
+        message_id="confirm-conflict",
+        text="CONFIRM",
+        now=now,
+    )
+
+    assert result.handled is True
+    assert result.next_status == "trial"
+    assert result.customer_id == "CUST0001"
+    assert "already set up" in result.reply_text.lower()
+    updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert len(updated.customers) == 1
+    assert "+19045550104" in [str(phone) for phone in updated.customers[0].authorized_request_numbers]
     assert updated.onboarding_sessions == []
 
 
@@ -1037,3 +1088,172 @@ def test_onboarding_session_requires_valid_status():
             started_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
         )
+
+
+def test_intake_language_and_text_mode_for_existing_customer(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 17, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    customer = store.new_customer(
+        business_name="Lakshmi's Kitchen",
+        business_address="90 Brybar Dr",
+        public_phone="+17329837841",
+        business_whatsapp_number="+17329837841",
+        authorized_request_number="+17329837841",
+        business_category="restaurant",
+        preferred_language="en",
+        plan_id="trial",
+        now=now,
+        primary_chat_id="17329837841@s.whatsapp.net",
+        onboarded_by_phone="+17329837841",
+    ).model_copy(update={"status": "trial"})
+    store.customers.append(customer)
+    state_path.write_text(store.model_dump_json(), encoding="utf-8")
+
+    start = handle_intake_message(
+        state_path=state_path,
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        message_id="i1",
+        text="Start Free Trial",
+        start_source="start_trial",
+        now=now,
+    )
+    assert start.action == "choose_language"
+    assert "Malayalam" in start.reply_text
+    lang = handle_intake_message(
+        state_path=state_path,
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        message_id="i2",
+        text="Tamil",
+        now=now,
+    )
+    assert lang.action == "choose_mode"
+    assert "Tamil" in lang.reply_text
+    ready = handle_intake_message(
+        state_path=state_path,
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        message_id="i3",
+        text="2",
+        now=now,
+    )
+    assert ready.action == "text_ready"
+    assert "existing flyer" in ready.reply_text
+    updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert updated.customers[0].preferred_language == "ta"
+    assert updated.intake_sessions == []
+
+
+def test_guided_intake_synthesizes_flyer_request(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 17, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    store.customers.append(store.new_customer(
+        business_name="Triveni",
+        business_address="Pineville",
+        public_phone="+17043243322",
+        business_whatsapp_number="+17043243322",
+        authorized_request_number="+17043243322",
+        business_category="grocery",
+        preferred_language="en",
+        plan_id="trial",
+        now=now,
+    ).model_copy(update={"status": "trial"}))
+    state_path.write_text(store.model_dump_json(), encoding="utf-8")
+
+    chat_id = "17043243322@s.whatsapp.net"
+    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17043243322", message_id="g1", text="Create flyer", start_source="new_flyer", now=now)
+    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17043243322", message_id="g2", text="English", now=now)
+    first_question = handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17043243322", message_id="g3", text="1", now=now)
+    assert first_question.action == "guided_question"
+    assert "what are you promoting" in first_question.reply_text.lower()
+    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17043243322", message_id="g4", text="Weekend breakfast specials", now=now)
+    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17043243322", message_id="g5", text="Saturday and Sunday 8 AM to 11 AM", now=now)
+    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17043243322", message_id="g6", text="Idli $4.99, Dosa $8.99", now=now)
+    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17043243322", message_id="g7", text="Use saved", now=now)
+    done = handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17043243322", message_id="g8", text="Use logo, festive style", now=now)
+    assert done.action == "create_project"
+    assert "Weekend breakfast specials" in done.raw_request
+    assert "Idli $4.99" in done.raw_request
+    assert "Preferred flyer language: English" in done.raw_request
+
+
+def test_guided_intake_preserves_attached_sample_for_project_creation(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 17, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    store.customers.append(store.new_customer(
+        business_name="Lakshmis Kitchen",
+        business_address="90 Brybar Dr St Johns FL",
+        public_phone="+17329837841",
+        business_whatsapp_number="+17329837841",
+        authorized_request_number="+17329837841",
+        business_category="grocery",
+        preferred_language="en",
+        plan_id="trial",
+        now=now,
+    ).model_copy(update={"status": "trial"}))
+    state_path.write_text(store.model_dump_json(), encoding="utf-8")
+
+    chat_id = "17329837841@s.whatsapp.net"
+    sample_path = "/opt/shift-agent/.hermes/image_cache/img_sample_di lives here.jpg"
+    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17329837841", message_id="m1", text="Create flyer", start_source="new_flyer", now=now)
+    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17329837841", message_id="m2", text="Telugu", now=now)
+    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17329837841", message_id="m3", text="1", now=now)
+    handle_intake_message(
+        state_path=state_path,
+        chat_id=chat_id,
+        sender_phone="+17329837841",
+        message_id="m4",
+        text="Diwali Grocery Sale. Use items in this flyer and create one for Lakshmis Kitchen",
+        media_path=sample_path,
+        now=now,
+    )
+    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17329837841", message_id="m5", text="May 22 to May 25", now=now)
+    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17329837841", message_id="m6", text="Extract items and prices from the sample flyer attached", now=now)
+    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17329837841", message_id="m7", text="90 Brybar Saint Johns FL", now=now)
+    done = handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17329837841", message_id="m8", text="SKIP", now=now)
+
+    assert done.action == "create_project"
+    assert done.reference_media_path == sample_path
+    assert "Preferred flyer language: Telugu" in done.raw_request
+    assert "Attached reference/sample flyer is available" in done.raw_request
+
+
+def test_start_trial_intake_hands_off_to_onboarding_with_language_and_mode(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 17, tzinfo=timezone.utc)
+    chat_id = "19045550155@s.whatsapp.net"
+    handle_intake_message(
+        state_path=state_path,
+        chat_id=chat_id,
+        sender_phone="+19045550155",
+        message_id="s1",
+        text="Start Free Trial",
+        start_source="start_trial",
+        now=now,
+    )
+    handle_intake_message(
+        state_path=state_path,
+        chat_id=chat_id,
+        sender_phone="+19045550155",
+        message_id="s2",
+        text="Malayalam",
+        now=now,
+    )
+    handoff = handle_intake_message(
+        state_path=state_path,
+        chat_id=chat_id,
+        sender_phone="+19045550155",
+        message_id="s3",
+        text="1",
+        now=now,
+    )
+    assert handoff.action == "onboarding_started"
+    assert "business name" in handoff.reply_text.lower()
+    store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert store.onboarding_sessions[0].preferred_language == "ml"
+    assert store.onboarding_sessions[0].creation_mode == "guided"
+    assert store.onboarding_sessions[0].plan_id == "trial"

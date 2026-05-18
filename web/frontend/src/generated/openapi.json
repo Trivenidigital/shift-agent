@@ -20,6 +20,46 @@
         "title": "AuthStatus",
         "type": "object"
       },
+      "Body_campaign_preview_csv_flyer_campaigns_preview_csv_post": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_campaign_preview_csv_flyer_campaigns_preview_csv_post",
+        "type": "object"
+      },
+      "Body_campaign_send_csv_flyer_campaigns_send_csv_post": {
+        "properties": {
+          "dry_run": {
+            "default": true,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 300,
+            "minLength": 5,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file",
+          "reason"
+        ],
+        "title": "Body_campaign_send_csv_flyer_campaigns_send_csv_post",
+        "type": "object"
+      },
       "Body_import_csv_roster_import_csv_post": {
         "properties": {
           "file": {
@@ -32,6 +72,38 @@
           "file"
         ],
         "title": "Body_import_csv_roster_import_csv_post",
+        "type": "object"
+      },
+      "CampaignSendBody": {
+        "properties": {
+          "dry_run": {
+            "default": true,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "include_paid": {
+            "default": false,
+            "title": "Include Paid",
+            "type": "boolean"
+          },
+          "reason": {
+            "maxLength": 300,
+            "minLength": 5,
+            "title": "Reason",
+            "type": "string"
+          },
+          "targets_text": {
+            "maxLength": 20000,
+            "minLength": 3,
+            "title": "Targets Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason",
+          "targets_text"
+        ],
+        "title": "CampaignSendBody",
         "type": "object"
       },
       "CancelBody": {
@@ -395,6 +467,28 @@
         "title": "EmployeePatch",
         "type": "object"
       },
+      "ExtendTrialBody": {
+        "properties": {
+          "extra_flyers": {
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Extra Flyers",
+            "type": "integer"
+          },
+          "reason": {
+            "maxLength": 300,
+            "minLength": 5,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason",
+          "extra_flyers"
+        ],
+        "title": "ExtendTrialBody",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -594,6 +688,21 @@
           "ok"
         ],
         "title": "PublicHealth",
+        "type": "object"
+      },
+      "ReasonBody": {
+        "properties": {
+          "reason": {
+            "maxLength": 300,
+            "minLength": 5,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "ReasonBody",
         "type": "object"
       },
       "SafetyToggleBody": {
@@ -1432,6 +1541,442 @@
         "summary": "Sign",
         "tags": [
           "disclosures"
+        ]
+      }
+    },
+    "/flyer/campaigns/preview": {
+      "post": {
+        "operationId": "campaign_preview_flyer_campaigns_preview_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CampaignSendBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Campaign Preview",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
+    "/flyer/campaigns/preview-csv": {
+      "post": {
+        "operationId": "campaign_preview_csv_flyer_campaigns_preview_csv_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_campaign_preview_csv_flyer_campaigns_preview_csv_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Campaign Preview Csv",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
+    "/flyer/campaigns/send": {
+      "post": {
+        "operationId": "campaign_send_flyer_campaigns_send_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CampaignSendBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Campaign Send",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
+    "/flyer/campaigns/send-csv": {
+      "post": {
+        "operationId": "campaign_send_csv_flyer_campaigns_send_csv_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_campaign_send_csv_flyer_campaigns_send_csv_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Campaign Send Csv",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
+    "/flyer/customers": {
+      "get": {
+        "operationId": "customers_flyer_customers_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "query",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Query",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "segment",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Segment",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Customers",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
+    "/flyer/customers/{customer_id}": {
+      "get": {
+        "operationId": "customer_detail_flyer_customers__customer_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "customer_id",
+            "required": true,
+            "schema": {
+              "title": "Customer Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Customer Detail",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
+    "/flyer/customers/{customer_id}/extend-trial": {
+      "post": {
+        "operationId": "extend_trial_flyer_customers__customer_id__extend_trial_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "customer_id",
+            "required": true,
+            "schema": {
+              "title": "Customer Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtendTrialBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Extend Trial",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
+    "/flyer/customers/{customer_id}/reset-trial": {
+      "post": {
+        "operationId": "reset_trial_flyer_customers__customer_id__reset_trial_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "customer_id",
+            "required": true,
+            "schema": {
+              "title": "Customer Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReasonBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reset Trial",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
+    "/flyer/guest-orders": {
+      "get": {
+        "operationId": "guest_orders_flyer_guest_orders_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Guest Orders",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
+    "/flyer/projects": {
+      "get": {
+        "operationId": "projects_flyer_projects_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "query",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Query",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Projects",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
+    "/flyer/summary": {
+      "get": {
+        "operationId": "summary_flyer_summary_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Summary",
+        "tags": [
+          "flyer"
         ]
       }
     },

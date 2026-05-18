@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import calendar
+from difflib import SequenceMatcher
 import hashlib
 import json
 import mimetypes
@@ -17,6 +18,7 @@ from schemas import (
     FlyerBrandAsset,
     FlyerCustomerProfile,
     FlyerCustomerStore,
+    FlyerIntakeSession,
     FlyerOnboardingSession,
     FlyerPlanTier,
 )
@@ -186,7 +188,18 @@ def handle_onboarding_message(
             )
         except ValueError:
             existing = _find_same_sender_duplicate_customer(store, session, sender_phone, chat_id)
+            if existing is None:
+                existing = _find_named_duplicate_customer(store, session)
             if existing and existing.status in {"active", "trial", "payment_pending"}:
+                if existing.status in {"active", "trial"}:
+                    _connect_recovered_sender(
+                        store=store,
+                        customer=existing,
+                        session=session,
+                        sender_phone=sender_phone,
+                        now=now,
+                    )
+                    existing = store.find_customer_by_id(existing.customer_id) or existing
                 _discard_session(store, session)
                 write_customer_store(state_path, store)
                 if existing.status == "payment_pending":
@@ -234,6 +247,18 @@ def handle_onboarding_message(
         customer_created = True
         session = session.model_copy(update={"status": customer.status, "updated_at": now, "customer_id": customer.customer_id})
         _replace_session(store, session)
+        if customer.status == "trial" and session.creation_mode == "guided":
+            store.replace_intake_session(FlyerIntakeSession(
+                chat_id=chat_id,
+                sender_phone=_phone_or_none(sender_phone),
+                status="guided_collecting_goal",
+                source="new_flyer",
+                started_at=now,
+                updated_at=now,
+                last_message_id=message_id,
+                preferred_language=session.preferred_language,
+                creation_mode="guided",
+            ))
     write_customer_store(state_path, store)
     return OnboardingResult(
         True,
@@ -369,7 +394,7 @@ def _advance_session(
     elif status == "collecting_authorized_request_number":
         update.update({"authorized_request_number": _parse_phone(text), "status": "collecting_business_profile"})
     elif status == "collecting_business_profile":
-        category, language = _parse_profile_text(text)
+        category, language = _parse_profile_text(text, default_language=session.preferred_language)
         next_status = "confirming_summary" if session.plan_id else "choosing_plan"
         update.update({"business_category": category, "preferred_language": language, "status": next_status})
     elif status == "choosing_plan":
@@ -467,6 +492,91 @@ def _find_same_sender_duplicate_customer(
     return None
 
 
+def _find_named_duplicate_customer(
+    store: FlyerCustomerStore,
+    session: FlyerOnboardingSession,
+) -> Optional[FlyerCustomerProfile]:
+    """Recover an already-onboarded business when a second sender retries setup.
+
+    This is intentionally narrower than "any duplicate phone": all duplicate
+    numbers in the pending session must point at one existing account, and the
+    business names must be close enough to be a human typo/variant. Otherwise a
+    stranger could type a real business phone and attach themselves.
+    """
+    session_phones = [
+        str(phone)
+        for phone in (
+            session.public_phone,
+            session.business_whatsapp_number,
+            session.authorized_request_number,
+        )
+        if phone
+    ]
+    conflict_ids: set[str] = set()
+    for phone in session_phones:
+        conflict_ids.update(store.customer_ids_for_phone(phone))
+    if len(conflict_ids) != 1:
+        return None
+    customer = store.find_customer_by_id(next(iter(conflict_ids)))
+    if customer is None:
+        return None
+    if not _business_names_match(session.business_name, customer.business_name):
+        return None
+    return customer
+
+
+def _business_names_match(left: str, right: str) -> bool:
+    l_norm = re.sub(r"[^a-z0-9]+", "", (left or "").lower())
+    r_norm = re.sub(r"[^a-z0-9]+", "", (right or "").lower())
+    if not l_norm or not r_norm:
+        return False
+    if l_norm in r_norm or r_norm in l_norm:
+        return True
+    return SequenceMatcher(None, l_norm, r_norm).ratio() >= 0.86
+
+
+def _connect_recovered_sender(
+    *,
+    store: FlyerCustomerStore,
+    customer: FlyerCustomerProfile,
+    session: FlyerOnboardingSession,
+    sender_phone: Optional[str],
+    now: datetime,
+) -> None:
+    updates: dict[str, object] = {"updated_at": now}
+    canonical_sender = _phone_or_none(sender_phone)
+    if canonical_sender and str(canonical_sender) not in customer.owned_phone_numbers():
+        updates["authorized_request_numbers"] = [
+            *customer.authorized_request_numbers,
+            E164Phone.from_any(canonical_sender, country_code="US"),
+        ]
+
+    pending_assets = list(session.pending_brand_assets)
+    if pending_assets:
+        existing_assets = list(customer.brand_assets)
+        existing_hashes = {asset.sha256 for asset in existing_assets}
+        merged_assets = existing_assets
+        for asset in pending_assets:
+            if asset.sha256 in existing_hashes:
+                continue
+            if asset.active:
+                merged_assets = [
+                    old.model_copy(update={"active": False})
+                    if old.kind == asset.kind and old.active else old
+                    for old in merged_assets
+                ]
+            merged_assets.append(asset)
+            existing_hashes.add(asset.sha256)
+        updates["brand_assets"] = merged_assets
+
+    if len(updates) == 1:
+        return
+    store.customers = [
+        row.model_copy(update=updates) if row.customer_id == customer.customer_id else row
+        for row in store.customers
+    ]
+
+
 def _reply_for_session(
     session: FlyerOnboardingSession,
     *,
@@ -496,7 +606,7 @@ def _reply_for_session(
         customer = next((c for c in store.customers if c.customer_id == customer_id), None)
         return _payment_reply(customer_id, session.plan_id, customer.payment_checkout_url if customer else "")
     if session.status == "trial":
-        return _trial_active_reply(customer_id)
+        return _trial_active_reply(customer_id, creation_mode=session.creation_mode, language=session.preferred_language)
     return _welcome_reply(tiers)
 
 
@@ -540,7 +650,22 @@ def _payment_reply(customer_id: str, plan_id: str, checkout_url: str) -> str:
     )
 
 
-def _trial_active_reply(customer_id: str) -> str:
+def _trial_active_reply(customer_id: str, *, creation_mode: str = "", language: str = "en") -> str:
+    if creation_mode == "guided":
+        return (
+            "Flyer Studio\n------------\n"
+            f"Free trial active for {customer_id}. You have 3 free sample flyers.\n\n"
+            "Guided Mode is ready.\n"
+            "First, what are you promoting? Example: weekend sale, breakfast specials, grand opening, class, service offer."
+        )
+    if creation_mode == "text":
+        return (
+            "Flyer Studio\n------------\n"
+            f"Free trial active for {customer_id}. You have 3 free sample flyers.\n\n"
+            "Text Mode is ready. Send your first flyer request in one message. "
+            "You can also attach an existing flyer, logo, menu, photos, or reference image."
+        )
+    del language
     return (
         "Flyer Studio\n------------\n"
         f"Free trial active for {customer_id}. You have 3 free sample flyers.\n"
@@ -611,18 +736,35 @@ def _require_text(text: str, label: str) -> str:
     return cleaned[:300]
 
 
-def _parse_profile_text(text: str) -> tuple[str, str]:
+def _parse_profile_text(text: str, *, default_language: str = "en") -> tuple[str, str]:
     lower = text.lower()
-    language = "en"
+    language = default_language if default_language in {"en", "te", "hi", "ml", "ta", "kn", "gu", "mr", "pa", "es", "mixed", "other"} else "en"
     if "telugu" in lower:
         language = "te"
     elif "hindi" in lower:
         language = "hi"
+    elif "malayalam" in lower:
+        language = "ml"
+    elif "tamil" in lower:
+        language = "ta"
+    elif "kannada" in lower:
+        language = "kn"
+    elif "gujarati" in lower:
+        language = "gu"
+    elif "marathi" in lower:
+        language = "mr"
+    elif "punjabi" in lower:
+        language = "pa"
     elif "spanish" in lower:
         language = "es"
     elif "mixed" in lower or "multi" in lower:
         language = "mixed"
-    category = re.sub(r"\b(english|telugu|hindi|spanish|mixed|language|languages|and)\b", "", text, flags=re.IGNORECASE)
+    category = re.sub(
+        r"\b(english|telugu|hindi|malayalam|tamil|kannada|gujarati|marathi|punjabi|spanish|mixed|language|languages|and)\b",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
     category = re.sub(r"[,;]+", " ", category)
     return (" ".join(category.split()) or text.strip() or "local business")[:120], language
 

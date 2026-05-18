@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -57,7 +58,7 @@ def log(
         "ua": ua[:200],
         "details": details or {},
     }
-    safe_io.ndjson_append(settings.cockpit_audit_log, entry)
+    safe_io.ndjson_append(settings.cockpit_audit_log, json.dumps(entry, separators=(",", ":"), default=str))
 
 
 # ─── Runtime self-check ────────────────────────────────────────────────

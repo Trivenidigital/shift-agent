@@ -25,6 +25,12 @@ LANGUAGE_NAMES = {
     "en": "English",
     "te": "Telugu",
     "hi": "Hindi",
+    "ml": "Malayalam",
+    "ta": "Tamil",
+    "kn": "Kannada",
+    "gu": "Gujarati",
+    "mr": "Marathi",
+    "pa": "Punjabi",
     "es": "Spanish",
     "mixed": "mixed language",
     "other": "the preferred language",
@@ -97,7 +103,7 @@ def next_status_for_project(
 def quality_check_project(project: FlyerProject) -> FlyerQualityResult:
     blockers = project.fields.missing_required_fields()
     warnings: list[str] = []
-    if project.fields.preferred_language in {"te", "hi"} and not project.assets:
+    if project.fields.preferred_language in {"te", "hi", "ml", "ta", "kn", "gu", "mr", "pa"} and not project.assets:
         warnings.append("regional_language_font_render_check_required")
     return FlyerQualityResult(ok=not blockers, blockers=blockers, warnings=warnings)
 
@@ -127,6 +133,33 @@ def _replace_once_or_flag(source: str, old: str, new: str) -> tuple[str, str]:
     if count > 1:
         return source, "appears multiple times"
     return re.sub(re.escape(old), new, source, count=1, flags=re.IGNORECASE), ""
+
+
+def _append_once(source: str, addition: str) -> str:
+    if not source:
+        return addition
+    if addition.lower() in source.lower():
+        return source
+    return f"{source.rstrip()} {addition}"
+
+
+def _extract_item_swap(text: str) -> tuple[str, str]:
+    body = " ".join((text or "").split())
+    patterns = [
+        r"\b(?:swap|replace)\s+(?P<old>[A-Za-z][A-Za-z\s/&-]{1,80}?)\s+with\s+(?P<new>[A-Za-z][A-Za-z\s/&-]{1,80}?)(?:\s*\(|[.!]|$)",
+        r"\b(?:remove|exclude)\s+(?P<old>[A-Za-z][A-Za-z\s/&-]{1,80}?).*?\b(?:add|use)\s+(?P<new>[A-Za-z][A-Za-z\s/&-]{1,80}?)(?:\s*\(|[.!]|$)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, body, flags=re.IGNORECASE)
+        if not match:
+            continue
+        old = re.sub(r"\bfrom\s+original\s+flyer\b", "", match.group("old"), flags=re.IGNORECASE)
+        new = re.sub(r"\bsame\s+price\b", "", match.group("new"), flags=re.IGNORECASE)
+        old = old.strip(" .,\"'")
+        new = new.strip(" .,\"'")
+        if old and new:
+            return old, new
+    return "", ""
 
 
 def _extract_phone(text: str) -> str:
@@ -242,6 +275,15 @@ def extract_revision_patch(project: FlyerProject, text: str) -> RevisionPatchRes
                 raw_request_update = replaced_raw
         else:
             notes_update = replaced_notes
+
+    old_item, new_item = _extract_item_swap(body)
+    if old_item and new_item:
+        item_instruction = (
+            f"Replace menu item {old_item} with {new_item}. "
+            f"Do not include {old_item} on the flyer."
+        )
+        notes_update = _append_once(notes_update if notes_update is not None else (project.fields.notes or ""), item_instruction)
+        raw_request_update = _append_once(raw_request_update if raw_request_update is not None else (project.raw_request or ""), item_instruction)
 
     changed = bool(updates) or notes_update is not None or raw_request_update is not None
     visual_only = _is_visual_only_revision(body)

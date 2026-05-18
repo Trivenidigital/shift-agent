@@ -186,6 +186,7 @@ def test_credential_report_never_leaks_values_paths_or_prefixes(tmp_path: Path):
         "\n".join(
             [
                 "OPENROUTER_API_KEY=sk-or-v1-super-secret-value",
+                "OPENAI_API_KEY=sk-openai-secret-value",
                 "AIRTABLE_API_KEY=PLACEHOLDER_fill_me_in",
                 "NOTION_API_KEY=MUTED_NOTION_TOKEN",
                 f"GOOGLE_APPLICATION_CREDENTIALS={secret_path}",
@@ -200,6 +201,7 @@ def test_credential_report_never_leaks_values_paths_or_prefixes(tmp_path: Path):
 
     forbidden = [
         "sk-or-v1-super-secret-value",
+        "sk-openai-secret-value",
         "super-secret",
         "very-secret",
         "google-service-account.json",
@@ -212,6 +214,7 @@ def test_credential_report_never_leaks_values_paths_or_prefixes(tmp_path: Path):
 
     statuses = {row["name"]: row["status"] for row in creds}
     assert statuses["OPENROUTER_API_KEY"] == "env_present"
+    assert statuses["OPENAI_API_KEY"] == "env_present"
     assert statuses["AIRTABLE_API_KEY"] == "placeholder"
     assert statuses["NOTION_API_KEY"] == "muted"
     assert statuses["GOOGLE_APPLICATION_CREDENTIALS"] == "env_present"
