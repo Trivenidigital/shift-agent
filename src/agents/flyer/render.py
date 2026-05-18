@@ -1545,7 +1545,7 @@ def _draw_flyer_pil(project: FlyerProject, *, concept_id: str, size: tuple[int, 
             fy += int(subtitle_font.size * 1.05)
         fy += 4
 
-    footer = "Send APPROVE to finalize - Hermes Flyer Studio"
+    footer = "Send APPROVE to finalize - Flyer Studio"
     bbox = draw.textbbox((0, 0), footer, font=small_font)
     draw.text(((width - (bbox[2] - bbox[0])) // 2, height - margin), footer, font=small_font, fill=tuple(palette["ink"]))
     return img
@@ -1613,7 +1613,7 @@ for label,value in spec["facts"]:
             raise SystemExit("critical text facts do not fit")
         draw.text((m+34,fy), line, font=sf, fill=tuple(palette["ink"])); fy += int(sf.size*1.05)
     fy += 4
-footer="Send APPROVE to finalize - Hermes Flyer Studio"; box=draw.textbbox((0,0),footer,font=sm)
+footer="Send APPROVE to finalize - Flyer Studio"; box=draw.textbbox((0,0),footer,font=sm)
 draw.text(((w-(box[2]-box[0]))//2,h-m), footer, font=sm, fill=tuple(palette["ink"]))
 if spec["format"]=="PDF": img.save(out,"PDF",resolution=150.0)
 else: img.save(out,format="PNG",optimize=True)

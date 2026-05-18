@@ -3605,6 +3605,8 @@ class CfRouterIntercepted(_BaseEntry):
         "flyer_intake_failed",
         "flyer_onboarding",
         "flyer_onboarding_failed",
+        "flyer_starter_brief",
+        "flyer_customer_not_active",
         "flyer_quota_blocked",
         "flyer_brand_asset_saved",
         "flyer_brand_asset_failed",

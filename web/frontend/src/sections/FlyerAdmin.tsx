@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, FileUp, Gift, Megaphone, RefreshCw, Search, Send, Users } from "lucide-react";
@@ -143,15 +143,38 @@ export function FlyerAdmin() {
   const [reason, setReason] = useState("operator dashboard action");
   const [selectedCustomer, setSelectedCustomer] = useState<FlyerCustomer | null>(null);
   const [extensionCount, setExtensionCount] = useState(1);
+  const [customerOffset, setCustomerOffset] = useState(0);
+  const CUSTOMER_PAGE_SIZE = 300;
+
+  // Reset to page 1 whenever the filter changes — otherwise an offset
+  // set against the old result set may overshoot the new total.
+  useEffect(() => {
+    setCustomerOffset(0);
+  }, [query, segment]);
 
   const { data: summary } = useQuery<FlyerSummary>({
     queryKey: ["flyer-summary"],
     queryFn: () => api.GET<FlyerSummary>("/flyer/summary"),
     refetchInterval: 15_000,
   });
-  const { data: customerData } = useQuery<{ customers: FlyerCustomer[] }>({
-    queryKey: ["flyer-customers", query, segment],
-    queryFn: () => api.GET<{ customers: FlyerCustomer[] }>(`/flyer/customers?query=${encodeURIComponent(query)}&segment=${encodeURIComponent(segment)}`),
+  const { data: customerData } = useQuery<{
+    customers: FlyerCustomer[];
+    total: number;
+    offset: number;
+    limit: number;
+    truncated: boolean;
+  }>({
+    queryKey: ["flyer-customers", query, segment, customerOffset],
+    queryFn: () =>
+      api.GET<{
+        customers: FlyerCustomer[];
+        total: number;
+        offset: number;
+        limit: number;
+        truncated: boolean;
+      }>(
+        `/flyer/customers?query=${encodeURIComponent(query)}&segment=${encodeURIComponent(segment)}&offset=${customerOffset}&limit=${CUSTOMER_PAGE_SIZE}`,
+      ),
   });
   const { data: projectsData } = useQuery<{ projects: FlyerProject[] }>({
     queryKey: ["flyer-projects"],
@@ -164,6 +187,8 @@ export function FlyerAdmin() {
   });
 
   const customers = customerData?.customers ?? [];
+  const customerTotal = customerData?.total ?? customers.length;
+  const customerTruncated = customerData?.truncated ?? false;
   const projects = projectsData?.projects ?? [];
   const guests = guestData?.orders ?? [];
 
@@ -315,6 +340,34 @@ export function FlyerAdmin() {
                   })}
                 </tbody>
               </table>
+              {customerTotal > 0 && (
+                <div className="flex items-center justify-between border-t border-zinc-100 px-3 py-2 text-xs text-zinc-500">
+                  <div>
+                    Showing {customers.length === 0 ? 0 : customerOffset + 1}
+                    {customers.length > 0 ? `–${customerOffset + customers.length}` : ""}
+                    {" of "}
+                    {customerTotal}
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={customerOffset === 0}
+                      onClick={() => setCustomerOffset(Math.max(0, customerOffset - CUSTOMER_PAGE_SIZE))}
+                    >
+                      Previous
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={!customerTruncated}
+                      onClick={() => setCustomerOffset(customerOffset + CUSTOMER_PAGE_SIZE)}
+                    >
+                      Next
+                    </Button>
+                  </div>
+                </div>
+              )}
             </CardContent>
           </Card>
 

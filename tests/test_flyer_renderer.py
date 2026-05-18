@@ -1146,3 +1146,24 @@ def test_authorized_source_artwork_update_is_treated_as_source_edit_for_finals(t
     whatsapp = next(spec for spec in specs if spec.output_format == "whatsapp_image")
     manifest = json.loads(Path(f"{whatsapp.path}.text.json").read_text(encoding="utf-8"))
     assert manifest["verification_mode"] == "source_edit_integrity_only"
+
+
+def test_render_customer_facing_footer_has_no_hermes_brand():
+    """BUG-FLYER-QA-004: customer-facing footer text in both render paths
+    must read 'Flyer Studio', not 'Hermes Flyer Studio'. The Hermes name is
+    internal-only; leaking it to customer flyers conflicts with the rule
+    that Hermes stays internal."""
+    render_py = Path(__file__).resolve().parent.parent / "src" / "agents" / "flyer" / "render.py"
+    src = render_py.read_text(encoding="utf-8")
+    # In-process Pillow path (_draw_flyer_pil) — use single-quoted needles to
+    # match the Python source literal exactly.
+    assert 'footer = "Send APPROVE to finalize - Flyer Studio"' in src, \
+        "Pillow renderer footer not updated"
+    # Subprocess renderer template (SUBPROCESS_RENDERER constant)
+    assert 'footer="Send APPROVE to finalize - Flyer Studio"' in src, \
+        "Subprocess renderer footer not updated"
+    # Regression guard: the legacy customer-facing footer must NOT remain in
+    # either renderer.
+    customer_facing_legacy = "Send APPROVE to finalize - Hermes Flyer Studio"
+    assert customer_facing_legacy not in src, \
+        "Legacy 'Hermes Flyer Studio' footer string still present in render.py"
