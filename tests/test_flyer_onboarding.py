@@ -54,6 +54,36 @@ def test_flyer_plan_tiers_are_data_driven_defaults():
     assert all(t.currency == "USD" for t in tiers)
 
 
+def test_customer_store_default_keeps_starter_prompts_auto():
+    now = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    customer = _trial_customer(customer_id="CUST0001", business_name="Demo Salon", phone="+17329837841", now=now)
+    store = FlyerCustomerStore(customers=[customer])
+
+    assert store.starter_prompt_mode(customer.customer_id) == "auto"
+    assert store.claim_starter_prompt_send(customer.customer_id) is True
+
+
+def test_customer_store_claim_allows_only_one_auto_starter_prompt():
+    now = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    customer = _trial_customer(customer_id="CUST0001", business_name="Demo Salon", phone="+17329837841", now=now)
+    store = FlyerCustomerStore(customers=[customer])
+
+    assert store.claim_starter_prompt_send(customer.customer_id) is True
+    assert store.claim_starter_prompt_send(customer.customer_id) is False
+
+
+def test_customer_store_preference_top_level_is_rollback_safe():
+    now = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    customer = _trial_customer(customer_id="CUST0001", business_name="Demo Salon", phone="+17329837841", now=now)
+    raw = json.loads(FlyerCustomerStore(customers=[customer]).model_dump_json())
+    raw["starter_prompt_preferences"] = {"CUST0001": "off"}
+    raw["starter_prompt_sent_counts"] = {"CUST0001": 1}
+
+    store = FlyerCustomerStore.model_validate(raw)
+
+    assert store.starter_prompt_mode("CUST0001") == "off"
+
+
 def test_onboarding_collects_required_business_and_plan_fields(tmp_path):
     state_path = tmp_path / "customers.json"
     now = datetime(2026, 5, 15, tzinfo=timezone.utc)
@@ -710,6 +740,8 @@ def test_trial_completion_suggests_business_category_starter_brief(tmp_path):
     assert "Here is a starter flyer request" in result.reply_text
     assert "Grow Your Business with Modern Marketing" in result.reply_text
     assert "Reply with your edited version" in result.reply_text
+    updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert updated.claim_starter_prompt_send(result.customer_id) is False
 
 
 def test_guided_trial_completion_does_not_append_full_starter_brief(tmp_path):
@@ -749,6 +781,7 @@ def test_guided_trial_completion_does_not_append_full_starter_brief(tmp_path):
     assert "Here is a starter flyer request" not in result.reply_text
     updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
     assert updated.intake_sessions[0].status == "guided_collecting_goal"
+    assert updated.claim_starter_prompt_send(result.customer_id) is False
 
 
 def test_text_mode_ready_includes_category_starter_brief(tmp_path):
@@ -798,6 +831,53 @@ def test_text_mode_ready_includes_category_starter_brief(tmp_path):
     assert result.action == "text_ready"
     assert "Here is a starter flyer request" in result.reply_text
     assert "Grow Your Business with Modern Marketing" in result.reply_text
+    updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert updated.claim_starter_prompt_send(customer.customer_id) is False
+
+
+def test_text_mode_ready_respects_starter_prompt_opt_out(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    customer = _trial_customer(
+        customer_id="CUST0001",
+        business_name="Demo Salon",
+        phone="+17329837841",
+        now=now,
+    ).model_copy(update={"business_category": "salon"})
+    store = FlyerCustomerStore(next_customer_sequence=2, customers=[customer])
+    store.set_starter_prompt_mode(customer.customer_id, "off")
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    start = handle_intake_message(
+        state_path=state_path,
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        message_id="start",
+        text="Create flyer",
+        start_source="new_flyer",
+        now=now,
+    )
+    assert start.action == "choose_language"
+    language = handle_intake_message(
+        state_path=state_path,
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        message_id="lang",
+        text="English",
+        now=now,
+    )
+    assert language.action == "choose_mode"
+    result = handle_intake_message(
+        state_path=state_path,
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        message_id="mode",
+        text="2",
+        now=now,
+    )
+
+    assert result.action == "text_ready"
+    assert "Here is a starter flyer request" not in result.reply_text
     assert "Reply with your edited version" in result.reply_text
 
 
@@ -1360,6 +1440,66 @@ def test_non_admin_cannot_mutate_account_but_can_status(tmp_path):
     )
     assert denied.ok is True
     assert "Only the business WhatsApp" in denied.reply_text
+
+
+def test_customer_can_turn_sample_prompts_off_and_on(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    customer = _trial_customer(customer_id="CUST0001", business_name="Demo Salon", phone="+17329837841", now=now)
+    state_path.write_text(FlyerCustomerStore(customers=[customer]).model_dump_json(), encoding="utf-8")
+
+    off = handle_account_command(
+        state_path=state_path,
+        sender_phone="+17329837841",
+        sender_role="customer",
+        chat_id="17329837841@s.whatsapp.net",
+        text="don't show sample prompts",
+        now=now,
+    )
+
+    assert off.ok is True
+    assert "Sample prompts are off for this business account" in off.reply_text
+    updated_store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert updated_store.starter_prompt_mode(customer.customer_id) == "off"
+
+    on = handle_account_command(
+        state_path=state_path,
+        sender_phone="+17329837841",
+        sender_role="customer",
+        chat_id="17329837841@s.whatsapp.net",
+        text="show sample prompts again",
+        now=now,
+    )
+
+    assert on.ok is True
+    updated_store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert updated_store.starter_prompt_mode(customer.customer_id) == "auto"
+    assert updated_store.claim_starter_prompt_send(customer.customer_id) is True
+
+
+def test_lid_only_customer_can_turn_sample_prompts_off(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    customer = _trial_customer(
+        customer_id="CUST0001",
+        business_name="Demo Salon",
+        phone="+17329837841",
+        now=now,
+    ).model_copy(update={"primary_chat_id": "201975216009469@lid"})
+    state_path.write_text(FlyerCustomerStore(customers=[customer]).model_dump_json(), encoding="utf-8")
+
+    result = handle_account_command(
+        state_path=state_path,
+        sender_phone=None,
+        sender_role="customer",
+        chat_id="201975216009469@lid",
+        text="[shift-agent-sender v=1 role=customer]\ndon't show sample prompts",
+        now=now,
+    )
+
+    assert result.ok is True
+    store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert store.starter_prompt_mode(customer.customer_id) == "off"
 
 
 def test_quota_counts_latest_reservation_state_once(tmp_path):

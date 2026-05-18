@@ -1061,11 +1061,13 @@ def flyer_starter_brief_reply(customer: dict) -> str:
                 "Main heading:\nSpecial Offer\n\n"
                 "Details:\nAdd what I am promoting, products or services, prices, dates, and contact details here.\n\n"
                 "Use my saved business name, address, phone, and logo.\n\n"
+                'Tip: reply "don\'t show sample prompts" anytime to turn off future examples for this business account.\n\n'
                 "Reply with your edited version, or replace it with your own flyer request."
             )
     return starter_brief_message(
         str(customer.get("business_category") or ""),
         business_name=str(customer.get("business_name") or ""),
+        include_opt_out_hint=True,
     )
 
 
@@ -1206,6 +1208,58 @@ def _canonical_phone(phone: Optional[str]) -> Optional[str]:
     return None
 
 
+def _customer_state_atomic_writer() -> Callable[[Path, str], None]:
+    _ensure_platform_path()
+    try:
+        from safe_io import atomic_write_text  # type: ignore
+        return atomic_write_text
+    except Exception:
+        def _fallback(path: Path, content: str) -> None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        return _fallback
+
+
+@contextmanager
+def _customer_state_lock() -> Iterator[None]:
+    _ensure_platform_path()
+    try:
+        from safe_io import FileLock  # type: ignore
+    except Exception:
+        yield
+        return
+    with FileLock(Path(str(FLYER_CUSTOMERS_PATH) + ".lock")):
+        yield
+
+
+def _read_customer_state() -> dict:
+    if not FLYER_CUSTOMERS_PATH.exists():
+        return {}
+    return json.loads(FLYER_CUSTOMERS_PATH.read_text(encoding="utf-8"))
+
+
+def _write_customer_state(store: dict) -> None:
+    FLYER_CUSTOMERS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(store, indent=2, sort_keys=True)
+    _customer_state_atomic_writer()(FLYER_CUSTOMERS_PATH, text)
+
+
+def _starter_prompt_metadata(store: dict, customer_id: str) -> dict:
+    preferences = store.get("starter_prompt_preferences") or {}
+    sent_counts = store.get("starter_prompt_sent_counts") or {}
+    return {
+        "_starter_prompt_mode": str(preferences.get(customer_id) or "auto"),
+        "_starter_prompt_sent_count": int(sent_counts.get(customer_id, 0) or 0),
+    }
+
+
+def _with_starter_prompt_metadata(customer: dict, store: dict) -> dict:
+    customer_id = str(customer.get("customer_id") or "")
+    enriched = dict(customer)
+    enriched.update(_starter_prompt_metadata(store, customer_id))
+    return enriched
+
+
 def find_flyer_customer_by_sender(phone: Optional[str], chat_id: str) -> Optional[dict]:
     """Return registered Flyer customer for this sender, if any."""
     canonical = _canonical_phone(phone)
@@ -1214,13 +1268,13 @@ def find_flyer_customer_by_sender(phone: Optional[str], chat_id: str) -> Optiona
     if not FLYER_CUSTOMERS_PATH.exists():
         return None
     try:
-        store = json.loads(FLYER_CUSTOMERS_PATH.read_text(encoding="utf-8"))
+        store = _read_customer_state()
         if not canonical and chat_id:
             matches = [
                 customer for customer in store.get("customers", [])
                 if isinstance(customer, dict) and customer.get("primary_chat_id") == chat_id
             ]
-            return matches[0] if len(matches) == 1 else None
+            return _with_starter_prompt_metadata(matches[0], store) if len(matches) == 1 else None
         if not canonical:
             return None
         matches = []
@@ -1232,9 +1286,66 @@ def find_flyer_customer_by_sender(phone: Optional[str], chat_id: str) -> Optiona
                     numbers.add(value)
             if canonical in numbers:
                 matches.append(customer)
-        return matches[0] if len(matches) == 1 else None
+        return _with_starter_prompt_metadata(matches[0], store) if len(matches) == 1 else None
     except Exception:
         return None
+
+
+def flyer_starter_prompts_enabled(customer: dict) -> bool:
+    return str(customer.get("_starter_prompt_mode") or "auto") != "off"
+
+
+def flyer_starter_prompt_already_sent(customer: dict) -> bool:
+    try:
+        return int(customer.get("_starter_prompt_sent_count") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def claim_flyer_starter_prompt_send(customer_id: str) -> bool:
+    if not customer_id:
+        return False
+    with _customer_state_lock():
+        try:
+            store = _read_customer_state()
+        except Exception:
+            return False
+        preferences = store.setdefault("starter_prompt_preferences", {})
+        sent_counts = store.setdefault("starter_prompt_sent_counts", {})
+        if str(preferences.get(customer_id) or "auto") == "off":
+            return False
+        if int(sent_counts.get(customer_id, 0) or 0) > 0:
+            return False
+        sent_counts[customer_id] = 1
+        _write_customer_state(store)
+        return True
+
+
+def release_flyer_starter_prompt_claim(customer_id: str) -> None:
+    if not customer_id:
+        return
+    with _customer_state_lock():
+        try:
+            store = _read_customer_state()
+        except Exception:
+            return
+        sent_counts = store.setdefault("starter_prompt_sent_counts", {})
+        current = int(sent_counts.get(customer_id, 0) or 0)
+        if current <= 1:
+            sent_counts.pop(customer_id, None)
+        else:
+            sent_counts[customer_id] = current - 1
+        _write_customer_state(store)
+
+
+def flyer_vague_request_clarification_reply(customer: dict) -> str:
+    name = str(customer.get("business_name") or "your business").strip() or "your business"
+    return (
+        "Flyer Studio\n"
+        "------------\n"
+        f"I can help create a flyer for {name}. What should this flyer promote? "
+        "Please send the offer, event, product, or service details you want on it."
+    )
 
 
 def find_flyer_onboarding_session_by_sender(phone: Optional[str], chat_id: str) -> Optional[dict]:
@@ -1374,11 +1485,19 @@ def _location_matches_allowed(requested: str, allowed_labels: list[str]) -> bool
 
 
 def is_flyer_account_command(text: str) -> bool:
+    body = flyer_visible_message_text(text)
     return bool(re.search(
-        r"^\s*(status|plan status|help|add (authorized )?(number|auth)|add authorized number|"
+        r"^\s*(status|plan status|help|"
+        r"don'?t show sample prompts|do not show sample prompts|stop sample prompts|"
+        r"hide sample prompts|turn off sample prompts|disable sample prompts|"
+        r"stop showing examples|no sample prompts|no examples|"
+        r"don'?t show examples|hide examples|stop examples|"
+        r"show sample prompts again|enable sample prompts|turn on sample prompts|"
+        r"bring back sample prompts|show examples again|bring back examples|"
+        r"add (authorized )?(number|auth)|add authorized number|"
         r"remove authorized number|remove number|update phone|update business phone|"
         r"update whatsapp|update business whatsapp|change plan|confirm update)\b",
-        text or "",
+        body or "",
         flags=re.IGNORECASE,
     ))
 

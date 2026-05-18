@@ -15,6 +15,10 @@ class StarterBrief:
 
 
 STARTER_BRIEF_MARKER = "Here is a starter flyer request"
+STARTER_PROMPT_OPT_OUT_HINT = (
+    'Tip: reply "don\'t show sample prompts" anytime to turn off future examples '
+    "for this business account."
+)
 
 
 def _briefs() -> tuple[StarterBrief, ...]:
@@ -198,12 +202,18 @@ def starter_brief_for_category(category: str) -> StarterBrief:
     return best[1]
 
 
-def starter_brief_message(category: str, *, business_name: str = "") -> str:
+def starter_brief_message(
+    category: str,
+    *,
+    business_name: str = "",
+    include_opt_out_hint: bool = False,
+) -> str:
     brief = starter_brief_for_category(category)
     normalized = _normalize(category)
     has_ai_claim = bool(re.search(r"(?:^| )ai(?: |$)|artificial intelligence|ai marketing|ai-powered", normalized))
     body = brief.ai_body if has_ai_claim and brief.ai_body else brief.body
     name_line = f"Business: {business_name.strip()}\n" if business_name and business_name.strip() else ""
+    opt_out_hint = f"{STARTER_PROMPT_OPT_OUT_HINT}\n\n" if include_opt_out_hint else ""
     return (
         "Flyer Studio\n"
         "------------\n"
@@ -211,5 +221,6 @@ def starter_brief_message(category: str, *, business_name: str = "") -> str:
         f"{name_line}"
         "Edit anything below and send it back.\n\n"
         f"{body}\n\n"
+        f"{opt_out_hint}"
         "Reply with your edited version, or replace it with your own flyer request."
     )
