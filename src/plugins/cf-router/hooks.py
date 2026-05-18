@@ -917,7 +917,7 @@ def _send_flyer_regeneration_failed_ack(chat_id: str, project_id: str) -> tuple[
             "Flyer Studio\n"
             "------------\n"
             f"I could not regenerate project {project_id} automatically just now.\n\n"
-            "I kept the edit request open for source-preserving follow-up instead of sending a mismatched flyer. "
+            "I kept the edit request open for follow-up instead of sending a mismatched flyer. "
             "Please check back here shortly, or send one exact correction if anything else must change."
         ),
     )
