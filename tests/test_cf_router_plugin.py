@@ -1392,7 +1392,7 @@ class TestF7PrimaryMode:
              patch.object(actions_mod, "send_flyer_processing_ack",
                           return_value=(True, "msg-processing", "")), \
              patch.object(actions_mod, "send_flyer_concept_previews",
-                          return_value=(False, "msg-preview", "bridge failed")), \
+                          return_value=(False, "", "bridge failed")), \
              patch.object(actions_mod, "trigger_flyer_finalize_usage") as mock_finalize, \
              patch.object(actions_mod, "trigger_flyer_release_quota",
                           return_value=(True, "released", {})) as mock_release:
@@ -1490,6 +1490,8 @@ class TestF7PrimaryMode:
                               "fields": {"event_or_business_name": "Lakshmis Kitchen"},
                               "assets": [{"kind": "reference_image"}],
                           })) as mock_create, \
+             patch.object(actions_mod, "flyer_source_edit_preflight",
+                          return_value=(True, "ready")), \
              patch.object(actions_mod, "trigger_flyer_reserve_quota",
                           return_value=(True, "reserved", {"access_type": "subscription", "reservation_id": "R1"})) as mock_reserve, \
              patch.object(actions_mod, "send_flyer_edit_processing_ack",
@@ -1517,6 +1519,59 @@ class TestF7PrimaryMode:
         mock_preview.assert_called_once_with("201975216009469@lid", "F0029")
         mock_manual_ack.assert_not_called()
 
+    def test_media_exact_reference_edit_preflight_queues_before_quota_and_processing(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+        event = _make_event(
+            "Remove extra 08:00 from this flyer.",
+            "201975216009469@lid",
+            message_id="exact-edit-preflight-1",
+        )
+        event.media_path = "/opt/shift-agent/.hermes/image_cache/existing-flyer.pdf"
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+19045550104", "employee")), \
+             patch.object(actions_mod, "find_active_flyer_project_by_sender",
+                          return_value=None), \
+             patch.object(actions_mod, "find_flyer_customer_by_sender",
+                          return_value={"customer_id": "CUST0001", "status": "trial", "business_name": "Lakshmis Kitchen"}), \
+             patch.object(actions_mod, "trigger_check_flyer_reference_scope",
+                          return_value=(True, "allow", {"decision": "allow"})), \
+             patch.object(actions_mod, "trigger_create_flyer_project",
+                          return_value=(True, "created", {
+                              "project_id": "F0099",
+                              "status": "manual_edit_required",
+                              "fields": {"event_or_business_name": "Lakshmis Kitchen"},
+                              "assets": [{"kind": "reference_image", "path": "/tmp/ref.pdf", "mime_type": "application/pdf"}],
+                          })), \
+             patch.object(actions_mod, "flyer_source_edit_preflight",
+                          return_value=(False, "source edit from PDF is not supported yet")) as mock_preflight, \
+             patch.object(actions_mod, "trigger_flyer_reserve_quota",
+                          return_value=(True, "reserved", {"access_type": "subscription", "reservation_id": "R99"})) as mock_reserve, \
+             patch.object(actions_mod, "trigger_flyer_release_quota",
+                          return_value=(True, "released", {})) as mock_release, \
+             patch.object(actions_mod, "send_flyer_edit_processing_ack") as mock_processing, \
+             patch.object(actions_mod, "trigger_generate_flyer_concepts") as mock_generate, \
+             patch.object(actions_mod, "send_flyer_manual_edit_ack",
+                          return_value=(True, "msg-manual", "")) as mock_manual_ack:
+            result = hooks_mod.pre_gateway_dispatch(event)
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router flyer exact edit queued: project F0099",
+        }
+        mock_preflight.assert_called_once()
+        mock_reserve.assert_called_once()
+        mock_release.assert_called_once()
+        mock_processing.assert_not_called()
+        mock_generate.assert_not_called()
+        mock_manual_ack.assert_called_once_with(
+            "201975216009469@lid",
+            "F0099",
+            "Remove extra 08:00 from this flyer.",
+            reason="source edit from PDF is not supported yet",
+        )
+
     def test_media_exact_reference_edit_releases_access_when_preview_delivery_fails(self, mods, state_env):
         hooks_mod, actions_mod = mods
         _seed_config(state_env, flyer_enabled=True)
@@ -1542,6 +1597,8 @@ class TestF7PrimaryMode:
                               "fields": {"event_or_business_name": "Lakshmis Kitchen"},
                               "assets": [{"kind": "reference_image"}],
                           })), \
+             patch.object(actions_mod, "flyer_source_edit_preflight",
+                          return_value=(True, "ready")), \
              patch.object(actions_mod, "trigger_flyer_reserve_quota",
                           return_value=(True, "reserved", {"access_type": "subscription", "reservation_id": "R3"})), \
              patch.object(actions_mod, "send_flyer_edit_processing_ack",
@@ -1549,7 +1606,7 @@ class TestF7PrimaryMode:
              patch.object(actions_mod, "trigger_generate_flyer_concepts",
                           return_value=(True, "generated")), \
              patch.object(actions_mod, "send_flyer_concept_previews",
-                          return_value=(False, "msg-preview", "bridge send failed")), \
+                          return_value=(False, "", "bridge send failed")), \
              patch.object(actions_mod, "trigger_flyer_finalize_usage") as mock_finalize, \
              patch.object(actions_mod, "trigger_flyer_release_quota",
                           return_value=(True, "released", {})) as mock_release:
@@ -1587,6 +1644,8 @@ class TestF7PrimaryMode:
                               "fields": {"event_or_business_name": "Lakshmis Kitchen"},
                               "assets": [{"kind": "reference_image"}],
                           })), \
+             patch.object(actions_mod, "flyer_source_edit_preflight",
+                          return_value=(True, "ready")), \
              patch.object(actions_mod, "trigger_flyer_reserve_quota",
                           return_value=(True, "reserved", {"access_type": "subscription", "reservation_id": "R2"})), \
              patch.object(actions_mod, "send_flyer_edit_processing_ack",
@@ -1690,7 +1749,7 @@ class TestF7PrimaryMode:
              patch.object(actions_mod, "send_flyer_processing_ack",
                           return_value=(True, "msg-processing", "")), \
              patch.object(actions_mod, "send_flyer_concept_previews",
-                          return_value=(False, "msg-preview", "bridge failed")):
+                          return_value=(False, "", "bridge failed")):
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
                     text="Create a flyer for Quick Promo. Contact +1 732 983 7841. Offer $4 today.",

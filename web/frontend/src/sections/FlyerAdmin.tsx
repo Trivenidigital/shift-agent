@@ -15,6 +15,8 @@ interface FlyerSummary {
   total_customers: number;
   active_projects: number;
   stuck_projects: number;
+  manual_edit_count: number;
+  stuck_edit_count: number;
   guest_orders: number;
   campaign_asset: { path: string; exists: boolean };
 }
@@ -45,6 +47,8 @@ interface FlyerProject {
   raw_request: string;
   concepts?: unknown[];
   final_asset_ids?: string[];
+  age_minutes?: number;
+  attention?: string[];
 }
 
 interface GuestOrder {
@@ -253,13 +257,14 @@ export function FlyerAdmin() {
 
       {tab === "overview" && (
         <div className="space-y-5">
-          <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-7">
             <Stat label="Customers" value={summary?.total_customers ?? "-"} />
             <Stat label="Free Trial" value={summary?.segments.free_trial ?? "-"} tone="good" />
             <Stat label="Paid" value={summary?.segments.paid ?? "-"} tone="good" />
             <Stat label="Payment Pending" value={summary?.segments.payment_pending ?? "-"} tone="warn" />
             <Stat label="One-time" value={summary?.segments.one_time ?? "-"} />
             <Stat label="Stuck" value={summary?.stuck_projects ?? "-"} tone={(summary?.stuck_projects ?? 0) > 0 ? "warn" : "default"} />
+            <Stat label="Edit Queue" value={summary?.manual_edit_count ?? "-"} tone={(summary?.stuck_edit_count ?? 0) > 0 ? "warn" : "default"} />
           </div>
           <Card>
             <CardHeader><CardTitle>Operator attention</CardTitle></CardHeader>
@@ -275,7 +280,7 @@ export function FlyerAdmin() {
                 <AlertTriangle size={18} className="mt-0.5 text-amber-600" />
                 <div>
                   <div className="text-sm font-medium">Active projects</div>
-                  <div className="text-xs text-zinc-500">{summary?.active_projects ?? 0} in progress; {summary?.stuck_projects ?? 0} need inspection.</div>
+                  <div className="text-xs text-zinc-500">{summary?.active_projects ?? 0} in progress; {summary?.stuck_projects ?? 0} intake and {summary?.stuck_edit_count ?? 0} edits need inspection.</div>
                 </div>
               </div>
               <div className="flex items-start gap-3 rounded-md border border-zinc-200 p-3">
@@ -508,7 +513,7 @@ export function FlyerAdmin() {
           <CardHeader><CardTitle>Projects</CardTitle></CardHeader>
           <CardContent className="p-0">
             <table className="w-full text-sm">
-              <thead className="bg-zinc-50 text-xs text-zinc-500"><tr><th className="px-3 py-2 text-left">Project</th><th className="px-3 py-2 text-left">Status</th><th className="px-3 py-2 text-left">Phone</th><th className="px-3 py-2 text-left">Request</th><th className="px-3 py-2 text-left">Assets</th></tr></thead>
+              <thead className="bg-zinc-50 text-xs text-zinc-500"><tr><th className="px-3 py-2 text-left">Project</th><th className="px-3 py-2 text-left">Status</th><th className="px-3 py-2 text-left">Phone</th><th className="px-3 py-2 text-left">Request</th><th className="px-3 py-2 text-left">Age</th><th className="px-3 py-2 text-left">Assets</th></tr></thead>
               <tbody>
                 {projects.map((project) => (
                   <tr key={project.project_id} className="border-t border-zinc-100">
@@ -516,6 +521,7 @@ export function FlyerAdmin() {
                     <td className="px-3 py-2"><Badge tone={project.status.includes("awaiting") ? "amber" : project.status === "delivered" ? "green" : "neutral"}>{project.status}</Badge></td>
                     <td className="px-3 py-2 font-mono text-xs">{project.customer_phone}</td>
                     <td className="max-w-xl truncate px-3 py-2">{project.raw_request}</td>
+                    <td className={cn("px-3 py-2 text-xs", (project.attention?.length ?? 0) > 0 ? "font-medium text-amber-700" : "text-zinc-500")}>{project.age_minutes ?? 0}m</td>
                     <td className="px-3 py-2 text-xs text-zinc-500">{project.concepts?.length ?? 0} concepts · {project.final_asset_ids?.length ?? 0} final</td>
                   </tr>
                 ))}

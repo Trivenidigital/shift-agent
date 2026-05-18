@@ -143,11 +143,23 @@ def _append_once(source: str, addition: str) -> str:
     return f"{source.rstrip()} {addition}"
 
 
+def _append_instruction(
+    notes_update: str | None,
+    raw_request_update: str | None,
+    project: FlyerProject,
+    instruction: str,
+) -> tuple[str, str]:
+    return (
+        _append_once(notes_update if notes_update is not None else (project.fields.notes or ""), instruction),
+        _append_once(raw_request_update if raw_request_update is not None else (project.raw_request or ""), instruction),
+    )
+
+
 def _extract_item_swap(text: str) -> tuple[str, str]:
     body = " ".join((text or "").split())
     patterns = [
-        r"\b(?:swap|replace)\s+(?P<old>[A-Za-z][A-Za-z\s/&-]{1,80}?)\s+with\s+(?P<new>[A-Za-z][A-Za-z\s/&-]{1,80}?)(?:\s*\(|[.!]|$)",
-        r"\b(?:remove|exclude)\s+(?P<old>[A-Za-z][A-Za-z\s/&-]{1,80}?).*?\b(?:add|use)\s+(?P<new>[A-Za-z][A-Za-z\s/&-]{1,80}?)(?:\s*\(|[.!]|$)",
+        r"\b(?:swap|replace)\s+(?P<old>[A-Za-z][A-Za-z\s/&-]{1,80}?)\s+with\s+(?P<new>[A-Za-z][A-Za-z\s/&-]{1,80}?(?:\s+for\s+\$?\d+(?:\.\d{2})?)?)(?:\s*\(|[.!]|$)",
+        r"\b(?:remove|exclude)\s+(?P<old>[A-Za-z][A-Za-z\s/&-]{1,80}?)\s+(?:and\s+)?(?:add|use)\s+(?P<new>[A-Za-z][A-Za-z\s/&-]{1,80}?(?:\s+same\s+price)?)(?:\s*\(|[.!]|$)",
     ]
     for pattern in patterns:
         match = re.search(pattern, body, flags=re.IGNORECASE)
@@ -160,6 +172,80 @@ def _extract_item_swap(text: str) -> tuple[str, str]:
         if old and new:
             return old, new
     return "", ""
+
+
+def _extract_extra_time_instruction(text: str) -> str:
+    marker = re.search(r"\b(?:extra|duplicate)\b(?P<tail>[^.?!]*)", text, flags=re.IGNORECASE)
+    if not marker:
+        return ""
+    match = re.search(
+        r"(?<![$\d])\b(?P<time>\d{1,2}(?::\d{2})?)\b(?!\.\d)",
+        marker.group("tail"),
+    )
+    if not match or not re.search(r"\b(?:remove|delete|exclude)\b", text[:marker.start()], flags=re.IGNORECASE):
+        return ""
+    return f'Remove duplicate/extra time text "{match.group("time")}" from the flyer.'
+
+
+def _extract_item_add_instruction(text: str) -> str:
+    match = re.search(
+        r"\b(?:add|include|put)\s+(?P<item>[A-Za-z][A-Za-z\s/&-]{1,80}?)\s+for\s+\$?(?P<price>\d+(?:\.\d{2})?)\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    item = match.group("item").strip(" .,\"'")
+    price = match.group("price")
+    return f"Add menu item {item} for ${price}."
+
+
+def _extract_remove_add_instruction(text: str) -> tuple[str, str]:
+    match = re.search(
+        r"\b(?:remove|exclude)\s+(?P<old>[A-Za-z][A-Za-z\s/&-]{1,80}?)\s+(?:and\s+)?(?:add|use)\s+(?P<new>[A-Za-z][A-Za-z\s/&-]{1,80}?(?:\s+same\s+price)?)(?:\s*\(|[.!]|$)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return "", ""
+    old = match.group("old").strip(" .,\"'")
+    new = match.group("new").strip(" .,\"'")
+    if not old or not new:
+        return "", ""
+    return f"Remove menu item {old}.", f"Add menu item {new}."
+
+
+def _replace_item_price_once(source: str, item: str, new_price: str) -> tuple[str, str]:
+    if not source:
+        return source, "not found"
+    matches = list(re.finditer(re.escape(item), source, flags=re.IGNORECASE))
+    if not matches:
+        return source, "not found"
+    if len(matches) > 1:
+        return source, "appears multiple times"
+    match = matches[0]
+    segment_start = max(source.rfind(".", 0, match.start()), source.rfind(",", 0, match.start())) + 1
+    next_stops = [idx for idx in (source.find(".", match.end()), source.find(",", match.end())) if idx != -1]
+    segment_end = min(next_stops) if next_stops else len(source)
+    segment = source[segment_start:segment_end]
+    price_match = re.search(r"\$\s*\d+(?:\.\d{2})?", segment)
+    if not price_match:
+        return source, "price not found near item"
+    absolute_start = segment_start + price_match.start()
+    absolute_end = segment_start + price_match.end()
+    return f"{source[:absolute_start]}{new_price}{source[absolute_end:]}", ""
+
+
+def _extract_item_price_to_new(text: str) -> tuple[str, str]:
+    match = re.search(
+        r"\b(?:change|update|set)\s+(?P<item>[A-Za-z][A-Za-z\s/&-]{1,80}?)\s+(?:price\s+)?(?:to|as|=|:)\s+\$?(?P<price>\d+(?:\.\d{2})?)\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return "", ""
+    item = re.sub(r"\bprice\b", "", match.group("item"), flags=re.IGNORECASE).strip(" .,\"'")
+    return item, f"${match.group('price')}"
 
 
 def _extract_phone(text: str) -> str:
@@ -276,14 +362,34 @@ def extract_revision_patch(project: FlyerProject, text: str) -> RevisionPatchRes
         else:
             notes_update = replaced_notes
 
+    item_for_price, new_item_price = _extract_item_price_to_new(body)
+    if item_for_price and new_item_price:
+        replaced_notes, reason = _replace_item_price_once(project.fields.notes or "", item_for_price, new_item_price)
+        if reason:
+            replaced_raw, raw_reason = _replace_item_price_once(project.raw_request or "", item_for_price, new_item_price)
+            if raw_reason:
+                unresolved.append(f"item price for {item_for_price} {reason if reason != 'not found' else 'not found in flyer details'}")
+            else:
+                raw_request_update = replaced_raw
+        else:
+            notes_update = replaced_notes
+
     old_item, new_item = _extract_item_swap(body)
     if old_item and new_item:
         item_instruction = (
             f"Replace menu item {old_item} with {new_item}. "
             f"Do not include {old_item} on the flyer."
         )
-        notes_update = _append_once(notes_update if notes_update is not None else (project.fields.notes or ""), item_instruction)
-        raw_request_update = _append_once(raw_request_update if raw_request_update is not None else (project.raw_request or ""), item_instruction)
+        notes_update, raw_request_update = _append_instruction(notes_update, raw_request_update, project, item_instruction)
+
+    remove_instruction, add_instruction = _extract_remove_add_instruction(body)
+    for instruction in (remove_instruction, add_instruction):
+        if instruction:
+            notes_update, raw_request_update = _append_instruction(notes_update, raw_request_update, project, instruction)
+
+    for instruction in (_extract_extra_time_instruction(body), _extract_item_add_instruction(body)):
+        if instruction:
+            notes_update, raw_request_update = _append_instruction(notes_update, raw_request_update, project, instruction)
 
     changed = bool(updates) or notes_update is not None or raw_request_update is not None
     visual_only = _is_visual_only_revision(body)

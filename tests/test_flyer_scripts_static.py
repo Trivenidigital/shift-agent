@@ -370,6 +370,10 @@ def test_active_revision_failure_gets_clarification_not_false_noted_message():
     update = (SCRIPTS / "update-flyer-project").read_text(encoding="utf-8")
     assert "revision_requires_clarification" in hooks
     assert "I need one clarification before regenerating" in hooks
+    assert "_send_flyer_regeneration_failed_ack" in hooks
+    assert "approve_regeneration_failed=true" in hooks
+    assert "failure_ack_sent=true" in hooks
     assert '"revision_requires_clarification": revision_requires_clarification' in update
     assert '"project_id": updated.project_id' in update
-    assert "Do not persist an unapplied no-op revision" in update
+    assert "if revision_requires_clarification:" in update
+    assert "return 0" in update

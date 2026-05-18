@@ -526,6 +526,30 @@ def _try_flyer_primary_intercept(
         access, quota_result = _reserve_flyer_access_or_reply(chat_id, phone, project_id, message_id, consume_quota=True)
         if quota_result is not None:
             return quota_result
+        ready_ok, ready_detail = actions.flyer_source_edit_preflight(project or {})
+        if not ready_ok:
+            ack_ok, outbound_message_id, ack_err = actions.send_flyer_manual_edit_ack(
+                chat_id,
+                project_id,
+                text,
+                reason=ready_detail,
+            )
+            release_ok, release_detail = _release_flyer_access(access, chat_id, phone, project_id, message_id)
+            actions.audit_intercepted(
+                reason="flyer_reference_exact_edit_queued",
+                chat_id=chat_id,
+                subprocess_rc=0 if ack_ok and release_ok else 3,
+                detail=(
+                    f"project_id={project_id}; sender_role={role}; "
+                    f"source_edit_preflight_failed={ready_detail[:250]}; access={access}; "
+                    f"release_ok={release_ok}; release_detail={release_detail[:250]}; "
+                    f"ack_message_id={outbound_message_id}; ack_error={ack_err[:300]}"
+                ),
+            )
+            return {
+                "action": "skip",
+                "reason": f"cf-router flyer exact edit queued: project {project_id}",
+            }
         proc_ok, proc_mid, proc_err = actions.send_flyer_edit_processing_ack(chat_id, project_id)
         gen_ok, gen_detail = actions.trigger_generate_flyer_concepts(project_id)
         if gen_ok:
@@ -538,10 +562,18 @@ def _try_flyer_primary_intercept(
                 if ack_ok else f"cf-router flyer exact edit delivery failed: project {project_id}"
             )
         else:
-            _release_flyer_access(access, chat_id, phone, project_id, message_id)
-            ack_ok, manual_mid, ack_err = actions.send_flyer_manual_edit_ack(chat_id, project_id, text)
+            ack_ok, manual_mid, ack_err = actions.send_flyer_manual_edit_ack(
+                chat_id,
+                project_id,
+                text,
+                reason=f"automatic edit generation failed: {gen_detail}",
+            )
+            release_ok, release_detail = _release_flyer_access(access, chat_id, phone, project_id, message_id)
             outbound_message_id = ",".join(x for x in [proc_mid, manual_mid] if x)
-            ack_err = f"edit_generation_failed: {gen_detail}; ack_error={ack_err}"
+            ack_err = (
+                f"edit_generation_failed: {gen_detail}; "
+                f"release_ok={release_ok}; release_detail={release_detail[:250]}; ack_error={ack_err}"
+            )
             reason = f"cf-router flyer exact edit queued: project {project_id}"
         actions.audit_intercepted(
             reason="flyer_primary_project_created" if gen_ok else "flyer_reference_exact_edit_queued",
@@ -715,6 +747,30 @@ def _try_flyer_reference_scope_authorization_intercept(text: str, chat_id: str, 
         access, quota_result = _reserve_flyer_access_or_reply(chat_id, phone, project_id, message_id, consume_quota=True)
         if quota_result is not None:
             return quota_result
+        ready_ok, ready_detail = actions.flyer_source_edit_preflight(project or {})
+        if not ready_ok:
+            ack_ok, outbound_message_id, ack_err = actions.send_flyer_manual_edit_ack(
+                chat_id,
+                project_id,
+                raw_request,
+                reason=ready_detail,
+            )
+            release_ok, release_detail = _release_flyer_access(access, chat_id, phone, project_id, message_id)
+            actions.audit_intercepted(
+                reason="flyer_reference_exact_edit_queued",
+                chat_id=chat_id,
+                subprocess_rc=0 if ack_ok and release_ok else 3,
+                detail=(
+                    f"project_id={project_id}; sender_role={role}; source={source}; "
+                    f"source_edit_preflight_failed={ready_detail[:250]}; access={access}; "
+                    f"release_ok={release_ok}; release_detail={release_detail[:250]}; "
+                    f"ack_message_id={outbound_message_id}; ack_error={ack_err[:300]}"
+                ),
+            )
+            return {
+                "action": "skip",
+                "reason": f"cf-router flyer reference scope authorized queued: project {project_id}",
+            }
         proc_ok, proc_mid, proc_err = actions.send_flyer_edit_processing_ack(chat_id, project_id)
         gen_ok, gen_detail = actions.trigger_generate_flyer_concepts(project_id)
         if gen_ok:
@@ -725,10 +781,18 @@ def _try_flyer_reference_scope_authorization_intercept(text: str, chat_id: str, 
             reason = f"cf-router flyer reference scope authorized generated: project {project_id}"
             audit_reason = "flyer_primary_project_created"
         else:
-            _release_flyer_access(access, chat_id, phone, project_id, message_id)
-            ack_ok, manual_mid, ack_err = actions.send_flyer_manual_edit_ack(chat_id, project_id, raw_request)
+            ack_ok, manual_mid, ack_err = actions.send_flyer_manual_edit_ack(
+                chat_id,
+                project_id,
+                raw_request,
+                reason=f"automatic edit generation failed: {gen_detail}",
+            )
+            release_ok, release_detail = _release_flyer_access(access, chat_id, phone, project_id, message_id)
             outbound_message_id = ",".join(x for x in [proc_mid, manual_mid] if x)
-            ack_err = f"edit_generation_failed: {gen_detail}; ack_error={ack_err}"
+            ack_err = (
+                f"edit_generation_failed: {gen_detail}; "
+                f"release_ok={release_ok}; release_detail={release_detail[:250]}; ack_error={ack_err}"
+            )
             reason = f"cf-router flyer reference scope authorized queued: project {project_id}"
             audit_reason = "flyer_reference_exact_edit_queued"
 
@@ -825,11 +889,24 @@ def _reserve_flyer_access_or_reply(
     return "", {"action": "skip", "reason": f"cf-router flyer quota blocked: {project_id}"}
 
 
-def _release_flyer_access(access: str, chat_id: str, phone: str, project_id: str, message_id: str) -> None:
+def _release_flyer_access(access: str, chat_id: str, phone: str, project_id: str, message_id: str) -> tuple[bool, str]:
     if access == "quota":
-        actions.trigger_flyer_release_quota(customer_phone=phone, project_id=project_id, message_id=message_id)
+        ok, detail, _result = actions.trigger_flyer_release_quota(customer_phone=phone, project_id=project_id, message_id=message_id)
     elif access == "guest":
-        actions.trigger_release_flyer_guest_order(sender_phone=phone, chat_id=chat_id, project_id=project_id)
+        ok, detail, _result = actions.trigger_release_flyer_guest_order(sender_phone=phone, chat_id=chat_id, project_id=project_id)
+    else:
+        return True, "no_access_to_release"
+    if not ok:
+        actions.audit_intercepted(
+            reason="flyer_access_release_failed",
+            chat_id=chat_id,
+            subprocess_rc=2,
+            detail=(
+                f"project_id={project_id}; access={access}; message_id={message_id}; "
+                f"release_detail={detail[:400]}"
+            ),
+        )
+    return ok, detail
 
 
 def _finalize_flyer_access_checked(access: str, chat_id: str, phone: str, project_id: str, message_id: str) -> tuple[bool, str]:
@@ -859,16 +936,17 @@ def _send_preview_then_finalize_access(
     if not proc_ok:
         ack_err = f"processing_ack_failed: {proc_err}; ack_error={ack_err}"
     if not preview_ok:
-        if _preview_may_have_delivered(outbound_message_id, ack_err):
+        if _preview_may_have_delivered(preview_mid, preview_err):
             access_ok, access_detail = _finalize_flyer_access_checked(access, chat_id, phone, project_id, message_id)
             if not access_ok:
                 return False, outbound_message_id, f"{ack_err}; access_finalize_failed={access_detail[:250]}"
             return False, outbound_message_id, ack_err
-        _release_flyer_access(access, chat_id, phone, project_id, message_id)
+        release_ok, release_detail = _release_flyer_access(access, chat_id, phone, project_id, message_id)
+        if not release_ok:
+            ack_err = f"{ack_err}; access_release_failed={release_detail[:250]}"
         return False, outbound_message_id, ack_err
     access_ok, access_detail = _finalize_flyer_access_checked(access, chat_id, phone, project_id, message_id)
     if not access_ok:
-        _release_flyer_access(access, chat_id, phone, project_id, message_id)
         return False, outbound_message_id, f"{ack_err}; access_finalize_failed={access_detail[:250]}"
     return proc_ok and preview_ok and access_ok, outbound_message_id, ack_err
 
@@ -876,6 +954,19 @@ def _send_preview_then_finalize_access(
 def _preview_may_have_delivered(outbound_message_id: str, ack_err: str) -> bool:
     err = (ack_err or "").lower()
     return bool(outbound_message_id) or "partial_delivery" in err or "send_uncertain" in err
+
+
+def _send_flyer_regeneration_failed_ack(chat_id: str, project_id: str) -> tuple[bool, str, str]:
+    return actions.send_flyer_text(
+        chat_id,
+        (
+            "Flyer Studio\n"
+            "------------\n"
+            f"I could not regenerate project {project_id} automatically just now.\n\n"
+            "I kept the edit request open for follow-up instead of sending a mismatched flyer. "
+            "Please check back here shortly, or send one exact correction if anything else must change."
+        ),
+    )
 
 
 def _try_flyer_account_intercept(text: str, chat_id: str, event: Any) -> Optional[dict]:
@@ -1456,20 +1547,44 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any) -> 
             "--revision-text", body,
             "--message-id", message_id,
         )
-        ack_ok, mid, err = actions.send_flyer_text(
-            chat_id,
-            (
+        revision_requires_clarification = False
+        clarification_reason = ""
+        try:
+            import json
+            update_doc = json.loads(detail)
+            patch = update_doc.get("revision_patch") or {}
+            revision_requires_clarification = bool(update_doc.get("revision_requires_clarification"))
+            clarification_reason = str(patch.get("unresolved_reason") or "I could not match that change to the queued edit.")
+        except Exception:
+            revision_requires_clarification = not ok
+            clarification_reason = detail[:180] or "I could not save that correction."
+        if revision_requires_clarification:
+            reply = (
+                "Flyer Studio\n"
+                "------------\n"
+                f"I need one clarification before adding that to project {project_id}: {clarification_reason}\n\n"
+                "Please send the exact text, item, price, date, or area of the flyer to change."
+            )
+        else:
+            reply = (
                 "Flyer Studio\n"
                 "------------\n"
                 f"Project {project_id} is already queued for a source-preserving edit. "
                 "I saved this additional correction with the edit request and will send the corrected flyer here when it is ready."
-            ),
+            )
+        ack_ok, mid, err = actions.send_flyer_text(
+            chat_id,
+            reply,
         )
         actions.audit_intercepted(
             reason="flyer_reference_exact_edit_queued" if ok and ack_ok else "flyer_primary_failed",
             chat_id=chat_id,
             subprocess_rc=0 if ok and ack_ok else 3,
-            detail=f"project_id={project_id}; queued_followup=true; sender_role={role}; update={detail[:250]}; ack_message_id={mid}; ack_error={err[:300]}",
+            detail=(
+                f"project_id={project_id}; queued_followup=true; "
+                f"revision_requires_clarification={revision_requires_clarification}; sender_role={role}; "
+                f"update={detail[:250]}; ack_message_id={mid}; ack_error={err[:300]}"
+            ),
         )
         return {"action": "skip",
                 "reason": f"cf-router flyer exact edit already queued for {project_id}"}
@@ -1490,7 +1605,19 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any) -> 
                 reason="flyer_primary_failed", chat_id=chat_id,
                 subprocess_rc=2, detail=f"project_id={project_id}; revision_regeneration_failed={gen_detail[:400]}",
             )
-            return None
+            fail_ack_ok, fail_mid, fail_err = _send_flyer_regeneration_failed_ack(chat_id, project_id)
+            actions.audit_intercepted(
+                reason="flyer_reference_exact_edit_queued" if fail_ack_ok else "flyer_primary_failed",
+                chat_id=chat_id,
+                subprocess_rc=0 if fail_ack_ok else 3,
+                detail=(
+                    f"project_id={project_id}; approve_regeneration_failed=true; "
+                    f"sender_role={role}; gen_detail={gen_detail[:300]}; "
+                    f"ack_message_id={fail_mid}; ack_error={fail_err[:300]}"
+                ),
+            )
+            return {"action": "skip",
+                    "reason": f"cf-router flyer active: regeneration failed for {project_id}"}
         if status == "revising_design":
             ok_status, status_detail = actions.invoke_update_flyer_project(project_id, "--status", "awaiting_final_approval")
             if not ok_status:
@@ -1539,6 +1666,7 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any) -> 
             chat_id,
             ack_message,
         )
+        regeneration_failed = False
         if ok and needs_regen and not revision_requires_clarification:
             gen_ok, gen_detail = actions.trigger_generate_flyer_concepts(project_id)
             if gen_ok:
@@ -1548,10 +1676,20 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any) -> 
                 if preview_err:
                     err = f"{err}; preview_error={preview_err}"
             else:
+                regeneration_failed = True
+                fail_ack_ok, fail_mid, fail_err = _send_flyer_regeneration_failed_ack(chat_id, project_id)
+                mid = ",".join(x for x in [mid, fail_mid] if x)
                 ack_ok = False
                 err = f"{err}; regeneration_failed={gen_detail[:300]}"
+                if fail_err:
+                    err = f"{err}; failure_ack_error={fail_err[:300]}"
+                if fail_ack_ok:
+                    err = f"{err}; failure_ack_sent=true"
         actions.audit_intercepted(
-            reason="flyer_primary_project_created" if ok else "flyer_primary_failed",
+            reason=(
+                "flyer_reference_exact_edit_queued"
+                if regeneration_failed else ("flyer_primary_project_created" if ok else "flyer_primary_failed")
+            ),
             chat_id=chat_id, subprocess_rc=0 if ok and ack_ok else 2,
             detail=f"project_id={project_id}; revision=true; revision_requires_clarification={revision_requires_clarification}; update={detail[:250]}; ack_message_id={mid}; ack_error={err}",
         )

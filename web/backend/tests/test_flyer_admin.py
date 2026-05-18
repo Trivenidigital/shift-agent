@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 import asyncio
+from datetime import datetime, timedelta, timezone
 import json
 
 import pytest
@@ -44,6 +44,26 @@ def _write_json(path, data: dict) -> None:
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
+def _project(project_id: str, *, status: str, updated_at: str = "2000-01-01T00:00:00Z") -> dict:
+    return {
+        "project_id": project_id,
+        "status": status,
+        "customer_phone": "+17329837841",
+        "created_at": "2000-01-01T00:00:00Z",
+        "updated_at": updated_at,
+        "original_message_id": f"msg-{project_id}",
+        "raw_request": "Edit uploaded flyer/source artwork. Remove stale time.",
+        "fields": {"event_or_business_name": "Lakshmis Kitchen", "contact_info": "+17329837841"},
+        "assets": [],
+        "concepts": [],
+        "selected_concept_id": None,
+        "revisions": [],
+        "version": 1,
+        "final_asset_ids": [],
+        "approved_message_id": "",
+    }
+
+
 def test_flyer_summary_segments_customers_and_guest_orders(tmp_path, monkeypatch):
     from app.routers import flyer
 
@@ -84,6 +104,17 @@ def test_flyer_summary_segments_customers_and_guest_orders(tmp_path, monkeypatch
             ],
         },
     )
+    _write_json(
+        settings.state_dir / "flyer" / "projects.json",
+        {
+            "schema_version": 1,
+            "next_sequence": 3,
+            "projects": [
+                _project("F9001", status="manual_edit_required"),
+                _project("F9002", status="intake_started"),
+            ],
+        },
+    )
 
     summary = flyer.build_summary()
 
@@ -91,6 +122,32 @@ def test_flyer_summary_segments_customers_and_guest_orders(tmp_path, monkeypatch
     assert summary["segments"]["paid"] == 1
     assert summary["segments"]["payment_pending"] == 1
     assert summary["segments"]["one_time"] == 1
+    assert summary["active_projects"] == 2
+    assert summary["manual_edit_count"] == 1
+    assert summary["stuck_edit_count"] == 1
+    assert summary["stuck_projects"] == 1
+
+
+def test_project_rows_mark_stale_manual_edits(tmp_path):
+    from app.routers import flyer
+
+    settings = flyer.get_settings()
+    settings.state_dir = tmp_path / "state"
+    settings.cockpit_audit_log = tmp_path / "logs" / "audit.log"
+    _write_json(
+        settings.state_dir / "flyer" / "projects.json",
+        {
+            "schema_version": 1,
+            "next_sequence": 2,
+            "projects": [_project("F9001", status="manual_edit_required")],
+        },
+    )
+
+    result = asyncio.run(flyer.projects())
+
+    assert result["projects"][0]["project_id"] == "F9001"
+    assert "manual_edit_queue" in result["projects"][0]["attention"]
+    assert "manual_edit_stale" in result["projects"][0]["attention"]
 
 
 def test_extend_trial_increases_trial_quota_limit(tmp_path):
