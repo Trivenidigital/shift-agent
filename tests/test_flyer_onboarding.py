@@ -576,6 +576,174 @@ def test_invalid_onboarding_field_reply_returns_prompt_instead_of_crashing(tmp_p
     assert "what is your business name" in result.reply_text.lower()
 
 
+def test_business_name_reply_at_address_step_stays_in_onboarding_repair_prompt(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    store.onboarding_sessions.append(FlyerOnboardingSession(
+        chat_id="158024815611933@lid",
+        sender_phone=None,
+        status="collecting_business_address",
+        started_at=now,
+        updated_at=now,
+        last_message_id="business-name",
+        business_name="Ram",
+        plan_id="trial",
+    ))
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    result = handle_onboarding_message(
+        state_path=state_path,
+        chat_id="158024815611933@lid",
+        sender_phone=None,
+        message_id="address-repair",
+        text="Chloe hair studio",
+        now=now,
+    )
+
+    updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert result.handled is True
+    assert result.next_status == "collecting_business_address"
+    assert "please send the full business address" in result.reply_text.lower()
+    assert "what is the business address" in result.reply_text.lower()
+    assert updated.onboarding_sessions[0].business_address == ""
+
+
+def test_phone_resolved_after_lid_only_start_finds_chat_bound_session(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    store.onboarding_sessions.append(FlyerOnboardingSession(
+        chat_id="158024815611933@lid",
+        sender_phone=None,
+        status="collecting_business_address",
+        started_at=now,
+        updated_at=now,
+        last_message_id="business-name",
+        business_name="Ram",
+        plan_id="trial",
+    ))
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    result = handle_onboarding_message(
+        state_path=state_path,
+        chat_id="158024815611933@lid",
+        sender_phone="+19803826497",
+        message_id="address",
+        text="123 Main St, Charlotte, NC",
+        now=now,
+    )
+
+    updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert result.next_status == "collecting_public_phone"
+    assert updated.onboarding_sessions[0].business_address == "123 Main St, Charlotte, NC"
+
+
+def test_onboarding_accepts_ok_proceed_as_confirmation(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    store.onboarding_sessions.append(FlyerOnboardingSession(
+        chat_id="158024815611933@lid",
+        sender_phone=None,
+        status="confirming_summary",
+        started_at=now,
+        updated_at=now,
+        last_message_id="summary",
+        business_name="Hisaku",
+        business_address="101 Kavitha Palace, KPHB, Hyderabad, Telangana 500085",
+        public_phone="+918985741562",
+        business_whatsapp_number="+918985741562",
+        authorized_request_number="+918985741562",
+        business_category="Digital Marketing",
+        preferred_language="en",
+        plan_id="trial",
+        creation_mode="text",
+    ))
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    result = handle_onboarding_message(
+        state_path=state_path,
+        chat_id="158024815611933@lid",
+        sender_phone=None,
+        message_id="ok-proceed",
+        text="Ok proceed",
+        now=now,
+    )
+
+    assert result.next_status == "trial"
+    assert "Text Mode is ready" in result.reply_text
+
+
+def test_business_whatsapp_can_be_skipped_with_no_business_account(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    store.onboarding_sessions.append(FlyerOnboardingSession(
+        chat_id="158024815611933@lid",
+        sender_phone=None,
+        status="collecting_business_whatsapp",
+        started_at=now,
+        updated_at=now,
+        last_message_id="public-phone",
+        business_name="Hisaku",
+        business_address="101 Kavitha Palace, KPHB, Hyderabad, Telangana 500085",
+        public_phone="+918985741562",
+        plan_id="trial",
+    ))
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    result = handle_onboarding_message(
+        state_path=state_path,
+        chat_id="158024815611933@lid",
+        sender_phone=None,
+        message_id="skip-whatsapp",
+        text="No business account",
+        now=now,
+    )
+
+    updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert result.next_status == "collecting_authorized_request_number"
+    assert updated.onboarding_sessions[0].business_whatsapp_number == "+918985741562"
+
+
+def test_profile_language_english_overrides_initial_mixed_choice(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    store.onboarding_sessions.append(FlyerOnboardingSession(
+        chat_id="158024815611933@lid",
+        sender_phone=None,
+        status="collecting_business_profile",
+        started_at=now,
+        updated_at=now,
+        last_message_id="authorized",
+        business_name="Hisaku",
+        business_address="101 Kavitha Palace, KPHB, Hyderabad, Telangana 500085",
+        public_phone="+918985741562",
+        business_whatsapp_number="+918985741562",
+        authorized_request_number="+918985741562",
+        preferred_language="mixed",
+        plan_id="trial",
+    ))
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    result = handle_onboarding_message(
+        state_path=state_path,
+        chat_id="158024815611933@lid",
+        sender_phone=None,
+        message_id="profile",
+        text="Digital Marketing, English",
+        now=now,
+    )
+
+    updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert result.next_status == "confirming_summary"
+    assert updated.onboarding_sessions[0].business_category == "Digital Marketing"
+    assert updated.onboarding_sessions[0].preferred_language == "en"
+    assert "Profile: Digital Marketing, en" in result.reply_text
+
+
 def test_trial_quota_blocks_fourth_flyer_and_prompts_upgrade(tmp_path):
     state_path = tmp_path / "customers.json"
     now = datetime(2026, 5, 16, tzinfo=timezone.utc)

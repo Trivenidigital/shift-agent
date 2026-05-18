@@ -147,6 +147,19 @@ def test_price_list_menu_flyer_does_not_require_event_date_time_or_venue():
     assert fields.missing_required_fields() == []
 
 
+def test_service_list_flyer_does_not_require_event_date_time_or_venue():
+    fields = FlyerRequestFields(
+        event_or_business_name="Marketing Services",
+        venue_or_location="101 Kavitha Palace, KPHB, Hyderabad, Telangana 500085",
+        contact_info="+918985741562",
+        notes=(
+            "Services: Social media marketing, Performance marketing, SEO, "
+            "AEO, GEO, AI Marketing, Content Creation, Paid Ads"
+        ),
+    )
+    assert fields.missing_required_fields() == []
+
+
 def test_uploaded_template_reference_can_generate_from_reference_image_only():
     fields = FlyerRequestFields(
         event_or_business_name="Thursday Dosa Night Special",

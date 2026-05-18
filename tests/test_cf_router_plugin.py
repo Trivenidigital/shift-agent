@@ -1885,6 +1885,35 @@ class TestF7PrimaryMode:
         mock_onboarding.assert_not_called()
         assert "$4" in mock_send.call_args.args[1]
 
+    def test_flyer_quick_order_intake_fails_closed_without_resolved_phone(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=(None, "customer")), \
+             patch.object(actions_mod, "find_flyer_customer_by_sender",
+                          return_value=None), \
+             patch.object(actions_mod, "find_flyer_intake_session_by_sender",
+                          return_value={"status": "choosing_language"}), \
+             patch.object(actions_mod, "trigger_flyer_intake",
+                          return_value=(True, "intake", {"action": "start_guest_order"})), \
+             patch.object(actions_mod, "trigger_start_flyer_guest_order") as mock_guest, \
+             patch.object(actions_mod, "send_flyer_text",
+                          return_value=(True, "msg-phone-required", "")) as mock_send:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    text="English",
+                    chat_id="201975216009469@lid",
+                ),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router flyer intake: quick_flyer_phone_required",
+        }
+        mock_guest.assert_not_called()
+        assert "verify the WhatsApp phone number" in mock_send.call_args.args[1]
+
     def test_flyer_campaign_cta_existing_customer_ignores_stale_onboarding_session(self, mods, state_env):
         hooks_mod, actions_mod = mods
         _seed_config(state_env, flyer_enabled=True)

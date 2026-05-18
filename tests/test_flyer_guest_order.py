@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -88,6 +89,31 @@ def test_guest_order_activation_then_single_use_consumes_order(tmp_path):
         sender_phone="+17329837841",
         chat_id="17329837841@s.whatsapp.net",
     ) is None
+
+
+def test_guest_order_activation_requires_payment_reference(tmp_path):
+    state = tmp_path / "guest_orders.json"
+    now = datetime(2026, 5, 17, tzinfo=timezone.utc)
+    start_guest_order(
+        state_path=state,
+        sender_phone="+17329837841",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="cta-1",
+        now=now,
+    )
+
+    active = activate_guest_order(
+        state_path=state,
+        order_id="GUEST0001",
+        payment_reference="   ",
+        now=now,
+    )
+
+    assert active.ok is False
+    assert active.detail == "payment_reference_required"
+    store = load_guest_order_store(state)
+    assert store.orders[0].status == "pending_payment"
+    assert store.orders[0].payment_reference == ""
 
 
 def test_guest_order_consume_requires_matching_reservation(tmp_path):
@@ -283,3 +309,42 @@ def test_guest_order_cli_dry_flow(tmp_path):
         check=True,
     )
     assert '"status": "paid"' in release.stdout
+
+
+def test_guest_order_cli_rejects_activation_without_payment_reference(tmp_path):
+    state = tmp_path / "guest_orders.json"
+    script = Path(__file__).resolve().parent.parent / "src" / "agents" / "flyer" / "scripts" / "manage-flyer-guest-order"
+    subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--start",
+            "--sender-phone", "+17329837841",
+            "--chat-id", "17329837841@s.whatsapp.net",
+            "--message-id", "cta-1",
+            "--state-path", str(state),
+            "--config-path", str(tmp_path / "missing.yaml"),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    activate = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--activate",
+            "--order-id", "GUEST0001",
+            "--state-path", str(state),
+            "--config-path", str(tmp_path / "missing.yaml"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert activate.returncode == 2
+    doc = json.loads(activate.stdout)
+    assert doc["detail"] == "payment_reference_required"
+    assert load_guest_order_store(state).orders[0].status == "pending_payment"

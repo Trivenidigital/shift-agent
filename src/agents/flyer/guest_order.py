@@ -102,6 +102,9 @@ def activate_guest_order(
     order = store.find_order_by_id(order_id) if order_id else store.find_open_order_by_sender(sender_phone)
     if order is None:
         return GuestOrderResult(False, True, "", detail="guest_order_not_found")
+    payment_reference = " ".join((payment_reference or "").split())
+    if not payment_reference:
+        return GuestOrderResult(False, True, "", order.order_id, order.status, detail="payment_reference_required")
     if any(
         other.payment_reference == payment_reference and other.order_id != order.order_id
         for other in store.orders

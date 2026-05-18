@@ -563,6 +563,341 @@ def test_generic_marketing_flyer_request_is_adaptive_intake_not_project_ready():
     assert not actions.should_start_new_flyer_over_active(text, has_media=False)
 
 
+def test_registered_customer_service_flyer_brief_is_not_language_preflight():
+    actions = _load_actions()
+    text = (
+        "I want you to create a flyer for Marketing with my services promoting\n"
+        "Services: Social media marketing\n"
+        "Performance marketing\n"
+        "SEO\n"
+        "AEO\n"
+        "GEO\n"
+        "AI Marketing\n"
+        "Content Creation\n"
+        "Paid Ads"
+    )
+
+    assert not actions.is_vague_flyer_start(text, has_media=False)
+    assert actions.should_start_new_flyer_over_active(text, has_media=False)
+
+
+def test_service_list_project_has_required_fields_without_event_date_time():
+    actions = _load_actions()
+    project = {
+        "project_id": "F0035",
+        "status": "intake_started",
+        "customer_phone": "+918985741562",
+        "raw_request": (
+            "I want you to create a flyer for Marketing with my services promoting "
+            "Services: Social media marketing Performance marketing SEO AEO GEO "
+            "AI Marketing Content Creation Paid Ads"
+        ),
+        "fields": {
+            "event_or_business_name": (
+                "Marketing with my services promoting Services: Social media marketing "
+                "Performance marketing SEO AEO GEO AI Marketing Content Creation Paid Ads"
+            ),
+            "venue_or_location": "101, kavitha palace , KPHB, Hyderabad, Telangana, 500085.",
+            "contact_info": "+18985741562",
+            "preferred_language": "mixed",
+            "notes": (
+                "I want you to create a flyer for Marketing with my services promoting "
+                "Services: Social media marketing Performance marketing SEO AEO GEO "
+                "AI Marketing Content Creation Paid Ads"
+            ),
+        },
+        "assets": [],
+        "concepts": [],
+    }
+
+    assert actions.flyer_project_has_required_fields(project)
+
+
+def test_lid_only_active_service_project_resumes_generation(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    project = {
+        "project_id": "F0035",
+        "status": "intake_started",
+        "customer_phone": "+918985741562",
+        "fields": {
+            "event_or_business_name": "Marketing Services",
+            "venue_or_location": "101 Kavitha Palace, KPHB",
+            "contact_info": "+918985741562",
+            "notes": "Services: Social media marketing, Performance marketing, SEO, AEO, GEO, AI Marketing, Content Creation, Paid Ads",
+        },
+        "concepts": [],
+        "revisions": [],
+    }
+    customer = {
+        "customer_id": "CUST0003",
+        "status": "trial",
+        "primary_chat_id": "158024815611933@lid",
+        "public_phone": "+918985741562",
+    }
+    calls = {}
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: (None, "unknown"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
+
+    def fake_find_active(phone, chat_id):
+        calls["lookup"] = (phone, chat_id)
+        return project
+
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", fake_find_active)
+    monkeypatch.setattr(actions, "flyer_project_has_required_fields", lambda _project: True)
+    monkeypatch.setattr(hooks, "_reserve_flyer_access_or_reply", lambda *_args, **_kwargs: ({"reservation_id": "R1"}, None))
+    monkeypatch.setattr(actions, "send_flyer_processing_ack", lambda _chat_id, _project_id: (True, "processing-mid", ""))
+    monkeypatch.setattr(actions, "trigger_generate_flyer_concepts", lambda _project_id: (True, "generated"))
+
+    def fake_send_preview(access, chat_id, phone, project_id, message_id, **kwargs):
+        calls["preview"] = {
+            "access": access,
+            "chat_id": chat_id,
+            "phone": phone,
+            "project_id": project_id,
+            "message_id": message_id,
+            "kwargs": kwargs,
+        }
+        return True, "preview-mid", ""
+
+    monkeypatch.setattr(hooks, "_send_preview_then_finalize_access", fake_send_preview)
+    monkeypatch.setattr(actions, "send_flyer_text", lambda *_args: (_ for _ in ()).throw(AssertionError("ready service project must not repeat missing-info prompt")))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+
+    result = hooks._try_flyer_active_project_intercept(
+        "This flyer should promote my business services",
+        "158024815611933@lid",
+        {"message_id": "followup-1"},
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer active: generated F0035"}
+    assert calls["lookup"] == ("+918985741562", "158024815611933@lid")
+    assert calls["preview"]["project_id"] == "F0035"
+    assert calls["preview"]["phone"] == "+918985741562"
+
+
+def test_flyer_customer_lookup_can_match_lid_primary_chat_without_phone(tmp_path):
+    actions = _load_actions()
+    customer_path = tmp_path / "customers.json"
+    actions.FLYER_CUSTOMERS_PATH = customer_path
+    customer_path.parent.mkdir(parents=True, exist_ok=True)
+    customer_path.write_text(
+        """
+{
+  "schema_version": 1,
+  "next_customer_sequence": 4,
+  "next_brand_asset_sequence": 1,
+  "customers": [
+    {
+      "customer_id": "CUST0003",
+      "business_name": "Hisaku",
+      "business_address": "101 Kavitha Palace, KPHB, Hyderabad, Telangana 500085",
+      "primary_chat_id": "158024815611933@lid",
+      "onboarded_by_phone": null,
+      "public_phone": "+918985741562",
+      "business_whatsapp_number": "+918985741562",
+      "authorized_request_numbers": ["+918985741562"],
+      "business_category": "Digital Marketing",
+      "preferred_language": "en",
+      "plan_id": "trial",
+      "status": "trial",
+      "created_at": "2026-05-18T17:42:34Z",
+      "updated_at": "2026-05-18T17:42:34Z"
+    }
+  ],
+  "onboarding_sessions": []
+}
+""".strip(),
+        encoding="utf-8",
+    )
+
+    customer = actions.find_flyer_customer_by_sender(None, "158024815611933@lid")
+
+    assert customer["customer_id"] == "CUST0003"
+
+
+def test_quick_flyer_guest_order_requires_resolved_sender_phone():
+    actions = _load_actions()
+
+    ok, detail, doc = actions.trigger_start_flyer_guest_order(
+        sender_phone=None,
+        chat_id="201975216009469@lid",
+        message_id="cta-quick",
+    )
+
+    assert ok is False
+    assert detail == "sender_phone_required"
+    assert doc["detail"] == "sender_phone_required"
+
+
+def test_registered_lid_only_text_mode_brief_creates_project_not_intake(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    text = (
+        "I want you to create a flyer for Marketing with my services promoting\n"
+        "Services: Social media marketing\n"
+        "Performance marketing\n"
+        "SEO\n"
+        "AEO\n"
+        "GEO\n"
+        "AI Marketing\n"
+        "Content Creation\n"
+        "Paid Ads"
+    )
+    customer = {
+        "customer_id": "CUST0003",
+        "status": "trial",
+        "primary_chat_id": "158024815611933@lid",
+        "public_phone": "+918985741562",
+        "business_whatsapp_number": "+918985741562",
+        "authorized_request_numbers": ["+918985741562"],
+    }
+    calls = {}
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: (None, "unknown"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
+
+    def fail_intake(**_kwargs):
+        raise AssertionError("registered text-mode flyer brief must not restart intake")
+
+    def fake_create_project(**kwargs):
+        calls["create"] = kwargs
+        return True, "project_id=F9001", {"project_id": "F9001", "fields": {}, "raw_request": kwargs["raw_request"]}
+
+    monkeypatch.setattr(actions, "trigger_flyer_intake", fail_intake)
+    monkeypatch.setattr(actions, "trigger_create_flyer_project", fake_create_project)
+    monkeypatch.setattr(actions, "flyer_project_has_required_fields", lambda _project: False)
+    monkeypatch.setattr(actions, "flyer_project_missing_info_reply", lambda _project: "What else should go on this flyer?")
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, _text: (True, "mid-1", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+
+    result = hooks._try_flyer_primary_intercept(
+        text,
+        "158024815611933@lid",
+        {"message_id": "brief-1"},
+        force_new=True,
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer primary: project F9001 created"}
+    assert calls["create"]["customer_phone"] == "+918985741562"
+    assert "Social media marketing" in calls["create"]["raw_request"]
+
+
+def test_active_customer_flyer_brief_ignores_stale_intake_session(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    text = (
+        "I want you to create a flyer for Marketing with my services promoting\n"
+        "Services: Social media marketing\n"
+        "Performance marketing\n"
+        "SEO"
+    )
+    customer = {
+        "customer_id": "CUST0003",
+        "status": "trial",
+        "primary_chat_id": "158024815611933@lid",
+        "public_phone": "+918985741562",
+    }
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: (None, "unknown"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
+    monkeypatch.setattr(actions, "find_flyer_intake_session_by_sender", lambda _phone, _chat_id: {"status": "choosing_mode"})
+    monkeypatch.setattr(actions, "trigger_flyer_intake", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("stale intake must be ignored")))
+
+    result = hooks._try_flyer_intake_intercept(
+        text,
+        "158024815611933@lid",
+        {"message_id": "brief-after-loop"},
+    )
+
+    assert result is None
+
+
+def test_active_customer_start_trial_cta_returns_ready_not_new_intake(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    customer = {
+        "customer_id": "CUST0004",
+        "business_name": "Chloe hair studio",
+        "status": "trial",
+        "primary_chat_id": "74290284261595@lid",
+        "public_phone": "+19803826497",
+    }
+    sent = {}
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: (None, "unknown"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
+    monkeypatch.setattr(actions, "trigger_flyer_intake", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("active customer CTA must not restart intake")))
+    def fake_send_ready(_chat_id, text):
+        sent["message"] = text
+        return True, "mid-1", ""
+
+    monkeypatch.setattr(actions, "send_flyer_text", fake_send_ready)
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+
+    result = hooks._try_flyer_campaign_cta_intercept(
+        "Start Free Trial",
+        "74290284261595@lid",
+        {"message_id": "retry-cta"},
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer active customer ready"}
+    assert "already set up for Chloe hair studio" in sent["message"]
+    assert "Send your flyer request" in sent["message"]
+
+
+def test_active_customer_stale_onboarding_non_flyer_gets_ready_reply(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    customer = {
+        "customer_id": "CUST0004",
+        "business_name": "Chloe hair studio",
+        "status": "trial",
+        "primary_chat_id": "74290284261595@lid",
+        "public_phone": "+19803826497",
+    }
+    sent = {}
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: (None, "unknown"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
+    monkeypatch.setattr(actions, "find_flyer_onboarding_session_by_sender", lambda _phone, _chat_id: {"status": "collecting_business_name"})
+    def fake_send_ready(_chat_id, text):
+        sent["message"] = text
+        return True, "mid-1", ""
+
+    monkeypatch.setattr(actions, "send_flyer_text", fake_send_ready)
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+
+    result = hooks._try_flyer_existing_onboarding_intercept(
+        "Chloe hair studio",
+        "74290284261595@lid",
+        {"message_id": "business-name-after-retry"},
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer active customer ready"}
+    assert "already set up for Chloe hair studio" in sent["message"]
+
+
+def test_active_customer_stale_onboarding_flyer_brief_continues_to_project(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    customer = {
+        "customer_id": "CUST0004",
+        "business_name": "Chloe hair studio",
+        "status": "trial",
+        "primary_chat_id": "74290284261595@lid",
+        "public_phone": "+19803826497",
+    }
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: (None, "unknown"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
+    monkeypatch.setattr(actions, "find_flyer_onboarding_session_by_sender", lambda _phone, _chat_id: {"status": "collecting_business_name"})
+    monkeypatch.setattr(actions, "send_flyer_text", lambda *_args: (_ for _ in ()).throw(AssertionError("flyer brief must not get ready-only reply")))
+
+    result = hooks._try_flyer_existing_onboarding_intercept(
+        "Create flyer for Chloe hair studio grand opening sale",
+        "74290284261595@lid",
+        {"message_id": "brief-after-retry"},
+    )
+
+    assert result is None
+
+
 def test_campaign_cta_starts_intake_for_lid_only_sender(monkeypatch):
     hooks, actions = _load_plugin_modules()
     calls = {}

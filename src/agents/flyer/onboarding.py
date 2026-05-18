@@ -386,11 +386,14 @@ def _advance_session(
     if status == "collecting_business_name":
         update.update({"business_name": _require_text(text, "business name"), "status": "collecting_business_address"})
     elif status == "collecting_business_address":
-        update.update({"business_address": _require_text(text, "business address"), "status": "collecting_public_phone"})
+        update.update({"business_address": _parse_business_address(text), "status": "collecting_public_phone"})
     elif status == "collecting_public_phone":
         update.update({"public_phone": _parse_phone(text), "status": "collecting_business_whatsapp"})
     elif status == "collecting_business_whatsapp":
-        update.update({"business_whatsapp_number": _parse_phone(text), "status": "collecting_authorized_request_number"})
+        update.update({
+            "business_whatsapp_number": _parse_optional_phone(text, fallback=session.public_phone),
+            "status": "collecting_authorized_request_number",
+        })
     elif status == "collecting_authorized_request_number":
         update.update({"authorized_request_number": _parse_phone(text), "status": "collecting_business_profile"})
     elif status == "collecting_business_profile":
@@ -720,6 +723,14 @@ def _parse_phone(text: str) -> str:
         raise ValueError("Please send a valid phone number with country code, or a US 10-digit number.") from e
 
 
+def _parse_optional_phone(text: str, *, fallback: Optional[str]) -> str:
+    if _is_skip_optional_reply(text):
+        if fallback:
+            return str(fallback)
+        raise ValueError("Please send a valid phone number, or type SKIP after the public phone is saved.")
+    return _parse_phone(text)
+
+
 def _phone_or_none(text: Optional[str]) -> Optional[str]:
     if not text:
         return None
@@ -736,10 +747,35 @@ def _require_text(text: str, label: str) -> str:
     return cleaned[:300]
 
 
+def _parse_business_address(text: str) -> str:
+    cleaned = _require_text(text, "business address")
+    lower = cleaned.lower()
+    has_digit = bool(re.search(r"\d", cleaned))
+    has_address_signal = bool(re.search(
+        r"\b(st|street|rd|road|dr|drive|ave|avenue|blvd|boulevard|ln|lane|ct|court|pl|place|"
+        r"pkwy|parkway|hwy|highway|suite|ste|unit|#|north|south|east|west|nc|sc|fl|tx|va|md|oh|ca|ny|nj)\b",
+        lower,
+    ))
+    if not has_digit and not has_address_signal:
+        raise ValueError("Please send the full business address, including street/city/state if available.")
+    return cleaned[:300]
+
+
 def _parse_profile_text(text: str, *, default_language: str = "en") -> tuple[str, str]:
     lower = text.lower()
     language = default_language if default_language in {"en", "te", "hi", "ml", "ta", "kn", "gu", "mr", "pa", "es", "mixed", "other"} else "en"
-    if "telugu" in lower:
+    explicit_languages = [
+        name for name in (
+            "english", "telugu", "hindi", "malayalam", "tamil", "kannada",
+            "gujarati", "marathi", "punjabi", "spanish",
+        )
+        if name in lower
+    ]
+    if len(explicit_languages) > 1:
+        language = "mixed"
+    elif "english" in lower:
+        language = "en"
+    elif "telugu" in lower:
         language = "te"
     elif "hindi" in lower:
         language = "hi"
@@ -791,7 +827,7 @@ def _parse_confirmation_edit(text: str, tiers: list[FlyerPlanTier]) -> dict[str,
     if field in {"name", "business", "business name"}:
         return {"business_name": _require_text(value, "business name")}
     if field in {"address", "business address"}:
-        return {"business_address": _require_text(value, "business address")}
+        return {"business_address": _parse_business_address(value)}
     if field in {"phone", "public phone", "flyer phone"}:
         return {"public_phone": _parse_phone(value)}
     if field in {"whatsapp", "business whatsapp"}:
@@ -807,7 +843,18 @@ def _parse_confirmation_edit(text: str, tiers: list[FlyerPlanTier]) -> dict[str,
 
 
 def _is_confirm_reply(text: str) -> bool:
+    body = " ".join((text or "").strip().lower().split())
+    if body in {"confirm", "ok", "okay", "ok proceed", "proceed", "yes", "yes proceed", "y", "go ahead", "looks good"}:
+        return True
     return bool(re.match(r"^\s*CONFIRM\b(?:\s*[\.:,;!\-]\s*|\s*$|\s+.+$)", text or "", flags=re.IGNORECASE | re.DOTALL))
+
+
+def _is_skip_optional_reply(text: str) -> bool:
+    body = " ".join((text or "").strip().lower().split())
+    return body in {
+        "no", "none", "skip", "no business account", "no business whatsapp",
+        "same", "same as public", "same as phone", "use same", "use public phone",
+    }
 
 
 def _checkout_url(*, template: str, customer_id: str, plan_id: str, chat_id: str) -> str:

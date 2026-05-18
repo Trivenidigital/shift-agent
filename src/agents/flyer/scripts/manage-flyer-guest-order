@@ -112,6 +112,17 @@ def main() -> int:
                     unit_price_cents=price_cents,
                 )
             elif args.activate:
+                if not " ".join((args.payment_reference or "").split()):
+                    print(json.dumps({
+                        "ok": False,
+                        "handled": True,
+                        "reply_text": "",
+                        "order_id": args.order_id,
+                        "status": "",
+                        "payment_checkout_url": "",
+                        "detail": "payment_reference_required",
+                    }))
+                    return 2
                 result = activate_guest_order(
                     state_path=state_path,
                     order_id=args.order_id,

@@ -1101,6 +1101,9 @@ class FlyerCustomerStore(BaseModel):
             for session in self.onboarding_sessions:
                 if session.sender_phone == canonical:
                     return session
+            for session in self.onboarding_sessions:
+                if session.sender_phone is None and session.chat_id == chat_id:
+                    return session
             return None
         for session in self.onboarding_sessions:
             if session.sender_phone is None and session.chat_id == chat_id:
@@ -1117,6 +1120,9 @@ class FlyerCustomerStore(BaseModel):
         if canonical:
             for session in self.intake_sessions:
                 if session.sender_phone == canonical:
+                    return session
+            for session in self.intake_sessions:
+                if session.sender_phone is None and session.chat_id == chat_id:
                     return session
             return None
         for session in self.intake_sessions:
@@ -1318,7 +1324,7 @@ class FlyerRequestFields(BaseModel):
 
     def _has_price_list_or_menu(self) -> bool:
         text = f"{self.notes} {self.style_preference}".lower()
-        return "$" in text or any(
+        has_price_or_menu = "$" in text or any(
             marker in text
             for marker in (
                 "menu item",
@@ -1334,6 +1340,12 @@ class FlyerRequestFields(BaseModel):
                 "deal",
             )
         )
+        has_service_list = bool(re.search(
+            r"\b(?:services?|social media marketing|performance marketing|seo|aeo|geo|"
+            r"ai marketing|content creation|paid ads|digital marketing|marketing services?)\b",
+            text,
+        ))
+        return has_price_or_menu or has_service_list
 
     def _has_template_reference(self) -> bool:
         text = f"{self.notes} {self.style_preference}".lower()

@@ -123,12 +123,23 @@ async function postCsv(file: File): Promise<CampaignPreview> {
   return res.json();
 }
 
+async function sendCsvCampaign(file: File, reason: string, dryRun: boolean): Promise<CampaignSendResult> {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("reason", reason);
+  form.append("dry_run", String(dryRun));
+  const res = await fetch("/api/flyer/campaigns/send-csv", { method: "POST", credentials: "include", body: form });
+  if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail ?? res.statusText);
+  return res.json();
+}
+
 export function FlyerAdmin() {
   const qc = useQueryClient();
   const [tab, setTab] = useState<Tab>("overview");
   const [query, setQuery] = useState("");
   const [segment, setSegment] = useState("");
   const [targetsText, setTargetsText] = useState("");
+  const [campaignCsvFile, setCampaignCsvFile] = useState<File | null>(null);
   const [reason, setReason] = useState("operator dashboard action");
   const [selectedCustomer, setSelectedCustomer] = useState<FlyerCustomer | null>(null);
   const [extensionCount, setExtensionCount] = useState(1);
@@ -161,7 +172,10 @@ export function FlyerAdmin() {
   });
   const csvPreview = useMutation({ mutationFn: postCsv });
   const sendCampaign = useMutation({
-    mutationFn: (dryRun: boolean) => api.POST<CampaignSendResult>("/flyer/campaigns/send", { targets_text: targetsText, reason, dry_run: dryRun }),
+    mutationFn: (dryRun: boolean) => {
+      if (campaignCsvFile) return sendCsvCampaign(campaignCsvFile, reason, dryRun);
+      return api.POST<CampaignSendResult>("/flyer/campaigns/send", { targets_text: targetsText, reason, dry_run: dryRun });
+    },
   });
   const resetTrial = useMutation({
     mutationFn: (customerId: string) => api.POST(`/flyer/customers/${customerId}/reset-trial`, { reason }),
@@ -187,7 +201,7 @@ export function FlyerAdmin() {
   }, [projects]);
 
   const campaignResult = sendCampaign.data;
-  const previewData = preview.data ?? csvPreview.data;
+  const previewData = campaignCsvFile ? csvPreview.data : preview.data;
 
   return (
     <div className="space-y-5">
@@ -342,11 +356,26 @@ export function FlyerAdmin() {
                 className="min-h-52 w-full rounded-md border border-zinc-300 p-3 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/50"
                 placeholder="+17329837841&#10;+18479155253"
                 value={targetsText}
-                onChange={(e) => setTargetsText(e.target.value)}
+                onChange={(e) => {
+                  setTargetsText(e.target.value);
+                  if (e.target.value.trim()) {
+                    setCampaignCsvFile(null);
+                    csvPreview.reset();
+                  }
+                }}
               />
               <div className="grid gap-2 md:grid-cols-[1fr_auto_auto_auto]">
                 <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason for audit log" />
-                <Button variant="outline" onClick={() => preview.mutate()} loading={preview.isPending}>Preview</Button>
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    if (campaignCsvFile) csvPreview.mutate(campaignCsvFile);
+                    else preview.mutate();
+                  }}
+                  loading={preview.isPending || csvPreview.isPending}
+                >
+                  Preview
+                </Button>
                 <Button variant="outline" onClick={() => sendCampaign.mutate(true)} loading={sendCampaign.isPending}>Dry run only</Button>
                 <Button
                   variant="destructive"
@@ -368,10 +397,20 @@ export function FlyerAdmin() {
                     className="hidden"
                     onChange={(e) => {
                       const file = e.target.files?.[0];
-                      if (file) csvPreview.mutate(file);
+                      if (file) {
+                        setCampaignCsvFile(file);
+                        setTargetsText("");
+                        preview.reset();
+                        csvPreview.mutate(file);
+                      }
                     }}
                   />
                 </label>
+                {campaignCsvFile && (
+                  <span className="rounded-md bg-brand-50 px-2 py-1 text-xs text-brand-700">
+                    CSV selected: {campaignCsvFile.name}
+                  </span>
+                )}
               </div>
             </CardContent>
           </Card>

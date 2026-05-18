@@ -915,8 +915,9 @@ def is_vague_flyer_start(text: str, *, has_media: bool = False) -> bool:
         return False
     has_detail = (
         "$" in lower
+        or ":" in body
         or bool(re.search(r"\b\d{1,2}\s*(?:am|pm)\b", lower))
-        or bool(re.search(r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|today|weekend|special|menu|sale|offer|discount|grand opening|class|event)\b", lower))
+        or bool(re.search(r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|today|weekend|special|menu|sale|offer|discount|grand opening|class|event|seo|aeo|geo|paid ads|content creation)\b", lower))
     )
     if has_detail:
         return False
@@ -963,6 +964,11 @@ def flyer_project_has_required_fields(project: dict) -> bool:
             )
         )
     )
+    has_service_list = bool(re.search(
+        r"\b(?:services?|social media marketing|performance marketing|seo|aeo|geo|"
+        r"ai marketing|content creation|paid ads|digital marketing|marketing services?)\b",
+        notes,
+    ))
     has_recurring = any(
         marker in notes
         for marker in (
@@ -972,7 +978,7 @@ def flyer_project_has_required_fields(project: dict) -> bool:
     )
     if has_template_reference:
         return has("event_or_business_name")
-    if has_price_list:
+    if has_price_list or has_service_list:
         return has("event_or_business_name") and has("contact_info")
     required = ["event_or_business_name", "event_time", "venue_or_location", "contact_info"]
     if not has_recurring:
@@ -1124,10 +1130,18 @@ def find_flyer_customer_by_sender(phone: Optional[str], chat_id: str) -> Optiona
     canonical = _canonical_phone(phone)
     if not canonical and chat_id.endswith("@s.whatsapp.net"):
         canonical = _canonical_phone(chat_id.split("@", 1)[0])
-    if not canonical or not FLYER_CUSTOMERS_PATH.exists():
+    if not FLYER_CUSTOMERS_PATH.exists():
         return None
     try:
         store = json.loads(FLYER_CUSTOMERS_PATH.read_text(encoding="utf-8"))
+        if not canonical and chat_id:
+            matches = [
+                customer for customer in store.get("customers", [])
+                if isinstance(customer, dict) and customer.get("primary_chat_id") == chat_id
+            ]
+            return matches[0] if len(matches) == 1 else None
+        if not canonical:
+            return None
         matches = []
         for customer in store.get("customers", []):
             numbers = set(customer.get("authorized_request_numbers") or [])
@@ -1159,7 +1173,7 @@ def find_flyer_onboarding_session_by_sender(phone: Optional[str], chat_id: str) 
             sender_phone = _canonical_phone(session.get("sender_phone"))
             if canonical and sender_phone == canonical:
                 return session
-            if not canonical and session.get("sender_phone") is None and session.get("chat_id") == chat_id:
+            if session.get("sender_phone") is None and session.get("chat_id") == chat_id:
                 return session
         return None
     except Exception:
@@ -1180,7 +1194,7 @@ def find_flyer_intake_session_by_sender(phone: Optional[str], chat_id: str) -> O
             sender_phone = _canonical_phone(session.get("sender_phone"))
             if canonical and sender_phone == canonical:
                 return session
-            if not canonical and session.get("sender_phone") is None and session.get("chat_id") == chat_id:
+            if session.get("sender_phone") is None and session.get("chat_id") == chat_id:
                 return session
         return None
     except Exception:
@@ -1380,7 +1394,20 @@ def _trigger_flyer_guest_order(*args: str) -> tuple[bool, str, Optional[dict]]:
     return True, detail[:500], doc
 
 
-def trigger_start_flyer_guest_order(*, sender_phone: str, chat_id: str, message_id: str) -> tuple[bool, str, Optional[dict]]:
+def _guest_sender_phone_required(sender_phone: Optional[str]) -> Optional[tuple[bool, str, Optional[dict]]]:
+    if sender_phone:
+        return None
+    return False, "sender_phone_required", {
+        "ok": False,
+        "handled": True,
+        "detail": "sender_phone_required",
+    }
+
+
+def trigger_start_flyer_guest_order(*, sender_phone: Optional[str], chat_id: str, message_id: str) -> tuple[bool, str, Optional[dict]]:
+    missing = _guest_sender_phone_required(sender_phone)
+    if missing:
+        return missing
     return _trigger_flyer_guest_order(
         "--start",
         "--sender-phone", sender_phone,
@@ -1389,7 +1416,10 @@ def trigger_start_flyer_guest_order(*, sender_phone: str, chat_id: str, message_
     )
 
 
-def trigger_consume_flyer_guest_order(*, sender_phone: str, chat_id: str, project_id: str) -> tuple[bool, str, Optional[dict]]:
+def trigger_consume_flyer_guest_order(*, sender_phone: Optional[str], chat_id: str, project_id: str) -> tuple[bool, str, Optional[dict]]:
+    missing = _guest_sender_phone_required(sender_phone)
+    if missing:
+        return missing
     return _trigger_flyer_guest_order(
         "--consume",
         "--sender-phone", sender_phone,
@@ -1398,7 +1428,10 @@ def trigger_consume_flyer_guest_order(*, sender_phone: str, chat_id: str, projec
     )
 
 
-def trigger_reserve_flyer_guest_order(*, sender_phone: str, chat_id: str, project_id: str) -> tuple[bool, str, Optional[dict]]:
+def trigger_reserve_flyer_guest_order(*, sender_phone: Optional[str], chat_id: str, project_id: str) -> tuple[bool, str, Optional[dict]]:
+    missing = _guest_sender_phone_required(sender_phone)
+    if missing:
+        return missing
     return _trigger_flyer_guest_order(
         "--reserve",
         "--sender-phone", sender_phone,
@@ -1407,7 +1440,10 @@ def trigger_reserve_flyer_guest_order(*, sender_phone: str, chat_id: str, projec
     )
 
 
-def trigger_release_flyer_guest_order(*, sender_phone: str, chat_id: str, project_id: str) -> tuple[bool, str, Optional[dict]]:
+def trigger_release_flyer_guest_order(*, sender_phone: Optional[str], chat_id: str, project_id: str) -> tuple[bool, str, Optional[dict]]:
+    missing = _guest_sender_phone_required(sender_phone)
+    if missing:
+        return missing
     return _trigger_flyer_guest_order(
         "--release",
         "--sender-phone", sender_phone,

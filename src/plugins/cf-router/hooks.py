@@ -180,14 +180,20 @@ def pre_gateway_dispatch(event: Any, gateway: Any = None, session_store: Any = N
             if actions.is_vague_flyer_start(text, has_media=bool(media_path)):
                 phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
                 if role != "owner":
-                    customer = actions.find_flyer_customer_by_sender(phone, chat_id) if phone else None
-                    source = "new_flyer" if customer else "start_trial"
-                    started = _start_flyer_intake(
-                        text, chat_id, event, source=source, original_text=text,
-                        media_path=media_path,
-                    )
-                    if started is not None:
-                        return started
+                    customer = actions.find_flyer_customer_by_sender(phone, chat_id)
+                    if customer:
+                        flyer_result = _try_flyer_primary_intercept(
+                            text, chat_id, event, force_new=True, media_path=media_path,
+                        )
+                        if flyer_result is not None:
+                            return flyer_result
+                    else:
+                        started = _start_flyer_intake(
+                            text, chat_id, event, source="start_trial", original_text=text,
+                            media_path=media_path,
+                        )
+                        if started is not None:
+                            return started
             if actions.should_start_new_flyer_over_active(text, has_media=bool(media_path)):
                 flyer_result = _try_flyer_primary_intercept(
                     text, chat_id, event, force_new=True, media_path=media_path,
@@ -330,9 +336,12 @@ def _try_flyer_primary_intercept(
     """
     message_id = _extract_message_id(event, chat_id, text)
     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
+    customer = actions.find_flyer_customer_by_sender(phone, chat_id)
+    if not phone:
+        phone = _flyer_customer_sender_phone(customer)
     if not phone:
         return None
-    if actions.is_vague_flyer_start(text, has_media=bool(media_path)):
+    if actions.is_vague_flyer_start(text, has_media=bool(media_path)) and not customer:
         return _start_flyer_intake(
             text, chat_id, event, source="new_flyer", original_text=text,
             media_path=media_path,
@@ -385,7 +394,7 @@ def _try_flyer_primary_intercept(
                 "reason": f"cf-router flyer primary: project {project_id} resumed"}
 
     raw_request = _flyer_raw_request_with_reference(text, media_path)
-    customer = actions.find_flyer_customer_by_sender(phone, chat_id)
+    customer = customer or actions.find_flyer_customer_by_sender(phone, chat_id)
     block_message = actions.flyer_location_block_message(customer or {}, raw_request)
     if block_message:
         ack_ok, mid, err = actions.send_flyer_text(chat_id, block_message)
@@ -867,6 +876,12 @@ def _try_flyer_campaign_cta_intercept(text: str, chat_id: str, event: Any) -> Op
     source = actions.flyer_campaign_source(text)
     if not source:
         return None
+    phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
+    if role == "owner":
+        return None
+    customer = actions.find_flyer_customer_by_sender(phone, chat_id)
+    if customer and customer.get("status") in {"active", "trial"}:
+        return _send_flyer_active_customer_ready(chat_id, customer, role=role)
     return _start_flyer_intake(text, chat_id, event, source=source, original_text=text)
 
 
@@ -927,6 +942,12 @@ def _try_flyer_intake_intercept(
     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
     if role == "owner":
         return None
+    customer = actions.find_flyer_customer_by_sender(phone, chat_id)
+    if customer and customer.get("status") in {"active", "trial"} and (
+        actions.classify_flyer_intent(text)[0]
+        or actions.should_start_new_flyer_over_active(text, has_media=bool(media_path))
+    ):
+        return None
     if not actions.find_flyer_intake_session_by_sender(phone, chat_id):
         return None
     ok, detail, result = actions.trigger_flyer_intake(
@@ -959,6 +980,24 @@ def _try_flyer_intake_intercept(
                 media_path=reference_media_path or media_path,
             )
     if action == "start_guest_order":
+        if not phone:
+            reply = (
+                "Flyer Studio\n"
+                "------------\n"
+                "I could not verify the WhatsApp phone number for this one-time flyer order.\n\n"
+                "Please message from the phone number you want to use for the order, or tap Start Free Trial to set up your business account first."
+            )
+            ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+            actions.audit_intercepted(
+                reason="flyer_guest_order_failed",
+                chat_id=chat_id,
+                subprocess_rc=0 if ack_ok else 3,
+                detail=(
+                    f"message_id={message_id}; detail=sender_phone_required; sender_role={role}; "
+                    f"ack_message_id={mid}; ack_error={err[:300]}"
+                ),
+            )
+            return {"action": "skip", "reason": "cf-router flyer intake: quick_flyer_phone_required"}
         ok_order, detail_order, order_result = actions.trigger_start_flyer_guest_order(
             sender_phone=phone,
             chat_id=chat_id,
@@ -1008,13 +1047,48 @@ def _flyer_raw_request_with_reference(text: str, media_path: Optional[str]) -> s
     return f"Create flyer from uploaded template/reference. Customer requested: {body}"
 
 
+def _flyer_customer_sender_phone(customer: Optional[dict]) -> str:
+    if not customer:
+        return ""
+    for key in ("business_whatsapp_number", "onboarded_by_phone", "public_phone"):
+        value = str(customer.get(key) or "").strip()
+        if value:
+            return value
+    for value in customer.get("authorized_request_numbers") or []:
+        value = str(value or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _send_flyer_active_customer_ready(chat_id: str, customer: dict, *, role: str = "") -> dict:
+    business_name = str(customer.get("business_name") or "this business")
+    reply = (
+        "Flyer Studio\n"
+        "------------\n"
+        f"This number is already set up for {business_name}.\n\n"
+        "Send your flyer request in one message, or attach an existing flyer, logo, menu, photos, or reference image."
+    )
+    ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+    actions.audit_intercepted(
+        reason="flyer_onboarding",
+        chat_id=chat_id,
+        subprocess_rc=0 if ack_ok else 3,
+        detail=(
+            f"status={customer.get('status') or ''}; customer_id={customer.get('customer_id') or ''}; "
+            f"sender_role={role}; ack_message_id={mid}; ack_error={err[:300]}"
+        ),
+    )
+    return {"action": "skip", "reason": "cf-router flyer active customer ready"}
+
+
 def _try_flyer_onboarding_intercept(text: str, chat_id: str, event: Any) -> Optional[dict]:
     """Start or advance WhatsApp-native customer onboarding for new senders."""
     message_id = _extract_message_id(event, chat_id, text)
     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
     if role == "owner":
         return None
-    customer = actions.find_flyer_customer_by_sender(phone, chat_id) if phone else None
+    customer = actions.find_flyer_customer_by_sender(phone, chat_id)
     if customer and customer.get("status") in {"active", "trial"}:
         return None
 
@@ -1065,10 +1139,19 @@ def _try_flyer_existing_onboarding_intercept(text: str, chat_id: str, event: Any
     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
     if role == "owner":
         return None
-    customer = actions.find_flyer_customer_by_sender(phone, chat_id) if phone else None
+    customer = actions.find_flyer_customer_by_sender(phone, chat_id)
+    session = actions.find_flyer_onboarding_session_by_sender(phone, chat_id)
     if customer and customer.get("status") in {"active", "trial"}:
-        return None
-    if not actions.find_flyer_onboarding_session_by_sender(phone, chat_id):
+        if not session:
+            return None
+        if (
+            actions.classify_flyer_intent(text)[0]
+            or actions.should_start_new_flyer_over_active(text, has_media=False)
+            or actions.is_flyer_campaign_cta(text)
+        ):
+            return None
+        return _send_flyer_active_customer_ready(chat_id, customer, role=role)
+    if not session:
         return None
     return _try_flyer_onboarding_intercept(text, chat_id, event)
 
@@ -1145,6 +1228,9 @@ def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_
 def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any) -> Optional[dict]:
     message_id = _extract_message_id(event, chat_id, text)
     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
+    customer = actions.find_flyer_customer_by_sender(phone, chat_id)
+    if not phone:
+        phone = _flyer_customer_sender_phone(customer)
     if not phone:
         return None
     active_project = actions.find_active_flyer_project_by_sender(phone, chat_id)
@@ -1162,6 +1248,48 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any) -> 
         "2": "C2", "option 2": "C2", "concept 2": "C2", "c2": "C2",
         "3": "C3", "option 3": "C3", "concept 3": "C3", "c3": "C3",
     }
+
+    if (
+        status in {"intake_started", "collecting_required_info", "awaiting_assets"}
+        and actions.flyer_project_has_required_fields(active_project)
+        and not active_project.get("concepts")
+    ):
+        access, quota_result = _reserve_flyer_access_or_reply(
+            chat_id, phone, project_id, message_id,
+            consume_quota=not bool(active_project.get("revisions")),
+        )
+        if quota_result is not None:
+            return quota_result
+        proc_ok, proc_mid, proc_err = actions.send_flyer_processing_ack(chat_id, project_id)
+        gen_ok, gen_detail = actions.trigger_generate_flyer_concepts(project_id)
+        if gen_ok:
+            if not active_project.get("revisions"):
+                ack_ok, outbound_message_id, ack_err = _send_preview_then_finalize_access(
+                    access, chat_id, phone, project_id, message_id,
+                    proc_ok=proc_ok, proc_mid=proc_mid, proc_err=proc_err,
+                )
+            else:
+                ack_ok, outbound_message_id, ack_err = actions.send_flyer_concept_previews(chat_id, project_id)
+                outbound_message_id = ",".join(x for x in [proc_mid, outbound_message_id] if x)
+                if not proc_ok:
+                    ack_err = f"processing_ack_failed: {proc_err}; ack_error={ack_err}"
+        else:
+            if not active_project.get("revisions"):
+                _release_flyer_access(access, chat_id, phone, project_id, message_id)
+            ack_ok, outbound_message_id, ack_err = actions.send_flyer_intake_ack(chat_id, project_id)
+            outbound_message_id = ",".join(x for x in [proc_mid, outbound_message_id] if x)
+            ack_err = f"concept_generation_failed: {gen_detail}; ack_error={ack_err}"
+        actions.audit_intercepted(
+            reason="flyer_primary_project_created" if gen_ok and ack_ok else "flyer_primary_failed",
+            chat_id=chat_id,
+            subprocess_rc=0 if gen_ok and ack_ok else 2,
+            detail=(
+                f"project_id={project_id}; intake_ready=true; sender_role={role}; "
+                f"ack_message_id={outbound_message_id}; ack_error={ack_err[:300]}"
+            ),
+        )
+        return {"action": "skip",
+                "reason": f"cf-router flyer active: generated {project_id}"}
 
     if status == "awaiting_concept_selection" and lower in selection_map:
         concept_id = selection_map[lower]
