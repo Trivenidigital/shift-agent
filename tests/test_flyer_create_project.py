@@ -218,6 +218,25 @@ def test_create_project_names_recurring_breakfast_specials_cleanly(tmp_path, mon
     assert project["fields"]["contact_info"] == "+17329837841"
 
 
+def test_create_project_parses_chloe_salon_service_request_without_prompt_leak(monkeypatch):
+    module = _load_script(monkeypatch)
+    fields = module._extract_fields(
+        (
+            "Create flyer for Chloe Hair Studio promoting the $20 men haircut, "
+            "$80 perms, and other hair services. Location: Virginia Beach, VA. "
+            "Contact: +1 757 555 0199"
+        ),
+        now=datetime(2026, 5, 18, tzinfo=timezone.utc),
+    )
+
+    assert fields.event_or_business_name == "Chloe Hair Studio"
+    assert fields.venue_or_location == "Virginia Beach, VA"
+    assert fields.contact_info == "+1 757 555 0199"
+    assert "food" not in fields.style_preference.lower()
+    assert "menu" not in fields.style_preference.lower()
+    assert "salon" in fields.style_preference.lower()
+
+
 def test_create_project_can_queue_exact_reference_edit_without_template_title(tmp_path, monkeypatch, capsys):
     module = _load_script(monkeypatch)
     customers_path = tmp_path / "customers.json"

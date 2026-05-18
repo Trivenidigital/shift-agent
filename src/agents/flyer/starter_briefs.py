@@ -82,7 +82,7 @@ def _briefs() -> tuple[StarterBrief, ...]:
                 "Create a professional real estate flyer.\n\n"
                 "Main heading:\nFind Your Next Home\n\n"
                 "Details:\nAdd property address, open house time, price, bedrooms, bathrooms, highlights, and agent notes here.\n\n"
-                "Style:\nClean upscale real estate layout with property-focused visuals, trust badges, modern typography, and clear contact details.\n\n"
+                "Style:\nClean upscale real estate layout with property-focused visuals, contact or licensing details I provide, modern typography, and clear contact details.\n\n"
                 "Use my saved business name, address, phone, and logo."
             ),
         ),
@@ -94,7 +94,7 @@ def _briefs() -> tuple[StarterBrief, ...]:
                 "Create a professional flyer for my tutoring or education service.\n\n"
                 "Main heading:\nLearn Better. Score Higher.\n\n"
                 "Classes or details:\nAdd subjects, grades, schedule, trial class, fees, and enrollment details here.\n\n"
-                "Style:\nFriendly, credible education flyer with clean sections, student success visuals, and a clear enrollment callout.\n\n"
+                "Style:\nFriendly, credible education flyer with clean sections, learning or classroom visuals, and a clear enrollment callout.\n\n"
                 "Use my saved business name, address, phone, and logo."
             ),
         ),
@@ -188,7 +188,9 @@ def starter_brief_for_category(category: str) -> StarterBrief:
 
 def starter_brief_message(category: str, *, business_name: str = "") -> str:
     brief = starter_brief_for_category(category)
-    body = brief.ai_body if "ai" in _normalize(category) and brief.ai_body else brief.body
+    normalized = _normalize(category)
+    has_ai_claim = bool(re.search(r"(?:^| )ai(?: |$)|artificial intelligence|ai marketing|ai-powered", normalized))
+    body = brief.ai_body if has_ai_claim and brief.ai_body else brief.body
     name_line = f"Business: {business_name.strip()}\n" if business_name and business_name.strip() else ""
     return (
         "Flyer Studio\n"

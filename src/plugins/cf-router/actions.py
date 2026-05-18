@@ -1066,6 +1066,33 @@ def flyer_starter_brief_reply(customer: dict) -> str:
     )
 
 
+def flyer_customer_not_active_reply(customer: dict) -> str:
+    status = str(customer.get("status") or "").strip() or "not_active"
+    if status == "payment_pending":
+        return (
+            "Flyer Studio\n"
+            "------------\n"
+            "Your account is waiting for payment confirmation. I saved your account details, but flyer generation starts after activation."
+        )
+    if status == "suspended":
+        return (
+            "Flyer Studio\n"
+            "------------\n"
+            "This Flyer Studio account is suspended. Contact Support before creating a new flyer."
+        )
+    if status == "cancelled":
+        return (
+            "Flyer Studio\n"
+            "------------\n"
+            "This Flyer Studio account is cancelled. Contact Support or restart setup before creating a new flyer."
+        )
+    return (
+        "Flyer Studio\n"
+        "------------\n"
+        f"This Flyer Studio account is {status}. Contact Support before creating a new flyer."
+    )
+
+
 def flyer_project_missing_info_reply(project: dict) -> str:
     """Customer-facing prompt for an incomplete Flyer project."""
     project_id = str(project.get("project_id") or "this project")

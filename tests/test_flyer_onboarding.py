@@ -712,6 +712,45 @@ def test_trial_completion_suggests_business_category_starter_brief(tmp_path):
     assert "Reply with your edited version" in result.reply_text
 
 
+def test_guided_trial_completion_does_not_append_full_starter_brief(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    store.onboarding_sessions.append(FlyerOnboardingSession(
+        chat_id="158024815611933@lid",
+        sender_phone=None,
+        status="confirming_summary",
+        started_at=now,
+        updated_at=now,
+        last_message_id="summary",
+        business_name="Hisaku",
+        business_address="101 Kavitha Palace, KPHB, Hyderabad, Telangana 500085",
+        public_phone="+918985741562",
+        business_whatsapp_number="+918985741562",
+        authorized_request_number="+918985741562",
+        business_category="Digital Marketing",
+        preferred_language="en",
+        plan_id="trial",
+        creation_mode="guided",
+    ))
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    result = handle_onboarding_message(
+        state_path=state_path,
+        chat_id="158024815611933@lid",
+        sender_phone=None,
+        message_id="confirm-guided",
+        text="CONFIRM",
+        now=now,
+    )
+
+    assert result.next_status == "trial"
+    assert "Guided Mode is ready" in result.reply_text
+    assert "Here is a starter flyer request" not in result.reply_text
+    updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert updated.intake_sessions[0].status == "guided_collecting_goal"
+
+
 def test_text_mode_ready_includes_category_starter_brief(tmp_path):
     state_path = tmp_path / "customers.json"
     now = datetime(2026, 5, 18, tzinfo=timezone.utc)
@@ -829,6 +868,43 @@ def test_profile_language_english_overrides_initial_mixed_choice(tmp_path):
     assert updated.onboarding_sessions[0].business_category == "Digital Marketing"
     assert updated.onboarding_sessions[0].preferred_language == "en"
     assert "Profile: Digital Marketing, en" in result.reply_text
+
+
+def test_language_only_business_profile_reply_is_rejected(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    store.onboarding_sessions.append(FlyerOnboardingSession(
+        chat_id="74290284261595@lid",
+        sender_phone="+19803826497",
+        status="collecting_business_profile",
+        started_at=now,
+        updated_at=now,
+        last_message_id="authorized",
+        business_name="Chloe Hair Studio",
+        business_address="11111 Gainsborough Ct, Fairfax, VA 22030",
+        public_phone="+19803826497",
+        business_whatsapp_number="+19803826497",
+        authorized_request_number="+19803826497",
+        preferred_language="en",
+        plan_id="trial",
+    ))
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    result = handle_onboarding_message(
+        state_path=state_path,
+        chat_id="74290284261595@lid",
+        sender_phone="+19803826497",
+        message_id="profile-language-only",
+        text="English",
+        now=now,
+    )
+
+    updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert result.handled is True
+    assert result.next_status == "collecting_business_profile"
+    assert "business type" in result.reply_text.lower()
+    assert updated.onboarding_sessions[0].business_category == ""
 
 
 def test_trial_quota_blocks_fourth_flyer_and_prompts_upgrade(tmp_path):

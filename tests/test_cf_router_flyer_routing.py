@@ -525,7 +525,7 @@ def test_vague_flyer_start_for_ineligible_customer_status_does_not_send_starter(
         monkeypatch.setattr(hooks, "_try_flyer_reference_scope_choice_intercept", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(hooks, "_try_flyer_reference_scope_authorization_intercept", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(hooks, "_try_flyer_existing_onboarding_intercept", lambda *_args, **_kwargs: None)
-        monkeypatch.setattr(hooks, "_try_flyer_primary_intercept", lambda *_args, **_kwargs: {"action": "skip", "reason": "primary"})
+        monkeypatch.setattr(hooks, "_try_flyer_primary_intercept", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("ineligible customer must not create project")))
         monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
         monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
         monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
@@ -537,8 +537,13 @@ def test_vague_flyer_start_for_ineligible_customer_status_does_not_send_starter(
             message_id=f"m-{status}",
         ))
 
-        assert result == {"action": "skip", "reason": "primary"}
+        assert result == {"action": "skip", "reason": "cf-router flyer customer not active"}
         assert not any("Here is a starter flyer request" in text for text in sent)
+        assert sent
+        if status == "payment_pending":
+            assert "waiting for payment" in sent[0].lower()
+        else:
+            assert status in sent[0].lower()
 
 
 def test_compound_confirm_routes_trailing_request_without_starter_brief(monkeypatch):

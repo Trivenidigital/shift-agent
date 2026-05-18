@@ -39,7 +39,9 @@ def test_all_starter_briefs_are_whatsapp_sized_customer_editable_and_public_safe
 
 def test_ai_powered_claim_only_appears_for_ai_marketing_categories():
     standard = starter_briefs.starter_brief_message("digital marketing agency")
+    paid_ads = starter_briefs.starter_brief_message("paid ads agency")
     ai = starter_briefs.starter_brief_message("AI marketing agency")
 
     assert "AI-Powered" not in standard
+    assert "AI-Powered" not in paid_ads
     assert "AI-Powered" in ai

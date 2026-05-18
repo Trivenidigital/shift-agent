@@ -24,6 +24,7 @@ from agents.flyer.render import (  # noqa: E402
     render_final_package,
     render_source_edit_preview,
     validate_text_manifest_file,
+    write_text_manifest,
 )
 from schemas import FlyerAsset, FlyerConcept, FlyerProject, FlyerRequestFields  # noqa: E402
 
@@ -981,6 +982,53 @@ def test_breakfast_menu_facts_are_customer_flyer_copy_not_raw_prompt():
         "Mysore Masala Dosa $11.99",
     ]
     assert all("Create a breakfast flyer" not in fact.text for fact in facts)
+
+
+def test_chloe_salon_prompt_is_not_food_or_festival_themed():
+    project = _complete_project().model_copy(update={
+        "raw_request": "Create flyer for Chloe Hair Studio promoting the $20 men haircut, $80 perms, and other hair services",
+        "fields": FlyerRequestFields(
+            event_or_business_name="Chloe Hair Studio",
+            venue_or_location="11111 Gainsborough Ct, Fairfax, VA 22030",
+            contact_info="+19803826497",
+            preferred_language="en",
+            style_preference="modern salon and beauty studio promotion",
+            notes="Men haircut $20; Perms $80; Other hair services.",
+        ),
+    })
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+
+    assert "salon" in prompt.lower()
+    assert "service offer cards" in prompt.lower()
+    assert "ethnic grocery" not in prompt.lower()
+    assert "south indian" not in prompt.lower()
+    assert "marigold" not in prompt.lower()
+    assert "mango-leaf" not in prompt.lower()
+    assert "appetizing food" not in prompt.lower()
+    assert "festival warmth" not in prompt.lower()
+    assert "restaurant/menu poster" not in prompt.lower()
+
+
+def test_text_manifest_blocks_customer_instruction_leak(tmp_path):
+    source = tmp_path / "bad.png"
+    source.write_bytes(_png_bytes())
+    project = _complete_project().model_copy(update={
+        "raw_request": "Create flyer for chloe hair studio promoting the $20 men haircut",
+        "fields": FlyerRequestFields(
+            event_or_business_name="chloe hair studio promoting the $20 men haircut",
+            venue_or_location="11111 Gainsborough Ct, Fairfax, VA 22030",
+            contact_info="+19803826497",
+            notes="Create flyer for chloe hair studio promoting the $20",
+        ),
+    })
+
+    try:
+        write_text_manifest(project, source, output_format="concept_preview")
+    except FlyerRenderError as e:
+        assert "instruction text leaked into flyer copy" in str(e)
+    else:
+        raise AssertionError("expected instruction leakage to fail text QA")
 
 
 def test_final_package_exports_from_selected_generated_concept_without_new_model_call(tmp_path, monkeypatch):

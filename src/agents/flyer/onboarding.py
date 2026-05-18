@@ -693,7 +693,7 @@ def _trial_active_reply(
             f"Free trial active for {customer_id}. You have 3 free sample flyers.\n"
             "Send your first flyer request now. After each sample, I will show the paid onboarding link and plans."
         )
-    if include_starter_brief and customer and customer.status in {"trial", "active"}:
+    if include_starter_brief and creation_mode != "guided" and customer and customer.status in {"trial", "active"}:
         reply = f"{reply}\n\n{starter_brief_message(customer.business_category, business_name=customer.business_name)}"
     return reply
 
@@ -824,7 +824,12 @@ def _parse_profile_text(text: str, *, default_language: str = "en") -> tuple[str
         flags=re.IGNORECASE,
     )
     category = re.sub(r"[,;]+", " ", category)
-    return (" ".join(category.split()) or text.strip() or "local business")[:120], language
+    category = " ".join(category.split())
+    if not category:
+        raise ValueError(
+            "Please include the business type, for example: Hair salon, English."
+        )
+    return category[:120], language
 
 
 def _parse_plan_choice(text: str, tiers: list[FlyerPlanTier]) -> str:

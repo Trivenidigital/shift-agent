@@ -195,11 +195,18 @@ def pre_gateway_dispatch(event: Any, gateway: Any = None, session_store: Any = N
                         )
                         return {"action": "skip", "reason": "cf-router flyer starter brief sent"}
                     elif customer:
-                        flyer_result = _try_flyer_primary_intercept(
-                            text, chat_id, event, force_new=True, media_path=media_path,
+                        reply = actions.flyer_customer_not_active_reply(customer)
+                        ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+                        actions.audit_intercepted(
+                            reason="flyer_customer_not_active",
+                            chat_id=chat_id,
+                            subprocess_rc=0 if ack_ok else 3,
+                            detail=(
+                                f"customer_id={customer.get('customer_id') or ''}; status={customer.get('status') or ''}; "
+                                f"sender_role={role}; ack_message_id={mid}; ack_error={err[:300]}"
+                            ),
                         )
-                        if flyer_result is not None:
-                            return flyer_result
+                        return {"action": "skip", "reason": "cf-router flyer customer not active"}
                     else:
                         started = _start_flyer_intake(
                             text, chat_id, event, source="start_trial", original_text=text,
