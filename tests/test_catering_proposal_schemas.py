@@ -199,6 +199,8 @@ def test_cf_router_reason_accepts_proposal_selection():
     "flyer_intake_failed",
     "flyer_onboarding",
     "flyer_onboarding_failed",
+    "flyer_starter_brief",            # BUG-FLYER-QA-003a (PR #102 hooks.py:188)
+    "flyer_customer_not_active",      # BUG-FLYER-QA-003a (PR #105 hooks.py:201)
     "flyer_quota_blocked",
     "flyer_brand_asset_saved",
     "flyer_brand_asset_failed",
