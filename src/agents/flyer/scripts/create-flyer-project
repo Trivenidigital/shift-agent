@@ -481,6 +481,12 @@ def main() -> int:
                     pending_reference_asset = reference_asset
                     should_extract_reference = True
         locked_facts = extract_text_facts(fields, args.raw_request, message_id=args.message_id)
+        if args.manual_edit_required and not reference_manual_required:
+            manual_review = make_manual_review(
+                reason_code="source_edit_provider_unavailable",
+                detail="authorized source-edit queued for manual review",
+                queued_at=now,
+            )
         status = "manual_edit_required" if args.manual_edit_required or reference_manual_required else "intake_started"
         project = FlyerProject(
             project_id=project_id,

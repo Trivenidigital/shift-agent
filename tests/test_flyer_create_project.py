@@ -636,3 +636,8 @@ def test_create_project_can_queue_exact_reference_edit_without_template_title(tm
     assert project["fields"]["event_or_business_name"] == "Lakshmis Kitchen"
     assert project["assets"][0]["kind"] == "reference_image"
     assert "Uploaded Flyer Template" not in project["fields"]["event_or_business_name"]
+    # Regression: --manual-edit-required must populate manual_review.reason_code,
+    # not leave it at the default 'unclassified' (the F0052/F0053 prod bug).
+    assert project["manual_review"]["status"] == "queued"
+    assert project["manual_review"]["reason_code"] == "source_edit_provider_unavailable"
+    assert project["manual_review"]["queued_at"] is not None

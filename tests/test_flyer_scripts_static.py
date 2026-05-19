@@ -45,13 +45,24 @@ def test_manual_queue_exposes_triage_and_backfill():
 
 def test_manual_transition_sites_use_helper():
     """Every code-path transition into manual_edit_required goes through make_manual_review()."""
-    for name in ["create-flyer-project", "generate-flyer-concepts", "finalize-flyer-assets"]:
+    for name in ["create-flyer-project", "generate-flyer-concepts", "finalize-flyer-assets", "update-flyer-project"]:
         text = (SCRIPTS / name).read_text(encoding="utf-8")
         assert "make_manual_review" in text, f"{name} should call make_manual_review"
 
     update_text = (SCRIPTS / "update-flyer-project").read_text(encoding="utf-8")
     assert "--manual-reason-code" in update_text
     assert "reason_code" in update_text
+
+
+def test_create_flyer_project_manual_edit_path_populates_reason_code():
+    """The forward-path bug that produced the 6 prod dead-letter projects:
+    --manual-edit-required without a reference failure must still populate manual_review.reason_code,
+    not leave it at the default 'unclassified'."""
+    text = (SCRIPTS / "create-flyer-project").read_text(encoding="utf-8")
+    # The fix: when args.manual_edit_required is set but no reference failure,
+    # build a manual_review via the helper with a concrete reason_code.
+    assert "args.manual_edit_required and not reference_manual_required" in text
+    assert "source_edit_provider_unavailable" in text
 
 
 def test_delivery_script_can_send_by_project_id():
