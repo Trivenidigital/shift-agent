@@ -159,6 +159,21 @@ Mirrors parent backlog §"90% Readiness Exit Criteria"; closed only when:
 
 Updates land here in reverse-chronological order after each slice merge/deploy.
 
+### 2026-05-19 — S8 P0-7 golden scenario regression suite + S6 follow-ups: MERGED + DEPLOYED
+
+- PR #123 merged at `40012d5` (2 commits: feat `c74f707` + review-fix `353e7b8`).
+- Three parallel reviewers dispatched (scenario coverage / cost-runtime safety / regression maintainability). Coverage reviewer found 2 BLOCKERs + 2 HIGH; cost reviewer: LGTM with 2 LOW followups; maintainability reviewer: LGTM with 3 LOW/3 FOLLOWUP. All 4 BLOCKER/HIGH fixed in `353e7b8`:
+  - **BLOCKER #1:** `_DELEGATED_SCENARIOS["exact_template_source_edit"]` pointed at a function name that doesn't exist; sentinel only checked file existence. Fixed: corrected name + sentinel now `ast.parse`s the owner file and asserts the `::test_name` symbol resolves to a real function body.
+  - **BLOCKER #2:** bidirectional substring assertion (`expected in actual or actual in expected`) accepted truncation regressions. Tightened to strict-equality for phones + `startswith` for text facts. Surfaced a real test-data bug: 6 scenario fixtures had asserted the full raw_request brand+event phrase but the extractor's actual output is just the brand — updated all 6.
+  - **HIGH #3:** catalog dropped 4 P0 axes from earlier slices (concept-selection text on awaiting_concept_selection, approval text on awaiting_final_approval, non-English replies, break-glass disambiguation). Added 4 delegated entries pointing at their dedicated owner tests + hoisted `EXPECTED_AXES` to a module-level constant so the structural test enforces single source of truth.
+  - **HIGH #4:** module docstring referenced a non-existent sibling `test_flyer_golden_scenarios_real_model.py`. Rewrote to point at the backlog tracking entry + added a "how to add a scenario" recipe.
+- Two S6 follow-ups landed in the same PR:
+  - `workflow.py::_read_env_value` — now checks `HERMES_ENV_PATH` (default `/root/.hermes/.env`) before `SHIFT_AGENT_ENV_PATH` (default `/opt/shift-agent/.env`), mirroring `visual_qa.py::_openrouter_key`. Operators provisioning OPENAI_API_KEY via the Hermes env store now get it picked up.
+  - `render.py::render_source_edit_preview` — cleans up orphan preview + raw-background PNGs on quality-check failure before re-raising. Prevents unbounded asset_dir growth on retries.
+- Deferred from S6: surface `verification_mode=source_edit_integrity_only` in the cockpit manual queue. Touches backend route + frontend badge logic — larger than the "small/safe" envelope.
+- Deploy tag `deploy-20260519-192901-353e7b89` on `main-vps`. Deploy smoke passed, final-package smoke `ok=true`, gateway+cockpit+bridge active, manual-queue triage unchanged at total=6 (3 legacy_unknown + 3 source_edit_provider_unavailable). Full pytest **1226 passed, 677 skipped** (+25 vs S7 baseline 1201, 0 regressions). Golden deterministic suite: **22/22 passed** on local build (the tarball intentionally excludes `tests/` per `build-deploy-tarball.sh`; local pytest gate runs before tarballing).
+- Lessons: (1) **Bidirectional substring assertions are dangerous in coverage suites** — they accept truncation regressions, which is the most common silent-failure class for extractor changes. Strict-or-startswith is the safe default. (2) **Sentinel tests that only verify file existence are inadequate** — they pass on renamed functions. `ast.parse` + symbol-table check catches the regression at the test level, not at the next refactor. (3) **Catalog single-source-of-truth matters** — keeping `EXPECTED_AXES` separate from `_SCENARIOS` and `_DELEGATED_SCENARIOS` creates a three-way sync requirement; hoisting to a module constant lets the structural test enforce both directions (missing axes AND orphan scenarios).
+
 ### 2026-05-19 — S7 P0-6 reason-code-aware state→reply table: MERGED + DEPLOYED
 
 - PR #122 merged at `87f8722` (2 commits: feat `71dd75b` + review-fix `d59a19e`).
