@@ -880,8 +880,15 @@ PY
                 # the import resolved; connection-refused or 5xx is the fail
                 # mode we care about. Run only after /health passed so we
                 # don't mask a plain restart fail.
+                #
+                # URL note (S2 deploy regression, fixed here): the cockpit
+                # uvicorn at port 8081 serves routes at /flyer/... directly.
+                # The /api/ prefix is added externally by Caddy when proxying
+                # browser requests; it is NOT part of the uvicorn path. The
+                # initial S2 deploy script used /api/flyer/manual-queue and
+                # would return 404 on every subsequent deploy, blocking it.
                 if [ "$cockpit_healthy" -eq 1 ] && [ -z "$cockpit_fail_reason" ]; then
-                    manual_queue_code=$(curl -s -o /dev/null --max-time 2 -w '%{http_code}' http://127.0.0.1:8081/api/flyer/manual-queue || echo "000")
+                    manual_queue_code=$(curl -s -o /dev/null --max-time 2 -w '%{http_code}' http://127.0.0.1:8081/flyer/manual-queue || echo "000")
                     case "$manual_queue_code" in
                         200|401|403)
                             : # route mounted (auth gate is the only thing in our way)
