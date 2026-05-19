@@ -4,7 +4,10 @@ from __future__ import annotations
 import csv
 import io
 import json
+import mimetypes
 import os
+import re
+import secrets
 import shutil
 import sys
 from datetime import datetime, timezone
@@ -12,6 +15,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from ..audit import log as audit_log
@@ -36,12 +40,16 @@ from schemas import (  # noqa: E402
 )
 try:
     from flyer_manual_queue import (  # type: ignore  # noqa: E402
+        _verification_modes as flyer_verification_modes,
         complete_manual_project,
+        list_manual_queue,
         triage_summary,
     )
 except ImportError:
     from agents.flyer.manual_queue import (  # noqa: E402
+        _verification_modes as flyer_verification_modes,
         complete_manual_project,
+        list_manual_queue,
         triage_summary,
     )
 
@@ -700,6 +708,272 @@ async def manual_queue_break_glass(
         details=result | {"reason": body.reason},
     )
     return result
+
+
+# ─────────────────────────────────────────────────────────────────
+# P0-1/P0-2/P0-3 cockpit-ops surface (manual-queue detail drawer,
+# operator-uploads endpoint, asset media-serve for visual preview).
+# ─────────────────────────────────────────────────────────────────
+
+_OPERATOR_UPLOAD_MAX_BYTES = 10 * 1024 * 1024  # 10 MiB cap; well above any real flyer
+_OPERATOR_MIME_TO_EXT: dict[str, str] = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+    "application/pdf": ".pdf",
+}
+# Cockpit-uploaded filenames are server-generated to prevent path-injection
+# (../../, NUL bytes, etc) and to keep operator-uploads listings sortable by
+# arrival time. The pattern matches what we generate so the GET media-serve
+# endpoint can reject anything else without filesystem stat.
+_OPERATOR_UPLOAD_NAME_RE = re.compile(
+    r"^\d{8}T\d{6}Z-[0-9a-f]{16}\.(?:png|jpg|webp|pdf)$"
+)
+
+
+def _generate_operator_upload_filename(mime: str) -> str:
+    """Timestamped + random server-controlled filename. Operator cannot
+    influence the path inside operator-uploads/."""
+    ext = _OPERATOR_MIME_TO_EXT[mime]
+    stamp = _now().strftime("%Y%m%dT%H%M%SZ")
+    return f"{stamp}-{secrets.token_hex(8)}{ext}"
+
+
+def _safe_operator_upload_target(filename: str) -> Path:
+    """Resolve filename under operator-uploads root, refusing traversal."""
+    if not _OPERATOR_UPLOAD_NAME_RE.match(filename):
+        raise HTTPException(422, "operator upload filename must match the cockpit-generated pattern")
+    upload_root = _operator_upload_root().resolve()
+    upload_root.mkdir(parents=True, exist_ok=True)
+    target = (upload_root / filename).resolve()
+    try:
+        target.relative_to(upload_root)
+    except ValueError:
+        raise HTTPException(422, "operator upload filename escapes upload root")
+    return target
+
+
+async def _validate_and_persist_operator_upload(
+    file: UploadFile,
+) -> tuple[Path, str, int]:
+    """Read the upload stream, enforce MIME + size cap, write to a fresh
+    server-generated path under operator-uploads/. Returns (path, mime, size)."""
+    declared_mime = (file.content_type or "").lower()
+    # Trust the declared MIME only as a hint — re-derive from extension on the
+    # generated filename (we control the extension based on this MIME).
+    if declared_mime not in _OPERATOR_ASSET_MIME_ALLOWLIST:
+        raise HTTPException(
+            415,
+            f"operator upload content_type {declared_mime!r} not in allowlist "
+            f"{sorted(_OPERATOR_ASSET_MIME_ALLOWLIST)}",
+        )
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(64 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > _OPERATOR_UPLOAD_MAX_BYTES:
+            raise HTTPException(
+                413,
+                f"operator upload exceeds {_OPERATOR_UPLOAD_MAX_BYTES} bytes",
+            )
+        chunks.append(chunk)
+    if total == 0:
+        raise HTTPException(422, "operator upload is empty")
+    filename = _generate_operator_upload_filename(declared_mime)
+    target = _safe_operator_upload_target(filename)
+    # Write atomically: tmp file in same dir, then rename.
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_bytes(b"".join(chunks))
+    try:
+        os.replace(tmp, target)
+    except OSError:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)  # type: ignore[arg-type]
+        raise
+    return target, declared_mime, total
+
+
+@router.post("/operator-uploads")
+async def operator_upload(
+    request: Request,
+    file: UploadFile = File(...),
+    reason: str = Form(..., min_length=5, max_length=300),
+    _=Depends(require_fresh_otp),
+):
+    """Upload an approved operator/designer asset to operator-uploads/.
+
+    P0-2: replaces the SCP-then-type-absolute-path UX with a cockpit
+    multipart upload. The returned `asset_path` is what the complete
+    endpoint expects; the operator does not type or see the file system
+    layout.
+    """
+    target, mime, size = await _validate_and_persist_operator_upload(file)
+    payload = {
+        "ok": True,
+        "asset_path": str(target),
+        "filename": target.name,
+        "mime_type": mime,
+        "size_bytes": size,
+    }
+    audit_log(
+        "flyer.operator_upload",
+        ip=client_ip(request),
+        ua=client_ua(request),
+        details={
+            "filename": target.name,
+            "mime_type": mime,
+            "size_bytes": size,
+            "reason": reason,
+            "original_filename": file.filename or "",
+        },
+    )
+    return payload
+
+
+@router.get("/operator-uploads/{filename}")
+async def operator_upload_media(
+    filename: str,
+    _=Depends(require_auth),
+):
+    """Serve a cockpit-uploaded file back to the operator for preview before
+    they commit Complete. Read-only; auth (not OTP) gated. Filename must
+    match the server-generated pattern so the operator cannot probe
+    arbitrary files under operator-uploads/."""
+    target = _safe_operator_upload_target(filename)
+    if not target.is_file():
+        raise HTTPException(404, "operator upload not found")
+    mime, _enc = mimetypes.guess_type(str(target))
+    return FileResponse(
+        path=str(target),
+        media_type=mime or "application/octet-stream",
+        filename=target.name,
+    )
+
+
+def _asset_summary(asset: Any, *, project_id: str) -> dict[str, Any]:
+    """Project-facing asset metadata for the cockpit drawer. Does NOT
+    include the raw `path` (operators read media via the auth-gated
+    media-serve endpoint, not by typing the VPS path)."""
+    return {
+        "asset_id": asset.asset_id,
+        "kind": asset.kind,
+        "source": asset.source,
+        "mime_type": asset.mime_type,
+        "sha256": asset.sha256[:16],  # truncated — full hash is rarely useful in UI
+        "delivery_status": asset.delivery_status,
+        "received_at": asset.received_at.isoformat() if asset.received_at else None,
+        "delivered_at": asset.delivered_at.isoformat() if asset.delivered_at else None,
+        "media_url": f"/api/flyer/projects/{project_id}/assets/{asset.asset_id}",
+    }
+
+
+def manual_queue_detail_action(project_id: str) -> dict[str, Any]:
+    """Rich per-project context for the cockpit drawer (P0-1).
+
+    Pulls together project state, locked facts, QA blockers, asset
+    summaries, manual review timeline, and a recommended-action playbook
+    key. Strictly read-only; no auth state mutation."""
+    store = load_project_store()
+    project = next((p for p in store.projects if p.project_id == project_id), None)
+    if project is None:
+        raise HTTPException(404, f"project {project_id} not found")
+    manual = project.manual_review
+    qa_blockers: list[str] = []
+    for report in project.qa_reports:
+        qa_blockers.extend(report.blockers)
+    timeline = [
+        {"ts": project.created_at.isoformat(), "event": "project_created", "detail": f"status={project.status}"},
+        {"ts": project.updated_at.isoformat(), "event": "project_updated", "detail": f"status={project.status}"},
+    ]
+    if manual.queued_at:
+        timeline.append({
+            "ts": manual.queued_at.isoformat(),
+            "event": "manual_review_queued",
+            "detail": f"reason_code={manual.reason_code}",
+        })
+    if manual.completed_at:
+        timeline.append({
+            "ts": manual.completed_at.isoformat(),
+            "event": f"manual_review_{manual.status}",
+            "detail": manual.detail[:200] if manual.detail else "",
+        })
+    timeline.sort(key=lambda row: row["ts"])
+    return {
+        "project_id": project.project_id,
+        "customer_phone": str(project.customer_phone),
+        "status": project.status,
+        "raw_request": project.raw_request,
+        "original_message_id": project.original_message_id,
+        "created_at": project.created_at.isoformat(),
+        "updated_at": project.updated_at.isoformat(),
+        "version": project.version,
+        "manual_review": {
+            "status": manual.status,
+            "reason": manual.reason,
+            "reason_code": manual.reason_code,
+            "detail": manual.detail,
+            "queued_at": manual.queued_at.isoformat() if manual.queued_at else None,
+            "completed_at": manual.completed_at.isoformat() if manual.completed_at else None,
+            "break_glass_reason": getattr(manual, "break_glass_reason", "") or "",
+            "operator_asset_ids": list(manual.operator_asset_ids),
+        },
+        "locked_facts": [fact.model_dump(mode="json") for fact in project.locked_facts],
+        "qa_blockers": qa_blockers,
+        "verification_modes": flyer_verification_modes(project),
+        "assets": [_asset_summary(asset, project_id=project.project_id) for asset in project.assets],
+        "final_asset_ids": list(project.final_asset_ids),
+        "selected_concept_id": project.selected_concept_id,
+        "fields": project.fields.model_dump(mode="json"),
+        "timeline": timeline,
+    }
+
+
+@router.get("/manual-queue/{project_id}/detail")
+async def manual_queue_detail(
+    project_id: str,
+    _=Depends(require_auth),
+):
+    return manual_queue_detail_action(project_id)
+
+
+@router.get("/projects/{project_id}/assets/{asset_id}")
+async def project_asset_media(
+    project_id: str,
+    asset_id: str,
+    _=Depends(require_auth),
+):
+    """Serve a project asset's bytes for thumbnail/preview rendering (P0-3).
+
+    Authorization: project + asset_id pair must exist in the live store.
+    Path is validated by the FlyerAsset schema to be under
+    /opt/shift-agent/state/flyer/, so we additionally ensure the resolved
+    file is under the flyer state root before serving.
+    """
+    if not re.match(r"^F\d{4,}$", project_id) or not re.match(r"^A\d{4,}$", asset_id):
+        raise HTTPException(422, "project_id or asset_id has wrong shape")
+    store = load_project_store()
+    project = next((p for p in store.projects if p.project_id == project_id), None)
+    if project is None:
+        raise HTTPException(404, f"project {project_id} not found")
+    asset = next((a for a in project.assets if a.asset_id == asset_id), None)
+    if asset is None:
+        raise HTTPException(404, f"asset {asset_id} not found in project {project_id}")
+    state_root = _flyer_dir().resolve()
+    asset_file = Path(asset.path).resolve()
+    try:
+        asset_file.relative_to(state_root)
+    except ValueError:
+        raise HTTPException(404, "asset path is outside flyer state root")
+    if not asset_file.is_file():
+        raise HTTPException(404, "asset file is missing on disk")
+    return FileResponse(
+        path=str(asset_file),
+        media_type=asset.mime_type or "application/octet-stream",
+        filename=asset_file.name,
+    )
 
 
 @router.post("/campaigns/send-csv")
