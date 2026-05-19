@@ -74,7 +74,14 @@ def _project(tmp_path: Path) -> FlyerProject:
     )
 
 
-def _write_visual_qa(asset_path: Path, *, project_id: str = "F0001", project_version: int = 1, output_format: str = "whatsapp_image") -> None:
+def _write_visual_qa(
+    asset_path: Path,
+    *,
+    project_id: str = "F0001",
+    project_version: int = 1,
+    output_format: str = "whatsapp_image",
+    qa_source: str = "ocr_vision",
+) -> None:
     from agents.flyer.visual_qa import write_visual_qa_report
 
     report = FlyerVisualQAReport(
@@ -85,7 +92,7 @@ def _write_visual_qa(asset_path: Path, *, project_id: str = "F0001", project_ver
         project_version=project_version,
         output_format=output_format,
         provider="test",
-        qa_source="ocr_vision",
+        qa_source=qa_source,
         status="passed",
         checked_at=datetime.now(timezone.utc),
     )
@@ -269,6 +276,72 @@ def test_project_delivery_blocks_without_passing_visual_qa(tmp_path, monkeypatch
     assert out["visual_qa_failed"].endswith("wa.png")
     rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
     assert rows[0]["error"].startswith("visual_qa_failed")
+
+
+def test_project_delivery_rejects_sidecar_visual_qa_even_when_env_allows_sidecar(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_QA_ALLOW_SIDECAR", "1")
+    mod = _load_script()
+    project = _project(tmp_path)
+    _write_visual_qa(tmp_path / "wa.png", qa_source="sidecar_test")
+    state_path = tmp_path / "projects.json"
+    log_path = tmp_path / "decisions.log"
+    state_path.write_text(FlyerProjectStore(projects=[project]).model_dump_json(indent=2), encoding="utf-8")
+
+    monkeypatch.setattr(mod, "validate_text_manifest_file", lambda *_args, **_kwargs: type("Result", (), {"ok": True, "blockers": []})())
+    monkeypatch.setattr(sys, "argv", [
+        "send-flyer-package",
+        "--jid", "15551234567@c.us",
+        "--project-id", project.project_id,
+        "--state-path", str(state_path),
+        "--log-path", str(log_path),
+    ])
+
+    assert mod.main() == 2
+
+    out = json.loads(capsys.readouterr().out)
+    assert "sidecar visual QA is disabled" in out["blockers"]
+
+
+def test_dry_run_project_delivery_can_explicitly_allow_sidecar_visual_qa(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    mod = _load_script()
+    project = _project(tmp_path)
+    for asset, output_format in zip(project.assets, ["whatsapp_image", "instagram_post", "instagram_story", "printable_pdf"]):
+        _write_visual_qa(Path(asset.path), output_format=output_format, qa_source="sidecar_test")
+    state_path = tmp_path / "projects.json"
+    log_path = tmp_path / "decisions.log"
+    state_path.write_text(FlyerProjectStore(projects=[project]).model_dump_json(indent=2), encoding="utf-8")
+
+    monkeypatch.setattr(mod, "validate_text_manifest_file", lambda *_args, **_kwargs: type("Result", (), {"ok": True, "blockers": []})())
+    monkeypatch.setattr(sys, "argv", [
+        "send-flyer-package",
+        "--jid", "15551234567@c.us",
+        "--project-id", project.project_id,
+        "--state-path", str(state_path),
+        "--log-path", str(log_path),
+        "--dry-run-bridge",
+        "--allow-sidecar-visual-qa",
+    ])
+
+    assert mod.main() == 0
+
+
+def test_direct_asset_delivery_requires_break_glass(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    mod = _load_script()
+    asset = tmp_path / "manual.png"
+    asset.write_bytes(b"asset")
+    monkeypatch.setattr(mod, "validate_text_manifest_file", lambda *_args, **_kwargs: type("Result", (), {"ok": True, "blockers": []})())
+    monkeypatch.setattr(sys, "argv", [
+        "send-flyer-package",
+        "--jid", "15551234567@c.us",
+        "--asset", str(asset),
+        "--dry-run-bridge",
+    ])
+
+    with pytest.raises(SystemExit, match="direct --asset sends require --allow-unverified-asset"):
+        mod.main()
 
 
 def test_delivery_report_summarizes_actionable_project_status(tmp_path, monkeypatch):

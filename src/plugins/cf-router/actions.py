@@ -1722,6 +1722,20 @@ def trigger_release_flyer_guest_order(*, sender_phone: Optional[str], chat_id: s
     )
 
 
+def find_reserved_flyer_guest_order(sender_phone: Optional[str], chat_id: str, project_id: str) -> Optional[dict]:
+    if not sender_phone:
+        return None
+    ok, _detail, doc = _trigger_flyer_guest_order(
+        "--find-reserved",
+        "--sender-phone", sender_phone,
+        "--chat-id", chat_id,
+        "--project-id", project_id,
+    )
+    if ok and doc and doc.get("reserved_order"):
+        return doc
+    return None
+
+
 def find_paid_flyer_guest_order(sender_phone: Optional[str], chat_id: str) -> Optional[dict]:
     if not sender_phone:
         return None
@@ -2327,6 +2341,7 @@ def send_flyer_concept_previews(chat_id: str, project_id: str) -> tuple[bool, st
             project_id=project_id,
             project_version=int(project.get("version") or 1),
             output_format="concept_preview",
+            allow_sidecar=False,
         )
         if not visual.ok:
             return False, "", "visual_qa_failed: " + "; ".join(visual.blockers)

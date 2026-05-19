@@ -23,6 +23,7 @@ import re
 import threading
 import time
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from typing import Any, Optional
 
 from . import actions
@@ -541,6 +542,12 @@ def _try_flyer_primary_intercept(
             return quota_result
         ready_ok, ready_detail = actions.flyer_source_edit_preflight(project or {})
         if not ready_ok:
+            actions.invoke_update_flyer_project(
+                project_id,
+                "--queue-manual-review",
+                "--manual-reason", "source_edit_provider_unavailable",
+                "--manual-detail", ready_detail[:500],
+            )
             ack_ok, outbound_message_id, ack_err = actions.send_flyer_manual_edit_ack(
                 chat_id,
                 project_id,
@@ -574,6 +581,12 @@ def _try_flyer_primary_intercept(
                 if ack_ok else f"cf-router flyer exact edit delivery failed: project {project_id}"
             )
         else:
+            actions.invoke_update_flyer_project(
+                project_id,
+                "--queue-manual-review",
+                "--manual-reason", "source_edit_generation_failed",
+                "--manual-detail", gen_detail[:500],
+            )
             ack_ok, manual_mid, ack_err = actions.send_flyer_manual_edit_ack(
                 chat_id,
                 project_id,
@@ -850,6 +863,8 @@ def _reserve_flyer_access_or_reply(
 ) -> tuple[str, Optional[dict]]:
     if not consume_quota:
         return "none", None
+    if actions.find_reserved_flyer_guest_order(phone, chat_id, project_id):
+        return "guest", None
     paid_guest_order = actions.find_paid_flyer_guest_order(phone, chat_id)
     if paid_guest_order:
         ok_guest, detail_guest, _guest_doc = actions.trigger_reserve_flyer_guest_order(
@@ -1460,6 +1475,16 @@ def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_
             "reason": f"cf-router flyer brand asset: {result.get('next_status')}"}
 
 
+def _similar_to_active_project_request(body: str, active_project: dict) -> bool:
+    current = " ".join(str(active_project.get("raw_request") or "").split()).lower()
+    incoming = " ".join((body or "").split()).lower()
+    if not current or not incoming:
+        return False
+    if incoming == current or incoming in current or current in incoming:
+        return True
+    return SequenceMatcher(None, incoming, current).ratio() >= 0.82
+
+
 def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, media_path: Optional[str] = None) -> Optional[dict]:
     message_id = _extract_message_id(event, chat_id, text)
     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
@@ -1473,6 +1498,21 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         return None
 
     project_id = str(active_project.get("project_id") or "")
+    if customer and customer.get("status") not in {"trial", "active"}:
+        if not actions.find_paid_flyer_guest_order(phone, chat_id) and not actions.find_reserved_flyer_guest_order(phone, chat_id, project_id):
+            reply = actions.flyer_customer_not_active_reply(customer)
+            ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+            actions.audit_intercepted(
+                reason="flyer_customer_not_active",
+                chat_id=chat_id,
+                subprocess_rc=0 if ack_ok else 3,
+                detail=(
+                    f"project_id={project_id}; customer_id={customer.get('customer_id') or ''}; "
+                    f"status={customer.get('status') or ''}; sender_role={role}; "
+                    f"ack_message_id={mid}; ack_error={err[:300]}"
+                ),
+            )
+            return {"action": "skip", "reason": "cf-router flyer customer not active"}
     status = str(active_project.get("status") or "")
     body = " ".join(actions.flyer_visible_message_text(text).split())
     lower = body.lower()
@@ -1482,6 +1522,7 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
             bool(media_path)
             or status not in {"intake_started", "collecting_required_info", "awaiting_assets"}
             or not actions.flyer_project_has_required_fields(active_project)
+            or not _similar_to_active_project_request(body, active_project)
         )
     ):
         return None

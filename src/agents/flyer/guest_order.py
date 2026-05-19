@@ -219,6 +219,11 @@ def find_paid_guest_order(*, state_path: Path, sender_phone: str, chat_id: str) 
     return load_guest_order_store(state_path).find_paid_order_by_sender(sender_phone, chat_id)
 
 
+def find_reserved_guest_order(*, state_path: Path, sender_phone: str, chat_id: str, project_id: str) -> Optional[FlyerGuestOrder]:
+    store = load_guest_order_store(state_path)
+    return _find_reserved_guest_order(store, sender_phone=sender_phone, chat_id=chat_id, project_id=project_id)
+
+
 def _reply_for_order(order: FlyerGuestOrder) -> str:
     price = f"${order.unit_price_cents / 100:.2f}".rstrip("0").rstrip(".")
     if order.status == "paid":

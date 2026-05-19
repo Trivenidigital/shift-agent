@@ -35,6 +35,7 @@ def test_delivery_script_can_send_by_project_id():
     assert "--project-id" in text
     assert "validate_text_manifest_file" in text
     assert "--allow-unverified-asset" in text
+    assert "--allow-sidecar-visual-qa" in text
     assert "--dry-run-bridge" in text
     assert "FLYER_TEXT_QA_BREAK_GLASS" in text
     assert "project.status != \"finalizing_assets\"" in text
@@ -52,6 +53,9 @@ def test_delivery_script_can_send_by_project_id():
     assert '"status": "delivered"' in text
     assert '"status": "delivered"' not in finalize
     assert "audit_uncertain_delivery_block" in text
+    smoke = (SCRIPTS / "smoke-flyer-quality").read_text(encoding="utf-8")
+    assert "write_visual_qa_report" in smoke
+    assert "--allow-sidecar-visual-qa" in smoke
 
 
 def test_delivery_report_installed_and_smoked_for_operator_visibility():
@@ -82,12 +86,14 @@ def test_guest_order_script_installed_for_quick_flyer_path():
     assert "--release" in script
     assert "--consume" in script
     assert "--find-paid" in script
+    assert "--find-reserved" in script
     assert "is_quick_flyer_campaign_cta" in actions
     assert "trigger_start_flyer_guest_order" in actions
     assert "trigger_reserve_flyer_guest_order" in actions
     assert "trigger_release_flyer_guest_order" in actions
     assert "trigger_consume_flyer_guest_order" in actions
     assert "find_paid_flyer_guest_order" in actions
+    assert "find_reserved_flyer_guest_order" in actions
     assert "quick_flyer_payment" in hooks
 
 

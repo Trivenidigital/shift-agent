@@ -228,6 +228,7 @@ def main() -> int:
     p.add_argument("--asset", action="append", default=[])
     p.add_argument("--caption", default="Your final flyer package is ready.")
     p.add_argument("--allow-unverified-asset", action="store_true")
+    p.add_argument("--allow-sidecar-visual-qa", action="store_true")
     p.add_argument("--break-glass-reason", default="")
     p.add_argument("--dry-run-bridge", action="store_true")
     args = p.parse_args()
@@ -255,6 +256,10 @@ def main() -> int:
         assets.extend(Path(asset.path) for asset in pending_project_assets)
     if not assets:
         raise SystemExit("no assets to send; pass --asset or --project-id")
+    if project is None and not args.allow_unverified_asset:
+        raise SystemExit("direct --asset sends require --allow-unverified-asset and break-glass reason")
+    if args.allow_sidecar_visual_qa and not args.dry_run_bridge:
+        raise SystemExit("--allow-sidecar-visual-qa is only allowed with --dry-run-bridge")
 
     failures = []
     outbound_ids = []
@@ -308,6 +313,7 @@ def main() -> int:
                     project_id=project.project_id,
                     project_version=project.version,
                     output_format=expected_output_format,
+                    allow_sidecar=args.allow_sidecar_visual_qa,
                 )
                 if not visual.ok:
                     project_asset = next((row for row in pending_project_assets if Path(row.path) == Path(asset)), None)

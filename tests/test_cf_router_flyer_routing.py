@@ -814,6 +814,134 @@ def test_repeated_full_request_during_open_intake_generates_existing_project(mon
     assert result == {"action": "skip", "reason": "cf-router flyer active: generated F0050"}
 
 
+def test_explicit_new_request_escapes_different_ready_intake_project(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    active_project = {
+        "project_id": "F1000",
+        "status": "intake_started",
+        "customer_phone": "+17329837841",
+        "raw_request": "Create flyer for Fresh Meats chicken promo.",
+        "fields": {"event_or_business_name": "Fresh Meats", "notes": "chicken promo"},
+        "concepts": [],
+        "revisions": [],
+    }
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
+    monkeypatch.setattr(actions, "flyer_project_has_required_fields", lambda _project: True)
+
+    result = hooks._try_flyer_active_project_intercept(
+        "Create flyer for Diwali grocery sale with sweets boxes $9.99",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "new-diwali"},
+    )
+
+    assert result is None
+
+
+def test_ineligible_customer_cannot_finalize_existing_active_project(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    active_project = {
+        "project_id": "F9999",
+        "status": "awaiting_final_approval",
+        "customer_phone": "+17329837841",
+        "raw_request": "Create flyer",
+        "concepts": [{"concept_id": "C1"}],
+    }
+    sent = []
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "payment_pending"})
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
+    monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
+    monkeypatch.setattr(actions, "find_reserved_flyer_guest_order", lambda _phone, _chat_id, _project_id: None)
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "finalize_and_send_flyer", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("inactive customer must not finalize")))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+
+    result = hooks._try_flyer_active_project_intercept(
+        "Approve",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "approve-inactive"},
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer customer not active"}
+    assert sent and "waiting for payment" in sent[0].lower()
+
+
+def test_exact_edit_manual_queue_ack_persists_manual_review_state(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    calls = {}
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial", "business_name": "Lakshmis Kitchen"})
+    monkeypatch.setattr(actions, "is_vague_flyer_start", lambda _text, has_media=False: False)
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: None)
+    monkeypatch.setattr(actions, "flyer_location_block_message", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(actions, "trigger_check_flyer_reference_scope", lambda **_kwargs: (True, "allow", {"decision": "allow"}))
+    monkeypatch.setattr(actions, "trigger_create_flyer_project", lambda **_kwargs: (True, "created", {"project_id": "F2000", "status": "manual_edit_required", "assets": [{"kind": "reference_image", "path": "C:/tmp/ref.png", "mime_type": "image/png"}]}))
+    monkeypatch.setattr(hooks, "_reserve_flyer_access_or_reply", lambda *_args, **_kwargs: ("quota", None))
+    monkeypatch.setattr(actions, "flyer_source_edit_preflight", lambda _project: (False, "source edit provider is not configured"))
+    monkeypatch.setattr(actions, "send_flyer_manual_edit_ack", lambda *_args, **_kwargs: (True, "manual-mid", ""))
+
+    def fake_update(project_id, *args):
+        calls["update"] = (project_id, args)
+        return True, "queued"
+
+    monkeypatch.setattr(actions, "invoke_update_flyer_project", fake_update)
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+
+    result = hooks._try_flyer_primary_intercept(
+        "Please update this flyer. Change the date.",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "exact-edit"},
+        force_new=True,
+        media_path="C:/tmp/ref.png",
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer exact edit queued: project F2000"}
+    assert calls["update"][0] == "F2000"
+    assert "--queue-manual-review" in calls["update"][1]
+
+
+def test_manual_completed_guest_order_uses_existing_reserved_order(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    active_project = {
+        "project_id": "F7777",
+        "status": "awaiting_final_approval",
+        "customer_phone": "+17329837841",
+        "raw_request": "Edit uploaded flyer/source artwork.",
+        "concepts": [{"concept_id": "C1"}],
+        "manual_review": {"status": "completed"},
+    }
+    calls = {}
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
+    monkeypatch.setattr(actions, "find_reserved_flyer_guest_order", lambda _phone, _chat_id, _project_id: {"reserved_order": True})
+    monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda *_args: (_ for _ in ()).throw(AssertionError("held guest order should be reused")))
+    monkeypatch.setattr(actions, "trigger_flyer_reserve_quota", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("guest manual order must not fall through to quota")))
+    monkeypatch.setattr(actions, "finalize_and_send_flyer", lambda *_args: (True, "sent"))
+
+    def fake_consume(**kwargs):
+        calls["consume"] = kwargs
+        return True, "consumed", {}
+
+    monkeypatch.setattr(actions, "trigger_consume_flyer_guest_order", fake_consume)
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+
+    result = hooks._try_flyer_active_project_intercept(
+        "APPROVE",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "manual-approve"},
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer active: finalized F7777"}
+    assert calls["consume"]["project_id"] == "F7777"
+
+
 @pytest.mark.parametrize("text, expected", [
     (
         "CONFIRM. Create a flyer for weekend sale with 20% off.",

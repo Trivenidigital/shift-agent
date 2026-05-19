@@ -13,6 +13,7 @@ sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(SRC_ROOT / "platform"))
 
 from schemas import (  # noqa: E402
+    FlyerManualReview,
     FlyerProjectStore,
     FlyerRequestFields,
     FlyerRevision,
@@ -52,6 +53,9 @@ def main() -> int:
     p.add_argument("--revision-text", default="")
     p.add_argument("--message-id", default="")
     p.add_argument("--approve-message-id", default="")
+    p.add_argument("--queue-manual-review", action="store_true")
+    p.add_argument("--manual-reason", default="")
+    p.add_argument("--manual-detail", default="")
     p.add_argument("--state-path", default=str(STATE_PATH))
     args = p.parse_args()
 
@@ -186,6 +190,20 @@ def main() -> int:
                     "status": "finalizing_assets",
                     "approved_message_id": args.approve_message_id,
                 })
+                should_write = True
+            if args.queue_manual_review:
+                now = datetime.now(timezone.utc)
+                manual = updated.manual_review.model_copy(update={
+                    "status": "queued",
+                    "reason": args.manual_reason or "operator_review_required",
+                    "detail": (args.manual_detail or "").strip()[:500],
+                    "queued_at": updated.manual_review.queued_at or now,
+                })
+                if updated.status != "manual_edit_required":
+                    if not is_flyer_transition_allowed(updated.status, "manual_edit_required"):
+                        raise SystemExit(f"invalid transition {updated.status}->manual_edit_required")
+                    updated = updated.model_copy(update={"status": "manual_edit_required"})
+                updated = updated.model_copy(update={"manual_review": manual})
                 should_write = True
             if should_write:
                 updated = updated.model_copy(update={"updated_at": datetime.now(timezone.utc)})

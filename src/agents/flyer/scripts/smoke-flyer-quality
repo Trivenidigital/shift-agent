@@ -22,6 +22,10 @@ try:
     from flyer_render import build_asset_manifest, inspect_rendered_asset, render_concept_previews, render_final_package, validate_text_manifest_file  # type: ignore  # noqa: E402
 except ImportError:
     from agents.flyer.render import build_asset_manifest, inspect_rendered_asset, render_concept_previews, render_final_package, validate_text_manifest_file  # noqa: E402
+try:
+    from flyer_visual_qa import run_visual_qa, write_visual_qa_report  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.visual_qa import run_visual_qa, write_visual_qa_report  # noqa: E402
 
 
 def _project() -> FlyerProject:
@@ -148,6 +152,19 @@ def main() -> int:
                 source="rendered",
                 original_message_id="smoke-quality-approve",
             )
+            for asset, spec in zip(final_assets, final_specs):
+                (Path(str(spec.path) + ".ocr.txt")).write_text(
+                    "Thursday Dosa Night Special Triveni Pineville +1 704 324 3322 Non-veg combo $16.99",
+                    encoding="utf-8",
+                )
+                qa_report = run_visual_qa(
+                    project,
+                    spec.path,
+                    output_format=spec.output_format,
+                    asset_id=asset.asset_id,
+                    allow_sidecar=True,
+                )
+                write_visual_qa_report(qa_report, spec.path)
             project = project.model_copy(update={
                 "assets": [*preview_assets, *final_assets],
                 "final_asset_ids": [asset.asset_id for asset in final_assets],
@@ -165,6 +182,7 @@ def main() -> int:
                     "--state-path", str(state_path),
                     "--log-path", str(log_path),
                     "--dry-run-bridge",
+                    "--allow-sidecar-visual-qa",
                 ],
                 capture_output=True,
                 text=True,
