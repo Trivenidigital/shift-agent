@@ -93,7 +93,7 @@ def _style_for_request(text: str) -> str:
 
 def _strip_offer_from_business_name(name: str) -> str:
     name = re.sub(
-        r"\s+\b(?:promoting|offering|featuring|advertising|announcing)\b.+$",
+        r"\s+\b(?:promoting|offering|featuring|advertising|announcing|using|with|including)\b.+$",
         "",
         name,
         flags=re.IGNORECASE,
@@ -103,7 +103,18 @@ def _strip_offer_from_business_name(name: str) -> str:
 
 def _clean_extracted_label(value: str) -> str:
     value = re.sub(r"[*_`]+", "", value or "")
+    value = re.sub(r"^(?:a\s+|an\s+)?(?:new\s+original|original|premium|local|professional)\s+", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"\s+\b(?:using|with)\s+(?:the\s+)?(?:attached|uploaded|provided)?\s*(?:logo|template|reference|image).*$", "", value, flags=re.IGNORECASE)
     return value.strip(" .:-")
+
+
+def _invalid_venue(value: str) -> bool:
+    clean = re.sub(r"\s+", " ", value or "").strip(" .,:;").lower()
+    return (
+        not clean
+        or clean in {"and", "or", "the bottom", "bottom", "top", "end", "customer profile"}
+        or clean.startswith(("phone ", "phone number", "contact ", "address and phone"))
+    )
 
 
 def _load_store(path: Path) -> FlyerProjectStore:
@@ -175,6 +186,7 @@ def _extract_fields(raw_request: str, *, now: datetime) -> FlyerRequestFields:
             event_name = menu_match.group(1).strip(" .")
             event_name = re.sub(r"\s+\b(?:flyer|flier|poster|banner)\b$", "", event_name, flags=re.IGNORECASE).strip(" .")
             event_name = re.sub(r"^(?:customer|business|client)\s+", "", event_name, flags=re.IGNORECASE).strip(" .")
+            event_name = _clean_extracted_label(event_name)
     if not event_name:
         offer_match = re.search(
             r"\b((?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)?\s*"
@@ -232,7 +244,7 @@ def _extract_fields(raw_request: str, *, now: datetime) -> FlyerRequestFields:
     if address_match:
         address = address_match.group(1).strip(" .")
         venue = f"{venue}, {address}" if venue else address
-    if re.search(r"\b(?:the\s+)?(?:bottom|top|end)\b", venue, flags=re.IGNORECASE):
+    if re.search(r"\b(?:the\s+)?(?:bottom|top|end)\b", venue, flags=re.IGNORECASE) or _invalid_venue(venue):
         venue = ""
 
     contact_match = re.search(r"\bcontact[:\s]+(.+?)(?=\.|$)", text, flags=re.IGNORECASE)

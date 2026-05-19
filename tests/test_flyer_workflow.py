@@ -247,6 +247,22 @@ def test_extract_revision_patch_handles_item_specific_price_to_new_price():
     assert "Poori with Chicken $14.99" in patch.notes_update
 
 
+def test_extract_revision_patch_replaces_decimal_price_before_period():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Weekend Breakfast Specials",
+        contact_info="+1 732 983 7841",
+        notes="Items: Poori with Chicken $14.99; Kheema Dosa $12.99. Thursday to Sunday.",
+    ))
+
+    patch = extract_revision_patch(project, "Change Kheema Dosa price to $13.99.")
+
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert "Kheema Dosa $13.99." in patch.notes_update
+    assert "$13.99.99" not in patch.notes_update
+    assert "Kheema Dosa $12.99" not in patch.notes_update
+
+
 def test_extract_revision_patch_flags_item_specific_price_without_adjacent_price():
     project = _project(FlyerRequestFields(
         event_or_business_name="Weekend Breakfast Specials",

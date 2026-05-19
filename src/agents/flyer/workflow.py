@@ -224,9 +224,11 @@ def _replace_item_price_once(source: str, item: str, new_price: str) -> tuple[st
     if len(matches) > 1:
         return source, "appears multiple times"
     match = matches[0]
-    segment_start = max(source.rfind(".", 0, match.start()), source.rfind(",", 0, match.start())) + 1
-    next_stops = [idx for idx in (source.find(".", match.end()), source.find(",", match.end())) if idx != -1]
-    segment_end = min(next_stops) if next_stops else len(source)
+    delimiter = r"[,;\n]|(?<!\d)\.(?!\d)"
+    before_stops = [m.end() for m in re.finditer(delimiter, source[:match.start()])]
+    segment_start = max(before_stops) if before_stops else 0
+    after_match = re.search(delimiter, source[match.end():])
+    segment_end = match.end() + after_match.start() if after_match else len(source)
     segment = source[segment_start:segment_end]
     price_match = re.search(r"\$\s*\d+(?:\.\d{2})?", segment)
     if not price_match:

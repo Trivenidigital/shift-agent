@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 import base64
+import http.client
 import io
 import json
 import sys
@@ -295,6 +296,25 @@ def test_image_prompt_skips_blank_optional_fields_for_price_list():
     assert "Venue: " not in prompt
 
 
+def test_image_prompt_does_not_turn_weekend_special_badge_into_schedule():
+    project = _complete_project().model_copy(update={
+        "fields": FlyerRequestFields(
+            event_or_business_name="Lakshmis Kitchn",
+            venue_or_location="90 Brybar Dr St Johns FL",
+            contact_info="+17329837841",
+            notes=(
+                "Headline: Family Combo Feast. Include badges Fresh, Homemade, Weekend Special. "
+                "Use green, gold, and warm rustic textures."
+            ),
+        ),
+    })
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+
+    assert "Schedule: Weekend Special" not in prompt
+    assert "Weekend Special. Use green" not in prompt
+
+
 def test_image_prompt_sanitizes_exact_customer_facts_from_model_context():
     project = _complete_project()
     fields = project.fields.model_copy(update={
@@ -556,6 +576,46 @@ def test_openrouter_image_renderer_posts_modalities_and_writes_data_url(tmp_path
     assert "Controlled customer copy" in prompt
     assert "$7.99" in prompt
     assert "recurring schedule" in prompt
+    assert specs[0].path.read_bytes().startswith(b"\x89PNG")
+
+
+def test_openrouter_image_renderer_retries_incomplete_chunk_read(tmp_path, monkeypatch):
+    project = _complete_project()
+    calls = {"count": 0}
+
+    class _Resp:
+        def __init__(self, fail: bool):
+            self.fail = fail
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            if self.fail:
+                raise http.client.IncompleteRead(b'{"choices":')
+            png = base64.b64encode(_png_bytes()).decode("ascii")
+            return json.dumps({
+                "choices": [{"message": {"images": [{"image_url": {"url": f"data:image/png;base64,{png}"}}]}}]
+            }).encode("utf-8")
+
+    def _fake_urlopen(_req, timeout):
+        calls["count"] += 1
+        return _Resp(fail=calls["count"] == 1)
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", _fake_urlopen)
+
+    specs = render_concept_previews(
+        project,
+        tmp_path,
+        model="openai/gpt-5-image",
+        quality="medium",
+    )
+
+    assert calls["count"] == 2
     assert specs[0].path.read_bytes().startswith(b"\x89PNG")
 
 

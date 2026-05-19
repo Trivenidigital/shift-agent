@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import base64
 import hashlib
+import http.client
 import io
 import json
 import mimetypes
@@ -20,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -278,18 +280,13 @@ def _schedule_hint(project: FlyerProject) -> str:
     if schedule_match:
         return schedule_match.group(1).strip(" .")
     recurring_match = re.search(
-        r"((?:daily|weekdays?|weekends?|every\s+[a-z]+|mon(?:day)?\s*-\s*fri(?:day)?).{0,80})(?:\.|$)",
+        r"((?:daily|weekdays|weekends|every\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend)|mon(?:day)?\s*-\s*fri(?:day)?).{0,80})(?:\.|$)",
         text,
         flags=re.IGNORECASE,
     )
     if recurring_match:
         return recurring_match.group(1).strip(" .")
-    weekend_match = re.search(
-        r"(.{0,80}(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend).{0,80})(?:\.|$)",
-        text,
-        flags=re.IGNORECASE,
-    )
-    return weekend_match.group(1).strip(" .") if weekend_match else ""
+    return ""
 
 
 def _normalize_fact_text(text: str) -> str:
@@ -1187,14 +1184,25 @@ def _openrouter_image_bytes(project: FlyerProject, *, concept_id: str, output_fo
         },
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=OPENROUTER_TIMEOUT_SEC) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as e:
-        err = e.read().decode("utf-8", errors="replace")[:1000]
-        raise FlyerRenderError(f"OpenRouter image HTTP {e.code}: {err}") from e
-    except urllib.error.URLError as e:
-        raise FlyerRenderError(f"OpenRouter image connection failed: {e.reason}") from e
+    body = ""
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=OPENROUTER_TIMEOUT_SEC) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+            break
+        except urllib.error.HTTPError as e:
+            err = e.read().decode("utf-8", errors="replace")[:1000]
+            raise FlyerRenderError(f"OpenRouter image HTTP {e.code}: {err}") from e
+        except (urllib.error.URLError, http.client.IncompleteRead, TimeoutError) as e:
+            last_error = e
+            if attempt == 2:
+                if isinstance(e, urllib.error.URLError):
+                    raise FlyerRenderError(f"OpenRouter image connection failed: {e.reason}") from e
+                raise FlyerRenderError(f"OpenRouter image response failed: {type(e).__name__}: {e}") from e
+            time.sleep(2 * (attempt + 1))
+    if not body and last_error is not None:
+        raise FlyerRenderError(f"OpenRouter image response failed: {type(last_error).__name__}: {last_error}") from last_error
     doc = json.loads(body)
     choices = doc.get("choices") or []
     if not choices:

@@ -175,6 +175,70 @@ def test_fresh_meats_product_promo_is_ready_without_event_or_contact(tmp_path, m
     assert actions.flyer_project_has_required_fields(project)
 
 
+def test_create_project_cleans_logo_prompt_business_and_bad_venue(tmp_path, monkeypatch, capsys):
+    module = _load_script(monkeypatch)
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    customers_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_customer_sequence": 2,
+        "customers": [{
+            "customer_id": "CUST0001",
+            "business_name": "Lakshmis Kitchn",
+            "business_address": "90 Brybar Dr St Johns FL",
+            "primary_chat_id": "17329837841@s.whatsapp.net",
+            "onboarded_by_phone": "+17329837841",
+            "public_phone": "+17329837841",
+            "business_whatsapp_number": "+17329837841",
+            "authorized_request_numbers": ["+17329837841"],
+            "business_category": "Indian Restaurant",
+            "preferred_language": "en",
+            "plan_id": "trial",
+            "status": "trial",
+            "created_at": datetime(2026, 5, 18, tzinfo=timezone.utc).isoformat(),
+            "updated_at": datetime(2026, 5, 18, tzinfo=timezone.utc).isoformat(),
+            "activated_at": datetime(2026, 5, 18, tzinfo=timezone.utc).isoformat(),
+            "monthly_flyers_used": 0,
+            "billing_provider": "manual",
+            "payment_currency": "USD",
+        }],
+        "onboarding_sessions": [],
+    }), encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+17329837841",
+        "--message-id", "m-logo",
+        "--raw-request", (
+            "Create a premium local restaurant flyer for Lakshmis Kitchn using the attached logo. "
+            "Headline: Family Combo Feast. Tagline: Fresh food. Happy family. "
+            "Feature biryani, dosa, and curry as hero foods. Include badges Fresh, Homemade, Weekend Special. "
+            "Use green, gold, and warm rustic textures. Include address and phone from customer profile."
+        ),
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+
+    assert project["fields"]["event_or_business_name"] == "Lakshmis Kitchn"
+    assert project["fields"]["venue_or_location"] == "90 Brybar Dr St Johns FL"
+    assert project["fields"]["event_time"] is None
+
+
+def test_create_project_cleans_new_original_reference_business_name(monkeypatch):
+    module = _load_script(monkeypatch)
+    raw_request = (
+        "Create a new original Lakshmis Kitchn flyer. Extract the visible snack item names and prices "
+        "from the attached sample/reference flyer, but do not copy SAMPLE MARKET branding."
+    )
+
+    fields = module._extract_fields(raw_request, now=datetime(2026, 5, 19, tzinfo=timezone.utc))
+
+    assert fields.event_or_business_name == "Lakshmis Kitchn"
+
+
 def test_all_starter_briefs_create_required_flyer_projects(tmp_path, monkeypatch, capsys):
     sys.path.insert(0, str(SRC))
     from agents.flyer.starter_briefs import all_starter_briefs  # noqa: E402
