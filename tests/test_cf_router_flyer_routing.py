@@ -1321,6 +1321,76 @@ def test_lid_only_active_service_project_resumes_generation(monkeypatch):
     assert calls["preview"]["phone"] == "+918985741562"
 
 
+def test_manual_source_edit_status_check_gets_queue_update_not_clarification(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    active_project = {
+        "project_id": "F0053",
+        "customer_phone": "+17329837841",
+        "status": "manual_edit_required",
+        "raw_request": (
+            "Original customer request: use this flyer for Lakshmis Kitchen. "
+            "Replace Triveni Express branding and use saved account details."
+        ),
+        "updated_at": "2026-05-19T02:11:00Z",
+    }
+    sent = []
+
+    monkeypatch.setattr(actions, "is_flyer_enabled", lambda: True)
+    monkeypatch.setattr(actions, "flyer_campaign_cta_text", lambda _text: "")
+    monkeypatch.setattr(hooks, "_try_flyer_intake_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_account_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_reference_scope_choice_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_reference_scope_authorization_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_existing_onboarding_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
+    monkeypatch.setattr(
+        actions,
+        "invoke_update_flyer_project",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("status check must not be parsed as an edit")),
+    )
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.append((chat_id, text)) or (True, "status-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+
+    result = hooks.pre_gateway_dispatch(SimpleNamespace(
+        text="any update",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="f0053-status-1",
+    ))
+
+    assert result == {
+        "action": "skip",
+        "reason": "cf-router flyer exact edit status for F0053",
+    }
+    assert sent
+    assert "already have the requested changes" in sent[0][1]
+    assert "No more details are needed" in sent[0][1]
+    assert "Please send the exact text" not in sent[0][1]
+
+
+def test_flyer_project_status_request_classifier_keeps_edits_separate():
+    actions = _load_actions()
+
+    for text in [
+        "any update",
+        "Any updates?",
+        "what's the status",
+        "is the flyer ready",
+        "still waiting",
+        "how long will it take",
+    ]:
+        assert actions.is_flyer_project_status_request(text)
+
+    for text in [
+        "update this flyer, change the phone number",
+        "change this flyer date to May 22",
+        "add one more item for $9.99",
+        "replace the Triveni Express logo",
+    ]:
+        assert not actions.is_flyer_project_status_request(text)
+
+
 def test_flyer_customer_lookup_can_match_lid_primary_chat_without_phone(tmp_path):
     actions = _load_actions()
     customer_path = tmp_path / "customers.json"

@@ -1545,6 +1545,20 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any) -> 
         return None
 
     if status == "manual_edit_required":
+        if actions.is_flyer_project_status_request(body):
+            reply = actions.flyer_manual_edit_status_reply(active_project)
+            ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+            actions.audit_intercepted(
+                reason="flyer_reference_exact_edit_status" if ack_ok else "flyer_primary_failed",
+                chat_id=chat_id,
+                subprocess_rc=0 if ack_ok else 3,
+                detail=(
+                    f"project_id={project_id}; queued_status_check=true; sender_role={role}; "
+                    f"ack_message_id={mid}; ack_error={err[:300]}"
+                ),
+            )
+            return {"action": "skip",
+                    "reason": f"cf-router flyer exact edit status for {project_id}"}
         ok, detail = actions.invoke_update_flyer_project(
             project_id,
             "--revision-text", body,
