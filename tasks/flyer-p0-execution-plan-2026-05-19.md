@@ -159,6 +159,14 @@ Mirrors parent backlog §"90% Readiness Exit Criteria"; closed only when:
 
 Updates land here in reverse-chronological order after each slice merge/deploy.
 
+### 2026-05-19 — S5 P0-4 visual/OCR QA gate hardening: MERGED + DEPLOYED
+
+- PR #120 merged at `bb7a6f8` (2 commits: feat `d5650eb` + review-fix `3526a35`).
+- Three parallel reviewers dispatched (truthfulness, send-safety, runtime-readiness). Truthfulness reviewer found 2 HIGH false-positive classes that defeated the QA gate's purpose: (1) substring containment without word boundary — locked `Idly` would have matched OCR `Idlysugar`, locked `Acme` would have matched `AcmeBuilding`; (2) phone digits-only globbed across the entire OCR digit-stream — `Order 17 — discount 32-98-37841` would have falsely matched locked `+17329837841`. Both fixed: `_text_value_present_in` uses word-boundary anchored on sides where the value starts/ends with a word char (so `$13.99` still matches non-word-prefix), `_phone_value_present_in` checks contiguous digit-bearing runs only (em-dashes break the run), and `_looks_like_phone` lower bound raised 7→10 digits so SKUs/order numbers don't trip the phone path. Send-safety reviewer: LGTM (all gates preserved, no schema migration, `safe_io.atomic_write_text` is POSIX-atomic). Runtime reviewer: LGTM (no surprise OpenRouter spend in smoke; `vision-auth-smoke` already fail-closes deploy when key missing).
+- Deploy tag `deploy-20260519-180815-3526a35d` on `main-vps`; all 4 Flyer smokes green; full pytest 1161 passed (+15 vs S4 baseline; +4 review-fix tests on top of +11 initial).
+- Post-deploy verification: VPS `/opt/shift-agent/flyer_visual_qa.py` carries the new helpers (8 matches for `_phone_value_present_in`/`_text_value_present_in`/`PLACEHOLDER_RE`).
+- Lessons: (1) **Naive substring is dangerous for short fact values** — 1-6 character item names ("Tea", "Idly", "Dosa") embed in countless longer words. Word-boundary anchoring is mandatory when the gate's false-pass cost is "shipped a wrong flyer to a customer." (2) **Digit-only normalization needs locality** — stripping non-digits from the whole OCR text glues unrelated regions together. Contiguous-run matching preserves the visual locality of a phone block on the rendered output. (3) **The truthfulness reviewer's lens is unique** — both HIGHs came from this reviewer alone; the send-safety and runtime reviewers couldn't have caught them. Three orthogonal vectors continues to earn its cost.
+
 ### 2026-05-19 — S4 P0-2 locked-fact renderer integration + missing-required-facts gate: MERGED + DEPLOYED
 
 - PR #119 merged at `dfcbea4` (2 commits: feat `3b9eaf6` + review-fix `41a9e9e`).
