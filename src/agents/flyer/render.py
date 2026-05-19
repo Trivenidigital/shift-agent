@@ -1774,6 +1774,14 @@ def render_source_edit_preview(project: FlyerProject, output_dir: Path | str, *,
     _write_generated_image_contained(raw, path, size=(1080, 1350))
     quality_report = inspect_rendered_asset(path, expected_width=1080, expected_height=1350, mime_type="image/png")
     if not quality_report.ok:
+        # P0-5 follow-up: clean up the orphan preview + raw-background files
+        # before propagating the FlyerRenderError. Otherwise every quality-
+        # check retry left a stale png in asset_dir (bounded but unbounded
+        # over many retries on the same project). The generate-flyer-concepts
+        # FlyerRenderError handler downstream rewrites manual_review state
+        # but doesn't touch disk artifacts; this is the right place.
+        path.unlink(missing_ok=True)
+        _raw_background_path(path).unlink(missing_ok=True)
         raise FlyerRenderError(f"edited concept failed quality check: {quality_report.blockers}")
     reference = _source_edit_reference_asset(project)
     write_text_manifest(
