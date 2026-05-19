@@ -35,6 +35,10 @@ PLACEHOLDER_RE = re.compile(
 
 
 _PHONE_DIGITS_RE = re.compile(r"\D+")
+# Localized run of digit-bearing characters (digits + common phone separators).
+# Anchors the digit-only comparison to a contiguous visual phone block so a
+# stray "17" elsewhere in the OCR doesn't glue onto the locked phone's digits.
+_PHONE_RUN_RE = re.compile(r"[\d\s\-().+/]{8,}")
 
 
 def _normalize_text_for_match(text: str) -> str:
@@ -46,26 +50,55 @@ def _normalize_text_for_match(text: str) -> str:
 
 
 def _looks_like_phone(value: str) -> bool:
+    # Raised lower bound from 7 → 10 digits so short SKUs / order numbers can't
+    # be treated as phones (the digits-only path is too permissive for 7-digit
+    # values that incidentally collide).
     digits = _PHONE_DIGITS_RE.sub("", value)
-    return len(digits) >= 7 and len(digits) <= 15
+    return 10 <= len(digits) <= 15
+
+
+def _phone_value_present_in(text: str, fact_value: str) -> bool:
+    """Phone presence: locked digits must appear inside a contiguous OCR
+    digit-bearing run (digits + spaces/hyphens/parens/dots/plus). Prevents
+    cross-region globbing where 'Order 17' + 'price 32-98-37841' get
+    concatenated into a false-positive '17329837841'.
+    """
+    value_digits = _PHONE_DIGITS_RE.sub("", fact_value)
+    for run in _PHONE_RUN_RE.findall(text):
+        run_digits = _PHONE_DIGITS_RE.sub("", run)
+        if value_digits in run_digits:
+            return True
+    return False
+
+
+def _text_value_present_in(normalized_text: str, normalized_value: str) -> bool:
+    """Word-boundary-aware presence: locked 'Idly' must NOT match 'Idlysugar',
+    locked 'Acme' must NOT match 'Acme Building Services'. Anchors with `\\b`
+    only on sides where the value itself starts/ends with a word char, so
+    values like '$13.99' (starts non-word) still match.
+    """
+    if not normalized_value:
+        return False
+    left = r"\b" if normalized_value[:1].isalnum() else ""
+    right = r"\b" if normalized_value[-1:].isalnum() else ""
+    pattern = left + re.escape(normalized_value) + right
+    return re.search(pattern, normalized_text) is not None
 
 
 def _value_present_in(normalized_text: str, fact_value: str) -> bool:
     """Smart presence check for a locked-fact value in the OCR'd text.
 
-    Phones: compare digits-only so locked '+17329837841' matches OCR
-    '+1 732 983 7841' or '+1 (732) 983 7841'.
+    Phones: digits-only within a contiguous OCR digit-run (see
+    `_phone_value_present_in`).
 
-    Other text: strip apostrophes + collapse whitespace + casefold before
-    substring match so locked "Lakshmi's Kitchen" matches OCR
-    "Lakshmis Kitchen".
+    Other text: apostrophe-strip + whitespace-collapse + casefold + word-
+    boundary (see `_text_value_present_in`) so locked "Lakshmi's Kitchen"
+    matches "Lakshmis Kitchen" but locked "Idly" does NOT match "Idlysugar".
     """
-    normalized_value = _normalize_text_for_match(fact_value)
     if _looks_like_phone(fact_value):
-        value_digits = _PHONE_DIGITS_RE.sub("", fact_value)
-        text_digits = _PHONE_DIGITS_RE.sub("", normalized_text)
-        return value_digits in text_digits
-    return normalized_value in normalized_text
+        return _phone_value_present_in(normalized_text, fact_value)
+    normalized_value = _normalize_text_for_match(fact_value)
+    return _text_value_present_in(normalized_text, normalized_value)
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_TIMEOUT_SEC = 60
 VISION_QA_MODEL = os.environ.get("FLYER_VISUAL_QA_MODEL") or os.environ.get("VISION_MODEL") or "openai/gpt-4o-mini"

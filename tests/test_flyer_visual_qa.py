@@ -286,6 +286,95 @@ def test_validate_visual_qa_report_rejects_missing_report(tmp_path):
     assert any("missing" in b for b in result.blockers)
 
 
+def test_visual_qa_does_not_match_short_item_inside_longer_word(tmp_path):
+    """Regression for review HIGH: locked item name 'Idly' must NOT match OCR
+    'Idlysugar' / 'Idlywood'. Pre-fix the naive substring check would have
+    passed QA. With word-boundary matching the QA correctly fails the missing-
+    item-name blocker."""
+    from agents.flyer.visual_qa import run_visual_qa
+    from schemas import FlyerLockedFact
+
+    project = _project().model_copy(update={
+        "locked_facts": [
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Fresh Meats", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:0:name", label="Item", value="Idly", source="customer_text", required=True),
+        ],
+    })
+
+    artifact = _write_sidecar(tmp_path, "Fresh Meats. Featuring Idlysugar Premium Combo $13.99")
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+    assert report.status == "failed"
+    assert any("item:0:name" in b for b in report.blockers)
+
+
+def test_visual_qa_does_not_match_business_name_as_prefix_of_unrelated_brand(tmp_path):
+    """Regression: locked business_name='Acme' must NOT match OCR mentioning
+    'Acme Building Services' as an unrelated brand. Word-boundary is on both
+    sides so 'Acme' alone is required."""
+    from agents.flyer.visual_qa import run_visual_qa
+    from schemas import FlyerLockedFact
+
+    project = _project().model_copy(update={
+        "locked_facts": [
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Acme", source="customer_text", required=True),
+        ],
+    })
+
+    # OCR mentions a multi-word brand starting with Acme but NOT just "Acme" as a stand-alone token.
+    # Word boundary correctly accepts "Acme" + space + "Building" as having word-boundary on both
+    # sides of "Acme" — so it IS a match. The actual false-positive class is the SUBSTRING form
+    # like "AcmeBuilding" (no space). Pin that.
+    artifact = _write_sidecar(tmp_path, "Featured: AcmeBuilding Premium Services $99")
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+    assert report.status == "failed", "QA must not match 'Acme' inside 'AcmeBuilding'"
+
+
+def test_visual_qa_phone_must_be_in_contiguous_run_not_globbed_across_text(tmp_path):
+    """Regression for review HIGH: locked phone '+17329837841' must NOT match
+    if its digits only appear by concatenating across unrelated text regions
+    (e.g. 'Order 17 — discount 32-98-37841'). Phone digits-only checked WITHIN
+    a single contiguous digit-bearing run, not against the whole-OCR digit
+    stream."""
+    from agents.flyer.visual_qa import run_visual_qa
+    from schemas import FlyerLockedFact
+
+    project = _project().model_copy(update={
+        "locked_facts": [
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Fresh Meats", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+        ],
+    })
+
+    # Across-region: digit fragments separated by an em-dash (not in the phone-run regex).
+    artifact = _write_sidecar(tmp_path, "Fresh Meats Order 17 — discount 32-98-37841 today")
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+    assert report.status == "failed"
+    assert any("contact_phone" in b for b in report.blockers)
+
+
+def test_visual_qa_short_local_number_is_not_treated_as_phone(tmp_path):
+    """Regression: a 7-digit value (legacy local number, or accidental SKU)
+    should NOT trigger the phone digits-only path which is too permissive at
+    that length. The word-boundary text path applies instead."""
+    from agents.flyer.visual_qa import run_visual_qa
+    from schemas import FlyerLockedFact
+
+    project = _project().model_copy(update={
+        "locked_facts": [
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Fresh Meats", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="sku", label="SKU", value="7329837", source="customer_text", required=True),
+        ],
+    })
+
+    # OCR has '17329837841' as a phone, which contains digits "7329837" as substring.
+    # Phone-path is disabled for sub-10-digit values → text path applies → word-boundary check on
+    # "7329837" against text "+17329837841" — fails because the digits are inside a longer digit run.
+    artifact = _write_sidecar(tmp_path, "Fresh Meats Contact: +17329837841 today")
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+    assert report.status == "failed"
+    assert any("sku" in b for b in report.blockers)
+
+
 def test_visual_qa_provider_unavailable_when_sidecar_disabled_and_no_openrouter_key(tmp_path, monkeypatch):
     """Provider unavailable scenario: no OPENROUTER_API_KEY and sidecar disabled means
     run_visual_qa returns provider_unavailable. The downstream generate/finalize callers
