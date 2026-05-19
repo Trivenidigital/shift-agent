@@ -266,3 +266,103 @@ def test_generate_deferred_reference_smoke_can_use_sidecar_visual_qa(monkeypatch
     assert persisted["status"] == "awaiting_final_approval"
     assert "Smoke Menu" in Path(str(rendered) + ".ocr.txt").read_text(encoding="utf-8")
     assert "Idly" in Path(str(rendered) + ".ocr.txt").read_text(encoding="utf-8")
+
+
+def test_generate_source_edit_provider_unavailable_queues_manual_review(monkeypatch, tmp_path, capsys):
+    """P0-5: when render_source_edit_preview raises FlyerRenderError (e.g.
+    OPENAI_API_KEY missing or provider 5xx), generate-flyer-concepts must
+    queue the project for manual review with reason_code=
+    `source_edit_provider_unavailable` rather than crashing — operator CLI
+    retries and edge cases where the cf-router preflight didn't catch the
+    failure must still land the project in a triage-visible state."""
+    module = _load_script(monkeypatch)
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    state_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    reference = asset_dir / "F0001-reference.png"
+    reference.write_bytes(b"fake image bytes")
+    project = _project_with_pending_reference(reference)
+    # Mark as source-edit so the script takes the render_source_edit_preview
+    # branch. The raw_request keyword `edit uploaded flyer/source artwork`
+    # is the dispatcher signal `_is_source_edit_project` keys on.
+    project["raw_request"] = "edit uploaded flyer/source artwork: change phone to +17329837841"
+    # Reference is already extracted (not in failure state) so the script
+    # bypasses the reference-failure manual-review path and reaches the
+    # source-edit render call.
+    project["reference_extractions"][0]["provider"] = "openai"
+    project["reference_extractions"][0]["status"] = "ok"
+    project["reference_extractions"][0]["detail"] = "extracted"
+    state_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_sequence": 2,
+        "projects": [project],
+    }), encoding="utf-8")
+
+    def fake_render_source_edit(*_args, **_kwargs):
+        raise module.FlyerRenderError("OPENAI_API_KEY is missing")
+
+    monkeypatch.setattr(module, "render_source_edit_preview", fake_render_source_edit)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts",
+        "--project-id", "F0001",
+        "--state-path", str(state_path),
+        "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+    ])
+
+    rc = module.main()
+    assert rc == 2  # non-zero: signals manual-review-required to the caller
+    out = json.loads(capsys.readouterr().out)
+    assert "OPENAI_API_KEY" in out["source_edit_failed"]
+    assert out["manual_review_reason_code"] == "source_edit_provider_unavailable"
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "manual_edit_required"
+    assert persisted["manual_review"]["status"] == "queued"
+    assert persisted["manual_review"]["reason_code"] == "source_edit_provider_unavailable"
+    assert "OPENAI_API_KEY" in persisted["manual_review"]["detail"]
+
+
+def test_generate_source_edit_other_render_error_queues_provider_timeout(monkeypatch, tmp_path, capsys):
+    """Non-provider FlyerRenderError (e.g. quality check failure) maps to
+    `provider_timeout` so operator triage can distinguish "key missing" from
+    "model output unusable" without parsing the detail string."""
+    module = _load_script(monkeypatch)
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    state_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    reference = asset_dir / "F0001-reference.png"
+    reference.write_bytes(b"fake image bytes")
+    project = _project_with_pending_reference(reference)
+    project["raw_request"] = "edit uploaded flyer/source artwork: replace headline"
+    project["reference_extractions"][0]["provider"] = "openai"
+    project["reference_extractions"][0]["status"] = "ok"
+    project["reference_extractions"][0]["detail"] = "extracted"
+    state_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_sequence": 2,
+        "projects": [project],
+    }), encoding="utf-8")
+
+    def fake_render_source_edit(*_args, **_kwargs):
+        raise module.FlyerRenderError("edited concept failed quality check")
+
+    monkeypatch.setattr(module, "render_source_edit_preview", fake_render_source_edit)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts",
+        "--project-id", "F0001",
+        "--state-path", str(state_path),
+        "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+    ])
+
+    rc = module.main()
+    assert rc == 2
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "manual_edit_required"
+    assert persisted["manual_review"]["reason_code"] == "provider_timeout"

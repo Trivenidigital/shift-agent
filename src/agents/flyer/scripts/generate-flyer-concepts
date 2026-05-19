@@ -28,9 +28,9 @@ try:
 except ImportError:
     from agents.flyer.reference_extract import build_reference_extraction_provider, extract_reference  # noqa: E402
 try:
-    from flyer_render import build_asset_manifest, next_asset_number, render_concept_previews, render_source_edit_preview  # type: ignore  # noqa: E402
+    from flyer_render import FlyerRenderError, build_asset_manifest, next_asset_number, render_concept_previews, render_source_edit_preview  # type: ignore  # noqa: E402
 except ImportError:
-    from agents.flyer.render import build_asset_manifest, next_asset_number, render_concept_previews, render_source_edit_preview  # noqa: E402
+    from agents.flyer.render import FlyerRenderError, build_asset_manifest, next_asset_number, render_concept_previews, render_source_edit_preview  # noqa: E402
 try:
     from flyer_visual_qa import run_visual_qa, write_visual_qa_report  # type: ignore  # noqa: E402
 except ImportError:
@@ -209,14 +209,55 @@ def main() -> int:
             or "authorized flyer/source artwork update" in (project.raw_request or "").lower()
         )
         if source_edit_requested:
-            specs = [
-                render_source_edit_preview(
-                    project,
-                    asset_dir,
-                    model=cfg.flyer.edit_image_model,
-                    quality=cfg.flyer.edit_image_quality,
+            # P0-5: render_source_edit_preview raises FlyerRenderError when the
+            # provider key is missing or the image edit endpoint fails. The cf-
+            # router preflight catches this at routing time, but operator CLI
+            # invocations and retries bypass that gate. Catch here so the
+            # project lands in manual_edit_required with the typed reason_code
+            # instead of crashing the script (which would leave the project
+            # mid-transition with no manual_review row).
+            try:
+                specs = [
+                    render_source_edit_preview(
+                        project,
+                        asset_dir,
+                        model=cfg.flyer.edit_image_model,
+                        quality=cfg.flyer.edit_image_quality,
+                    )
+                ]
+            except FlyerRenderError as exc:
+                now = datetime.now(timezone.utc)
+                detail = str(exc)
+                # Provider key / endpoint failures map to source_edit_provider_unavailable;
+                # other render errors (quality check, format) map to provider_timeout
+                # which the manual queue dashboard surfaces as a transient issue.
+                lower = detail.lower()
+                if "openai" in lower or "api_key" in lower or "provider" in lower:
+                    reason_code = "source_edit_provider_unavailable"
+                else:
+                    reason_code = "provider_timeout"
+                manual = make_manual_review(
+                    reason_code=reason_code,
+                    detail=detail[:500],
+                    queued_at=now,
                 )
-            ]
+                with FileLock(Path(str(state_path) + ".lock")):
+                    store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
+                    for idx, current in enumerate(store.projects):
+                        if current.project_id == args.project_id:
+                            store.projects[idx] = current.model_copy(update={
+                                "status": "manual_edit_required",
+                                "manual_review": manual,
+                                "updated_at": now,
+                            })
+                            break
+                    atomic_write_text(state_path, store.model_dump_json(indent=2))
+                print(json.dumps({
+                    "project_id": args.project_id,
+                    "source_edit_failed": detail[:500],
+                    "manual_review_reason_code": reason_code,
+                }))
+                return 2
         else:
             specs = render_concept_previews(
                 project,

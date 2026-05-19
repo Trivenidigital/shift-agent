@@ -569,9 +569,15 @@ def _try_flyer_primary_intercept(
             return quota_result
         ready_ok, ready_detail = actions.flyer_source_edit_preflight(project or {})
         if not ready_ok:
+            # P0-5: route via --manual-reason-code (the typed enum field that the
+            # cockpit triage view groups + tallies on), not just --manual-reason
+            # (the free-form human label). S1's reason_code defaults to
+            # `operator_request` otherwise, which is wrong for a provider-
+            # unavailable / unsupported-media preflight failure.
             actions.invoke_update_flyer_project(
                 project_id,
                 "--queue-manual-review",
+                "--manual-reason-code", "source_edit_provider_unavailable",
                 "--manual-reason", "source_edit_provider_unavailable",
                 "--manual-detail", ready_detail[:500],
             )
@@ -837,6 +843,20 @@ def _try_flyer_reference_scope_authorization_intercept(text: str, chat_id: str, 
             return quota_result
         ready_ok, ready_detail = actions.flyer_source_edit_preflight(project or {})
         if not ready_ok:
+            # P0-5: also update the project state, not just send a customer
+            # ack. Pre-S6 this site only sent send_flyer_manual_edit_ack +
+            # released quota — the project stayed at intake_started, so the
+            # cockpit triage view never saw it and "any update?" status checks
+            # had no manual_review row to read. Now the project transitions to
+            # manual_edit_required with the typed reason_code so subsequent
+            # operator/customer status flows behave consistently.
+            queue_ok, queue_detail = actions.invoke_update_flyer_project(
+                project_id,
+                "--queue-manual-review",
+                "--manual-reason-code", "source_edit_provider_unavailable",
+                "--manual-reason", "source_edit_provider_unavailable",
+                "--manual-detail", ready_detail[:500],
+            )
             ack_ok, outbound_message_id, ack_err = actions.send_flyer_manual_edit_ack(
                 chat_id,
                 project_id,
@@ -847,11 +867,12 @@ def _try_flyer_reference_scope_authorization_intercept(text: str, chat_id: str, 
             actions.audit_intercepted(
                 reason="flyer_reference_exact_edit_queued",
                 chat_id=chat_id,
-                subprocess_rc=0 if ack_ok and release_ok else 3,
+                subprocess_rc=0 if ack_ok and release_ok and queue_ok else 3,
                 detail=(
                     f"project_id={project_id}; sender_role={role}; source={source}; "
                     f"source_edit_preflight_failed={ready_detail[:250]}; access={access}; "
                     f"release_ok={release_ok}; release_detail={release_detail[:250]}; "
+                    f"queue_ok={queue_ok}; queue_detail={queue_detail[:250]}; "
                     f"ack_message_id={outbound_message_id}; ack_error={ack_err[:300]}"
                 ),
             )

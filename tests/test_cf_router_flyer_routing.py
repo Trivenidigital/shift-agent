@@ -902,7 +902,14 @@ def test_exact_edit_manual_queue_ack_persists_manual_review_state(monkeypatch):
 
     assert result == {"action": "skip", "reason": "cf-router flyer exact edit queued: project F2000"}
     assert calls["update"][0] == "F2000"
-    assert "--queue-manual-review" in calls["update"][1]
+    args = calls["update"][1]
+    assert "--queue-manual-review" in args
+    # S6 P0-5: must use the TYPED reason_code (S1 enum) so the cockpit triage
+    # view groups + tallies on source_edit_provider_unavailable, not the
+    # default `operator_request` that --manual-reason alone would leave.
+    assert "--manual-reason-code" in args
+    code_idx = args.index("--manual-reason-code")
+    assert args[code_idx + 1] == "source_edit_provider_unavailable"
 
 
 def test_manual_completed_guest_order_uses_existing_reserved_order(monkeypatch):
