@@ -29,6 +29,31 @@ def test_scripts_use_atomic_writes_and_locks():
             assert "atomic_write_text" in text
 
 
+def test_manual_queue_exposes_triage_and_backfill():
+    queue_cli = (SCRIPTS / "flyer-manual-queue").read_text(encoding="utf-8")
+    assert "--triage" in queue_cli
+    assert "triage_summary" in queue_cli
+
+    backfill = SCRIPTS / "backfill-flyer-manual-reasons"
+    assert backfill.is_file(), "backfill-flyer-manual-reasons script missing"
+    body = backfill.read_text(encoding="utf-8")
+    assert "backfill_manual_reasons" in body
+    assert "--apply" in body
+    assert "FileLock" in body
+    assert "atomic_write_text" in body
+
+
+def test_manual_transition_sites_use_helper():
+    """Every code-path transition into manual_edit_required goes through make_manual_review()."""
+    for name in ["create-flyer-project", "generate-flyer-concepts", "finalize-flyer-assets"]:
+        text = (SCRIPTS / name).read_text(encoding="utf-8")
+        assert "make_manual_review" in text, f"{name} should call make_manual_review"
+
+    update_text = (SCRIPTS / "update-flyer-project").read_text(encoding="utf-8")
+    assert "--manual-reason-code" in update_text
+    assert "reason_code" in update_text
+
+
 def test_delivery_script_can_send_by_project_id():
     text = (SCRIPTS / "send-flyer-package").read_text(encoding="utf-8")
     finalize = (SCRIPTS / "finalize-flyer-assets").read_text(encoding="utf-8")

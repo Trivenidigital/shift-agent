@@ -188,6 +188,12 @@ if ! sudo -u shift-agent "$PY" /usr/local/bin/flyer-delivery-report --json > /de
 fi
 echo "Flyer delivery report smoke passed"
 
+if ! sudo -u shift-agent "$PY" /usr/local/bin/flyer-manual-queue --triage > /dev/null; then
+    echo "FAIL: Flyer manual-queue triage view failed"
+    exit 1
+fi
+echo "Flyer manual-queue triage smoke passed"
+
 if [ -x /usr/local/bin/credential-minimized-readiness ]; then
     "$PY" /usr/local/bin/credential-minimized-readiness --format text || true
 fi

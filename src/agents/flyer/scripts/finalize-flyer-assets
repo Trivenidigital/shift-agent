@@ -22,6 +22,10 @@ try:
     from flyer_visual_qa import run_visual_qa, write_visual_qa_report  # type: ignore  # noqa: E402
 except ImportError:
     from agents.flyer.visual_qa import run_visual_qa, write_visual_qa_report  # noqa: E402
+try:
+    from flyer_manual_queue import make_manual_review  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.manual_queue import make_manual_review  # noqa: E402
 
 
 STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
@@ -72,12 +76,11 @@ def main() -> int:
                 qa_reports.append(report)
             failed_qa = [report for report in qa_reports if report.status != "passed"]
             if failed_qa:
-                manual = project.manual_review.model_copy(update={
-                    "status": "queued",
-                    "reason": "visual_qa_failed",
-                    "detail": "; ".join(blocker for report in failed_qa for blocker in report.blockers)[:500],
-                    "queued_at": now,
-                })
+                manual = make_manual_review(
+                    reason_code="visual_qa_failed",
+                    detail="; ".join(blocker for report in failed_qa for blocker in report.blockers)[:500],
+                    queued_at=now,
+                )
                 store.projects[idx] = project.model_copy(update={
                     "status": "manual_edit_required",
                     "approved_message_id": args.approved_message_id,

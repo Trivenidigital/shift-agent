@@ -725,6 +725,19 @@ FlyerReferenceExtractionStatus = Literal["not_run", "ok", "low_confidence", "pro
 FlyerVisualQAStatus = Literal["passed", "failed", "not_run", "provider_unavailable"]
 FlyerVisualQASource = Literal["ocr_vision", "sidecar_test"]
 FlyerManualReviewStatus = Literal["none", "queued", "in_progress", "completed", "break_glass_sent"]
+FlyerManualReviewReason = Literal[
+    "unclassified",
+    "legacy_unknown",
+    "reference_low_confidence",
+    "reference_provider_unavailable",
+    "reference_unsupported",
+    "reference_not_run",
+    "visual_qa_failed",
+    "source_edit_provider_unavailable",
+    "operator_request",
+    "policy_block",
+    "provider_timeout",
+]
 FlyerAssetKind = Literal[
     "logo",
     "reference_image",
@@ -1481,6 +1494,7 @@ class FlyerManualReview(BaseModel):
     model_config = ConfigDict(extra="forbid")
     status: FlyerManualReviewStatus = "none"
     reason: str = Field(default="", max_length=120)
+    reason_code: FlyerManualReviewReason = "unclassified"
     detail: str = Field(default="", max_length=500)
     queued_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
@@ -4179,7 +4193,7 @@ __all__ = [
     "FlyerConfig", "FlyerWorkflowStatus", "FlyerOnboardingStatus", "FlyerLanguage", "FlyerCreationMode",
     "FlyerIntakeStatus", "FlyerIntakeSource", "FlyerOutputFormat", "FlyerImageQuality",
     "FlyerFactSource", "FlyerReferenceRole", "FlyerReferenceExtractionStatus",
-    "FlyerVisualQAStatus", "FlyerVisualQASource", "FlyerManualReviewStatus",
+    "FlyerVisualQAStatus", "FlyerVisualQASource", "FlyerManualReviewStatus", "FlyerManualReviewReason",
     "FlyerAssetKind", "FLYER_TRANSITIONS", "is_flyer_transition_allowed",
     "FlyerPlanTier", "FlyerBrandAsset", "FlyerUsageEvent", "FlyerPaymentRecord", "FlyerGuestOrder",
     "FLYER_AUTHORIZED_REQUESTER_LIMIT",
