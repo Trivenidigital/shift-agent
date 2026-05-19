@@ -16,7 +16,89 @@ import urllib.request
 from schemas import FlyerProject, FlyerVisualQAReport
 
 
-PLACEHOLDER_RE = re.compile(r"\[(?:price|phone|date|time|address|item|text)[^\]]*\]|lorem ipsum", re.IGNORECASE)
+# Bracketed slot leakage ([price], [phone], …) + lorem ipsum + common template-
+# editor placeholder text that leaks through generator/templates and would be
+# invisible to OCR-vs-locked-fact substring matching (the template text isn't a
+# customer fact, so no `missing required fact` blocker would fire). Operator
+# triage on production seeing any of these means we shipped a generic template
+# to a customer — fail-closed.
+PLACEHOLDER_RE = re.compile(
+    r"\[(?:price|phone|date|time|address|item|text|business[_ ]?name|tagline|headline|logo)[^\]]*\]"
+    r"|lorem ipsum"
+    r"|\byour\s+(?:logo|business\s+name|brand|text|tagline|headline|address|phone|contact|number|company\s+name)\s+here\b"
+    r"|\bclick\s+(?:here\s+)?to\s+(?:add|edit|insert)\b"
+    r"|\b(?:add|insert)\s+your\s+(?:logo|text|business\s+name|brand|headline|tagline)\b"
+    r"|\b(?:tap|press)\s+to\s+edit\b"
+    r"|\bsample\s+text\b",
+    re.IGNORECASE,
+)
+
+
+_PHONE_DIGITS_RE = re.compile(r"\D+")
+# Localized run of digit-bearing characters (digits + common phone separators).
+# Anchors the digit-only comparison to a contiguous visual phone block so a
+# stray "17" elsewhere in the OCR doesn't glue onto the locked phone's digits.
+_PHONE_RUN_RE = re.compile(r"[\d\s\-().+/]{8,}")
+
+
+def _normalize_text_for_match(text: str) -> str:
+    """Casefold + collapse whitespace + strip common typographic apostrophes."""
+    lowered = re.sub(r"\s+", " ", text).casefold()
+    for ch in ("‘", "’", "ʼ", "`", "'"):
+        lowered = lowered.replace(ch, "")
+    return lowered
+
+
+def _looks_like_phone(value: str) -> bool:
+    # Raised lower bound from 7 → 10 digits so short SKUs / order numbers can't
+    # be treated as phones (the digits-only path is too permissive for 7-digit
+    # values that incidentally collide).
+    digits = _PHONE_DIGITS_RE.sub("", value)
+    return 10 <= len(digits) <= 15
+
+
+def _phone_value_present_in(text: str, fact_value: str) -> bool:
+    """Phone presence: locked digits must appear inside a contiguous OCR
+    digit-bearing run (digits + spaces/hyphens/parens/dots/plus). Prevents
+    cross-region globbing where 'Order 17' + 'price 32-98-37841' get
+    concatenated into a false-positive '17329837841'.
+    """
+    value_digits = _PHONE_DIGITS_RE.sub("", fact_value)
+    for run in _PHONE_RUN_RE.findall(text):
+        run_digits = _PHONE_DIGITS_RE.sub("", run)
+        if value_digits in run_digits:
+            return True
+    return False
+
+
+def _text_value_present_in(normalized_text: str, normalized_value: str) -> bool:
+    """Word-boundary-aware presence: locked 'Idly' must NOT match 'Idlysugar',
+    locked 'Acme' must NOT match 'Acme Building Services'. Anchors with `\\b`
+    only on sides where the value itself starts/ends with a word char, so
+    values like '$13.99' (starts non-word) still match.
+    """
+    if not normalized_value:
+        return False
+    left = r"\b" if normalized_value[:1].isalnum() else ""
+    right = r"\b" if normalized_value[-1:].isalnum() else ""
+    pattern = left + re.escape(normalized_value) + right
+    return re.search(pattern, normalized_text) is not None
+
+
+def _value_present_in(normalized_text: str, fact_value: str) -> bool:
+    """Smart presence check for a locked-fact value in the OCR'd text.
+
+    Phones: digits-only within a contiguous OCR digit-run (see
+    `_phone_value_present_in`).
+
+    Other text: apostrophe-strip + whitespace-collapse + casefold + word-
+    boundary (see `_text_value_present_in`) so locked "Lakshmi's Kitchen"
+    matches "Lakshmis Kitchen" but locked "Idly" does NOT match "Idlysugar".
+    """
+    if _looks_like_phone(fact_value):
+        return _phone_value_present_in(normalized_text, fact_value)
+    normalized_value = _normalize_text_for_match(fact_value)
+    return _text_value_present_in(normalized_text, normalized_value)
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_TIMEOUT_SEC = 60
 VISION_QA_MODEL = os.environ.get("FLYER_VISUAL_QA_MODEL") or os.environ.get("VISION_MODEL") or "openai/gpt-4o-mini"
@@ -151,14 +233,17 @@ def run_visual_qa(
             extracted_text="",
             checked_at=datetime.now(timezone.utc),
         )
-    normalized = re.sub(r"\s+", " ", extracted_text).casefold()
+    normalized = _normalize_text_for_match(extracted_text)
     if PLACEHOLDER_RE.search(extracted_text):
         blockers.append("placeholder text is visible in generated flyer")
     blockers.extend(note for note in provider_notes if "placeholder" in note.lower() or "unreadable" in note.lower() or "garbled" in note.lower())
     for fact in project.locked_facts:
         if not fact.required:
             continue
-        if fact.value.casefold() not in normalized:
+        # _value_present_in handles phone-digit-only matching and apostrophe-
+        # tolerant text matching so locked '+17329837841' / "Lakshmi's Kitchen"
+        # don't false-fail against OCR '+1 732 983 7841' / 'Lakshmis Kitchen'.
+        if not _value_present_in(normalized, fact.value):
             blockers.append(f"missing required visible fact: {fact.fact_id}")
     return FlyerVisualQAReport(
         project_id=project.project_id,
