@@ -1894,6 +1894,17 @@ def _reference_scope_choice(text: str) -> str:
     return ""
 
 
+def _reference_scope_explicit_choice(text: str) -> str:
+    body = " ".join(flyer_visible_message_text(text).split()).lower().strip(" .!,:;-")
+    if body in {"1", "option 1", "path 1", "choice 1"}:
+        return "authorized"
+    if body in {"2", "option 2", "path 2", "choice 2"}:
+        return "use_reference"
+    if "use as reference" in body or "only a reference" in body or "reference only" in body:
+        return "use_reference"
+    return ""
+
+
 def _read_reference_scope_state(now: Optional[float] = None) -> dict:
     now_ts = time.time() if now is None else now
     try:
@@ -2065,9 +2076,8 @@ def _consume_flyer_reference_authorization_reply_locked(
     note = str(matched.get("authorization_note") or "").strip()
     combined = "; ".join(part for part in [note, body] if part)
     matched["authorization_note"] = combined
-    remaining.append(matched)
     _write_reference_scope_state({"schema_version": 1, "pending": remaining})
-    matched["choice"] = "authorization_note_recorded"
+    matched["choice"] = "use_account_details"
     matched["authorization_reply"] = body
     return matched
 
@@ -2082,7 +2092,7 @@ def consume_flyer_reference_authorization_reply(
     body = " ".join(flyer_visible_message_text(text).split()).strip()
     if not body:
         return None
-    if _reference_scope_choice(body):
+    if _reference_scope_explicit_choice(body):
         return None
 
     with _reference_scope_state_lock():

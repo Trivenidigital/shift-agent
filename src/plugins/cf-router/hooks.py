@@ -639,8 +639,8 @@ def _try_flyer_reference_scope_choice_intercept(text: str, chat_id: str, event: 
             "Flyer Studio\n"
             "------------\n"
             f"Thanks. Please reply with how {source} is connected to {business_name}, "
-            f"and send the {business_name} logo/details to use.\n\n"
-            "Once I have that, I can continue with the flyer update."
+            f"and include any {business_name} logo/details that are different from the saved account details.\n\n"
+            "If the saved account details are correct, a short answer like \"co-owner\" is enough."
         )
         ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
         actions.audit_intercepted(

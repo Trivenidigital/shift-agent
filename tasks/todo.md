@@ -1019,3 +1019,7 @@ Review results:
   - [x] Write design spec and get it reviewed by two parallel agents.
   - [x] Build fixes with TDD and focused verification.
   - [ ] Create PR and get three parallel review vectors before merge.
+- [x] Flyer reference-scope relationship memory fix (2026-05-19): after a customer chooses authorized use for an unrelated-looking source flyer, answers like `Co-owner` must be remembered and should continue the flyer update instead of asking the same relationship/logo/details question repeatedly.
+  - Root cause: `consume_flyer_reference_authorization_reply()` stored the relationship as `authorization_note_recorded`, kept the pending row alive, and only continued on the exact phrase `use account details`.
+  - Fix: first relationship/detail reply now consumes the pending authorization row, carries the note into the authorized source-edit project path, and uses saved account details by default. Exact option/reference choices are still excluded from this detail parser.
+  - Review: focused router/static tests `81 passed`; broader Flyer suite `250 passed`; compileall and `git diff --check` passed.
