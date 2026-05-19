@@ -58,6 +58,7 @@ STATUS_LINES = {
     "finalizing_assets": "The final files are being prepared for delivery.",
     "delivered": "The final flyer files have been delivered.",
     "completed": "This flyer project is complete.",
+    "closed_no_send": "This flyer project was closed by the operator without sending final assets.",
 }
 
 
@@ -167,9 +168,9 @@ def build_project_status_reply(project: FlyerProject) -> str:
         missing facts vs visual QA failed vs source-edit provider down) need
         different operator/customer signals.
       - For all other statuses, STATUS_LINES is the source of truth.
-      - manual_review with status `break_glass_sent` or `completed` is no
-        longer a customer-blocking signal; the project's own status drives
-        the reply (the operator already acted out-of-band or completed it).
+      - manual_review with status `break_glass_sent`, `completed`, or
+        `closed_no_send` is no longer a customer-blocking signal; the
+        project's own status drives the reply (the operator already acted).
     """
     line = STATUS_LINES.get(project.status, "I have this flyer project open.")
     manual = getattr(project, "manual_review", None)

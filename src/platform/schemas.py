@@ -646,6 +646,7 @@ FlyerWorkflowStatus = Literal[
     "finalizing_assets",
     "delivered",
     "completed",
+    "closed_no_send",
 ]
 
 FlyerOnboardingStatus = Literal[
@@ -724,7 +725,7 @@ FlyerReferenceRole = Literal[
 FlyerReferenceExtractionStatus = Literal["not_run", "ok", "low_confidence", "provider_unavailable", "unsupported"]
 FlyerVisualQAStatus = Literal["passed", "failed", "not_run", "provider_unavailable"]
 FlyerVisualQASource = Literal["ocr_vision", "sidecar_test"]
-FlyerManualReviewStatus = Literal["none", "queued", "in_progress", "completed", "break_glass_sent"]
+FlyerManualReviewStatus = Literal["none", "queued", "in_progress", "completed", "break_glass_sent", "closed_no_send"]
 FlyerManualReviewReason = Literal[
     "unclassified",
     "legacy_unknown",
@@ -754,7 +755,7 @@ FLYER_TRANSITIONS: dict[FlyerWorkflowStatus, set[FlyerWorkflowStatus]] = {
     "intake_started": {"collecting_required_info"},
     "collecting_required_info": {"awaiting_assets", "generating_concepts"},
     "awaiting_assets": {"generating_concepts"},
-    "manual_edit_required": {"generating_concepts", "revising_design", "awaiting_final_approval"},
+    "manual_edit_required": {"generating_concepts", "revising_design", "awaiting_final_approval", "closed_no_send"},
     "generating_concepts": {"awaiting_concept_selection", "awaiting_final_approval", "manual_edit_required"},
     "awaiting_concept_selection": {"revising_design"},
     "revising_design": {"generating_concepts", "awaiting_final_approval"},
@@ -762,6 +763,7 @@ FLYER_TRANSITIONS: dict[FlyerWorkflowStatus, set[FlyerWorkflowStatus]] = {
     "finalizing_assets": {"delivered", "manual_edit_required"},
     "delivered": {"completed", "revising_design"},
     "completed": set(),
+    "closed_no_send": set(),
 }
 
 

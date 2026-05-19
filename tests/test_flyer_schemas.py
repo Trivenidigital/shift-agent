@@ -191,6 +191,7 @@ def test_project_state_machine_allows_only_expected_transitions():
         ("awaiting_assets", "generating_concepts"),
         ("manual_edit_required", "generating_concepts"),
         ("manual_edit_required", "revising_design"),
+        ("manual_edit_required", "closed_no_send"),
         ("generating_concepts", "awaiting_concept_selection"),
         ("generating_concepts", "awaiting_final_approval"),
         ("generating_concepts", "manual_edit_required"),
@@ -208,6 +209,7 @@ def test_project_state_machine_allows_only_expected_transitions():
     assert not is_flyer_transition_allowed("awaiting_final_approval", "completed")
     assert not is_flyer_transition_allowed("manual_edit_required", "delivered")
     assert not is_flyer_transition_allowed("manual_edit_required", "completed")
+    assert not is_flyer_transition_allowed("closed_no_send", "revising_design")
     assert not is_flyer_transition_allowed("completed", "revising_design")
 
 
@@ -371,4 +373,5 @@ def test_workflow_status_literal_contains_requested_states():
         "finalizing_assets",
         "delivered",
         "completed",
+        "closed_no_send",
     }

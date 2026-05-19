@@ -26,6 +26,7 @@ Valid states:
 - `finalizing_assets`
 - `delivered`
 - `completed`
+- `closed_no_send`
 
 ## Inputs from `dispatch_shift_agent`
 

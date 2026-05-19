@@ -79,6 +79,34 @@ def test_complete_manual_project_rejects_nonqueued_project(tmp_path, monkeypatch
         complete_manual_project(store, "F9100", asset, reason="designer approved")
 
 
+def test_close_manual_project_marks_no_send_terminal_and_excludes_from_queue():
+    from agents.flyer.manual_queue import close_manual_project, list_manual_queue
+
+    store = FlyerProjectStore(projects=[_manual_project()])
+
+    updated = close_manual_project(store, "F9100", reason="stale/superseded operator cleanup")
+    project = updated.projects[0]
+
+    assert project.status == "closed_no_send"
+    assert project.manual_review.status == "closed_no_send"
+    assert project.manual_review.detail == "stale/superseded operator cleanup"
+    assert project.manual_review.completed_at is not None
+    assert list_manual_queue(updated) == []
+
+
+def test_close_manual_project_rejects_nonqueued_project():
+    from agents.flyer.manual_queue import close_manual_project
+
+    project = _manual_project().model_copy(update={
+        "status": "delivered",
+        "manual_review": FlyerManualReview(status="none"),
+    })
+    store = FlyerProjectStore(projects=[project])
+
+    with pytest.raises(ValueError, match="not queued for manual close"):
+        close_manual_project(store, "F9100", reason="stale/superseded operator cleanup")
+
+
 def test_make_manual_review_sets_status_reason_and_code():
     from agents.flyer.manual_queue import make_manual_review
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""List and complete Flyer Studio manual-review queue items."""
+"""List and disposition Flyer Studio manual-review queue items."""
 from __future__ import annotations
 
 import argparse
@@ -15,9 +15,9 @@ sys.path.insert(0, str(SRC_ROOT))
 from schemas import FlyerProjectStore  # noqa: E402
 from safe_io import FileLock, atomic_write_text  # noqa: E402
 try:
-    from flyer_manual_queue import complete_manual_project, list_manual_queue, triage_summary  # type: ignore  # noqa: E402
+    from flyer_manual_queue import close_manual_project, complete_manual_project, list_manual_queue, triage_summary  # type: ignore  # noqa: E402
 except ImportError:
-    from agents.flyer.manual_queue import complete_manual_project, list_manual_queue, triage_summary  # noqa: E402
+    from agents.flyer.manual_queue import close_manual_project, complete_manual_project, list_manual_queue, triage_summary  # noqa: E402
 
 
 STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
@@ -35,6 +35,7 @@ def main() -> int:
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--triage", action="store_true", help="grouped + reason-tallied operator view")
     parser.add_argument("--complete", metavar="PROJECT_ID")
+    parser.add_argument("--close", metavar="PROJECT_ID", help="operator-close without sending assets")
     parser.add_argument("--asset")
     parser.add_argument("--reason", default="")
     args = parser.parse_args()
@@ -56,7 +57,15 @@ def main() -> int:
             atomic_write_text(state_path, store.model_dump_json(indent=2))
         print(json.dumps({"project_id": args.complete, "status": "awaiting_final_approval"}))
         return 0
-    raise SystemExit("pass --list, --triage, or --complete")
+    if args.close:
+        if not args.reason.strip():
+            raise SystemExit("--close requires --reason")
+        with FileLock(Path(str(state_path) + ".lock")):
+            store = close_manual_project(_load(state_path), args.close, reason=args.reason)
+            atomic_write_text(state_path, store.model_dump_json(indent=2))
+        print(json.dumps({"project_id": args.close, "status": "closed_no_send"}))
+        return 0
+    raise SystemExit("pass --list, --triage, --complete, or --close")
 
 
 if __name__ == "__main__":

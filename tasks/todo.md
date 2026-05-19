@@ -922,7 +922,7 @@ Review results:
 - [x] Diagnose and fix bad `F0014` flyer quality: production used `openai/gpt-5.4-image-2` high quality, but the parser produced `a breakfast` and the compositor pasted raw request text into a black debug panel. Added recurring breakfast title cleanup, menu-item extraction, schedule cleanup, and a designed menu-card overlay.
 - [x] Verification: `python -m pytest tests/test_flyer_create_project.py tests/test_flyer_renderer.py tests/test_flyer_onboarding.py tests/test_cf_router_flyer_routing.py tests/test_cf_router_plugin.py -q` -> `62 passed, 103 skipped`; script byte-compile and `git diff --check` passed.
 - [x] Deploy to `main-vps` as `deploy-20260517-164403-59407d33`; repaired `F0014` without another model call by reusing the raw generated background, replacing the bad overlay, updating state/hash, and sending corrected preview `3EB0B626DCB1E86518B369`.
-- [ ] Controlled direct generation for customer-grade Flyer Studio posters (2026-05-17).
+- [x] Controlled direct generation for customer-grade Flyer Studio posters (2026-05-17).
   - Drift-check tag: extends-Hermes
   - Hermes-first analysis: reuse Hermes WhatsApp ingress, image-reference media passing, JSON project state, OpenRouter image gateway, existing delivery, and text-manifest send gate. No new Hermes substrate is needed; net-new scope is the Flyer-specific poster copy plan, direct image prompt contract, and production render path that lets the image model produce integrated poster typography instead of a text-free background plus overlay.
   - [x] Add regression tests proving menu poster prompts include exact copy, item cards, reference-following instructions, and no longer tell the image model to suppress all readable text.
@@ -949,7 +949,7 @@ Review results:
   - [x] Verify locally, deploy, and document live behavior.
   - Review: focused quick-order/Flyer/cf-router suite `117 passed, 109 skipped`; byte-compile and `git diff --check` passed. Deployed with staging deploy script as `deploy-20260517-195240-59407d33`; all smoke checks passed. Temp-state VPS smoke proved guest order `pending_payment -> paid -> used` and one paid order is no longer reusable after consumption.
   - Operational note: live `quick_flyer_checkout_url_template` is not configured yet, so the CTA reply currently says the payment link is not configured. Configure a real payment template before sending this CTA to prospects.
-- [ ] Flyer Studio adaptive language/mode intake and location entitlement gate (2026-05-17).
+- [x] Flyer Studio adaptive language/mode intake and location entitlement gate (2026-05-17).
   - Drift-check tag: extends-Hermes
   - Hermes-first analysis: reuse Hermes WhatsApp ingress, cf-router pre-gateway interception, sender identity, existing Flyer customer/onboarding JSON state, guest-order state, project creation, media/reference handling, quota, and delivery. Net-new scope is only Flyer-specific preflight state, guided intake prompts, language selection copy, and per-customer location entitlement validation.
   - Product decisions:
@@ -967,28 +967,28 @@ Review results:
   - [x] Add focused tests for CTA language-first, adaptive fast path, guided flow, text+media handling, and cross-location blocking.
   - [x] Deploy to `main-vps`, run local/VPS smoke, and send a fresh business campaign for manual testing.
   - Review: focused local suite `125 passed, 106 skipped`; `py_compile` and `git diff --check` passed. Deployed `deploy-20260517-212022-59407d33` through the staged deploy script after the first installed-script pass exposed the known self-overwrite gap for the new `flyer_intake.py` install rule. VPS smoke proved language-first -> Malayalam -> guided onboarding handoff, location block copy for Pineville/Virginia, and vague-vs-complete adaptive detection. Fresh campaign sent to `+17329837841` with media `3EB019AACFFB76C2C61F6C` and CTA `3EB0BFADC4F5AC9750C509`.
-- [ ] F0023 empty-project regression repair (2026-05-17): bare `Create flyer` retried from `+19802005022` created F0020-F0023 in `intake_started` with no concepts because the deterministic new-project classifier still returned true for vague action text.
+- [x] F0023 empty-project regression repair (2026-05-17): bare `Create flyer` retried from `+19802005022` created F0020-F0023 in `intake_started` with no concepts because the deterministic new-project classifier still returned true for vague action text.
   - [x] Reproduce with failing classifier regression test: `should_start_new_flyer_over_active("Create flyer")` returned true.
   - [x] Fix root cause so vague flyer starts do not count as new-project triggers.
   - [x] Add defense-in-depth guard in primary project creation so fallback Flyer routing starts intake instead of creating a blank project.
   - [x] Verify locally with focused Flyer/cf-router suite.
   - [x] Deploy and retire stale empty F0020-F0023 live projects.
   - Review: focused regression passed; broader Flyer/cf-router suite `125 passed, 106 skipped`; `py_compile` and `git diff --check` passed. Deployed `deploy-20260517-215123-59407d33`; live classifier now reports `Create flyer vague=True start_new=False` and detailed breakfast request `vague=False start_new=True`. Retired empty projects F0020-F0023 to `completed` after backup.
-- [ ] F0024 attached-sample readiness repair (2026-05-17): guided request asked to extract items/prices from a sample flyer, but no media/reference asset reached the project; the readiness heuristic treated generic `items/prices` words as enough and produced a misleading processing acknowledgement.
+- [x] F0024 attached-sample readiness repair (2026-05-17): guided request asked to extract items/prices from a sample flyer, but no media/reference asset reached the project; the readiness heuristic treated generic `items/prices` words as enough and produced a misleading processing acknowledgement.
   - [x] Reproduce with failing regression test for attachment-dependent request without assets.
   - [x] Mark attachment-dependent briefs as incomplete until reference media exists.
   - [x] Replace misleading incomplete-project acknowledgement with an actionable prompt to attach the sample flyer or type details.
   - [x] Verify locally with focused Flyer/cf-router suite.
   - [x] Deploy and monitor live F0024 state/customer prompt.
   - Review: focused local Flyer/cf-router suite `126 passed, 106 skipped`; `py_compile` and `git diff --check` passed. Deployed `deploy-20260517-232228-59407d33`. Live audit showed F0024 later recovered through generation/approval/delivery before a corrective prompt was needed: status `delivered`, selected `C1`, final assets `A0002-A0005`, delivery audit at `2026-05-17T23:17:25Z`.
-- [ ] F0024 guided media/language fidelity repair (2026-05-17): customer attached a sample flyer during Guided Mode, selected Telugu, and asked to extract items/prices; generated design was visually good but all-English and generic because guided intake did not carry media into project creation and the render prompt did not hard-require Telugu/sample-price extraction.
+- [x] F0024 guided media/language fidelity repair (2026-05-17): customer attached a sample flyer during Guided Mode, selected Telugu, and asked to extract items/prices; generated design was visually good but all-English and generic because guided intake did not carry media into project creation and the render prompt did not hard-require Telugu/sample-price extraction.
   - [x] Add failing regressions for guided intake media carry-forward, router reference-media project creation, processing ETA copy, Telugu-first prompt copy, and extract-items/prices reference instructions.
   - [x] Preserve attached media through Guided Mode sessions and pass it to project creation as `reference_media_path`.
   - [x] Strengthen processing acknowledgement with a 5-6 minute check-back expectation.
   - [x] Strengthen direct-generation prompt for Telugu-first flyer text and exact item/price extraction from sample/reference flyers.
   - [x] Verify locally, deploy to `main-vps`, and smoke the live path.
   - Review: focused local suite `95 passed, 107 skipped`; byte-compile and `git diff --check` passed. Deployed `deploy-20260517-234251-59407d33`; deploy smoke passed. Temp-state VPS smoke proved Guided Mode image attachment -> `reference_media_path` -> `create-flyer-project` `reference_image` asset, with `preferred_language=te`. Post-deploy gateway active and WhatsApp bridge connected (`queueLength=0`).
-- [ ] Flyer Studio admin dashboard for operator support (2026-05-18): replace manual SSH/state-file operations with an authenticated operator UI.
+- [x] Flyer Studio admin dashboard for operator support (2026-05-18): replace manual SSH/state-file operations with an authenticated operator UI.
   - Drift-check tag: extends-Hermes
   - Hermes-first analysis: reuse existing Flyer JSON state, account/quota scripts, campaign sender, project store, delivery audit, and current cockpit/portal deployment patterns. Net-new scope is a narrow operator surface and audited admin actions.
   - Initial actions: search customer by phone/LID/business, view plan/status/usage/projects, reset trial quota for testing, change plan/status, resend campaign, view latest campaign/flyer/project messages, and inspect stuck intake/project state.
@@ -1001,7 +1001,7 @@ Review results:
   - Review: backend cockpit tests `42 passed, 1 skipped`; focused Flyer schema/onboarding/project tests `50 passed`; frontend `npm run build` passed; agent tarball deploy `deploy-20260518-013249-59407d33` passed smoke/readiness; cockpit served at `http://46.62.206.192:8080/` with `/api/health` returning `{"ok":true}` and live Flyer summary reporting 2 customers, 1 one-time order, 11 active projects, and 7 stuck/intake projects.
 - [ ] Flyer package platform-truthfulness backlog (2026-05-18): stop claiming “Instagram story” unless the asset is a true story-safe creative, not just a generic vertical image.
   - Need revisit later with product/design decision: either generate platform-specific WhatsApp image, square feed post, vertical story/status creative, and printable PDF with visual QA, or rename deliverables honestly to “WhatsApp image,” “square image,” “vertical/status image,” and “printable PDF.”
-- [ ] F0029 exact-reference-edit quality gate (2026-05-18): customer attached an existing Lakshmis Kitchen flyer and asked to remove an extra `08:00` plus add an item for `$9.99`, but the app generated a new low-quality flyer titled `Uploaded Flyer Template`.
+- [x] F0029 exact-reference-edit quality gate (2026-05-18): customer attached an existing Lakshmis Kitchen flyer and asked to remove an extra `08:00` plus add an item for `$9.99`, but the app generated a new low-quality flyer titled `Uploaded Flyer Template`.
   - Drift-check tag: extends-Hermes
   - Hermes-first analysis: reuse Hermes WhatsApp media ingress, project-level reference assets, JSON state, bridge replies, admin/manual review surface, and existing reference-scope gate. Net-new scope is only Flyer-specific classification of source-preserving artwork edits so they do not go through the new-poster image-generation path.
   - [x] Trace live F0029 state and confirm the wrong title/request mapping.
@@ -1014,14 +1014,15 @@ Review results:
   - [x] Reserve subscription/guest access before long-running generation, release it on generation or preview-delivery failure, and finalize usage only after the preview was delivered.
   - [x] Mark source-edit manifests as `source_edit_integrity_only` so the system does not over-claim OCR/text QA for model-edited artwork.
   - Review: focused Flyer suite `131 passed`; backend cockpit tests `48 passed, 1 skipped`; frontend `npm run build` passed; `py_compile` passed; `git diff --check` returned only line-ending warnings. Three reviewer passes found and the branch fixed: auth bypass in cockpit service, source-edit classifier/durability gaps, partial-preview access release, and guest-order reservation idempotency. `tests/test_cf_router_plugin.py` is Linux-only and skipped on this Windows host.
-- [ ] Flyer edit-flow hardening follow-up (2026-05-18): rigorous testing found that source-preserving edits still have production gaps: missing `OPENAI_API_KEY` makes source edits fail, unclear revisions can clear active previews/finals, natural edit language is under-parsed, and manual edit queue copy promises more than the system can complete automatically.
+- [x] Flyer edit-flow hardening follow-up (2026-05-18): rigorous testing found that source-preserving edits still have production gaps: missing `OPENAI_API_KEY` makes source edits fail, unclear revisions can clear active previews/finals, natural edit language is under-parsed, and manual edit queue copy promises more than the system can complete automatically.
   - Drift-check tag: extends-Hermes
   - Hermes-first analysis: reuse Hermes WhatsApp ingress, sender identity, media cache, JSON state, `safe_io`, audit, bridge delivery, Flyer quota/guest access, and admin cockpit. Net-new scope is only Flyer-specific edit classification, revision parsing/state safety, source-edit provider readiness, and operator-visible manual edit work.
   - [x] Write implementation plan: `docs/superpowers/plans/2026-05-18-flyer-edit-flow-hardening.md`.
   - [x] Get implementation plan reviewed by two parallel agents.
   - [x] Write design spec and get it reviewed by two parallel agents.
   - [x] Build fixes with TDD and focused verification.
-  - [ ] Create PR and get three parallel review vectors before merge.
+  - [x] Create PR and get three parallel review vectors before merge.
+  - Reconciliation: superseded by the 2026-05-19 P0 run. S6 P0-5 shipped typed source-edit preflight/reason routing and source-edit provider reliability; S7 P0-6 shipped reason-code-aware customer replies; S8 P0-7 shipped golden coverage and the remaining S6 follow-ups.
 - [x] Flyer reference-scope relationship memory fix (2026-05-19): after a customer chooses authorized use for an unrelated-looking source flyer, answers like `Co-owner` must be remembered and should continue the flyer update instead of asking the same relationship/logo/details question repeatedly.
   - Root cause: `consume_flyer_reference_authorization_reply()` stored the relationship as `authorization_note_recorded`, kept the pending row alive, and only continued on the exact phrase `use account details`.
   - Fix: first relationship/detail reply now consumes the pending authorization row, carries the note into the authorized source-edit project path, and uses saved account details by default. Exact option/reference choices are still excluded from this detail parser.
