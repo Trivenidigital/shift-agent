@@ -1334,6 +1334,11 @@ class FlyerRequestFields(BaseModel):
     def missing_required_fields(self) -> list[str]:
         if self._has_template_reference():
             return [name for name in ["event_or_business_name"] if not (getattr(self, name) or "").strip()]
+        if self._has_product_or_brand_promo():
+            return [
+                name for name in ["event_or_business_name"]
+                if not (getattr(self, name) or "").strip()
+            ]
         if self._has_price_list_or_menu():
             return [
                 name for name in ["event_or_business_name", "contact_info"]
@@ -1390,6 +1395,16 @@ class FlyerRequestFields(BaseModel):
             text,
         ))
         return has_price_or_menu or has_service_list
+
+    def _has_product_or_brand_promo(self) -> bool:
+        text = f"{self.notes} {self.style_preference}".lower()
+        if not re.search(r"\b(?:flyer|flier|poster|banner)\b", text):
+            return False
+        return bool(re.search(
+            r"\b(?:hero image|tagline|badge|badges|certified|brand|branding|"
+            r"product|featuring|premium|organic-style|organic style|grocery aesthetic)\b",
+            text,
+        ))
 
     def _has_template_reference(self) -> bool:
         text = f"{self.notes} {self.style_preference}".lower()

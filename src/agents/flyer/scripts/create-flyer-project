@@ -55,10 +55,27 @@ MARKETING_TERMS = ("marketing", "seo", "paid ads", "content creation", "social m
 
 def _has_any(text: str, terms: tuple[str, ...]) -> bool:
     lower = text.lower()
-    return any(term in lower for term in terms)
+    for term in terms:
+        if " " in term or "-" in term:
+            if term in lower:
+                return True
+        elif re.search(rf"\b{re.escape(term)}\b", lower):
+            return True
+    return False
+
+
+def _is_product_or_brand_promo(text: str) -> bool:
+    lower = text.lower()
+    return bool(re.search(
+        r"\b(?:hero image|tagline|badge|badges|certified|brand|branding|"
+        r"product|featuring|premium|organic-style|organic style|grocery aesthetic)\b",
+        lower,
+    ))
 
 
 def _style_for_request(text: str) -> str:
+    if _is_product_or_brand_promo(text):
+        return "premium organic-style product promotion with brand-forward grocery styling, hero product imagery, certification badges, and clean space for optional address or phone"
     if _has_any(text, SALON_TERMS):
         return "modern US salon and beauty studio promotion with clean upscale service-offer cards, hair-service photography, and category-safe styling"
     if _has_any(text, TAX_TERMS):
@@ -82,6 +99,11 @@ def _strip_offer_from_business_name(name: str) -> str:
         flags=re.IGNORECASE,
     )
     return name.strip(" .:-")
+
+
+def _clean_extracted_label(value: str) -> str:
+    value = re.sub(r"[*_`]+", "", value or "")
+    return value.strip(" .:-")
 
 
 def _load_store(path: Path) -> FlyerProjectStore:
@@ -141,7 +163,7 @@ def _extract_fields(raw_request: str, *, now: datetime) -> FlyerRequestFields:
         flags=re.IGNORECASE,
     )
     if event_match:
-        event_name = _strip_offer_from_business_name(event_match.group(1).strip(" ."))
+        event_name = _clean_extracted_label(_strip_offer_from_business_name(event_match.group(1).strip(" .")))
         event_name = re.sub(r"^(?:customer|business|client)\s+", "", event_name, flags=re.IGNORECASE).strip(" .")
     if not event_name:
         menu_match = re.search(
@@ -210,6 +232,8 @@ def _extract_fields(raw_request: str, *, now: datetime) -> FlyerRequestFields:
     if address_match:
         address = address_match.group(1).strip(" .")
         venue = f"{venue}, {address}" if venue else address
+    if re.search(r"\b(?:the\s+)?(?:bottom|top|end)\b", venue, flags=re.IGNORECASE):
+        venue = ""
 
     contact_match = re.search(r"\bcontact[:\s]+(.+?)(?=\.|$)", text, flags=re.IGNORECASE)
     if contact_match:
@@ -251,7 +275,7 @@ def _extract_fields(raw_request: str, *, now: datetime) -> FlyerRequestFields:
         language = "es"
     elif "mixed" in lower or "multi-language" in lower or "multilingual" in lower:
         language = "mixed"
-    if "style" in lower:
+    if re.search(r"\b(?:style|look|design style|visual style)\s*:", text, flags=re.IGNORECASE):
         style_match = re.search(
             r"\bstyle\s*:\s*(.+?)(?=\.|,\s*(?:location|address|phone|contact)\b|\s+(?:location|address|phone|contact)\b|$)",
             text,
