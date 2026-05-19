@@ -882,7 +882,11 @@ def test_exact_edit_manual_queue_ack_persists_manual_review_state(monkeypatch):
     monkeypatch.setattr(actions, "trigger_check_flyer_reference_scope", lambda **_kwargs: (True, "allow", {"decision": "allow"}))
     monkeypatch.setattr(actions, "trigger_create_flyer_project", lambda **_kwargs: (True, "created", {"project_id": "F2000", "status": "manual_edit_required", "assets": [{"kind": "reference_image", "path": "C:/tmp/ref.png", "mime_type": "image/png"}]}))
     monkeypatch.setattr(hooks, "_reserve_flyer_access_or_reply", lambda *_args, **_kwargs: ("quota", None))
-    monkeypatch.setattr(actions, "flyer_source_edit_preflight", lambda _project: (False, "source edit provider is not configured"))
+    monkeypatch.setattr(
+        actions,
+        "flyer_source_edit_preflight",
+        lambda _project: (False, "source edit provider is not configured", "source_edit_provider_unavailable"),
+    )
     monkeypatch.setattr(actions, "send_flyer_manual_edit_ack", lambda *_args, **_kwargs: (True, "manual-mid", ""))
 
     def fake_update(project_id, *args):
@@ -902,7 +906,14 @@ def test_exact_edit_manual_queue_ack_persists_manual_review_state(monkeypatch):
 
     assert result == {"action": "skip", "reason": "cf-router flyer exact edit queued: project F2000"}
     assert calls["update"][0] == "F2000"
-    assert "--queue-manual-review" in calls["update"][1]
+    args = calls["update"][1]
+    assert "--queue-manual-review" in args
+    # S6 P0-5: must use the TYPED reason_code (S1 enum) so the cockpit triage
+    # view groups + tallies on source_edit_provider_unavailable, not the
+    # default `operator_request` that --manual-reason alone would leave.
+    assert "--manual-reason-code" in args
+    code_idx = args.index("--manual-reason-code")
+    assert args[code_idx + 1] == "source_edit_provider_unavailable"
 
 
 def test_manual_completed_guest_order_uses_existing_reserved_order(monkeypatch):

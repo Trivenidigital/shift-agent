@@ -1957,8 +1957,23 @@ def trigger_create_flyer_project(
     return True, detail[:500], project
 
 
-def flyer_source_edit_preflight(project: dict) -> tuple[bool, str]:
-    """Return whether source-preserving edit generation can run for project."""
+def flyer_source_edit_preflight(project: dict) -> tuple[bool, str, str]:
+    """Return ``(ok, detail, reason_code)`` for source-preserving edit readiness.
+
+    On success: ``(True, "ready", "")``.
+
+    On failure, ``reason_code`` is a `FlyerManualReviewReason` enum value that
+    cockpit triage groups + tallies on, so callers MUST NOT hardcode a single
+    code for every failure mode. Mapping:
+
+      - ``source_edit_provider_unavailable`` — OPENAI key absent/placeholder,
+        or the workflow helper failed to import (provider stack broken).
+      - ``reference_unsupported`` — reference media is PDF / non-image type
+        the source-edit endpoint cannot consume.
+      - ``reference_provider_unavailable`` — no reference image attached to
+        the project, OR the attached image is no longer on disk (retention,
+        failover). Operator action is "re-upload the source flyer."
+    """
     try:
         _ensure_platform_path()
         from flyer_workflow import source_edit_provider_ready  # type: ignore
@@ -1967,18 +1982,26 @@ def flyer_source_edit_preflight(project: dict) -> tuple[bool, str]:
             _ensure_local_src_path()
             from agents.flyer.workflow import source_edit_provider_ready  # type: ignore
         except Exception as e:
-            return False, f"source edit readiness helper unavailable: {type(e).__name__}: {e}"
+            return (
+                False,
+                f"source edit readiness helper unavailable: {type(e).__name__}: {e}",
+                "source_edit_provider_unavailable",
+            )
     ok, detail = source_edit_provider_ready(project)
     if not ok:
-        return ok, detail
+        if "uploaded reference image" in detail:
+            return ok, detail, "reference_provider_unavailable"
+        if "must be an image" in detail:
+            return ok, detail, "reference_unsupported"
+        return ok, detail, "source_edit_provider_unavailable"
     assets = project.get("assets") or []
     reference = next((asset for asset in reversed(assets) if (asset or {}).get("kind") == "reference_image"), None)
     path = str((reference or {}).get("path") or "")
     if path.lower().endswith(".pdf"):
-        return False, "source edit from PDF is not supported yet"
+        return False, "source edit from PDF is not supported yet", "reference_unsupported"
     if path and not Path(path).exists():
-        return False, "source edit reference image is not available on this server"
-    return True, "ready"
+        return False, "source edit reference image is not available on this server", "reference_provider_unavailable"
+    return True, "ready", ""
 
 
 def trigger_check_flyer_reference_scope(

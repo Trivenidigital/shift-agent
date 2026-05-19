@@ -1340,9 +1340,13 @@ def _openai_source_edit_bytes(
     model: str,
     quality: str,
 ) -> bytes:
+    # P0-5 defense-in-depth: mirror workflow.py::source_edit_provider_ready —
+    # treat PLACEHOLDER as missing so an operator CLI / retry path that
+    # bypassed the cf-router preflight doesn't waste an OpenAI request and
+    # surface a 401 mid-customer-flow.
     api_key = _read_env_value("OPENAI_API_KEY")
-    if not api_key:
-        raise FlyerRenderError("OPENAI_API_KEY is missing")
+    if not api_key or "PLACEHOLDER" in api_key:
+        raise FlyerRenderError("OPENAI_API_KEY is missing or placeholder")
     reference = _source_edit_reference_asset(project)
     reference_path = Path(reference.path)
     mime = reference.mime_type or mimetypes.guess_type(str(reference_path))[0] or "image/png"
@@ -1545,12 +1549,23 @@ def _export_from_source_image_contained(source: Path, path: Path, *, size: tuple
 
 
 def _is_source_edit_project(project: FlyerProject) -> bool:
+    # P0-5: a project is source-edit only when there's positive evidence —
+    # either an explicit raw_request/notes marker, or it's queued for manual
+    # review WITH an uploaded reference image to edit. The bare
+    # `status == "manual_edit_required"` disjunct previously misclassified
+    # missing_required_facts / visual_qa_failed projects as source-edit,
+    # which sent them down the source-preservation rendering path and lost
+    # their original manual_review context.
     text = f"{project.raw_request} {project.fields.notes}".lower()
-    return (
-        project.status == "manual_edit_required"
-        or "edit uploaded flyer/source artwork" in text
+    has_marker = (
+        "edit uploaded flyer/source artwork" in text
         or "authorized flyer/source artwork update" in text
     )
+    if has_marker:
+        return True
+    if project.status != "manual_edit_required":
+        return False
+    return any(asset.kind == "reference_image" for asset in (project.assets or []))
 
 
 def _draw_flyer_pil(project: FlyerProject, *, concept_id: str, size: tuple[int, int], pil_modules):
