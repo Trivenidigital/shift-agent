@@ -12,12 +12,16 @@ SRC_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(SRC_ROOT / "platform"))
 
-from schemas import Config, FlyerProjectStore  # noqa: E402
+from schemas import Config, FlyerManualReview, FlyerProjectStore  # noqa: E402
 from safe_io import FileLock, atomic_write_text, load_yaml_model  # noqa: E402
 try:
     from flyer_render import build_asset_manifest, next_asset_number, render_final_package  # type: ignore  # noqa: E402
 except ImportError:
     from agents.flyer.render import build_asset_manifest, next_asset_number, render_final_package  # noqa: E402
+try:
+    from flyer_visual_qa import run_visual_qa, write_visual_qa_report  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.visual_qa import run_visual_qa, write_visual_qa_report  # noqa: E402
 
 
 STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
@@ -56,10 +60,43 @@ def main() -> int:
                 source="rendered",
                 original_message_id=args.approved_message_id,
             )
+            qa_reports = []
+            for asset, spec in zip(assets, specs):
+                report = run_visual_qa(
+                    project,
+                    spec.path,
+                    output_format=spec.output_format,
+                    asset_id=asset.asset_id,
+                )
+                write_visual_qa_report(report, spec.path)
+                qa_reports.append(report)
+            failed_qa = [report for report in qa_reports if report.status != "passed"]
+            if failed_qa:
+                manual = project.manual_review.model_copy(update={
+                    "status": "queued",
+                    "reason": "visual_qa_failed",
+                    "detail": "; ".join(blocker for report in failed_qa for blocker in report.blockers)[:500],
+                    "queued_at": now,
+                })
+                store.projects[idx] = project.model_copy(update={
+                    "status": "manual_edit_required",
+                    "approved_message_id": args.approved_message_id,
+                    "assets": [*project.assets, *assets],
+                    "qa_reports": [*project.qa_reports, *qa_reports],
+                    "manual_review": manual,
+                    "updated_at": now,
+                })
+                atomic_write_text(state_path, store.model_dump_json(indent=2))
+                print(json.dumps({
+                    "project_id": args.project_id,
+                    "visual_qa_failed": [report.model_dump(mode="json") for report in failed_qa],
+                }))
+                return 2
             store.projects[idx] = project.model_copy(update={
                 "status": "finalizing_assets",
                 "approved_message_id": args.approved_message_id,
                 "assets": [*project.assets, *assets],
+                "qa_reports": [*project.qa_reports, *qa_reports],
                 "final_asset_ids": [asset.asset_id for asset in assets],
                 "updated_at": now,
             })

@@ -23,6 +23,7 @@ import re
 import threading
 import time
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from typing import Any, Optional
 
 from . import actions
@@ -177,7 +178,7 @@ def pre_gateway_dispatch(event: Any, gateway: Any = None, session_store: Any = N
                 )
                 if flyer_result is not None:
                     return flyer_result
-            flyer_result = _try_flyer_active_project_intercept(text, chat_id, event)
+            flyer_result = _try_flyer_active_project_intercept(text, chat_id, event, media_path)
             if flyer_result is not None:
                 return flyer_result
             if actions.should_start_new_flyer_over_active(text, has_media=bool(media_path)):
@@ -392,6 +393,19 @@ def _try_flyer_primary_intercept(
             text, chat_id, event, source="new_flyer", original_text=text,
             media_path=media_path,
         )
+    if customer and customer.get("status") not in {"trial", "active"} and not actions.find_paid_flyer_guest_order(phone, chat_id):
+        reply = actions.flyer_customer_not_active_reply(customer)
+        ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+        actions.audit_intercepted(
+            reason="flyer_customer_not_active",
+            chat_id=chat_id,
+            subprocess_rc=0 if ack_ok else 3,
+            detail=(
+                f"customer_id={customer.get('customer_id') or ''}; status={customer.get('status') or ''}; "
+                f"sender_role={role}; explicit=true; ack_message_id={mid}; ack_error={err[:300]}"
+            ),
+        )
+        return {"action": "skip", "reason": "cf-router flyer customer not active"}
 
     active_project = None if force_new else actions.find_active_flyer_project_by_sender(phone, chat_id)
     if active_project is not None:
@@ -528,21 +542,26 @@ def _try_flyer_primary_intercept(
             return quota_result
         ready_ok, ready_detail = actions.flyer_source_edit_preflight(project or {})
         if not ready_ok:
+            actions.invoke_update_flyer_project(
+                project_id,
+                "--queue-manual-review",
+                "--manual-reason", "source_edit_provider_unavailable",
+                "--manual-detail", ready_detail[:500],
+            )
             ack_ok, outbound_message_id, ack_err = actions.send_flyer_manual_edit_ack(
                 chat_id,
                 project_id,
                 text,
                 reason=ready_detail,
             )
-            release_ok, release_detail = _release_flyer_access(access, chat_id, phone, project_id, message_id)
             actions.audit_intercepted(
                 reason="flyer_reference_exact_edit_queued",
                 chat_id=chat_id,
-                subprocess_rc=0 if ack_ok and release_ok else 3,
+                subprocess_rc=0 if ack_ok else 3,
                 detail=(
                     f"project_id={project_id}; sender_role={role}; "
                     f"source_edit_preflight_failed={ready_detail[:250]}; access={access}; "
-                    f"release_ok={release_ok}; release_detail={release_detail[:250]}; "
+                    "access_held_for_manual_review=true; "
                     f"ack_message_id={outbound_message_id}; ack_error={ack_err[:300]}"
                 ),
             )
@@ -562,17 +581,23 @@ def _try_flyer_primary_intercept(
                 if ack_ok else f"cf-router flyer exact edit delivery failed: project {project_id}"
             )
         else:
+            actions.invoke_update_flyer_project(
+                project_id,
+                "--queue-manual-review",
+                "--manual-reason", "source_edit_generation_failed",
+                "--manual-detail", gen_detail[:500],
+            )
             ack_ok, manual_mid, ack_err = actions.send_flyer_manual_edit_ack(
                 chat_id,
                 project_id,
                 text,
                 reason=f"automatic edit generation failed: {gen_detail}",
             )
-            release_ok, release_detail = _release_flyer_access(access, chat_id, phone, project_id, message_id)
             outbound_message_id = ",".join(x for x in [proc_mid, manual_mid] if x)
             ack_err = (
                 f"edit_generation_failed: {gen_detail}; "
-                f"release_ok={release_ok}; release_detail={release_detail[:250]}; ack_error={ack_err}"
+                "access_held_for_manual_review=true; "
+                f"ack_error={ack_err}"
             )
             reason = f"cf-router flyer exact edit queued: project {project_id}"
         actions.audit_intercepted(
@@ -838,6 +863,8 @@ def _reserve_flyer_access_or_reply(
 ) -> tuple[str, Optional[dict]]:
     if not consume_quota:
         return "none", None
+    if actions.find_reserved_flyer_guest_order(phone, chat_id, project_id):
+        return "guest", None
     paid_guest_order = actions.find_paid_flyer_guest_order(phone, chat_id)
     if paid_guest_order:
         ok_guest, detail_guest, _guest_doc = actions.trigger_reserve_flyer_guest_order(
@@ -1448,7 +1475,17 @@ def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_
             "reason": f"cf-router flyer brand asset: {result.get('next_status')}"}
 
 
-def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any) -> Optional[dict]:
+def _similar_to_active_project_request(body: str, active_project: dict) -> bool:
+    current = " ".join(str(active_project.get("raw_request") or "").split()).lower()
+    incoming = " ".join((body or "").split()).lower()
+    if not current or not incoming:
+        return False
+    if incoming == current or incoming in current or current in incoming:
+        return True
+    return SequenceMatcher(None, incoming, current).ratio() >= 0.82
+
+
+def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, media_path: Optional[str] = None) -> Optional[dict]:
     message_id = _extract_message_id(event, chat_id, text)
     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
     customer = actions.find_flyer_customer_by_sender(phone, chat_id)
@@ -1461,14 +1498,58 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any) -> 
         return None
 
     project_id = str(active_project.get("project_id") or "")
+    if customer and customer.get("status") not in {"trial", "active"}:
+        if not actions.find_paid_flyer_guest_order(phone, chat_id) and not actions.find_reserved_flyer_guest_order(phone, chat_id, project_id):
+            reply = actions.flyer_customer_not_active_reply(customer)
+            ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+            actions.audit_intercepted(
+                reason="flyer_customer_not_active",
+                chat_id=chat_id,
+                subprocess_rc=0 if ack_ok else 3,
+                detail=(
+                    f"project_id={project_id}; customer_id={customer.get('customer_id') or ''}; "
+                    f"status={customer.get('status') or ''}; sender_role={role}; "
+                    f"ack_message_id={mid}; ack_error={err[:300]}"
+                ),
+            )
+            return {"action": "skip", "reason": "cf-router flyer customer not active"}
     status = str(active_project.get("status") or "")
     body = " ".join(actions.flyer_visible_message_text(text).split())
     lower = body.lower()
     if (
-        actions.should_start_new_flyer_over_active(body, has_media=False)
-        and status not in {"intake_started", "collecting_required_info", "awaiting_assets"}
+        actions.should_start_new_flyer_over_active(body, has_media=bool(media_path))
+        and (
+            bool(media_path)
+            or status not in {"intake_started", "collecting_required_info", "awaiting_assets"}
+            or not actions.flyer_project_has_required_fields(active_project)
+            or not _similar_to_active_project_request(body, active_project)
+        )
     ):
         return None
+    if actions.is_flyer_project_status_request(body) and status not in {"completed"}:
+        reply = (
+            actions.flyer_manual_edit_status_reply(active_project)
+            if status == "manual_edit_required" else
+            actions.flyer_project_status_reply(active_project)
+        )
+        ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+        actions.audit_intercepted(
+            reason=("flyer_reference_exact_edit_status" if status == "manual_edit_required" and ack_ok else ("flyer_project_status" if ack_ok else "flyer_primary_failed")),
+            chat_id=chat_id,
+            subprocess_rc=0 if ack_ok else 3,
+            detail=(
+                f"project_id={project_id}; status_check=true; status={status}; sender_role={role}; "
+                f"ack_message_id={mid}; ack_error={err[:300]}"
+            ),
+        )
+        return {
+            "action": "skip",
+            "reason": (
+                f"cf-router flyer exact edit status for {project_id}"
+                if status == "manual_edit_required" else
+                f"cf-router flyer status for {project_id}"
+            ),
+        }
     selection_map = {
         "1": "C1", "option 1": "C1", "concept 1": "C1", "c1": "C1",
         "2": "C2", "option 2": "C2", "concept 2": "C2", "c2": "C2",
@@ -1643,7 +1724,25 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any) -> 
                     subprocess_rc=2, detail=f"project_id={project_id}; approve_status_failed={status_detail[:400]}",
                 )
                 return None
+        manual_completed = (active_project.get("manual_review") or {}).get("status") == "completed"
+        manual_access = "none"
+        if manual_completed:
+            manual_access, quota_result = _reserve_flyer_access_or_reply(
+                chat_id, phone, project_id, message_id,
+                consume_quota=True,
+            )
+            if quota_result is not None:
+                return quota_result
         ok, detail = actions.finalize_and_send_flyer(chat_id, project_id, message_id)
+        if ok and manual_completed:
+            access_ok, access_detail = _finalize_flyer_access_checked(manual_access, chat_id, phone, project_id, message_id)
+            if not access_ok:
+                ok = False
+                detail = f"{detail}; manual_access_finalize_failed={access_detail[:250]}"
+        elif manual_completed:
+            release_ok, release_detail = _release_flyer_access(manual_access, chat_id, phone, project_id, message_id)
+            if not release_ok:
+                detail = f"{detail}; manual_access_release_failed={release_detail[:250]}"
         actions.audit_intercepted(
             reason="flyer_primary_project_created" if ok else "flyer_primary_failed",
             chat_id=chat_id, subprocess_rc=0 if ok else 2,

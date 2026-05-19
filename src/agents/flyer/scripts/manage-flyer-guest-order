@@ -17,6 +17,7 @@ try:
         activate_guest_order,
         consume_guest_order,
         find_paid_guest_order,
+        find_reserved_guest_order,
         release_guest_order,
         reserve_guest_order,
         start_guest_order,
@@ -26,6 +27,7 @@ except ModuleNotFoundError:
         activate_guest_order,
         consume_guest_order,
         find_paid_guest_order,
+        find_reserved_guest_order,
         release_guest_order,
         reserve_guest_order,
         start_guest_order,
@@ -87,6 +89,7 @@ def main() -> int:
     mode.add_argument("--release", action="store_true")
     mode.add_argument("--consume", action="store_true")
     mode.add_argument("--find-paid", action="store_true")
+    mode.add_argument("--find-reserved", action="store_true")
     p.add_argument("--sender-phone", default="")
     p.add_argument("--chat-id", default="")
     p.add_argument("--message-id", default="")
@@ -150,7 +153,7 @@ def main() -> int:
                     chat_id=args.chat_id,
                     project_id=args.project_id,
                 )
-            else:
+            elif args.find_paid:
                 order = find_paid_guest_order(
                     state_path=state_path,
                     sender_phone=args.sender_phone,
@@ -165,6 +168,26 @@ def main() -> int:
                     "paid_order": True,
                     "order_id": order.order_id,
                     "status": order.status,
+                    "remaining": order.remaining(),
+                }))
+                return 0
+            else:
+                order = find_reserved_guest_order(
+                    state_path=state_path,
+                    sender_phone=args.sender_phone,
+                    chat_id=args.chat_id,
+                    project_id=args.project_id,
+                )
+                if order is None:
+                    print(json.dumps({"ok": False, "handled": True, "reserved_order": False}))
+                    return 2
+                print(json.dumps({
+                    "ok": True,
+                    "handled": True,
+                    "reserved_order": True,
+                    "order_id": order.order_id,
+                    "status": order.status,
+                    "reserved_project_id": order.reserved_project_id,
                     "remaining": order.remaining(),
                 }))
                 return 0

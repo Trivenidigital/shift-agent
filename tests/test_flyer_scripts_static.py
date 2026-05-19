@@ -35,11 +35,13 @@ def test_delivery_script_can_send_by_project_id():
     assert "--project-id" in text
     assert "validate_text_manifest_file" in text
     assert "--allow-unverified-asset" in text
+    assert "--allow-sidecar-visual-qa" in text
     assert "--dry-run-bridge" in text
     assert "FLYER_TEXT_QA_BREAK_GLASS" in text
     assert "project.status != \"finalizing_assets\"" in text
     assert "FINAL_KIND_TO_FORMAT" in text
-    assert "output_format=expected_formats.get(str(asset)) or None" in text
+    assert "validate_visual_qa_report" in text
+    assert "output_format=expected_output_format" in text
     assert "project_changed_during_delivery" in text
     assert "_record_asset_delivery" in text
     assert "_pending_project_assets" in text
@@ -51,6 +53,9 @@ def test_delivery_script_can_send_by_project_id():
     assert '"status": "delivered"' in text
     assert '"status": "delivered"' not in finalize
     assert "audit_uncertain_delivery_block" in text
+    smoke = (SCRIPTS / "smoke-flyer-quality").read_text(encoding="utf-8")
+    assert "write_visual_qa_report" in smoke
+    assert "--allow-sidecar-visual-qa" in smoke
 
 
 def test_delivery_report_installed_and_smoked_for_operator_visibility():
@@ -81,13 +86,24 @@ def test_guest_order_script_installed_for_quick_flyer_path():
     assert "--release" in script
     assert "--consume" in script
     assert "--find-paid" in script
+    assert "--find-reserved" in script
     assert "is_quick_flyer_campaign_cta" in actions
     assert "trigger_start_flyer_guest_order" in actions
     assert "trigger_reserve_flyer_guest_order" in actions
     assert "trigger_release_flyer_guest_order" in actions
     assert "trigger_consume_flyer_guest_order" in actions
     assert "find_paid_flyer_guest_order" in actions
+    assert "find_reserved_flyer_guest_order" in actions
     assert "quick_flyer_payment" in hooks
+
+
+def test_flyer_dispatcher_skill_does_not_bypass_cf_router_quota_gate():
+    skill = (SCRIPTS.parent / "skills" / "flyer_dispatcher" / "SKILL.md").read_text(encoding="utf-8")
+
+    assert "cf-router" in skill
+    assert "do not call project/render/delivery scripts directly" in skill
+    assert "account status, quota/guest-order reservation" in skill
+    assert "Do not send final" in skill
 
 
 def test_intake_script_installed_for_language_and_guided_mode():
@@ -239,8 +255,8 @@ def test_router_starts_new_work_over_active_state_for_explicit_or_media_template
     assert "Please resend the flyer request" not in hooks
     assert "Authorized flyer/source artwork" in hooks
     assert "manual_edit_required=True" in hooks
-    assert hooks.index("_try_flyer_reference_scope_choice_intercept(text, chat_id, event)") < hooks.index("_try_flyer_active_project_intercept(text, chat_id, event)")
-    assert hooks.index("_try_flyer_reference_scope_authorization_intercept(text, chat_id, event)") < hooks.index("_try_flyer_active_project_intercept(text, chat_id, event)")
+    assert hooks.index("_try_flyer_reference_scope_choice_intercept(text, chat_id, event)") < hooks.index("_try_flyer_active_project_intercept(text, chat_id, event, media_path)")
+    assert hooks.index("_try_flyer_reference_scope_authorization_intercept(text, chat_id, event)") < hooks.index("_try_flyer_active_project_intercept(text, chat_id, event, media_path)")
 
 
 def test_onboarding_is_whatsapp_native_and_plan_config_driven():
@@ -354,6 +370,23 @@ def test_phase2_quality_smoke_and_workflow_deploy_contracts():
     assert f".{{args.project_id}}.generate.lock" in generate
     assert "source_edit_requested" in generate
     assert "authorized flyer/source artwork update" in generate
+
+
+def test_production_readiness_modules_installed_and_smoked():
+    deploy = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh").read_text(encoding="utf-8")
+    smoke = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-smoke-test.sh").read_text(encoding="utf-8")
+
+    for module in [
+        "flyer_facts",
+        "flyer_reference_extract",
+        "flyer_visual_qa",
+        "flyer_manual_queue",
+    ]:
+        assert f"/opt/shift-agent/{module}.py" in deploy
+        assert f"import {module}" in smoke
+
+    assert "flyer-manual-queue" in deploy
+    assert "flyer-manual-queue" in smoke
 
 
 def test_generation_does_not_hold_file_lock_during_render():

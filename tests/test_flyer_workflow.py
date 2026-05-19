@@ -32,6 +32,54 @@ def _project(fields: FlyerRequestFields) -> FlyerProject:
     )
 
 
+def test_build_project_status_reply_covers_all_flyer_states():
+    from agents.flyer.workflow import build_project_status_reply
+
+    now = datetime(2026, 5, 19, tzinfo=timezone.utc)
+    statuses = [
+        "intake_started",
+        "collecting_required_info",
+        "awaiting_assets",
+        "manual_edit_required",
+        "generating_concepts",
+        "awaiting_concept_selection",
+        "revising_design",
+        "awaiting_final_approval",
+        "finalizing_assets",
+        "delivered",
+        "completed",
+    ]
+    for status in statuses:
+        project = FlyerProject(
+            project_id="F9003",
+            status=status,
+            customer_phone="+17329837841",
+            created_at=now,
+            updated_at=now,
+            original_message_id="m-status",
+            raw_request="Create flyer",
+        )
+
+        reply = build_project_status_reply(project)
+
+        assert "Flyer Studio" in reply
+        assert "F9003" in reply
+        assert "resend" not in reply.lower()
+
+
+def test_source_edit_provider_ready_reads_shift_agent_env_file(tmp_path, monkeypatch):
+    from agents.flyer.workflow import source_edit_provider_ready
+
+    env_path = tmp_path / ".env"
+    env_path.write_text("OPENAI_API_KEY=sk-test\n", encoding="utf-8")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    ok, detail = source_edit_provider_ready({"assets": [{"kind": "reference_image", "mime_type": "image/png", "path": "x.png"}]}, env_path=env_path)
+
+    assert ok
+    assert detail == "ready"
+
+
 def test_intent_regex_catches_flyer_requests_without_generic_event():
     assert FLYER_INTENT_RE.search("Need flyer for Bathukamma Oct 10")
     assert FLYER_INTENT_RE.search("Can you make an Instagram poster?")

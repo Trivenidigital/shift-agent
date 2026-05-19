@@ -417,6 +417,44 @@ def test_guest_order_cli_dry_flow(tmp_path):
     assert '"status": "paid"' in release.stdout
 
 
+def test_guest_order_cli_finds_reserved_project(tmp_path):
+    state = tmp_path / "guest_orders.json"
+    script = Path(__file__).resolve().parent.parent / "src" / "agents" / "flyer" / "scripts" / "manage-flyer-guest-order"
+    common = ["--state-path", str(state), "--config-path", str(tmp_path / "missing.yaml")]
+
+    subprocess.run(
+        [sys.executable, str(script), "--start",
+         "--sender-phone", "+17329837841",
+         "--chat-id", "17329837841@s.whatsapp.net",
+         "--message-id", "cta-1", *common],
+        capture_output=True, text=True, check=True,
+    )
+    subprocess.run(
+        [sys.executable, str(script), "--activate",
+         "--order-id", "GUEST0001",
+         "--payment-reference", "manual-test", *common],
+        capture_output=True, text=True, check=True,
+    )
+    subprocess.run(
+        [sys.executable, str(script), "--reserve",
+         "--sender-phone", "+17329837841",
+         "--chat-id", "17329837841@s.whatsapp.net",
+         "--project-id", "F0020", *common],
+        capture_output=True, text=True, check=True,
+    )
+
+    found = subprocess.run(
+        [sys.executable, str(script), "--find-reserved",
+         "--sender-phone", "+17329837841",
+         "--chat-id", "17329837841@s.whatsapp.net",
+         "--project-id", "F0020", *common],
+        capture_output=True, text=True, check=True,
+    )
+
+    assert '"reserved_order": true' in found.stdout
+    assert '"reserved_project_id": "F0020"' in found.stdout
+
+
 def test_guest_order_cli_consume_idempotent_on_replay(tmp_path):
     """BUG-FLYER-QA-001 end-to-end: a second --consume for the same project_id
     must exit 0 through the subprocess layer (not just in-process). This

@@ -176,6 +176,36 @@ def test_source_artwork_followup_stays_in_manual_edit_queue(tmp_path, monkeypatc
     assert persisted["revisions"][0]["request_text"] == "Remove extra 08:00 and add Any Item for $9.99."
 
 
+def test_queue_manual_review_marks_manual_project_completable(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    module = _load_script(monkeypatch)
+    state_path = tmp_path / "projects.json"
+    state_path.write_text(
+        _project_store_json(
+            tmp_path,
+            status="manual_edit_required",
+            raw_request="Edit uploaded flyer/source artwork. Preserve the source flyer.",
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(sys, "argv", [
+        "update-flyer-project",
+        "--project-id", "F9001",
+        "--queue-manual-review",
+        "--manual-reason", "source_edit_provider_unavailable",
+        "--manual-detail", "source edit provider is not configured",
+        "--state-path", str(state_path),
+    ])
+
+    assert module.main() == 0
+    capsys.readouterr()
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["manual_review"]["status"] == "queued"
+    assert persisted["manual_review"]["reason"] == "source_edit_provider_unavailable"
+    assert persisted["manual_review"]["detail"] == "source edit provider is not configured"
+
+
 def test_source_artwork_followup_after_preview_requires_regeneration(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     module = _load_script(monkeypatch)
