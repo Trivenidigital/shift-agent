@@ -64,11 +64,9 @@ def list_manual_queue(store: FlyerProjectStore, *, now: datetime | None = None) 
     rows: list[dict] = []
     for project in store.projects:
         manual = project.manual_review
-        # break-glass terminates the operator workflow for this row even if
-        # project.status stays at manual_edit_required (operator signalled
-        # out-of-band resolution). Excluding here prevents the queue and the
-        # build_summary counters from accumulating ghost stuck rows.
-        if manual.status == "break_glass_sent":
+        # Operator terminal dispositions should not keep accumulating as
+        # ghost stuck rows in the queue counters.
+        if manual.status in {"break_glass_sent", "closed_no_send"}:
             continue
         has_failed_qa = any(report.status != "passed" for report in project.qa_reports)
         if project.status != "manual_edit_required" and manual.status not in {"queued", "in_progress"} and not has_failed_qa:
@@ -256,6 +254,36 @@ def complete_manual_project(
             "concepts": [concept],
             "selected_concept_id": "C1",
             "manual_review": manual,
+            "updated_at": now,
+        })
+        return FlyerProjectStore.model_validate(store.model_dump())
+    raise ValueError(f"project not found: {project_id}")
+
+
+def close_manual_project(
+    store: FlyerProjectStore,
+    project_id: str,
+    *,
+    reason: str,
+) -> FlyerProjectStore:
+    """Close a queued manual-review project without sending customer assets."""
+    now = datetime.now(timezone.utc)
+    for idx, project in enumerate(store.projects):
+        if project.project_id != project_id:
+            continue
+        manual = project.manual_review
+        if project.status != "manual_edit_required" or manual.status not in {"queued", "in_progress"}:
+            raise ValueError(f"project not queued for manual close: {project_id}")
+        if not is_flyer_transition_allowed(project.status, "closed_no_send"):
+            raise ValueError(f"invalid transition {project.status}->closed_no_send")
+        new_manual = project.manual_review.model_copy(update={
+            "status": "closed_no_send",
+            "detail": reason[:500],
+            "completed_at": now,
+        })
+        store.projects[idx] = project.model_copy(update={
+            "status": "closed_no_send",
+            "manual_review": new_manual,
             "updated_at": now,
         })
         return FlyerProjectStore.model_validate(store.model_dump())

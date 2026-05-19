@@ -270,11 +270,38 @@ def test_scenario4_correction_after_delivery_targets_latest_active_project(monke
             monkeypatch_ctx.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: None)
             monkeypatch_ctx.setattr(actions, "_canonical_phone", lambda v: v)
             picked = actions.find_active_flyer_project_by_sender("+17329837841", "17329837841@s.whatsapp.net")
+            assert picked is not None and picked["project_id"] == "F0801"
         finally:
             monkeypatch_ctx.undo()
     finally:
         path.unlink(missing_ok=True)
-    assert picked is not None and picked["project_id"] == "F0801"
+
+
+def test_closed_no_send_project_is_not_active_for_sender(monkeypatch):
+    """Operator-closed no-send projects are terminal and must not swallow new work."""
+    actions = _load_actions()
+    now = datetime.now(timezone.utc).isoformat()
+    fake_store = {
+        "projects": [
+            {
+                "project_id": "F0802",
+                "status": "closed_no_send",
+                "customer_phone": "+17329837841",
+                "updated_at": now,
+                "created_at": now,
+            },
+        ],
+    }
+    import json as _json
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as fh:
+        _json.dump(fake_store, fh)
+        path = Path(fh.name)
+    monkeypatch.setattr(actions, "FLYER_PROJECTS_PATH", path)
+    try:
+        assert actions.find_active_flyer_project_by_sender("+17329837841", "17329837841@s.whatsapp.net") is None
+    finally:
+        path.unlink(missing_ok=True)
 
 
 def test_scenario5_authorized_request_phone_resolves_to_same_account_project(monkeypatch):

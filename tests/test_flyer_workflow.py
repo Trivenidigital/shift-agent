@@ -48,6 +48,7 @@ def test_build_project_status_reply_covers_all_flyer_states():
         "finalizing_assets",
         "delivered",
         "completed",
+        "closed_no_send",
     ]
     for status in statuses:
         project = FlyerProject(

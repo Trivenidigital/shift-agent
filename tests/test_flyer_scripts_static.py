@@ -334,6 +334,13 @@ def test_onboarding_is_whatsapp_native_and_plan_config_driven():
     assert hooks.index("_try_flyer_active_project_intercept") < hooks.index("_try_flyer_onboarding_intercept")
 
 
+def test_manual_queue_cli_has_no_send_close_action():
+    script = (SCRIPTS / "flyer-manual-queue").read_text(encoding="utf-8")
+    assert "close_manual_project" in script
+    assert 'parser.add_argument("--close"' in script
+    assert '"status": "closed_no_send"' in script
+
+
 def test_flyer_launch_marketing_pack_exists_and_has_trial_ctas():
     pack = (REPO / "docs" / "marketing" / "flyer-studio-launch-funnel.md").read_text(encoding="utf-8")
     sales_flyer = (REPO / "docs" / "marketing" / "flyer-studio-sales-flyer.html").read_text(encoding="utf-8")

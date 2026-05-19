@@ -1164,7 +1164,7 @@ def find_active_flyer_project_by_sender(phone: Optional[str], chat_id: str) -> O
     """
     if not phone or not FLYER_PROJECTS_PATH.exists():
         return None
-    terminal = {"completed"}
+    terminal = {"completed", "closed_no_send"}
     try:
         account_phones = {_canonical_phone(phone) or phone}
         customer = find_flyer_customer_by_sender(phone, chat_id)
