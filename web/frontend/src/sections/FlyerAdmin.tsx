@@ -22,6 +22,7 @@ interface ManualQueueRow {
   manual_detail: string;
   age_hours: number;
   asset_ids: string[];
+  verification_modes?: string[];
   locked_facts: unknown[];
   qa_blockers: string[];
 }
@@ -683,6 +684,11 @@ export function FlyerAdmin() {
                               <td className="px-3 py-2"><Badge tone={manualStatusTone(row.manual_status)}>{row.manual_status}</Badge></td>
                               <td className="px-3 py-2">
                                 <div className="font-mono text-xs">{row.manual_reason_code}</div>
+                                {row.verification_modes?.includes("source_edit_integrity_only") && (
+                                  <div className="mt-1">
+                                    <Badge tone="amber">Integrity only</Badge>
+                                  </div>
+                                )}
                               </td>
                               <td className="px-3 py-2 text-xs">{row.age_hours}h</td>
                               <td className="px-3 py-2 text-xs">

@@ -5,6 +5,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 import hashlib
+import json
 import mimetypes
 import os
 import shutil
@@ -42,6 +43,22 @@ def make_manual_review(
     )
 
 
+def _verification_modes(project: FlyerProject) -> list[str]:
+    modes: set[str] = set()
+    for asset in project.assets:
+        if asset.kind not in {"concept_preview", "final_whatsapp_image", "final_instagram_post", "final_instagram_story", "final_printable_pdf"}:
+            continue
+        sidecar = Path(f"{asset.path}.text.json")
+        try:
+            doc = json.loads(sidecar.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        mode = str(doc.get("verification_mode") or "").strip()
+        if mode:
+            modes.add(mode)
+    return sorted(modes)
+
+
 def list_manual_queue(store: FlyerProjectStore, *, now: datetime | None = None) -> list[dict]:
     now = now or datetime.now(timezone.utc)
     rows: list[dict] = []
@@ -68,6 +85,7 @@ def list_manual_queue(store: FlyerProjectStore, *, now: datetime | None = None) 
             "manual_detail": manual.detail,
             "age_hours": max(age_hours, 0),
             "asset_ids": [asset.asset_id for asset in project.assets],
+            "verification_modes": _verification_modes(project),
             "locked_facts": [fact.model_dump(mode="json") for fact in project.locked_facts],
             "qa_blockers": [blocker for report in project.qa_reports for blocker in report.blockers],
         })

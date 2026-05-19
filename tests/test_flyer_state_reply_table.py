@@ -224,6 +224,39 @@ def test_cf_router_status_reply_dispatch_uses_source_edit_helper_only_for_source
     )
 
 
+def test_source_edit_status_helper_uses_canonical_reason_line():
+    """The source-edit-specific cf-router helper must not drift from
+    MANUAL_REVIEW_REASON_LINES. Operators compare queue/status copy across
+    cockpit and WhatsApp; two hand-written paths create confusing divergence.
+    """
+    import importlib.machinery
+    import importlib.util
+    import sys
+
+    repo = Path(__file__).resolve().parent.parent
+    name = "cf_router_actions_for_source_edit_status_reply_test"
+    sys.modules.pop(name, None)
+    loader = importlib.machinery.SourceFileLoader(
+        name,
+        str(repo / "src" / "plugins" / "cf-router" / "actions.py"),
+    )
+    spec = importlib.util.spec_from_loader(name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    loader.exec_module(mod)
+
+    project = _project(
+        status="manual_edit_required",
+        manual_status="queued",
+        reason_code="source_edit_provider_unavailable",
+        business_name="Lakshmis Kitchen",
+    )
+    reply = mod.flyer_manual_edit_status_reply(project.model_dump(mode="json"))
+
+    assert MANUAL_REVIEW_REASON_LINES["source_edit_provider_unavailable"] in reply
+    assert "source-preserving edit queue" not in reply
+
+
 # ---------- status-request semantic coverage ----------
 
 def test_status_request_classifier_recognizes_common_check_in_phrases():

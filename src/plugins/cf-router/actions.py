@@ -1297,22 +1297,7 @@ def is_flyer_project_status_request(text: str) -> bool:
 
 
 def flyer_manual_edit_status_reply(project: dict) -> str:
-    project_id = str(project.get("project_id") or "this project")
-    fields = project.get("fields") if isinstance(project.get("fields"), dict) else {}
-    business_name = str(fields.get("event_or_business_name") or "").strip()
-    detail_line = (
-        f"I already have the requested changes and the saved {business_name} account details."
-        if business_name else
-        "I already have the requested changes and the saved account details."
-    )
-    return (
-        "Flyer Studio\n"
-        "------------\n"
-        f"Project {project_id} is still in the source-preserving edit queue.\n\n"
-        f"{detail_line} No more details are needed from you right now.\n\n"
-        "This edit must preserve the original flyer design, so it is handled as an exact artwork update "
-        "instead of a new flyer. I will send the corrected flyer here as soon as it is ready."
-    )
+    return flyer_project_status_reply(project)
 
 
 def flyer_project_status_reply(project: dict) -> str:

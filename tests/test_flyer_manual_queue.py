@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from schemas import (
+    FlyerAsset,
     FlyerManualReview,
     FlyerProject,
     FlyerProjectStore,
@@ -111,6 +112,41 @@ def test_list_manual_queue_includes_reason_code():
 
     rows = list_manual_queue(FlyerProjectStore(projects=[_manual_project()]), now=datetime(2026, 5, 20, tzinfo=timezone.utc))
     assert rows[0]["manual_reason_code"] == "source_edit_provider_unavailable"
+
+
+def test_list_manual_queue_surfaces_source_edit_integrity_mode(tmp_path, monkeypatch):
+    """Cockpit triage needs to distinguish source-edit previews that passed
+    text-manifest integrity only from fully OCR/visual-QA'd generated flyers.
+    """
+    from agents.flyer.manual_queue import list_manual_queue
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    now = datetime(2026, 5, 19, tzinfo=timezone.utc)
+    preview = tmp_path / "manual" / "F9100" / "F9100-C1-preview.png"
+    preview.parent.mkdir(parents=True)
+    preview.write_bytes(b"png")
+    Path(f"{preview}.text.json").write_text(
+        '{"verification_mode":"source_edit_integrity_only"}',
+        encoding="utf-8",
+    )
+    project = _manual_project().model_copy(update={
+        "assets": [
+            FlyerAsset(
+                asset_id="A0001",
+                kind="concept_preview",
+                source="rendered",
+                path=str(preview),
+                mime_type="image/png",
+                sha256="0" * 64,
+                original_message_id="m-manual",
+                received_at=now,
+            )
+        ],
+    })
+
+    rows = list_manual_queue(FlyerProjectStore(projects=[project]), now=datetime(2026, 5, 20, tzinfo=timezone.utc))
+
+    assert rows[0]["verification_modes"] == ["source_edit_integrity_only"]
 
 
 def _project(project_id: str, phone: str, age_hours: int, *, reason_code: str = "operator_request", status: str = "manual_edit_required") -> FlyerProject:

@@ -30,6 +30,16 @@ Awesome Hermes Agent ecosystem check: no turnkey production Flyer Studio QA pipe
 
 This plan is a P0 production-pilot hardening tranche, not permission to call Flyer Studio 90% ready by itself. After this plan passes, the correct claim is: "known live QA blockers now fail closed or route to manual review, and the deterministic P0 gate is green." The product still cannot be called 90% production-ready until the full backlog exit criteria pass: deterministic golden scenarios, spend-gated real-model eval, source-edit/manual fallback, real OCR/vision QA, operator queue clearance, and `main-vps` provider readiness.
 
+## Pilot-Hardening Addendum - 2026-05-19
+
+All P0 slices from this plan have shipped, deployed, and verified. The post-P0 follow-ups tracked after the 92% pilot-ready verdict are now closed in code except for live operator disposition of the six already-classified manual-queue projects:
+
+- Spend-gated real-model golden smoke exists in `tests/test_flyer_golden_scenarios_real_model.py`; normal CI proves it fails closed without explicit `--allow-spend`.
+- Cockpit manual queue now surfaces `source_edit_integrity_only` as an "Integrity only" badge via `verification_modes` from text-manifest sidecars.
+- `flyer_manual_edit_status_reply` now delegates to the canonical state/reason table so source-edit status copy cannot drift from `MANUAL_REVIEW_REASON_LINES`.
+- The deterministic golden suite includes messy F-series-style raw requests for Chloe salon service pricing, Lakshmi typo/price-list shorthand, and exact-edit wording.
+- Manual queue burn-down remains an operator action, not a code action: production rows are classified and actionable, but completing or break-glassing real customer projects requires explicit operator approval plus backup/audit.
+
 ## Review Fixes Applied
 
 - Added Task 0 for P0-1 project context isolation and stale-state routing.

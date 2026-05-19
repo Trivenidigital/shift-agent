@@ -8,14 +8,14 @@ canonical scenario catalog defined in `_SCENARIOS` + `_DELEGATED_SCENARIOS`.
 Each scenario has a stable `id`; failures print the id + scenario description
 so triage points at a real flow, not an opaque parametrize index.
 
-**Spend-gated real-model**: NOT in this PR. Tracked in
-`tasks/flyer-p0-execution-plan-2026-05-19.md` as a follow-up; requires an
-allow-spend flag, isolated VPS credentials, and a separate test file to
-ensure CI cannot accidentally invoke it. The deterministic suite proves
+**Spend-gated real-model**: now covered by
+`tests/test_flyer_golden_scenarios_real_model.py`; it requires an explicit
+allow-spend environment flag plus the smoke script's `--allow-spend` flag so
+CI cannot accidentally invoke it. The deterministic suite proves
 state / routing / reason_code / locked-fact / status-reply truthfulness —
 which is what the user-spec axes assert. Real-model rendering / OCR are
-exercised by the existing `smoke-flyer-quality --real-model --allow-spend`
-path (deploy-gated, not auto-invoked).
+exercised by `smoke-flyer-quality --real-model --allow-spend` through the
+spend-gated test path (not auto-invoked).
 
 How to add a new scenario:
   1. Add a `GoldenScenario(...)` to `_SCENARIOS` if you're writing a new
@@ -90,6 +90,10 @@ EXPECTED_AXES: frozenset[str] = frozenset({
     "approval_text_after_threshold",  # S3 stale guard preserves "approve"/"yes"
     "non_english_reply",  # S3 stale guard preserves Hindi/Telugu/Hinglish
     "break_glass_status_disambiguation",  # S2 break_glass_sent disambiguation
+    # Post-P0 pilot-hardening: messy real-customer-style raw_request strings.
+    "real_customer_chloe_salon",
+    "real_customer_lakshmi_price_list",
+    "real_customer_source_edit_request",
 })
 
 REPO = Path(__file__).resolve().parent.parent
@@ -240,6 +244,47 @@ _SCENARIOS: list[GoldenScenario] = [
         expected_status_reply_contains=[
             "I'm missing a couple of required details",
             "send the remaining info",
+        ],
+    ),
+    GoldenScenario(
+        id="real_customer_chloe_salon",
+        description="Chloe-style service flyer with price-before-service phrasing and labelled contact/location.",
+        category="salon",
+        raw_request=(
+            "Create flyer for Chloe Hair Studio promoting the $20 men haircut, "
+            "$80 perms, and other hair services. Location: Virginia Beach, VA. "
+            "Contact: +1 757 555 0199"
+        ),
+        expected_locked_facts={
+            "business_name": "Chloe Hair Studio",
+            "contact_phone": "+1 757 555 0199",
+        },
+    ),
+    GoldenScenario(
+        id="real_customer_lakshmi_price_list",
+        description="Lakshmi-style WhatsApp shorthand with typo, compact item list, and phone label.",
+        category="restaurant",
+        raw_request=(
+            "Creare flyer for customer Lakshmis Kitchn. Items: Bobbatlu $2/piece, "
+            "Idly $4.99, Dosa $6.99. Phone: +1 9802005022"
+        ),
+        expected_locked_facts={
+            "business_name": "Lakshmis Kitchn",
+            "contact_phone": "+1 9802005022",
+        },
+    ),
+    GoldenScenario(
+        id="real_customer_source_edit_request",
+        description="Exact-edit wording from the F0029 family must fail closed, not become a generic flyer.",
+        category="manual_queue",
+        raw_request=(
+            "Use this flyer for Lakshmis Kitchen. Replace Triveni Express. "
+            "Remove extra 08:00 and add Any Item for $9.99."
+        ),
+        expected_status="manual_edit_required",
+        expected_reason_code="missing_required_facts",
+        expected_status_reply_contains=[
+            "I'm missing a couple of required details",
         ],
     ),
 
