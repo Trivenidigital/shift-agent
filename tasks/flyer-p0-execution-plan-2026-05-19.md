@@ -159,6 +159,44 @@ Mirrors parent backlog §"90% Readiness Exit Criteria"; closed only when:
 
 Updates land here in reverse-chronological order after each slice merge/deploy.
 
+### 2026-05-19 — Operator-accepted readiness verdict (~92% pilot-ready)
+
+> Flyer Studio is ready for a controlled production pilot. P0 safety and
+> correctness gates are complete, all known customer-dangerous paths
+> fail closed or route to manual review, and the deterministic golden
+> suite passes. Remaining work is pilot-hardening around real-model
+> golden coverage, cockpit polish, and real-message corpus expansion.
+
+This is "pilot-ready," not "fully GA mature." Climb from baseline
+60-65% to ~92% over the 8-slice backlog (2026-05-19 session). Evidence:
+
+- All P0 slices shipped, merged, deployed, smoke-verified (see ledger
+  above).
+- Originally risky surfaces controlled: stale context, locked facts,
+  reference extraction, visual QA, source edits, manual queue, state
+  replies, golden scenarios.
+- The 6 dead-letter manual-review rows from session start are no
+  longer silent — backfilled, classified, surfaced in cockpit + CLI,
+  and operator-actionable.
+- Full pytest: 1226 passed, 677 skipped (baseline 1102; +124 net new
+  tests across 8 slices, 0 regressions).
+- Golden deterministic suite: 22/22 passing, covers all 20 canonical
+  user-spec axes.
+- Real-provider posture: fail-closed where not fully automated
+  (OPENROUTER vision-auth gate at deploy; OPENAI source-edit preflight
+  routes to manual review on missing key; sidecar QA rejected in prod).
+
+**Four remaining follow-ups — post-P0/pilot-hardening, NOT blockers:**
+
+1. Spend-gated real-model golden suite (allow-spend flag + isolated
+   credentials).
+2. Cockpit badge for `source_edit_integrity_only` (operator dashboard
+   polish).
+3. Copy consistency between `flyer_manual_edit_status_reply` and
+   `MANUAL_REVIEW_REASON_LINES["source_edit_provider_unavailable"]`.
+4. Real-customer message sampling into golden scenarios (sample 2-3
+   F-series production raw_requests from decisions.log).
+
 ### 2026-05-19 — S8 P0-7 golden scenario regression suite + S6 follow-ups: MERGED + DEPLOYED
 
 - PR #123 merged at `40012d5` (2 commits: feat `c74f707` + review-fix `353e7b8`).
