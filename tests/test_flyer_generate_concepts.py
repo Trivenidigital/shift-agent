@@ -87,6 +87,15 @@ def _project_with_failed_reference() -> dict:
     }
 
 
+def _project_with_pending_reference(asset_path: Path) -> dict:
+    project = _project_with_failed_reference()
+    project["reference_extractions"][0]["provider"] = "not_run"
+    project["reference_extractions"][0]["status"] = "not_run"
+    project["reference_extractions"][0]["detail"] = "reference extraction pending"
+    project["assets"][0]["path"] = str(asset_path)
+    return project
+
+
 def test_generate_refuses_unextracted_required_reference_before_render(monkeypatch, tmp_path, capsys):
     module = _load_script(monkeypatch)
     state_path = tmp_path / "projects.json"
@@ -119,3 +128,76 @@ def test_generate_refuses_unextracted_required_reference_before_render(monkeypat
     assert persisted["status"] == "manual_edit_required"
     assert persisted["manual_review"]["status"] == "queued"
     assert persisted["manual_review"]["reason"] == "reference_provider_unavailable"
+
+
+def test_generate_extracts_pending_reference_facts_before_render(monkeypatch, tmp_path, capsys):
+    module = _load_script(monkeypatch)
+    from schemas import FlyerVisualQAReport  # noqa: E402
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    state_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    reference = asset_dir / "F0001-reference.png"
+    reference.write_bytes(b"fake image bytes")
+    rendered = asset_dir / "F0001-C1.png"
+    state_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_sequence": 2,
+        "projects": [_project_with_pending_reference(reference)],
+    }), encoding="utf-8")
+
+    class FakeProvider:
+        provider_name = "fake_vision"
+
+        def extract_text(self, _asset, _raw_request):
+            return "Idly $7\nDosa $8", "ok"
+
+    def fake_render(project, _asset_dir, **_kwargs):
+        by_value = {fact.value for fact in project.locked_facts}
+        assert {"Idly", "$7", "Dosa", "$8"}.issubset(by_value)
+        rendered.write_bytes(b"rendered")
+        return [types.SimpleNamespace(
+            path=rendered,
+            kind="concept_preview",
+            output_format="concept_preview",
+            width=1080,
+            height=1350,
+            concept_id="C1",
+        )]
+
+    def fake_qa(project, path, *, output_format, asset_id):
+        return FlyerVisualQAReport(
+            project_id=project.project_id,
+            asset_id=asset_id,
+            artifact_path=str(path),
+            artifact_sha256="b" * 64,
+            project_version=project.version,
+            output_format=output_format,
+            provider="test",
+            qa_source="sidecar_test",
+            status="passed",
+            checked_at=datetime(2026, 5, 19, tzinfo=timezone.utc),
+        )
+
+    monkeypatch.setattr(module, "build_reference_extraction_provider", lambda: FakeProvider())
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts",
+        "--project-id", "F0001",
+        "--state-path", str(state_path),
+        "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+    ])
+
+    assert module.main() == 0
+    out = json.loads(capsys.readouterr().out)
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    values = {fact["value"] for fact in persisted["locked_facts"]}
+
+    assert out["project_id"] == "F0001"
+    assert {"Idly", "$7", "Dosa", "$8"}.issubset(values)
+    assert persisted["reference_extractions"][0]["status"] == "ok"
+    assert persisted["status"] == "awaiting_final_approval"

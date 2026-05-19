@@ -122,13 +122,64 @@ def merge_locked_facts(*fact_lists: Iterable[FlyerLockedFact]) -> list[FlyerLock
         "uploaded_asset": 5,
         "system": 6,
     }
+    item_pattern = re.compile(r"^item:(?P<index>\d+):(?P<kind>name|price)$")
+    materialized = [list(facts) for facts in fact_lists]
     merged: dict[str, FlyerLockedFact] = {}
-    for facts in fact_lists:
+    item_records: list[dict[str, FlyerLockedFact | int | str]] = []
+
+    def item_key(value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", (value or "").lower()).strip()
+
+    def add_or_replace_item(name_fact: FlyerLockedFact, price_fact: FlyerLockedFact | None) -> None:
+        key = item_key(name_fact.value)
+        if not key:
+            return
+        new_priority = priority.get(name_fact.source, 99)
+        for record in item_records:
+            if record["key"] != key:
+                continue
+            old_priority = int(record["priority"])
+            if new_priority < old_priority:
+                record["name"] = name_fact
+                record["price"] = price_fact
+                record["priority"] = new_priority
+            return
+        item_records.append({"key": key, "name": name_fact, "price": price_fact, "priority": new_priority})
+
+    for facts in materialized:
         for fact in facts:
+            if item_pattern.match(fact.fact_id):
+                continue
             current = merged.get(fact.fact_id)
             if current is None or priority.get(fact.source, 99) < priority.get(current.source, 99):
                 merged[fact.fact_id] = fact
-    return list(merged.values())
+
+        grouped: dict[int, dict[str, FlyerLockedFact]] = {}
+        order: list[int] = []
+        for fact in facts:
+            match = item_pattern.match(fact.fact_id)
+            if not match:
+                continue
+            index = int(match.group("index"))
+            if index not in grouped:
+                grouped[index] = {}
+                order.append(index)
+            grouped[index][match.group("kind")] = fact
+        for index in order:
+            name_fact = grouped[index].get("name")
+            if name_fact is None:
+                continue
+            add_or_replace_item(name_fact, grouped[index].get("price"))
+
+    result = list(merged.values())
+    for index, record in enumerate(item_records):
+        name_fact = record["name"]
+        price_fact = record["price"]
+        if isinstance(name_fact, FlyerLockedFact):
+            result.append(name_fact.model_copy(update={"fact_id": f"item:{index}:name"}))
+        if isinstance(price_fact, FlyerLockedFact):
+            result.append(price_fact.model_copy(update={"fact_id": f"item:{index}:price"}))
+    return result
 
 
 def facts_by_id(project: FlyerProject | object) -> dict[str, FlyerLockedFact]:

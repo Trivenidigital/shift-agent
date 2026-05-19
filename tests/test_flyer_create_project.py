@@ -446,6 +446,34 @@ def test_create_project_pdf_reference_queues_manual_review(monkeypatch, tmp_path
     assert "application/pdf" in project["reference_extractions"][0]["detail"]
 
 
+def test_create_project_pdf_logo_queues_manual_review_not_generic_generation(monkeypatch, tmp_path, capsys):
+    module = _load_script(monkeypatch)
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    reference = tmp_path / "logo.pdf"
+    reference.write_bytes(b"%PDF-1.4 fake")
+    _write_customer(customers_path, category="Indian grocery", phone="+17329837841")
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+17329837841",
+        "--message-id", "m-pdf-logo",
+        "--raw-request", "Create a premium flyer for Lakshmis Kitchen using this as our logo.",
+        "--reference-media-path", str(reference),
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+        "--asset-dir", str(tmp_path / "assets"),
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+
+    assert project["status"] == "manual_edit_required"
+    assert project["manual_review"]["reason"] == "reference_unsupported"
+    assert project["reference_extractions"][0]["role"] == "logo"
+    assert project["reference_extractions"][0]["status"] == "unsupported"
+
+
 def test_create_project_cleans_new_original_reference_business_name(monkeypatch):
     module = _load_script(monkeypatch)
     raw_request = (

@@ -535,6 +535,25 @@ def _try_flyer_primary_intercept(
             subprocess_rc=2, detail=detail[:500],
         )
         return None
+    if not exact_reference_edit and actions.flyer_project_has_manual_review_queued(project or {}):
+        manual = (project or {}).get("manual_review") or {}
+        ack_ok, outbound_message_id, ack_err = actions.send_flyer_manual_review_ack(
+            chat_id,
+            project_id,
+            text,
+            reason=str(manual.get("detail") or manual.get("reason") or ""),
+        )
+        actions.audit_intercepted(
+            reason="flyer_reference_manual_review_queued",
+            chat_id=chat_id,
+            subprocess_rc=0 if ack_ok else 3,
+            detail=(
+                f"project_id={project_id}; sender_role={role}; "
+                f"manual_reason={manual.get('reason') or ''}; "
+                f"ack_message_id={outbound_message_id}; ack_error={ack_err[:300]}"
+            ),
+        )
+        return {"action": "skip", "reason": f"cf-router flyer manual review queued: project {project_id}"}
 
     if exact_reference_edit:
         access, quota_result = _reserve_flyer_access_or_reply(chat_id, phone, project_id, message_id, consume_quota=True)
@@ -625,7 +644,15 @@ def _try_flyer_primary_intercept(
             )
         else:
             _release_flyer_access(access, chat_id, phone, project_id, message_id)
-            ack_ok, outbound_message_id, ack_err = actions.send_flyer_intake_ack(chat_id, project_id)
+            if actions.flyer_generation_queued_manual_review(gen_detail):
+                ack_ok, outbound_message_id, ack_err = actions.send_flyer_manual_review_ack(
+                    chat_id,
+                    project_id,
+                    text,
+                    reason=gen_detail,
+                )
+            else:
+                ack_ok, outbound_message_id, ack_err = actions.send_flyer_intake_ack(chat_id, project_id)
             outbound_message_id = ",".join(x for x in [proc_mid, outbound_message_id] if x)
             ack_err = f"concept_generation_failed: {gen_detail}; ack_error={ack_err}"
     else:
@@ -698,6 +725,25 @@ def _try_flyer_reference_scope_choice_intercept(text: str, chat_id: str, event: 
             subprocess_rc=2, detail=f"reference_choice=true; {detail[:450]}",
         )
         return None
+    if actions.flyer_project_has_manual_review_queued(project or {}):
+        manual = (project or {}).get("manual_review") or {}
+        ack_ok, outbound_message_id, ack_err = actions.send_flyer_manual_review_ack(
+            chat_id,
+            project_id,
+            raw_request,
+            reason=str(manual.get("detail") or manual.get("reason") or ""),
+        )
+        actions.audit_intercepted(
+            reason="flyer_reference_manual_review_queued",
+            chat_id=chat_id,
+            subprocess_rc=0 if ack_ok else 3,
+            detail=(
+                f"project_id={project_id}; sender_role={role}; source={source}; "
+                f"manual_reason={manual.get('reason') or ''}; "
+                f"ack_message_id={outbound_message_id}; ack_error={ack_err[:300]}"
+            ),
+        )
+        return {"action": "skip", "reason": f"cf-router flyer reference manual review queued: project {project_id}"}
 
     has_required = actions.flyer_project_has_required_fields(project or {})
     if has_required:
@@ -713,7 +759,15 @@ def _try_flyer_reference_scope_choice_intercept(text: str, chat_id: str, event: 
             )
         else:
             _release_flyer_access(access, chat_id, phone, project_id, message_id)
-            ack_ok, outbound_message_id, ack_err = actions.send_flyer_intake_ack(chat_id, project_id)
+            if actions.flyer_generation_queued_manual_review(gen_detail):
+                ack_ok, outbound_message_id, ack_err = actions.send_flyer_manual_review_ack(
+                    chat_id,
+                    project_id,
+                    raw_request,
+                    reason=gen_detail,
+                )
+            else:
+                ack_ok, outbound_message_id, ack_err = actions.send_flyer_intake_ack(chat_id, project_id)
             outbound_message_id = ",".join(x for x in [proc_mid, outbound_message_id] if x)
             ack_err = f"concept_generation_failed: {gen_detail}; ack_error={ack_err}"
     else:

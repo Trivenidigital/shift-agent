@@ -74,6 +74,30 @@ def test_extract_text_facts_splits_visible_copy_from_style_instructions():
     assert all("rustic textures" not in fact.value for fact in facts)
 
 
+def test_merge_locked_facts_overrides_reference_items_by_name_not_position():
+    from agents.flyer.facts import merge_locked_facts
+
+    customer = [
+        FlyerLockedFact(fact_id="item:0:name", label="Item", value="Dosa", source="customer_text"),
+        FlyerLockedFact(fact_id="item:0:price", label="Price", value="$8.50", source="customer_text"),
+    ]
+    reference = [
+        FlyerLockedFact(fact_id="item:0:name", label="Item", value="Idly", source="reference_vision"),
+        FlyerLockedFact(fact_id="item:0:price", label="Price", value="$7", source="reference_vision"),
+        FlyerLockedFact(fact_id="item:1:name", label="Item", value="Dosa", source="reference_vision"),
+        FlyerLockedFact(fact_id="item:1:price", label="Price", value="$8", source="reference_vision"),
+    ]
+
+    merged = merge_locked_facts(customer, reference)
+    by_id = {fact.fact_id: fact for fact in merged}
+
+    assert by_id["item:0:name"].value == "Dosa"
+    assert by_id["item:0:price"].value == "$8.50"
+    assert by_id["item:1:name"].value == "Idly"
+    assert by_id["item:1:price"].value == "$7"
+    assert [fact.value for fact in merged if fact.value == "Dosa"] == ["Dosa"]
+
+
 def test_context_isolation_blocks_stale_project_provenance():
     from agents.flyer.facts import context_isolation_blockers
 

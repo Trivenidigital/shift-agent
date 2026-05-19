@@ -172,30 +172,39 @@ class SidecarReferenceExtractionProvider(ReferenceExtractionProvider):
 
 def _facts_from_text(text: str, *, asset: FlyerAsset, source: str) -> list[FlyerLockedFact]:
     facts: list[FlyerLockedFact] = []
-    pattern = re.compile(r"(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,60}?)\s*(?:-|:)?\s*\$\s*(?P<price>\d+(?:\.\d{2})?)")
-    for idx, match in enumerate(pattern.finditer(text or "")):
-        name = " ".join(match.group("name").strip(" .,:;-").split())
-        price = f"${match.group('price')}"
-        if not name:
-            continue
-        facts.append(FlyerLockedFact(
-            fact_id=f"item:{idx}:name",
-            label="Item",
-            value=name,
-            source=source,
-            required=True,
-            source_asset_id=asset.asset_id,
-            source_sha256=asset.sha256,
-        ))
-        facts.append(FlyerLockedFact(
-            fact_id=f"item:{idx}:price",
-            label="Price",
-            value=price,
-            source=source,
-            required=True,
-            source_asset_id=asset.asset_id,
-            source_sha256=asset.sha256,
-        ))
+    pattern = re.compile(
+        r"(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,60}?)\s*(?:-|:)?\s*\$\s*(?P<price>\d+(?:\.\d{2})?)\b(?P<tail>[^\n\r,;]*)",
+        flags=re.IGNORECASE,
+    )
+    promo_tail = re.compile(r"^\s*(?:off|discount|save|coupon|credit|cashback|%|\bpercent\b)", flags=re.IGNORECASE)
+    for line in (text or "").splitlines():
+        for match in pattern.finditer(line):
+            if promo_tail.search(match.group("tail") or ""):
+                continue
+            name = " ".join(match.group("name").strip(" .,:;-").split())
+            name = re.sub(r"^(?:and|with|include|includes)\s+", "", name, flags=re.IGNORECASE).strip()
+            if not name:
+                continue
+            idx = len(facts) // 2
+            price = f"${match.group('price')}"
+            facts.append(FlyerLockedFact(
+                fact_id=f"item:{idx}:name",
+                label="Item",
+                value=name,
+                source=source,
+                required=True,
+                source_asset_id=asset.asset_id,
+                source_sha256=asset.sha256,
+            ))
+            facts.append(FlyerLockedFact(
+                fact_id=f"item:{idx}:price",
+                label="Price",
+                value=price,
+                source=source,
+                required=True,
+                source_asset_id=asset.asset_id,
+                source_sha256=asset.sha256,
+            ))
     return facts
 
 
@@ -249,6 +258,16 @@ def extract_reference(
             provider=provider.provider_name,
             status="provider_unavailable",
             detail="reference OCR/vision provider unavailable",
+            extracted_at=datetime.now(timezone.utc),
+        )
+    if status == "low_confidence":
+        return FlyerReferenceExtraction(
+            asset_id=asset.asset_id,
+            role=role,
+            provider=provider.provider_name,
+            status="low_confidence",
+            extracted_facts=[],
+            detail="reference OCR/vision confidence too low",
             extracted_at=datetime.now(timezone.utc),
         )
     source = "reference_ocr" if provider.provider_name == "sidecar" else "reference_vision"
