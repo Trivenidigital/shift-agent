@@ -279,7 +279,10 @@ def test_paid_back_from_confirming_summary_returns_to_choosing_plan(tmp_path):
     store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
     session = next(s for s in store.onboarding_sessions if s.chat_id == chat_id)
     assert session.status == "confirming_summary"
-    assert session.plan_id != "trial"
+    # Tighter than `!= "trial"`: position "2" must map to "starter". Catches
+    # silent reordering of default_tiers() that would otherwise let the
+    # test pass with a different paid plan.
+    assert session.plan_id == "starter"
 
     result = handle_onboarding_message(
         state_path=state_path, chat_id=chat_id, sender_phone="+19045550155",
