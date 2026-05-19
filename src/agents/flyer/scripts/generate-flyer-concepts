@@ -16,6 +16,10 @@ sys.path.insert(0, str(SRC_ROOT / "platform"))
 from schemas import Config, FlyerConcept, FlyerManualReview, FlyerProjectStore, FlyerReferenceExtraction  # noqa: E402
 from safe_io import FileLock, atomic_write_text, load_yaml_model  # noqa: E402
 try:
+    from flyer_manual_queue import make_manual_review  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.manual_queue import make_manual_review  # noqa: E402
+try:
     from flyer_facts import merge_locked_facts  # type: ignore  # noqa: E402
 except ImportError:
     from agents.flyer.facts import merge_locked_facts  # noqa: E402
@@ -110,9 +114,8 @@ def _persist_reference_extraction_results(state_path: Path, project_id: str, ext
             if failed:
                 first = failed[0]
                 updates["status"] = "manual_edit_required"
-                updates["manual_review"] = FlyerManualReview(
-                    status="queued",
-                    reason=f"reference_{first.status}",
+                updates["manual_review"] = make_manual_review(
+                    reason_code=f"reference_{first.status}",
                     detail=first.detail,
                     queued_at=now,
                 )
@@ -176,12 +179,11 @@ def main() -> int:
     if failed_reference_extractions:
         now = datetime.now(timezone.utc)
         first = failed_reference_extractions[0]
-        manual = project.manual_review.model_copy(update={
-            "status": "queued",
-            "reason": f"reference_{first.status}",
-            "detail": first.detail,
-            "queued_at": now,
-        })
+        manual = make_manual_review(
+            reason_code=f"reference_{first.status}",
+            detail=first.detail,
+            queued_at=now,
+        )
         with FileLock(Path(str(state_path) + ".lock")):
             store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
             for idx, current in enumerate(store.projects):
@@ -276,12 +278,11 @@ def main() -> int:
                 for revision in current.revisions
             ]
             if failed_qa:
-                manual = current.manual_review.model_copy(update={
-                    "status": "queued",
-                    "reason": "visual_qa_failed",
-                    "detail": "; ".join(blocker for report in failed_qa for blocker in report.blockers)[:500],
-                    "queued_at": now,
-                })
+                manual = make_manual_review(
+                    reason_code="visual_qa_failed",
+                    detail="; ".join(blocker for report in failed_qa for blocker in report.blockers)[:500],
+                    queued_at=now,
+                )
                 store.projects[snapshot_idx] = current.model_copy(update={
                     "status": "manual_edit_required",
                     "assets": [*current.assets, *assets],

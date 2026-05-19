@@ -24,6 +24,10 @@ try:
     from flyer_workflow import extract_revision_patch  # type: ignore  # noqa: E402
 except ImportError:
     from agents.flyer.workflow import extract_revision_patch  # noqa: E402
+try:
+    from flyer_manual_queue import make_manual_review  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.manual_queue import make_manual_review  # noqa: E402
 
 
 STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
@@ -55,6 +59,23 @@ def main() -> int:
     p.add_argument("--approve-message-id", default="")
     p.add_argument("--queue-manual-review", action="store_true")
     p.add_argument("--manual-reason", default="")
+    p.add_argument(
+        "--manual-reason-code",
+        default="operator_request",
+        choices=[
+            "unclassified",
+            "legacy_unknown",
+            "reference_low_confidence",
+            "reference_provider_unavailable",
+            "reference_unsupported",
+            "reference_not_run",
+            "visual_qa_failed",
+            "source_edit_provider_unavailable",
+            "operator_request",
+            "policy_block",
+            "provider_timeout",
+        ],
+    )
     p.add_argument("--manual-detail", default="")
     p.add_argument("--state-path", default=str(STATE_PATH))
     args = p.parse_args()
@@ -193,12 +214,12 @@ def main() -> int:
                 should_write = True
             if args.queue_manual_review:
                 now = datetime.now(timezone.utc)
-                manual = updated.manual_review.model_copy(update={
-                    "status": "queued",
-                    "reason": args.manual_reason or "operator_review_required",
-                    "detail": (args.manual_detail or "").strip()[:500],
-                    "queued_at": updated.manual_review.queued_at or now,
-                })
+                manual = make_manual_review(
+                    reason_code=args.manual_reason_code,
+                    reason=args.manual_reason,
+                    detail=(args.manual_detail or "").strip(),
+                    queued_at=updated.manual_review.queued_at or now,
+                )
                 if updated.status != "manual_edit_required":
                     if not is_flyer_transition_allowed(updated.status, "manual_edit_required"):
                         raise SystemExit(f"invalid transition {updated.status}->manual_edit_required")

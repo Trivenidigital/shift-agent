@@ -15,9 +15,9 @@ sys.path.insert(0, str(SRC_ROOT))
 from schemas import FlyerProjectStore  # noqa: E402
 from safe_io import FileLock, atomic_write_text  # noqa: E402
 try:
-    from flyer_manual_queue import complete_manual_project, list_manual_queue  # type: ignore  # noqa: E402
+    from flyer_manual_queue import complete_manual_project, list_manual_queue, triage_summary  # type: ignore  # noqa: E402
 except ImportError:
-    from agents.flyer.manual_queue import complete_manual_project, list_manual_queue  # noqa: E402
+    from agents.flyer.manual_queue import complete_manual_project, list_manual_queue, triage_summary  # noqa: E402
 
 
 STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
@@ -33,12 +33,16 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--state-path", default=str(STATE_PATH))
     parser.add_argument("--list", action="store_true")
+    parser.add_argument("--triage", action="store_true", help="grouped + reason-tallied operator view")
     parser.add_argument("--complete", metavar="PROJECT_ID")
     parser.add_argument("--asset")
     parser.add_argument("--reason", default="")
     args = parser.parse_args()
 
     state_path = Path(args.state_path)
+    if args.triage:
+        print(json.dumps(triage_summary(_load(state_path)), default=str))
+        return 0
     if args.list:
         print(json.dumps({"queue": list_manual_queue(_load(state_path))}, default=str))
         return 0
@@ -52,7 +56,7 @@ def main() -> int:
             atomic_write_text(state_path, store.model_dump_json(indent=2))
         print(json.dumps({"project_id": args.complete, "status": "awaiting_final_approval"}))
         return 0
-    raise SystemExit("pass --list or --complete")
+    raise SystemExit("pass --list, --triage, or --complete")
 
 
 if __name__ == "__main__":

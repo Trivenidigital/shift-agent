@@ -20,6 +20,10 @@ sys.path.insert(0, str(SRC_ROOT))
 from schemas import FlyerAsset, FlyerCustomerStore, FlyerManualReview, FlyerProject, FlyerProjectStore, FlyerProjectCreated, FlyerReferenceExtraction, FlyerRequestFields  # noqa: E402
 from safe_io import FileLock, atomic_write_text  # noqa: E402
 try:
+    from flyer_manual_queue import make_manual_review  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.manual_queue import make_manual_review  # noqa: E402
+try:
     from flyer_facts import extract_text_facts, merge_locked_facts  # type: ignore  # noqa: E402
 except ImportError:
     from agents.flyer.facts import extract_text_facts, merge_locked_facts  # noqa: E402
@@ -468,9 +472,8 @@ def main() -> int:
                 reference_extractions.append(extraction)
                 if _reference_failure_requires_manual_review(extraction):
                     reference_manual_required = True
-                    manual_review = FlyerManualReview(
-                        status="queued",
-                        reason=f"reference_{extraction.status}",
+                    manual_review = make_manual_review(
+                        reason_code=f"reference_{extraction.status}",
                         detail=extraction.detail,
                         queued_at=now,
                     )
@@ -478,6 +481,12 @@ def main() -> int:
                     pending_reference_asset = reference_asset
                     should_extract_reference = True
         locked_facts = extract_text_facts(fields, args.raw_request, message_id=args.message_id)
+        if args.manual_edit_required and not reference_manual_required:
+            manual_review = make_manual_review(
+                reason_code="source_edit_provider_unavailable",
+                detail="authorized source-edit queued for manual review",
+                queued_at=now,
+            )
         status = "manual_edit_required" if args.manual_edit_required or reference_manual_required else "intake_started"
         project = FlyerProject(
             project_id=project_id,
@@ -531,9 +540,8 @@ def main() -> int:
             }
             if _reference_failure_requires_manual_review(extraction):
                 updates["status"] = "manual_edit_required"
-                updates["manual_review"] = FlyerManualReview(
-                    status="queued",
-                    reason=f"reference_{extraction.status}",
+                updates["manual_review"] = make_manual_review(
+                    reason_code=f"reference_{extraction.status}",
                     detail=extraction.detail,
                     queued_at=now,
                 )

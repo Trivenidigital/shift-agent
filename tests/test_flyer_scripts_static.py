@@ -29,6 +29,42 @@ def test_scripts_use_atomic_writes_and_locks():
             assert "atomic_write_text" in text
 
 
+def test_manual_queue_exposes_triage_and_backfill():
+    queue_cli = (SCRIPTS / "flyer-manual-queue").read_text(encoding="utf-8")
+    assert "--triage" in queue_cli
+    assert "triage_summary" in queue_cli
+
+    backfill = SCRIPTS / "backfill-flyer-manual-reasons"
+    assert backfill.is_file(), "backfill-flyer-manual-reasons script missing"
+    body = backfill.read_text(encoding="utf-8")
+    assert "backfill_manual_reasons" in body
+    assert "--apply" in body
+    assert "FileLock" in body
+    assert "atomic_write_text" in body
+
+
+def test_manual_transition_sites_use_helper():
+    """Every code-path transition into manual_edit_required goes through make_manual_review()."""
+    for name in ["create-flyer-project", "generate-flyer-concepts", "finalize-flyer-assets", "update-flyer-project"]:
+        text = (SCRIPTS / name).read_text(encoding="utf-8")
+        assert "make_manual_review" in text, f"{name} should call make_manual_review"
+
+    update_text = (SCRIPTS / "update-flyer-project").read_text(encoding="utf-8")
+    assert "--manual-reason-code" in update_text
+    assert "reason_code" in update_text
+
+
+def test_create_flyer_project_manual_edit_path_populates_reason_code():
+    """The forward-path bug that produced the 6 prod dead-letter projects:
+    --manual-edit-required without a reference failure must still populate manual_review.reason_code,
+    not leave it at the default 'unclassified'."""
+    text = (SCRIPTS / "create-flyer-project").read_text(encoding="utf-8")
+    # The fix: when args.manual_edit_required is set but no reference failure,
+    # build a manual_review via the helper with a concrete reason_code.
+    assert "args.manual_edit_required and not reference_manual_required" in text
+    assert "source_edit_provider_unavailable" in text
+
+
 def test_delivery_script_can_send_by_project_id():
     text = (SCRIPTS / "send-flyer-package").read_text(encoding="utf-8")
     finalize = (SCRIPTS / "finalize-flyer-assets").read_text(encoding="utf-8")
