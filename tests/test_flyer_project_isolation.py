@@ -340,6 +340,88 @@ def test_scenario6_fresh_active_project_still_attaches_revision_correction(monke
     assert result is not None
 
 
+def test_stale_guard_does_not_drop_concept_selection_after_threshold(monkeypatch):
+    """Regression for review BLOCKER: concept selection "1"/"2"/"3"/"C1" past the
+    awaiting_concept_selection 6h threshold must NOT trip the stale guard. The selection_map
+    handler runs further down the intercept and must still be reachable.
+    """
+    hooks, actions = _load_plugin_modules()
+    stale_awaiting_selection = _stale_project(
+        project_id="F0910",
+        status="awaiting_concept_selection",
+        hours_old=10,
+    )
+    _patch_basic_lookups(hooks, actions, monkeypatch, stale_awaiting_selection)
+    # Downstream selection handler invokes update-flyer-project + sends a confirmation.
+    monkeypatch.setattr(actions, "invoke_update_flyer_project", lambda *_a, **_kw: (True, ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, _text: (True, "mid", ""))
+
+    result = hooks._try_flyer_active_project_intercept(
+        "1",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "select-concept-1"},
+    )
+    assert result is not None, "concept selection text must not be dropped by stale guard"
+    assert "selected C1" in result.get("reason", ""), result
+
+
+def test_stale_guard_does_not_drop_approval_text_after_threshold(monkeypatch):
+    """Regression for review BLOCKER: "approve" on stale awaiting_final_approval must NOT
+    trip the stale guard. The approval flow runs further down the intercept."""
+    hooks, actions = _load_plugin_modules()
+    stale_awaiting_approval = _stale_project(
+        project_id="F0911",
+        status="awaiting_final_approval",
+        hours_old=10,
+        raw_request="Create flyer for Diwali",
+    )
+    stale_awaiting_approval["concepts"] = [{"concept_id": "C1"}]
+    stale_awaiting_approval["selected_concept_id"] = "C1"
+    _patch_basic_lookups(hooks, actions, monkeypatch, stale_awaiting_approval)
+    monkeypatch.setattr(actions, "invoke_update_flyer_project", lambda *_a, **_kw: (True, ""))
+    monkeypatch.setattr(actions, "finalize_and_send_flyer", lambda *_a, **_kw: (True, "finalized"))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, _text: (True, "mid", ""))
+
+    result = hooks._try_flyer_active_project_intercept(
+        "approve",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "approve-stale"},
+    )
+    # The result is whatever the approval handler returns; the key invariant is "not None"
+    # (i.e. the stale guard did NOT short-circuit the approval flow).
+    assert result is not None, "approval text must not be dropped by stale guard"
+
+
+def test_stale_guard_does_not_drop_non_english_reply(monkeypatch):
+    """Regression for review HIGH: Hindi/Telugu/Hinglish replies on stale projects must
+    NOT bail to new-project path. The regex helpers are English-only; the corrected guard
+    uses positive evidence (should_start_new_flyer_over_active) which is also English-only
+    but only fires on confident new-flyer matches, so non-English short replies attach
+    normally."""
+    hooks, actions = _load_plugin_modules()
+    stale = _stale_project(
+        project_id="F0912",
+        status="manual_edit_required",
+        hours_old=30,
+    )
+    _patch_basic_lookups(hooks, actions, monkeypatch, stale)
+    sent: list[str] = []
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "flyer_manual_edit_status_reply", lambda _project: "manual reply")
+    monkeypatch.setattr(actions, "flyer_project_status_reply", lambda _project: "status reply")
+
+    # Telugu transliteration of "any update?" — neither English regex matches; with the
+    # negative-evidence design this would have been dropped. With positive-evidence, the
+    # short non-English reply has no should_start_new signal, so the intercept attaches
+    # it to the existing project for downstream forwarding.
+    result = hooks._try_flyer_active_project_intercept(
+        "edaina update unda?",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "non-english-status"},
+    )
+    assert result is not None, "non-English short reply must not be dropped by stale guard"
+
+
 def test_stale_guard_lets_status_check_through_on_stale_project(monkeypatch):
     """A status check on a stale project must still route to the status-check handler,
     not bail out as a new-project case."""
