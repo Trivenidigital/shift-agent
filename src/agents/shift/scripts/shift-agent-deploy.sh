@@ -852,13 +852,15 @@ PY
         # restart cleared the stale module cache.
         #
         # Unit-presence-gated so VPSes without the cockpit installed aren't
-        # affected. Inside the gate: restart --wait + /health probe so a real
-        # cockpit failure fails the deploy + rolls back instead of being
-        # masked by `|| true` — the silent-failure mode this hook exists to
-        # prevent. Mirrors the rotate-jwt-secret.sh pattern.
+        # affected. Inside the gate: restart + /health probe so a real cockpit
+        # failure fails the deploy + rolls back instead of being masked by
+        # `|| true` — the silent-failure mode this hook exists to prevent.
+        # Do not use `systemctl restart --wait` here: on main-vps it can hang
+        # even after the unit is active and no jobs remain; the HTTP health
+        # probe below is the readiness check.
         if systemctl list-unit-files shift-agent-cockpit.service >/dev/null 2>&1; then
             cockpit_fail_reason=""
-            if ! systemctl restart --wait shift-agent-cockpit.service; then
+            if ! systemctl restart shift-agent-cockpit.service; then
                 cockpit_fail_reason="restart"
             else
                 cockpit_healthy=0
@@ -972,7 +974,7 @@ PY
         # cascaded into another rollback — we're already in rollback.
         if systemctl list-unit-files shift-agent-cockpit.service >/dev/null 2>&1; then
             cockpit_fail_reason=""
-            if ! systemctl restart --wait shift-agent-cockpit.service; then
+            if ! systemctl restart shift-agent-cockpit.service; then
                 cockpit_fail_reason="restart"
             else
                 cockpit_healthy=0

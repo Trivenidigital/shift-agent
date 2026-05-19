@@ -389,6 +389,14 @@ def test_production_readiness_modules_installed_and_smoked():
     assert "flyer-manual-queue" in smoke
 
 
+def test_cockpit_deploy_restart_uses_health_probe_without_systemctl_wait():
+    deploy = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh").read_text(encoding="utf-8")
+
+    assert "systemctl restart --wait shift-agent-cockpit.service" not in deploy
+    assert "systemctl restart shift-agent-cockpit.service" in deploy
+    assert "http://127.0.0.1:8081/health" in deploy
+
+
 def test_generation_does_not_hold_file_lock_during_render():
     generate = (SCRIPTS / "generate-flyer-concepts").read_text(encoding="utf-8")
     first_lock_start = generate.index("with FileLock")
