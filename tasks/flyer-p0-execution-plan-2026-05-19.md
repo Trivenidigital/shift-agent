@@ -159,6 +159,15 @@ Mirrors parent backlog §"90% Readiness Exit Criteria"; closed only when:
 
 Updates land here in reverse-chronological order after each slice merge/deploy.
 
+### 2026-05-19 — S7 P0-6 reason-code-aware state→reply table: MERGED + DEPLOYED
+
+- PR #122 merged at `87f8722` (2 commits: feat `71dd75b` + review-fix `d59a19e`).
+- Three parallel reviewers dispatched (state coverage / customer UX / runtime safety). State-coverage reviewer: LGTM (no fallthrough). Customer-UX reviewer: 4 HIGH copy fixes applied (overcommit on "I'll continue" for queued-for-designer states, hardcoded "menu/prices" assumption, hardcoded "business name and contact" instead of generic missing-info phrasing). Runtime reviewer: 1 LOW audit-tag fix applied (second status-check site was hardcoding `flyer_reference_exact_edit_status` regardless of reason_code → operator dashboards would have overcounted source-edit traffic).
+- Deferred review items (non-blocking): LOW delivered/completed nudge, LOW provider_timeout/visual_qa_failed warmth, LOW passive-voice tone, NIT "approve" repair prompt for intake_started (P0-7 scope), NIT i18n (`LANGUAGE_NAMES` exists but unapplied), NIT repetition rate-limit, dual-path divergence between `flyer_manual_edit_status_reply` and `MANUAL_REVIEW_REASON_LINES["source_edit_provider_unavailable"]` (within-project consistency held; cross-project divergence affects operator dashboards not customers).
+- Deploy tag `deploy-20260519-190930-d59a19ea` on `main-vps`; all 4 Flyer smokes green; full pytest **1201 passed, 677 skipped** (+30 vs S6 baseline 1171).
+- 7-item verification: deploy smoke ✓; `smoke-flyer-quality --final-package` `ok=true`; gateway+cockpit active, `/flyer/manual-queue` HTTP 401, bridge on `:3000`; dry-run status reply per state returned correct copy for 6 representative states (source-edit/missing-facts/visual-qa/reference-unsupported manual-queue + awaiting_final_approval + delivered); triage CLI unchanged at total=6 (3 legacy_unknown + 3 source_edit_provider_unavailable).
+- Lessons: (1) **Reason-code-driven copy beats status-code-driven copy** at the customer-facing layer — pre-S7, every manual_edit_required project (whether queued for source-edit, missing facts, PDF unsupported, or visual-QA failure) got the same source-preserving-edit reply, which was misleading for 11 of 12 reason codes. The dispatch indirection (status → reason_code → MANUAL_REVIEW_REASON_LINES) localizes the customer signal to its actual operator workflow. (2) **Audit reasons must mirror reply-routing branches** — the second status-check site was hardcoded to `flyer_reference_exact_edit_status` even when the reply was now general; operator dashboards filtering by audit reason would have produced wrong traffic-mix numbers. Reply-routing and audit-tagging are two sides of the same dispatch and need symmetric branching.
+
 ### 2026-05-19 — S6 P0-5 source-edit preflight + reliability: MERGED + DEPLOYED
 
 - PR #121 merged at `04ad45f` (3 commits: feat `e3013e2` + initial-review-fix `3526a35`-equiv on same branch + **operator-required review-fix `060df50` per user direction**).
