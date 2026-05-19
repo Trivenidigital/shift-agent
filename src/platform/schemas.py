@@ -902,6 +902,9 @@ class FlyerGuestOrder(BaseModel):
         )
 
 
+FLYER_AUTHORIZED_REQUESTER_LIMIT = 2
+
+
 class FlyerCustomerProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
     customer_id: str = Field(pattern=r"^CUST\d{4,}$")
@@ -911,7 +914,11 @@ class FlyerCustomerProfile(BaseModel):
     onboarded_by_phone: Optional[E164Phone] = None
     public_phone: E164Phone
     business_whatsapp_number: E164Phone
-    authorized_request_numbers: list[E164Phone] = Field(default_factory=list, min_length=1, max_length=20)
+    authorized_request_numbers: list[E164Phone] = Field(
+        default_factory=list,
+        min_length=1,
+        max_length=FLYER_AUTHORIZED_REQUESTER_LIMIT,
+    )
     business_category: str = Field(default="", max_length=120)
     preferred_language: FlyerLanguage = "en"
     plan_id: str = Field(min_length=1, max_length=40)
@@ -4095,6 +4102,7 @@ __all__ = [
     "FlyerIntakeStatus", "FlyerIntakeSource", "FlyerOutputFormat", "FlyerImageQuality",
     "FlyerAssetKind", "FLYER_TRANSITIONS", "is_flyer_transition_allowed",
     "FlyerPlanTier", "FlyerBrandAsset", "FlyerUsageEvent", "FlyerPaymentRecord", "FlyerGuestOrder",
+    "FLYER_AUTHORIZED_REQUESTER_LIMIT",
     "FlyerCustomerProfile", "FlyerOnboardingSession", "FlyerIntakeSession", "FlyerCustomerStore", "FlyerGuestOrderStore",
     "FlyerRequestFields", "FlyerAsset", "FlyerConcept", "FlyerRevision",
     "FlyerBrandKit", "FlyerProject", "FlyerProjectStore",

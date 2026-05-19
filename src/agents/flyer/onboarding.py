@@ -15,6 +15,7 @@ from typing import Optional
 
 from schemas import (
     E164Phone,
+    FLYER_AUTHORIZED_REQUESTER_LIMIT,
     FlyerBrandAsset,
     FlyerCustomerProfile,
     FlyerCustomerStore,
@@ -577,10 +578,11 @@ def _connect_recovered_sender(
     updates: dict[str, object] = {"updated_at": now}
     canonical_sender = _phone_or_none(sender_phone)
     if canonical_sender and str(canonical_sender) not in customer.owned_phone_numbers():
-        updates["authorized_request_numbers"] = [
-            *customer.authorized_request_numbers,
-            E164Phone.from_any(canonical_sender, country_code="US"),
-        ]
+        if len(customer.authorized_request_numbers) < FLYER_AUTHORIZED_REQUESTER_LIMIT:
+            updates["authorized_request_numbers"] = [
+                *customer.authorized_request_numbers,
+                E164Phone.from_any(canonical_sender, country_code="US"),
+            ]
 
     pending_assets = list(session.pending_brand_assets)
     if pending_assets:

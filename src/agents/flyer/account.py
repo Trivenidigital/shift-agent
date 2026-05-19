@@ -11,6 +11,7 @@ from typing import Optional
 
 from schemas import (
     E164Phone,
+    FLYER_AUTHORIZED_REQUESTER_LIMIT,
     FlyerAccountUpdated,
     FlyerCustomerActivated,
     FlyerCustomerProfile,
@@ -585,6 +586,14 @@ def _apply_account_update(
         _ensure_phone_available(store, phone, customer.customer_id)
         numbers = list(customer.authorized_request_numbers)
         if phone not in numbers:
+            if len(numbers) >= FLYER_AUTHORIZED_REQUESTER_LIMIT:
+                return (
+                    customer,
+                    "Flyer Studio\n------------\n"
+                    f"This account already has {FLYER_AUTHORIZED_REQUESTER_LIMIT} authorized requester numbers.\n\n"
+                    "Remove one before adding another.",
+                    "authorized_limit_reached",
+                )
             numbers.append(phone)
         return customer.model_copy(update={"authorized_request_numbers": numbers, "updated_at": now}), "Flyer Studio\n------------\nAuthorized request number added.", "authorized_added"
     if command == "remove_authorized":
@@ -601,7 +610,7 @@ def _apply_account_update(
         phone = E164Phone.from_any(value, country_code="US")
         _ensure_phone_available(store, phone, customer.customer_id)
         numbers = list(customer.authorized_request_numbers)
-        if phone not in numbers:
+        if phone not in numbers and len(numbers) < FLYER_AUTHORIZED_REQUESTER_LIMIT:
             numbers.append(phone)
         return customer.model_copy(update={
             "business_whatsapp_number": phone,
@@ -639,8 +648,17 @@ def _help_reply(customer: FlyerCustomerProfile) -> str:
     if customer.status == "payment_pending":
         return "Flyer Studio\n------------\nYour registration is saved and waiting for payment confirmation. You can send STATUS, HELP, or upload a logo/template."
     if customer.status == "trial":
-        return "Flyer Studio\n------------\nYour free trial includes 3 free sample flyers. Send a flyer request, STATUS, or CHANGE PLAN to upgrade."
-    return "Flyer Studio\n------------\nSend a flyer request, STATUS, or HELP. Account admins can add numbers, update phone details, or request a plan change."
+        return (
+            "Flyer Studio\n------------\n"
+            "Your free trial includes 3 free sample flyers. Send a flyer request, STATUS, or CHANGE PLAN to upgrade. "
+            f"Account admins can keep up to {FLYER_AUTHORIZED_REQUESTER_LIMIT} authorized requester numbers."
+        )
+    return (
+        "Flyer Studio\n------------\n"
+        "Send a flyer request, STATUS, or HELP. "
+        f"Account admins can keep up to {FLYER_AUTHORIZED_REQUESTER_LIMIT} authorized requester numbers, "
+        "update phone details, or request a plan change."
+    )
 
 
 def _activation_reply(customer: FlyerCustomerProfile, tiers: list[FlyerPlanTier]) -> str:
