@@ -641,3 +641,91 @@ def test_create_project_can_queue_exact_reference_edit_without_template_title(tm
     assert project["manual_review"]["status"] == "queued"
     assert project["manual_review"]["reason_code"] == "source_edit_provider_unavailable"
     assert project["manual_review"]["queued_at"] is not None
+
+
+def test_create_flyer_project_queues_manual_review_on_missing_required_facts(tmp_path, monkeypatch, capsys):
+    """P0-2: when extraction does not surface every required fact slot
+    (business_name + contact_phone by default), the project must be queued for
+    manual review with reason_code='missing_required_facts' rather than
+    silently entering intake_started."""
+    module = _load_script(monkeypatch)
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    projects_path = tmp_path / "projects.json"
+    customers_path = tmp_path / "customers.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    projects_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_sequence": 1,
+        "projects": [],
+    }), encoding="utf-8")
+    customers_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_customer_sequence": 1,
+        "customers": [],
+    }), encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+17329837841",
+        "--message-id", "missing-required-msg",
+        "--raw-request", "Make a flyer please.",
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+        "--asset-dir", str(asset_dir),
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+
+    assert project["status"] == "manual_edit_required"
+    assert project["manual_review"]["status"] == "queued"
+    assert project["manual_review"]["reason_code"] == "missing_required_facts"
+    detail = project["manual_review"]["detail"]
+    assert "missing required fact slots" in detail
+    # At least one of the required slots must be named in the detail (the bare
+    # request "Make a flyer please." has neither a business name nor a phone).
+    assert ("business_name" in detail) or ("contact_phone" in detail)
+
+
+def test_create_flyer_project_does_not_queue_when_required_facts_present(tmp_path, monkeypatch, capsys):
+    """Regression guard: when extraction DOES surface every required slot, project
+    enters intake_started and manual_review stays at status='none'."""
+    module = _load_script(monkeypatch)
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    projects_path = tmp_path / "projects.json"
+    customers_path = tmp_path / "customers.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    projects_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_sequence": 1,
+        "projects": [],
+    }), encoding="utf-8")
+    customers_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_customer_sequence": 1,
+        "customers": [],
+    }), encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+17329837841",
+        "--message-id", "complete-msg",
+        "--raw-request", (
+            "Create flyer for Lakshmis Kitchen Thursday dinner special. "
+            "Contact +17329837841. Idly $7 and Dosa $8."
+        ),
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+        "--asset-dir", str(asset_dir),
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+
+    assert project["status"] == "intake_started"
+    assert project["manual_review"]["status"] == "none"
+    assert project["manual_review"]["reason_code"] == "unclassified"

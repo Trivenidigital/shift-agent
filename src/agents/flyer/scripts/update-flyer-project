@@ -74,6 +74,7 @@ def main() -> int:
             "operator_request",
             "policy_block",
             "provider_timeout",
+            "missing_required_facts",
         ],
     )
     p.add_argument("--manual-detail", default="")

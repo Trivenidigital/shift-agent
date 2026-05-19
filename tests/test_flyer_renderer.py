@@ -127,6 +127,51 @@ def test_collect_text_facts_keeps_revised_price_phone_location_and_schedule():
     assert "$12.99" in facts["detail_002"]
 
 
+def test_collect_text_facts_prefers_locked_business_name_over_fields():
+    """P0-2: renderer must use locked_facts["business_name"] over fields.event_or_business_name
+    so a typed customer correction (customer_text source) flows into the rendered title without
+    a separate codepath. Today's bug class: fields hold the stale onboarding value while
+    locked_facts has the customer's latest correction; renderer was reading fields."""
+    project = _complete_project().model_copy(update={
+        "fields": FlyerRequestFields(
+            event_or_business_name="Old Stale Name",
+            venue_or_location="Old Stale Address",
+            contact_info="+19999999999",
+            notes="-",
+        ),
+        "locked_facts": [
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Chloe Hair Studio", source="customer_text"),
+            FlyerLockedFact(fact_id="location", label="Location", value="11111 Gainsborough Ct, Fairfax, VA", source="customer_text"),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+19803826497", source="customer_text"),
+        ],
+    })
+
+    facts = {fact.fact_id: fact.text for fact in collect_text_facts(project)}
+    assert facts["title"] == "Chloe Hair Studio"
+    assert facts["location"] == "11111 Gainsborough Ct, Fairfax, VA"
+    assert facts["contact"] == "+19803826497"
+
+
+def test_collect_text_facts_falls_back_to_fields_when_locked_slot_missing():
+    """P0-2: if locked_facts has no entry for a slot, the existing field is used unchanged.
+    Regression guard so the locked-fact preference doesn't blank out projects that only
+    populated the legacy fields path."""
+    project = _complete_project().model_copy(update={
+        "fields": FlyerRequestFields(
+            event_or_business_name="Lakshmis Kitchn",
+            venue_or_location="St Johns FL",
+            contact_info="+17329837841",
+            notes="-",
+        ),
+        "locked_facts": [],  # no locked facts at all
+    })
+
+    facts = {fact.fact_id: fact.text for fact in collect_text_facts(project)}
+    assert facts["title"] == "Lakshmis Kitchn"
+    assert facts["location"] == "St Johns FL"
+    assert facts["contact"] == "+17329837841"
+
+
 def test_collect_text_facts_uses_locked_reference_items_before_raw_request():
     project = _complete_project().model_copy(update={
         "raw_request": "Create a flyer from this attached menu.",

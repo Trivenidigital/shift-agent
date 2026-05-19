@@ -28,6 +28,11 @@ import uuid
 
 from schemas import FlyerAsset, FlyerCustomerStore, FlyerOutputFormat, FlyerProject
 
+try:
+    from flyer_facts import fact_value  # type: ignore
+except ImportError:  # pragma: no cover - src layout fallback
+    from agents.flyer.facts import fact_value
+
 
 class FlyerRenderError(RuntimeError):
     pass
@@ -467,7 +472,12 @@ def collect_text_facts(project: FlyerProject) -> list[FlyerTextFact]:
         if clean:
             facts.append(FlyerTextFact(fact_id=fact_id, label=label, text=clean))
 
-    add("title", "Title", project.fields.event_or_business_name or "Flyer")
+    # P0-2: prefer locked_facts over `fields.*` so typed customer corrections
+    # (customer_text source, priority 0) override stale profile values without a
+    # separate codepath per field. `fact_value` falls back to the original
+    # field when the locked-fact slot is missing or empty.
+    title_text = fact_value(project, "business_name", fallback=project.fields.event_or_business_name) or "Flyer"
+    add("title", "Title", title_text)
     schedule = _schedule_hint(project)
     if project.fields.event_date:
         add("date", "Date", project.fields.event_date)
@@ -475,10 +485,12 @@ def collect_text_facts(project: FlyerProject) -> list[FlyerTextFact]:
         add("schedule", "Schedule", schedule)
     if project.fields.event_time:
         add("time", "Time", project.fields.event_time)
-    if project.fields.venue_or_location:
-        add("location", "Location", project.fields.venue_or_location)
-    if project.fields.contact_info:
-        add("contact", "Contact", project.fields.contact_info)
+    location_text = fact_value(project, "location", fallback=project.fields.venue_or_location)
+    if location_text:
+        add("location", "Location", location_text)
+    contact_text = fact_value(project, "contact_phone", fallback=project.fields.contact_info)
+    if contact_text:
+        add("contact", "Contact", contact_text)
     for idx, clause in enumerate(_detail_clauses(project), start=1):
         add(f"detail_{idx:03d}", "Detail", clause)
     if len(facts) > MAX_TEXT_FACTS:

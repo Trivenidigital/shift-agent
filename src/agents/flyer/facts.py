@@ -212,6 +212,47 @@ def required_fact_blockers(project: FlyerProject) -> list[str]:
     return [f"missing required fact: {fact.fact_id}" for fact in project.locked_facts if fact.required and not fact.value.strip()]
 
 
+# Top-level customer-visible facts that every renderable Flyer project must have.
+# Items/prices are validated at generation time, not here — many flyer categories
+# (service/salon/tutor/event) have no $-prices to extract.
+DEFAULT_REQUIRED_FACT_IDS = ("business_name", "contact_phone")
+
+
+def missing_required_facts(
+    project: FlyerProject,
+    *,
+    required_ids: tuple[str, ...] = DEFAULT_REQUIRED_FACT_IDS,
+) -> list[str]:
+    """Return the fact_ids that the project SHOULD carry as required locked facts
+    but doesn't — i.e. extraction never produced them from any source (text /
+    profile / reference). Surfaces the "required slot missing entirely" class,
+    which `required_fact_blockers` cannot — it only catches required facts whose
+    value went empty post-creation.
+    """
+    by_id = facts_by_id(project)
+    return [fid for fid in required_ids if not (by_id.get(fid) and by_id[fid].value.strip())]
+
+
+def fact_value(
+    project: FlyerProject | object,
+    fact_id: str,
+    *,
+    fallback: str = "",
+) -> str:
+    """Return the locked-fact value for `fact_id`, falling back to `fallback`
+    when the project has no locked fact (or empty value) for that slot.
+
+    Renderer/QA call sites should prefer this over `project.fields.*` so that
+    typed customer corrections (customer_text source) and operator overrides
+    flow through to generated copy without a separate codepath per field.
+    """
+    by_id = facts_by_id(project)
+    fact = by_id.get(fact_id)
+    if fact and fact.value.strip():
+        return fact.value
+    return fallback
+
+
 def context_isolation_blockers(project: FlyerProject) -> list[str]:
     blockers: list[str] = []
     for fact in project.locked_facts:
