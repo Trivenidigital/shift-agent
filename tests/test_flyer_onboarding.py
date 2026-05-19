@@ -185,6 +185,22 @@ def test_free_trial_onboarding_skips_paid_plan_choice_and_activates_trial(tmp_pa
     assert customer.quota_remaining(FlyerPlanTier.default_tiers()) == 3
 
 
+def test_language_menu_pins_deployed_order_at_positions_4_through_6():
+    """BUG-FLYER-QA-2026-05-19-002: pin the deployed menu order so a future
+    reorder is caught at PR time, not at QA time. Workbook FS-A2-012 must
+    agree with `parse_language_choice("5") == "ta"`. Pinning positions 4-6
+    explicitly catches any adjacent-pair swap; a single-position pin would
+    miss e.g. a 4↔5 swap."""
+    from agents.flyer.intake import parse_language_choice, _language_prompt
+    assert parse_language_choice("4") == "ml"
+    assert parse_language_choice("5") == "ta"
+    assert parse_language_choice("6") == "kn"
+    prompt = _language_prompt()
+    assert "4. Malayalam" in prompt
+    assert "5. Tamil" in prompt
+    assert "6. Kannada" in prompt
+
+
 def test_trial_back_from_confirming_summary_skips_choosing_plan(tmp_path):
     """BUG-FLYER-QA-2026-05-19-001: trial sessions skip `choosing_plan` on
     the forward path. BACK from `confirming_summary` must mirror that skip,
