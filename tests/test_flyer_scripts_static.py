@@ -97,6 +97,15 @@ def test_guest_order_script_installed_for_quick_flyer_path():
     assert "quick_flyer_payment" in hooks
 
 
+def test_flyer_dispatcher_skill_does_not_bypass_cf_router_quota_gate():
+    skill = (SCRIPTS.parent / "skills" / "flyer_dispatcher" / "SKILL.md").read_text(encoding="utf-8")
+
+    assert "cf-router" in skill
+    assert "do not call project/render/delivery scripts directly" in skill
+    assert "account status, quota/guest-order reservation" in skill
+    assert "Do not send final" in skill
+
+
 def test_intake_script_installed_for_language_and_guided_mode():
     deploy = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh").read_text(encoding="utf-8")
     smoke = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-smoke-test.sh").read_text(encoding="utf-8")
