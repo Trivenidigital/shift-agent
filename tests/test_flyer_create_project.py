@@ -142,6 +142,39 @@ def test_create_project_hydrates_missing_contact_from_trial_customer(tmp_path, m
     assert project["fields"]["contact_info"] in projects_path.read_text(encoding="utf-8")
 
 
+def test_fresh_meats_product_promo_is_ready_without_event_or_contact(tmp_path, monkeypatch):
+    """Real customer regression: a product/brand promo brief with a logo
+    should not be treated as an event requiring date/time/contact.
+
+    The live loop created F0050/F0051 and asked for the full request again
+    because "at the bottom" was parsed as a venue and contact/date/time were
+    required even though the customer asked for a non-event product poster.
+    """
+    module = _load_script(monkeypatch)
+    actions = _load_cf_actions(monkeypatch)
+    raw_request = (
+        "Design a premium organic-style flyer for *Fresh Meats* featuring a whole fresh chicken "
+        "as the hero image, surrounded by herbs, garlic, and natural ingredients on an earthy green "
+        "and brown background. Add bold elegant typography with the text *Premium Amish Organic Chicken* "
+        "and the tagline *Clean bird. Strong life.* Include premium badges like *Fresh, Healthy, Natural, "
+        "along with a green **Halal Certified** seal. Create a clean modern luxury grocery aesthetic "
+        "with cinematic lighting, rustic textures, and space for address and phone number at the bottom."
+    )
+
+    fields = module._extract_fields(raw_request, now=datetime(2026, 5, 19, tzinfo=timezone.utc))
+    project = {
+        "raw_request": raw_request,
+        "fields": json.loads(fields.model_dump_json()),
+        "assets": [{"kind": "reference_image"}],
+    }
+
+    assert fields.event_or_business_name == "Fresh Meats"
+    assert fields.venue_or_location is None
+    assert "organic-style" in fields.style_preference
+    assert fields.missing_required_fields() == []
+    assert actions.flyer_project_has_required_fields(project)
+
+
 def test_all_starter_briefs_create_required_flyer_projects(tmp_path, monkeypatch, capsys):
     sys.path.insert(0, str(SRC))
     from agents.flyer.starter_briefs import all_starter_briefs  # noqa: E402

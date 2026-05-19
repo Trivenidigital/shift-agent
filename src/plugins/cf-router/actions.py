@@ -979,6 +979,14 @@ def flyer_project_has_required_fields(project: dict) -> bool:
             )
         )
     )
+    has_product_or_brand_promo = bool(
+        re.search(r"\b(?:flyer|flier|poster|banner)\b", notes)
+        and re.search(
+            r"\b(?:hero image|tagline|badge|badges|certified|brand|branding|"
+            r"product|featuring|premium|organic-style|organic style|grocery aesthetic)\b",
+            notes,
+        )
+    )
     has_service_list = bool(re.search(
         r"\b(?:services?|social media marketing|performance marketing|seo|aeo|geo|"
         r"ai marketing|content creation|paid ads|digital marketing|marketing services?)\b",
@@ -992,6 +1000,8 @@ def flyer_project_has_required_fields(project: dict) -> bool:
         )
     )
     if has_template_reference:
+        return has("event_or_business_name")
+    if has_product_or_brand_promo:
         return has("event_or_business_name")
     if has_price_list or has_service_list:
         return has("event_or_business_name") and has("contact_info")
