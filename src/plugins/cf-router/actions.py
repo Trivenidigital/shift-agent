@@ -1297,7 +1297,35 @@ def is_flyer_project_status_request(text: str) -> bool:
 
 
 def flyer_manual_edit_status_reply(project: dict) -> str:
-    return flyer_project_status_reply(project)
+    reply = flyer_project_status_reply(project)
+    project_id = str(project.get("project_id") or "this project")
+    generic_fallback = (
+        f"Project {project_id}: I have this flyer project open and am checking the latest status."
+    )
+    if generic_fallback not in reply:
+        return reply
+    manual = project.get("manual_review") if isinstance(project.get("manual_review"), dict) else {}
+    reason_code = str(manual.get("reason_code") or "source_edit_provider_unavailable")
+    try:
+        _ensure_platform_path()
+        from flyer_workflow import MANUAL_REVIEW_REASON_LINES  # type: ignore
+    except Exception:
+        try:
+            _ensure_local_src_path()
+            from agents.flyer.workflow import MANUAL_REVIEW_REASON_LINES  # type: ignore
+        except Exception:
+            MANUAL_REVIEW_REASON_LINES = {
+                "source_edit_provider_unavailable": (
+                    "Your edit is queued for a designer to apply by hand. "
+                    "I have the requested changes and the saved account details "
+                    "\u2014 no extra information needed from you."
+                )
+            }
+    line = MANUAL_REVIEW_REASON_LINES.get(
+        reason_code,
+        MANUAL_REVIEW_REASON_LINES["source_edit_provider_unavailable"],
+    )
+    return f"Flyer Studio\n------------\nProject {project_id}: {line}"
 
 
 def flyer_project_status_reply(project: dict) -> str:
