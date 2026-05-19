@@ -872,6 +872,25 @@ PY
                     sleep 1
                 done
                 [ "$cockpit_healthy" -ne 1 ] && cockpit_fail_reason="health probe"
+                # Per-route mount probe for the manual-queue surface. The route
+                # uses a conditional import (flyer_manual_queue vs
+                # agents.flyer.manual_queue) that fails silently if either
+                # module is missing — /health alone wouldn't catch that.
+                # 401/403 here is success: it proves the route is mounted and
+                # the import resolved; connection-refused or 5xx is the fail
+                # mode we care about. Run only after /health passed so we
+                # don't mask a plain restart fail.
+                if [ "$cockpit_healthy" -eq 1 ] && [ -z "$cockpit_fail_reason" ]; then
+                    manual_queue_code=$(curl -s -o /dev/null --max-time 2 -w '%{http_code}' http://127.0.0.1:8081/api/flyer/manual-queue || echo "000")
+                    case "$manual_queue_code" in
+                        200|401|403)
+                            : # route mounted (auth gate is the only thing in our way)
+                            ;;
+                        *)
+                            cockpit_fail_reason="manual-queue route probe (got $manual_queue_code)"
+                            ;;
+                    esac
+                fi
             fi
             if [ -n "$cockpit_fail_reason" ]; then
                 echo "FAIL: cockpit $cockpit_fail_reason failed after restart — rolling back" >&2

@@ -34,6 +34,16 @@ from schemas import (  # noqa: E402
     FlyerProjectStore,
     FlyerUsageEvent,
 )
+try:
+    from flyer_manual_queue import (  # type: ignore  # noqa: E402
+        complete_manual_project,
+        triage_summary,
+    )
+except ImportError:
+    from agents.flyer.manual_queue import (  # noqa: E402
+        complete_manual_project,
+        triage_summary,
+    )
 
 router = APIRouter(prefix="/flyer", tags=["flyer"])
 
@@ -54,6 +64,14 @@ class CampaignSendBody(ReasonBody):
     targets_text: str = Field(min_length=3, max_length=20_000)
     dry_run: bool = True
     include_paid: bool = False
+
+
+class ManualQueueCompleteBody(ReasonBody):
+    operator_asset_path: str = Field(min_length=1, max_length=500)
+
+
+class ManualQueueBreakGlassBody(ReasonBody):
+    pass
 
 
 def _flyer_dir() -> Path:
@@ -183,9 +201,19 @@ def build_summary() -> dict[str, Any]:
         "finalizing_assets",
     }
     stuck_statuses = {"intake_started", "collecting_required_info", "awaiting_assets"}
-    manual_edit_count = sum(1 for p in projects.projects if p.status == "manual_edit_required")
+    # break-glass rows stay at status=manual_edit_required by design (audit
+    # signal for "operator resolved out-of-band"), but for the operator
+    # dashboard counters they're terminal — don't ghost in manual_edit_count
+    # or stuck_edit_count forever.
+    manual_edit_count = sum(
+        1
+        for p in projects.projects
+        if p.status == "manual_edit_required" and p.manual_review.status != "break_glass_sent"
+    )
     stuck_edit_count = 0
     for project in projects.projects:
+        if project.manual_review.status == "break_glass_sent":
+            continue
         age_minutes = max(0, int((now - project.updated_at).total_seconds() // 60))
         if project.status == "manual_edit_required" and age_minutes >= 30:
             stuck_edit_count += 1
@@ -524,6 +552,154 @@ async def campaign_send(body: CampaignSendBody, request: Request, _=Depends(requ
         },
     )
     return result | {"invalid": parsed["invalid"], "duplicate_count": parsed["duplicate_count"]}
+
+
+def manual_queue_triage_action() -> dict[str, Any]:
+    """Read-only triage view for the Flyer manual-review queue."""
+    return triage_summary(load_project_store())
+
+
+def _operator_upload_root() -> Path:
+    return _flyer_dir() / "operator-uploads"
+
+
+_OPERATOR_ASSET_MIME_ALLOWLIST: frozenset[str] = frozenset({
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "application/pdf",
+})
+
+
+def manual_queue_complete_action(project_id: str, *, asset_path: str, reason: str) -> dict[str, Any]:
+    """Operator-completes a queued manual-review project by attaching an approved asset.
+
+    Wraps `complete_manual_project` from the agent helper with the cockpit
+    backup + atomic-write contract that the rest of this router uses for
+    operator mutations.
+    """
+    source = Path(asset_path)
+    if not source.is_absolute():
+        raise HTTPException(422, "operator_asset_path must be absolute")
+    if not source.exists() or not source.is_file():
+        raise HTTPException(404, f"operator asset not found: {asset_path}")
+    # Constrain to the operator-uploads root so a fresh-OTP'd operator can't
+    # accidentally publish /opt/shift-agent/.env, /etc/passwd, or other
+    # process-readable files as flyer artwork. Operator places the file
+    # under state/flyer/operator-uploads/ via SCP/SFTP first.
+    upload_root = _operator_upload_root().resolve()
+    upload_root.mkdir(parents=True, exist_ok=True)
+    try:
+        source.resolve().relative_to(upload_root)
+    except ValueError:
+        raise HTTPException(
+            422,
+            f"operator_asset_path must be under {upload_root} (got {source})",
+        )
+    import mimetypes as _mimetypes
+    mime, _ = _mimetypes.guess_type(str(source))
+    if mime not in _OPERATOR_ASSET_MIME_ALLOWLIST:
+        raise HTTPException(
+            415,
+            f"operator_asset_path mime {mime!r} not in allowlist {sorted(_OPERATOR_ASSET_MIME_ALLOWLIST)}",
+        )
+    path = _projects_path()
+    with safe_io.flock(path):
+        backup = _backup_path(path, reason)
+        store = load_project_store()
+        try:
+            updated = complete_manual_project(store, project_id, source, reason=reason)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
+        _dump_store(path, updated)
+        completed = next(p for p in updated.projects if p.project_id == project_id)
+    return {
+        "ok": True,
+        "project_id": project_id,
+        "status": completed.status,
+        "manual_status": completed.manual_review.status,
+        "operator_asset_ids": list(completed.manual_review.operator_asset_ids),
+        "backup": backup,
+    }
+
+
+def manual_queue_break_glass_action(project_id: str, *, reason: str) -> dict[str, Any]:
+    """Mark a queued project as operator-handled out-of-band (no QA).
+
+    Does NOT change project.status — the operator is signalling "I have
+    resolved this customer's request outside automation; record the audit
+    trail." Subsequent triage will surface this row as
+    `manual_status: break_glass_sent` so it's distinct from completed.
+    """
+    path = _projects_path()
+    with safe_io.flock(path):
+        backup = _backup_path(path, reason)
+        store = load_project_store()
+        target = next((p for p in store.projects if p.project_id == project_id), None)
+        if target is None:
+            raise HTTPException(404, f"project {project_id} not found")
+        if target.status != "manual_edit_required" or target.manual_review.status not in {"queued", "in_progress"}:
+            raise HTTPException(409, f"project not queued for break-glass: {project_id}")
+        now = _now()
+        new_manual = target.manual_review.model_copy(update={
+            "status": "break_glass_sent",
+            "break_glass_reason": reason[:500],
+            "completed_at": now,
+        })
+        for idx, project in enumerate(store.projects):
+            if project.project_id == project_id:
+                store.projects[idx] = project.model_copy(update={
+                    "manual_review": new_manual,
+                    "updated_at": now,
+                })
+                break
+        store = FlyerProjectStore.model_validate(store.model_dump())
+        _dump_store(path, store)
+    return {
+        "ok": True,
+        "project_id": project_id,
+        "manual_status": "break_glass_sent",
+        "backup": backup,
+    }
+
+
+@router.get("/manual-queue")
+async def manual_queue(_=Depends(require_auth)):
+    return manual_queue_triage_action()
+
+
+@router.post("/manual-queue/{project_id}/complete")
+async def manual_queue_complete(
+    project_id: str,
+    body: ManualQueueCompleteBody,
+    request: Request,
+    _=Depends(require_fresh_otp),
+):
+    result = manual_queue_complete_action(project_id, asset_path=body.operator_asset_path, reason=body.reason)
+    audit_log(
+        "flyer.manual_queue.complete",
+        ip=client_ip(request),
+        ua=client_ua(request),
+        details=result | {"reason": body.reason},
+    )
+    return result
+
+
+@router.post("/manual-queue/{project_id}/break-glass")
+async def manual_queue_break_glass(
+    project_id: str,
+    body: ManualQueueBreakGlassBody,
+    request: Request,
+    _=Depends(require_fresh_otp),
+):
+    result = manual_queue_break_glass_action(project_id, reason=body.reason)
+    audit_log(
+        "flyer.manual_queue.break_glass",
+        ip=client_ip(request),
+        ua=client_ua(request),
+        details=result | {"reason": body.reason},
+    )
+    return result
 
 
 @router.post("/campaigns/send-csv")
