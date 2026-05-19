@@ -821,6 +821,15 @@ PY
         systemctl restart shift-agent-tail-logger.timer 2>/dev/null || true
         systemctl restart shift-agent-health.timer 2>/dev/null || true
         systemctl restart hermes-gateway
+        # Cockpit holds Pydantic models in memory; install_artifacts() above
+        # replaced /opt/shift-agent/schemas.py + safe_io.py + shared modules,
+        # but the cockpit's long-running uvicorn process keeps the OLD modules
+        # loaded until restart. Skipping this step caused the 2026-05-19
+        # incident where /flyer/customers returned 500 (Pydantic
+        # ValidationError on a new FlyerWorkflowStatus value) until a manual
+        # restart cleared the stale module cache. Best-effort: `|| true` for
+        # VPSes where the cockpit isn't installed.
+        systemctl restart shift-agent-cockpit.service 2>/dev/null || true
         sleep 5
 
         # Smoke test gate
@@ -900,6 +909,10 @@ PY
 
         systemctl restart shift-agent-tail-logger.timer 2>/dev/null || true
         systemctl restart hermes-gateway
+        # Cockpit must pick up the rolled-back schemas.py / safe_io.py too —
+        # otherwise it stays on the (broken-forward) module cache. See the
+        # deploy-path comment above for the failure mode that motivated this.
+        systemctl restart shift-agent-cockpit.service 2>/dev/null || true
         sleep 5
 
         # Re-run smoke after rollback. If the prior tarball is itself broken
