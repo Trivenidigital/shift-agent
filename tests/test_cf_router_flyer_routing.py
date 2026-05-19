@@ -659,6 +659,63 @@ def test_vague_start_during_active_project_routes_to_project_not_starter(monkeyp
     assert result == {"action": "skip", "reason": "active project"}
 
 
+def test_repeated_full_request_during_open_intake_generates_existing_project(monkeypatch):
+    """Real customer regression: repeating the full prompt while an intake
+    project is open must not create F0051/F0052 in a loop.
+    """
+    hooks, actions = _load_plugin_modules()
+    raw_request = (
+        "Design a premium organic-style flyer for Fresh Meats featuring a whole fresh chicken "
+        "with Premium Amish Organic Chicken, Clean bird. Strong life, Fresh, Healthy, Natural, "
+        "and Halal Certified seal."
+    )
+    active_project = {
+        "project_id": "F0050",
+        "status": "intake_started",
+        "customer_phone": "+17329837841",
+        "raw_request": raw_request,
+        "fields": {
+            "event_or_business_name": "Fresh Meats",
+            "notes": raw_request,
+            "style_preference": "premium organic-style grocery product promotion",
+        },
+        "concepts": [],
+        "revisions": [],
+    }
+
+    monkeypatch.setattr(actions, "is_flyer_enabled", lambda: True)
+    monkeypatch.setattr(actions, "flyer_campaign_cta_text", lambda _text: "")
+    monkeypatch.setattr(hooks, "_try_flyer_intake_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_account_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_reference_scope_choice_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_reference_scope_authorization_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_existing_onboarding_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
+    monkeypatch.setattr(actions, "flyer_project_has_required_fields", lambda _project: True)
+    monkeypatch.setattr(actions, "trigger_flyer_reserve_quota", lambda **_kwargs: (True, "reserved", {"quota_allowed": True}))
+    monkeypatch.setattr(actions, "send_flyer_processing_ack", lambda _chat_id, _project_id: (True, "processing-mid", ""))
+    monkeypatch.setattr(actions, "trigger_generate_flyer_concepts", lambda _project_id: (True, "generated"))
+    monkeypatch.setattr(actions, "send_flyer_concept_previews", lambda _chat_id, _project_id: (True, "preview-mid", ""))
+    monkeypatch.setattr(actions, "trigger_flyer_finalize_usage", lambda **_kwargs: (True, "finalized", {}))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        actions,
+        "trigger_create_flyer_project",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not create another project")),
+    )
+
+    result = hooks.pre_gateway_dispatch(SimpleNamespace(
+        text=raw_request,
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="fresh-meats-repeat",
+    ))
+
+    assert result == {"action": "skip", "reason": "cf-router flyer active: generated F0050"}
+
+
 @pytest.mark.parametrize("text, expected", [
     (
         "CONFIRM. Create a flyer for weekend sale with 20% off.",

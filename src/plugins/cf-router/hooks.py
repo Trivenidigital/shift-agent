@@ -177,15 +177,15 @@ def pre_gateway_dispatch(event: Any, gateway: Any = None, session_store: Any = N
                 )
                 if flyer_result is not None:
                     return flyer_result
+            flyer_result = _try_flyer_active_project_intercept(text, chat_id, event)
+            if flyer_result is not None:
+                return flyer_result
             if actions.should_start_new_flyer_over_active(text, has_media=bool(media_path)):
                 flyer_result = _try_flyer_primary_intercept(
                     text, chat_id, event, force_new=True, media_path=media_path,
                 )
                 if flyer_result is not None:
                     return flyer_result
-            flyer_result = _try_flyer_active_project_intercept(text, chat_id, event)
-            if flyer_result is not None:
-                return flyer_result
             if actions.is_vague_flyer_start(text, has_media=bool(media_path)):
                 phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
                 if role != "owner":
@@ -1464,7 +1464,10 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any) -> 
     status = str(active_project.get("status") or "")
     body = " ".join(actions.flyer_visible_message_text(text).split())
     lower = body.lower()
-    if actions.should_start_new_flyer_over_active(body, has_media=False):
+    if (
+        actions.should_start_new_flyer_over_active(body, has_media=False)
+        and status not in {"intake_started", "collecting_required_info", "awaiting_assets"}
+    ):
         return None
     selection_map = {
         "1": "C1", "option 1": "C1", "concept 1": "C1", "c1": "C1",
