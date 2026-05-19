@@ -1606,6 +1606,25 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         )
     ):
         return None
+    # P0-1 stale-project guard: when the active project has been idle past
+    # its per-status threshold (actions._FLYER_STALE_HOURS) AND the inbound
+    # is a CLEAR new-flyer request (`should_start_new_flyer_over_active`),
+    # bail so the new-project path takes ownership. F0036/F0043/F0045-style
+    # ~19h-old projects on prod were the empirical motivation.
+    #
+    # Design note (S3 review fix): the guard uses POSITIVE evidence
+    # ("this is a clear new request") instead of negative evidence
+    # ("not a status/revision"). Negative evidence drops concept
+    # selections ("1"/"C1"), approvals ("approve"/"yes"/"ok"), and
+    # non-English replies that the English-regex revision/status helpers
+    # don't classify — all of which should continue to attach so the
+    # downstream handlers (selection_map, approval flow, manual-review
+    # forwarding) run normally.
+    if (
+        actions.is_stale_for_new_request(active_project)
+        and actions.should_start_new_flyer_over_active(body, has_media=bool(media_path))
+    ):
+        return None
     if actions.is_flyer_project_status_request(body) and status not in {"completed"}:
         reply = (
             actions.flyer_manual_edit_status_reply(active_project)

@@ -1201,6 +1201,61 @@ def has_non_delivered_flyer_project_by_sender(phone: Optional[str], chat_id: str
     return bool(project and project.get("status") != "delivered")
 
 
+# Per-status thresholds in hours beyond which an active project is "stale" — a
+# new inbound that is NOT a clear status check or revision will bypass the
+# active-project attach path. Empirical baseline: F0036/F0043/F0045 on prod
+# sat at manual_edit_required for ~19h before any operator action; we don't
+# want a 19h-old project swallowing today's distinct new flyer request.
+_FLYER_STALE_HOURS: dict[str, float] = {
+    "intake_started": 2.0,
+    "collecting_required_info": 2.0,
+    "awaiting_assets": 2.0,
+    "generating_concepts": 2.0,
+    "finalizing_assets": 2.0,
+    "awaiting_concept_selection": 6.0,
+    "awaiting_final_approval": 6.0,
+    "revising_design": 6.0,
+    "manual_edit_required": 24.0,
+    "delivered": 24.0,
+}
+
+
+def is_stale_for_new_request(
+    project: dict,
+    *,
+    now: Optional[datetime] = None,
+    overrides: Optional[dict[str, float]] = None,
+) -> bool:
+    """Return True when an active project is old enough that a new inbound
+    must NOT silently attach to it.
+
+    Status check + revision-intent inbound continue to attach (the caller is
+    expected to re-check those gates); anything else should bypass this
+    project so the new-project path takes over.
+    """
+    status = str(project.get("status") or "")
+    thresholds = {**_FLYER_STALE_HOURS, **(overrides or {})}
+    threshold_hours = thresholds.get(status)
+    if threshold_hours is None:
+        return False
+    raw = project.get("updated_at") or project.get("created_at")
+    if not raw:
+        return False
+    try:
+        if isinstance(raw, datetime):
+            updated_at = raw
+        else:
+            # Pydantic emits ISO8601 with trailing 'Z' or '+00:00'; both parse.
+            updated_at = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except Exception:
+        return False
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    age_hours = (now - updated_at).total_seconds() / 3600.0
+    return age_hours >= threshold_hours
+
+
 def is_flyer_revision_intent(text: str) -> bool:
     body = flyer_visible_message_text(text).lower()
     return bool(re.search(
