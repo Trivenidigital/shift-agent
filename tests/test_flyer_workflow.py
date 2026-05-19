@@ -80,6 +80,58 @@ def test_source_edit_provider_ready_reads_shift_agent_env_file(tmp_path, monkeyp
     assert detail == "ready"
 
 
+def test_read_env_value_checks_hermes_env_before_shift_agent_env(tmp_path, monkeypatch):
+    """P0-5 follow-up: source-edit env lookup must mirror visual_qa's lookup
+    order — Hermes-managed `/root/.hermes/.env` is checked before the
+    agent-local `/opt/shift-agent/.env`. Operators who provision OPENAI_API_KEY
+    via the Hermes env store should not have their key missed by source-edit.
+    """
+    from agents.flyer.workflow import _read_env_value
+
+    hermes_env = tmp_path / "hermes.env"
+    agent_env = tmp_path / "agent.env"
+    hermes_env.write_text("OPENAI_API_KEY=sk-from-hermes\n", encoding="utf-8")
+    agent_env.write_text("OPENAI_API_KEY=sk-from-agent\n", encoding="utf-8")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("HERMES_ENV_PATH", str(hermes_env))
+    monkeypatch.setenv("SHIFT_AGENT_ENV_PATH", str(agent_env))
+
+    # Hermes env wins because it's checked first.
+    assert _read_env_value("OPENAI_API_KEY") == "sk-from-hermes"
+
+
+def test_read_env_value_falls_back_to_shift_agent_env_when_hermes_missing(tmp_path, monkeypatch):
+    """When the Hermes env file doesn't exist, the agent-local .env still
+    works — preserves backward compatibility with VPSes that haven't yet
+    provisioned the Hermes path."""
+    from agents.flyer.workflow import _read_env_value
+
+    agent_env = tmp_path / "agent.env"
+    agent_env.write_text("OPENAI_API_KEY=sk-from-agent\n", encoding="utf-8")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("HERMES_ENV_PATH", str(tmp_path / "does-not-exist.env"))
+    monkeypatch.setenv("SHIFT_AGENT_ENV_PATH", str(agent_env))
+
+    assert _read_env_value("OPENAI_API_KEY") == "sk-from-agent"
+
+
+def test_read_env_value_explicit_env_path_overrides_lookup_chain(tmp_path, monkeypatch):
+    """When the caller explicitly passes `env_path=`, only that file is
+    consulted (preserves test isolation; matches the pre-S8 contract used
+    by `source_edit_provider_ready`)."""
+    from agents.flyer.workflow import _read_env_value
+
+    explicit_env = tmp_path / "explicit.env"
+    explicit_env.write_text("OPENAI_API_KEY=sk-explicit\n", encoding="utf-8")
+    other_env = tmp_path / "other.env"
+    other_env.write_text("OPENAI_API_KEY=sk-other\n", encoding="utf-8")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("HERMES_ENV_PATH", str(other_env))
+    monkeypatch.setenv("SHIFT_AGENT_ENV_PATH", str(other_env))
+
+    assert _read_env_value("OPENAI_API_KEY", env_path=explicit_env) == "sk-explicit"
+
+
 def test_intent_regex_catches_flyer_requests_without_generic_event():
     assert FLYER_INTENT_RE.search("Need flyer for Bathukamma Oct 10")
     assert FLYER_INTENT_RE.search("Can you make an Instagram poster?")

@@ -188,21 +188,41 @@ def build_project_status_reply(project: FlyerProject) -> str:
 
 
 def _read_env_value(name: str, *, env_path: Path | None = None) -> str:
+    """Lookup an env value: process env first, then file-based env stores.
+
+    P0-5 follow-up: align with `visual_qa.py::_openrouter_key` which checks
+    BOTH `/root/.hermes/.env` and `/opt/shift-agent/.env`. Source-edit had
+    historically only checked the agent .env, missing keys provisioned via
+    Hermes' own env store. When the caller passes `env_path` explicitly, only
+    that file is consulted (preserves test isolation).
+    """
     value = os.environ.get(name, "").strip()
     if value:
         return value
-    path = env_path or Path(os.environ.get("SHIFT_AGENT_ENV_PATH", "/opt/shift-agent/.env"))
-    if not path.exists():
-        return ""
-    try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip() or line.lstrip().startswith("#") or "=" not in line:
-                continue
-            key, raw = line.split("=", 1)
-            if key.strip() == name:
-                return raw.strip().strip('"').strip("'")
-    except OSError:
-        return ""
+    if env_path is not None:
+        candidates = [env_path]
+    else:
+        # Order matters: Hermes-managed env first (operator-provisioned),
+        # then agent-local env (legacy fallback). The first file that holds
+        # a non-empty value wins.
+        candidates = [
+            Path(os.environ.get("HERMES_ENV_PATH", "/root/.hermes/.env")),
+            Path(os.environ.get("SHIFT_AGENT_ENV_PATH", "/opt/shift-agent/.env")),
+        ]
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip() or line.lstrip().startswith("#") or "=" not in line:
+                    continue
+                key, raw = line.split("=", 1)
+                if key.strip() == name:
+                    extracted = raw.strip().strip('"').strip("'")
+                    if extracted:
+                        return extracted
+        except OSError:
+            continue
     return ""
 
 
