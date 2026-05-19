@@ -1606,6 +1606,18 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         )
     ):
         return None
+    # P0-1 stale-project guard: a project that hasn't been touched in N hours
+    # (per-status thresholds in actions._FLYER_STALE_HOURS) MUST NOT silently
+    # swallow an inbound that isn't an explicit status check or revision
+    # correction. F0036/F0043/F0045-style ~19h-old projects on prod were the
+    # empirical motivation. Status check + revision intent fall through to
+    # the existing handlers below.
+    if (
+        actions.is_stale_for_new_request(active_project)
+        and not actions.is_flyer_project_status_request(body)
+        and not actions.is_flyer_revision_intent(body)
+    ):
+        return None
     if actions.is_flyer_project_status_request(body) and status not in {"completed"}:
         reply = (
             actions.flyer_manual_edit_status_reply(active_project)
