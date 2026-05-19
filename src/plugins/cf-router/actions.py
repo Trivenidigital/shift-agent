@@ -2251,11 +2251,45 @@ def _consume_flyer_reference_authorization_reply_locked(
     pending = state.get("pending", [])
     matched: Optional[dict] = None
     remaining: list[dict] = []
+    # The bot's scope-check prompt invites a narrative reply ("reply with how
+    # it is connected to <Business>"). A reply like "Co-owner" / "Family
+    # business" / "Founder's sister" doesn't match any of the keyword tokens
+    # in `_reference_scope_choice` (i_own / we_own / authorized / connected),
+    # so it never consumes the `awaiting_choice` row at the choice intercept.
+    # Pre-fix it then fell through to `_try_flyer_active_project_intercept`
+    # and got routed as a revision against the source-edit project, returning
+    # "I could not match that change to the queued edit" — the exact prod bug
+    # observed on F0050.
+    #
+    # Fix: this consumer ALSO matches `awaiting_choice` rows when the body
+    # looks like a substantive relationship answer rather than a trivial
+    # acknowledgement. Definition of "substantive":
+    #   - at least 4 alphabetic characters after stripping (rejects "ok",
+    #     "yes", "yep", "k", "ya")
+    #   - AND not in a small ack-only set (rejects "yeah", "okay", "sure",
+    #     "fine", "thanks", "cool" — these are intent-ambiguous, route
+    #     elsewhere)
+    # The caller (`consume_flyer_reference_authorization_reply`) has already
+    # filtered explicit "1" / "2" / "use as reference" replies via
+    # `_reference_scope_explicit_choice`, so those still route through the
+    # choice intercept rather than landing here. Conservative threshold:
+    # false-negative (narrative reply misses the new path) keeps today's
+    # behavior; false-positive (ack consumes a choice row) would silently
+    # start a source-edit the customer didn't authorize.
+    _ACK_ONLY = {"yeah", "okay", "sure", "fine", "thanks", "cool", "ok", "yes", "yep", "yup"}
+    body_alpha = "".join(ch for ch in body if ch.isalpha())
+    body_lower = body.lower().strip(" .!,:;-")
+    body_is_substantive = len(body_alpha) >= 4 and body_lower not in _ACK_ONLY
+    consumable_statuses = {"awaiting_authorization_details"}
+    if body_is_substantive:
+        consumable_statuses.add("awaiting_choice")
+
     for item in pending:
         same_chat = chat_id and item.get("chat_id") == chat_id
         same_phone = sender_phone and item.get("sender_phone") == sender_phone
-        is_auth_pending = str(item.get("status") or "") == "awaiting_authorization_details"
-        if matched is None and is_auth_pending and (same_chat or same_phone):
+        item_status = str(item.get("status") or "")
+        is_consumable = item_status in consumable_statuses
+        if matched is None and is_consumable and (same_chat or same_phone):
             matched = dict(item)
             continue
         remaining.append(item)

@@ -443,6 +443,107 @@ def test_reference_scope_relationship_answer_completes_authorized_path(tmp_path)
     ) is None
 
 
+def test_reference_scope_narrative_reply_consumes_awaiting_choice_row_directly(tmp_path):
+    """Production bug seen on F0050 (2026-05-19): bot prompts "I need to
+    confirm... reply with how it is connected to Lakshmis Kitchn", customer
+    replies "Co-owner" (a narrative), and pre-fix the reply fell through to
+    the active-project intercept and got routed as a revision — returning
+    "I could not match that change to the queued edit."
+
+    Root cause: the explicit-choice detector (`_reference_scope_choice`)
+    matched only `i own`/`we own`/`authorized`/`connected` — none of which
+    is in "Co-owner" — so the choice intercept passed; the authorization
+    intercept then required `status == "awaiting_authorization_details"`
+    but the row was still `awaiting_choice`. Customer was stuck in a 2-step
+    state machine the bot's UX presents as 1-step.
+
+    Fix: `_consume_flyer_reference_authorization_reply_locked` now ALSO
+    matches `awaiting_choice` rows when the body is substantive (≥ 4 alpha
+    chars + not in the small ack-only set). The narrative becomes the
+    authorization_note + the row is promoted to `use_account_details`.
+    """
+    actions = _load_actions()
+    actions.FLYER_REFERENCE_SCOPE_PATH = tmp_path / "reference_scope_pending.json"
+
+    actions.save_flyer_reference_scope_pending(
+        chat_id="201975216009469@lid",
+        sender_phone="+19045550104",
+        customer={"business_name": "Lakshmis Kitchen"},
+        raw_request="Use this flyer for Lakshmis Kitchen. Replace Triveni Express.",
+        media_path="/opt/shift-agent/.hermes/image_cache/triveni.jpg",
+        scope={"visible_organization_names": ["Triveni Express"]},
+        ttl_sec=600,
+    )
+
+    # Customer skips the explicit "1" step and replies directly with the
+    # relationship narrative — matching what the bot prompt invites.
+    final = actions.consume_flyer_reference_authorization_reply(
+        "Co-owner",
+        chat_id="201975216009469@lid",
+        sender_phone="+19045550104",
+    )
+
+    assert final is not None, (
+        "narrative reply on awaiting_choice row must consume the row "
+        "instead of falling through to active-project revision routing"
+    )
+    assert final["choice"] == "use_account_details"
+    assert final["authorization_reply"] == "Co-owner"
+    assert "Co-owner" in final["authorization_note"]
+    # Row consumed: a second identical reply finds no pending row.
+    assert actions.consume_flyer_reference_authorization_reply(
+        "Co-owner",
+        chat_id="201975216009469@lid",
+        sender_phone="+19045550104",
+    ) is None
+
+
+def test_reference_scope_ack_only_reply_does_not_consume_awaiting_choice_row(tmp_path):
+    """Conservative safety check for the awaiting_choice fallback: short
+    acks ("yeah", "okay", "thanks", "yes", "yep", "ok", "sure", "fine",
+    "cool", "k") must NOT consume the row. Customer's ack is intent-
+    ambiguous; treating it as implicit authorization would silently start
+    a source-edit they didn't choose. Pre-S1, these would fall through to
+    the same downstream revision-routing path they hit today; the goal of
+    the fix is to catch narrative answers like "Co-owner" without
+    accidentally consuming acks.
+    """
+    actions = _load_actions()
+    actions.FLYER_REFERENCE_SCOPE_PATH = tmp_path / "reference_scope_pending.json"
+
+    actions.save_flyer_reference_scope_pending(
+        chat_id="201975216009469@lid",
+        sender_phone="+19045550104",
+        customer={"business_name": "Lakshmis Kitchen"},
+        raw_request="Use this flyer for Lakshmis Kitchen. Replace Triveni Express.",
+        media_path="/opt/shift-agent/.hermes/image_cache/triveni.jpg",
+        scope={"visible_organization_names": ["Triveni Express"]},
+        ttl_sec=600,
+    )
+
+    for ack in ["ok", "OK", "ok.", "yes", "Yes", "yep", "Yeah", "Sure",
+                "thanks", "Cool", "k", "okay", "fine"]:
+        result = actions.consume_flyer_reference_authorization_reply(
+            ack,
+            chat_id="201975216009469@lid",
+            sender_phone="+19045550104",
+        )
+        assert result is None, (
+            f"ack-only reply {ack!r} must not consume awaiting_choice row "
+            f"(would falsely start source-edit project without authorization)"
+        )
+
+    # Row is still in pending — a real narrative reply afterwards still
+    # consumes it.
+    final = actions.consume_flyer_reference_authorization_reply(
+        "Co-owner of Lakshmis",
+        chat_id="201975216009469@lid",
+        sender_phone="+19045550104",
+    )
+    assert final is not None
+    assert final["choice"] == "use_account_details"
+
+
 def test_reference_scope_authorized_sentence_counts_as_relationship_details(tmp_path):
     actions = _load_actions()
     actions.FLYER_REFERENCE_SCOPE_PATH = tmp_path / "reference_scope_pending.json"
