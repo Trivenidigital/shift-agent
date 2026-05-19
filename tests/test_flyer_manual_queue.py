@@ -447,6 +447,42 @@ def test_close_freshness_guard_passes_aged_rows():
     )
 
 
+def test_close_freshness_guard_uses_queue_row_age_not_project_age():
+    """REGRESSION: An old project that JUST transitioned to manual_edit_required
+    (e.g., after a generation failure or break-glass round-trip) has a fresh
+    `manual_review.queued_at` but an old `created_at`. The guard must use the
+    queue-row age, not the project age — otherwise a row queued seconds ago
+    can be closed silently because the underlying project is days old."""
+    from agents.flyer.manual_queue import enforce_close_freshness_guard
+    project_created = datetime(2026, 5, 15, 10, 0, 0, tzinfo=timezone.utc)  # 4+ days ago
+    queued = datetime(2026, 5, 19, 21, 5, 0, tzinfo=timezone.utc)  # 5 min before "now"
+    now = datetime(2026, 5, 19, 21, 10, 0, tzinfo=timezone.utc)
+    store = FlyerProjectStore(projects=[FlyerProject(
+        project_id="F0058",
+        status="manual_edit_required",
+        customer_phone="+19045550104",
+        created_at=project_created,
+        updated_at=queued,
+        original_message_id="m-58",
+        raw_request="Authorized exact edit",
+        manual_review=FlyerManualReview(
+            status="queued",
+            reason="source_edit_provider_unavailable",
+            reason_code="source_edit_provider_unavailable",
+            queued_at=queued,
+        ),
+    )])
+    with pytest.raises(ValueError) as exc:
+        enforce_close_freshness_guard(
+            store, "F0058",
+            reason="cleanup",
+            force=False,
+            now=now,
+        )
+    assert "F0058" in str(exc.value)
+    assert "queue row" in str(exc.value).lower()  # error names the right age source
+
+
 def test_close_freshness_guard_reason_match_is_case_insensitive():
     """Reason matching normalizes to lowercase so uppercase token typed by
     the operator still passes."""

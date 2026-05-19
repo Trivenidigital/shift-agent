@@ -60,8 +60,23 @@ def reason_has_fresh_ok_token(reason: str) -> bool:
     return bool(_CLOSE_FRESH_REASON_TOKEN_RE.search(reason.lower()))
 
 
-def _project_age_minutes(project: FlyerProject, *, now: datetime) -> float:
-    ts = project.created_at or project.updated_at
+def _queue_row_age_minutes(project: FlyerProject, *, now: datetime) -> float:
+    """Minutes since this project entered the manual queue.
+
+    The freshness guard protects fresh QUEUE ROWS, not fresh projects: an
+    old project (created_at days ago) that JUST transitioned to
+    manual_edit_required has a queued_at of seconds-ago and must still be
+    guarded. Resolution order:
+      1. `manual_review.queued_at` — the row's queue entry time. Authoritative.
+      2. `updated_at` — fallback when queued_at is missing (legacy rows).
+      3. `created_at` — last-resort fallback for stores without timestamps.
+    """
+    manual = project.manual_review
+    ts: datetime | None = None
+    if manual is not None:
+        ts = getattr(manual, "queued_at", None)
+    if ts is None:
+        ts = project.updated_at or project.created_at
     if ts is None:
         return float("inf")
     if ts.tzinfo is None:
@@ -91,14 +106,14 @@ def enforce_close_freshness_guard(
     if target is None:
         # Closure helper will raise the canonical "not found" error.
         return
-    age_minutes = _project_age_minutes(target, now=now)
+    age_minutes = _queue_row_age_minutes(target, now=now)
     if age_minutes >= CLOSE_FRESH_MIN_AGE_MINUTES:
         return
     if reason_has_fresh_ok_token(reason):
         return
     accepted = ", ".join(CLOSE_FRESH_OK_REASON_TOKENS)
     raise ValueError(
-        f"--close of {project_id} blocked: project is only {age_minutes:.1f} min old "
+        f"--close of {project_id} blocked: queue row is only {age_minutes:.1f} min old "
         f"(< {CLOSE_FRESH_MIN_AGE_MINUTES} min). Pass --force, or use --reason "
         f"containing one of: {accepted}."
     )

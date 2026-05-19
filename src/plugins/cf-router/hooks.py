@@ -1610,7 +1610,43 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         return None
     active_project = actions.find_active_flyer_project_by_sender(phone, chat_id)
     if active_project is None:
-        return None
+        # No active row, but a status check ("any update?" / "F0058 status")
+        # must still resolve when the only relevant project is closed_no_send
+        # or explicitly named. Without this branch the inbound falls through
+        # to LLM dispatch and the customer never learns their project was
+        # closed.
+        body_no_active = " ".join(actions.flyer_visible_message_text(text).split())
+        if not actions.is_flyer_project_status_request(body_no_active):
+            return None
+        mentioned_id = actions.extract_flyer_project_id_mention(body_no_active)
+        status_project = None
+        if mentioned_id:
+            status_project = actions.find_flyer_project_by_id_for_sender(phone, chat_id, mentioned_id)
+        if status_project is None:
+            status_project = actions.find_latest_flyer_project_for_status_by_sender(phone, chat_id)
+        if status_project is None:
+            return None
+        sp_id = str(status_project.get("project_id") or "")
+        sp_status = str(status_project.get("status") or "")
+        manual_block = status_project.get("manual_review") or {}
+        manual_reason_code = str(manual_block.get("reason_code") or "")
+        if sp_status == "manual_edit_required" and manual_reason_code == "source_edit_provider_unavailable":
+            reply = actions.flyer_manual_edit_status_reply(status_project)
+        else:
+            reply = actions.flyer_project_status_reply(status_project)
+        ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+        actions.audit_intercepted(
+            reason=("flyer_project_status" if ack_ok else "flyer_primary_failed"),
+            chat_id=chat_id,
+            subprocess_rc=0 if ack_ok else 3,
+            detail=(
+                f"project_id={sp_id}; status_check=true; status={sp_status}; "
+                f"no_active_project=true; sender_role={role}; "
+                f"id_mentioned={'1' if mentioned_id else '0'}; "
+                f"ack_message_id={mid}; ack_error={err[:300]}"
+            ),
+        )
+        return {"action": "skip", "reason": f"cf-router flyer status for {sp_id}"}
 
     project_id = str(active_project.get("project_id") or "")
     if customer and customer.get("status") not in {"trial", "active"}:

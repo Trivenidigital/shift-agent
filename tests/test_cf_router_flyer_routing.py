@@ -2286,3 +2286,103 @@ def test_closed_no_send_does_not_swallow_new_flyer_request(tmp_path, monkeypatch
         "active picker must NOT return closed_no_send — otherwise a fresh "
         "'Create a flyer for ...' request would attach to the closed row"
     )
+
+
+def test_status_reply_when_only_closed_no_send_exists(tmp_path, monkeypatch):
+    """REGRESSION (review-found): customer has ONLY a closed_no_send project
+    (no active row). 'any update?' must still resolve to the closure — the
+    early-return on `active_project is None` previously dropped the inbound
+    to LLM dispatch."""
+    hooks, actions = _load_plugin_modules()
+    projects = [
+        {
+            "project_id": "F0058",
+            "customer_phone": "+19045550104",
+            "status": "closed_no_send",
+            "updated_at": "2026-05-19T21:13:34Z",
+            "created_at": "2026-05-19T21:04:04Z",
+            "manual_review": {
+                "status": "closed_no_send",
+                "reason_code": "source_edit_provider_unavailable",
+                "reason": "source_edit_provider_unavailable",
+            },
+            "fields": {"event_or_business_name": "Lakshmis Kitchen", "contact_info": "+19045550104"},
+            "raw_request": "Authorized exact edit",
+            "original_message_id": "m-58",
+        },
+    ]
+    monkeypatch.setattr(actions, "FLYER_PROJECTS_PATH", _flyer_projects_fixture(tmp_path, projects))
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+19045550104", "employee"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _p, _c: {"customer_id": "CUST0001", "status": "trial"})
+    sent = {}
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: (sent.update({"text": text}), (True, "out-mid", ""))[1])
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kw: None)
+
+    result = hooks._try_flyer_active_project_intercept(
+        "any update?",
+        "201975216009469@lid",
+        {"message_id": "m-update"},
+    )
+    assert result is not None and result.get("action") == "skip"
+    assert "F0058" in sent["text"], (
+        "expected status reply about F0058 even though active picker returned None"
+    )
+
+
+def test_status_reply_with_explicit_id_when_no_active_project(tmp_path, monkeypatch):
+    """REGRESSION (review-found): 'any update on F0058?' must resolve to F0058
+    via exact-id lookup even when active picker returns None. Without the
+    no-active-project status branch, the inbound never reaches the id
+    selector."""
+    hooks, actions = _load_plugin_modules()
+    projects = [
+        {
+            "project_id": "F0058",
+            "customer_phone": "+19045550104",
+            "status": "closed_no_send",
+            "updated_at": "2026-05-19T21:13:34Z",
+            "created_at": "2026-05-19T21:04:04Z",
+            "manual_review": {
+                "status": "closed_no_send",
+                "reason_code": "source_edit_provider_unavailable",
+                "reason": "source_edit_provider_unavailable",
+            },
+            "fields": {"event_or_business_name": "Lakshmis Kitchen", "contact_info": "+19045550104"},
+            "raw_request": "Authorized exact edit",
+            "original_message_id": "m-58",
+        },
+    ]
+    monkeypatch.setattr(actions, "FLYER_PROJECTS_PATH", _flyer_projects_fixture(tmp_path, projects))
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+19045550104", "employee"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _p, _c: {"customer_id": "CUST0001", "status": "trial"})
+    sent = {}
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: (sent.update({"text": text}), (True, "out-mid", ""))[1])
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kw: None)
+
+    result = hooks._try_flyer_active_project_intercept(
+        "any update on F0058?",
+        "201975216009469@lid",
+        {"message_id": "m-explicit"},
+    )
+    assert result is not None and result.get("action") == "skip"
+    assert "F0058" in sent["text"]
+
+
+def test_status_reply_returns_none_when_no_projects_at_all(tmp_path, monkeypatch):
+    """Negative path: status inbound from a customer with NO projects must
+    return None so downstream intercepts (or LLM dispatch) handle the
+    message — we don't want to send a fabricated 'closed' reply for a
+    customer who has never had a project."""
+    hooks, actions = _load_plugin_modules()
+    monkeypatch.setattr(actions, "FLYER_PROJECTS_PATH", _flyer_projects_fixture(tmp_path, []))
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+19045550104", "employee"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _p, _c: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(actions, "send_flyer_text", lambda *_a, **_kw: pytest.fail("must not send when no projects exist"))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kw: None)
+
+    result = hooks._try_flyer_active_project_intercept(
+        "any update?",
+        "201975216009469@lid",
+        {"message_id": "m-none"},
+    )
+    assert result is None
