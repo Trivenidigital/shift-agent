@@ -325,10 +325,13 @@ def test_generate_source_edit_provider_unavailable_queues_manual_review(monkeypa
     assert "OPENAI_API_KEY" in persisted["manual_review"]["detail"]
 
 
-def test_generate_source_edit_other_render_error_queues_provider_timeout(monkeypatch, tmp_path, capsys):
-    """Non-provider FlyerRenderError (e.g. quality check failure) maps to
-    `provider_timeout` so operator triage can distinguish "key missing" from
-    "model output unusable" without parsing the detail string."""
+def test_generate_source_edit_quality_failure_queues_visual_qa_failed(monkeypatch, tmp_path, capsys):
+    """Quality-check FlyerRenderError ("edited concept failed quality check: …")
+    is a structural failure (wrong dimensions / mime / corrupt bytes), NOT a
+    transient provider issue. It must map to `visual_qa_failed` so operator
+    triage routes it to designer review rather than the "retry the provider"
+    bucket — `provider_timeout` would mislead operators into retrying a
+    deterministically-bad output."""
     module = _load_script(monkeypatch)
 
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
@@ -349,7 +352,7 @@ def test_generate_source_edit_other_render_error_queues_provider_timeout(monkeyp
     }), encoding="utf-8")
 
     def fake_render_source_edit(*_args, **_kwargs):
-        raise module.FlyerRenderError("edited concept failed quality check")
+        raise module.FlyerRenderError("edited concept failed quality check: width != 1080")
 
     monkeypatch.setattr(module, "render_source_edit_preview", fake_render_source_edit)
     monkeypatch.setattr(sys, "argv", [
@@ -365,4 +368,87 @@ def test_generate_source_edit_other_render_error_queues_provider_timeout(monkeyp
 
     persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
     assert persisted["status"] == "manual_edit_required"
-    assert persisted["manual_review"]["reason_code"] == "provider_timeout"
+    assert persisted["manual_review"]["reason_code"] == "visual_qa_failed"
+
+
+def test_generate_missing_required_facts_project_does_not_enter_source_edit_renderer(
+    monkeypatch, tmp_path, capsys,
+):
+    """Fix D regression: a project at status=manual_edit_required for the
+    missing_required_facts reason (S4) — i.e. NO source-edit raw_request
+    marker AND NO reference_image asset — must NOT take the source-edit
+    rendering branch. Pre-fix, the bare status-only detection would have
+    sent it into `render_source_edit_preview` which then fails inside
+    `_source_edit_reference_asset` and rewrites manual_review with a
+    misleading provider/quality reason_code, losing the original
+    missing_required_facts context."""
+    module = _load_script(monkeypatch)
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    state_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+
+    # Project at manual_edit_required for missing_required_facts: bare
+    # raw_request (no source-edit marker), no assets (no reference_image).
+    # Schema requires non-empty event_or_business_name; in the real
+    # missing_required_facts flow it gets set to a placeholder/profile value.
+    now = datetime(2026, 5, 19, tzinfo=timezone.utc).isoformat()
+    project = {
+        "project_id": "F0002",
+        "status": "manual_edit_required",
+        "customer_phone": "+17329837841",
+        "created_at": now,
+        "updated_at": now,
+        "original_message_id": "m-missing",
+        "raw_request": "Make a flyer please.",
+        "fields": {"event_or_business_name": "Pending Customer", "contact_info": "+17329837841"},
+        "assets": [],  # no reference_image -> not a source-edit project
+        "manual_review": {
+            "status": "queued",
+            "reason": "missing_required_facts",
+            "reason_code": "missing_required_facts",
+            "detail": "missing required fact slots: business_name, contact_phone",
+            "queued_at": now,
+        },
+        "version": 1,
+    }
+    state_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_sequence": 3,
+        "projects": [project],
+    }), encoding="utf-8")
+
+    # If source-edit branch is taken, the test fails — render_source_edit_preview
+    # would be called. We patch it to assert that it is NOT called.
+    def fake_render_source_edit(*_args, **_kwargs):
+        raise AssertionError("missing_required_facts project must not enter source-edit renderer")
+
+    # Render_concept_previews should be the path. Stub it to a no-op spec; the
+    # script will then attempt downstream steps which may fail — we just need
+    # to verify the source-edit branch was NOT taken.
+    monkeypatch.setattr(module, "render_source_edit_preview", fake_render_source_edit)
+
+    def fake_render_concepts(*_args, **_kwargs):
+        # No-op: return empty list so downstream code path bails harmlessly.
+        return []
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render_concepts)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts",
+        "--project-id", "F0002",
+        "--state-path", str(state_path),
+        "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+    ])
+
+    # The script may rc==0 or rc!=0 depending on downstream behavior with an
+    # empty specs list; either way the AssertionError from
+    # fake_render_source_edit would propagate up and fail the test. The
+    # invariant under test is "source-edit branch NOT taken", not the rc.
+    try:
+        module.main()
+    except SystemExit:
+        pass  # downstream paths may SystemExit on empty specs; tolerated.
+    # If we got here without AssertionError, the source-edit branch was
+    # correctly avoided.

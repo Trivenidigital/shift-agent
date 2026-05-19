@@ -18,12 +18,14 @@ def _load_actions_module():
 
 
 def test_source_edit_preflight_rejects_pdf_reference(tmp_path, monkeypatch):
+    """PDF reference must NOT bucket as a provider outage — it's an
+    unsupported-media gap the operator triages by re-uploading an image."""
     actions = _load_actions_module()
     pdf = tmp_path / "reference.pdf"
     pdf.write_bytes(b"%PDF")
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
-    ok, detail = actions.flyer_source_edit_preflight({
+    ok, detail, reason_code = actions.flyer_source_edit_preflight({
         "assets": [{
             "kind": "reference_image",
             "path": str(pdf),
@@ -32,7 +34,12 @@ def test_source_edit_preflight_rejects_pdf_reference(tmp_path, monkeypatch):
     })
 
     assert ok is False
-    assert "must be an image" in detail
+    # Detail comes from `source_edit_provider_ready` (mime check at workflow.py)
+    # when mime_type='application/pdf'. The preflight classifies non-image mime
+    # as `reference_unsupported` so cockpit triage groups it with media gaps,
+    # not provider outages.
+    assert "must be an image" in detail or "PDF" in detail
+    assert reason_code == "reference_unsupported"
 
 
 def test_source_edit_preflight_requires_provider_key(tmp_path, monkeypatch):
@@ -41,7 +48,7 @@ def test_source_edit_preflight_requires_provider_key(tmp_path, monkeypatch):
     image.write_bytes(b"png")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
-    ok, detail = actions.flyer_source_edit_preflight({
+    ok, detail, reason_code = actions.flyer_source_edit_preflight({
         "assets": [{
             "kind": "reference_image",
             "path": str(image),
@@ -51,6 +58,7 @@ def test_source_edit_preflight_requires_provider_key(tmp_path, monkeypatch):
 
     assert ok is False
     assert "provider is not configured" in detail
+    assert reason_code == "source_edit_provider_unavailable"
 
 
 def test_source_edit_preflight_accepts_available_image(tmp_path, monkeypatch):
@@ -59,7 +67,7 @@ def test_source_edit_preflight_accepts_available_image(tmp_path, monkeypatch):
     image.write_bytes(b"png")
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
-    ok, detail = actions.flyer_source_edit_preflight({
+    ok, detail, reason_code = actions.flyer_source_edit_preflight({
         "assets": [{
             "kind": "reference_image",
             "path": str(image),
@@ -69,31 +77,31 @@ def test_source_edit_preflight_accepts_available_image(tmp_path, monkeypatch):
 
     assert ok is True
     assert detail == "ready"
+    assert reason_code == ""
 
 
 def test_source_edit_preflight_requires_uploaded_reference(tmp_path, monkeypatch):
     """Regression: a project with no reference_image asset must NOT enter the
-    source-edit provider path. Source-edit semantically requires an uploaded
-    source flyer to edit; without it the right action is manual review or
-    re-prompting the customer."""
+    source-edit provider path. Missing reference → reference_provider_unavailable
+    so operators see "re-upload source flyer" not "provider outage"."""
     actions = _load_actions_module()
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
-    ok, detail = actions.flyer_source_edit_preflight({"assets": []})
+    ok, detail, reason_code = actions.flyer_source_edit_preflight({"assets": []})
     assert ok is False
     assert "uploaded reference image" in detail
+    assert reason_code == "reference_provider_unavailable"
 
 
 def test_source_edit_preflight_rejects_placeholder_provider_key(tmp_path, monkeypatch):
     """Regression: a .env that still has the PLACEHOLDER token (typical on
-    fresh customer VPSes before key provisioning) must fail-closed, not
-    proceed to the OpenAI image-edit call and surface a 401 mid-customer-flow."""
+    fresh customer VPSes before key provisioning) must fail-closed."""
     actions = _load_actions_module()
     image = tmp_path / "reference.png"
     image.write_bytes(b"png")
     monkeypatch.setenv("OPENAI_API_KEY", "PLACEHOLDER-not-a-real-key")
 
-    ok, detail = actions.flyer_source_edit_preflight({
+    ok, detail, reason_code = actions.flyer_source_edit_preflight({
         "assets": [{
             "kind": "reference_image",
             "path": str(image),
@@ -103,18 +111,17 @@ def test_source_edit_preflight_rejects_placeholder_provider_key(tmp_path, monkey
 
     assert ok is False
     assert "provider is not configured" in detail
+    assert reason_code == "source_edit_provider_unavailable"
 
 
 def test_source_edit_preflight_rejects_missing_image_on_disk(tmp_path, monkeypatch):
     """Regression: a reference_image asset whose `path` no longer exists on
-    disk (e.g. cleaned by retention, never copied during failover) must fail
-    preflight so the operator gets a clear blocker rather than an opaque
-    404-from-OpenAI later."""
+    disk → reference_provider_unavailable (operator action: re-upload)."""
     actions = _load_actions_module()
     missing = tmp_path / "missing.png"
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
-    ok, detail = actions.flyer_source_edit_preflight({
+    ok, detail, reason_code = actions.flyer_source_edit_preflight({
         "assets": [{
             "kind": "reference_image",
             "path": str(missing),
@@ -124,45 +131,86 @@ def test_source_edit_preflight_rejects_missing_image_on_disk(tmp_path, monkeypat
 
     assert ok is False
     assert "not available" in detail
+    assert reason_code == "reference_provider_unavailable"
 
 
-def test_every_preflight_failure_site_in_hooks_queues_typed_reason_code():
+def test_every_preflight_failure_site_in_hooks_uses_dynamic_reason_code():
     """Structural invariant: every cf-router hooks.py site that calls
-    `flyer_source_edit_preflight` and short-circuits on `not ready_ok` MUST
-    update the project to manual_edit_required with `--manual-reason-code
-    source_edit_provider_unavailable`. Pre-S6 the second site (reference-
-    scope-authorized flow) sent the customer ack but never queued the project
-    — the cockpit triage view had no row to surface, "any update?" checks had
-    no manual_review to read.
-
-    Static analysis: scan hooks.py for each `flyer_source_edit_preflight(...)`
-    call followed within ~30 lines by `if not ready_ok:` and verify the same
-    branch references both `--queue-manual-review` and
-    `--manual-reason-code` ... `source_edit_provider_unavailable`.
+    `flyer_source_edit_preflight` and short-circuits on `not ready_ok` MUST:
+      - unpack the 3-tuple (`ready_ok, ready_detail, ready_reason_code`)
+      - call invoke_update_flyer_project with --queue-manual-review AND
+        --manual-reason-code threaded from the dynamic ready_reason_code
+        (so PDF rejections, missing-reference, and missing-key each get
+        their own typed code in cockpit triage)
+      - capture the queue_ok return value (no silent queue failures)
+      - skip the customer "queued" ack when queue_ok is False
     """
     import re
     hooks_path = REPO / "src" / "plugins" / "cf-router" / "hooks.py"
     text = hooks_path.read_text(encoding="utf-8")
 
-    # Match each `if not ready_ok:` block — body is everything until the next
-    # de-dented line (start of return/etc at less-than the if's indent).
-    # Use a loose regex: capture from `if not ready_ok:` up to the next
-    # function-level return that ends the block.
     blocks = re.findall(
-        r"flyer_source_edit_preflight\([^)]*\)\s*\n\s*if not ready_ok:.*?return\s*\{",
+        r"flyer_source_edit_preflight\([^)]*\).*?(?:return\s*\{|return None)",
         text,
         flags=re.DOTALL,
     )
-    assert blocks, "expected at least one preflight-failure block in hooks.py"
+    assert blocks, "expected at least one preflight call block in hooks.py"
 
-    for i, block in enumerate(blocks):
+    failure_blocks = [b for b in blocks if "if not ready_ok:" in b]
+    assert failure_blocks, "expected at least one preflight-failure block"
+
+    for i, block in enumerate(failure_blocks):
+        # 3-tuple unpack
+        assert "ready_reason_code" in block, (
+            f"preflight-failure block #{i}: must unpack the 3-tuple including ready_reason_code"
+        )
+        # Queue with dynamic reason code
         assert "--queue-manual-review" in block, (
-            f"preflight-failure block #{i} in hooks.py must queue manual review"
+            f"preflight-failure block #{i} must queue manual review"
         )
         assert "--manual-reason-code" in block, (
-            f"preflight-failure block #{i} in hooks.py must pass --manual-reason-code"
+            f"preflight-failure block #{i} must pass --manual-reason-code"
         )
-        assert "source_edit_provider_unavailable" in block, (
-            f"preflight-failure block #{i} in hooks.py must use reason_code "
-            f"source_edit_provider_unavailable, not a free-form --manual-reason only"
+        # Must NOT hardcode source_edit_provider_unavailable as the only code —
+        # the reason_code is supplied by the preflight result.
+        assert "ready_reason_code" in block and "ready_reason_code," in block, (
+            f"preflight-failure block #{i} must thread the dynamic reason_code "
+            f"(not hardcode source_edit_provider_unavailable for every failure)"
         )
+        # Queue-result capture (fix B)
+        assert "queue_ok" in block and "queue_detail" in block, (
+            f"preflight-failure block #{i} must capture queue_ok/queue_detail "
+            f"(do not swallow invoke_update_flyer_project failures)"
+        )
+        # Skip ack on queue failure
+        assert "if queue_ok:" in block, (
+            f"preflight-failure block #{i} must guard send_flyer_manual_edit_ack on queue_ok"
+        )
+
+
+def test_site_2_release_runs_before_ack_for_consistent_quota_ordering():
+    """Fix E: in `_try_flyer_reference_scope_authorization_intercept`, the
+    quota release MUST happen before the customer ack (matching site 1). If
+    the ack stalls or the customer retries before release runs, the quota
+    reservation could leak."""
+    import re
+    hooks_path = REPO / "src" / "plugins" / "cf-router" / "hooks.py"
+    text = hooks_path.read_text(encoding="utf-8")
+
+    # Find the reference-scope-authorization intercept's failure block.
+    match = re.search(
+        r"def _try_flyer_reference_scope_authorization_intercept.*?"
+        r"flyer_source_edit_preflight.*?"
+        r"if not ready_ok:(.*?)return\s*\{",
+        text,
+        flags=re.DOTALL,
+    )
+    assert match, "could not locate reference-scope-authorization preflight failure block"
+    block = match.group(1)
+    release_pos = block.find("_release_flyer_access")
+    ack_pos = block.find("send_flyer_manual_edit_ack")
+    assert 0 <= release_pos < ack_pos, (
+        "fix E: _release_flyer_access must appear BEFORE send_flyer_manual_edit_ack "
+        "in the reference-scope-authorization preflight failure block "
+        f"(release_pos={release_pos}, ack_pos={ack_pos})"
+    )

@@ -1330,6 +1330,104 @@ def test_authorized_source_artwork_update_is_treated_as_source_edit_for_finals(t
     assert manifest["verification_mode"] == "source_edit_integrity_only"
 
 
+def test_is_source_edit_project_requires_marker_or_reference_image(tmp_path, monkeypatch):
+    """Fix D: `_is_source_edit_project` must not return True for every
+    manual_edit_required project. It needs either the explicit raw_request
+    marker OR a reference_image asset alongside manual_edit_required.
+    Missing_required_facts projects (no marker, no reference image) at
+    manual_edit_required must NOT be classified as source-edit."""
+    from agents.flyer.render import _is_source_edit_project
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    now = datetime(2026, 5, 19, tzinfo=timezone.utc)
+    base = {
+        "project_id": "F9100",
+        "customer_phone": "+17329837841",
+        "created_at": now,
+        "updated_at": now,
+        "original_message_id": "m-1",
+        "raw_request": "Make a flyer please.",
+        "fields": {"event_or_business_name": "Bare", "contact_info": "+17329837841"},
+    }
+
+    # 1) manual_edit_required + no marker + no reference_image -> NOT source-edit.
+    bare = FlyerProject.model_validate({**base, "status": "manual_edit_required", "assets": []})
+    assert _is_source_edit_project(bare) is False
+
+    # 2) Explicit marker in raw_request -> source-edit (regardless of status / assets).
+    marked = FlyerProject.model_validate({
+        **base,
+        "status": "intake_started",
+        "raw_request": "Edit uploaded flyer/source artwork. Change date.",
+        "assets": [],
+    })
+    assert _is_source_edit_project(marked) is True
+
+    # 3) manual_edit_required + reference_image asset -> source-edit.
+    ref_path = tmp_path / "F9100-ref.png"
+    ref_path.write_bytes(b"fake")
+    with_ref = FlyerProject.model_validate({
+        **base,
+        "status": "manual_edit_required",
+        "assets": [{
+            "asset_id": "A0001",
+            "kind": "reference_image",
+            "source": "whatsapp",
+            "path": str(ref_path),
+            "mime_type": "image/png",
+            "sha256": "a" * 64,
+            "received_at": now,
+        }],
+    })
+    assert _is_source_edit_project(with_ref) is True
+
+
+def test_openai_source_edit_bytes_fails_closed_on_placeholder_key(tmp_path, monkeypatch):
+    """Fix F: a PLACEHOLDER OPENAI key must NOT make a network request.
+    Mirror visual_qa / workflow defense-in-depth: missing OR placeholder
+    fails closed before urlopen is called, raising FlyerRenderError that
+    generate-flyer-concepts catches and classifies as
+    source_edit_provider_unavailable."""
+    import agents.flyer.render as render_mod
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    ref_path = tmp_path / "F9101-ref.png"
+    ref_path.write_bytes(b"fake")
+
+    now = datetime(2026, 5, 19, tzinfo=timezone.utc)
+    project = FlyerProject.model_validate({
+        "project_id": "F9101",
+        "status": "manual_edit_required",
+        "customer_phone": "+17329837841",
+        "created_at": now,
+        "updated_at": now,
+        "original_message_id": "m-1",
+        "raw_request": "Edit uploaded flyer/source artwork. Change date.",
+        "fields": {"event_or_business_name": "Lakshmis", "contact_info": "+17329837841"},
+        "assets": [{
+            "asset_id": "A0001",
+            "kind": "reference_image",
+            "source": "whatsapp",
+            "path": str(ref_path),
+            "mime_type": "image/png",
+            "sha256": "a" * 64,
+            "received_at": now,
+        }],
+    })
+
+    # If a network request were attempted with a PLACEHOLDER key, urlopen would
+    # be called. Patch it to a tripwire so any call fails the test.
+    def tripwire(*_args, **_kwargs):
+        raise AssertionError("network request issued with PLACEHOLDER key — defense-in-depth violated")
+
+    monkeypatch.setattr(render_mod.urllib.request, "urlopen", tripwire)
+    monkeypatch.setattr(render_mod, "_read_env_value", lambda _name: "PLACEHOLDER-key")
+
+    import pytest as _pytest
+    with _pytest.raises(FlyerRenderError, match="placeholder"):
+        render_mod._openai_source_edit_bytes(project, size=(1080, 1350), model="gpt-image-1", quality="medium")
+
+
 def test_render_customer_facing_footer_has_no_hermes_brand():
     """BUG-FLYER-QA-004: customer-facing footer text in both render paths
     must read 'Flyer Studio', not 'Hermes Flyer Studio'. The Hermes name is

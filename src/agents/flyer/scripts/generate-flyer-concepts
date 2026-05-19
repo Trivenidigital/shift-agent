@@ -203,10 +203,25 @@ def main() -> int:
 
     asset_dir = Path(args.asset_dir)
     with FileLock(asset_dir / f".{args.project_id}.generate.lock"):
+        # P0-5: source-edit detection must require an explicit raw_request
+        # marker OR (manual_edit_required AND a reference_image asset). The
+        # bare `status == "manual_edit_required"` disjunct previously caught
+        # projects queued for OTHER reasons (e.g. missing_required_facts
+        # from S4) and pushed them down the source-edit renderer path, which
+        # then failed inside `_source_edit_reference_asset` and rewrote
+        # manual_review with a misleading provider/quality reason_code,
+        # losing the original context.
+        raw_lower = (project.raw_request or "").lower()
+        has_source_edit_marker = (
+            "edit uploaded flyer/source artwork" in raw_lower
+            or "authorized flyer/source artwork update" in raw_lower
+        )
+        has_reference_image = any(
+            getattr(asset, "kind", "") == "reference_image" for asset in (project.assets or [])
+        )
         source_edit_requested = (
-            project.status == "manual_edit_required"
-            or "edit uploaded flyer/source artwork" in (project.raw_request or "").lower()
-            or "authorized flyer/source artwork update" in (project.raw_request or "").lower()
+            has_source_edit_marker
+            or (project.status == "manual_edit_required" and has_reference_image)
         )
         if source_edit_requested:
             # P0-5: render_source_edit_preview raises FlyerRenderError when the
@@ -228,11 +243,16 @@ def main() -> int:
             except FlyerRenderError as exc:
                 now = datetime.now(timezone.utc)
                 detail = str(exc)
-                # Provider key / endpoint failures map to source_edit_provider_unavailable;
-                # other render errors (quality check, format) map to provider_timeout
-                # which the manual queue dashboard surfaces as a transient issue.
                 lower = detail.lower()
-                if "openai" in lower or "api_key" in lower or "provider" in lower:
+                # Quality-check failures are structural (wrong dimensions /
+                # mime / corrupt bytes) — not transient. Map to
+                # `visual_qa_failed` so operator triage doesn't waste time on
+                # provider retries. Provider key / endpoint failures map to
+                # `source_edit_provider_unavailable`. Everything else falls to
+                # `provider_timeout` for transient network/5xx issues.
+                if "quality check" in lower or "failed quality" in lower:
+                    reason_code = "visual_qa_failed"
+                elif "openai" in lower or "api_key" in lower or "provider" in lower:
                     reason_code = "source_edit_provider_unavailable"
                 else:
                     reason_code = "provider_timeout"
