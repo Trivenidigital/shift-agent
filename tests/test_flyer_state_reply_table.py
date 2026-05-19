@@ -170,6 +170,30 @@ def test_closed_no_send_with_none_manual_status_falls_back_to_generic_line():
     assert CLOSED_NO_SEND_REASON_LINES["source_edit_provider_unavailable"] not in reply
 
 
+# ---------- proactive close-time push copy parity ----------
+
+
+@pytest.mark.parametrize("reason_code", sorted(get_args(FlyerManualReviewReason)))
+def test_build_closure_customer_text_matches_reactive_reply(reason_code: str):
+    """SINGLE-SOURCE-OF-TRUTH INVARIANT: the proactive close-time WhatsApp
+    push and the reactive 'any update?' reply MUST produce identical text.
+    Drift would surface as customers seeing two different stories about the
+    same closure — defeats the explicit PR design choice to share one copy."""
+    from agents.flyer.manual_queue import build_closure_customer_text
+    project = _project(
+        status="closed_no_send",
+        manual_status="closed_no_send",
+        reason_code=reason_code,
+    )
+    proactive = build_closure_customer_text(project)
+    reactive = build_project_status_reply(project)
+    assert proactive == reactive, (
+        f"reason_code {reason_code!r}: proactive vs reactive copy drift\n"
+        f"proactive: {proactive!r}\nreactive: {reactive!r}"
+    )
+    assert CLOSED_NO_SEND_REASON_LINES[reason_code] in proactive
+
+
 # ---------- manual_review status-aware routing ----------
 
 def test_manual_edit_required_with_none_manual_status_falls_back_to_generic_line():

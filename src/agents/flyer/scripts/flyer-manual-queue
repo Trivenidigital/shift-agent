@@ -21,6 +21,7 @@ try:
         complete_manual_project,
         enforce_close_freshness_guard,
         list_manual_queue,
+        notify_customer_of_closure,
         triage_summary,
     )
 except ImportError:
@@ -29,11 +30,14 @@ except ImportError:
         complete_manual_project,
         enforce_close_freshness_guard,
         list_manual_queue,
+        notify_customer_of_closure,
         triage_summary,
     )
 
 
 STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
+CUSTOMERS_PATH = Path("/opt/shift-agent/state/flyer/customers.json")
+DECISIONS_LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
 
 
 def _load(path: Path) -> FlyerProjectStore:
@@ -88,6 +92,15 @@ def main() -> int:
                 raise SystemExit(str(exc))
             store = close_manual_project(store, args.close, reason=args.reason)
             atomic_write_text(state_path, store.model_dump_json(indent=2))
+        # Closure state is now committed. Proactive customer notification is
+        # best-effort: never raises into the script, always audits. The
+        # reactive "any update?" path (PR #129) is the safety net for missed
+        # sends.
+        notify_customer_of_closure(
+            store, args.close,
+            customers_path=CUSTOMERS_PATH,
+            decisions_log_path=DECISIONS_LOG_PATH,
+        )
         print(json.dumps({"project_id": args.close, "status": "closed_no_send"}))
         return 0
     raise SystemExit("pass --list, --triage, --complete, or --close")

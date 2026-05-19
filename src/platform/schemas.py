@@ -3202,6 +3202,25 @@ class FlyerQuotaBlocked(_BaseEntry):
     limit: int = Field(ge=1)
 
 
+class FlyerClosureCustomerNotified(_BaseEntry):
+    """Operator-driven `flyer-manual-queue --close` proactive customer push.
+
+    Closure state write is the primary operation; this audit row records the
+    outcome of the best-effort notification that follows it. `send_ok=False`
+    rows mean the customer will learn via the reactive "any update?" safety
+    net instead. Distinct from `FlyerAssetsDelivered` because closure pushes
+    carry no asset and signal a non-completion outcome.
+    """
+    type: Literal["flyer_closure_customer_notified"]
+    project_id: str = Field(pattern=r"^F\d{4,}$")
+    customer_phone: E164Phone
+    reason_code: str = Field(min_length=1, max_length=80)
+    chat_id: str = Field(default="", max_length=200)
+    send_ok: bool
+    outbound_message_id: str = Field(default="", max_length=200)
+    error: str = Field(default="", max_length=500)
+
+
 class CateringLeadCreated(_BaseEntry):
     type: Literal["catering_lead_created"]
     lead_id: str = Field(min_length=1)
@@ -4143,6 +4162,7 @@ LogEntry = Annotated[
         Annotated[FlyerAccountUpdated, Tag("flyer_account_updated")],
         Annotated[FlyerUsageRecorded, Tag("flyer_usage_recorded")],
         Annotated[FlyerQuotaBlocked, Tag("flyer_quota_blocked")],
+        Annotated[FlyerClosureCustomerNotified, Tag("flyer_closure_customer_notified")],
         # PR-D1 forward-compat shim — UNKNOWN tags route here
         Annotated[_UnknownLogEntry, Tag("_unknown_")],
     ],
@@ -4230,7 +4250,7 @@ __all__ = [
     "FlyerProjectCreated", "FlyerStatusChange",
     "FlyerAssetsDelivered", "FlyerDeliveryFailed",
     "FlyerCustomerCreated", "FlyerCustomerActivated", "FlyerAccountUpdated",
-    "FlyerUsageRecorded", "FlyerQuotaBlocked",
+    "FlyerUsageRecorded", "FlyerQuotaBlocked", "FlyerClosureCustomerNotified",
     "Proposal", "ProposalId", "ProposalCode",
     "AwaitingProposal", "ApprovedProposal", "ReconcilingProposal", "SentProposal",
     "SendFailedProposal", "AcceptedProposal", "DeclinedProposal", "DeniedByOwnerProposal",
