@@ -790,6 +790,99 @@ def test_notify_customer_of_closure_audit_validates_as_logentry(tmp_path):
     assert validated.send_ok is True
 
 
+def test_build_closure_customer_text_resolves_in_flat_installed_layout(tmp_path):
+    """REGRESSION (PR #130 first review): the deployed VPS layout flattens
+    Flyer modules to `/opt/shift-agent/flyer_*.py` — there is no
+    `agents.flyer` package on the import path. `build_closure_customer_text`
+    must therefore prefer the flat alias (`from flyer_workflow import ...`)
+    with the packaged path as a dev/test fallback. Without that pattern the
+    function raises `ModuleNotFoundError` in production, gets swallowed by
+    `notify_customer_of_closure`'s broad exception handler, and audits as an
+    `unexpected: ...` send failure — exactly the silent-failure mode the
+    PR #129 reactive safety net is supposed to backstop, NOT cover for.
+
+    Strategy: copy the three files the helper touches into a tmp dir using
+    the flat install names (`flyer_manual_queue.py`, `flyer_workflow.py`,
+    `schemas.py` + `safe_io.py`), import `flyer_manual_queue` from that
+    isolated path, and call the helper. If the deployed import shape breaks,
+    this test fails before deploy.
+    """
+    import importlib
+    import importlib.util
+    import shutil
+    import sys
+
+    repo = Path(__file__).resolve().parent.parent
+    src = repo / "src"
+    # Mirror the deployed flat layout in a tmp install dir.
+    install_dir = tmp_path / "shift-agent-install"
+    install_dir.mkdir()
+    shutil.copy(src / "agents" / "flyer" / "manual_queue.py", install_dir / "flyer_manual_queue.py")
+    shutil.copy(src / "agents" / "flyer" / "workflow.py", install_dir / "flyer_workflow.py")
+    # workflow.py imports LANGUAGE_NAMES, FIELD_LABELS — copy supporting modules
+    # if they exist alongside, else trust schemas to be reachable via platform.
+    for support in ("facts.py", "starter_briefs.py"):
+        src_path = src / "agents" / "flyer" / support
+        if src_path.exists():
+            shutil.copy(src_path, install_dir / f"flyer_{support}")
+    # platform schemas are deployed flat into /opt/shift-agent/schemas.py
+    shutil.copy(src / "platform" / "schemas.py", install_dir / "schemas.py")
+
+    # Isolate sys.path/sys.modules so the flat-layout import doesn't piggyback
+    # on the already-loaded packaged versions.
+    saved_path = list(sys.path)
+    saved_modules = {name: sys.modules[name] for name in list(sys.modules)
+                     if name in {"flyer_manual_queue", "flyer_workflow",
+                                 "agents", "agents.flyer", "agents.flyer.workflow",
+                                 "agents.flyer.manual_queue", "schemas"}}
+    for name in list(saved_modules):
+        del sys.modules[name]
+    sys.path.insert(0, str(install_dir))
+    try:
+        # Now import flat — this is what the VPS Python process sees.
+        flat_mq = importlib.import_module("flyer_manual_queue")
+        # Build a closed project in this isolated module's schema namespace.
+        from schemas import FlyerProject as FP, FlyerManualReview as FMR, FlyerProjectStore as FPS  # type: ignore
+        now = datetime(2026, 5, 19, 22, 0, 0, tzinfo=timezone.utc)
+        project = FP(
+            project_id="F0058",
+            status="closed_no_send",
+            customer_phone="+19045550104",
+            created_at=now,
+            updated_at=now,
+            original_message_id="m-58",
+            raw_request="Authorized exact edit",
+            manual_review=FMR(
+                status="closed_no_send",
+                reason="source_edit_provider_unavailable",
+                reason_code="source_edit_provider_unavailable",
+                queued_at=now,
+                completed_at=now,
+            ),
+        )
+        text = flat_mq.build_closure_customer_text(project)
+        # Must resolve to the closure-aware reason line, not raise.
+        assert "F0058" in text
+        assert "source-flyer edit" in text or "closed" in text.lower()
+        # And the source must contain the flat-first import pattern so we
+        # don't regress to a single packaged-only import.
+        manual_queue_src = (install_dir / "flyer_manual_queue.py").read_text(encoding="utf-8")
+        assert "from flyer_workflow import build_project_status_reply" in manual_queue_src, (
+            "manual_queue.py must prefer the flat `flyer_workflow` alias to "
+            "match the deployed /opt/shift-agent/ layout"
+        )
+        assert "from agents.flyer.workflow import build_project_status_reply" in manual_queue_src, (
+            "manual_queue.py must keep the packaged fallback for dev/test"
+        )
+    finally:
+        # Restore the packaged-layout sys.path/modules for subsequent tests.
+        sys.path[:] = saved_path
+        for name in list(sys.modules):
+            if name in {"flyer_manual_queue", "flyer_workflow", "schemas"}:
+                del sys.modules[name]
+        sys.modules.update(saved_modules)
+
+
 def test_close_script_invokes_notify_after_state_write_and_only_once():
     """The script's --close branch MUST call notify_customer_of_closure
     AFTER close_manual_project + atomic_write_text, and exactly once. This

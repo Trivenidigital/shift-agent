@@ -404,8 +404,19 @@ def build_closure_customer_text(project: FlyerProject) -> str:
     Delegates to `build_project_status_reply` so the proactive close-time
     push and the reactive "any update?" reply CANNOT drift. Single source
     of truth lives in `agents.flyer.workflow.CLOSED_NO_SEND_REASON_LINES`.
+
+    Import order matters: the deployed VPS layout has Flyer modules at
+    `/opt/shift-agent/flyer_*.py` (flat, no `agents.flyer` package), so the
+    flat alias MUST be tried first. The packaged path is the dev/test
+    fallback. Without this dual-path pattern the function raises
+    ModuleNotFoundError in production, which `notify_customer_of_closure`
+    would swallow as an audited send failure — silent failure mode that
+    PR #130's first reviewer caught.
     """
-    from agents.flyer.workflow import build_project_status_reply
+    try:
+        from flyer_workflow import build_project_status_reply  # type: ignore
+    except ImportError:
+        from agents.flyer.workflow import build_project_status_reply
     return build_project_status_reply(project)
 
 
