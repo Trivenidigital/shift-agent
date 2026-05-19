@@ -17,16 +17,16 @@ sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(SRC_ROOT / "platform"))
 sys.path.insert(0, str(SRC_ROOT))
 
-from schemas import FlyerAsset, FlyerCustomerStore, FlyerManualReview, FlyerProject, FlyerProjectStore, FlyerProjectCreated, FlyerRequestFields  # noqa: E402
+from schemas import FlyerAsset, FlyerCustomerStore, FlyerManualReview, FlyerProject, FlyerProjectStore, FlyerProjectCreated, FlyerReferenceExtraction, FlyerRequestFields  # noqa: E402
 from safe_io import FileLock, atomic_write_text  # noqa: E402
 try:
     from flyer_facts import extract_text_facts, merge_locked_facts  # type: ignore  # noqa: E402
 except ImportError:
     from agents.flyer.facts import extract_text_facts, merge_locked_facts  # noqa: E402
 try:
-    from flyer_reference_extract import NoopReferenceExtractionProvider, extract_reference  # type: ignore  # noqa: E402
+    from flyer_reference_extract import build_reference_extraction_provider, classify_reference_role, extract_reference  # type: ignore  # noqa: E402
 except ImportError:
-    from agents.flyer.reference_extract import NoopReferenceExtractionProvider, extract_reference  # noqa: E402
+    from agents.flyer.reference_extract import build_reference_extraction_provider, classify_reference_role, extract_reference  # noqa: E402
 
 
 STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
@@ -377,12 +377,56 @@ def _copy_reference_asset(
     )
 
 
+def _reference_failure_requires_manual_review(extraction) -> bool:
+    if extraction.status not in {"provider_unavailable", "unsupported", "low_confidence"}:
+        return False
+    if extraction.status == "unsupported":
+        return True
+    return extraction.role in {"menu_reference", "old_flyer_reference", "source_edit_template", "unsupported"}
+
+
+def _initial_reference_extraction(asset: FlyerAsset, *, raw_request: str, now: datetime) -> FlyerReferenceExtraction:
+    role = classify_reference_role(raw_request, asset)
+    mime = (asset.mime_type or "").lower()
+    if role == "unsupported" or not mime.startswith("image/"):
+        return FlyerReferenceExtraction(
+            asset_id=asset.asset_id,
+            role=role,
+            provider="not_run",
+            status="unsupported",
+            detail=f"unsupported reference media type: {asset.mime_type}",
+            extracted_at=now,
+        )
+    if role not in {"menu_reference", "old_flyer_reference"}:
+        return FlyerReferenceExtraction(
+            asset_id=asset.asset_id,
+            role=role,
+            provider="not_run",
+            status="not_run",
+            detail="reference extraction not required for this role",
+            extracted_at=now,
+        )
+    return FlyerReferenceExtraction(
+        asset_id=asset.asset_id,
+        role=role,
+        provider="not_run",
+        status="not_run",
+        detail="reference extraction pending",
+        extracted_at=now,
+    )
+
+
+def _needs_reference_extraction(extraction: FlyerReferenceExtraction) -> bool:
+    return extraction.role in {"menu_reference", "old_flyer_reference"} and extraction.status == "not_run"
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--customer-phone", required=True)
     p.add_argument("--message-id", required=True)
     p.add_argument("--raw-request", required=True)
     p.add_argument("--reference-media-path", default="")
+    p.add_argument("--defer-reference-extraction", action="store_true")
     p.add_argument("--manual-edit-required", action="store_true")
     p.add_argument("--state-path", default=str(STATE_PATH))
     p.add_argument("--customer-state-path", default=str(CUSTOMERS_PATH))
@@ -390,11 +434,14 @@ def main() -> int:
     args = p.parse_args()
 
     state_path = Path(args.state_path)
+    project: FlyerProject | None = None
+    pending_reference_asset: FlyerAsset | None = None
+    should_extract_reference = False
     with FileLock(Path(str(state_path) + ".lock")):
         store = _load_store(state_path)
-        for project in store.projects:
-            if project.original_message_id == args.message_id:
-                print(project.model_dump_json())
+        for existing in store.projects:
+            if existing.original_message_id == args.message_id:
+                print(existing.model_dump_json())
                 return 0
 
         now = datetime.now(timezone.utc)
@@ -407,6 +454,7 @@ def main() -> int:
         reference_asset = None
         reference_extractions = []
         manual_review = FlyerManualReview()
+        reference_manual_required = False
         if args.reference_media_path:
             reference_asset = _copy_reference_asset(
                 Path(args.reference_media_path),
@@ -416,26 +464,21 @@ def main() -> int:
                 now=now,
             )
             if reference_asset is not None:
-                extraction = extract_reference(
-                    reference_asset,
-                    raw_request=args.raw_request,
-                    provider=NoopReferenceExtractionProvider(),
-                )
+                extraction = _initial_reference_extraction(reference_asset, raw_request=args.raw_request, now=now)
                 reference_extractions.append(extraction)
-                if args.manual_edit_required and extraction.status in {"provider_unavailable", "unsupported", "low_confidence"}:
+                if _reference_failure_requires_manual_review(extraction):
+                    reference_manual_required = True
                     manual_review = FlyerManualReview(
                         status="queued",
                         reason=f"reference_{extraction.status}",
                         detail=extraction.detail,
                         queued_at=now,
                     )
+                elif _needs_reference_extraction(extraction) and not args.defer_reference_extraction:
+                    pending_reference_asset = reference_asset
+                    should_extract_reference = True
         locked_facts = extract_text_facts(fields, args.raw_request, message_id=args.message_id)
-        if reference_extractions:
-            locked_facts = merge_locked_facts(
-                locked_facts,
-                *(extraction.extracted_facts for extraction in reference_extractions),
-            )
-        status = "manual_edit_required" if args.manual_edit_required else "intake_started"
+        status = "manual_edit_required" if args.manual_edit_required or reference_manual_required else "intake_started"
         project = FlyerProject(
             project_id=project_id,
             status=status,
@@ -460,7 +503,45 @@ def main() -> int:
             customer_phone=args.customer_phone,
             original_message_id=args.message_id,
         )
-        print(project.model_dump_json())
+    if not should_extract_reference or pending_reference_asset is None or project is None:
+        if project is not None:
+            print(project.model_dump_json())
+        return 0
+
+    extraction = extract_reference(
+        pending_reference_asset,
+        raw_request=args.raw_request,
+        provider=build_reference_extraction_provider(),
+    )
+    now = datetime.now(timezone.utc)
+    with FileLock(Path(str(state_path) + ".lock")):
+        store = _load_store(state_path)
+        for idx, current in enumerate(store.projects):
+            if current.project_id != project.project_id:
+                continue
+            reference_extractions = [
+                extraction if item.asset_id == extraction.asset_id else item
+                for item in current.reference_extractions
+            ]
+            locked_facts = merge_locked_facts(current.locked_facts, extraction.extracted_facts)
+            updates = {
+                "reference_extractions": reference_extractions,
+                "locked_facts": locked_facts,
+                "updated_at": now,
+            }
+            if _reference_failure_requires_manual_review(extraction):
+                updates["status"] = "manual_edit_required"
+                updates["manual_review"] = FlyerManualReview(
+                    status="queued",
+                    reason=f"reference_{extraction.status}",
+                    detail=extraction.detail,
+                    queued_at=now,
+                )
+            store.projects[idx] = current.model_copy(update=updates)
+            _write_store(state_path, store)
+            print(store.projects[idx].model_dump_json())
+            return 0
+    print(project.model_dump_json())
     return 0
 
 

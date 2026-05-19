@@ -216,6 +216,25 @@ def test_flyer_complete_requests_send_processing_ack_before_generation():
     assert hooks.index("send_flyer_processing_ack(chat_id, project_id)") < hooks.index("trigger_generate_flyer_concepts(project_id)")
 
 
+def test_reference_manual_fallback_copy_reaches_resume_paths_and_releases_source_edit_quota():
+    hooks = (REPO / "src" / "plugins" / "cf-router" / "hooks.py").read_text(encoding="utf-8")
+    actions = (REPO / "src" / "plugins" / "cf-router" / "actions.py").read_text(encoding="utf-8")
+
+    assert "def send_flyer_manual_review_ack" in actions
+    assert hooks.count("flyer_generation_queued_manual_review(gen_detail)") >= 4
+    assert hooks.count("send_flyer_manual_review_ack(") >= 4
+    assert "source_edit_preflight_failed" in hooks
+    assert "release_ok={release_ok}; release_detail={release_detail[:250]}" in hooks
+
+
+def test_deploy_smoke_exercises_deferred_reference_extraction():
+    smoke = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-smoke-test.sh").read_text(encoding="utf-8")
+
+    assert "--defer-reference-extraction" in smoke
+    assert "FLYER_REFERENCE_ALLOW_SIDECAR=1" in smoke
+    assert "Flyer deferred reference extraction smoke passed" in smoke
+
+
 def test_intake_script_handles_menu_fliers_with_location_phone_and_address():
     script = (SCRIPTS / "create-flyer-project").read_text(encoding="utf-8")
     assert "menu_match" in script

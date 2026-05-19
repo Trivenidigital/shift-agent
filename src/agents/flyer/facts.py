@@ -69,17 +69,35 @@ def _tagline(text: str) -> str:
 
 def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFact]:
     facts: list[FlyerLockedFact] = []
-    pattern = re.compile(
+    name_before_price = re.compile(
         r"(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,60}?)\s*(?:-|:)?\s*\$\s*(?P<price>\d+(?:\.\d{2})?)",
         flags=re.IGNORECASE,
     )
+    price_before_name = re.compile(
+        r"\$\s*(?P<price>\d+(?:\.\d{2})?)\s*(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,50})",
+        flags=re.IGNORECASE,
+    )
     seen: set[str] = set()
-    for idx, match in enumerate(pattern.finditer(text or "")):
-        name = _clean(match.group("name"))
-        name = re.sub(r"^(?:and|with|include|includes)\s+", "", name, flags=re.IGNORECASE)
-        price = f"${match.group('price')}"
+    promo_name = re.compile(r"^(?:save|coupon|discount|offer|deal|special|cashback|credit)\b", flags=re.IGNORECASE)
+    bad_context = re.compile(r"\b(?:create|make|generate|design|flyer|flier|poster|banner|promoting|promote|promotion)\b", flags=re.IGNORECASE)
+
+    def add_item(name: str, price: str) -> None:
+        name = _clean(name)
+        name = re.sub(
+            r"^(?:create|make|generate|design)\s+(?:a\s+)?(?:menu\s+)?(?:flyer|flier|poster|banner)\s+(?:with|for)?\s*",
+            "",
+            name,
+            flags=re.IGNORECASE,
+        ).strip()
+        name = re.sub(r"^(?:and|with|include|includes|feature|features|featuring)\s+", "", name, flags=re.IGNORECASE)
         if not name or name.lower() in seen:
-            continue
+            return
+        if name.lower() in {"and", "with", "include", "includes", "for", "on", "at"}:
+            return
+        if promo_name.search(name) or bad_context.search(name):
+            return
+        if len(name.split()) > 5:
+            return
         seen.add(name.lower())
         name_fact = _fact(f"item:{len(seen)-1}:name", "Item", name, "customer_text", message_id=message_id)
         price_fact = _fact(f"item:{len(seen)-1}:price", "Price", price, "customer_text", message_id=message_id)
@@ -87,6 +105,16 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
             facts.append(name_fact)
         if price_fact:
             facts.append(price_fact)
+
+    for segment in re.split(r"[\n\r,;]+", text or ""):
+        for match in name_before_price.finditer(segment):
+            add_item(match.group("name"), f"${match.group('price')}")
+        for match in price_before_name.finditer(segment):
+            name = match.group("name")
+            name = re.split(r"\b(?:and|with|include|includes|plus|for|on|at)\b|[.!?]", name, maxsplit=1, flags=re.IGNORECASE)[0]
+            if not name.strip():
+                continue
+            add_item(name, f"${match.group('price')}")
     return facts
 
 
@@ -116,13 +144,64 @@ def merge_locked_facts(*fact_lists: Iterable[FlyerLockedFact]) -> list[FlyerLock
         "uploaded_asset": 5,
         "system": 6,
     }
+    item_pattern = re.compile(r"^item:(?P<index>\d+):(?P<kind>name|price)$")
+    materialized = [list(facts) for facts in fact_lists]
     merged: dict[str, FlyerLockedFact] = {}
-    for facts in fact_lists:
+    item_records: list[dict[str, FlyerLockedFact | int | str]] = []
+
+    def item_key(value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", (value or "").lower()).strip()
+
+    def add_or_replace_item(name_fact: FlyerLockedFact, price_fact: FlyerLockedFact | None) -> None:
+        key = item_key(name_fact.value)
+        if not key:
+            return
+        new_priority = priority.get(name_fact.source, 99)
+        for record in item_records:
+            if record["key"] != key:
+                continue
+            old_priority = int(record["priority"])
+            if new_priority < old_priority:
+                record["name"] = name_fact
+                record["price"] = price_fact
+                record["priority"] = new_priority
+            return
+        item_records.append({"key": key, "name": name_fact, "price": price_fact, "priority": new_priority})
+
+    for facts in materialized:
         for fact in facts:
+            if item_pattern.match(fact.fact_id):
+                continue
             current = merged.get(fact.fact_id)
             if current is None or priority.get(fact.source, 99) < priority.get(current.source, 99):
                 merged[fact.fact_id] = fact
-    return list(merged.values())
+
+        grouped: dict[int, dict[str, FlyerLockedFact]] = {}
+        order: list[int] = []
+        for fact in facts:
+            match = item_pattern.match(fact.fact_id)
+            if not match:
+                continue
+            index = int(match.group("index"))
+            if index not in grouped:
+                grouped[index] = {}
+                order.append(index)
+            grouped[index][match.group("kind")] = fact
+        for index in order:
+            name_fact = grouped[index].get("name")
+            if name_fact is None:
+                continue
+            add_or_replace_item(name_fact, grouped[index].get("price"))
+
+    result = list(merged.values())
+    for index, record in enumerate(item_records):
+        name_fact = record["name"]
+        price_fact = record["price"]
+        if isinstance(name_fact, FlyerLockedFact):
+            result.append(name_fact.model_copy(update={"fact_id": f"item:{index}:name"}))
+        if isinstance(price_fact, FlyerLockedFact):
+            result.append(price_fact.model_copy(update={"fact_id": f"item:{index}:price"}))
+    return result
 
 
 def facts_by_id(project: FlyerProject | object) -> dict[str, FlyerLockedFact]:

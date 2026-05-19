@@ -1883,6 +1883,7 @@ def trigger_create_flyer_project(
         ]
         if reference_media_path:
             cmd.extend(["--reference-media-path", reference_media_path])
+            cmd.append("--defer-reference-extraction")
         if manual_edit_required:
             cmd.append("--manual-edit-required")
         result = subprocess.run(
@@ -1935,6 +1936,23 @@ def trigger_check_flyer_reference_scope(
     business_name = str(customer.get("business_name") or "").strip()
     if not business_name or not media_path:
         return True, "scope_check_not_applicable", {"decision": "allow", "reason": "not_applicable"}
+    if os.environ.get("FLYER_REFERENCE_SCOPE_ALLOW_SPEND") != "1":
+        lower = " ".join((raw_request or "").lower().split())
+        if re.search(r"\b(?:logo|menu|price\s*list|items?|prices?)\b", lower):
+            return True, "scope_check_skipped_no_spend", {"decision": "allow", "reason": "no_spend_menu_or_logo"}
+        return True, "scope_check_deferred_no_spend", {
+            "decision": "clarify",
+            "reason": "scope_check_requires_provider_after_quota",
+            "reply_text": (
+                "Flyer Studio\n"
+                "------------\n"
+                f"I need to confirm whether the attached flyer belongs to {business_name}.\n\n"
+                f"If you own or are authorized to use this flyer, reply with how it is connected to {business_name}, "
+                f"and send the {business_name} logo/details to use.\n"
+                f"If this is only a reference, reply \"use as reference\" and Flyer Studio can create a new original "
+                f"{business_name} flyer using it as inspiration without copying another business's branding/layout exactly."
+            ),
+        }
     cmd = [
         str(PYTHON_BIN),
         str(CHECK_FLYER_REFERENCE_SCOPE_BIN),
@@ -2218,6 +2236,49 @@ def send_flyer_manual_edit_ack(
     if ok:
         return True, message_id, ""
     return False, message_id, f"{status}: {err}"
+
+
+def send_flyer_manual_review_ack(
+    chat_id: str,
+    project_id: str,
+    request_text: str = "",
+    reason: str = "",
+) -> tuple[bool, str, str]:
+    """Acknowledge fail-closed manual review for unsupported or unverifiable reference media."""
+    _ensure_platform_path()
+    try:
+        from safe_io import bridge_post  # type: ignore
+    except Exception as e:
+        return False, "", f"safe_io_import_failed: {type(e).__name__}: {e}"
+    body = flyer_visible_message_text(request_text).strip()
+    requested = f"\n\nRequest: {body}" if body else ""
+    reason_line = f"\n\nReason: {reason.strip()[:240]}" if reason.strip() else ""
+    message = (
+        "Flyer Studio\n"
+        "------------\n"
+        f"I received your flyer request and queued project {project_id} for manual review."
+        f"{requested}"
+        f"{reason_line}\n\n"
+        "I could not safely use the uploaded reference automatically, so I am not generating a generic flyer from it. "
+        "I will send an update here once it is reviewed."
+    )
+    ok, message_id, err, status = bridge_post(chat_id, message)
+    if ok:
+        return True, message_id, ""
+    return False, message_id, f"{status}: {err}"
+
+
+def flyer_project_has_manual_review_queued(project: Optional[dict]) -> bool:
+    if not project:
+        return False
+    manual = project.get("manual_review") or {}
+    return project.get("status") == "manual_edit_required" and manual.get("status") == "queued"
+
+
+def flyer_generation_queued_manual_review(detail: str) -> bool:
+    if "reference_extraction_failed" in (detail or ""):
+        return True
+    return False
 
 
 def send_flyer_edit_processing_ack(chat_id: str, project_id: str) -> tuple[bool, str, str]:
