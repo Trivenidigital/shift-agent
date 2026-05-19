@@ -1523,6 +1523,23 @@ def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_
                 )
                 if preview_ok:
                     return {"action": "skip", "reason": f"cf-router flyer brand asset saved and regenerated {project_id}"}
+            if actions.flyer_generation_queued_manual_review(gen_detail):
+                ack_ok, manual_mid, ack_err = actions.send_flyer_manual_review_ack(
+                    chat_id,
+                    project_id,
+                    text,
+                    reason=gen_detail,
+                )
+                actions.audit_intercepted(
+                    reason="flyer_reference_manual_review_queued",
+                    chat_id=chat_id,
+                    subprocess_rc=0 if ack_ok else 3,
+                    detail=(
+                        f"project_id={project_id}; brand_asset_regeneration_manual=true; "
+                        f"status={result.get('next_status')}; ack_message_id={manual_mid}; ack_error={ack_err[:300]}"
+                    ),
+                )
+                return {"action": "skip", "reason": f"cf-router flyer brand asset manual review queued {project_id}"}
             reply = f"{reply}\n\nSaved. I could not regenerate the flyer automatically yet: {gen_detail[:160] if 'gen_detail' in locals() else ''}"
 
     ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
@@ -1774,7 +1791,15 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
                 reason="flyer_primary_failed", chat_id=chat_id,
                 subprocess_rc=2, detail=f"project_id={project_id}; revision_regeneration_failed={gen_detail[:400]}",
             )
-            fail_ack_ok, fail_mid, fail_err = _send_flyer_regeneration_failed_ack(chat_id, project_id)
+            if actions.flyer_generation_queued_manual_review(gen_detail):
+                fail_ack_ok, fail_mid, fail_err = actions.send_flyer_manual_review_ack(
+                    chat_id,
+                    project_id,
+                    body,
+                    reason=gen_detail,
+                )
+            else:
+                fail_ack_ok, fail_mid, fail_err = _send_flyer_regeneration_failed_ack(chat_id, project_id)
             actions.audit_intercepted(
                 reason="flyer_reference_exact_edit_queued" if fail_ack_ok else "flyer_primary_failed",
                 chat_id=chat_id,
@@ -1864,7 +1889,15 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
                     err = f"{err}; preview_error={preview_err}"
             else:
                 regeneration_failed = True
-                fail_ack_ok, fail_mid, fail_err = _send_flyer_regeneration_failed_ack(chat_id, project_id)
+                if actions.flyer_generation_queued_manual_review(gen_detail):
+                    fail_ack_ok, fail_mid, fail_err = actions.send_flyer_manual_review_ack(
+                        chat_id,
+                        project_id,
+                        body,
+                        reason=gen_detail,
+                    )
+                else:
+                    fail_ack_ok, fail_mid, fail_err = _send_flyer_regeneration_failed_ack(chat_id, project_id)
                 mid = ",".join(x for x in [mid, fail_mid] if x)
                 ack_ok = False
                 err = f"{err}; regeneration_failed={gen_detail[:300]}"

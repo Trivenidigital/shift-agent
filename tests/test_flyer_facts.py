@@ -114,6 +114,9 @@ def test_extract_text_facts_handles_price_first_without_prompt_prefix_pollution(
     assert by_id["item:0:price"].value == "$20"
     assert by_id["item:1:name"].value == "perms"
     assert by_id["item:1:price"].value == "$80"
+    assert by_id["item:2:name"].value == "kids trim"
+    assert by_id["item:2:price"].value == "$7"
+    assert "item:3:name" not in by_id
     assert all("Create flyer" not in fact.value for fact in facts)
 
 

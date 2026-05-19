@@ -1936,6 +1936,23 @@ def trigger_check_flyer_reference_scope(
     business_name = str(customer.get("business_name") or "").strip()
     if not business_name or not media_path:
         return True, "scope_check_not_applicable", {"decision": "allow", "reason": "not_applicable"}
+    if os.environ.get("FLYER_REFERENCE_SCOPE_ALLOW_SPEND") != "1":
+        lower = " ".join((raw_request or "").lower().split())
+        if re.search(r"\b(?:logo|menu|price\s*list|items?|prices?)\b", lower):
+            return True, "scope_check_skipped_no_spend", {"decision": "allow", "reason": "no_spend_menu_or_logo"}
+        return True, "scope_check_deferred_no_spend", {
+            "decision": "clarify",
+            "reason": "scope_check_requires_provider_after_quota",
+            "reply_text": (
+                "Flyer Studio\n"
+                "------------\n"
+                f"I need to confirm whether the attached flyer belongs to {business_name}.\n\n"
+                f"If you own or are authorized to use this flyer, reply with how it is connected to {business_name}, "
+                f"and send the {business_name} logo/details to use.\n"
+                f"If this is only a reference, reply \"use as reference\" and Flyer Studio can create a new original "
+                f"{business_name} flyer using it as inspiration without copying another business's branding/layout exactly."
+            ),
+        }
     cmd = [
         str(PYTHON_BIN),
         str(CHECK_FLYER_REFERENCE_SCOPE_BIN),

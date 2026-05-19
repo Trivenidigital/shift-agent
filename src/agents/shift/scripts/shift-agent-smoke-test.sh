@@ -124,6 +124,27 @@ cleanup_ref_smoke() { rm -rf "$REF_SMOKE_DIR"; }
 trap cleanup_ref_smoke EXIT
 mkdir -p "$REF_SMOKE_DIR/assets"
 printf 'fake image bytes' > "$REF_SMOKE_DIR/menu.png"
+cat > "$REF_SMOKE_DIR/config.yaml" <<'YAML'
+schema_version: 1
+customer:
+  name: Smoke
+  location_id: smoke
+  timezone: America/New_York
+owner:
+  name: Owner
+  phone: "+19045550000"
+limits: {}
+alerting:
+  pushover_user_key: k
+  pushover_app_token: t
+backup:
+  gpg_recipient_email: owner@example.com
+flyer:
+  enabled: true
+  draft_image_model: deterministic-renderer
+  draft_image_quality: low
+  concept_count: 1
+YAML
 chown -R shift-agent:shift-agent "$REF_SMOKE_DIR"
 if ! sudo -u shift-agent env FLYER_STATE_ROOT="$REF_SMOKE_DIR" "$PY" /usr/local/bin/create-flyer-project \
     --customer-phone +19045550123 \
@@ -143,7 +164,7 @@ if ! sudo -u shift-agent env FLYER_STATE_ROOT="$REF_SMOKE_DIR" FLYER_REFERENCE_A
     --project-id F0001 \
     --state-path "$REF_SMOKE_DIR/projects.json" \
     --asset-dir "$REF_SMOKE_DIR/assets" \
-    --config-path /opt/shift-agent/config.yaml > "$REF_SMOKE_DIR/generate.json"; then
+    --config-path "$REF_SMOKE_DIR/config.yaml" > "$REF_SMOKE_DIR/generate.json"; then
     echo "FAIL: Flyer deferred reference generate smoke failed"
     exit 1
 fi

@@ -375,6 +375,9 @@ def _detail_clauses(project: FlyerProject) -> list[str]:
 
 
 def _menu_item_lines(project: FlyerProject) -> list[str]:
+    locked_items = _locked_menu_item_lines(project)
+    if locked_items:
+        return locked_items
     text = (project.fields.notes or project.raw_request or "").strip()
     if not text:
         return []
@@ -425,6 +428,34 @@ def _menu_item_lines(project: FlyerProject) -> list[str]:
         if key not in seen:
             seen.add(key)
             items.append(line)
+    return items[:MAX_DETAIL_FACTS]
+
+
+def _locked_menu_item_lines(project: FlyerProject) -> list[str]:
+    grouped: dict[int, dict[str, str]] = {}
+    order: list[int] = []
+    for fact in project.locked_facts:
+        match = re.match(r"^item:(\d+):(name|price)$", fact.fact_id)
+        if not match:
+            continue
+        index = int(match.group(1))
+        if index not in grouped:
+            grouped[index] = {}
+            order.append(index)
+        grouped[index][match.group(2)] = _clean_fact_text(fact.value)
+    items: list[str] = []
+    seen: set[str] = set()
+    for index in order:
+        name = grouped[index].get("name", "")
+        price = grouped[index].get("price", "")
+        if not name:
+            continue
+        line = f"{name} {price}".strip()
+        key = _normalize_fact_text(line)
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(line)
     return items[:MAX_DETAIL_FACTS]
 
 

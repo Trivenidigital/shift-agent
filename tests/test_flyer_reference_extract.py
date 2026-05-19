@@ -29,6 +29,7 @@ def test_classifies_logo_menu_reference_and_source_edit(tmp_path, monkeypatch):
     assert classify_reference_role("Use this as our logo", asset) == "logo"
     assert classify_reference_role("Extract item names and prices from attached sample flyer", asset) == "menu_reference"
     assert classify_reference_role("Create a flyer from this attached menu", asset) == "menu_reference"
+    assert classify_reference_role("Create flyer. Menu attached.", asset) == "menu_reference"
     assert classify_reference_role("Remove extra 08:00 from this uploaded flyer", asset) == "source_edit_template"
 
 

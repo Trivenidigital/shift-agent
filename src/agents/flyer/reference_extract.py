@@ -48,7 +48,8 @@ def classify_reference_role(raw_request: str, asset: FlyerAsset) -> FlyerReferen
     if re.search(
         r"\b(?:extract|take|use).{0,60}\b(?:items?|prices?|menu)\b"
         r"|\b(?:sample|reference|attached|uploaded|this).{0,30}\b(?:flyer|menu|price\s*list)\b"
-        r"|\b(?:from|using)\s+(?:this\s+)?(?:attached|uploaded)\s+(?:menu|price\s*list)\b",
+        r"|\b(?:from|using)\s+(?:this\s+)?(?:attached|uploaded)\s+(?:menu|price\s*list)\b"
+        r"|\b(?:menu|price\s*list)\s+(?:attached|uploaded)\b",
         text,
     ):
         return "menu_reference"

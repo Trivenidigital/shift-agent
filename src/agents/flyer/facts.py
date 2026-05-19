@@ -92,6 +92,8 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
         name = re.sub(r"^(?:and|with|include|includes|feature|features|featuring)\s+", "", name, flags=re.IGNORECASE)
         if not name or name.lower() in seen:
             return
+        if name.lower() in {"and", "with", "include", "includes", "for", "on", "at"}:
+            return
         if promo_name.search(name) or bad_context.search(name):
             return
         if len(name.split()) > 5:

@@ -27,7 +27,7 @@ from agents.flyer.render import (  # noqa: E402
     validate_text_manifest_file,
     write_text_manifest,
 )
-from schemas import FlyerAsset, FlyerConcept, FlyerProject, FlyerRequestFields, FlyerRevision  # noqa: E402
+from schemas import FlyerAsset, FlyerConcept, FlyerLockedFact, FlyerProject, FlyerRequestFields, FlyerRevision  # noqa: E402
 
 
 def _complete_project() -> FlyerProject:
@@ -125,6 +125,30 @@ def test_collect_text_facts_keeps_revised_price_phone_location_and_schedule():
     assert facts["contact"] == "+1 980 200 5022"
     assert "$16.99" in facts["detail_001"]
     assert "$12.99" in facts["detail_002"]
+
+
+def test_collect_text_facts_uses_locked_reference_items_before_raw_request():
+    project = _complete_project().model_copy(update={
+        "raw_request": "Create a flyer from this attached menu.",
+        "fields": FlyerRequestFields(
+            event_or_business_name="Menu Specials",
+            contact_info="+1 904 555 0123",
+            notes="Create a flyer from this attached menu.",
+        ),
+        "locked_facts": [
+            FlyerLockedFact(fact_id="item:0:name", label="Item", value="Idly", source="reference_vision"),
+            FlyerLockedFact(fact_id="item:0:price", label="Price", value="$7", source="reference_vision"),
+            FlyerLockedFact(fact_id="item:1:name", label="Item", value="Dosa", source="reference_vision"),
+            FlyerLockedFact(fact_id="item:1:price", label="Price", value="$8", source="reference_vision"),
+        ],
+    })
+
+    facts = {fact.fact_id: fact.text for fact in collect_text_facts(project)}
+    payload = _menu_overlay_payload(project)
+
+    assert facts["detail_001"] == "Idly $7"
+    assert facts["detail_002"] == "Dosa $8"
+    assert payload["items"] == ["Idly $7", "Dosa $8"]
 
 
 def test_collect_text_facts_suppresses_old_phone_from_notes_after_revision():
