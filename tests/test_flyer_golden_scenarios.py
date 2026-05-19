@@ -1,24 +1,38 @@
 """S8 P0-7: Flyer Studio golden scenario regression suite.
 
-Locks down end-to-end behavior across real customer-style flows. Two suites:
+Locks down end-to-end behavior across real customer-style flows.
 
-  - **Deterministic** (this file): runs in CI + deploy smoke without spending
-    model credits. Uses parametrized assertions over the canonical scenario
-    catalog defined in `_SCENARIOS`. Each scenario has a stable `id`; failures
-    print the id + scenario description so triage points at a real flow, not
-    an opaque parametrize index.
+**Deterministic** (this file): runs in CI + the deploy-time pytest gate
+without spending model credits. Uses parametrized assertions over the
+canonical scenario catalog defined in `_SCENARIOS` + `_DELEGATED_SCENARIOS`.
+Each scenario has a stable `id`; failures print the id + scenario description
+so triage points at a real flow, not an opaque parametrize index.
 
-  - **Spend-gated real-model** (`test_flyer_golden_scenarios_real_model.py` —
-    see module docstring there): explicitly opt-in via `FLYER_GOLDEN_ALLOW_SPEND=1`
-    + provider keys; renders real images / runs real OCR. NOT run by default;
-    intentionally a separate file so CI cannot accidentally invoke it.
+**Spend-gated real-model**: NOT in this PR. Tracked in
+`tasks/flyer-p0-execution-plan-2026-05-19.md` as a follow-up; requires an
+allow-spend flag, isolated VPS credentials, and a separate test file to
+ensure CI cannot accidentally invoke it. The deterministic suite proves
+state / routing / reason_code / locked-fact / status-reply truthfulness —
+which is what the user-spec axes assert. Real-model rendering / OCR are
+exercised by the existing `smoke-flyer-quality --real-model --allow-spend`
+path (deploy-gated, not auto-invoked).
 
-The scenario catalog covers the 16 user-spec axes:
-  restaurant_menu, grocery_promotion, halal_meat, salon_service, tutor_class,
-  temple_event, logo_upload_only, exact_template_source_edit,
-  reference_flyer_recreation, price_correction, language_specific,
-  vague_prompt_recovery, repeated_corrections, stale_new_project_separation,
-  manual_queue_status_check, unsupported_pdf_manual_fallback.
+How to add a new scenario:
+  1. Add a `GoldenScenario(...)` to `_SCENARIOS` if you're writing a new
+     direct end-to-end assertion.
+  2. OR add `(id, "tests/<file>.py::<test>", signal)` to
+     `_DELEGATED_SCENARIOS` if the axis is already covered by a dedicated
+     test from an earlier slice.
+  3. Extend `EXPECTED_AXES` with the new id.
+  All three steps fail-closed: the structural test asserts
+  EXPECTED_AXES == direct_ids ∪ delegated_ids, and the delegation
+  sentinel verifies the `::test_name` actually resolves to a function
+  body in the owner file (via ast).
+
+The scenario catalog covers the canonical 20-axis user-spec set (16 from
+the original S8 brief + 4 added via review HIGH #3 extension —
+concept_selection text, approval text, non-English replies, break-glass
+disambiguation).
 
 Coverage axes asserted per scenario:
   - locked_facts (business_name / contact_phone / item:N / location / language)
@@ -34,6 +48,7 @@ What this suite does NOT do:
 """
 from __future__ import annotations
 
+import ast
 import importlib.machinery
 import importlib.util
 import json
@@ -45,6 +60,37 @@ from pathlib import Path
 from typing import Optional
 
 import pytest
+
+
+# Canonical user-spec axes that this suite must cover. Single source of truth —
+# the structural test below asserts `direct_ids | delegated_ids == EXPECTED_AXES`
+# so adding a scenario without extending this set (or vice versa) fails closed.
+EXPECTED_AXES: frozenset[str] = frozenset({
+    # S8 original 16-axis brief
+    "restaurant_menu",
+    "grocery_promotion",
+    "halal_meat",
+    "salon_service",
+    "tutor_class",
+    "temple_event",
+    "logo_upload_only",
+    "exact_template_source_edit",
+    "reference_flyer_recreation",
+    "price_correction",
+    "language_specific",
+    "vague_prompt_recovery",
+    "repeated_corrections",
+    "stale_new_project_separation",
+    "manual_queue_status_check",
+    "unsupported_pdf_manual_fallback",
+    # Review HIGH #3 extension: P0 axes from earlier slices that the original
+    # brief did not name but that have dedicated owner tests and warrant
+    # golden-suite coverage:
+    "concept_selection_text_after_threshold",  # S3 stale guard preserves "1"/"C1"
+    "approval_text_after_threshold",  # S3 stale guard preserves "approve"/"yes"
+    "non_english_reply",  # S3 stale guard preserves Hindi/Telugu/Hinglish
+    "break_glass_status_disambiguation",  # S2 break_glass_sent disambiguation
+})
 
 REPO = Path(__file__).resolve().parent.parent
 PLATFORM = REPO / "src" / "platform"
@@ -78,8 +124,10 @@ _SCENARIOS: list[GoldenScenario] = [
             "Create flyer for Lakshmis Kitchen Thursday Dosa Night Special. "
             "Contact +17329837841. Idly $7, Dosa $8, Veg combo $12.99."
         ),
+        # The extractor identifies the brand name as the business signal.
+        # Trailing event/special phrasing is not part of the locked brand.
         expected_locked_facts={
-            "business_name": "Lakshmis Kitchen Thursday Dosa Night Special",
+            "business_name": "Lakshmis Kitchen",
             "contact_phone": "+17329837841",
         },
     ),
@@ -92,7 +140,7 @@ _SCENARIOS: list[GoldenScenario] = [
             "Contact +18004442222. Sweets box $9.99, Basmati rice $14."
         ),
         expected_locked_facts={
-            "business_name": "Triveni Supermarket Diwali weekend sale",
+            "business_name": "Triveni Supermarket",
             "contact_phone": "+18004442222",
         },
     ),
@@ -105,7 +153,7 @@ _SCENARIOS: list[GoldenScenario] = [
             "Contact +19045550104. Halal chicken $13.99, Lamb chops $19.99."
         ),
         expected_locked_facts={
-            "business_name": "Fresh Meats Halal premium chicken",
+            "business_name": "Fresh Meats",
             "contact_phone": "+19045550104",
         },
     ),
@@ -144,7 +192,7 @@ _SCENARIOS: list[GoldenScenario] = [
             "Contact +17329837841. April 9 6pm-9pm, free entry."
         ),
         expected_locked_facts={
-            "business_name": "Sri Venkateswara Temple Ugadi celebration",
+            "business_name": "Sri Venkateswara Temple",
             "contact_phone": "+17329837841",
         },
     ),
@@ -158,8 +206,9 @@ _SCENARIOS: list[GoldenScenario] = [
             "Create flyer for Lakshmis Kitchen with corrected prices. "
             "Contact +17329837841. Idly $8 (was $7), Dosa $9 (was $8)."
         ),
+        # Brand name only — "with corrected prices" is intent, not brand.
         expected_locked_facts={
-            "business_name": "Lakshmis Kitchen with corrected prices",
+            "business_name": "Lakshmis Kitchen",
             "contact_phone": "+17329837841",
         },
     ),
@@ -172,10 +221,10 @@ _SCENARIOS: list[GoldenScenario] = [
             "Contact +17329837841. Idly $7, Dosa $8."
         ),
         # Language detection happens upstream; the locked_facts assertion only
-        # pins business + contact. Telugu rendering is exercised by the
+        # pins business brand + contact. Telugu rendering is exercised by the
         # render-side tests, not this routing assertion.
         expected_locked_facts={
-            "business_name": "Lakshmis Kitchen in Telugu",
+            "business_name": "Lakshmis Kitchen",
             "contact_phone": "+17329837841",
         },
     ),
@@ -208,15 +257,27 @@ _SCENARIOS: list[GoldenScenario] = [
 
 
 # Scenarios that delegate end-to-end coverage to dedicated existing test files.
-# We assert these are reachable + correctly tagged, not the full flow.
+# Format: (scenario_id, "tests/<file>.py::<test_function>", signal description).
+# The sentinel `test_golden_delegated_scenario_has_owner_test` asserts BOTH
+# the file exists AND the `::test_function` name resolves to a real function
+# body in that file (via ast.parse) — catches the regression where the owner
+# test got renamed and the delegation map silently went stale (pre-merge fix
+# of S8 review BLOCKER #1).
 _DELEGATED_SCENARIOS: list[tuple[str, str, str]] = [
     ("logo_upload_only", "tests/test_flyer_facts.py::test_reference_extraction_logo_role_does_not_create_item_price_facts", "no item/price facts from logo"),
-    ("exact_template_source_edit", "tests/test_flyer_create_project.py::test_create_flyer_project_exact_edit", "source_edit_provider_unavailable reason_code"),
-    ("reference_flyer_recreation", "tests/test_flyer_reference_extract.py", "reference extraction status + facts"),
+    ("exact_template_source_edit", "tests/test_flyer_create_project.py::test_create_project_can_queue_exact_reference_edit_without_template_title", "source_edit_provider_unavailable reason_code"),
+    ("reference_flyer_recreation", "tests/test_flyer_reference_extract.py::test_classifies_logo_menu_reference_and_source_edit", "reference role classification"),
     ("repeated_corrections", "tests/test_flyer_project_isolation.py::test_scenario6_fresh_active_project_still_attaches_revision_correction", "revision attaches; no new project"),
     ("stale_new_project_separation", "tests/test_flyer_project_isolation.py::test_scenario1_old_awaiting_approval_does_not_swallow_complete_new_request", "S3 stale guard bails to new"),
     ("manual_queue_status_check", "tests/test_flyer_state_reply_table.py::test_every_manual_review_reason_produces_specific_reply", "reason-code-specific status reply"),
     ("unsupported_pdf_manual_fallback", "tests/test_flyer_source_edit_preflight.py::test_source_edit_preflight_rejects_pdf_reference", "reference_unsupported reason_code"),
+    # P0-axes coverage extension (S8 review HIGH #3): concept-selection text on
+    # awaiting_concept_selection, approval text on awaiting_final_approval, non-
+    # English replies — all have dedicated owner tests from earlier slices.
+    ("concept_selection_text_after_threshold", "tests/test_flyer_project_isolation.py::test_stale_guard_does_not_drop_concept_selection_after_threshold", "S3 stale guard preserves selection"),
+    ("approval_text_after_threshold", "tests/test_flyer_project_isolation.py::test_stale_guard_does_not_drop_approval_text_after_threshold", "S3 stale guard preserves approval"),
+    ("non_english_reply", "tests/test_flyer_project_isolation.py::test_stale_guard_does_not_drop_non_english_reply", "S3 stale guard preserves non-English"),
+    ("break_glass_status_disambiguation", "tests/test_flyer_state_reply_table.py::test_manual_edit_required_with_break_glass_sent_does_not_use_queued_branch", "break_glass excluded from queued copy"),
 ]
 
 
@@ -303,15 +364,36 @@ def test_golden_scenario_deterministic(scenario: GoldenScenario, tmp_path, monke
             f"got reason_code={actual_code!r}"
         )
 
-    # Locked-fact assertions: a successful create surfaces the expected
-    # business_name / contact_phone slots derived from the customer text.
+    # Locked-fact assertions: assert the locked-fact value STARTS WITH the
+    # expected token-set we typed in raw_request, then optionally allows a
+    # short trailing fragment (e.g. an "in Telugu" / "weekend sale" qualifier).
+    # Pre-fix this used bidirectional substring which silently accepted
+    # truncation regressions (S8 review BLOCKER #2: locked "Lakshmis" against
+    # expected "Lakshmis Kitchen Thursday Dosa..." passed because the short
+    # value was a substring of the expected one).
     locked_by_id = {fact["fact_id"]: fact["value"] for fact in (project.get("locked_facts") or [])}
     for fact_id, expected_value in scenario.expected_locked_facts.items():
         actual_value = locked_by_id.get(fact_id, "")
-        assert expected_value in actual_value or actual_value in expected_value, (
-            f"[{scenario.id}] locked_fact[{fact_id}]: "
-            f"expected to contain {expected_value!r}, got {actual_value!r}"
-        )
+        normalized_expected = expected_value.strip().casefold()
+        normalized_actual = actual_value.strip().casefold()
+        # Phone facts: exact equality (digit-formatting variations get normalized
+        # by visual_qa, not by the fact-extractor — locked store should match
+        # what the customer typed verbatim).
+        if fact_id == "contact_phone":
+            assert normalized_actual == normalized_expected, (
+                f"[{scenario.id}] locked_fact[{fact_id}]: "
+                f"expected exact match {expected_value!r}, got {actual_value!r}"
+            )
+        else:
+            # Business-name / similar text facts: locked value must START with
+            # the expected token-set (catches truncation regressions) and the
+            # expected value must be present in the locked value (catches
+            # extractor returning unrelated content).
+            assert normalized_actual.startswith(normalized_expected), (
+                f"[{scenario.id}] locked_fact[{fact_id}]: expected value to start with "
+                f"{expected_value!r}, got {actual_value!r}. Tightened from substring-in-"
+                f"either-direction (S8 review BLOCKER #2 fix) — short returns now fail."
+            )
 
     # Status reply assertions: build the status reply for the project and
     # confirm reason-specific copy lines surface (S7 P0-6 contract).
@@ -337,48 +419,61 @@ def test_golden_scenario_deterministic(scenario: GoldenScenario, tmp_path, monke
 @pytest.mark.parametrize("scenario_id, owner_test, signal", _DELEGATED_SCENARIOS, ids=lambda x: x if isinstance(x, str) else x[0])
 def test_golden_delegated_scenario_has_owner_test(scenario_id: str, owner_test: str, signal: str):
     """Each canonical scenario the golden suite delegates to a dedicated test
-    file MUST have an owner test file on disk. Catches the regression where
-    the delegated test was deleted/renamed and the golden coverage map went
-    stale. This is a coverage-truthfulness gate, not a behavioral test."""
-    owner_path = REPO / owner_test.split("::", 1)[0]
+    MUST have BOTH an owner file on disk AND a function with the named
+    `::test_<name>` symbol inside it.
+
+    Pre-fix (S8 review BLOCKER #1), the sentinel only checked file existence
+    — a delegated entry like `tests/test_flyer_create_project.py::
+    test_create_flyer_project_exact_edit` passed silently even though no such
+    function exists in that file. The post-fix `ast.parse` walk catches the
+    function-name regression before it reaches the operator.
+    """
+    if "::" in owner_test:
+        file_part, func_name = owner_test.split("::", 1)
+    else:
+        file_part, func_name = owner_test, ""
+    owner_path = REPO / file_part
     assert owner_path.exists(), (
-        f"[{scenario_id}] delegated owner test {owner_path} not found "
+        f"[{scenario_id}] delegated owner test file {owner_path} not found "
         f"(signal: {signal}). Either restore the file or update the "
         f"_DELEGATED_SCENARIOS map in this file."
     )
+    if func_name:
+        source = owner_path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        defined = {
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        assert func_name in defined, (
+            f"[{scenario_id}] delegated owner test function `{func_name}` not "
+            f"found in {owner_path} (signal: {signal}). The test may have been "
+            f"renamed or removed; update _DELEGATED_SCENARIOS to point at the "
+            f"current owner."
+        )
 
 
 # ---------- coverage truthfulness ----------
 
-def test_golden_catalog_covers_all_16_user_spec_axes():
-    """Structural invariant: the union of _SCENARIOS ids + _DELEGATED_SCENARIOS
-    ids must cover every axis in the S8 user-spec catalog. A future axis
-    addition forces the operator to either land a new direct scenario here
-    or document its owner test in _DELEGATED_SCENARIOS.
+def test_golden_catalog_covers_canonical_axes():
+    """Structural invariant: the union of `_SCENARIOS` ids and
+    `_DELEGATED_SCENARIOS` ids must EQUAL the canonical `EXPECTED_AXES` set.
+    A future axis addition forces three coordinated edits (scenario or
+    delegation + EXPECTED_AXES extension); the test fails if any one is
+    missed. Detects orphan axes (in EXPECTED_AXES but no scenario) AND
+    orphan scenarios (with no canonical entry).
     """
     direct_ids = {s.id for s in _SCENARIOS}
     delegated_ids = {sid for sid, _, _ in _DELEGATED_SCENARIOS}
-    expected_axes = {
-        "restaurant_menu",
-        "grocery_promotion",
-        "halal_meat",
-        "salon_service",
-        "tutor_class",
-        "temple_event",
-        "logo_upload_only",
-        "exact_template_source_edit",
-        "reference_flyer_recreation",
-        "price_correction",
-        "language_specific",
-        "vague_prompt_recovery",
-        "repeated_corrections",
-        "stale_new_project_separation",
-        "manual_queue_status_check",
-        "unsupported_pdf_manual_fallback",
-    }
     covered = direct_ids | delegated_ids
-    missing = expected_axes - covered
+    missing = EXPECTED_AXES - covered
+    orphan = covered - EXPECTED_AXES
     assert not missing, f"golden suite missing coverage for axes: {sorted(missing)}"
+    assert not orphan, (
+        f"golden suite has scenarios with no canonical EXPECTED_AXES entry: "
+        f"{sorted(orphan)} — either add them to EXPECTED_AXES or remove."
+    )
 
 
 def test_golden_scenario_ids_are_unique():
