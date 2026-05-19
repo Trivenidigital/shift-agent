@@ -159,6 +159,16 @@ Mirrors parent backlog §"90% Readiness Exit Criteria"; closed only when:
 
 Updates land here in reverse-chronological order after each slice merge/deploy.
 
+### 2026-05-19 — S2 P0-8b cockpit operator escape hatch: MERGED + DEPLOYED + HOTFIX MERGED + DEPLOYED
+
+- PR #116 merged at `2d25344` (2 commits: feat `cd157ea` + review-fix `dc7a6b4`).
+- Reviewer findings applied: HIGH structural (`break_glass_sent` would ghost in queue + summary counters forever — fixed via filter in both `list_manual_queue` and `build_summary`), GAP-BLOCKING (deploy probe added for new HTTP route), LOW structural (operator_asset_path constrained to `state/flyer/operator-uploads/` root + image/pdf mime allowlist). Test-coverage reviewer: 1 BLOCKING (route probe) + 2 FOLLOWUPS (idempotency test added; audit-log + HTTP TestClient deferred to match existing repo gaps).
+- Agent-side deploy tag `deploy-20260519-164229-dc7a6b48` on `main-vps`; agent smoke passed. **Cockpit was NOT redeployed by `shift-agent-deploy.sh`** — cockpit lives at `/opt/shift-agent/cockpit/backend/` and has its own deploy pipeline at `web/deploy/deploy.sh`. Followed up with a manual tar+scp+restart bringing cockpit backend + frontend dist to the VPS.
+- Post cockpit redeploy: `curl http://127.0.0.1:8081/flyer/manual-queue` → HTTP 401 (route mounted, auth-gated).
+- **Hotfix PR #117 merged at `74cb339`**: the S2-added deploy-script per-route probe used the wrong URL (`/api/flyer/...` — the `/api` prefix is added externally by Caddy, not part of the uvicorn route path). Caught by direct curl probe during post-deploy verification. Hotfix deploy tag `deploy-20260519-165012-9998488a`. The hotfix needed a one-time bootstrap (manual sed of `/usr/local/bin/shift-agent-deploy.sh` before re-running) because the buggy script was already loaded into the running bash process; subsequent deploys exercise the fixed probe normally.
+- Final verification: gateway active, cockpit active, `/flyer/manual-queue` HTTP 401, manual-queue triage CLI total=6 reasons={legacy_unknown: 3, source_edit_provider_unavailable: 3}.
+- Lessons: (1) cockpit code lives under a separate deploy pipeline; agent-tarball deploy does NOT push cockpit changes. (2) Per-route probes that target new code surface during the same deploy that installs them won't run on that deploy — the running bash has the prior version cached.
+
 ### 2026-05-19 — S1 P0-8a manual-queue triage visibility: MERGED + DEPLOYED + BACKFILLED
 
 - PR #115 merged at `e309028` (2 commits: feat `54c45b8` + review-fix `05a08fa`).
