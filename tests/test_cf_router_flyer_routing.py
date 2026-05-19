@@ -316,8 +316,9 @@ def test_reference_scope_authorization_reply_transaction_holds_state_lock(monkey
         sender_phone="+19045550104",
     )
 
-    assert recorded["choice"] == "authorization_note_recorded"
-    assert writes[0]["pending"][0]["authorization_note"] == "Sister business, same owner approved"
+    assert recorded["choice"] == "use_account_details"
+    assert recorded["authorization_note"] == "Sister business, same owner approved"
+    assert writes[0]["pending"] == []
     assert held["value"] is False
 
 
@@ -393,15 +394,83 @@ def test_reference_scope_authorized_path_records_relationship_followup(tmp_path)
         sender_phone="+19045550104",
     )
 
-    assert recorded["choice"] == "authorization_note_recorded"
+    assert recorded["choice"] == "use_account_details"
     assert recorded["authorization_reply"] == "Sister business, co-owned by Triveni"
-    final = actions.consume_flyer_reference_authorization_reply(
-        "use account details",
+    assert "Sister business" in recorded["authorization_note"]
+    assert actions.consume_flyer_reference_authorization_reply(
+        "Sister business, co-owned by Triveni",
+        chat_id="201975216009469@lid",
+        sender_phone="+19045550104",
+    ) is None
+
+
+def test_reference_scope_relationship_answer_completes_authorized_path(tmp_path):
+    actions = _load_actions()
+    actions.FLYER_REFERENCE_SCOPE_PATH = tmp_path / "reference_scope_pending.json"
+
+    actions.save_flyer_reference_scope_pending(
+        chat_id="201975216009469@lid",
+        sender_phone="+19045550104",
+        customer={"business_name": "Lakshmis Kitchen"},
+        raw_request=(
+            "Use this flyer for Lakshmis Kitchen. Replace Triveni Express. "
+            "Replace phone number. Veg Thali Special, replace Rice with Jeera Rice."
+        ),
+        media_path="/opt/shift-agent/.hermes/image_cache/triveni.jpg",
+        scope={"visible_organization_names": ["Triveni Express"]},
+        ttl_sec=600,
+    )
+    pending = actions.consume_flyer_reference_scope_choice(
+        "1",
         chat_id="201975216009469@lid",
         sender_phone="+19045550104",
     )
+    actions.save_flyer_reference_authorization_pending(pending)
+
+    final = actions.consume_flyer_reference_authorization_reply(
+        "Co-owner",
+        chat_id="201975216009469@lid",
+        sender_phone="+19045550104",
+    )
+
     assert final["choice"] == "use_account_details"
-    assert "Sister business" in final["authorization_note"]
+    assert final["authorization_reply"] == "Co-owner"
+    assert final["authorization_note"] == "Co-owner"
+    assert actions.consume_flyer_reference_authorization_reply(
+        "Co-owner",
+        chat_id="201975216009469@lid",
+        sender_phone="+19045550104",
+    ) is None
+
+
+def test_reference_scope_authorized_sentence_counts_as_relationship_details(tmp_path):
+    actions = _load_actions()
+    actions.FLYER_REFERENCE_SCOPE_PATH = tmp_path / "reference_scope_pending.json"
+
+    actions.save_flyer_reference_scope_pending(
+        chat_id="201975216009469@lid",
+        sender_phone="+19045550104",
+        customer={"business_name": "Lakshmis Kitchen"},
+        raw_request="Use this flyer for Lakshmis Kitchen. Replace Triveni Express.",
+        media_path="/opt/shift-agent/.hermes/image_cache/triveni.jpg",
+        scope={"visible_organization_names": ["Triveni Express"]},
+        ttl_sec=600,
+    )
+    pending = actions.consume_flyer_reference_scope_choice(
+        "1",
+        chat_id="201975216009469@lid",
+        sender_phone="+19045550104",
+    )
+    actions.save_flyer_reference_authorization_pending(pending)
+
+    final = actions.consume_flyer_reference_authorization_reply(
+        "I am authorized and co-owner for both businesses",
+        chat_id="201975216009469@lid",
+        sender_phone="+19045550104",
+    )
+
+    assert final["choice"] == "use_account_details"
+    assert "co-owner" in final["authorization_note"]
 
 
 def test_wrong_flyer_correction_starts_new_work_instead_of_mutating_stale_project():
