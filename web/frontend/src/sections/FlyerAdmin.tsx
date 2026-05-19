@@ -8,7 +8,36 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
 import { cn } from "@/lib/cn";
 
-type Tab = "overview" | "customers" | "campaigns" | "projects" | "guests";
+type Tab = "overview" | "customers" | "campaigns" | "projects" | "guests" | "queue";
+
+type ManualReviewStatus = "none" | "queued" | "in_progress" | "completed" | "break_glass_sent";
+
+interface ManualQueueRow {
+  project_id: string;
+  customer_phone: string;
+  status: string;
+  manual_status: ManualReviewStatus;
+  manual_reason: string;
+  manual_reason_code: string;
+  manual_detail: string;
+  age_hours: number;
+  asset_ids: string[];
+  locked_facts: unknown[];
+  qa_blockers: string[];
+}
+
+interface ManualQueueGroup {
+  customer_phone: string;
+  count: number;
+  oldest_age_hours: number;
+  projects: ManualQueueRow[];
+}
+
+interface ManualQueueSummary {
+  total: number;
+  reason_counts: Record<string, number>;
+  groups: ManualQueueGroup[];
+}
 
 interface FlyerSummary {
   segments: Record<string, number>;
@@ -81,7 +110,23 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "campaigns", label: "Campaigns" },
   { id: "projects", label: "Projects" },
   { id: "guests", label: "One-time" },
+  { id: "queue", label: "Manual Queue" },
 ];
+
+function manualStatusTone(status: ManualReviewStatus): "neutral" | "green" | "amber" | "red" | "blue" {
+  switch (status) {
+    case "queued":
+      return "amber";
+    case "in_progress":
+      return "blue";
+    case "completed":
+      return "green";
+    case "break_glass_sent":
+      return "red";
+    default:
+      return "neutral";
+  }
+}
 
 function Stat({ label, value, tone = "default" }: { label: string; value: number | string; tone?: "default" | "warn" | "good" }) {
   return (
@@ -149,6 +194,8 @@ export function FlyerAdmin() {
   const [extensionCount, setExtensionCount] = useState(1);
   const [customerOffset, setCustomerOffset] = useState(0);
   const CUSTOMER_PAGE_SIZE = 300;
+  const [queueReasonByProject, setQueueReasonByProject] = useState<Record<string, string>>({});
+  const [queueAssetByProject, setQueueAssetByProject] = useState<Record<string, string>>({});
 
   // Reset to page 1 whenever the filter changes — otherwise an offset
   // set against the old result set may overshoot the new total.
@@ -188,6 +235,29 @@ export function FlyerAdmin() {
   const { data: guestData } = useQuery<{ orders: GuestOrder[] }>({
     queryKey: ["flyer-guests"],
     queryFn: () => api.GET<{ orders: GuestOrder[] }>("/flyer/guest-orders"),
+  });
+  const { data: queueData, refetch: refetchQueue } = useQuery<ManualQueueSummary>({
+    queryKey: ["flyer-manual-queue"],
+    queryFn: () => api.GET<ManualQueueSummary>("/flyer/manual-queue"),
+    refetchInterval: 30_000,
+  });
+
+  const completeQueueItem = useMutation({
+    mutationFn: ({ projectId, assetPath, opReason }: { projectId: string; assetPath: string; opReason: string }) =>
+      api.POST(`/flyer/manual-queue/${projectId}/complete`, { operator_asset_path: assetPath, reason: opReason }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["flyer-manual-queue"] });
+      qc.invalidateQueries({ queryKey: ["flyer-summary"] });
+      qc.invalidateQueries({ queryKey: ["flyer-projects"] });
+    },
+  });
+  const breakGlassQueueItem = useMutation({
+    mutationFn: ({ projectId, opReason }: { projectId: string; opReason: string }) =>
+      api.POST(`/flyer/manual-queue/${projectId}/break-glass`, { reason: opReason }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["flyer-manual-queue"] });
+      qc.invalidateQueries({ queryKey: ["flyer-summary"] });
+    },
   });
 
   const customers = customerData?.customers ?? [];
@@ -551,6 +621,126 @@ export function FlyerAdmin() {
             </table>
           </CardContent>
         </Card>
+      )}
+
+      {tab === "queue" && (
+        <div className="space-y-4">
+          <Card>
+            <CardHeader>
+              <div className="flex items-center justify-between">
+                <CardTitle>Manual review queue</CardTitle>
+                <Button onClick={() => refetchQueue()} variant="outline" size="sm"><RefreshCw size={14} className="mr-1" />Refresh</Button>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+                <Stat label="Total queued" value={queueData?.total ?? "-"} tone={(queueData?.total ?? 0) > 0 ? "warn" : "default"} />
+                {Object.entries(queueData?.reason_counts ?? {}).slice(0, 4).map(([code, count]) => (
+                  <Stat key={code} label={code} value={count} />
+                ))}
+              </div>
+              {(completeQueueItem.isError || breakGlassQueueItem.isError) && (
+                <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+                  {mutationErrorMessage(completeQueueItem.error ?? breakGlassQueueItem.error)}
+                </div>
+              )}
+              {!queueData || queueData.groups.length === 0 ? (
+                <div className="rounded-md border border-zinc-200 bg-zinc-50 px-3 py-6 text-center text-sm text-zinc-500">
+                  No projects in the manual-review queue.
+                </div>
+              ) : (
+                queueData.groups.map((group) => (
+                  <div key={group.customer_phone} className="rounded-md border border-zinc-200">
+                    <div className="flex items-center justify-between border-b border-zinc-100 bg-zinc-50 px-3 py-2 text-sm">
+                      <div className="font-mono">{group.customer_phone}</div>
+                      <div className="text-xs text-zinc-500">{group.count} project{group.count === 1 ? "" : "s"} · oldest {group.oldest_age_hours}h</div>
+                    </div>
+                    <table className="w-full text-sm">
+                      <thead className="text-xs uppercase text-zinc-500">
+                        <tr>
+                          <th className="px-3 py-2 text-left">Project</th>
+                          <th className="px-3 py-2 text-left">Manual status</th>
+                          <th className="px-3 py-2 text-left">Reason</th>
+                          <th className="px-3 py-2 text-left">Age</th>
+                          <th className="px-3 py-2 text-left">Detail / blockers</th>
+                          <th className="px-3 py-2 text-left">Operator action</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {group.projects.map((row) => {
+                          const localReason = queueReasonByProject[row.project_id] ?? "";
+                          const localAsset = queueAssetByProject[row.project_id] ?? "";
+                          const setReasonFor = (val: string) => setQueueReasonByProject((m) => ({ ...m, [row.project_id]: val }));
+                          const setAssetFor = (val: string) => setQueueAssetByProject((m) => ({ ...m, [row.project_id]: val }));
+                          const reasonOk = localReason.trim().length >= 5;
+                          const assetOk = localAsset.trim().startsWith("/");
+                          return (
+                            <tr key={row.project_id} className="border-t border-zinc-100 align-top">
+                              <td className="px-3 py-2">
+                                <div className="font-mono text-xs">{row.project_id}</div>
+                                <div className="text-xs text-zinc-500">{row.status}</div>
+                              </td>
+                              <td className="px-3 py-2"><Badge tone={manualStatusTone(row.manual_status)}>{row.manual_status}</Badge></td>
+                              <td className="px-3 py-2">
+                                <div className="font-mono text-xs">{row.manual_reason_code}</div>
+                              </td>
+                              <td className="px-3 py-2 text-xs">{row.age_hours}h</td>
+                              <td className="px-3 py-2 text-xs">
+                                <div className="text-zinc-700">{row.manual_detail || "—"}</div>
+                                {row.qa_blockers.length > 0 && (
+                                  <ul className="mt-1 list-disc pl-4 text-rose-700">
+                                    {row.qa_blockers.slice(0, 3).map((b, i) => (<li key={i}>{b}</li>))}
+                                  </ul>
+                                )}
+                                {row.asset_ids.length > 0 && (
+                                  <div className="mt-1 text-zinc-500">assets: {row.asset_ids.join(", ")}</div>
+                                )}
+                              </td>
+                              <td className="px-3 py-2">
+                                <div className="space-y-1.5">
+                                  <Input
+                                    placeholder="operator reason (min 5 chars)"
+                                    value={localReason}
+                                    onChange={(e) => setReasonFor(e.target.value)}
+                                    className="h-8 text-xs"
+                                  />
+                                  <Input
+                                    placeholder="absolute asset path on VPS (for complete)"
+                                    value={localAsset}
+                                    onChange={(e) => setAssetFor(e.target.value)}
+                                    className="h-8 font-mono text-xs"
+                                  />
+                                  <div className="flex gap-1.5">
+                                    <Button
+                                      size="sm"
+                                      disabled={!reasonOk || !assetOk || completeQueueItem.isPending}
+                                      onClick={() => completeQueueItem.mutate({ projectId: row.project_id, assetPath: localAsset, opReason: localReason })}
+                                    >Complete</Button>
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      disabled={!reasonOk || breakGlassQueueItem.isPending}
+                                      onClick={() => {
+                                        if (window.confirm(`Break-glass send for ${row.project_id}? This bypasses QA — audit row will mark break_glass_sent.`)) {
+                                          breakGlassQueueItem.mutate({ projectId: row.project_id, opReason: localReason });
+                                        }
+                                      }}
+                                      className="border-rose-300 text-rose-700 hover:bg-rose-50"
+                                    >Break-glass</Button>
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                ))
+              )}
+            </CardContent>
+          </Card>
+        </div>
       )}
     </div>
   );

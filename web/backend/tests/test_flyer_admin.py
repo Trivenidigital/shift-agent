@@ -438,3 +438,189 @@ def test_campaign_sender_uses_allowlisted_cli_wrapper(monkeypatch):
             60,
         )
     ]
+
+
+# --- manual-queue triage / complete / break-glass (S2 P0-8b) ---
+
+def _queued_project(
+    project_id: str,
+    *,
+    phone: str = "+17329837841",
+    reason_code: str = "source_edit_provider_unavailable",
+    updated_at: str = "2026-05-18T20:00:00Z",
+) -> dict:
+    return {
+        "project_id": project_id,
+        "status": "manual_edit_required",
+        "customer_phone": phone,
+        "created_at": "2026-05-18T19:00:00Z",
+        "updated_at": updated_at,
+        "original_message_id": f"msg-{project_id}",
+        "raw_request": "Authorized flyer/source artwork update. Replace phone number.",
+        "fields": {"event_or_business_name": "Lakshmis Kitchen", "contact_info": phone},
+        "manual_review": {
+            "status": "queued",
+            "reason": reason_code,
+            "reason_code": reason_code,
+            "detail": "legacy source-edit project queued before reason was tracked",
+            "queued_at": updated_at,
+        },
+        "assets": [],
+        "concepts": [],
+        "selected_concept_id": None,
+        "revisions": [],
+        "version": 1,
+        "final_asset_ids": [],
+        "approved_message_id": "",
+    }
+
+
+def _seed_queue(tmp_path, projects: list[dict]) -> None:
+    from app.routers import flyer
+
+    settings = flyer.get_settings()
+    settings.state_dir = tmp_path / "state"
+    settings.cockpit_audit_log = tmp_path / "logs" / "audit.log"
+    _write_json(
+        settings.state_dir / "flyer" / "projects.json",
+        {"schema_version": 1, "next_sequence": len(projects) + 1, "projects": projects},
+    )
+
+
+def test_manual_queue_triage_groups_and_aggregates(tmp_path):
+    from app.routers import flyer
+
+    _seed_queue(tmp_path, [
+        _queued_project("F0052", phone="+19045550104", reason_code="source_edit_provider_unavailable"),
+        _queued_project("F0053", phone="+19045550104", reason_code="source_edit_provider_unavailable", updated_at="2026-05-18T19:30:00Z"),
+        _queued_project("F0036", phone="+19803826497", reason_code="legacy_unknown", updated_at="2026-05-18T15:00:00Z"),
+    ])
+
+    summary = flyer.manual_queue_triage_action()
+
+    assert summary["total"] == 3
+    assert summary["reason_counts"] == {
+        "source_edit_provider_unavailable": 2,
+        "legacy_unknown": 1,
+    }
+    phones = [g["customer_phone"] for g in summary["groups"]]
+    assert "+19045550104" in phones and "+19803826497" in phones
+
+
+def test_manual_queue_complete_attaches_operator_asset_and_backs_up(tmp_path):
+    from app.routers import flyer
+
+    _seed_queue(tmp_path, [_queued_project("F0052", phone="+19045550104")])
+    asset = tmp_path / "operator_approved.png"
+    asset.write_bytes(b"approved bytes")
+
+    result = flyer.manual_queue_complete_action(
+        "F0052",
+        asset_path=str(asset),
+        reason="operator-approved designer asset",
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "awaiting_final_approval"
+    assert result["manual_status"] == "completed"
+    assert result["operator_asset_ids"]
+    # backup of pre-mutation state is recorded next to projects.json
+    flyer_dir = flyer.get_settings().state_dir / "flyer"
+    assert list(flyer_dir.glob("projects.json.pre-admin-*"))
+
+
+def test_manual_queue_complete_rejects_missing_asset(tmp_path):
+    from fastapi import HTTPException
+    from app.routers import flyer
+
+    _seed_queue(tmp_path, [_queued_project("F0052", phone="+19045550104")])
+
+    with pytest.raises(HTTPException) as ei:
+        flyer.manual_queue_complete_action(
+            "F0052",
+            asset_path=str(tmp_path / "does-not-exist.png"),
+            reason="operator-approved",
+        )
+    assert ei.value.status_code == 404
+
+
+def test_manual_queue_complete_rejects_relative_asset_path(tmp_path):
+    from fastapi import HTTPException
+    from app.routers import flyer
+
+    _seed_queue(tmp_path, [_queued_project("F0052", phone="+19045550104")])
+
+    with pytest.raises(HTTPException) as ei:
+        flyer.manual_queue_complete_action(
+            "F0052",
+            asset_path="relative/path.png",
+            reason="operator-approved",
+        )
+    assert ei.value.status_code == 422
+
+
+def test_manual_queue_complete_rejects_nonqueued_project(tmp_path):
+    from fastapi import HTTPException
+    from app.routers import flyer
+
+    delivered = _queued_project("F0052", phone="+19045550104")
+    delivered["status"] = "delivered"
+    delivered["manual_review"]["status"] = "completed"
+    _seed_queue(tmp_path, [delivered])
+    asset = tmp_path / "approved.png"
+    asset.write_bytes(b"x")
+
+    with pytest.raises(HTTPException) as ei:
+        flyer.manual_queue_complete_action(
+            "F0052",
+            asset_path=str(asset),
+            reason="should fail",
+        )
+    assert ei.value.status_code == 409
+
+
+def test_manual_queue_break_glass_marks_status_and_backs_up(tmp_path):
+    from app.routers import flyer
+
+    _seed_queue(tmp_path, [_queued_project("F0052", phone="+19045550104")])
+
+    result = flyer.manual_queue_break_glass_action(
+        "F0052",
+        reason="customer received deliverable via designer email; logging for audit",
+    )
+
+    assert result["ok"] is True
+    assert result["manual_status"] == "break_glass_sent"
+    flyer_dir = flyer.get_settings().state_dir / "flyer"
+    assert list(flyer_dir.glob("projects.json.pre-admin-*"))
+    # project status stays manual_edit_required by design — operator is signalling
+    # out-of-band resolution, not bypassing the state machine quietly.
+    persisted = flyer.load_project_store().projects[0]
+    assert persisted.status == "manual_edit_required"
+    assert persisted.manual_review.status == "break_glass_sent"
+    assert "customer received deliverable" in persisted.manual_review.break_glass_reason
+
+
+def test_manual_queue_break_glass_rejects_unknown_project(tmp_path):
+    from fastapi import HTTPException
+    from app.routers import flyer
+
+    _seed_queue(tmp_path, [_queued_project("F0052", phone="+19045550104")])
+
+    with pytest.raises(HTTPException) as ei:
+        flyer.manual_queue_break_glass_action("F9999", reason="not present")
+    assert ei.value.status_code == 404
+
+
+def test_manual_queue_break_glass_rejects_nonqueued_project(tmp_path):
+    from fastapi import HTTPException
+    from app.routers import flyer
+
+    delivered = _queued_project("F0052", phone="+19045550104")
+    delivered["status"] = "delivered"
+    delivered["manual_review"]["status"] = "completed"
+    _seed_queue(tmp_path, [delivered])
+
+    with pytest.raises(HTTPException) as ei:
+        flyer.manual_queue_break_glass_action("F0052", reason="too late, already delivered")
+    assert ei.value.status_code == 409
