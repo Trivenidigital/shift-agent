@@ -201,3 +201,68 @@ def test_generate_extracts_pending_reference_facts_before_render(monkeypatch, tm
     assert {"Idly", "$7", "Dosa", "$8"}.issubset(values)
     assert persisted["reference_extractions"][0]["status"] == "ok"
     assert persisted["status"] == "awaiting_final_approval"
+
+
+def test_generate_deferred_reference_smoke_can_use_sidecar_visual_qa(monkeypatch, tmp_path, capsys):
+    module = _load_script(monkeypatch)
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_QA_ALLOW_SIDECAR", "1")
+    state_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    reference = asset_dir / "F0001-reference.png"
+    reference.write_bytes(b"fake image bytes")
+    rendered = asset_dir / "F0001-C1.png"
+    project = _project_with_pending_reference(reference)
+    project["raw_request"] = "Create a flyer for Smoke Menu. Contact +19045550123. Create a flyer from this attached menu."
+    project["fields"] = {
+        "event_or_business_name": "Smoke Menu",
+        "contact_info": "+19045550123",
+        "notes": project["raw_request"],
+    }
+    project["locked_facts"] = [
+        {"fact_id": "business_name", "label": "Business", "value": "Smoke Menu", "source": "customer_text", "required": True},
+        {"fact_id": "contact_phone", "label": "Contact", "value": "+19045550123", "source": "customer_profile", "required": True},
+    ]
+    state_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_sequence": 2,
+        "projects": [project],
+    }), encoding="utf-8")
+
+    class FakeProvider:
+        provider_name = "sidecar"
+
+        def extract_text(self, _asset, _raw_request):
+            return "Idly $7\nDosa $8", "ok"
+
+    def fake_render(_project, _asset_dir, **_kwargs):
+        rendered.write_bytes(b"rendered")
+        return [types.SimpleNamespace(
+            path=rendered,
+            kind="concept_preview",
+            output_format="concept_preview",
+            width=1080,
+            height=1350,
+            concept_id="C1",
+        )]
+
+    monkeypatch.setattr(module, "build_reference_extraction_provider", lambda: FakeProvider())
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts",
+        "--project-id", "F0001",
+        "--state-path", str(state_path),
+        "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+    ])
+
+    assert module.main() == 0
+    out = json.loads(capsys.readouterr().out)
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+
+    assert out["project_id"] == "F0001"
+    assert persisted["status"] == "awaiting_final_approval"
+    assert "Smoke Menu" in Path(str(rendered) + ".ocr.txt").read_text(encoding="utf-8")
+    assert "Idly" in Path(str(rendered) + ".ocr.txt").read_text(encoding="utf-8")
