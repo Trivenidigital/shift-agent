@@ -8,6 +8,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import re
 import shutil
 
 from schemas import (
@@ -19,6 +20,103 @@ from schemas import (
     FlyerProjectStore,
     is_flyer_transition_allowed,
 )
+
+
+# Rows younger than this can only be closed with --force OR with a reason
+# whose tokens include one of CLOSE_FRESH_OK_REASON_TOKENS. Silently closing
+# a freshly-queued source-edit row (~9 min old) is the failure shape this
+# guard prevents: the customer hasn't had time to even notice the queue ack
+# before the row vanishes.
+CLOSE_FRESH_MIN_AGE_MINUTES = 30
+
+# Reason tokens that justify closing a fresh row without --force. Matched as
+# discrete tokens delimited by non-alphanumeric characters on the lowercased
+# reason string (NOT loose substring containment). So:
+#   - "operator_burndown_duplicate_..." passes (duplicate delimited by `_`)
+#   - "...provider_unavailable_after_retry" passes (exact multi-word token)
+#   - "...provider_unavailable..." alone does NOT pass — it is a substring
+#     of provider_unavailable_after_retry but not the documented token.
+# Custom boundary `[^a-z0-9]` is used instead of `\b` because `\b` treats `_`
+# as a word character; that would prevent `_duplicate_` from matching.
+CLOSE_FRESH_OK_REASON_TOKENS = (
+    "duplicate",
+    "test",
+    "superseded",
+    "provider_unavailable_after_retry",
+)
+_CLOSE_FRESH_REASON_TOKEN_RE = re.compile(
+    r"(?:^|[^a-z0-9])(?:"
+    + "|".join(re.escape(t) for t in CLOSE_FRESH_OK_REASON_TOKENS)
+    + r")(?:[^a-z0-9]|$)",
+)
+
+
+def reason_has_fresh_ok_token(reason: str) -> bool:
+    """Return True if `reason` (lowercased) contains an exact-token match for
+    one of CLOSE_FRESH_OK_REASON_TOKENS. The custom non-alphanumeric boundary
+    treats `_`, `-`, whitespace, and punctuation as token separators so the
+    operator-burndown reason format `operator_burndown_DATE_TOKEN_...` is
+    parsed token-wise rather than as one giant string."""
+    return bool(_CLOSE_FRESH_REASON_TOKEN_RE.search(reason.lower()))
+
+
+def _queue_row_age_minutes(project: FlyerProject, *, now: datetime) -> float:
+    """Minutes since this project entered the manual queue.
+
+    The freshness guard protects fresh QUEUE ROWS, not fresh projects: an
+    old project (created_at days ago) that JUST transitioned to
+    manual_edit_required has a queued_at of seconds-ago and must still be
+    guarded. Resolution order:
+      1. `manual_review.queued_at` — the row's queue entry time. Authoritative.
+      2. `updated_at` — fallback when queued_at is missing (legacy rows).
+      3. `created_at` — last-resort fallback for stores without timestamps.
+    """
+    manual = project.manual_review
+    ts: datetime | None = None
+    if manual is not None:
+        ts = getattr(manual, "queued_at", None)
+    if ts is None:
+        ts = project.updated_at or project.created_at
+    if ts is None:
+        return float("inf")
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return max((now - ts).total_seconds() / 60.0, 0.0)
+
+
+def enforce_close_freshness_guard(
+    store: FlyerProjectStore,
+    project_id: str,
+    *,
+    reason: str,
+    force: bool,
+    now: datetime,
+) -> None:
+    """Reject `--close` of a fresh row unless explicitly justified.
+
+    Raises `ValueError` (translated to `SystemExit` by the calling script)
+    when a young project is being closed without `--force` AND without a
+    documented reason token. Applies ONLY to `--close`; `--complete` and
+    break-glass paths are customer-visible operations with their own audit
+    and do not need this guard.
+    """
+    if force:
+        return
+    target = next((p for p in store.projects if p.project_id == project_id), None)
+    if target is None:
+        # Closure helper will raise the canonical "not found" error.
+        return
+    age_minutes = _queue_row_age_minutes(target, now=now)
+    if age_minutes >= CLOSE_FRESH_MIN_AGE_MINUTES:
+        return
+    if reason_has_fresh_ok_token(reason):
+        return
+    accepted = ", ".join(CLOSE_FRESH_OK_REASON_TOKENS)
+    raise ValueError(
+        f"--close of {project_id} blocked: queue row is only {age_minutes:.1f} min old "
+        f"(< {CLOSE_FRESH_MIN_AGE_MINUTES} min). Pass --force, or use --reason "
+        f"containing one of: {accepted}."
+    )
 
 
 def make_manual_review(

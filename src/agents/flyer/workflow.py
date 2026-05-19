@@ -115,6 +115,65 @@ MANUAL_REVIEW_REASON_LINES: dict[str, str] = {
 }
 
 
+# Per-reason customer-facing copy for projects sitting at `closed_no_send`.
+# Closed projects are operator-aborted — the customer must learn the project
+# won't be delivered AND what to do next (typically: re-send a fresh
+# request). Keyed on FlyerManualReviewReason; falls back to
+# STATUS_LINES["closed_no_send"] for any unknown code.
+# Every reason_code in src/platform/schemas.py::FlyerManualReviewReason MUST
+# have an entry here — enforced by test_flyer_state_reply_table.py.
+CLOSED_NO_SEND_REASON_LINES: dict[str, str] = {
+    "unclassified": (
+        "This flyer project was closed without delivering. "
+        "Please re-send your request and I'll start a fresh one."
+    ),
+    "legacy_unknown": (
+        "This flyer project was closed without delivering. "
+        "Please re-send your request and I'll start a fresh one."
+    ),
+    "source_edit_provider_unavailable": (
+        "I wasn't able to apply that source-flyer edit on this project. "
+        "Please re-send the flyer with the changes you want and I'll start a fresh request."
+    ),
+    "reference_unsupported": (
+        "This source-flyer edit couldn't be completed — the file format wasn't supported. "
+        "Please re-upload the source flyer as a JPG or PNG image to start a fresh request."
+    ),
+    "reference_provider_unavailable": (
+        "This source-flyer edit couldn't be completed because the source flyer wasn't available. "
+        "Please re-upload the flyer image to start a fresh request."
+    ),
+    "reference_low_confidence": (
+        "This flyer project was closed without delivering. "
+        "Please re-upload a clearer source flyer, or describe the details you'd like included, and I'll start fresh."
+    ),
+    "reference_not_run": (
+        "This flyer project was closed without delivering. "
+        "Please re-send your source flyer and I'll start a fresh request."
+    ),
+    "visual_qa_failed": (
+        "This flyer project was closed without delivering — the generated flyer didn't pass our quality checks. "
+        "Please re-send your request and I'll start a fresh one."
+    ),
+    "missing_required_facts": (
+        "This flyer project was closed without delivering because required details were missing. "
+        "Please re-send your request with the missing info and I'll start a fresh one."
+    ),
+    "operator_request": (
+        "This flyer project was closed by our team. "
+        "Please re-send your request if you'd like us to try again."
+    ),
+    "policy_block": (
+        "This flyer project was closed during review. "
+        "Please re-send your request and we'll take another look."
+    ),
+    "provider_timeout": (
+        "This flyer project was closed without delivering due to a temporary issue. "
+        "Please re-send your request and I'll try again."
+    ),
+}
+
+
 @dataclass(frozen=True)
 class FlyerQualityResult:
     ok: bool
@@ -164,23 +223,32 @@ def build_project_status_reply(project: FlyerProject) -> str:
     Rules:
       - For manual_edit_required projects with an actively-queued
         manual_review, the reason_code (S1 enum) drives the copy via
-        MANUAL_REVIEW_REASON_LINES — different reasons (PDF unsupported vs
-        missing facts vs visual QA failed vs source-edit provider down) need
-        different operator/customer signals.
+        MANUAL_REVIEW_REASON_LINES.
+      - For closed_no_send projects with manual_review.status=closed_no_send,
+        the reason_code drives the copy via CLOSED_NO_SEND_REASON_LINES so
+        the customer learns why the project was aborted and what to do next.
       - For all other statuses, STATUS_LINES is the source of truth.
-      - manual_review with status `break_glass_sent`, `completed`, or
-        `closed_no_send` is no longer a customer-blocking signal; the
-        project's own status drives the reply (the operator already acted).
+      - manual_review with status `break_glass_sent` or `completed` is no
+        longer a customer-blocking signal; the project's own status drives
+        the reply (the operator already acted).
     """
     line = STATUS_LINES.get(project.status, "I have this flyer project open.")
     manual = getattr(project, "manual_review", None)
+    manual_status = getattr(manual, "status", "none") if manual is not None else "none"
     if (
         project.status == "manual_edit_required"
         and manual is not None
-        and getattr(manual, "status", "none") in {"queued", "in_progress"}
+        and manual_status in {"queued", "in_progress"}
     ):
         reason_code = (getattr(manual, "reason_code", "") or "unclassified").strip() or "unclassified"
         line = MANUAL_REVIEW_REASON_LINES.get(reason_code, STATUS_LINES["manual_edit_required"])
+    elif (
+        project.status == "closed_no_send"
+        and manual is not None
+        and manual_status == "closed_no_send"
+    ):
+        reason_code = (getattr(manual, "reason_code", "") or "unclassified").strip() or "unclassified"
+        line = CLOSED_NO_SEND_REASON_LINES.get(reason_code, STATUS_LINES["closed_no_send"])
     return (
         "Flyer Studio\n"
         "------------\n"

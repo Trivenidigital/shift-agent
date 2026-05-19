@@ -1610,7 +1610,43 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         return None
     active_project = actions.find_active_flyer_project_by_sender(phone, chat_id)
     if active_project is None:
-        return None
+        # No active row, but a status check ("any update?" / "F0058 status")
+        # must still resolve when the only relevant project is closed_no_send
+        # or explicitly named. Without this branch the inbound falls through
+        # to LLM dispatch and the customer never learns their project was
+        # closed.
+        body_no_active = " ".join(actions.flyer_visible_message_text(text).split())
+        if not actions.is_flyer_project_status_request(body_no_active):
+            return None
+        mentioned_id = actions.extract_flyer_project_id_mention(body_no_active)
+        status_project = None
+        if mentioned_id:
+            status_project = actions.find_flyer_project_by_id_for_sender(phone, chat_id, mentioned_id)
+        if status_project is None:
+            status_project = actions.find_latest_flyer_project_for_status_by_sender(phone, chat_id)
+        if status_project is None:
+            return None
+        sp_id = str(status_project.get("project_id") or "")
+        sp_status = str(status_project.get("status") or "")
+        manual_block = status_project.get("manual_review") or {}
+        manual_reason_code = str(manual_block.get("reason_code") or "")
+        if sp_status == "manual_edit_required" and manual_reason_code == "source_edit_provider_unavailable":
+            reply = actions.flyer_manual_edit_status_reply(status_project)
+        else:
+            reply = actions.flyer_project_status_reply(status_project)
+        ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+        actions.audit_intercepted(
+            reason=("flyer_project_status" if ack_ok else "flyer_primary_failed"),
+            chat_id=chat_id,
+            subprocess_rc=0 if ack_ok else 3,
+            detail=(
+                f"project_id={sp_id}; status_check=true; status={sp_status}; "
+                f"no_active_project=true; sender_role={role}; "
+                f"id_mentioned={'1' if mentioned_id else '0'}; "
+                f"ack_message_id={mid}; ack_error={err[:300]}"
+            ),
+        )
+        return {"action": "skip", "reason": f"cf-router flyer status for {sp_id}"}
 
     project_id = str(active_project.get("project_id") or "")
     if customer and customer.get("status") not in {"trial", "active"}:
@@ -1661,34 +1697,57 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
     ):
         return None
     if actions.is_flyer_project_status_request(body) and status not in {"completed"}:
+        # Project resolution for status replies is DISTINCT from active-project
+        # routing. The active picker excludes closed_no_send (so closures
+        # don't swallow new-request flow); for status checks we must surface
+        # the project the customer is actually asking about, which is the one
+        # they last engaged with (or named explicitly).
+        #   1. Exact F#### id mention in the body wins.
+        #   2. Otherwise, latest-for-status selector (includes closed_no_send
+        #      and delivered) wins when it's strictly newer than the active
+        #      picker's result. We refuse to downgrade the customer to a
+        #      staler row.
+        status_project = active_project
+        mentioned_id = actions.extract_flyer_project_id_mention(body)
+        if mentioned_id:
+            named = actions.find_flyer_project_by_id_for_sender(phone, chat_id, mentioned_id)
+            if named is not None:
+                status_project = named
+        else:
+            latest = actions.find_latest_flyer_project_for_status_by_sender(phone, chat_id)
+            if latest is not None and str(latest.get("updated_at") or "") > str(active_project.get("updated_at") or ""):
+                status_project = latest
+        status_project_id = str(status_project.get("project_id") or "")
+        status_project_status = str(status_project.get("status") or "")
         # P0-6: manual_edit_required projects pick the source-edit-specific
         # reply ONLY when the reason_code is source_edit_provider_unavailable.
         # All other reason codes (missing_required_facts, reference_unsupported,
         # visual_qa_failed, etc.) flow through the general status reply, which
         # now consults MANUAL_REVIEW_REASON_LINES to deliver reason-specific
         # copy instead of the generic "source-preserving edit queue" text.
-        manual_block = active_project.get("manual_review") or {}
+        manual_block = status_project.get("manual_review") or {}
         manual_reason_code = str(manual_block.get("reason_code") or "")
-        if status == "manual_edit_required" and manual_reason_code == "source_edit_provider_unavailable":
-            reply = actions.flyer_manual_edit_status_reply(active_project)
+        if status_project_status == "manual_edit_required" and manual_reason_code == "source_edit_provider_unavailable":
+            reply = actions.flyer_manual_edit_status_reply(status_project)
         else:
-            reply = actions.flyer_project_status_reply(active_project)
+            reply = actions.flyer_project_status_reply(status_project)
         ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
         actions.audit_intercepted(
-            reason=("flyer_reference_exact_edit_status" if status == "manual_edit_required" and ack_ok else ("flyer_project_status" if ack_ok else "flyer_primary_failed")),
+            reason=("flyer_reference_exact_edit_status" if status_project_status == "manual_edit_required" and ack_ok else ("flyer_project_status" if ack_ok else "flyer_primary_failed")),
             chat_id=chat_id,
             subprocess_rc=0 if ack_ok else 3,
             detail=(
-                f"project_id={project_id}; status_check=true; status={status}; sender_role={role}; "
+                f"project_id={status_project_id}; status_check=true; status={status_project_status}; sender_role={role}; "
+                f"id_mentioned={'1' if mentioned_id else '0'}; "
                 f"ack_message_id={mid}; ack_error={err[:300]}"
             ),
         )
         return {
             "action": "skip",
             "reason": (
-                f"cf-router flyer exact edit status for {project_id}"
-                if status == "manual_edit_required" else
-                f"cf-router flyer status for {project_id}"
+                f"cf-router flyer exact edit status for {status_project_id}"
+                if status_project_status == "manual_edit_required" else
+                f"cf-router flyer status for {status_project_id}"
             ),
         }
     selection_map = {
@@ -1776,16 +1835,34 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
 
     if status == "manual_edit_required":
         if actions.is_flyer_project_status_request(body):
+            # Status-reply project resolution: prefer an explicit FXXXX
+            # mention, else any closed_no_send/delivered/etc. row that's
+            # strictly newer than the active picker's choice. Same rule as
+            # the active-project status branch — keep the two sites
+            # consistent so customers get the same answer regardless of
+            # which intercept path runs first.
+            status_project = active_project
+            mentioned_id = actions.extract_flyer_project_id_mention(body)
+            if mentioned_id:
+                named = actions.find_flyer_project_by_id_for_sender(phone, chat_id, mentioned_id)
+                if named is not None:
+                    status_project = named
+            else:
+                latest = actions.find_latest_flyer_project_for_status_by_sender(phone, chat_id)
+                if latest is not None and str(latest.get("updated_at") or "") > str(active_project.get("updated_at") or ""):
+                    status_project = latest
+            status_project_id = str(status_project.get("project_id") or "")
+            status_project_status = str(status_project.get("status") or "")
             # P0-6: same reason_code routing as the first status-check handler
             # — source-edit-specific reply for source_edit_provider_unavailable
             # only; everything else flows through the reason-code-aware general
             # reply.
-            manual_block = active_project.get("manual_review") or {}
+            manual_block = status_project.get("manual_review") or {}
             manual_reason_code = str(manual_block.get("reason_code") or "")
-            if manual_reason_code == "source_edit_provider_unavailable":
-                reply = actions.flyer_manual_edit_status_reply(active_project)
+            if status_project_status == "manual_edit_required" and manual_reason_code == "source_edit_provider_unavailable":
+                reply = actions.flyer_manual_edit_status_reply(status_project)
             else:
-                reply = actions.flyer_project_status_reply(active_project)
+                reply = actions.flyer_project_status_reply(status_project)
             ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
             # P0-6: audit reason must match the routing branch. Pre-S7 this
             # was hardcoded to flyer_reference_exact_edit_status regardless
@@ -1795,7 +1872,7 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
             if ack_ok:
                 audit_reason = (
                     "flyer_reference_exact_edit_status"
-                    if manual_reason_code == "source_edit_provider_unavailable"
+                    if status_project_status == "manual_edit_required" and manual_reason_code == "source_edit_provider_unavailable"
                     else "flyer_project_status"
                 )
             else:
@@ -1805,13 +1882,14 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
                 chat_id=chat_id,
                 subprocess_rc=0 if ack_ok else 3,
                 detail=(
-                    f"project_id={project_id}; queued_status_check=true; "
-                    f"reason_code={manual_reason_code}; sender_role={role}; "
+                    f"project_id={status_project_id}; queued_status_check=true; "
+                    f"status={status_project_status}; reason_code={manual_reason_code}; sender_role={role}; "
+                    f"id_mentioned={'1' if mentioned_id else '0'}; "
                     f"ack_message_id={mid}; ack_error={err[:300]}"
                 ),
             )
             return {"action": "skip",
-                    "reason": f"cf-router flyer exact edit status for {project_id}"}
+                    "reason": f"cf-router flyer status for {status_project_id}"}
         ok, detail = actions.invoke_update_flyer_project(
             project_id,
             "--revision-text", body,

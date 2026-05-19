@@ -1999,3 +1999,390 @@ def test_media_backed_new_work_escapes_stale_active_project(monkeypatch):
     )
 
     assert result is None
+
+
+# --------------------------------------------------------------------------
+# closed_no_send status-reply routing (fix for the screenshot bug:
+# customer asked "any update?" on a freshly-closed source-edit and got
+# a delivery line for an older project)
+# --------------------------------------------------------------------------
+
+
+def _flyer_projects_fixture(tmp_path, projects):
+    """Materialize a flyer projects.json file and return its Path."""
+    store_path = tmp_path / "flyer-projects.json"
+    store_path.write_text(
+        '{"projects": ' + __import__("json").dumps(projects) + "}",
+        encoding="utf-8",
+    )
+    return store_path
+
+
+def test_extract_flyer_project_id_mention_finds_explicit_id():
+    actions = _load_actions()
+    assert actions.extract_flyer_project_id_mention("any update on F0058?") == "F0058"
+    assert actions.extract_flyer_project_id_mention("Status of f0012") == "F0012"
+    assert actions.extract_flyer_project_id_mention("f0058 status") == "F0058"
+
+
+def test_extract_flyer_project_id_mention_ignores_non_matches():
+    actions = _load_actions()
+    assert actions.extract_flyer_project_id_mention("any update?") is None
+    assert actions.extract_flyer_project_id_mention("F58") is None  # not 4 digits
+    assert actions.extract_flyer_project_id_mention("AF0058") is None  # not word-boundary
+    assert actions.extract_flyer_project_id_mention("") is None
+
+
+def test_active_picker_excludes_closed_no_send(tmp_path, monkeypatch):
+    """find_active_flyer_project_by_sender (used by new-request / revision /
+    approval routing) must NOT return closed_no_send rows — otherwise a
+    closed project swallows fresh customer work."""
+    actions = _load_actions()
+    projects = [
+        {
+            "project_id": "F0058",
+            "customer_phone": "+19045550104",
+            "status": "closed_no_send",
+            "updated_at": "2026-05-19T21:13:34Z",
+            "created_at": "2026-05-19T21:04:04Z",
+        },
+        {
+            "project_id": "F0034",
+            "customer_phone": "+19045550104",
+            "status": "revising_design",
+            "updated_at": "2026-05-18T19:14:34Z",
+            "created_at": "2026-05-18T17:18:47Z",
+        },
+    ]
+    monkeypatch.setattr(actions, "FLYER_PROJECTS_PATH", _flyer_projects_fixture(tmp_path, projects))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _p, _c: None)
+    active = actions.find_active_flyer_project_by_sender("+19045550104", "201975216009469@lid")
+    assert active is not None
+    assert active["project_id"] == "F0034"  # closed F0058 skipped despite being newer
+
+
+def test_latest_status_picker_includes_closed_no_send(tmp_path, monkeypatch):
+    """The status-reply selector DOES include closed_no_send so customers
+    asking 'any update?' learn about their recent closure rather than
+    getting pointed at a stale older project."""
+    actions = _load_actions()
+    projects = [
+        {
+            "project_id": "F0058",
+            "customer_phone": "+19045550104",
+            "status": "closed_no_send",
+            "updated_at": "2026-05-19T21:13:34Z",
+            "created_at": "2026-05-19T21:04:04Z",
+        },
+        {
+            "project_id": "F0034",
+            "customer_phone": "+19045550104",
+            "status": "revising_design",
+            "updated_at": "2026-05-18T19:14:34Z",
+            "created_at": "2026-05-18T17:18:47Z",
+        },
+    ]
+    monkeypatch.setattr(actions, "FLYER_PROJECTS_PATH", _flyer_projects_fixture(tmp_path, projects))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _p, _c: None)
+    latest = actions.find_latest_flyer_project_for_status_by_sender("+19045550104", "201975216009469@lid")
+    assert latest is not None
+    assert latest["project_id"] == "F0058"
+
+
+def test_latest_status_picker_excludes_completed_but_keeps_delivered(tmp_path, monkeypatch):
+    """`completed` is truly terminal (customer-finalized). `delivered` is
+    non-terminal (customer can still request revisions) — surface it in
+    status replies when it's the newest."""
+    actions = _load_actions()
+    projects = [
+        {
+            "project_id": "F0028",
+            "customer_phone": "+19045550104",
+            "status": "delivered",
+            "updated_at": "2026-05-18T13:20:20Z",
+            "created_at": "2026-05-18T13:15:19Z",
+        },
+        {
+            "project_id": "F0006",
+            "customer_phone": "+19045550104",
+            "status": "completed",
+            "updated_at": "2026-05-19T20:00:00Z",  # newer than F0028 but completed
+            "created_at": "2026-05-15T03:51:04Z",
+        },
+    ]
+    monkeypatch.setattr(actions, "FLYER_PROJECTS_PATH", _flyer_projects_fixture(tmp_path, projects))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _p, _c: None)
+    latest = actions.find_latest_flyer_project_for_status_by_sender("+19045550104", "201975216009469@lid")
+    assert latest is not None
+    assert latest["project_id"] == "F0028"  # completed excluded
+
+
+def test_find_flyer_project_by_id_respects_sender_ownership(tmp_path, monkeypatch):
+    """Exact id lookup must not leak project state across customers — only
+    return a row when its customer_phone is in the sender's account set."""
+    actions = _load_actions()
+    projects = [
+        {
+            "project_id": "F0058",
+            "customer_phone": "+19045550104",
+            "status": "closed_no_send",
+            "updated_at": "2026-05-19T21:13:34Z",
+        },
+        {
+            "project_id": "F0050",
+            "customer_phone": "+19048626362",  # different customer
+            "status": "awaiting_final_approval",
+            "updated_at": "2026-05-19T18:00:00Z",
+        },
+    ]
+    monkeypatch.setattr(actions, "FLYER_PROJECTS_PATH", _flyer_projects_fixture(tmp_path, projects))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _p, _c: None)
+
+    # Owner can fetch their own row
+    own = actions.find_flyer_project_by_id_for_sender("+19045550104", "201975216009469@lid", "F0058")
+    assert own is not None and own["project_id"] == "F0058"
+
+    # Cross-customer leak is blocked
+    leak = actions.find_flyer_project_by_id_for_sender("+19045550104", "201975216009469@lid", "F0050")
+    assert leak is None
+
+
+def test_status_reply_prefers_recent_closed_no_send_over_older_active(tmp_path, monkeypatch):
+    """Screenshot scenario: customer has F0034 (revising_design from
+    yesterday) AND a fresh F0058 closed_no_send. 'any update?' must
+    surface F0058's closure, not F0034's revising line."""
+    hooks, actions = _load_plugin_modules()
+    projects = [
+        {
+            "project_id": "F0058",
+            "customer_phone": "+19045550104",
+            "status": "closed_no_send",
+            "updated_at": "2026-05-19T21:13:34Z",
+            "created_at": "2026-05-19T21:04:04Z",
+            "manual_review": {
+                "status": "closed_no_send",
+                "reason_code": "source_edit_provider_unavailable",
+                "reason": "source_edit_provider_unavailable",
+            },
+            "fields": {"event_or_business_name": "Lakshmis Kitchen", "contact_info": "+19045550104"},
+            "raw_request": "Authorized exact edit",
+            "original_message_id": "m-58",
+        },
+        {
+            "project_id": "F0034",
+            "customer_phone": "+19045550104",
+            "status": "revising_design",
+            "updated_at": "2026-05-18T19:14:34Z",
+            "created_at": "2026-05-18T17:18:47Z",
+            "manual_review": {"status": "none", "reason_code": "unclassified", "reason": ""},
+            "fields": {"event_or_business_name": "Lakshmis Kitchen", "contact_info": "+19045550104"},
+            "raw_request": "Revise design",
+            "original_message_id": "m-34",
+        },
+    ]
+    state_path = _flyer_projects_fixture(tmp_path, projects)
+    monkeypatch.setattr(actions, "FLYER_PROJECTS_PATH", state_path)
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+19045550104", "employee"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _p, _c: {"customer_id": "CUST0001", "status": "trial"})
+    sent = {}
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: (sent.update({"chat_id": chat_id, "text": text}), (True, "out-mid", ""))[1])
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kw: None)
+
+    result = hooks._try_flyer_active_project_intercept(
+        "any update?",
+        "201975216009469@lid",
+        {"message_id": "m-update"},
+    )
+    assert result is not None and result.get("action") == "skip"
+    assert "F0058" in sent["text"], f"expected status reply about F0058, got: {sent['text']!r}"
+    assert "F0034" not in sent["text"]
+    # Should be the closed_no_send reason-aware line, not the revising-design line.
+    assert "apply that source-flyer edit" in sent["text"] or "closed without delivering" in sent["text"]
+
+
+def test_status_reply_with_explicit_id_mention_wins_over_latest(tmp_path, monkeypatch):
+    """If the customer names a project id, exact lookup wins — even when a
+    different project would be the latest-updated."""
+    hooks, actions = _load_plugin_modules()
+    projects = [
+        {
+            "project_id": "F0058",
+            "customer_phone": "+19045550104",
+            "status": "closed_no_send",
+            "updated_at": "2026-05-19T21:13:34Z",
+            "created_at": "2026-05-19T21:04:04Z",
+            "manual_review": {
+                "status": "closed_no_send",
+                "reason_code": "source_edit_provider_unavailable",
+                "reason": "source_edit_provider_unavailable",
+            },
+            "fields": {"event_or_business_name": "Lakshmis Kitchen", "contact_info": "+19045550104"},
+            "raw_request": "Authorized exact edit",
+            "original_message_id": "m-58",
+        },
+        {
+            "project_id": "F0028",
+            "customer_phone": "+19045550104",
+            "status": "delivered",
+            "updated_at": "2026-05-18T13:20:20Z",
+            "created_at": "2026-05-18T13:15:19Z",
+            "manual_review": {"status": "none", "reason_code": "unclassified", "reason": ""},
+            "fields": {"event_or_business_name": "Lakshmis Kitchen", "contact_info": "+19045550104"},
+            "raw_request": "Original brief",
+            "original_message_id": "m-28",
+        },
+        {
+            "project_id": "F0034",
+            "customer_phone": "+19045550104",
+            "status": "revising_design",
+            "updated_at": "2026-05-18T19:14:34Z",
+            "created_at": "2026-05-18T17:18:47Z",
+            "manual_review": {"status": "none", "reason_code": "unclassified", "reason": ""},
+            "fields": {"event_or_business_name": "Lakshmis Kitchen", "contact_info": "+19045550104"},
+            "raw_request": "Revise design",
+            "original_message_id": "m-34",
+        },
+    ]
+    monkeypatch.setattr(actions, "FLYER_PROJECTS_PATH", _flyer_projects_fixture(tmp_path, projects))
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+19045550104", "employee"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _p, _c: {"customer_id": "CUST0001", "status": "trial"})
+    sent = {}
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: (sent.update({"text": text}), (True, "out-mid", ""))[1])
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kw: None)
+
+    result = hooks._try_flyer_active_project_intercept(
+        "any update on F0028?",
+        "201975216009469@lid",
+        {"message_id": "m-explicit"},
+    )
+    assert result is not None
+    assert "F0028" in sent["text"], f"expected reply about F0028 (explicit mention), got: {sent['text']!r}"
+    assert "F0058" not in sent["text"]
+
+
+def test_closed_no_send_does_not_swallow_new_flyer_request(tmp_path, monkeypatch):
+    """Regression: after F0058 is closed_no_send, a subsequent NEW flyer
+    request from the same sender must not attach to the closed row — the
+    active picker still excludes closed_no_send, so new-request routing
+    creates a fresh project."""
+    actions = _load_actions()
+    projects = [
+        {
+            "project_id": "F0058",
+            "customer_phone": "+19045550104",
+            "status": "closed_no_send",
+            "updated_at": "2026-05-19T21:13:34Z",
+            "created_at": "2026-05-19T21:04:04Z",
+        },
+    ]
+    monkeypatch.setattr(actions, "FLYER_PROJECTS_PATH", _flyer_projects_fixture(tmp_path, projects))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _p, _c: None)
+
+    # The active picker is what every non-status path (new-request, revision,
+    # approval, image upload) consults. It must return None so the
+    # new-flyer-request path takes over.
+    active = actions.find_active_flyer_project_by_sender("+19045550104", "201975216009469@lid")
+    assert active is None, (
+        "active picker must NOT return closed_no_send — otherwise a fresh "
+        "'Create a flyer for ...' request would attach to the closed row"
+    )
+
+
+def test_status_reply_when_only_closed_no_send_exists(tmp_path, monkeypatch):
+    """REGRESSION (review-found): customer has ONLY a closed_no_send project
+    (no active row). 'any update?' must still resolve to the closure — the
+    early-return on `active_project is None` previously dropped the inbound
+    to LLM dispatch."""
+    hooks, actions = _load_plugin_modules()
+    projects = [
+        {
+            "project_id": "F0058",
+            "customer_phone": "+19045550104",
+            "status": "closed_no_send",
+            "updated_at": "2026-05-19T21:13:34Z",
+            "created_at": "2026-05-19T21:04:04Z",
+            "manual_review": {
+                "status": "closed_no_send",
+                "reason_code": "source_edit_provider_unavailable",
+                "reason": "source_edit_provider_unavailable",
+            },
+            "fields": {"event_or_business_name": "Lakshmis Kitchen", "contact_info": "+19045550104"},
+            "raw_request": "Authorized exact edit",
+            "original_message_id": "m-58",
+        },
+    ]
+    monkeypatch.setattr(actions, "FLYER_PROJECTS_PATH", _flyer_projects_fixture(tmp_path, projects))
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+19045550104", "employee"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _p, _c: {"customer_id": "CUST0001", "status": "trial"})
+    sent = {}
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: (sent.update({"text": text}), (True, "out-mid", ""))[1])
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kw: None)
+
+    result = hooks._try_flyer_active_project_intercept(
+        "any update?",
+        "201975216009469@lid",
+        {"message_id": "m-update"},
+    )
+    assert result is not None and result.get("action") == "skip"
+    assert "F0058" in sent["text"], (
+        "expected status reply about F0058 even though active picker returned None"
+    )
+
+
+def test_status_reply_with_explicit_id_when_no_active_project(tmp_path, monkeypatch):
+    """REGRESSION (review-found): 'any update on F0058?' must resolve to F0058
+    via exact-id lookup even when active picker returns None. Without the
+    no-active-project status branch, the inbound never reaches the id
+    selector."""
+    hooks, actions = _load_plugin_modules()
+    projects = [
+        {
+            "project_id": "F0058",
+            "customer_phone": "+19045550104",
+            "status": "closed_no_send",
+            "updated_at": "2026-05-19T21:13:34Z",
+            "created_at": "2026-05-19T21:04:04Z",
+            "manual_review": {
+                "status": "closed_no_send",
+                "reason_code": "source_edit_provider_unavailable",
+                "reason": "source_edit_provider_unavailable",
+            },
+            "fields": {"event_or_business_name": "Lakshmis Kitchen", "contact_info": "+19045550104"},
+            "raw_request": "Authorized exact edit",
+            "original_message_id": "m-58",
+        },
+    ]
+    monkeypatch.setattr(actions, "FLYER_PROJECTS_PATH", _flyer_projects_fixture(tmp_path, projects))
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+19045550104", "employee"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _p, _c: {"customer_id": "CUST0001", "status": "trial"})
+    sent = {}
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: (sent.update({"text": text}), (True, "out-mid", ""))[1])
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kw: None)
+
+    result = hooks._try_flyer_active_project_intercept(
+        "any update on F0058?",
+        "201975216009469@lid",
+        {"message_id": "m-explicit"},
+    )
+    assert result is not None and result.get("action") == "skip"
+    assert "F0058" in sent["text"]
+
+
+def test_status_reply_returns_none_when_no_projects_at_all(tmp_path, monkeypatch):
+    """Negative path: status inbound from a customer with NO projects must
+    return None so downstream intercepts (or LLM dispatch) handle the
+    message — we don't want to send a fabricated 'closed' reply for a
+    customer who has never had a project."""
+    hooks, actions = _load_plugin_modules()
+    monkeypatch.setattr(actions, "FLYER_PROJECTS_PATH", _flyer_projects_fixture(tmp_path, []))
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+19045550104", "employee"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _p, _c: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(actions, "send_flyer_text", lambda *_a, **_kw: pytest.fail("must not send when no projects exist"))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kw: None)
+
+    result = hooks._try_flyer_active_project_intercept(
+        "any update?",
+        "201975216009469@lid",
+        {"message_id": "m-none"},
+    )
+    assert result is None
