@@ -1501,9 +1501,8 @@ def test_manual_source_edit_status_check_gets_queue_update_not_clarification(mon
         ),
         "updated_at": "2026-05-19T02:11:00Z",
         # S7 P0-6: reason_code on the manual_review row drives cf-router
-        # routing — source_edit_provider_unavailable hits the source-edit-
-        # specific reply ("already have the requested changes ...") rather
-        # than the new general-purpose reason-code reply.
+        # routing — source_edit_provider_unavailable hits the canonical
+        # source-edit reason line rather than a clarification/edit parser.
         "manual_review": {
             "status": "queued",
             "reason": "source_edit_provider_unavailable",
@@ -1543,8 +1542,8 @@ def test_manual_source_edit_status_check_gets_queue_update_not_clarification(mon
         "reason": "cf-router flyer exact edit status for F0053",
     }
     assert sent
-    assert "already have the requested changes" in sent[0][1]
-    assert "No more details are needed" in sent[0][1]
+    assert "I have the requested changes" in sent[0][1]
+    assert "no extra information needed" in sent[0][1]
     assert "Please send the exact text" not in sent[0][1]
 
 
