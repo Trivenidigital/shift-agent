@@ -386,3 +386,164 @@ def close_manual_project(
         })
         return FlyerProjectStore.model_validate(store.model_dump())
     raise ValueError(f"project not found: {project_id}")
+
+
+# ─────────────────────────────────────────────────────────────────
+# Proactive closure customer-notification helpers (PR follow-up to PR #129)
+#
+# At operator-close time we push a customer-visible WhatsApp message so the
+# customer learns about the closure immediately, rather than only on their
+# next "any update?" inbound. The reactive PR #129 path remains the safety
+# net for sends that fail or for customers without a known chat_id.
+# ─────────────────────────────────────────────────────────────────
+
+
+def build_closure_customer_text(project: FlyerProject) -> str:
+    """Customer-visible text for a closed_no_send project.
+
+    Delegates to `build_project_status_reply` so the proactive close-time
+    push and the reactive "any update?" reply CANNOT drift. Single source
+    of truth lives in `agents.flyer.workflow.CLOSED_NO_SEND_REASON_LINES`.
+    """
+    from agents.flyer.workflow import build_project_status_reply
+    return build_project_status_reply(project)
+
+
+def notify_customer_of_closure(
+    store: FlyerProjectStore,
+    project_id: str,
+    *,
+    customers_path: Path,
+    decisions_log_path: Path,
+    bridge_send=None,
+    audit_append=None,
+    now_fn=None,
+) -> dict:
+    """Best-effort proactive WhatsApp send for a freshly-closed_no_send row.
+
+    The closure state write is the PRIMARY operation — the caller must
+    invoke this AFTER `close_manual_project` succeeds and the store is
+    persisted. This helper NEVER raises into the caller: operators must
+    not see a notification failure surface as a non-zero exit code,
+    because the closure itself succeeded. PR #129's reactive "any update?"
+    path is the safety net for any failure here.
+
+    Audit invariant: a `flyer_closure_customer_notified` row is appended
+    for EVERY closure attempt (success, missing chat_id, bridge failure)
+    so operators can grep the audit log for traceability. The only case
+    where no audit is written is a catastrophic post-close store
+    inconsistency (project missing) — impossible in practice because the
+    caller just wrote the store; if it ever happens stderr surfaces it.
+
+    Dependencies are injected so the helper is fully testable without
+    touching the WhatsApp bridge or the live decisions log. Defaults wire
+    up `safe_io.bridge_post` + `safe_io.ndjson_append` lazily so this
+    module stays importable on Windows where `fcntl` is absent.
+
+    Returns the audit entry dict that was (or would have been) appended,
+    so the caller can log to stderr or aggregate without re-reading the
+    log file.
+    """
+    if bridge_send is None or audit_append is None:
+        # Lazy import: keeps manual_queue.py importable on platforms
+        # where safe_io cannot load (e.g., Windows test runs).
+        from safe_io import bridge_post as _default_bridge  # type: ignore
+        from safe_io import ndjson_append as _default_append  # type: ignore
+        if bridge_send is None:
+            bridge_send = _default_bridge
+        if audit_append is None:
+            audit_append = _default_append
+    if now_fn is None:
+        now_fn = lambda: datetime.now(timezone.utc)
+    project = next((p for p in store.projects if p.project_id == project_id), None)
+    if project is None:
+        return {
+            "type": "flyer_closure_customer_notified",
+            "project_id": project_id,
+            "skipped": True,
+            "error": "project_not_found_post_close",
+        }
+    customer_phone = str(project.customer_phone)
+    manual = project.manual_review
+    reason_code = str(getattr(manual, "reason_code", "") or "unclassified")
+    chat_id = ""
+    send_ok = False
+    outbound_mid = ""
+    error = ""
+    try:
+        chat_id = resolve_customer_chat_id_by_phone(customers_path, customer_phone) or ""
+        if not chat_id:
+            error = "no_chat_id_for_customer"
+        else:
+            text = build_closure_customer_text(project)
+            ok, mid, err, status = bridge_send(chat_id, text)
+            send_ok = bool(ok)
+            outbound_mid = mid or ""
+            if not ok:
+                error = f"{status}: {err}"[:500]
+    except Exception as e:
+        # Best-effort: unexpected errors become audited send failures
+        # rather than caller-level exceptions. Closure stays committed.
+        error = f"unexpected: {type(e).__name__}: {e}"[:500]
+    entry = {
+        "ts": now_fn().strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "type": "flyer_closure_customer_notified",
+        "project_id": project_id,
+        "customer_phone": customer_phone,
+        "reason_code": reason_code,
+        "chat_id": chat_id,
+        "send_ok": send_ok,
+        "outbound_message_id": outbound_mid,
+        "error": error,
+    }
+    try:
+        audit_append(decisions_log_path, json.dumps(entry, separators=(",", ":")))
+    except Exception as e:
+        entry["audit_append_failed"] = f"{type(e).__name__}: {e}"
+    return entry
+
+
+def resolve_customer_chat_id_by_phone(
+    customers_path: Path, customer_phone: str,
+) -> str | None:
+    """Look up the customer record by phone, return `primary_chat_id` or None.
+
+    `primary_chat_id` is the customer's last-known WhatsApp chat identifier
+    (set during onboarding and refreshed on inbound). For proactive close-time
+    sends the script has only `customer_phone` from the project record, so we
+    consult the customers store to find a workable chat_id.
+
+    Returns None when:
+      - the store file is missing
+      - no customer matches the phone (across primary/whatsapp/onboarding
+        numbers and authorized_request_numbers)
+      - the matching customer has no `primary_chat_id`
+
+    Multiple-match safety: returns None if more than one customer claims the
+    same phone — operator must disambiguate (matches the existing
+    `find_flyer_customer_by_sender` behavior).
+    """
+    if not customer_phone or not customers_path.exists():
+        return None
+    try:
+        store = json.loads(customers_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    target = str(customer_phone).strip()
+    if not target:
+        return None
+    matches = []
+    for customer in store.get("customers", []) or []:
+        if not isinstance(customer, dict):
+            continue
+        numbers = set(customer.get("authorized_request_numbers") or [])
+        for key in ("business_whatsapp_number", "onboarded_by_phone", "public_phone"):
+            value = customer.get(key)
+            if value:
+                numbers.add(str(value))
+        if target in numbers:
+            matches.append(customer)
+    if len(matches) != 1:
+        return None
+    chat_id = str(matches[0].get("primary_chat_id") or "").strip()
+    return chat_id or None
