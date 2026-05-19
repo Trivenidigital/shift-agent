@@ -1,0 +1,19 @@
+{
+  "topic": "flyer-qa-round-2-fixes",
+  "task_text": "flyer-qa-round-2-fixes",
+  "completed_at": "2026-05-19T00:35:00Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 5,
+  "hermes_step_count": 6,
+  "files_to_read_first": [
+    "src/agents/flyer/onboarding.py",
+    "src/agents/flyer/intake.py",
+    "src/platform/schemas.py",
+    "web/frontend/src/api/schema.ts",
+    "web/frontend/src/generated/openapi.json",
+    "tasks/generate_flyer_qa_scenarios.py",
+    "tests/test_flyer_onboarding.py",
+    "tests/test_cf_router_flyer_routing.py",
+    "tests/test_catering_proposal_schemas.py"
+  ]
+}

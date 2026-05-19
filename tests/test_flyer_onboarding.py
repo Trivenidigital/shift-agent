@@ -185,6 +185,118 @@ def test_free_trial_onboarding_skips_paid_plan_choice_and_activates_trial(tmp_pa
     assert customer.quota_remaining(FlyerPlanTier.default_tiers()) == 3
 
 
+def test_language_menu_pins_deployed_order_at_positions_4_through_6():
+    """BUG-FLYER-QA-2026-05-19-002: pin the deployed menu order so a future
+    reorder is caught at PR time, not at QA time. Workbook FS-A2-012 must
+    agree with `parse_language_choice("5") == "ta"`. Pinning positions 4-6
+    explicitly catches any adjacent-pair swap; a single-position pin would
+    miss e.g. a 4↔5 swap."""
+    from agents.flyer.intake import parse_language_choice, _language_prompt
+    assert parse_language_choice("4") == "ml"
+    assert parse_language_choice("5") == "ta"
+    assert parse_language_choice("6") == "kn"
+    prompt = _language_prompt()
+    assert "4. Malayalam" in prompt
+    assert "5. Tamil" in prompt
+    assert "6. Kannada" in prompt
+
+
+def test_trial_back_from_confirming_summary_skips_choosing_plan(tmp_path):
+    """BUG-FLYER-QA-2026-05-19-001: trial sessions skip `choosing_plan` on
+    the forward path. BACK from `confirming_summary` must mirror that skip,
+    otherwise a trial user pressing BACK at the summary lands in the paid
+    plan chooser and loses `plan_id="trial"`."""
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 19, tzinfo=timezone.utc)
+    chat_id = "19045550199@s.whatsapp.net"
+
+    handle_onboarding_message(
+        state_path=state_path, chat_id=chat_id, sender_phone="+19045550199",
+        message_id="trial-1", text="Start Free Trial", now=now,
+    )
+    for message_id, text in [
+        ("trial-2", "Coastal Crab Shack"),
+        ("trial-3", "100 Ocean Blvd, Wilmington, NC"),
+        ("trial-4", "+1 910 555 0177"),
+        ("trial-5", "+1 910 555 0177"),
+        ("trial-6", "+1 910 555 0177"),
+        ("trial-7", "Seafood restaurant, English"),
+    ]:
+        handle_onboarding_message(
+            state_path=state_path, chat_id=chat_id, sender_phone="+19045550199",
+            message_id=message_id, text=text, now=now,
+        )
+
+    store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    session = next(s for s in store.onboarding_sessions if s.chat_id == chat_id)
+    assert session.status == "confirming_summary"
+    assert session.plan_id == "trial"
+
+    result = handle_onboarding_message(
+        state_path=state_path, chat_id=chat_id, sender_phone="+19045550199",
+        message_id="trial-back", text="BACK", now=now,
+    )
+    assert result.handled is True
+    assert result.next_status == "collecting_business_profile", (
+        "trial BACK must skip choosing_plan; got " + result.next_status
+    )
+
+    store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    session = next(s for s in store.onboarding_sessions if s.chat_id == chat_id)
+    assert session.plan_id == "trial", "trial plan_id must survive BACK from summary"
+    assert session.status == "collecting_business_profile"
+    assert session.business_category == ""
+
+
+def test_paid_back_from_confirming_summary_returns_to_choosing_plan(tmp_path):
+    """BUG-FLYER-QA-2026-05-19-001 regression guard: paid-plan BACK from
+    `confirming_summary` still routes to `choosing_plan` and clears
+    `plan_id`. The trial-aware branch must not break the paid path."""
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 19, tzinfo=timezone.utc)
+    chat_id = "19045550155@s.whatsapp.net"
+
+    # "Hi" is the canonical paid-path opener; it does not match any trial
+    # keyword (free trial / start trial / set up flyer studio / etc.).
+    handle_onboarding_message(
+        state_path=state_path, chat_id=chat_id, sender_phone="+19045550155",
+        message_id="paid-1", text="Hi", now=now,
+    )
+    for message_id, text in [
+        ("paid-2", "Lakshmi Kitchen"),
+        ("paid-3", "123 Main St, Pineville, NC"),
+        ("paid-4", "+1 704 555 0199"),
+        ("paid-5", "+1 704 555 0199"),
+        ("paid-6", "+1 904 555 0188"),
+        ("paid-7", "Indian restaurant, English"),
+        ("paid-8", "2"),  # plan 1 is "trial"; pick starter (plan 2) for paid path
+    ]:
+        handle_onboarding_message(
+            state_path=state_path, chat_id=chat_id, sender_phone="+19045550155",
+            message_id=message_id, text=text, now=now,
+        )
+
+    store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    session = next(s for s in store.onboarding_sessions if s.chat_id == chat_id)
+    assert session.status == "confirming_summary"
+    # Tighter than `!= "trial"`: position "2" must map to "starter". Catches
+    # silent reordering of default_tiers() that would otherwise let the
+    # test pass with a different paid plan.
+    assert session.plan_id == "starter"
+
+    result = handle_onboarding_message(
+        state_path=state_path, chat_id=chat_id, sender_phone="+19045550155",
+        message_id="paid-back", text="BACK", now=now,
+    )
+    assert result.handled is True
+    assert result.next_status == "choosing_plan"
+
+    store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    session = next(s for s in store.onboarding_sessions if s.chat_id == chat_id)
+    assert session.status == "choosing_plan"
+    assert session.plan_id == ""
+
+
 def test_compound_confirm_finishes_trial_onboarding(tmp_path):
     state_path = tmp_path / "customers.json"
     now = datetime(2026, 5, 17, tzinfo=timezone.utc)
