@@ -27,15 +27,15 @@ try:
     from flyer_facts import (  # type: ignore  # noqa: E402
         DEFAULT_REQUIRED_FACT_IDS,
         extract_text_facts,
-        facts_by_id,
         merge_locked_facts,
+        missing_required_facts,
     )
 except ImportError:
     from agents.flyer.facts import (  # noqa: E402
         DEFAULT_REQUIRED_FACT_IDS,
         extract_text_facts,
-        facts_by_id,
         merge_locked_facts,
+        missing_required_facts,
     )
 try:
     from flyer_reference_extract import build_reference_extraction_provider, classify_reference_role, extract_reference  # type: ignore  # noqa: E402
@@ -496,8 +496,11 @@ def main() -> int:
         # review rather than rendering a project the system knows is incomplete.
         # Reference-failure / source-edit gates above take precedence (they have
         # more specific reason codes); only fire if none of those already queued.
-        by_id = facts_by_id(type("P", (), {"locked_facts": locked_facts})())
-        missing_ids = [fid for fid in DEFAULT_REQUIRED_FACT_IDS if not (by_id.get(fid) and by_id[fid].value.strip())]
+        # `missing_required_facts` accepts any object with `locked_facts`; we
+        # build a lightweight shim so we don't have to construct the full
+        # FlyerProject just to check.
+        _facts_shim = type("P", (), {"locked_facts": locked_facts})()
+        missing_ids = missing_required_facts(_facts_shim, required_ids=DEFAULT_REQUIRED_FACT_IDS)
         missing_required_fact_queue = bool(
             missing_ids
             and not args.manual_edit_required

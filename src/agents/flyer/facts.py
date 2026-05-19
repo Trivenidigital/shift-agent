@@ -237,7 +237,7 @@ def fact_value(
     project: FlyerProject | object,
     fact_id: str,
     *,
-    fallback: str = "",
+    fallback: str | None = "",
 ) -> str:
     """Return the locked-fact value for `fact_id`, falling back to `fallback`
     when the project has no locked fact (or empty value) for that slot.
@@ -245,12 +245,14 @@ def fact_value(
     Renderer/QA call sites should prefer this over `project.fields.*` so that
     typed customer corrections (customer_text source) and operator overrides
     flow through to generated copy without a separate codepath per field.
+    `fallback=None` is coerced to "" so callers can pass Optional[str] fields
+    directly without an `or ""` at every call site.
     """
     by_id = facts_by_id(project)
     fact = by_id.get(fact_id)
     if fact and fact.value.strip():
         return fact.value
-    return fallback
+    return fallback or ""
 
 
 def context_isolation_blockers(project: FlyerProject) -> list[str]:
