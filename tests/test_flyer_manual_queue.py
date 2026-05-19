@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
 
 from schemas import FlyerManualReview, FlyerProject, FlyerProjectStore
 
@@ -48,3 +51,21 @@ def test_complete_manual_project_attaches_operator_asset(tmp_path, monkeypatch):
     assert project.status == "awaiting_final_approval"
     assert project.manual_review.status == "completed"
     assert project.concepts[0].preview_asset_id == "A0001"
+    assert str(tmp_path / "manual" / "F9100") in project.assets[-1].path
+    assert Path(project.assets[-1].path).exists()
+
+
+def test_complete_manual_project_rejects_nonqueued_project(tmp_path, monkeypatch):
+    from agents.flyer.manual_queue import complete_manual_project
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    asset = tmp_path / "approved.png"
+    asset.write_bytes(b"approved")
+    project = _manual_project().model_copy(update={
+        "status": "delivered",
+        "manual_review": FlyerManualReview(status="none"),
+    })
+    store = FlyerProjectStore(projects=[project])
+
+    with pytest.raises(ValueError, match="not queued for manual completion"):
+        complete_manual_project(store, "F9100", asset, reason="designer approved")

@@ -422,7 +422,7 @@ def main() -> int:
                     provider=NoopReferenceExtractionProvider(),
                 )
                 reference_extractions.append(extraction)
-                if extraction.status in {"provider_unavailable", "unsupported", "low_confidence"}:
+                if args.manual_edit_required and extraction.status in {"provider_unavailable", "unsupported", "low_confidence"}:
                     manual_review = FlyerManualReview(
                         status="queued",
                         reason=f"reference_{extraction.status}",
@@ -435,7 +435,7 @@ def main() -> int:
                 locked_facts,
                 *(extraction.extracted_facts for extraction in reference_extractions),
             )
-        status = "manual_edit_required" if args.manual_edit_required or manual_review.status == "queued" else "intake_started"
+        status = "manual_edit_required" if args.manual_edit_required else "intake_started"
         project = FlyerProject(
             project_id=project_id,
             status=status,

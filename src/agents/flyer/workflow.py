@@ -141,7 +141,7 @@ def _read_env_value(name: str, *, env_path: Path | None = None) -> str:
 def source_edit_provider_ready(project_or_asset, *, env_path: Path | None = None) -> tuple[bool, str]:
     key = _read_env_value("OPENAI_API_KEY", env_path=env_path)
     if not key or "PLACEHOLDER" in key:
-        return False, "OPENAI_API_KEY missing"
+        return False, "source edit provider is not configured: OPENAI_API_KEY missing"
     assets = []
     if isinstance(project_or_asset, dict):
         if "assets" in project_or_asset:

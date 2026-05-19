@@ -2294,6 +2294,14 @@ def send_flyer_concept_previews(chat_id: str, project_id: str) -> tuple[bool, st
     except Exception as e:
         return False, "", f"flyer_render_import_failed: {type(e).__name__}: {e}"
     try:
+        from flyer_visual_qa import validate_visual_qa_report  # type: ignore
+    except Exception:
+        try:
+            _ensure_local_src_path()
+            from agents.flyer.visual_qa import validate_visual_qa_report  # type: ignore
+        except Exception as e:
+            return False, "", f"flyer_visual_qa_import_failed: {type(e).__name__}: {e}"
+    try:
         store = json.loads(FLYER_PROJECTS_PATH.read_text(encoding="utf-8"))
         project = next((p for p in store.get("projects", []) if p.get("project_id") == project_id), None)
     except Exception as e:
@@ -2314,6 +2322,14 @@ def send_flyer_concept_previews(chat_id: str, project_id: str) -> tuple[bool, st
         )
         if not qa.ok:
             return False, "", "text_qa_failed: " + "; ".join(qa.blockers)
+        visual = validate_visual_qa_report(
+            asset.get("path", ""),
+            project_id=project_id,
+            project_version=int(project.get("version") or 1),
+            output_format="concept_preview",
+        )
+        if not visual.ok:
+            return False, "", "visual_qa_failed: " + "; ".join(visual.blockers)
         caption = (
             f"{concept.get('concept_id')}: {concept.get('title')}\n"
             f"{concept.get('style_summary')}\n\n"

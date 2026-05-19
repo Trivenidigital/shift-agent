@@ -281,8 +281,8 @@ def test_create_project_records_reference_extraction_provider_failure(monkeypatc
 
     assert project["reference_extractions"][0]["role"] == "menu_reference"
     assert project["reference_extractions"][0]["status"] == "provider_unavailable"
-    assert project["manual_review"]["status"] == "queued"
-    assert project["status"] == "manual_edit_required"
+    assert project["manual_review"]["status"] == "none"
+    assert project["status"] == "intake_started"
 
 
 def test_create_project_cleans_new_original_reference_business_name(monkeypatch):

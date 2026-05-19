@@ -39,7 +39,8 @@ def test_delivery_script_can_send_by_project_id():
     assert "FLYER_TEXT_QA_BREAK_GLASS" in text
     assert "project.status != \"finalizing_assets\"" in text
     assert "FINAL_KIND_TO_FORMAT" in text
-    assert "output_format=expected_formats.get(str(asset)) or None" in text
+    assert "validate_visual_qa_report" in text
+    assert "output_format=expected_output_format" in text
     assert "project_changed_during_delivery" in text
     assert "_record_asset_delivery" in text
     assert "_pending_project_assets" in text
@@ -239,8 +240,8 @@ def test_router_starts_new_work_over_active_state_for_explicit_or_media_template
     assert "Please resend the flyer request" not in hooks
     assert "Authorized flyer/source artwork" in hooks
     assert "manual_edit_required=True" in hooks
-    assert hooks.index("_try_flyer_reference_scope_choice_intercept(text, chat_id, event)") < hooks.index("_try_flyer_active_project_intercept(text, chat_id, event)")
-    assert hooks.index("_try_flyer_reference_scope_authorization_intercept(text, chat_id, event)") < hooks.index("_try_flyer_active_project_intercept(text, chat_id, event)")
+    assert hooks.index("_try_flyer_reference_scope_choice_intercept(text, chat_id, event)") < hooks.index("_try_flyer_active_project_intercept(text, chat_id, event, media_path)")
+    assert hooks.index("_try_flyer_reference_scope_authorization_intercept(text, chat_id, event)") < hooks.index("_try_flyer_active_project_intercept(text, chat_id, event, media_path)")
 
 
 def test_onboarding_is_whatsapp_native_and_plan_config_driven():

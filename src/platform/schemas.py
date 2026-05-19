@@ -745,7 +745,7 @@ FLYER_TRANSITIONS: dict[FlyerWorkflowStatus, set[FlyerWorkflowStatus]] = {
     "awaiting_concept_selection": {"revising_design"},
     "revising_design": {"generating_concepts", "awaiting_final_approval"},
     "awaiting_final_approval": {"finalizing_assets", "revising_design"},
-    "finalizing_assets": {"delivered"},
+    "finalizing_assets": {"delivered", "manual_edit_required"},
     "delivered": {"completed", "revising_design"},
     "completed": set(),
 }

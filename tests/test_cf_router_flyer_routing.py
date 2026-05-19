@@ -632,6 +632,35 @@ def test_vague_flyer_start_for_ineligible_customer_status_does_not_send_starter(
             assert status in sent[0].lower()
 
 
+def test_explicit_flyer_request_for_ineligible_customer_status_does_not_create_project(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    sent = []
+    customer = {
+        "customer_id": "CUST0001",
+        "business_name": "Spark Growth",
+        "business_category": "digital marketing agency",
+        "status": "payment_pending",
+    }
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
+    monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
+    monkeypatch.setattr(actions, "trigger_create_flyer_project", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("ineligible customer must not create project")))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+
+    result = hooks._try_flyer_primary_intercept(
+        "Create premium flyer for weekend sale with chicken combo $9.99",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "m-explicit-ineligible"},
+        force_new=True,
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer customer not active"}
+    assert sent
+    assert "waiting for payment" in sent[0].lower()
+
+
 def test_vague_flyer_start_for_opted_out_customer_asks_short_clarification(monkeypatch):
     hooks, actions = _load_plugin_modules()
     sent = []
@@ -1697,3 +1726,26 @@ def test_extract_flyer_request_after_compound_confirm():
         "yes create flyer for weekend sale"
     ) == "create flyer for weekend sale"
     assert actions.extract_flyer_request_after_confirm("CONFIRM") == ""
+
+
+def test_media_backed_new_work_escapes_stale_active_project(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    stale_project = {
+        "project_id": "F0042",
+        "customer_phone": "+17329837841",
+        "status": "awaiting_final_approval",
+        "concepts": [{"concept_id": "C1"}],
+    }
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: stale_project)
+
+    result = hooks._try_flyer_active_project_intercept(
+        "Please update this flyer. Change the date from May 16 to May 22.",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "m-media-new"},
+        media_path="C:/tmp/source.png",
+    )
+
+    assert result is None

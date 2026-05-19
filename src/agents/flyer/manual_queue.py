@@ -5,9 +5,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 import hashlib
 import mimetypes
+import os
 import shutil
 
-from schemas import FlyerAsset, FlyerConcept, FlyerManualReview, FlyerProjectStore
+from schemas import FlyerAsset, FlyerConcept, FlyerManualReview, FlyerProjectStore, is_flyer_transition_allowed
 
 
 def list_manual_queue(store: FlyerProjectStore, *, now: datetime | None = None) -> list[dict]:
@@ -57,12 +58,20 @@ def complete_manual_project(
     for idx, project in enumerate(store.projects):
         if project.project_id != project_id:
             continue
+        manual = project.manual_review
+        if project.status != "manual_edit_required" or manual.status not in {"queued", "in_progress"}:
+            raise ValueError(f"project not queued for manual completion: {project_id}")
+        if not is_flyer_transition_allowed(project.status, "awaiting_final_approval"):
+            raise ValueError(f"invalid transition {project.status}->awaiting_final_approval")
+        if not source.exists() or not source.is_file():
+            raise ValueError(f"approved asset not found: {source}")
         asset_id = _next_asset_id(project)
-        dest = source
-        if source.exists():
-            dest = source.with_name(f"{project_id}-{asset_id}{source.suffix or '.png'}")
-            if source.resolve() != dest.resolve():
-                shutil.copy2(source, dest)
+        root = Path(os.environ.get("FLYER_STATE_ROOT", "/opt/shift-agent/state/flyer")).resolve()
+        dest_dir = root / "manual" / project_id
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / f"{project_id}-{asset_id}{source.suffix or '.png'}"
+        if source.resolve() != dest.resolve():
+            shutil.copy2(source, dest)
         data = dest.read_bytes()
         asset = FlyerAsset(
             asset_id=asset_id,
