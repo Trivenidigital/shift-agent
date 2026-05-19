@@ -1485,6 +1485,61 @@ def test_non_admin_cannot_mutate_account_but_can_status(tmp_path):
     assert "Only the business WhatsApp" in denied.reply_text
 
 
+def test_admin_can_add_second_authorized_number_but_third_is_rejected(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 19, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    customer = store.new_customer(
+        business_name="Triveni",
+        business_address="300 S Polk St",
+        public_phone="+17043243322",
+        business_whatsapp_number="+17043243322",
+        authorized_request_number="+19045550104",
+        business_category="restaurant",
+        preferred_language="en",
+        plan_id="trial",
+        now=now,
+        onboarded_by_phone="+17043243322",
+    ).model_copy(update={"status": "trial"})
+    store.customers.append(customer)
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    second = handle_account_command(
+        state_path=state_path,
+        sender_phone="+17043243322",
+        sender_role="customer",
+        chat_id="17043243322@s.whatsapp.net",
+        text="ADD AUTHORIZED NUMBER +1 904 555 0105",
+        now=now,
+    )
+
+    assert second.ok is True
+    assert "Authorized request number added" in second.reply_text
+    after_second = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert [str(phone) for phone in after_second.customers[0].authorized_request_numbers] == [
+        "+19045550104",
+        "+19045550105",
+    ]
+
+    third = handle_account_command(
+        state_path=state_path,
+        sender_phone="+17043243322",
+        sender_role="customer",
+        chat_id="17043243322@s.whatsapp.net",
+        text="ADD AUTHORIZED NUMBER +1 904 555 0106",
+        now=now,
+    )
+
+    assert third.ok is True
+    assert "This account already has 2 authorized requester numbers" in third.reply_text
+    assert "Remove one before adding another." in third.reply_text
+    after_third = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert [str(phone) for phone in after_third.customers[0].authorized_request_numbers] == [
+        "+19045550104",
+        "+19045550105",
+    ]
+
+
 def test_customer_can_turn_sample_prompts_off_and_on(tmp_path):
     state_path = tmp_path / "customers.json"
     now = datetime(2026, 5, 18, tzinfo=timezone.utc)
@@ -1598,6 +1653,51 @@ def test_quota_counts_latest_reservation_state_once(tmp_path):
     assert finalized.ok is True
     final_store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
     assert final_store.customers[0].usage_count_for_current_period() == 2
+
+
+def test_quota_is_shared_across_two_authorized_requesters(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 19, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    customer = store.new_customer(
+        business_name="Triveni",
+        business_address="300 S Polk St",
+        public_phone="+17043243322",
+        business_whatsapp_number="+17043243322",
+        authorized_request_number="+19045550104",
+        business_category="restaurant",
+        preferred_language="en",
+        plan_id="starter",
+        now=now,
+    ).model_copy(update={
+        "status": "active",
+        "current_period_start": now,
+        "current_period_end": datetime(2026, 6, 19, tzinfo=timezone.utc),
+        "authorized_request_numbers": ["+19045550104", "+19045550105"],
+    })
+    store.customers.append(customer)
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    first = reserve_quota(
+        state_path=state_path,
+        customer_phone="+19045550104",
+        project_id="F0100",
+        message_id="m1",
+        now=now,
+    )
+    second = reserve_quota(
+        state_path=state_path,
+        customer_phone="+19045550105",
+        project_id="F0101",
+        message_id="m2",
+        now=now,
+    )
+
+    assert first.ok is True
+    assert second.ok is True
+    updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert updated.customers[0].usage_count_for_current_period() == 2
+    assert updated.customers[0].quota_remaining(FlyerPlanTier.default_tiers()) == 28
 
 
 def test_onboarding_session_requires_valid_status():
