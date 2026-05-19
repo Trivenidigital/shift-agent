@@ -1772,6 +1772,8 @@ export interface operations {
             query?: {
                 query?: string;
                 segment?: string;
+                offset?: number;
+                limit?: number;
             };
             header?: never;
             path?: never;
