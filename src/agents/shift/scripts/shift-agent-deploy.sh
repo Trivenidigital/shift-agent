@@ -827,9 +827,43 @@ PY
         # loaded until restart. Skipping this step caused the 2026-05-19
         # incident where /flyer/customers returned 500 (Pydantic
         # ValidationError on a new FlyerWorkflowStatus value) until a manual
-        # restart cleared the stale module cache. Best-effort: `|| true` for
-        # VPSes where the cockpit isn't installed.
-        systemctl restart shift-agent-cockpit.service 2>/dev/null || true
+        # restart cleared the stale module cache.
+        #
+        # Unit-presence-gated so VPSes without the cockpit installed aren't
+        # affected. Inside the gate: restart --wait + /health probe so a real
+        # cockpit failure fails the deploy + rolls back instead of being
+        # masked by `|| true` — the silent-failure mode this hook exists to
+        # prevent. Mirrors the rotate-jwt-secret.sh pattern.
+        if systemctl list-unit-files shift-agent-cockpit.service >/dev/null 2>&1; then
+            cockpit_fail_reason=""
+            if ! systemctl restart --wait shift-agent-cockpit.service; then
+                cockpit_fail_reason="restart"
+            else
+                cockpit_healthy=0
+                for _ in 1 2 3 4 5; do
+                    if curl -sf -o /dev/null --max-time 2 http://127.0.0.1:8081/health; then
+                        cockpit_healthy=1
+                        break
+                    fi
+                    sleep 1
+                done
+                [ "$cockpit_healthy" -ne 1 ] && cockpit_fail_reason="health probe"
+            fi
+            if [ -n "$cockpit_fail_reason" ]; then
+                echo "FAIL: cockpit $cockpit_fail_reason failed after restart — rolling back" >&2
+                if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                    "$0" rollback "$PREV_TAG"
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                else
+                    /usr/local/bin/shift-agent-notify-owner \
+                        --title "Deploy FAILED at cockpit $cockpit_fail_reason, no prior tarball" \
+                        --priority 2 \
+                        "Deploy $NEW_TAG: cockpit $cockpit_fail_reason after restart. SSH immediately." 2>/dev/null || true
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                fi
+                exit 1
+            fi
+        fi
         sleep 5
 
         # Smoke test gate
@@ -912,7 +946,31 @@ PY
         # Cockpit must pick up the rolled-back schemas.py / safe_io.py too —
         # otherwise it stays on the (broken-forward) module cache. See the
         # deploy-path comment above for the failure mode that motivated this.
-        systemctl restart shift-agent-cockpit.service 2>/dev/null || true
+        # Failure here is reported loudly (Pushover P2 + exit 1) rather than
+        # cascaded into another rollback — we're already in rollback.
+        if systemctl list-unit-files shift-agent-cockpit.service >/dev/null 2>&1; then
+            cockpit_fail_reason=""
+            if ! systemctl restart --wait shift-agent-cockpit.service; then
+                cockpit_fail_reason="restart"
+            else
+                cockpit_healthy=0
+                for _ in 1 2 3 4 5; do
+                    if curl -sf -o /dev/null --max-time 2 http://127.0.0.1:8081/health; then
+                        cockpit_healthy=1
+                        break
+                    fi
+                    sleep 1
+                done
+                [ "$cockpit_healthy" -ne 1 ] && cockpit_fail_reason="health probe"
+            fi
+            if [ -n "$cockpit_fail_reason" ]; then
+                /usr/local/bin/shift-agent-notify-owner \
+                    --priority 2 \
+                    --title "Rollback to $TARGET — cockpit $cockpit_fail_reason failed" \
+                    "Rolled back to $TARGET but shift-agent-cockpit $cockpit_fail_reason failed. Cockpit may be down or on stale modules. SSH immediately." 2>/dev/null || true
+                exit 1
+            fi
+        fi
         sleep 5
 
         # Re-run smoke after rollback. If the prior tarball is itself broken
