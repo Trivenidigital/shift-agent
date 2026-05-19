@@ -279,6 +279,26 @@ install_artifacts() {
     else
         rm -f /opt/shift-agent/flyer_guest_order.py
     fi
+    if [ -f src/agents/flyer/facts.py ]; then
+        install -m 644 src/agents/flyer/facts.py /opt/shift-agent/flyer_facts.py
+    else
+        rm -f /opt/shift-agent/flyer_facts.py
+    fi
+    if [ -f src/agents/flyer/reference_extract.py ]; then
+        install -m 644 src/agents/flyer/reference_extract.py /opt/shift-agent/flyer_reference_extract.py
+    else
+        rm -f /opt/shift-agent/flyer_reference_extract.py
+    fi
+    if [ -f src/agents/flyer/visual_qa.py ]; then
+        install -m 644 src/agents/flyer/visual_qa.py /opt/shift-agent/flyer_visual_qa.py
+    else
+        rm -f /opt/shift-agent/flyer_visual_qa.py
+    fi
+    if [ -f src/agents/flyer/manual_queue.py ]; then
+        install -m 644 src/agents/flyer/manual_queue.py /opt/shift-agent/flyer_manual_queue.py
+    else
+        rm -f /opt/shift-agent/flyer_manual_queue.py
+    fi
     if [ -d src/agents/flyer/scripts ] && compgen -G "src/agents/flyer/scripts/*" > /dev/null; then
         install -m 755 src/agents/flyer/scripts/* /usr/local/bin/
         for flyer_binary in \
@@ -295,6 +315,7 @@ install_artifacts() {
             send-flyer-package \
             send-flyer-campaign \
             flyer-delivery-report \
+            flyer-manual-queue \
             smoke-flyer-quality; do
             if [ ! -f "src/agents/flyer/scripts/${flyer_binary}" ]; then
                 rm -f "/usr/local/bin/${flyer_binary}"
@@ -316,6 +337,7 @@ install_artifacts() {
             /usr/local/bin/manage-flyer-account \
             /usr/local/bin/manage-flyer-guest-order \
             /usr/local/bin/flyer-delivery-report \
+            /usr/local/bin/flyer-manual-queue \
             /usr/local/bin/send-flyer-campaign \
             /usr/local/bin/send-flyer-package \
             /usr/local/bin/smoke-flyer-quality

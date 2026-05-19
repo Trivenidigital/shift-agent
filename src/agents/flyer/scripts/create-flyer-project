@@ -17,8 +17,16 @@ sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(SRC_ROOT / "platform"))
 sys.path.insert(0, str(SRC_ROOT))
 
-from schemas import FlyerAsset, FlyerCustomerStore, FlyerProject, FlyerProjectStore, FlyerProjectCreated, FlyerRequestFields  # noqa: E402
+from schemas import FlyerAsset, FlyerCustomerStore, FlyerManualReview, FlyerProject, FlyerProjectStore, FlyerProjectCreated, FlyerRequestFields  # noqa: E402
 from safe_io import FileLock, atomic_write_text  # noqa: E402
+try:
+    from flyer_facts import extract_text_facts, merge_locked_facts  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.facts import extract_text_facts, merge_locked_facts  # noqa: E402
+try:
+    from flyer_reference_extract import NoopReferenceExtractionProvider, extract_reference  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.reference_extract import NoopReferenceExtractionProvider, extract_reference  # noqa: E402
 
 
 STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
@@ -397,6 +405,8 @@ def main() -> int:
         )
         project_id = f"F{store.next_sequence:04d}"
         reference_asset = None
+        reference_extractions = []
+        manual_review = FlyerManualReview()
         if args.reference_media_path:
             reference_asset = _copy_reference_asset(
                 Path(args.reference_media_path),
@@ -405,15 +415,39 @@ def main() -> int:
                 asset_dir=Path(args.asset_dir),
                 now=now,
             )
+            if reference_asset is not None:
+                extraction = extract_reference(
+                    reference_asset,
+                    raw_request=args.raw_request,
+                    provider=NoopReferenceExtractionProvider(),
+                )
+                reference_extractions.append(extraction)
+                if extraction.status in {"provider_unavailable", "unsupported", "low_confidence"}:
+                    manual_review = FlyerManualReview(
+                        status="queued",
+                        reason=f"reference_{extraction.status}",
+                        detail=extraction.detail,
+                        queued_at=now,
+                    )
+        locked_facts = extract_text_facts(fields, args.raw_request, message_id=args.message_id)
+        if reference_extractions:
+            locked_facts = merge_locked_facts(
+                locked_facts,
+                *(extraction.extracted_facts for extraction in reference_extractions),
+            )
+        status = "manual_edit_required" if args.manual_edit_required or manual_review.status == "queued" else "intake_started"
         project = FlyerProject(
             project_id=project_id,
-            status="manual_edit_required" if args.manual_edit_required else "intake_started",
+            status=status,
             customer_phone=args.customer_phone,
             created_at=now,
             updated_at=now,
             original_message_id=args.message_id,
             raw_request=args.raw_request,
             fields=fields,
+            locked_facts=locked_facts,
+            reference_extractions=reference_extractions,
+            manual_review=manual_review,
             assets=[reference_asset] if reference_asset else [],
         )
         store.projects.append(project)

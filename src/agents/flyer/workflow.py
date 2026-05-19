@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
+import os
 import re
 
 from schemas import FlyerProject, FlyerWorkflowStatus
@@ -42,6 +44,20 @@ FIELD_LABELS = {
     "event_time": "time",
     "venue_or_location": "venue or location",
     "contact_info": "contact info",
+}
+
+STATUS_LINES = {
+    "intake_started": "I have the request open and am checking the flyer details.",
+    "collecting_required_info": "I am waiting for the missing flyer details before creating the design.",
+    "awaiting_assets": "I am waiting for the logo, photo, menu, or reference image needed for this flyer.",
+    "manual_edit_required": "This is queued for designer-assisted review because automation cannot safely finish it.",
+    "generating_concepts": "The flyer design is being generated now.",
+    "awaiting_concept_selection": "The preview is ready. Please choose a concept or send changes.",
+    "revising_design": "Your requested changes are saved and the revised design is being prepared.",
+    "awaiting_final_approval": "The preview is ready for approval. Reply APPROVE when it looks right.",
+    "finalizing_assets": "The final files are being prepared for delivery.",
+    "delivered": "The final flyer files have been delivered.",
+    "completed": "This flyer project is complete.",
 }
 
 
@@ -86,6 +102,61 @@ def build_missing_info_prompt(missing: list[str], *, preferred_language: str = "
     else:
         joined = ", ".join(labels[:-1]) + f", and {labels[-1]}"
     return f"Please send the {joined}. I will keep the flyer copy in {language}."
+
+
+def build_project_status_reply(project: FlyerProject) -> str:
+    line = STATUS_LINES.get(project.status, "I have this flyer project open.")
+    manual = getattr(project, "manual_review", None)
+    if manual is not None and getattr(manual, "status", "none") in {"queued", "in_progress"}:
+        detail = getattr(manual, "detail", "") or getattr(manual, "reason", "")
+        line = "This is queued for designer-assisted review. No need to resend details."
+        if detail:
+            line = f"{line} Reason: {detail}"
+    return (
+        "Flyer Studio\n"
+        "------------\n"
+        f"Project {project.project_id}: {line}"
+    )
+
+
+def _read_env_value(name: str, *, env_path: Path | None = None) -> str:
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value
+    path = env_path or Path(os.environ.get("SHIFT_AGENT_ENV_PATH", "/opt/shift-agent/.env"))
+    if not path.exists():
+        return ""
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip() or line.lstrip().startswith("#") or "=" not in line:
+                continue
+            key, raw = line.split("=", 1)
+            if key.strip() == name:
+                return raw.strip().strip('"').strip("'")
+    except OSError:
+        return ""
+    return ""
+
+
+def source_edit_provider_ready(project_or_asset, *, env_path: Path | None = None) -> tuple[bool, str]:
+    key = _read_env_value("OPENAI_API_KEY", env_path=env_path)
+    if not key or "PLACEHOLDER" in key:
+        return False, "OPENAI_API_KEY missing"
+    assets = []
+    if isinstance(project_or_asset, dict):
+        if "assets" in project_or_asset:
+            assets = list(project_or_asset.get("assets") or [])
+        else:
+            assets = [project_or_asset]
+    else:
+        assets = list(getattr(project_or_asset, "assets", []) or [])
+    reference = next((asset for asset in reversed(assets) if (asset.get("kind") if isinstance(asset, dict) else getattr(asset, "kind", "")) == "reference_image"), None)
+    if reference is None:
+        return False, "source edit needs an uploaded reference image"
+    mime = reference.get("mime_type", "") if isinstance(reference, dict) else getattr(reference, "mime_type", "")
+    if mime and not str(mime).startswith("image/"):
+        return False, f"source edit reference must be an image, got {mime}"
+    return True, "ready"
 
 
 def next_status_for_project(

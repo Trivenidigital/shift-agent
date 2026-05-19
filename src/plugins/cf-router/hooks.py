@@ -1469,6 +1469,30 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any) -> 
         and status not in {"intake_started", "collecting_required_info", "awaiting_assets"}
     ):
         return None
+    if actions.is_flyer_project_status_request(body) and status not in {"completed"}:
+        reply = (
+            actions.flyer_manual_edit_status_reply(active_project)
+            if status == "manual_edit_required" else
+            actions.flyer_project_status_reply(active_project)
+        )
+        ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+        actions.audit_intercepted(
+            reason=("flyer_reference_exact_edit_status" if status == "manual_edit_required" and ack_ok else ("flyer_project_status" if ack_ok else "flyer_primary_failed")),
+            chat_id=chat_id,
+            subprocess_rc=0 if ack_ok else 3,
+            detail=(
+                f"project_id={project_id}; status_check=true; status={status}; sender_role={role}; "
+                f"ack_message_id={mid}; ack_error={err[:300]}"
+            ),
+        )
+        return {
+            "action": "skip",
+            "reason": (
+                f"cf-router flyer exact edit status for {project_id}"
+                if status == "manual_edit_required" else
+                f"cf-router flyer status for {project_id}"
+            ),
+        }
     selection_map = {
         "1": "C1", "option 1": "C1", "concept 1": "C1", "c1": "C1",
         "2": "C2", "option 2": "C2", "concept 2": "C2", "c2": "C2",

@@ -356,6 +356,23 @@ def test_phase2_quality_smoke_and_workflow_deploy_contracts():
     assert "authorized flyer/source artwork update" in generate
 
 
+def test_production_readiness_modules_installed_and_smoked():
+    deploy = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh").read_text(encoding="utf-8")
+    smoke = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-smoke-test.sh").read_text(encoding="utf-8")
+
+    for module in [
+        "flyer_facts",
+        "flyer_reference_extract",
+        "flyer_visual_qa",
+        "flyer_manual_queue",
+    ]:
+        assert f"/opt/shift-agent/{module}.py" in deploy
+        assert f"import {module}" in smoke
+
+    assert "flyer-manual-queue" in deploy
+    assert "flyer-manual-queue" in smoke
+
+
 def test_generation_does_not_hold_file_lock_during_render():
     generate = (SCRIPTS / "generate-flyer-concepts").read_text(encoding="utf-8")
     first_lock_start = generate.index("with FileLock")

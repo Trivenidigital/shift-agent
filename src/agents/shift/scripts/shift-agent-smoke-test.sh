@@ -48,6 +48,7 @@ for script in \
     /usr/local/bin/manage-flyer-account \
     /usr/local/bin/manage-flyer-guest-order \
     /usr/local/bin/flyer-delivery-report \
+    /usr/local/bin/flyer-manual-queue \
     /usr/local/bin/send-flyer-campaign \
     /usr/local/bin/smoke-flyer-quality \
     /usr/local/bin/send-flyer-package ; do
@@ -89,6 +90,10 @@ import flyer_workflow
 import flyer_onboarding
 import flyer_account
 import flyer_starter_briefs
+import flyer_facts
+import flyer_reference_extract
+import flyer_visual_qa
+import flyer_manual_queue
 print('schema classes:', [c for c in dir(schemas) if not c.startswith('_')][:5])
 " > /dev/null; then
     echo "FAIL: Python modules don't import"

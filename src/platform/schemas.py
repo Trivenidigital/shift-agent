@@ -704,6 +704,27 @@ FlyerOutputFormat = Literal[
 ]
 
 FlyerImageQuality = Literal["low", "medium", "high"]
+FlyerFactSource = Literal[
+    "customer_text",
+    "customer_profile",
+    "reference_ocr",
+    "reference_vision",
+    "uploaded_asset",
+    "operator",
+    "system",
+]
+FlyerReferenceRole = Literal[
+    "logo",
+    "menu_reference",
+    "old_flyer_reference",
+    "source_edit_template",
+    "inspiration",
+    "unsupported",
+]
+FlyerReferenceExtractionStatus = Literal["not_run", "ok", "low_confidence", "provider_unavailable", "unsupported"]
+FlyerVisualQAStatus = Literal["passed", "failed", "not_run", "provider_unavailable"]
+FlyerVisualQASource = Literal["ocr_vision", "sidecar_test"]
+FlyerManualReviewStatus = Literal["none", "queued", "in_progress", "completed", "break_glass_sent"]
 FlyerAssetKind = Literal[
     "logo",
     "reference_image",
@@ -719,7 +740,7 @@ FLYER_TRANSITIONS: dict[FlyerWorkflowStatus, set[FlyerWorkflowStatus]] = {
     "intake_started": {"collecting_required_info"},
     "collecting_required_info": {"awaiting_assets", "generating_concepts"},
     "awaiting_assets": {"generating_concepts"},
-    "manual_edit_required": {"generating_concepts", "revising_design"},
+    "manual_edit_required": {"generating_concepts", "revising_design", "awaiting_final_approval"},
     "generating_concepts": {"awaiting_concept_selection", "awaiting_final_approval"},
     "awaiting_concept_selection": {"revising_design"},
     "revising_design": {"generating_concepts", "awaiting_final_approval"},
@@ -1414,6 +1435,59 @@ class FlyerRequestFields(BaseModel):
         )
 
 
+class FlyerLockedFact(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    fact_id: str = Field(min_length=1, max_length=120)
+    label: str = Field(min_length=1, max_length=80)
+    value: str = Field(min_length=1, max_length=500)
+    source: FlyerFactSource
+    required: bool = False
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    source_project_id: str = Field(default="", max_length=40)
+    source_asset_id: str = Field(default="", max_length=40)
+    source_message_id: str = Field(default="", max_length=200)
+    source_sha256: str = Field(default="", max_length=64)
+
+
+class FlyerReferenceExtraction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    asset_id: str = Field(min_length=1, max_length=40)
+    role: FlyerReferenceRole
+    provider: str = Field(default="", max_length=120)
+    status: FlyerReferenceExtractionStatus = "not_run"
+    extracted_facts: list[FlyerLockedFact] = Field(default_factory=list, max_length=100)
+    detail: str = Field(default="", max_length=500)
+    extracted_at: Optional[datetime] = None
+
+
+class FlyerVisualQAReport(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project_id: str = Field(min_length=1, max_length=40)
+    asset_id: str = Field(default="", max_length=40)
+    artifact_path: str = Field(min_length=1, max_length=500)
+    artifact_sha256: str = Field(pattern=r"^[a-fA-F0-9]{64}$")
+    project_version: int = Field(ge=1)
+    output_format: str = Field(min_length=1, max_length=80)
+    provider: str = Field(min_length=1, max_length=120)
+    qa_source: FlyerVisualQASource
+    status: FlyerVisualQAStatus
+    blockers: list[str] = Field(default_factory=list, max_length=50)
+    warnings: list[str] = Field(default_factory=list, max_length=50)
+    extracted_text: str = Field(default="", max_length=5000)
+    checked_at: datetime
+
+
+class FlyerManualReview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: FlyerManualReviewStatus = "none"
+    reason: str = Field(default="", max_length=120)
+    detail: str = Field(default="", max_length=500)
+    queued_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    operator_asset_ids: list[str] = Field(default_factory=list, max_length=20)
+    break_glass_reason: str = Field(default="", max_length=500)
+
+
 class FlyerAsset(BaseModel):
     model_config = ConfigDict(extra="forbid")
     asset_id: str = Field(pattern=r"^A\d{4,}$")
@@ -1488,6 +1562,10 @@ class FlyerProject(BaseModel):
     original_message_id: str = Field(min_length=1, max_length=200)
     raw_request: str = Field(min_length=1, max_length=2000)
     fields: FlyerRequestFields = Field(default_factory=FlyerRequestFields)
+    locked_facts: list[FlyerLockedFact] = Field(default_factory=list, max_length=100)
+    reference_extractions: list[FlyerReferenceExtraction] = Field(default_factory=list, max_length=20)
+    qa_reports: list[FlyerVisualQAReport] = Field(default_factory=list, max_length=100)
+    manual_review: FlyerManualReview = Field(default_factory=FlyerManualReview)
     assets: list[FlyerAsset] = Field(default_factory=list, max_length=50)
     concepts: list[FlyerConcept] = Field(default_factory=list, max_length=3)
     selected_concept_id: Optional[str] = Field(default=None, pattern=r"^C[1-3]$")
@@ -4100,11 +4178,14 @@ __all__ = [
     "is_catering_terminal", "CATERING_TERMINAL_STATUSES",
     "FlyerConfig", "FlyerWorkflowStatus", "FlyerOnboardingStatus", "FlyerLanguage", "FlyerCreationMode",
     "FlyerIntakeStatus", "FlyerIntakeSource", "FlyerOutputFormat", "FlyerImageQuality",
+    "FlyerFactSource", "FlyerReferenceRole", "FlyerReferenceExtractionStatus",
+    "FlyerVisualQAStatus", "FlyerVisualQASource", "FlyerManualReviewStatus",
     "FlyerAssetKind", "FLYER_TRANSITIONS", "is_flyer_transition_allowed",
     "FlyerPlanTier", "FlyerBrandAsset", "FlyerUsageEvent", "FlyerPaymentRecord", "FlyerGuestOrder",
     "FLYER_AUTHORIZED_REQUESTER_LIMIT",
     "FlyerCustomerProfile", "FlyerOnboardingSession", "FlyerIntakeSession", "FlyerCustomerStore", "FlyerGuestOrderStore",
-    "FlyerRequestFields", "FlyerAsset", "FlyerConcept", "FlyerRevision",
+    "FlyerRequestFields", "FlyerLockedFact", "FlyerReferenceExtraction",
+    "FlyerVisualQAReport", "FlyerManualReview", "FlyerAsset", "FlyerConcept", "FlyerRevision",
     "FlyerBrandKit", "FlyerProject", "FlyerProjectStore",
     # v0.3 status-machine + helpers
     "CATERING_TRANSITIONS", "is_catering_transition_allowed",

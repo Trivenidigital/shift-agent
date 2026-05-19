@@ -225,6 +225,64 @@ def test_create_project_cleans_logo_prompt_business_and_bad_venue(tmp_path, monk
     assert project["fields"]["event_or_business_name"] == "Lakshmis Kitchn"
     assert project["fields"]["venue_or_location"] == "90 Brybar Dr St Johns FL"
     assert project["fields"]["event_time"] is None
+    facts = {fact["fact_id"]: fact for fact in project["locked_facts"]}
+    assert facts["business_name"]["value"] == "Lakshmis Kitchn"
+    assert facts["headline"]["value"] == "Family Combo Feast"
+    assert facts["tagline"]["value"] == "Fresh food. Happy family"
+    assert facts["contact_phone"]["source"] == "customer_profile"
+
+
+def test_create_project_records_reference_extraction_provider_failure(monkeypatch, tmp_path, capsys):
+    module = _load_script(monkeypatch)
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    reference = tmp_path / "sample.png"
+    reference.write_bytes(b"fake")
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    customers_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_customer_sequence": 2,
+        "customers": [{
+            "customer_id": "CUST0001",
+            "business_name": "Lakshmis Kitchn",
+            "business_address": "90 Brybar Dr St Johns FL",
+            "primary_chat_id": "17329837841@s.whatsapp.net",
+            "onboarded_by_phone": "+17329837841",
+            "public_phone": "+17329837841",
+            "business_whatsapp_number": "+17329837841",
+            "authorized_request_numbers": ["+17329837841"],
+            "business_category": "Indian Restaurant",
+            "preferred_language": "en",
+            "plan_id": "trial",
+            "status": "trial",
+            "created_at": datetime(2026, 5, 18, tzinfo=timezone.utc).isoformat(),
+            "updated_at": datetime(2026, 5, 18, tzinfo=timezone.utc).isoformat(),
+            "activated_at": datetime(2026, 5, 18, tzinfo=timezone.utc).isoformat(),
+            "monthly_flyers_used": 0,
+            "billing_provider": "manual",
+            "payment_currency": "USD",
+        }],
+        "onboarding_sessions": [],
+    }), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+17329837841",
+        "--message-id", "m-reference",
+        "--raw-request", "Create flyer. Extract item names and prices from attached sample flyer.",
+        "--reference-media-path", str(reference),
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+        "--asset-dir", str(asset_dir),
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+
+    assert project["reference_extractions"][0]["role"] == "menu_reference"
+    assert project["reference_extractions"][0]["status"] == "provider_unavailable"
+    assert project["manual_review"]["status"] == "queued"
+    assert project["status"] == "manual_edit_required"
 
 
 def test_create_project_cleans_new_original_reference_business_name(monkeypatch):

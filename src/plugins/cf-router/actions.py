@@ -1260,6 +1260,26 @@ def flyer_manual_edit_status_reply(project: dict) -> str:
     )
 
 
+def flyer_project_status_reply(project: dict) -> str:
+    try:
+        _ensure_platform_path()
+        from schemas import FlyerProject  # type: ignore
+        from flyer_workflow import build_project_status_reply  # type: ignore
+    except Exception:
+        try:
+            _ensure_local_src_path()
+            from schemas import FlyerProject  # type: ignore
+            from agents.flyer.workflow import build_project_status_reply  # type: ignore
+        except Exception:
+            project_id = str(project.get("project_id") or "this project")
+            return f"Flyer Studio\n------------\nProject {project_id}: I have this flyer project open and am checking the latest status."
+    try:
+        return build_project_status_reply(FlyerProject.model_validate(project))
+    except Exception:
+        project_id = str(project.get("project_id") or "this project")
+        return f"Flyer Studio\n------------\nProject {project_id}: I have this flyer project open and am checking the latest status."
+
+
 def _canonical_phone(phone: Optional[str]) -> Optional[str]:
     if not phone:
         return None
@@ -1869,23 +1889,25 @@ def trigger_create_flyer_project(
 
 def flyer_source_edit_preflight(project: dict) -> tuple[bool, str]:
     """Return whether source-preserving edit generation can run for project."""
+    try:
+        _ensure_platform_path()
+        from flyer_workflow import source_edit_provider_ready  # type: ignore
+    except Exception:
+        try:
+            _ensure_local_src_path()
+            from agents.flyer.workflow import source_edit_provider_ready  # type: ignore
+        except Exception as e:
+            return False, f"source edit readiness helper unavailable: {type(e).__name__}: {e}"
+    ok, detail = source_edit_provider_ready(project)
+    if not ok:
+        return ok, detail
     assets = project.get("assets") or []
-    reference = next(
-        (asset for asset in reversed(assets) if (asset or {}).get("kind") == "reference_image"),
-        None,
-    )
-    if not reference:
-        return False, "source edit needs an uploaded reference image"
+    reference = next((asset for asset in reversed(assets) if (asset or {}).get("kind") == "reference_image"), None)
     path = str((reference or {}).get("path") or "")
-    mime = str((reference or {}).get("mime_type") or mimetypes.guess_type(path)[0] or "")
-    if mime and not mime.startswith("image/"):
-        return False, f"source edit reference must be an image, got {mime}"
     if path.lower().endswith(".pdf"):
         return False, "source edit from PDF is not supported yet"
     if path and not Path(path).exists():
         return False, "source edit reference image is not available on this server"
-    if not os.environ.get("OPENAI_API_KEY"):
-        return False, "source edit provider is not configured"
     return True, "ready"
 
 
