@@ -28,6 +28,11 @@ import uuid
 
 from schemas import FlyerAsset, FlyerCustomerStore, FlyerOutputFormat, FlyerProject
 
+try:
+    from flyer_facts import fact_value  # type: ignore
+except ImportError:  # pragma: no cover - src layout fallback
+    from agents.flyer.facts import fact_value
+
 
 class FlyerRenderError(RuntimeError):
     pass
@@ -467,7 +472,12 @@ def collect_text_facts(project: FlyerProject) -> list[FlyerTextFact]:
         if clean:
             facts.append(FlyerTextFact(fact_id=fact_id, label=label, text=clean))
 
-    add("title", "Title", project.fields.event_or_business_name or "Flyer")
+    # P0-2: prefer locked_facts over `fields.*` so typed customer corrections
+    # (customer_text source, priority 0) override stale profile values without a
+    # separate codepath per field. `fact_value` falls back to the original
+    # field when the locked-fact slot is missing or empty.
+    title_text = fact_value(project, "business_name", fallback=project.fields.event_or_business_name) or "Flyer"
+    add("title", "Title", title_text)
     schedule = _schedule_hint(project)
     if project.fields.event_date:
         add("date", "Date", project.fields.event_date)
@@ -475,10 +485,12 @@ def collect_text_facts(project: FlyerProject) -> list[FlyerTextFact]:
         add("schedule", "Schedule", schedule)
     if project.fields.event_time:
         add("time", "Time", project.fields.event_time)
-    if project.fields.venue_or_location:
-        add("location", "Location", project.fields.venue_or_location)
-    if project.fields.contact_info:
-        add("contact", "Contact", project.fields.contact_info)
+    location_text = fact_value(project, "location", fallback=project.fields.venue_or_location)
+    if location_text:
+        add("location", "Location", location_text)
+    contact_text = fact_value(project, "contact_phone", fallback=project.fields.contact_info)
+    if contact_text:
+        add("contact", "Contact", contact_text)
     for idx, clause in enumerate(_detail_clauses(project), start=1):
         add(f"detail_{idx:03d}", "Detail", clause)
     if len(facts) > MAX_TEXT_FACTS:
@@ -500,18 +512,24 @@ def _fact_lines(project: FlyerProject) -> list[str]:
 
 
 def _menu_overlay_payload(project: FlyerProject) -> dict[str, object]:
+    # P0-2: must mirror collect_text_facts() so the drawn image matches the
+    # text manifest S5 will OCR-validate against. Same locked-fact preference
+    # for title/location/contact.
     items = _menu_item_lines(project)
     schedule = _schedule_hint(project)
     return {
-        "title": project.fields.event_or_business_name or "Specials",
+        "title": fact_value(project, "business_name", fallback=project.fields.event_or_business_name) or "Specials",
         "schedule": schedule,
         "items": items,
-        "location": project.fields.venue_or_location or "",
-        "contact": project.fields.contact_info or "",
+        "location": fact_value(project, "location", fallback=project.fields.venue_or_location) or "",
+        "contact": fact_value(project, "contact_phone", fallback=project.fields.contact_info) or "",
     }
 
 
 def _poster_copy_plan(project: FlyerProject) -> PosterCopyPlan:
+    # P0-2: must mirror collect_text_facts() — same locked-fact preference for
+    # title/location/contact so the OpenRouter prompt's "Render the following
+    # text exactly" block names the same values the text manifest expects.
     items: list[tuple[str, str]] = []
     for item in _menu_item_lines(project):
         name, price = _split_item_price(item)
@@ -523,10 +541,10 @@ def _poster_copy_plan(project: FlyerProject) -> PosterCopyPlan:
             continue
         detail_lines.append(detail)
     return PosterCopyPlan(
-        title=project.fields.event_or_business_name or "Specials",
+        title=fact_value(project, "business_name", fallback=project.fields.event_or_business_name) or "Specials",
         schedule=_schedule_hint(project),
-        location=project.fields.venue_or_location or "",
-        contact=project.fields.contact_info or "",
+        location=fact_value(project, "location", fallback=project.fields.venue_or_location) or "",
+        contact=fact_value(project, "contact_phone", fallback=project.fields.contact_info) or "",
         items=items,
         detail_lines=detail_lines,
     )
@@ -937,7 +955,7 @@ Controlled customer copy:
 {_poster_copy_block(project)}
 
 Visual context for style and imagery:
-- theme/category: {_sanitize_visual_context(project.fields.event_or_business_name or project.raw_request or "local SMB promotion")}
+- theme/category: {_sanitize_visual_context(fact_value(project, "business_name", fallback=project.fields.event_or_business_name) or project.raw_request or "local SMB promotion")}
 - style: {sanitized_style}
 
 Layout requirements:
@@ -1258,7 +1276,11 @@ def _source_edit_reference_asset(project: FlyerProject) -> FlyerAsset:
 
 
 def _source_edit_prompt(project: FlyerProject) -> str:
-    business_name = _registered_business_name(project) or project.fields.event_or_business_name or "this business"
+    business_name = (
+        _registered_business_name(project)
+        or fact_value(project, "business_name", fallback=project.fields.event_or_business_name)
+        or "this business"
+    )
     request = " ".join((project.raw_request or project.fields.notes or "").split())[:1200]
     return f"""Edit the attached flyer image. Preserve the existing flyer design.
 
@@ -1559,7 +1581,8 @@ def _draw_flyer_pil(project: FlyerProject, *, concept_id: str, size: tuple[int, 
     draw.text((margin, int(height * 0.045)), language_label.upper(), font=small_font, fill=tuple(palette["soft"]))
 
     y = int(height * 0.245)
-    for line in _wrap(draw, project.fields.event_or_business_name or "", title_font, width - margin * 2):
+    title_text = fact_value(project, "business_name", fallback=project.fields.event_or_business_name) or ""
+    for line in _wrap(draw, title_text, title_font, width - margin * 2):
         if y + title_font.size > int(height * 0.45):
             raise FlyerRenderError("critical text facts do not fit")
         draw.text((margin, y), line, font=title_font, fill=tuple(palette["primary"]))
@@ -1680,7 +1703,7 @@ def _render_with_system_pillow(project: FlyerProject, path: Path, *, concept_id:
         "format": "PDF" if size is None else "PNG",
         "palette": PALETTES.get(concept_id, PALETTES["C1"]),
         "language": language,
-        "title": project.fields.event_or_business_name or "",
+        "title": fact_value(project, "business_name", fallback=project.fields.event_or_business_name) or "",
         "style": project.fields.style_preference,
         "facts": [
             [fact.label.upper(), fact.text]

@@ -737,6 +737,7 @@ FlyerManualReviewReason = Literal[
     "operator_request",
     "policy_block",
     "provider_timeout",
+    "missing_required_facts",
 ]
 FlyerAssetKind = Literal[
     "logo",
