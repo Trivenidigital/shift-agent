@@ -61,6 +61,59 @@ STATUS_LINES = {
 }
 
 
+# Per-reason customer-facing copy for projects sitting at manual_edit_required.
+# Keyed on FlyerManualReviewReason (S1 enum). Falls back to STATUS_LINES
+# generic line when the project's reason_code is not in this table.
+# Every reason_code in src/platform/schemas.py::FlyerManualReviewReason MUST
+# have an entry here — enforced by test_state_reply_table.py structural
+# coverage test.
+MANUAL_REVIEW_REASON_LINES: dict[str, str] = {
+    "unclassified": (
+        "This project is queued for designer review. I'll follow up here when it's ready."
+    ),
+    "legacy_unknown": (
+        "This project is queued for designer review. I'll follow up here when it's ready."
+    ),
+    "source_edit_provider_unavailable": (
+        "Your edit is queued for a designer to apply by hand. "
+        "I have the requested changes and the saved account details — no extra information needed from you."
+    ),
+    "reference_unsupported": (
+        "The file you uploaded isn't a supported format for an exact edit. "
+        "Please re-upload the source flyer as a JPG or PNG image — once we have it, our designer can pick this up."
+    ),
+    "reference_provider_unavailable": (
+        "I can't find the source flyer to edit. "
+        "Please re-upload the flyer image and our designer will continue from there."
+    ),
+    "reference_low_confidence": (
+        "I'm having trouble reading the details from your uploaded reference. "
+        "If you can, re-upload a clearer copy, or describe the details you'd like included."
+    ),
+    "reference_not_run": (
+        "I haven't been able to extract the details from your uploaded reference yet. "
+        "I'll follow up here as soon as that's done."
+    ),
+    "visual_qa_failed": (
+        "The generated flyer didn't pass our quality checks. "
+        "It's queued for designer review and I'll send the corrected version here when it's ready."
+    ),
+    "missing_required_facts": (
+        "I'm missing a couple of required details before I can finish this flyer. "
+        "Please send the remaining info and I'll continue."
+    ),
+    "operator_request": (
+        "This project is being reviewed by our team. I'll follow up here when it's ready."
+    ),
+    "policy_block": (
+        "This project is paused for a quick review. I'll follow up here once it's cleared."
+    ),
+    "provider_timeout": (
+        "I hit a temporary issue generating this. It's queued for retry/designer review and I'll follow up here when it's ready."
+    ),
+}
+
+
 @dataclass(frozen=True)
 class FlyerQualityResult:
     ok: bool
@@ -105,13 +158,28 @@ def build_missing_info_prompt(missing: list[str], *, preferred_language: str = "
 
 
 def build_project_status_reply(project: FlyerProject) -> str:
+    """Return the deterministic customer-facing status reply for the project.
+
+    Rules:
+      - For manual_edit_required projects with an actively-queued
+        manual_review, the reason_code (S1 enum) drives the copy via
+        MANUAL_REVIEW_REASON_LINES — different reasons (PDF unsupported vs
+        missing facts vs visual QA failed vs source-edit provider down) need
+        different operator/customer signals.
+      - For all other statuses, STATUS_LINES is the source of truth.
+      - manual_review with status `break_glass_sent` or `completed` is no
+        longer a customer-blocking signal; the project's own status drives
+        the reply (the operator already acted out-of-band or completed it).
+    """
     line = STATUS_LINES.get(project.status, "I have this flyer project open.")
     manual = getattr(project, "manual_review", None)
-    if manual is not None and getattr(manual, "status", "none") in {"queued", "in_progress"}:
-        detail = getattr(manual, "detail", "") or getattr(manual, "reason", "")
-        line = "This is queued for designer-assisted review. No need to resend details."
-        if detail:
-            line = f"{line} Reason: {detail}"
+    if (
+        project.status == "manual_edit_required"
+        and manual is not None
+        and getattr(manual, "status", "none") in {"queued", "in_progress"}
+    ):
+        reason_code = (getattr(manual, "reason_code", "") or "unclassified").strip() or "unclassified"
+        line = MANUAL_REVIEW_REASON_LINES.get(reason_code, STATUS_LINES["manual_edit_required"])
     return (
         "Flyer Studio\n"
         "------------\n"
