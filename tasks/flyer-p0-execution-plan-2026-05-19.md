@@ -159,6 +159,15 @@ Mirrors parent backlog §"90% Readiness Exit Criteria"; closed only when:
 
 Updates land here in reverse-chronological order after each slice merge/deploy.
 
+### 2026-05-19 — S3 P0-1 project context isolation + stale-state guard: MERGED + DEPLOYED
+
+- PR #118 merged at `e2842d1` (2 commits: feat `9e8d4b6` + review-fix `25bc14a`).
+- Reviewer findings applied: 2 BLOCKERS + 2 HIGH from structural reviewer rooted in the original negative-evidence guard design (`not status AND not revision` was silently dropping concept selections "1"/"C1", approvals "approve"/"yes"/"ok"/"send", and Hindi/Telugu/Hinglish replies on stale projects). Fix: switched the guard to POSITIVE evidence — bail only when `should_start_new_flyer_over_active(body)` returns True. Hermes-first reviewer SCOPE-OK on the new code; flagged the pre-existing English-regex intent classifiers as a follow-up (matches `feedback_dont_overengineer_llm_intent.md`).
+- Deploy tag `deploy-20260519-171859-25bc14aa` on `main-vps`; smoke green incl. all 4 Flyer smokes; the per-route manual-queue probe also ran cleanly (PR #117 URL fix from S2 path works).
+- Full pytest 1133 passed (baseline 1117; +16 new across the slice). No regressions.
+- Post-deploy verification: cf-router on `/root/.hermes/plugins/cf-router/` carries the new `is_stale_for_new_request` helper + `_FLYER_STALE_HOURS` dict (3 matches in actions.py, 1 in hooks.py); gateway active, cockpit active, `/flyer/manual-queue` HTTP 401 (route mounted, auth-gated); manual-queue triage CLI unchanged at total=6 (3 legacy_unknown + 3 source_edit_provider_unavailable).
+- Lessons: (1) routing guards should default to **positive evidence** — "this IS a new request" — rather than negative evidence — "this is NOT a status/revision" — because English-regex helpers cannot enumerate all the things that aren't a new request. (2) Per-status thresholds matter less under positive-evidence design because the guard fires only on clear new-flyer signals; the threshold becomes a "how-old-before-we-trust-new-evidence" knob rather than the entire bail condition.
+
 ### 2026-05-19 — S2 P0-8b cockpit operator escape hatch: MERGED + DEPLOYED + HOTFIX MERGED + DEPLOYED
 
 - PR #116 merged at `2d25344` (2 commits: feat `cd157ea` + review-fix `dc7a6b4`).
