@@ -454,6 +454,12 @@ def _handle_session_control(
         )
     if upper != "BACK":
         return None
+    # BUG-FLYER-QA-2026-05-19-001: trial sessions skip `choosing_plan`
+    # entirely on the forward path (see `next_status` around the
+    # collecting_business_profile branch). The BACK chain must mirror that
+    # skip on the return trip — otherwise a trial user pressing BACK at
+    # the summary screen lands in the paid plan chooser and loses
+    # `plan_id="trial"`.
     back = {
         "collecting_business_address": ("collecting_business_name", {"business_name": ""}),
         "collecting_public_phone": ("collecting_business_address", {"business_address": ""}),
@@ -461,7 +467,11 @@ def _handle_session_control(
         "collecting_authorized_request_number": ("collecting_business_whatsapp", {"business_whatsapp_number": None}),
         "collecting_business_profile": ("collecting_authorized_request_number", {"authorized_request_number": None}),
         "choosing_plan": ("collecting_business_profile", {"business_category": "", "preferred_language": "en"}),
-        "confirming_summary": ("choosing_plan", {"plan_id": ""}),
+        "confirming_summary": (
+            ("collecting_business_profile", {"business_category": "", "preferred_language": "en"})
+            if session.plan_id == "trial"
+            else ("choosing_plan", {"plan_id": ""})
+        ),
     }
     target = back.get(session.status)
     if not target:
