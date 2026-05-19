@@ -149,7 +149,7 @@ chown -R shift-agent:shift-agent "$REF_SMOKE_DIR"
 if ! sudo -u shift-agent env FLYER_STATE_ROOT="$REF_SMOKE_DIR" "$PY" /usr/local/bin/create-flyer-project \
     --customer-phone +19045550123 \
     --message-id smoke-reference-menu \
-    --raw-request "Create a flyer from this attached menu." \
+    --raw-request "Create a flyer for Smoke Menu. Contact +19045550123. Create a flyer from this attached menu." \
     --reference-media-path "$REF_SMOKE_DIR/menu.png" \
     --state-path "$REF_SMOKE_DIR/projects.json" \
     --customer-state-path "$REF_SMOKE_DIR/customers.json" \
@@ -160,7 +160,7 @@ if ! sudo -u shift-agent env FLYER_STATE_ROOT="$REF_SMOKE_DIR" "$PY" /usr/local/
 fi
 REF_ASSET_PATH="$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1]))["assets"][0]["path"])' "$REF_SMOKE_DIR/create.json")"
 printf 'Idly $7\nDosa $8\n' > "${REF_ASSET_PATH}.ocr.txt"
-if ! sudo -u shift-agent env FLYER_STATE_ROOT="$REF_SMOKE_DIR" FLYER_REFERENCE_ALLOW_SIDECAR=1 "$PY" /usr/local/bin/generate-flyer-concepts \
+if ! sudo -u shift-agent env FLYER_STATE_ROOT="$REF_SMOKE_DIR" FLYER_REFERENCE_ALLOW_SIDECAR=1 FLYER_QA_ALLOW_SIDECAR=1 "$PY" /usr/local/bin/generate-flyer-concepts \
     --project-id F0001 \
     --state-path "$REF_SMOKE_DIR/projects.json" \
     --asset-dir "$REF_SMOKE_DIR/assets" \

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
@@ -58,6 +59,26 @@ def _pending_required_reference_extractions(project) -> list:
 
 def _asset_for_extraction(project, extraction):
     return next((asset for asset in project.assets if asset.asset_id == extraction.asset_id), None)
+
+
+# FLYER_QA_ALLOW_SIDECAR=1 is smoke/test-only — must not be enabled in production runtime.
+def _write_sidecar_visual_qa_fixture(project, artifact_path: Path) -> None:
+    if os.environ.get("FLYER_QA_ALLOW_SIDECAR") != "1":
+        return
+    sidecar = Path(str(artifact_path) + ".ocr.txt")
+    if sidecar.exists():
+        return
+    lines: list[str] = []
+    seen: set[str] = set()
+    for fact in project.locked_facts:
+        value = " ".join((fact.value or "").split())
+        key = value.casefold()
+        if not value or key in seen:
+            continue
+        seen.add(key)
+        lines.append(value)
+    if lines:
+        atomic_write_text(sidecar, "\n".join(lines) + "\n")
 
 
 def _persist_reference_extraction_results(state_path: Path, project_id: str, extractions: list[FlyerReferenceExtraction]):
@@ -238,6 +259,7 @@ def main() -> int:
             one_shot = len(concepts) == 1
             qa_reports = []
             for asset, spec in zip(assets, specs):
+                _write_sidecar_visual_qa_fixture(current, spec.path)
                 report = run_visual_qa(
                     current,
                     spec.path,
