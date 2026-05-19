@@ -1023,3 +1023,10 @@ Review results:
   - Root cause: `consume_flyer_reference_authorization_reply()` stored the relationship as `authorization_note_recorded`, kept the pending row alive, and only continued on the exact phrase `use account details`.
   - Fix: first relationship/detail reply now consumes the pending authorization row, carries the note into the authorized source-edit project path, and uses saved account details by default. Exact option/reference choices are still excluded from this detail parser.
   - Review: focused router/static tests `81 passed`; broader Flyer suite `250 passed`; compileall and `git diff --check` passed.
+- [ ] Flyer Studio production-readiness backlog (2026-05-19): validated the post-hotfix QA handoff against `66cb0f3`, current code, QA report, Hermes-first constraints, and focused tests, then created the full backlog at `tasks/flyer-studio-production-readiness-backlog.md`.
+  - Drift-check tag: extends-Hermes
+  - Hermes-first analysis: reuse Hermes WhatsApp/media ingress, sender identity, JSON state, audit, bridge delivery, OCR/vision/image primitives, and existing Flyer source-edit/render paths. Net-new scope is Flyer-specific structured fact locking, reference OCR mapping, visual/OCR QA, state/status UX, golden evals, and manual review workflow.
+  - [x] Validate the handoff and readiness estimate against repo artifacts.
+  - [x] Run focused Flyer suite on the hotfix baseline: `247 passed`.
+  - [x] Create prioritized backlog with production bar, acceptance criteria, Hermes-first analysis, and 90% exit criteria.
+  - [ ] Execute P0-1 through P0-8 in priority order before calling Flyer Studio 90% production-ready.
