@@ -214,11 +214,13 @@ def test_cf_router_status_reply_dispatch_uses_source_edit_helper_only_for_source
     assert 'manual_reason_code == "source_edit_provider_unavailable"' in hooks_text, (
         "cf-router routing must branch on reason_code, not just status"
     )
-    # Verify both status-check sites have the same routing pattern.
-    # Site 1: _try_flyer_active_project_intercept; site 2: manual_edit_required branch.
+    # Verify both status-check sites have the routing pattern. The string can
+    # appear additional times for audit-reason classification (S7 fix to
+    # avoid mis-tagging non-source-edit status checks as source-edit traffic).
     source_edit_route_count = hooks_text.count('manual_reason_code == "source_edit_provider_unavailable"')
-    assert source_edit_route_count == 2, (
-        f"expected 2 reason_code routing sites in hooks.py, got {source_edit_route_count}"
+    assert source_edit_route_count >= 2, (
+        f"expected at least 2 reason_code routing sites in hooks.py "
+        f"(one per status-check branch), got {source_edit_route_count}"
     )
 
 

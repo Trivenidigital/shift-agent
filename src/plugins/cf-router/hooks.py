@@ -1787,12 +1787,26 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
             else:
                 reply = actions.flyer_project_status_reply(active_project)
             ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+            # P0-6: audit reason must match the routing branch. Pre-S7 this
+            # was hardcoded to flyer_reference_exact_edit_status regardless
+            # of reason_code — operator dashboards filtering by audit reason
+            # would have overcounted source-edit traffic vs the general
+            # manual-queue status checks (visual_qa_failed, etc.).
+            if ack_ok:
+                audit_reason = (
+                    "flyer_reference_exact_edit_status"
+                    if manual_reason_code == "source_edit_provider_unavailable"
+                    else "flyer_project_status"
+                )
+            else:
+                audit_reason = "flyer_primary_failed"
             actions.audit_intercepted(
-                reason="flyer_reference_exact_edit_status" if ack_ok else "flyer_primary_failed",
+                reason=audit_reason,
                 chat_id=chat_id,
                 subprocess_rc=0 if ack_ok else 3,
                 detail=(
-                    f"project_id={project_id}; queued_status_check=true; sender_role={role}; "
+                    f"project_id={project_id}; queued_status_check=true; "
+                    f"reason_code={manual_reason_code}; sender_role={role}; "
                     f"ack_message_id={mid}; ack_error={err[:300]}"
                 ),
             )

@@ -80,27 +80,27 @@ MANUAL_REVIEW_REASON_LINES: dict[str, str] = {
     ),
     "reference_unsupported": (
         "The file you uploaded isn't a supported format for an exact edit. "
-        "Please re-upload the source flyer as a JPG or PNG image so I can continue."
+        "Please re-upload the source flyer as a JPG or PNG image — once we have it, our designer can pick this up."
     ),
     "reference_provider_unavailable": (
         "I can't find the source flyer to edit. "
-        "Please re-upload the flyer image and I'll continue from there."
+        "Please re-upload the flyer image and our designer will continue from there."
     ),
     "reference_low_confidence": (
         "I'm having trouble reading the details from your uploaded reference. "
-        "If you can, re-upload a clearer copy, or list the items and prices you'd like included."
+        "If you can, re-upload a clearer copy, or describe the details you'd like included."
     ),
     "reference_not_run": (
         "I haven't been able to extract the details from your uploaded reference yet. "
         "I'll follow up here as soon as that's done."
     ),
     "visual_qa_failed": (
-        "The generated flyer didn't pass quality checks. "
+        "The generated flyer didn't pass our quality checks. "
         "It's queued for designer review and I'll send the corrected version here when it's ready."
     ),
     "missing_required_facts": (
-        "I'm missing a couple of required details (business name and contact) before I can finish this flyer. "
-        "Please send them and I'll continue."
+        "I'm missing a couple of required details before I can finish this flyer. "
+        "Please send the remaining info and I'll continue."
     ),
     "operator_request": (
         "This project is being reviewed by our team. I'll follow up here when it's ready."
