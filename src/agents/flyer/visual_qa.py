@@ -16,7 +16,56 @@ import urllib.request
 from schemas import FlyerProject, FlyerVisualQAReport
 
 
-PLACEHOLDER_RE = re.compile(r"\[(?:price|phone|date|time|address|item|text)[^\]]*\]|lorem ipsum", re.IGNORECASE)
+# Bracketed slot leakage ([price], [phone], …) + lorem ipsum + common template-
+# editor placeholder text that leaks through generator/templates and would be
+# invisible to OCR-vs-locked-fact substring matching (the template text isn't a
+# customer fact, so no `missing required fact` blocker would fire). Operator
+# triage on production seeing any of these means we shipped a generic template
+# to a customer — fail-closed.
+PLACEHOLDER_RE = re.compile(
+    r"\[(?:price|phone|date|time|address|item|text|business[_ ]?name|tagline|headline|logo)[^\]]*\]"
+    r"|lorem ipsum"
+    r"|\byour\s+(?:logo|business\s+name|brand|text|tagline|headline|address|phone|contact|number|company\s+name)\s+here\b"
+    r"|\bclick\s+(?:here\s+)?to\s+(?:add|edit|insert)\b"
+    r"|\b(?:add|insert)\s+your\s+(?:logo|text|business\s+name|brand|headline|tagline)\b"
+    r"|\b(?:tap|press)\s+to\s+edit\b"
+    r"|\bsample\s+text\b",
+    re.IGNORECASE,
+)
+
+
+_PHONE_DIGITS_RE = re.compile(r"\D+")
+
+
+def _normalize_text_for_match(text: str) -> str:
+    """Casefold + collapse whitespace + strip common typographic apostrophes."""
+    lowered = re.sub(r"\s+", " ", text).casefold()
+    for ch in ("‘", "’", "ʼ", "`", "'"):
+        lowered = lowered.replace(ch, "")
+    return lowered
+
+
+def _looks_like_phone(value: str) -> bool:
+    digits = _PHONE_DIGITS_RE.sub("", value)
+    return len(digits) >= 7 and len(digits) <= 15
+
+
+def _value_present_in(normalized_text: str, fact_value: str) -> bool:
+    """Smart presence check for a locked-fact value in the OCR'd text.
+
+    Phones: compare digits-only so locked '+17329837841' matches OCR
+    '+1 732 983 7841' or '+1 (732) 983 7841'.
+
+    Other text: strip apostrophes + collapse whitespace + casefold before
+    substring match so locked "Lakshmi's Kitchen" matches OCR
+    "Lakshmis Kitchen".
+    """
+    normalized_value = _normalize_text_for_match(fact_value)
+    if _looks_like_phone(fact_value):
+        value_digits = _PHONE_DIGITS_RE.sub("", fact_value)
+        text_digits = _PHONE_DIGITS_RE.sub("", normalized_text)
+        return value_digits in text_digits
+    return normalized_value in normalized_text
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_TIMEOUT_SEC = 60
 VISION_QA_MODEL = os.environ.get("FLYER_VISUAL_QA_MODEL") or os.environ.get("VISION_MODEL") or "openai/gpt-4o-mini"
@@ -151,14 +200,17 @@ def run_visual_qa(
             extracted_text="",
             checked_at=datetime.now(timezone.utc),
         )
-    normalized = re.sub(r"\s+", " ", extracted_text).casefold()
+    normalized = _normalize_text_for_match(extracted_text)
     if PLACEHOLDER_RE.search(extracted_text):
         blockers.append("placeholder text is visible in generated flyer")
     blockers.extend(note for note in provider_notes if "placeholder" in note.lower() or "unreadable" in note.lower() or "garbled" in note.lower())
     for fact in project.locked_facts:
         if not fact.required:
             continue
-        if fact.value.casefold() not in normalized:
+        # _value_present_in handles phone-digit-only matching and apostrophe-
+        # tolerant text matching so locked '+17329837841' / "Lakshmi's Kitchen"
+        # don't false-fail against OCR '+1 732 983 7841' / 'Lakshmis Kitchen'.
+        if not _value_present_in(normalized, fact.value):
             blockers.append(f"missing required visible fact: {fact.fact_id}")
     return FlyerVisualQAReport(
         project_id=project.project_id,
