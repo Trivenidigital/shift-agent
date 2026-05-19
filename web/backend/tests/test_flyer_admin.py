@@ -507,16 +507,24 @@ def test_manual_queue_triage_groups_and_aggregates(tmp_path):
     assert "+19045550104" in phones and "+19803826497" in phones
 
 
+def _seed_operator_upload(tmp_path, filename: str, *, content: bytes = b"approved bytes") -> str:
+    from app.routers import flyer
+    upload_dir = flyer.get_settings().state_dir / "flyer" / "operator-uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    asset = upload_dir / filename
+    asset.write_bytes(content)
+    return str(asset)
+
+
 def test_manual_queue_complete_attaches_operator_asset_and_backs_up(tmp_path):
     from app.routers import flyer
 
     _seed_queue(tmp_path, [_queued_project("F0052", phone="+19045550104")])
-    asset = tmp_path / "operator_approved.png"
-    asset.write_bytes(b"approved bytes")
+    asset_path = _seed_operator_upload(tmp_path, "operator_approved.png")
 
     result = flyer.manual_queue_complete_action(
         "F0052",
-        asset_path=str(asset),
+        asset_path=asset_path,
         reason="operator-approved designer asset",
     )
 
@@ -527,6 +535,66 @@ def test_manual_queue_complete_attaches_operator_asset_and_backs_up(tmp_path):
     # backup of pre-mutation state is recorded next to projects.json
     flyer_dir = flyer.get_settings().state_dir / "flyer"
     assert list(flyer_dir.glob("projects.json.pre-admin-*"))
+
+
+def test_manual_queue_complete_rejects_asset_outside_upload_root(tmp_path):
+    from fastapi import HTTPException
+    from app.routers import flyer
+
+    _seed_queue(tmp_path, [_queued_project("F0052", phone="+19045550104")])
+    # Asset exists, is absolute, has a valid image extension — but lives
+    # outside the allowed operator-uploads root.
+    outside = tmp_path / "secrets" / "env.png"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_bytes(b"secret bytes")
+
+    with pytest.raises(HTTPException) as ei:
+        flyer.manual_queue_complete_action(
+            "F0052",
+            asset_path=str(outside),
+            reason="should fail — outside upload root",
+        )
+    assert ei.value.status_code == 422
+
+
+def test_manual_queue_complete_rejects_disallowed_mime(tmp_path):
+    from fastapi import HTTPException
+    from app.routers import flyer
+
+    _seed_queue(tmp_path, [_queued_project("F0052", phone="+19045550104")])
+    asset_path = _seed_operator_upload(tmp_path, "secret.env", content=b"DB_PASSWORD=...")
+
+    with pytest.raises(HTTPException) as ei:
+        flyer.manual_queue_complete_action(
+            "F0052",
+            asset_path=asset_path,
+            reason="should fail — .env mime not in allowlist",
+        )
+    assert ei.value.status_code == 415
+
+
+def test_manual_queue_complete_is_idempotent_failure(tmp_path):
+    """Calling complete twice on the same project must 409 the second time."""
+    from fastapi import HTTPException
+    from app.routers import flyer
+
+    _seed_queue(tmp_path, [_queued_project("F0052", phone="+19045550104")])
+    asset_path = _seed_operator_upload(tmp_path, "first.png")
+
+    first = flyer.manual_queue_complete_action(
+        "F0052",
+        asset_path=asset_path,
+        reason="operator-approved first call",
+    )
+    assert first["ok"] is True
+
+    with pytest.raises(HTTPException) as ei:
+        flyer.manual_queue_complete_action(
+            "F0052",
+            asset_path=asset_path,
+            reason="operator-approved second call",
+        )
+    assert ei.value.status_code == 409
 
 
 def test_manual_queue_complete_rejects_missing_asset(tmp_path):
@@ -567,13 +635,12 @@ def test_manual_queue_complete_rejects_nonqueued_project(tmp_path):
     delivered["status"] = "delivered"
     delivered["manual_review"]["status"] = "completed"
     _seed_queue(tmp_path, [delivered])
-    asset = tmp_path / "approved.png"
-    asset.write_bytes(b"x")
+    asset_path = _seed_operator_upload(tmp_path, "approved.png")
 
     with pytest.raises(HTTPException) as ei:
         flyer.manual_queue_complete_action(
             "F0052",
-            asset_path=str(asset),
+            asset_path=asset_path,
             reason="should fail",
         )
     assert ei.value.status_code == 409
@@ -624,3 +691,27 @@ def test_manual_queue_break_glass_rejects_nonqueued_project(tmp_path):
     with pytest.raises(HTTPException) as ei:
         flyer.manual_queue_break_glass_action("F0052", reason="too late, already delivered")
     assert ei.value.status_code == 409
+
+
+def test_break_glass_row_is_dropped_from_triage_and_summary_counters(tmp_path):
+    """Regression: after break-glass, the row must NOT remain in list_manual_queue or in
+    build_summary's manual_edit_count / stuck_edit_count. The operator signal is
+    "I resolved this out-of-band" — a recurring ghost in the queue/badges defeats that intent.
+    """
+    from app.routers import flyer
+
+    _seed_queue(tmp_path, [_queued_project("F0052", phone="+19045550104")])
+
+    pre = flyer.build_summary()
+    assert pre["manual_edit_count"] == 1
+
+    flyer.manual_queue_break_glass_action(
+        "F0052",
+        reason="customer received deliverable via designer email — out-of-band resolution",
+    )
+
+    post_triage = flyer.manual_queue_triage_action()
+    assert post_triage["total"] == 0, "break-glass row must not surface in triage"
+    post_summary = flyer.build_summary()
+    assert post_summary["manual_edit_count"] == 0, "break-glass row must not count in manual_edit_count"
+    assert post_summary["stuck_edit_count"] == 0, "break-glass row must not count in stuck_edit_count"

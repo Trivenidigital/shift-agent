@@ -201,9 +201,19 @@ def build_summary() -> dict[str, Any]:
         "finalizing_assets",
     }
     stuck_statuses = {"intake_started", "collecting_required_info", "awaiting_assets"}
-    manual_edit_count = sum(1 for p in projects.projects if p.status == "manual_edit_required")
+    # break-glass rows stay at status=manual_edit_required by design (audit
+    # signal for "operator resolved out-of-band"), but for the operator
+    # dashboard counters they're terminal — don't ghost in manual_edit_count
+    # or stuck_edit_count forever.
+    manual_edit_count = sum(
+        1
+        for p in projects.projects
+        if p.status == "manual_edit_required" and p.manual_review.status != "break_glass_sent"
+    )
     stuck_edit_count = 0
     for project in projects.projects:
+        if project.manual_review.status == "break_glass_sent":
+            continue
         age_minutes = max(0, int((now - project.updated_at).total_seconds() // 60))
         if project.status == "manual_edit_required" and age_minutes >= 30:
             stuck_edit_count += 1
@@ -549,6 +559,18 @@ def manual_queue_triage_action() -> dict[str, Any]:
     return triage_summary(load_project_store())
 
 
+def _operator_upload_root() -> Path:
+    return _flyer_dir() / "operator-uploads"
+
+
+_OPERATOR_ASSET_MIME_ALLOWLIST: frozenset[str] = frozenset({
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "application/pdf",
+})
+
+
 def manual_queue_complete_action(project_id: str, *, asset_path: str, reason: str) -> dict[str, Any]:
     """Operator-completes a queued manual-review project by attaching an approved asset.
 
@@ -561,6 +583,26 @@ def manual_queue_complete_action(project_id: str, *, asset_path: str, reason: st
         raise HTTPException(422, "operator_asset_path must be absolute")
     if not source.exists() or not source.is_file():
         raise HTTPException(404, f"operator asset not found: {asset_path}")
+    # Constrain to the operator-uploads root so a fresh-OTP'd operator can't
+    # accidentally publish /opt/shift-agent/.env, /etc/passwd, or other
+    # process-readable files as flyer artwork. Operator places the file
+    # under state/flyer/operator-uploads/ via SCP/SFTP first.
+    upload_root = _operator_upload_root().resolve()
+    upload_root.mkdir(parents=True, exist_ok=True)
+    try:
+        source.resolve().relative_to(upload_root)
+    except ValueError:
+        raise HTTPException(
+            422,
+            f"operator_asset_path must be under {upload_root} (got {source})",
+        )
+    import mimetypes as _mimetypes
+    mime, _ = _mimetypes.guess_type(str(source))
+    if mime not in _OPERATOR_ASSET_MIME_ALLOWLIST:
+        raise HTTPException(
+            415,
+            f"operator_asset_path mime {mime!r} not in allowlist {sorted(_OPERATOR_ASSET_MIME_ALLOWLIST)}",
+        )
     path = _projects_path()
     with safe_io.flock(path):
         backup = _backup_path(path, reason)

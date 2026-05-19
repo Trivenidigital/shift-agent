@@ -47,6 +47,12 @@ def list_manual_queue(store: FlyerProjectStore, *, now: datetime | None = None) 
     rows: list[dict] = []
     for project in store.projects:
         manual = project.manual_review
+        # break-glass terminates the operator workflow for this row even if
+        # project.status stays at manual_edit_required (operator signalled
+        # out-of-band resolution). Excluding here prevents the queue and the
+        # build_summary counters from accumulating ghost stuck rows.
+        if manual.status == "break_glass_sent":
+            continue
         has_failed_qa = any(report.status != "passed" for report in project.qa_reports)
         if project.status != "manual_edit_required" and manual.status not in {"queued", "in_progress"} and not has_failed_qa:
             continue
