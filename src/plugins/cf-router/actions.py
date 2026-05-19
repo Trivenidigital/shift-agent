@@ -1156,38 +1156,136 @@ def is_flyer_enabled() -> bool:
         return False
 
 
-def find_active_flyer_project_by_sender(phone: Optional[str], chat_id: str) -> Optional[dict]:
-    """Look up a non-terminal flyer project by sender phone.
+def _flyer_account_phones(phone: Optional[str], chat_id: str) -> set[str]:
+    """All canonical phone identifiers tied to the sender's flyer account.
 
-    Flyer projects currently store canonical customer_phone. LID senders are
-    mapped to phone by the caller via identify-sender before invoking this.
+    Used by every flyer project selector so the picker matches a project's
+    `customer_phone` against any number registered on the customer record,
+    not just the inbound sender's number.
+    """
+    account_phones: set[str] = set()
+    canonical_sender = _canonical_phone(phone) or phone
+    if canonical_sender:
+        account_phones.add(canonical_sender)
+    customer = find_flyer_customer_by_sender(phone, chat_id)
+    if customer:
+        for key in ("public_phone", "business_whatsapp_number", "onboarded_by_phone"):
+            value = customer.get(key)
+            canonical = _canonical_phone(value)
+            if canonical:
+                account_phones.add(canonical)
+        for value in customer.get("authorized_request_numbers") or []:
+            canonical = _canonical_phone(value)
+            if canonical:
+                account_phones.add(canonical)
+    return account_phones
+
+
+def _load_flyer_projects() -> list[dict]:
+    if not FLYER_PROJECTS_PATH.exists():
+        return []
+    try:
+        with FLYER_PROJECTS_PATH.open(encoding="utf-8") as f:
+            store = json.load(f)
+    except Exception:
+        return []
+    projects = store.get("projects", [])
+    return projects if isinstance(projects, list) else []
+
+
+def find_active_flyer_project_by_sender(phone: Optional[str], chat_id: str) -> Optional[dict]:
+    """Look up a non-terminal flyer project by sender phone, for routing
+    new-request / revision / approval flow.
+
+    `closed_no_send` is intentionally excluded: an operator-closed row must
+    not swallow legitimate new flyer requests from the same customer. Use
+    `find_latest_flyer_project_for_status_by_sender` for status replies,
+    which DOES need to surface closures.
     """
     if not phone or not FLYER_PROJECTS_PATH.exists():
         return None
     terminal = {"completed", "closed_no_send"}
     try:
-        account_phones = {_canonical_phone(phone) or phone}
-        customer = find_flyer_customer_by_sender(phone, chat_id)
-        if customer:
-            for key in ("public_phone", "business_whatsapp_number", "onboarded_by_phone"):
-                value = customer.get(key)
-                canonical = _canonical_phone(value)
-                if canonical:
-                    account_phones.add(canonical)
-            for value in customer.get("authorized_request_numbers") or []:
-                canonical = _canonical_phone(value)
-                if canonical:
-                    account_phones.add(canonical)
-        with FLYER_PROJECTS_PATH.open(encoding="utf-8") as f:
-            store = json.load(f)
-        projects = store.get("projects", [])
-        if not isinstance(projects, list):
+        account_phones = _flyer_account_phones(phone, chat_id)
+        if not account_phones:
             return None
         matches = [
-            row for row in projects
+            row for row in _load_flyer_projects()
             if isinstance(row, dict)
             and row.get("customer_phone") in account_phones
             and row.get("status") not in terminal
+        ]
+        if not matches:
+            return None
+        return max(matches, key=lambda row: str(row.get("updated_at") or row.get("created_at") or ""))
+    except Exception:
+        return None
+
+
+_FLYER_PROJECT_ID_RE = re.compile(r"\bF\d{4}\b", re.IGNORECASE)
+
+
+def extract_flyer_project_id_mention(text: str) -> Optional[str]:
+    """Return the FXXXX project id mentioned in the message body, if any.
+
+    Customers asking "any update on F0058?" should reach the specific
+    project they referenced, not whichever project the latest-updated
+    heuristic happens to pick. Returns the upper-cased canonical id.
+    """
+    if not text:
+        return None
+    match = _FLYER_PROJECT_ID_RE.search(text)
+    return match.group(0).upper() if match else None
+
+
+def find_flyer_project_by_id_for_sender(
+    phone: Optional[str], chat_id: str, project_id: str,
+) -> Optional[dict]:
+    """Return the project with `project_id` IF it belongs to this sender's
+    account (any phone in `_flyer_account_phones`). Returns None otherwise —
+    we do NOT leak project state across customers.
+    """
+    if not phone or not project_id or not FLYER_PROJECTS_PATH.exists():
+        return None
+    try:
+        account_phones = _flyer_account_phones(phone, chat_id)
+        if not account_phones:
+            return None
+        target = project_id.upper()
+        for row in _load_flyer_projects():
+            if (
+                isinstance(row, dict)
+                and str(row.get("project_id") or "").upper() == target
+                and row.get("customer_phone") in account_phones
+            ):
+                return row
+        return None
+    except Exception:
+        return None
+
+
+def find_latest_flyer_project_for_status_by_sender(
+    phone: Optional[str], chat_id: str,
+) -> Optional[dict]:
+    """Status-reply selector: includes closed_no_send, delivered, and every
+    other non-`completed` status. Picks by max(updated_at).
+
+    Distinct from `find_active_flyer_project_by_sender` (active-routing
+    selector) because closed_no_send and delivered need to surface for
+    "any update?" replies but MUST stay out of new-request / revision /
+    approval routing.
+    """
+    if not phone or not FLYER_PROJECTS_PATH.exists():
+        return None
+    try:
+        account_phones = _flyer_account_phones(phone, chat_id)
+        if not account_phones:
+            return None
+        matches = [
+            row for row in _load_flyer_projects()
+            if isinstance(row, dict)
+            and row.get("customer_phone") in account_phones
+            and row.get("status") != "completed"
         ]
         if not matches:
             return None

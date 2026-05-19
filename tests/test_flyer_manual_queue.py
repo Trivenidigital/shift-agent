@@ -342,3 +342,137 @@ def test_backfill_skips_already_classified_projects():
     result = backfill_manual_reasons(store, apply=False)
 
     assert result["candidate_count"] == 0
+
+
+# --------------------------------------------------------------------------
+# flyer-manual-queue --close freshness guard
+# --------------------------------------------------------------------------
+
+
+def _fresh_store():
+    now = datetime(2026, 5, 19, 21, 4, 4, tzinfo=timezone.utc)
+    return FlyerProjectStore(projects=[FlyerProject(
+        project_id="F0058",
+        status="manual_edit_required",
+        customer_phone="+19045550104",
+        created_at=now,
+        updated_at=now,
+        original_message_id="m-58",
+        raw_request="Authorized exact edit",
+        manual_review=FlyerManualReview(
+            status="queued",
+            reason="source_edit_provider_unavailable",
+            reason_code="source_edit_provider_unavailable",
+            queued_at=now,
+        ),
+    )])
+
+
+@pytest.mark.parametrize("token", ["duplicate", "test", "superseded", "provider_unavailable_after_retry"])
+def test_close_freshness_guard_allows_fresh_row_with_documented_reason_token(token):
+    from agents.flyer.manual_queue import enforce_close_freshness_guard
+    now = datetime(2026, 5, 19, 21, 10, 0, tzinfo=timezone.utc)  # +6 min: fresh
+    # No exception raised
+    enforce_close_freshness_guard(
+        _fresh_store(), "F0058",
+        reason=f"operator_burndown_{token}",
+        force=False,
+        now=now,
+    )
+
+
+def test_close_freshness_guard_allows_fresh_row_with_force():
+    from agents.flyer.manual_queue import enforce_close_freshness_guard
+    now = datetime(2026, 5, 19, 21, 10, 0, tzinfo=timezone.utc)
+    enforce_close_freshness_guard(
+        _fresh_store(), "F0058",
+        reason="provider_unavailable_no_customer_asset_sent",
+        force=True,
+        now=now,
+    )
+
+
+def test_close_freshness_guard_blocks_fresh_row_without_force_or_token():
+    from agents.flyer.manual_queue import enforce_close_freshness_guard
+    now = datetime(2026, 5, 19, 21, 10, 0, tzinfo=timezone.utc)
+    with pytest.raises(ValueError) as exc:
+        enforce_close_freshness_guard(
+            _fresh_store(), "F0058",
+            reason="cleanup",
+            force=False,
+            now=now,
+        )
+    msg = str(exc.value)
+    assert "F0058" in msg
+    assert "--force" in msg
+    assert "duplicate" in msg  # accepted-token list surfaced to operator
+
+
+def test_close_freshness_guard_does_not_accept_provider_unavailable_substring():
+    """SUBSTRING SLIPPAGE GUARD: the operator-burndown reason as seen in prod
+    (`operator_burndown_20260519_duplicate_source_edit_provider_unavailable_no_customer_asset_sent`)
+    contains `provider_unavailable` but NOT the documented exact token
+    `provider_unavailable_after_retry`. Without word-boundary anchoring on the
+    matcher, a bare `provider_unavailable` substring would silently bypass
+    the guard. It must NOT — only the exact token (or --force) bypasses."""
+    from agents.flyer.manual_queue import enforce_close_freshness_guard
+    now = datetime(2026, 5, 19, 21, 10, 0, tzinfo=timezone.utc)
+    reason = "operator_burndown_provider_unavailable_no_customer_asset_sent"
+    with pytest.raises(ValueError):
+        enforce_close_freshness_guard(
+            _fresh_store(), "F0058",
+            reason=reason,
+            force=False,
+            now=now,
+        )
+    # Same reason BUT containing duplicate — bypassed via duplicate token.
+    enforce_close_freshness_guard(
+        _fresh_store(), "F0058",
+        reason="operator_burndown_20260519_duplicate_" + reason,
+        force=False,
+        now=now,
+    )
+
+
+def test_close_freshness_guard_passes_aged_rows():
+    """A row older than the freshness threshold can be closed with any
+    non-empty reason — the guard is targeted at fresh-row protection only."""
+    from agents.flyer.manual_queue import enforce_close_freshness_guard
+    now = datetime(2026, 5, 19, 22, 0, 0, tzinfo=timezone.utc)  # +56 min
+    enforce_close_freshness_guard(
+        _fresh_store(), "F0058",
+        reason="cleanup",
+        force=False,
+        now=now,
+    )
+
+
+def test_close_freshness_guard_reason_match_is_case_insensitive():
+    """Reason matching normalizes to lowercase so uppercase token typed by
+    the operator still passes."""
+    from agents.flyer.manual_queue import enforce_close_freshness_guard
+    now = datetime(2026, 5, 19, 21, 10, 0, tzinfo=timezone.utc)
+    enforce_close_freshness_guard(
+        _fresh_store(), "F0058",
+        reason="DUPLICATE",
+        force=False,
+        now=now,
+    )
+
+
+def test_close_freshness_guard_only_invoked_inside_close_branch():
+    """The guard is bound to `--close` only — `--complete` and other
+    dispositions must not be subject to it. Verified by source inspection:
+    one call site, gated by the `if args.close:` argparse branch."""
+    source = Path(__file__).resolve().parent.parent / "src" / "agents" / "flyer" / "scripts" / "flyer-manual-queue"
+    text = source.read_text(encoding="utf-8")
+    assert text.count("enforce_close_freshness_guard(") == 1, (
+        "guard must be invoked exactly once (inside --close)"
+    )
+    close_idx = text.find("if args.close:")
+    complete_idx = text.find("if args.complete:")
+    guard_idx = text.find("enforce_close_freshness_guard(")
+    assert close_idx >= 0 and complete_idx >= 0 and guard_idx >= 0
+    assert complete_idx < close_idx < guard_idx, (
+        "guard must sit inside the --close branch, after --complete"
+    )

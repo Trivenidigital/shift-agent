@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from agents.flyer.workflow import (
+    CLOSED_NO_SEND_REASON_LINES,
     MANUAL_REVIEW_REASON_LINES,
     STATUS_LINES,
     build_project_status_reply,
@@ -87,6 +88,19 @@ def test_manual_review_reason_lines_covers_every_flyer_manual_review_reason():
     assert not extra, f"MANUAL_REVIEW_REASON_LINES has entries for non-existent reasons: {sorted(extra)}"
 
 
+def test_closed_no_send_reason_lines_covers_every_flyer_manual_review_reason():
+    """Mirror of the manual-review-reason coverage gate, for closed_no_send
+    projects. After operator close, the customer's status reply must carry
+    reason-specific copy with a concrete next step — no silent fall-through
+    to the generic 'closed by the operator' line."""
+    all_reasons = set(get_args(FlyerManualReviewReason))
+    table_keys = set(CLOSED_NO_SEND_REASON_LINES.keys())
+    missing = all_reasons - table_keys
+    extra = table_keys - all_reasons
+    assert not missing, f"CLOSED_NO_SEND_REASON_LINES missing entries for: {sorted(missing)}"
+    assert not extra, f"CLOSED_NO_SEND_REASON_LINES has entries for non-existent reasons: {sorted(extra)}"
+
+
 # ---------- per-status determinism ----------
 
 @pytest.mark.parametrize("status", sorted(get_args(FlyerWorkflowStatus)))
@@ -121,6 +135,39 @@ def test_every_manual_review_reason_produces_specific_reply(reason_code: str):
         f"reason_code {reason_code!r}: expected MANUAL_REVIEW_REASON_LINES"
         f"[{reason_code}] in reply, got {reply!r}"
     )
+
+
+@pytest.mark.parametrize("reason_code", sorted(get_args(FlyerManualReviewReason)))
+def test_every_closed_no_send_reason_produces_specific_reply(reason_code: str):
+    """A closed_no_send project with each reason_code returns the
+    reason-specific copy from CLOSED_NO_SEND_REASON_LINES — NOT the generic
+    STATUS_LINES['closed_no_send'] line. Otherwise the customer gets a
+    closure notice with no guidance on what to do next."""
+    project = _project(
+        status="closed_no_send",
+        manual_status="closed_no_send",
+        reason_code=reason_code,
+    )
+    reply = build_project_status_reply(project)
+    expected_line = CLOSED_NO_SEND_REASON_LINES[reason_code]
+    assert expected_line in reply, (
+        f"reason_code {reason_code!r}: expected CLOSED_NO_SEND_REASON_LINES"
+        f"[{reason_code}] in reply, got {reply!r}"
+    )
+
+
+def test_closed_no_send_with_none_manual_status_falls_back_to_generic_line():
+    """Legacy/pre-S1 projects at closed_no_send have manual_review.status
+    that isn't 'closed_no_send' (e.g., 'none'). The reason-code branch
+    must NOT fire — fall back to STATUS_LINES['closed_no_send']."""
+    project = _project(
+        status="closed_no_send",
+        manual_status="none",
+        reason_code="source_edit_provider_unavailable",
+    )
+    reply = build_project_status_reply(project)
+    assert STATUS_LINES["closed_no_send"] in reply
+    assert CLOSED_NO_SEND_REASON_LINES["source_edit_provider_unavailable"] not in reply
 
 
 # ---------- manual_review status-aware routing ----------
