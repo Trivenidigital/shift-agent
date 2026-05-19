@@ -64,6 +64,29 @@ def test_sidecar_provider_extracts_items_and_prices(tmp_path, monkeypatch):
     assert {"Idly", "$7", "Dosa", "$8"}.issubset(values)
 
 
+def test_openrouter_provider_extracts_menu_text_from_image(monkeypatch, tmp_path):
+    from agents.flyer.reference_extract import OpenRouterVisionReferenceExtractionProvider
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    asset = _asset(tmp_path)
+
+    def fake_call(_payload):
+        return {
+            "visible_text": "Lakshmis Kitchen\nIdly $7.00\nDosa $8.00\nCall 904-555-0123",
+            "confidence": "high",
+            "warnings": [],
+        }
+
+    provider = OpenRouterVisionReferenceExtractionProvider(call_json=fake_call)
+
+    text, status = provider.extract_text(asset, "Extract item names and prices from attached sample flyer")
+
+    assert status == "ok"
+    assert "Idly $7.00" in text
+    assert "Dosa $8.00" in text
+
+
 def test_unsupported_pdf_queues_manual_not_extraction(tmp_path, monkeypatch):
     from agents.flyer.reference_extract import NoopReferenceExtractionProvider, extract_reference
 

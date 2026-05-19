@@ -281,8 +281,169 @@ def test_create_project_records_reference_extraction_provider_failure(monkeypatc
 
     assert project["reference_extractions"][0]["role"] == "menu_reference"
     assert project["reference_extractions"][0]["status"] == "provider_unavailable"
-    assert project["manual_review"]["status"] == "none"
+    assert project["manual_review"]["status"] == "queued"
+    assert project["manual_review"]["reason"] == "reference_provider_unavailable"
+    assert project["status"] == "manual_edit_required"
+
+
+def test_create_project_image_reference_extracts_locked_menu_facts(monkeypatch, tmp_path, capsys):
+    module = _load_script(monkeypatch)
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    reference = tmp_path / "menu.png"
+    reference.write_bytes(b"fake image bytes")
+    _write_customer(customers_path, category="Indian grocery", phone="+17329837841")
+
+    class FakeReferenceProvider:
+        provider_name = "fake_vision"
+
+        def extract_text(self, _asset, _raw_request):
+            return "Lakshmis Kitchen\nIdly $7.00\nDosa $8.00\nSamosa $3.50", "ok"
+
+    monkeypatch.setattr(
+        module,
+        "build_reference_extraction_provider",
+        lambda: FakeReferenceProvider(),
+        raising=False,
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+17329837841",
+        "--message-id", "m-image-menu",
+        "--raw-request", "Create a menu flyer. Extract item names and prices from attached sample flyer.",
+        "--reference-media-path", str(reference),
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+        "--asset-dir", str(asset_dir),
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+    facts = {(fact["fact_id"], fact["value"], fact["source"]) for fact in project["locked_facts"]}
+
     assert project["status"] == "intake_started"
+    assert project["manual_review"]["status"] == "none"
+    assert project["reference_extractions"][0]["status"] == "ok"
+    assert ("item:0:name", "Idly", "reference_vision") in facts
+    assert ("item:0:price", "$7.00", "reference_vision") in facts
+    assert ("item:1:name", "Dosa", "reference_vision") in facts
+    assert ("item:1:price", "$8.00", "reference_vision") in facts
+
+
+def test_create_project_typed_facts_override_reference_facts(monkeypatch, tmp_path, capsys):
+    module = _load_script(monkeypatch)
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    reference = tmp_path / "menu.png"
+    reference.write_bytes(b"fake image bytes")
+    _write_customer(customers_path, category="Indian grocery", phone="+17329837841")
+
+    class FakeReferenceProvider:
+        provider_name = "fake_vision"
+
+        def extract_text(self, _asset, _raw_request):
+            return "Idly $7.00\nDosa $8.00", "ok"
+
+    monkeypatch.setattr(
+        module,
+        "build_reference_extraction_provider",
+        lambda: FakeReferenceProvider(),
+        raising=False,
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+17329837841",
+        "--message-id", "m-typed-wins",
+        "--raw-request", (
+            "Create a menu flyer with Idly $6.50 and Dosa $8.50. "
+            "Extract item names and prices from attached sample flyer."
+        ),
+        "--reference-media-path", str(reference),
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+        "--asset-dir", str(tmp_path / "assets"),
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+    facts = {fact["fact_id"]: fact for fact in project["locked_facts"]}
+
+    assert facts["item:0:name"]["value"] == "Idly"
+    assert facts["item:0:price"]["value"] == "$6.50"
+    assert facts["item:1:name"]["value"] == "Dosa"
+    assert facts["item:1:price"]["value"] == "$8.50"
+
+
+def test_create_project_logo_only_image_does_not_become_menu_facts(monkeypatch, tmp_path, capsys):
+    module = _load_script(monkeypatch)
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    reference = tmp_path / "logo.png"
+    reference.write_bytes(b"fake image bytes")
+    _write_customer(customers_path, category="Indian grocery", phone="+17329837841")
+
+    class ExplodingReferenceProvider:
+        provider_name = "should_not_run"
+
+        def extract_text(self, _asset, _raw_request):
+            raise AssertionError("logo-only references should not run menu extraction")
+
+    monkeypatch.setattr(
+        module,
+        "build_reference_extraction_provider",
+        lambda: ExplodingReferenceProvider(),
+        raising=False,
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+17329837841",
+        "--message-id", "m-logo-ref",
+        "--raw-request", "Create a premium flyer for Lakshmis Kitchen using this as our logo.",
+        "--reference-media-path", str(reference),
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+        "--asset-dir", str(tmp_path / "assets"),
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+
+    assert project["reference_extractions"][0]["role"] == "logo"
+    assert project["reference_extractions"][0]["status"] == "not_run"
+    assert not [fact for fact in project["locked_facts"] if fact["fact_id"].startswith("item:")]
+
+
+def test_create_project_pdf_reference_queues_manual_review(monkeypatch, tmp_path, capsys):
+    module = _load_script(monkeypatch)
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    reference = tmp_path / "menu.pdf"
+    reference.write_bytes(b"%PDF-1.4 fake")
+    _write_customer(customers_path, category="Indian grocery", phone="+17329837841")
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+17329837841",
+        "--message-id", "m-pdf-menu",
+        "--raw-request", "Create a menu flyer. Extract item names and prices from attached sample menu.",
+        "--reference-media-path", str(reference),
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+        "--asset-dir", str(tmp_path / "assets"),
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+
+    assert project["status"] == "manual_edit_required"
+    assert project["manual_review"]["status"] == "queued"
+    assert project["manual_review"]["reason"] == "reference_unsupported"
+    assert project["reference_extractions"][0]["status"] == "unsupported"
+    assert "application/pdf" in project["reference_extractions"][0]["detail"]
 
 
 def test_create_project_cleans_new_original_reference_business_name(monkeypatch):

@@ -27,6 +27,16 @@ except ImportError:
 STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
 ASSET_DIR = Path("/opt/shift-agent/state/flyer/assets")
 CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
+REFERENCE_BLOCKING_ROLES = {"menu_reference", "old_flyer_reference", "source_edit_template", "unsupported"}
+REFERENCE_BLOCKING_STATUSES = {"provider_unavailable", "unsupported", "low_confidence"}
+
+
+def _failed_required_reference_extractions(project) -> list:
+    return [
+        extraction
+        for extraction in project.reference_extractions
+        if extraction.role in REFERENCE_BLOCKING_ROLES and extraction.status in REFERENCE_BLOCKING_STATUSES
+    ]
 
 
 def main() -> int:
@@ -51,6 +61,33 @@ def main() -> int:
             break
     if project is None:
         raise SystemExit(f"project not found: {args.project_id}")
+
+    failed_reference_extractions = _failed_required_reference_extractions(project)
+    if failed_reference_extractions:
+        now = datetime.now(timezone.utc)
+        first = failed_reference_extractions[0]
+        manual = project.manual_review.model_copy(update={
+            "status": "queued",
+            "reason": f"reference_{first.status}",
+            "detail": first.detail,
+            "queued_at": now,
+        })
+        with FileLock(Path(str(state_path) + ".lock")):
+            store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
+            for idx, current in enumerate(store.projects):
+                if current.project_id == args.project_id:
+                    store.projects[idx] = current.model_copy(update={
+                        "status": "manual_edit_required",
+                        "manual_review": manual,
+                        "updated_at": now,
+                    })
+                    break
+            atomic_write_text(state_path, store.model_dump_json(indent=2))
+        print(json.dumps({
+            "project_id": args.project_id,
+            "reference_extraction_failed": [item.model_dump(mode="json") for item in failed_reference_extractions],
+        }))
+        return 2
 
     asset_dir = Path(args.asset_dir)
     with FileLock(asset_dir / f".{args.project_id}.generate.lock"):

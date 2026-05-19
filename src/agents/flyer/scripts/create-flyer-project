@@ -24,9 +24,9 @@ try:
 except ImportError:
     from agents.flyer.facts import extract_text_facts, merge_locked_facts  # noqa: E402
 try:
-    from flyer_reference_extract import NoopReferenceExtractionProvider, extract_reference  # type: ignore  # noqa: E402
+    from flyer_reference_extract import build_reference_extraction_provider, extract_reference  # type: ignore  # noqa: E402
 except ImportError:
-    from agents.flyer.reference_extract import NoopReferenceExtractionProvider, extract_reference  # noqa: E402
+    from agents.flyer.reference_extract import build_reference_extraction_provider, extract_reference  # noqa: E402
 
 
 STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
@@ -377,6 +377,12 @@ def _copy_reference_asset(
     )
 
 
+def _reference_failure_requires_manual_review(extraction) -> bool:
+    if extraction.status not in {"provider_unavailable", "unsupported", "low_confidence"}:
+        return False
+    return extraction.role in {"menu_reference", "old_flyer_reference", "source_edit_template", "unsupported"}
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--customer-phone", required=True)
@@ -407,6 +413,7 @@ def main() -> int:
         reference_asset = None
         reference_extractions = []
         manual_review = FlyerManualReview()
+        reference_manual_required = False
         if args.reference_media_path:
             reference_asset = _copy_reference_asset(
                 Path(args.reference_media_path),
@@ -419,10 +426,11 @@ def main() -> int:
                 extraction = extract_reference(
                     reference_asset,
                     raw_request=args.raw_request,
-                    provider=NoopReferenceExtractionProvider(),
+                    provider=build_reference_extraction_provider(),
                 )
                 reference_extractions.append(extraction)
-                if args.manual_edit_required and extraction.status in {"provider_unavailable", "unsupported", "low_confidence"}:
+                if _reference_failure_requires_manual_review(extraction):
+                    reference_manual_required = True
                     manual_review = FlyerManualReview(
                         status="queued",
                         reason=f"reference_{extraction.status}",
@@ -435,7 +443,7 @@ def main() -> int:
                 locked_facts,
                 *(extraction.extracted_facts for extraction in reference_extractions),
             )
-        status = "manual_edit_required" if args.manual_edit_required else "intake_started"
+        status = "manual_edit_required" if args.manual_edit_required or reference_manual_required else "intake_started"
         project = FlyerProject(
             project_id=project_id,
             status=status,

@@ -76,6 +76,12 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
     seen: set[str] = set()
     for idx, match in enumerate(pattern.finditer(text or "")):
         name = _clean(match.group("name"))
+        name = re.sub(
+            r"^(?:create|make|generate|design)\s+(?:a\s+)?(?:menu\s+)?(?:flyer|flier|poster|banner)\s+(?:with|for)?\s*",
+            "",
+            name,
+            flags=re.IGNORECASE,
+        ).strip()
         name = re.sub(r"^(?:and|with|include|includes)\s+", "", name, flags=re.IGNORECASE)
         price = f"${match.group('price')}"
         if not name or name.lower() in seen:
