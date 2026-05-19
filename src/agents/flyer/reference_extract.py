@@ -45,7 +45,12 @@ def classify_reference_role(raw_request: str, asset: FlyerAsset) -> FlyerReferen
         text,
     ):
         return "source_edit_template"
-    if re.search(r"\b(?:extract|take|use).{0,60}\b(?:items?|prices?|menu)\b|\b(?:sample|reference).{0,30}\b(?:flyer|menu)\b", text):
+    if re.search(
+        r"\b(?:extract|take|use).{0,60}\b(?:items?|prices?|menu)\b"
+        r"|\b(?:sample|reference|attached|uploaded|this).{0,30}\b(?:flyer|menu|price\s*list)\b"
+        r"|\b(?:from|using)\s+(?:this\s+)?(?:attached|uploaded)\s+(?:menu|price\s*list)\b",
+        text,
+    ):
         return "menu_reference"
     if not mime.startswith("image/"):
         return "unsupported"
@@ -177,13 +182,14 @@ def _facts_from_text(text: str, *, asset: FlyerAsset, source: str) -> list[Flyer
         flags=re.IGNORECASE,
     )
     promo_tail = re.compile(r"^\s*(?:off|discount|save|coupon|credit|cashback|%|\bpercent\b)", flags=re.IGNORECASE)
+    promo_name = re.compile(r"^(?:save|coupon|discount|offer|deal|special|weekend special|cashback|credit)\b", flags=re.IGNORECASE)
     for line in (text or "").splitlines():
         for match in pattern.finditer(line):
             if promo_tail.search(match.group("tail") or ""):
                 continue
             name = " ".join(match.group("name").strip(" .,:;-").split())
             name = re.sub(r"^(?:and|with|include|includes)\s+", "", name, flags=re.IGNORECASE).strip()
-            if not name:
+            if not name or promo_name.search(name):
                 continue
             idx = len(facts) // 2
             price = f"${match.group('price')}"

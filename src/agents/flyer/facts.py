@@ -69,23 +69,33 @@ def _tagline(text: str) -> str:
 
 def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFact]:
     facts: list[FlyerLockedFact] = []
-    pattern = re.compile(
+    name_before_price = re.compile(
         r"(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,60}?)\s*(?:-|:)?\s*\$\s*(?P<price>\d+(?:\.\d{2})?)",
         flags=re.IGNORECASE,
     )
+    price_before_name = re.compile(
+        r"\$\s*(?P<price>\d+(?:\.\d{2})?)\s*(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,50})",
+        flags=re.IGNORECASE,
+    )
     seen: set[str] = set()
-    for idx, match in enumerate(pattern.finditer(text or "")):
-        name = _clean(match.group("name"))
+    promo_name = re.compile(r"^(?:save|coupon|discount|offer|deal|special|cashback|credit)\b", flags=re.IGNORECASE)
+    bad_context = re.compile(r"\b(?:create|make|generate|design|flyer|flier|poster|banner|promoting|promote|promotion)\b", flags=re.IGNORECASE)
+
+    def add_item(name: str, price: str) -> None:
+        name = _clean(name)
         name = re.sub(
             r"^(?:create|make|generate|design)\s+(?:a\s+)?(?:menu\s+)?(?:flyer|flier|poster|banner)\s+(?:with|for)?\s*",
             "",
             name,
             flags=re.IGNORECASE,
         ).strip()
-        name = re.sub(r"^(?:and|with|include|includes)\s+", "", name, flags=re.IGNORECASE)
-        price = f"${match.group('price')}"
+        name = re.sub(r"^(?:and|with|include|includes|feature|features|featuring)\s+", "", name, flags=re.IGNORECASE)
         if not name or name.lower() in seen:
-            continue
+            return
+        if promo_name.search(name) or bad_context.search(name):
+            return
+        if len(name.split()) > 5:
+            return
         seen.add(name.lower())
         name_fact = _fact(f"item:{len(seen)-1}:name", "Item", name, "customer_text", message_id=message_id)
         price_fact = _fact(f"item:{len(seen)-1}:price", "Price", price, "customer_text", message_id=message_id)
@@ -93,6 +103,16 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
             facts.append(name_fact)
         if price_fact:
             facts.append(price_fact)
+
+    for segment in re.split(r"[\n\r,;]+", text or ""):
+        for match in name_before_price.finditer(segment):
+            add_item(match.group("name"), f"${match.group('price')}")
+        for match in price_before_name.finditer(segment):
+            name = match.group("name")
+            name = re.split(r"\b(?:and|with|include|includes|plus|for|on|at)\b|[.!?]", name, maxsplit=1, flags=re.IGNORECASE)[0]
+            if not name.strip():
+                continue
+            add_item(name, f"${match.group('price')}")
     return facts
 
 

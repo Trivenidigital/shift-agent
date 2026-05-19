@@ -28,6 +28,7 @@ def test_classifies_logo_menu_reference_and_source_edit(tmp_path, monkeypatch):
 
     assert classify_reference_role("Use this as our logo", asset) == "logo"
     assert classify_reference_role("Extract item names and prices from attached sample flyer", asset) == "menu_reference"
+    assert classify_reference_role("Create a flyer from this attached menu", asset) == "menu_reference"
     assert classify_reference_role("Remove extra 08:00 from this uploaded flyer", asset) == "source_edit_template"
 
 
@@ -92,7 +93,7 @@ def test_reference_extraction_does_not_treat_discount_copy_as_menu_item(tmp_path
         provider_name = "test_promo"
 
         def extract_text(self, _asset, _raw_request):
-            return "Weekend Special $5 off\nIdly $7\nDosa $8", "ok"
+            return "Weekend Special $5 off\nSave $5 on Dosa\nCoupon $4\nIdly $7\nDosa $8", "ok"
 
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
 
@@ -104,6 +105,8 @@ def test_reference_extraction_does_not_treat_discount_copy_as_menu_item(tmp_path
 
     values = {fact.value for fact in result.extracted_facts}
     assert "Weekend Special" not in values
+    assert "Save" not in values
+    assert "Coupon" not in values
     assert {"Idly", "$7", "Dosa", "$8"}.issubset(values)
 
 

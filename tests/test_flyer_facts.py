@@ -98,6 +98,25 @@ def test_merge_locked_facts_overrides_reference_items_by_name_not_position():
     assert [fact.value for fact in merged if fact.value == "Dosa"] == ["Dosa"]
 
 
+def test_extract_text_facts_handles_price_first_without_prompt_prefix_pollution():
+    from agents.flyer.facts import extract_text_facts, facts_by_id
+
+    fields = FlyerRequestFields(
+        event_or_business_name="Chloe Hair Studio",
+        contact_info="+1 757 555 0199",
+        notes="Create flyer for Chloe Hair Studio promoting the $20 men haircut, $80 perms, and $7 kids trim.",
+    )
+
+    facts = extract_text_facts(fields, fields.notes, message_id="m-1")
+    by_id = facts_by_id(type("P", (), {"locked_facts": facts})())
+
+    assert by_id["item:0:name"].value == "men haircut"
+    assert by_id["item:0:price"].value == "$20"
+    assert by_id["item:1:name"].value == "perms"
+    assert by_id["item:1:price"].value == "$80"
+    assert all("Create flyer" not in fact.value for fact in facts)
+
+
 def test_context_isolation_blocks_stale_project_provenance():
     from agents.flyer.facts import context_isolation_blockers
 

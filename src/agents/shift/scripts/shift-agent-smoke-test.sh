@@ -119,6 +119,48 @@ if ! sudo -u shift-agent "$PY" /usr/local/bin/smoke-flyer-quality --final-packag
 fi
 echo "Flyer quality deterministic smoke passed"
 
+REF_SMOKE_DIR="$(mktemp -d /tmp/flyer-reference-smoke.XXXXXX)"
+cleanup_ref_smoke() { rm -rf "$REF_SMOKE_DIR"; }
+trap cleanup_ref_smoke EXIT
+mkdir -p "$REF_SMOKE_DIR/assets"
+printf 'fake image bytes' > "$REF_SMOKE_DIR/menu.png"
+chown -R shift-agent:shift-agent "$REF_SMOKE_DIR"
+if ! sudo -u shift-agent env FLYER_STATE_ROOT="$REF_SMOKE_DIR" "$PY" /usr/local/bin/create-flyer-project \
+    --customer-phone +19045550123 \
+    --message-id smoke-reference-menu \
+    --raw-request "Create a flyer from this attached menu." \
+    --reference-media-path "$REF_SMOKE_DIR/menu.png" \
+    --state-path "$REF_SMOKE_DIR/projects.json" \
+    --customer-state-path "$REF_SMOKE_DIR/customers.json" \
+    --asset-dir "$REF_SMOKE_DIR/assets" \
+    --defer-reference-extraction > "$REF_SMOKE_DIR/create.json"; then
+    echo "FAIL: Flyer deferred reference create smoke failed"
+    exit 1
+fi
+REF_ASSET_PATH="$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1]))["assets"][0]["path"])' "$REF_SMOKE_DIR/create.json")"
+printf 'Idly $7\nDosa $8\n' > "${REF_ASSET_PATH}.ocr.txt"
+if ! sudo -u shift-agent env FLYER_STATE_ROOT="$REF_SMOKE_DIR" FLYER_REFERENCE_ALLOW_SIDECAR=1 "$PY" /usr/local/bin/generate-flyer-concepts \
+    --project-id F0001 \
+    --state-path "$REF_SMOKE_DIR/projects.json" \
+    --asset-dir "$REF_SMOKE_DIR/assets" \
+    --config-path /opt/shift-agent/config.yaml > "$REF_SMOKE_DIR/generate.json"; then
+    echo "FAIL: Flyer deferred reference generate smoke failed"
+    exit 1
+fi
+if ! "$PY" - "$REF_SMOKE_DIR/projects.json" <<'PY' > /dev/null; then
+import json, sys
+project = json.load(open(sys.argv[1], encoding="utf-8"))["projects"][0]
+values = {fact["value"] for fact in project.get("locked_facts", [])}
+assert {"Idly", "$7", "Dosa", "$8"}.issubset(values)
+assert project["reference_extractions"][0]["status"] == "ok"
+PY
+    echo "FAIL: Flyer deferred reference facts smoke failed"
+    exit 1
+fi
+trap - EXIT
+cleanup_ref_smoke
+echo "Flyer deferred reference extraction smoke passed"
+
 if ! sudo -u shift-agent "$PY" /usr/local/bin/flyer-delivery-report --json > /dev/null; then
     echo "FAIL: Flyer delivery report failed"
     exit 1
