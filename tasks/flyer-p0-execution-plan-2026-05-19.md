@@ -159,6 +159,14 @@ Mirrors parent backlog §"90% Readiness Exit Criteria"; closed only when:
 
 Updates land here in reverse-chronological order after each slice merge/deploy.
 
+### 2026-05-19 — S4 P0-2 locked-fact renderer integration + missing-required-facts gate: MERGED + DEPLOYED
+
+- PR #119 merged at `dfcbea4` (2 commits: feat `3b9eaf6` + review-fix `41a9e9e`).
+- Three parallel reviewers dispatched (provenance, runtime/state, rendering/QA). One HIGH from the rendering reviewer caught the critical issue: the manifest was locked-aware but six image-generation paths (`_menu_overlay_payload`, `_poster_copy_plan`, `_image_prompt` theme line, `_source_edit_prompt`, Pillow fallback title, Pillow spec) still read `fields.*` directly — S5's visual QA would have fired false-positive mismatches on every project where locked overrode fields. All six routed through `fact_value` in the review-fix commit. Two LOW polish items applied (fact_value `str | None` signature; create-flyer-project calls `missing_required_facts` instead of inlining). Three reviewer findings deferred to follow-up backlog (operator priority dormant; profile-hydrated business_name source label; non-item `_detail_clauses` parsing).
+- Deploy tag `deploy-20260519-174614-41a9e9e5` on `main-vps`; all 4 Flyer smokes green; full pytest 1146 passed (+13 vs S3 baseline).
+- Post-deploy verification: VPS has `DEFAULT_REQUIRED_FACT_IDS`/`missing_required_facts`/`fact_value` in `/opt/shift-agent/flyer_facts.py` (4 matches); schema enum extended (1 match for `missing_required_facts`); gateway+cockpit active; `/flyer/manual-queue` HTTP 401; CLI triage unchanged (6 items, 3 legacy_unknown + 3 source_edit_provider_unavailable).
+- Lessons: (1) When canonicalizing a value (manifest vs image consumer), **both producers must use the same source** — locking the manifest without locking the prompt/draw paths creates a "ghost" QA mismatch invisible to unit tests. The rendering reviewer caught it by tracing end-to-end (customer text → manifest → image prompt → Pillow draw → S5 OCR). (2) Three reviewers along **orthogonal lenses** (provenance / runtime / rendering) found three completely different classes of issue; running them in parallel was the right cost for this slice — none would have caught all three classes alone.
+
 ### 2026-05-19 — S3 P0-1 project context isolation + stale-state guard: MERGED + DEPLOYED
 
 - PR #118 merged at `e2842d1` (2 commits: feat `9e8d4b6` + review-fix `25bc14a`).
