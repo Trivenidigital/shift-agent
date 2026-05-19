@@ -888,9 +888,15 @@ def _image_message_content(project: FlyerProject, *, concept_id: str, output_for
     return parts if len(parts) > 1 else prompt
 
 
-def _image_prompt(project: FlyerProject, *, concept_id: str, output_format: str, size: tuple[int, int] | None) -> str:
+def _revision_notes_for_prompt(project: FlyerProject) -> str:
+    if project.status not in {"revising_design", "manual_edit_required"}:
+        return "- none"
     revisions = [r.request_text for r in project.revisions[-4:]]
-    revision_block = "\n".join(f"- {r}" for r in revisions) if revisions else "- none"
+    return "\n".join(f"- {r}" for r in revisions) if revisions else "- none"
+
+
+def _image_prompt(project: FlyerProject, *, concept_id: str, output_format: str, size: tuple[int, int] | None) -> str:
+    revision_block = _revision_notes_for_prompt(project)
     reference_instruction = _reference_preservation_instruction(project)
     sanitized_style = _sanitize_visual_context(project.fields.style_preference or "festive, clean, professional")
     return f"""Create a complete, finished customer-ready poster flyer for WhatsApp delivery.
