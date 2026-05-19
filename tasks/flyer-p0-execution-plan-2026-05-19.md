@@ -159,6 +159,25 @@ Mirrors parent backlog §"90% Readiness Exit Criteria"; closed only when:
 
 Updates land here in reverse-chronological order after each slice merge/deploy.
 
+### 2026-05-19 — S6 P0-5 source-edit preflight + reliability: MERGED + DEPLOYED
+
+- PR #121 merged at `04ad45f` (3 commits: feat `e3013e2` + initial-review-fix `3526a35`-equiv on same branch + **operator-required review-fix `060df50` per user direction**).
+- Workflow change: user instructed mid-slice "Do not deploy, create PR for my review and once review done you can deploy." Three automated reviewers (source-preservation, state/quota safety, QA-truthfulness) reported. Convergent + HIGH findings A-F were applied in `060df50`; G + H deferred as follow-ups.
+- Six fixes shipped:
+  - **A.** `flyer_source_edit_preflight` returns `(ok, detail, reason_code)`; cockpit triage now groups PDF rejections as `reference_unsupported` and missing-on-disk as `reference_provider_unavailable`, not blanket `source_edit_provider_unavailable`.
+  - **B.** cf-router exact-edit site captures `(queue_ok, queue_detail)` and skips the misleading "queued" customer ack when queue update silently failed.
+  - **C.** Quality-check `FlyerRenderError` maps to `visual_qa_failed` (structural) instead of `provider_timeout` (transient).
+  - **D.** `_is_source_edit_project` requires explicit raw_request marker OR (manual_edit_required AND reference_image asset). S4 missing_required_facts and S5 visual_qa_failed projects no longer get misclassified as source-edit.
+  - **E.** Site 2 reorders release-before-ack (matches site 1 quota safety).
+  - **F.** `_openai_source_edit_bytes` rejects PLACEHOLDER keys before urlopen — defense-in-depth mirroring workflow + visual_qa.
+- Deploy tag `deploy-20260519-184721-060df509` on `main-vps`; all 4 Flyer smokes green; full pytest **1171 passed, 677 skipped** (+10 vs S5 baseline 1161 across the slice).
+- 7-item post-deploy verification: deploy smoke ✓; `smoke-flyer-quality --final-package` `ok=true` (concept_count=1, send_dry_run.ok=true, stale_sidecar_check tripped); gateway active since 18:47:30 UTC, cockpit active, `/flyer/manual-queue` HTTP 401, bridge on `:3000`; preflight provider-unavailable dry-run returned correct `reason_code="source_edit_provider_unavailable"`; preflight PDF dry-run returned correct `reason_code="reference_unsupported"` (verifies fix A in prod); existing F0052/F0053/F0056 source-edit-queued projects still visible in `flyer-manual-queue --list` with correct reason_code; triage CLI unchanged at total=6 (3+3 grouping).
+- Deferred follow-ups (acceptable per user scope):
+  - Align source-edit env lookup with visual-QA key lookup across `/root/.hermes/.env` and `/opt/shift-agent/.env`.
+  - Clean orphan preview/temp files on source-edit quality-check failure.
+  - Surface `source_edit_integrity_only` verification mode in cockpit manual queue (so operators can visually distinguish integrity-only from fully-QA'd source-edit projects).
+- Lessons: (1) **Reviewer-flagged HIGH wiring bugs surface only when fixes pass real prod data through them** — the PDF-rejection regression went from "test-expected `must be an image`" to "post-fix `reference_unsupported`" because the workflow-helper's pre-existing mime check runs before our preflight's path-extension check; the typed-tuple refactor needed to handle BOTH classification paths. Caught by re-running the test suite after the first fix attempt. (2) **The "do not deploy, PR for review" workflow ran cleanly** — automated reviewers found 4 HIGH bugs the smoke gate would not have caught; user review confirmed the priorities; only A-F got shipped in the same PR cycle, G/H deferred as documented follow-ups. The reviewer-first cadence is materially safer than the post-deploy fix-forward cadence used in S1/S2/S5.
+
 ### 2026-05-19 — S5 P0-4 visual/OCR QA gate hardening: MERGED + DEPLOYED
 
 - PR #120 merged at `bb7a6f8` (2 commits: feat `d5650eb` + review-fix `3526a35`).
