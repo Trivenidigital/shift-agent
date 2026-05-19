@@ -26,7 +26,7 @@ from agents.flyer.render import (  # noqa: E402
     validate_text_manifest_file,
     write_text_manifest,
 )
-from schemas import FlyerAsset, FlyerConcept, FlyerProject, FlyerRequestFields  # noqa: E402
+from schemas import FlyerAsset, FlyerConcept, FlyerProject, FlyerRequestFields, FlyerRevision  # noqa: E402
 
 
 def _complete_project() -> FlyerProject:
@@ -306,6 +306,59 @@ def test_image_prompt_sanitizes_exact_customer_facts_from_model_context():
     assert "Contact: +1 904 555 0123" in prompt
     assert "Date: 2026-10-10" in prompt
     assert "Call +1 904 555 0123 on 2026-10-10" not in prompt
+
+
+def test_fresh_generation_prompt_does_not_carry_stale_revision_history():
+    project = _complete_project().model_copy(update={
+        "status": "intake_started",
+        "raw_request": "Create a premium chicken flyer for Fresh Meats.",
+        "fields": FlyerRequestFields(
+            event_or_business_name="Fresh Meats",
+            venue_or_location="9551 Baymeadows Rd Suite 18",
+            contact_info="+19048626362",
+            notes="Premium Clean Chicken. Clean bird. Strong life.",
+            style_preference="premium organic-style chicken grocery flyer",
+        ),
+        "revisions": [
+            FlyerRevision(
+                revision_id="R001",
+                message_id="old-1",
+                requested_at=datetime.now(timezone.utc),
+                request_text="Use the old dosa night layout with orange festival colors.",
+            ),
+            FlyerRevision(
+                revision_id="R002",
+                message_id="old-2",
+                requested_at=datetime.now(timezone.utc),
+                request_text="Make the stale biryani flyer darker and keep the old template.",
+            ),
+        ],
+    })
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+
+    assert "Fresh Meats" in prompt
+    assert "old dosa night layout" not in prompt
+    assert "stale biryani flyer" not in prompt
+
+
+def test_revision_generation_prompt_keeps_current_revision_notes():
+    project = _complete_project().model_copy(update={
+        "status": "revising_design",
+        "revisions": [
+            FlyerRevision(
+                revision_id="R001",
+                message_id="rev-1",
+                requested_at=datetime.now(timezone.utc),
+                request_text="Make the logo larger and brighten the hero food photo.",
+            ),
+        ],
+    })
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+
+    assert "Make the logo larger" in prompt
+    assert "brighten the hero food photo" in prompt
 
 
 def test_image_prompt_sanitizes_style_and_brand_asset_notes(tmp_path, monkeypatch):
