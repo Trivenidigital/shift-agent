@@ -1500,6 +1500,17 @@ def test_manual_source_edit_status_check_gets_queue_update_not_clarification(mon
             "Replace Triveni Express branding and use saved account details."
         ),
         "updated_at": "2026-05-19T02:11:00Z",
+        # S7 P0-6: reason_code on the manual_review row drives cf-router
+        # routing — source_edit_provider_unavailable hits the source-edit-
+        # specific reply ("already have the requested changes ...") rather
+        # than the new general-purpose reason-code reply.
+        "manual_review": {
+            "status": "queued",
+            "reason": "source_edit_provider_unavailable",
+            "reason_code": "source_edit_provider_unavailable",
+            "detail": "legacy source-edit project queued before reason was tracked",
+            "queued_at": "2026-05-19T02:11:00Z",
+        },
     }
     sent = []
 

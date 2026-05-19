@@ -195,13 +195,26 @@ def test_scenario2_old_manual_edit_required_does_not_swallow_distinct_poster_req
 
 
 def test_scenario3_status_check_on_stale_manual_edit_still_returns_manual_status(monkeypatch):
-    """Status check ('any update?') on a stale manual_edit_required project still routes to the manual-queue status reply, not bypassed."""
+    """Status check ('any update?') on a stale manual_edit_required project still routes to the manual-queue status reply, not bypassed.
+
+    Locks in source-edit reason_code routing — `flyer_manual_edit_status_reply`
+    is now reserved for reason_code=source_edit_provider_unavailable (S7 P0-6);
+    other reason codes flow through `flyer_project_status_reply` which now
+    consults MANUAL_REVIEW_REASON_LINES."""
     hooks, actions = _load_plugin_modules()
     stale = _stale_project(
         project_id="F0902",
         status="manual_edit_required",
         hours_old=30,
     )
+    # Set reason_code so the source-edit-specific reply path is taken.
+    stale["manual_review"] = {
+        "status": "queued",
+        "reason": "source_edit_provider_unavailable",
+        "reason_code": "source_edit_provider_unavailable",
+        "detail": "stale source-edit project",
+        "queued_at": stale["updated_at"],
+    }
     _patch_basic_lookups(hooks, actions, monkeypatch, stale)
     sent: list[str] = []
     monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
