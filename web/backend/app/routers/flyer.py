@@ -1564,7 +1564,7 @@ def _flyer_image_model_config() -> dict[str, dict[str, str]]:
         edit = defaults.edit_image_model
     return {
         "openrouter_generation_vision": {"draft_image_model": draft, "final_image_model": final},
-        "openai_source_edit": {"edit_image_model": edit},
+        "openrouter_source_edit": {"edit_image_model": edit},
     }
 
 
@@ -1622,12 +1622,12 @@ async def _platform_runtime_components() -> list[dict[str, Any]]:
 
 
 def _flyer_provider_components() -> list[dict[str, Any]]:
-    """Per-provider posture for OpenRouter (generation/vision) + OpenAI (source-edit).
+    """Per-provider posture for OpenRouter generation/vision + source-edit.
 
     NEVER returns secret values or prefixes -- only key_present + key_source.
     Severity policy:
       - OpenRouter missing/placeholder => red (hard block on normal generation).
-      - OpenAI source-edit missing/placeholder => yellow (degraded; routes to
+      - OpenRouter source-edit missing/placeholder => yellow (degraded; routes to
         manual review). Stays yellow even when queued_count > 0 -- the detail
         string surfaces the manual-queue impact prominently instead.
     """
@@ -1648,32 +1648,31 @@ def _flyer_provider_components() -> list[dict[str, Any]]:
         or_severity = "red"
         or_detail = "OPENROUTER_API_KEY missing - normal Flyer Studio generation is blocked"
 
-    # OpenAI source-edit. Yellow when missing; queue impact surfaces in detail.
-    oa_value, oa_source = _read_env_layered("OPENAI_API_KEY")
-    oa_placeholder = bool(oa_value) and _is_placeholder(oa_value)
-    oa_present = bool(oa_value) and not oa_placeholder
+    # OpenRouter source-edit. Yellow when missing; queue impact surfaces in detail.
+    edit_value, edit_source = _read_env_layered("OPENROUTER_API_KEY")
+    edit_placeholder = bool(edit_value) and _is_placeholder(edit_value)
+    edit_present = bool(edit_value) and not edit_placeholder
     queue_impact = _source_edit_manual_queue_impact()
-    if oa_present:
-        oa_severity = "green"
-        oa_detail = f"OPENAI_API_KEY present ({oa_source})"
+    if edit_present:
+        edit_severity = "green"
+        edit_detail = f"OPENROUTER_API_KEY present ({edit_source})"
     else:
-        oa_severity = "yellow"
+        edit_severity = "yellow"
         queued = queue_impact["queued_count"]
         oldest = queue_impact["oldest_age_hours"]
         if queued > 0:
-            oa_detail = (
+            edit_detail = (
                 "Exact flyer edits are falling back to manual review because source-edit "
                 f"provider is unavailable ({queued} queued; oldest "
                 f"{oldest if oldest is not None else 0}h)"
             )
-        elif oa_placeholder:
-            oa_detail = "OPENAI_API_KEY is a placeholder - exact edits will route to manual review"
+        elif edit_placeholder:
+            edit_detail = "OPENROUTER_API_KEY is a placeholder - exact edits will route to manual review"
         else:
-            oa_detail = "OPENAI_API_KEY missing - exact edits will route to manual review"
+            edit_detail = "OPENROUTER_API_KEY missing - exact edits will route to manual review"
 
-    operator_note_oa = (
-        "Source-edit uses the OpenAI Images Edits API; generation/vision uses OpenRouter. "
-        "See backlog tasks/flyer-source-edit-provider-posture-2026-05-20.md."
+    operator_note_edit = (
+        "Source-edit uses OpenRouter with the configured edit_image_model; generation and vision use the same OpenRouter key."
     )
 
     return [
@@ -1688,15 +1687,15 @@ def _flyer_provider_components() -> list[dict[str, Any]]:
             "checked_at": now_iso,
         },
         {
-            "name": "openai_source_edit",
-            "purpose": "Exact source-preserving flyer edits (OpenAI Images Edits API)",
-            "severity": oa_severity,
-            "detail": oa_detail,
-            "key_present": oa_present,
-            "key_source": oa_source if oa_present else None,
-            "model_config": models["openai_source_edit"],
+            "name": "openrouter_source_edit",
+            "purpose": "Exact source-preserving flyer edits (OpenRouter image output)",
+            "severity": edit_severity,
+            "detail": edit_detail,
+            "key_present": edit_present,
+            "key_source": edit_source if edit_present else None,
+            "model_config": models["openrouter_source_edit"],
             "manual_queue_impact": queue_impact,
-            "operator_note": operator_note_oa,
+            "operator_note": operator_note_edit,
             "checked_at": now_iso,
         },
     ]
@@ -1707,7 +1706,7 @@ async def flyer_health(_=Depends(require_auth)):
     """Read-only flyer provider + platform-runtime health.
 
     Surfaces gateway / bridge / paired / cockpit deploy plus OpenRouter
-    (generation + vision) and OpenAI source-edit posture. Never returns
+    generation / vision / source-edit posture. Never returns
     secret values or prefixes - only key_present + key_source.
     OpenRouter missing = red (blocks generation); source-edit missing = yellow
     (degraded; routes to manual review).

@@ -801,7 +801,7 @@ def test_direct_poster_prompt_extracts_items_and_prices_from_sample_reference(mo
     assert "Do not replace them with generic grocery categories" in prompt
 
 
-def test_source_edit_preview_calls_openai_edit_api_with_reference_image(tmp_path, monkeypatch):
+def test_source_edit_preview_calls_openrouter_with_reference_image(tmp_path, monkeypatch):
     reference = tmp_path / "reference.png"
     reference.write_bytes(_png_bytes())
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
@@ -826,7 +826,13 @@ def test_source_edit_preview_calls_openai_edit_api_with_reference_image(tmp_path
     class _Resp:
         def __enter__(self):
             png = base64.b64encode(_png_bytes(color=(40, 90, 50))).decode("ascii")
-            self._body = json.dumps({"data": [{"b64_json": png}]}).encode("utf-8")
+            self._body = json.dumps({
+                "choices": [{
+                    "message": {
+                        "images": [{"image_url": {"url": f"data:image/png;base64,{png}"}}],
+                    }
+                }]
+            }).encode("utf-8")
             return self
 
         def __exit__(self, *_args):
@@ -839,13 +845,13 @@ def test_source_edit_preview_calls_openai_edit_api_with_reference_image(tmp_path
         requests.append((req, timeout, req.data))
         return _Resp()
 
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
     monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", _fake_urlopen)
 
     spec = render_source_edit_preview(
         project,
         tmp_path,
-        model="gpt-image-1",
+        model="openai/gpt-image-1",
         quality="medium",
     )
 
@@ -853,14 +859,17 @@ def test_source_edit_preview_calls_openai_edit_api_with_reference_image(tmp_path
     assert spec.path.read_bytes().startswith(b"\x89PNG")
     assert len(requests) == 1
     req, timeout, body = requests[0]
-    assert req.full_url.endswith("/v1/images/edits")
+    assert req.full_url == "https://openrouter.ai/api/v1/chat/completions"
     assert timeout == 180
     assert req.headers["Authorization"] == "Bearer sk-test"
-    assert b'name="model"\r\n\r\ngpt-image-1' in body
-    assert b'name="input_fidelity"\r\n\r\nhigh' in body
-    assert b'name="prompt"' in body
-    assert b"Remove extra 08:00" in body
-    assert b'name="image"; filename="reference.png"' in body
+    payload = json.loads(body.decode("utf-8"))
+    assert payload["model"] == "openai/gpt-image-1"
+    assert payload["modalities"] == ["image", "text"]
+    content = payload["messages"][0]["content"]
+    assert any(part.get("type") == "text" and "Remove extra 08:00" in part.get("text", "") for part in content)
+    image_parts = [part for part in content if part.get("type") == "image_url"]
+    assert len(image_parts) == 1
+    assert image_parts[0]["image_url"]["url"].startswith("data:image/png;base64,")
     manifest = json.loads(Path(f"{spec.path}.text.json").read_text(encoding="utf-8"))
     assert manifest["verification_mode"] == "source_edit_integrity_only"
     assert "inspect the preview visually" in " ".join(manifest["warnings"])
@@ -898,7 +907,7 @@ def test_source_edit_rejects_pdf_reference_before_provider_call(tmp_path, monkey
     def _fail_urlopen(*_args, **_kwargs):
         raise AssertionError("PDF references must not reach image edit provider")
 
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
     monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", _fail_urlopen)
 
     try:
@@ -946,7 +955,13 @@ def test_source_edit_reference_uses_latest_reference_asset(tmp_path, monkeypatch
     class _Resp:
         def __enter__(self):
             png = base64.b64encode(_png_bytes()).decode("ascii")
-            self._body = json.dumps({"data": [{"b64_json": png}]}).encode("utf-8")
+            self._body = json.dumps({
+                "choices": [{
+                    "message": {
+                        "images": [{"image_url": {"url": f"data:image/png;base64,{png}"}}],
+                    }
+                }]
+            }).encode("utf-8")
             return self
 
         def __exit__(self, *_args):
@@ -955,13 +970,15 @@ def test_source_edit_reference_uses_latest_reference_asset(tmp_path, monkeypatch
         def read(self):
             return self._body
 
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
     monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", lambda req, timeout: requests.append(req.data) or _Resp())
 
-    render_source_edit_preview(project, tmp_path, model="gpt-image-1", quality="medium")
+    render_source_edit_preview(project, tmp_path, model="openai/gpt-image-1", quality="medium")
 
-    assert b'filename="latest.png"' in requests[0]
-    assert b'filename="old.png"' not in requests[0]
+    payload = json.loads(requests[0].decode("utf-8"))
+    image_url = next(part["image_url"]["url"] for part in payload["messages"][0]["content"] if part.get("type") == "image_url")
+    assert base64.b64decode(image_url.split(",", 1)[1]) == latest.read_bytes()
+    assert first.read_bytes() not in requests[0]
 
 
 def test_direct_poster_prompt_uses_registered_business_name_not_reference_brand(tmp_path, monkeypatch):
@@ -1382,8 +1399,8 @@ def test_is_source_edit_project_requires_marker_or_reference_image(tmp_path, mon
     assert _is_source_edit_project(with_ref) is True
 
 
-def test_openai_source_edit_bytes_fails_closed_on_placeholder_key(tmp_path, monkeypatch):
-    """Fix F: a PLACEHOLDER OPENAI key must NOT make a network request.
+def test_openrouter_source_edit_bytes_fails_closed_on_placeholder_key(tmp_path, monkeypatch):
+    """A PLACEHOLDER OpenRouter key must NOT make a network request.
     Mirror visual_qa / workflow defense-in-depth: missing OR placeholder
     fails closed before urlopen is called, raising FlyerRenderError that
     generate-flyer-concepts catches and classifies as
@@ -1425,7 +1442,7 @@ def test_openai_source_edit_bytes_fails_closed_on_placeholder_key(tmp_path, monk
 
     import pytest as _pytest
     with _pytest.raises(FlyerRenderError, match="placeholder"):
-        render_mod._openai_source_edit_bytes(project, size=(1080, 1350), model="gpt-image-1", quality="medium")
+        render_mod._openrouter_source_edit_bytes(project, size=(1080, 1350), model="openai/gpt-image-1", quality="medium")
 
 
 def test_render_customer_facing_footer_has_no_hermes_brand():

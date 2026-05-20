@@ -141,7 +141,7 @@ def main() -> int:
     posture = {
         "provider": "deterministic",
         "openrouter_key": {"present": False, "source": None},
-        "openai_source_edit_key": {"present": False, "source": None},
+        "openrouter_source_edit_key": {"present": False, "source": None},
     }
     if args.real_model:
         cfg = _load_config(Path(args.config_path))
@@ -151,7 +151,7 @@ def main() -> int:
         posture = {
             "provider": "openrouter",
             "openrouter_key": _key_posture("OPENROUTER_API_KEY"),
-            "openai_source_edit_key": _key_posture("OPENAI_API_KEY"),
+            "openrouter_source_edit_key": _key_posture("OPENROUTER_API_KEY"),
         }
 
     try:

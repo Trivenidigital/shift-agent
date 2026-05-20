@@ -270,7 +270,7 @@ def test_generate_deferred_reference_smoke_can_use_sidecar_visual_qa(monkeypatch
 
 def test_generate_source_edit_provider_unavailable_queues_manual_review(monkeypatch, tmp_path, capsys):
     """P0-5: when render_source_edit_preview raises FlyerRenderError (e.g.
-    OPENAI_API_KEY missing or provider 5xx), generate-flyer-concepts must
+    OPENROUTER_API_KEY missing or provider 5xx), generate-flyer-concepts must
     queue the project for manual review with reason_code=
     `source_edit_provider_unavailable` rather than crashing — operator CLI
     retries and edge cases where the cf-router preflight didn't catch the
@@ -291,7 +291,7 @@ def test_generate_source_edit_provider_unavailable_queues_manual_review(monkeypa
     # Reference is already extracted (not in failure state) so the script
     # bypasses the reference-failure manual-review path and reaches the
     # source-edit render call.
-    project["reference_extractions"][0]["provider"] = "openai"
+    project["reference_extractions"][0]["provider"] = "openrouter"
     project["reference_extractions"][0]["status"] = "ok"
     project["reference_extractions"][0]["detail"] = "extracted"
     state_path.write_text(json.dumps({
@@ -301,7 +301,7 @@ def test_generate_source_edit_provider_unavailable_queues_manual_review(monkeypa
     }), encoding="utf-8")
 
     def fake_render_source_edit(*_args, **_kwargs):
-        raise module.FlyerRenderError("OPENAI_API_KEY is missing")
+        raise module.FlyerRenderError("OPENROUTER_API_KEY is missing")
 
     monkeypatch.setattr(module, "render_source_edit_preview", fake_render_source_edit)
     monkeypatch.setattr(sys, "argv", [
@@ -315,14 +315,14 @@ def test_generate_source_edit_provider_unavailable_queues_manual_review(monkeypa
     rc = module.main()
     assert rc == 2  # non-zero: signals manual-review-required to the caller
     out = json.loads(capsys.readouterr().out)
-    assert "OPENAI_API_KEY" in out["source_edit_failed"]
+    assert "OPENROUTER_API_KEY" in out["source_edit_failed"]
     assert out["manual_review_reason_code"] == "source_edit_provider_unavailable"
 
     persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
     assert persisted["status"] == "manual_edit_required"
     assert persisted["manual_review"]["status"] == "queued"
     assert persisted["manual_review"]["reason_code"] == "source_edit_provider_unavailable"
-    assert "OPENAI_API_KEY" in persisted["manual_review"]["detail"]
+    assert "OPENROUTER_API_KEY" in persisted["manual_review"]["detail"]
 
 
 def test_generate_source_edit_quality_failure_queues_visual_qa_failed(monkeypatch, tmp_path, capsys):

@@ -781,7 +781,7 @@ class FlyerConfig(BaseModel):
     draft_image_quality: FlyerImageQuality = "low"
     final_image_model: str = Field(default="gpt-image-1.5", min_length=1, max_length=120)
     final_image_quality: FlyerImageQuality = "medium"
-    edit_image_model: str = Field(default="gpt-image-1", min_length=1, max_length=120)
+    edit_image_model: str = Field(default="openai/gpt-image-1", min_length=1, max_length=120)
     edit_image_quality: FlyerImageQuality = "medium"
     concept_count: int = Field(default=1, ge=1, le=3)
     max_revision_rounds: int = Field(default=6, ge=1, le=20)

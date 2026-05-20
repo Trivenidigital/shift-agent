@@ -1651,7 +1651,7 @@ class TestF7PrimaryMode:
              patch.object(actions_mod, "send_flyer_edit_processing_ack",
                           return_value=(True, "msg-processing", "")), \
              patch.object(actions_mod, "trigger_generate_flyer_concepts",
-                          return_value=(False, "OPENAI_API_KEY is missing")), \
+                          return_value=(False, "OPENROUTER_API_KEY is missing")), \
              patch.object(actions_mod, "trigger_flyer_release_quota",
                           return_value=(True, "released", {})) as mock_release, \
              patch.object(actions_mod, "send_flyer_manual_edit_ack",

@@ -31,7 +31,7 @@ def _manual_project():
             status="queued",
             reason="source_edit_provider_unavailable",
             reason_code="source_edit_provider_unavailable",
-            detail="OPENAI_API_KEY missing",
+            detail="OPENROUTER_API_KEY missing",
             queued_at=now,
         ),
     )

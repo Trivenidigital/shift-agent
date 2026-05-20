@@ -461,7 +461,7 @@ def image_reference_scenarios():
     )); i += 1
     out.append(row(i, A, name,
         "Source-edit preview delivery success",
-        "manual_edit_required project; OPENAI_API_KEY configured",
+        "manual_edit_required project; OPENROUTER_API_KEY configured",
         "1. Run generate-flyer-concepts on the project.",
         "Preview image sent via WhatsApp; manifest carries warning: 'Source-preserving edit output is model-edited artwork; inspect the preview visually before approval.'",
         "P0", "Happy", "WhatsApp",
@@ -469,7 +469,7 @@ def image_reference_scenarios():
     )); i += 1
     out.append(row(i, A, name,
         "Source-edit preview generation failure -> manual ack",
-        "manual_edit_required; OpenAI image-edits failure",
+        "manual_edit_required; OpenRouter source-edit failure",
         "1. Trigger generation; force failure (no key or network error).",
         "send_flyer_manual_edit_ack invoked. Customer receives manual edit acknowledgement. Project queued.",
         "P1", "Negative", "WhatsApp",

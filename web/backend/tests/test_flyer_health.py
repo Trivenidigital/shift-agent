@@ -5,7 +5,7 @@ Covers acceptance from `tasks/flyer-cockpit-p0-7-health-panel-plan.md`:
 - No secrets in response body.
 - Placeholder keys count as missing/degraded.
 - OpenRouter missing/placeholder = red.
-- OpenAI source-edit missing/placeholder = yellow (degraded).
+- OpenRouter source-edit missing/placeholder = yellow (degraded).
 - key_source reports which env file/process_env matched.
 - Manual-queue impact (queued_count + oldest_age_hours) for
   source_edit_provider_unavailable rows.
@@ -68,7 +68,6 @@ def _manual_edit_project(
 def _clear_provider_env(monkeypatch) -> None:
     """Strip provider env vars + force empty env-file overrides."""
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
 
 def _isolate_env_files(monkeypatch, tmp_path):
@@ -148,7 +147,7 @@ def test_flyer_health_returns_expected_shape(tmp_path, monkeypatch):
     assert "deploy_tag" not in body, "deploy_tag is mis-named; use shift_agent_deploy_tag"
     assert "commit_hash" not in body, "commit_hash is mis-named; use shift_agent_commit_hash"
     provider_names = {p["name"] for p in body["providers"]}
-    assert provider_names == {"openrouter_generation_vision", "openai_source_edit"}
+    assert provider_names == {"openrouter_generation_vision", "openrouter_source_edit"}
 
 
 # ─── Secret redaction ────────────────────────────────────────────────────
@@ -157,7 +156,6 @@ def test_flyer_health_returns_expected_shape(tmp_path, monkeypatch):
 def test_flyer_health_redacts_secret_values(tmp_path, monkeypatch):
     secret = "sk-realsecretvalue1234567890abcdef"
     monkeypatch.setenv("OPENROUTER_API_KEY", secret)
-    monkeypatch.setenv("OPENAI_API_KEY", secret + "OPENAI")
     _isolate_env_files(monkeypatch, tmp_path)
     _isolate_deploy_markers(monkeypatch, tmp_path)
 
@@ -166,14 +164,13 @@ def test_flyer_health_redacts_secret_values(tmp_path, monkeypatch):
 
     raw = resp.text
     assert secret not in raw, "Secret OPENROUTER value leaked into health response body"
-    assert (secret + "OPENAI") not in raw, "Secret OPENAI value leaked into health response body"
     # Quick sanity: known-safe substrings should still be there.
     assert "OPENROUTER_API_KEY" in raw  # used in detail text without value
     assert "key_present" in raw
 
     body = resp.json()
     provider_or = next(p for p in body["providers"] if p["name"] == "openrouter_generation_vision")
-    provider_oa = next(p for p in body["providers"] if p["name"] == "openai_source_edit")
+    provider_oa = next(p for p in body["providers"] if p["name"] == "openrouter_source_edit")
     assert provider_or["key_present"] is True
     assert provider_or["key_source"] == "process_env"
     assert provider_oa["key_present"] is True
@@ -200,7 +197,6 @@ def test_openrouter_missing_is_red(tmp_path, monkeypatch):
 
 def test_openrouter_placeholder_is_red(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "PLACEHOLDER")
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     _isolate_env_files(monkeypatch, tmp_path)
     _isolate_deploy_markers(monkeypatch, tmp_path)
 
@@ -214,7 +210,6 @@ def test_openrouter_placeholder_is_red(tmp_path, monkeypatch):
 
 def test_openrouter_present_is_green(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-real-key")
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     _isolate_env_files(monkeypatch, tmp_path)
     _isolate_deploy_markers(monkeypatch, tmp_path)
 
@@ -227,45 +222,43 @@ def test_openrouter_present_is_green(tmp_path, monkeypatch):
     assert "sk-real-key" not in or_p["detail"]
 
 
-# ─── OpenAI source-edit severity matrix ──────────────────────────────────
+# ─── OpenRouter source-edit severity matrix ──────────────────────────────────
 
 
-def test_openai_source_edit_missing_is_yellow_not_red(tmp_path, monkeypatch):
+def test_openrouter_source_edit_missing_is_yellow_not_red(tmp_path, monkeypatch):
     _clear_provider_env(monkeypatch)
     _isolate_env_files(monkeypatch, tmp_path)
     _isolate_deploy_markers(monkeypatch, tmp_path)
 
     from app.routers import flyer
 
-    oa_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "openai_source_edit")
+    oa_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "openrouter_source_edit")
     assert oa_p["severity"] == "yellow", "source-edit missing must be degraded, not blocking"
     assert oa_p["key_present"] is False
     assert oa_p["key_source"] is None
     assert "manual review" in oa_p["detail"].lower()
 
 
-def test_openai_source_edit_placeholder_is_yellow(tmp_path, monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-PLACEHOLDER")
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+def test_openrouter_source_edit_placeholder_is_yellow(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-PLACEHOLDER")
     _isolate_env_files(monkeypatch, tmp_path)
     _isolate_deploy_markers(monkeypatch, tmp_path)
 
     from app.routers import flyer
 
-    oa_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "openai_source_edit")
+    oa_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "openrouter_source_edit")
     assert oa_p["severity"] == "yellow"
     assert oa_p["key_present"] is False
 
 
-def test_openai_source_edit_present_is_green(tmp_path, monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-real-openai-key")
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+def test_openrouter_source_edit_present_is_green(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-real-openrouter-key")
     _isolate_env_files(monkeypatch, tmp_path)
     _isolate_deploy_markers(monkeypatch, tmp_path)
 
     from app.routers import flyer
 
-    oa_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "openai_source_edit")
+    oa_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "openrouter_source_edit")
     assert oa_p["severity"] == "green"
     assert oa_p["key_present"] is True
 
@@ -373,7 +366,7 @@ def test_model_config_present_in_provider_block(tmp_path, monkeypatch):
 
     providers = flyer._flyer_provider_components()
     or_p = next(p for p in providers if p["name"] == "openrouter_generation_vision")
-    oa_p = next(p for p in providers if p["name"] == "openai_source_edit")
+    oa_p = next(p for p in providers if p["name"] == "openrouter_source_edit")
     assert "draft_image_model" in or_p["model_config"]
     assert "final_image_model" in or_p["model_config"]
     assert "edit_image_model" in oa_p["model_config"]
@@ -449,7 +442,7 @@ def test_source_edit_detail_surfaces_queue_impact_when_present(tmp_path, monkeyp
         },
     )
 
-    oa_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "openai_source_edit")
+    oa_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "openrouter_source_edit")
     assert oa_p["manual_queue_impact"]["queued_count"] == 1
     assert "falling back to manual review" in oa_p["detail"]
     assert oa_p["severity"] == "yellow"

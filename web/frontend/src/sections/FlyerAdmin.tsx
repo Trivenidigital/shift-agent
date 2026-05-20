@@ -144,7 +144,7 @@ interface FlyerHealthComponent {
 }
 
 interface FlyerHealthProvider {
-  name: "openrouter_generation_vision" | "openai_source_edit";
+  name: "openrouter_generation_vision" | "openrouter_source_edit";
   purpose: string;
   severity: HealthSeverity;
   detail: string;
@@ -281,7 +281,7 @@ function FlyerHealthPanel({ data }: { data: FlyerHealth | undefined }) {
   const provider = (name: FlyerHealthProvider["name"]) =>
     data.providers.find((p) => p.name === name);
   const openrouter = provider("openrouter_generation_vision");
-  const openai = provider("openai_source_edit");
+  const sourceEdit = provider("openrouter_source_edit");
 
   return (
     <Card>
@@ -330,27 +330,27 @@ function FlyerHealthPanel({ data }: { data: FlyerHealth | undefined }) {
               </div>
             </div>
           )}
-          {openai && (
+          {sourceEdit && (
             <div className="rounded-md border-2 border-zinc-200 p-3">
               <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2 text-sm font-semibold">
-                  <HealthDot severity={openai.severity} />
-                  OpenAI — exact source edits
+                  <HealthDot severity={sourceEdit.severity} />
+                  Source edits - OpenRouter
                 </div>
-                <Badge tone={severityTone(openai.severity)}>{openai.severity}</Badge>
+                <Badge tone={severityTone(sourceEdit.severity)}>{sourceEdit.severity}</Badge>
               </div>
-              <div className="mt-2 text-xs text-zinc-600">{openai.detail}</div>
+              <div className="mt-2 text-xs text-zinc-600">{sourceEdit.detail}</div>
               <div className="mt-2 text-xs text-zinc-500">
-                edit model: <span className="font-mono">{openai.model_config.edit_image_model ?? "?"}</span>
+                edit model: <span className="font-mono">{sourceEdit.model_config.edit_image_model ?? "?"}</span>
               </div>
-              {openai.manual_queue_impact && openai.manual_queue_impact.queued_count > 0 && (
+              {sourceEdit.manual_queue_impact && sourceEdit.manual_queue_impact.queued_count > 0 && (
                 <div className="mt-2 rounded bg-amber-50 px-2 py-1 text-xs text-amber-800">
-                  <strong>{openai.manual_queue_impact.queued_count}</strong> queued; oldest{" "}
-                  <strong>{openai.manual_queue_impact.oldest_age_hours ?? 0}h</strong>
+                  <strong>{sourceEdit.manual_queue_impact.queued_count}</strong> queued; oldest{" "}
+                  <strong>{sourceEdit.manual_queue_impact.oldest_age_hours ?? 0}h</strong>
                 </div>
               )}
-              {openai.operator_note && (
-                <div className="mt-2 text-xs italic text-zinc-500">{openai.operator_note}</div>
+              {sourceEdit.operator_note && (
+                <div className="mt-2 text-xs italic text-zinc-500">{sourceEdit.operator_note}</div>
               )}
             </div>
           )}
@@ -429,7 +429,7 @@ const REASON_PLAYBOOK: Record<string, { title: string; next_steps: string[] }> =
   source_edit_provider_unavailable: {
     title: "Source-edit provider down",
     next_steps: [
-      "Provision/verify OPENAI_API_KEY on the VPS, OR",
+      "Provision/verify OPENROUTER_API_KEY on the VPS and confirm the edit model, OR",
       "Upload an approved designer flyer here and click Complete, OR",
       "Close with reason containing `provider_unavailable_after_retry` if the row is genuinely stuck.",
     ],

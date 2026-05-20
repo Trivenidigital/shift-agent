@@ -24,7 +24,6 @@ import textwrap
 import time
 import urllib.error
 import urllib.request
-import uuid
 
 from schemas import FlyerAsset, FlyerCustomerStore, FlyerOutputFormat, FlyerProject
 
@@ -120,8 +119,6 @@ FONT_CANDIDATES = [
 
 OPENROUTER_IMAGE_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_TIMEOUT_SEC = 180
-OPENAI_IMAGE_EDIT_URL = "https://api.openai.com/v1/images/edits"
-OPENAI_IMAGE_EDIT_TIMEOUT_SEC = 180
 def _flyer_state_root() -> Path:
     return Path(os.environ.get("FLYER_STATE_ROOT", "/opt/shift-agent/state/flyer/"))
 
@@ -1297,43 +1294,7 @@ Rules:
 """
 
 
-def _openai_edit_size(size: tuple[int, int] | None) -> str:
-    if size is None:
-        return "1024x1536"
-    width, height = size
-    if width == height:
-        return "1024x1024"
-    return "1536x1024" if width > height else "1024x1536"
-
-
-def _multipart_form_data(
-    fields: dict[str, str],
-    files: list[tuple[str, str, str, bytes]],
-) -> tuple[bytes, str]:
-    boundary = f"----FlyerStudio{uuid.uuid4().hex}"
-    chunks: list[bytes] = []
-    for name, value in fields.items():
-        chunks.append(f"--{boundary}\r\n".encode("utf-8"))
-        chunks.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"))
-        chunks.append(str(value).encode("utf-8"))
-        chunks.append(b"\r\n")
-    for name, filename, content_type, data in files:
-        safe_filename = Path(filename).name or "reference.png"
-        chunks.append(f"--{boundary}\r\n".encode("utf-8"))
-        chunks.append(
-            (
-                f'Content-Disposition: form-data; name="{name}"; '
-                f'filename="{safe_filename}"\r\n'
-                f"Content-Type: {content_type}\r\n\r\n"
-            ).encode("utf-8")
-        )
-        chunks.append(data)
-        chunks.append(b"\r\n")
-    chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
-    return b"".join(chunks), boundary
-
-
-def _openai_source_edit_bytes(
+def _openrouter_source_edit_bytes(
     project: FlyerProject,
     *,
     size: tuple[int, int] | None,
@@ -1342,62 +1303,74 @@ def _openai_source_edit_bytes(
 ) -> bytes:
     # P0-5 defense-in-depth: mirror workflow.py::source_edit_provider_ready —
     # treat PLACEHOLDER as missing so an operator CLI / retry path that
-    # bypassed the cf-router preflight doesn't waste an OpenAI request and
+    # bypassed the cf-router preflight doesn't waste an OpenRouter request and
     # surface a 401 mid-customer-flow.
-    api_key = _read_env_value("OPENAI_API_KEY")
+    api_key = _read_env_value("OPENROUTER_API_KEY")
     if not api_key or "PLACEHOLDER" in api_key:
-        raise FlyerRenderError("OPENAI_API_KEY is missing or placeholder")
+        raise FlyerRenderError("OPENROUTER_API_KEY is missing or placeholder")
     reference = _source_edit_reference_asset(project)
     reference_path = Path(reference.path)
     mime = reference.mime_type or mimetypes.guess_type(str(reference_path))[0] or "image/png"
-    body, boundary = _multipart_form_data(
-        {
-            "model": model,
-            "prompt": _source_edit_prompt(project),
-            "size": _openai_edit_size(size),
-            "quality": quality,
-            "input_fidelity": "high",
-        },
-        [
-            (
-                "image",
-                reference_path.name,
-                mime,
-                reference_path.read_bytes(),
-            )
+    encoded_reference = base64.b64encode(reference_path.read_bytes()).decode("ascii")
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": _source_edit_prompt(project)},
+                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded_reference}"}},
+                ],
+            }
         ],
-    )
+        "modalities": ["image", "text"],
+        "stream": False,
+        "image_config": {
+            "aspect_ratio": _aspect_ratio(size),
+            "image_size": "2K" if quality == "high" else "1K",
+        },
+    }
     req = urllib.request.Request(
-        os.environ.get("OPENAI_IMAGE_EDIT_URL", OPENAI_IMAGE_EDIT_URL),
-        data=body,
+        OPENROUTER_IMAGE_URL,
+        data=json.dumps(payload).encode("utf-8"),
         headers={
             "Authorization": f"Bearer {api_key}",
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/Trivenidigital/SME-Agents",
+            "X-Title": "Hermes Flyer Studio",
         },
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=OPENAI_IMAGE_EDIT_TIMEOUT_SEC) as resp:
-            raw_body = resp.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as e:
-        err = e.read().decode("utf-8", errors="replace")[:1000]
-        raise FlyerRenderError(f"OpenAI image edit HTTP {e.code}: {err}") from e
-    except urllib.error.URLError as e:
-        raise FlyerRenderError(f"OpenAI image edit connection failed: {e.reason}") from e
-    doc = json.loads(raw_body)
-    data = doc.get("data") or []
-    if not data:
-        raise FlyerRenderError(f"OpenAI image edit response had no data: {raw_body[:500]}")
-    encoded = data[0].get("b64_json") or ""
-    if encoded:
+    raw_body = ""
+    last_error: Exception | None = None
+    for attempt in range(3):
         try:
-            return base64.b64decode(encoded)
-        except Exception as e:
-            raise FlyerRenderError(f"OpenAI image edit base64 decode failed: {e}") from e
-    url = str(data[0].get("url") or "")
+            with urllib.request.urlopen(req, timeout=OPENROUTER_TIMEOUT_SEC) as resp:
+                raw_body = resp.read().decode("utf-8", errors="replace")
+            break
+        except urllib.error.HTTPError as e:
+            err = e.read().decode("utf-8", errors="replace")[:1000]
+            raise FlyerRenderError(f"OpenRouter source edit HTTP {e.code}: {err}") from e
+        except (urllib.error.URLError, http.client.IncompleteRead, TimeoutError) as e:
+            last_error = e
+            if attempt == 2:
+                if isinstance(e, urllib.error.URLError):
+                    raise FlyerRenderError(f"OpenRouter source edit connection failed: {e.reason}") from e
+                raise FlyerRenderError(f"OpenRouter source edit response failed: {type(e).__name__}: {e}") from e
+            time.sleep(2 * (attempt + 1))
+    if not raw_body and last_error is not None:
+        raise FlyerRenderError(f"OpenRouter source edit response failed: {type(last_error).__name__}: {last_error}") from last_error
+    doc = json.loads(raw_body)
+    choices = doc.get("choices") or []
+    if not choices:
+        raise FlyerRenderError(f"OpenRouter source edit response had no choices: {raw_body[:500]}")
+    images = choices[0].get("message", {}).get("images") or []
+    if not images:
+        raise FlyerRenderError(f"OpenRouter source edit response had no images: {raw_body[:500]}")
+    url = str(images[0].get("image_url", {}).get("url") or "")
     if url.startswith("data:image/"):
         return _decode_data_url(url)
-    raise FlyerRenderError("OpenAI image edit response did not include image data")
+    raise FlyerRenderError("OpenRouter source edit response did not include base64 image data")
 
 
 def _write_generated_image(raw: bytes, path: Path, *, size: tuple[int, int] | None) -> None:
@@ -1769,7 +1742,7 @@ def render_source_edit_preview(project: FlyerProject, output_dir: Path | str, *,
     output_dir = Path(output_dir)
     concept_id = "C1"
     path = output_dir / f"{project.project_id}-{concept_id}-preview.png"
-    raw = _openai_source_edit_bytes(project, size=(1080, 1350), model=model, quality=quality)
+    raw = _openrouter_source_edit_bytes(project, size=(1080, 1350), model=model, quality=quality)
     _raw_background_path(path).unlink(missing_ok=True)
     _write_generated_image_contained(raw, path, size=(1080, 1350))
     quality_report = inspect_rendered_asset(path, expected_width=1080, expected_height=1350, mime_type="image/png")

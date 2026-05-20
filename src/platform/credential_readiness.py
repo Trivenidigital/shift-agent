@@ -552,8 +552,7 @@ AGENT_CAPABILITIES: tuple[AgentCapability, ...] = (
 
 
 CREDENTIAL_REQUIREMENTS: tuple[CredentialRequirement, ...] = (
-    CredentialRequirement("OPENROUTER_API_KEY", "api_key", "Current production model/vision gate."),
-    CredentialRequirement("OPENAI_API_KEY", "api_key", "Flyer Studio source-preserving image edit gate."),
+    CredentialRequirement("OPENROUTER_API_KEY", "api_key", "Current production model/vision/source-edit gate."),
     CredentialRequirement("KIMI_API_KEY", "api_key", "Optional provider."),
     CredentialRequirement("AIRTABLE_API_KEY", "pat", "Airtable connected mode."),
     CredentialRequirement("NOTION_API_KEY", "api_key", "Notion connected mode."),
