@@ -2627,24 +2627,27 @@ def send_flyer_manual_edit_ack(
     request_text: str = "",
     reason: str = "",
 ) -> tuple[bool, str, str]:
-    """Acknowledge source-preserving flyer edits without auto-generating."""
+    """Acknowledge a queued source-preserving flyer edit on WhatsApp.
+
+    The WhatsApp body is deliberately outcome-only: it confirms receipt and
+    promises delivery, nothing more. Workflow internals (source-preserving,
+    edit queue, operator/provider language, raw customer request echo,
+    project ID) live in the audit log and Cockpit, not the customer reply.
+    Reason: echoing the request text was the F0063 drift surface; explaining
+    the queue is workflow leakage. `request_text`, `project_id`, and `reason`
+    remain on the signature for caller compatibility (7 sites in cf-router/
+    hooks.py) but no longer reach the WhatsApp message body.
+    """
     _ensure_platform_path()
     try:
         from safe_io import bridge_post  # type: ignore
     except Exception as e:
         return False, "", f"safe_io_import_failed: {type(e).__name__}: {e}"
-    body = flyer_visible_message_text(request_text).strip()
-    requested = f"\n\nRequested edit: {body}" if body else ""
-    queue_reason = "\n\nThis edit needs the source-preserving workflow, so it is in the operator edit queue." if reason.strip() else ""
     message = (
         "Flyer Studio\n"
         "------------\n"
-        f"I received your uploaded flyer and queued project {project_id} for a source-preserving edit."
-        f"{requested}\n\n"
-        "This should preserve the existing design and change only the requested text/artwork, "
-        "so I am holding it in the edit queue instead of generating a new flyer from scratch."
-        f"{queue_reason}\n\n"
-        "I will send the updated flyer here once it is ready."
+        "Got it. This needs a careful flyer edit. "
+        "I'll send the updated flyer here once it's ready."
     )
     ok, message_id, err, status = bridge_post(chat_id, message)
     if ok:
