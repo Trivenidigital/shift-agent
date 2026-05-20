@@ -4,6 +4,12 @@
 **Owner:** Flyer Studio
 **Rollout posture:** Post-customer-rollout. Do not block PR-1.
 
+## Sequencing
+
+- PR-1 before rollout: wire `draft_provider_policy` and `final_provider_policy`, add policy docs, add this admin-dashboard backlog item, and keep source-edit path unchanged. Status: done in PR #144 and deployed to `main-vps`.
+- PR-2 after rollout: source-edit model/provider migration only after a visual-QA regression dataset exists and proves source preservation on real source-edit cases.
+- PR-3 after bakeoff: optional Ideogram provider and admin-dashboard controls only after the 20-case bakeoff shows the quality/cost gain is worth another key/subscription.
+
 ## Goal
 
 Add admin-dashboard controls for Flyer Studio model policy so operators can change draft/final/source-edit providers without editing YAML over SSH.

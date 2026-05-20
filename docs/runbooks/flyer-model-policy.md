@@ -8,6 +8,12 @@ For the customer rollout window, Flyer Studio uses one production image-provider
 
 Source-preserving uploaded-flyer edits are deliberately not migrated to OpenRouter in this PR. That path remains on the existing direct OpenAI image-edit code path until a visual-QA regression dataset proves a replacement is source-preserving.
 
+## PR Sequence
+
+- PR-1 before rollout: wire `draft_provider_policy` and `final_provider_policy`, add policy docs, add admin-dashboard backlog, and keep source-edit path unchanged. Status: done in PR #144 and deployed to `main-vps`.
+- PR-2 after rollout: source-edit model/provider migration only after a real visual-QA regression dataset exists and passes the source-preservation gate.
+- PR-3 after bakeoff: optional Ideogram provider and admin-dashboard controls only if the bakeoff justifies the added key/subscription and operational complexity.
+
 ## Production Defaults
 
 | Situation | Provider | Model | Quality | Runtime status |
