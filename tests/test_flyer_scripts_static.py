@@ -434,6 +434,21 @@ def test_phase2_quality_smoke_and_workflow_deploy_contracts():
     assert "authorized flyer/source artwork update" in generate
 
 
+def test_flyer_generation_scripts_resolve_draft_and_final_provider_policy():
+    generate = (SCRIPTS / "generate-flyer-concepts").read_text(encoding="utf-8")
+    finalize = (SCRIPTS / "finalize-flyer-assets").read_text(encoding="utf-8")
+
+    assert "draft_provider = cfg.flyer.resolve_draft_render_provider()" in generate
+    assert "model=draft_provider.model" in generate
+    assert "quality=draft_provider.quality" in generate
+    assert "cfg.flyer.draft_image_model" not in generate
+
+    assert "final_provider = cfg.flyer.resolve_final_render_provider()" in finalize
+    assert "model=final_provider.model" in finalize
+    assert "quality=final_provider.quality" in finalize
+    assert "cfg.flyer.final_image_model" not in finalize
+
+
 def test_production_readiness_modules_installed_and_smoked():
     deploy = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh").read_text(encoding="utf-8")
     smoke = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-smoke-test.sh").read_text(encoding="utf-8")

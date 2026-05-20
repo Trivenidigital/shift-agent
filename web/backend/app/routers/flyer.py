@@ -1557,13 +1557,26 @@ def _flyer_image_model_config() -> dict[str, dict[str, str]]:
         draft = flyer_cfg.draft_image_model
         final = flyer_cfg.final_image_model
         edit = flyer_cfg.edit_image_model
+        draft_provider = flyer_cfg.resolve_draft_render_provider()
+        final_provider = flyer_cfg.resolve_final_render_provider()
     except Exception:
         defaults = FlyerConfig()
         draft = defaults.draft_image_model
         final = defaults.final_image_model
         edit = defaults.edit_image_model
+        draft_provider = defaults.resolve_draft_render_provider()
+        final_provider = defaults.resolve_final_render_provider()
     return {
-        "openrouter_generation_vision": {"draft_image_model": draft, "final_image_model": final},
+        "openrouter_generation_vision": {
+            "draft_image_model": draft,
+            "final_image_model": final,
+            "draft_provider": draft_provider.provider,
+            "draft_provider_model": draft_provider.model,
+            "draft_provider_quality": draft_provider.quality,
+            "final_provider": final_provider.provider,
+            "final_provider_model": final_provider.model,
+            "final_provider_quality": final_provider.quality,
+        },
         "openai_source_edit": {"edit_image_model": edit},
     }
 

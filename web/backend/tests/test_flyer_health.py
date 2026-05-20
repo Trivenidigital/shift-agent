@@ -76,6 +76,13 @@ def _isolate_env_files(monkeypatch, tmp_path):
     so tests aren't poisoned by whatever the host has on disk."""
     monkeypatch.setenv("HERMES_ENV_PATH", str(tmp_path / "hermes" / "missing.env"))
     monkeypatch.setenv("SHIFT_AGENT_ENV_PATH", str(tmp_path / "agent" / "missing.env"))
+    from app.routers import health
+
+    monkeypatch.setattr(
+        health.settings,
+        "hermes_creds_json",
+        tmp_path / "hermes" / "whatsapp" / "session" / "missing-creds.json",
+    )
 
 
 def _isolate_deploy_markers(monkeypatch, tmp_path):
@@ -376,6 +383,8 @@ def test_model_config_present_in_provider_block(tmp_path, monkeypatch):
     oa_p = next(p for p in providers if p["name"] == "openai_source_edit")
     assert "draft_image_model" in or_p["model_config"]
     assert "final_image_model" in or_p["model_config"]
+    assert or_p["model_config"]["draft_provider_model"] == "openai/gpt-5.4-image-2"
+    assert or_p["model_config"]["final_provider_model"] == "deterministic-renderer"
     assert "edit_image_model" in oa_p["model_config"]
 
 

@@ -7,6 +7,20 @@ Last updated: 2026-05-20 (pilot-hardening golden live-shape samples and stale Fl
 
 ---
 
+## Active - Flyer model policy lock-in (2026-05-20)
+
+**Drift-check tag:** extends-Hermes
+
+Hermes-first summary: reuse Hermes/OpenRouter gateway credentials and existing Flyer render scripts. Net-new scope is Flyer-side provider-policy config for draft/final rendering, a policy runbook, and admin-dashboard backlog documentation. Source-edit provider migration is explicitly deferred until a regression dataset exists.
+
+- [x] Verify current code defaults and live OpenRouter slug posture.
+- [x] Lock PR-1 scope: draft/final provider policy only; keep source-edit path unchanged.
+- [x] Add schema defaults for `draft_provider_policy` and `final_provider_policy`.
+- [x] Wire concept generation and finalization through provider policy resolvers.
+- [x] Add policy runbook and admin-dashboard backlog item.
+- [x] Add focused schema/static/cockpit health tests.
+- [x] Run final focused verification before PR handoff.
+
 ## Active - Hermes fleet upgrade train (2026-05-20)
 
 **Drift-check tag:** extends-Hermes

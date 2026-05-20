@@ -52,11 +52,12 @@ def main() -> int:
             now = datetime.now(timezone.utc)
             if project.status != "finalizing_assets":
                 raise SystemExit(f"project must be finalizing_assets, got {project.status}")
+            final_provider = cfg.flyer.resolve_final_render_provider()
             specs = render_final_package(
                 project,
                 Path(args.final_dir),
-                model=cfg.flyer.final_image_model,
-                quality=cfg.flyer.final_image_quality,
+                model=final_provider.model,
+                quality=final_provider.quality,
             )
             assets = build_asset_manifest(
                 specs,
