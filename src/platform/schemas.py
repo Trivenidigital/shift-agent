@@ -3216,6 +3216,7 @@ class FlyerClosureCustomerNotified(_BaseEntry):
     customer_phone: E164Phone
     reason_code: str = Field(min_length=1, max_length=80)
     chat_id: str = Field(default="", max_length=200)
+    chat_id_source: Literal["audit_log", "primary_chat_id", "none", ""] = ""
     send_ok: bool
     outbound_message_id: str = Field(default="", max_length=200)
     error: str = Field(default="", max_length=500)

@@ -549,11 +549,16 @@ def notify_customer_of_closure(
     manual = project.manual_review
     reason_code = str(getattr(manual, "reason_code", "") or "unclassified")
     chat_id = ""
+    chat_id_source = "none"
     send_ok = False
     outbound_mid = ""
     error = ""
     try:
-        chat_id = resolve_customer_chat_id_by_phone(customers_path, customer_phone) or ""
+        chat_id, chat_id_source = resolve_proactive_chat_id_for_project(
+            project,
+            customers_path=customers_path,
+            decisions_log_path=decisions_log_path,
+        )
         if not chat_id:
             error = "no_chat_id_for_customer"
         else:
@@ -574,6 +579,7 @@ def notify_customer_of_closure(
         "customer_phone": customer_phone,
         "reason_code": reason_code,
         "chat_id": chat_id,
+        "chat_id_source": chat_id_source,
         "send_ok": send_ok,
         "outbound_message_id": outbound_mid,
         "error": error,
@@ -583,6 +589,88 @@ def notify_customer_of_closure(
     except Exception as e:
         entry["audit_append_failed"] = f"{type(e).__name__}: {e}"
     return entry
+
+
+def find_recent_inbound_chat_id_for_project(
+    decisions_log_path: Path, project_id: str,
+    *, max_lines: int = 50_000,
+) -> str:
+    """Most recent inbound `chat_id` the agent associated with this project.
+
+    Scans the agent decisions log (newest first) for `cf_router_intercepted`
+    or `raw_inbound` rows whose serialized form mentions this project_id;
+    returns the row's top-level `chat_id` or an empty string when no
+    evidence exists.
+
+    Why this exists (PR #133 review finding HIGH-1):
+    For LID-only or authorized-requester projects, the customer's
+    `primary_chat_id` (set during onboarding via `customer_phone → JID`)
+    can be a different WhatsApp thread than the one the inbound actually
+    arrived on. The bridge accepts the phone JID and returns ok=True even
+    when the customer's visible chat never sees the message — silent
+    misroute. The 2026-05-19 F0060 incident is the canonical example:
+    project phone `+19045550104`, customer primary chat
+    `17329837841@s.whatsapp.net`, but the live inbound thread was
+    `201975216009469@lid`; proactive notification went to the phone JID
+    and the customer's chat received nothing.
+
+    Audit-derived chat_id is the canonical "where did the inbound for this
+    project arrive" answer; falling back to `primary_chat_id` is only safe
+    when no audit evidence exists (legacy/seeded rows).
+    """
+    if not decisions_log_path or not Path(decisions_log_path).exists():
+        return ""
+    try:
+        lines = Path(decisions_log_path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    needle = f"project_id={project_id}"
+    # Walk from newest to oldest; first qualifying match wins.
+    for line in reversed(lines[-max_lines:]):
+        if needle not in line:
+            continue
+        try:
+            doc = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if doc.get("type") not in {"cf_router_intercepted", "raw_inbound"}:
+            continue
+        chat_id = str(doc.get("chat_id") or "")
+        if chat_id:
+            return chat_id
+    return ""
+
+
+def resolve_proactive_chat_id_for_project(
+    project: FlyerProject,
+    *,
+    customers_path: Path,
+    decisions_log_path: Path,
+) -> tuple[str, str]:
+    """Safest WhatsApp chat_id for a proactive customer push.
+
+    Resolution order (PR #133 HIGH-1 fix):
+      1. `find_recent_inbound_chat_id_for_project` — audit evidence from
+         the agent decisions log. Canonical answer when present.
+      2. `resolve_customer_chat_id_by_phone` — customer record's
+         `primary_chat_id` looked up via `customer_phone`. Only safe when
+         the customer's onboarded thread is the same thread the project's
+         inbound arrived on (NOT the LID/authorized-requester case).
+      3. Empty string — operator must rely on the reactive "any update?"
+         safety net.
+
+    Returns `(chat_id, source)` so callers (cockpit preview, audit row)
+    can show the operator which path matched.
+    """
+    audit_chat_id = find_recent_inbound_chat_id_for_project(
+        decisions_log_path, project.project_id,
+    )
+    if audit_chat_id:
+        return audit_chat_id, "audit_log"
+    fallback = resolve_customer_chat_id_by_phone(customers_path, str(project.customer_phone)) or ""
+    if fallback:
+        return fallback, "primary_chat_id"
+    return "", "none"
 
 
 def resolve_customer_chat_id_by_phone(
