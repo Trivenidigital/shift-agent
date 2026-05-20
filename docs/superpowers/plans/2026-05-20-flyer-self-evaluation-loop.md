@@ -79,6 +79,7 @@ Net-new: 3 of 6 steps. This avoids creating a second learning substrate.
 - Add: `tests/test_flyer_self_evaluation.py`
 
 - [x] Write tests for stale manual source-edit, internal copy leak, missing source contract, missing source QA, repeated check-ins, clean-state no incident, JSON/Markdown rendering, and static no-live-mutation guards.
+- [x] Pin customer-copy detection boundary: decisions.log detection only sees rows with outbound text fields; metadata-only cf-router sends require the optional source-code scan (`--scan-source-copy`) or future outbound-body audit.
 - [x] Run `python -m pytest tests/test_flyer_self_evaluation.py -q`; expected RED because `tools/flyer-self-evaluation.py` does not exist.
 
 ### Task 2: Implement Report CLI
@@ -88,6 +89,7 @@ Net-new: 3 of 6 steps. This avoids creating a second learning substrate.
 
 - [x] Implement tolerant project/log loading.
 - [x] Implement incident detection functions.
+- [x] Implement optional targeted source-code scan for customer-ack copy leaks; scan function bodies only, not whole files.
 - [x] Implement JSON and Markdown rendering.
 - [x] Implement `--projects`, `--decisions-log`, `--now`, `--format`, `--out`, and threshold flags.
 - [x] Use `safe_io.atomic_write_text` for `--out` when importable; fall back to direct write only for local Windows import failure.

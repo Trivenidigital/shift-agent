@@ -107,6 +107,64 @@ def test_customer_copy_internal_leak_detected_from_decisions_log():
     assert "Requested edit:" in incident["evidence"]
 
 
+def test_static_source_scan_finds_current_ack_leaks_when_audit_lacks_body(tmp_path):
+    module = load_module()
+    source = tmp_path / "actions.py"
+    source.write_text(
+        """
+def send_flyer_manual_edit_ack(project_id):
+    body = f'''Flyer Studio
+------------
+I received your uploaded flyer and queued project {project_id} for a source-preserving edit.
+Requested edit: Authorized flyer/source artwork update.
+Original customer request: long raw request
+'''
+    return send_flyer_text(body)
+""",
+        encoding="utf-8",
+    )
+
+    report = module.build_report(
+        projects={"projects": []},
+        decision_entries=[],
+        now=module.parse_utc("2026-05-20T11:00:00Z"),
+        source_files=[source],
+    )
+
+    incident = report["incidents"][0]
+    assert incident["type"] == "customer_copy_static_internal_leak"
+    assert incident["project_id"] == ""
+    assert "actions.py" in incident["evidence"]
+    assert "source-code customer ack scan" in incident["suggested_action"]
+
+
+def test_static_source_scan_ignores_internal_terms_outside_customer_ack_blocks(tmp_path):
+    module = load_module()
+    source = tmp_path / "actions.py"
+    source.write_text(
+        """
+PROVIDER_DEBUG = "provider reason_code operator queued project"
+
+def unrelated_helper():
+    return "Original customer request"
+
+def send_flyer_manual_edit_ack(project_id):
+    body = "Flyer Studio\\n------------\\nGot it. This needs a careful flyer edit."
+    return send_flyer_text(body)
+""",
+        encoding="utf-8",
+    )
+
+    report = module.build_report(
+        projects={"projects": []},
+        decision_entries=[],
+        now=module.parse_utc("2026-05-20T11:00:00Z"),
+        source_files=[source],
+    )
+
+    assert report["incidents"] == []
+
+
 def test_missing_source_contract_for_exact_edit_is_reported():
     module = load_module()
     project = _project(
@@ -166,6 +224,155 @@ def test_source_contract_without_qa_for_generated_asset_is_reported():
 
     assert [item["type"] for item in report["incidents"]] == ["source_contract_qa_missing"]
     assert "visual QA" in report["incidents"][0]["suggested_action"]
+
+
+def test_generic_passed_ocr_qa_does_not_count_as_source_aware_qa():
+    """Regression for PR review: generic passed OCR QA is not proof that the
+    source contract was verified. The report must still flag the missing
+    source-aware QA condition.
+    """
+    module = load_module()
+    generated = _reference_asset("A0002")
+    generated.update({"kind": "concept_preview", "source": "generated"})
+    project = _project(
+        "F9007",
+        status="awaiting_final_approval",
+        manual_review={"status": "none", "reason": "", "reason_code": "unclassified"},
+        assets=[_reference_asset(), generated],
+        reference_extractions=[
+            {
+                "asset_id": "A0001",
+                "role": "source_edit_template",
+                "provider": "test",
+                "status": "succeeded",
+                "extracted_facts": [],
+                "source_contract": {
+                    "required_text": ["Monday Thali Specials"],
+                    "preserve_layout": True,
+                    "preserve_unmentioned_text": True,
+                    "confidence": 0.9,
+                },
+            }
+        ],
+        qa_reports=[
+            {
+                "project_id": "F9007",
+                "asset_id": "A0002",
+                "artifact_path": "/opt/shift-agent/state/flyer/projects/F9007/preview.png",
+                "artifact_sha256": "b" * 64,
+                "project_version": 1,
+                "output_format": "concept_preview",
+                "provider": "openrouter-vision",
+                "qa_source": "ocr_vision",
+                "status": "passed",
+                "blockers": [],
+                "warnings": [],
+                "extracted_text": "Lakshmi's Kitchen",
+                "checked_at": "2026-05-20T10:10:00Z",
+            }
+        ],
+    )
+
+    report = module.build_report(
+        projects={"projects": [project]},
+        decision_entries=[],
+        now=module.parse_utc("2026-05-20T11:00:00Z"),
+    )
+
+    assert [item["type"] for item in report["incidents"]] == ["source_contract_qa_missing"]
+
+
+def test_source_contract_named_qa_satisfies_source_aware_check():
+    module = load_module()
+    generated = _reference_asset("A0002")
+    generated.update({"kind": "concept_preview", "source": "generated"})
+    project = _project(
+        "F9008",
+        status="awaiting_final_approval",
+        manual_review={"status": "none", "reason": "", "reason_code": "unclassified"},
+        assets=[_reference_asset(), generated],
+        reference_extractions=[
+            {
+                "asset_id": "A0001",
+                "role": "source_edit_template",
+                "provider": "test",
+                "status": "succeeded",
+                "extracted_facts": [],
+                "source_contract": {"required_text": ["Monday Thali Specials"], "confidence": 0.9},
+            }
+        ],
+        qa_reports=[
+            {
+                "project_id": "F9008",
+                "asset_id": "A0002",
+                "artifact_path": "/opt/shift-agent/state/flyer/projects/F9008/preview.png",
+                "artifact_sha256": "c" * 64,
+                "project_version": 1,
+                "output_format": "concept_preview",
+                "provider": "source-contract-qa",
+                "qa_source": "ocr_vision",
+                "status": "passed",
+                "blockers": [],
+                "warnings": ["source contract verified"],
+                "extracted_text": "Monday Thali Specials",
+                "checked_at": "2026-05-20T10:10:00Z",
+            }
+        ],
+    )
+
+    report = module.build_report(
+        projects={"projects": [project]},
+        decision_entries=[],
+        now=module.parse_utc("2026-05-20T11:00:00Z"),
+    )
+
+    assert report["incidents"] == []
+
+
+def test_operator_review_qa_satisfies_source_aware_check():
+    module = load_module()
+    generated = _reference_asset("A0002")
+    generated.update({"kind": "concept_preview", "source": "generated"})
+    project = _project(
+        "F9009",
+        status="awaiting_final_approval",
+        manual_review={"status": "none", "reason": "", "reason_code": "unclassified"},
+        assets=[_reference_asset(), generated],
+        reference_extractions=[
+            {
+                "asset_id": "A0001",
+                "role": "source_edit_template",
+                "provider": "test",
+                "status": "succeeded",
+                "extracted_facts": [],
+                "source_contract": {"required_text": ["Monday Thali Specials"], "confidence": 0.9},
+            }
+        ],
+        qa_reports=[
+            {
+                "project_id": "F9009",
+                "asset_id": "A0002",
+                "artifact_path": "/opt/shift-agent/state/flyer/projects/F9009/preview.png",
+                "artifact_sha256": "d" * 64,
+                "project_version": 1,
+                "output_format": "concept_preview",
+                "provider": "operator-cockpit",
+                "qa_source": "operator_review",
+                "status": "passed",
+                "blockers": [],
+                "warnings": [],
+                "checked_at": "2026-05-20T10:10:00Z",
+            }
+        ],
+    )
+
+    report = module.build_report(
+        projects={"projects": [project]},
+        decision_entries=[],
+        now=module.parse_utc("2026-05-20T11:00:00Z"),
+    )
+
+    assert report["incidents"] == []
 
 
 def test_repeated_status_checkins_are_grouped_without_creating_projects():

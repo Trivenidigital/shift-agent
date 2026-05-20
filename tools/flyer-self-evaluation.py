@@ -20,6 +20,16 @@ from typing import Any
 
 DEFAULT_PROJECTS_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
 DEFAULT_DECISIONS_LOG = Path("/opt/shift-agent/logs/decisions.log")
+DEFAULT_SOURCE_FILES = (
+    Path("src/plugins/cf-router/actions.py"),
+    Path("src/plugins/cf-router/hooks.py"),
+    Path("src/agents/flyer/workflow.py"),
+)
+STATIC_COPY_SCAN_FUNCTIONS = (
+    "send_flyer_manual_edit_ack",
+    "send_flyer_edit_processing_ack",
+    "flyer_manual_edit_status_reply",
+)
 
 INTERNAL_COPY_TERMS = (
     "queued project",
@@ -34,6 +44,7 @@ INTERNAL_COPY_TERMS = (
     "provider",
     "reason_code",
 )
+SOURCE_QA_MARKERS = ("source", "contract", "integrity", "operator_review")
 
 SOURCE_EDIT_CUES = (
     "do not change anything else",
@@ -138,8 +149,11 @@ def has_source_qa(project: dict[str, Any]) -> bool:
             continue
         blockers = " ".join(str(item) for item in report.get("blockers") or [])
         warnings = " ".join(str(item) for item in report.get("warnings") or [])
-        blob = f"{report.get('provider', '')} {report.get('qa_source', '')} {blockers} {warnings}".lower()
-        if "source" in blob or "contract" in blob or report.get("status") == "passed":
+        blob = (
+            f"{report.get('provider', '')} {report.get('qa_source', '')} "
+            f"{report.get('output_format', '')} {blockers} {warnings}"
+        ).lower()
+        if report.get("status") == "passed" and any(marker in blob for marker in SOURCE_QA_MARKERS):
             return True
     return False
 
@@ -275,6 +289,51 @@ def customer_copy_incidents(entries: list[dict[str, Any]]) -> list[dict[str, Any
     return out
 
 
+def static_customer_copy_incidents(source_files: list[Path]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for path in source_files:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        scanned = "\n".join(extract_function_block(text, name) for name in STATIC_COPY_SCAN_FUNCTIONS)
+        if not scanned:
+            continue
+        matched = [term for term in INTERNAL_COPY_TERMS if term.lower() in scanned.lower()]
+        if not matched:
+            continue
+        out.append(
+            incident(
+                "customer_copy_static_internal_leak",
+                severity="medium",
+                evidence=f"{path}: " + ", ".join(matched[:5]),
+                suggested_action=(
+                    "Review source-code customer ack scan; decisions.log may not contain outbound bodies for this path."
+                ),
+                category="customer-message copy",
+            )
+        )
+    return out
+
+
+def extract_function_block(source: str, function_name: str) -> str:
+    lines = source.splitlines()
+    start: int | None = None
+    for index, line in enumerate(lines):
+        if re.match(rf"^def {re.escape(function_name)}\b", line):
+            start = index
+            break
+    if start is None:
+        return ""
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        line = lines[index]
+        if line.startswith("def ") or line.startswith("class "):
+            end = index
+            break
+    return "\n".join(lines[start:end])
+
+
 def repeated_checkin_incidents(entries: list[dict[str, Any]], *, threshold: int) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for entry in entries:
@@ -343,6 +402,7 @@ def build_report(
     manual_stale_minutes: int = 30,
     generation_stale_minutes: int = 15,
     repeated_checkin_threshold: int = 3,
+    source_files: list[Path] | None = None,
 ) -> dict[str, Any]:
     now = now or utc_now()
     project_rows = projects.get("projects") if isinstance(projects.get("projects"), list) else []
@@ -354,6 +414,7 @@ def build_report(
             generation_stale_minutes=generation_stale_minutes,
         )
         + customer_copy_incidents(decision_entries)
+        + static_customer_copy_incidents(source_files or [])
         + repeated_checkin_incidents(decision_entries, threshold=repeated_checkin_threshold)
     )
     severity_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1}
@@ -381,6 +442,7 @@ def build_report(
             "no customer messages sent",
             "no project/customer/manual-queue/payment/campaign mutation",
             "no prompt/SKILL/model/code self-modification",
+            "customer-copy log scan only sees decisions.log rows with outbound text fields; use --scan-source-copy for metadata-only cf-router send paths",
         ],
     }
 
@@ -438,6 +500,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--manual-stale-minutes", type=int, default=30)
     parser.add_argument("--generation-stale-minutes", type=int, default=15)
     parser.add_argument("--repeated-checkin-threshold", type=int, default=3)
+    parser.add_argument(
+        "--scan-source-copy",
+        action="store_true",
+        help="Also scan known source files for customer-copy internal terms when audit rows do not include outbound bodies.",
+    )
     return parser.parse_args(argv)
 
 
@@ -450,6 +517,7 @@ def main(argv: list[str] | None = None) -> int:
         manual_stale_minutes=args.manual_stale_minutes,
         generation_stale_minutes=args.generation_stale_minutes,
         repeated_checkin_threshold=args.repeated_checkin_threshold,
+        source_files=[Path.cwd() / path for path in DEFAULT_SOURCE_FILES] if args.scan_source_copy else [],
     )
     if args.format == "json":
         output = json.dumps(report, indent=2) + "\n"
