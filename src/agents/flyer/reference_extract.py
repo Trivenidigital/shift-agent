@@ -12,7 +12,14 @@ from typing import Callable
 import urllib.error
 import urllib.request
 
-from schemas import FlyerAsset, FlyerLockedFact, FlyerReferenceExtraction, FlyerReferenceRole
+from schemas import (
+    FlyerAsset,
+    FlyerLockedFact,
+    FlyerReferenceExtraction,
+    FlyerReferenceRole,
+    FlyerSourceContract,
+    FlyerSourceContractSection,
+)
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_TIMEOUT_SEC = 60
@@ -33,6 +40,78 @@ Rules:
 - If no readable menu/reference text exists, use an empty visible_text string and confidence "low".
 - Return only JSON. No markdown.
 """
+
+SOURCE_CONTRACT_PROMPT = """Read this uploaded source flyer for an SMB Flyer Studio
+exact-edit request. Extract the visible structure and the customer's stated changes.
+
+Return STRICT JSON only:
+{
+  "source_business_names": ["..."],
+  "target_business_name": "...",
+  "required_headings": ["..."],
+  "required_text": ["..."],
+  "sections": [{"heading": "...", "items": ["...", "..."]}],
+  "requested_replacements": {"OLD": "NEW", ...},
+  "forbidden_substrings": [],
+  "preserve_layout": true,
+  "preserve_unmentioned_text": true,
+  "confidence": "high" | "medium" | "low",
+  "notes": "..."
+}
+
+Rules:
+- Do not invent items, prices, or business names.
+- Preserve item names exactly (case + spelling).
+- "preserve_unmentioned_text" = true when the customer text contains any of:
+  "do not change anything else", "only change", "same layout", "preserve", "keep the rest".
+- "preserve_layout" = true when the customer text references layout, design, or look preservation.
+- "forbidden_substrings" stays empty here; it is populated downstream from replacements.
+- "requested_replacements" maps explicit "replace X with Y" from the customer text only.
+- Return only JSON. No markdown.
+"""
+
+
+_REPLACEMENT_TRAILING_ROLE_NOUNS = re.compile(
+    r"\s+\b(?:branding|brand|name|info|information|details|address|phone)\b\s*$",
+    flags=re.IGNORECASE,
+)
+
+_PRESERVE_UNMENTIONED_RE = re.compile(
+    r"\b(?:do\s+not\s+change\s+anything\s+else|only\s+change|same\s+layout|preserve|keep\s+the\s+rest)\b",
+    flags=re.IGNORECASE,
+)
+_PRESERVE_LAYOUT_RE = re.compile(
+    r"\b(?:layout|design|look|same\s+layout|same\s+design|preserve\s+the\s+layout)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def extract_requested_replacements_from_text(raw_request: str) -> dict[str, str]:
+    """Deterministic 'replace X with Y' parser for customer text.
+
+    Strips trailing role nouns from the new capture so
+    `replace Triveni Express with Lakshmi's Kitchen branding` resolves to
+    `{"Triveni Express": "Lakshmi's Kitchen"}` — not with a stray `branding`.
+    """
+    replacements: dict[str, str] = {}
+    for match in re.finditer(
+        r"\breplace\s+(?P<old>.+?)\s+(?:with|to)\s+(?P<new>.+?)(?=\.|\n|\d+\.\s|$)",
+        raw_request or "",
+        flags=re.IGNORECASE,
+    ):
+        old = " ".join(match.group("old").strip(" .,:;").split())
+        new = " ".join(match.group("new").strip(" .,:;").split())
+        new = _REPLACEMENT_TRAILING_ROLE_NOUNS.sub("", new).strip()
+        if old and new and len(old) <= 80 and len(new) <= 80:
+            replacements[old] = new
+    return replacements
+
+
+def _confidence_to_float(value: str | float | int) -> float:
+    if isinstance(value, (int, float)):
+        return max(0.0, min(1.0, float(value)))
+    text = str(value or "").strip().lower()
+    return {"high": 0.9, "medium": 0.6, "low": 0.3}.get(text, 0.0)
 
 
 def classify_reference_role(raw_request: str, asset: FlyerAsset) -> FlyerReferenceRole:
@@ -221,6 +300,140 @@ def build_reference_extraction_provider() -> ReferenceExtractionProvider:
     return OpenRouterVisionReferenceExtractionProvider()
 
 
+def _parse_source_contract_json(payload: str, *, raw_request: str) -> FlyerSourceContract | None:
+    """Permissively parse vision JSON into a strict FlyerSourceContract.
+
+    The vision model output is parsed with json.loads (tolerant); then we
+    project the fields into the strict schema. Unknown keys are silently
+    dropped before validation so extra="forbid" doesn't reject otherwise-
+    usable contracts.
+    """
+    if not payload:
+        return None
+    try:
+        raw = json.loads(payload)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    sections: list[FlyerSourceContractSection] = []
+    for section in (raw.get("sections") or []):
+        if not isinstance(section, dict):
+            continue
+        heading = str(section.get("heading") or "").strip()[:160]
+        raw_items = section.get("items") or []
+        items = [str(it).strip()[:120] for it in raw_items if str(it or "").strip()][:50]
+        sections.append(FlyerSourceContractSection(heading=heading, items=items))
+    requested = {}
+    for key, value in (raw.get("requested_replacements") or {}).items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            continue
+        k = key.strip()[:80]
+        v = value.strip()[:80]
+        if k and v:
+            requested[k] = v
+    # Merge customer-text deterministic parser (authoritative on conflict).
+    requested.update(extract_requested_replacements_from_text(raw_request))
+    customer_text = (raw_request or "").lower()
+    preserve_layout = bool(raw.get("preserve_layout")) or bool(_PRESERVE_LAYOUT_RE.search(customer_text))
+    preserve_unmentioned = bool(raw.get("preserve_unmentioned_text")) or bool(_PRESERVE_UNMENTIONED_RE.search(customer_text))
+    try:
+        contract = FlyerSourceContract(
+            source_business_names=[str(n).strip()[:120] for n in (raw.get("source_business_names") or []) if str(n).strip()][:10],
+            target_business_name=str(raw.get("target_business_name") or "").strip()[:160],
+            required_headings=[str(h).strip()[:120] for h in (raw.get("required_headings") or []) if str(h).strip()][:20],
+            required_text=[str(t).strip()[:160] for t in (raw.get("required_text") or []) if str(t).strip()][:100],
+            sections=sections[:20],
+            requested_replacements=dict(list(requested.items())[:50]),
+            forbidden_substrings=[],
+            preserve_layout=preserve_layout,
+            preserve_unmentioned_text=preserve_unmentioned,
+            confidence=_confidence_to_float(raw.get("confidence", "")),
+            notes=str(raw.get("notes") or "")[:1000],
+        )
+    except Exception:
+        return None
+    return contract
+
+
+def _extract_source_contract(
+    asset: FlyerAsset,
+    *,
+    raw_request: str,
+    provider: ReferenceExtractionProvider,
+    role: FlyerReferenceRole,
+    now: datetime,
+) -> FlyerReferenceExtraction:
+    """Vision + customer-text -> FlyerSourceContract for source_edit_template role.
+
+    Provider unavailable -> status=provider_unavailable, no contract attached.
+    JSON parse / validation failure -> low_confidence with merged text-only
+    replacements still attached so the manual queue can show them.
+    """
+    raw_text, status = provider.extract_text_with_prompt(asset, raw_request, SOURCE_CONTRACT_PROMPT) \
+        if hasattr(provider, "extract_text_with_prompt") \
+        else provider.extract_text(asset, raw_request)
+
+    text_replacements = extract_requested_replacements_from_text(raw_request)
+
+    if status == "unsupported":
+        return FlyerReferenceExtraction(
+            asset_id=asset.asset_id,
+            role=role,
+            provider=provider.provider_name,
+            status="unsupported",
+            detail=f"unsupported reference media type: {asset.mime_type}",
+            extracted_at=now,
+        )
+    if status == "provider_unavailable":
+        contract = None
+        if text_replacements:
+            customer_text = (raw_request or "").lower()
+            contract = FlyerSourceContract(
+                requested_replacements=text_replacements,
+                preserve_layout=bool(_PRESERVE_LAYOUT_RE.search(customer_text)),
+                preserve_unmentioned_text=bool(_PRESERVE_UNMENTIONED_RE.search(customer_text)),
+                confidence=0.3,
+            )
+        return FlyerReferenceExtraction(
+            asset_id=asset.asset_id,
+            role=role,
+            provider=provider.provider_name,
+            status="provider_unavailable",
+            detail="source-contract vision provider unavailable",
+            source_contract=contract,
+            extracted_at=now,
+        )
+    contract = _parse_source_contract_json(raw_text, raw_request=raw_request)
+    if contract is None:
+        customer_text = (raw_request or "").lower()
+        contract = FlyerSourceContract(
+            requested_replacements=text_replacements,
+            preserve_layout=bool(_PRESERVE_LAYOUT_RE.search(customer_text)),
+            preserve_unmentioned_text=bool(_PRESERVE_UNMENTIONED_RE.search(customer_text)),
+            confidence=0.3,
+        )
+        return FlyerReferenceExtraction(
+            asset_id=asset.asset_id,
+            role=role,
+            provider=provider.provider_name,
+            status="low_confidence",
+            detail="source-contract vision JSON parse failure",
+            source_contract=contract,
+            extracted_at=now,
+        )
+    final_status = "ok" if contract.confidence >= 0.5 and (contract.required_headings or contract.sections or contract.requested_replacements) else "low_confidence"
+    return FlyerReferenceExtraction(
+        asset_id=asset.asset_id,
+        role=role,
+        provider=provider.provider_name,
+        status=final_status,
+        source_contract=contract,
+        detail="" if final_status == "ok" else "source contract has low confidence or insufficient structure",
+        extracted_at=now,
+    )
+
+
 def extract_reference(
     asset: FlyerAsset,
     *,
@@ -238,6 +451,14 @@ def extract_reference(
             status="unsupported",
             detail=f"unsupported reference media type: {asset.mime_type}",
             extracted_at=datetime.now(timezone.utc),
+        )
+    if role == "source_edit_template":
+        return _extract_source_contract(
+            asset,
+            raw_request=raw_request,
+            provider=provider,
+            role=role,
+            now=datetime.now(timezone.utc),
         )
     if role not in {"menu_reference", "old_flyer_reference"}:
         return FlyerReferenceExtraction(
