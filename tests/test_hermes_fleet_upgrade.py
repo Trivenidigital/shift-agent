@@ -1,5 +1,6 @@
 import importlib.util
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = REPO_ROOT / "tools" / "hermes-fleet-upgrade.py"
+NORMALIZATION_FIXTURES = REPO_ROOT / "tests" / "fixtures" / "hermes_fleet_normalization"
 
 
 def load_module():
@@ -242,6 +244,181 @@ def test_normalization_report_uses_main_as_reference():
     assert "env symlink" in report
     assert "WhatsApp bridge" in report
     assert "patch gate" in report
+
+
+def test_normalization_report_accepts_offline_snapshots_and_renders_roles():
+    module = load_module()
+
+    snapshots = module.load_normalization_snapshot_payload(NORMALIZATION_FIXTURES / "blocked_snapshots.json")
+    report = module.render_normalization_markdown(snapshots)
+
+    assert "Srilu" in report
+    assert "Main" in report
+    assert "VPIN" in report
+    assert "canary" in report
+
+
+def test_promotion_readiness_requires_srilu_green_before_main_or_vpin():
+    module = load_module()
+
+    payload = module.normalization_payload(
+        module.load_normalization_snapshot_payload(NORMALIZATION_FIXTURES / "blocked_snapshots.json")
+    )
+
+    assert payload["promotion_readiness"]["srilu_to_main"]["ready"] is False
+    assert "Srilu must be green before Main promotion" in payload["promotion_readiness"]["srilu_to_main"]["reasons"]
+
+
+def test_promotion_readiness_turns_green_when_contract_is_green():
+    module = load_module()
+
+    payload = module.normalization_payload(
+        module.load_normalization_snapshot_payload(NORMALIZATION_FIXTURES / "green_snapshots.json")
+    )
+
+    assert payload["promotion_readiness"]["srilu_to_main"]["ready"] is True
+    assert payload["promotion_readiness"]["main_to_vpin"]["ready"] is True
+    assert payload["promotion_readiness"]["docker_decision"]["status"] == "deferred"
+
+
+def test_promotion_readiness_requires_green_not_yellow_hosts():
+    module = load_module()
+    snapshots = module.load_normalization_snapshot_payload(NORMALIZATION_FIXTURES / "green_snapshots.json")
+    snapshots["hosts"][0]["patch_gate_status"] = "missing"
+
+    payload = module.normalization_payload(snapshots)
+
+    srilu = next(host for host in payload["hosts"] if host["label"] == "Srilu")
+    assert srilu["health"]["status"] == "yellow"
+    assert payload["promotion_readiness"]["srilu_to_main"]["ready"] is False
+    assert "Srilu must be green before Main promotion" in payload["promotion_readiness"]["srilu_to_main"]["reasons"]
+
+
+def test_normalization_report_does_not_include_mutation_commands():
+    module = load_module()
+
+    snapshots = module.load_normalization_snapshot_payload(NORMALIZATION_FIXTURES / "blocked_snapshots.json")
+    report = module.render_normalization_markdown(snapshots)
+    forbidden = ["systemctl restart", "scp ", "rsync", "deploy.sh", "git checkout", "hermes update"]
+
+    assert not any(token in report for token in forbidden)
+
+
+def test_normalization_report_cli_requires_snapshots_json(monkeypatch):
+    module = load_module()
+    monkeypatch.setattr(module, "probe_host", lambda *_args, **_kwargs: pytest.fail("must not SSH in normalization-report v0.1"))
+
+    assert module.main(["normalization-report", "--format", "json"]) == 2
+
+
+def test_normalization_report_cli_uses_snapshot_fixture_without_ssh(monkeypatch, tmp_path):
+    module = load_module()
+    monkeypatch.setattr(module, "probe_host", lambda *_args, **_kwargs: pytest.fail("must not SSH when snapshots are provided"))
+    out = tmp_path / "nested" / "fleet.json"
+
+    code = module.main([
+        "normalization-report",
+        "--format",
+        "json",
+        "--snapshots-json",
+        str(NORMALIZATION_FIXTURES / "blocked_snapshots.json"),
+        "--out",
+        str(out),
+    ])
+
+    assert code == 0
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert "hosts" in payload
+    assert "promotion_readiness" in payload
+    assert payload["hosts"][0]["health"]["status"] == "red"
+
+
+def test_normalization_payload_blocks_when_snapshot_file_is_wall_clock_stale():
+    """R1-H3: a snapshot whose internal timestamps look consistent can still
+    be a fixture file from weeks ago. The promotion gate must reject such
+    files because they cannot speak to whether the live host is green
+    today, no matter how internally-consistent they were on the day they
+    were written.
+
+    Uses ``now`` injection so the test does not drift over time. The
+    blocked_snapshots fixture is generated_at 2026-05-20T12:00:00Z;
+    asserting against now=2026-06-15 forces wall-clock staleness even
+    though every internal checked_at/generated_at offset is unchanged.
+    """
+    module = load_module()
+    snapshots = module.load_normalization_snapshot_payload(NORMALIZATION_FIXTURES / "green_snapshots.json")
+    far_future_now = datetime(2026, 6, 15, 0, 0, 0, tzinfo=timezone.utc)
+
+    payload = module.normalization_payload(snapshots, now=far_future_now)
+
+    assert payload["wall_clock_fresh"] is False
+    assert payload["wall_clock_age_hours"] is not None
+    assert payload["wall_clock_age_hours"] > 24
+    for host in payload["hosts"]:
+        assert host["health"]["status"] == "red"
+        assert any(
+            "snapshot file stale" in blocker and "wall-clock" in blocker
+            for blocker in host["health"]["blockers"]
+        ), f"{host['label']} blockers must include wall-clock staleness; got {host['health']['blockers']}"
+    # Promotion readiness must also be blocked since every host is now red.
+    assert payload["promotion_readiness"]["srilu_to_main"]["ready"] is False
+    assert payload["promotion_readiness"]["main_to_vpin"]["ready"] is False
+
+
+def test_normalization_payload_is_fresh_when_now_is_within_threshold():
+    """Mirror invariant of the previous test: a deliberately recent ``now``
+    must keep the green fixture green (the wall-clock check must not
+    fire-always)."""
+    module = load_module()
+    snapshots = module.load_normalization_snapshot_payload(NORMALIZATION_FIXTURES / "green_snapshots.json")
+    just_after_generated = datetime(2026, 5, 20, 13, 0, 0, tzinfo=timezone.utc)
+
+    payload = module.normalization_payload(snapshots, now=just_after_generated)
+
+    assert payload["wall_clock_fresh"] is True
+    assert payload["wall_clock_age_hours"] is not None
+    assert payload["wall_clock_age_hours"] < 24
+    # Original green status preserved for all hosts.
+    for host in payload["hosts"]:
+        assert host["health"]["status"] == "green"
+
+
+def test_normalization_payload_blocks_when_generated_at_unparseable():
+    """R1-H3: missing or unparseable generated_at is still a stale-snapshot
+    case — operators must not get a 'fresh' read out of garbage input."""
+    module = load_module()
+    snapshots = module.load_normalization_snapshot_payload(NORMALIZATION_FIXTURES / "green_snapshots.json")
+    snapshots["generated_at"] = "not-a-timestamp"
+
+    payload = module.normalization_payload(snapshots)
+
+    assert payload["wall_clock_fresh"] is False
+    assert payload["wall_clock_age_hours"] is None
+    for host in payload["hosts"]:
+        assert any("snapshot file generated_at missing or unparseable" in b for b in host["health"]["blockers"])
+
+
+def test_normalization_payload_blocks_stale_snapshot():
+    module = load_module()
+    snapshots = module.load_normalization_snapshot_payload(NORMALIZATION_FIXTURES / "blocked_snapshots.json")
+
+    payload = module.normalization_payload(snapshots)
+
+    vpin = next(host for host in payload["hosts"] if host["label"] == "VPIN")
+    assert any("snapshot stale" in blocker for blocker in vpin["health"]["blockers"])
+    assert payload["promotion_readiness"]["main_to_vpin"]["ready"] is False
+
+
+def test_normalization_json_redacts_secret_like_fields():
+    module = load_module()
+    snapshots = module.load_normalization_snapshot_payload(NORMALIZATION_FIXTURES / "green_snapshots.json")
+    snapshots["hosts"][0]["OPENROUTER_API_KEY"] = "sk-secret"
+
+    payload = module.render_normalization_json(snapshots)
+
+    assert "OPENROUTER_API_KEY" not in payload
+    assert "sk-secret" not in payload
+    assert "secret" not in payload.lower()
 
 
 def test_remote_probe_script_is_lf_only_for_linux_bash():

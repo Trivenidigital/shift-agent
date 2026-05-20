@@ -169,6 +169,98 @@ def test_missing_optional_sources_are_non_blocking(tmp_path):
     assert "No automation configs found." in markdown
 
 
+def test_operator_brief_includes_flyer_autonomous_train_status(tmp_path):
+    module = load_module()
+    repo = tmp_path
+    tasks = repo / "tasks"
+    tasks.mkdir()
+    (tasks / "operator-decisions.md").write_text("# Operator Decisions\n", encoding="utf-8")
+    (tasks / "todo.md").write_text("# Backlog\n", encoding="utf-8")
+    flyer_report = repo / "flyer-train.json"
+    flyer_report.write_text(
+        json.dumps(
+            {
+                "status": "attention",
+                "open_autonomous_prs": [{"number": 139, "title": "test"}],
+                "merged_not_deployed": [{"number": 137, "title": "source contract first"}],
+                "blocked_candidates": [{"id": "provider-posture", "reason": "human decision required"}],
+                "needs_srini": ["provider posture decision"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    brief = module.build_brief(
+        repo_root=repo,
+        decisions_path=tasks / "operator-decisions.md",
+        todo_path=tasks / "todo.md",
+        fleet_json_path=None,
+        flyer_train_json_path=flyer_report,
+        automations_dir=repo / "missing-automations",
+        generated_date="2026-05-21",
+        include_git=False,
+    )
+    markdown = module.render_markdown(brief)
+
+    assert "Flyer Autonomous Train" in markdown
+    assert "Open autonomous PRs: #139 test" in markdown
+    assert "Merged-not-deployed: #137 source contract first" in markdown
+    assert "Blocked: provider-posture - human decision required" in markdown
+    assert "Needs Srini: provider posture decision" in markdown
+
+
+def test_operator_brief_includes_fleet_normalization_readiness(tmp_path):
+    module = load_module()
+    repo = tmp_path
+    tasks = repo / "tasks"
+    tasks.mkdir()
+    (tasks / "operator-decisions.md").write_text("# Operator Decisions\n", encoding="utf-8")
+    (tasks / "todo.md").write_text("# Backlog\n", encoding="utf-8")
+    normalization = repo / "fleet-normalization.json"
+    normalization.write_text(
+        json.dumps(
+            {
+                "hosts": [
+                    {
+                        "label": "Srilu",
+                        "health": {
+                            "status": "red",
+                            "summary": "blocked",
+                            "blockers": ["env symlink not ok"],
+                            "warnings": [],
+                        },
+                    }
+                ],
+                "promotion_readiness": {
+                    "srilu_to_main": {"ready": False, "reasons": ["Srilu must be green before Main promotion"]},
+                    "main_to_vpin": {"ready": True, "reasons": []},
+                    "docker_decision": {"status": "deferred", "until": ["normalization contract is green"]},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    brief = module.build_brief(
+        repo_root=repo,
+        decisions_path=tasks / "operator-decisions.md",
+        todo_path=tasks / "todo.md",
+        fleet_json_path=None,
+        fleet_normalization_json_path=normalization,
+        automations_dir=repo / "missing-automations",
+        generated_date="2026-05-21",
+        include_git=False,
+    )
+    markdown = module.render_markdown(brief)
+
+    assert "Fleet Normalization" in markdown
+    assert "Srilu: red - blocked" in markdown
+    assert "Srilu -> Main: blocked" in markdown
+    assert "Srilu must be green before Main promotion" in markdown
+    assert "Main -> VPIN: ready" in markdown
+    assert "Docker: deferred" in markdown
+
+
 def test_todo_signals_ignore_horizontal_rules_checked_items_and_plain_bullets(tmp_path):
     module = load_module()
     todo = tmp_path / "todo.md"

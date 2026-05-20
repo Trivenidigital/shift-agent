@@ -48,6 +48,8 @@ class Brief:
     decisions: OperatorDecisions
     todo_signals: list[str]
     fleet_lines: list[str]
+    flyer_train_lines: list[str]
+    fleet_normalization_lines: list[str]
     automation_lines: list[str]
     git: GitSummary | None
 
@@ -138,6 +140,63 @@ def summarize_fleet_report(path: Path | None) -> list[str]:
     return lines or ["Fleet report contains no readable hosts."]
 
 
+def _item_label(item: object) -> str:
+    if not isinstance(item, dict):
+        return str(item)
+    number = item.get("number")
+    title = str(item.get("title") or item.get("id") or "")
+    if number:
+        return f"#{number} {title}".strip()
+    return title or str(item)
+
+
+def summarize_flyer_train_report(path: Path | None) -> list[str]:
+    if path is None:
+        return []
+    if not path.exists():
+        return [f"Flyer train report file not found: {path}"]
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return [f"Flyer train report is not valid JSON: {exc}"]
+
+    lines = [f"Status: {payload.get('status', 'unknown')}"]
+    open_prs = payload.get("open_autonomous_prs") or []
+    if open_prs:
+        lines.append("Open autonomous PRs: " + ", ".join(_item_label(item) for item in open_prs))
+    merged = payload.get("merged_not_deployed") or []
+    if merged:
+        lines.append("Merged-not-deployed: " + ", ".join(_item_label(item) for item in merged))
+    for item in payload.get("blocked_candidates") or []:
+        if isinstance(item, dict):
+            lines.append(f"Blocked: {item.get('id', 'unknown')} - {item.get('reason', 'unknown')}")
+    for item in payload.get("needs_srini") or []:
+        lines.append(f"Needs Srini: {item}")
+    return lines
+
+
+def summarize_fleet_normalization_report(path: Path | None) -> list[str]:
+    if path is None:
+        return []
+    lines = summarize_fleet_report(path)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return lines
+    readiness = payload.get("promotion_readiness")
+    if isinstance(readiness, dict):
+        for key, label in (("srilu_to_main", "Srilu -> Main"), ("main_to_vpin", "Main -> VPIN")):
+            item = readiness.get(key) if isinstance(readiness.get(key), dict) else {}
+            state = "ready" if item.get("ready") else "blocked"
+            lines.append(f"{label}: {state}")
+            for reason in item.get("reasons") or []:
+                lines.append(f"  {reason}")
+        docker = readiness.get("docker_decision") if isinstance(readiness.get("docker_decision"), dict) else {}
+        if docker:
+            lines.append(f"Docker: {docker.get('status', 'unknown')}")
+    return lines
+
+
 def parse_toml_scalar(line: str) -> tuple[str, str] | None:
     match = re.match(r"^\s*([A-Za-z0-9_-]+)\s*=\s*(.+?)\s*$", line)
     if not match:
@@ -201,6 +260,8 @@ def build_brief(
     decisions_path: Path | None = None,
     todo_path: Path | None = None,
     fleet_json_path: Path | None = None,
+    flyer_train_json_path: Path | None = None,
+    fleet_normalization_json_path: Path | None = None,
     automations_dir: Path | None = None,
     generated_date: str | None = None,
     include_git: bool = True,
@@ -213,6 +274,8 @@ def build_brief(
         decisions=load_operator_decisions(decisions_file),
         todo_signals=load_todo_signals(todo_file),
         fleet_lines=summarize_fleet_report(fleet_json_path),
+        flyer_train_lines=summarize_flyer_train_report(flyer_train_json_path),
+        fleet_normalization_lines=summarize_fleet_normalization_report(fleet_normalization_json_path),
         automation_lines=load_automations(automation_root),
         git=load_git_summary(repo_root) if include_git else None,
     )
@@ -242,6 +305,10 @@ def render_markdown(brief: Brief) -> str:
     append_section(lines, "Active Risks", decisions.active_risks, "No active risks listed.")
     append_section(lines, "Open Todo Signals", brief.todo_signals, "No unchecked todo signals found.")
     append_section(lines, "Fleet Status", brief.fleet_lines, "No fleet status available.")
+    if brief.flyer_train_lines:
+        append_section(lines, "Flyer Autonomous Train", brief.flyer_train_lines, "No Flyer train report provided.")
+    if brief.fleet_normalization_lines:
+        append_section(lines, "Fleet Normalization", brief.fleet_normalization_lines, "No fleet normalization report provided.")
     append_section(lines, "Automations", brief.automation_lines, "No automation configs found.")
 
     if brief.git is not None:
@@ -273,6 +340,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--decisions", type=Path, default=None)
     parser.add_argument("--todo", type=Path, default=None)
     parser.add_argument("--fleet-json", type=Path, default=None)
+    parser.add_argument("--flyer-train-json", type=Path, default=None)
+    parser.add_argument("--fleet-normalization-json", type=Path, default=None)
     parser.add_argument("--automations-dir", type=Path, default=None)
     parser.add_argument("--date", default=None, help="Brief date, YYYY-MM-DD. Defaults to today.")
     parser.add_argument("--out", type=Path, default=None, help="Write Markdown to this path instead of stdout.")
@@ -287,6 +356,8 @@ def main(argv: list[str] | None = None) -> int:
         decisions_path=args.decisions,
         todo_path=args.todo,
         fleet_json_path=args.fleet_json,
+        flyer_train_json_path=args.flyer_train_json,
+        fleet_normalization_json_path=args.fleet_normalization_json,
         automations_dir=args.automations_dir,
         generated_date=args.date,
         include_git=not args.no_git,

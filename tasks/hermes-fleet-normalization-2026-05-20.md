@@ -65,8 +65,13 @@ From this repo:
 
 ```powershell
 python tools\hermes-fleet-upgrade.py check --format markdown --timeout 15
-python tools\hermes-fleet-upgrade.py normalization-report --timeout 15
 python tools\hermes-fleet-upgrade.py skill-sync-report --timeout 15
+```
+
+For the v0.1 normalization contract report, feed a saved/offline snapshot payload. This mode is intentionally read-only and does not SSH-probe hosts:
+
+```powershell
+python tools\hermes-fleet-upgrade.py normalization-report --format markdown --snapshots-json tests\fixtures\hermes_fleet_normalization\blocked_snapshots.json
 ```
 
 Expected before execute-mode upgrade work:

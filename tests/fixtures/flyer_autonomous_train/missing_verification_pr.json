@@ -1,0 +1,39 @@
+{
+  "number": 144,
+  "title": "test: missing verification",
+  "author": "codex-worker",
+  "metadata_source": "offline_fixture",
+  "collected_at": "2026-05-20T00:00:00Z",
+  "metadata_trusted_for_merge": false,
+  "head_sha": "ffffffffffffffffffffffffffffffffffffffff",
+  "is_open": true,
+  "behind_origin_main": false,
+  "category": "golden_fixture_tests",
+  "changed_files": [
+    "tests/fixtures/flyer_golden/live_customer_message_shapes.json"
+  ],
+  "touched_subsystems": [
+    "flyer-golden-fixtures"
+  ],
+  "reviewers": [
+    {
+      "login": "a",
+      "role": "autonomous",
+      "state": "approved",
+      "commit_sha": "ffffffffffffffffffffffffffffffffffffffff",
+      "is_stale": false,
+      "is_author": false
+    },
+    {
+      "login": "b",
+      "role": "autonomous",
+      "state": "approved",
+      "commit_sha": "ffffffffffffffffffffffffffffffffffffffff",
+      "is_stale": false,
+      "is_author": false
+    }
+  ],
+  "findings": [],
+  "verification": [],
+  "base": "main"
+}
