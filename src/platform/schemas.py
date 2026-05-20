@@ -724,7 +724,7 @@ FlyerReferenceRole = Literal[
 ]
 FlyerReferenceExtractionStatus = Literal["not_run", "ok", "low_confidence", "provider_unavailable", "unsupported"]
 FlyerVisualQAStatus = Literal["passed", "failed", "not_run", "provider_unavailable"]
-FlyerVisualQASource = Literal["ocr_vision", "sidecar_test"]
+FlyerVisualQASource = Literal["ocr_vision", "sidecar_test", "operator_review"]
 FlyerManualReviewStatus = Literal["none", "queued", "in_progress", "completed", "break_glass_sent", "closed_no_send"]
 FlyerManualReviewReason = Literal[
     "unclassified",

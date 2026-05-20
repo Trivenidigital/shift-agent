@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -513,6 +514,135 @@ def test_close_freshness_guard_only_invoked_inside_close_branch():
     assert complete_idx < close_idx < guard_idx, (
         "guard must sit inside the --close branch, after --complete"
     )
+
+
+def test_complete_writes_qa_sidecars_so_send_path_clears(tmp_path, monkeypatch):
+    """REGRESSION (PR #131 review finding 1): a cockpit "Complete with
+    uploaded asset" action must produce a project state that the
+    downstream send path (`send_flyer_concept_previews`) can ACTUALLY
+    deliver. Before this fix, `complete_manual_project` attached the
+    uploaded file as a concept_preview but wrote no `.text.json` or
+    `.visual_qa.json` sidecars, so `validate_text_manifest_file` returned
+    `text manifest missing` and the customer never received the preview.
+
+    Pin both halves of the fix:
+      1. After complete, the artifact's text manifest sidecar exists,
+         carries `source_edit_integrity_only` verification mode, and
+         validates.
+      2. The visual QA sidecar exists, is attributed to `operator_review`
+         (NOT `sidecar_test` — that's dev-only), and passes validation
+         without the `FLYER_QA_ALLOW_SIDECAR` env gate.
+    """
+    from agents.flyer.manual_queue import complete_manual_project
+    from agents.flyer.render import validate_text_manifest_file
+    from agents.flyer.visual_qa import validate_visual_qa_report
+
+    # FlyerAsset.path validator constrains the asset to live under this
+    # root; both the upload source and the post-copy dest must satisfy it.
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    # The whole point of qa_source=="operator_review" is to clear without
+    # this env flag. Make sure it's off.
+    monkeypatch.delenv("FLYER_QA_ALLOW_SIDECAR", raising=False)
+
+    queued_at = datetime(2026, 5, 19, 21, 0, 0, tzinfo=timezone.utc)
+    project = FlyerProject(
+        project_id="F0058",
+        status="manual_edit_required",
+        customer_phone="+19045550104",
+        created_at=queued_at,
+        updated_at=queued_at,
+        original_message_id="m-58",
+        raw_request="Authorized exact edit. Replace phone number.",
+        manual_review=FlyerManualReview(
+            status="queued",
+            reason="source_edit_provider_unavailable",
+            reason_code="source_edit_provider_unavailable",
+            queued_at=queued_at,
+        ),
+    )
+    store = FlyerProjectStore(projects=[project])
+
+    asset_src = tmp_path / "operator-uploads" / "approved.png"
+    asset_src.parent.mkdir(parents=True, exist_ok=True)
+    asset_src.write_bytes(b"\x89PNG\r\n\x1a\noperator-approved-bytes")
+
+    updated = complete_manual_project(store, "F0058", asset_src, reason="operator-approved designer asset")
+    completed = next(p for p in updated.projects if p.project_id == "F0058")
+    assert completed.status == "awaiting_final_approval"
+    assert completed.selected_concept_id == "C1"
+    assert len(completed.concepts) == 1
+
+    asset = next(a for a in completed.assets if a.kind == "concept_preview")
+    artifact = Path(asset.path)
+    assert artifact.exists(), f"asset must be copied under FLYER_STATE_ROOT: {artifact}"
+
+    text_qa = validate_text_manifest_file(
+        artifact,
+        project_id="F0058",
+        project_version=completed.version,
+        output_format="concept_preview",
+    )
+    assert text_qa.ok, (
+        f"text QA gate must clear after operator complete; blockers={text_qa.blockers}"
+    )
+
+    visual_qa = validate_visual_qa_report(
+        artifact,
+        project_id="F0058",
+        project_version=completed.version,
+        output_format="concept_preview",
+        allow_sidecar=False,
+    )
+    assert visual_qa.ok, (
+        f"visual QA gate must clear after operator complete; blockers={visual_qa.blockers}"
+    )
+
+    qa_doc = json.loads(Path(str(artifact) + ".qa.json").read_text(encoding="utf-8"))
+    assert qa_doc["qa_source"] == "operator_review", qa_doc.get("qa_source")
+    assert qa_doc["status"] == "passed"
+    assert qa_doc["provider"] == "operator-cockpit"
+
+
+def test_operator_review_qa_source_passes_without_sidecar_env_gate():
+    """The `operator_review` qa_source is a distinct semantic from
+    `sidecar_test`: the latter is dev-only (gated by FLYER_QA_ALLOW_SIDECAR),
+    the former carries operator authority by construction. Pin that the
+    validator does NOT add the sidecar-disabled blocker for operator_review."""
+    from agents.flyer.visual_qa import validate_visual_qa_report, write_visual_qa_report
+    from schemas import FlyerVisualQAReport
+    import tempfile as _tempfile
+    with _tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        artifact = td_path / "img.png"
+        artifact.write_bytes(b"\x89PNG\r\n\x1a\nbytes")
+        sha = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        report = FlyerVisualQAReport(
+            project_id="F0058",
+            asset_id="A0001",
+            artifact_path=str(artifact),
+            artifact_sha256=sha,
+            project_version=1,
+            output_format="concept_preview",
+            provider="operator-cockpit",
+            qa_source="operator_review",
+            status="passed",
+            blockers=[],
+            warnings=[],
+            extracted_text="",
+            checked_at=datetime.now(timezone.utc),
+        )
+        write_visual_qa_report(report, artifact)
+        result = validate_visual_qa_report(
+            artifact,
+            project_id="F0058",
+            project_version=1,
+            output_format="concept_preview",
+            allow_sidecar=False,
+        )
+        assert result.ok, (
+            f"operator_review must validate without the sidecar env flag; "
+            f"blockers={result.blockers}"
+        )
 
 
 # --------------------------------------------------------------------------

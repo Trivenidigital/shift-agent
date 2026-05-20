@@ -346,7 +346,7 @@ def complete_manual_project(
             "completed_at": now,
             "operator_asset_ids": [asset.asset_id],
         })
-        store.projects[idx] = project.model_copy(update={
+        project_after = project.model_copy(update={
             "status": "awaiting_final_approval",
             "assets": [*project.assets, asset],
             "concepts": [concept],
@@ -354,8 +354,79 @@ def complete_manual_project(
             "manual_review": manual,
             "updated_at": now,
         })
+        # The downstream send path (`send_flyer_concept_previews`) gates
+        # delivery on `validate_text_manifest_file` + `validate_visual_qa_report`.
+        # Without sidecars, an operator-completed row reaches
+        # awaiting_final_approval but the preview send will fail with
+        # `text_qa_failed: text manifest missing` — the customer never sees
+        # the approved asset. Reviewer caught this on PR #131; write both
+        # sidecars at completion so the send path clears.
+        #
+        # Verification mode is `source_edit_integrity_only` (the validator
+        # already accepts that as an integrity-only manifest where the
+        # customer's APPROVE is the final visual/text gate). Visual QA is
+        # attributed to `operator_review` — distinct from `sidecar_test`
+        # (which is dev-only) — because the operator's fresh-OTP + reason
+        # IS the QA assertion.
+        _write_operator_qa_sidecars(project_after, dest, asset)
+        store.projects[idx] = project_after
         return FlyerProjectStore.model_validate(store.model_dump())
     raise ValueError(f"project not found: {project_id}")
+
+
+def _write_operator_qa_sidecars(
+    project: "FlyerProject",
+    asset_path: Path,
+    asset: "FlyerAsset",
+) -> None:
+    """Write integrity-only text manifest + operator-attributed visual QA
+    report for a manually-completed asset, so the downstream preview send
+    clears the QA validators. Best-effort: a sidecar-write failure is
+    surfaced as a ValueError so the caller (cockpit complete endpoint)
+    rolls back the operator-completion rather than leaving the row in a
+    send-failing state."""
+    try:
+        try:
+            from flyer_render import write_text_manifest  # type: ignore
+        except ImportError:
+            from agents.flyer.render import write_text_manifest  # type: ignore
+        try:
+            from flyer_visual_qa import write_visual_qa_report  # type: ignore
+        except ImportError:
+            from agents.flyer.visual_qa import write_visual_qa_report  # type: ignore
+        from schemas import FlyerVisualQAReport  # type: ignore
+    except Exception as e:
+        raise ValueError(f"operator QA sidecar imports failed: {type(e).__name__}: {e}")
+    try:
+        write_text_manifest(
+            project,
+            asset_path,
+            output_format="concept_preview",
+            selected_concept_id=project.selected_concept_id or "C1",
+            source_path=asset_path,
+            verification_mode="source_edit_integrity_only",
+        )
+    except Exception as e:
+        raise ValueError(f"operator text manifest write failed: {type(e).__name__}: {e}")
+    report = FlyerVisualQAReport(
+        project_id=project.project_id,
+        asset_id=asset.asset_id,
+        artifact_path=str(asset_path),
+        artifact_sha256=asset.sha256,
+        project_version=project.version,
+        output_format="concept_preview",
+        provider="operator-cockpit",
+        qa_source="operator_review",
+        status="passed",
+        blockers=[],
+        warnings=[],
+        extracted_text="",
+        checked_at=datetime.now(timezone.utc),
+    )
+    try:
+        write_visual_qa_report(report, asset_path)
+    except Exception as e:
+        raise ValueError(f"operator visual QA write failed: {type(e).__name__}: {e}")
 
 
 def close_manual_project(

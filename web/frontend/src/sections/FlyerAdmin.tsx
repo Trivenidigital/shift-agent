@@ -40,6 +40,63 @@ interface ManualQueueSummary {
   groups: ManualQueueGroup[];
 }
 
+interface ManualQueueDetailAsset {
+  asset_id: string;
+  kind: string;
+  source: string;
+  mime_type: string;
+  sha256: string;
+  delivery_status: string;
+  received_at: string | null;
+  delivered_at: string | null;
+  media_url: string;
+}
+
+interface ManualQueueDetailManualReview {
+  status: ManualReviewStatus;
+  reason: string;
+  reason_code: string;
+  detail: string;
+  queued_at: string | null;
+  completed_at: string | null;
+  break_glass_reason: string;
+  operator_asset_ids: string[];
+}
+
+interface ManualQueueDetailTimelineEvent {
+  ts: string;
+  event: string;
+  detail: string;
+}
+
+interface ManualQueueDetail {
+  project_id: string;
+  customer_phone: string;
+  status: string;
+  raw_request: string;
+  original_message_id: string;
+  created_at: string;
+  updated_at: string;
+  version: number;
+  manual_review: ManualQueueDetailManualReview;
+  locked_facts: { name: string; value: string; source?: string }[];
+  qa_blockers: string[];
+  verification_modes: string[];
+  assets: ManualQueueDetailAsset[];
+  final_asset_ids: string[];
+  selected_concept_id: string | null;
+  fields: Record<string, unknown>;
+  timeline: ManualQueueDetailTimelineEvent[];
+}
+
+interface OperatorUploadResult {
+  ok: boolean;
+  asset_path: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+}
+
 interface FlyerSummary {
   segments: Record<string, number>;
   total_customers: number;
@@ -183,6 +240,115 @@ async function sendCsvCampaign(file: File, reason: string, dryRun: boolean): Pro
   return res.json();
 }
 
+async function uploadOperatorAsset(file: File, reason: string): Promise<OperatorUploadResult> {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("reason", reason);
+  const res = await fetch("/api/flyer/operator-uploads", { method: "POST", credentials: "include", body: form });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    const detail = typeof body?.detail === "string" ? body.detail : res.statusText;
+    const err = new Error(detail) as Error & { status?: number };
+    err.status = res.status;
+    throw err;
+  }
+  return res.json();
+}
+
+// P0-1 reason-code playbook copy. Keys MUST stay in sync with
+// FlyerManualReviewReason in src/platform/schemas.py and with
+// CLOSED_NO_SEND_REASON_LINES / MANUAL_REVIEW_REASON_LINES in
+// src/agents/flyer/workflow.py so operator guidance matches what the
+// customer will hear if we proactively notify them.
+const REASON_PLAYBOOK: Record<string, { title: string; next_steps: string[] }> = {
+  source_edit_provider_unavailable: {
+    title: "Source-edit provider down",
+    next_steps: [
+      "Provision/verify OPENAI_API_KEY on the VPS, OR",
+      "Upload an approved designer flyer here and click Complete, OR",
+      "Close with reason containing `provider_unavailable_after_retry` if the row is genuinely stuck.",
+    ],
+  },
+  reference_unsupported: {
+    title: "Reference file format unsupported",
+    next_steps: [
+      "Reply to the customer asking for a JPG or PNG source flyer, OR",
+      "Upload a designer-extracted JPG/PNG version here and Complete.",
+    ],
+  },
+  reference_provider_unavailable: {
+    title: "Reference flyer not retrievable",
+    next_steps: [
+      "Check WhatsApp bridge / media cache, OR",
+      "Ask the customer to re-upload the source flyer.",
+    ],
+  },
+  reference_low_confidence: {
+    title: "Couldn't read uploaded reference",
+    next_steps: [
+      "Inspect the reference thumbnail below — is it legible?",
+      "Ask customer for a clearer copy OR a text description.",
+    ],
+  },
+  reference_not_run: {
+    title: "Extraction not run yet",
+    next_steps: [
+      "If queued >30 min, investigate extractor health / restart agent.",
+      "Otherwise leave queued and re-check shortly.",
+    ],
+  },
+  visual_qa_failed: {
+    title: "Visual QA blockers",
+    next_steps: [
+      "Read the QA blockers below — do they reflect real defects or false positives?",
+      "If real: regenerate or upload a corrected designer asset and Complete.",
+      "If false-positive on text recognition: consider Break-glass with a clear audit reason.",
+    ],
+  },
+  missing_required_facts: {
+    title: "Required facts missing",
+    next_steps: [
+      "Read the locked facts below and the raw request — what's missing?",
+      "Reply to the customer asking for the missing info (do not auto-close).",
+    ],
+  },
+  operator_request: {
+    title: "Operator-flagged review",
+    next_steps: [
+      "Inspect why it was flagged — check audit log for the originating cockpit action.",
+      "Either Complete with a fresh asset or Close once disposition is clear.",
+    ],
+  },
+  policy_block: {
+    title: "Policy-block review",
+    next_steps: [
+      "Compliance/policy issue — escalate per runbook before any send.",
+      "Do NOT Break-glass without explicit operator approval.",
+    ],
+  },
+  provider_timeout: {
+    title: "Provider timeout",
+    next_steps: [
+      "Likely transient. Re-queue / retry generation.",
+      "If repeated: check provider status, then upload designer asset OR close.",
+    ],
+  },
+  unclassified: {
+    title: "Unclassified queue row",
+    next_steps: [
+      "Inspect raw request + assets to understand intent.",
+      "Reach out to operator runbook if context is missing.",
+    ],
+  },
+  legacy_unknown: {
+    title: "Legacy queue row (pre-S1 reason tracking)",
+    next_steps: [
+      "Reason code wasn't recorded — inspect raw request + audit log to infer.",
+      "Once disposition is clear, Complete with asset or Close with reason.",
+    ],
+  },
+};
+
 export function FlyerAdmin() {
   const qc = useQueryClient();
   const [tab, setTab] = useState<Tab>("overview");
@@ -195,8 +361,19 @@ export function FlyerAdmin() {
   const [extensionCount, setExtensionCount] = useState(1);
   const [customerOffset, setCustomerOffset] = useState(0);
   const CUSTOMER_PAGE_SIZE = 300;
-  const [queueReasonByProject, setQueueReasonByProject] = useState<Record<string, string>>({});
-  const [queueAssetByProject, setQueueAssetByProject] = useState<Record<string, string>>({});
+  // P0-1 Manual Queue drawer + filter state
+  const [drawerProjectId, setDrawerProjectId] = useState<string | null>(null);
+  const [queueFilterReason, setQueueFilterReason] = useState("");
+  const [queueFilterPhone, setQueueFilterPhone] = useState("");
+  const [queueFilterAgeBucket, setQueueFilterAgeBucket] = useState("");
+  const [queueFilterManualStatus, setQueueFilterManualStatus] = useState("");
+  const [queueFilterProjectId, setQueueFilterProjectId] = useState("");
+  // P0-2 in-drawer upload-then-complete state (per drawer instance — drawer
+  // is single-row, so flat state is sufficient)
+  const [drawerReason, setDrawerReason] = useState("");
+  const [drawerUploadedAsset, setDrawerUploadedAsset] = useState<OperatorUploadResult | null>(null);
+  const [drawerUploadError, setDrawerUploadError] = useState<string | null>(null);
+  const [drawerUploadBusy, setDrawerUploadBusy] = useState(false);
 
   // Reset to page 1 whenever the filter changes — otherwise an offset
   // set against the old result set may overshoot the new total.
@@ -242,6 +419,74 @@ export function FlyerAdmin() {
     queryFn: () => api.GET<ManualQueueSummary>("/flyer/manual-queue"),
     refetchInterval: 30_000,
   });
+  const { data: queueDetail, isFetching: queueDetailFetching } = useQuery<ManualQueueDetail>({
+    queryKey: ["flyer-manual-queue-detail", drawerProjectId],
+    queryFn: () => api.GET<ManualQueueDetail>(`/flyer/manual-queue/${drawerProjectId}/detail`),
+    enabled: !!drawerProjectId,
+    refetchInterval: drawerProjectId ? 15_000 : false,
+  });
+
+  const closeDrawer = () => {
+    setDrawerProjectId(null);
+    setDrawerReason("");
+    setDrawerUploadedAsset(null);
+    setDrawerUploadError(null);
+  };
+  const openDrawer = (projectId: string) => {
+    setDrawerReason("");
+    setDrawerUploadedAsset(null);
+    setDrawerUploadError(null);
+    setDrawerProjectId(projectId);
+  };
+
+  // Filter the queue groups client-side. Backend filters can come later
+  // (P1-1) — for now the queue is bounded enough that JS-side filtering
+  // is the right tradeoff against shipping schema/route churn.
+  const filteredQueueGroups: ManualQueueGroup[] = useMemo(() => {
+    if (!queueData) return [];
+    const reasonF = queueFilterReason.trim().toLowerCase();
+    const phoneF = queueFilterPhone.trim().toLowerCase();
+    const projF = queueFilterProjectId.trim().toLowerCase();
+    const statusF = queueFilterManualStatus.trim();
+    const ageF = queueFilterAgeBucket;
+    return queueData.groups
+      .map((group) => {
+        const projects = group.projects.filter((row) => {
+          if (reasonF && !row.manual_reason_code.toLowerCase().includes(reasonF)) return false;
+          if (projF && !row.project_id.toLowerCase().includes(projF)) return false;
+          if (statusF && row.manual_status !== statusF) return false;
+          if (ageF === "lt_2h" && !(row.age_hours < 2)) return false;
+          if (ageF === "2_24h" && !(row.age_hours >= 2 && row.age_hours < 24)) return false;
+          if (ageF === "gte_24h" && !(row.age_hours >= 24)) return false;
+          return true;
+        });
+        return { ...group, projects, count: projects.length };
+      })
+      .filter((group) => {
+        if (group.projects.length === 0) return false;
+        if (phoneF && !group.customer_phone.toLowerCase().includes(phoneF)) return false;
+        return true;
+      });
+  }, [queueData, queueFilterReason, queueFilterPhone, queueFilterAgeBucket, queueFilterManualStatus, queueFilterProjectId]);
+
+  const filteredQueueCount = filteredQueueGroups.reduce((acc, g) => acc + g.projects.length, 0);
+
+  const handleOperatorUpload = async (file: File) => {
+    setDrawerUploadError(null);
+    setDrawerUploadBusy(true);
+    try {
+      if (drawerReason.trim().length < 5) {
+        throw new Error("operator reason (min 5 chars) is required before upload");
+      }
+      const result = await uploadOperatorAsset(file, drawerReason.trim());
+      setDrawerUploadedAsset(result);
+    } catch (err) {
+      setDrawerUploadedAsset(null);
+      setDrawerUploadError(mutationErrorMessage(err));
+    } finally {
+      setDrawerUploadBusy(false);
+    }
+  };
 
   const completeQueueItem = useMutation({
     mutationFn: ({ projectId, assetPath, opReason }: { projectId: string; assetPath: string; opReason: string }) =>
@@ -640,9 +885,60 @@ export function FlyerAdmin() {
                   <Stat key={code} label={code} value={count} />
                 ))}
               </div>
+              {/* P0-1 filter row */}
+              <div className="grid grid-cols-2 gap-2 lg:grid-cols-5">
+                <Input
+                  placeholder="project id (F0058)"
+                  value={queueFilterProjectId}
+                  onChange={(e) => setQueueFilterProjectId(e.target.value)}
+                  className="h-8 font-mono text-xs"
+                />
+                <Input
+                  placeholder="customer phone"
+                  value={queueFilterPhone}
+                  onChange={(e) => setQueueFilterPhone(e.target.value)}
+                  className="h-8 text-xs"
+                />
+                <select
+                  className="h-8 rounded-md border border-zinc-300 bg-white px-2 text-xs"
+                  value={queueFilterReason}
+                  onChange={(e) => setQueueFilterReason(e.target.value)}
+                >
+                  <option value="">All reason codes</option>
+                  {Object.keys(REASON_PLAYBOOK).map((code) => (
+                    <option key={code} value={code}>{code}</option>
+                  ))}
+                </select>
+                <select
+                  className="h-8 rounded-md border border-zinc-300 bg-white px-2 text-xs"
+                  value={queueFilterManualStatus}
+                  onChange={(e) => setQueueFilterManualStatus(e.target.value)}
+                >
+                  <option value="">All manual statuses</option>
+                  <option value="queued">queued</option>
+                  <option value="in_progress">in_progress</option>
+                  <option value="completed">completed</option>
+                  <option value="break_glass_sent">break_glass_sent</option>
+                </select>
+                <select
+                  className="h-8 rounded-md border border-zinc-300 bg-white px-2 text-xs"
+                  value={queueFilterAgeBucket}
+                  onChange={(e) => setQueueFilterAgeBucket(e.target.value)}
+                >
+                  <option value="">Any age</option>
+                  <option value="lt_2h">&lt; 2 hours</option>
+                  <option value="2_24h">2–24 hours</option>
+                  <option value="gte_24h">≥ 24 hours</option>
+                </select>
+              </div>
               {(completeQueueItem.isError || breakGlassQueueItem.isError) && (
                 <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
                   {mutationErrorMessage(completeQueueItem.error ?? breakGlassQueueItem.error)}
+                </div>
+              )}
+              {(queueData?.total ?? 0) > 0 && filteredQueueCount === 0 && (
+                <div className="rounded-md border border-zinc-200 bg-zinc-50 px-3 py-3 text-center text-xs text-zinc-500">
+                  No rows match the current filters. {(queueData?.total ?? 0)} row{(queueData?.total ?? 0) === 1 ? "" : "s"} hidden.
                 </div>
               )}
               {!queueData || queueData.groups.length === 0 ? (
@@ -650,7 +946,7 @@ export function FlyerAdmin() {
                   No projects in the manual-review queue.
                 </div>
               ) : (
-                queueData.groups.map((group) => (
+                filteredQueueGroups.map((group) => (
                   <div key={group.customer_phone} className="rounded-md border border-zinc-200">
                     <div className="flex items-center justify-between border-b border-zinc-100 bg-zinc-50 px-3 py-2 text-sm">
                       <div className="font-mono">{group.customer_phone}</div>
@@ -664,81 +960,44 @@ export function FlyerAdmin() {
                           <th className="px-3 py-2 text-left">Reason</th>
                           <th className="px-3 py-2 text-left">Age</th>
                           <th className="px-3 py-2 text-left">Detail / blockers</th>
-                          <th className="px-3 py-2 text-left">Operator action</th>
+                          <th className="px-3 py-2 text-left">Operator</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {group.projects.map((row) => {
-                          const localReason = queueReasonByProject[row.project_id] ?? "";
-                          const localAsset = queueAssetByProject[row.project_id] ?? "";
-                          const setReasonFor = (val: string) => setQueueReasonByProject((m) => ({ ...m, [row.project_id]: val }));
-                          const setAssetFor = (val: string) => setQueueAssetByProject((m) => ({ ...m, [row.project_id]: val }));
-                          const reasonOk = localReason.trim().length >= 5;
-                          const assetOk = localAsset.trim().startsWith("/");
-                          return (
-                            <tr key={row.project_id} className="border-t border-zinc-100 align-top">
-                              <td className="px-3 py-2">
-                                <div className="font-mono text-xs">{row.project_id}</div>
-                                <div className="text-xs text-zinc-500">{row.status}</div>
-                              </td>
-                              <td className="px-3 py-2"><Badge tone={manualStatusTone(row.manual_status)}>{row.manual_status}</Badge></td>
-                              <td className="px-3 py-2">
-                                <div className="font-mono text-xs">{row.manual_reason_code}</div>
-                                {row.verification_modes?.includes("source_edit_integrity_only") && (
-                                  <div className="mt-1">
-                                    <Badge tone="amber">Integrity only</Badge>
-                                  </div>
-                                )}
-                              </td>
-                              <td className="px-3 py-2 text-xs">{row.age_hours}h</td>
-                              <td className="px-3 py-2 text-xs">
-                                <div className="text-zinc-700">{row.manual_detail || "—"}</div>
-                                {row.qa_blockers.length > 0 && (
-                                  <ul className="mt-1 list-disc pl-4 text-rose-700">
-                                    {row.qa_blockers.slice(0, 3).map((b, i) => (<li key={i}>{b}</li>))}
-                                  </ul>
-                                )}
-                                {row.asset_ids.length > 0 && (
-                                  <div className="mt-1 text-zinc-500">assets: {row.asset_ids.join(", ")}</div>
-                                )}
-                              </td>
-                              <td className="px-3 py-2">
-                                <div className="space-y-1.5">
-                                  <Input
-                                    placeholder="operator reason (min 5 chars)"
-                                    value={localReason}
-                                    onChange={(e) => setReasonFor(e.target.value)}
-                                    className="h-8 text-xs"
-                                  />
-                                  <Input
-                                    placeholder="absolute asset path on VPS (for complete)"
-                                    value={localAsset}
-                                    onChange={(e) => setAssetFor(e.target.value)}
-                                    className="h-8 font-mono text-xs"
-                                  />
-                                  <div className="flex gap-1.5">
-                                    <Button
-                                      size="sm"
-                                      disabled={!reasonOk || !assetOk || completeQueueItem.isPending}
-                                      onClick={() => completeQueueItem.mutate({ projectId: row.project_id, assetPath: localAsset, opReason: localReason })}
-                                    >Complete</Button>
-                                    <Button
-                                      size="sm"
-                                      variant="outline"
-                                      disabled={!reasonOk || breakGlassQueueItem.isPending}
-                                      onClick={() => {
-                                        if (window.confirm(`Break-glass send for ${row.project_id}? This bypasses QA — audit row will mark break_glass_sent.`)) {
-                                          breakGlassQueueItem.mutate({ projectId: row.project_id, opReason: localReason });
-                                        }
-                                      }}
-                                      className="border-rose-300 text-rose-700 hover:bg-rose-50"
-                                    >Break-glass</Button>
-                                  </div>
+                        {group.projects.map((row) => (
+                          <tr
+                            key={row.project_id}
+                            className="cursor-pointer border-t border-zinc-100 align-top hover:bg-brand-50/40"
+                            onClick={() => openDrawer(row.project_id)}
+                          >
+                            <td className="px-3 py-2">
+                              <div className="font-mono text-xs text-brand-700 underline-offset-2 hover:underline">{row.project_id}</div>
+                              <div className="text-xs text-zinc-500">{row.status}</div>
+                            </td>
+                            <td className="px-3 py-2"><Badge tone={manualStatusTone(row.manual_status)}>{row.manual_status}</Badge></td>
+                            <td className="px-3 py-2">
+                              <div className="font-mono text-xs">{row.manual_reason_code}</div>
+                              {row.verification_modes?.includes("source_edit_integrity_only") && (
+                                <div className="mt-1">
+                                  <Badge tone="amber">Integrity only</Badge>
                                 </div>
-                              </td>
-                            </tr>
-                          );
-                        })}
+                              )}
+                            </td>
+                            <td className="px-3 py-2 text-xs">{row.age_hours}h</td>
+                            <td className="px-3 py-2 text-xs">
+                              <div className="text-zinc-700">{row.manual_detail || "—"}</div>
+                              {row.qa_blockers.length > 0 && (
+                                <ul className="mt-1 list-disc pl-4 text-rose-700">
+                                  {row.qa_blockers.slice(0, 3).map((b, i) => (<li key={i}>{b}</li>))}
+                                </ul>
+                              )}
+                              {row.asset_ids.length > 0 && (
+                                <div className="mt-1 text-zinc-500">assets: {row.asset_ids.join(", ")}</div>
+                              )}
+                            </td>
+                            <td className="px-3 py-2 text-xs text-brand-700">Open →</td>
+                          </tr>
+                        ))}
                       </tbody>
                     </table>
                   </div>
@@ -748,6 +1007,293 @@ export function FlyerAdmin() {
           </Card>
         </div>
       )}
+      {/* P0-1/P0-2/P0-3 detail drawer (slide-over panel) */}
+      {drawerProjectId && (
+        <div className="fixed inset-0 z-40 flex justify-end bg-black/30">
+          <div className="h-full w-full max-w-2xl overflow-y-auto bg-white shadow-xl">
+            <div className="flex items-center justify-between border-b border-zinc-200 px-4 py-3">
+              <div>
+                <div className="font-mono text-sm font-semibold">{drawerProjectId}</div>
+                <div className="text-xs text-zinc-500">Manual queue detail</div>
+              </div>
+              <Button variant="outline" size="sm" onClick={closeDrawer}>Close</Button>
+            </div>
+            <div className="space-y-4 p-4 text-sm">
+              {queueDetailFetching && !queueDetail && (
+                <div className="text-xs text-zinc-500">Loading project context…</div>
+              )}
+              {queueDetail && (
+                <ManualQueueDrawerBody
+                  detail={queueDetail}
+                  playbook={REASON_PLAYBOOK[queueDetail.manual_review.reason_code] ?? REASON_PLAYBOOK.unclassified}
+                  reason={drawerReason}
+                  onReasonChange={setDrawerReason}
+                  uploadedAsset={drawerUploadedAsset}
+                  uploadError={drawerUploadError}
+                  uploadBusy={drawerUploadBusy}
+                  onUpload={handleOperatorUpload}
+                  onComplete={() => {
+                    if (!drawerUploadedAsset) return;
+                    completeQueueItem.mutate(
+                      { projectId: queueDetail.project_id, assetPath: drawerUploadedAsset.asset_path, opReason: drawerReason.trim() },
+                      { onSuccess: () => closeDrawer() },
+                    );
+                  }}
+                  onBreakGlass={() => {
+                    if (window.confirm(`Break-glass send for ${queueDetail.project_id}? This bypasses QA — audit row will mark break_glass_sent.`)) {
+                      breakGlassQueueItem.mutate(
+                        { projectId: queueDetail.project_id, opReason: drawerReason.trim() },
+                        { onSuccess: () => closeDrawer() },
+                      );
+                    }
+                  }}
+                  completePending={completeQueueItem.isPending}
+                  breakGlassPending={breakGlassQueueItem.isPending}
+                  completeError={mutationErrorMessage(completeQueueItem.error)}
+                  breakGlassError={mutationErrorMessage(breakGlassQueueItem.error)}
+                />
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface ManualQueueDrawerBodyProps {
+  detail: ManualQueueDetail;
+  playbook: { title: string; next_steps: string[] };
+  reason: string;
+  onReasonChange: (val: string) => void;
+  uploadedAsset: OperatorUploadResult | null;
+  uploadError: string | null;
+  uploadBusy: boolean;
+  onUpload: (file: File) => void;
+  onComplete: () => void;
+  onBreakGlass: () => void;
+  completePending: boolean;
+  breakGlassPending: boolean;
+  completeError: string;
+  breakGlassError: string;
+}
+
+function ManualQueueDrawerBody(props: ManualQueueDrawerBodyProps) {
+  const {
+    detail, playbook, reason, onReasonChange,
+    uploadedAsset, uploadError, uploadBusy, onUpload,
+    onComplete, onBreakGlass, completePending, breakGlassPending,
+    completeError, breakGlassError,
+  } = props;
+  const reasonOk = reason.trim().length >= 5;
+  const completeOk = reasonOk && !!uploadedAsset && !completePending;
+  const referenceAssets = detail.assets.filter(
+    (a) => a.kind === "reference_image" || a.kind === "logo",
+  );
+  const integrityOnly = detail.verification_modes.includes("source_edit_integrity_only");
+  return (
+    <div className="space-y-4">
+      {/* Header block: status + reason + age */}
+      <div className="rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2">
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <Badge tone={manualStatusTone(detail.manual_review.status)}>{detail.manual_review.status}</Badge>
+          <span className="font-mono">{detail.manual_review.reason_code}</span>
+          {integrityOnly && <Badge tone="amber">Integrity only</Badge>}
+          <span className="text-zinc-500">customer {detail.customer_phone}</span>
+        </div>
+        <div className="mt-1 text-xs text-zinc-600">Updated {new Date(detail.updated_at).toLocaleString()}</div>
+        {detail.manual_review.detail && (
+          <div className="mt-2 text-xs text-zinc-700">{detail.manual_review.detail}</div>
+        )}
+      </div>
+
+      {/* Reason playbook */}
+      <div className="rounded-md border border-brand-200 bg-brand-50/50 px-3 py-2 text-xs">
+        <div className="font-semibold text-brand-900">{playbook.title}</div>
+        <ul className="mt-1 list-disc pl-5 text-brand-900/90">
+          {playbook.next_steps.map((step, i) => (<li key={i}>{step}</li>))}
+        </ul>
+      </div>
+
+      {/* Raw customer request */}
+      <div className="rounded-md border border-zinc-200 px-3 py-2 text-xs">
+        <div className="text-xs uppercase tracking-wide text-zinc-500">Customer request</div>
+        <div className="mt-1 whitespace-pre-wrap text-zinc-800">{detail.raw_request}</div>
+      </div>
+
+      {/* Locked facts */}
+      {detail.locked_facts.length > 0 && (
+        <div className="rounded-md border border-zinc-200 px-3 py-2 text-xs">
+          <div className="text-xs uppercase tracking-wide text-zinc-500">Locked facts</div>
+          <table className="mt-1 w-full text-xs">
+            <tbody>
+              {detail.locked_facts.map((fact, i) => (
+                <tr key={i} className="border-t border-zinc-100">
+                  <td className="py-1 pr-3 font-mono text-zinc-700">{fact.name}</td>
+                  <td className="py-1 text-zinc-900">{fact.value}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* QA blockers */}
+      {detail.qa_blockers.length > 0 && (
+        <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs">
+          <div className="text-xs uppercase tracking-wide text-rose-700">QA blockers</div>
+          <ul className="mt-1 list-disc pl-5 text-rose-800">
+            {detail.qa_blockers.map((b, i) => (<li key={i}>{b}</li>))}
+          </ul>
+        </div>
+      )}
+
+      {/* Reference / source thumbnails (P0-3 partial). PDFs render an
+          "Open PDF" affordance rather than a broken <img>; image MIMEs
+          inline-thumbnail. Reviewer (PR #131) caught the broken-img
+          fallback for reference_unsupported rows. */}
+      {referenceAssets.length > 0 && (
+        <div className="rounded-md border border-zinc-200 px-3 py-2">
+          <div className="text-xs uppercase tracking-wide text-zinc-500">Source / reference</div>
+          <div className="mt-2 grid grid-cols-2 gap-2">
+            {referenceAssets.map((asset) => {
+              const isImage = asset.mime_type.startsWith("image/");
+              const isPdf = asset.mime_type === "application/pdf";
+              return (
+                <div key={asset.asset_id} className="rounded border border-zinc-200 bg-zinc-50 p-1">
+                  {isImage && (
+                    <img
+                      src={asset.media_url}
+                      alt={asset.asset_id}
+                      className="h-32 w-full rounded object-contain"
+                      loading="lazy"
+                    />
+                  )}
+                  {isPdf && (
+                    <a
+                      href={asset.media_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="flex h-32 w-full items-center justify-center rounded bg-white text-xs text-brand-700 underline-offset-2 hover:underline"
+                    >
+                      Open PDF in new tab
+                    </a>
+                  )}
+                  {!isImage && !isPdf && (
+                    <a
+                      href={asset.media_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="flex h-32 w-full items-center justify-center rounded bg-white text-xs text-brand-700 underline-offset-2 hover:underline"
+                    >
+                      Download {asset.mime_type || "asset"}
+                    </a>
+                  )}
+                  <div className="mt-1 text-[10px] text-zinc-500">
+                    <span className="font-mono">{asset.asset_id}</span> · {asset.kind} · {asset.mime_type}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Operator action: upload + complete + break-glass */}
+      <div className="rounded-md border border-zinc-200 px-3 py-2">
+        <div className="text-xs uppercase tracking-wide text-zinc-500">Operator action</div>
+        <div className="mt-2 space-y-2">
+          <Input
+            placeholder="operator reason (min 5 chars)"
+            value={reason}
+            onChange={(e) => onReasonChange(e.target.value)}
+            className="h-8 text-xs"
+          />
+          {/* Upload control (P0-2) */}
+          <label className="flex items-center gap-2 text-xs text-zinc-700">
+            <FileUp size={14} className="text-brand-700" />
+            <span>Upload designer asset (PNG/JPG/WEBP/PDF, ≤10 MB)</span>
+            <input
+              type="file"
+              accept="image/png,image/jpeg,image/webp,application/pdf"
+              disabled={!reasonOk || uploadBusy}
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) onUpload(file);
+                e.target.value = "";
+              }}
+              className="text-xs"
+            />
+          </label>
+          {uploadBusy && (
+            <div className="text-xs text-zinc-500">Uploading…</div>
+          )}
+          {uploadError && (
+            <div className="rounded border border-rose-200 bg-rose-50 px-2 py-1 text-xs text-rose-700">{uploadError}</div>
+          )}
+          {uploadedAsset && (
+            <div className="rounded border border-emerald-200 bg-emerald-50 px-2 py-2 text-xs">
+              <div className="font-semibold text-emerald-800">Uploaded — preview before Complete</div>
+              <div className="mt-1 text-emerald-900">{uploadedAsset.filename} · {uploadedAsset.mime_type} · {Math.round(uploadedAsset.size_bytes / 1024)} KB</div>
+              {uploadedAsset.mime_type.startsWith("image/") && (
+                <img
+                  src={`/api/flyer/operator-uploads/${uploadedAsset.filename}`}
+                  alt="uploaded designer asset"
+                  className="mt-2 h-40 w-full rounded border border-emerald-300 bg-white object-contain"
+                  loading="lazy"
+                />
+              )}
+              {uploadedAsset.mime_type === "application/pdf" && (
+                <a
+                  href={`/api/flyer/operator-uploads/${uploadedAsset.filename}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-2 inline-block rounded border border-emerald-300 bg-white px-2 py-1 text-xs text-brand-700 underline-offset-2 hover:underline"
+                >
+                  Open uploaded PDF in new tab
+                </a>
+              )}
+            </div>
+          )}
+          {(completeError || breakGlassError) && (
+            <div className="rounded border border-rose-200 bg-rose-50 px-2 py-1 text-xs text-rose-700">
+              {completeError || breakGlassError}
+            </div>
+          )}
+          <div className="flex gap-2">
+            <Button
+              size="sm"
+              disabled={!completeOk}
+              onClick={onComplete}
+            >
+              Complete with uploaded asset
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!reasonOk || breakGlassPending}
+              onClick={onBreakGlass}
+              className="border-rose-300 text-rose-700 hover:bg-rose-50"
+            >
+              Break-glass
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      {/* Timeline */}
+      <div className="rounded-md border border-zinc-200 px-3 py-2 text-xs">
+        <div className="text-xs uppercase tracking-wide text-zinc-500">Timeline</div>
+        <ul className="mt-1 space-y-1">
+          {detail.timeline.map((row, i) => (
+            <li key={i} className="flex items-start gap-2">
+              <span className="font-mono text-zinc-500">{new Date(row.ts).toLocaleString()}</span>
+              <span className="font-mono text-zinc-700">{row.event}</span>
+              {row.detail && <span className="text-zinc-600">{row.detail}</span>}
+            </li>
+          ))}
+        </ul>
+      </div>
     </div>
   );
 }

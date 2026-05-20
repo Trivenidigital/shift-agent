@@ -310,5 +310,12 @@ def validate_visual_qa_report(
         blockers.append("visual QA did not pass")
     if report.qa_source == "sidecar_test" and not allow_sidecar:
         blockers.append("sidecar visual QA is disabled")
+    # `operator_review` is the cockpit-completion path: a fresh-OTP'd
+    # operator uploaded an approved designer asset with a reason. The
+    # operator's cockpit-audit row + the project's `manual_review.detail`
+    # are the audit trail; the customer's APPROVE reply on the resulting
+    # preview is the final visual/text QA gate. We accept it without the
+    # sidecar env flag because it is NOT a dev-test bypass — it carries
+    # operator authority by construction.
     blockers.extend(report.blockers)
     return VisualQAValidation(not blockers, blockers, path)
