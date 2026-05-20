@@ -2,11 +2,26 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parent.parent
 ACTIONS = REPO / "src" / "plugins" / "cf-router" / "actions.py"
+
+
+def _load_workflow_module():
+    """Load `src/agents/flyer/workflow.py` so we can call
+    `source_edit_provider_ready` directly (the 2-tuple layer)."""
+    src = REPO / "src"
+    platform_dir = REPO / "src" / "platform"
+    if str(platform_dir) not in sys.path:
+        sys.path.insert(0, str(platform_dir))
+    if str(src) not in sys.path:
+        sys.path.insert(0, str(src))
+    # Import via the package path so __name__ matches the deployed layout.
+    from agents.flyer import workflow  # type: ignore
+    return workflow
 
 
 def _load_actions_module():
@@ -23,7 +38,7 @@ def test_source_edit_preflight_rejects_pdf_reference(tmp_path, monkeypatch):
     actions = _load_actions_module()
     pdf = tmp_path / "reference.pdf"
     pdf.write_bytes(b"%PDF")
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-test-key")
 
     ok, detail, reason_code = actions.flyer_source_edit_preflight({
         "assets": [{
@@ -46,7 +61,11 @@ def test_source_edit_preflight_requires_provider_key(tmp_path, monkeypatch):
     actions = _load_actions_module()
     image = tmp_path / "reference.png"
     image.write_bytes(b"png")
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    # Set OPENAI_API_KEY to a valid value to prove non-influence: this PR moves
+    # source-edit off OpenAI, so OPENAI_API_KEY presence must NOT mark provider
+    # as ready.
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-real-openai-test")
 
     ok, detail, reason_code = actions.flyer_source_edit_preflight({
         "assets": [{
@@ -58,6 +77,7 @@ def test_source_edit_preflight_requires_provider_key(tmp_path, monkeypatch):
 
     assert ok is False
     assert "provider is not configured" in detail
+    assert "OPENROUTER_API_KEY" in detail
     assert reason_code == "source_edit_provider_unavailable"
 
 
@@ -65,7 +85,7 @@ def test_source_edit_preflight_accepts_available_image(tmp_path, monkeypatch):
     actions = _load_actions_module()
     image = tmp_path / "reference.png"
     image.write_bytes(b"png")
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-test-key")
 
     ok, detail, reason_code = actions.flyer_source_edit_preflight({
         "assets": [{
@@ -85,7 +105,7 @@ def test_source_edit_preflight_requires_uploaded_reference(tmp_path, monkeypatch
     source-edit provider path. Missing reference → reference_provider_unavailable
     so operators see "re-upload source flyer" not "provider outage"."""
     actions = _load_actions_module()
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-test-key")
 
     ok, detail, reason_code = actions.flyer_source_edit_preflight({"assets": []})
     assert ok is False
@@ -99,7 +119,7 @@ def test_source_edit_preflight_rejects_placeholder_provider_key(tmp_path, monkey
     actions = _load_actions_module()
     image = tmp_path / "reference.png"
     image.write_bytes(b"png")
-    monkeypatch.setenv("OPENAI_API_KEY", "PLACEHOLDER-not-a-real-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "PLACEHOLDER-not-a-real-key")
 
     ok, detail, reason_code = actions.flyer_source_edit_preflight({
         "assets": [{
@@ -119,7 +139,7 @@ def test_source_edit_preflight_rejects_missing_image_on_disk(tmp_path, monkeypat
     disk → reference_provider_unavailable (operator action: re-upload)."""
     actions = _load_actions_module()
     missing = tmp_path / "missing.png"
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-test-key")
 
     ok, detail, reason_code = actions.flyer_source_edit_preflight({
         "assets": [{
@@ -192,14 +212,14 @@ def test_source_branch_route_falls_through_source_edit_preflight(tmp_path, monke
     """Regression-pin (Task 8): the new SOURCE branch added in Task 5 routes
     customers through trigger_create_flyer_project(manual_edit_required=True).
     The downstream `--manual-edit-required` path in create-flyer-project
-    queues `source_edit_provider_unavailable` when OPENAI_API_KEY is absent;
-    this test pins that the source-edit preflight returns the correct triad
-    (which the create-flyer-project flow then keys on)."""
+    queues `source_edit_provider_unavailable` when OPENROUTER_API_KEY is
+    absent; this test pins that the source-edit preflight returns the correct
+    triad (which the create-flyer-project flow then keys on)."""
     actions = _load_actions_module()
     image = tmp_path / "ref.png"
     image.write_bytes(b"png")
-    # No OPENAI key — provider unavailable.
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    # No OPENROUTER key — provider unavailable.
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
 
     ok, detail, reason_code = actions.flyer_source_edit_preflight({
         "assets": [{
@@ -213,12 +233,12 @@ def test_source_branch_route_falls_through_source_edit_preflight(tmp_path, monke
 
 
 def test_source_branch_with_provider_key_passes_preflight(tmp_path, monkeypatch):
-    """SOURCE branch + valid OPENAI key reaches the generate path
+    """SOURCE branch + valid OPENROUTER key reaches the generate path
     (preflight returns ready)."""
     actions = _load_actions_module()
     image = tmp_path / "ref.png"
     image.write_bytes(b"png")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-real-test-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-real-test-key")
 
     ok, detail, reason_code = actions.flyer_source_edit_preflight({
         "assets": [{
@@ -258,3 +278,110 @@ def test_site_2_release_runs_before_ack_for_consistent_quota_ordering():
         "in the reference-scope-authorization preflight failure block "
         f"(release_pos={release_pos}, ack_pos={ack_pos})"
     )
+
+
+# ─── 2-tuple layer: workflow.py:source_edit_provider_ready directly ──
+
+
+def _project_with_reference(path: Path) -> dict:
+    return {
+        "assets": [{
+            "kind": "reference_image",
+            "path": str(path),
+            "mime_type": "image/png",
+        }]
+    }
+
+
+def test_source_edit_provider_ready_returns_false_when_openrouter_missing(tmp_path, monkeypatch):
+    """2-tuple layer: missing OPENROUTER_API_KEY (and present OPENAI_API_KEY,
+    to prove non-influence) → (False, '...OPENROUTER_API_KEY missing'). Pins
+    the env-key swap inside workflow.py."""
+    workflow = _load_workflow_module()
+    image = tmp_path / "reference.png"
+    image.write_bytes(b"png")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-real-openai-test")
+    env_file = tmp_path / "shift-agent.env"
+    env_file.write_text("# empty\n", encoding="utf-8")
+
+    ok, detail = workflow.source_edit_provider_ready(
+        _project_with_reference(image), env_path=env_file,
+    )
+    assert ok is False
+    assert "OPENROUTER_API_KEY" in detail
+    assert "provider is not configured" in detail
+
+
+def test_source_edit_provider_ready_returns_false_on_placeholder(tmp_path, monkeypatch):
+    """2-tuple layer: PLACEHOLDER OPENROUTER_API_KEY still fails closed."""
+    workflow = _load_workflow_module()
+    image = tmp_path / "reference.png"
+    image.write_bytes(b"png")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "PLACEHOLDER_xxxx_not_real")
+    env_file = tmp_path / "shift-agent.env"
+    env_file.write_text("# empty\n", encoding="utf-8")
+
+    ok, detail = workflow.source_edit_provider_ready(
+        _project_with_reference(image), env_path=env_file,
+    )
+    assert ok is False
+    assert "OPENROUTER_API_KEY" in detail
+
+
+def test_source_edit_provider_ready_returns_true_with_valid_openrouter(tmp_path, monkeypatch):
+    """2-tuple layer: valid OPENROUTER_API_KEY + valid image reference →
+    (True, 'ready')."""
+    workflow = _load_workflow_module()
+    image = tmp_path / "reference.png"
+    image.write_bytes(b"png")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-real-test-key")
+    env_file = tmp_path / "shift-agent.env"
+    env_file.write_text("# empty\n", encoding="utf-8")
+
+    ok, detail = workflow.source_edit_provider_ready(
+        _project_with_reference(image), env_path=env_file,
+    )
+    assert ok is True
+    assert detail == "ready"
+
+
+def test_source_edit_provider_ready_reads_key_from_env_file(tmp_path, monkeypatch):
+    """2-tuple layer: dual env-file search — process env empty, key resolved
+    from the env file passed via `env_path`. Mirrors deployed dual-search
+    (Hermes .env / shift-agent .env) covered through the explicit
+    `env_path` test-injection seam."""
+    workflow = _load_workflow_module()
+    image = tmp_path / "reference.png"
+    image.write_bytes(b"png")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    env_file = tmp_path / "agent.env"
+    env_file.write_text('OPENROUTER_API_KEY="sk-or-v1-from-file"\n', encoding="utf-8")
+
+    ok, detail = workflow.source_edit_provider_ready(
+        _project_with_reference(image), env_path=env_file,
+    )
+    assert ok is True
+    assert detail == "ready"
+
+
+def test_flyer_source_edit_preflight_wraps_2tuple_with_provider_unavailable_code(tmp_path, monkeypatch):
+    """3-tuple wrapper: when source_edit_provider_ready returns (False,
+    '...OPENROUTER_API_KEY missing'), flyer_source_edit_preflight maps it
+    to reason_code='source_edit_provider_unavailable' via the existing
+    substring-fallback branch in actions.py — preserved by exhaustion."""
+    actions = _load_actions_module()
+    image = tmp_path / "reference.png"
+    image.write_bytes(b"png")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    ok, detail, reason_code = actions.flyer_source_edit_preflight({
+        "assets": [{
+            "kind": "reference_image",
+            "path": str(image),
+            "mime_type": "image/png",
+        }]
+    })
+    assert ok is False
+    assert "OPENROUTER_API_KEY" in detail
+    assert reason_code == "source_edit_provider_unavailable"

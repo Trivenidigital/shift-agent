@@ -9,6 +9,8 @@ import io
 import json
 import sys
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src" / "platform"))
 
@@ -801,7 +803,39 @@ def test_direct_poster_prompt_extracts_items_and_prices_from_sample_reference(mo
     assert "Do not replace them with generic grocery categories" in prompt
 
 
-def test_source_edit_preview_calls_openai_edit_api_with_reference_image(tmp_path, monkeypatch):
+def _openrouter_image_response_body(png_color=(40, 90, 50)) -> bytes:
+    """Build the OpenRouter chat-completions multimodal-image response shape."""
+    encoded = base64.b64encode(_png_bytes(color=png_color)).decode("ascii")
+    return json.dumps({
+        "choices": [{
+            "message": {
+                "content": "",
+                "images": [{
+                    "image_url": {"url": f"data:image/png;base64,{encoded}"},
+                }],
+            },
+        }],
+    }).encode("utf-8")
+
+
+class _OpenRouterFakeResponse:
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self):
+        return self._body
+
+
+def test_openrouter_source_edit_request_shape(tmp_path, monkeypatch):
+    """Request payload sent to OpenRouter chat-completions for source-edit
+    must be the multimodal text + image_url shape with the documented model
+    slug, modalities, and image_config block."""
     reference = tmp_path / "reference.png"
     reference.write_bytes(_png_bytes())
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
@@ -823,29 +857,18 @@ def test_source_edit_preview_calls_openai_edit_api_with_reference_image(tmp_path
     })
     requests = []
 
-    class _Resp:
-        def __enter__(self):
-            png = base64.b64encode(_png_bytes(color=(40, 90, 50))).decode("ascii")
-            self._body = json.dumps({"data": [{"b64_json": png}]}).encode("utf-8")
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def read(self):
-            return self._body
-
     def _fake_urlopen(req, timeout):
         requests.append((req, timeout, req.data))
-        return _Resp()
+        return _OpenRouterFakeResponse(_openrouter_image_response_body())
 
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-test")
+    monkeypatch.delenv("FLYER_SOURCE_EDIT_MODEL", raising=False)
     monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", _fake_urlopen)
 
     spec = render_source_edit_preview(
         project,
         tmp_path,
-        model="gpt-image-1",
+        model="google/gemini-2.5-flash-image-preview",
         quality="medium",
     )
 
@@ -853,25 +876,100 @@ def test_source_edit_preview_calls_openai_edit_api_with_reference_image(tmp_path
     assert spec.path.read_bytes().startswith(b"\x89PNG")
     assert len(requests) == 1
     req, timeout, body = requests[0]
-    assert req.full_url.endswith("/v1/images/edits")
+    assert req.full_url == "https://openrouter.ai/api/v1/chat/completions"
     assert timeout == 180
-    assert req.headers["Authorization"] == "Bearer sk-test"
-    assert b'name="model"\r\n\r\ngpt-image-1' in body
-    assert b'name="input_fidelity"\r\n\r\nhigh' in body
-    assert b'name="prompt"' in body
-    assert b"Remove extra 08:00" in body
-    assert b'name="image"; filename="reference.png"' in body
+    assert req.headers["Authorization"] == "Bearer sk-or-v1-test"
+    assert req.headers["Content-type"] == "application/json"
+    payload = json.loads(body.decode("utf-8"))
+    assert payload["model"] == "google/gemini-2.5-flash-image-preview"
+    assert payload["modalities"] == ["image", "text"]
+    assert payload["stream"] is False
+    assert payload["image_config"]["image_size"] == "1K"
+    assert payload["image_config"]["aspect_ratio"] in {"4:5", "1:1", "9:16", "2:3", "3:4"}
+    content = payload["messages"][0]["content"]
+    assert any(part.get("type") == "text" and "Remove extra 08:00" in part.get("text", "") for part in content)
+    image_part = next(part for part in content if part.get("type") == "image_url")
+    assert image_part["image_url"]["url"].startswith("data:image/png;base64,")
     manifest = json.loads(Path(f"{spec.path}.text.json").read_text(encoding="utf-8"))
     assert manifest["verification_mode"] == "source_edit_integrity_only"
     assert "inspect the preview visually" in " ".join(manifest["warnings"])
-    qa = validate_text_manifest_file(
-        spec.path,
-        project_id=project.project_id,
-        project_version=project.version,
-        output_format="concept_preview",
+
+
+def test_openrouter_source_edit_request_shape_image_size_high(tmp_path, monkeypatch):
+    """`quality='high'` must surface as `image_config.image_size='2K'` in the
+    outgoing payload (mirrors the existing _openrouter_image_bytes contract)."""
+    reference = tmp_path / "reference.png"
+    reference.write_bytes(_png_bytes())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    project = _complete_project().model_copy(update={
+        "status": "manual_edit_required",
+        "raw_request": "Edit uploaded flyer/source artwork. Customer requested: Change date.",
+        "assets": [
+            FlyerAsset(
+                asset_id="A0001",
+                kind="reference_image",
+                source="whatsapp",
+                path=str(reference),
+                mime_type="image/png",
+                sha256="a" * 64,
+                original_message_id="wamid.reference",
+                received_at=datetime.now(timezone.utc),
+            )
+        ],
+    })
+    requests = []
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-test")
+    monkeypatch.delenv("FLYER_SOURCE_EDIT_MODEL", raising=False)
+    monkeypatch.setattr(
+        "agents.flyer.render.urllib.request.urlopen",
+        lambda req, timeout: requests.append(req.data) or _OpenRouterFakeResponse(_openrouter_image_response_body()),
     )
-    assert qa.ok is True
-    assert any("integrity only" in warning for warning in qa.warnings)
+    render_source_edit_preview(project, tmp_path, model="google/gemini-2.5-flash-image-preview", quality="high")
+    payload = json.loads(requests[0].decode("utf-8"))
+    assert payload["image_config"]["image_size"] == "2K"
+
+
+def test_openrouter_source_edit_response_parse_happy_path(tmp_path, monkeypatch):
+    """Mock the documented response shape (`choices[0].message.images[0]
+    .image_url.url=data:image/png;base64,...`) and assert the helper returns
+    the decoded bytes."""
+    import agents.flyer.render as render_mod
+    reference = tmp_path / "F9101-ref.png"
+    reference.write_bytes(_png_bytes())
+
+    now = datetime(2026, 5, 20, tzinfo=timezone.utc)
+    project = FlyerProject.model_validate({
+        "project_id": "F9101",
+        "status": "manual_edit_required",
+        "customer_phone": "+17329837841",
+        "created_at": now,
+        "updated_at": now,
+        "original_message_id": "m-1",
+        "raw_request": "Edit uploaded flyer/source artwork. Change date.",
+        "fields": {"event_or_business_name": "Lakshmis", "contact_info": "+17329837841"},
+        "assets": [{
+            "asset_id": "A0001",
+            "kind": "reference_image",
+            "source": "whatsapp",
+            "path": str(reference),
+            "mime_type": "image/png",
+            "sha256": "a" * 64,
+            "received_at": now,
+        }],
+    })
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-test")
+    monkeypatch.delenv("FLYER_SOURCE_EDIT_MODEL", raising=False)
+    monkeypatch.setattr(
+        render_mod.urllib.request,
+        "urlopen",
+        lambda req, timeout: _OpenRouterFakeResponse(_openrouter_image_response_body(png_color=(10, 200, 90))),
+    )
+
+    raw = render_mod._openrouter_source_edit_bytes(
+        project, size=(1080, 1350), model="google/gemini-2.5-flash-image-preview", quality="medium",
+    )
+    assert raw.startswith(b"\x89PNG")
 
 
 def test_source_edit_rejects_pdf_reference_before_provider_call(tmp_path, monkeypatch):
@@ -898,11 +996,11 @@ def test_source_edit_rejects_pdf_reference_before_provider_call(tmp_path, monkey
     def _fail_urlopen(*_args, **_kwargs):
         raise AssertionError("PDF references must not reach image edit provider")
 
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-test")
     monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", _fail_urlopen)
 
     try:
-        render_source_edit_preview(project, tmp_path, model="gpt-image-1", quality="medium")
+        render_source_edit_preview(project, tmp_path, model="google/gemini-2.5-flash-image-preview", quality="medium")
     except FlyerRenderError as e:
         assert "must be an image" in str(e)
     else:
@@ -910,11 +1008,15 @@ def test_source_edit_rejects_pdf_reference_before_provider_call(tmp_path, monkey
 
 
 def test_source_edit_reference_uses_latest_reference_asset(tmp_path, monkeypatch):
+    """The latest reference_image asset must be the one embedded in the
+    OpenRouter request payload's data URL (not an earlier one)."""
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     first = tmp_path / "old.png"
     latest = tmp_path / "latest.png"
-    first.write_bytes(_png_bytes(color=(10, 20, 30)))
-    latest.write_bytes(_png_bytes(color=(40, 90, 50)))
+    first_bytes = _png_bytes(color=(10, 20, 30))
+    latest_bytes = _png_bytes(color=(40, 90, 50))
+    first.write_bytes(first_bytes)
+    latest.write_bytes(latest_bytes)
     project = _complete_project().model_copy(update={
         "status": "manual_edit_required",
         "raw_request": "Edit uploaded flyer/source artwork. Customer requested: Change date.",
@@ -943,25 +1045,363 @@ def test_source_edit_reference_uses_latest_reference_asset(tmp_path, monkeypatch
     })
     requests = []
 
-    class _Resp:
-        def __enter__(self):
-            png = base64.b64encode(_png_bytes()).decode("ascii")
-            self._body = json.dumps({"data": [{"b64_json": png}]}).encode("utf-8")
-            return self
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-test")
+    monkeypatch.delenv("FLYER_SOURCE_EDIT_MODEL", raising=False)
+    monkeypatch.setattr(
+        "agents.flyer.render.urllib.request.urlopen",
+        lambda req, timeout: requests.append(req.data) or _OpenRouterFakeResponse(_openrouter_image_response_body()),
+    )
 
-        def __exit__(self, *_args):
-            return False
+    render_source_edit_preview(project, tmp_path, model="google/gemini-2.5-flash-image-preview", quality="medium")
 
-        def read(self):
-            return self._body
+    latest_b64 = base64.b64encode(latest_bytes).decode("ascii")
+    first_b64 = base64.b64encode(first_bytes).decode("ascii")
+    body = requests[0].decode("utf-8")
+    assert latest_b64 in body
+    assert first_b64 not in body
 
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", lambda req, timeout: requests.append(req.data) or _Resp())
 
-    render_source_edit_preview(project, tmp_path, model="gpt-image-1", quality="medium")
+# ─── Model resolution precedence (8 + 1 trust-operator escape hatch) ──
 
-    assert b'filename="latest.png"' in requests[0]
-    assert b'filename="old.png"' not in requests[0]
+
+def test_model_resolution_env_wins(monkeypatch):
+    import agents.flyer.render as render_mod
+    monkeypatch.setenv("FLYER_SOURCE_EDIT_MODEL", "custom/model-x")
+    assert render_mod._resolve_source_edit_model("google/gemini-2.5-flash-image-preview") == "custom/model-x"
+
+
+def test_model_resolution_caller_slug_used_when_no_env(monkeypatch):
+    import agents.flyer.render as render_mod
+    monkeypatch.delenv("FLYER_SOURCE_EDIT_MODEL", raising=False)
+    assert render_mod._resolve_source_edit_model("anthropic/claude-3-opus") == "anthropic/claude-3-opus"
+
+
+def test_model_resolution_default_when_caller_lacks_slash(monkeypatch):
+    import agents.flyer.render as render_mod
+    monkeypatch.delenv("FLYER_SOURCE_EDIT_MODEL", raising=False)
+    # Bare model name without slash falls to default (not a valid OpenRouter id).
+    assert render_mod._resolve_source_edit_model("gpt-4o") == render_mod.FLYER_SOURCE_EDIT_DEFAULT_MODEL
+
+
+def test_model_resolution_legacy_sentinel_substituted(monkeypatch):
+    import agents.flyer.render as render_mod
+    monkeypatch.delenv("FLYER_SOURCE_EDIT_MODEL", raising=False)
+    assert render_mod._resolve_source_edit_model("gpt-image-1") == render_mod.FLYER_SOURCE_EDIT_DEFAULT_MODEL
+
+
+def test_model_resolution_legacy_dall_e_2_substituted(monkeypatch):
+    import agents.flyer.render as render_mod
+    monkeypatch.delenv("FLYER_SOURCE_EDIT_MODEL", raising=False)
+    assert render_mod._resolve_source_edit_model("dall-e-2") == render_mod.FLYER_SOURCE_EDIT_DEFAULT_MODEL
+
+
+def test_model_resolution_legacy_dall_e_3_substituted(monkeypatch):
+    import agents.flyer.render as render_mod
+    monkeypatch.delenv("FLYER_SOURCE_EDIT_MODEL", raising=False)
+    assert render_mod._resolve_source_edit_model("dall-e-3") == render_mod.FLYER_SOURCE_EDIT_DEFAULT_MODEL
+
+
+def test_model_resolution_empty_caller_uses_default(monkeypatch):
+    import agents.flyer.render as render_mod
+    monkeypatch.delenv("FLYER_SOURCE_EDIT_MODEL", raising=False)
+    assert render_mod._resolve_source_edit_model("") == render_mod.FLYER_SOURCE_EDIT_DEFAULT_MODEL
+
+
+def test_model_resolution_env_overrides_legacy_caller(monkeypatch):
+    """Env still wins even when caller passes a stale legacy sentinel value."""
+    import agents.flyer.render as render_mod
+    monkeypatch.setenv("FLYER_SOURCE_EDIT_MODEL", "custom/model-x")
+    assert render_mod._resolve_source_edit_model("gpt-image-1") == "custom/model-x"
+
+
+def test_model_resolution_env_with_legacy_sentinel_value_still_returned_unchanged(monkeypatch):
+    """Trust-operator escape hatch: an operator who sets
+    FLYER_SOURCE_EDIT_MODEL=gpt-image-1 gets exactly that and OpenRouter will
+    400. This is the intentional v0.1 posture — env wins UNCONDITIONALLY with
+    no validation. Pinned so a future contributor does not add validation
+    that breaks the escape hatch."""
+    import agents.flyer.render as render_mod
+    monkeypatch.setenv("FLYER_SOURCE_EDIT_MODEL", "gpt-image-1")
+    assert render_mod._resolve_source_edit_model("google/gemini-2.5-flash-image-preview") == "gpt-image-1"
+
+
+def test_schema_default_is_openrouter_gemini_slug():
+    """Schema default flip is pinned so a future schema-cleanup PR can't
+    silently revert it."""
+    from schemas import FlyerConfig as _FlyerConfig  # noqa: PLC0415
+    assert _FlyerConfig().edit_image_model == "google/gemini-2.5-flash-image-preview"
+
+
+# ─── Error taxonomy (one test per row of the design table) ──
+
+
+def _source_edit_project(tmp_path) -> "FlyerProject":
+    reference = tmp_path / "F9101-ref.png"
+    reference.write_bytes(_png_bytes())
+    now = datetime(2026, 5, 20, tzinfo=timezone.utc)
+    return FlyerProject.model_validate({
+        "project_id": "F9101",
+        "status": "manual_edit_required",
+        "customer_phone": "+17329837841",
+        "created_at": now,
+        "updated_at": now,
+        "original_message_id": "m-1",
+        "raw_request": "Edit uploaded flyer/source artwork. Change date.",
+        "fields": {"event_or_business_name": "Lakshmis", "contact_info": "+17329837841"},
+        "assets": [{
+            "asset_id": "A0001",
+            "kind": "reference_image",
+            "source": "whatsapp",
+            "path": str(reference),
+            "mime_type": "image/png",
+            "sha256": "a" * 64,
+            "received_at": now,
+        }],
+    })
+
+
+def _http_error(code: int, body_text: str = "") -> "Exception":
+    import urllib.error  # noqa: PLC0415
+    err = urllib.error.HTTPError(
+        url="https://openrouter.ai/api/v1/chat/completions",
+        code=code,
+        msg=f"HTTP {code}",
+        hdrs=None,
+        fp=io.BytesIO((body_text or f"err {code}").encode("utf-8")),
+    )
+    return err
+
+
+def test_openrouter_source_edit_http_400_raises_immediately(tmp_path, monkeypatch):
+    """Non-retriable 4xx → raise on first attempt, no retry."""
+    import agents.flyer.render as render_mod
+    import pytest as _pytest
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-test")
+    monkeypatch.delenv("FLYER_SOURCE_EDIT_MODEL", raising=False)
+    calls: list[int] = []
+    def _fake(_req, timeout):
+        calls.append(1)
+        raise _http_error(400, '{"error":"bad request"}')
+    monkeypatch.setattr(render_mod.urllib.request, "urlopen", _fake)
+    sleeps: list[float] = []
+    monkeypatch.setattr(render_mod.time, "sleep", lambda s: sleeps.append(s))
+    project = _source_edit_project(tmp_path)
+    with _pytest.raises(FlyerRenderError, match="HTTP 400"):
+        render_mod._openrouter_source_edit_bytes(project, size=(1080, 1350), model="google/gemini-2.5-flash-image-preview", quality="medium")
+    assert len(calls) == 1
+    assert sleeps == []
+
+
+@pytest.mark.parametrize("code", [429, 502, 503, 504])
+def test_openrouter_source_edit_retriable_http_retries_three_times(tmp_path, monkeypatch, code):
+    """Retriable HTTP code exhausts the 3-attempt budget with backoff before
+    raising FlyerRenderError."""
+    import agents.flyer.render as render_mod
+    import pytest as _pytest
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-test")
+    monkeypatch.delenv("FLYER_SOURCE_EDIT_MODEL", raising=False)
+    calls: list[int] = []
+    def _fake(_req, timeout):
+        calls.append(code)
+        raise _http_error(code, f'{{"error":"retriable {code}"}}')
+    monkeypatch.setattr(render_mod.urllib.request, "urlopen", _fake)
+    sleeps: list[float] = []
+    monkeypatch.setattr(render_mod.time, "sleep", lambda s: sleeps.append(s))
+    project = _source_edit_project(tmp_path)
+    with _pytest.raises(FlyerRenderError, match=f"HTTP {code}"):
+        render_mod._openrouter_source_edit_bytes(project, size=(1080, 1350), model="google/gemini-2.5-flash-image-preview", quality="medium")
+    assert len(calls) == 3
+    # 2 sleeps between attempts; final attempt raises without sleep.
+    assert len(sleeps) == 2
+
+
+def test_openrouter_source_edit_http_500_non_retriable(tmp_path, monkeypatch):
+    """500 is NOT in the retriable set; must raise on first attempt."""
+    import agents.flyer.render as render_mod
+    import pytest as _pytest
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-test")
+    monkeypatch.delenv("FLYER_SOURCE_EDIT_MODEL", raising=False)
+    calls: list[int] = []
+    def _fake(_req, timeout):
+        calls.append(500)
+        raise _http_error(500, '{"error":"internal"}')
+    monkeypatch.setattr(render_mod.urllib.request, "urlopen", _fake)
+    sleeps: list[float] = []
+    monkeypatch.setattr(render_mod.time, "sleep", lambda s: sleeps.append(s))
+    project = _source_edit_project(tmp_path)
+    with _pytest.raises(FlyerRenderError, match="HTTP 500"):
+        render_mod._openrouter_source_edit_bytes(project, size=(1080, 1350), model="google/gemini-2.5-flash-image-preview", quality="medium")
+    assert len(calls) == 1
+    assert sleeps == []
+
+
+def test_openrouter_source_edit_timeout_retries_three_times(tmp_path, monkeypatch):
+    import agents.flyer.render as render_mod
+    import pytest as _pytest
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-test")
+    monkeypatch.delenv("FLYER_SOURCE_EDIT_MODEL", raising=False)
+    calls: list[int] = []
+    def _fake(_req, timeout):
+        calls.append(1)
+        raise TimeoutError("read timeout")
+    monkeypatch.setattr(render_mod.urllib.request, "urlopen", _fake)
+    monkeypatch.setattr(render_mod.time, "sleep", lambda s: None)
+    project = _source_edit_project(tmp_path)
+    with _pytest.raises(FlyerRenderError, match="response failed"):
+        render_mod._openrouter_source_edit_bytes(project, size=(1080, 1350), model="google/gemini-2.5-flash-image-preview", quality="medium")
+    assert len(calls) == 3
+
+
+def test_openrouter_source_edit_urlerror_retries_three_times(tmp_path, monkeypatch):
+    import agents.flyer.render as render_mod
+    import pytest as _pytest
+    import urllib.error
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-test")
+    monkeypatch.delenv("FLYER_SOURCE_EDIT_MODEL", raising=False)
+    calls: list[int] = []
+    def _fake(_req, timeout):
+        calls.append(1)
+        raise urllib.error.URLError("connection refused")
+    monkeypatch.setattr(render_mod.urllib.request, "urlopen", _fake)
+    monkeypatch.setattr(render_mod.time, "sleep", lambda s: None)
+    project = _source_edit_project(tmp_path)
+    with _pytest.raises(FlyerRenderError, match="response failed"):
+        render_mod._openrouter_source_edit_bytes(project, size=(1080, 1350), model="google/gemini-2.5-flash-image-preview", quality="medium")
+    assert len(calls) == 3
+
+
+def test_openrouter_source_edit_empty_choices_distinct_message(tmp_path, monkeypatch):
+    import agents.flyer.render as render_mod
+    import pytest as _pytest
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-test")
+    monkeypatch.delenv("FLYER_SOURCE_EDIT_MODEL", raising=False)
+    body = json.dumps({"choices": []}).encode("utf-8")
+    monkeypatch.setattr(render_mod.urllib.request, "urlopen", lambda req, timeout: _OpenRouterFakeResponse(body))
+    project = _source_edit_project(tmp_path)
+    with _pytest.raises(FlyerRenderError, match="had no choices"):
+        render_mod._openrouter_source_edit_bytes(project, size=(1080, 1350), model="google/gemini-2.5-flash-image-preview", quality="medium")
+
+
+def test_openrouter_source_edit_refusal_content_filter(tmp_path, monkeypatch):
+    """`finish_reason=content_filter` + no images → distinct refusal message."""
+    import agents.flyer.render as render_mod
+    import pytest as _pytest
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-test")
+    monkeypatch.delenv("FLYER_SOURCE_EDIT_MODEL", raising=False)
+    body = json.dumps({
+        "choices": [{"finish_reason": "content_filter", "message": {"content": "", "images": []}}],
+    }).encode("utf-8")
+    monkeypatch.setattr(render_mod.urllib.request, "urlopen", lambda req, timeout: _OpenRouterFakeResponse(body))
+    project = _source_edit_project(tmp_path)
+    with _pytest.raises(FlyerRenderError, match="refused .likely content policy"):
+        render_mod._openrouter_source_edit_bytes(project, size=(1080, 1350), model="google/gemini-2.5-flash-image-preview", quality="medium")
+
+
+def test_openrouter_source_edit_refusal_safety(tmp_path, monkeypatch):
+    """`finish_reason=safety` + no images → distinct refusal message."""
+    import agents.flyer.render as render_mod
+    import pytest as _pytest
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-test")
+    monkeypatch.delenv("FLYER_SOURCE_EDIT_MODEL", raising=False)
+    body = json.dumps({
+        "choices": [{"finish_reason": "safety", "message": {"content": "", "images": []}}],
+    }).encode("utf-8")
+    monkeypatch.setattr(render_mod.urllib.request, "urlopen", lambda req, timeout: _OpenRouterFakeResponse(body))
+    project = _source_edit_project(tmp_path)
+    with _pytest.raises(FlyerRenderError, match="refused .likely content policy"):
+        render_mod._openrouter_source_edit_bytes(project, size=(1080, 1350), model="google/gemini-2.5-flash-image-preview", quality="medium")
+
+
+def test_openrouter_source_edit_text_only_response_classified_as_refusal(tmp_path, monkeypatch):
+    """Text-only response (message.content non-empty, no images, no
+    finish_reason) is heuristically classified as a refusal so operator
+    triage can disambiguate refusal-vs-malformed in audit logs."""
+    import agents.flyer.render as render_mod
+    import pytest as _pytest
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-test")
+    monkeypatch.delenv("FLYER_SOURCE_EDIT_MODEL", raising=False)
+    body = json.dumps({
+        "choices": [{"message": {"content": "I can't edit that image.", "images": []}}],
+    }).encode("utf-8")
+    monkeypatch.setattr(render_mod.urllib.request, "urlopen", lambda req, timeout: _OpenRouterFakeResponse(body))
+    project = _source_edit_project(tmp_path)
+    with _pytest.raises(FlyerRenderError, match="refused .likely content policy"):
+        render_mod._openrouter_source_edit_bytes(project, size=(1080, 1350), model="google/gemini-2.5-flash-image-preview", quality="medium")
+
+
+def test_openrouter_source_edit_generic_no_images_distinct_message(tmp_path, monkeypatch):
+    """No images, no finish_reason hint, no content → generic 'had no images' message."""
+    import agents.flyer.render as render_mod
+    import pytest as _pytest
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-test")
+    monkeypatch.delenv("FLYER_SOURCE_EDIT_MODEL", raising=False)
+    body = json.dumps({"choices": [{"message": {"images": []}}]}).encode("utf-8")
+    monkeypatch.setattr(render_mod.urllib.request, "urlopen", lambda req, timeout: _OpenRouterFakeResponse(body))
+    project = _source_edit_project(tmp_path)
+    with _pytest.raises(FlyerRenderError, match="had no images"):
+        render_mod._openrouter_source_edit_bytes(project, size=(1080, 1350), model="google/gemini-2.5-flash-image-preview", quality="medium")
+
+
+def test_openrouter_source_edit_bad_data_url_distinct_message(tmp_path, monkeypatch):
+    """Image URL not starting with `data:image/` → distinct message."""
+    import agents.flyer.render as render_mod
+    import pytest as _pytest
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-test")
+    monkeypatch.delenv("FLYER_SOURCE_EDIT_MODEL", raising=False)
+    body = json.dumps({
+        "choices": [{"message": {"images": [{"image_url": {"url": "https://example.com/img.png"}}]}}],
+    }).encode("utf-8")
+    monkeypatch.setattr(render_mod.urllib.request, "urlopen", lambda req, timeout: _OpenRouterFakeResponse(body))
+    project = _source_edit_project(tmp_path)
+    with _pytest.raises(FlyerRenderError, match="did not include base64 image data"):
+        render_mod._openrouter_source_edit_bytes(project, size=(1080, 1350), model="google/gemini-2.5-flash-image-preview", quality="medium")
+
+
+def test_openrouter_source_edit_malformed_base64_via_decode_data_url(tmp_path, monkeypatch):
+    """Bad base64 payload in the data URL → _decode_data_url raises which the
+    helper propagates as FlyerRenderError."""
+    import agents.flyer.render as render_mod
+    import pytest as _pytest
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-test")
+    monkeypatch.delenv("FLYER_SOURCE_EDIT_MODEL", raising=False)
+    body = json.dumps({
+        "choices": [{"message": {"images": [{"image_url": {"url": "data:image/png;base64,@@@not-base64@@@"}}]}}],
+    }).encode("utf-8")
+    monkeypatch.setattr(render_mod.urllib.request, "urlopen", lambda req, timeout: _OpenRouterFakeResponse(body))
+    project = _source_edit_project(tmp_path)
+    with _pytest.raises(FlyerRenderError, match="base64 decode failed"):
+        render_mod._openrouter_source_edit_bytes(project, size=(1080, 1350), model="google/gemini-2.5-flash-image-preview", quality="medium")
+
+
+# ─── Static guard: function-scoped OPENAI_API_KEY removal + deletion of OpenAI helpers ──
+
+
+def test_static_guard_no_openai_api_key_in_three_named_functions():
+    """Function-scoped (not repo-wide): verify the three named source-edit
+    functions do NOT reference OPENAI_API_KEY after the refactor. Repo-wide
+    grep would false-positive on out-of-scope readiness/smoke files (see plan
+    Deferred items #3 and #4)."""
+    import inspect  # noqa: PLC0415
+    import agents.flyer.render as render_mod  # noqa: PLC0415
+    import agents.flyer.workflow as workflow_mod  # noqa: PLC0415
+
+    pre_src = inspect.getsource(workflow_mod.source_edit_provider_ready)
+    assert "OPENAI_API_KEY" not in pre_src, "source_edit_provider_ready must not reference OPENAI_API_KEY"
+
+    helper_src = inspect.getsource(render_mod._openrouter_source_edit_bytes)
+    assert "OPENAI_API_KEY" not in helper_src, "_openrouter_source_edit_bytes must not reference OPENAI_API_KEY"
+
+    caller_src = inspect.getsource(render_mod.render_source_edit_preview)
+    assert "OPENAI_API_KEY" not in caller_src, "render_source_edit_preview must not reference OPENAI_API_KEY"
+
+
+def test_openai_source_edit_helpers_are_deleted():
+    """Real deletions, not commented-out leftovers. The render module must no
+    longer expose the OpenAI source-edit helpers."""
+    import agents.flyer.render as render_mod  # noqa: PLC0415
+    assert not hasattr(render_mod, "_openai_source_edit_bytes")
+    assert not hasattr(render_mod, "_openai_edit_size")
+    assert not hasattr(render_mod, "_multipart_form_data")
 
 
 def test_direct_poster_prompt_uses_registered_business_name_not_reference_brand(tmp_path, monkeypatch):
@@ -1382,8 +1822,8 @@ def test_is_source_edit_project_requires_marker_or_reference_image(tmp_path, mon
     assert _is_source_edit_project(with_ref) is True
 
 
-def test_openai_source_edit_bytes_fails_closed_on_placeholder_key(tmp_path, monkeypatch):
-    """Fix F: a PLACEHOLDER OPENAI key must NOT make a network request.
+def test_openrouter_source_edit_bytes_fails_closed_on_placeholder_key(tmp_path, monkeypatch):
+    """A PLACEHOLDER OPENROUTER key must NOT make a network request.
     Mirror visual_qa / workflow defense-in-depth: missing OR placeholder
     fails closed before urlopen is called, raising FlyerRenderError that
     generate-flyer-concepts catches and classifies as
@@ -1425,7 +1865,7 @@ def test_openai_source_edit_bytes_fails_closed_on_placeholder_key(tmp_path, monk
 
     import pytest as _pytest
     with _pytest.raises(FlyerRenderError, match="placeholder"):
-        render_mod._openai_source_edit_bytes(project, size=(1080, 1350), model="gpt-image-1", quality="medium")
+        render_mod._openrouter_source_edit_bytes(project, size=(1080, 1350), model="google/gemini-2.5-flash-image-preview", quality="medium")
 
 
 def test_render_customer_facing_footer_has_no_hermes_brand():

@@ -270,7 +270,7 @@ def test_generate_deferred_reference_smoke_can_use_sidecar_visual_qa(monkeypatch
 
 def test_generate_source_edit_provider_unavailable_queues_manual_review(monkeypatch, tmp_path, capsys):
     """P0-5: when render_source_edit_preview raises FlyerRenderError (e.g.
-    OPENAI_API_KEY missing or provider 5xx), generate-flyer-concepts must
+    OPENROUTER_API_KEY missing or provider 5xx), generate-flyer-concepts must
     queue the project for manual review with reason_code=
     `source_edit_provider_unavailable` rather than crashing — operator CLI
     retries and edge cases where the cf-router preflight didn't catch the
@@ -291,7 +291,7 @@ def test_generate_source_edit_provider_unavailable_queues_manual_review(monkeypa
     # Reference is already extracted (not in failure state) so the script
     # bypasses the reference-failure manual-review path and reaches the
     # source-edit render call.
-    project["reference_extractions"][0]["provider"] = "openai"
+    project["reference_extractions"][0]["provider"] = "openrouter"
     project["reference_extractions"][0]["status"] = "ok"
     project["reference_extractions"][0]["detail"] = "extracted"
     state_path.write_text(json.dumps({
@@ -301,7 +301,7 @@ def test_generate_source_edit_provider_unavailable_queues_manual_review(monkeypa
     }), encoding="utf-8")
 
     def fake_render_source_edit(*_args, **_kwargs):
-        raise module.FlyerRenderError("OPENAI_API_KEY is missing")
+        raise module.FlyerRenderError("OPENROUTER_API_KEY is missing or placeholder")
 
     monkeypatch.setattr(module, "render_source_edit_preview", fake_render_source_edit)
     monkeypatch.setattr(sys, "argv", [
@@ -315,14 +315,14 @@ def test_generate_source_edit_provider_unavailable_queues_manual_review(monkeypa
     rc = module.main()
     assert rc == 2  # non-zero: signals manual-review-required to the caller
     out = json.loads(capsys.readouterr().out)
-    assert "OPENAI_API_KEY" in out["source_edit_failed"]
+    assert "OPENROUTER_API_KEY" in out["source_edit_failed"]
     assert out["manual_review_reason_code"] == "source_edit_provider_unavailable"
 
     persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
     assert persisted["status"] == "manual_edit_required"
     assert persisted["manual_review"]["status"] == "queued"
     assert persisted["manual_review"]["reason_code"] == "source_edit_provider_unavailable"
-    assert "OPENAI_API_KEY" in persisted["manual_review"]["detail"]
+    assert "OPENROUTER_API_KEY" in persisted["manual_review"]["detail"]
 
 
 def test_generate_source_edit_quality_failure_queues_visual_qa_failed(monkeypatch, tmp_path, capsys):
@@ -452,3 +452,78 @@ def test_generate_missing_required_facts_project_does_not_enter_source_edit_rend
         pass  # downstream paths may SystemExit on empty specs; tolerated.
     # If we got here without AssertionError, the source-edit branch was
     # correctly avoided.
+
+
+# ─── Reason-code classifier extension: every OpenRouter error-taxonomy row
+# must map to `source_edit_provider_unavailable`, NOT `provider_timeout`. ──
+
+
+@pytest.mark.parametrize("error_message", [
+    "OPENROUTER_API_KEY is missing or placeholder",
+    "OpenRouter source-edit HTTP 400: bad request",
+    "OpenRouter source-edit HTTP 401: unauthorized",
+    "OpenRouter source-edit HTTP 429: rate limited",
+    "OpenRouter source-edit HTTP 500: internal",
+    "OpenRouter source-edit HTTP 502: bad gateway",
+    "OpenRouter source-edit HTTP 503: service unavailable",
+    "OpenRouter source-edit HTTP 504: gateway timeout",
+    "OpenRouter source-edit refused (likely content policy): {...}",
+    "OpenRouter source-edit response had no choices: {}",
+    "OpenRouter source-edit response had no images: {}",
+    "OpenRouter source-edit response did not include base64 image data",
+    "OpenRouter source-edit response failed: TimeoutError: read timeout",
+    "OpenRouter source-edit response failed: URLError: connection refused",
+])
+def test_openrouter_render_error_routes_to_source_edit_provider_unavailable(
+    monkeypatch, tmp_path, capsys, error_message,
+):
+    """Every error-taxonomy row from the design's `_openrouter_source_edit_bytes`
+    table must classify to `source_edit_provider_unavailable` (queued-for-
+    designer copy), never `provider_timeout` (temporary-issue copy). The
+    classifier extension at `generate-flyer-concepts:255` (adding "openrouter"
+    substring) is what makes HTTP/refusal/malformed errors route correctly —
+    without it, only the key-missing case would route correctly via
+    "api_key" substring match."""
+    module = _load_script(monkeypatch)
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    state_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    reference = asset_dir / "F0001-reference.png"
+    reference.write_bytes(b"fake image bytes")
+    project = _project_with_pending_reference(reference)
+    project["raw_request"] = "edit uploaded flyer/source artwork: change phone"
+    project["reference_extractions"][0]["provider"] = "openrouter"
+    project["reference_extractions"][0]["status"] = "ok"
+    project["reference_extractions"][0]["detail"] = "extracted"
+    state_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_sequence": 2,
+        "projects": [project],
+    }), encoding="utf-8")
+
+    def fake_render_source_edit(*_args, **_kwargs):
+        raise module.FlyerRenderError(error_message)
+
+    monkeypatch.setattr(module, "render_source_edit_preview", fake_render_source_edit)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts",
+        "--project-id", "F0001",
+        "--state-path", str(state_path),
+        "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+    ])
+
+    rc = module.main()
+    assert rc == 2
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "manual_edit_required"
+    assert persisted["manual_review"]["reason_code"] == "source_edit_provider_unavailable", (
+        f"OpenRouter error message {error_message!r} routed to "
+        f"reason_code={persisted['manual_review']['reason_code']} — must be "
+        "source_edit_provider_unavailable so the customer sees the "
+        "'queued for a designer' copy from MANUAL_REVIEW_REASON_LINES, "
+        "not the 'temporary issue' provider_timeout copy."
+    )
