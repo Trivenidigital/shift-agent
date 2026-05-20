@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 
 import pytest
@@ -42,6 +43,11 @@ def _customer(
 def _write_json(path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def _write_ndjson(path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(json.dumps(row, separators=(",", ":")) for row in rows) + "\n", encoding="utf-8")
 
 
 def _project(project_id: str, *, status: str, updated_at: str = "2000-01-01T00:00:00Z") -> dict:
@@ -715,3 +721,157 @@ def test_break_glass_row_is_dropped_from_triage_and_summary_counters(tmp_path):
     post_summary = flyer.build_summary()
     assert post_summary["manual_edit_count"] == 0, "break-glass row must not count in manual_edit_count"
     assert post_summary["stuck_edit_count"] == 0, "break-glass row must not count in stuck_edit_count"
+
+
+def _tiny_png_bytes(width: int = 2, height: int = 1) -> bytes:
+    # Valid PNG header + IHDR. The metadata reader only needs the IHDR fields.
+    import struct
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + struct.pack(">I", 13)
+        + b"IHDR"
+        + struct.pack(">II", width, height)
+        + b"\x08\x02\x00\x00\x00"
+        + b"\x00\x00\x00\x00"
+    )
+
+
+def test_manual_queue_detail_joins_decisions_and_cockpit_audit_logs(tmp_path):
+    from app.routers import flyer
+
+    _seed_queue(tmp_path, [_queued_project("F0052", phone="+19045550104")])
+    settings = flyer.get_settings()
+    settings.decisions_path = tmp_path / "logs" / "decisions.log"
+    settings.cockpit_audit_log = tmp_path / "logs" / "cockpit-audit.log"
+    _write_ndjson(
+        settings.decisions_path,
+        [
+            {
+                "ts": "2026-05-18T20:01:00Z",
+                "type": "flyer_status_change",
+                "project_id": "F0052",
+                "from_status": "generating_concepts",
+                "to_status": "manual_edit_required",
+                "actor": "system",
+                "reason": "visual qa failed",
+            },
+            {
+                "ts": "2026-05-18T20:02:00Z",
+                "type": "flyer_assets_delivered",
+                "project_id": "F9999",
+                "asset_ids": ["A0009"],
+            },
+        ],
+    )
+    _write_ndjson(
+        settings.cockpit_audit_log,
+        [
+            {
+                "ts": "2026-05-18T20:03:00+00:00",
+                "event": "flyer.manual_queue.break_glass",
+                "actor": "owner",
+                "details": {"project_id": "F0052", "reason": "operator review"},
+            }
+        ],
+    )
+
+    detail = flyer.manual_queue_detail_action("F0052")
+
+    events = [(row["source"], row["event"]) for row in detail["timeline"]]
+    assert ("project_state", "project_created") in events
+    assert ("decisions", "flyer_status_change") in events
+    assert ("cockpit_audit", "flyer.manual_queue.break_glass") in events
+    assert ("decisions", "flyer_assets_delivered") not in events
+    timestamps = [row["ts"] for row in detail["timeline"]]
+    assert timestamps == sorted(timestamps)
+    status_change = next(row for row in detail["timeline"] if row["event"] == "flyer_status_change")
+    assert "generating_concepts->manual_edit_required" in status_change["detail"]
+    cockpit = next(row for row in detail["timeline"] if row["source"] == "cockpit_audit")
+    assert "operator review" in cockpit["detail"]
+
+
+def test_manual_queue_detail_exposes_final_asset_metadata_by_output_format(tmp_path, monkeypatch):
+    from app.routers import flyer
+
+    settings = flyer.get_settings()
+    settings.state_dir = tmp_path / "state"
+    flyer_root = settings.state_dir / "flyer"
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(flyer_root))
+    image_path = flyer_root / "projects" / "F0052" / "final-whatsapp.png"
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    image_bytes = _tiny_png_bytes(width=2, height=1)
+    image_path.write_bytes(image_bytes)
+    pdf_path = flyer_root / "projects" / "F0052" / "final-print.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n% test\n")
+    image_sha = hashlib.sha256(image_bytes).hexdigest()
+    pdf_sha = hashlib.sha256(pdf_path.read_bytes()).hexdigest()
+    project = _queued_project("F0052", phone="+19045550104")
+    project["assets"] = [
+        {
+            "asset_id": "A0001",
+            "kind": "final_whatsapp_image",
+            "source": "rendered",
+            "path": str(image_path),
+            "mime_type": "image/png",
+            "sha256": image_sha,
+            "original_message_id": "msg-F0052",
+            "received_at": "2026-05-18T20:10:00Z",
+            "delivery_status": "sent",
+            "outbound_message_id": "wamid.final.1",
+            "delivered_at": "2026-05-18T20:15:00Z",
+        },
+        {
+            "asset_id": "A0002",
+            "kind": "final_printable_pdf",
+            "source": "rendered",
+            "path": str(pdf_path),
+            "mime_type": "application/pdf",
+            "sha256": pdf_sha,
+            "original_message_id": "msg-F0052",
+            "received_at": "2026-05-18T20:11:00Z",
+            "delivery_status": "pending",
+        },
+        {
+            "asset_id": "A0003",
+            "kind": "final_instagram_post",
+            "source": "rendered",
+            "path": str(image_path),
+            "mime_type": "image/png",
+            "sha256": image_sha,
+            "original_message_id": "msg-F0052",
+            "received_at": "2026-05-18T20:12:00Z",
+            "delivery_status": "pending",
+        },
+        {
+            "asset_id": "A0004",
+            "kind": "final_instagram_story",
+            "source": "rendered",
+            "path": str(image_path),
+            "mime_type": "image/png",
+            "sha256": image_sha,
+            "original_message_id": "msg-F0052",
+            "received_at": "2026-05-18T20:13:00Z",
+            "delivery_status": "pending",
+        },
+    ]
+    project["final_asset_ids"] = ["A0001", "A0002", "A0003", "A0004"]
+    _seed_queue(tmp_path, [project])
+
+    detail = flyer.manual_queue_detail_action("F0052")
+
+    by_format = {asset["output_format"]: asset for asset in detail["final_assets"]}
+    whatsapp = by_format["whatsapp_image"]
+    assert whatsapp["asset_id"] == "A0001"
+    assert whatsapp["sha256"] == image_sha
+    assert whatsapp["sha256_short"] == image_sha[:16]
+    assert whatsapp["width"] == 2
+    assert whatsapp["height"] == 1
+    assert whatsapp["size_bytes"] == len(image_bytes)
+    assert whatsapp["delivery_status"] == "sent"
+    assert whatsapp["source"] == "rendered"
+    assert whatsapp["media_url"] == "/api/flyer/projects/F0052/assets/A0001"
+    assert by_format["printable_pdf"]["sha256"] == pdf_sha
+    assert by_format["printable_pdf"]["width"] is None
+    assert by_format["printable_pdf"]["height"] is None
+    assert by_format["instagram_post"]["asset_id"] == "A0003"
+    assert by_format["instagram_story"]["asset_id"] == "A0004"

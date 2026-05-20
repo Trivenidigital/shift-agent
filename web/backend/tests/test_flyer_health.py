@@ -14,11 +14,8 @@ Covers acceptance from `tasks/flyer-cockpit-p0-7-health-panel-plan.md`:
 """
 from __future__ import annotations
 
-import asyncio
 import json
 from datetime import datetime, timedelta, timezone
-
-import pytest
 
 
 # ─── Helpers to write env files + project state ──────────────────────────

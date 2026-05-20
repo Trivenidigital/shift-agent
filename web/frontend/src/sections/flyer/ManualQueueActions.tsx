@@ -62,6 +62,12 @@ export interface ManualQueueActionsProps {
   reasonCode: string;
   reason: string;
   canComplete: boolean;
+  completeAsset: {
+    filename: string;
+    mimeType: string;
+    sizeBytes: number;
+    url: string;
+  } | null;
   onCompleteConfirmed: () => void;
   onBreakGlassConfirmed: () => void;
   onCloseNoSendConfirmed: (opts: { force: boolean }) => void;
@@ -71,7 +77,7 @@ export interface ManualQueueActionsProps {
 
 export function ManualQueueActions(props: ManualQueueActionsProps) {
   const {
-    projectId, reasonCode, reason, canComplete,
+    projectId, reasonCode, reason, canComplete, completeAsset,
     onCompleteConfirmed, onBreakGlassConfirmed, onCloseNoSendConfirmed,
     pendingAction, errors,
   } = props;
@@ -159,6 +165,7 @@ export function ManualQueueActions(props: ManualQueueActionsProps) {
           reasonText={reason}
           reasonOk={reasonOk}
           canComplete={canComplete}
+          completeAsset={completeAsset}
           forceClose={forceClose}
           onForceChange={setForceClose}
           actionPending={confirmActive}
@@ -184,6 +191,12 @@ interface ActionPreviewModalProps {
   reasonText: string;
   reasonOk: boolean;
   canComplete: boolean;
+  completeAsset: {
+    filename: string;
+    mimeType: string;
+    sizeBytes: number;
+    url: string;
+  } | null;
   forceClose: boolean;
   onForceChange: (val: boolean) => void;
   actionPending: boolean;
@@ -196,7 +209,7 @@ function ActionPreviewModal(props: ActionPreviewModalProps) {
   const {
     action, preview, previewBusy, previewError,
     reasonCode, reasonText, reasonOk, canComplete,
-    forceClose, onForceChange,
+    completeAsset, forceClose, onForceChange,
     actionPending, actionError, onCancel, onConfirm,
   } = props;
 
@@ -248,6 +261,9 @@ function ActionPreviewModal(props: ActionPreviewModalProps) {
                   Upload an approved asset before Complete. The Complete button stays disabled until both reason and upload are ready.
                 </div>
               )}
+              {action === "complete" && completeAsset && (
+                <CompleteAssetConfirmation asset={completeAsset} />
+              )}
             </>
           )}
           {actionError && (
@@ -268,6 +284,58 @@ function ActionPreviewModal(props: ActionPreviewModalProps) {
           </Button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function CompleteAssetConfirmation(props: {
+  asset: {
+    filename: string;
+    mimeType: string;
+    sizeBytes: number;
+    url: string;
+  };
+}) {
+  const { asset } = props;
+  const isImage = asset.mimeType.startsWith("image/");
+  const isPdf = asset.mimeType === "application/pdf";
+  return (
+    <div className="rounded border border-amber-200 bg-amber-50 px-2 py-2 text-xs text-amber-900">
+      <div className="font-semibold">Final asset confirmation</div>
+      <div className="mt-1">
+        Confirm this visible asset is the operator-reviewed output that will be attached to the project.
+      </div>
+      <div className="mt-1 font-mono text-[11px]">
+        {asset.filename} / {asset.mimeType} / {Math.round(asset.sizeBytes / 1024)} KB
+      </div>
+      {isImage && (
+        <img
+          src={asset.url}
+          alt="final confirmation asset"
+          className="mt-2 h-48 w-full rounded border border-amber-300 bg-white object-contain"
+          loading="lazy"
+        />
+      )}
+      {isPdf && (
+        <a
+          href={asset.url}
+          target="_blank"
+          rel="noreferrer"
+          className="mt-2 inline-block rounded border border-amber-300 bg-white px-2 py-1 text-xs text-brand-700 underline-offset-2 hover:underline"
+        >
+          Open final PDF in new tab
+        </a>
+      )}
+      {!isImage && !isPdf && (
+        <a
+          href={asset.url}
+          target="_blank"
+          rel="noreferrer"
+          className="mt-2 inline-block rounded border border-amber-300 bg-white px-2 py-1 text-xs text-brand-700 underline-offset-2 hover:underline"
+        >
+          Download final asset
+        </a>
+      )}
     </div>
   );
 }
