@@ -2661,23 +2661,18 @@ def send_flyer_manual_review_ack(
     request_text: str = "",
     reason: str = "",
 ) -> tuple[bool, str, str]:
-    """Acknowledge fail-closed manual review for unsupported or unverifiable reference media."""
+    """Acknowledge fail-closed manual review without exposing workflow internals."""
     _ensure_platform_path()
     try:
         from safe_io import bridge_post  # type: ignore
     except Exception as e:
         return False, "", f"safe_io_import_failed: {type(e).__name__}: {e}"
-    body = flyer_visible_message_text(request_text).strip()
-    requested = f"\n\nRequest: {body}" if body else ""
-    reason_line = f"\n\nReason: {reason.strip()[:240]}" if reason.strip() else ""
+    del project_id, request_text, reason
     message = (
         "Flyer Studio\n"
         "------------\n"
-        f"I received your flyer request and queued project {project_id} for manual review."
-        f"{requested}"
-        f"{reason_line}\n\n"
-        "I could not safely use the uploaded reference automatically, so I am not generating a generic flyer from it. "
-        "I will send an update here once it is reviewed."
+        "Got it. This needs a careful flyer edit. "
+        "I'll send the updated flyer here once it's ready."
     )
     ok, message_id, err, status = bridge_post(chat_id, message)
     if ok:
@@ -2699,19 +2694,17 @@ def flyer_generation_queued_manual_review(detail: str) -> bool:
 
 
 def send_flyer_edit_processing_ack(chat_id: str, project_id: str) -> tuple[bool, str, str]:
-    """Acknowledge source-preserving edit generation before the model call."""
+    """Acknowledge source-edit generation before the model call."""
     _ensure_platform_path()
     try:
         from safe_io import bridge_post  # type: ignore
     except Exception as e:
         return False, "", f"safe_io_import_failed: {type(e).__name__}: {e}"
+    del project_id
     message = (
         "Flyer Studio\n"
         "------------\n"
-        f"I received your uploaded flyer as project {project_id} and am editing the source artwork now.\n\n"
-        "This is a source-preserving edit, so I will keep the existing design and change only the requested text/artwork. "
-        "It usually takes 5-6 minutes. I will send the edited preview here when it is ready.\n\n"
-        "Reply here if you need to add another correction while I work on it."
+        "Got it. I'm updating your flyer now and will send the revised version here when it's ready."
     )
     ok, message_id, err, status = bridge_post(chat_id, message)
     if ok:
