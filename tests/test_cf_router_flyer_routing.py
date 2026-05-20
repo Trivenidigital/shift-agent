@@ -2425,7 +2425,7 @@ def test_exact_edit_request_use_as_reference_does_not_downgrade(monkeypatch):
     sent: list[str] = []
     audited: list[dict] = []
 
-    def fake_consume(text, *, chat_id, sender_phone):
+    def fake_consume(text, *, chat_id, sender_phone, transition_to_status=None):
         body = " ".join(text.split()).lower().strip(" .!,:;-")
         if body in {"use as reference", "use it as reference", "use as a reference"}:
             return {
@@ -2620,3 +2620,107 @@ def test_queued_source_edit_status_checkin_does_not_reenter_clarification(monkey
     # None is acceptable (no pending row); the key invariant is
     # trigger_create_flyer_project must not be called.
     assert result is None or result.get("action") == "skip"
+
+
+def test_parse_source_vs_new_followup_handles_compound_reply():
+    actions = _load_actions()
+    assert actions.parse_source_vs_new_followup("SOURCE") == ("source", "")
+    assert actions.parse_source_vs_new_followup("Source.") == ("source", "")
+    assert actions.parse_source_vs_new_followup("NEW") == ("new", "")
+    assert actions.parse_source_vs_new_followup("any update?") == ("", "")
+    choice, trailing = actions.parse_source_vs_new_followup("SOURCE, also change date to Saturday")
+    assert choice == "source"
+    assert "Saturday" in trailing
+    choice2, trailing2 = actions.parse_source_vs_new_followup("Option 2 - please use cursive font")
+    assert choice2 == "new"
+    assert "cursive" in trailing2
+    assert actions.parse_source_vs_new_followup("1") == ("source", "")
+    assert actions.parse_source_vs_new_followup("2") == ("new", "")
+
+
+def test_consume_flyer_source_vs_new_choice_round_trip(tmp_path):
+    actions = _load_actions()
+    actions.FLYER_REFERENCE_SCOPE_PATH = tmp_path / "reference_scope_pending.json"
+    actions.save_flyer_reference_scope_pending(
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        customer={"business_name": "Lakshmis Kitchen", "customer_id": "CUST0001"},
+        raw_request="Replace Triveni Express with Lakshmi's Kitchen branding.",
+        media_path="/tmp/ref.jpg",
+        scope={"visible_organization_names": ["Triveni Express"]},
+        original_intent="exact_source_edit",
+    )
+
+    # Transition the row via the choice consumer (use_reference + exact_source_edit).
+    pending = actions.consume_flyer_reference_scope_choice(
+        "use as reference",
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        transition_to_status="awaiting_source_vs_new_choice",
+    )
+    assert pending is not None
+    assert pending["choice"] == "use_reference"
+    assert pending["original_intent"] == "exact_source_edit"
+
+    # Row is still present under the new status — peek finds it.
+    peek = actions.peek_flyer_source_vs_new_pending(
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+    )
+    assert peek is not None
+    assert peek["status"] == "awaiting_source_vs_new_choice"
+
+    # Consume SOURCE — row removed.
+    sv = actions.consume_flyer_source_vs_new_choice(
+        "source", "also change date",
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+    )
+    assert sv is not None
+    assert sv["choice"] == "source"
+    assert sv["customer_followup_instruction"] == "also change date"
+    # Idempotent: second consume finds nothing.
+    assert actions.consume_flyer_source_vs_new_choice(
+        "source", "",
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+    ) is None
+
+
+def test_flyer_is_status_checkin_matches_expected_phrases():
+    actions = _load_actions()
+    assert actions.flyer_is_status_checkin("any update?")
+    assert actions.flyer_is_status_checkin("is it ready?")
+    assert actions.flyer_is_status_checkin("status")
+    assert not actions.flyer_is_status_checkin("source please")
+    assert not actions.flyer_is_status_checkin("change the date")
+
+
+def test_generic_reference_use_as_reference_still_works(tmp_path):
+    """Regression: generic-reference customers must NOT see the SOURCE/NEW
+    detour. They get the existing use-reference path."""
+    actions = _load_actions()
+    actions.FLYER_REFERENCE_SCOPE_PATH = tmp_path / "reference_scope_pending.json"
+
+    actions.save_flyer_reference_scope_pending(
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        customer={"business_name": "Lakshmis Kitchen"},
+        raw_request="Use this flyer.",
+        media_path="/tmp/ref.jpg",
+        scope={"visible_organization_names": ["Triveni Express"]},
+        original_intent="generic_reference",
+    )
+    pending = actions.consume_flyer_reference_scope_choice(
+        "use as reference",
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        transition_to_status="awaiting_source_vs_new_choice",
+    )
+    assert pending is not None
+    # Even though we passed transition_to_status, generic_reference rows are
+    # consumed (removed) — no detour.
+    assert actions.peek_flyer_source_vs_new_pending(
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+    ) is None
