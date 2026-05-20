@@ -2386,3 +2386,237 @@ def test_status_reply_returns_none_when_no_projects_at_all(tmp_path, monkeypatch
         {"message_id": "m-none"},
     )
     assert result is None
+
+
+# ─── F0061 source-contract regression tests (Task 1; red until Task 5 lands) ──
+
+
+def test_save_flyer_reference_scope_pending_persists_original_intent(tmp_path):
+    """Scope-pending row carries `original_intent` so downstream intercepts
+    can branch on exact-source-edit vs generic-reference. Pre-fix the field
+    was not even on the wire."""
+    actions = _load_actions()
+    actions.FLYER_REFERENCE_SCOPE_PATH = tmp_path / "reference_scope_pending.json"
+
+    actions.save_flyer_reference_scope_pending(
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        customer={"business_name": "Lakshmis Kitchen"},
+        raw_request="Replace Triveni Express with Lakshmi's Kitchen branding.",
+        media_path="/tmp/ref.jpg",
+        scope={"visible_organization_names": ["Triveni Express"]},
+        original_intent="exact_source_edit",
+    )
+
+    pending = actions.consume_flyer_reference_scope_choice(
+        "use as reference",
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+    )
+    assert pending is not None
+    assert pending.get("original_intent") == "exact_source_edit"
+
+
+def test_exact_edit_request_use_as_reference_does_not_downgrade(monkeypatch):
+    """F0061 load-bearing regression: after scope clarify on an exact-edit
+    request, customer replies `use as reference` — system must NOT call
+    trigger_create_flyer_project. It must send SOURCE/NEW clarification."""
+    hooks, actions = _load_plugin_modules()
+    sent: list[str] = []
+    audited: list[dict] = []
+
+    def fake_consume(text, *, chat_id, sender_phone):
+        body = " ".join(text.split()).lower().strip(" .!,:;-")
+        if body in {"use as reference", "use it as reference", "use as a reference"}:
+            return {
+                "chat_id": chat_id,
+                "sender_phone": sender_phone,
+                "customer": {"business_name": "Lakshmis Kitchen", "customer_id": "CUST0001"},
+                "raw_request": "I'd like you use this flyer for Lakshmi's Kitchen. Replace Triveni Express with Lakshmi's Kitchen branding.",
+                "media_path": "/tmp/ref.jpg",
+                "source_organization": "Triveni Express",
+                "status": "awaiting_choice",
+                "original_intent": "exact_source_edit",
+                "created_at": 0,
+                "choice": "use_reference",
+            }
+        return None
+
+    monkeypatch.setattr(actions, "consume_flyer_reference_scope_choice", fake_consume)
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda *_a, **_kw: {"customer_id": "CUST0001"})
+    monkeypatch.setattr(
+        actions, "trigger_create_flyer_project",
+        lambda **_kw: pytest.fail("must NOT create project on bare `use as reference` for exact-edit"),
+    )
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _c, text: (sent.append(text), (True, "mid", ""))[1])
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kw: audited.append(kw) or None)
+    if hasattr(actions, "audit_source_vs_new"):
+        monkeypatch.setattr(actions, "audit_source_vs_new", lambda **kw: audited.append(kw) or None)
+
+    result = hooks._try_flyer_reference_scope_choice_intercept(
+        "use as reference",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "m-use-ref"},
+    )
+
+    assert result is not None and result.get("action") == "skip"
+    assert any("SOURCE" in t and "NEW" in t for t in sent), (
+        f"clarification must mention both SOURCE and NEW; sent={sent!r}"
+    )
+
+
+def test_source_vs_new_new_choice_creates_project_without_manual_edit(monkeypatch):
+    """After SOURCE/NEW clarification, customer reply `NEW` must call
+    trigger_create_flyer_project WITHOUT manual_edit_required and with
+    raw_request containing a `Create a new original` flavor marker."""
+    hooks, actions = _load_plugin_modules()
+    created: dict = {}
+
+    def fake_consume_source_vs_new(choice_token, trailing, *, chat_id, sender_phone):
+        if choice_token == "new":
+            return {
+                "chat_id": chat_id,
+                "sender_phone": sender_phone,
+                "customer": {"business_name": "Lakshmis Kitchen", "customer_id": "CUST0001"},
+                "raw_request": "I'd like you use this flyer for Lakshmi's Kitchen.",
+                "media_path": "/tmp/ref.jpg",
+                "source_organization": "Triveni Express",
+                "original_intent": "exact_source_edit",
+                "customer_followup_instruction": trailing,
+                "choice": "new",
+            }
+        return None
+
+    if not hasattr(actions, "consume_flyer_source_vs_new_choice"):
+        pytest.skip("consume_flyer_source_vs_new_choice not yet implemented (Task 5)")
+    monkeypatch.setattr(actions, "consume_flyer_source_vs_new_choice", fake_consume_source_vs_new)
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+17329837841", "customer"))
+
+    def fake_create(**kwargs):
+        created.update(kwargs)
+        return True, "", {"project_id": "F0062", "status": "intake_started", "manual_review": {}}
+
+    monkeypatch.setattr(actions, "trigger_create_flyer_project", fake_create)
+    monkeypatch.setattr(actions, "send_flyer_text", lambda *_a, **_kw: (True, "mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_processing_ack", lambda *_a, **_kw: (True, "mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_intake_ack", lambda *_a, **_kw: (True, "mid", ""))
+    monkeypatch.setattr(actions, "trigger_generate_flyer_concepts", lambda *_a, **_kw: (True, ""))
+    monkeypatch.setattr(actions, "flyer_project_has_required_fields", lambda *_a, **_kw: False)
+    monkeypatch.setattr(actions, "flyer_project_has_manual_review_queued", lambda *_a, **_kw: False)
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kw: None)
+    if hasattr(actions, "audit_source_vs_new"):
+        monkeypatch.setattr(actions, "audit_source_vs_new", lambda **_kw: None)
+
+    if not hasattr(hooks, "_try_flyer_source_vs_new_choice_intercept"):
+        pytest.skip("_try_flyer_source_vs_new_choice_intercept not yet implemented (Task 5)")
+
+    result = hooks._try_flyer_source_vs_new_choice_intercept(
+        "NEW",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "m-new"},
+    )
+
+    assert result is not None and result.get("action") == "skip"
+    assert created.get("manual_edit_required") in (False, None), (
+        f"NEW branch must NOT pass manual_edit_required; got {created.get('manual_edit_required')!r}"
+    )
+    raw = created.get("raw_request", "")
+    assert "Create a new original" in raw, (
+        f"NEW branch raw_request must contain 'Create a new original'; got {raw!r}"
+    )
+
+
+def test_source_vs_new_source_choice_creates_manual_edit_project(monkeypatch):
+    """SOURCE branch routes through existing exact-edit handler:
+    trigger_create_flyer_project called WITH manual_edit_required=True and
+    raw_request prefixed `Edit uploaded flyer/source artwork`."""
+    hooks, actions = _load_plugin_modules()
+    created: dict = {}
+
+    def fake_consume_source_vs_new(choice_token, trailing, *, chat_id, sender_phone):
+        if choice_token == "source":
+            return {
+                "chat_id": chat_id,
+                "sender_phone": sender_phone,
+                "customer": {"business_name": "Lakshmis Kitchen", "customer_id": "CUST0001"},
+                "raw_request": "I'd like you use this flyer for Lakshmi's Kitchen. Replace Triveni Express.",
+                "media_path": "/tmp/ref.jpg",
+                "source_organization": "Triveni Express",
+                "original_intent": "exact_source_edit",
+                "customer_followup_instruction": trailing,
+                "choice": "source",
+            }
+        return None
+
+    if not hasattr(actions, "consume_flyer_source_vs_new_choice"):
+        pytest.skip("consume_flyer_source_vs_new_choice not yet implemented (Task 5)")
+    monkeypatch.setattr(actions, "consume_flyer_source_vs_new_choice", fake_consume_source_vs_new)
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+17329837841", "customer"))
+
+    def fake_create(**kwargs):
+        created.update(kwargs)
+        return True, "", {
+            "project_id": "F0063",
+            "status": "manual_edit_required",
+            "manual_review": {"status": "queued", "reason_code": "source_edit_provider_unavailable"},
+        }
+
+    monkeypatch.setattr(actions, "trigger_create_flyer_project", fake_create)
+    monkeypatch.setattr(actions, "flyer_project_has_manual_review_queued", lambda *_a, **_kw: True)
+    monkeypatch.setattr(actions, "send_flyer_manual_edit_ack", lambda *_a, **_kw: (True, "mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_manual_review_ack", lambda *_a, **_kw: (True, "mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kw: None)
+    if hasattr(actions, "audit_source_vs_new"):
+        monkeypatch.setattr(actions, "audit_source_vs_new", lambda **_kw: None)
+
+    if not hasattr(hooks, "_try_flyer_source_vs_new_choice_intercept"):
+        pytest.skip("_try_flyer_source_vs_new_choice_intercept not yet implemented (Task 5)")
+
+    result = hooks._try_flyer_source_vs_new_choice_intercept(
+        "SOURCE",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "m-source"},
+    )
+
+    assert result is not None and result.get("action") == "skip"
+    assert created.get("manual_edit_required") is True, (
+        f"SOURCE branch must pass manual_edit_required=True; got {created.get('manual_edit_required')!r}"
+    )
+    raw = created.get("raw_request", "")
+    assert raw.startswith("Edit uploaded flyer/source artwork"), (
+        f"SOURCE branch raw_request must be prefixed; got {raw!r}"
+    )
+
+
+def test_queued_source_edit_status_checkin_does_not_reenter_clarification(monkeypatch):
+    """After SOURCE-chosen project is queued, follow-up `any update?` MUST
+    NOT re-enter the SOURCE/NEW clarification (lessons.md 2026-05-19)."""
+    hooks, actions = _load_plugin_modules()
+
+    if not hasattr(hooks, "_try_flyer_source_vs_new_choice_intercept"):
+        pytest.skip("_try_flyer_source_vs_new_choice_intercept not yet implemented (Task 5)")
+
+    def fake_consume_source_vs_new(choice_token, trailing, *, chat_id, sender_phone):
+        return None
+
+    if hasattr(actions, "consume_flyer_source_vs_new_choice"):
+        monkeypatch.setattr(actions, "consume_flyer_source_vs_new_choice", fake_consume_source_vs_new)
+    if hasattr(actions, "peek_flyer_source_vs_new_pending"):
+        monkeypatch.setattr(actions, "peek_flyer_source_vs_new_pending", lambda **_kw: None)
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+17329837841", "customer"))
+    monkeypatch.setattr(
+        actions, "trigger_create_flyer_project",
+        lambda **_kw: pytest.fail("status check-in must NOT create a project"),
+    )
+    monkeypatch.setattr(actions, "send_flyer_text", lambda *_a, **_kw: (True, "mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kw: None)
+
+    result = hooks._try_flyer_source_vs_new_choice_intercept(
+        "any update?",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "m-status"},
+    )
+    # None is acceptable (no pending row); the key invariant is
+    # trigger_create_flyer_project must not be called.
+    assert result is None or result.get("action") == "skip"
