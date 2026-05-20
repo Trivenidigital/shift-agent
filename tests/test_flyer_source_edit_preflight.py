@@ -309,6 +309,15 @@ def test_source_edit_preflight_config_error_fails_closed(tmp_path, monkeypatch):
     assert reason_code == "source_edit_provider_unavailable"
 
 
+def test_generation_detail_with_source_edit_failed_counts_as_manual_review():
+    actions = _load_actions_module()
+
+    assert actions.flyer_generation_queued_manual_review(
+        '{"project_id":"F0064","source_edit_failed":"OpenRouter source edit HTTP 500",'
+        '"manual_review_reason_code":"source_edit_provider_unavailable"}'
+    )
+
+
 def test_site_2_release_runs_before_ack_for_consistent_quota_ordering():
     """Fix E: in `_try_flyer_reference_scope_authorization_intercept`, the
     quota release MUST happen before the customer ack (matching site 1). If

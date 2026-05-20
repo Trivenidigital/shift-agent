@@ -59,15 +59,15 @@ def resolve_source_edit_render_provider(self) -> FlyerRenderProviderConfig:
             model=self.edit_image_model,
             quality=self.edit_image_quality,
         )
-    return self.source_edit_provider_policy.default
+    return self.source_edit_provider_policy.emergency_fallback
 ```
 
 Rationale:
 
-- Fresh configs with no source-edit override get OpenRouter, matching the rollout request.
+- Fresh configs with no explicit source-edit policy fail closed to manual review; OpenRouter is active only when `source_edit_provider_policy` is present in config.
 - Existing configs that explicitly set legacy edit fields retain direct OpenAI.
 - Explicit policy always wins.
-- `manual_review` is a sentinel for future config; render dispatch must fail closed if selected.
+- `manual_review` is the default no-policy sentinel; render dispatch must fail closed if selected.
 
 ## Config Loading In Router Preflight
 
@@ -106,7 +106,7 @@ Provider normalization accepts:
 - `FlyerRenderProviderConfig`-like object
 - dict with `provider` and `model`
 - string provider name
-- `None`, defaulting to OpenRouter model `openai/gpt-5.4-image-2` for compatibility with the new default
+- `None`, defaulting to `manual_review` so old callers cannot activate provider traffic without an explicit policy-derived provider
 
 Credential mapping:
 
@@ -143,7 +143,7 @@ def render_source_edit_preview(project, output_dir, *, model, quality="medium", 
 
 Dispatch:
 
-- `provider is None` -> legacy direct OpenAI path. This preserves existing external/operator callers that omit the new keyword.
+- `provider is None` -> manual-review failure. Callers must pass the resolved provider from config; direct OpenAI requires explicit `provider="openai"`.
 - `provider == "openrouter"` -> `_openrouter_source_edit_bytes(...)`
 - `provider == "openai"` -> `_openai_source_edit_bytes(...)`
 - `provider == "manual_review"` -> `FlyerRenderError("source edit provider configured for manual review")`

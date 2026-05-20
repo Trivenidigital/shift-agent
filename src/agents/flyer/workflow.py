@@ -297,16 +297,16 @@ def _read_env_value(name: str, *, env_path: Path | None = None) -> str:
 
 def _source_edit_provider_parts(provider) -> tuple[str, str]:
     if provider is None:
-        return "openrouter", "openai/gpt-5.4-image-2"
+        return "manual_review", "manual_review"
     if isinstance(provider, str):
         return provider.strip().lower(), ""
     if isinstance(provider, dict):
         return (
-            str(provider.get("provider") or "openrouter").strip().lower(),
+            str(provider.get("provider") or "manual_review").strip().lower(),
             str(provider.get("model") or "").strip(),
         )
     return (
-        str(getattr(provider, "provider", "openrouter") or "openrouter").strip().lower(),
+        str(getattr(provider, "provider", "manual_review") or "manual_review").strip().lower(),
         str(getattr(provider, "model", "") or "").strip(),
     )
 

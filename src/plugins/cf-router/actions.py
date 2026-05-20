@@ -2127,8 +2127,9 @@ def flyer_source_edit_preflight(project: dict) -> tuple[bool, str, str]:
     cockpit triage groups + tallies on, so callers MUST NOT hardcode a single
     code for every failure mode. Mapping:
 
-      - ``source_edit_provider_unavailable`` — OPENAI key absent/placeholder,
-        or the workflow helper failed to import (provider stack broken).
+      - ``source_edit_provider_unavailable`` — configured provider key
+        absent/placeholder, manual-review sentinel selected, or the workflow
+        helper failed to import (provider stack broken).
       - ``reference_unsupported`` — reference media is PDF / non-image type
         the source-edit endpoint cannot consume.
       - ``reference_provider_unavailable`` — no reference image attached to
@@ -2713,6 +2714,8 @@ def flyer_project_has_manual_review_queued(project: Optional[dict]) -> bool:
 
 def flyer_generation_queued_manual_review(detail: str) -> bool:
     if "reference_extraction_failed" in (detail or ""):
+        return True
+    if "source_edit_failed" in (detail or ""):
         return True
     return False
 

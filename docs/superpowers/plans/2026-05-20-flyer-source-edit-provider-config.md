@@ -6,7 +6,7 @@ Date: 2026-05-20
 
 ## Goal
 
-Move exact uploaded-flyer source edits off the direct-OpenAI-only runtime gate so they can use the configured Flyer provider path, primarily OpenRouter via `OPENROUTER_API_KEY`. Keep customer copy, manual queue UX, dashboard UI, and draft/final provider policy unchanged.
+Move exact uploaded-flyer source edits off the direct-OpenAI-only runtime gate so they can use the configured Flyer provider path, primarily OpenRouter via `OPENROUTER_API_KEY`. Keep customer copy, manual queue UX, admin controls, and draft/final provider policy unchanged. The only dashboard-adjacent change allowed is tiny health/readiness wording so operators do not see stale `openai_source_edit` posture.
 
 This plan intentionally supersedes the older `docs/runbooks/flyer-model-policy.md` source-edit boundary that deferred all OpenRouter source-edit work until after a regression dataset. The narrow posture for this PR is: wire the provider path and offline fail-closed tests now, do not deploy, and require spend-gated real source-edit smoke before any customer-grade operational reliance.
 
@@ -44,14 +44,14 @@ In scope:
 - Add source-edit provider policy/config resolution.
 - Allow source-edit readiness to pass when an OpenRouter source-edit provider is configured and `OPENROUTER_API_KEY` is present.
 - Dispatch source-edit rendering through OpenRouter when configured.
-- Preserve direct OpenAI rendering only when explicitly configured as the provider.
+- Preserve direct OpenAI rendering only when explicitly configured or explicitly requested as the provider.
 - Preserve manual-review fail-closed behavior for missing/placeholder keys, unsupported provider, HTTP/timeout failures, invalid responses, and unsupported remote URL-only responses.
 - Update focused offline tests.
 
 Out of scope:
 
 - Customer copy changes.
-- Dashboard frontend/backend controls.
+- Dashboard frontend/backend controls. Health/readiness label updates are allowed only to avoid contradictory provider status.
 - Draft/final generation policy changes.
 - Manual queue UX changes.
 - Real API calls in tests.
@@ -68,7 +68,7 @@ Out of scope:
    - Resolver precedence:
      - If `source_edit_provider_policy` is explicitly present in config, use `source_edit_provider_policy.default`.
      - Else if legacy `edit_image_model` or `edit_image_quality` is explicitly present in config, preserve legacy direct OpenAI behavior with those fields.
-     - Else use the new OpenRouter default. This satisfies fresh rollout config while avoiding silent override of an operator's explicit legacy edit model.
+     - Else use the `manual_review` sentinel. OpenRouter becomes active only when `source_edit_provider_policy` is explicitly present in config; this avoids accidental provider traffic from old callers or bare schema defaults.
 
 2. Update readiness:
    - Add a small provider-target input to `source_edit_provider_ready(...)`.
@@ -80,7 +80,7 @@ Out of scope:
 3. Update router preflight:
    - Resolve source-edit provider from `config.yaml` when available using platform schema loading.
    - Fail closed on config read/parse/schema errors. Do not fall back to defaults after malformed or unreadable production config, because generation will later load the same config strictly.
-   - Use `FlyerConfig().resolve_source_edit_render_provider()` only inside isolated unit seams where no config path is available by construction.
+   - Use `FlyerConfig().resolve_source_edit_render_provider()` only inside isolated unit seams where no config path is available by construction; default result is manual review, not OpenRouter.
    - Keep reason-code mapping unchanged.
 
 4. Update renderer:
@@ -101,7 +101,7 @@ Out of scope:
    - Renderer tests for OpenRouter request payload and success response, HTTP/connection failure, invalid response, remote URL-only failure, and explicit OpenAI compatibility.
    - Script/static or generation test proving source-edit branch uses resolver.
    - Hook/router tests or focused static assertions proving the three preflight consumers still thread the dynamic reason-code triad and do not change customer copy/manual queue UX.
-   - Static/diff guard that this PR does not touch `web/` dashboard files and does not alter draft/final provider resolver behavior.
+   - Health tests proving the provider block is named `source_edit_provider` and reports manual-review / configured-provider posture without leaking secrets.
 
 7. Verification:
    - Red run after writing tests and before implementation.

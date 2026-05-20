@@ -21,7 +21,8 @@ Hermes-first summary: reuse Hermes/OpenRouter gateway credentials and existing F
 - [x] Add focused schema/static/cockpit health tests.
 - [x] Run final focused verification before PR handoff.
 - [x] PR-1 landed as PR #144 and deployed to `main-vps`: `draft_provider_policy` and `final_provider_policy` are wired; policy docs and admin-dashboard backlog exist; source-edit path remains unchanged.
-- [ ] PR-2 after rollout: migrate source-edit model/provider only after a real visual-QA regression dataset exists and proves source preservation.
+- [ ] PR-2 source-edit provider wiring: PR #147 wires the configured provider path offline/no-deploy; production reliance remains blocked until a spend-gated 5-10 case source-preservation smoke proves layout fidelity.
+- [ ] Source-edit regression dataset: build real visual-QA/source-contract cases before treating OpenRouter source edits as customer-grade or adding any automatic challenger/fallback routing.
 - [ ] PR-3 after bakeoff: optionally add a separate Ideogram provider key and admin-dashboard model controls if the 20-case bakeoff justifies the added provider/subscription.
 
 ## Active - Hermes fleet upgrade train (2026-05-20)

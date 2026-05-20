@@ -68,8 +68,8 @@ def test_flyer_config_defaults_are_safe_and_cost_bounded():
     assert cfg.source_edit_provider_policy.emergency_fallback.provider == "manual_review"
     assert cfg.resolve_draft_render_provider().model == "openai/gpt-5.4-image-2"
     assert cfg.resolve_final_render_provider().model == "deterministic-renderer"
-    assert cfg.resolve_source_edit_render_provider().provider == "openrouter"
-    assert cfg.resolve_source_edit_render_provider().model == "openai/gpt-5.4-image-2"
+    assert cfg.resolve_source_edit_render_provider().provider == "manual_review"
+    assert cfg.resolve_source_edit_render_provider().model == "manual_review"
     assert [(t.plan_id, t.monthly_price_usd, t.included_flyers) for t in cfg.plan_tiers] == [
         ("trial", 0.00, 3),
         ("starter", 49.99, 30),

@@ -927,7 +927,7 @@ class FlyerConfig(BaseModel):
                 model=self.edit_image_model,
                 quality=self.edit_image_quality,
             )
-        return self.source_edit_provider_policy.default
+        return self.source_edit_provider_policy.emergency_fallback
 
 
 class FlyerPlanTier(BaseModel):

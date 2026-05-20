@@ -1501,17 +1501,27 @@ def _openai_source_edit_bytes(
         raise FlyerRenderError(f"OpenAI image edit HTTP {e.code}: {err}") from e
     except urllib.error.URLError as e:
         raise FlyerRenderError(f"OpenAI image edit connection failed: {e.reason}") from e
-    doc = json.loads(raw_body)
+    try:
+        doc = json.loads(raw_body)
+    except json.JSONDecodeError as e:
+        raise FlyerRenderError(f"OpenAI image edit invalid JSON response: {raw_body[:500]}") from e
+    if not isinstance(doc, dict):
+        raise FlyerRenderError(f"OpenAI image edit invalid response shape: {raw_body[:500]}")
     data = doc.get("data") or []
+    if not isinstance(data, list):
+        raise FlyerRenderError(f"OpenAI image edit invalid data shape: {raw_body[:500]}")
     if not data:
         raise FlyerRenderError(f"OpenAI image edit response had no data: {raw_body[:500]}")
-    encoded = data[0].get("b64_json") or ""
+    first = data[0]
+    if not isinstance(first, dict):
+        raise FlyerRenderError(f"OpenAI image edit invalid item shape: {raw_body[:500]}")
+    encoded = first.get("b64_json") or ""
     if encoded:
         try:
             return base64.b64decode(encoded)
         except Exception as e:
             raise FlyerRenderError(f"OpenAI image edit base64 decode failed: {e}") from e
-    url = str(data[0].get("url") or "")
+    url = str(first.get("url") or "")
     if url.startswith("data:image/"):
         return _decode_data_url(url)
     raise FlyerRenderError("OpenAI image edit response did not include image data")
@@ -1886,7 +1896,7 @@ def render_source_edit_preview(project: FlyerProject, output_dir: Path | str, *,
     output_dir = Path(output_dir)
     concept_id = "C1"
     path = output_dir / f"{project.project_id}-{concept_id}-preview.png"
-    provider_name = (provider or "openai").strip().lower()
+    provider_name = (provider or "manual_review").strip().lower()
     if provider_name == "openrouter":
         raw = _openrouter_source_edit_bytes(project, size=(1080, 1350), model=model, quality=quality)
     elif provider_name == "openai":

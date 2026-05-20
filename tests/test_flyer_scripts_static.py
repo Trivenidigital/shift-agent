@@ -455,6 +455,13 @@ def test_flyer_generation_scripts_resolve_draft_and_final_provider_policy():
     assert "cfg.flyer.final_image_model" not in finalize
 
 
+def test_source_edit_generation_failure_does_not_overwrite_script_manual_review_state():
+    hooks = (REPO / "src" / "plugins" / "cf-router" / "hooks.py").read_text(encoding="utf-8")
+
+    assert "if not actions.flyer_generation_queued_manual_review(gen_detail):" in hooks
+    assert '"--manual-reason", "source_edit_generation_failed"' in hooks
+
+
 def test_production_readiness_modules_installed_and_smoked():
     deploy = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh").read_text(encoding="utf-8")
     smoke = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-smoke-test.sh").read_text(encoding="utf-8")
