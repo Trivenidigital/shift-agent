@@ -731,10 +731,15 @@ async def manual_queue_break_glass(
 # P0-6 close/no-send cockpit action + P0-5 customer-message preview.
 #
 # Close path mirrors `flyer-manual-queue --close` CLI semantics:
-#   enforce_close_freshness_guard → close_manual_project →
-#   notify_customer_of_closure under flock with backup + audit.
-# Reuses the agent helpers from PRs #127/#129/#130 so the cockpit
-# binding is the only net-new surface.
+#   under flock: enforce_close_freshness_guard → close_manual_project
+#                → backup + atomic state write
+#   then OUTSIDE flock: notify_customer_of_closure (bridge + audit).
+# Notify runs after the lock is released so a slow bridge call cannot
+# block unrelated project writers — closure state is already
+# persisted, and the reactive "any update?" path is the safety net
+# when the proactive push misses. Reuses the agent helpers from
+# PRs #127/#129/#130 so the cockpit binding is the only net-new
+# surface.
 # ─────────────────────────────────────────────────────────────────
 
 
