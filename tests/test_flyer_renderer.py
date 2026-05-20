@@ -934,6 +934,7 @@ def test_openrouter_source_edit_response_parse_happy_path(tmp_path, monkeypatch)
     .image_url.url=data:image/png;base64,...`) and assert the helper returns
     the decoded bytes."""
     import agents.flyer.render as render_mod
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     reference = tmp_path / "F9101-ref.png"
     reference.write_bytes(_png_bytes())
 
@@ -1135,7 +1136,11 @@ def test_schema_default_is_openrouter_gemini_slug():
 # ─── Error taxonomy (one test per row of the design table) ──
 
 
-def _source_edit_project(tmp_path) -> "FlyerProject":
+def _source_edit_project(tmp_path, monkeypatch) -> "FlyerProject":
+    """Build a minimal FlyerProject + reference image suitable for invoking
+    `_openrouter_source_edit_bytes` directly. Sets `FLYER_STATE_ROOT` so the
+    schema's asset-path-under-root validator accepts the tmp_path reference."""
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     reference = tmp_path / "F9101-ref.png"
     reference.write_bytes(_png_bytes())
     now = datetime(2026, 5, 20, tzinfo=timezone.utc)
@@ -1185,7 +1190,7 @@ def test_openrouter_source_edit_http_400_raises_immediately(tmp_path, monkeypatc
     monkeypatch.setattr(render_mod.urllib.request, "urlopen", _fake)
     sleeps: list[float] = []
     monkeypatch.setattr(render_mod.time, "sleep", lambda s: sleeps.append(s))
-    project = _source_edit_project(tmp_path)
+    project = _source_edit_project(tmp_path, monkeypatch)
     with _pytest.raises(FlyerRenderError, match="HTTP 400"):
         render_mod._openrouter_source_edit_bytes(project, size=(1080, 1350), model="google/gemini-2.5-flash-image-preview", quality="medium")
     assert len(calls) == 1
@@ -1207,7 +1212,7 @@ def test_openrouter_source_edit_retriable_http_retries_three_times(tmp_path, mon
     monkeypatch.setattr(render_mod.urllib.request, "urlopen", _fake)
     sleeps: list[float] = []
     monkeypatch.setattr(render_mod.time, "sleep", lambda s: sleeps.append(s))
-    project = _source_edit_project(tmp_path)
+    project = _source_edit_project(tmp_path, monkeypatch)
     with _pytest.raises(FlyerRenderError, match=f"HTTP {code}"):
         render_mod._openrouter_source_edit_bytes(project, size=(1080, 1350), model="google/gemini-2.5-flash-image-preview", quality="medium")
     assert len(calls) == 3
@@ -1228,7 +1233,7 @@ def test_openrouter_source_edit_http_500_non_retriable(tmp_path, monkeypatch):
     monkeypatch.setattr(render_mod.urllib.request, "urlopen", _fake)
     sleeps: list[float] = []
     monkeypatch.setattr(render_mod.time, "sleep", lambda s: sleeps.append(s))
-    project = _source_edit_project(tmp_path)
+    project = _source_edit_project(tmp_path, monkeypatch)
     with _pytest.raises(FlyerRenderError, match="HTTP 500"):
         render_mod._openrouter_source_edit_bytes(project, size=(1080, 1350), model="google/gemini-2.5-flash-image-preview", quality="medium")
     assert len(calls) == 1
@@ -1246,7 +1251,7 @@ def test_openrouter_source_edit_timeout_retries_three_times(tmp_path, monkeypatc
         raise TimeoutError("read timeout")
     monkeypatch.setattr(render_mod.urllib.request, "urlopen", _fake)
     monkeypatch.setattr(render_mod.time, "sleep", lambda s: None)
-    project = _source_edit_project(tmp_path)
+    project = _source_edit_project(tmp_path, monkeypatch)
     with _pytest.raises(FlyerRenderError, match="response failed"):
         render_mod._openrouter_source_edit_bytes(project, size=(1080, 1350), model="google/gemini-2.5-flash-image-preview", quality="medium")
     assert len(calls) == 3
@@ -1264,7 +1269,7 @@ def test_openrouter_source_edit_urlerror_retries_three_times(tmp_path, monkeypat
         raise urllib.error.URLError("connection refused")
     monkeypatch.setattr(render_mod.urllib.request, "urlopen", _fake)
     monkeypatch.setattr(render_mod.time, "sleep", lambda s: None)
-    project = _source_edit_project(tmp_path)
+    project = _source_edit_project(tmp_path, monkeypatch)
     with _pytest.raises(FlyerRenderError, match="response failed"):
         render_mod._openrouter_source_edit_bytes(project, size=(1080, 1350), model="google/gemini-2.5-flash-image-preview", quality="medium")
     assert len(calls) == 3
@@ -1277,7 +1282,7 @@ def test_openrouter_source_edit_empty_choices_distinct_message(tmp_path, monkeyp
     monkeypatch.delenv("FLYER_SOURCE_EDIT_MODEL", raising=False)
     body = json.dumps({"choices": []}).encode("utf-8")
     monkeypatch.setattr(render_mod.urllib.request, "urlopen", lambda req, timeout: _OpenRouterFakeResponse(body))
-    project = _source_edit_project(tmp_path)
+    project = _source_edit_project(tmp_path, monkeypatch)
     with _pytest.raises(FlyerRenderError, match="had no choices"):
         render_mod._openrouter_source_edit_bytes(project, size=(1080, 1350), model="google/gemini-2.5-flash-image-preview", quality="medium")
 
@@ -1292,7 +1297,7 @@ def test_openrouter_source_edit_refusal_content_filter(tmp_path, monkeypatch):
         "choices": [{"finish_reason": "content_filter", "message": {"content": "", "images": []}}],
     }).encode("utf-8")
     monkeypatch.setattr(render_mod.urllib.request, "urlopen", lambda req, timeout: _OpenRouterFakeResponse(body))
-    project = _source_edit_project(tmp_path)
+    project = _source_edit_project(tmp_path, monkeypatch)
     with _pytest.raises(FlyerRenderError, match="refused .likely content policy"):
         render_mod._openrouter_source_edit_bytes(project, size=(1080, 1350), model="google/gemini-2.5-flash-image-preview", quality="medium")
 
@@ -1307,7 +1312,7 @@ def test_openrouter_source_edit_refusal_safety(tmp_path, monkeypatch):
         "choices": [{"finish_reason": "safety", "message": {"content": "", "images": []}}],
     }).encode("utf-8")
     monkeypatch.setattr(render_mod.urllib.request, "urlopen", lambda req, timeout: _OpenRouterFakeResponse(body))
-    project = _source_edit_project(tmp_path)
+    project = _source_edit_project(tmp_path, monkeypatch)
     with _pytest.raises(FlyerRenderError, match="refused .likely content policy"):
         render_mod._openrouter_source_edit_bytes(project, size=(1080, 1350), model="google/gemini-2.5-flash-image-preview", quality="medium")
 
@@ -1324,7 +1329,7 @@ def test_openrouter_source_edit_text_only_response_classified_as_refusal(tmp_pat
         "choices": [{"message": {"content": "I can't edit that image.", "images": []}}],
     }).encode("utf-8")
     monkeypatch.setattr(render_mod.urllib.request, "urlopen", lambda req, timeout: _OpenRouterFakeResponse(body))
-    project = _source_edit_project(tmp_path)
+    project = _source_edit_project(tmp_path, monkeypatch)
     with _pytest.raises(FlyerRenderError, match="refused .likely content policy"):
         render_mod._openrouter_source_edit_bytes(project, size=(1080, 1350), model="google/gemini-2.5-flash-image-preview", quality="medium")
 
@@ -1337,7 +1342,7 @@ def test_openrouter_source_edit_generic_no_images_distinct_message(tmp_path, mon
     monkeypatch.delenv("FLYER_SOURCE_EDIT_MODEL", raising=False)
     body = json.dumps({"choices": [{"message": {"images": []}}]}).encode("utf-8")
     monkeypatch.setattr(render_mod.urllib.request, "urlopen", lambda req, timeout: _OpenRouterFakeResponse(body))
-    project = _source_edit_project(tmp_path)
+    project = _source_edit_project(tmp_path, monkeypatch)
     with _pytest.raises(FlyerRenderError, match="had no images"):
         render_mod._openrouter_source_edit_bytes(project, size=(1080, 1350), model="google/gemini-2.5-flash-image-preview", quality="medium")
 
@@ -1352,7 +1357,7 @@ def test_openrouter_source_edit_bad_data_url_distinct_message(tmp_path, monkeypa
         "choices": [{"message": {"images": [{"image_url": {"url": "https://example.com/img.png"}}]}}],
     }).encode("utf-8")
     monkeypatch.setattr(render_mod.urllib.request, "urlopen", lambda req, timeout: _OpenRouterFakeResponse(body))
-    project = _source_edit_project(tmp_path)
+    project = _source_edit_project(tmp_path, monkeypatch)
     with _pytest.raises(FlyerRenderError, match="did not include base64 image data"):
         render_mod._openrouter_source_edit_bytes(project, size=(1080, 1350), model="google/gemini-2.5-flash-image-preview", quality="medium")
 
@@ -1368,7 +1373,7 @@ def test_openrouter_source_edit_malformed_base64_via_decode_data_url(tmp_path, m
         "choices": [{"message": {"images": [{"image_url": {"url": "data:image/png;base64,@@@not-base64@@@"}}]}}],
     }).encode("utf-8")
     monkeypatch.setattr(render_mod.urllib.request, "urlopen", lambda req, timeout: _OpenRouterFakeResponse(body))
-    project = _source_edit_project(tmp_path)
+    project = _source_edit_project(tmp_path, monkeypatch)
     with _pytest.raises(FlyerRenderError, match="base64 decode failed"):
         render_mod._openrouter_source_edit_bytes(project, size=(1080, 1350), model="google/gemini-2.5-flash-image-preview", quality="medium")
 

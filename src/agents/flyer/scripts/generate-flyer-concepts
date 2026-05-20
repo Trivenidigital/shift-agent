@@ -252,7 +252,7 @@ def main() -> int:
                 # `provider_timeout` for transient network/5xx issues.
                 if "quality check" in lower or "failed quality" in lower:
                     reason_code = "visual_qa_failed"
-                elif "openai" in lower or "api_key" in lower or "provider" in lower:
+                elif "openai" in lower or "openrouter" in lower or "api_key" in lower or "provider" in lower:
                     reason_code = "source_edit_provider_unavailable"
                 else:
                     reason_code = "provider_timeout"

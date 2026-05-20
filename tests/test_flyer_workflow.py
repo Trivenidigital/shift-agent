@@ -72,8 +72,8 @@ def test_source_edit_provider_ready_reads_shift_agent_env_file(tmp_path, monkeyp
     from agents.flyer.workflow import source_edit_provider_ready
 
     env_path = tmp_path / ".env"
-    env_path.write_text("OPENAI_API_KEY=sk-test\n", encoding="utf-8")
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    env_path.write_text("OPENROUTER_API_KEY=sk-or-v1-test\n", encoding="utf-8")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
 
     ok, detail = source_edit_provider_ready({"assets": [{"kind": "reference_image", "mime_type": "image/png", "path": "x.png"}]}, env_path=env_path)
 

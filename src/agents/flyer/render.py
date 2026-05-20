@@ -24,7 +24,6 @@ import textwrap
 import time
 import urllib.error
 import urllib.request
-import uuid
 
 from schemas import FlyerAsset, FlyerCustomerStore, FlyerOutputFormat, FlyerProject
 
@@ -120,8 +119,20 @@ FONT_CANDIDATES = [
 
 OPENROUTER_IMAGE_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_TIMEOUT_SEC = 180
-OPENAI_IMAGE_EDIT_URL = "https://api.openai.com/v1/images/edits"
-OPENAI_IMAGE_EDIT_TIMEOUT_SEC = 180
+
+# Flyer source-edit (OpenRouter / Gemini 2.5 Flash Image preview by default).
+# Operator override via `FLYER_SOURCE_EDIT_MODEL` env wins unconditionally; see
+# `_resolve_source_edit_model` for the full precedence ladder.
+FLYER_SOURCE_EDIT_DEFAULT_MODEL = "google/gemini-2.5-flash-image-preview"
+# Stale schema-default / config sentinels that must NOT be forwarded as an
+# OpenRouter model id. Defense-in-depth against operator VPSes whose config.yaml
+# still carries the pre-flip default `"gpt-image-1"`; without substitution
+# OpenRouter would 400 on every customer SOURCE inbound.
+OPENAI_LEGACY_MODEL_SENTINELS = frozenset({"gpt-image-1", "dall-e-2", "dall-e-3"})
+# HTTP statuses that warrant retry within the 3-attempt budget. Other 4xx are
+# raised on first attempt (won't change on retry); other 5xx (e.g. 500) raise
+# on first attempt too — those typically mean provider-side bug, not transient.
+RETRIABLE_HTTP_STATUSES = frozenset({429, 502, 503, 504})
 def _flyer_state_root() -> Path:
     return Path(os.environ.get("FLYER_STATE_ROOT", "/opt/shift-agent/state/flyer/"))
 
@@ -1320,107 +1331,150 @@ Rules:
 """
 
 
-def _openai_edit_size(size: tuple[int, int] | None) -> str:
-    if size is None:
-        return "1024x1536"
-    width, height = size
-    if width == height:
-        return "1024x1024"
-    return "1536x1024" if width > height else "1024x1536"
+def _resolve_source_edit_model(caller_model: str) -> str:
+    """Resolve the effective OpenRouter source-edit model id.
+
+    Precedence (boring, no clever fallbacks):
+      1. `FLYER_SOURCE_EDIT_MODEL` env — operator override; wins unconditionally
+         when set and non-empty. Intentional trust-the-operator escape hatch
+         for live VPS slug swaps without a deploy; no validation applied here.
+      2. `caller_model` arg — accepted only if it looks like an OpenRouter slug
+         (contains "/") AND is not in `OPENAI_LEGACY_MODEL_SENTINELS`. Tighter
+         than "not a legacy sentinel" because a stray caller could pass a bare
+         model name like "gpt-4o" that isn't a sentinel but still isn't a
+         valid OpenRouter id.
+      3. Hard default `FLYER_SOURCE_EDIT_DEFAULT_MODEL`.
+    """
+    env_override = os.environ.get("FLYER_SOURCE_EDIT_MODEL", "").strip()
+    if env_override:
+        return env_override
+    if caller_model and "/" in caller_model and caller_model not in OPENAI_LEGACY_MODEL_SENTINELS:
+        return caller_model
+    return FLYER_SOURCE_EDIT_DEFAULT_MODEL
 
 
-def _multipart_form_data(
-    fields: dict[str, str],
-    files: list[tuple[str, str, str, bytes]],
-) -> tuple[bytes, str]:
-    boundary = f"----FlyerStudio{uuid.uuid4().hex}"
-    chunks: list[bytes] = []
-    for name, value in fields.items():
-        chunks.append(f"--{boundary}\r\n".encode("utf-8"))
-        chunks.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"))
-        chunks.append(str(value).encode("utf-8"))
-        chunks.append(b"\r\n")
-    for name, filename, content_type, data in files:
-        safe_filename = Path(filename).name or "reference.png"
-        chunks.append(f"--{boundary}\r\n".encode("utf-8"))
-        chunks.append(
-            (
-                f'Content-Disposition: form-data; name="{name}"; '
-                f'filename="{safe_filename}"\r\n'
-                f"Content-Type: {content_type}\r\n\r\n"
-            ).encode("utf-8")
-        )
-        chunks.append(data)
-        chunks.append(b"\r\n")
-    chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
-    return b"".join(chunks), boundary
+def _classify_openrouter_no_images(body: str, doc: dict) -> str:
+    """Pick the most informative FlyerRenderError message for a 200-OK
+    response that came back without an image.
+
+    Heuristic order:
+      1. `finish_reason in {content_filter, safety}` → distinct refusal message.
+      2. `message.content` is non-empty (text response with no image) → also
+         treat as refusal (older models don't always set finish_reason).
+      3. Generic "no images" message — model error or response shape drift.
+
+    Both refusal cases route to manual-queue through the same FlyerRenderError
+    path; only the human-readable message differs so operator triage can
+    disambiguate refusal-vs-malformed in audit logs.
+    """
+    choices = doc.get("choices") or [{}]
+    first = choices[0] if choices else {}
+    finish_reason = str(first.get("finish_reason") or "").lower()
+    content_text = ""
+    message = first.get("message") or {}
+    content = message.get("content")
+    if isinstance(content, str):
+        content_text = content.strip()
+    elif isinstance(content, list):
+        # Multimodal content shape; join text parts.
+        content_text = " ".join(
+            str(part.get("text", "")) for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        ).strip()
+    if finish_reason in {"content_filter", "safety"} or content_text:
+        return f"OpenRouter source-edit refused (likely content policy): {body[:500]}"
+    return f"OpenRouter source-edit response had no images: {body[:500]}"
 
 
-def _openai_source_edit_bytes(
+def _openrouter_source_edit_bytes(
     project: FlyerProject,
     *,
     size: tuple[int, int] | None,
     model: str,
     quality: str,
 ) -> bytes:
-    # P0-5 defense-in-depth: mirror workflow.py::source_edit_provider_ready —
-    # treat PLACEHOLDER as missing so an operator CLI / retry path that
-    # bypassed the cf-router preflight doesn't waste an OpenAI request and
-    # surface a 401 mid-customer-flow.
-    api_key = _read_env_value("OPENAI_API_KEY")
+    """Reference-image-conditioned generation via OpenRouter / Gemini 2.5
+    Flash Image preview. Mirrors `_openrouter_image_bytes` for body/headers
+    but with multimodal content (text + image_url) and a broader retry policy
+    (HTTPError retries for `RETRIABLE_HTTP_STATUSES`).
+
+    Defense-in-depth: mirror workflow.py::source_edit_provider_ready — treat
+    PLACEHOLDER as missing so an operator CLI / retry path that bypassed the
+    cf-router preflight doesn't waste a provider request and surface a 401
+    mid-customer-flow.
+    """
+    api_key = _read_env_value("OPENROUTER_API_KEY")
     if not api_key or "PLACEHOLDER" in api_key:
-        raise FlyerRenderError("OPENAI_API_KEY is missing or placeholder")
+        raise FlyerRenderError("OPENROUTER_API_KEY is missing or placeholder")
+    effective_model = _resolve_source_edit_model(model)
     reference = _source_edit_reference_asset(project)
     reference_path = Path(reference.path)
     mime = reference.mime_type or mimetypes.guess_type(str(reference_path))[0] or "image/png"
-    body, boundary = _multipart_form_data(
-        {
-            "model": model,
-            "prompt": _source_edit_prompt(project),
-            "size": _openai_edit_size(size),
-            "quality": quality,
-            "input_fidelity": "high",
+    source_b64 = base64.b64encode(reference_path.read_bytes()).decode("ascii")
+    source_data_url = f"data:{mime};base64,{source_b64}"
+    payload = {
+        "model": effective_model,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": _source_edit_prompt(project)},
+                {"type": "image_url", "image_url": {"url": source_data_url}},
+            ],
+        }],
+        "modalities": ["image", "text"],
+        "stream": False,
+        "image_config": {
+            "aspect_ratio": _aspect_ratio(size),
+            "image_size": "2K" if quality == "high" else "1K",
         },
-        [
-            (
-                "image",
-                reference_path.name,
-                mime,
-                reference_path.read_bytes(),
-            )
-        ],
-    )
+    }
     req = urllib.request.Request(
-        os.environ.get("OPENAI_IMAGE_EDIT_URL", OPENAI_IMAGE_EDIT_URL),
-        data=body,
+        OPENROUTER_IMAGE_URL,
+        data=json.dumps(payload).encode("utf-8"),
         headers={
             "Authorization": f"Bearer {api_key}",
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/Trivenidigital/SME-Agents",
+            "X-Title": "Hermes Flyer Studio",
         },
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=OPENAI_IMAGE_EDIT_TIMEOUT_SEC) as resp:
-            raw_body = resp.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as e:
-        err = e.read().decode("utf-8", errors="replace")[:1000]
-        raise FlyerRenderError(f"OpenAI image edit HTTP {e.code}: {err}") from e
-    except urllib.error.URLError as e:
-        raise FlyerRenderError(f"OpenAI image edit connection failed: {e.reason}") from e
-    doc = json.loads(raw_body)
-    data = doc.get("data") or []
-    if not data:
-        raise FlyerRenderError(f"OpenAI image edit response had no data: {raw_body[:500]}")
-    encoded = data[0].get("b64_json") or ""
-    if encoded:
+    body = ""
+    last_error: Exception | None = None
+    for attempt in range(3):
         try:
-            return base64.b64decode(encoded)
-        except Exception as e:
-            raise FlyerRenderError(f"OpenAI image edit base64 decode failed: {e}") from e
-    url = str(data[0].get("url") or "")
-    if url.startswith("data:image/"):
-        return _decode_data_url(url)
-    raise FlyerRenderError("OpenAI image edit response did not include image data")
+            with urllib.request.urlopen(req, timeout=OPENROUTER_TIMEOUT_SEC) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+            break
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode("utf-8", errors="replace")[:1000]
+            if e.code in RETRIABLE_HTTP_STATUSES and attempt < 2:
+                # HTTPError branch is "retry or raise" exclusively. The
+                # post-loop `if not body and last_error` guard handles the
+                # URLError/Timeout branch only, where the loop can exit
+                # cleanly without raising. Keeping last_error scoped to
+                # transport errors avoids dead-mutation drift.
+                time.sleep(2 * (attempt + 1))
+                continue
+            raise FlyerRenderError(f"OpenRouter source-edit HTTP {e.code}: {err_body}") from e
+        except (urllib.error.URLError, http.client.IncompleteRead, TimeoutError) as e:
+            last_error = e
+            if attempt == 2:
+                raise FlyerRenderError(f"OpenRouter source-edit response failed: {type(e).__name__}: {e}") from e
+            time.sleep(2 * (attempt + 1))
+    if not body and last_error is not None:
+        raise FlyerRenderError(f"OpenRouter source-edit response failed: {type(last_error).__name__}: {last_error}") from last_error
+    doc = json.loads(body)
+    choices = doc.get("choices") or []
+    if not choices:
+        raise FlyerRenderError(f"OpenRouter source-edit response had no choices: {body[:500]}")
+    images = choices[0].get("message", {}).get("images") or []
+    if not images:
+        raise FlyerRenderError(_classify_openrouter_no_images(body, doc))
+    url = images[0].get("image_url", {}).get("url") or ""
+    if not url.startswith("data:image/"):
+        raise FlyerRenderError("OpenRouter source-edit response did not include base64 image data")
+    return _decode_data_url(url)
 
 
 def _write_generated_image(raw: bytes, path: Path, *, size: tuple[int, int] | None) -> None:
@@ -1792,7 +1846,7 @@ def render_source_edit_preview(project: FlyerProject, output_dir: Path | str, *,
     output_dir = Path(output_dir)
     concept_id = "C1"
     path = output_dir / f"{project.project_id}-{concept_id}-preview.png"
-    raw = _openai_source_edit_bytes(project, size=(1080, 1350), model=model, quality=quality)
+    raw = _openrouter_source_edit_bytes(project, size=(1080, 1350), model=model, quality=quality)
     _raw_background_path(path).unlink(missing_ok=True)
     _write_generated_image_contained(raw, path, size=(1080, 1350))
     quality_report = inspect_rendered_asset(path, expected_width=1080, expected_height=1350, mime_type="image/png")
