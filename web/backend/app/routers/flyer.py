@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import mimetypes
@@ -9,6 +10,7 @@ import os
 import re
 import secrets
 import shutil
+import struct
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -852,22 +854,179 @@ async def operator_upload_media(
         filename=target.name,
     )
 
+_FINAL_ASSET_KINDS = {
+    "final_whatsapp_image",
+    "final_instagram_post",
+    "final_instagram_story",
+    "final_printable_pdf",
+}
+
+_ASSET_OUTPUT_FORMATS = {
+    "concept_preview": "concept_preview",
+    "final_whatsapp_image": "whatsapp_image",
+    "final_instagram_post": "instagram_post",
+    "final_instagram_story": "instagram_story",
+    "final_printable_pdf": "printable_pdf",
+}
+
+
+def _asset_output_format(kind: str) -> str:
+    return _ASSET_OUTPUT_FORMATS.get(kind, kind)
+
+
+def _file_sha256(path: Path) -> str:
+    if not path.is_file():
+        return ""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+def _asset_dimensions(path: Path, mime_type: str) -> tuple[int | None, int | None]:
+    """Best-effort image dimensions. PDFs and unreadable images return None."""
+    if not path.is_file():
+        return None, None
+    if mime_type == "image/png":
+        try:
+            data = path.read_bytes()[:24]
+        except OSError:
+            return None, None
+        if len(data) >= 24 and data[:8] == b"\x89PNG\r\n\x1a\n" and data[12:16] == b"IHDR":
+            return struct.unpack(">II", data[16:24])
+    if mime_type.startswith("image/"):
+        try:
+            from PIL import Image  # type: ignore
+            with Image.open(path) as img:
+                return int(img.width), int(img.height)
+        except Exception:
+            return None, None
+    return None, None
+
 
 def _asset_summary(asset: Any, *, project_id: str) -> dict[str, Any]:
-    """Project-facing asset metadata for the cockpit drawer. Does NOT
-    include the raw `path` (operators read media via the auth-gated
-    media-serve endpoint, not by typing the VPS path)."""
+    path = Path(asset.path)
+    width, height = _asset_dimensions(path, asset.mime_type)
+    size_bytes = path.stat().st_size if path.is_file() else None
     return {
         "asset_id": asset.asset_id,
         "kind": asset.kind,
+        "output_format": _asset_output_format(asset.kind),
         "source": asset.source,
         "mime_type": asset.mime_type,
-        "sha256": asset.sha256[:16],  # truncated — full hash is rarely useful in UI
+        "sha256": asset.sha256,
+        "sha256_short": asset.sha256[:16],
+        "file_sha256": _file_sha256(path),
+        "size_bytes": size_bytes,
+        "width": width,
+        "height": height,
         "delivery_status": asset.delivery_status,
+        "outbound_message_id": asset.outbound_message_id,
         "received_at": asset.received_at.isoformat() if asset.received_at else None,
         "delivered_at": asset.delivered_at.isoformat() if asset.delivered_at else None,
         "media_url": f"/api/flyer/projects/{project_id}/assets/{asset.asset_id}",
     }
+
+
+def _parse_ts(value: Any) -> datetime:
+    raw = str(value or "").strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _timeline_ts(value: Any) -> str:
+    parsed = _parse_ts(value)
+    if parsed == datetime.min.replace(tzinfo=timezone.utc):
+        return ""
+    return parsed.isoformat()
+
+
+def _safe_json_rows(path: Path, *, max_lines: int = 5000) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in lines[-max_lines:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            doc = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(doc, dict):
+            rows.append(doc)
+    return rows
+
+
+def _entry_project_id(entry: dict[str, Any]) -> str:
+    direct = str(entry.get("project_id") or "").strip()
+    if direct:
+        return direct
+    details = entry.get("details")
+    if isinstance(details, dict):
+        direct = str(details.get("project_id") or "").strip()
+        if direct:
+            return direct
+    text = json.dumps(details if details is not None else entry, default=str, separators=(",", ":"))
+    match = re.search(r"\b(F\d{4,})\b", text)
+    return match.group(1) if match else ""
+
+
+def _entry_detail(entry: dict[str, Any]) -> str:
+    if entry.get("type") == "flyer_status_change":
+        return (
+            f"{entry.get('from_status', '')}->{entry.get('to_status', '')}; "
+            f"actor={entry.get('actor', '')}; reason={entry.get('reason', '')}"
+        ).strip("; ")
+    if entry.get("type") == "flyer_assets_delivered":
+        return f"asset_ids={','.join(str(x) for x in entry.get('asset_ids', []) or [])}"
+    details = entry.get("details")
+    if isinstance(details, dict):
+        parts = []
+        for key in ("reason", "status", "manual_status", "asset_path", "operator_asset_ids", "backup"):
+            if key in details and details.get(key) not in ("", None, []):
+                parts.append(f"{key}={details.get(key)}")
+        if parts:
+            return "; ".join(parts)[:500]
+        return json.dumps(details, default=str, separators=(",", ":"))[:500]
+    if isinstance(details, str):
+        return details[:500]
+    if "detail" in entry:
+        return str(entry.get("detail") or "")[:500]
+    return ""
+
+
+def _audit_timeline(project_id: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    settings = get_settings()
+    for source, path, event_key in (
+        ("decisions", settings.decisions_path, "type"),
+        ("cockpit_audit", settings.cockpit_audit_log, "event"),
+    ):
+        for entry in _safe_json_rows(path):
+            if _entry_project_id(entry) != project_id:
+                continue
+            ts = _timeline_ts(entry.get("ts"))
+            if not ts:
+                continue
+            rows.append({
+                "ts": ts,
+                "event": str(entry.get(event_key) or entry.get("type") or entry.get("event") or "audit_event"),
+                "detail": _entry_detail(entry),
+                "source": source,
+            })
+    return rows
 
 
 def manual_queue_detail_action(project_id: str) -> dict[str, Any]:
@@ -885,22 +1044,32 @@ def manual_queue_detail_action(project_id: str) -> dict[str, Any]:
     for report in project.qa_reports:
         qa_blockers.extend(report.blockers)
     timeline = [
-        {"ts": project.created_at.isoformat(), "event": "project_created", "detail": f"status={project.status}"},
-        {"ts": project.updated_at.isoformat(), "event": "project_updated", "detail": f"status={project.status}"},
+        {"ts": project.created_at.isoformat(), "event": "project_created", "detail": f"status={project.status}", "source": "project_state"},
+        {"ts": project.updated_at.isoformat(), "event": "project_updated", "detail": f"status={project.status}", "source": "project_state"},
     ]
     if manual.queued_at:
         timeline.append({
             "ts": manual.queued_at.isoformat(),
             "event": "manual_review_queued",
             "detail": f"reason_code={manual.reason_code}",
+            "source": "project_state",
         })
     if manual.completed_at:
         timeline.append({
             "ts": manual.completed_at.isoformat(),
             "event": f"manual_review_{manual.status}",
             "detail": manual.detail[:200] if manual.detail else "",
+            "source": "project_state",
         })
-    timeline.sort(key=lambda row: row["ts"])
+    timeline.extend(_audit_timeline(project.project_id))
+    timeline.sort(key=lambda row: _parse_ts(row["ts"]))
+    asset_summaries = [_asset_summary(asset, project_id=project.project_id) for asset in project.assets]
+    final_asset_ids = set(project.final_asset_ids)
+    final_assets = [
+        asset
+        for asset in asset_summaries
+        if asset["kind"] in _FINAL_ASSET_KINDS or asset["asset_id"] in final_asset_ids
+    ]
     return {
         "project_id": project.project_id,
         "customer_phone": str(project.customer_phone),
@@ -923,7 +1092,8 @@ def manual_queue_detail_action(project_id: str) -> dict[str, Any]:
         "locked_facts": [fact.model_dump(mode="json") for fact in project.locked_facts],
         "qa_blockers": qa_blockers,
         "verification_modes": flyer_verification_modes(project),
-        "assets": [_asset_summary(asset, project_id=project.project_id) for asset in project.assets],
+        "assets": asset_summaries,
+        "final_assets": final_assets,
         "final_asset_ids": list(project.final_asset_ids),
         "selected_concept_id": project.selected_concept_id,
         "fields": project.fields.model_dump(mode="json"),

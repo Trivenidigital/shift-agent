@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/Button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
 import { cn } from "@/lib/cn";
+import { FlyerProjectEvidenceDrawer } from "./FlyerProjectEvidenceDrawer";
 
 type Tab = "overview" | "customers" | "campaigns" | "projects" | "guests" | "queue";
 
@@ -43,10 +44,17 @@ interface ManualQueueSummary {
 interface ManualQueueDetailAsset {
   asset_id: string;
   kind: string;
+  output_format: string;
   source: string;
   mime_type: string;
   sha256: string;
+  sha256_short: string;
+  file_sha256: string;
+  size_bytes: number | null;
+  width: number | null;
+  height: number | null;
   delivery_status: string;
+  outbound_message_id: string;
   received_at: string | null;
   delivered_at: string | null;
   media_url: string;
@@ -67,6 +75,7 @@ interface ManualQueueDetailTimelineEvent {
   ts: string;
   event: string;
   detail: string;
+  source: string;
 }
 
 interface ManualQueueDetail {
@@ -83,6 +92,7 @@ interface ManualQueueDetail {
   qa_blockers: string[];
   verification_modes: string[];
   assets: ManualQueueDetailAsset[];
+  final_assets: ManualQueueDetailAsset[];
   final_asset_ids: string[];
   selected_concept_id: string | null;
   fields: Record<string, unknown>;
@@ -1087,10 +1097,17 @@ function ManualQueueDrawerBody(props: ManualQueueDrawerBodyProps) {
   } = props;
   const reasonOk = reason.trim().length >= 5;
   const completeOk = reasonOk && !!uploadedAsset && !completePending;
+  const [showCompleteConfirm, setShowCompleteConfirm] = useState(false);
   const referenceAssets = detail.assets.filter(
     (a) => a.kind === "reference_image" || a.kind === "logo",
   );
   const integrityOnly = detail.verification_modes.includes("source_edit_integrity_only");
+  const uploadedAssetUrl = uploadedAsset ? `/api/flyer/operator-uploads/${uploadedAsset.filename}` : "";
+
+  useEffect(() => {
+    setShowCompleteConfirm(false);
+  }, [uploadedAsset?.filename, reason]);
+
   return (
     <div className="space-y-4">
       {/* Header block: status + reason + age */}
@@ -1199,6 +1216,8 @@ function ManualQueueDrawerBody(props: ManualQueueDrawerBodyProps) {
         </div>
       )}
 
+      <FlyerProjectEvidenceDrawer detail={{ ...detail, assets: [] }} />
+
       {/* Operator action: upload + complete + break-glass */}
       <div className="rounded-md border border-zinc-200 px-3 py-2">
         <div className="text-xs uppercase tracking-wide text-zinc-500">Operator action</div>
@@ -1212,7 +1231,7 @@ function ManualQueueDrawerBody(props: ManualQueueDrawerBodyProps) {
           {/* Upload control (P0-2) */}
           <label className="flex items-center gap-2 text-xs text-zinc-700">
             <FileUp size={14} className="text-brand-700" />
-            <span>Upload designer asset (PNG/JPG/WEBP/PDF, ≤10 MB)</span>
+            <span>Upload designer asset (PNG/JPG/WEBP/PDF, up to 10 MB)</span>
             <input
               type="file"
               accept="image/png,image/jpeg,image/webp,application/pdf"
@@ -1233,11 +1252,13 @@ function ManualQueueDrawerBody(props: ManualQueueDrawerBodyProps) {
           )}
           {uploadedAsset && (
             <div className="rounded border border-emerald-200 bg-emerald-50 px-2 py-2 text-xs">
-              <div className="font-semibold text-emerald-800">Uploaded — preview before Complete</div>
-              <div className="mt-1 text-emerald-900">{uploadedAsset.filename} · {uploadedAsset.mime_type} · {Math.round(uploadedAsset.size_bytes / 1024)} KB</div>
+              <div className="font-semibold text-emerald-800">Uploaded - preview before complete</div>
+              <div className="mt-1 text-emerald-900">
+                {uploadedAsset.filename} / {uploadedAsset.mime_type} / {Math.round(uploadedAsset.size_bytes / 1024)} KB
+              </div>
               {uploadedAsset.mime_type.startsWith("image/") && (
                 <img
-                  src={`/api/flyer/operator-uploads/${uploadedAsset.filename}`}
+                  src={uploadedAssetUrl}
                   alt="uploaded designer asset"
                   className="mt-2 h-40 w-full rounded border border-emerald-300 bg-white object-contain"
                   loading="lazy"
@@ -1245,7 +1266,7 @@ function ManualQueueDrawerBody(props: ManualQueueDrawerBodyProps) {
               )}
               {uploadedAsset.mime_type === "application/pdf" && (
                 <a
-                  href={`/api/flyer/operator-uploads/${uploadedAsset.filename}`}
+                  href={uploadedAssetUrl}
                   target="_blank"
                   rel="noreferrer"
                   className="mt-2 inline-block rounded border border-emerald-300 bg-white px-2 py-1 text-xs text-brand-700 underline-offset-2 hover:underline"
@@ -1260,13 +1281,45 @@ function ManualQueueDrawerBody(props: ManualQueueDrawerBodyProps) {
               {completeError || breakGlassError}
             </div>
           )}
+          {uploadedAsset && showCompleteConfirm && (
+            <div className="rounded border border-amber-200 bg-amber-50 px-2 py-2 text-xs text-amber-900">
+              <div className="font-semibold">Final confirmation</div>
+              <div className="mt-1">
+                Confirm this visible asset is the final operator-reviewed output for {detail.project_id}.
+              </div>
+              {uploadedAsset.mime_type.startsWith("image/") && (
+                <img
+                  src={uploadedAssetUrl}
+                  alt="final confirmation asset"
+                  className="mt-2 h-48 w-full rounded border border-amber-300 bg-white object-contain"
+                  loading="lazy"
+                />
+              )}
+              {uploadedAsset.mime_type === "application/pdf" && (
+                <a
+                  href={uploadedAssetUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-2 inline-block rounded border border-amber-300 bg-white px-2 py-1 text-xs text-brand-700 underline-offset-2 hover:underline"
+                >
+                  Open final PDF in new tab
+                </a>
+              )}
+            </div>
+          )}
           <div className="flex gap-2">
             <Button
               size="sm"
               disabled={!completeOk}
-              onClick={onComplete}
+              onClick={() => {
+                if (!showCompleteConfirm) {
+                  setShowCompleteConfirm(true);
+                  return;
+                }
+                onComplete();
+              }}
             >
-              Complete with uploaded asset
+              {showCompleteConfirm ? "Confirm complete with visible asset" : "Review final asset"}
             </Button>
             <Button
               size="sm"
@@ -1279,20 +1332,6 @@ function ManualQueueDrawerBody(props: ManualQueueDrawerBodyProps) {
             </Button>
           </div>
         </div>
-      </div>
-
-      {/* Timeline */}
-      <div className="rounded-md border border-zinc-200 px-3 py-2 text-xs">
-        <div className="text-xs uppercase tracking-wide text-zinc-500">Timeline</div>
-        <ul className="mt-1 space-y-1">
-          {detail.timeline.map((row, i) => (
-            <li key={i} className="flex items-start gap-2">
-              <span className="font-mono text-zinc-500">{new Date(row.ts).toLocaleString()}</span>
-              <span className="font-mono text-zinc-700">{row.event}</span>
-              {row.detail && <span className="text-zinc-600">{row.detail}</span>}
-            </li>
-          ))}
-        </ul>
       </div>
     </div>
   );
