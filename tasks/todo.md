@@ -1118,3 +1118,13 @@ Review results:
   - [x] Update production readiness backlog with landed P0-3 status and remaining gaps.
   - Review: focused P0-3 acceptance subset `11 passed`; reference/create/generation/static/QA suite `46 passed`; broader focused Flyer suite first `292 passed, 13 warnings`, then final `303 passed, 117 skipped, 13 warnings`; `py_compile` and `git diff --check` passed. PR #113 review vectors were extraction correctness, state/manual fallback safety, and runtime/deploy readiness.
   - 2026-05-19 continuation review on local worktree head `27de178` plus uncommitted review fixes: focused P0-3/Flyer/router suite `166 passed`; broader Flyer suite `304 passed, 13 warnings`; `py_compile` passed; `git diff --check` passed; Git Bash syntax check for deploy/smoke scripts passed. The default `bash` shim failed locally because `/bin/bash` was unavailable, so `C:/Program Files/Git/bin/bash.exe` was used.
+- [ ] Flyer source-edit provider config wiring (2026-05-20): exact uploaded-flyer source edits should use the configured provider path instead of requiring a separate `OPENAI_API_KEY`.
+  - Drift-check tag: extends-Hermes
+  - Hermes-first analysis: reuse Hermes WhatsApp media ingress, Flyer project assets, config schema, OpenRouter env lookup, renderer QA, and manual-review fail-closed behavior. Net-new scope is only Flyer-specific source-edit provider resolution and OpenRouter dispatch.
+  - [x] Write implementation plan: `docs/superpowers/plans/2026-05-20-flyer-source-edit-provider-config.md`.
+  - [x] Get implementation plan reviewed by two parallel agents.
+  - [x] Write design spec.
+  - [x] Get design spec reviewed by two parallel agents.
+  - [x] Build with TDD and focused verification.
+  - [ ] Open PR; no merge or deploy.
+  - Review: red run first produced 19 focused failures across source-edit preflight, renderer provider dispatch, workflow readiness, schema resolver, and script static wiring. Final verification passed: `tests/test_flyer_source_edit_preflight.py tests/test_flyer_renderer.py tests/test_flyer_workflow.py tests/test_flyer_schemas.py` -> `119 passed`; `tests/test_flyer_generate_concepts.py tests/test_cf_router_flyer_routing.py -k "source_edit or preflight"` -> `7 passed, 93 deselected`; `tests/test_flyer_golden_scenarios_real_model.py tests/test_flyer_scripts_static.py` -> `34 passed, 1 skipped`; `tests/ -k "flyer and source_edit"` -> `53 passed, 4 skipped, 2094 deselected`; touched-file `py_compile` passed; `git diff --check` passed. No deploy performed.

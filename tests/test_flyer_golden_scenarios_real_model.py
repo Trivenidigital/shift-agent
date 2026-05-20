@@ -140,4 +140,6 @@ def test_real_model_golden_smoke_allow_spend(tmp_path):
     assert payload["posture"]["provider"] == "openrouter"
     assert "present" in payload["posture"]["openrouter_key"]
     assert "source" in payload["posture"]["openrouter_key"]
-    assert "present" in payload["posture"]["openai_source_edit_key"]
+    assert payload["posture"]["source_edit_provider"].startswith("openrouter/")
+    assert "present" in payload["posture"]["source_edit_key"]
+    assert "source" in payload["posture"]["source_edit_key"]

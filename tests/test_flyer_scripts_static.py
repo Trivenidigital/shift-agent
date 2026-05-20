@@ -438,6 +438,12 @@ def test_flyer_generation_scripts_resolve_draft_and_final_provider_policy():
     generate = (SCRIPTS / "generate-flyer-concepts").read_text(encoding="utf-8")
     finalize = (SCRIPTS / "finalize-flyer-assets").read_text(encoding="utf-8")
 
+    assert "source_edit_provider = cfg.flyer.resolve_source_edit_render_provider()" in generate
+    assert "provider=source_edit_provider.provider" in generate
+    assert "model=source_edit_provider.model" in generate
+    assert "quality=source_edit_provider.quality" in generate
+    assert "cfg.flyer.edit_image_model" not in generate
+
     assert "draft_provider = cfg.flyer.resolve_draft_render_provider()" in generate
     assert "model=draft_provider.model" in generate
     assert "quality=draft_provider.quality" in generate

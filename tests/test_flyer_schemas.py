@@ -63,8 +63,13 @@ def test_flyer_config_defaults_are_safe_and_cost_bounded():
     assert cfg.final_provider_policy.default.provider == "local"
     assert cfg.final_provider_policy.default.model == "deterministic-renderer"
     assert cfg.final_provider_policy.fallback.model == "openai/gpt-5.4-image-2"
+    assert cfg.source_edit_provider_policy.default.provider == "openrouter"
+    assert cfg.source_edit_provider_policy.default.model == "openai/gpt-5.4-image-2"
+    assert cfg.source_edit_provider_policy.emergency_fallback.provider == "manual_review"
     assert cfg.resolve_draft_render_provider().model == "openai/gpt-5.4-image-2"
     assert cfg.resolve_final_render_provider().model == "deterministic-renderer"
+    assert cfg.resolve_source_edit_render_provider().provider == "openrouter"
+    assert cfg.resolve_source_edit_render_provider().model == "openai/gpt-5.4-image-2"
     assert [(t.plan_id, t.monthly_price_usd, t.included_flyers) for t in cfg.plan_tiers] == [
         ("trial", 0.00, 3),
         ("starter", 49.99, 30),
@@ -126,6 +131,46 @@ def test_flyer_config_provider_policy_overrides_legacy_model_fields():
     assert cfg.resolve_draft_render_provider().model == "recraft/recraft-v4.1"
     assert cfg.resolve_draft_render_provider().quality == "balanced"
     assert cfg.resolve_final_render_provider().model == "deterministic-renderer"
+
+
+def test_flyer_config_source_edit_policy_overrides_legacy_model_fields():
+    cfg = FlyerConfig.model_validate({
+        "enabled": True,
+        "edit_image_model": "gpt-image-1",
+        "edit_image_quality": "medium",
+        "source_edit_provider_policy": {
+            "default": {
+                "provider": "openrouter",
+                "model": "openai/gpt-5.4-image-2",
+                "quality": "high",
+            },
+            "emergency_fallback": {
+                "provider": "manual_review",
+                "model": "manual_review",
+                "quality": "high",
+            },
+        },
+    })
+
+    source = cfg.resolve_source_edit_render_provider()
+
+    assert source.provider == "openrouter"
+    assert source.model == "openai/gpt-5.4-image-2"
+    assert source.quality == "high"
+
+
+def test_flyer_config_source_edit_legacy_fields_preserve_openai_when_policy_absent():
+    cfg = FlyerConfig.model_validate({
+        "enabled": True,
+        "edit_image_model": "gpt-image-1",
+        "edit_image_quality": "medium",
+    })
+
+    source = cfg.resolve_source_edit_render_provider()
+
+    assert source.provider == "openai"
+    assert source.model == "gpt-image-1"
+    assert source.quality == "medium"
 
 
 def test_config_includes_flyer_default_disabled():

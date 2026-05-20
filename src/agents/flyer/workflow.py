@@ -295,10 +295,35 @@ def _read_env_value(name: str, *, env_path: Path | None = None) -> str:
     return ""
 
 
-def source_edit_provider_ready(project_or_asset, *, env_path: Path | None = None) -> tuple[bool, str]:
-    key = _read_env_value("OPENAI_API_KEY", env_path=env_path)
-    if not key or "PLACEHOLDER" in key:
-        return False, "source edit provider is not configured: OPENAI_API_KEY missing"
+def _source_edit_provider_parts(provider) -> tuple[str, str]:
+    if provider is None:
+        return "openrouter", "openai/gpt-5.4-image-2"
+    if isinstance(provider, str):
+        return provider.strip().lower(), ""
+    if isinstance(provider, dict):
+        return (
+            str(provider.get("provider") or "openrouter").strip().lower(),
+            str(provider.get("model") or "").strip(),
+        )
+    return (
+        str(getattr(provider, "provider", "openrouter") or "openrouter").strip().lower(),
+        str(getattr(provider, "model", "") or "").strip(),
+    )
+
+
+def source_edit_provider_ready(project_or_asset, *, provider=None, env_path: Path | None = None) -> tuple[bool, str]:
+    provider_name, model = _source_edit_provider_parts(provider)
+    if provider_name == "openrouter":
+        key_name = "OPENROUTER_API_KEY"
+    elif provider_name == "openai":
+        key_name = "OPENAI_API_KEY"
+    elif provider_name == "manual_review":
+        return False, "source edit provider configured for manual review"
+    else:
+        return False, f"source edit provider is unsupported: {provider_name or 'unknown'}"
+    key = _read_env_value(key_name, env_path=env_path)
+    if not key or "PLACEHOLDER" in key.upper():
+        return False, f"source edit provider is not configured: {key_name} missing"
     assets = []
     if isinstance(project_or_asset, dict):
         if "assets" in project_or_asset:
@@ -313,7 +338,8 @@ def source_edit_provider_ready(project_or_asset, *, env_path: Path | None = None
     mime = reference.get("mime_type", "") if isinstance(reference, dict) else getattr(reference, "mime_type", "")
     if mime and not str(mime).startswith("image/"):
         return False, f"source edit reference must be an image, got {mime}"
-    return True, "ready"
+    detail_model = model or "openai/gpt-5.4-image-2"
+    return True, f"source edit provider configured: {provider_name}/{detail_model}"
 
 
 def next_status_for_project(

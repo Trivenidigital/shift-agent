@@ -4,6 +4,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import yaml
+
 
 REPO = Path(__file__).resolve().parent.parent
 ACTIONS = REPO / "src" / "plugins" / "cf-router" / "actions.py"
@@ -17,13 +19,52 @@ def _load_actions_module():
     return module
 
 
+def _write_config(path: Path, *, flyer: dict | None = None) -> None:
+    cfg = {
+        "schema_version": 1,
+        "customer": {
+            "name": "Triveni",
+            "location_id": "loc_pineville_01",
+            "timezone": "America/New_York",
+        },
+        "owner": {"name": "Owner", "phone": "+19045550000"},
+        "limits": {},
+        "alerting": {"pushover_user_key": "u", "pushover_app_token": "a"},
+        "backup": {"gpg_recipient_email": "owner@example.com"},
+        "flyer": flyer or {
+            "enabled": True,
+            "source_edit_provider_policy": {
+                "default": {
+                    "provider": "openrouter",
+                    "model": "openai/gpt-5.4-image-2",
+                    "quality": "high",
+                },
+                "emergency_fallback": {
+                    "provider": "manual_review",
+                    "model": "manual_review",
+                    "quality": "high",
+                },
+            },
+        },
+    }
+    path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+
+def _patch_config(actions, tmp_path: Path, *, flyer: dict | None = None) -> None:
+    cfg_path = tmp_path / "config.yaml"
+    _write_config(cfg_path, flyer=flyer)
+    actions.CONFIG_PATH = cfg_path
+
+
 def test_source_edit_preflight_rejects_pdf_reference(tmp_path, monkeypatch):
     """PDF reference must NOT bucket as a provider outage — it's an
     unsupported-media gap the operator triages by re-uploading an image."""
     actions = _load_actions_module()
+    _patch_config(actions, tmp_path)
     pdf = tmp_path / "reference.pdf"
     pdf.write_bytes(b"%PDF")
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     ok, detail, reason_code = actions.flyer_source_edit_preflight({
         "assets": [{
@@ -44,8 +85,10 @@ def test_source_edit_preflight_rejects_pdf_reference(tmp_path, monkeypatch):
 
 def test_source_edit_preflight_requires_provider_key(tmp_path, monkeypatch):
     actions = _load_actions_module()
+    _patch_config(actions, tmp_path)
     image = tmp_path / "reference.png"
     image.write_bytes(b"png")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     ok, detail, reason_code = actions.flyer_source_edit_preflight({
@@ -58,14 +101,17 @@ def test_source_edit_preflight_requires_provider_key(tmp_path, monkeypatch):
 
     assert ok is False
     assert "provider is not configured" in detail
+    assert "OPENROUTER_API_KEY" in detail
     assert reason_code == "source_edit_provider_unavailable"
 
 
 def test_source_edit_preflight_accepts_available_image(tmp_path, monkeypatch):
     actions = _load_actions_module()
+    _patch_config(actions, tmp_path)
     image = tmp_path / "reference.png"
     image.write_bytes(b"png")
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     ok, detail, reason_code = actions.flyer_source_edit_preflight({
         "assets": [{
@@ -85,7 +131,9 @@ def test_source_edit_preflight_requires_uploaded_reference(tmp_path, monkeypatch
     source-edit provider path. Missing reference → reference_provider_unavailable
     so operators see "re-upload source flyer" not "provider outage"."""
     actions = _load_actions_module()
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    _patch_config(actions, tmp_path)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     ok, detail, reason_code = actions.flyer_source_edit_preflight({"assets": []})
     assert ok is False
@@ -97,9 +145,11 @@ def test_source_edit_preflight_rejects_placeholder_provider_key(tmp_path, monkey
     """Regression: a .env that still has the PLACEHOLDER token (typical on
     fresh customer VPSes before key provisioning) must fail-closed."""
     actions = _load_actions_module()
+    _patch_config(actions, tmp_path)
     image = tmp_path / "reference.png"
     image.write_bytes(b"png")
-    monkeypatch.setenv("OPENAI_API_KEY", "PLACEHOLDER-not-a-real-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "PLACEHOLDER-not-a-real-key")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     ok, detail, reason_code = actions.flyer_source_edit_preflight({
         "assets": [{
@@ -118,8 +168,10 @@ def test_source_edit_preflight_rejects_missing_image_on_disk(tmp_path, monkeypat
     """Regression: a reference_image asset whose `path` no longer exists on
     disk → reference_provider_unavailable (operator action: re-upload)."""
     actions = _load_actions_module()
+    _patch_config(actions, tmp_path)
     missing = tmp_path / "missing.png"
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     ok, detail, reason_code = actions.flyer_source_edit_preflight({
         "assets": [{
@@ -196,9 +248,11 @@ def test_source_branch_route_falls_through_source_edit_preflight(tmp_path, monke
     this test pins that the source-edit preflight returns the correct triad
     (which the create-flyer-project flow then keys on)."""
     actions = _load_actions_module()
+    _patch_config(actions, tmp_path)
     image = tmp_path / "ref.png"
     image.write_bytes(b"png")
     # No OPENAI key — provider unavailable.
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     ok, detail, reason_code = actions.flyer_source_edit_preflight({
@@ -209,16 +263,19 @@ def test_source_branch_route_falls_through_source_edit_preflight(tmp_path, monke
         }]
     })
     assert ok is False
+    assert "OPENROUTER_API_KEY" in detail
     assert reason_code == "source_edit_provider_unavailable"
 
 
 def test_source_branch_with_provider_key_passes_preflight(tmp_path, monkeypatch):
-    """SOURCE branch + valid OPENAI key reaches the generate path
+    """SOURCE branch + valid OpenRouter key reaches the generate path
     (preflight returns ready)."""
     actions = _load_actions_module()
+    _patch_config(actions, tmp_path)
     image = tmp_path / "ref.png"
     image.write_bytes(b"png")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-real-test-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-real-test-key")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     ok, detail, reason_code = actions.flyer_source_edit_preflight({
         "assets": [{
@@ -230,6 +287,26 @@ def test_source_branch_with_provider_key_passes_preflight(tmp_path, monkeypatch)
     assert ok is True
     assert detail == "ready"
     assert reason_code == ""
+
+
+def test_source_edit_preflight_config_error_fails_closed(tmp_path, monkeypatch):
+    actions = _load_actions_module()
+    actions.CONFIG_PATH = tmp_path / "missing-config.yaml"
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-real-test-key")
+    image = tmp_path / "ref.png"
+    image.write_bytes(b"png")
+
+    ok, detail, reason_code = actions.flyer_source_edit_preflight({
+        "assets": [{
+            "kind": "reference_image",
+            "path": str(image),
+            "mime_type": "image/png",
+        }]
+    })
+
+    assert ok is False
+    assert "source edit provider config unavailable" in detail
+    assert reason_code == "source_edit_provider_unavailable"
 
 
 def test_site_2_release_runs_before_ack_for_consistent_quota_ordering():

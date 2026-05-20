@@ -176,20 +176,26 @@ def _read_env_value(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if value:
         return value
-    env_path = Path(os.environ.get("SHIFT_AGENT_ENV_PATH", "/opt/shift-agent/.env"))
-    if not env_path.exists():
-        return ""
-    try:
-        for line in env_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, raw = line.split("=", 1)
-            if key.strip() != name:
-                continue
-            return raw.strip().strip('"').strip("'")
-    except OSError:
-        return ""
+    candidates = [
+        Path(os.environ.get("HERMES_ENV_PATH", "/root/.hermes/.env")),
+        Path(os.environ.get("SHIFT_AGENT_ENV_PATH", "/opt/shift-agent/.env")),
+    ]
+    for env_path in candidates:
+        if not env_path.exists():
+            continue
+        try:
+            for line in env_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, raw = line.split("=", 1)
+                if key.strip() != name:
+                    continue
+                extracted = raw.strip().strip('"').strip("'")
+                if extracted:
+                    return extracted
+        except OSError:
+            continue
     return ""
 
 
@@ -1288,6 +1294,94 @@ def _openrouter_image_bytes(project: FlyerProject, *, concept_id: str, output_fo
     return _decode_data_url(url)
 
 
+def _openrouter_source_edit_bytes(
+    project: FlyerProject,
+    *,
+    size: tuple[int, int] | None,
+    model: str,
+    quality: str,
+) -> bytes:
+    api_key = _read_env_value("OPENROUTER_API_KEY")
+    if not api_key or "PLACEHOLDER" in api_key.upper():
+        raise FlyerRenderError("OPENROUTER_API_KEY is missing or placeholder")
+    reference = _source_edit_reference_asset(project)
+    reference_path = Path(reference.path)
+    mime = reference.mime_type or mimetypes.guess_type(str(reference_path))[0] or "image/png"
+    data_url = (
+        f"data:{mime};base64,"
+        + base64.b64encode(reference_path.read_bytes()).decode("ascii")
+    )
+    payload = {
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": _source_edit_prompt(project)},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ],
+        }],
+        "modalities": ["image", "text"],
+        "stream": False,
+        "image_config": {
+            "aspect_ratio": _aspect_ratio(size),
+            "image_size": "2K" if quality == "high" else "1K",
+        },
+    }
+    req = urllib.request.Request(
+        OPENROUTER_IMAGE_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/Trivenidigital/SME-Agents",
+            "X-Title": "Hermes Flyer Studio",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=OPENROUTER_TIMEOUT_SEC) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        err = e.read().decode("utf-8", errors="replace")[:1000]
+        raise FlyerRenderError(f"OpenRouter source edit HTTP {e.code}: {err}") from e
+    except (urllib.error.URLError, http.client.IncompleteRead, TimeoutError) as e:
+        if isinstance(e, urllib.error.URLError):
+            raise FlyerRenderError(f"OpenRouter source edit connection failed: {e.reason}") from e
+        raise FlyerRenderError(f"OpenRouter source edit response failed: {type(e).__name__}: {e}") from e
+    try:
+        doc = json.loads(body)
+    except json.JSONDecodeError as e:
+        raise FlyerRenderError(f"OpenRouter source edit invalid JSON response: {body[:500]}") from e
+    if not isinstance(doc, dict):
+        raise FlyerRenderError(f"OpenRouter source edit invalid response shape: {body[:500]}")
+    choices = doc.get("choices") or []
+    if not isinstance(choices, list):
+        raise FlyerRenderError(f"OpenRouter source edit invalid choices shape: {body[:500]}")
+    if not choices:
+        raise FlyerRenderError(f"OpenRouter source edit response had no choices: {body[:500]}")
+    first_choice = choices[0]
+    if not isinstance(first_choice, dict):
+        raise FlyerRenderError(f"OpenRouter source edit invalid choice shape: {body[:500]}")
+    message = first_choice.get("message") or {}
+    if not isinstance(message, dict):
+        raise FlyerRenderError(f"OpenRouter source edit invalid message shape: {body[:500]}")
+    images = message.get("images") or []
+    if not isinstance(images, list):
+        raise FlyerRenderError(f"OpenRouter source edit invalid images shape: {body[:500]}")
+    if not images:
+        raise FlyerRenderError(f"OpenRouter source edit response had no images: {body[:500]}")
+    first_image = images[0]
+    if not isinstance(first_image, dict):
+        raise FlyerRenderError(f"OpenRouter source edit invalid image shape: {body[:500]}")
+    image_url = first_image.get("image_url") or {}
+    if not isinstance(image_url, dict):
+        raise FlyerRenderError(f"OpenRouter source edit invalid image_url shape: {body[:500]}")
+    url = image_url.get("url") or ""
+    if not url.startswith("data:image/"):
+        raise FlyerRenderError("OpenRouter source edit response did not include base64 image data")
+    return _decode_data_url(url)
+
+
 def _source_edit_reference_asset(project: FlyerProject) -> FlyerAsset:
     for asset in reversed(project.assets):
         if asset.kind == "reference_image" and Path(asset.path).exists():
@@ -1368,7 +1462,7 @@ def _openai_source_edit_bytes(
     # bypassed the cf-router preflight doesn't waste an OpenAI request and
     # surface a 401 mid-customer-flow.
     api_key = _read_env_value("OPENAI_API_KEY")
-    if not api_key or "PLACEHOLDER" in api_key:
+    if not api_key or "PLACEHOLDER" in api_key.upper():
         raise FlyerRenderError("OPENAI_API_KEY is missing or placeholder")
     reference = _source_edit_reference_asset(project)
     reference_path = Path(reference.path)
@@ -1788,11 +1882,19 @@ def render_concept_previews(project: FlyerProject, output_dir: Path | str, *, mo
     return specs
 
 
-def render_source_edit_preview(project: FlyerProject, output_dir: Path | str, *, model: str, quality: str = "medium") -> RenderedAssetSpec:
+def render_source_edit_preview(project: FlyerProject, output_dir: Path | str, *, model: str, quality: str = "medium", provider: str | None = None) -> RenderedAssetSpec:
     output_dir = Path(output_dir)
     concept_id = "C1"
     path = output_dir / f"{project.project_id}-{concept_id}-preview.png"
-    raw = _openai_source_edit_bytes(project, size=(1080, 1350), model=model, quality=quality)
+    provider_name = (provider or "openai").strip().lower()
+    if provider_name == "openrouter":
+        raw = _openrouter_source_edit_bytes(project, size=(1080, 1350), model=model, quality=quality)
+    elif provider_name == "openai":
+        raw = _openai_source_edit_bytes(project, size=(1080, 1350), model=model, quality=quality)
+    elif provider_name == "manual_review":
+        raise FlyerRenderError("source edit provider configured for manual review")
+    else:
+        raise FlyerRenderError(f"unsupported source edit provider: {provider_name or 'unknown'}")
     _raw_background_path(path).unlink(missing_ok=True)
     _write_generated_image_contained(raw, path, size=(1080, 1350))
     quality_report = inspect_rendered_asset(path, expected_width=1080, expected_height=1350, mime_type="image/png")

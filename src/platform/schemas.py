@@ -817,6 +817,21 @@ class FlyerFinalProviderPolicy(BaseModel):
         model="openai/gpt-5.4-image-2",
         quality="high",
     ))
+
+
+class FlyerSourceEditProviderPolicy(BaseModel):
+    """Provider routing for source-preserving uploaded-flyer edits."""
+    model_config = ConfigDict(extra="forbid")
+    default: FlyerRenderProviderConfig = Field(default_factory=lambda: FlyerRenderProviderConfig(
+        provider="openrouter",
+        model="openai/gpt-5.4-image-2",
+        quality="high",
+    ))
+    emergency_fallback: FlyerRenderProviderConfig = Field(default_factory=lambda: FlyerRenderProviderConfig(
+        provider="manual_review",
+        model="manual_review",
+        quality="high",
+    ))
 FlyerAssetKind = Literal[
     "logo",
     "reference_image",
@@ -862,6 +877,7 @@ class FlyerConfig(BaseModel):
     edit_image_quality: FlyerImageQuality = "medium"
     draft_provider_policy: FlyerDraftProviderPolicy = Field(default_factory=FlyerDraftProviderPolicy)
     final_provider_policy: FlyerFinalProviderPolicy = Field(default_factory=FlyerFinalProviderPolicy)
+    source_edit_provider_policy: FlyerSourceEditProviderPolicy = Field(default_factory=FlyerSourceEditProviderPolicy)
     concept_count: int = Field(default=1, ge=1, le=3)
     max_revision_rounds: int = Field(default=6, ge=1, le=20)
     payment_provider: Literal["manual", "stripe", "razorpay", "other"] = "manual"
@@ -901,6 +917,17 @@ class FlyerConfig(BaseModel):
             model=self.final_image_model,
             quality=self.final_image_quality,
         )
+
+    def resolve_source_edit_render_provider(self) -> FlyerRenderProviderConfig:
+        if "source_edit_provider_policy" in self.model_fields_set:
+            return self.source_edit_provider_policy.default
+        if {"edit_image_model", "edit_image_quality"} & self.model_fields_set:
+            return FlyerRenderProviderConfig(
+                provider="openai",
+                model=self.edit_image_model,
+                quality=self.edit_image_quality,
+            )
+        return self.source_edit_provider_policy.default
 
 
 class FlyerPlanTier(BaseModel):
@@ -4387,6 +4414,7 @@ __all__ = [
     "CateringLearningSummary",
     "is_catering_terminal", "CATERING_TERMINAL_STATUSES",
     "FlyerConfig", "FlyerRenderProviderConfig", "FlyerDraftProviderPolicy", "FlyerFinalProviderPolicy",
+    "FlyerSourceEditProviderPolicy",
     "FlyerTextHeavyDraftPolicy", "FlyerVisualHeavyDraftPolicy",
     "FlyerWorkflowStatus", "FlyerOnboardingStatus", "FlyerLanguage", "FlyerCreationMode",
     "FlyerIntakeStatus", "FlyerIntakeSource", "FlyerOutputFormat", "FlyerImageQuality", "FlyerProviderQuality",
