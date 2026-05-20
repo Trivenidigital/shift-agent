@@ -2251,18 +2251,30 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
             revision_requires_clarification = not ok
             clarification_reason = detail[:180] or "I could not save that correction."
         if revision_requires_clarification:
+            # Outcome-only customer copy (mirrors send_flyer_manual_edit_ack
+            # tone landed in PR #140). Project ID stays in the audit row's
+            # `detail` field below; the customer reply asks the specific
+            # clarification question without leaking the internal project
+            # identifier. clarification_reason is preserved because it IS
+            # the useful customer-facing signal.
             reply = (
                 "Flyer Studio\n"
                 "------------\n"
-                f"I need one clarification before adding that to project {project_id}: {clarification_reason}\n\n"
+                f"I need one clarification before adding that: {clarification_reason}\n\n"
                 "Please send the exact text, item, price, date, or area of the flyer to change."
             )
         else:
+            # Outcome-only success copy for the queued-followup path. Mirrors
+            # send_flyer_manual_edit_ack from PR #140: confirms receipt of the
+            # additional correction and promises delivery, without leaking
+            # "Project {project_id} ... queued for a source-preserving edit"
+            # workflow internals. Audit row below still captures project_id
+            # + queued_followup=true for operator/Cockpit triage.
             reply = (
                 "Flyer Studio\n"
                 "------------\n"
-                f"Project {project_id} is already queued for a source-preserving edit. "
-                "I saved this additional correction with the edit request and will send the corrected flyer here when it is ready."
+                "Got it. I've added this to the careful flyer edit. "
+                "I'll send the updated flyer here once it's ready."
             )
         ack_ok, mid, err = actions.send_flyer_text(
             chat_id,
