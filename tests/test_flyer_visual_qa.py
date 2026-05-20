@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from schemas import FlyerLockedFact, FlyerProject, FlyerVisualQAReport
+from schemas import (
+    FlyerLockedFact,
+    FlyerProject,
+    FlyerReferenceExtraction,
+    FlyerSourceContract,
+    FlyerVisualQAReport,
+)
 
 
 def _project():
@@ -392,3 +398,97 @@ def test_visual_qa_provider_unavailable_when_sidecar_disabled_and_no_openrouter_
     report = run_visual_qa(_project(), artifact, output_format="concept_preview", allow_sidecar=False)
     assert report.status == "provider_unavailable"
     assert any("OPENROUTER_API_KEY" in b or "ocr/vision text unavailable" in b for b in report.blockers)
+
+
+# ─── Task 6: source-contract forbidden-substring QA gate ──────────
+
+
+def _source_contract_project(forbidden, required_text=None, required_facts=None):
+    now = datetime(2026, 5, 20, tzinfo=timezone.utc)
+    return FlyerProject(
+        project_id="F9091",
+        status="awaiting_final_approval",
+        customer_phone="+17329837841",
+        created_at=now,
+        updated_at=now,
+        original_message_id="m-source-qa",
+        raw_request="Edit uploaded flyer.",
+        locked_facts=required_facts or [],
+        reference_extractions=[
+            FlyerReferenceExtraction(
+                asset_id="A0001",
+                role="source_edit_template",
+                provider="test",
+                status="ok",
+                source_contract=FlyerSourceContract(
+                    requested_replacements={"Triveni Express": "Lakshmi's Kitchen"},
+                    forbidden_substrings=list(forbidden),
+                    required_text=list(required_text or []),
+                    preserve_layout=True,
+                    preserve_unmentioned_text=True,
+                    confidence=0.9,
+                ),
+            ),
+        ],
+    )
+
+
+def _write_sidecar_for_source(tmp_path, content):
+    artifact = tmp_path / "flyer.png"
+    artifact.write_bytes(b"img")
+    (tmp_path / "flyer.png.ocr.txt").write_text(content, encoding="utf-8")
+    return artifact
+
+
+def test_visual_qa_blocks_when_replaced_brand_still_visible(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    project = _source_contract_project(["Triveni Express"])
+    # OCR still has the OLD brand alongside the new — must fail QA.
+    artifact = _write_sidecar_for_source(
+        tmp_path,
+        "Lakshmi's Kitchen Monday Thali Specials. Triveni Express ad bottom.",
+    )
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+    assert report.status == "failed"
+    assert any("Triveni Express" in b for b in report.blockers)
+
+
+def test_visual_qa_passes_when_forbidden_brand_absent(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    project = _source_contract_project(["Triveni Express"])
+    artifact = _write_sidecar_for_source(
+        tmp_path,
+        "Lakshmi's Kitchen Monday Thali Specials. Jeera Rice.",
+    )
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+    assert all("Triveni Express" not in b for b in report.blockers)
+
+
+def test_visual_qa_phone_forbidden_match(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    project = _source_contract_project(["9045550100"])
+    artifact = _write_sidecar_for_source(
+        tmp_path,
+        "Lakshmi's Kitchen Monday Thali Specials. Call (904) 555-0100 today.",
+    )
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+    assert report.status == "failed"
+    assert any("9045550100" in b for b in report.blockers)
+
+
+def test_visual_qa_brown_rice_passes_when_only_jeera_rice_is_a_replacement(tmp_path):
+    """`Rice -> Jeera Rice` is a menu-item replacement: `Rice` is NOT
+    populated into forbidden_substrings, so OCR text containing
+    `Brown Rice` (a different rice variant) passes."""
+    from agents.flyer.visual_qa import run_visual_qa
+
+    project = _source_contract_project([])  # forbidden_substrings empty
+    artifact = _write_sidecar_for_source(
+        tmp_path,
+        "Lakshmi's Kitchen Brown Rice and Jeera Rice listed.",
+    )
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+    assert all("Brown Rice" not in b and "Rice" not in b for b in report.blockers)

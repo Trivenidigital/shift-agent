@@ -692,6 +692,15 @@ def write_text_manifest(
         "artifact_sha256": _sha256(artifact) if artifact.exists() else "",
         "source_sha256": _sha256(Path(source_path)) if source_path and Path(source_path).exists() else "",
         "verification_mode": verification_mode,
+        # Additive honesty fields (2026-05-20): `rendered_facts` is a copy of
+        # `expected_facts` because this manifest declares the facts the
+        # renderer was asked to draw, not the facts proven present in
+        # rendered pixels. Image-pixel verification is the QA report's job
+        # (run_visual_qa). Field-rename to `declared_facts` deferred to keep
+        # this PR scoped; the bool surface lets readers know to look at
+        # the QA report for ground truth.
+        "is_rendered_proof": False,
+        "verification_method": "declared_render_facts",
         "expected_facts": _facts_for_manifest(expected),
         "rendered_facts": _facts_for_manifest(rendered),
         "missing_fact_labels": sorted(set(missing)),
