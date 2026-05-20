@@ -1845,7 +1845,7 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
         suffix = "pdf" if size is None else "png"
         path = output_dir / f"{project.project_id}-{output_format}.{suffix}"
         source_for_manifest: Path | None = None
-        if selected_preview is not None and (_is_source_edit_project(project) or model.strip().lower() not in DETERMINISTIC_MODEL_NAMES):
+        if selected_preview is not None:
             source = _raw_background_path(selected_preview)
             direct_poster_source = (
                 not source.exists()

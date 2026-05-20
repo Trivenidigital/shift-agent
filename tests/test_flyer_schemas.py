@@ -50,12 +50,21 @@ def test_flyer_config_defaults_are_safe_and_cost_bounded():
     assert cfg.enabled is False
     assert cfg.concept_count == 1
     assert cfg.max_revision_rounds == 6
-    assert cfg.draft_image_model == "gpt-image-1-mini"
-    assert cfg.draft_image_quality == "low"
-    assert cfg.final_image_model == "gpt-image-1.5"
-    assert cfg.final_image_quality == "medium"
+    assert cfg.draft_image_model == "openai/gpt-5.4-image-2"
+    assert cfg.draft_image_quality == "high"
+    assert cfg.final_image_model == "deterministic-renderer"
+    assert cfg.final_image_quality == "high"
     assert cfg.edit_image_model == "gpt-image-1"
     assert cfg.edit_image_quality == "medium"
+    assert cfg.draft_provider_policy.default.model == "openai/gpt-5.4-image-2"
+    assert cfg.draft_provider_policy.text_heavy.primary.model == "recraft/recraft-v4.1"
+    assert cfg.draft_provider_policy.text_heavy.premium.model == "sourceful/riverflow-v2-pro"
+    assert cfg.draft_provider_policy.visual_heavy.primary.model == "black-forest-labs/flux.2-pro"
+    assert cfg.final_provider_policy.default.provider == "local"
+    assert cfg.final_provider_policy.default.model == "deterministic-renderer"
+    assert cfg.final_provider_policy.fallback.model == "openai/gpt-5.4-image-2"
+    assert cfg.resolve_draft_render_provider().model == "openai/gpt-5.4-image-2"
+    assert cfg.resolve_final_render_provider().model == "deterministic-renderer"
     assert [(t.plan_id, t.monthly_price_usd, t.included_flyers) for t in cfg.plan_tiers] == [
         ("trial", 0.00, 3),
         ("starter", 49.99, 30),
@@ -71,6 +80,52 @@ def test_flyer_config_defaults_are_safe_and_cost_bounded():
         "instagram_story",
         "printable_pdf",
     ]
+
+
+def test_flyer_config_legacy_model_fields_still_resolve_when_policy_absent():
+    cfg = FlyerConfig.model_validate({
+        "enabled": True,
+        "draft_image_model": "deterministic-renderer",
+        "draft_image_quality": "low",
+        "final_image_model": "openai/gpt-5.4-image-2",
+        "final_image_quality": "high",
+    })
+
+    draft = cfg.resolve_draft_render_provider()
+    final = cfg.resolve_final_render_provider()
+
+    assert draft.provider == "local"
+    assert draft.model == "deterministic-renderer"
+    assert draft.quality == "low"
+    assert final.provider == "openrouter"
+    assert final.model == "openai/gpt-5.4-image-2"
+    assert final.quality == "high"
+
+
+def test_flyer_config_provider_policy_overrides_legacy_model_fields():
+    cfg = FlyerConfig.model_validate({
+        "enabled": True,
+        "draft_image_model": "deterministic-renderer",
+        "draft_provider_policy": {
+            "default": {
+                "provider": "openrouter",
+                "model": "recraft/recraft-v4.1",
+                "quality": "balanced",
+            }
+        },
+        "final_image_model": "openai/gpt-5.4-image-2",
+        "final_provider_policy": {
+            "default": {
+                "provider": "local",
+                "model": "deterministic-renderer",
+                "quality": "high",
+            }
+        },
+    })
+
+    assert cfg.resolve_draft_render_provider().model == "recraft/recraft-v4.1"
+    assert cfg.resolve_draft_render_provider().quality == "balanced"
+    assert cfg.resolve_final_render_provider().model == "deterministic-renderer"
 
 
 def test_config_includes_flyer_default_disabled():

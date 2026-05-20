@@ -279,11 +279,12 @@ def main() -> int:
                 }))
                 return 2
         else:
+            draft_provider = cfg.flyer.resolve_draft_render_provider()
             specs = render_concept_previews(
                 project,
                 asset_dir,
-                model=cfg.flyer.draft_image_model,
-                quality=cfg.flyer.draft_image_quality,
+                model=draft_provider.model,
+                quality=draft_provider.quality,
                 concept_count=cfg.flyer.concept_count,
             )
 

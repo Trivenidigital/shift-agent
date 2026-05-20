@@ -705,6 +705,8 @@ FlyerOutputFormat = Literal[
 ]
 
 FlyerImageQuality = Literal["low", "medium", "high"]
+FlyerProviderQuality = Literal["low", "medium", "high", "balanced"]
+FlyerModelProviderName = Literal["openrouter", "openai", "local", "manual_review"]
 FlyerFactSource = Literal[
     "customer_text",
     "customer_profile",
@@ -740,6 +742,81 @@ FlyerManualReviewReason = Literal[
     "provider_timeout",
     "missing_required_facts",
 ]
+
+
+class FlyerRenderProviderConfig(BaseModel):
+    """Single Flyer Studio render provider target."""
+    model_config = ConfigDict(extra="forbid")
+    provider: FlyerModelProviderName
+    model: str = Field(min_length=1, max_length=120)
+    quality: FlyerProviderQuality = "balanced"
+
+
+class FlyerTextHeavyDraftPolicy(BaseModel):
+    """Rollout-safe text-heavy flyer candidates; only primary is automatic."""
+    model_config = ConfigDict(extra="forbid")
+    primary: FlyerRenderProviderConfig = Field(default_factory=lambda: FlyerRenderProviderConfig(
+        provider="openrouter",
+        model="recraft/recraft-v4.1",
+        quality="balanced",
+    ))
+    premium: FlyerRenderProviderConfig = Field(default_factory=lambda: FlyerRenderProviderConfig(
+        provider="openrouter",
+        model="sourceful/riverflow-v2-pro",
+        quality="high",
+    ))
+    fallback: FlyerRenderProviderConfig = Field(default_factory=lambda: FlyerRenderProviderConfig(
+        provider="openrouter",
+        model="openai/gpt-5.4-image-2",
+        quality="high",
+    ))
+
+
+class FlyerVisualHeavyDraftPolicy(BaseModel):
+    """Visual-heavy challenger policy for operator bakeoffs."""
+    model_config = ConfigDict(extra="forbid")
+    primary: FlyerRenderProviderConfig = Field(default_factory=lambda: FlyerRenderProviderConfig(
+        provider="openrouter",
+        model="black-forest-labs/flux.2-pro",
+        quality="high",
+    ))
+    fallback: FlyerRenderProviderConfig = Field(default_factory=lambda: FlyerRenderProviderConfig(
+        provider="openrouter",
+        model="openai/gpt-5.4-image-2",
+        quality="high",
+    ))
+
+
+class FlyerDraftProviderPolicy(BaseModel):
+    """Provider routing for new flyer drafts. PR-1 wires only default automatic use."""
+    model_config = ConfigDict(extra="forbid")
+    default: FlyerRenderProviderConfig = Field(default_factory=lambda: FlyerRenderProviderConfig(
+        provider="openrouter",
+        model="openai/gpt-5.4-image-2",
+        quality="high",
+    ))
+    cost_sensitive: FlyerRenderProviderConfig = Field(default_factory=lambda: FlyerRenderProviderConfig(
+        provider="openrouter",
+        model="openai/gpt-5-image-mini",
+        quality="balanced",
+    ))
+    text_heavy: FlyerTextHeavyDraftPolicy = Field(default_factory=FlyerTextHeavyDraftPolicy)
+    visual_heavy: FlyerVisualHeavyDraftPolicy = Field(default_factory=FlyerVisualHeavyDraftPolicy)
+
+
+class FlyerFinalProviderPolicy(BaseModel):
+    """Final asset policy. Default is deterministic export; model fallback is manual/operator-triggered."""
+    model_config = ConfigDict(extra="forbid")
+    default: FlyerRenderProviderConfig = Field(default_factory=lambda: FlyerRenderProviderConfig(
+        provider="local",
+        model="deterministic-renderer",
+        quality="high",
+    ))
+    fallback: FlyerRenderProviderConfig = Field(default_factory=lambda: FlyerRenderProviderConfig(
+        provider="openrouter",
+        model="openai/gpt-5.4-image-2",
+        quality="high",
+    ))
 FlyerAssetKind = Literal[
     "logo",
     "reference_image",
@@ -777,12 +854,14 @@ class FlyerConfig(BaseModel):
     enabled: bool = False
     conversation_model: str = Field(default="default_hermes_gateway", min_length=1, max_length=120)
     prompt_model: str = Field(default="default_hermes_gateway", min_length=1, max_length=120)
-    draft_image_model: str = Field(default="gpt-image-1-mini", min_length=1, max_length=120)
-    draft_image_quality: FlyerImageQuality = "low"
-    final_image_model: str = Field(default="gpt-image-1.5", min_length=1, max_length=120)
-    final_image_quality: FlyerImageQuality = "medium"
+    draft_image_model: str = Field(default="openai/gpt-5.4-image-2", min_length=1, max_length=120)
+    draft_image_quality: FlyerImageQuality = "high"
+    final_image_model: str = Field(default="deterministic-renderer", min_length=1, max_length=120)
+    final_image_quality: FlyerImageQuality = "high"
     edit_image_model: str = Field(default="gpt-image-1", min_length=1, max_length=120)
     edit_image_quality: FlyerImageQuality = "medium"
+    draft_provider_policy: FlyerDraftProviderPolicy = Field(default_factory=FlyerDraftProviderPolicy)
+    final_provider_policy: FlyerFinalProviderPolicy = Field(default_factory=FlyerFinalProviderPolicy)
     concept_count: int = Field(default=1, ge=1, le=3)
     max_revision_rounds: int = Field(default=6, ge=1, le=20)
     payment_provider: Literal["manual", "stripe", "razorpay", "other"] = "manual"
@@ -800,6 +879,28 @@ class FlyerConfig(BaseModel):
         min_length=1,
         max_length=4,
     )
+
+    @staticmethod
+    def _legacy_provider_for_model(model: str) -> FlyerModelProviderName:
+        return "local" if model.strip().lower() in {"", "deterministic-renderer", "pillow", "local-pillow"} else "openrouter"
+
+    def resolve_draft_render_provider(self) -> FlyerRenderProviderConfig:
+        if "draft_provider_policy" in self.model_fields_set:
+            return self.draft_provider_policy.default
+        return FlyerRenderProviderConfig(
+            provider=self._legacy_provider_for_model(self.draft_image_model),
+            model=self.draft_image_model,
+            quality=self.draft_image_quality,
+        )
+
+    def resolve_final_render_provider(self) -> FlyerRenderProviderConfig:
+        if "final_provider_policy" in self.model_fields_set:
+            return self.final_provider_policy.default
+        return FlyerRenderProviderConfig(
+            provider=self._legacy_provider_for_model(self.final_image_model),
+            model=self.final_image_model,
+            quality=self.final_image_quality,
+        )
 
 
 class FlyerPlanTier(BaseModel):
@@ -4285,8 +4386,10 @@ __all__ = [
     "CateringLearningSource", "CateringLearningProposalHealth",
     "CateringLearningSummary",
     "is_catering_terminal", "CATERING_TERMINAL_STATUSES",
-    "FlyerConfig", "FlyerWorkflowStatus", "FlyerOnboardingStatus", "FlyerLanguage", "FlyerCreationMode",
-    "FlyerIntakeStatus", "FlyerIntakeSource", "FlyerOutputFormat", "FlyerImageQuality",
+    "FlyerConfig", "FlyerRenderProviderConfig", "FlyerDraftProviderPolicy", "FlyerFinalProviderPolicy",
+    "FlyerTextHeavyDraftPolicy", "FlyerVisualHeavyDraftPolicy",
+    "FlyerWorkflowStatus", "FlyerOnboardingStatus", "FlyerLanguage", "FlyerCreationMode",
+    "FlyerIntakeStatus", "FlyerIntakeSource", "FlyerOutputFormat", "FlyerImageQuality", "FlyerProviderQuality",
     "FlyerFactSource", "FlyerReferenceRole", "FlyerReferenceExtractionStatus",
     "FlyerVisualQAStatus", "FlyerVisualQASource", "FlyerManualReviewStatus", "FlyerManualReviewReason",
     "FlyerAssetKind", "FLYER_TRANSITIONS", "is_flyer_transition_allowed",

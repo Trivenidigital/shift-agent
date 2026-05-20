@@ -1251,6 +1251,44 @@ def test_final_package_exports_from_selected_generated_concept_without_new_model
     assert all(s.path.exists() and s.path.stat().st_size > 1000 for s in specs)
 
 
+def test_final_package_reuses_selected_concept_with_deterministic_model(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    approved = tmp_path / "F0001-C1-preview.png"
+    approved.write_bytes(_png_bytes(size=(1080, 1350), color=(60, 20, 160)))
+    asset = FlyerAsset(
+        asset_id="A0001",
+        kind="concept_preview",
+        source="rendered",
+        path=str(approved),
+        mime_type="image/png",
+        sha256="a" * 64,
+        original_message_id="wamid.flyer.1",
+        received_at=datetime.now(timezone.utc),
+    )
+    project = _complete_project().model_copy(update={
+        "assets": [asset],
+        "concepts": [
+            FlyerConcept(
+                concept_id="C1",
+                title="Approved Flyer",
+                style_summary="Approved preview",
+                preview_asset_id="A0001",
+                prompt="",
+                created_at=datetime.now(timezone.utc),
+                selected_at=datetime.now(timezone.utc),
+            )
+        ],
+        "selected_concept_id": "C1",
+    })
+
+    specs = render_final_package(project, tmp_path / "finals", model="deterministic-renderer", quality="high")
+
+    from PIL import Image
+    whatsapp = next(spec for spec in specs if spec.output_format == "whatsapp_image")
+    with Image.open(whatsapp.path) as final_img, Image.open(approved) as approved_img:
+        assert final_img.getpixel((20, 20)) == approved_img.getpixel((20, 20))
+
+
 def test_source_edit_final_package_reuses_approved_preview_even_with_deterministic_model(tmp_path, monkeypatch):
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     approved = tmp_path / "F0001-C1-preview.png"
