@@ -82,8 +82,8 @@ def _isolate_env_files(monkeypatch, tmp_path):
 
 
 def _isolate_deploy_markers(monkeypatch, tmp_path):
-    monkeypatch.setenv("COCKPIT_DEPLOY_HASH_PATH", str(tmp_path / "no-commit-hash"))
-    monkeypatch.setenv("COCKPIT_DEPLOYS_DIR", str(tmp_path / "no-deploys"))
+    monkeypatch.setenv("SHIFT_AGENT_DEPLOY_HASH_PATH", str(tmp_path / "no-commit-hash"))
+    monkeypatch.setenv("SHIFT_AGENT_DEPLOYS_DIR", str(tmp_path / "no-deploys"))
 
 
 def _build_test_client():
@@ -135,9 +135,21 @@ def test_flyer_health_returns_expected_shape(tmp_path, monkeypatch):
 
     assert resp.status_code == 200
     body = resp.json()
-    assert set(body.keys()) >= {"checked_at", "deploy_tag", "commit_hash", "components", "providers"}
+    assert set(body.keys()) >= {
+        "checked_at",
+        "shift_agent_deploy_tag",
+        "shift_agent_commit_hash",
+        "components",
+        "providers",
+    }
     component_names = {c["name"] for c in body["components"]}
-    assert {"gateway", "whatsapp_bridge", "whatsapp_paired", "cockpit_service"} <= component_names
+    assert {"gateway", "whatsapp_bridge", "whatsapp_paired", "shift_agent_deploy"} <= component_names
+    # Truthfulness: top-level deploy fields are named for the agent tarball,
+    # not the cockpit (the cockpit deploys separately with no marker today).
+    assert "shift_agent_deploy_tag" in body
+    assert "shift_agent_commit_hash" in body
+    assert "deploy_tag" not in body, "deploy_tag is mis-named; use shift_agent_deploy_tag"
+    assert "commit_hash" not in body, "commit_hash is mis-named; use shift_agent_commit_hash"
     provider_names = {p["name"] for p in body["providers"]}
     assert provider_names == {"openrouter_generation_vision", "openai_source_edit"}
 
@@ -331,23 +343,23 @@ def test_deploy_tag_resolves_from_markers(tmp_path, monkeypatch):
     deploys_dir.mkdir()
     (deploys_dir / "deploy-20260520-000424-a0e853e7.tgz").write_bytes(b"x")
     (deploys_dir / "deploy-20260519-120000-aaaaaaaa.tgz").write_bytes(b"x")
-    monkeypatch.setenv("COCKPIT_DEPLOY_HASH_PATH", str(hash_path))
-    monkeypatch.setenv("COCKPIT_DEPLOYS_DIR", str(deploys_dir))
+    monkeypatch.setenv("SHIFT_AGENT_DEPLOY_HASH_PATH", str(hash_path))
+    monkeypatch.setenv("SHIFT_AGENT_DEPLOYS_DIR", str(deploys_dir))
 
     from app.routers import flyer
 
-    deploy_tag, commit_hash = flyer._cockpit_deploy_tag()
+    deploy_tag, commit_hash = flyer._shift_agent_deploy_tag()
     assert deploy_tag == "deploy-20260520-000424-a0e853e7"
     assert commit_hash == "a0e853e7abcdef1234567890"
 
 
 def test_deploy_tag_null_when_markers_missing(tmp_path, monkeypatch):
-    monkeypatch.setenv("COCKPIT_DEPLOY_HASH_PATH", str(tmp_path / "no-hash"))
-    monkeypatch.setenv("COCKPIT_DEPLOYS_DIR", str(tmp_path / "no-deploys"))
+    monkeypatch.setenv("SHIFT_AGENT_DEPLOY_HASH_PATH", str(tmp_path / "no-hash"))
+    monkeypatch.setenv("SHIFT_AGENT_DEPLOYS_DIR", str(tmp_path / "no-deploys"))
 
     from app.routers import flyer
 
-    deploy_tag, commit_hash = flyer._cockpit_deploy_tag()
+    deploy_tag, commit_hash = flyer._shift_agent_deploy_tag()
     assert deploy_tag is None
     assert commit_hash is None
 

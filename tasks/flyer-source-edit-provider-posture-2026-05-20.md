@@ -88,6 +88,31 @@ Future: a deterministic "near-source" path that uses Pillow + parsed locked fact
 - Provider switch code path — see Option B. Not in this PR.
 - Visual-QA regression dataset for source-edit — needed for Option B; not built yet.
 - Designer-asset fallback path — see Option C. Not in this PR.
+- **Real cockpit deploy marker** (see "Related follow-up" below).
+
+## Related follow-up — real cockpit deploy marker
+
+The P0-7 health panel surfaces a deploy marker labeled `shift_agent_deploy`
+(top-level `shift_agent_deploy_tag` + `shift_agent_commit_hash`). The values
+come from `/opt/shift-agent/.commit-hash` + the newest tarball in
+`/opt/shift-agent/deploys/`, which describe **the agent tarball**, not the
+cockpit. The cockpit (FastAPI + React) deploys separately via its own path;
+if cockpit code is fresh but the agent tarball is stale (or vice versa), the
+agent-deploy marker can be green while the cockpit is actually old.
+
+This is correctly labeled now (post-review-fix). A future enhancement should
+add a **real cockpit deploy marker** so the panel can surface both deploy
+states distinctly:
+
+- Cockpit deploy writes `/opt/shift-agent/web/.cockpit-commit-hash` (or
+  equivalent) at install time.
+- Health endpoint reads the cockpit marker into a second component
+  (`cockpit_deploy`) alongside `shift_agent_deploy`.
+- A mismatch warning surfaces when the two deploy hashes diverge by more
+  than N hours (P2-3 in the cockpit backlog).
+
+Trigger to schedule: any incident where the operator was confused about
+which side (agent vs cockpit) was current.
 
 ## Acceptance for this note (P0-7 scope only)
 

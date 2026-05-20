@@ -133,8 +133,10 @@ interface FlyerHealthProvider {
 
 interface FlyerHealth {
   checked_at: string;
-  deploy_tag: string | null;
-  commit_hash: string | null;
+  // Truthful naming: these are the SHIFT-AGENT tarball markers, not the
+  // cockpit's. The cockpit deploys separately and has no own marker today.
+  shift_agent_deploy_tag: string | null;
+  shift_agent_commit_hash: string | null;
   components: FlyerHealthComponent[];
   providers: FlyerHealthProvider[];
 }
@@ -263,8 +265,8 @@ function FlyerHealthPanel({ data }: { data: FlyerHealth | undefined }) {
           <CardTitle className="flex items-center gap-2 text-sm">
             <Activity size={16} /> Provider & runtime health
           </CardTitle>
-          <div className="text-xs text-zinc-500">
-            {data.deploy_tag ?? data.commit_hash ?? "deploy marker missing"}
+          <div className="text-xs text-zinc-500" title="Shift-agent tarball deploy marker (cockpit deploys separately)">
+            agent: {data.shift_agent_deploy_tag ?? data.shift_agent_commit_hash ?? "marker missing"}
           </div>
         </div>
       </CardHeader>

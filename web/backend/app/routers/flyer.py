@@ -1048,17 +1048,23 @@ def _read_env_layered(name: str) -> tuple[str, str | None]:
     return "", None
 
 
-def _cockpit_deploy_tag() -> tuple[str | None, str | None]:
-    """Resolve current deploy_tag + commit_hash from on-disk markers.
+def _shift_agent_deploy_tag() -> tuple[str | None, str | None]:
+    """Resolve the SHIFT-AGENT deploy_tag + commit_hash from on-disk markers.
 
     /opt/shift-agent/.commit-hash is written by tools/build-deploy-tarball.sh.
-    The newest /opt/shift-agent/deploys/deploy-*.tgz is the active deploy.
+    The newest /opt/shift-agent/deploys/deploy-*.tgz is the active agent deploy.
     Both env-overrideable for test isolation. Either or both may be None.
+
+    IMPORTANT: this is the agent tarball deploy, NOT the cockpit deploy. The
+    cockpit (FastAPI + React) deploys separately and there is no cockpit-side
+    marker today; surfacing this value labeled as "cockpit" would lie when
+    cockpit code is fresh but the agent tarball is stale or vice versa.
+    See tasks/flyer-source-edit-provider-posture-2026-05-20.md follow-ups.
     """
     commit_hash: str | None = None
     deploy_tag: str | None = None
-    hash_path = Path(os.environ.get("COCKPIT_DEPLOY_HASH_PATH", "/opt/shift-agent/.commit-hash"))
-    deploys_dir = Path(os.environ.get("COCKPIT_DEPLOYS_DIR", "/opt/shift-agent/deploys"))
+    hash_path = Path(os.environ.get("SHIFT_AGENT_DEPLOY_HASH_PATH", "/opt/shift-agent/.commit-hash"))
+    deploys_dir = Path(os.environ.get("SHIFT_AGENT_DEPLOYS_DIR", "/opt/shift-agent/deploys"))
     if hash_path.exists():
         try:
             commit_hash = (hash_path.read_text(encoding="utf-8").strip() or None)
@@ -1160,20 +1166,23 @@ async def _platform_runtime_components() -> list[dict[str, Any]]:
         "checked_at": now_iso,
     })
 
-    deploy_tag, commit_hash = _cockpit_deploy_tag()
+    deploy_tag, commit_hash = _shift_agent_deploy_tag()
     if deploy_tag:
-        cockpit_detail = deploy_tag
-        cockpit_severity = "green"
+        deploy_detail = deploy_tag
+        deploy_severity = "green"
     elif commit_hash:
-        cockpit_detail = f"commit {commit_hash}"
-        cockpit_severity = "green"
+        deploy_detail = f"commit {commit_hash}"
+        deploy_severity = "green"
     else:
-        cockpit_detail = "deploy marker missing"
-        cockpit_severity = "yellow"
+        deploy_detail = "deploy marker missing"
+        deploy_severity = "yellow"
     components.append({
-        "name": "cockpit_service",
-        "severity": cockpit_severity,
-        "detail": cockpit_detail,
+        # Truthful label: this is the SHIFT-AGENT tarball marker, not the
+        # cockpit's. Cockpit deploys separately and has no own marker today
+        # (deferred — see plan/posture follow-up).
+        "name": "shift_agent_deploy",
+        "severity": deploy_severity,
+        "detail": deploy_detail,
         "checked_at": now_iso,
     })
     return components
@@ -1272,11 +1281,13 @@ async def flyer_health(_=Depends(require_auth)):
     """
     components = await _platform_runtime_components()
     providers = _flyer_provider_components()
-    deploy_tag, commit_hash = _cockpit_deploy_tag()
+    # Top-level deploy fields name the SHIFT-AGENT tarball explicitly so a
+    # consumer cannot mis-attribute them to the cockpit's own deploy state.
+    shift_agent_deploy_tag, shift_agent_commit_hash = _shift_agent_deploy_tag()
     return {
         "checked_at": _now().isoformat(),
-        "deploy_tag": deploy_tag,
-        "commit_hash": commit_hash,
+        "shift_agent_deploy_tag": shift_agent_deploy_tag,
+        "shift_agent_commit_hash": shift_agent_commit_hash,
         "components": components,
         "providers": providers,
     }

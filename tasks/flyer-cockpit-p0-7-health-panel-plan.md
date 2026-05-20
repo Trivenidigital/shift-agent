@@ -233,7 +233,7 @@ New file `tasks/flyer-source-edit-provider-posture-2026-05-20.md`:
 - **Provider migration to OpenRouter-only** — see new backlog note.
 - **Real-time bridge metrics / historical SLO** — out of scope for read-only first cut.
 - **OpenAPI schema regeneration on the cockpit** — done as part of CI/build, not committed by hand.
-- **Cockpit deploy-tag vs agent deploy-tag mismatch warning** — brief says "deploy tag", not "drift warning". P2-3 in the cockpit backlog covers reconciliation.
+- **Real cockpit deploy marker.** The panel today surfaces only the agent tarball deploy (`shift_agent_deploy` component + `shift_agent_deploy_tag`/`shift_agent_commit_hash` top-level fields). Cockpit deploys separately and has no own marker today. Adding one + a cockpit-vs-agent-mismatch warning is a separate PR (related to P2-3 in the cockpit backlog). Documented in detail in `tasks/flyer-source-edit-provider-posture-2026-05-20.md` "Related follow-up".
 
 ## Approval gate
 
