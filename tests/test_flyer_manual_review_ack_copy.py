@@ -20,8 +20,8 @@ ACTIONS_PATH = REPO_ROOT / "src" / "plugins" / "cf-router" / "actions.py"
 MANUAL_REVIEW_EXPECTED_BODY = (
     "Flyer Studio\n"
     "------------\n"
-    "Got it. This needs a careful flyer edit. "
-    "I'll send the updated flyer here once it's ready."
+    "Got it. I need to review the uploaded file before creating the flyer. "
+    "I'll send an update here once it's ready."
 )
 
 EDIT_PROCESSING_EXPECTED_BODY = (
@@ -62,6 +62,8 @@ FORBIDDEN_CUSTOMER_TERMS = (
     "co-owners",
     "Lakshmis Kitchen",
     "08:00",
+    "careful flyer edit",
+    "updated flyer",
 )
 
 
@@ -129,4 +131,3 @@ def test_source_edit_processing_ack_is_short_active_edit_copy(captured_message):
     assert err == ""
     assert captured["message"] == EDIT_PROCESSING_EXPECTED_BODY
     _assert_no_customer_leaks(str(captured["message"]))
-
