@@ -232,12 +232,14 @@ def main() -> int:
             # instead of crashing the script (which would leave the project
             # mid-transition with no manual_review row).
             try:
+                source_edit_provider = cfg.flyer.resolve_source_edit_render_provider()
                 specs = [
                     render_source_edit_preview(
                         project,
                         asset_dir,
-                        model=cfg.flyer.edit_image_model,
-                        quality=cfg.flyer.edit_image_quality,
+                        provider=source_edit_provider.provider,
+                        model=source_edit_provider.model,
+                        quality=source_edit_provider.quality,
                     )
                 ]
             except FlyerRenderError as exc:
@@ -252,7 +254,7 @@ def main() -> int:
                 # `provider_timeout` for transient network/5xx issues.
                 if "quality check" in lower or "failed quality" in lower:
                     reason_code = "visual_qa_failed"
-                elif "openai" in lower or "api_key" in lower or "provider" in lower:
+                elif "openai" in lower or "openrouter" in lower or "api_key" in lower or "provider" in lower or "manual review" in lower:
                     reason_code = "source_edit_provider_unavailable"
                 else:
                     reason_code = "provider_timeout"

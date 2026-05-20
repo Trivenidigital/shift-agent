@@ -845,6 +845,7 @@ def test_source_edit_preview_calls_openai_edit_api_with_reference_image(tmp_path
     spec = render_source_edit_preview(
         project,
         tmp_path,
+        provider="openai",
         model="gpt-image-1",
         quality="medium",
     )
@@ -872,6 +873,359 @@ def test_source_edit_preview_calls_openai_edit_api_with_reference_image(tmp_path
     )
     assert qa.ok is True
     assert any("integrity only" in warning for warning in qa.warnings)
+
+
+def test_source_edit_preview_calls_openrouter_with_reference_image(tmp_path, monkeypatch):
+    reference = tmp_path / "reference.png"
+    reference.write_bytes(_png_bytes())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    project = _complete_project().model_copy(update={
+        "status": "manual_edit_required",
+        "raw_request": "Edit uploaded flyer/source artwork. Customer requested: Remove extra 08:00. Add Any Item for $9.99.",
+        "assets": [
+            FlyerAsset(
+                asset_id="A0001",
+                kind="reference_image",
+                source="whatsapp",
+                path=str(reference),
+                mime_type="image/png",
+                sha256="a" * 64,
+                original_message_id="wamid.reference",
+                received_at=datetime.now(timezone.utc),
+            )
+        ],
+    })
+    requests = []
+
+    class _Resp:
+        def __enter__(self):
+            data_url = "data:image/png;base64," + base64.b64encode(_png_bytes(color=(40, 90, 50))).decode("ascii")
+            self._body = json.dumps({
+                "choices": [{
+                    "message": {
+                        "images": [{"image_url": {"url": data_url}}],
+                    },
+                }],
+            }).encode("utf-8")
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return self._body
+
+    def _fake_urlopen(req, timeout):
+        requests.append((req, timeout, json.loads(req.data.decode("utf-8"))))
+        return _Resp()
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", _fake_urlopen)
+
+    spec = render_source_edit_preview(
+        project,
+        tmp_path,
+        provider="openrouter",
+        model="openai/gpt-5.4-image-2",
+        quality="high",
+    )
+
+    assert spec.kind == "concept_preview"
+    assert spec.path.read_bytes().startswith(b"\x89PNG")
+    assert len(requests) == 1
+    req, timeout, payload = requests[0]
+    assert "openrouter.ai" in req.full_url
+    assert timeout == 180
+    assert req.headers["Authorization"] == "Bearer sk-or-test"
+    assert payload["model"] == "openai/gpt-5.4-image-2"
+    assert payload["modalities"] == ["image", "text"]
+    content = payload["messages"][0]["content"]
+    assert content[0]["type"] == "text"
+    assert "Remove extra 08:00" in content[0]["text"]
+    assert content[1]["type"] == "image_url"
+    assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+    manifest = json.loads(Path(f"{spec.path}.text.json").read_text(encoding="utf-8"))
+    assert manifest["verification_mode"] == "source_edit_integrity_only"
+
+
+def test_source_edit_preview_omitted_provider_fails_closed_to_manual_review(tmp_path, monkeypatch):
+    reference = tmp_path / "reference.png"
+    reference.write_bytes(_png_bytes())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    project = _complete_project().model_copy(update={
+        "status": "manual_edit_required",
+        "raw_request": "Edit uploaded flyer/source artwork. Customer requested: Change date.",
+        "assets": [
+            FlyerAsset(
+                asset_id="A0001",
+                kind="reference_image",
+                source="whatsapp",
+                path=str(reference),
+                mime_type="image/png",
+                sha256="a" * 64,
+                original_message_id="wamid.reference",
+                received_at=datetime.now(timezone.utc),
+            )
+        ],
+    })
+    urls = []
+
+    class _Resp:
+        def __enter__(self):
+            data_url = "data:image/png;base64," + base64.b64encode(_png_bytes()).decode("ascii")
+            self._body = json.dumps({
+                "choices": [{
+                    "message": {"images": [{"image_url": {"url": data_url}}]},
+                }],
+            }).encode("utf-8")
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return self._body
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", lambda req, timeout=None: urls.append(req.full_url) or _Resp())
+
+    import pytest as _pytest
+    with _pytest.raises(FlyerRenderError, match="manual review"):
+        render_source_edit_preview(project, tmp_path, model="openai/gpt-5.4-image-2", quality="high")
+
+    assert urls == []
+
+
+def test_openrouter_source_edit_fails_closed_on_remote_url_response(tmp_path, monkeypatch):
+    reference = tmp_path / "reference.png"
+    reference.write_bytes(_png_bytes())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    project = _complete_project().model_copy(update={
+        "status": "manual_edit_required",
+        "raw_request": "Edit uploaded flyer/source artwork. Customer requested: Change date.",
+        "assets": [
+            FlyerAsset(
+                asset_id="A0001",
+                kind="reference_image",
+                source="whatsapp",
+                path=str(reference),
+                mime_type="image/png",
+                sha256="a" * 64,
+                original_message_id="wamid.reference",
+                received_at=datetime.now(timezone.utc),
+            )
+        ],
+    })
+
+    class _Resp:
+        def __enter__(self):
+            self._body = json.dumps({
+                "choices": [{
+                    "message": {
+                        "images": [{"image_url": {"url": "https://example.com/generated.png"}}],
+                    },
+                }],
+            }).encode("utf-8")
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return self._body
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", lambda _req, timeout=None: _Resp())
+
+    import pytest as _pytest
+    with _pytest.raises(FlyerRenderError, match="base64 image data"):
+        render_source_edit_preview(
+            project,
+            tmp_path,
+            provider="openrouter",
+            model="openai/gpt-5.4-image-2",
+            quality="high",
+        )
+
+
+def test_openrouter_source_edit_fails_closed_on_malformed_json_shape(tmp_path, monkeypatch):
+    reference = tmp_path / "reference.png"
+    reference.write_bytes(_png_bytes())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    project = _complete_project().model_copy(update={
+        "status": "manual_edit_required",
+        "raw_request": "Edit uploaded flyer/source artwork. Customer requested: Change date.",
+        "assets": [
+            FlyerAsset(
+                asset_id="A0001",
+                kind="reference_image",
+                source="whatsapp",
+                path=str(reference),
+                mime_type="image/png",
+                sha256="a" * 64,
+                original_message_id="wamid.reference",
+                received_at=datetime.now(timezone.utc),
+            )
+        ],
+    })
+
+    class _Resp:
+        def __enter__(self):
+            self._body = json.dumps({
+                "choices": [{
+                    "message": {
+                        "images": ["not-a-dict"],
+                    },
+                }],
+            }).encode("utf-8")
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return self._body
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", lambda _req, timeout=None: _Resp())
+
+    import pytest as _pytest
+    with _pytest.raises(FlyerRenderError, match="invalid image shape"):
+        render_source_edit_preview(
+            project,
+            tmp_path,
+            provider="openrouter",
+            model="openai/gpt-5.4-image-2",
+            quality="high",
+        )
+
+
+def test_openrouter_source_edit_fails_closed_on_placeholder_key(tmp_path, monkeypatch):
+    import agents.flyer.render as render_mod
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    reference = tmp_path / "reference.png"
+    reference.write_bytes(_png_bytes())
+    project = _complete_project().model_copy(update={
+        "status": "manual_edit_required",
+        "raw_request": "Edit uploaded flyer/source artwork. Customer requested: Change date.",
+        "assets": [
+            FlyerAsset(
+                asset_id="A0001",
+                kind="reference_image",
+                source="whatsapp",
+                path=str(reference),
+                mime_type="image/png",
+                sha256="a" * 64,
+                original_message_id="wamid.reference",
+                received_at=datetime.now(timezone.utc),
+            )
+        ],
+    })
+
+    def tripwire(*_args, **_kwargs):
+        raise AssertionError("network request issued with PLACEHOLDER OpenRouter key")
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "PLACEHOLDER-key")
+    monkeypatch.setattr(render_mod.urllib.request, "urlopen", tripwire)
+
+    import pytest as _pytest
+    with _pytest.raises(FlyerRenderError, match="OPENROUTER_API_KEY"):
+        render_source_edit_preview(
+            project,
+            tmp_path,
+            provider="openrouter",
+            model="openai/gpt-5.4-image-2",
+            quality="high",
+        )
+
+
+def test_openai_source_edit_bytes_fails_closed_on_lowercase_placeholder_key(tmp_path, monkeypatch):
+    import agents.flyer.render as render_mod
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    ref_path = tmp_path / "F9102-ref.png"
+    ref_path.write_bytes(b"fake")
+
+    now = datetime(2026, 5, 19, tzinfo=timezone.utc)
+    project = FlyerProject.model_validate({
+        "project_id": "F9102",
+        "status": "manual_edit_required",
+        "customer_phone": "+17329837841",
+        "created_at": now,
+        "updated_at": now,
+        "original_message_id": "m-1",
+        "raw_request": "Edit uploaded flyer/source artwork. Change date.",
+        "fields": {"event_or_business_name": "Lakshmis", "contact_info": "+17329837841"},
+        "assets": [{
+            "asset_id": "A0001",
+            "kind": "reference_image",
+            "source": "whatsapp",
+            "path": str(ref_path),
+            "mime_type": "image/png",
+            "sha256": "a" * 64,
+            "received_at": now,
+        }],
+    })
+
+    def tripwire(*_args, **_kwargs):
+        raise AssertionError("network request issued with lowercase placeholder OpenAI key")
+
+    monkeypatch.setattr(render_mod.urllib.request, "urlopen", tripwire)
+    monkeypatch.setattr(render_mod, "_read_env_value", lambda _name: "placeholder-key")
+
+    import pytest as _pytest
+    with _pytest.raises(FlyerRenderError, match="placeholder"):
+        render_mod._openai_source_edit_bytes(project, size=(1080, 1350), model="gpt-image-1", quality="medium")
+
+
+def test_openai_source_edit_bytes_fails_closed_on_malformed_json_shape(tmp_path, monkeypatch):
+    import agents.flyer.render as render_mod
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    ref_path = tmp_path / "F9103-ref.png"
+    ref_path.write_bytes(b"fake")
+
+    now = datetime(2026, 5, 19, tzinfo=timezone.utc)
+    project = FlyerProject.model_validate({
+        "project_id": "F9103",
+        "status": "manual_edit_required",
+        "customer_phone": "+17329837841",
+        "created_at": now,
+        "updated_at": now,
+        "original_message_id": "m-1",
+        "raw_request": "Edit uploaded flyer/source artwork. Change date.",
+        "fields": {"event_or_business_name": "Lakshmis", "contact_info": "+17329837841"},
+        "assets": [{
+            "asset_id": "A0001",
+            "kind": "reference_image",
+            "source": "whatsapp",
+            "path": str(ref_path),
+            "mime_type": "image/png",
+            "sha256": "a" * 64,
+            "received_at": now,
+        }],
+    })
+
+    class _Resp:
+        def __enter__(self):
+            self._body = json.dumps({"data": ["not-a-dict"]}).encode("utf-8")
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return self._body
+
+    monkeypatch.setattr(render_mod, "_read_env_value", lambda _name: "sk-test")
+    monkeypatch.setattr(render_mod.urllib.request, "urlopen", lambda _req, timeout=None: _Resp())
+
+    import pytest as _pytest
+    with _pytest.raises(FlyerRenderError, match="invalid item shape"):
+        render_mod._openai_source_edit_bytes(project, size=(1080, 1350), model="gpt-image-1", quality="medium")
 
 
 def test_source_edit_rejects_pdf_reference_before_provider_call(tmp_path, monkeypatch):
@@ -902,7 +1256,7 @@ def test_source_edit_rejects_pdf_reference_before_provider_call(tmp_path, monkey
     monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", _fail_urlopen)
 
     try:
-        render_source_edit_preview(project, tmp_path, model="gpt-image-1", quality="medium")
+        render_source_edit_preview(project, tmp_path, provider="openai", model="gpt-image-1", quality="medium")
     except FlyerRenderError as e:
         assert "must be an image" in str(e)
     else:
@@ -958,7 +1312,7 @@ def test_source_edit_reference_uses_latest_reference_asset(tmp_path, monkeypatch
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", lambda req, timeout: requests.append(req.data) or _Resp())
 
-    render_source_edit_preview(project, tmp_path, model="gpt-image-1", quality="medium")
+    render_source_edit_preview(project, tmp_path, provider="openai", model="gpt-image-1", quality="medium")
 
     assert b'filename="latest.png"' in requests[0]
     assert b'filename="old.png"' not in requests[0]

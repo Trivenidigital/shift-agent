@@ -2102,6 +2102,22 @@ def trigger_create_flyer_project(
     return True, detail[:500], project
 
 
+def _resolve_flyer_source_edit_provider_for_preflight():
+    try:
+        _ensure_platform_path()
+        from schemas import Config  # type: ignore
+    except Exception:
+        _ensure_local_src_path()
+        platform = Path(__file__).resolve().parents[2] / "platform"
+        p = str(platform)
+        if p not in sys.path:
+            sys.path.insert(0, p)
+        from schemas import Config  # type: ignore
+    import yaml  # type: ignore
+    cfg = Config.model_validate(yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {})
+    return cfg.flyer.resolve_source_edit_render_provider()
+
+
 def flyer_source_edit_preflight(project: dict) -> tuple[bool, str, str]:
     """Return ``(ok, detail, reason_code)`` for source-preserving edit readiness.
 
@@ -2111,8 +2127,9 @@ def flyer_source_edit_preflight(project: dict) -> tuple[bool, str, str]:
     cockpit triage groups + tallies on, so callers MUST NOT hardcode a single
     code for every failure mode. Mapping:
 
-      - ``source_edit_provider_unavailable`` — OPENAI key absent/placeholder,
-        or the workflow helper failed to import (provider stack broken).
+      - ``source_edit_provider_unavailable`` — configured provider key
+        absent/placeholder, manual-review sentinel selected, or the workflow
+        helper failed to import (provider stack broken).
       - ``reference_unsupported`` — reference media is PDF / non-image type
         the source-edit endpoint cannot consume.
       - ``reference_provider_unavailable`` — no reference image attached to
@@ -2132,7 +2149,15 @@ def flyer_source_edit_preflight(project: dict) -> tuple[bool, str, str]:
                 f"source edit readiness helper unavailable: {type(e).__name__}: {e}",
                 "source_edit_provider_unavailable",
             )
-    ok, detail = source_edit_provider_ready(project)
+    try:
+        provider = _resolve_flyer_source_edit_provider_for_preflight()
+    except Exception as e:
+        return (
+            False,
+            f"source edit provider config unavailable: {type(e).__name__}: {e}",
+            "source_edit_provider_unavailable",
+        )
+    ok, detail = source_edit_provider_ready(project, provider=provider)
     if not ok:
         if "uploaded reference image" in detail:
             return ok, detail, "reference_provider_unavailable"
@@ -2689,6 +2714,8 @@ def flyer_project_has_manual_review_queued(project: Optional[dict]) -> bool:
 
 def flyer_generation_queued_manual_review(detail: str) -> bool:
     if "reference_extraction_failed" in (detail or ""):
+        return True
+    if "source_edit_failed" in (detail or ""):
         return True
     return False
 

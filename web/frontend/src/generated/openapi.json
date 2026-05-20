@@ -2011,7 +2011,7 @@
     },
     "/flyer/health": {
       "get": {
-        "description": "Read-only flyer provider + platform-runtime health.\n\nSurfaces gateway / bridge / paired / cockpit deploy plus OpenRouter\n(generation + vision) and OpenAI source-edit posture. Never returns\nsecret values or prefixes - only key_present + key_source.\nOpenRouter missing = red (blocks generation); source-edit missing = yellow\n(degraded; routes to manual review).",
+        "description": "Read-only flyer provider + platform-runtime health.\n\nSurfaces gateway / bridge / paired / cockpit deploy plus OpenRouter\n(generation + vision) and configured source-edit posture. Never returns\nsecret values or prefixes - only key_present + key_source.\nOpenRouter missing = red (blocks generation); source-edit missing = yellow\n(degraded; routes to manual review).",
         "operationId": "flyer_health_flyer_health_get",
         "responses": {
           "200": {

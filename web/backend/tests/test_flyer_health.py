@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 
 # ─── Helpers to write env files + project state ──────────────────────────
@@ -112,6 +113,14 @@ def _build_test_client():
     return _Ctx()
 
 
+def _mock_flyer_config(monkeypatch, flyer_payload: dict) -> None:
+    from app import state as state_mod
+    from schemas import FlyerConfig
+
+    cfg = FlyerConfig.model_validate(flyer_payload)
+    monkeypatch.setattr(state_mod, "load_config", lambda: SimpleNamespace(flyer=cfg))
+
+
 # ─── Auth + shape ────────────────────────────────────────────────────────
 
 
@@ -155,7 +164,7 @@ def test_flyer_health_returns_expected_shape(tmp_path, monkeypatch):
     assert "deploy_tag" not in body, "deploy_tag is mis-named; use shift_agent_deploy_tag"
     assert "commit_hash" not in body, "commit_hash is mis-named; use shift_agent_commit_hash"
     provider_names = {p["name"] for p in body["providers"]}
-    assert provider_names == {"openrouter_generation_vision", "openai_source_edit"}
+    assert provider_names == {"openrouter_generation_vision", "source_edit_provider"}
 
 
 # ─── Secret redaction ────────────────────────────────────────────────────
@@ -180,11 +189,11 @@ def test_flyer_health_redacts_secret_values(tmp_path, monkeypatch):
 
     body = resp.json()
     provider_or = next(p for p in body["providers"] if p["name"] == "openrouter_generation_vision")
-    provider_oa = next(p for p in body["providers"] if p["name"] == "openai_source_edit")
+    provider_source = next(p for p in body["providers"] if p["name"] == "source_edit_provider")
     assert provider_or["key_present"] is True
     assert provider_or["key_source"] == "process_env"
-    assert provider_oa["key_present"] is True
-    assert provider_oa["key_source"] == "process_env"
+    assert provider_source["key_present"] is False
+    assert provider_source["model_config"]["source_edit_provider"] == "manual_review"
 
 
 # ─── OpenRouter severity matrix ──────────────────────────────────────────
@@ -234,47 +243,119 @@ def test_openrouter_present_is_green(tmp_path, monkeypatch):
     assert "sk-real-key" not in or_p["detail"]
 
 
-# ─── OpenAI source-edit severity matrix ──────────────────────────────────
+# ─── Source-edit provider severity matrix ────────────────────────────────
 
 
-def test_openai_source_edit_missing_is_yellow_not_red(tmp_path, monkeypatch):
+def test_source_edit_default_manual_review_is_yellow_not_red(tmp_path, monkeypatch):
     _clear_provider_env(monkeypatch)
     _isolate_env_files(monkeypatch, tmp_path)
     _isolate_deploy_markers(monkeypatch, tmp_path)
 
     from app.routers import flyer
 
-    oa_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "openai_source_edit")
-    assert oa_p["severity"] == "yellow", "source-edit missing must be degraded, not blocking"
-    assert oa_p["key_present"] is False
-    assert oa_p["key_source"] is None
-    assert "manual review" in oa_p["detail"].lower()
+    source_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "source_edit_provider")
+    assert source_p["severity"] == "yellow", "manual-review source edit must be degraded, not blocking"
+    assert source_p["key_present"] is False
+    assert source_p["key_source"] is None
+    assert source_p["model_config"]["source_edit_provider"] == "manual_review"
+    assert "manual review" in source_p["detail"].lower()
 
 
-def test_openai_source_edit_placeholder_is_yellow(tmp_path, monkeypatch):
+def test_explicit_openai_source_edit_placeholder_is_yellow(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-PLACEHOLDER")
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     _isolate_env_files(monkeypatch, tmp_path)
     _isolate_deploy_markers(monkeypatch, tmp_path)
+    _mock_flyer_config(monkeypatch, {
+        "enabled": True,
+        "edit_image_model": "gpt-image-1",
+        "edit_image_quality": "medium",
+    })
 
     from app.routers import flyer
 
-    oa_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "openai_source_edit")
-    assert oa_p["severity"] == "yellow"
-    assert oa_p["key_present"] is False
+    source_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "source_edit_provider")
+    assert source_p["severity"] == "yellow"
+    assert source_p["key_present"] is False
+    assert source_p["model_config"]["source_edit_provider"] == "openai"
 
 
-def test_openai_source_edit_present_is_green(tmp_path, monkeypatch):
+def test_explicit_openai_source_edit_present_is_green(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-real-openai-key")
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     _isolate_env_files(monkeypatch, tmp_path)
     _isolate_deploy_markers(monkeypatch, tmp_path)
+    _mock_flyer_config(monkeypatch, {
+        "enabled": True,
+        "edit_image_model": "gpt-image-1",
+        "edit_image_quality": "medium",
+    })
 
     from app.routers import flyer
 
-    oa_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "openai_source_edit")
-    assert oa_p["severity"] == "green"
-    assert oa_p["key_present"] is True
+    source_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "source_edit_provider")
+    assert source_p["severity"] == "green"
+    assert source_p["key_present"] is True
+
+
+def test_explicit_openai_source_edit_policy_present_is_green(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-real-openai-key")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    _isolate_env_files(monkeypatch, tmp_path)
+    _isolate_deploy_markers(monkeypatch, tmp_path)
+    _mock_flyer_config(monkeypatch, {
+        "enabled": True,
+        "source_edit_provider_policy": {
+            "default": {
+                "provider": "openai",
+                "model": "gpt-image-1",
+                "quality": "high",
+            },
+            "emergency_fallback": {
+                "provider": "manual_review",
+                "model": "manual_review",
+                "quality": "high",
+            },
+        },
+    })
+
+    from app.routers import flyer
+
+    source_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "source_edit_provider")
+    assert source_p["severity"] == "green"
+    assert source_p["key_present"] is True
+    assert source_p["key_source"] == "process_env"
+    assert source_p["model_config"]["source_edit_provider"] == "openai"
+
+
+def test_explicit_openrouter_source_edit_present_is_green(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-real-openrouter-key")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    _isolate_env_files(monkeypatch, tmp_path)
+    _isolate_deploy_markers(monkeypatch, tmp_path)
+    _mock_flyer_config(monkeypatch, {
+        "enabled": True,
+        "source_edit_provider_policy": {
+            "default": {
+                "provider": "openrouter",
+                "model": "openai/gpt-5.4-image-2",
+                "quality": "high",
+            },
+            "emergency_fallback": {
+                "provider": "manual_review",
+                "model": "manual_review",
+                "quality": "high",
+            },
+        },
+    })
+
+    from app.routers import flyer
+
+    source_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "source_edit_provider")
+    assert source_p["severity"] == "green"
+    assert source_p["key_present"] is True
+    assert source_p["key_source"] == "process_env"
+    assert source_p["model_config"]["source_edit_provider"] == "openrouter"
 
 
 # ─── key_source layered-env reader ───────────────────────────────────────
@@ -380,12 +461,13 @@ def test_model_config_present_in_provider_block(tmp_path, monkeypatch):
 
     providers = flyer._flyer_provider_components()
     or_p = next(p for p in providers if p["name"] == "openrouter_generation_vision")
-    oa_p = next(p for p in providers if p["name"] == "openai_source_edit")
+    source_p = next(p for p in providers if p["name"] == "source_edit_provider")
     assert "draft_image_model" in or_p["model_config"]
     assert "final_image_model" in or_p["model_config"]
     assert or_p["model_config"]["draft_provider_model"] == "openai/gpt-5.4-image-2"
     assert or_p["model_config"]["final_provider_model"] == "deterministic-renderer"
-    assert "edit_image_model" in oa_p["model_config"]
+    assert "edit_image_model" in source_p["model_config"]
+    assert source_p["model_config"]["source_edit_provider"] == "manual_review"
 
 
 def test_manual_queue_impact_zero_by_default(tmp_path, monkeypatch):
@@ -458,7 +540,7 @@ def test_source_edit_detail_surfaces_queue_impact_when_present(tmp_path, monkeyp
         },
     )
 
-    oa_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "openai_source_edit")
-    assert oa_p["manual_queue_impact"]["queued_count"] == 1
-    assert "falling back to manual review" in oa_p["detail"]
-    assert oa_p["severity"] == "yellow"
+    source_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "source_edit_provider")
+    assert source_p["manual_queue_impact"]["queued_count"] == 1
+    assert "manual review" in source_p["detail"]
+    assert source_p["severity"] == "yellow"

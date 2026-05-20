@@ -72,13 +72,89 @@ def test_source_edit_provider_ready_reads_shift_agent_env_file(tmp_path, monkeyp
     from agents.flyer.workflow import source_edit_provider_ready
 
     env_path = tmp_path / ".env"
-    env_path.write_text("OPENAI_API_KEY=sk-test\n", encoding="utf-8")
+    env_path.write_text("OPENROUTER_API_KEY=sk-or-test\n", encoding="utf-8")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
-    ok, detail = source_edit_provider_ready({"assets": [{"kind": "reference_image", "mime_type": "image/png", "path": "x.png"}]}, env_path=env_path)
+    ok, detail = source_edit_provider_ready(
+        {"assets": [{"kind": "reference_image", "mime_type": "image/png", "path": "x.png"}]},
+        provider={"provider": "openrouter", "model": "openai/gpt-5.4-image-2"},
+        env_path=env_path,
+    )
 
     assert ok
-    assert detail == "ready"
+    assert detail == "source edit provider configured: openrouter/openai/gpt-5.4-image-2"
+
+
+def test_source_edit_provider_ready_openrouter_does_not_require_openai(tmp_path, monkeypatch):
+    from agents.flyer.workflow import source_edit_provider_ready
+
+    env_path = tmp_path / ".env"
+    env_path.write_text("OPENROUTER_API_KEY=sk-or-test\n", encoding="utf-8")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    ok, detail = source_edit_provider_ready(
+        {"assets": [{"kind": "reference_image", "mime_type": "image/png", "path": "x.png"}]},
+        provider={"provider": "openrouter", "model": "openai/gpt-5.4-image-2"},
+        env_path=env_path,
+    )
+
+    assert ok is True
+    assert detail == "source edit provider configured: openrouter/openai/gpt-5.4-image-2"
+
+
+def test_source_edit_provider_ready_without_explicit_provider_fails_closed(tmp_path, monkeypatch):
+    from agents.flyer.workflow import source_edit_provider_ready
+
+    env_path = tmp_path / ".env"
+    env_path.write_text("OPENROUTER_API_KEY=sk-or-test\nOPENAI_API_KEY=sk-test\n", encoding="utf-8")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    ok, detail = source_edit_provider_ready(
+        {"assets": [{"kind": "reference_image", "mime_type": "image/png", "path": "x.png"}]},
+        env_path=env_path,
+    )
+
+    assert ok is False
+    assert detail == "source edit provider configured for manual review"
+
+
+def test_source_edit_provider_ready_openrouter_missing_key_fails(tmp_path, monkeypatch):
+    from agents.flyer.workflow import source_edit_provider_ready
+
+    env_path = tmp_path / ".env"
+    env_path.write_text("OPENROUTER_API_KEY=PLACEHOLDER-key\n", encoding="utf-8")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    ok, detail = source_edit_provider_ready(
+        {"assets": [{"kind": "reference_image", "mime_type": "image/png", "path": "x.png"}]},
+        provider={"provider": "openrouter", "model": "openai/gpt-5.4-image-2"},
+        env_path=env_path,
+    )
+
+    assert ok is False
+    assert detail == "source edit provider is not configured: OPENROUTER_API_KEY missing"
+
+
+def test_source_edit_provider_ready_explicit_openai_still_requires_openai(tmp_path, monkeypatch):
+    from agents.flyer.workflow import source_edit_provider_ready
+
+    env_path = tmp_path / ".env"
+    env_path.write_text("OPENROUTER_API_KEY=sk-or-test\n", encoding="utf-8")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    ok, detail = source_edit_provider_ready(
+        {"assets": [{"kind": "reference_image", "mime_type": "image/png", "path": "x.png"}]},
+        provider={"provider": "openai", "model": "gpt-image-1"},
+        env_path=env_path,
+    )
+
+    assert ok is False
+    assert detail == "source edit provider is not configured: OPENAI_API_KEY missing"
 
 
 def test_read_env_value_checks_hermes_env_before_shift_agent_env(tmp_path, monkeypatch):

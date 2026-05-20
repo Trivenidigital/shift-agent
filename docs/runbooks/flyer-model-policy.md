@@ -6,12 +6,12 @@ Last updated: 2026-05-20
 
 For the customer rollout window, Flyer Studio uses one production image-provider account: OpenRouter. Ideogram is not part of the rollout because it requires a separate key/subscription and is not available through OpenRouter.
 
-Source-preserving uploaded-flyer edits are deliberately not migrated to OpenRouter in this PR. That path remains on the existing direct OpenAI image-edit code path until a visual-QA regression dataset proves a replacement is source-preserving.
+Source-preserving uploaded-flyer edits are now being wired for provider configuration in the follow-up PR after PR #144. The code path may use OpenRouter when explicitly resolved by `source_edit_provider_policy`, but it must not be deployed or treated as customer-grade until spend-gated real source-edit smoke proves source preservation on real Flyer Studio cases.
 
 ## PR Sequence
 
 - PR-1 before rollout: wire `draft_provider_policy` and `final_provider_policy`, add policy docs, add admin-dashboard backlog, and keep source-edit path unchanged. Status: done in PR #144 and deployed to `main-vps`.
-- PR-2 after rollout: source-edit model/provider migration only after a real visual-QA regression dataset exists and passes the source-preservation gate.
+- PR-2 before relying on automated source edits operationally: source-edit model/provider wiring plus offline fail-closed tests. No deploy until a spend-gated real source-edit smoke verifies provider capability and source preservation.
 - PR-3 after bakeoff: optional Ideogram provider and admin-dashboard controls only if the bakeoff justifies the added key/subscription and operational complexity.
 
 ## Production Defaults
@@ -21,7 +21,7 @@ Source-preserving uploaded-flyer edits are deliberately not migrated to OpenRout
 | New flyer draft, default | OpenRouter | `openai/gpt-5.4-image-2` | `high` | wired |
 | Final asset, default | local | `deterministic-renderer` | `high` | wired |
 | Final fallback | OpenRouter | `openai/gpt-5.4-image-2` | `high` | config only |
-| Source-preserving edit | direct OpenAI | existing `edit_image_model` | existing quality | unchanged |
+| Source-preserving edit | OpenRouter by policy, direct OpenAI only for explicit legacy config | `openai/gpt-5.4-image-2` default policy, legacy `edit_image_model` when explicitly configured | `high` default policy | wired; no customer-grade reliance before spend-gated smoke |
 | Source-edit emergency fallback | manual review | n/a | n/a | existing manual queue |
 
 Finalization exports the selected approved preview when one exists. The `deterministic-renderer` default is therefore a no-new-model-call finalization posture, not permission to visually regenerate a different final after customer approval.
@@ -42,14 +42,14 @@ Before promoting any candidate, run an authenticated OpenRouter slug check with 
 
 ## Source-Edit Boundary
 
-Do not route source-preserving edits through OpenRouter until the follow-up PR includes:
+Do not rely on source-preserving edits through OpenRouter for customer operations until the follow-up verification includes:
 
 - A visual-QA regression dataset with real source-edit cases.
 - Provider capability verification for uploaded-reference image editing.
 - A source-preservation pass/fail criterion that catches layout regeneration.
 - Kill-switch behavior that queues manual review instead of sending degraded output.
 
-The safe fallback for source-edit provider uncertainty is manual review, not a cheap image model.
+The safe fallback for source-edit provider uncertainty remains manual review, not a cheap image model. If provider readiness, API shape, response shape, or source-preservation confidence fails, queue manual review.
 
 ## Admin Dashboard Backlog
 

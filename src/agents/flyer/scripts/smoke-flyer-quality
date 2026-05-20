@@ -141,17 +141,24 @@ def main() -> int:
     posture = {
         "provider": "deterministic",
         "openrouter_key": {"present": False, "source": None},
-        "openai_source_edit_key": {"present": False, "source": None},
+        "source_edit_provider": "not_checked",
+        "source_edit_key": {"present": False, "source": None},
     }
     if args.real_model:
         cfg = _load_config(Path(args.config_path))
         model = cfg.flyer.draft_image_model
         quality = cfg.flyer.draft_image_quality
+        source_edit_provider = cfg.flyer.resolve_source_edit_render_provider()
+        source_edit_key_name = {
+            "openrouter": "OPENROUTER_API_KEY",
+            "openai": "OPENAI_API_KEY",
+        }.get(source_edit_provider.provider, "")
         spend_mode = "real-model"
         posture = {
             "provider": "openrouter",
             "openrouter_key": _key_posture("OPENROUTER_API_KEY"),
-            "openai_source_edit_key": _key_posture("OPENAI_API_KEY"),
+            "source_edit_provider": f"{source_edit_provider.provider}/{source_edit_provider.model}",
+            "source_edit_key": _key_posture(source_edit_key_name) if source_edit_key_name else {"present": False, "source": None},
         }
 
     try:

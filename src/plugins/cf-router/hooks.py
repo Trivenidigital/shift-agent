@@ -647,12 +647,13 @@ def _try_flyer_primary_intercept(
                 if ack_ok else f"cf-router flyer exact edit delivery failed: project {project_id}"
             )
         else:
-            actions.invoke_update_flyer_project(
-                project_id,
-                "--queue-manual-review",
-                "--manual-reason", "source_edit_generation_failed",
-                "--manual-detail", gen_detail[:500],
-            )
+            if not actions.flyer_generation_queued_manual_review(gen_detail):
+                actions.invoke_update_flyer_project(
+                    project_id,
+                    "--queue-manual-review",
+                    "--manual-reason", "source_edit_generation_failed",
+                    "--manual-detail", gen_detail[:500],
+                )
             ack_ok, manual_mid, ack_err = actions.send_flyer_manual_edit_ack(
                 chat_id,
                 project_id,
@@ -1067,12 +1068,13 @@ def _try_flyer_source_vs_new_choice_intercept(text: str, chat_id: str, event: An
             )
             audit_reason = "flyer_primary_project_created"
         else:
-            actions.invoke_update_flyer_project(
-                project_id,
-                "--queue-manual-review",
-                "--manual-reason", "source_edit_generation_failed",
-                "--manual-detail", gen_detail[:500],
-            )
+            if not actions.flyer_generation_queued_manual_review(gen_detail):
+                actions.invoke_update_flyer_project(
+                    project_id,
+                    "--queue-manual-review",
+                    "--manual-reason", "source_edit_generation_failed",
+                    "--manual-detail", gen_detail[:500],
+                )
             ack_ok, manual_mid, ack_err = actions.send_flyer_manual_edit_ack(
                 chat_id,
                 project_id,
