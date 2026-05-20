@@ -43,15 +43,25 @@ from schemas import (  # noqa: E402
 try:
     from flyer_manual_queue import (  # type: ignore  # noqa: E402
         _verification_modes as flyer_verification_modes,
+        build_closure_customer_text,
+        close_manual_project,
         complete_manual_project,
+        enforce_close_freshness_guard,
         list_manual_queue,
+        notify_customer_of_closure,
+        resolve_proactive_chat_id_for_project,
         triage_summary,
     )
 except ImportError:
     from agents.flyer.manual_queue import (  # noqa: E402
         _verification_modes as flyer_verification_modes,
+        build_closure_customer_text,
+        close_manual_project,
         complete_manual_project,
+        enforce_close_freshness_guard,
         list_manual_queue,
+        notify_customer_of_closure,
+        resolve_proactive_chat_id_for_project,
         triage_summary,
     )
 
@@ -82,6 +92,13 @@ class ManualQueueCompleteBody(ReasonBody):
 
 class ManualQueueBreakGlassBody(ReasonBody):
     pass
+
+
+class ManualQueueCloseNoSendBody(ReasonBody):
+    """Operator-close request body. `force=True` bypasses the freshness
+    guard; the agent helper `enforce_close_freshness_guard` accepts force
+    OR a documented bypass token in the reason string."""
+    force: bool = False
 
 
 def _flyer_dir() -> Path:
@@ -713,6 +730,252 @@ async def manual_queue_break_glass(
 
 
 # ─────────────────────────────────────────────────────────────────
+# P0-6 close/no-send cockpit action + P0-5 customer-message preview.
+#
+# Close path mirrors `flyer-manual-queue --close` CLI semantics:
+#   under flock: enforce_close_freshness_guard → close_manual_project
+#                → backup + atomic state write
+#   then OUTSIDE flock: notify_customer_of_closure (bridge + audit).
+# Notify runs after the lock is released so a slow bridge call cannot
+# block unrelated project writers — closure state is already
+# persisted, and the reactive "any update?" path is the safety net
+# when the proactive push misses. Reuses the agent helpers from
+# PRs #127/#129/#130 so the cockpit binding is the only net-new
+# surface.
+# ─────────────────────────────────────────────────────────────────
+
+
+def _decisions_log_path() -> Path:
+    """Resolve the agent decisions log path.
+
+    `notify_customer_of_closure` writes a `flyer_closure_customer_notified`
+    row to the agent decisions log. Use the same `Settings.decisions_path`
+    other cockpit routes rely on so test mode (Settings.state_dir under
+    tmp_path) and production (/opt/shift-agent/logs/decisions.log) both
+    resolve correctly.
+    """
+    return get_settings().decisions_path
+
+
+def manual_queue_close_no_send_action(
+    project_id: str, *, reason: str, force: bool,
+) -> dict[str, Any]:
+    """Close a queued manual-review row without sending customer assets.
+
+    Symmetric with `manual_queue_complete_action` / `manual_queue_break_glass_action`:
+    cockpit backup + atomic write + agent helpers. Best-effort proactive
+    notification runs AFTER state is persisted; its result is returned in
+    the response and audited but does NOT roll back the closure (reactive
+    "any update?" path is the safety net).
+    """
+    path = _projects_path()
+    backup = ""
+    closed_status = ""
+    closed_manual_status = ""
+    notification: dict[str, Any] = {}
+    # Hold the flock ONLY for the state mutation. The proactive bridge call
+    # below (notify_customer_of_closure → WhatsApp send + audit append) can
+    # take seconds; holding flock through it would block unrelated project
+    # writes. Closure state is already persisted before the bridge call, so
+    # a failure or slow send doesn't roll anything back — the reactive
+    # "any update?" safety net carries when the proactive push misses.
+    with safe_io.flock(path):
+        backup = _backup_path(path, reason)
+        store = load_project_store()
+        # Freshness guard. Raises ValueError on a fresh row without --force
+        # AND without a documented bypass token in the reason string.
+        try:
+            enforce_close_freshness_guard(
+                store, project_id,
+                reason=reason,
+                force=force,
+                now=_now(),
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
+        # Transition manual_edit_required → closed_no_send. Raises ValueError
+        # if the row isn't currently in a closable state.
+        try:
+            updated = close_manual_project(store, project_id, reason=reason)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
+        _dump_store(path, updated)
+        closed = next(p for p in updated.projects if p.project_id == project_id)
+        closed_status = closed.status
+        closed_manual_status = closed.manual_review.status
+    # Notify the customer proactively. Best-effort; never raises.
+    # OUTSIDE the flock — bridge calls must not block other state writers.
+    notification = notify_customer_of_closure(
+        updated, project_id,
+        customers_path=_customers_path(),
+        decisions_log_path=_decisions_log_path(),
+    )
+    return {
+        "ok": True,
+        "project_id": project_id,
+        "status": closed_status,
+        "manual_status": closed_manual_status,
+        "backup": backup,
+        "notification": {
+            "send_ok": bool(notification.get("send_ok", False)),
+            "chat_id": notification.get("chat_id", ""),
+            "outbound_message_id": notification.get("outbound_message_id", ""),
+            "error": notification.get("error", ""),
+        },
+    }
+
+
+@router.post("/manual-queue/{project_id}/close-no-send")
+async def manual_queue_close_no_send(
+    project_id: str,
+    body: ManualQueueCloseNoSendBody,
+    request: Request,
+    _=Depends(require_fresh_otp),
+):
+    result = manual_queue_close_no_send_action(
+        project_id, reason=body.reason, force=body.force,
+    )
+    audit_log(
+        "flyer.manual_queue.close_no_send",
+        ip=client_ip(request),
+        ua=client_ua(request),
+        details=result | {"reason": body.reason, "force": body.force},
+    )
+    return result
+
+
+# ── P0-5: action preview ──────────────────────────────────────────
+
+
+_ALLOWED_PREVIEW_ACTIONS = frozenset({"close_no_send", "complete", "break_glass"})
+
+
+def manual_queue_action_preview(project_id: str, *, action: str) -> dict[str, Any]:
+    """Customer-visible preview for a mutating cockpit action.
+
+    Reuses the agent's deterministic copy sources so the cockpit preview
+    is the SAME text the customer will actually receive:
+      - close_no_send → `build_closure_customer_text` on a simulated
+        post-close project (so it picks up `CLOSED_NO_SEND_REASON_LINES`).
+      - complete → the next concept-preview caption pattern emitted by
+        `send_flyer_concept_previews`. Operator-completed assets land as
+        concept C1 with title `Designer Approved` / style summary
+        `Operator-approved manual review asset`.
+      - break_glass → no customer push. Explicitly flagged so the cockpit
+        can render "No customer message will be sent" instead of a copy
+        preview the operator might confuse for one.
+    """
+    if action not in _ALLOWED_PREVIEW_ACTIONS:
+        raise HTTPException(422, f"unknown action {action!r}; expected one of {sorted(_ALLOWED_PREVIEW_ACTIONS)}")
+    store = load_project_store()
+    project = next((p for p in store.projects if p.project_id == project_id), None)
+    if project is None:
+        raise HTTPException(404, f"project {project_id} not found")
+
+    # Use the same audit-derived resolver `notify_customer_of_closure` will
+    # use at send time so the cockpit preview shows the chat_id the
+    # customer will actually receive on (P0-5 single-source-of-truth +
+    # PR #133 review fix for the LID/authorized-requester misroute).
+    chat_id, chat_id_source = resolve_proactive_chat_id_for_project(
+        project,
+        customers_path=_customers_path(),
+        decisions_log_path=_decisions_log_path(),
+    )
+
+    if action == "close_no_send":
+        # Simulate the post-close state so the canonical copy table fires.
+        # We don't write — just project the state forward to read out the
+        # reason-aware closure copy.
+        simulated_manual = project.manual_review.model_copy(update={"status": "closed_no_send"})
+        simulated = project.model_copy(update={
+            "status": "closed_no_send",
+            "manual_review": simulated_manual,
+        })
+        customer_text = build_closure_customer_text(simulated)
+        return {
+            "action": "close_no_send",
+            "project_id": project_id,
+            "will_notify": bool(chat_id),
+            "customer_text": customer_text,
+            "customer_messages": [customer_text],
+            "would_notify_chat_id": chat_id,
+            "chat_id_source": chat_id_source,
+            "note": (
+                "Customer will receive this message on close. "
+                "If no chat_id is on file, the safety net 'any update?' "
+                "reactive reply still surfaces the closure."
+            ),
+            "reason_code": str(project.manual_review.reason_code or ""),
+        }
+
+    if action == "complete":
+        # `send_flyer_concept_previews` emits TWO customer-visible messages
+        # on the next preview send: (1) media caption attached to the
+        # concept image, (2) a follow-up text. Both are previewed so the
+        # operator sees the full customer-visible sequence (P0-5 + PR #133
+        # review HIGH-3 fix — caption alone was an incomplete preview).
+        # `complete_manual_project` attaches the uploaded asset as concept
+        # C1 with these exact literals; the caption helper in
+        # `cf-router/actions.py::send_flyer_concept_previews` concatenates
+        # concept_id, title, style_summary, then a separate bridge_post
+        # ships the follow-up.
+        caption = (
+            "C1: Designer Approved\n"
+            "Operator-approved manual review asset\n"
+            "\n"
+            "Reply APPROVE or reply with changes."
+        )
+        followup = "Reply APPROVE to receive final files, or reply with changes."
+        messages = [caption, followup]
+        return {
+            "action": "complete",
+            "project_id": project_id,
+            "will_notify": False,
+            # `customer_text` retained for back-compat with any earlier
+            # consumer; joined with an explicit separator so a client
+            # reading only the legacy field still sees both messages.
+            "customer_text": "\n\n--- followed by ---\n\n".join(messages),
+            "customer_messages": messages,
+            "would_notify_chat_id": chat_id,
+            "chat_id_source": chat_id_source,
+            "note": (
+                "Complete transitions the project to awaiting_final_approval. "
+                "No immediate proactive push; the customer sees these two "
+                "messages on the next send_flyer_concept_previews fire — "
+                "the caption ships on the concept image, the follow-up "
+                "ships as a separate text."
+            ),
+            "reason_code": str(project.manual_review.reason_code or ""),
+        }
+
+    # break_glass
+    return {
+        "action": "break_glass",
+        "project_id": project_id,
+        "will_notify": False,
+        "customer_text": None,
+        "customer_messages": [],
+        "would_notify_chat_id": chat_id,
+        "chat_id_source": chat_id_source,
+        "note": (
+            "Break-glass records `manual_review.status=break_glass_sent` "
+            "for audit. No customer message is sent by the agent — operator "
+            "is asserting out-of-band delivery."
+        ),
+        "reason_code": str(project.manual_review.reason_code or ""),
+    }
+
+
+@router.get("/manual-queue/{project_id}/action-preview")
+async def manual_queue_action_preview_endpoint(
+    project_id: str,
+    action: str,
+    _=Depends(require_auth),
+):
+    return manual_queue_action_preview(project_id, action=action)
+
+
+# ─────────────────────────────────────────────────────────────────
 # P0-1/P0-2/P0-3 cockpit-ops surface (manual-queue detail drawer,
 # operator-uploads endpoint, asset media-serve for visual preview).
 # ─────────────────────────────────────────────────────────────────
@@ -1170,3 +1433,294 @@ async def campaign_send_csv(
         },
     )
     return result | {"invalid": parsed["invalid"], "duplicate_count": parsed["duplicate_count"]}
+
+
+# ─── P0-7: provider + runtime health ────────────────────────────────────
+#
+# Read-only health surface for the Flyer cockpit. Never returns secret values
+# or prefixes; only key_present + key_source so the operator knows WHICH env
+# file to inspect without revealing anything sensitive. Mirrors the layered
+# env reader convention from src/agents/flyer/workflow.py::_read_env_value
+# (process env -> /root/.hermes/.env -> /opt/shift-agent/.env) but exposes the
+# matching source. Placeholder detection matches workflow.source_edit_provider_ready
+# (any value containing "PLACEHOLDER" counts as missing).
+
+
+def _is_placeholder(value: str) -> bool:
+    return "PLACEHOLDER" in value.upper()
+
+
+def _read_env_layered(name: str) -> tuple[str, str | None]:
+    """Return (value, source) where source is process_env|hermes_env|agent_env or None.
+
+    Honors HERMES_ENV_PATH / SHIFT_AGENT_ENV_PATH overrides so tests can isolate.
+    Process env wins over both files (matches workflow._read_env_value order).
+    """
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value, "process_env"
+    candidates = (
+        ("hermes_env", Path(os.environ.get("HERMES_ENV_PATH", "/root/.hermes/.env"))),
+        ("agent_env", Path(os.environ.get("SHIFT_AGENT_ENV_PATH", "/opt/shift-agent/.env"))),
+    )
+    for source, env_path in candidates:
+        if not env_path.exists():
+            continue
+        try:
+            for line in env_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, raw = line.split("=", 1)
+                if key.strip() == name:
+                    raw = raw.strip().strip('"').strip("'")
+                    if raw:
+                        return raw, source
+        except OSError:
+            continue
+    return "", None
+
+
+def _shift_agent_deploy_tag() -> tuple[str | None, str | None]:
+    """Resolve the SHIFT-AGENT deploy_tag + commit_hash from on-disk markers.
+
+    /opt/shift-agent/.commit-hash is written by tools/build-deploy-tarball.sh.
+    The newest /opt/shift-agent/deploys/deploy-*.tgz is the active agent deploy.
+    Both env-overrideable for test isolation. Either or both may be None.
+
+    IMPORTANT: this is the agent tarball deploy, NOT the cockpit deploy. The
+    cockpit (FastAPI + React) deploys separately and there is no cockpit-side
+    marker today; surfacing this value labeled as "cockpit" would lie when
+    cockpit code is fresh but the agent tarball is stale or vice versa.
+    See tasks/flyer-source-edit-provider-posture-2026-05-20.md follow-ups.
+    """
+    commit_hash: str | None = None
+    deploy_tag: str | None = None
+    hash_path = Path(os.environ.get("SHIFT_AGENT_DEPLOY_HASH_PATH", "/opt/shift-agent/.commit-hash"))
+    deploys_dir = Path(os.environ.get("SHIFT_AGENT_DEPLOYS_DIR", "/opt/shift-agent/deploys"))
+    if hash_path.exists():
+        try:
+            commit_hash = (hash_path.read_text(encoding="utf-8").strip() or None)
+            if commit_hash:
+                commit_hash = commit_hash[:40]
+        except OSError:
+            commit_hash = None
+    if deploys_dir.exists():
+        try:
+            # Deploy tag names embed a UTC timestamp (deploy-YYYYMMDD-HHMMSS-<sha>),
+            # so name-desc is the authoritative ordering. mtime is a secondary
+            # tiebreaker for tarballs that share an embedded timestamp.
+            tarballs = sorted(
+                (p for p in deploys_dir.iterdir() if p.name.startswith("deploy-") and p.suffix == ".tgz"),
+                key=lambda p: (p.name, p.stat().st_mtime),
+                reverse=True,
+            )
+            if tarballs:
+                deploy_tag = tarballs[0].name[: -len(".tgz")]
+        except OSError:
+            deploy_tag = None
+    return deploy_tag, commit_hash
+
+
+def _source_edit_manual_queue_impact() -> dict[str, Any]:
+    """Count active manual-queue rows with reason_code=source_edit_provider_unavailable.
+
+    Active = manual_status in {queued, in_progress}. Returns
+    {queued_count: int, oldest_age_hours: int | None}. Best-effort: any
+    exception loading the project store returns zero impact (the health
+    endpoint must never raise).
+    """
+    try:
+        rows = list_manual_queue(load_project_store())
+    except Exception:
+        return {"queued_count": 0, "oldest_age_hours": None}
+    matched = [
+        r for r in rows
+        if r.get("manual_reason_code") == "source_edit_provider_unavailable"
+        and r.get("manual_status") in {"queued", "in_progress"}
+    ]
+    if not matched:
+        return {"queued_count": 0, "oldest_age_hours": None}
+    oldest = max(int(r.get("age_hours", 0) or 0) for r in matched)
+    return {"queued_count": len(matched), "oldest_age_hours": oldest}
+
+
+def _flyer_image_model_config() -> dict[str, dict[str, str]]:
+    """Read deployed image-gen model config from config.yaml (not FlyerConfig defaults).
+
+    Falls back to FlyerConfig defaults if config.yaml cannot be loaded -- keeps
+    the health endpoint best-effort and non-raising.
+    """
+    try:
+        from ..state import load_config
+        flyer_cfg = load_config().flyer
+        draft = flyer_cfg.draft_image_model
+        final = flyer_cfg.final_image_model
+        edit = flyer_cfg.edit_image_model
+    except Exception:
+        defaults = FlyerConfig()
+        draft = defaults.draft_image_model
+        final = defaults.final_image_model
+        edit = defaults.edit_image_model
+    return {
+        "openrouter_generation_vision": {"draft_image_model": draft, "final_image_model": final},
+        "openai_source_edit": {"edit_image_model": edit},
+    }
+
+
+async def _platform_runtime_components() -> list[dict[str, Any]]:
+    """Probe gateway / bridge / paired / cockpit deploy. Reuses health.py helpers."""
+    from .health import _bridge_health, _gateway_active, _wa_paired
+
+    components: list[dict[str, Any]] = []
+    now_iso = _now().isoformat()
+
+    gw = _gateway_active()
+    components.append({
+        "name": "gateway",
+        "severity": "green" if gw else "red",
+        "detail": "active" if gw else "inactive",
+        "checked_at": now_iso,
+    })
+
+    bridge_ok, bridge_detail = await _bridge_health()
+    components.append({
+        "name": "whatsapp_bridge",
+        "severity": "green" if bridge_ok else "red",
+        "detail": bridge_detail,
+        "checked_at": now_iso,
+    })
+
+    paired, me_id = _wa_paired()
+    components.append({
+        "name": "whatsapp_paired",
+        "severity": "green" if paired else "red",
+        "detail": me_id or "not paired",
+        "checked_at": now_iso,
+    })
+
+    deploy_tag, commit_hash = _shift_agent_deploy_tag()
+    if deploy_tag:
+        deploy_detail = deploy_tag
+        deploy_severity = "green"
+    elif commit_hash:
+        deploy_detail = f"commit {commit_hash}"
+        deploy_severity = "green"
+    else:
+        deploy_detail = "deploy marker missing"
+        deploy_severity = "yellow"
+    components.append({
+        # Truthful label: this is the SHIFT-AGENT tarball marker, not the
+        # cockpit's. Cockpit deploys separately and has no own marker today
+        # (deferred — see plan/posture follow-up).
+        "name": "shift_agent_deploy",
+        "severity": deploy_severity,
+        "detail": deploy_detail,
+        "checked_at": now_iso,
+    })
+    return components
+
+
+def _flyer_provider_components() -> list[dict[str, Any]]:
+    """Per-provider posture for OpenRouter (generation/vision) + OpenAI (source-edit).
+
+    NEVER returns secret values or prefixes -- only key_present + key_source.
+    Severity policy:
+      - OpenRouter missing/placeholder => red (hard block on normal generation).
+      - OpenAI source-edit missing/placeholder => yellow (degraded; routes to
+        manual review). Stays yellow even when queued_count > 0 -- the detail
+        string surfaces the manual-queue impact prominently instead.
+    """
+    now_iso = _now().isoformat()
+    models = _flyer_image_model_config()
+
+    # OpenRouter -- generation + vision (normal path).
+    or_value, or_source = _read_env_layered("OPENROUTER_API_KEY")
+    or_placeholder = bool(or_value) and _is_placeholder(or_value)
+    or_present = bool(or_value) and not or_placeholder
+    if or_present:
+        or_severity = "green"
+        or_detail = f"OPENROUTER_API_KEY present ({or_source})"
+    elif or_placeholder:
+        or_severity = "red"
+        or_detail = "OPENROUTER_API_KEY is a placeholder - normal Flyer Studio generation is blocked"
+    else:
+        or_severity = "red"
+        or_detail = "OPENROUTER_API_KEY missing - normal Flyer Studio generation is blocked"
+
+    # OpenAI source-edit. Yellow when missing; queue impact surfaces in detail.
+    oa_value, oa_source = _read_env_layered("OPENAI_API_KEY")
+    oa_placeholder = bool(oa_value) and _is_placeholder(oa_value)
+    oa_present = bool(oa_value) and not oa_placeholder
+    queue_impact = _source_edit_manual_queue_impact()
+    if oa_present:
+        oa_severity = "green"
+        oa_detail = f"OPENAI_API_KEY present ({oa_source})"
+    else:
+        oa_severity = "yellow"
+        queued = queue_impact["queued_count"]
+        oldest = queue_impact["oldest_age_hours"]
+        if queued > 0:
+            oa_detail = (
+                "Exact flyer edits are falling back to manual review because source-edit "
+                f"provider is unavailable ({queued} queued; oldest "
+                f"{oldest if oldest is not None else 0}h)"
+            )
+        elif oa_placeholder:
+            oa_detail = "OPENAI_API_KEY is a placeholder - exact edits will route to manual review"
+        else:
+            oa_detail = "OPENAI_API_KEY missing - exact edits will route to manual review"
+
+    operator_note_oa = (
+        "Source-edit uses the OpenAI Images Edits API; generation/vision uses OpenRouter. "
+        "See backlog tasks/flyer-source-edit-provider-posture-2026-05-20.md."
+    )
+
+    return [
+        {
+            "name": "openrouter_generation_vision",
+            "purpose": "Image generation + vision extraction (normal Flyer Studio path)",
+            "severity": or_severity,
+            "detail": or_detail,
+            "key_present": or_present,
+            "key_source": or_source if or_present else None,
+            "model_config": models["openrouter_generation_vision"],
+            "checked_at": now_iso,
+        },
+        {
+            "name": "openai_source_edit",
+            "purpose": "Exact source-preserving flyer edits (OpenAI Images Edits API)",
+            "severity": oa_severity,
+            "detail": oa_detail,
+            "key_present": oa_present,
+            "key_source": oa_source if oa_present else None,
+            "model_config": models["openai_source_edit"],
+            "manual_queue_impact": queue_impact,
+            "operator_note": operator_note_oa,
+            "checked_at": now_iso,
+        },
+    ]
+
+
+@router.get("/health")
+async def flyer_health(_=Depends(require_auth)):
+    """Read-only flyer provider + platform-runtime health.
+
+    Surfaces gateway / bridge / paired / cockpit deploy plus OpenRouter
+    (generation + vision) and OpenAI source-edit posture. Never returns
+    secret values or prefixes - only key_present + key_source.
+    OpenRouter missing = red (blocks generation); source-edit missing = yellow
+    (degraded; routes to manual review).
+    """
+    components = await _platform_runtime_components()
+    providers = _flyer_provider_components()
+    # Top-level deploy fields name the SHIFT-AGENT tarball explicitly so a
+    # consumer cannot mis-attribute them to the cockpit's own deploy state.
+    shift_agent_deploy_tag, shift_agent_commit_hash = _shift_agent_deploy_tag()
+    return {
+        "checked_at": _now().isoformat(),
+        "shift_agent_deploy_tag": shift_agent_deploy_tag,
+        "shift_agent_commit_hash": shift_agent_commit_hash,
+        "components": components,
+        "providers": providers,
+    }

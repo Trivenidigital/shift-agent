@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import type React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, FileUp, Gift, Megaphone, RefreshCw, Search, Send, Users } from "lucide-react";
+import { Activity, AlertTriangle, FileUp, Gift, Megaphone, RefreshCw, Search, Send, Users } from "lucide-react";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
 import { cn } from "@/lib/cn";
 import { FlyerProjectEvidenceDrawer } from "./FlyerProjectEvidenceDrawer";
+import { ManualQueueActions } from "./flyer/ManualQueueActions";
 
 type Tab = "overview" | "customers" | "campaigns" | "projects" | "guests" | "queue";
 
@@ -107,6 +108,20 @@ interface OperatorUploadResult {
   size_bytes: number;
 }
 
+interface CloseNoSendResult {
+  ok: boolean;
+  project_id: string;
+  status: string;
+  manual_status: string;
+  backup: string;
+  notification: {
+    send_ok: boolean;
+    chat_id: string;
+    outbound_message_id: string;
+    error: string;
+  };
+}
+
 interface FlyerSummary {
   segments: Record<string, number>;
   total_customers: number;
@@ -116,6 +131,39 @@ interface FlyerSummary {
   stuck_edit_count: number;
   guest_orders: number;
   campaign_asset: { path: string; exists: boolean };
+}
+
+// P0-7: provider + runtime health
+type HealthSeverity = "green" | "yellow" | "red";
+
+interface FlyerHealthComponent {
+  name: string;
+  severity: HealthSeverity;
+  detail: string;
+  checked_at: string;
+}
+
+interface FlyerHealthProvider {
+  name: "openrouter_generation_vision" | "openai_source_edit";
+  purpose: string;
+  severity: HealthSeverity;
+  detail: string;
+  key_present: boolean;
+  key_source: "process_env" | "hermes_env" | "agent_env" | null;
+  model_config: Record<string, string>;
+  manual_queue_impact?: { queued_count: number; oldest_age_hours: number | null };
+  operator_note?: string;
+  checked_at: string;
+}
+
+interface FlyerHealth {
+  checked_at: string;
+  // Truthful naming: these are the SHIFT-AGENT tarball markers, not the
+  // cockpit's. The cockpit deploys separately and has no own marker today.
+  shift_agent_deploy_tag: string | null;
+  shift_agent_commit_hash: string | null;
+  components: FlyerHealthComponent[];
+  providers: FlyerHealthProvider[];
 }
 
 interface FlyerCustomer {
@@ -202,6 +250,113 @@ function Stat({ label, value, tone = "default" }: { label: string; value: number
       <div className="text-xs uppercase tracking-wide text-zinc-500">{label}</div>
       <div className={cn("mt-1 text-2xl font-semibold", tone === "warn" && "text-amber-700", tone === "good" && "text-emerald-700")}>{value}</div>
     </div>
+  );
+}
+
+function severityTone(severity: HealthSeverity): "green" | "amber" | "red" {
+  return severity === "green" ? "green" : severity === "yellow" ? "amber" : "red";
+}
+
+function HealthDot({ severity }: { severity: HealthSeverity }) {
+  const color = severity === "green" ? "bg-emerald-500" : severity === "yellow" ? "bg-amber-500" : "bg-red-500";
+  return <span className={cn("inline-block h-2 w-2 rounded-full", color)} aria-label={`severity: ${severity}`} />;
+}
+
+function FlyerHealthPanel({ data }: { data: FlyerHealth | undefined }) {
+  if (!data) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <Activity size={16} /> Provider & runtime health
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="text-xs text-zinc-500">Loading health…</div>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const provider = (name: FlyerHealthProvider["name"]) =>
+    data.providers.find((p) => p.name === name);
+  const openrouter = provider("openrouter_generation_vision");
+  const openai = provider("openai_source_edit");
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between gap-3">
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <Activity size={16} /> Provider & runtime health
+          </CardTitle>
+          <div className="text-xs text-zinc-500" title="Shift-agent tarball deploy marker (cockpit deploys separately)">
+            agent: {data.shift_agent_deploy_tag ?? data.shift_agent_commit_hash ?? "marker missing"}
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+          {data.components.map((c) => (
+            <div
+              key={c.name}
+              className="flex items-start gap-2 rounded-md border border-zinc-200 bg-white px-3 py-2"
+            >
+              <HealthDot severity={c.severity} />
+              <div className="min-w-0">
+                <div className="text-xs font-medium text-zinc-700">{c.name.replace(/_/g, " ")}</div>
+                <div className="truncate text-xs text-zinc-500" title={c.detail}>
+                  {c.detail}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="grid gap-3 lg:grid-cols-2">
+          {openrouter && (
+            <div className="rounded-md border-2 border-zinc-200 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-sm font-semibold">
+                  <HealthDot severity={openrouter.severity} />
+                  OpenRouter — generation & vision
+                </div>
+                <Badge tone={severityTone(openrouter.severity)}>{openrouter.severity}</Badge>
+              </div>
+              <div className="mt-2 text-xs text-zinc-600">{openrouter.detail}</div>
+              <div className="mt-2 text-xs text-zinc-500">
+                draft: <span className="font-mono">{openrouter.model_config.draft_image_model ?? "?"}</span> ·
+                {" "}final: <span className="font-mono">{openrouter.model_config.final_image_model ?? "?"}</span>
+              </div>
+            </div>
+          )}
+          {openai && (
+            <div className="rounded-md border-2 border-zinc-200 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-sm font-semibold">
+                  <HealthDot severity={openai.severity} />
+                  OpenAI — exact source edits
+                </div>
+                <Badge tone={severityTone(openai.severity)}>{openai.severity}</Badge>
+              </div>
+              <div className="mt-2 text-xs text-zinc-600">{openai.detail}</div>
+              <div className="mt-2 text-xs text-zinc-500">
+                edit model: <span className="font-mono">{openai.model_config.edit_image_model ?? "?"}</span>
+              </div>
+              {openai.manual_queue_impact && openai.manual_queue_impact.queued_count > 0 && (
+                <div className="mt-2 rounded bg-amber-50 px-2 py-1 text-xs text-amber-800">
+                  <strong>{openai.manual_queue_impact.queued_count}</strong> queued; oldest{" "}
+                  <strong>{openai.manual_queue_impact.oldest_age_hours ?? 0}h</strong>
+                </div>
+              )}
+              {openai.operator_note && (
+                <div className="mt-2 text-xs italic text-zinc-500">{openai.operator_note}</div>
+              )}
+            </div>
+          )}
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -396,6 +551,12 @@ export function FlyerAdmin() {
     queryFn: () => api.GET<FlyerSummary>("/flyer/summary"),
     refetchInterval: 15_000,
   });
+  // P0-7: provider + runtime health (read-only). 30s cadence is conservative.
+  const { data: health } = useQuery<FlyerHealth>({
+    queryKey: ["flyer-health"],
+    queryFn: () => api.GET<FlyerHealth>("/flyer/health"),
+    refetchInterval: 30_000,
+  });
   const { data: customerData } = useQuery<{
     customers: FlyerCustomer[];
     total: number;
@@ -515,6 +676,21 @@ export function FlyerAdmin() {
       qc.invalidateQueries({ queryKey: ["flyer-summary"] });
     },
   });
+  // P0-6: close/no-send mutation. Returns notification result the cockpit
+  // surfaces inline so the operator sees whether the proactive customer
+  // push reached the bridge or fell back to the reactive safety net.
+  const closeNoSendQueueItem = useMutation({
+    mutationFn: ({ projectId, opReason, force }: { projectId: string; opReason: string; force: boolean }) =>
+      api.POST<CloseNoSendResult>(
+        `/flyer/manual-queue/${projectId}/close-no-send`,
+        { reason: opReason, force },
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["flyer-manual-queue"] });
+      qc.invalidateQueries({ queryKey: ["flyer-summary"] });
+      qc.invalidateQueries({ queryKey: ["flyer-projects"] });
+    },
+  });
 
   const customers = customerData?.customers ?? [];
   const customerTotal = customerData?.total ?? customers.length;
@@ -583,6 +759,7 @@ export function FlyerAdmin() {
 
       {tab === "overview" && (
         <div className="space-y-5">
+          <FlyerHealthPanel data={health} />
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-7">
             <Stat label="Customers" value={summary?.total_customers ?? "-"} />
             <Stat label="Free Trial" value={summary?.segments.free_trial ?? "-"} tone="good" />
@@ -1050,17 +1227,25 @@ export function FlyerAdmin() {
                     );
                   }}
                   onBreakGlass={() => {
-                    if (window.confirm(`Break-glass send for ${queueDetail.project_id}? This bypasses QA — audit row will mark break_glass_sent.`)) {
-                      breakGlassQueueItem.mutate(
-                        { projectId: queueDetail.project_id, opReason: drawerReason.trim() },
-                        { onSuccess: () => closeDrawer() },
-                      );
-                    }
+                    breakGlassQueueItem.mutate(
+                      { projectId: queueDetail.project_id, opReason: drawerReason.trim() },
+                      { onSuccess: () => closeDrawer() },
+                    );
+                  }}
+                  onCloseNoSend={({ force }: { force: boolean }) => {
+                    closeNoSendQueueItem.mutate(
+                      { projectId: queueDetail.project_id, opReason: drawerReason.trim(), force },
+                      // Don't auto-close: the operator should see the proactive
+                      // notification result inline before dismissing the drawer.
+                    );
                   }}
                   completePending={completeQueueItem.isPending}
                   breakGlassPending={breakGlassQueueItem.isPending}
+                  closeNoSendPending={closeNoSendQueueItem.isPending}
                   completeError={mutationErrorMessage(completeQueueItem.error)}
                   breakGlassError={mutationErrorMessage(breakGlassQueueItem.error)}
+                  closeNoSendError={mutationErrorMessage(closeNoSendQueueItem.error)}
+                  closeNoSendResult={closeNoSendQueueItem.data ?? null}
                 />
               )}
             </div>
@@ -1082,28 +1267,35 @@ interface ManualQueueDrawerBodyProps {
   onUpload: (file: File) => void;
   onComplete: () => void;
   onBreakGlass: () => void;
+  onCloseNoSend: (opts: { force: boolean }) => void;
   completePending: boolean;
   breakGlassPending: boolean;
+  closeNoSendPending: boolean;
   completeError: string;
   breakGlassError: string;
+  closeNoSendError: string;
+  closeNoSendResult: CloseNoSendResult | null;
 }
 
 function ManualQueueDrawerBody(props: ManualQueueDrawerBodyProps) {
   const {
     detail, playbook, reason, onReasonChange,
     uploadedAsset, uploadError, uploadBusy, onUpload,
-    onComplete, onBreakGlass, completePending, breakGlassPending,
-    completeError, breakGlassError,
+    onComplete, onBreakGlass, onCloseNoSend,
+    completePending, breakGlassPending, closeNoSendPending,
+    completeError, breakGlassError, closeNoSendError, closeNoSendResult,
   } = props;
   const reasonOk = reason.trim().length >= 5;
   const completeOk = reasonOk && !!uploadedAsset && !completePending;
-  const [showCompleteConfirm, setShowCompleteConfirm] = useState(false);
+  const pendingActionKind = completePending
+    ? ("complete" as const)
+    : breakGlassPending
+      ? ("break_glass" as const)
+      : closeNoSendPending
+        ? ("close_no_send" as const)
+        : null;
   const integrityOnly = detail.verification_modes.includes("source_edit_integrity_only");
   const uploadedAssetUrl = uploadedAsset ? `/api/flyer/operator-uploads/${uploadedAsset.filename}` : "";
-
-  useEffect(() => {
-    setShowCompleteConfirm(false);
-  }, [uploadedAsset?.filename, reason]);
 
   return (
     <div className="space-y-4">
@@ -1222,61 +1414,61 @@ function ManualQueueDrawerBody(props: ManualQueueDrawerBodyProps) {
               )}
             </div>
           )}
-          {(completeError || breakGlassError) && (
-            <div className="rounded border border-rose-200 bg-rose-50 px-2 py-1 text-xs text-rose-700">
-              {completeError || breakGlassError}
-            </div>
-          )}
-          {uploadedAsset && showCompleteConfirm && (
-            <div className="rounded border border-amber-200 bg-amber-50 px-2 py-2 text-xs text-amber-900">
-              <div className="font-semibold">Final confirmation</div>
-              <div className="mt-1">
-                Confirm this visible asset is the final operator-reviewed output for {detail.project_id}.
+          <ManualQueueActions
+            projectId={detail.project_id}
+            reasonCode={detail.manual_review.reason_code}
+            reason={reason}
+            canComplete={completeOk}
+            onCompleteConfirmed={onComplete}
+            onBreakGlassConfirmed={onBreakGlass}
+            onCloseNoSendConfirmed={onCloseNoSend}
+            pendingAction={pendingActionKind}
+            completeAsset={uploadedAsset ? {
+              filename: uploadedAsset.filename,
+              mimeType: uploadedAsset.mime_type,
+              sizeBytes: uploadedAsset.size_bytes,
+              url: uploadedAssetUrl,
+            } : null}
+            errors={{
+              complete: completeError,
+              breakGlass: breakGlassError,
+              closeNoSend: closeNoSendError,
+            }}
+          />
+          {closeNoSendResult && (
+            <div
+              className={cn(
+                "rounded border px-2 py-2 text-xs",
+                closeNoSendResult.notification.send_ok
+                  ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+                  : "border-amber-200 bg-amber-50 text-amber-900",
+              )}
+            >
+              <div className="font-semibold">
+                {closeNoSendResult.notification.send_ok
+                  ? "Customer notified."
+                  : "Closed; customer notification did NOT send."}
               </div>
-              {uploadedAsset.mime_type.startsWith("image/") && (
-                <img
-                  src={uploadedAssetUrl}
-                  alt="final confirmation asset"
-                  className="mt-2 h-48 w-full rounded border border-amber-300 bg-white object-contain"
-                  loading="lazy"
-                />
+              <div className="mt-1">
+                Project {closeNoSendResult.project_id} · status {closeNoSendResult.status} · manual {closeNoSendResult.manual_status}
+              </div>
+              {closeNoSendResult.notification.send_ok && (
+                <div className="mt-1 font-mono">
+                  chat_id {closeNoSendResult.notification.chat_id} · outbound {closeNoSendResult.notification.outbound_message_id}
+                </div>
               )}
-              {uploadedAsset.mime_type === "application/pdf" && (
-                <a
-                  href={uploadedAssetUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="mt-2 inline-block rounded border border-amber-300 bg-white px-2 py-1 text-xs text-brand-700 underline-offset-2 hover:underline"
-                >
-                  Open final PDF in new tab
-                </a>
+              {!closeNoSendResult.notification.send_ok && closeNoSendResult.notification.error && (
+                <div className="mt-1 font-mono">
+                  {closeNoSendResult.notification.error}
+                </div>
+              )}
+              {!closeNoSendResult.notification.send_ok && (
+                <div className="mt-1 text-xs">
+                  Closure was persisted. The reactive "any update?" reply will still surface the closure on the customer's next inbound — that path is the safety net.
+                </div>
               )}
             </div>
           )}
-          <div className="flex gap-2">
-            <Button
-              size="sm"
-              disabled={!completeOk}
-              onClick={() => {
-                if (!showCompleteConfirm) {
-                  setShowCompleteConfirm(true);
-                  return;
-                }
-                onComplete();
-              }}
-            >
-              {showCompleteConfirm ? "Confirm complete with visible asset" : "Review final asset"}
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={!reasonOk || breakGlassPending}
-              onClick={onBreakGlass}
-              className="border-rose-300 text-rose-700 hover:bg-rose-50"
-            >
-              Break-glass
-            </Button>
-          </div>
         </div>
       </div>
     </div>
