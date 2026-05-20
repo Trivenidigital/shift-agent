@@ -1,7 +1,7 @@
 {
   "topic": "flyer-cockpit-p0-7-health-panel",
   "task_text": "flyer-cockpit-p0-7-health-panel",
-  "completed_at": "2026-05-20T01:54:50Z",
+  "completed_at": "2026-05-20T02:01:18Z",
   "drift_check_tag": "extends-Hermes",
   "net_new_step_count": 4,
   "hermes_step_count": 7,
@@ -18,5 +18,5 @@
     "src/agents/shift/scripts/shift-agent-deploy.sh",
     "web/frontend/src/sections/FlyerAdmin.tsx"
   ],
-  "refresh_reason": "review-fix: rename cockpit_service -> shift_agent_deploy for truthfulness (reviewer 2026-05-20 PR#134)"
+  "refresh_reason": "doc-nit: align plan-doc JSON sketch + helper names with post-review backend (reviewer 2026-05-20 PR#134)"
 }

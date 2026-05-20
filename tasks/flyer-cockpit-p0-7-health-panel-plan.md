@@ -69,13 +69,13 @@ In `web/backend/app/routers/flyer.py`, add one new route returning a structured 
 ```json
 {
   "checked_at": "2026-05-20T03:14:15Z",
-  "deploy_tag": "deploy-20260520-000424-a0e853e7",
-  "commit_hash": "a0e853e7",
+  "shift_agent_deploy_tag": "deploy-20260520-000424-a0e853e7",
+  "shift_agent_commit_hash": "a0e853e7",
   "components": [
-    {"name": "gateway",         "severity": "green", "detail": "active",                     "checked_at": "..."},
-    {"name": "whatsapp_bridge", "severity": "green", "detail": "connected",                  "checked_at": "..."},
-    {"name": "whatsapp_paired", "severity": "green", "detail": "<jid>",                      "checked_at": "..."},
-    {"name": "cockpit_service", "severity": "green", "detail": "deploy-...-a0e853e7",        "checked_at": "..."}
+    {"name": "gateway",            "severity": "green", "detail": "active",                  "checked_at": "..."},
+    {"name": "whatsapp_bridge",    "severity": "green", "detail": "connected",               "checked_at": "..."},
+    {"name": "whatsapp_paired",    "severity": "green", "detail": "<jid>",                   "checked_at": "..."},
+    {"name": "shift_agent_deploy", "severity": "green", "detail": "deploy-...-a0e853e7",     "checked_at": "..."}
   ],
   "providers": [
     {
@@ -103,7 +103,7 @@ In `web/backend/app/routers/flyer.py`, add one new route returning a structured 
 
 **Severity rules** (no false-positive red):
 
-- `gateway` / `bridge` / `paired` / `cockpit_service` — `green` if ok, `red` otherwise.
+- `gateway` / `whatsapp_bridge` / `whatsapp_paired` / `shift_agent_deploy` — `green` if ok, `red` (or `yellow` if deploy marker is missing) otherwise.
 - `openrouter_generation_vision` — `green` if key present, **`red`** if missing (hard block on normal generation).
 - `openai_source_edit` — `green` if key present, **`yellow`** if missing. Yellow because source-edit-unavailable is a known degraded posture that routes to the manual queue (`source_edit_provider_unavailable` reason exists today); it's not a customer-blocking outage for generation.
 
@@ -120,10 +120,12 @@ def _flyer_provider_health() -> list[dict]:
     """Inspects OPENROUTER_API_KEY + OPENAI_API_KEY; calls source_edit_provider_ready({})."""
 
 def _platform_runtime_health() -> list[dict]:
-    """Wraps existing health.py helpers (gateway, bridge, paired) + cockpit deploy tag."""
+    """Wraps existing health.py helpers (gateway, bridge, paired) + shift-agent deploy tag."""
 
-def _cockpit_deploy_tag() -> tuple[str | None, str | None]:
-    """Reads /opt/shift-agent/.commit-hash + scans deploys/ for newest deploy-*.tgz tag."""
+def _shift_agent_deploy_tag() -> tuple[str | None, str | None]:
+    """Reads /opt/shift-agent/.commit-hash + scans deploys/ for newest deploy-*.tgz tag.
+    NOTE: this is the AGENT tarball marker, not the cockpit's. Cockpit deploys
+    separately and has no own marker today (see deferred items + posture note)."""
 ```
 
 ### 2. Frontend: Health panel in `FlyerAdmin.tsx` overview tab
@@ -195,7 +197,7 @@ New file `tasks/flyer-source-edit-provider-posture-2026-05-20.md`:
 - `test_flyer_health_openai_missing_is_yellow_not_red` — no key → `severity="yellow"` (degraded, not hard block).
 - `test_flyer_health_key_source_reported` — fake `/root/.hermes/.env` file with key → `key_source="hermes_env"`; same key in process env → `key_source="process_env"` (process env wins).
 - `test_flyer_health_includes_model_config` — `draft_image_model`/`final_image_model`/`edit_image_model` exposed.
-- `test_flyer_health_returns_deploy_tag_when_marker_present` / `..._is_null_when_marker_missing`.
+- `test_deploy_tag_resolves_from_markers` / `test_deploy_tag_null_when_markers_missing` — asserts top-level keys `shift_agent_deploy_tag` + `shift_agent_commit_hash` (the shape test additionally rejects the old generic `deploy_tag`/`commit_hash` names as a regression guard).
 
 ### Smoke (`tests/test_flyer_golden_scenarios_real_model.py`)
 
