@@ -4,7 +4,13 @@ from __future__ import annotations
 import re
 from typing import Iterable
 
-from schemas import FlyerLockedFact, FlyerProject, FlyerRequestFields
+from schemas import (
+    FlyerAsset,
+    FlyerLockedFact,
+    FlyerProject,
+    FlyerRequestFields,
+    FlyerSourceContract,
+)
 
 
 ALLOWED_NEW_PROJECT_FACT_SOURCES = {
@@ -253,6 +259,134 @@ def fact_value(
     if fact and fact.value.strip():
         return fact.value
     return fallback or ""
+
+
+def _populate_forbidden_substrings(contract: FlyerSourceContract) -> None:
+    """Mutate `contract.forbidden_substrings` from requested replacements.
+
+    Three independent backstops guard against false positives that would
+    block legitimate flyers:
+      1. Skip if the OLD value is already a vision-extracted section item.
+      2. Skip if NEW starts with OLD (e.g. `Rice -> Jeera Rice` is a variant).
+      3. Skip single-word values that are not phone-shaped or address-shaped
+         — single-word brands are too risky to auto-forbid.
+    """
+    section_items = {item.lower() for section in contract.sections for item in section.items}
+    for old, new in contract.requested_replacements.items():
+        if not old or len(old) < 3:
+            continue
+        # Backstop 1: vision-confirmed menu item.
+        if old.lower() in section_items:
+            continue
+        # Backstop 2: new is a variant/extension of old.
+        if new and new.lower().startswith(old.lower()):
+            continue
+        digits = re.sub(r"\D", "", old)
+        if len(digits) >= 10:
+            if digits not in contract.forbidden_substrings:
+                contract.forbidden_substrings.append(digits)
+            continue
+        if re.search(r"\d", old) and any(
+            t in old.lower() for t in (" st", " dr", " ave", " rd", " blvd", " ln", " way", " ct", " pkwy")
+        ):
+            if old not in contract.forbidden_substrings:
+                contract.forbidden_substrings.append(old)
+            continue
+        # Backstop 3: single-word brands are too risky.
+        if len(old.split()) < 2:
+            continue
+        if any(word and word[0].isupper() for word in old.split()):
+            if old not in contract.forbidden_substrings:
+                contract.forbidden_substrings.append(old)
+
+
+def source_contract_locked_facts(
+    contract: FlyerSourceContract,
+    *,
+    asset: FlyerAsset,
+    message_id: str = "",
+) -> list[FlyerLockedFact]:
+    """Project a FlyerSourceContract into locked facts.
+
+    Fact id convention:
+      - source_heading:N            (reference_vision; required if preserve_*)
+      - source_section:N:heading    (reference_vision; required if preserve_*)
+      - source_section:N:item:M     (reference_vision; required if preserve_*)
+      - replacement:N:old           (customer_text; never required)
+      - replacement:N:new           (customer_text; always required)
+    """
+    facts: list[FlyerLockedFact] = []
+    require = contract.preserve_layout or contract.preserve_unmentioned_text
+    asset_meta = {"source_asset_id": asset.asset_id, "source_sha256": asset.sha256}
+
+    for idx, heading in enumerate(contract.required_headings):
+        fact = _fact(
+            f"source_heading:{idx}",
+            "Source heading",
+            heading,
+            "reference_vision",
+            required=require,
+            message_id=message_id,
+        )
+        if fact:
+            facts.append(fact.model_copy(update=asset_meta))
+
+    for section_idx, section in enumerate(contract.sections):
+        heading_fact = _fact(
+            f"source_section:{section_idx}:heading",
+            "Source section",
+            section.heading,
+            "reference_vision",
+            required=require,
+            message_id=message_id,
+        )
+        if heading_fact:
+            facts.append(heading_fact.model_copy(update=asset_meta))
+        for item_idx, item in enumerate(section.items):
+            item_fact = _fact(
+                f"source_section:{section_idx}:item:{item_idx}",
+                "Source item",
+                item,
+                "reference_vision",
+                required=require,
+                message_id=message_id,
+            )
+            if item_fact:
+                facts.append(item_fact.model_copy(update=asset_meta))
+
+    # `required_text` carries arbitrary visible source text the vision pass
+    # flagged as required (e.g. tagline rows, badges, sides rows). Without
+    # locking these as facts, "preserve everything else" survives in the
+    # schema but never reaches QA. Required-flag mirrors headings/sections.
+    for idx, text in enumerate(contract.required_text):
+        text_fact = _fact(
+            f"source_required_text:{idx}",
+            "Source required text",
+            text,
+            "reference_vision",
+            required=require,
+            message_id=message_id,
+        )
+        if text_fact:
+            facts.append(text_fact.model_copy(update=asset_meta))
+
+    for repl_idx, (old, new) in enumerate(contract.requested_replacements.items()):
+        for suffix, label, value, required in [
+            ("old", "Replaced source text", old, False),
+            ("new", "Required replacement text", new, True),
+        ]:
+            fact = _fact(
+                f"replacement:{repl_idx}:{suffix}",
+                label,
+                value,
+                "customer_text",
+                required=required,
+                message_id=message_id,
+            )
+            if fact:
+                facts.append(fact.model_copy(update=asset_meta))
+
+    return facts
 
 
 def context_isolation_blockers(project: FlyerProject) -> list[str]:

@@ -1,0 +1,24 @@
+{
+  "topic": "flyer-source-contract-first",
+  "task_text": "flyer-source-contract-first",
+  "completed_at": "2026-05-20T03:30:00Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 8,
+  "hermes_step_count": 6,
+  "files_to_read_first": [
+    "src/platform/schemas.py",
+    "src/platform/safe_io.py",
+    "src/agents/catering/scripts/parse-menu-photo",
+    "src/agents/catering/skills/update_catering_menu/SKILL.md",
+    "src/plugins/cf-router/hooks.py",
+    "src/plugins/cf-router/actions.py",
+    "src/agents/flyer/reference_extract.py",
+    "src/agents/flyer/facts.py",
+    "src/agents/flyer/visual_qa.py",
+    "src/agents/flyer/render.py",
+    "src/agents/flyer/scripts/create-flyer-project",
+    "tests/test_cf_router_flyer_routing.py",
+    "tests/test_flyer_schemas.py",
+    "tests/test_flyer_reference_extract.py"
+  ]
+}

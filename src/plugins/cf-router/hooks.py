@@ -161,6 +161,14 @@ def pre_gateway_dispatch(event: Any, gateway: Any = None, session_store: Any = N
             scope_choice_result = _try_flyer_reference_scope_choice_intercept(text, chat_id, event)
             if scope_choice_result is not None:
                 return scope_choice_result
+            # SOURCE/NEW intercept claims rows transitioned to
+            # `awaiting_source_vs_new_choice` by the choice intercept above.
+            # Ordered AFTER scope-choice (which may transition the row in the
+            # same pass) but BEFORE scope-authorization (status isolation:
+            # source-vs-new rows are not authorization-eligible).
+            source_vs_new_result = _try_flyer_source_vs_new_choice_intercept(text, chat_id, event)
+            if source_vs_new_result is not None:
+                return source_vs_new_result
             scope_auth_result = _try_flyer_reference_scope_authorization_intercept(text, chat_id, event)
             if scope_auth_result is not None:
                 return scope_auth_result
@@ -505,6 +513,18 @@ def _try_flyer_primary_intercept(
                     "I could not confirm this attached flyer belongs to this business account. "
                     "Please send a related flyer/reference or use Create One Flyer - $4 for unrelated work."
                 )
+            # Compute `original_intent` BEFORE save so the downstream
+            # SOURCE/NEW intercept can branch on exact-source-edit
+            # vs generic-reference. Today line 528 evaluates
+            # `is_exact_reference_edit_request` AFTER we return at 527
+            # for clarify/block — that signal would be lost without this
+            # capture. Computed only inside the clarify/block branch so
+            # scope_ok rows don't carry stale intent metadata.
+            original_intent = (
+                "exact_source_edit"
+                if media_path and actions.is_exact_reference_edit_request(text, has_media=True)
+                else "generic_reference"
+            )
             actions.save_flyer_reference_scope_pending(
                 chat_id=chat_id,
                 sender_phone=phone,
@@ -512,6 +532,7 @@ def _try_flyer_primary_intercept(
                 raw_request=raw_request,
                 media_path=media_path,
                 scope=scope or {},
+                original_intent=original_intent,
             )
             ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
             actions.audit_intercepted(
@@ -703,13 +724,60 @@ def _try_flyer_reference_scope_choice_intercept(text: str, chat_id: str, event: 
     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
     if not phone:
         return None
-    pending = actions.consume_flyer_reference_scope_choice(text, chat_id=chat_id, sender_phone=phone)
+    # When the original raw_request was an exact-source-edit and the customer
+    # replies `use as reference`, atomically transition the row to
+    # `awaiting_source_vs_new_choice` rather than consume it. The SOURCE/NEW
+    # intercept (below) then claims it on the customer's next reply.
+    pending = actions.consume_flyer_reference_scope_choice(
+        text,
+        chat_id=chat_id,
+        sender_phone=phone,
+        transition_to_status="awaiting_source_vs_new_choice",
+    )
     if not pending:
         return None
 
     choice = str(pending.get("choice") or "")
     business_name = str(((pending.get("customer") or {}).get("business_name")) or "this business")
     source = str(pending.get("source_organization") or "the source flyer")
+    original_intent = str(pending.get("original_intent") or "unknown")
+
+    # F0061 load-bearing branch: exact-edit + use-as-reference → ask
+    # explicit SOURCE vs NEW. Pre-fix this fell through to the use_reference
+    # path and silently downgraded the exact-edit request to a generic
+    # poster. The pending row's status has already been atomically rewritten
+    # to awaiting_source_vs_new_choice by the consumer above.
+    if choice == "use_reference" and original_intent == "exact_source_edit":
+        clarification = (
+            "Flyer Studio\n"
+            "------------\n"
+            "I can do this two ways:\n\n"
+            "Reply SOURCE to keep this same flyer and apply only the changes you asked for.\n"
+            "Reply NEW to create a brand-new flyer inspired by this one (different layout)."
+        )
+        ack_ok, mid, err = actions.send_flyer_text(chat_id, clarification)
+        pending_created_at = float(pending.get("created_at") or 0)
+        pending_age_sec = int(time.time() - pending_created_at) if pending_created_at else 0
+        try:
+            actions.audit_source_vs_new(
+                sender_phone=phone,
+                customer_id=str((pending.get("customer") or {}).get("customer_id") or ""),
+                original_intent="exact_source_edit",
+                choice="clarification_sent",
+                pending_age_sec=pending_age_sec,
+            )
+        except Exception:
+            pass  # best-effort; audit never blocks
+        actions.audit_intercepted(
+            reason="flyer_reference_scope_blocked",
+            chat_id=chat_id,
+            subprocess_rc=0 if ack_ok else 3,
+            detail=(
+                f"source_vs_new_clarification_sent; sender_role={role}; "
+                f"ack_message_id={mid}; ack_error={err[:300]}"
+            ),
+        )
+        return {"action": "skip", "reason": "cf-router flyer source-vs-new clarification sent"}
 
     if choice == "authorized":
         actions.save_flyer_reference_authorization_pending(pending)
@@ -812,6 +880,282 @@ def _try_flyer_reference_scope_choice_intercept(text: str, chat_id: str, event: 
     )
     return {"action": "skip",
             "reason": f"cf-router flyer reference scope use-reference: project {project_id}"}
+
+
+def _try_flyer_source_vs_new_choice_intercept(text: str, chat_id: str, event: Any) -> Optional[dict]:
+    """Claim SOURCE/NEW replies after `_try_flyer_reference_scope_choice_intercept`
+    transitioned a pending row to `awaiting_source_vs_new_choice`.
+
+    Five branches:
+      1. Compound parse: SOURCE/NEW followed by trailing instruction.
+      2. Status check-in pre-claim: `any update?` re-sends the clarification
+         verbatim and audits `clarification_resent` without consuming.
+      3. SOURCE branch: rebuilds raw_request with the source-edit marker
+         and triggers create-flyer-project with manual_edit_required=True.
+      4. NEW branch: triggers create-flyer-project WITHOUT manual_edit_required.
+      5. Idempotent retry: when consume returns None but a recent (<60s)
+         manual_edit_required project exists for this customer, re-send the ack.
+    """
+    message_id = _extract_message_id(event, chat_id, text)
+    phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
+    if not phone:
+        return None
+
+    choice_token, trailing = actions.parse_source_vs_new_followup(text)
+
+    # Branch 2: status check-in re-send.
+    if not choice_token:
+        existing = actions.peek_flyer_source_vs_new_pending(chat_id=chat_id, sender_phone=phone)
+        if existing and actions.flyer_is_status_checkin(text):
+            clarification = (
+                "Flyer Studio\n"
+                "------------\n"
+                "I can do this two ways:\n\n"
+                "Reply SOURCE to keep this same flyer and apply only the changes you asked for.\n"
+                "Reply NEW to create a brand-new flyer inspired by this one (different layout)."
+            )
+            ack_ok, mid, err = actions.send_flyer_text(chat_id, clarification)
+            try:
+                actions.audit_source_vs_new(
+                    sender_phone=phone,
+                    customer_id=str((existing.get("customer") or {}).get("customer_id") or ""),
+                    original_intent="exact_source_edit",
+                    choice="clarification_resent",
+                )
+            except Exception:
+                pass
+            actions.audit_intercepted(
+                reason="flyer_reference_scope_blocked",
+                chat_id=chat_id,
+                subprocess_rc=0 if ack_ok else 3,
+                detail=f"source_vs_new_status_checkin_resent; ack_message_id={mid}; ack_error={err[:300]}",
+            )
+            return {"action": "skip", "reason": "cf-router flyer source-vs-new status check-in"}
+        return None
+
+    pending = actions.consume_flyer_source_vs_new_choice(
+        choice_token,
+        trailing,
+        chat_id=chat_id,
+        sender_phone=phone,
+    )
+    if not pending:
+        # Branch 5: idempotent retry. SOURCE-only by design: a SOURCE-chosen
+        # project queues for manual review and the customer gets one ack, so
+        # a duplicate SOURCE reply within 60s should re-send the same ack.
+        # NEW-chosen projects already trigger a customer-facing concept-
+        # generation ack via the existing flyer-primary-project-created path,
+        # so a duplicate NEW reply does not need a second ack here — it falls
+        # through to the next intercept (or to the LLM) where the active-
+        # project intercept will catch any further customer text.
+        recent = actions.find_recent_flyer_manual_edit_project(phone, window_sec=60)
+        if recent and choice_token == "source":
+            project_id = str(recent.get("project_id") or "")
+            ack_ok, mid, err = actions.send_flyer_manual_edit_ack(
+                chat_id,
+                project_id,
+                str(recent.get("raw_request") or ""),
+                reason="source_edit_provider_unavailable",
+            )
+            actions.audit_intercepted(
+                reason="flyer_reference_exact_edit_queued",
+                chat_id=chat_id,
+                subprocess_rc=0 if ack_ok else 3,
+                detail=f"source_vs_new_retry_idempotent; project_id={project_id}; ack_message_id={mid}; ack_error={err[:300]}",
+            )
+            return {"action": "skip", "reason": f"cf-router flyer source-vs-new retry idempotent: project {project_id}"}
+        return None
+
+    customer = pending.get("customer") or {}
+    business_name = str(customer.get("business_name") or "this business")
+    raw_request = str(pending.get("raw_request") or "")
+    trailing_text = str(pending.get("customer_followup_instruction") or "")
+    customer_id = str(customer.get("customer_id") or "")
+    pending_created_at = float(pending.get("created_at") or 0)
+    pending_age_sec = int(time.time() - pending_created_at) if pending_created_at else 0
+
+    if pending.get("choice") == "source":
+        visible = " ".join(actions.flyer_visible_message_text(raw_request).split())
+        if trailing_text:
+            visible = f"{visible}. Also: {trailing_text}"
+        new_raw_request = f"Edit uploaded flyer/source artwork. Customer requested: {visible}"
+        ok, detail, project = actions.trigger_create_flyer_project(
+            customer_phone=phone,
+            raw_request=new_raw_request,
+            message_id=message_id,
+            reference_media_path=str(pending.get("media_path") or ""),
+            manual_edit_required=True,
+        )
+        project_id = str((project or {}).get("project_id") or "")
+        try:
+            actions.audit_source_vs_new(
+                sender_phone=phone,
+                customer_id=customer_id,
+                original_intent="exact_source_edit",
+                choice="source",
+                pending_age_sec=pending_age_sec,
+                customer_followup_instruction=trailing_text,
+            )
+        except Exception:
+            pass
+        if not ok or not project_id:
+            actions.audit_intercepted(
+                reason="flyer_primary_failed", chat_id=chat_id,
+                subprocess_rc=2, detail=f"source_vs_new_source_failed; {detail[:450]}",
+            )
+            return None
+
+        # Mirror the existing primary exact-edit handler at hooks.py:587-697:
+        # reserve quota → preflight → either run generation OR queue manual review.
+        # Previous shape always sent the manual-edit ack, which means a valid
+        # OPENAI_API_KEY never reached generation from the SOURCE branch.
+        access, quota_result = _reserve_flyer_access_or_reply(
+            chat_id, phone, project_id, message_id, consume_quota=True,
+        )
+        if quota_result is not None:
+            return quota_result
+        ready_ok, ready_detail, ready_reason_code = actions.flyer_source_edit_preflight(project or {})
+        if not ready_ok:
+            queue_ok, queue_detail = actions.invoke_update_flyer_project(
+                project_id,
+                "--queue-manual-review",
+                "--manual-reason-code", ready_reason_code,
+                "--manual-reason", ready_reason_code,
+                "--manual-detail", ready_detail[:500],
+            )
+            release_ok, release_detail = _release_flyer_access(
+                access, chat_id, phone, project_id, message_id,
+            )
+            if queue_ok:
+                ack_ok, outbound_message_id, ack_err = actions.send_flyer_manual_edit_ack(
+                    chat_id,
+                    project_id,
+                    new_raw_request,
+                    reason=ready_detail,
+                )
+            else:
+                ack_ok = False
+                outbound_message_id = ""
+                ack_err = f"manual_edit_ack_skipped_because_queue_failed: {queue_detail[:200]}"
+            actions.audit_intercepted(
+                reason="flyer_reference_exact_edit_queued" if (queue_ok and ack_ok) else "flyer_primary_failed",
+                chat_id=chat_id,
+                subprocess_rc=0 if queue_ok and ack_ok and release_ok else 3,
+                detail=(
+                    f"source_vs_new_source; project_id={project_id}; sender_role={role}; "
+                    f"source_edit_preflight_failed={ready_detail[:250]}; "
+                    f"reason_code={ready_reason_code}; access={access}; "
+                    f"queue_ok={queue_ok}; queue_detail={queue_detail[:250]}; "
+                    f"release_ok={release_ok}; release_detail={release_detail[:250]}; "
+                    f"ack_message_id={outbound_message_id}; ack_error={ack_err[:300]}"
+                ),
+            )
+            return {
+                "action": "skip",
+                "reason": f"cf-router flyer source-edit queued: project {project_id}",
+            }
+        proc_ok, proc_mid, proc_err = actions.send_flyer_edit_processing_ack(chat_id, project_id)
+        gen_ok, gen_detail = actions.trigger_generate_flyer_concepts(project_id)
+        if gen_ok:
+            ack_ok, outbound_message_id, ack_err = _send_preview_then_finalize_access(
+                access, chat_id, phone, project_id, message_id,
+                proc_ok=proc_ok, proc_mid=proc_mid, proc_err=proc_err,
+            )
+            reason = (
+                f"cf-router flyer source-edit generated: project {project_id}"
+                if ack_ok else f"cf-router flyer source-edit delivery failed: project {project_id}"
+            )
+            audit_reason = "flyer_primary_project_created"
+        else:
+            actions.invoke_update_flyer_project(
+                project_id,
+                "--queue-manual-review",
+                "--manual-reason", "source_edit_generation_failed",
+                "--manual-detail", gen_detail[:500],
+            )
+            ack_ok, manual_mid, ack_err = actions.send_flyer_manual_edit_ack(
+                chat_id,
+                project_id,
+                new_raw_request,
+                reason=f"automatic edit generation failed: {gen_detail}",
+            )
+            release_ok, release_detail = _release_flyer_access(
+                access, chat_id, phone, project_id, message_id,
+            )
+            outbound_message_id = ",".join(x for x in [proc_mid, manual_mid] if x)
+            ack_err = (
+                f"edit_generation_failed: {gen_detail}; "
+                f"release_ok={release_ok}; release_detail={release_detail[:250]}; ack_error={ack_err}"
+            )
+            reason = f"cf-router flyer source-edit queued: project {project_id}"
+            audit_reason = "flyer_reference_exact_edit_queued"
+        actions.audit_intercepted(
+            reason=audit_reason,
+            chat_id=chat_id,
+            subprocess_rc=0 if ack_ok else 3,
+            detail=(
+                f"source_vs_new_source; project_id={project_id}; sender_role={role}; "
+                f"ack_message_id={outbound_message_id}; ack_error={ack_err[:300]}"
+            ),
+        )
+        return {"action": "skip", "reason": reason}
+
+    if pending.get("choice") == "new":
+        source = str(pending.get("source_organization") or "the source flyer")
+        new_raw_request = (
+            f"{raw_request}\n\n"
+            f"Customer chose path 2: use {source} only as a reference/inspiration. "
+            f"Create a new original {business_name} flyer with a similar menu/content structure. "
+            f"Do not copy {source} branding/layout exactly."
+        ).strip()
+        if trailing_text:
+            new_raw_request = f"{new_raw_request}\n\nAdditional customer instruction: {trailing_text}"
+        ok, detail, project = actions.trigger_create_flyer_project(
+            customer_phone=phone,
+            raw_request=new_raw_request,
+            message_id=message_id,
+            reference_media_path=str(pending.get("media_path") or ""),
+        )
+        project_id = str((project or {}).get("project_id") or "")
+        try:
+            actions.audit_source_vs_new(
+                sender_phone=phone,
+                customer_id=customer_id,
+                original_intent="exact_source_edit",
+                choice="new",
+                pending_age_sec=pending_age_sec,
+                customer_followup_instruction=trailing_text,
+            )
+        except Exception:
+            pass
+        if not ok or not project_id:
+            actions.audit_intercepted(
+                reason="flyer_primary_failed", chat_id=chat_id,
+                subprocess_rc=2, detail=f"source_vs_new_new_failed; {detail[:450]}",
+            )
+            return None
+        if actions.flyer_project_has_manual_review_queued(project or {}):
+            manual = (project or {}).get("manual_review") or {}
+            ack_ok, outbound_message_id, ack_err = actions.send_flyer_manual_review_ack(
+                chat_id,
+                project_id,
+                new_raw_request,
+                reason=str(manual.get("detail") or manual.get("reason") or ""),
+            )
+        else:
+            ack_ok, outbound_message_id, ack_err = actions.send_flyer_intake_ack(chat_id, project_id)
+        actions.audit_intercepted(
+            reason="flyer_primary_project_created",
+            chat_id=chat_id,
+            subprocess_rc=0 if ack_ok else 3,
+            detail=(
+                f"source_vs_new_new; project_id={project_id}; sender_role={role}; "
+                f"ack_message_id={outbound_message_id}; ack_error={ack_err[:300]}"
+            ),
+        )
+        return {"action": "skip", "reason": f"cf-router flyer new-from-source chosen: project {project_id}"}
+
+    return None
 
 
 def _try_flyer_reference_scope_authorization_intercept(text: str, chat_id: str, event: Any) -> Optional[dict]:

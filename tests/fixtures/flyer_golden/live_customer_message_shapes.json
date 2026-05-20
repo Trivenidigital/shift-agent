@@ -80,5 +80,21 @@
       "starts_new_flyer": false,
       "revision_intent": true
     }
+  },
+  {
+    "id": "live_f0061_exact_edit_use_reference_downgrade",
+    "source": "redacted from main-vps F0061 (2026-05-20). Customer asked for exact source flyer edits, system clarification was sent, customer replied 'use as reference', and the system pre-fix downgraded the request to generic generation.",
+    "description": "Exact-edit raw request + 'use as reference' reply must NOT downgrade to generic generation. System must ask SOURCE vs NEW.",
+    "kind": "reply_shape",
+    "message": "use as reference",
+    "original_request": "I'd like you use this flyer for Lakshmi's Kitchen. Do not change anything else in the flyer, except the changes asked explicitly. Changes I want. 1. Replace Triveni Express with Lakshmi's Kitchen branding. 2. Replace phone number to +17329837841. 3. Veg Thali Special, replace Rice with Jeera Rice. 4. Change address to 90 Brybar Dr, Saint Johns, FL.",
+    "reply": "use as reference",
+    "expected_policy": "requires_explicit_new_or_source_choice",
+    "assertions": {
+      "status_request": false,
+      "approval_text": false,
+      "starts_new_flyer": false,
+      "revision_intent": false
+    }
   }
 ]

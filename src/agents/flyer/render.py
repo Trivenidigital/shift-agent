@@ -692,6 +692,15 @@ def write_text_manifest(
         "artifact_sha256": _sha256(artifact) if artifact.exists() else "",
         "source_sha256": _sha256(Path(source_path)) if source_path and Path(source_path).exists() else "",
         "verification_mode": verification_mode,
+        # Additive honesty fields (2026-05-20): `rendered_facts` is a copy of
+        # `expected_facts` because this manifest declares the facts the
+        # renderer was asked to draw, not the facts proven present in
+        # rendered pixels. Image-pixel verification is the QA report's job
+        # (run_visual_qa). Field-rename to `declared_facts` deferred to keep
+        # this PR scoped; the bool surface lets readers know to look at
+        # the QA report for ground truth.
+        "is_rendered_proof": False,
+        "verification_method": "declared_render_facts",
         "expected_facts": _facts_for_manifest(expected),
         "rendered_facts": _facts_for_manifest(rendered),
         "missing_fact_labels": sorted(set(missing)),
@@ -877,7 +886,21 @@ def _category_context(project: FlyerProject) -> str:
 
 
 def _context_has(context: str, terms: set[str]) -> bool:
-    return any(term in context for term in terms)
+    """Word-boundary-aware presence check for category-routing terms.
+
+    Pre-fix: bare substring match — `spa` matched inside `space`,
+    `transparent`, `Hispanic`. Multi-word terms (spaces or hyphens)
+    keep substring semantics because regex word-boundary doesn't help
+    when the term itself contains punctuation; single-word terms use
+    `\\bterm\\b`.
+    """
+    for term in terms:
+        if " " in term or "-" in term:
+            if term in context:
+                return True
+        elif re.search(rf"\b{re.escape(term)}\b", context):
+            return True
+    return False
 
 
 def _is_food_or_grocery_project(project: FlyerProject) -> bool:

@@ -29,10 +29,26 @@ class _NoopFileLock:
         return None
 
 
-def _load_script(monkeypatch: pytest.MonkeyPatch):
+def _load_script(monkeypatch: pytest.MonkeyPatch, *, with_audit: bool = False):
     fake_safe_io = types.ModuleType("safe_io")
     fake_safe_io.FileLock = _NoopFileLock
     fake_safe_io.atomic_write_text = lambda path, text: Path(path).write_text(text, encoding="utf-8")
+    if with_audit:
+        # Audit emission for FlyerSourceContractExtracted uses these; expose
+        # them on the stubbed safe_io so the script's optional import succeeds.
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _noop_flock(_path):
+            yield
+
+        def _append(path, line):
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            with Path(path).open("a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+
+        fake_safe_io.flock = _noop_flock
+        fake_safe_io.ndjson_append = _append
     monkeypatch.setitem(sys.modules, "safe_io", fake_safe_io)
     sys.path.insert(0, str(PLATFORM))
     module_name = "create_flyer_project_under_test"
@@ -729,3 +745,356 @@ def test_create_flyer_project_does_not_queue_when_required_facts_present(tmp_pat
     assert project["status"] == "intake_started"
     assert project["manual_review"]["status"] == "none"
     assert project["manual_review"]["reason_code"] == "unclassified"
+
+
+# ─── Task 4: source-contract locked-fact helpers ──────────────────
+
+
+def test_source_contract_locked_facts_for_f0061(tmp_path, monkeypatch):
+    """F0061-style contract yields source_section, source_heading, and
+    replacement:N:new locked facts. preserve_layout/preserve_unmentioned_text
+    flip the required bit on source-derived facts."""
+    sys.path.insert(0, str(PLATFORM))
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    from schemas import FlyerAsset, FlyerSourceContract, FlyerSourceContractSection
+    from agents.flyer.facts import source_contract_locked_facts
+
+    (tmp_path / "sample.png").write_bytes(b"x")
+    asset = FlyerAsset(
+        asset_id="A0001",
+        kind="reference_image",
+        source="whatsapp",
+        path=str(tmp_path / "sample.png"),
+        mime_type="image/png",
+        sha256="a" * 64,
+        original_message_id="m-ref",
+        received_at=datetime(2026, 5, 20, tzinfo=timezone.utc),
+    )
+
+    contract = FlyerSourceContract(
+        required_headings=["Monday Thali Specials"],
+        sections=[FlyerSourceContractSection(heading="Veg Thali Specials", items=["Rice", "Dal"])],
+        requested_replacements={"Triveni Express": "Lakshmi's Kitchen", "Rice": "Jeera Rice"},
+        preserve_layout=True,
+        preserve_unmentioned_text=True,
+    )
+    facts = source_contract_locked_facts(contract, asset=asset, message_id="m-x")
+    by_id = {f.fact_id: f for f in facts}
+    assert "source_heading:0" in by_id
+    assert by_id["source_heading:0"].value == "Monday Thali Specials"
+    assert by_id["source_heading:0"].required is True
+    assert by_id["source_section:0:heading"].value == "Veg Thali Specials"
+    assert by_id["source_section:0:item:0"].value == "Rice"
+    assert "replacement:0:new" in by_id
+    assert by_id["replacement:0:new"].required is True
+    # `replacement:N:old` is present but not required (it's tracked for QA negative-checks).
+    assert "replacement:0:old" in by_id
+    assert by_id["replacement:0:old"].required is False
+    # Provenance survives on every fact.
+    assert by_id["source_heading:0"].source_asset_id == "A0001"
+
+
+def test_source_contract_locked_facts_includes_required_text(tmp_path, monkeypatch):
+    """Required source text (e.g. tagline rows, sides rows, badges) must
+    become locked facts so QA's required-fact loop can enforce them.
+    Without this, `required_text` extracted from the source flyer lives
+    in the schema but never reaches QA — the "do not change anything else"
+    promise leaks at the QA boundary.
+
+    Regression for PR #137 review finding 1.
+    """
+    sys.path.insert(0, str(PLATFORM))
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    from schemas import FlyerAsset, FlyerSourceContract
+    from agents.flyer.facts import source_contract_locked_facts
+
+    (tmp_path / "sample.png").write_bytes(b"x")
+    asset = FlyerAsset(
+        asset_id="A0001",
+        kind="reference_image",
+        source="whatsapp",
+        path=str(tmp_path / "sample.png"),
+        mime_type="image/png",
+        sha256="a" * 64,
+        original_message_id="m-ref",
+        received_at=datetime(2026, 5, 20, tzinfo=timezone.utc),
+    )
+    contract = FlyerSourceContract(
+        required_text=["Sides: salad, raita, papad", "Today's special"],
+        preserve_layout=True,
+        preserve_unmentioned_text=True,
+    )
+    facts = source_contract_locked_facts(contract, asset=asset, message_id="m-x")
+    by_id = {f.fact_id: f for f in facts}
+    assert "source_required_text:0" in by_id
+    assert by_id["source_required_text:0"].value == "Sides: salad, raita, papad"
+    assert by_id["source_required_text:0"].required is True
+    assert by_id["source_required_text:0"].source == "reference_vision"
+    assert by_id["source_required_text:0"].source_asset_id == "A0001"
+    assert by_id["source_required_text:1"].value == "Today's special"
+
+
+def test_source_contract_locked_facts_not_required_when_no_preserve(tmp_path, monkeypatch):
+    sys.path.insert(0, str(PLATFORM))
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    from schemas import FlyerAsset, FlyerSourceContract
+    from agents.flyer.facts import source_contract_locked_facts
+
+    (tmp_path / "sample.png").write_bytes(b"x")
+    asset = FlyerAsset(
+        asset_id="A0001",
+        kind="reference_image",
+        source="whatsapp",
+        path=str(tmp_path / "sample.png"),
+        mime_type="image/png",
+        sha256="a" * 64,
+        original_message_id="m-ref",
+        received_at=datetime(2026, 5, 20, tzinfo=timezone.utc),
+    )
+    contract = FlyerSourceContract(
+        required_headings=["Some Heading"],
+        preserve_layout=False,
+        preserve_unmentioned_text=False,
+    )
+    facts = source_contract_locked_facts(contract, asset=asset)
+    by_id = {f.fact_id: f for f in facts}
+    assert by_id["source_heading:0"].required is False
+
+
+def test_populate_forbidden_substrings_brand_phone_but_not_menu_item(tmp_path):
+    sys.path.insert(0, str(PLATFORM))
+    from schemas import FlyerSourceContract, FlyerSourceContractSection
+    from agents.flyer.facts import _populate_forbidden_substrings
+
+    contract = FlyerSourceContract(
+        sections=[FlyerSourceContractSection(heading="Veg Thali Specials", items=["Rice"])],
+        requested_replacements={
+            "Triveni Express": "Lakshmi's Kitchen",
+            "Rice": "Jeera Rice",
+            "555-010-0100": "+17329837841",
+        },
+    )
+    _populate_forbidden_substrings(contract)
+    forbidden = contract.forbidden_substrings
+    assert "Triveni Express" in forbidden, forbidden
+    # Menu-item swap is NOT forbidden — both legitimately co-exist.
+    assert "Rice" not in forbidden
+    # Phone replacement adds digits-only run.
+    assert any("5550100100" in f for f in forbidden)
+
+
+def test_populate_forbidden_substrings_skips_single_word_brand(tmp_path):
+    sys.path.insert(0, str(PLATFORM))
+    from schemas import FlyerSourceContract
+    from agents.flyer.facts import _populate_forbidden_substrings
+
+    contract = FlyerSourceContract(
+        requested_replacements={"Acme": "Bravo"},
+    )
+    _populate_forbidden_substrings(contract)
+    assert "Acme" not in contract.forbidden_substrings
+
+
+def test_populate_forbidden_substrings_skips_new_starts_with_old(tmp_path):
+    """Rice -> Jeera Rice doesn't add Rice to forbidden_substrings even
+    when Rice is not in the vision section items."""
+    sys.path.insert(0, str(PLATFORM))
+    from schemas import FlyerSourceContract
+    from agents.flyer.facts import _populate_forbidden_substrings
+
+    contract = FlyerSourceContract(
+        requested_replacements={"Rice": "Jeera Rice"},
+    )
+    _populate_forbidden_substrings(contract)
+    assert "Rice" not in contract.forbidden_substrings
+
+
+# ─── Task 7: brand/branding edit semantics ────────────────────────
+
+
+def test_is_product_or_brand_promo_does_not_match_bare_branding_edit(monkeypatch):
+    """`replace Triveni branding with Lakshmi's Kitchen branding` is an
+    edit instruction — not a product-promo request. The post-fix matcher
+    requires brand keywords be paired with explicit promo/forward cues."""
+    module = _load_script(monkeypatch)
+    text = "Replace Triveni Express with Lakshmi's Kitchen branding"
+    assert module._is_product_or_brand_promo(text) is False
+
+
+def test_is_product_or_brand_promo_still_matches_explicit_brand_forward(monkeypatch):
+    module = _load_script(monkeypatch)
+    text = "brand-forward product promotion with premium imagery"
+    assert module._is_product_or_brand_promo(text) is True
+
+
+def test_is_product_or_brand_promo_matches_brand_promo_phrase(monkeypatch):
+    module = _load_script(monkeypatch)
+    text = "We need a brand promo for our supermarket grand opening"
+    assert module._is_product_or_brand_promo(text) is True
+
+
+# ─── Task 12 (PR-review follow-up): FlyerSourceContractExtracted audit emission ──
+
+
+def test_create_project_emits_source_contract_extracted_audit(monkeypatch, tmp_path, capsys):
+    """Regression for PR #137 review finding 2: design committed to emitting
+    FlyerSourceContractExtracted after extract_reference returns, but the
+    initial implementation never called the audit chokepoint. Operator
+    observability into provider-availability regressions depends on this row.
+
+    Test strategy: monkeypatch the audit helper to capture its kwargs rather
+    than trust filesystem-side audit IO. Verifies the call site exists and
+    is reached for source_edit_template role on a successful extraction.
+    """
+    sys.path.insert(0, str(PLATFORM))
+    module = _load_script(monkeypatch, with_audit=True)
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    reference = tmp_path / "src.png"
+    reference.write_bytes(b"fake")
+    _write_customer(customers_path, category="Indian grocery", phone="+17329837841")
+
+    captured = []
+
+    def _capture(*, extraction, project_id, now):
+        captured.append({
+            "role": extraction.role,
+            "status": extraction.status,
+            "project_id": project_id,
+            "source_contract": extraction.source_contract,
+        })
+
+    monkeypatch.setattr(
+        module,
+        "_emit_source_contract_extracted_audit",
+        _capture,
+        raising=False,
+    )
+
+    from schemas import FlyerSourceContract, FlyerSourceContractSection
+
+    def _fake_extract_reference(asset, *, raw_request, provider):
+        from schemas import FlyerReferenceExtraction
+        return FlyerReferenceExtraction(
+            asset_id=asset.asset_id,
+            role="source_edit_template",
+            provider="fake_source_contract",
+            status="ok",
+            extracted_facts=[],
+            detail="",
+            source_contract=FlyerSourceContract(
+                source_business_names=["Triveni Express"],
+                target_business_name="Lakshmi's Kitchen",
+                required_headings=["Monday Thali Specials"],
+                sections=[FlyerSourceContractSection(heading="Veg", items=["Rice"])],
+                requested_replacements={"Triveni Express": "Lakshmi's Kitchen"},
+                preserve_layout=True,
+                preserve_unmentioned_text=True,
+                confidence=0.85,
+            ),
+            extracted_at=datetime(2026, 5, 20, tzinfo=timezone.utc),
+        )
+
+    monkeypatch.setattr(module, "extract_reference", _fake_extract_reference, raising=False)
+    monkeypatch.setattr(
+        module,
+        "build_reference_extraction_provider",
+        lambda: None,
+        raising=False,
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+17329837841",
+        "--message-id", "m-audit",
+        "--raw-request",
+        # Must contain a `replace|change|edit` verb + `this/attached/source flyer`
+        # cue to trip classify_reference_role into source_edit_template.
+        "Replace Triveni Express with Lakshmi's Kitchen in this flyer. Do not change anything else.",
+        "--reference-media-path", str(reference),
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+        "--asset-dir", str(asset_dir),
+    ])
+
+    assert module.main() == 0
+    capsys.readouterr()
+    assert len(captured) == 1, f"expected one audit call; got {captured!r}"
+    assert captured[0]["role"] == "source_edit_template"
+    assert captured[0]["status"] == "ok"
+    assert captured[0]["project_id"].startswith("F")
+    assert captured[0]["source_contract"] is not None
+    assert "Monday Thali Specials" in captured[0]["source_contract"].required_headings
+
+
+def test_create_project_emits_audit_even_on_provider_unavailable(monkeypatch, tmp_path, capsys):
+    """Provider unavailable / low-confidence extraction must still trigger
+    the audit emission — operator visibility into how often the provider
+    is missing is part of the source-contract observability contract.
+    """
+    sys.path.insert(0, str(PLATFORM))
+    module = _load_script(monkeypatch, with_audit=True)
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    reference = tmp_path / "src.png"
+    reference.write_bytes(b"fake")
+    _write_customer(customers_path, category="Indian grocery", phone="+17329837841")
+
+    captured = []
+
+    def _capture(*, extraction, project_id, now):
+        captured.append({
+            "role": extraction.role,
+            "status": extraction.status,
+            "source_contract": extraction.source_contract,
+        })
+
+    monkeypatch.setattr(
+        module,
+        "_emit_source_contract_extracted_audit",
+        _capture,
+        raising=False,
+    )
+
+    def _fake_extract_reference(asset, *, raw_request, provider):
+        from schemas import FlyerReferenceExtraction
+        return FlyerReferenceExtraction(
+            asset_id=asset.asset_id,
+            role="source_edit_template",
+            provider="fake",
+            status="provider_unavailable",
+            extracted_facts=[],
+            detail="provider unavailable",
+            source_contract=None,
+            extracted_at=datetime(2026, 5, 20, tzinfo=timezone.utc),
+        )
+
+    monkeypatch.setattr(module, "extract_reference", _fake_extract_reference, raising=False)
+    monkeypatch.setattr(
+        module,
+        "build_reference_extraction_provider",
+        lambda: None,
+        raising=False,
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+17329837841",
+        "--message-id", "m-audit-pu",
+        "--raw-request",
+        # Must contain a `replace|change|edit` verb + `this/attached/source flyer`
+        # cue to trip classify_reference_role into source_edit_template.
+        "Replace Triveni Express with Lakshmi's Kitchen in this flyer. Do not change anything else.",
+        "--reference-media-path", str(reference),
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+        "--asset-dir", str(asset_dir),
+    ])
+    assert module.main() == 0
+    capsys.readouterr()
+    assert len(captured) == 1, f"expected one audit call even on provider_unavailable; got {captured!r}"
+    assert captured[0]["role"] == "source_edit_template"
+    assert captured[0]["status"] == "provider_unavailable"
+    assert captured[0]["source_contract"] is None

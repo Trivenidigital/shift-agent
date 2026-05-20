@@ -245,6 +245,26 @@ def run_visual_qa(
         # don't false-fail against OCR '+1 732 983 7841' / 'Lakshmis Kitchen'.
         if not _value_present_in(normalized, fact.value):
             blockers.append(f"missing required visible fact: {fact.fact_id}")
+    # Source-contract negative-assertion gate: any value in
+    # forbidden_substrings (populated upstream from brand/phone/address
+    # replacements) must NOT appear in the OCR text. Reuses the same
+    # word-boundary-aware presence check as the positive loop.
+    for ext in getattr(project, "reference_extractions", []) or []:
+        contract = getattr(ext, "source_contract", None)
+        if not contract:
+            continue
+        for forbidden in getattr(contract, "forbidden_substrings", []) or []:
+            if not forbidden:
+                continue
+            if _looks_like_phone(forbidden):
+                if _phone_value_present_in(extracted_text, forbidden):
+                    blockers.append(f"replaced source text still visible: {forbidden}")
+                continue
+            normalized_forbidden = _normalize_text_for_match(forbidden)
+            if not normalized_forbidden:
+                continue
+            if _text_value_present_in(normalized, normalized_forbidden):
+                blockers.append(f"replaced source text still visible: {forbidden}")
     return FlyerVisualQAReport(
         project_id=project.project_id,
         asset_id=asset_id,

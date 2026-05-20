@@ -188,6 +188,50 @@ def test_every_preflight_failure_site_in_hooks_uses_dynamic_reason_code():
         )
 
 
+def test_source_branch_route_falls_through_source_edit_preflight(tmp_path, monkeypatch):
+    """Regression-pin (Task 8): the new SOURCE branch added in Task 5 routes
+    customers through trigger_create_flyer_project(manual_edit_required=True).
+    The downstream `--manual-edit-required` path in create-flyer-project
+    queues `source_edit_provider_unavailable` when OPENAI_API_KEY is absent;
+    this test pins that the source-edit preflight returns the correct triad
+    (which the create-flyer-project flow then keys on)."""
+    actions = _load_actions_module()
+    image = tmp_path / "ref.png"
+    image.write_bytes(b"png")
+    # No OPENAI key — provider unavailable.
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    ok, detail, reason_code = actions.flyer_source_edit_preflight({
+        "assets": [{
+            "kind": "reference_image",
+            "path": str(image),
+            "mime_type": "image/png",
+        }]
+    })
+    assert ok is False
+    assert reason_code == "source_edit_provider_unavailable"
+
+
+def test_source_branch_with_provider_key_passes_preflight(tmp_path, monkeypatch):
+    """SOURCE branch + valid OPENAI key reaches the generate path
+    (preflight returns ready)."""
+    actions = _load_actions_module()
+    image = tmp_path / "ref.png"
+    image.write_bytes(b"png")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-real-test-key")
+
+    ok, detail, reason_code = actions.flyer_source_edit_preflight({
+        "assets": [{
+            "kind": "reference_image",
+            "path": str(image),
+            "mime_type": "image/png",
+        }]
+    })
+    assert ok is True
+    assert detail == "ready"
+    assert reason_code == ""
+
+
 def test_site_2_release_runs_before_ack_for_consistent_quota_ordering():
     """Fix E: in `_try_flyer_reference_scope_authorization_intercept`, the
     quota release MUST happen before the customer ack (matching site 1). If

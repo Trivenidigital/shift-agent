@@ -513,6 +513,40 @@ def audit_intercepted(reason: str, chat_id: str, code: Optional[str] = None,
         sys.stderr.write(f"cf-router: audit emit failed (non-fatal): {e}\n")
 
 
+def audit_source_vs_new(
+    *,
+    sender_phone: str = "",
+    customer_id: str = "",
+    original_intent: str = "exact_source_edit",
+    choice: str = "clarification_sent",
+    pending_age_sec: int = 0,
+    customer_followup_instruction: str = "",
+) -> None:
+    """Emit a `flyer_source_vs_new_chosen` audit row via the deployed
+    safe_io.ndjson_append chokepoint.
+
+    Best-effort: failures are logged to stderr so a broken audit pipeline
+    cannot regress the customer-facing behavior.
+    """
+    try:
+        _ensure_platform_path()
+        from safe_io import ndjson_append  # type: ignore
+        from schemas import FlyerSourceVsNewChosen  # type: ignore
+        entry = FlyerSourceVsNewChosen(
+            type="flyer_source_vs_new_chosen",
+            ts=datetime.now(timezone.utc),
+            sender_phone=sender_phone,
+            customer_id=customer_id,
+            original_intent=original_intent,  # type: ignore
+            choice=choice,  # type: ignore
+            pending_age_sec=pending_age_sec,
+            customer_followup_instruction=customer_followup_instruction[:500],
+        )
+        ndjson_append(LOG_PATH, entry.model_dump_json())
+    except Exception as e:
+        sys.stderr.write(f"cf-router: source_vs_new audit emit failed (non-fatal): {e}\n")
+
+
 # === F7 path: catering-dispatcher-watchdog (PR-CF7) ===
 #
 # Replaces the standalone `catering-dispatcher-watchdog` daemon
@@ -2254,8 +2288,17 @@ def save_flyer_reference_scope_pending(
     ttl_sec: int = 1800,
     status: str = "awaiting_choice",
     authorization_note: str = "",
+    original_intent: str = "unknown",
 ) -> None:
-    """Remember that the last unrelated-reference reply is awaiting option 1/2."""
+    """Remember that the last unrelated-reference reply is awaiting option 1/2.
+
+    `original_intent` records whether the original raw request was an
+    exact-source-edit ('exact_source_edit') or a generic reference use
+    ('generic_reference'). Downstream intercepts branch on this to decide
+    whether `use as reference` triggers the SOURCE/NEW clarification path
+    instead of immediate generic generation. Defaults to 'unknown' for
+    callers that have not been updated.
+    """
     if not chat_id or not media_path:
         return
     now_ts = time.time()
@@ -2282,6 +2325,7 @@ def save_flyer_reference_scope_pending(
             "source_organization": source_names[0] if source_names else "",
             "status": status,
             "authorization_note": authorization_note,
+            "original_intent": original_intent,
             "created_at": now_ts,
             "expires_at": now_ts + max(60, ttl_sec),
         })
@@ -2310,8 +2354,17 @@ def consume_flyer_reference_scope_choice(
     *,
     chat_id: str,
     sender_phone: str,
+    transition_to_status: Optional[str] = None,
 ) -> Optional[dict]:
-    """Return pending reference-scope choice for option 1/2 replies, consuming it."""
+    """Return pending reference-scope choice for option 1/2 replies, consuming it.
+
+    When `transition_to_status` is provided AND the matched row's choice is
+    `use_reference` AND its `original_intent == 'exact_source_edit'`, the row
+    is REWRITTEN in-place with the new status under the same lock instead of
+    being removed. This eliminates the race window between the
+    `_try_flyer_reference_scope_choice_intercept` consume step and the
+    SOURCE/NEW intercept's lookup of the awaiting-source-vs-new-choice row.
+    """
     choice = _reference_scope_choice(text)
     if not choice:
         return None
@@ -2319,6 +2372,7 @@ def consume_flyer_reference_scope_choice(
         state = _read_reference_scope_state()
         pending = state.get("pending", [])
         matched: Optional[dict] = None
+        matched_index: int = -1
         remaining: list[dict] = []
         for item in pending:
             if str(item.get("status") or "awaiting_choice") != "awaiting_choice":
@@ -2328,15 +2382,152 @@ def consume_flyer_reference_scope_choice(
             same_phone = sender_phone and item.get("sender_phone") == sender_phone
             if matched is None and (same_chat or same_phone):
                 matched = dict(item)
+                matched_index = len(remaining)
                 continue
             remaining.append(item)
         if matched is None:
             if remaining != pending:
                 _write_reference_scope_state({"schema_version": 1, "pending": remaining})
             return None
-        _write_reference_scope_state({"schema_version": 1, "pending": remaining})
+        if (
+            transition_to_status
+            and choice == "use_reference"
+            and str(matched.get("original_intent") or "") == "exact_source_edit"
+        ):
+            transitioned = dict(matched)
+            transitioned["status"] = transition_to_status
+            remaining.insert(matched_index, transitioned)
+            _write_reference_scope_state({"schema_version": 1, "pending": remaining})
+        else:
+            _write_reference_scope_state({"schema_version": 1, "pending": remaining})
     matched["choice"] = choice
     return matched
+
+
+def consume_flyer_source_vs_new_choice(
+    choice_token: str,
+    trailing: str,
+    *,
+    chat_id: str,
+    sender_phone: str,
+) -> Optional[dict]:
+    """Consume a pending awaiting_source_vs_new_choice row for SOURCE/NEW reply.
+
+    Returns the row (with `choice` and `customer_followup_instruction`
+    attached) if a matching row exists, else None. Removes the row from the
+    state file inside the same lock that scopes the read.
+    """
+    if choice_token not in {"source", "new"}:
+        return None
+    with _reference_scope_state_lock():
+        state = _read_reference_scope_state()
+        pending = state.get("pending", [])
+        matched: Optional[dict] = None
+        remaining: list[dict] = []
+        for item in pending:
+            if str(item.get("status") or "") != "awaiting_source_vs_new_choice":
+                remaining.append(item)
+                continue
+            same_chat = chat_id and item.get("chat_id") == chat_id
+            same_phone = sender_phone and item.get("sender_phone") == sender_phone
+            if matched is None and (same_chat or same_phone):
+                matched = dict(item)
+                continue
+            remaining.append(item)
+        if matched is None:
+            return None
+        _write_reference_scope_state({"schema_version": 1, "pending": remaining})
+    matched["choice"] = choice_token
+    matched["customer_followup_instruction"] = trailing or ""
+    return matched
+
+
+def peek_flyer_source_vs_new_pending(
+    *,
+    chat_id: str,
+    sender_phone: str,
+) -> Optional[dict]:
+    """Read-only lookup for the awaiting_source_vs_new_choice row.
+
+    Used by the status check-in branch so it can re-send the clarification
+    without consuming the pending row.
+    """
+    with _reference_scope_state_lock():
+        state = _read_reference_scope_state()
+        for item in state.get("pending", []):
+            if str(item.get("status") or "") != "awaiting_source_vs_new_choice":
+                continue
+            same_chat = chat_id and item.get("chat_id") == chat_id
+            same_phone = sender_phone and item.get("sender_phone") == sender_phone
+            if same_chat or same_phone:
+                return dict(item)
+    return None
+
+
+_SOURCE_TOKEN_RE = re.compile(
+    r"^\s*(?P<token>source|keep\s+source|same\s+flyer|exact\s+edit|option\s*1|1)\b[\s.,:;!\-—]*(?P<trailing>.*)$",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+_NEW_TOKEN_RE = re.compile(
+    r"^\s*(?P<token>new|new\s+flyer|inspired(?:\s+by)?|option\s*2|2)\b[\s.,:;!\-—]*(?P<trailing>.*)$",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+
+
+def parse_source_vs_new_followup(text: str) -> tuple[str, str]:
+    """Return (choice, trailing). choice is 'source'|'new'|''."""
+    body = " ".join(flyer_visible_message_text(text).split())
+    for choice, pattern in (("source", _SOURCE_TOKEN_RE), ("new", _NEW_TOKEN_RE)):
+        match = pattern.match(body)
+        if match:
+            trailing = " ".join(match.group("trailing").strip(" .,:;-—").split())
+            return choice, trailing[:500]
+    return "", ""
+
+
+_STATUS_CHECKIN_RE = re.compile(
+    r"^(?:any\s+update|is\s+it\s+ready|what'?s?\s+(?:the\s+)?status|update\??|status\??|ready\??)\??$",
+    flags=re.IGNORECASE,
+)
+
+
+def flyer_is_status_checkin(text: str) -> bool:
+    body = " ".join(flyer_visible_message_text(text).split()).strip(" .!,:;-—")
+    return bool(_STATUS_CHECKIN_RE.match(body))
+
+
+def find_recent_flyer_manual_edit_project(
+    customer_phone: str,
+    *,
+    window_sec: int = 60,
+) -> Optional[dict]:
+    """Return the most recent manual_edit_required project for this customer
+    created within `window_sec` seconds. Used by the idempotent-retry
+    branch of the SOURCE/NEW intercept."""
+    try:
+        doc = json.loads(Path(str(FLYER_PROJECTS_PATH)).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    now_ts = time.time()
+    candidates = []
+    for project in doc.get("projects", []) or []:
+        if not isinstance(project, dict):
+            continue
+        if project.get("customer_phone") != customer_phone:
+            continue
+        if project.get("status") != "manual_edit_required":
+            continue
+        created_at = project.get("created_at") or ""
+        try:
+            ts = datetime.fromisoformat(str(created_at).replace("Z", "+00:00")).timestamp()
+        except (ValueError, TypeError):
+            continue
+        if now_ts - ts <= max(1, window_sec):
+            candidates.append((ts, project))
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return candidates[0][1]
 
 
 def _consume_flyer_reference_authorization_reply_locked(
