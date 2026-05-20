@@ -1,0 +1,84 @@
+[
+  {
+    "id": "live_source_edit_long_changes_co_owner",
+    "source": "redacted from main-vps F0052/F0053/F0058-F0060 projects and decisions.log on 2026-05-20",
+    "description": "Source flyer edit with long explicit changes, saved account details, and short co-owner continuation.",
+    "kind": "create_project",
+    "category": "manual_queue",
+    "manual_edit_required": true,
+    "raw_request": "Authorized flyer/source artwork update.\nAuthorized relationship note: co-owner.\nUse saved Lakshmis Kitchen account details.\n\nOriginal customer request: I'd like you use this flyer for Lakshmi's Kitchen. Do not change anything else in the flyer, except the changes asked explicitly. Changes I want. 1. Replace Triveni Express with Lakshmi's Kitchen branding. 2. Replace phone number to +1 555 010 0100. 3. Veg Thali Special, replace Rice with Jeera Rice.\nUploaded reference image/template is attached. Use it when designing this flyer.",
+    "expected_status": "manual_edit_required",
+    "expected_reason_code": "source_edit_provider_unavailable",
+    "expected_locked_facts": {
+      "business_name": "Lakshmi's Kitchen"
+    }
+  },
+  {
+    "id": "live_status_any_update",
+    "source": "redacted from main-vps source-edit status-check follow-ups around F0052/F0053/F0058-F0060",
+    "description": "Customer check-in while a source-preserving edit is queued.",
+    "kind": "reply_shape",
+    "message": "any update?",
+    "assertions": {
+      "status_request": true,
+      "approval_text": false,
+      "starts_new_flyer": false,
+      "revision_intent": false
+    }
+  },
+  {
+    "id": "live_short_co_owner_ack",
+    "source": "redacted from main-vps F0053/F0058/F0059/F0060 authorization follow-up shape",
+    "description": "Short authorization relationship reply after the system asks for source-flyer relationship.",
+    "kind": "reference_authorization_reply",
+    "message": "co-owner",
+    "chat_id": "201975216009469@lid",
+    "sender_phone": "+19045550104",
+    "pending": {
+      "customer": {
+        "business_name": "Lakshmis Kitchen"
+      },
+      "raw_request": "Use this flyer for Lakshmis Kitchen. Replace Triveni Express. Replace phone number. Veg Thali Special, replace Rice with Jeera Rice.",
+      "media_path": "/opt/shift-agent/.hermes/image_cache/triveni.jpg",
+      "scope": {
+        "visible_organization_names": [
+          "Triveni Express"
+        ]
+      }
+    },
+    "expected_choice": "use_account_details",
+    "expected_authorization_note": "co-owner",
+    "assertions": {
+      "status_request": false,
+      "approval_text": false,
+      "starts_new_flyer": false,
+      "revision_intent": false
+    }
+  },
+  {
+    "id": "live_short_approval_reply",
+    "source": "redacted from live WhatsApp approval/ack reply patterns and approval tests",
+    "description": "Title-case approval reply from a real WhatsApp user.",
+    "kind": "reply_shape",
+    "message": "Approve",
+    "assertions": {
+      "status_request": false,
+      "approval_text": true,
+      "starts_new_flyer": false,
+      "revision_intent": false
+    }
+  },
+  {
+    "id": "live_short_correction_reply",
+    "source": "redacted from immediate post-delivery correction shape in Flyer lessons and F-series routing fixes",
+    "description": "Short correction that must stay a revision/correction, not a status request or new flyer.",
+    "kind": "reply_shape",
+    "message": "Swap Tatte Idly with Ghee Karam Idly",
+    "assertions": {
+      "status_request": false,
+      "approval_text": false,
+      "starts_new_flyer": false,
+      "revision_intent": true
+    }
+  }
+]

@@ -94,12 +94,16 @@ EXPECTED_AXES: frozenset[str] = frozenset({
     "real_customer_chloe_salon",
     "real_customer_lakshmi_price_list",
     "real_customer_source_edit_request",
+    "live_source_edit_long_changes_co_owner",
 })
 
 REPO = Path(__file__).resolve().parent.parent
 PLATFORM = REPO / "src" / "platform"
 SRC = REPO / "src"
 SCRIPT = REPO / "src" / "agents" / "flyer" / "scripts" / "create-flyer-project"
+LIVE_SHAPES_FIXTURE = (
+    REPO / "tests" / "fixtures" / "flyer_golden" / "live_customer_message_shapes.json"
+)
 
 
 # ---------- scenario catalog ----------
@@ -116,6 +120,95 @@ class GoldenScenario:
     expected_locked_facts: dict[str, str] = field(default_factory=dict)
     expected_status_reply_contains: list[str] = field(default_factory=list)
     expected_status_reply_excludes: list[str] = field(default_factory=list)
+    source: str = ""
+    manual_edit_required: bool = False
+
+
+@dataclass(frozen=True)
+class LiveReplyShape:
+    id: str
+    description: str
+    message: str
+    assertions: dict[str, bool]
+    source: str = ""
+
+
+@dataclass(frozen=True)
+class LiveReferenceAuthorizationShape:
+    id: str
+    description: str
+    message: str
+    chat_id: str
+    sender_phone: str
+    pending: dict
+    expected_choice: str
+    expected_authorization_note: str
+    assertions: dict[str, bool]
+    source: str = ""
+
+
+def _load_live_shapes() -> tuple[
+    list[GoldenScenario],
+    list[LiveReplyShape],
+    list[LiveReferenceAuthorizationShape],
+]:
+    rows = json.loads(LIVE_SHAPES_FIXTURE.read_text(encoding="utf-8"))
+    create_project_rows: list[GoldenScenario] = []
+    reply_rows: list[LiveReplyShape] = []
+    authorization_rows: list[LiveReferenceAuthorizationShape] = []
+    for row in rows:
+        kind = row["kind"]
+        if kind == "create_project":
+            create_project_rows.append(
+                GoldenScenario(
+                    id=row["id"],
+                    description=row["description"],
+                    category=row.get("category", "live_customer"),
+                    raw_request=row["raw_request"],
+                    expected_status=row.get("expected_status", "intake_started"),
+                    expected_reason_code=row.get("expected_reason_code"),
+                    expected_locked_facts=row.get("expected_locked_facts", {}),
+                    expected_status_reply_contains=row.get("expected_status_reply_contains", []),
+                    expected_status_reply_excludes=row.get("expected_status_reply_excludes", []),
+                    source=row.get("source", ""),
+                    manual_edit_required=bool(row.get("manual_edit_required", False)),
+                )
+            )
+        elif kind == "reference_authorization_reply":
+            authorization_rows.append(
+                LiveReferenceAuthorizationShape(
+                    id=row["id"],
+                    description=row["description"],
+                    message=row["message"],
+                    chat_id=row["chat_id"],
+                    sender_phone=row["sender_phone"],
+                    pending=row["pending"],
+                    expected_choice=row["expected_choice"],
+                    expected_authorization_note=row["expected_authorization_note"],
+                    assertions=row.get("assertions", {}),
+                    source=row.get("source", ""),
+                )
+            )
+        elif kind == "reply_shape":
+            reply_rows.append(
+                LiveReplyShape(
+                    id=row["id"],
+                    description=row["description"],
+                    message=row["message"],
+                    assertions=row.get("assertions", {}),
+                    source=row.get("source", ""),
+                )
+            )
+        else:
+            raise AssertionError(f"unknown live Flyer golden fixture kind: {kind!r}")
+    return create_project_rows, reply_rows, authorization_rows
+
+
+(
+    _LIVE_CREATE_PROJECT_SCENARIOS,
+    _LIVE_REPLY_SHAPES,
+    _LIVE_AUTHORIZATION_SHAPES,
+) = _load_live_shapes()
 
 
 _SCENARIOS: list[GoldenScenario] = [
@@ -298,7 +391,7 @@ _SCENARIOS: list[GoldenScenario] = [
     # (3 source-edit scenarios), tests/test_flyer_visual_qa.py (8 QA scenarios),
     # tests/test_flyer_project_isolation.py (6 isolation scenarios), and
     # tests/test_flyer_state_reply_table.py (status-reply table per state).
-]
+] + _LIVE_CREATE_PROJECT_SCENARIOS
 
 
 # Scenarios that delegate end-to-end coverage to dedicated existing test files.
@@ -389,6 +482,8 @@ def test_golden_scenario_deterministic(scenario: GoldenScenario, tmp_path, monke
         "--customer-state-path", str(customers_path),
         "--asset-dir", str(asset_dir),
     ]
+    if scenario.manual_edit_required:
+        argv.append("--manual-edit-required")
     monkeypatch.setattr(sys, "argv", argv)
     rc = module.main()
     project = json.loads(capsys.readouterr().out)
@@ -457,6 +552,109 @@ def test_golden_scenario_deterministic(scenario: GoldenScenario, tmp_path, monke
                 f"[{scenario.id}] status reply contained forbidden phrase {phrase!r}; "
                 f"got reply: {reply!r}"
             )
+
+
+@pytest.mark.parametrize("shape", _LIVE_REPLY_SHAPES, ids=lambda s: s.id)
+def test_golden_live_reply_shape_classification(shape: LiveReplyShape):
+    """Redacted live WhatsApp reply shapes stay routed to the intended bucket.
+
+    These samples come from main-vps F-series project/log shapes. They pin
+    terse customer messages like "any update?", "co-owner", title-case
+    "Approve", and immediate correction replies that do not look like clean
+    synthetic prose.
+    """
+    import importlib.machinery
+    import importlib.util
+
+    name = "cf_router_actions_for_live_golden_shapes"
+    sys.modules.pop(name, None)
+    loader = importlib.machinery.SourceFileLoader(
+        name,
+        str(REPO / "src" / "plugins" / "cf-router" / "actions.py"),
+    )
+    spec = importlib.util.spec_from_loader(name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    loader.exec_module(mod)
+
+    checks: dict[str, bool] = {
+        "status_request": mod.is_flyer_project_status_request(shape.message),
+        "approval_text": mod.is_flyer_approval_text(shape.message),
+        "starts_new_flyer": mod.should_start_new_flyer_over_active(shape.message, has_media=False),
+        "revision_intent": mod.is_flyer_revision_intent(shape.message),
+    }
+    for key, expected in shape.assertions.items():
+        assert checks[key] is expected, (
+            f"[{shape.id}] {key} expected {expected}, got {checks[key]} "
+            f"for live-shape message {shape.message!r}; source={shape.source}"
+        )
+
+
+@pytest.mark.parametrize("shape", _LIVE_AUTHORIZATION_SHAPES, ids=lambda s: s.id)
+def test_golden_live_reference_authorization_shape_consumes_pending_state(
+    shape: LiveReferenceAuthorizationShape,
+    tmp_path,
+):
+    """Live source-flyer relationship replies consume pending auth state.
+
+    This catches the real bug path behind short replies such as "co-owner":
+    the message must not merely be classified as non-status/non-revision; it
+    must consume the pending reference-scope row and continue with saved
+    account details.
+    """
+    import importlib.machinery
+    import importlib.util
+
+    name = "cf_router_actions_for_live_authorization_shapes"
+    sys.modules.pop(name, None)
+    loader = importlib.machinery.SourceFileLoader(
+        name,
+        str(REPO / "src" / "plugins" / "cf-router" / "actions.py"),
+    )
+    spec = importlib.util.spec_from_loader(name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    loader.exec_module(mod)
+    mod.FLYER_REFERENCE_SCOPE_PATH = tmp_path / "reference_scope_pending.json"
+
+    pending = shape.pending
+    mod.save_flyer_reference_scope_pending(
+        chat_id=shape.chat_id,
+        sender_phone=shape.sender_phone,
+        customer=pending["customer"],
+        raw_request=pending["raw_request"],
+        media_path=pending["media_path"],
+        scope=pending["scope"],
+        ttl_sec=600,
+    )
+
+    checks: dict[str, bool] = {
+        "status_request": mod.is_flyer_project_status_request(shape.message),
+        "approval_text": mod.is_flyer_approval_text(shape.message),
+        "starts_new_flyer": mod.should_start_new_flyer_over_active(shape.message, has_media=False),
+        "revision_intent": mod.is_flyer_revision_intent(shape.message),
+    }
+    for key, expected in shape.assertions.items():
+        assert checks[key] is expected, (
+            f"[{shape.id}] {key} expected {expected}, got {checks[key]} "
+            f"for live authorization message {shape.message!r}; source={shape.source}"
+        )
+
+    recorded = mod.consume_flyer_reference_authorization_reply(
+        shape.message,
+        chat_id=shape.chat_id,
+        sender_phone=shape.sender_phone,
+    )
+
+    assert recorded is not None, f"[{shape.id}] pending reference auth row was not consumed"
+    assert recorded["choice"] == shape.expected_choice
+    assert recorded["authorization_note"] == shape.expected_authorization_note
+    assert recorded["authorization_reply"] == shape.message
+    assert mod.consume_flyer_reference_authorization_reply(
+        shape.message,
+        chat_id=shape.chat_id,
+        sender_phone=shape.sender_phone,
+    ) is None
 
 
 # ---------- delegated-scenario presence ----------
