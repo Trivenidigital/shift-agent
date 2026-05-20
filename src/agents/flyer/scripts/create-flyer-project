@@ -91,12 +91,27 @@ def _has_any(text: str, terms: tuple[str, ...]) -> bool:
 
 
 def _is_product_or_brand_promo(text: str) -> bool:
+    """True when the request asks for a product/brand promo flyer.
+
+    Pre-fix this matched bare `brand`/`branding`, which incorrectly
+    poisoned exact-edit requests like `replace Triveni branding with
+    Lakshmi's Kitchen branding` into grocery-product styling. Brand/
+    branding edit verbs are now scoped to phrases that combine a brand
+    cue with an explicit promo/product cue.
+    """
     lower = text.lower()
-    return bool(re.search(
-        r"\b(?:hero image|tagline|badge|badges|certified|brand|branding|"
+    if re.search(
+        r"\b(?:hero image|tagline|badge|badges|certified|"
         r"product|featuring|premium|organic-style|organic style|grocery aesthetic)\b",
         lower,
-    ))
+    ):
+        return True
+    # `brand-forward product promo` / `brand promo` etc. still count.
+    if re.search(r"\bbrand(?:-|\s+)forward\b", lower):
+        return True
+    if re.search(r"\bbrand(?:ing)?\s+(?:promo|promotion|forward|focus)\b", lower):
+        return True
+    return False
 
 
 def _style_for_request(text: str) -> str:

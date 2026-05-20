@@ -851,3 +851,27 @@ def test_populate_forbidden_substrings_skips_new_starts_with_old(tmp_path):
     )
     _populate_forbidden_substrings(contract)
     assert "Rice" not in contract.forbidden_substrings
+
+
+# ─── Task 7: brand/branding edit semantics ────────────────────────
+
+
+def test_is_product_or_brand_promo_does_not_match_bare_branding_edit(monkeypatch):
+    """`replace Triveni branding with Lakshmi's Kitchen branding` is an
+    edit instruction — not a product-promo request. The post-fix matcher
+    requires brand keywords be paired with explicit promo/forward cues."""
+    module = _load_script(monkeypatch)
+    text = "Replace Triveni Express with Lakshmi's Kitchen branding"
+    assert module._is_product_or_brand_promo(text) is False
+
+
+def test_is_product_or_brand_promo_still_matches_explicit_brand_forward(monkeypatch):
+    module = _load_script(monkeypatch)
+    text = "brand-forward product promotion with premium imagery"
+    assert module._is_product_or_brand_promo(text) is True
+
+
+def test_is_product_or_brand_promo_matches_brand_promo_phrase(monkeypatch):
+    module = _load_script(monkeypatch)
+    text = "We need a brand promo for our supermarket grand opening"
+    assert module._is_product_or_brand_promo(text) is True

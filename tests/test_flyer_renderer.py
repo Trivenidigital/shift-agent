@@ -1447,3 +1447,26 @@ def test_render_customer_facing_footer_has_no_hermes_brand():
     customer_facing_legacy = "Send APPROVE to finalize - Hermes Flyer Studio"
     assert customer_facing_legacy not in src, \
         "Legacy 'Hermes Flyer Studio' footer string still present in render.py"
+
+
+# ─── Task 7: word-boundary _context_has + brand/branding edit semantics ──
+
+
+def test_context_has_word_boundary_does_not_match_substring():
+    """Pre-fix, `spa` matched inside `space`, `transparent`, `Hispanic`.
+    Post-fix the helper uses word boundaries for single-word terms."""
+    import agents.flyer.render as render_mod
+
+    assert render_mod._context_has("modern spa retreat", {"spa"}) is True
+    assert render_mod._context_has("clean space for address", {"spa"}) is False
+    assert render_mod._context_has("transparent design", {"spa"}) is False
+    assert render_mod._context_has("Hispanic restaurant", {"spa"}) is False
+
+
+def test_context_has_multi_word_term_keeps_substring_semantics():
+    import agents.flyer.render as render_mod
+
+    # Multi-word terms (containing spaces or hyphens) still match by substring,
+    # because regex word boundaries don't help with embedded punctuation.
+    assert render_mod._context_has("our deep clean service", {"deep clean"}) is True
+    assert render_mod._context_has("hand-made noodles", {"hand-made"}) is True
