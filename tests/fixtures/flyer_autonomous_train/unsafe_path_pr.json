@@ -9,14 +9,37 @@
   "is_open": true,
   "behind_origin_main": false,
   "category": "golden_fixture_tests",
-  "changed_files": ["tools/build-deploy-tarball.sh"],
-  "touched_subsystems": ["deploy"],
+  "changed_files": [
+    "tools/build-deploy-tarball.sh"
+  ],
+  "touched_subsystems": [
+    "deploy"
+  ],
   "reviewers": [
-    {"login": "a", "role": "autonomous", "state": "approved", "commit_sha": "4444444444444444444444444444444444444444", "is_stale": false, "is_author": false},
-    {"login": "b", "role": "autonomous", "state": "approved", "commit_sha": "4444444444444444444444444444444444444444", "is_stale": false, "is_author": false}
+    {
+      "login": "a",
+      "role": "autonomous",
+      "state": "approved",
+      "commit_sha": "4444444444444444444444444444444444444444",
+      "is_stale": false,
+      "is_author": false
+    },
+    {
+      "login": "b",
+      "role": "autonomous",
+      "state": "approved",
+      "commit_sha": "4444444444444444444444444444444444444444",
+      "is_stale": false,
+      "is_author": false
+    }
   ],
   "findings": [],
   "verification": [
-    {"name": "focused pytest", "state": "passed", "commit_sha": "4444444444444444444444444444444444444444"}
-  ]
+    {
+      "name": "focused pytest",
+      "state": "passed",
+      "commit_sha": "4444444444444444444444444444444444444444"
+    }
+  ],
+  "base": "main"
 }

@@ -9,16 +9,42 @@
   "is_open": true,
   "behind_origin_main": false,
   "category": "flyer_parser_routing",
-  "changed_files": ["src/plugins/cf-router/hooks.py", "tests/test_cf_router_flyer_routing.py"],
-  "touched_subsystems": ["cf-router-hooks"],
-  "previous_run_touched_subsystems": ["cf-router-hooks"],
+  "changed_files": [
+    "src/plugins/cf-router/hooks.py",
+    "tests/test_cf_router_flyer_routing.py"
+  ],
+  "touched_subsystems": [
+    "cf-router-hooks"
+  ],
+  "previous_run_touched_subsystems": [
+    "cf-router-hooks"
+  ],
   "urgent_customer_visible": true,
   "reviewers": [
-    {"login": "a", "role": "autonomous", "state": "approved", "commit_sha": "3333333333333333333333333333333333333333", "is_stale": false, "is_author": false},
-    {"login": "b", "role": "autonomous", "state": "approved", "commit_sha": "3333333333333333333333333333333333333333", "is_stale": false, "is_author": false}
+    {
+      "login": "a",
+      "role": "autonomous",
+      "state": "approved",
+      "commit_sha": "3333333333333333333333333333333333333333",
+      "is_stale": false,
+      "is_author": false
+    },
+    {
+      "login": "b",
+      "role": "autonomous",
+      "state": "approved",
+      "commit_sha": "3333333333333333333333333333333333333333",
+      "is_stale": false,
+      "is_author": false
+    }
   ],
   "findings": [],
   "verification": [
-    {"name": "focused pytest", "state": "passed", "commit_sha": "3333333333333333333333333333333333333333"}
-  ]
+    {
+      "name": "focused pytest",
+      "state": "passed",
+      "commit_sha": "3333333333333333333333333333333333333333"
+    }
+  ],
+  "base": "main"
 }

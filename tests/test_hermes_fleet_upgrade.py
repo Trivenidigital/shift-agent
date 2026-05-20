@@ -1,5 +1,6 @@
 import importlib.util
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -330,6 +331,71 @@ def test_normalization_report_cli_uses_snapshot_fixture_without_ssh(monkeypatch,
     assert "hosts" in payload
     assert "promotion_readiness" in payload
     assert payload["hosts"][0]["health"]["status"] == "red"
+
+
+def test_normalization_payload_blocks_when_snapshot_file_is_wall_clock_stale():
+    """R1-H3: a snapshot whose internal timestamps look consistent can still
+    be a fixture file from weeks ago. The promotion gate must reject such
+    files because they cannot speak to whether the live host is green
+    today, no matter how internally-consistent they were on the day they
+    were written.
+
+    Uses ``now`` injection so the test does not drift over time. The
+    blocked_snapshots fixture is generated_at 2026-05-20T12:00:00Z;
+    asserting against now=2026-06-15 forces wall-clock staleness even
+    though every internal checked_at/generated_at offset is unchanged.
+    """
+    module = load_module()
+    snapshots = module.load_normalization_snapshot_payload(NORMALIZATION_FIXTURES / "green_snapshots.json")
+    far_future_now = datetime(2026, 6, 15, 0, 0, 0, tzinfo=timezone.utc)
+
+    payload = module.normalization_payload(snapshots, now=far_future_now)
+
+    assert payload["wall_clock_fresh"] is False
+    assert payload["wall_clock_age_hours"] is not None
+    assert payload["wall_clock_age_hours"] > 24
+    for host in payload["hosts"]:
+        assert host["health"]["status"] == "red"
+        assert any(
+            "snapshot file stale" in blocker and "wall-clock" in blocker
+            for blocker in host["health"]["blockers"]
+        ), f"{host['label']} blockers must include wall-clock staleness; got {host['health']['blockers']}"
+    # Promotion readiness must also be blocked since every host is now red.
+    assert payload["promotion_readiness"]["srilu_to_main"]["ready"] is False
+    assert payload["promotion_readiness"]["main_to_vpin"]["ready"] is False
+
+
+def test_normalization_payload_is_fresh_when_now_is_within_threshold():
+    """Mirror invariant of the previous test: a deliberately recent ``now``
+    must keep the green fixture green (the wall-clock check must not
+    fire-always)."""
+    module = load_module()
+    snapshots = module.load_normalization_snapshot_payload(NORMALIZATION_FIXTURES / "green_snapshots.json")
+    just_after_generated = datetime(2026, 5, 20, 13, 0, 0, tzinfo=timezone.utc)
+
+    payload = module.normalization_payload(snapshots, now=just_after_generated)
+
+    assert payload["wall_clock_fresh"] is True
+    assert payload["wall_clock_age_hours"] is not None
+    assert payload["wall_clock_age_hours"] < 24
+    # Original green status preserved for all hosts.
+    for host in payload["hosts"]:
+        assert host["health"]["status"] == "green"
+
+
+def test_normalization_payload_blocks_when_generated_at_unparseable():
+    """R1-H3: missing or unparseable generated_at is still a stale-snapshot
+    case — operators must not get a 'fresh' read out of garbage input."""
+    module = load_module()
+    snapshots = module.load_normalization_snapshot_payload(NORMALIZATION_FIXTURES / "green_snapshots.json")
+    snapshots["generated_at"] = "not-a-timestamp"
+
+    payload = module.normalization_payload(snapshots)
+
+    assert payload["wall_clock_fresh"] is False
+    assert payload["wall_clock_age_hours"] is None
+    for host in payload["hosts"]:
+        assert any("snapshot file generated_at missing or unparseable" in b for b in host["health"]["blockers"])
 
 
 def test_normalization_payload_blocks_stale_snapshot():

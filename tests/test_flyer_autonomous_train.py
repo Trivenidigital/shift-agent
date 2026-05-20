@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = REPO_ROOT / "tools" / "flyer-autonomous-train.py"
@@ -51,6 +53,100 @@ def test_unresolved_blocker_severity_finding_blocks_same_as_high_medium():
 
     assert result["eligible"] is False
     assert "unresolved high/medium review finding" in result["reasons"]
+
+
+def test_strict_mode_exits_non_zero_when_ineligible(tmp_path):
+    """R1-H1: automation runners need to distinguish 'policy ran cleanly,
+    PR eligible' from 'policy ran cleanly, PR rejected' via exit code.
+    --strict makes ineligible verdicts exit 3 (not 2; 2 is argparse error)."""
+    code_ineligible = subprocess.run(
+        [
+            sys.executable,
+            str(MODULE_PATH),
+            "eligibility",
+            "--metadata",
+            str(FIXTURES / "one_review_pr.json"),
+            "--strict",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert code_ineligible.returncode == 3, (
+        f"strict ineligible should exit 3; got {code_ineligible.returncode}\n"
+        f"stdout: {code_ineligible.stdout}\nstderr: {code_ineligible.stderr}"
+    )
+
+    code_eligible = subprocess.run(
+        [
+            sys.executable,
+            str(MODULE_PATH),
+            "eligibility",
+            "--metadata",
+            str(FIXTURES / "eligible_pr.json"),
+            "--strict",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert code_eligible.returncode == 0, (
+        f"strict eligible should exit 0; got {code_eligible.returncode}\n"
+        f"stdout: {code_eligible.stdout}\nstderr: {code_eligible.stderr}"
+    )
+
+    # Default (no --strict) keeps backwards-compat: always exit 0 for ran-cleanly.
+    code_advisory = subprocess.run(
+        [
+            sys.executable,
+            str(MODULE_PATH),
+            "eligibility",
+            "--metadata",
+            str(FIXTURES / "one_review_pr.json"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert code_advisory.returncode == 0
+
+
+def test_missing_is_open_field_blocks_fail_closed():
+    """R1-M1: missing evidence is treated as ineligibility, not 'OK by default.'
+    is_open must be explicitly True; absent/None blocks."""
+    module = load_module()
+    metadata = load_fixture("eligible_pr.json")
+    metadata.pop("is_open", None)
+
+    result = module.evaluate_pr(metadata)
+
+    assert result["eligible"] is False
+    assert "is_open evidence missing" in result["reasons"]
+
+
+def test_missing_behind_origin_main_field_blocks_fail_closed():
+    """R1-M1: behind_origin_main must be explicitly False; absent/None blocks."""
+    module = load_module()
+    metadata = load_fixture("eligible_pr.json")
+    metadata.pop("behind_origin_main", None)
+
+    result = module.evaluate_pr(metadata)
+
+    assert result["eligible"] is False
+    assert "behind_origin_main evidence missing" in result["reasons"]
+
+
+def test_missing_base_branch_blocks_fail_closed():
+    """R1-M1: base must be explicitly 'main'; absent/None blocks separately
+    from the 'must be main' reason so operators can distinguish the cases."""
+    module = load_module()
+    metadata = load_fixture("eligible_pr.json")
+    metadata.pop("base", None)
+
+    result = module.evaluate_pr(metadata)
+
+    assert result["eligible"] is False
+    assert "base branch missing (must be 'main')" in result["reasons"]
 
 
 def test_pr_author_does_not_count_as_their_own_reviewer():
@@ -102,6 +198,59 @@ def test_blocked_provider_posture_category_is_rejected():
 
     assert result["eligible"] is False
     assert "blocked category: provider_model_posture" in result["reasons"]
+
+
+@pytest.mark.parametrize(
+    "category",
+    [
+        "deploy_change",
+        "payment_quota_account_state",
+        "campaign_send",
+        "provider_model_posture",
+        "broad_non_flyer_cf_router",
+        "manual_queue_closure",
+        "customer_state_repair",
+        "vps_runtime_mutation",
+    ],
+)
+def test_every_blocked_category_is_individually_rejected(category):
+    """R1-M3: pin EACH BLOCKED_CATEGORIES entry, not just provider_model_posture.
+
+    Builds a synthetic metadata around the eligible_pr.json baseline and
+    swaps in each blocked category in turn. Catches the failure mode where
+    a refactor accidentally drops a category from the set: under the prior
+    coverage that only exercised provider_model_posture, six of the eight
+    could silently regress to 'unknown category requires human decision'
+    (visible) or — worse — accidentally land in ALLOWED_CATEGORIES.
+    """
+    module = load_module()
+    metadata = load_fixture("eligible_pr.json")
+    metadata["category"] = category
+    # Strip changed_files that would mismatch the new category; the
+    # category-block test is what we're isolating here.
+    metadata["changed_files"] = ["tasks/notes.md"]
+
+    result = module.evaluate_pr(metadata)
+
+    assert result["eligible"] is False, f"{category} must be ineligible; got {result}"
+    assert f"blocked category: {category}" in result["reasons"], (
+        f"{category} must surface as a blocked category in reasons; got {result['reasons']}"
+    )
+    # Sanity: it must NOT be reported as an allowed category in the output.
+    assert result["allowed_category"] == ""
+
+
+def test_blocked_categories_set_is_non_empty_and_disjoint_from_allowed():
+    """Sanity invariant: a refactor cannot quietly empty BLOCKED_CATEGORIES
+    or move a token into ALLOWED_CATEGORIES without this test failing."""
+    module = load_module()
+
+    assert len(module.BLOCKED_CATEGORIES) == 8, (
+        f"BLOCKED_CATEGORIES must remain 8 entries; got {sorted(module.BLOCKED_CATEGORIES)}"
+    )
+    assert module.BLOCKED_CATEGORIES.isdisjoint(module.ALLOWED_CATEGORIES), (
+        "no category may appear in both ALLOWED and BLOCKED"
+    )
 
 
 def test_unsafe_changed_path_blocks_even_with_safe_category():
@@ -178,15 +327,63 @@ def test_allowed_fixture_pr_is_policy_eligible_but_advisory_only():
     assert result["would_be_auto_merge_eligible_if_live_runner_enabled"] is False
 
 
-def test_cf_router_hooks_cooldown_blocks_unless_urgent_customer_visible():
+def test_cf_router_hooks_cooldown_is_advisory_when_metadata_self_attested():
+    """R1-H2 downgrade contract.
+
+    When the only evidence of the previous run's touched subsystems is the
+    PR metadata itself (self-attested), the cooldown is REPORTED as a hit
+    but does NOT block eligibility. Otherwise a malicious caller could
+    bypass cooldown by omitting the field, AND a trustworthy caller can't
+    be silently demoted into a fake clearance.
+
+    The blocking variant — when evidence comes from a persisted state file
+    that the train tool itself controls — is covered by
+    test_cf_router_hooks_cooldown_blocks_when_state_is_persisted.
+    """
     module = load_module()
 
     blocked = module.evaluate_pr(load_fixture("cooldown_hooks_pr.json"))
     urgent = module.evaluate_pr(load_fixture("cooldown_hooks_urgent_pr.json"))
 
-    assert blocked["eligible"] is False
-    assert "risky subsystem cooldown: cf-router hooks touched in back-to-back runs" in blocked["reasons"]
+    # The cooldown hit IS visible in the structured output for operator visibility.
+    assert blocked["cooldown"]["cooldown_hit"] is True
+    assert blocked["cooldown"]["evidence_source"] == "self_attested"
+    # ...but it does NOT block eligibility on its own when self-attested.
+    assert blocked["cooldown"]["blocks_eligibility"] is False
+    assert "risky subsystem cooldown" not in " ".join(blocked["reasons"])
+    # Urgent variant: cooldown still detected (cooldown_hit may be True), but
+    # urgent_customer_visible flips blocks_eligibility off regardless of source.
+    assert urgent["cooldown"]["urgent_customer_visible"] is True
+    assert urgent["cooldown"]["blocks_eligibility"] is False
     assert urgent["eligible"] is True
+
+
+def test_cf_router_hooks_cooldown_blocks_when_state_is_persisted(tmp_path):
+    """When `previous_run_touched_subsystems` comes from a persisted state
+    file the train tool itself controls, the cooldown is trust-anchored
+    and DOES block eligibility (unless urgent_customer_visible=true).
+
+    The persisted state file path mirrors what a future trusted runner
+    would write after each completed run.
+    """
+    module = load_module()
+    state_path = tmp_path / ".flyer-train-cooldown-state.json"
+    state_path.write_text(
+        json.dumps({"previous_run_touched_subsystems": ["cf-router-hooks"]}),
+        encoding="utf-8",
+    )
+
+    # Strip self-attested provenance from the fixture so only the persisted
+    # state file can supply previous_run evidence.
+    metadata = load_fixture("cooldown_hooks_pr.json")
+    metadata.pop("previous_run_touched_subsystems", None)
+
+    blocked = module.evaluate_pr(metadata, cooldown_state_path=state_path)
+
+    assert blocked["cooldown"]["evidence_source"] == "persisted_state"
+    assert blocked["cooldown"]["blocks_eligibility"] is True
+    assert "risky subsystem cooldown: cf-router hooks touched in back-to-back runs" in blocked["reasons"]
+    assert blocked["eligible"] is False
 
 
 def test_report_surfaces_pr137_as_merged_and_residual_source_contract_backlog(tmp_path):

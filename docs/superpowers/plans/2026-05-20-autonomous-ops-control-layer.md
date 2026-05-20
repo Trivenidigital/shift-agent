@@ -29,6 +29,26 @@
 
 Evidence checked before planning: in-tree `tools/hermes-fleet-upgrade.py`, `tools/operator-brief.py`, `tasks/todo.md`, `tasks/operator-decisions.md`, PR #137's landed source-contract files, Hermes Skills Hub (`https://hermes-agent.nousresearch.com/docs/skills`), Hermes bundled skills catalog (`https://hermes-agent.nousresearch.com/docs/reference/skills-catalog`), and awesome-hermes-agent ecosystem references from existing project docs. No Hermes-native fleet promotion policy or Flyer PR auto-merge policy exists. Verdict: reuse Hermes scheduling/state/reporting substrate and build only the repo-specific offline policy layer.
 
+## Hermes-first capability checklist
+
+Canonical per-step `[Hermes]` / `[net-new]` table (per AGENTS.md). Receipt: `tasks/.hermes-check-receipts/autonomous-ops-control-layer.json`.
+
+| # | Implementation step | `[Hermes]` or `[net-new]` |
+|---|---|---|
+| 1 | Hermes/cron invokes train script on a clean repo checkout | `[Hermes]` — Skill dispatch + LLM gateway substrate |
+| 2 | Read `tasks/todo.md` + `tasks/operator-decisions.md` | `[Hermes]` — SKILLs read files inline |
+| 3 | Read optional caller-supplied state JSON | `[Hermes]` — stdlib file IO |
+| 4 | Persisted cooldown-state JSON (`tasks/.flyer-train-cooldown-state.json`) | `[net-new]` ~25 LOC + ~30 LOC tests |
+| 5 | Render Flyer-train Markdown/JSON report layout | `[net-new]` ~100 LOC + ~60 LOC tests |
+| 6 | Read offline PR metadata JSON fixture | `[Hermes]` — file IO |
+| 7 | PR-eligibility policy evaluator (9 gates) | `[net-new]` ~150 LOC + ~200 LOC tests |
+| 8 | Strict-mode exit-code contract for ineligible PRs | `[net-new]` ~10 LOC + ~15 LOC tests |
+| 9 | Read offline fleet snapshot JSON | `[Hermes]` — file IO |
+| 10 | Wall-clock freshness + Srilu/Main/VPIN promotion readiness | `[net-new]` ~80 LOC + ~100 LOC tests |
+| 11 | Operator-brief Markdown rendering | `[Hermes]` — existing operator-brief renderer; fed JSON |
+
+`[net-new]` step count: 5 of 11 (45%, below 50% red-flag). Total net-new effort: ~365 LOC code + ~405 LOC tests. Drift-rule self-checks: see design doc.
+
 ## Safety Boundaries
 
 - No deploy, no merge, no live auto-merge.

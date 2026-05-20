@@ -436,11 +436,37 @@ def _parse_utc(value: object) -> datetime | None:
 
 
 def _snapshot_age_hours(host: dict[str, object], generated_at: str) -> float | None:
+    """Internal age: how stale was the host probe at the time the snapshot
+    file was written? Computed as ``generated_at - checked_at``.
+
+    NOTE: this is only the *internal* consistency check. It does NOT catch
+    a stale snapshot file whose `generated_at` is itself ancient — a
+    fixture from a month ago can have a `checked_at` 30 minutes older than
+    `generated_at` and still pass this check. The wall-clock freshness
+    check in `_wall_clock_age_hours` covers that failure mode.
+    """
     checked = _parse_utc(host.get("checked_at"))
     generated = _parse_utc(generated_at)
     if checked is None or generated is None:
         return None
     return (generated - checked).total_seconds() / 3600
+
+
+def _wall_clock_age_hours(generated_at: str, *, now: datetime | None = None) -> float | None:
+    """How stale is the snapshot FILE itself, measured against current
+    wall-clock time (R1-H3).
+
+    A snapshot whose internal `checked_at`/`generated_at` look consistent
+    can still be a fixture from weeks ago. The promotion gate must reject
+    those: a stale file can't speak to whether the live host is green.
+
+    ``now`` is injectable for tests so they don't drift over time.
+    """
+    generated = _parse_utc(generated_at)
+    if generated is None:
+        return None
+    current = now or datetime.now(timezone.utc)
+    return (current - generated).total_seconds() / 3600
 
 
 def _host_snapshot_from_normalization(host: dict[str, object]) -> HostSnapshot:
@@ -586,7 +612,25 @@ def _promotion_readiness(hosts: list[dict[str, object]]) -> dict[str, object]:
     }
 
 
-def normalization_payload(snapshot_payload: dict[str, object]) -> dict[str, object]:
+WALL_CLOCK_FRESHNESS_THRESHOLD_HOURS = 24
+
+
+def normalization_payload(
+    snapshot_payload: dict[str, object],
+    *,
+    now: datetime | None = None,
+    max_wall_clock_age_hours: float = WALL_CLOCK_FRESHNESS_THRESHOLD_HOURS,
+) -> dict[str, object]:
+    """Render the normalization payload from an offline snapshot.
+
+    Wall-clock freshness (R1-H3): if the snapshot file's `generated_at` is
+    older than `max_wall_clock_age_hours` against current time, EVERY host
+    in the payload is downgraded with a `snapshot file stale` blocker.
+    Internal `checked_at` vs `generated_at` consistency is still checked
+    per-host (existing behavior), but it cannot mask an ancient file.
+
+    ``now`` is injectable for deterministic tests.
+    """
     generated_at = str(snapshot_payload.get("generated_at") or utc_now())
     raw_hosts = snapshot_payload.get("hosts") if isinstance(snapshot_payload.get("hosts"), list) else []
     host_reports = [
@@ -595,9 +639,29 @@ def normalization_payload(snapshot_payload: dict[str, object]) -> dict[str, obje
         if isinstance(host, dict)
     ]
     host_reports.sort(key=lambda host: parse_int(str(host.get("promotion_order") or "0")))
+
+    file_age = _wall_clock_age_hours(generated_at, now=now)
+    file_stale = file_age is None or file_age > max_wall_clock_age_hours
+    if file_stale:
+        if file_age is None:
+            blocker_msg = "snapshot file generated_at missing or unparseable"
+        else:
+            blocker_msg = f"snapshot file stale: {file_age:g}h since generated_at (wall-clock)"
+        for host in host_reports:
+            health = host["health"]
+            blockers = list(health.get("blockers") or [])
+            if blocker_msg not in blockers:
+                blockers.append(blocker_msg)
+            health["blockers"] = blockers
+            health["status"] = "red"
+            health["summary"] = "blocked"
+
     return {
         "generated_at": generated_at,
         "mode": "offline_snapshot",
+        "wall_clock_age_hours": file_age,
+        "wall_clock_threshold_hours": max_wall_clock_age_hours,
+        "wall_clock_fresh": not file_stale,
         "hosts": host_reports,
         "promotion_readiness": _promotion_readiness(host_reports),
     }

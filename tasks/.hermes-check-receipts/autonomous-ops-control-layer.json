@@ -1,0 +1,17 @@
+{
+  "topic": "autonomous-ops-control-layer",
+  "task_text": "autonomous-ops-control-layer",
+  "completed_at": "2026-05-20T04:55:00Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 5,
+  "hermes_step_count": 6,
+  "files_to_read_first": [
+    "tools/hermes-fleet-upgrade.py",
+    "tools/operator-brief.py",
+    "tasks/todo.md",
+    "tasks/operator-decisions.md",
+    "tests/test_hermes_fleet_upgrade.py",
+    "tests/test_operator_brief.py",
+    "src/platform/safe_io.py"
+  ]
+}

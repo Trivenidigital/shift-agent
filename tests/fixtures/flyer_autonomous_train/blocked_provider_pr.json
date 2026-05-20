@@ -9,14 +9,37 @@
   "is_open": true,
   "behind_origin_main": false,
   "category": "provider_model_posture",
-  "changed_files": ["tasks/flyer-source-edit-provider-posture-2026-05-20.md"],
-  "touched_subsystems": ["provider-model-posture"],
+  "changed_files": [
+    "tasks/flyer-source-edit-provider-posture-2026-05-20.md"
+  ],
+  "touched_subsystems": [
+    "provider-model-posture"
+  ],
   "reviewers": [
-    {"login": "a", "role": "autonomous", "state": "approved", "commit_sha": "dddddddddddddddddddddddddddddddddddddddd", "is_stale": false, "is_author": false},
-    {"login": "b", "role": "autonomous", "state": "approved", "commit_sha": "dddddddddddddddddddddddddddddddddddddddd", "is_stale": false, "is_author": false}
+    {
+      "login": "a",
+      "role": "autonomous",
+      "state": "approved",
+      "commit_sha": "dddddddddddddddddddddddddddddddddddddddd",
+      "is_stale": false,
+      "is_author": false
+    },
+    {
+      "login": "b",
+      "role": "autonomous",
+      "state": "approved",
+      "commit_sha": "dddddddddddddddddddddddddddddddddddddddd",
+      "is_stale": false,
+      "is_author": false
+    }
   ],
   "findings": [],
   "verification": [
-    {"name": "focused pytest", "state": "passed", "commit_sha": "dddddddddddddddddddddddddddddddddddddddd"}
-  ]
+    {
+      "name": "focused pytest",
+      "state": "passed",
+      "commit_sha": "dddddddddddddddddddddddddddddddddddddddd"
+    }
+  ],
+  "base": "main"
 }

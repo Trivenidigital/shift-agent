@@ -231,16 +231,94 @@ def blocked_path_reasons(changed_files: object, category: str) -> list[str]:
     return reasons
 
 
+def _load_persisted_cooldown_state(path: Path | None) -> tuple[list[str], str]:
+    """Load `previous_run_touched_subsystems` from a persisted state file.
+
+    Returns ``(subsystems, evidence_source)``. Evidence source is one of:
+    - ``"persisted_state"`` — file exists and was readable; trusted for cooldown enforcement.
+    - ``"missing"`` — no path or file absent; cooldown falls back to metadata (self-attested).
+    - ``"unreadable"`` — path provided but JSON parse failed; treat as missing.
+
+    The trust distinction matters because metadata-supplied
+    `previous_run_touched_subsystems` is self-attested — the same caller
+    that wrote the PR metadata also chose what to declare as "previous."
+    """
+    if path is None:
+        return [], "missing"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return [], "unreadable"
+    if not isinstance(payload, dict):
+        return [], "unreadable"
+    subsystems = payload.get("previous_run_touched_subsystems") or []
+    if not isinstance(subsystems, list):
+        return [], "unreadable"
+    return [str(item) for item in subsystems], "persisted_state"
+
+
+def evaluate_cooldown(
+    metadata: dict[str, object],
+    *,
+    persisted_subsystems: list[str] | None = None,
+    persisted_evidence: str = "missing",
+) -> dict[str, object]:
+    """Evaluate risky-subsystem cooldown with explicit evidence provenance.
+
+    Persisted-state evidence is trusted and BLOCKS eligibility on a hit.
+    Metadata-only (self-attested) evidence is ADVISORY: the hit is reported
+    in the output, but `blocks_eligibility` is False so a malicious caller
+    can't bypass cooldown by omitting `previous_run_touched_subsystems`,
+    and a trustworthy caller can't be silently demoted into a fake clearance.
+    """
+    changed_files = metadata.get("changed_files") if isinstance(metadata.get("changed_files"), list) else []
+    current = set(metadata.get("touched_subsystems") or derive_touched_subsystems(changed_files))
+    if persisted_subsystems is not None:
+        previous = set(persisted_subsystems)
+    else:
+        previous = set(metadata.get("previous_run_touched_subsystems") or [])
+    urgent = metadata.get("urgent_customer_visible") is True
+    cooldown_hit = "cf-router-hooks" in current and "cf-router-hooks" in previous
+    evidence_source = persisted_evidence if persisted_subsystems is not None else (
+        "self_attested" if metadata.get("previous_run_touched_subsystems") else "missing"
+    )
+    blocks_eligibility = cooldown_hit and not urgent and evidence_source == "persisted_state"
+    return {
+        "cooldown_hit": cooldown_hit,
+        "blocks_eligibility": blocks_eligibility,
+        "urgent_customer_visible": urgent,
+        "evidence_source": evidence_source,
+    }
+
+
 def violates_risky_subsystem_cooldown(metadata: dict[str, object]) -> bool:
+    """Legacy boolean wrapper preserved for backwards-compat callers and tests.
+
+    NOTE: trusts metadata's self-attested previous_run; this is the OLD
+    semantics. New callers should use evaluate_cooldown() with a persisted
+    state path so the cooldown is trust-anchored. evaluate_pr() now uses
+    evaluate_cooldown directly.
+    """
+    if metadata.get("urgent_customer_visible") is True:
+        return False
     changed_files = metadata.get("changed_files") if isinstance(metadata.get("changed_files"), list) else []
     current = set(metadata.get("touched_subsystems") or derive_touched_subsystems(changed_files))
     previous = set(metadata.get("previous_run_touched_subsystems") or [])
-    if metadata.get("urgent_customer_visible") is True:
-        return False
     return "cf-router-hooks" in current and "cf-router-hooks" in previous
 
 
-def evaluate_pr(metadata: dict[str, object]) -> dict[str, object]:
+def evaluate_pr(
+    metadata: dict[str, object],
+    *,
+    cooldown_state_path: Path | None = None,
+) -> dict[str, object]:
+    """Evaluate a PR against the v0.1 autonomous policy.
+
+    Fail-closed defaults: missing `is_open` / `behind_origin_main` / `base`
+    fields are treated as ineligibility reasons, not "OK by default." A
+    caller that omits a field must explicitly opt in by passing the field;
+    silence is treated as missing evidence, which blocks.
+    """
     reasons: list[str] = []
     head_sha = str(metadata.get("head_sha") or "")
     author = str(metadata.get("author") or "")
@@ -257,13 +335,25 @@ def evaluate_pr(metadata: dict[str, object]) -> dict[str, object]:
         reasons.append("metadata collected_at is stale")
     if not is_valid_sha(head_sha):
         reasons.append("head_sha must be a 40-character hex SHA")
-    if metadata.get("base") not in {None, "main"}:
+    # Fail-closed: missing base must be flagged (not silently accepted as 'main').
+    base = metadata.get("base")
+    if base is None:
+        reasons.append("base branch missing (must be 'main')")
+    elif base != "main":
         reasons.append("base branch must be main")
     if approvals < 2:
         reasons.append("requires at least 2 current autonomous reviewer approvals")
-    if not metadata.get("is_open", True):
+    # Fail-closed: is_open MUST be explicitly True. Missing/None blocks.
+    is_open = metadata.get("is_open")
+    if is_open is None:
+        reasons.append("is_open evidence missing")
+    elif not is_open:
         reasons.append("PR is not open")
-    if metadata.get("behind_origin_main"):
+    # Fail-closed: behind_origin_main MUST be explicitly False. Missing/None blocks.
+    behind = metadata.get("behind_origin_main")
+    if behind is None:
+        reasons.append("behind_origin_main evidence missing")
+    elif behind:
         reasons.append("branch is behind origin/main")
     if has_unresolved_high_or_medium(metadata.get("findings", []), head_sha=head_sha):
         reasons.append("unresolved high/medium review finding")
@@ -275,7 +365,18 @@ def evaluate_pr(metadata: dict[str, object]) -> dict[str, object]:
     elif category not in ALLOWED_CATEGORIES:
         reasons.append(f"category requires human decision: {category or 'missing'}")
     reasons.extend(blocked_path_reasons(metadata.get("changed_files", []), category))
-    if violates_risky_subsystem_cooldown(metadata):
+    # Cooldown with explicit evidence provenance (R1-H2).
+    persisted_subsystems: list[str] | None = None
+    persisted_evidence = "missing"
+    if cooldown_state_path is not None:
+        loaded, persisted_evidence = _load_persisted_cooldown_state(cooldown_state_path)
+        persisted_subsystems = loaded if persisted_evidence == "persisted_state" else None
+    cooldown = evaluate_cooldown(
+        metadata,
+        persisted_subsystems=persisted_subsystems,
+        persisted_evidence=persisted_evidence,
+    )
+    if cooldown["blocks_eligibility"]:
         reasons.append("risky subsystem cooldown: cf-router hooks touched in back-to-back runs")
     eligible = not reasons
     trusted = (
@@ -295,6 +396,7 @@ def evaluate_pr(metadata: dict[str, object]) -> dict[str, object]:
         "approvals": approvals,
         "allowed_category": category if category in ALLOWED_CATEGORIES else "",
         "touched_subsystems": metadata.get("touched_subsystems") or derive_touched_subsystems(metadata.get("changed_files", [])),
+        "cooldown": cooldown,
     }
 
 
@@ -425,8 +527,22 @@ def require_offline(args: argparse.Namespace) -> bool:
 
 
 def run_eligibility(args: argparse.Namespace) -> int:
-    payload = evaluate_pr(load_json(args.metadata))
+    """Evaluate offline PR metadata against the v0.1 policy.
+
+    Exit codes:
+    - 0: policy ran successfully AND (the PR is eligible OR --strict is off).
+    - 3: --strict requested and the PR is ineligible. Distinguishes
+      "policy ran cleanly and rejected this PR" from a plain "policy
+      ran" (0) and from argparse failure (2). Automation runners should
+      pass --strict so a non-zero exit signals 'do not merge.'
+    """
+    payload = evaluate_pr(
+        load_json(args.metadata),
+        cooldown_state_path=args.cooldown_state,
+    )
     write_or_print(json.dumps(payload, indent=2, sort_keys=True) + "\n", args.out)
+    if getattr(args, "strict", False) and not payload.get("eligible"):
+        return 3
     return 0
 
 
@@ -456,6 +572,16 @@ def build_parser() -> argparse.ArgumentParser:
     eligibility.add_argument("--metadata", type=Path, required=True)
     eligibility.add_argument("--format", choices=["json"], default="json")
     eligibility.add_argument("--out", type=Path)
+    eligibility.add_argument(
+        "--strict",
+        action="store_true",
+        help="exit 3 when the PR is ineligible (default: always exit 0; advisory only)",
+    )
+    eligibility.add_argument(
+        "--cooldown-state",
+        type=Path,
+        help="persisted cooldown-state JSON (trusted source of previous_run_touched_subsystems)",
+    )
     eligibility.set_defaults(func=run_eligibility)
 
     report = subparsers.add_parser("report", help="render offline Flyer train report")

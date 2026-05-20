@@ -23,6 +23,28 @@ Build v0.1 of a safe control layer that lets Srini see what Flyer Studio and Her
 
 Awesome Hermes Agent ecosystem check: no existing skill/plugin provides repo-specific autonomous PR eligibility or Srilu/Main/VPIN promotion contract enforcement. Verdict: extend Hermes-backed local tooling and keep execution outside this slice.
 
+## Hermes-first capability checklist
+
+Canonical per-step `[Hermes]` / `[net-new]` table (per AGENTS.md). Counts only `[net-new]` rows toward effort. Receipt: `tasks/.hermes-check-receipts/autonomous-ops-control-layer.json`.
+
+| # | Implementation step | `[Hermes]` or `[net-new]` |
+|---|---|---|
+| 1 | Hermes/cron invokes the train script on a clean repo checkout | `[Hermes]` — Skill dispatch + LLM gateway substrate |
+| 2 | Read `tasks/todo.md` + `tasks/operator-decisions.md` for backlog/decisions | `[Hermes]` — SKILLs already read files inline |
+| 3 | Read optional state JSON (caller-supplied backlog candidates) | `[Hermes]` — stdlib JSON read; same primitive |
+| 4 | Persisted cooldown-state JSON read/write at `tasks/.flyer-train-cooldown-state.json` | `[net-new]` — no Hermes precedent for Flyer-train cooldown state. ~25 LOC + ~30 LOC tests |
+| 5 | Render Flyer-train Markdown/JSON report (open PRs / blocked / needs-Srini / residual) | `[net-new]` — Flyer-train-specific report layout. ~100 LOC + ~60 LOC tests |
+| 6 | Read offline PR metadata JSON fixture | `[Hermes]` — file IO substrate |
+| 7 | Evaluate against 9 PR-eligibility gates (reviewers/findings/verification/category/cooldown/freshness/canonical-paths/base/head_sha) | `[net-new]` — repo-specific policy; no Hermes auto-merge skill exists. ~150 LOC + ~200 LOC tests |
+| 8 | Strict-mode exit-code contract for ineligible PRs (runner-friendly) | `[net-new]` — runner contract; ~10 LOC + ~15 LOC tests |
+| 9 | Read offline fleet snapshot JSON | `[Hermes]` — file IO substrate |
+| 10 | Compute wall-clock snapshot freshness + Srilu/Main/VPIN promotion readiness; Docker deferred | `[net-new]` — Shift-Agent-fleet-specific. ~80 LOC + ~100 LOC tests |
+| 11 | Operator-brief Markdown rendering of train + normalization sections | `[Hermes]` — existing operator-brief renderer; we feed it JSON |
+
+`[net-new]` step count: 5 of 11 (45%, below the 50% red-flag threshold). Total net-new effort: ~365 LOC code + ~405 LOC tests, distributed across 5 commits per the plan task table.
+
+Awesome-Hermes-Agent ecosystem cross-check: no installable skill replaces the Flyer-train policy or Shift-Agent fleet contract. Verdict: extend Hermes-backed local tooling; keep execution outside this slice.
+
 Live VPS skill/plugin posture: prior fleet checks already report installed skills/plugins; this slice does not run new live SSH. The design relies on those existing reports and adds only offline report consumers. If a future design needs a fresh live `/root/.hermes/skills` or `/root/.hermes/plugins` inventory, it must flow through the existing report-only fleet check, not this v0.1 builder.
 
 ## Non-Negotiable Boundaries

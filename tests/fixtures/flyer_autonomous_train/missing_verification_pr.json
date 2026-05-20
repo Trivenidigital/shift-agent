@@ -9,12 +9,31 @@
   "is_open": true,
   "behind_origin_main": false,
   "category": "golden_fixture_tests",
-  "changed_files": ["tests/fixtures/flyer_golden/live_customer_message_shapes.json"],
-  "touched_subsystems": ["flyer-golden-fixtures"],
+  "changed_files": [
+    "tests/fixtures/flyer_golden/live_customer_message_shapes.json"
+  ],
+  "touched_subsystems": [
+    "flyer-golden-fixtures"
+  ],
   "reviewers": [
-    {"login": "a", "role": "autonomous", "state": "approved", "commit_sha": "ffffffffffffffffffffffffffffffffffffffff", "is_stale": false, "is_author": false},
-    {"login": "b", "role": "autonomous", "state": "approved", "commit_sha": "ffffffffffffffffffffffffffffffffffffffff", "is_stale": false, "is_author": false}
+    {
+      "login": "a",
+      "role": "autonomous",
+      "state": "approved",
+      "commit_sha": "ffffffffffffffffffffffffffffffffffffffff",
+      "is_stale": false,
+      "is_author": false
+    },
+    {
+      "login": "b",
+      "role": "autonomous",
+      "state": "approved",
+      "commit_sha": "ffffffffffffffffffffffffffffffffffffffff",
+      "is_stale": false,
+      "is_author": false
+    }
   ],
   "findings": [],
-  "verification": []
+  "verification": [],
+  "base": "main"
 }
