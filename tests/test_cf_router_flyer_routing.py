@@ -2638,6 +2638,31 @@ def test_parse_source_vs_new_followup_handles_compound_reply():
     assert actions.parse_source_vs_new_followup("2") == ("new", "")
 
 
+def test_parse_source_vs_new_followup_documents_greedy_match_tail_risk():
+    """Pin the documented design fail-mode: a bare "Source code please" reply
+    parses as choice="source" with trailing="code please" because the leading
+    token regex matches `\\bsource\\b` then captures the rest of the line.
+
+    This is intentional accepted behavior per the plan's compound-reply
+    semantics: customers can append free-form instructions after SOURCE/NEW.
+    The cost is a narrow tail-risk if a customer happens to use the word
+    "source" in a non-choice sentence WHILE a pending row is sitting in
+    `awaiting_source_vs_new_choice`. Mitigation: `peek_flyer_source_vs_new_pending`
+    gates the consume on the row's existence, so this only fires when there
+    actually is a pending choice for this sender.
+
+    Future hardening (out of scope for this PR): require trailing chunk to
+    start with a punctuation/conjunction (e.g. `[,.;:!\\-—]` or
+    whitespace+`also|and|plus`) so a bare word like "code" does not get
+    accepted. Captured as a follow-up backlog item; this test pins the
+    current accepted shape so a tightener cannot regress it silently.
+    """
+    actions = _load_actions()
+    choice, trailing = actions.parse_source_vs_new_followup("Source code please")
+    assert choice == "source"
+    assert "code please" in trailing
+
+
 def test_consume_flyer_source_vs_new_choice_round_trip(tmp_path):
     actions = _load_actions()
     actions.FLYER_REFERENCE_SCOPE_PATH = tmp_path / "reference_scope_pending.json"

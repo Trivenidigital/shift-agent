@@ -940,7 +940,14 @@ def _try_flyer_source_vs_new_choice_intercept(text: str, chat_id: str, event: An
         sender_phone=phone,
     )
     if not pending:
-        # Branch 5: idempotent retry.
+        # Branch 5: idempotent retry. SOURCE-only by design: a SOURCE-chosen
+        # project queues for manual review and the customer gets one ack, so
+        # a duplicate SOURCE reply within 60s should re-send the same ack.
+        # NEW-chosen projects already trigger a customer-facing concept-
+        # generation ack via the existing flyer-primary-project-created path,
+        # so a duplicate NEW reply does not need a second ack here — it falls
+        # through to the next intercept (or to the LLM) where the active-
+        # project intercept will catch any further customer text.
         recent = actions.find_recent_flyer_manual_edit_project(phone, window_sec=60)
         if recent and choice_token == "source":
             project_id = str(recent.get("project_id") or "")
