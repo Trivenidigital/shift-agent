@@ -1098,9 +1098,6 @@ function ManualQueueDrawerBody(props: ManualQueueDrawerBodyProps) {
   const reasonOk = reason.trim().length >= 5;
   const completeOk = reasonOk && !!uploadedAsset && !completePending;
   const [showCompleteConfirm, setShowCompleteConfirm] = useState(false);
-  const referenceAssets = detail.assets.filter(
-    (a) => a.kind === "reference_image" || a.kind === "logo",
-  );
   const integrityOnly = detail.verification_modes.includes("source_edit_integrity_only");
   const uploadedAssetUrl = uploadedAsset ? `/api/flyer/operator-uploads/${uploadedAsset.filename}` : "";
 
@@ -1165,58 +1162,7 @@ function ManualQueueDrawerBody(props: ManualQueueDrawerBodyProps) {
         </div>
       )}
 
-      {/* Reference / source thumbnails (P0-3 partial). PDFs render an
-          "Open PDF" affordance rather than a broken <img>; image MIMEs
-          inline-thumbnail. Reviewer (PR #131) caught the broken-img
-          fallback for reference_unsupported rows. */}
-      {referenceAssets.length > 0 && (
-        <div className="rounded-md border border-zinc-200 px-3 py-2">
-          <div className="text-xs uppercase tracking-wide text-zinc-500">Source / reference</div>
-          <div className="mt-2 grid grid-cols-2 gap-2">
-            {referenceAssets.map((asset) => {
-              const isImage = asset.mime_type.startsWith("image/");
-              const isPdf = asset.mime_type === "application/pdf";
-              return (
-                <div key={asset.asset_id} className="rounded border border-zinc-200 bg-zinc-50 p-1">
-                  {isImage && (
-                    <img
-                      src={asset.media_url}
-                      alt={asset.asset_id}
-                      className="h-32 w-full rounded object-contain"
-                      loading="lazy"
-                    />
-                  )}
-                  {isPdf && (
-                    <a
-                      href={asset.media_url}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="flex h-32 w-full items-center justify-center rounded bg-white text-xs text-brand-700 underline-offset-2 hover:underline"
-                    >
-                      Open PDF in new tab
-                    </a>
-                  )}
-                  {!isImage && !isPdf && (
-                    <a
-                      href={asset.media_url}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="flex h-32 w-full items-center justify-center rounded bg-white text-xs text-brand-700 underline-offset-2 hover:underline"
-                    >
-                      Download {asset.mime_type || "asset"}
-                    </a>
-                  )}
-                  <div className="mt-1 text-[10px] text-zinc-500">
-                    <span className="font-mono">{asset.asset_id}</span> · {asset.kind} · {asset.mime_type}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      <FlyerProjectEvidenceDrawer detail={{ ...detail, assets: [] }} />
+      <FlyerProjectEvidenceDrawer detail={detail} />
 
       {/* Operator action: upload + complete + break-glass */}
       <div className="rounded-md border border-zinc-200 px-3 py-2">
