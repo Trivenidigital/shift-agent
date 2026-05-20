@@ -3,7 +3,7 @@
 Living checklist. Items grouped by priority; each completed item gets `✅` and a date.
 For history of *completed* multi-phase initiatives (platform extract, sender-id, agent #2/4/5, etc.), see git log + `tasks/all-phases-*.md`.
 
-Last updated: 2026-05-14 (Hermes SMB operating-layer roadmap added; prior note: post-PR #72 backlog refresh added first-traffic verification of provider_routing, audit_pairing.py factor-out, replay harness v0.2, SKILL.md hash manifest, stale config-backup cleanup, --yolo CLI mismatch)
+Last updated: 2026-05-20 (pilot-hardening golden live-shape samples and stale Flyer backlog reconciliation; prior note: Hermes SMB operating-layer roadmap added)
 
 ---
 
@@ -40,6 +40,11 @@ Hermes-first summary: reuse Hermes WhatsApp ingress, `dispatch_shift_agent`, sen
 - [x] 2026-05-19 Flyer Studio post-P0 pilot-hardening follow-ups: add spend-gated real-model golden smoke, surface `source_edit_integrity_only` in Cockpit manual queue, unify source-edit status copy through the canonical reason table, and add messy F-series-style raw requests to the deterministic golden suite.
   - Review: focused state/manual/golden suite `73 passed, 1 skipped`; cockpit backend manual-queue suite `24 passed`; frontend `npm run typecheck` and `npm run build` passed after `npm ci`; targeted red/green tests pinned copy consistency and the new integrity-only queue metadata.
   - Operator burn-down: PR #127 added `closed_no_send` so stale/superseded manual-review rows can be closed without implying customer delivery or QA break-glass. Deployed `deploy-20260519-211053-a8244611`; backup `/opt/shift-agent/state/flyer/projects.json.backup-pre-manual-burndown-20260519T211134Z`; closed F0036/F0043/F0045/F0052/F0053/F0056 plus duplicate F0058; final manual-queue triage `total=0`.
+- [x] 2026-05-20 pilot-hardening golden live-shape sampling and backlog reconciliation.
+  - Drift/Hermes-first check: reused deployed Flyer `projects.json`, `customers.json`, `decisions.log`, the existing deterministic golden harness, cf-router classifier helpers, and task docs. No dashboard or runtime behavior changes.
+  - Live samples redacted into `tests/fixtures/flyer_golden/live_customer_message_shapes.json`: source flyer + long changes + `co-owner`, `any update?`, title-case `Approve`, and short item-swap correction.
+  - Backlog reconciliation keeps history but removes stale P0-looking ambiguity around CTA idempotency, F0012, adaptive language/mode, F0023/F0024/F0029/edit-flow, and the mobile design draft disposition. Production-quality real-model smoke remains open as Session 3-owned until that PR lands.
+  - Review: red run caught missing `--manual-edit-required` fixture wiring; final focused suite `187 passed`; `py_compile` and `git diff --check` passed. Mobile app draft disposition recorded separately in `tasks/flyer-mobile-app-v1-follow-up-2026-05-20.md`.
 - [ ] 2026-05-18 business-type starter briefs: store 10 editable sample flyer briefs keyed by customer business category, show the best brief after registration or before vague flyer creation, and let the user edit/submit it as the normal Flyer Studio request.
   - Drift/Hermes-first check: reuse Flyer `business_category`, onboarding, intake sessions, project creation, renderer, WhatsApp delivery, live VPS `flyer_generation`/`dispatch_shift_agent` skills, and `cf-router`. Checked Hermes Skills Hub and awesome-hermes-agent; no purpose-built business-type flyer prompt catalog found. Net-new scope is a small local starter-brief catalog and reply integration.
   - [x] Create branch `codex/flyer-starter-briefs`.
@@ -71,9 +76,12 @@ Hermes-first summary: reuse Hermes WhatsApp ingress, `dispatch_shift_agent`, sen
     - Review fixes: restored account phone normalization for audit/pending-change guards, added new cf-router reasons to the strict audit schema, reset starter sent-counts when customers opt back in, and included opt-out hints on every full starter prompt surface.
     - Follow-up review fixes: guided-mode no longer consumes starter prompt entitlement without showing a starter; cf-router starter prompt claim/release now goes through the locked `manage-flyer-account` path; onboarding/intake release starter claims on hard send failure; broad account commands for unknown users fall through while preference commands still fail closed.
 - [x] 2026-05-17 launch funnel reliability pass: fix compound `CONFIRM + flyer request`, broaden new-project detection for menu/marketing requests, prevent generic LLM fallback during active intake, require explicit media intent before saving brand assets, deploy, and send a fresh campaign message for user testing.
-- [ ] 2026-05-17 CTA idempotency and live-state repair: restore the accidentally cleared `+17329837841` Flyer customer, harden Start Free Trial / Act Now paths for new, in-progress, payment-pending, trial, and active customers, verify locally and on VPS, then resend the test campaign.
+- [ ] 2026-05-17 CTA idempotency and live-state repair: code/state repair is shipped; only manual campaign resend verification remains.
   - [x] Local bugfix: duplicate-phone `CONFIRM` from the same sender now resumes the existing Flyer account, clears the stale onboarding session, and keeps true cross-account duplicate blocking customer-safe.
   - [x] VPS targeted hotfix: deployed duplicate-onboarding resume plus free-trial project field hydration without tarballing unrelated dirty worktree changes; temp-state smokes passed for both paths.
+  - [x] Current live state verified 2026-05-20: `CUST0001` is restored as `trial` with `public_phone/business_whatsapp/onboarded_by_phone=+17329837841`, `primary_chat_id=17329837841@s.whatsapp.net`, and `authorized_request_numbers=["+17329837841","+19045550104"]`.
+  - [x] Current local coverage: CTA routing has focused tests for payment-pending, trial/active existing customer retries, sender-block/card-text CTA detection, LID-only senders, stale onboarding-session bypass, and active-customer ready prompts in `tests/test_cf_router_flyer_routing.py` and `tests/test_cf_router_plugin.py`.
+  - [ ] Manual resend verification only: from the existing Flyer admin/campaign sender, resend the current Flyer Studio campaign to the test WhatsApp account `+17329837841`, then tap both quick replies. Expected: `Start Free Trial` returns the existing-account ready prompt without restarting onboarding or creating a project; `Act Now! Save Time and Money` returns the same ready/account prompt; decisions.log records `flyer_onboarding`/active-customer-ready style handling, not `flyer_intake_started` or duplicate customer creation.
 - [x] Add Flyer Agent schemas: config, request fields, brand kit, assets, concepts, revisions, project store, exact workflow-state transitions, and audit entries.
 - [x] Add WhatsApp media delivery helper for the existing bridge `/send-media` endpoint.
 - [x] Add Flyer Agent SKILLs for dispatch, intake, generation/revision guidance, final approval, and delivery.
@@ -91,13 +99,15 @@ Hermes-first summary: reuse Hermes WhatsApp ingress, `dispatch_shift_agent`, sen
 - [x] Fix live WhatsApp misroute where cf-router F7 treated explicit flyer messages as Catering follow-ups when the sender had an active catering lead.
 - [x] Redeploy cf-router flyer-priority guard and verify the exact Ugadi flyer prompt clears cf-router and routes to Flyer in dispatcher replay.
 - [x] Add deterministic cf-router Flyer primary-mode so explicit flyer WhatsApp requests do not depend on the brittle generic LLM dispatcher.
-- [ ] Production-quality image generation smoke: configure a real image-output model for Flyer Studio concepts/finals, run a live Ugadi flyer request, and compare the delivered visual quality against the deterministic renderer.
+- [ ] Production-quality image generation smoke: owned by Session 3 / pending PR.
+  - Evidence already shipped: controlled direct-generation poster path landed 2026-05-17 and deployed as `deploy-20260517-181423-59407d33`; `tests/test_flyer_golden_scenarios_real_model.py` keeps the real-model path spend-gated.
+  - Still pending before closure: Session 3's real-model/spend-gated smoke and provider-posture PR must land, then update this item with the exact PR/deploy/test evidence.
 - [x] Credit optimization: switch Flyer Studio default from three generated concepts to one best generated design, with WhatsApp copy `Reply APPROVE or reply with changes.`
 - [x] Marketing CTA correction: split `Start Free Trial` and `Act Now! Save Time and Money` into distinct WhatsApp prefill intents, add router coverage for `ACT NOW`, and make the trial welcome copy start with a ready-to-create flyer prompt.
 - [x] 2026-05-18 Chloe Hair Studio creation-flow blocker: prevent non-food service flyers from inheriting Indian festive/food-menu defaults, block instruction-text leakage in text QA, reject language-only business profile replies, parse `Location:`/`Contact:` labels, repair live `CUST0004` category to `Hair salon`, and move unsafe `F0036` out of final approval to `manual_edit_required`.
   - Review: local focused suite `132 passed`; `python -m compileall -q src\agents\flyer src\platform` passed; `git diff --check` passed for changed files; VPS hotfix syntax check passed; VPS smoke parsed a fresh Chloe request as `Chloe Hair Studio` with Virginia location/contact and no blocked food/festival prompt terms.
   - Fresh candidate: generated `F0048` from the repaired path; visual QA passed for salon-appropriate imagery and required copy. Earlier QA candidates `F0043`/`F0045` were contained as `manual_edit_required`.
-- [ ] Free Trial flyer generation bug: live F0012 created after onboarding but stayed `intake_started` because project extraction required `contact_info` from the flyer text and did not hydrate the saved trial customer profile.
+- [x] Free Trial flyer generation bug: live F0012 created after onboarding but stayed `intake_started` because project extraction required `contact_info` from the flyer text and did not hydrate the saved trial customer profile.
   - Drift/Hermes-first check: reused existing Flyer onboarding account state, project script, cf-router primary path, quota path, and renderer. No new Hermes substrate or custom workflow is needed; net-new scope is filling missing project fields from the already-collected Flyer customer profile.
   - [x] Isolate work in branch/worktree `codex/fix-flyer-free-trial-generation`.
   - [x] Verify live state: F0012 request has breakfast menu/prices but `fields.contact_info=null`; customer `CUST0002` is trial-active with `public_phone=+19802005022`.
@@ -105,6 +115,7 @@ Hermes-first summary: reuse Hermes WhatsApp ingress, `dispatch_shift_agent`, sen
   - [x] Implement profile hydration in `create-flyer-project`.
   - [x] Run focused verification and record result.
   - Review: `python -m pytest tests\test_flyer_create_project.py tests\test_flyer_schemas.py tests\test_flyer_onboarding.py tests\test_cf_router_flyer_routing.py tests\test_flyer_scripts_static.py -q` -> 56 passed.
+  - Reconciliation 2026-05-20: fix is present on `origin/main` via `_hydrate_fields_from_customer()` in `src/agents/flyer/scripts/create-flyer-project` and regression `test_create_project_hydrates_missing_contact_from_trial_customer`. Historical live row `F0012` remains `intake_started`; treat that as optional operator cleanup if the tester still uses that thread, not as an open code gap.
 
 ### Infrastructure Hardening - Hermes Runtime Ownership (2026-05-16)
 
