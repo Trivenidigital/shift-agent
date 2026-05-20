@@ -25,6 +25,18 @@ Hermes-first summary: reuse Hermes source, deployed Shift Agent patch gates, tar
 - [x] Review first live fleet-check output: Main is yellow (upstream high-risk changes + persistent standalone patch-gate availability); Srilu is red (bridge/env/deploy-marker/patch-gate/cockpit posture); VPIN is red (env/deploy-marker/patch-gate/cockpit posture).
 - [ ] Normalize Srilu/VPIN runtime posture before adding any execute-mode upgrade command.
 
+## Active - Operator ops brief via Hermes memory (2026-05-20)
+
+**Drift-check tag:** extends-Hermes
+
+Hermes-first summary: reuse repo-backed task docs, existing app automations, Hermes chat/cron as the reminder surface, and `tools/hermes-fleet-upgrade.py` report output. Net-new scope is a deterministic local Markdown brief generator plus a small operator-decisions file; v1 does not post to WhatsApp/Telegram or create a competing task database.
+
+- [x] Add `tasks/operator-decisions.md` as the human-maintained decision/blocker/handoff queue.
+- [x] Add `tools/operator-brief.py` to render a daily Markdown brief from repo docs, optional fleet JSON, automations, and git state.
+- [x] Add focused parser/rendering tests for the operator brief.
+- [x] Add a runbook for invoking the brief from Hermes/cron without mutating production state.
+  - Review: `python -m pytest tests\test_operator_brief.py tests\test_hermes_fleet_upgrade.py -q` -> 28 passed; `python -m py_compile tools\operator-brief.py tools\hermes-fleet-upgrade.py` passed; `python tools\operator-brief.py --repo-root . --no-git` rendered the repo-backed brief; `git diff --check` passed.
+
 ## Active - Hermes SMB operating layer strategy (2026-05-14)
 
 **Drift-check tag:** extends-Hermes

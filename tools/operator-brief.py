@@ -1,0 +1,305 @@
+#!/usr/bin/env python3
+"""Render a repo-backed daily operator brief.
+
+The brief is intentionally read-only. It summarizes existing sources of truth
+instead of creating a second task system or probing production hosts directly.
+"""
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from datetime import date
+from pathlib import Path
+
+
+SECTION_NAMES = {
+    "needs your decision": "needs_decision",
+    "waiting on you": "waiting_on_you",
+    "active risks": "active_risks",
+    "handoffs and promises": "handoffs",
+    "parking lot": "parking_lot",
+}
+
+
+@dataclass
+class OperatorDecisions:
+    needs_decision: list[str] = field(default_factory=list)
+    waiting_on_you: list[str] = field(default_factory=list)
+    active_risks: list[str] = field(default_factory=list)
+    handoffs: list[str] = field(default_factory=list)
+    parking_lot: list[str] = field(default_factory=list)
+    missing: bool = False
+
+
+@dataclass
+class GitSummary:
+    branch: str = "unknown"
+    changes: list[str] = field(default_factory=list)
+    recent_commits: list[str] = field(default_factory=list)
+    error: str = ""
+
+
+@dataclass
+class Brief:
+    generated_date: str
+    decisions: OperatorDecisions
+    todo_signals: list[str]
+    fleet_lines: list[str]
+    automation_lines: list[str]
+    git: GitSummary | None
+
+
+def normalize_heading(raw: str) -> str:
+    return re.sub(r"[^a-z0-9 ]+", "", raw.strip().lower()).strip()
+
+
+def clean_checklist_item(line: str) -> str | None:
+    stripped = line.strip()
+    if not stripped.startswith("-"):
+        return None
+    match = re.match(r"^-\s+\[([ xX])\]\s+(.*)$", stripped)
+    if match:
+        if match.group(1).lower() == "x":
+            return None
+        return match.group(2).strip()
+    return stripped[1:].strip() or None
+
+
+def clean_open_checklist_item(line: str) -> str | None:
+    match = re.match(r"^\s*-\s+\[\s\]\s+(.*)$", line)
+    if not match:
+        return None
+    return match.group(1).strip() or None
+
+
+def load_operator_decisions(path: Path) -> OperatorDecisions:
+    if not path.exists():
+        return OperatorDecisions(missing=True)
+
+    values = OperatorDecisions()
+    current_attr: str | None = None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("## "):
+            current_attr = SECTION_NAMES.get(normalize_heading(line[3:]))
+            continue
+        if current_attr is None:
+            continue
+        item = clean_checklist_item(line)
+        if item:
+            getattr(values, current_attr).append(item)
+    return values
+
+
+def load_todo_signals(path: Path, limit: int = 8) -> list[str]:
+    if not path.exists():
+        return []
+
+    signals: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        item = clean_open_checklist_item(line)
+        if item:
+            signals.append(item)
+        if len(signals) >= limit:
+            break
+    return signals
+
+
+def summarize_fleet_report(path: Path | None) -> list[str]:
+    if path is None:
+        return ["No fleet report provided."]
+    if not path.exists():
+        return [f"Fleet report file not found: {path}"]
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return [f"Fleet report is not valid JSON: {exc}"]
+
+    hosts = payload.get("hosts")
+    if not isinstance(hosts, list) or not hosts:
+        return ["Fleet report contains no hosts."]
+
+    lines: list[str] = []
+    for host in hosts:
+        if not isinstance(host, dict):
+            continue
+        label = str(host.get("label") or host.get("alias") or "unknown")
+        health = host.get("health") if isinstance(host.get("health"), dict) else {}
+        status = str(health.get("status") or "unknown")
+        summary = str(health.get("summary") or "unknown")
+        lines.append(f"{label}: {status} - {summary}")
+        for blocker in health.get("blockers") or []:
+            lines.append(f"  BLOCKER: {blocker}")
+        for warning in health.get("warnings") or []:
+            lines.append(f"  WARN: {warning}")
+    return lines or ["Fleet report contains no readable hosts."]
+
+
+def parse_toml_scalar(line: str) -> tuple[str, str] | None:
+    match = re.match(r"^\s*([A-Za-z0-9_-]+)\s*=\s*(.+?)\s*$", line)
+    if not match:
+        return None
+    value = match.group(2).strip()
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        value = value[1:-1]
+    return match.group(1), value
+
+
+def load_automations(automations_dir: Path) -> list[str]:
+    if not automations_dir.exists():
+        return ["No automation configs found."]
+
+    configs = sorted(automations_dir.glob("*/automation.toml"))
+    if not configs:
+        return ["No automation configs found."]
+
+    lines: list[str] = []
+    for config in configs:
+        values: dict[str, str] = {}
+        for line in config.read_text(encoding="utf-8").splitlines():
+            parsed = parse_toml_scalar(line)
+            if parsed:
+                values[parsed[0]] = parsed[1]
+        name = values.get("name") or config.parent.name
+        status = values.get("status") or "unknown"
+        lines.append(f"{name}: {status}")
+    return lines
+
+
+def load_git_summary(repo_root: Path) -> GitSummary:
+    try:
+        status = subprocess.run(
+            ["git", "status", "--short", "--branch"],
+            cwd=repo_root,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        log = subprocess.run(
+            ["git", "log", "-5", "--oneline", "--decorate"],
+            cwd=repo_root,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        return GitSummary(error=str(exc))
+
+    status_lines = [line for line in status.stdout.splitlines() if line.strip()]
+    branch = status_lines[0].removeprefix("## ").strip() if status_lines else "unknown"
+    changes = status_lines[1:]
+    commits = [line.strip() for line in log.stdout.splitlines() if line.strip()]
+    return GitSummary(branch=branch, changes=changes, recent_commits=commits)
+
+
+def build_brief(
+    *,
+    repo_root: Path,
+    decisions_path: Path | None = None,
+    todo_path: Path | None = None,
+    fleet_json_path: Path | None = None,
+    automations_dir: Path | None = None,
+    generated_date: str | None = None,
+    include_git: bool = True,
+) -> Brief:
+    decisions_file = decisions_path or repo_root / "tasks" / "operator-decisions.md"
+    todo_file = todo_path or repo_root / "tasks" / "todo.md"
+    automation_root = automations_dir or Path.home() / ".codex" / "automations"
+    return Brief(
+        generated_date=generated_date or date.today().isoformat(),
+        decisions=load_operator_decisions(decisions_file),
+        todo_signals=load_todo_signals(todo_file),
+        fleet_lines=summarize_fleet_report(fleet_json_path),
+        automation_lines=load_automations(automation_root),
+        git=load_git_summary(repo_root) if include_git else None,
+    )
+
+
+def append_section(lines: list[str], title: str, items: list[str], empty: str) -> None:
+    lines.extend(["", f"## {title}", ""])
+    if items:
+        for item in items:
+            lines.append(f"- {item}")
+    else:
+        lines.append(f"- {empty}")
+
+
+def render_markdown(brief: Brief) -> str:
+    decisions = brief.decisions
+    lines = [f"# Ops Brief - {brief.generated_date}"]
+
+    missing_decision_msg = ["No operator decisions file found."] if decisions.missing else []
+    append_section(
+        lines,
+        "Needs Your Decision",
+        missing_decision_msg + decisions.needs_decision,
+        "No decisions listed.",
+    )
+    append_section(lines, "Waiting On You", decisions.waiting_on_you, "No waiting-on-you items listed.")
+    append_section(lines, "Active Risks", decisions.active_risks, "No active risks listed.")
+    append_section(lines, "Open Todo Signals", brief.todo_signals, "No unchecked todo signals found.")
+    append_section(lines, "Fleet Status", brief.fleet_lines, "No fleet status available.")
+    append_section(lines, "Automations", brief.automation_lines, "No automation configs found.")
+
+    if brief.git is not None:
+        git_lines = []
+        if brief.git.error:
+            git_lines.append(f"Git status unavailable: {brief.git.error}")
+        else:
+            git_lines.append(f"Branch: {brief.git.branch}")
+            if brief.git.changes:
+                git_lines.extend(f"Dirty: {change}" for change in brief.git.changes[:8])
+            else:
+                git_lines.append("Working tree clean.")
+            git_lines.extend(f"Recent: {commit}" for commit in brief.git.recent_commits[:3])
+        append_section(lines, "Git State", git_lines, "Git state not checked.")
+
+    recommended = (
+        decisions.needs_decision[:2]
+        + decisions.waiting_on_you[:1]
+        + brief.todo_signals[: max(0, 3 - min(3, len(decisions.needs_decision[:2] + decisions.waiting_on_you[:1])))]
+    )
+    append_section(lines, "Recommended Next 3", recommended[:3], "No recommended actions.")
+    append_section(lines, "Handoffs And Promises", decisions.handoffs, "No handoffs listed.")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Render the daily operator ops brief.")
+    parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument("--decisions", type=Path, default=None)
+    parser.add_argument("--todo", type=Path, default=None)
+    parser.add_argument("--fleet-json", type=Path, default=None)
+    parser.add_argument("--automations-dir", type=Path, default=None)
+    parser.add_argument("--date", default=None, help="Brief date, YYYY-MM-DD. Defaults to today.")
+    parser.add_argument("--out", type=Path, default=None, help="Write Markdown to this path instead of stdout.")
+    parser.add_argument("--no-git", action="store_true", help="Skip git status/log checks.")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv or sys.argv[1:])
+    brief = build_brief(
+        repo_root=args.repo_root,
+        decisions_path=args.decisions,
+        todo_path=args.todo,
+        fleet_json_path=args.fleet_json,
+        automations_dir=args.automations_dir,
+        generated_date=args.date,
+        include_git=not args.no_git,
+    )
+    markdown = render_markdown(brief)
+    if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(markdown, encoding="utf-8")
+        sys.stderr.write(f"Wrote {args.out}\n")
+    else:
+        sys.stdout.write(markdown)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
