@@ -51,9 +51,9 @@ Add `tools/hermes-fleet-upgrade.py` with two safe subcommands:
 
 1. `check`
    - Default hosts: `srilu`, `main-vps`, `vpin`.
-   - Collects read-only runtime facts over SSH.
+   - Collects runtime-safe posture facts over SSH.
    - Compares each host to upstream HEAD or `--upstream-commit`.
-   - Fetches upstream metadata in the Hermes checkout and classifies changed paths by risk.
+   - Fetches upstream metadata in the Hermes checkout and classifies changed paths by risk. This writes to the checkout's `.git` mirror only; it does not alter Hermes/Shift Agent runtime state, working tree files, systemd services, or customer state.
    - Emits Markdown or JSON.
 
 2. `promotion-plan`
@@ -119,7 +119,8 @@ Tests will not SSH. They will exercise pure parsing, classification, and renderi
 ## Implementation Notes
 
 - Use only standard library Python.
-- Keep SSH probing read-only.
+- Keep SSH probing read-only to runtime state; the probe may update Hermes `.git` remote refs to compute upstream diffs.
+- Use non-interactive SSH (`BatchMode=yes` and bounded `ConnectTimeout`) so cron cannot hang on auth prompts.
 - Avoid printing environment values; report only presence/source.
 - The CLI may use normal subprocess capture for local operator use, but documentation must retain the project rule for manual SSH debugging: redirect SSH output to a file and read it separately on Windows.
 - Do not edit production state, Hermes checkouts, or VPS configs in this PR.

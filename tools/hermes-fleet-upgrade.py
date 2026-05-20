@@ -24,6 +24,7 @@ class FleetHost:
     label: str
     role: str
     promotion_order: int
+    expects_whatsapp: bool = True
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,7 @@ class HostSnapshot:
     checked_at: str = ""
     probe_error: str = ""
     changed_paths: tuple[str, ...] = ()
+    expects_whatsapp: bool = True
 
     def replace(self, **changes: object) -> "HostSnapshot":
         return replace(self, **changes)
@@ -102,7 +104,7 @@ def classify_snapshot(snapshot: HostSnapshot, upstream_commit: str = "") -> Host
         blockers.append("unknown Hermes commit")
     if snapshot.gateway_status != "active":
         blockers.append("hermes-gateway inactive")
-    if snapshot.bridge_status != "listening":
+    if snapshot.expects_whatsapp and snapshot.bridge_status != "listening":
         blockers.append("WhatsApp bridge not listening")
     if snapshot.env_symlink_status != "ok":
         blockers.append("env symlink not ok")
@@ -143,8 +145,14 @@ def classify_upstream_changes(paths: Iterable[str]) -> UpstreamRisk:
         "scripts/whatsapp-bridge/",
         "providers/",
         "agent/providers/",
-        "agent/vision",
+        # Conservative high-risk list from Hermes Agent top-level/runtime dirs
+        # observed on 2026-05-20; expand when upstream adds new runtime roots.
+        "agent/vision/",
         "vision/",
+        "cli/",
+        "core/",
+        "config/",
+        "migrations/",
         "plugins/",
         "tools/",
         "pyproject.toml",
@@ -403,7 +411,7 @@ def normalization_gaps(snapshot: HostSnapshot, reference: HostSnapshot | None) -
     gaps: list[str] = []
     if snapshot.env_symlink_status != "ok":
         gaps.append("env symlink is not ok")
-    if snapshot.bridge_status != "listening":
+    if snapshot.expects_whatsapp and snapshot.bridge_status != "listening":
         gaps.append("WhatsApp bridge is not listening")
     if snapshot.patch_gate_status != "ok":
         gaps.append("patch gate is not ready")
@@ -507,6 +515,10 @@ def fetch_upstream_commit(upstream_url: str = DEFAULT_UPSTREAM_URL) -> str:
 def remote_probe_script() -> str:
     return r"""
 set +e
+# This probe is read-only to Hermes/Shift Agent runtime state. It does run
+# `git fetch` inside the Hermes checkout so reports can classify upstream
+# changed paths; no working tree files or services are modified.
+trap 'rm -f /tmp/hermes_fetch.out /tmp/hermes_patch_gate.out' EXIT
 HERMES_DIR=""
 for d in /root/.hermes/hermes-agent /usr/local/lib/hermes-agent; do
   if [ -d "$d/.git" ]; then HERMES_DIR="$d"; break; fi
@@ -577,6 +589,7 @@ def parse_probe_output(host: FleetHost, output: str, checked_at: str) -> HostSna
         patch_gate_status=values.get("patch_gate_status", "unknown"),
         checked_at=checked_at,
         changed_paths=parse_changed_paths(values.get("changed_paths", "")),
+        expects_whatsapp=host.expects_whatsapp,
     )
 
 
@@ -596,7 +609,15 @@ def probe_host(host: FleetHost, timeout: int = 45) -> HostSnapshot:
     probe = remote_probe_script().replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
     try:
         proc = subprocess.run(
-            ["ssh", host.alias, "bash -s"],
+            [
+                "ssh",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                host.alias,
+                "bash -s",
+            ],
             input=probe,
             capture_output=True,
             text=False,

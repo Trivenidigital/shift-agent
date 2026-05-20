@@ -74,6 +74,7 @@ Expected before execute-mode upgrade work:
 - Main: green or yellow only for upstream drift.
 - Srilu: no red blockers if selected as canary.
 - VPIN: no red blockers before it enters a promotion wave.
+- Any host that is intentionally non-WhatsApp must be configured/documented with that expectation before bridge status stops being a blocker.
 
 ## Stop Conditions
 

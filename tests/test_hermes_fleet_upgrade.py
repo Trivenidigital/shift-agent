@@ -34,6 +34,7 @@ def good_snapshot(module, *, label="Main", alias="main-vps", commit=None):
         plugins_count=8,
         patch_gate_status="ok",
         checked_at="2026-05-20T12:00:00Z",
+        expects_whatsapp=True,
     )
 
 
@@ -76,6 +77,19 @@ def test_classifies_blocking_runtime_gaps_as_red(field, value, expected_blocker)
 
     assert health.status == "red"
     assert expected_blocker in health.blockers
+
+
+def test_non_whatsapp_host_does_not_block_on_missing_bridge():
+    module = load_module()
+    snapshot = good_snapshot(module).replace(
+        bridge_status="not_listening",
+        expects_whatsapp=False,
+    )
+
+    health = module.classify_snapshot(snapshot, upstream_commit="a" * 40)
+
+    assert health.status == "green"
+    assert "WhatsApp bridge not listening" not in health.blockers
 
 
 def test_missing_optional_cockpit_is_yellow_not_red():
@@ -246,6 +260,7 @@ def test_remote_probe_only_runs_installed_patch_gate_when_baseline_exists():
 
     assert "/usr/local/bin/hermes-patch-baseline.txt" in script
     assert "[ -f /usr/local/bin/hermes-patch-baseline.txt ]" in script
+    assert "rm -f /tmp/hermes_fetch.out /tmp/hermes_patch_gate.out" in script
 
 
 def test_probe_host_sends_lf_only_bytes_to_ssh(monkeypatch):
@@ -258,6 +273,7 @@ def test_probe_host_sends_lf_only_bytes_to_ssh(monkeypatch):
         stderr = ""
 
     def fake_run(*args, **kwargs):
+        captured["args"] = args[0]
         captured["input"] = kwargs["input"]
         captured["text"] = kwargs.get("text")
         return FakeProcess()
@@ -269,6 +285,32 @@ def test_probe_host_sends_lf_only_bytes_to_ssh(monkeypatch):
     assert isinstance(captured["input"], bytes)
     assert b"\r" not in captured["input"]
     assert captured["text"] is False
+    assert "-o" in captured["args"]
+    assert "BatchMode=yes" in captured["args"]
+    assert "ConnectTimeout=10" in captured["args"]
+
+
+def test_probe_timeout_returns_probe_error(monkeypatch):
+    module = load_module()
+
+    def fake_run(*args, **kwargs):
+        raise module.subprocess.TimeoutExpired(cmd="ssh", timeout=45)
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    snapshot = module.probe_host(module.default_fleet_hosts()[0])
+
+    assert snapshot.probe_error
+    assert snapshot.alias == "srilu-vps"
+
+
+def test_validate_candidate_rejects_wrong_length_and_non_hex():
+    module = load_module()
+
+    with pytest.raises(ValueError):
+        module.validate_candidate("abc")
+    with pytest.raises(ValueError):
+        module.validate_candidate("g" * 40)
 
 
 def test_promotion_plan_requires_candidate_sha():
