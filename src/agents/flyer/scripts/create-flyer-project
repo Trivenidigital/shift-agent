@@ -29,6 +29,8 @@ try:
         extract_text_facts,
         merge_locked_facts,
         missing_required_facts,
+        source_contract_locked_facts,
+        _populate_forbidden_substrings,
     )
 except ImportError:
     from agents.flyer.facts import (  # noqa: E402
@@ -36,6 +38,8 @@ except ImportError:
         extract_text_facts,
         merge_locked_facts,
         missing_required_facts,
+        source_contract_locked_facts,
+        _populate_forbidden_substrings,
     )
 try:
     from flyer_reference_extract import build_reference_extraction_provider, classify_reference_role, extract_reference  # type: ignore  # noqa: E402
@@ -411,7 +415,7 @@ def _initial_reference_extraction(asset: FlyerAsset, *, raw_request: str, now: d
             detail=f"unsupported reference media type: {asset.mime_type}",
             extracted_at=now,
         )
-    if role not in {"menu_reference", "old_flyer_reference"}:
+    if role not in {"menu_reference", "old_flyer_reference", "source_edit_template"}:
         return FlyerReferenceExtraction(
             asset_id=asset.asset_id,
             role=role,
@@ -431,7 +435,10 @@ def _initial_reference_extraction(asset: FlyerAsset, *, raw_request: str, now: d
 
 
 def _needs_reference_extraction(extraction: FlyerReferenceExtraction) -> bool:
-    return extraction.role in {"menu_reference", "old_flyer_reference"} and extraction.status == "not_run"
+    return (
+        extraction.role in {"menu_reference", "old_flyer_reference", "source_edit_template"}
+        and extraction.status == "not_run"
+    )
 
 
 def main() -> int:
@@ -553,6 +560,17 @@ def main() -> int:
         raw_request=args.raw_request,
         provider=build_reference_extraction_provider(),
     )
+    # Convert source-contract into locked facts + populate forbidden substrings
+    # before the merge so the project carries source-derived requirements and
+    # the negative-assertion list reaches QA via reference_extractions[N].source_contract.
+    source_facts = []
+    if extraction.source_contract is not None:
+        _populate_forbidden_substrings(extraction.source_contract)
+        source_facts = source_contract_locked_facts(
+            extraction.source_contract,
+            asset=pending_reference_asset,
+            message_id=args.message_id,
+        )
     now = datetime.now(timezone.utc)
     with FileLock(Path(str(state_path) + ".lock")):
         store = _load_store(state_path)
@@ -563,7 +581,11 @@ def main() -> int:
                 extraction if item.asset_id == extraction.asset_id else item
                 for item in current.reference_extractions
             ]
-            locked_facts = merge_locked_facts(current.locked_facts, extraction.extracted_facts)
+            locked_facts = merge_locked_facts(
+                current.locked_facts,
+                extraction.extracted_facts,
+                source_facts,
+            )
             updates = {
                 "reference_extractions": reference_extractions,
                 "locked_facts": locked_facts,
@@ -571,8 +593,15 @@ def main() -> int:
             }
             if _reference_failure_requires_manual_review(extraction):
                 updates["status"] = "manual_edit_required"
+                # Source-edit role uses the source_edit-prefixed reason code
+                # so the cockpit triage view groups exact-edit provider gaps
+                # under their own bucket instead of the generic reference_* one.
+                if extraction.role == "source_edit_template":
+                    reason_code = "source_edit_provider_unavailable"
+                else:
+                    reason_code = f"reference_{extraction.status}"
                 updates["manual_review"] = make_manual_review(
-                    reason_code=f"reference_{extraction.status}",
+                    reason_code=reason_code,
                     detail=extraction.detail,
                     queued_at=now,
                 )

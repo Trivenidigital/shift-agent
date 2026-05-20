@@ -729,3 +729,125 @@ def test_create_flyer_project_does_not_queue_when_required_facts_present(tmp_pat
     assert project["status"] == "intake_started"
     assert project["manual_review"]["status"] == "none"
     assert project["manual_review"]["reason_code"] == "unclassified"
+
+
+# ─── Task 4: source-contract locked-fact helpers ──────────────────
+
+
+def test_source_contract_locked_facts_for_f0061(tmp_path, monkeypatch):
+    """F0061-style contract yields source_section, source_heading, and
+    replacement:N:new locked facts. preserve_layout/preserve_unmentioned_text
+    flip the required bit on source-derived facts."""
+    sys.path.insert(0, str(PLATFORM))
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    from schemas import FlyerAsset, FlyerSourceContract, FlyerSourceContractSection
+    from agents.flyer.facts import source_contract_locked_facts
+
+    (tmp_path / "sample.png").write_bytes(b"x")
+    asset = FlyerAsset(
+        asset_id="A0001",
+        kind="reference_image",
+        source="whatsapp",
+        path=str(tmp_path / "sample.png"),
+        mime_type="image/png",
+        sha256="a" * 64,
+        original_message_id="m-ref",
+        received_at=datetime(2026, 5, 20, tzinfo=timezone.utc),
+    )
+
+    contract = FlyerSourceContract(
+        required_headings=["Monday Thali Specials"],
+        sections=[FlyerSourceContractSection(heading="Veg Thali Specials", items=["Rice", "Dal"])],
+        requested_replacements={"Triveni Express": "Lakshmi's Kitchen", "Rice": "Jeera Rice"},
+        preserve_layout=True,
+        preserve_unmentioned_text=True,
+    )
+    facts = source_contract_locked_facts(contract, asset=asset, message_id="m-x")
+    by_id = {f.fact_id: f for f in facts}
+    assert "source_heading:0" in by_id
+    assert by_id["source_heading:0"].value == "Monday Thali Specials"
+    assert by_id["source_heading:0"].required is True
+    assert by_id["source_section:0:heading"].value == "Veg Thali Specials"
+    assert by_id["source_section:0:item:0"].value == "Rice"
+    assert "replacement:0:new" in by_id
+    assert by_id["replacement:0:new"].required is True
+    # `replacement:N:old` is present but not required (it's tracked for QA negative-checks).
+    assert "replacement:0:old" in by_id
+    assert by_id["replacement:0:old"].required is False
+    # Provenance survives on every fact.
+    assert by_id["source_heading:0"].source_asset_id == "A0001"
+
+
+def test_source_contract_locked_facts_not_required_when_no_preserve(tmp_path, monkeypatch):
+    sys.path.insert(0, str(PLATFORM))
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    from schemas import FlyerAsset, FlyerSourceContract
+    from agents.flyer.facts import source_contract_locked_facts
+
+    (tmp_path / "sample.png").write_bytes(b"x")
+    asset = FlyerAsset(
+        asset_id="A0001",
+        kind="reference_image",
+        source="whatsapp",
+        path=str(tmp_path / "sample.png"),
+        mime_type="image/png",
+        sha256="a" * 64,
+        original_message_id="m-ref",
+        received_at=datetime(2026, 5, 20, tzinfo=timezone.utc),
+    )
+    contract = FlyerSourceContract(
+        required_headings=["Some Heading"],
+        preserve_layout=False,
+        preserve_unmentioned_text=False,
+    )
+    facts = source_contract_locked_facts(contract, asset=asset)
+    by_id = {f.fact_id: f for f in facts}
+    assert by_id["source_heading:0"].required is False
+
+
+def test_populate_forbidden_substrings_brand_phone_but_not_menu_item(tmp_path):
+    sys.path.insert(0, str(PLATFORM))
+    from schemas import FlyerSourceContract, FlyerSourceContractSection
+    from agents.flyer.facts import _populate_forbidden_substrings
+
+    contract = FlyerSourceContract(
+        sections=[FlyerSourceContractSection(heading="Veg Thali Specials", items=["Rice"])],
+        requested_replacements={
+            "Triveni Express": "Lakshmi's Kitchen",
+            "Rice": "Jeera Rice",
+            "555-010-0100": "+17329837841",
+        },
+    )
+    _populate_forbidden_substrings(contract)
+    forbidden = contract.forbidden_substrings
+    assert "Triveni Express" in forbidden, forbidden
+    # Menu-item swap is NOT forbidden — both legitimately co-exist.
+    assert "Rice" not in forbidden
+    # Phone replacement adds digits-only run.
+    assert any("5550100100" in f for f in forbidden)
+
+
+def test_populate_forbidden_substrings_skips_single_word_brand(tmp_path):
+    sys.path.insert(0, str(PLATFORM))
+    from schemas import FlyerSourceContract
+    from agents.flyer.facts import _populate_forbidden_substrings
+
+    contract = FlyerSourceContract(
+        requested_replacements={"Acme": "Bravo"},
+    )
+    _populate_forbidden_substrings(contract)
+    assert "Acme" not in contract.forbidden_substrings
+
+
+def test_populate_forbidden_substrings_skips_new_starts_with_old(tmp_path):
+    """Rice -> Jeera Rice doesn't add Rice to forbidden_substrings even
+    when Rice is not in the vision section items."""
+    sys.path.insert(0, str(PLATFORM))
+    from schemas import FlyerSourceContract
+    from agents.flyer.facts import _populate_forbidden_substrings
+
+    contract = FlyerSourceContract(
+        requested_replacements={"Rice": "Jeera Rice"},
+    )
+    _populate_forbidden_substrings(contract)
+    assert "Rice" not in contract.forbidden_substrings
