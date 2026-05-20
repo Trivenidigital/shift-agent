@@ -27,10 +27,14 @@ The runtime blocker: PR #137 wired the SOURCE/NEW clarification and routes SOURC
 
 **In scope:**
 - `src/agents/flyer/workflow.py:source_edit_provider_ready` — env key from `OPENAI_API_KEY` → `OPENROUTER_API_KEY`. **Return shape unchanged** (`tuple[bool, str]`). The 3-tuple `(ok, detail, reason_code)` lives in `cf-router/actions.py:flyer_source_edit_preflight` and is preserved as-is.
-- `src/agents/flyer/render.py` — add `_openrouter_source_edit_bytes(project, *, size, model, quality) -> bytes`; replace single caller at line 1795 (`render_source_edit_preview`). Delete `_openai_source_edit_bytes`, `_openai_edit_size`, `_multipart_form_data`, `OPENAI_IMAGE_EDIT_URL`, `OPENAI_IMAGE_EDIT_TIMEOUT_SEC`.
+- `src/agents/flyer/render.py` — add `_openrouter_source_edit_bytes(project, *, size, model, quality) -> bytes`; replace single caller in `render_source_edit_preview` (anchor on function name, not line number). Delete `_openai_source_edit_bytes`, `_openai_edit_size`, `_multipart_form_data`, `OPENAI_IMAGE_EDIT_URL`, `OPENAI_IMAGE_EDIT_TIMEOUT_SEC`.
+- `src/agents/flyer/scripts/generate-flyer-concepts:255` — one-word addition to reason-code classifier: `elif "openai" in lower or "openrouter" in lower or "api_key" in lower or "provider" in lower`. Routes new OpenRouter HTTP/refusal/malformed error messages to `source_edit_provider_unavailable` instead of silently falling through to `provider_timeout`. See design §"Reason-code classifier extension."
 - `src/platform/schemas.py:784` — flip `FlyerStudioConfig.edit_image_model` default from `"gpt-image-1"` to `"google/gemini-2.5-flash-image-preview"`. One-line change. Field shape unchanged. Operator-set values continue to win.
 - `tests/test_flyer_source_edit_preflight.py` — preflight env-key swap + PLACEHOLDER fail-closed (2-tuple shape).
 - `tests/test_flyer_renderer.py` — mock OpenRouter response shape, error taxonomy (including content-filter refusal), retry policy, manual-queue fallback chain, model-resolution precedence (env > caller arg > schema default).
+- `tests/test_flyer_schemas.py:57` — rewrite assertion to new Gemini-slug default.
+- `tests/test_flyer_renderer.py:845-965` + `:1385-1428` — rewrite/replace existing OpenAI-multipart tests to OpenRouter chat-completions shape; replace `test_openai_source_edit_bytes_fails_closed_on_placeholder_key` with the OpenRouter-equivalent (existing test imports a helper this PR deletes). See design §"Test migrations required by this PR."
+- `tests/test_flyer_generate_concepts.py` — parametrized test: each error-taxonomy row maps to `reason_code=source_edit_provider_unavailable` and the correct `MANUAL_REVIEW_REASON_LINES` copy.
 
 **Out of scope (per operator guardrails):**
 - `web/backend/` or `web/frontend/` — `FlyerAdmin.tsx`, health endpoints. Provider choice is server-side; the UI does not need to know.
@@ -397,16 +401,31 @@ Expected: green; only the intended files touched; no `web/` or `credential_readi
   - **"Do not auto-deploy after merge. `OPENROUTER_API_KEY` is already populated on main-vps so merge alone changes live exact-edit behavior on the next inbound. Require operator green-light for the deploy."**
   - **"Spend-gated VPS smoke is required before declaring automated exact-edit customer-grade."**
 
-### Pre-merge operator checklist (must complete before merge approval)
+### Pre-merge operator checklist (REQUIRED before merge approval)
 
-- [ ] Operator confirms `google/gemini-2.5-flash-image-preview` is a live OpenRouter slug. Reviewer can verify externally; the operator confirms before merge:
+- [ ] Operator confirms `google/gemini-2.5-flash-image-preview` is a live OpenRouter slug. Two-step command that fails loud on auth/error responses (not just on grep miss):
   ```bash
+  # Step 1: API returned non-empty data (catches missing key / 401 / 5xx).
   curl -s -H "Authorization: Bearer $OPENROUTER_API_KEY" \
-    https://openrouter.ai/api/v1/models | jq -r '.data[].id' | grep -i gemini.*image
+    https://openrouter.ai/api/v1/models \
+    | jq -e '.data | length > 0' >/dev/null \
+    || { echo "ERROR: OpenRouter /api/v1/models returned no data or auth failed"; exit 1; }
+
+  # Step 2: locate the slug.
+  curl -s -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+    https://openrouter.ai/api/v1/models \
+    | jq -r '.data[].id' | grep -E "gemini.*image"
   ```
-  If the slug returned differs, the operator either updates `FLYER_SOURCE_EDIT_DEFAULT_MODEL` in render.py to match OR sets the `FLYER_SOURCE_EDIT_MODEL` env on main-vps before deploy. Either is acceptable; the slug must exist on OpenRouter at deploy time or every customer SOURCE inbound 400s.
-- [ ] Operator confirms `OPENROUTER_API_KEY` is populated on main-vps (already true per the PR #137 context) and is NOT a `PLACEHOLDER` value.
-- [ ] Operator commits to running 1 controlled SOURCE edit via VPS smoke BEFORE green-lighting unrestricted customer traffic. The kill-switch criterion (Risks #1) is N≥3/5 regenerations → revert this PR.
+  If the slug returned differs, the operator either updates `FLYER_SOURCE_EDIT_DEFAULT_MODEL` in render.py + `FlyerStudioConfig.edit_image_model` default in schemas.py to match OR sets the `FLYER_SOURCE_EDIT_MODEL` env on main-vps before deploy.
+- [ ] Operator confirms `OPENROUTER_API_KEY` is populated on main-vps and is NOT a `PLACEHOLDER` value.
+
+### Pre-deploy operator checklist (REQUIRED before any customer SOURCE inbound after merge)
+
+This is the **post-merge gate**, distinct from the pre-merge checks above. With `OPENROUTER_API_KEY` already populated on main-vps, the next customer SOURCE inbound after deploy hits Gemini live — so a controlled smoke is required before unrestricted traffic.
+
+- [ ] Operator runs 1 controlled SOURCE edit via VPS smoke against `main-vps` (e.g., from a known-safe test source flyer). Visually inspect the resulting preview.
+- [ ] Layout preservation confirmed: source flyer's layout/typography/imagery clearly preserved with only the requested edits applied. If regenerated-not-edited, follow the kill-switch criterion.
+- [ ] **Kill-switch criterion specified:** revert this PR if N≥3/5 source-edits show layout regeneration (vs in-place editing) in EITHER (a) the first 5 spend-gated VPS smoke runs OR (b) the first ≥5 customer SOURCE edits within 24h of deploy. Specific sample window so 'N≥3/5' isn't ambiguous over time.
 
 ## Risks
 
@@ -429,6 +448,7 @@ Expected: green; only the intended files touched; no `web/` or `credential_readi
 6. **Spend-gated VPS smoke runbook.** Before declaring automated exact-edit customer-grade, operator runs N source-edits through main-vps with controlled OpenRouter spend and visually inspects fidelity against the kill-switch criterion (Risks #1). Tracked separately.
 7. **PR #138 closure.** Once this lands, the operator can close #138 as superseded. This PR is narrower (+~330 LOC vs +299/-313 across 21 files in #138, focused on the runtime swap only).
 8. **`tasks/flyer-cockpit-p0-7-health-panel-plan.md` rebase.** Co-resident plan reads `OPENAI_API_KEY` posture for the source-edit provider; framing becomes stale after this PR. P0-7 author should rebase before re-review.
+9. **Refusal customer-ack copy review (v0.2).** Content-policy refusals route to the existing `MANUAL_REVIEW_REASON_LINES["source_edit_provider_unavailable"]` "queued for a designer to apply by hand" ack. But a designer can't fix Gemini-deemed-problematic source artwork either. Acceptable for v0.1 per the operator's "no new customer copy" guardrail. v0.2 needs a distinct ack for content-policy refusals that points the customer to send a different source flyer rather than wait for a designer.
 
 ## Self-Review Checklist
 

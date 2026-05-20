@@ -4,7 +4,24 @@
 
 **Plan reference:** `tasks/flyer-source-edit-openrouter-v01-plan.md` (commit `d71f197`).
 
-**New primitives introduced:** `_openrouter_source_edit_bytes` (replaces `_openai_source_edit_bytes`); `_resolve_source_edit_model` precedence helper; `_classify_openrouter_no_images` refusal-vs-malformed disambiguator; preflight env-key swap to `OPENROUTER_API_KEY`; `FlyerStudioConfig.edit_image_model` default value flip from `"gpt-image-1"` to `"google/gemini-2.5-flash-image-preview"`. **No** new schema fields (default value only), **no** new state, **no** new audit variant, **no** new customer-copy string.
+**New primitives introduced:** `_openrouter_source_edit_bytes` (replaces `_openai_source_edit_bytes`); `_resolve_source_edit_model` precedence helper; `_classify_openrouter_no_images` refusal-vs-malformed disambiguator; preflight env-key swap to `OPENROUTER_API_KEY`; `FlyerStudioConfig.edit_image_model` default value flip from `"gpt-image-1"` to `"google/gemini-2.5-flash-image-preview"`; `generate-flyer-concepts` reason-code classifier extended to match `"openrouter"` substring. **No** new schema fields (default value only), **no** new state, **no** new audit variant, **no** new customer-copy string.
+
+## Design-review pass-1 corrections (2026-05-20)
+
+Two parallel reviewers (schema/contract + customer-flow/rollout) returned the following BLOCKERS during design review; all are folded into the sections below:
+
+- **Reason-code classifier coupling (customer-flow reviewer).** `generate-flyer-concepts:255` matches on substring `"openai" | "api_key" | "provider"` to route between `source_edit_provider_unavailable` (queued-for-designer copy) and `provider_timeout` (temporary-issue copy). With this PR's new error messages, only the key-missing case (`"...API_KEY missing"` matches `"api_key"`) routes correctly; HTTP errors, refusals, malformed responses, and bad data URLs would all silently fall through to `provider_timeout` and the customer would see "temporary issue" copy instead of the correct "queued for a designer" copy. **No new customer-visible strings** claim was technically true but operationally wrong. Fixed: add `"openrouter"` to the classifier substring set. Single-word change. Acceptance criterion #11 below pins each error row to its resulting reason_code AND customer-ack copy.
+- **Existing OpenAI-shaped tests will break (schema/contract reviewer).** `tests/test_flyer_schemas.py:57` hardcodes `cfg.edit_image_model == "gpt-image-1"`; `tests/test_flyer_renderer.py` lines 845-874, 877-909, 912-965 hardcode the OpenAI multipart shape (`/v1/images/edits`, `b'name="model"\r\n\r\ngpt-image-1'`, `b'name="input_fidelity"'`, `b64_json` response, `latest.png`); `tests/test_flyer_renderer.py:1385-1428` imports `render_mod._openai_source_edit_bytes` which is being deleted. Fixed: new §"Test migrations required by this PR" lists every test that needs rewrite/deletion alongside the build commits.
+- **Env-step legacy-sentinel posture (schema/contract reviewer).** `_resolve_source_edit_model` step 1 returns `FLYER_SOURCE_EDIT_MODEL` unconditionally without slug/sentinel validation. Documented as **intentional trust-the-operator escape hatch**, pinned by a regression test so the behavior is intentional, not accidental.
+- **Pre-deploy spend-gated smoke checkbox (customer-flow reviewer).** Plan §Deferred items #6 documented the spend-gated VPS smoke as a follow-up, but with `OPENROUTER_API_KEY` already populated on main-vps, merge alone changes live behavior on the next inbound. Fixed: explicit pre-deploy operator checkbox in the PR-template — "run 1 SOURCE edit via VPS smoke against main-vps, visually verify layout preservation" — that blocks deploy, not just merge.
+- **Retry-policy divergence framing (schema/contract reviewer).** Earlier "mirrors `_openrouter_image_bytes`" framing understated that the new helper adds HTTPError-retry for `{429,502,503,504}` that the existing helper doesn't have. Hermes-first checklist row #7 softened.
+- **Dead-code `last_error = e` on HTTPError path (schema/contract reviewer).** Removed from the helper code — only the URLError branch needs the post-loop guard.
+- **`_classify_openrouter_no_images` text-only false-positive risk (schema/contract reviewer).** A model that always emits a courtesy text alongside images could be classified as refusal on a parse bug. Acceptable for v0.1 (both route to manual-queue, only audit string differs) but flagged in Risks.
+- **Pre-merge slug-check curl exit code (schema/contract reviewer).** The `grep` exit code doesn't fail loudly on auth/error responses from `/api/v1/models`. Tightened to `jq -e '.data | length > 0'` so the operator gets a non-zero exit on missing key or API error.
+- **Caller-swap line-number anchor (schema/contract reviewer).** Switched to function-name anchor (`render_source_edit_preview`) since line numbers drift.
+- **Kill-switch window (customer-flow reviewer).** Risks #1 stated "N≥3/5 regenerations → revert" but didn't define the sample window. Specified: "first 5 spend-gated smoke SOURCE edits OR first ≥5 customer SOURCE edits within 24h of deploy."
+- **PR #137 dependency (customer-flow reviewer).** This PR's helper is only reachable via PR #137's `_try_flyer_source_vs_new_choice_intercept` SOURCE branch. Flagged as Risk row so a future revert of #137 doesn't orphan this helper silently.
+- **Refusal copy defensibility for v0.2 (customer-flow reviewer).** Content-policy refusal currently routes to "queued for a designer to apply by hand," but a designer can't fix Gemini-deemed-problematic source artwork either. Acceptable for v0.1; flagged in Deferred items #9.
 
 ## Hermes-first capability checklist
 
@@ -18,11 +35,12 @@ Receipt: `tasks/.hermes-check-receipts/flyer-source-edit-openrouter-v01.json`. 2
 | 4 | Preflight env-key swap (OPENAI → OPENROUTER) | `[net-new]` ~10 LOC + ~30 LOC tests |
 | 5 | Manual-queue fallback on provider-unavailable | `[Hermes]` — PR #137 substrate (behavior preserved) |
 | 6 | Processing ack + concept-generation trigger | `[Hermes]` — existing |
-| 7 | OpenRouter source-edit POST request + response parse | `[net-new]` ~80 LOC (request shape mirrors `_openrouter_image_bytes` but adds reference-image attachment via multimodal `content` list) |
+| 7 | OpenRouter source-edit POST request + response parse | `[net-new]` ~80 LOC (request shape mirrors `_openrouter_image_bytes` for body/headers; retry policy is BROADER — adds HTTPError retry for `{429,502,503,504}` that the existing helper doesn't have) |
 | 8 | Error taxonomy: retriable HTTP, refusal disambiguation, malformed response → `FlyerRenderError` | `[net-new]` ~30 LOC (overlaps with #7) + ~120 LOC tests |
 | 9 | Model resolution precedence (env > caller arg with slug check > default) | `[net-new]` ~15 LOC + ~30 LOC tests |
 | 10 | Schema default flip `edit_image_model` → Gemini slug | `[net-new]` 1 LOC + ~5 LOC tests |
-| 11 | Visual QA, text manifest, customer preview send | `[Hermes]` — PR #137 substrate, not touched |
+| 11 | Reason-code classifier extension at `generate-flyer-concepts:255` (`"openrouter"` substring added so HTTP/refusal/malformed errors route to the correct customer-ack copy) | `[net-new]` 1 LOC + ~30 LOC tests |
+| 12 | Visual QA, text manifest, customer preview send | `[Hermes]` — PR #137 substrate, not touched |
 
 Awesome-Hermes-Agent ecosystem check: no installable skill provides reference-image-conditioned image generation; building on the existing `_openrouter_image_bytes` pattern is the right shape.
 
@@ -41,6 +59,10 @@ Awesome-Hermes-Agent ecosystem check: no installable skill provides reference-im
 - ✅ Read `tests/test_flyer_source_edit_preflight.py` — pattern for monkeypatching `_read_env_value`.
 - ✅ Read `tests/test_flyer_renderer.py` — pattern for mocking `urllib.request.urlopen` with `FakeResponse`.
 - ✅ Read `tests/test_flyer_generate_concepts.py:272` — `render_source_edit_preview` raising `FlyerRenderError` is caught by `generate-flyer-concepts`; the chain to `hooks.py:1058` (`gen_ok=False`) and `--queue-manual-review` is intact.
+- ✅ Read `src/agents/flyer/scripts/generate-flyer-concepts:243-258` — reason-code classifier on caught `FlyerRenderError`. Today it matches substring `"openai" | "api_key" | "provider"` to route between `source_edit_provider_unavailable` and `provider_timeout`. New OpenRouter error messages from this PR's helper would silently fall through to `provider_timeout` for HTTP/refusal/malformed cases unless `"openrouter"` is added. **In scope for this PR** (one-word change at line 255).
+- ✅ Read `tests/test_flyer_schemas.py:53-57` (`test_flyer_studio_config_defaults`) — asserts `cfg.edit_image_model == "gpt-image-1"`. Schema flip in this PR breaks this assertion; design's "Test migrations required" section lists the rewrite.
+- ✅ Read `tests/test_flyer_renderer.py:845-965` — three existing source-edit tests assert the OpenAI multipart shape (`/v1/images/edits` URL, `b'name="model"\r\n\r\ngpt-image-1'`, `b'name="input_fidelity"\r\n\r\nhigh'`, `b64_json` response, `latest.png`). All three need rewrite to OpenRouter chat-completions shape; listed in §"Test migrations required."
+- ✅ Read `tests/test_flyer_renderer.py:1385-1428` — `test_openai_source_edit_bytes_fails_closed_on_placeholder_key` imports `render_mod._openai_source_edit_bytes` which this PR deletes. Listed for replacement in §"Test migrations required."
 
 ## Schema details — final shape
 
@@ -214,7 +236,11 @@ def _openrouter_source_edit_bytes(
         except urllib.error.HTTPError as e:
             err_body = e.read().decode("utf-8", errors="replace")[:1000]
             if e.code in RETRIABLE_HTTP_STATUSES and attempt < 2:
-                last_error = e
+                # No `last_error = e` here: HTTPError branch is "retry or raise"
+                # exclusively. The post-loop `if not body and last_error` guard
+                # is for the URLError/Timeout branch only, where the loop can
+                # exit cleanly without raising. Keeping last_error scoped to
+                # transport errors avoids dead-mutation drift.
                 time.sleep(2 * (attempt + 1))
                 continue
             raise FlyerRenderError(f"OpenRouter source-edit HTTP {e.code}: {err_body}") from e
@@ -252,14 +278,82 @@ def _openrouter_source_edit_bytes(
 
 Return shape `tuple[bool, str]` preserved. The cf-router wrapper at `actions.py:2071+` (`flyer_source_edit_preflight`) keeps its 3-tuple return; its reason-code mapping at `actions.py:2137-2141` falls through to `"source_edit_provider_unavailable"` for the new detail string by exhaustion (the new detail contains neither `"uploaded reference image"` nor `"must be an image"`).
 
-## Caller swap at `render.py:1795`
+## Caller swap inside `render_source_edit_preview`
+
+Anchored to the function name rather than a line number (which can drift):
 
 ```diff
 -    raw = _openai_source_edit_bytes(project, size=(1080, 1350), model=model, quality=quality)
 +    raw = _openrouter_source_edit_bytes(project, size=(1080, 1350), model=model, quality=quality)
 ```
 
-`render_source_edit_preview` does not need any other change. The `model` arg passes through verbatim; precedence resolution happens inside the helper.
+`render_source_edit_preview` does not need any other change. The `model` arg passes through verbatim; precedence resolution happens inside the helper via `_resolve_source_edit_model`.
+
+## Reason-code classifier extension at `generate-flyer-concepts:255`
+
+`generate-flyer-concepts` catches `FlyerRenderError` from `render_source_edit_preview` and maps the detail string to a `reason_code` so the cf-router downstream picks the right customer-ack copy. Today (PR #137 substrate):
+
+```python
+# generate-flyer-concepts:253-258, today
+if "quality check" in lower or "failed quality" in lower:
+    reason_code = "visual_qa_failed"
+elif "openai" in lower or "api_key" in lower or "provider" in lower:
+    reason_code = "source_edit_provider_unavailable"
+else:
+    reason_code = "provider_timeout"
+```
+
+Post-PR error messages routing:
+
+| New helper message | Substring matches today | Today's reason_code | After PR fix |
+|---|---|---|---|
+| `OPENROUTER_API_KEY is missing or placeholder` | `"api_key"` ✓ | `source_edit_provider_unavailable` | ✓ unchanged |
+| `OpenRouter source-edit HTTP 500: ...` | none of openai/api_key/provider | `provider_timeout` ✗ | `source_edit_provider_unavailable` ✓ |
+| `OpenRouter source-edit HTTP 429: ...` | none | `provider_timeout` ✗ | `source_edit_provider_unavailable` ✓ |
+| `OpenRouter source-edit refused (likely content policy): ...` | none | `provider_timeout` ✗ | `source_edit_provider_unavailable` ✓ |
+| `OpenRouter source-edit response had no choices: ...` | none | `provider_timeout` ✗ | `source_edit_provider_unavailable` ✓ |
+| `OpenRouter source-edit response had no images: ...` | none | `provider_timeout` ✗ | `source_edit_provider_unavailable` ✓ |
+| `OpenRouter source-edit response did not include base64 image data` | none | `provider_timeout` ✗ | `source_edit_provider_unavailable` ✓ |
+| `OpenRouter source-edit response failed: TimeoutError: ...` | none | `provider_timeout` ✓ (incidentally correct via the "response failed" not matching anything; lands in else) | `source_edit_provider_unavailable` ✓ (after fix) |
+
+The fix is a one-word addition to the substring set:
+
+```diff
+- elif "openai" in lower or "api_key" in lower or "provider" in lower:
++ elif "openai" in lower or "openrouter" in lower or "api_key" in lower or "provider" in lower:
+     reason_code = "source_edit_provider_unavailable"
+```
+
+This is generic enough that future provider swaps don't need the same fix (any error message containing `"openrouter"` substring will route correctly). Customer-ack copy resolves to `MANUAL_REVIEW_REASON_LINES["source_edit_provider_unavailable"]` for ALL provider-side failures — matching the existing OpenAI-missing behavior exactly.
+
+`provider_timeout` becomes effectively unreachable for source-edit after this change, which is the intended invariant: every source-edit provider-side failure → "queued for a designer" copy, never "temporary issue" copy.
+
+## Test migrations required by this PR
+
+Existing tests that hardcode OpenAI shapes or import deleted helpers MUST be rewritten or deleted alongside the source changes. Without these migrations, commit 2 (implementation) lands red.
+
+| Test | File:line | Action | Reason |
+|---|---|---|---|
+| `test_flyer_studio_config_defaults` | `tests/test_flyer_schemas.py:53-57` | **Rewrite** assertion at line 57 from `"gpt-image-1"` to `"google/gemini-2.5-flash-image-preview"` | Schema default flip |
+| `test_openai_source_edit_request_shape` (or similar) | `tests/test_flyer_renderer.py:845-874` | **Replace** with `test_openrouter_source_edit_request_shape` asserting the new chat-completions multimodal payload | Helper deleted; request shape changes |
+| `test_openai_source_edit_response_shape` (or similar) | `tests/test_flyer_renderer.py:877-909` | **Replace** with OpenRouter response-shape test (`choices[0].message.images[0].image_url.url`) | Helper deleted; response shape changes |
+| `test_openai_source_edit_error_paths` (or similar) | `tests/test_flyer_renderer.py:912-965` | **Replace** with OpenRouter error-taxonomy tests (one per row of §"Error taxonomy — final table") | Helper deleted; error messages change |
+| `test_openai_source_edit_bytes_fails_closed_on_placeholder_key` | `tests/test_flyer_renderer.py:1385-1428` | **Replace** with `test_openrouter_source_edit_bytes_fails_closed_on_placeholder_key`; import `_openrouter_source_edit_bytes` instead | Imports a deleted helper |
+| (any other test referencing `_openai_source_edit_bytes`, `_openai_edit_size`, `_multipart_form_data`, `OPENAI_IMAGE_EDIT_URL`, `OPENAI_IMAGE_EDIT_TIMEOUT_SEC`) | grep-find at build time | **Rewrite or delete** | Helper deleted |
+
+Build commit ordering accommodates this:
+- Commit 1 (`test(flyer): ...`) — adds the new tests AND migrates the old ones in the same commit so the RED state is clean.
+- Commit 2 (`fix(flyer): ...`) — adds the new helper, deletes the old, flips schema default. Tests go green.
+
+Without combining migrations into commit 1, the bisect surface gets nasty (intermediate commit has both old and new tests, two different render paths, partial green/red).
+
+## Env-step legacy-sentinel posture
+
+`_resolve_source_edit_model` step 1 returns `FLYER_SOURCE_EDIT_MODEL` env unconditionally without slug/sentinel validation. **This is intentional: env override is a trust-the-operator escape hatch for live VPS slug swaps without a deploy.** An operator who sets `FLYER_SOURCE_EDIT_MODEL="gpt-image-1"` gets exactly that, and OpenRouter will 400 — that's the operator's choice, not a code-side footgun.
+
+Pin this behavior with a regression test so a future contributor doesn't add validation that breaks the escape hatch:
+
+- `test_model_resolution_env_with_legacy_sentinel_value_still_returned_unchanged` — set `FLYER_SOURCE_EDIT_MODEL="gpt-image-1"`, caller arg `"google/gemini-2.5-flash-image-preview"` → returns `"gpt-image-1"` (env wins, no second-guessing). Comment: "Trust-operator escape hatch; intentional v0.1 posture per design."
 
 ## Deletions (after green tests)
 
@@ -299,16 +393,24 @@ Operator-greppable disambiguators:
 
 Per operator: **pre-merge slug verification is required, not optional**. If `google/gemini-2.5-flash-image-preview` is not present in OpenRouter `/api/v1/models`, pause and choose a live slug rather than merge a known-400.
 
-Reviewer-runnable command:
+Reviewer-runnable command (tightened to fail-loud on auth/error responses, not just on grep miss):
 
 ```bash
+# Step 1: verify the API responded with a non-empty model list (catches
+# missing key / 401 / 5xx — grep would silently miss these).
+curl -s -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+  https://openrouter.ai/api/v1/models \
+  | jq -e '.data | length > 0' >/dev/null \
+  || { echo "ERROR: OpenRouter /api/v1/models returned no data or auth failed"; exit 1; }
+
+# Step 2: find the slug we plan to use.
 curl -s -H "Authorization: Bearer $OPENROUTER_API_KEY" \
   https://openrouter.ai/api/v1/models \
   | jq -r '.data[].id' \
   | grep -E "gemini.*image"
 ```
 
-Expected output: at least one line matching the slug we plan to use. If the slug returned differs (e.g., `google/gemini-2.0-flash-exp:image-generation`), the operator picks one of two acceptable resolutions BEFORE merge:
+Expected output: step 1 exits 0; step 2 prints at least one line matching the slug we plan to use. If the slug returned differs (e.g., `google/gemini-2.0-flash-exp:image-generation`), the operator picks one of two acceptable resolutions BEFORE merge:
 
 1. Update `FLYER_SOURCE_EDIT_DEFAULT_MODEL` constant in `render.py` AND `FlyerStudioConfig.edit_image_model` default in `schemas.py` to the live slug. Re-run tests. Re-merge.
 2. Set `FLYER_SOURCE_EDIT_MODEL=<live-slug>` env on main-vps before deploy. Schema/constants unchanged. Env wins at runtime.
@@ -381,14 +483,19 @@ See plan doc for full list. Design-time additions:
 
 | Risk | Mitigation in design |
 |---|---|
-| Gemini regenerates instead of edits | Design preserves existing `_source_edit_prompt` (instructs "preserve original layout, colors, logo, food/product imagery, typography style, contact area"). If Gemini doesn't honor that, the kill-switch criterion (N≥3/5 regenerations → revert this PR) catches it in spend-gated smoke. |
-| Model slug 400s at runtime | Pre-merge `/api/v1/models` check is REQUIRED. Merge blocked otherwise. |
-| Content-policy refusal looks like malformed response | `_classify_openrouter_no_images` heuristic + distinct message string. |
+| Gemini regenerates instead of edits | Design preserves existing `_source_edit_prompt` (instructs "preserve original layout, colors, logo, food/product imagery, typography style, contact area"). Kill-switch criterion (see below) catches it in spend-gated smoke. |
+| **Kill-switch window specification** | "Revert this PR if N≥3/5 source-edits show layout regeneration (vs in-place editing) in EITHER (a) the first 5 spend-gated VPS smoke runs OR (b) the first ≥5 customer SOURCE edits within 24h of deploy." Specific sample window so 'N≥3/5' isn't ambiguous over time. |
+| Model slug 400s at runtime | Pre-merge `/api/v1/models` check is REQUIRED with `jq -e '.data \| length > 0'` step that fails loud on auth/error responses. Merge blocked otherwise. |
+| Content-policy refusal looks like malformed response | `_classify_openrouter_no_images` heuristic + distinct message string. Customer-ack copy resolves to "queued for a designer" via the classifier extension at `generate-flyer-concepts:255`. |
+| `_classify_openrouter_no_images` text-only false-positive | A model that always emits courtesy text alongside images could be classified as refusal on a parse bug. Acceptable for v0.1 — both refusal and "no images" route to manual-queue with the same customer-ack; only the audit-log message string differs (operator triage uses the distinct strings to disambiguate). |
 | Transient 5xx blocks customer flow | `RETRIABLE_HTTP_STATUSES = {429, 502, 503, 504}` retries within 3-attempt budget. Other 5xx (e.g., 500) raise immediately — those usually mean provider-side bug, not transient. |
 | Stale operator config keeps `"gpt-image-1"` | Legacy-sentinel substitution in `_resolve_source_edit_model` overrides at the helper before the OpenRouter call. |
+| **Env-step legacy sentinel intentionally not validated** | `FLYER_SOURCE_EDIT_MODEL` env wins unconditionally — operator-trust escape hatch. An operator who sets the env to `"gpt-image-1"` gets exactly that and OpenRouter will 400; that's their choice. Pinned by `test_model_resolution_env_with_legacy_sentinel_value_still_returned_unchanged`. |
 | Caller passes bare model name (`"gpt-4o"`) instead of slug | Step 2 of resolution requires `/` in caller arg; falls through to default. |
 | Schema default revert in a future cleanup PR | `test_schema_default_is_openrouter_gemini_slug` pins it. |
+| **PR #137 dependency / orphan risk** | This PR's `_openrouter_source_edit_bytes` is reachable ONLY via `_try_flyer_source_vs_new_choice_intercept` SOURCE branch (PR #137 substrate). If PR #137 is reverted in the future, the helper becomes orphan code with no callers. Acknowledged here so a future revert audit catches the dependency rather than silently dead-coding the helper. |
 | Vision-client chokepoint debt grows | Acknowledged; v0.2+. Helper structured for easy absorption later. |
+| Refusal customer-ack defensibility (content-policy case) | A designer cannot manually edit a Gemini-deemed-problematic source artwork either. The "queued for a designer" ack is technically misleading for content-policy refusals. Acceptable v0.1 per the operator's "no new customer copy" guardrail; v0.2 follow-up needed (see Deferred items #9). |
 
 ## Out of scope — documented deferred drift (NOT surprise edits in this PR)
 
@@ -413,12 +520,15 @@ Schema default flip lands in commit 2 alongside the helper.
 ## Acceptance criteria
 
 1. Customer SOURCE-edit reaches `_openrouter_source_edit_bytes`, generates image via Gemini, customer sees preview through unchanged visual_qa + customer-send pipeline.
-2. Missing/PLACEHOLDER `OPENROUTER_API_KEY` → manual-queue ack (existing copy).
-3. Provider error (HTTP / timeout / refusal / malformed) → `FlyerRenderError` → manual-queue ack (existing copy). No customer-visible new strings.
+2. Missing/PLACEHOLDER `OPENROUTER_API_KEY` → manual-queue ack (existing `source_edit_provider_unavailable` copy).
+3. Provider error (HTTP / timeout / refusal / malformed) → `FlyerRenderError` → manual-queue ack (existing `source_edit_provider_unavailable` copy via the extended classifier at `generate-flyer-concepts:255`). **No customer-visible new strings; no silent shift to `provider_timeout` copy.**
 4. Zero `OPENAI_API_KEY` references in the three named source-edit functions. Static guard test pins this.
 5. `_openai_source_edit_bytes`, `_openai_edit_size`, `_multipart_form_data` deletions are real (not commented-out); module no longer exposes them.
 6. Schema default flip pinned by `test_schema_default_is_openrouter_gemini_slug`.
-7. Model resolution exercises all 3 precedence branches + sentinel substitution + empty caller. 8 tests.
-8. Pre-merge model-slug check completed by operator BEFORE merge approval (manual checkbox in PR body).
-9. `credential_readiness.py:556`, `smoke-flyer-quality:154`, web/backend health, and P0-7 plan untouched. Documented as deferred drift in PR body.
-10. No deploy after merge until operator green-light. PR body says so explicitly.
+7. Model resolution exercises all 3 precedence branches + sentinel substitution + empty caller + env-with-legacy-value-trust-operator pin. 9 tests.
+8. Pre-merge model-slug check completed by operator BEFORE merge approval, with `jq -e '.data | length > 0'` step that fails loud on auth/error responses.
+9. **Pre-deploy operator checkbox:** 1 SOURCE edit via VPS smoke against main-vps, visually verify layout preservation before any customer SOURCE inbound is allowed. Blocks deploy, not just merge.
+10. Reason-code-classifier extension pinned: each error-taxonomy row maps to the correct `reason_code` and the correct `MANUAL_REVIEW_REASON_LINES` copy via a parametrized test.
+11. All existing OpenAI-shaped tests (`tests/test_flyer_schemas.py:57`, `tests/test_flyer_renderer.py:845-965`, `:1385-1428`) rewritten or replaced per §"Test migrations required by this PR." No commented-out / xfail leftovers.
+12. `credential_readiness.py:556`, `smoke-flyer-quality:154`, web/backend health, and P0-7 plan untouched. Documented as deferred drift in PR body.
+13. No deploy after merge until operator green-light AND post-merge VPS smoke completes. PR body says so explicitly.
