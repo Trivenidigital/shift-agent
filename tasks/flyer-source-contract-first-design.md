@@ -116,20 +116,52 @@ class FlyerSourceContractExtracted(_BaseEntry):
 
 ### `FlyerSourceVsNewChosen` (new audit variant)
 
+Match the existing Flyer audit-variant field convention (`sender_phone` + `customer_id`, NO `chat_id`; see schemas.py:4157-4166 and existing `FlyerProjectCreated`/`FlyerStatusChange` shapes).
+
 ```python
 class FlyerSourceVsNewChosen(_BaseEntry):
     type: Literal["flyer_source_vs_new_chosen"] = "flyer_source_vs_new_chosen"
-    chat_id: str = Field(default="", max_length=80)
     sender_phone: str = Field(default="", max_length=32)
     customer_id: str = Field(default="", max_length=40)
     original_intent: Literal["exact_source_edit", "generic_reference", "unknown"]
-    choice: Literal["source", "new", "clarification_sent"]
+    choice: Literal["source", "new", "clarification_sent", "clarification_resent", "expired"]
     pending_age_sec: int = 0
+    customer_followup_instruction: str = Field(default="", max_length=500)
 ```
+
+`choice` Literal values:
+
+- `"clarification_sent"` — the SOURCE/NEW prompt was first issued.
+- `"clarification_resent"` — customer sent a status check-in (`any update?`) while awaiting; prompt re-issued (idempotent).
+- `"source"` — customer chose SOURCE; row consumed; project queued via `manual_edit_required=True`.
+- `"new"` — customer chose NEW; row consumed; project created without `manual_edit_required`.
+- `"expired"` — TTL prune found the row unconsumed; row removed; operator visibility.
+
+`customer_followup_instruction` carries any text after the SOURCE/NEW token (see §"Compound-reply parser" below).
 
 ### `LogEntry` union update
 
-Append both new classes to the `LogEntry = Union[...]` definition; mirror existing order alphabetically within the Flyer cluster. `_UnknownLogEntry` requires no edit — its `type` Literal exclusion is the negative-space pattern; new positive types add themselves cleanly.
+The deployed pattern is `Annotated[Model, Tag("...")]` inside `Annotated[Union[...], Discriminator(_pick_log_entry_tag)]` (schemas.py:4037-4170), NOT bare `Union[Model, ...]`. Add both new variants in the Flyer Studio cluster (currently ends at line 4166 just before the `_UnknownLogEntry` sentinel):
+
+```python
+LogEntry = Annotated[
+    Union[
+        ...
+        # Hermes Flyer Studio
+        Annotated[FlyerProjectCreated, Tag("flyer_project_created")],
+        ...
+        Annotated[FlyerClosureCustomerNotified, Tag("flyer_closure_customer_notified")],
+        # NEW — source-contract observability
+        Annotated[FlyerSourceContractExtracted, Tag("flyer_source_contract_extracted")],
+        Annotated[FlyerSourceVsNewChosen, Tag("flyer_source_vs_new_chosen")],
+        # PR-D1 forward-compat shim — UNKNOWN tags route here
+        Annotated[_UnknownLogEntry, Tag("_unknown_")],
+    ],
+    Discriminator(_pick_log_entry_tag),
+]
+```
+
+`_build_known_log_entry_types()` at schemas.py:4174 introspects the union and auto-includes new tags — no manual edit needed. `_UnknownLogEntry` keeps the forward-compat fallback for older deserializers receiving new tags they don't yet know (`extra="allow"` swallows new fields without dropping the row).
 
 ## Vision prompt — final shape
 
@@ -192,9 +224,14 @@ def extract_reference(asset, *, raw_request, provider=None):
 
 `_extract_source_contract` is new; it uses the same `provider.extract_text` interface but with `SOURCE_CONTRACT_PROMPT`. Vision-output JSON is parsed with `FlyerSourceContract.model_validate_json` wrapped in a permissive try/except — on JSON parse failure, status becomes `low_confidence`; on provider unavailable, status becomes `provider_unavailable`; on success, the contract is attached AND `extract_requested_replacements_from_text(raw_request)` is *merged* (customer-text replacements override vision-extracted dict on key collision because customer text is authoritative).
 
-Deterministic helper:
+Deterministic helper. The `new` value is post-trimmed to drop trailing role nouns (`branding`, `name`, `details`, `info`) so `replace Triveni Express with Lakshmi's Kitchen branding` resolves to `{"Triveni Express": "Lakshmi's Kitchen"}` not `{"Triveni Express": "Lakshmi's Kitchen branding"}`:
 
 ```python
+_REPLACEMENT_TRAILING_ROLE_NOUNS = re.compile(
+    r"\s+\b(?:branding|brand|name|info|information|details|address|phone)\b\s*$",
+    flags=re.IGNORECASE,
+)
+
 def extract_requested_replacements_from_text(raw_request: str) -> dict[str, str]:
     replacements: dict[str, str] = {}
     for match in re.finditer(
@@ -204,12 +241,13 @@ def extract_requested_replacements_from_text(raw_request: str) -> dict[str, str]
     ):
         old = " ".join(match.group("old").strip(" .,:;").split())
         new = " ".join(match.group("new").strip(" .,:;").split())
+        new = _REPLACEMENT_TRAILING_ROLE_NOUNS.sub("", new).strip()
         if old and new and len(old) <= 80 and len(new) <= 80:
             replacements[old] = new
     return replacements
 ```
 
-Audit emission: after the extraction returns (success or provider_unavailable), the caller in `create-flyer-project` emits `FlyerSourceContractExtracted` via the existing `ndjson_append` chokepoint used for `log-decision-direct`. Mirrors how `parse-menu-photo` writes `MenuUpdateProposed` after extraction.
+Audit emission: after the extraction returns (success or provider_unavailable), the caller in `create-flyer-project` emits `FlyerSourceContractExtracted` via direct `ndjson_append(LOG_PATH, ...)` call. This mirrors `parse-menu-photo:249` and `parse-menu-photo:341` exactly — `ndjson_append` IS the chokepoint; the legacy `log-decision-direct` SKILL is a separate wrapper that calls the same primitive. Spell out the direct call in the implementation note to avoid the misleading phrasing.
 
 ## Locked-fact generation — exact shape
 
@@ -229,31 +267,44 @@ Audit emission: after the extraction returns (success or provider_unavailable), 
 
 ## Forbidden-substrings population heuristic
 
-In `create-flyer-project` immediately after building `source_contract_locked_facts`, walk `contract.requested_replacements`:
+In `create-flyer-project` immediately after building `source_contract_locked_facts`, walk `contract.requested_replacements`. Three independent backstops protect against false positives (which would block legitimate flyers):
+
+1. Skip if `old.lower()` appears in extracted section items (vision-extracted menu).
+2. Skip if `new.lower().startswith(old.lower())` — covers `Rice → Jeera Rice` (new is a *variant* of old) even when vision missed the source-flyer item.
+3. Skip if `old` is a single word AND not phone/address-shaped — single-word brand names are too risky to auto-forbid; require multi-word brands (`Triveni Express`, `Acme Restaurants`) for the brand branch.
 
 ```python
 def _populate_forbidden_substrings(contract: FlyerSourceContract) -> None:
     section_items = {item.lower() for section in contract.sections for item in section.items}
-    for old, _new in contract.requested_replacements.items():
+    for old, new in contract.requested_replacements.items():
         if not old or len(old) < 3:
             continue
+        # Backstop 1: vision-confirmed menu item
         if old.lower() in section_items:
-            # Menu-item swap (Rice -> Jeera Rice); old item may legitimately stay
+            continue
+        # Backstop 2: new is a variant/extension of old (covers Rice → Jeera Rice when
+        # vision missed Rice from the section items)
+        if new and new.lower().startswith(old.lower()):
             continue
         digits = re.sub(r"\D", "", old)
         if len(digits) >= 10:
+            # Phone-shaped — forbid the digits-only run
             if digits not in contract.forbidden_substrings:
                 contract.forbidden_substrings.append(digits)
             continue
         if re.search(r"\d", old) and any(t in old.lower() for t in (" st", " dr", " ave", " rd", " blvd", " ln", " way", " ct", " pkwy")):
+            # US address-shaped
             contract.forbidden_substrings.append(old)
             continue
-        # Brand-name heuristic
+        # Backstop 3: single-word "brands" are too risky (could be "Rice", "Coffee")
+        if len(old.split()) < 2:
+            continue
+        # Multi-word brand-name heuristic: at least one uppercase-leading word
         if any(word and word[0].isupper() for word in old.split()):
             contract.forbidden_substrings.append(old)
 ```
 
-This is intentionally conservative — false negatives (missing a forbidden) are recoverable by operator override; false positives (auto-banning a menu word) would block legitimate flyers.
+False-positive cost: blocks a legitimate flyer at QA → operator manual review. False-negative cost: rendered flyer shows old brand alongside new brand → operator/customer catches it visually. The asymmetry justifies the conservative posture (more backstops, fewer false positives).
 
 ## Cf-router intercept wiring
 
@@ -291,14 +342,24 @@ pending.append({
 
 Before the existing `save_flyer_reference_scope_pending(...)` call at `hooks.py:508`, compute `original_intent` once. This is the LOAD-BEARING edit. Today `line 528` (`is_exact_reference_edit_request`) is unreachable when scope clarifies (we `return` at 527 first). We move that evaluation up by ~20 lines into the pending save.
 
+**Computation scope:** `original_intent` is computed and persisted ONLY inside the `if decision in {"block", "clarify"}:` branch (currently hooks.py:499) — i.e., only when a pending row is actually being saved. When scope_ok is True we skip this entirely because the existing exact-edit branch at line 528 still runs.
+
 ```python
-# In _try_flyer_primary_intercept, immediately before the scope_ok branch:
+# Inside hooks.py _try_flyer_primary_intercept, INSIDE the if decision in {"block", "clarify"}: block:
 original_intent = (
     "exact_source_edit"
     if media_path and actions.is_exact_reference_edit_request(text, has_media=True)
     else "generic_reference"
 )
-# ... then pass original_intent=original_intent to save_flyer_reference_scope_pending(...)
+actions.save_flyer_reference_scope_pending(
+    chat_id=chat_id,
+    sender_phone=phone,
+    customer=customer,
+    raw_request=raw_request,
+    media_path=media_path,
+    scope=scope or {},
+    original_intent=original_intent,  # NEW kwarg
+)
 ```
 
 ### Step 3 — `consume_flyer_reference_scope_choice` (existing)
@@ -307,25 +368,28 @@ Already returns the full pending dict including unknown fields (it uses `item.ge
 
 ### Step 4 — `_try_flyer_reference_scope_choice_intercept` (existing, modify)
 
-After `choice = str(pending.get("choice") or "")` (~hooks.py:710), early-return on the exact-edit branch:
+**Race-safe state transition.** Today `consume_flyer_reference_scope_choice` *removes* the row inside the lock. If we then re-save under a new status outside the lock, there's a brief window where the file has no pending row for this sender. To eliminate that, extend the existing consumer to accept a `transition_to_status: Optional[str] = None` kwarg: when set, it rewrites the row's `status` field in-place under the same lock rather than removing it.
+
+After `choice = str(pending.get("choice") or "")` (~hooks.py:710), early-return on the exact-edit branch. (Note: the consumer is called with `transition_to_status="awaiting_source_vs_new_choice"` for this branch — see Step 6 below):
 
 ```python
 if choice == "use_reference" and pending.get("original_intent") == "exact_source_edit":
-    # Save the pending row under "awaiting_source_vs_new_choice" status.
-    actions.save_flyer_source_vs_new_pending(pending)   # NEW writer
+    # Pending row already transitioned to status="awaiting_source_vs_new_choice"
+    # atomically by consume_flyer_reference_scope_choice(..., transition_to_status=...)
     clarification = (
         "Flyer Studio\n"
         "------------\n"
         "I can do this two ways:\n\n"
-        "Reply SOURCE to keep the same flyer design and make only your requested changes.\n"
-        "Reply NEW to create a new flyer inspired by this one. It will not preserve the exact layout."
+        "Reply SOURCE to keep this same flyer and apply only the changes you asked for.\n"
+        "Reply NEW to create a brand-new flyer inspired by this one (different layout)."
     )
     ack_ok, mid, err = actions.send_flyer_text(chat_id, clarification)
-    # audit row: FlyerSourceVsNewChosen choice="clarification_sent"
     actions.audit_source_vs_new(
-        chat_id=chat_id, sender_phone=phone, customer_id=...,
-        original_intent="exact_source_edit", choice="clarification_sent",
-        pending_age_sec=int(time.time() - pending.get("created_at", 0)),
+        sender_phone=phone,
+        customer_id=str((pending.get("customer") or {}).get("customer_id") or ""),
+        original_intent="exact_source_edit",
+        choice="clarification_sent",
+        pending_age_sec=int(time.time() - (pending.get("created_at") or time.time())),
     )
     actions.audit_intercepted(
         reason="flyer_reference_scope_blocked",
@@ -336,9 +400,22 @@ if choice == "use_reference" and pending.get("original_intent") == "exact_source
     return {"action": "skip", "reason": "cf-router flyer source-vs-new clarification sent"}
 ```
 
+Customer copy notes:
+
+- "preserve" replaced with "keep" (SMB-owner clear, per lessons.md preferences).
+- Parallel verb structure ("keep this same flyer" / "create a brand-new flyer").
+- No internal jargon (no "queue", "provider", "designer", "manual").
+- Parenthetical `(different layout)` is the only minor hint at the tradeoff.
+
 ### Step 5 — new intercept `_try_flyer_source_vs_new_choice_intercept`
 
-Insert in `hooks.py` immediately after `_try_flyer_reference_scope_choice_intercept`. Order in the main dispatcher: AFTER existing scope-choice intercept (line 161) but BEFORE the scope-authorization intercept (line 164). Logic:
+Insert in `hooks.py` immediately after `_try_flyer_reference_scope_choice_intercept`. Order in the main dispatcher: AFTER existing scope-choice intercept (line 161) but BEFORE the scope-authorization intercept (line 164). Branches:
+
+1. **Compound-reply parsing:** `_source_contract_followup_choice(text)` returns `(choice, trailing)`. Trailing text is merged into the consumed pending row's `raw_request` as customer follow-up.
+2. **Status check-in pre-claim:** if parser returns `("", "")` (no SOURCE/NEW token) AND a row for this sender exists with status `awaiting_source_vs_new_choice` AND `flyer_is_status_checkin(text)` matches, re-send the clarification verbatim and audit `clarification_resent`. Do NOT consume the row.
+3. **SOURCE branch:** consume row, merge trailing instruction, call `trigger_create_flyer_project(..., manual_edit_required=True)`.
+4. **NEW branch:** consume row, call `trigger_create_flyer_project(...)` mirroring the existing use_reference path.
+5. **Idempotent retry:** if `consume_flyer_source_vs_new_choice` returns None (row already consumed) AND parser returned SOURCE or NEW AND the most recent flyer project for this customer was created within the last 60 seconds AND its `status="manual_edit_required"`, re-send the appropriate ack and return skip.
 
 ```python
 def _try_flyer_source_vs_new_choice_intercept(text, chat_id, event):
@@ -346,52 +423,140 @@ def _try_flyer_source_vs_new_choice_intercept(text, chat_id, event):
     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
     if not phone:
         return None
-    pending = actions.consume_flyer_source_vs_new_choice(text, chat_id=chat_id, sender_phone=phone)
-    if not pending:
+
+    choice_token, trailing = actions.parse_source_vs_new_followup(text)
+
+    # Branch 2: status check-in re-send (lessons.md 2026-05-19)
+    if not choice_token:
+        existing = actions.peek_flyer_source_vs_new_pending(chat_id=chat_id, sender_phone=phone)
+        if existing and actions.flyer_is_status_checkin(text):
+            # Re-send clarification verbatim; do NOT consume; audit clarification_resent.
+            ...
+            return {"action": "skip", "reason": "cf-router flyer source-vs-new status check-in"}
         return None
+
+    pending = actions.consume_flyer_source_vs_new_choice(
+        choice_token, trailing, chat_id=chat_id, sender_phone=phone,
+    )
+    if not pending:
+        # Branch 5: idempotent retry — same customer just chose; bonus check.
+        recent = actions.find_recent_flyer_manual_edit_project(phone, window_sec=60)
+        if recent and choice_token == "source":
+            ack_ok, mid, err = actions.send_flyer_manual_edit_ack(
+                chat_id, recent["project_id"], pending and pending.get("raw_request") or "",
+                reason="source_edit_provider_unavailable",
+            )
+            return {"action": "skip", "reason": "cf-router flyer source-vs-new retry idempotent"}
+        return None
+
     customer = pending.get("customer") or {}
     business_name = str(customer.get("business_name") or "this business")
-    choice = pending.get("choice")  # "source" or "new"
+    raw_request = pending.get("raw_request") or ""
+    trailing = pending.get("customer_followup_instruction") or ""
 
-    if choice == "source":
-        visible = " ".join(actions.flyer_visible_message_text(pending.get("raw_request") or "").split())
-        raw_request = f"Edit uploaded flyer/source artwork. Customer requested: {visible}"
+    if pending.get("choice") == "source":
+        visible = " ".join(actions.flyer_visible_message_text(raw_request).split())
+        if trailing:
+            visible = f"{visible}. Also: {trailing}"
+        new_raw_request = f"Edit uploaded flyer/source artwork. Customer requested: {visible}"
         ok, detail, project = actions.trigger_create_flyer_project(
             customer_phone=phone,
-            raw_request=raw_request,
+            raw_request=new_raw_request,
             message_id=message_id,
             reference_media_path=str(pending.get("media_path") or ""),
             manual_edit_required=True,
         )
-        # Routes through existing exact-edit handler at hooks.py:566-657 because
-        # manual_edit_required=True → project.status="manual_edit_required" → preflight
-        # → manual review queue when OPENAI_API_KEY is PLACEHOLDER.
+        # Routes through existing exact-edit handler at hooks.py:566-657 → preflight →
+        # manual-review queue when OPENAI_API_KEY is PLACEHOLDER. Audit choice="source".
         ...
         return {"action": "skip", "reason": f"cf-router flyer source-edit chosen: project {project_id}"}
 
-    if choice == "new":
+    if pending.get("choice") == "new":
         source = str(pending.get("source_organization") or "the source flyer")
-        raw_request = (
-            f"{pending.get('raw_request') or ''}\n\n"
+        new_raw_request = (
+            f"{raw_request}\n\n"
             f"Customer chose path 2: use {source} only as a reference/inspiration. "
             f"Create a new original {business_name} flyer with a similar menu/content structure. "
             f"Do not copy {source} branding/layout exactly."
+            + (f"\n\nAdditional customer instruction: {trailing}" if trailing else "")
         ).strip()
-        # Mirror existing _try_flyer_reference_scope_choice_intercept use_reference branch.
+        # Mirror existing use_reference branch from _try_flyer_reference_scope_choice_intercept.
+        # Audit choice="new".
         ...
         return {"action": "skip", "reason": f"cf-router flyer new-from-source chosen: project {project_id}"}
 
     return None
 ```
 
-### Step 6 — `consume_flyer_source_vs_new_choice` writer + consumer
+### Step 5.1 — Compound-reply parser
 
-Two new helpers in `actions.py` near `save_flyer_reference_scope_pending` / `consume_flyer_reference_scope_choice`:
+```python
+_SOURCE_TOKEN = re.compile(
+    r"^\s*(?P<token>source|keep\s+source|same\s+flyer|exact\s+edit|option\s*1|1)\b[\s.,:;!\-—]*(?P<trailing>.*)$",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+_NEW_TOKEN = re.compile(
+    r"^\s*(?P<token>new|new\s+flyer|inspired(?:\s+by)?|option\s*2|2)\b[\s.,:;!\-—]*(?P<trailing>.*)$",
+    flags=re.IGNORECASE | re.DOTALL,
+)
 
-- `save_flyer_source_vs_new_pending(pending)` — updates status to `awaiting_source_vs_new_choice` and re-saves into the same `reference_scope_pending.json` (reuse `_reference_scope_state_lock`, `_write_reference_scope_state`).
-- `consume_flyer_source_vs_new_choice(text, *, chat_id, sender_phone)` — parses `text` via `_source_contract_followup_choice`, looks up pending row by (chat_id, sender_phone) AND `status == "awaiting_source_vs_new_choice"`, holds the lock across the full read-modify-write, removes the row, returns the row with `choice` attached.
+def parse_source_vs_new_followup(text: str) -> tuple[str, str]:
+    """Return ("source"|"new"|"", trailing_text). Normalizes sender block first."""
+    body = " ".join(flyer_visible_message_text(text).split())
+    for choice, pattern in (("source", _SOURCE_TOKEN), ("new", _NEW_TOKEN)):
+        match = pattern.match(body)
+        if match:
+            trailing = " ".join(match.group("trailing").strip(" .,:;-—").split())
+            return choice, trailing[:500]
+    return "", ""
+```
 
-Both functions follow the existing pattern at `actions.py:2317-2406`.
+Behavior:
+
+- "SOURCE" → `("source", "")`.
+- "Source." → `("source", "")`.
+- "SOURCE, also change date to Saturday" → `("source", "also change date to Saturday")`.
+- "1" → `("source", "")`.
+- "Option 2 — please use cursive font" → `("new", "please use cursive font")`.
+- "any update?" → `("", "")` (no match; falls to status check-in branch).
+- "[shift-agent-sender ...]\nSource" → `("source", "")` (sender block normalized first via `flyer_visible_message_text`).
+
+### Step 5.2 — Status check-in helper
+
+```python
+_STATUS_CHECKIN = re.compile(
+    r"^(?:any\s+update|is\s+it\s+ready|what'?s?\s+(?:the\s+)?status|update\??|status\??|ready\??)\??$",
+    flags=re.IGNORECASE,
+)
+
+def flyer_is_status_checkin(text: str) -> bool:
+    body = " ".join(flyer_visible_message_text(text).split()).strip(" .!,:;-—")
+    return bool(_STATUS_CHECKIN.match(body))
+```
+
+Already-deployed nearby pattern: `is_flyer_approval_text` at `actions.py:830-833`. Mirror style + tests.
+
+### Step 6 — state-transition + consumer + peek + expiry-prune
+
+Five new functions in `actions.py` near `save_flyer_reference_scope_pending` / `consume_flyer_reference_scope_choice`:
+
+- **Modify `consume_flyer_reference_scope_choice`** to accept `transition_to_status: Optional[str] = None` kwarg. When set AND the matched row would otherwise be removed AND `choice == "use_reference"` AND `original_intent == "exact_source_edit"`, instead atomically rewrite that row's `status` and return it. This keeps the row present (no race window) while signaling the caller it can proceed with the next step.
+
+- `consume_flyer_source_vs_new_choice(choice_token: str, trailing: str, *, chat_id: str, sender_phone: str) -> Optional[dict]` — finds the row with `status="awaiting_source_vs_new_choice"` matching `(chat_id, sender_phone)`, removes it from the state file under `_reference_scope_state_lock()`, attaches `choice` and `customer_followup_instruction=trailing` to the returned dict.
+
+- `peek_flyer_source_vs_new_pending(*, chat_id: str, sender_phone: str) -> Optional[dict]` — read-only lookup (does not consume) used by the status check-in branch. Acquires the lock briefly to read; does not write.
+
+- `parse_source_vs_new_followup(text: str) -> tuple[str, str]` — pure helper (no state I/O). Spelled out in Step 5.1.
+
+- `flyer_is_status_checkin(text: str) -> bool` — pure helper. Spelled out in Step 5.2.
+
+- `find_recent_flyer_manual_edit_project(customer_phone: str, *, window_sec: int = 60) -> Optional[dict]` — reads `projects.json`, returns the most recent project for `customer_phone` whose `status == "manual_edit_required"` AND was created within the last `window_sec` seconds. Used by the idempotent-retry branch.
+
+**Prune-on-expiry audit:**
+
+- Extend `_read_reference_scope_state` (`actions.py` ~line 2200) so when it drops expired rows (existing TTL behavior), for any dropped row with `original_intent="exact_source_edit"` it appends a `FlyerSourceVsNewChosen` audit entry with `choice="expired"`. This gives operators visibility into customer-abandonment without depending on a new daemon. Reuses the existing `ndjson_append` chokepoint.
+
+All functions follow the existing pattern at `actions.py:2317-2406` (lock surface, atomic write, error-tolerant for absent files).
 
 ## QA changes — exact extension
 
@@ -465,12 +630,20 @@ def _context_has(context: str, terms: set[str]) -> bool:
 `tests/test_cf_router_flyer_routing.py` (extend):
 - `original_intent="exact_source_edit"` persisted on scope-pending save when F0061-style text + media.
 - `original_intent="generic_reference"` persisted when text lacks edit verbs.
-- `use as reference` reply on exact-edit pending → clarification sent, no `trigger_create_flyer_project`.
+- `original_intent` ONLY computed when `decision in {"block", "clarify"}` (not on scope-ok path).
+- `use as reference` reply on exact-edit pending → clarification sent (no `trigger_create_flyer_project`), pending row stays under `awaiting_source_vs_new_choice` status (atomic transition, not consume+resave).
 - `NEW` after clarification → `trigger_create_flyer_project` WITHOUT `manual_edit_required`.
 - `SOURCE` after clarification → `trigger_create_flyer_project` WITH `manual_edit_required=True`, raw_request prefixed `Edit uploaded flyer/source artwork`.
+- Compound reply `SOURCE - also change date to Saturday` → `customer_followup_instruction="also change date to Saturday"` carried into project's raw_request.
+- Compound reply `Option 2, please use cursive font` → NEW branch + trailing carried into NEW path's raw_request.
 - `consume_flyer_source_vs_new_choice` holds lock across read-modify-write (mirror existing test pattern at line 233-275).
-- After SOURCE-chosen project is queued manual, follow-up `any update?` does NOT re-enter clarification, does NOT call `trigger_create_flyer_project`.
+- After SOURCE-chosen project is queued manual, follow-up `any update?` re-sends the SAME clarification verbatim, audits `clarification_resent`, does NOT call `trigger_create_flyer_project`.
+- After SOURCE chosen, `_consume_flyer_reference_authorization_reply_locked` does NOT claim `awaiting_source_vs_new_choice` rows (status isolation).
+- Customer replies SOURCE twice (idempotent retry): second reply finds no pending row but recent (≤60s) manual-edit project; re-sends manual-edit ack without re-creating project.
+- TTL expiry on `exact_source_edit` pending row emits `FlyerSourceVsNewChosen` audit with `choice="expired"`.
+- Media path missing on disk at SOURCE-branch time → customer-safe "please resend" reply, pending row removed.
 - Generic-reference customer still completes `use as reference` flow without the extra step.
+- Sender-block-prefixed inbound (`[shift-agent-sender ...]\nSource`) parses as `("source", "")` after `flyer_visible_message_text` normalization.
 
 `tests/test_flyer_visual_qa.py` (extend):
 - OCR text lacking `Monday Thali Specials` fails when source contract requires it.
@@ -494,12 +667,17 @@ def _context_has(context: str, terms: set[str]) -> bool:
 | Risk | Mitigation |
 |---|---|
 | `_extract_source_contract` returns junk JSON when vision model degrades. | Pydantic `extra="forbid"` + `model_validate_json` raises → catch → status=`low_confidence`, queue manual review. |
-| Customer wrote ambiguous text; vision says `preserve_layout=False` but customer meant True. | Deterministic text parser extracts replacements separately; OR'd into the contract. Customer can still reply with corrections, and the SOURCE/NEW clarification gives them an explicit out. |
-| `forbidden_substrings` over-bans a legitimate word. | Conservative heuristic (length ≥ 3, uppercase word, not a section item, phone-shape, address-shape). False negative is recoverable; false positive blocks customer work. |
-| `LogEntry` discriminator silently drops new variants in older deserializers. | New `Literal[...]` types appended; `_UnknownLogEntry` fallback handles forward-compat. Test pins round-trip. |
-| Pending row TTL (1800s) expires before customer replies SOURCE/NEW. | Reuse existing TTL semantics; if expired, next inbound goes through fresh primary intercept (acceptable for now). |
-| Multiple worktrees / concurrent sessions touch the same `reference_scope_pending.json`. | Existing `FileLock` + atomic-write already covers this; new consumer reuses the same lock surface. |
-| Cf-router routing-order regression — the new intercept could swallow non-source-edit follow-ups. | New consumer matches ONLY pending rows with `status="awaiting_source_vs_new_choice"`. No bare-text match. |
+| Customer wrote ambiguous text; vision says `preserve_layout=False` but customer meant True. | Deterministic text parser extracts replacements separately; merged into the contract. SOURCE/NEW clarification gives the customer an explicit override. |
+| `forbidden_substrings` over-bans a legitimate word. | Three independent backstops: skip if vision-confirmed section item; skip if new is a variant/extension of old (`Jeera Rice` startswith `Rice`); skip single-word brands. False positive must clear all three. |
+| `LogEntry` discriminator silently drops new variants in older deserializers. | New `Annotated[..., Tag(...)]` entries added; `_UnknownLogEntry` (`extra="allow"`) handles forward-compat. Test pins round-trip both ways. |
+| Pending row TTL (1800s) expires before customer replies SOURCE/NEW. | Existing TTL prunes on next read. New behavior: dropped row with `original_intent="exact_source_edit"` emits `FlyerSourceVsNewChosen` audit row with `choice="expired"` so operators see abandons. |
+| Customer media path GC'd by Hermes between scope-clarify and SOURCE/NEW reply. | `media_path` on disk: `is_file()` check before SOURCE-branch `trigger_create_flyer_project`. If missing, fall back to a customer-safe "could not find original flyer, please resend" reply + remove pending row. |
+| Multiple worktrees / concurrent sessions touch the same `reference_scope_pending.json`. | Existing `FileLock` + atomic-write already covers this; new functions reuse the same lock surface. State transitions use the consumer's atomic rewrite path, not consume-then-resave. |
+| Cf-router routing-order regression — new intercept could swallow non-source-edit follow-ups. | (a) New consumer matches ONLY pending rows with `status="awaiting_source_vs_new_choice"`. (b) Existing scope-choice consumer requires `status="awaiting_choice"`; existing auth consumer requires `status="awaiting_authorization_details"`. No cross-status claim. (c) Tests pin each consumer's status filter. |
+| Two-sender business (lessons.md 2026-05-15): sender A initiates scope-pending, sender B replies SOURCE. | Consumer matches on `(chat_id, sender_phone)`. Sender B's reply does not match → falls through to LLM. Mirrors existing scope-choice behavior; documented but not fixed in this PR (cross-sender resumption is a follow-up). |
+| Customer replies "SOURCE" twice (network retry, accidental double-send). | Idempotent-retry branch: if consume returns None AND parser matched SOURCE/NEW AND a recent manual-edit project (≤60s) exists for this customer, re-send the same ack. |
+| Compound reply "SOURCE, also change date to Saturday" loses the trailing instruction. | Parser returns `(token, trailing)`; trailing merged into the consumed row's `raw_request` as customer follow-up before `trigger_create_flyer_project`. |
+| Status check-in "any update?" arrives while pending is `awaiting_source_vs_new_choice`. | Pre-claim branch: re-send the same clarification verbatim (no consume), audit `clarification_resent`. Matches lessons.md 2026-05-19 entry. |
 
 ## Out of scope (for cross-reference)
 
