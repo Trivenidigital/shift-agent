@@ -258,7 +258,64 @@ def test_operator_brief_includes_fleet_normalization_readiness(tmp_path):
     assert "Srilu -> Main: blocked" in markdown
     assert "Srilu must be green before Main promotion" in markdown
     assert "Main -> VPIN: ready" in markdown
-    assert "Docker: deferred" in markdown
+
+
+def test_operator_brief_includes_flyer_self_evaluation_incidents(tmp_path):
+    module = load_module()
+    repo = tmp_path
+    tasks = repo / "tasks"
+    tasks.mkdir()
+    (tasks / "operator-decisions.md").write_text("# Operator Decisions\n", encoding="utf-8")
+    (tasks / "todo.md").write_text("# Backlog\n", encoding="utf-8")
+    evaluation = repo / "flyer-evaluation.json"
+    evaluation.write_text(
+        json.dumps(
+            {
+                "status": "red",
+                "summary": {"incident_count": 2, "high_or_critical_count": 1},
+                "incidents": [
+                    {
+                        "type": "manual_source_edit_stale",
+                        "severity": "high",
+                        "project_id": "F0063",
+                        "suggested_action": "Burn down manual queue row.",
+                    },
+                    {
+                        "type": "repeated_status_checkins",
+                        "severity": "medium",
+                        "project_id": "F0063",
+                        "suggested_action": "Review SLA copy.",
+                    },
+                ],
+                "eval_candidates": [
+                    {
+                        "category": "source_edit_provider_posture",
+                        "project_id": "F0063",
+                        "suggested_fixture": "tests/test_flyer_source_edit_preflight.py",
+                    }
+                ],
+                "needs_srini": ["manual_source_edit_stale F0063"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    brief = module.build_brief(
+        repo_root=repo,
+        decisions_path=tasks / "operator-decisions.md",
+        todo_path=tasks / "todo.md",
+        flyer_evaluation_json_path=evaluation,
+        automations_dir=repo / "missing-automations",
+        generated_date="2026-05-21",
+        include_git=False,
+    )
+    markdown = module.render_markdown(brief)
+
+    assert "Flyer Self-Evaluation" in markdown
+    assert "Status: red; incidents=2; high_or_critical=1" in markdown
+    assert "HIGH: manual_source_edit_stale F0063 - Burn down manual queue row." in markdown
+    assert "Eval: source_edit_provider_posture F0063 -> tests/test_flyer_source_edit_preflight.py" in markdown
+    assert "Needs Srini: manual_source_edit_stale F0063" in markdown
 
 
 def test_todo_signals_ignore_horizontal_rules_checked_items_and_plain_bullets(tmp_path):

@@ -1,0 +1,19 @@
+{
+  "task": "flyer-self-evaluation-loop",
+  "date": "2026-05-20",
+  "drift_check_tag": "extends-Hermes",
+  "checked_repo_primitives": [
+    "src/platform/schemas.py FlyerProjectStore/FlyerProject/FlyerManualReview/FlyerSourceContract/FlyerVisualQAReport",
+    "src/platform/safe_io.py atomic_write_text",
+    "tools/operator-brief.py optional JSON report sections",
+    "tests/test_operator_brief.py",
+    "docs/superpowers/plans/2026-05-14-catering-100-autonomy-self-learning-plan.md",
+    "docs/superpowers/specs/2026-05-14-catering-self-learning-rails-design.md"
+  ],
+  "checked_hermes_sources": [
+    "Hermes Agent official docs and skills pages",
+    "NousResearch/hermes-agent-self-evolution PLAN.md",
+    "project memory hermes_first_vps_capabilities.md"
+  ],
+  "decision": "Build a narrow report-only Flyer self-evaluation CLI and operator-brief input. Reuse Hermes/Shift state, audit, and brief substrate; do not mutate production behavior or enable self-modification."
+}
