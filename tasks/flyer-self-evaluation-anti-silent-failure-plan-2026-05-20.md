@@ -80,6 +80,8 @@ Each source-contract incident must include an `evidence_details` object with sta
 - `forbidden_text_hits`
 - `queued_age_minutes`
 - `customer_impact`
+- `project_status`
+- `active_customer_risk`
 
 New incident types in this slice:
 
@@ -118,12 +120,15 @@ New incident types in this slice:
 - Deterministic read-only report surfaces the real source-edit/source-contract silent-failure classes.
 - Generic passed QA does not satisfy source-aware QA.
 - Source-aware QA is accepted when `qa_source=operator_review` or explicit source-contract/source-integrity evidence exists.
+- Accepted source-aware QA is tied to the current project/generated asset and rejects missing/stale project version, generated asset hash, project id, or `checked_at` evidence.
 - Exact source-edit projects with reference images and no source contract are reported.
 - Stale manual source-edit rows are reported after threshold.
 - Secret-like values are redacted from report output.
 - decisions.log outbound-body limitation is documented in report boundaries and Markdown.
 - `source_contract_locked_fact_gap`, `source_contract_qa_fact_gap`, and `source_contract_forbidden_text_present` have deterministic tests.
 - Operator brief includes Flyer self-eval status, grouped top incidents, stale manual queue summary, source-contract/QA gap summary, repeated check-ins, and Needs Srini.
+- Operator brief distinguishes active customer-risk incidents from historical/audit findings and keeps top incident rows bounded.
+- CLI red/yellow reports remain advisory and exit `0` on successful rendering; strict gating is deferred to a future explicit `--strict` mode.
 - No provider behavior changes, no customer behavior changes, no production mutation.
 
 ## Deferred Items

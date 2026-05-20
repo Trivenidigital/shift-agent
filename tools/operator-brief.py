@@ -217,6 +217,29 @@ def summarize_flyer_evaluation_report(path: Path | None) -> list[str]:
         f"high_or_critical={summary.get('high_or_critical_count', 0)}"
     ]
     incidents = [item for item in (payload.get("incidents") or []) if isinstance(item, dict)]
+    active_risk = 0
+    historical = 0
+    for item in incidents:
+        details = item.get("evidence_details") if isinstance(item.get("evidence_details"), dict) else {}
+        if details.get("active_customer_risk") is True:
+            active_risk += 1
+        elif details.get("active_customer_risk") is False:
+            historical += 1
+    if active_risk or historical:
+        lines.append(f"Customer risk: active={active_risk}; historical_or_audit={historical}")
+
+    def active_state(item: dict) -> bool | None:
+        details = item.get("evidence_details") if isinstance(item.get("evidence_details"), dict) else {}
+        value = details.get("active_customer_risk")
+        return value if isinstance(value, bool) else None
+
+    def active_suffix(items: list[dict]) -> str:
+        active = sum(1 for item in items if active_state(item) is True)
+        old = sum(1 for item in items if active_state(item) is False)
+        if active or old:
+            return f"; active={active}; historical_or_audit={old}"
+        return ""
+
     stale = [item for item in incidents if item.get("type") == "manual_source_edit_stale"]
     if stale:
         ages = [
@@ -226,23 +249,40 @@ def summarize_flyer_evaluation_report(path: Path | None) -> list[str]:
             if isinstance(details.get("queued_age_minutes"), (int, float))
         ]
         oldest = max(ages) if ages else 0
-        lines.append(f"Manual queue: stale_source_edits={len(stale)}; oldest={oldest:g}min")
-    source_missing = sum(1 for item in incidents if item.get("type") == "source_contract_missing")
-    locked_gaps = sum(1 for item in incidents if item.get("type") == "source_contract_locked_fact_gap")
+        lines.append(f"Manual queue: stale_source_edits={len(stale)}; oldest={oldest:g}min{active_suffix(stale)}")
+    source_items = [
+        item for item in incidents
+        if item.get("type") in {"source_contract_missing", "source_contract_locked_fact_gap"}
+    ]
+    source_missing = sum(1 for item in source_items if item.get("type") == "source_contract_missing")
+    locked_gaps = sum(1 for item in source_items if item.get("type") == "source_contract_locked_fact_gap")
     if source_missing or locked_gaps:
-        lines.append(f"Source contracts: missing={source_missing}; locked_fact_gaps={locked_gaps}")
-    qa_missing = sum(1 for item in incidents if item.get("type") == "source_contract_qa_missing")
-    qa_gaps = sum(1 for item in incidents if item.get("type") == "source_contract_qa_fact_gap")
-    forbidden = sum(1 for item in incidents if item.get("type") == "source_contract_forbidden_text_present")
+        lines.append(f"Source contracts: missing={source_missing}; locked_fact_gaps={locked_gaps}{active_suffix(source_items)}")
+    qa_items = [
+        item for item in incidents
+        if item.get("type") in {
+            "source_contract_qa_missing",
+            "source_contract_qa_fact_gap",
+            "source_contract_forbidden_text_present",
+        }
+    ]
+    qa_missing = sum(1 for item in qa_items if item.get("type") == "source_contract_qa_missing")
+    qa_gaps = sum(1 for item in qa_items if item.get("type") == "source_contract_qa_fact_gap")
+    forbidden = sum(1 for item in qa_items if item.get("type") == "source_contract_forbidden_text_present")
     if qa_missing or qa_gaps or forbidden:
-        lines.append(f"QA gaps: missing={qa_missing}; fact_gaps={qa_gaps}; forbidden_text_hits={forbidden}")
-    checkins = sum(1 for item in incidents if item.get("type") == "repeated_status_checkins")
+        lines.append(f"QA gaps: missing={qa_missing}; fact_gaps={qa_gaps}; forbidden_text_hits={forbidden}{active_suffix(qa_items)}")
+    checkin_items = [item for item in incidents if item.get("type") == "repeated_status_checkins"]
+    checkins = len(checkin_items)
     if checkins:
-        lines.append(f"Customer waiting: repeated_checkins={checkins}")
+        lines.append(f"Customer waiting: repeated_checkins={checkins}{active_suffix(checkin_items)}")
     severity_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
     top_incidents = sorted(
         incidents,
-        key=lambda item: (severity_rank.get(str(item.get("severity") or "").lower(), 4), str(item.get("type") or "")),
+        key=lambda item: (
+            severity_rank.get(str(item.get("severity") or "").lower(), 4),
+            {True: 0, None: 1, False: 2}[active_state(item)],
+            str(item.get("type") or ""),
+        ),
     )[:5]
     for item in top_incidents:
         severity = str(item.get("severity") or "unknown").upper()

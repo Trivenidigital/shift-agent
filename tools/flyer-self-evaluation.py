@@ -296,15 +296,36 @@ def accepted_source_qa_report(project: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def report_checked_after_project_update(project: dict[str, Any], report: dict[str, Any]) -> bool:
+    project_updated_at = project.get("updated_at")
+    checked_at = report.get("checked_at")
+    if not checked_at:
+        return False
+    if not project_updated_at:
+        return True
+    try:
+        return parse_utc(str(checked_at)) >= parse_utc(str(project_updated_at))
+    except (TypeError, ValueError):
+        return False
+
+
 def qa_report_matches_current_project(project: dict[str, Any], report: dict[str, Any]) -> bool:
+    project_id = str(project.get("project_id") or "")
+    report_project_id = str(report.get("project_id") or "")
+    if project_id and report_project_id != project_id:
+        return False
     project_version = project.get("version")
     report_version = report.get("project_version")
-    if project_version is not None and report_version is not None:
+    if project_version is not None:
+        if report_version is None:
+            return False
         try:
             if int(project_version) != int(report_version):
                 return False
         except (TypeError, ValueError):
             return False
+    if not report_checked_after_project_update(project, report):
+        return False
     generated_assets = [
         asset for asset in project.get("assets") or []
         if isinstance(asset, dict)
@@ -317,13 +338,16 @@ def qa_report_matches_current_project(project: dict[str, Any], report: dict[str,
     if not generated_assets:
         return True
     report_asset_id = str(report.get("asset_id") or "")
+    if not report_asset_id:
+        return False
     if report_asset_id:
         matches = [asset for asset in generated_assets if str(asset.get("asset_id") or "") == report_asset_id]
         if not matches:
             return False
         report_sha = str(report.get("artifact_sha256") or "")
-        if report_sha and any(asset.get("sha256") for asset in matches):
-            return any(str(asset.get("sha256") or "") == report_sha for asset in matches)
+        current_shas = {str(asset.get("sha256") or "") for asset in matches if asset.get("sha256")}
+        if current_shas:
+            return bool(report_sha) and report_sha in current_shas
     return True
 
 
@@ -363,6 +387,8 @@ def source_contract_evidence_details(
         if any(contract.get(field) for contract in contracts):
             fields_present.append(field)
     return {
+        "project_status": str(project.get("status") or ""),
+        "active_customer_risk": active_customer_risk(project),
         "has_reference_media": has_reference_media(project),
         "exact_source_edit_cues": looks_like_exact_source_edit(project),
         "has_source_contract": bool(contracts),
@@ -375,6 +401,11 @@ def source_contract_evidence_details(
         "queued_age_minutes": round(queued_age_minutes, 1) if queued_age_minutes is not None else None,
         "customer_impact": customer_impact,
     }
+
+
+def active_customer_risk(project: dict[str, Any]) -> bool:
+    status = str(project.get("status") or "")
+    return status not in {"delivered", "completed", "closed_no_send", "cancelled", "archived"}
 
 
 def looks_like_exact_source_edit(project: dict[str, Any]) -> bool:
@@ -524,6 +555,12 @@ def project_incidents(
                     evidence=f"status={project.get('status')}; updated_age_minutes={gen_age:.1f}",
                     suggested_action="Investigate provider/runtime logs and send a customer-safe status update if needed.",
                     category="provider_runtime",
+                    evidence_details={
+                        "project_status": str(project.get("status") or ""),
+                        "active_customer_risk": True,
+                        "updated_age_minutes": round(gen_age, 1),
+                        "customer_impact": "customer may be waiting on generation/finalization",
+                    },
                 )
             )
     return out
@@ -626,6 +663,10 @@ def repeated_checkin_incidents(entries: list[dict[str, Any]], *, threshold: int)
                 suggested_action="Review SLA/status-copy loop; repeated check-ins are a customer-visible waiting signal.",
                 category="customer_status_sla",
                 count=len(rows),
+                evidence_details={
+                    "active_customer_risk": True,
+                    "customer_impact": "customer has repeatedly asked for status",
+                },
             )
         )
     return out

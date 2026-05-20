@@ -22,7 +22,7 @@ def _project(
     *,
     status: str = "manual_edit_required",
     raw_request: str = "Please edit this uploaded flyer. Do not change anything else.",
-    updated_at: str = "2026-05-20T11:00:00Z",
+    updated_at: str = "2026-05-20T10:00:00Z",
     manual_review: dict | None = None,
     assets: list[dict] | None = None,
     reference_extractions: list[dict] | None = None,
@@ -439,6 +439,86 @@ def test_stale_source_qa_report_does_not_satisfy_current_project_version():
     assert "source_contract_qa_missing" in [item["type"] for item in report["incidents"]]
 
 
+def test_stale_source_qa_report_does_not_satisfy_current_project_timestamp():
+    module = load_module()
+    generated = _reference_asset("A0002")
+    generated.update({"kind": "concept_preview", "source": "generated", "sha256": "4" * 64})
+    project = _project(
+        "F9017",
+        status="awaiting_final_approval",
+        updated_at="2026-05-20T10:30:00Z",
+        manual_review={"status": "none", "reason": "", "reason_code": "unclassified"},
+        assets=[_reference_asset(), generated],
+        reference_extractions=[_source_contract_extraction()],
+        qa_reports=[
+            {
+                "project_id": "F9017",
+                "asset_id": "A0002",
+                "artifact_sha256": "4" * 64,
+                "project_version": 1,
+                "output_format": "concept_preview",
+                "provider": "openrouter-vision",
+                "qa_source": "ocr_vision",
+                "status": "passed",
+                "blockers": [],
+                "warnings": [],
+                "extracted_text": "Lakshmis Kitchen Monday Thali Specials Veg Thali Specials Rice Dal Sides: salad, raita, papad",
+                "checked_at": "2026-05-20T10:10:00Z",
+            }
+        ],
+    )
+    project["version"] = 1
+    project["locked_facts"] = _source_locked_facts()
+
+    report = module.build_report(
+        projects={"projects": [project]},
+        decision_entries=[],
+        now=module.parse_utc("2026-05-20T11:00:00Z"),
+    )
+
+    assert "source_contract_qa_missing" in [item["type"] for item in report["incidents"]]
+
+
+def test_source_qa_report_missing_binding_fields_fails_closed():
+    module = load_module()
+    for missing_field in ("checked_at", "project_id", "project_version", "artifact_sha256"):
+        generated = _reference_asset("A0002")
+        generated.update({"kind": "concept_preview", "source": "generated", "sha256": "6" * 64})
+        qa_report = {
+            "project_id": f"F91{missing_field[:2]}",
+            "asset_id": "A0002",
+            "artifact_sha256": "6" * 64,
+            "project_version": 1,
+            "output_format": "concept_preview",
+            "provider": "openrouter-vision",
+            "qa_source": "ocr_vision",
+            "status": "passed",
+            "blockers": [],
+            "warnings": [],
+            "extracted_text": "Lakshmis Kitchen Monday Thali Specials Veg Thali Specials Rice Dal Sides: salad, raita, papad",
+            "checked_at": "2026-05-20T10:10:00Z",
+        }
+        qa_report.pop(missing_field)
+        project = _project(
+            qa_report.get("project_id") or f"F91{missing_field[:2]}",
+            status="awaiting_final_approval",
+            manual_review={"status": "none", "reason": "", "reason_code": "unclassified"},
+            assets=[_reference_asset(), generated],
+            reference_extractions=[_source_contract_extraction()],
+            qa_reports=[qa_report],
+        )
+        project["version"] = 1
+        project["locked_facts"] = _source_locked_facts()
+
+        report = module.build_report(
+            projects={"projects": [project]},
+            decision_entries=[],
+            now=module.parse_utc("2026-05-20T11:00:00Z"),
+        )
+
+        assert "source_contract_qa_missing" in [item["type"] for item in report["incidents"]], missing_field
+
+
 def test_complete_later_source_qa_report_prevents_false_fact_gap():
     module = load_module()
     generated = _reference_asset("A0002")
@@ -455,6 +535,7 @@ def test_complete_later_source_qa_report_prevents_false_fact_gap():
         "blockers": [],
         "warnings": [],
         "extracted_text": "Monday Thali Specials",
+        "checked_at": "2026-05-20T10:10:00Z",
     }
     complete = dict(partial)
     complete["extracted_text"] = "Lakshmis Kitchen Monday Thali Specials Veg Thali Specials Rice Dal Sides: salad, raita, papad"
@@ -689,6 +770,39 @@ def test_operator_review_qa_satisfies_source_aware_check():
     assert report["incidents"] == []
 
 
+def test_stray_operator_review_without_current_asset_does_not_satisfy_source_aware_check():
+    module = load_module()
+    generated = _reference_asset("A0002")
+    generated.update({"kind": "concept_preview", "source": "generated", "sha256": "5" * 64})
+    project = _project(
+        "F9018",
+        status="awaiting_final_approval",
+        manual_review={"status": "none", "reason": "", "reason_code": "unclassified"},
+        assets=[_reference_asset(), generated],
+        reference_extractions=[_source_contract_extraction()],
+        qa_reports=[
+            {
+                "project_id": "F9018",
+                "artifact_sha256": "5" * 64,
+                "project_version": 1,
+                "provider": "operator-cockpit",
+                "qa_source": "operator_review",
+                "status": "passed",
+                "checked_at": "2026-05-20T10:10:00Z",
+            }
+        ],
+    )
+    project["locked_facts"] = _source_locked_facts()
+
+    report = module.build_report(
+        projects={"projects": [project]},
+        decision_entries=[],
+        now=module.parse_utc("2026-05-20T11:00:00Z"),
+    )
+
+    assert "source_contract_qa_missing" in [item["type"] for item in report["incidents"]]
+
+
 def test_repeated_status_checkins_are_grouped_without_creating_projects():
     module = load_module()
     entries = [
@@ -710,6 +824,7 @@ def test_repeated_status_checkins_are_grouped_without_creating_projects():
 
     assert [item["type"] for item in report["incidents"]] == ["repeated_status_checkins"]
     assert report["incidents"][0]["count"] == 4
+    assert report["incidents"][0]["evidence_details"]["active_customer_risk"] is True
 
 
 def test_clean_state_has_empty_incidents_and_green_status():

@@ -49,8 +49,10 @@ Awesome Hermes ecosystem check: no existing Hermes skill replaces this report-si
 
 `has_source_qa(project)` must stop trusting provider/warning marker text. Source-aware QA is satisfied only when:
 
-- a passed report has `qa_source="operator_review"`; or
-- a passed report has non-empty `extracted_text` and report-side evidence that every positive source-contract obligation is represented.
+- a passed report has `qa_source="operator_review"` and is tied to the current project/generated asset; or
+- a passed report is tied to the current project/generated asset, has non-empty `extracted_text`, and report-side evidence that every positive source-contract obligation is represented.
+
+Current-project matching rejects reports for a missing/different `project_id`, missing/different `project_version` when the project has a version, missing/different generated `asset_id`/`artifact_sha256` when the current asset has a hash, missing `checked_at`, or a `checked_at` timestamp older than the project `updated_at` timestamp when both timestamps are present. Stray operator-review rows are not authoritative unless they are tied to the relevant generated asset/project.
 
 Positive source-contract obligations are required locked facts with prefixes:
 
@@ -78,6 +80,8 @@ Report-side text matching must mirror `src/agents/flyer/visual_qa.py` semantics:
 
 All source-contract incidents include `evidence_details` with the plan-defined stable keys. Fields that do not apply are empty lists, `false`, `0`, or `null`.
 
+`evidence_details.active_customer_risk` distinguishes open/customer-risk rows from historical/audit findings. Delivered/completed/closed/cancelled/archived projects remain reportable but are grouped separately in operator-facing summaries.
+
 ## Redaction
 
 Implement a field-aware recursive `sanitize_report()` pass over the completed report before rendering. Apply it to JSON and Markdown output.
@@ -102,6 +106,7 @@ Do not print raw `raw_request`, full outbound bodies, env file contents, or prov
 Keep `--flyer-evaluation-json`; change only summarization:
 
 - `Status: red; incidents=N; high_or_critical=M`
+- `Customer risk: active=X; historical_or_audit=Y`
 - `Manual queue: stale_source_edits=X; oldest=Ymin`
 - `Source contracts: missing=X; locked_fact_gaps=Y`
 - `QA gaps: missing=X; fact_gaps=Y; forbidden_text_hits=Z`
@@ -110,6 +115,10 @@ Keep `--flyer-evaluation-json`; change only summarization:
 - `Needs Srini: ...`
 
 No new data source or production probe is added.
+
+The self-evaluation CLI remains advisory and exits `0` when it successfully renders a red/yellow/green report. A future gating mode should add an explicit `--strict` flag rather than changing default operator-brief behavior.
+
+Grouped brief buckets include active/historical counts when incident evidence exposes `active_customer_risk`, and top incidents sort active customer-risk rows ahead of historical/audit rows within the same severity.
 
 `operator-brief.py` must consume `evidence_details` for age/count grouping. It must not parse free-text `evidence`.
 
@@ -135,7 +144,8 @@ The fixture should include:
 - Existing focused suite remains green after updating obsolete marker-based source-QA expectations.
 - New red/green tests:
   - generic passed QA does not count as source-aware;
-  - operator review QA counts;
+  - operator review QA counts only when tied to the current project/generated asset;
+  - stale QA by project version or `checked_at < updated_at` does not count;
   - actual source obligations in extracted QA text count;
   - marker-only provider/warning QA fails, and a positive test with locked-fact evidence in `extracted_text` passes;
   - missing locked source facts emits `source_contract_locked_fact_gap`;
