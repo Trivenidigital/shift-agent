@@ -56,6 +56,49 @@ def _load_config(path: Path) -> Config:
         return Config.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")) or {})
 
 
+_CI_ENV_VARS = ("GITHUB_ACTIONS", "CI", "BUILDKITE", "JENKINS_URL")
+
+
+def _looks_like_ci() -> tuple[bool, str]:
+    """Detect common CI markers so --real-model --allow-spend cannot accidentally
+    run in a build pipeline. Tightens the existing --allow-spend gate; does NOT
+    relax it. Returns (is_ci, first_matched_var).
+    """
+    for name in _CI_ENV_VARS:
+        value = os.environ.get(name, "").strip().lower()
+        if value and value not in ("0", "false", "no", ""):
+            return True, name
+    return False, ""
+
+
+def _key_posture(name: str) -> dict:
+    """Best-effort posture of a provider key for spend-mode output. Reports
+    presence + which env source matched. Never returns the value itself."""
+    process_value = os.environ.get(name, "").strip()
+    if process_value:
+        return {"present": "PLACEHOLDER" not in process_value.upper(), "source": "process_env"}
+    for source, path_str in (
+        ("hermes_env", os.environ.get("HERMES_ENV_PATH", "/root/.hermes/.env")),
+        ("agent_env", os.environ.get("SHIFT_AGENT_ENV_PATH", "/opt/shift-agent/.env")),
+    ):
+        path = Path(path_str)
+        if not path.exists():
+            continue
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, raw = line.split("=", 1)
+                if key.strip() == name:
+                    raw = raw.strip().strip('"').strip("'")
+                    if raw:
+                        return {"present": "PLACEHOLDER" not in raw.upper(), "source": source}
+        except OSError:
+            continue
+    return {"present": False, "source": None}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", default="")
@@ -70,6 +113,22 @@ def main() -> int:
         print(json.dumps({"ok": False, "error": "--real-model requires --allow-spend"}))
         return 2
 
+    # P0-7 belt-and-suspenders: refuse to spend in a CI/build pipeline even if
+    # the operator passed --allow-spend. Most accidental spend events arise from
+    # someone copying a working env into a build secret; the existing
+    # FLYER_GOLDEN_ALLOW_SPEND env in pytest is one half of the gate, this is
+    # the other. Operator can set ALLOW_SPEND_IN_CI=1 to override (documented
+    # path; not the default).
+    if args.real_model and args.allow_spend and os.environ.get("ALLOW_SPEND_IN_CI", "").lower() not in ("1", "true", "yes"):
+        is_ci, var_name = _looks_like_ci()
+        if is_ci:
+            print(json.dumps({
+                "ok": False,
+                "error": f"refusing --real-model in CI environment ({var_name} is set)",
+                "remedy": "unset CI markers, or set ALLOW_SPEND_IN_CI=1 if intentional",
+            }))
+            return 3
+
     temp_root = Path(args.output_dir) if args.output_dir else Path(tempfile.mkdtemp(prefix="flyer-quality-smoke-"))
     temp_root.mkdir(parents=True, exist_ok=True)
     os.environ["FLYER_STATE_ROOT"] = str(temp_root)
@@ -79,11 +138,21 @@ def main() -> int:
     model = "deterministic-renderer"
     quality = "low"
     spend_mode = "none"
+    posture = {
+        "provider": "deterministic",
+        "openrouter_key": {"present": False, "source": None},
+        "openai_source_edit_key": {"present": False, "source": None},
+    }
     if args.real_model:
         cfg = _load_config(Path(args.config_path))
         model = cfg.flyer.draft_image_model
         quality = cfg.flyer.draft_image_quality
         spend_mode = "real-model"
+        posture = {
+            "provider": "openrouter",
+            "openrouter_key": _key_posture("OPENROUTER_API_KEY"),
+            "openai_source_edit_key": _key_posture("OPENAI_API_KEY"),
+        }
 
     try:
         project = _project()
@@ -231,6 +300,7 @@ def main() -> int:
             "mode": spend_mode,
             "model": model,
             "quality": quality,
+            "posture": posture,
             "concept_count": len(specs),
             "output_dir": str(temp_root),
             "assets": diagnostics,

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, FileUp, Gift, Megaphone, RefreshCw, Search, Send, Users } from "lucide-react";
+import { Activity, AlertTriangle, FileUp, Gift, Megaphone, RefreshCw, Search, Send, Users } from "lucide-react";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
@@ -123,6 +123,39 @@ interface FlyerSummary {
   campaign_asset: { path: string; exists: boolean };
 }
 
+// P0-7: provider + runtime health
+type HealthSeverity = "green" | "yellow" | "red";
+
+interface FlyerHealthComponent {
+  name: string;
+  severity: HealthSeverity;
+  detail: string;
+  checked_at: string;
+}
+
+interface FlyerHealthProvider {
+  name: "openrouter_generation_vision" | "openai_source_edit";
+  purpose: string;
+  severity: HealthSeverity;
+  detail: string;
+  key_present: boolean;
+  key_source: "process_env" | "hermes_env" | "agent_env" | null;
+  model_config: Record<string, string>;
+  manual_queue_impact?: { queued_count: number; oldest_age_hours: number | null };
+  operator_note?: string;
+  checked_at: string;
+}
+
+interface FlyerHealth {
+  checked_at: string;
+  // Truthful naming: these are the SHIFT-AGENT tarball markers, not the
+  // cockpit's. The cockpit deploys separately and has no own marker today.
+  shift_agent_deploy_tag: string | null;
+  shift_agent_commit_hash: string | null;
+  components: FlyerHealthComponent[];
+  providers: FlyerHealthProvider[];
+}
+
 interface FlyerCustomer {
   customer_id: string;
   business_name: string;
@@ -207,6 +240,113 @@ function Stat({ label, value, tone = "default" }: { label: string; value: number
       <div className="text-xs uppercase tracking-wide text-zinc-500">{label}</div>
       <div className={cn("mt-1 text-2xl font-semibold", tone === "warn" && "text-amber-700", tone === "good" && "text-emerald-700")}>{value}</div>
     </div>
+  );
+}
+
+function severityTone(severity: HealthSeverity): "green" | "amber" | "red" {
+  return severity === "green" ? "green" : severity === "yellow" ? "amber" : "red";
+}
+
+function HealthDot({ severity }: { severity: HealthSeverity }) {
+  const color = severity === "green" ? "bg-emerald-500" : severity === "yellow" ? "bg-amber-500" : "bg-red-500";
+  return <span className={cn("inline-block h-2 w-2 rounded-full", color)} aria-label={`severity: ${severity}`} />;
+}
+
+function FlyerHealthPanel({ data }: { data: FlyerHealth | undefined }) {
+  if (!data) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <Activity size={16} /> Provider & runtime health
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="text-xs text-zinc-500">Loading health…</div>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const provider = (name: FlyerHealthProvider["name"]) =>
+    data.providers.find((p) => p.name === name);
+  const openrouter = provider("openrouter_generation_vision");
+  const openai = provider("openai_source_edit");
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between gap-3">
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <Activity size={16} /> Provider & runtime health
+          </CardTitle>
+          <div className="text-xs text-zinc-500" title="Shift-agent tarball deploy marker (cockpit deploys separately)">
+            agent: {data.shift_agent_deploy_tag ?? data.shift_agent_commit_hash ?? "marker missing"}
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+          {data.components.map((c) => (
+            <div
+              key={c.name}
+              className="flex items-start gap-2 rounded-md border border-zinc-200 bg-white px-3 py-2"
+            >
+              <HealthDot severity={c.severity} />
+              <div className="min-w-0">
+                <div className="text-xs font-medium text-zinc-700">{c.name.replace(/_/g, " ")}</div>
+                <div className="truncate text-xs text-zinc-500" title={c.detail}>
+                  {c.detail}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="grid gap-3 lg:grid-cols-2">
+          {openrouter && (
+            <div className="rounded-md border-2 border-zinc-200 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-sm font-semibold">
+                  <HealthDot severity={openrouter.severity} />
+                  OpenRouter — generation & vision
+                </div>
+                <Badge tone={severityTone(openrouter.severity)}>{openrouter.severity}</Badge>
+              </div>
+              <div className="mt-2 text-xs text-zinc-600">{openrouter.detail}</div>
+              <div className="mt-2 text-xs text-zinc-500">
+                draft: <span className="font-mono">{openrouter.model_config.draft_image_model ?? "?"}</span> ·
+                {" "}final: <span className="font-mono">{openrouter.model_config.final_image_model ?? "?"}</span>
+              </div>
+            </div>
+          )}
+          {openai && (
+            <div className="rounded-md border-2 border-zinc-200 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-sm font-semibold">
+                  <HealthDot severity={openai.severity} />
+                  OpenAI — exact source edits
+                </div>
+                <Badge tone={severityTone(openai.severity)}>{openai.severity}</Badge>
+              </div>
+              <div className="mt-2 text-xs text-zinc-600">{openai.detail}</div>
+              <div className="mt-2 text-xs text-zinc-500">
+                edit model: <span className="font-mono">{openai.model_config.edit_image_model ?? "?"}</span>
+              </div>
+              {openai.manual_queue_impact && openai.manual_queue_impact.queued_count > 0 && (
+                <div className="mt-2 rounded bg-amber-50 px-2 py-1 text-xs text-amber-800">
+                  <strong>{openai.manual_queue_impact.queued_count}</strong> queued; oldest{" "}
+                  <strong>{openai.manual_queue_impact.oldest_age_hours ?? 0}h</strong>
+                </div>
+              )}
+              {openai.operator_note && (
+                <div className="mt-2 text-xs italic text-zinc-500">{openai.operator_note}</div>
+              )}
+            </div>
+          )}
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -400,6 +540,12 @@ export function FlyerAdmin() {
     queryKey: ["flyer-summary"],
     queryFn: () => api.GET<FlyerSummary>("/flyer/summary"),
     refetchInterval: 15_000,
+  });
+  // P0-7: provider + runtime health (read-only). 30s cadence is conservative.
+  const { data: health } = useQuery<FlyerHealth>({
+    queryKey: ["flyer-health"],
+    queryFn: () => api.GET<FlyerHealth>("/flyer/health"),
+    refetchInterval: 30_000,
   });
   const { data: customerData } = useQuery<{
     customers: FlyerCustomer[];
@@ -603,6 +749,7 @@ export function FlyerAdmin() {
 
       {tab === "overview" && (
         <div className="space-y-5">
+          <FlyerHealthPanel data={health} />
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-7">
             <Stat label="Customers" value={summary?.total_customers ?? "-"} />
             <Stat label="Free Trial" value={summary?.segments.free_trial ?? "-"} tone="good" />

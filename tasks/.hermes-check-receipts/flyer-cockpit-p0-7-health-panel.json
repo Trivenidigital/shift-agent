@@ -1,0 +1,22 @@
+{
+  "topic": "flyer-cockpit-p0-7-health-panel",
+  "task_text": "flyer-cockpit-p0-7-health-panel",
+  "completed_at": "2026-05-20T02:01:18Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 4,
+  "hermes_step_count": 7,
+  "files_to_read_first": [
+    "web/backend/app/routers/health.py",
+    "web/backend/app/models.py",
+    "web/backend/app/routers/flyer.py",
+    "web/backend/app/config.py",
+    "src/agents/flyer/workflow.py",
+    "src/agents/flyer/render.py",
+    "src/platform/schemas.py",
+    "src/agents/flyer/scripts/smoke-flyer-quality",
+    "tests/test_flyer_golden_scenarios_real_model.py",
+    "src/agents/shift/scripts/shift-agent-deploy.sh",
+    "web/frontend/src/sections/FlyerAdmin.tsx"
+  ],
+  "refresh_reason": "doc-nit: align plan-doc JSON sketch + helper names with post-review backend (reviewer 2026-05-20 PR#134)"
+}
