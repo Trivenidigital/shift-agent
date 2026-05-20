@@ -41,15 +41,25 @@ from schemas import (  # noqa: E402
 try:
     from flyer_manual_queue import (  # type: ignore  # noqa: E402
         _verification_modes as flyer_verification_modes,
+        build_closure_customer_text,
+        close_manual_project,
         complete_manual_project,
+        enforce_close_freshness_guard,
         list_manual_queue,
+        notify_customer_of_closure,
+        resolve_customer_chat_id_by_phone,
         triage_summary,
     )
 except ImportError:
     from agents.flyer.manual_queue import (  # noqa: E402
         _verification_modes as flyer_verification_modes,
+        build_closure_customer_text,
+        close_manual_project,
         complete_manual_project,
+        enforce_close_freshness_guard,
         list_manual_queue,
+        notify_customer_of_closure,
+        resolve_customer_chat_id_by_phone,
         triage_summary,
     )
 
@@ -80,6 +90,13 @@ class ManualQueueCompleteBody(ReasonBody):
 
 class ManualQueueBreakGlassBody(ReasonBody):
     pass
+
+
+class ManualQueueCloseNoSendBody(ReasonBody):
+    """Operator-close request body. `force=True` bypasses the freshness
+    guard; the agent helper `enforce_close_freshness_guard` accepts force
+    OR a documented bypass token in the reason string."""
+    force: bool = False
 
 
 def _flyer_dir() -> Path:
@@ -708,6 +725,213 @@ async def manual_queue_break_glass(
         details=result | {"reason": body.reason},
     )
     return result
+
+
+# ─────────────────────────────────────────────────────────────────
+# P0-6 close/no-send cockpit action + P0-5 customer-message preview.
+#
+# Close path mirrors `flyer-manual-queue --close` CLI semantics:
+#   enforce_close_freshness_guard → close_manual_project →
+#   notify_customer_of_closure under flock with backup + audit.
+# Reuses the agent helpers from PRs #127/#129/#130 so the cockpit
+# binding is the only net-new surface.
+# ─────────────────────────────────────────────────────────────────
+
+
+def _decisions_log_path() -> Path:
+    """Resolve the agent decisions log path.
+
+    `notify_customer_of_closure` writes a `flyer_closure_customer_notified`
+    row to the agent decisions log. Use the same `Settings.decisions_path`
+    other cockpit routes rely on so test mode (Settings.state_dir under
+    tmp_path) and production (/opt/shift-agent/logs/decisions.log) both
+    resolve correctly.
+    """
+    return get_settings().decisions_path
+
+
+def manual_queue_close_no_send_action(
+    project_id: str, *, reason: str, force: bool,
+) -> dict[str, Any]:
+    """Close a queued manual-review row without sending customer assets.
+
+    Symmetric with `manual_queue_complete_action` / `manual_queue_break_glass_action`:
+    cockpit backup + atomic write + agent helpers. Best-effort proactive
+    notification runs AFTER state is persisted; its result is returned in
+    the response and audited but does NOT roll back the closure (reactive
+    "any update?" path is the safety net).
+    """
+    path = _projects_path()
+    backup = ""
+    closed_status = ""
+    closed_manual_status = ""
+    notification: dict[str, Any] = {}
+    with safe_io.flock(path):
+        backup = _backup_path(path, reason)
+        store = load_project_store()
+        # Freshness guard. Raises ValueError on a fresh row without --force
+        # AND without a documented bypass token in the reason string.
+        try:
+            enforce_close_freshness_guard(
+                store, project_id,
+                reason=reason,
+                force=force,
+                now=_now(),
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
+        # Transition manual_edit_required → closed_no_send. Raises ValueError
+        # if the row isn't currently in a closable state.
+        try:
+            updated = close_manual_project(store, project_id, reason=reason)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
+        _dump_store(path, updated)
+        closed = next(p for p in updated.projects if p.project_id == project_id)
+        closed_status = closed.status
+        closed_manual_status = closed.manual_review.status
+        # Notify the customer proactively. Best-effort; never raises.
+        notification = notify_customer_of_closure(
+            updated, project_id,
+            customers_path=_customers_path(),
+            decisions_log_path=_decisions_log_path(),
+        )
+    return {
+        "ok": True,
+        "project_id": project_id,
+        "status": closed_status,
+        "manual_status": closed_manual_status,
+        "backup": backup,
+        "notification": {
+            "send_ok": bool(notification.get("send_ok", False)),
+            "chat_id": notification.get("chat_id", ""),
+            "outbound_message_id": notification.get("outbound_message_id", ""),
+            "error": notification.get("error", ""),
+        },
+    }
+
+
+@router.post("/manual-queue/{project_id}/close-no-send")
+async def manual_queue_close_no_send(
+    project_id: str,
+    body: ManualQueueCloseNoSendBody,
+    request: Request,
+    _=Depends(require_fresh_otp),
+):
+    result = manual_queue_close_no_send_action(
+        project_id, reason=body.reason, force=body.force,
+    )
+    audit_log(
+        "flyer.manual_queue.close_no_send",
+        ip=client_ip(request),
+        ua=client_ua(request),
+        details=result | {"reason": body.reason, "force": body.force},
+    )
+    return result
+
+
+# ── P0-5: action preview ──────────────────────────────────────────
+
+
+_ALLOWED_PREVIEW_ACTIONS = frozenset({"close_no_send", "complete", "break_glass"})
+
+
+def manual_queue_action_preview(project_id: str, *, action: str) -> dict[str, Any]:
+    """Customer-visible preview for a mutating cockpit action.
+
+    Reuses the agent's deterministic copy sources so the cockpit preview
+    is the SAME text the customer will actually receive:
+      - close_no_send → `build_closure_customer_text` on a simulated
+        post-close project (so it picks up `CLOSED_NO_SEND_REASON_LINES`).
+      - complete → the next concept-preview caption pattern emitted by
+        `send_flyer_concept_previews`. Operator-completed assets land as
+        concept C1 with title `Designer Approved` / style summary
+        `Operator-approved manual review asset`.
+      - break_glass → no customer push. Explicitly flagged so the cockpit
+        can render "No customer message will be sent" instead of a copy
+        preview the operator might confuse for one.
+    """
+    if action not in _ALLOWED_PREVIEW_ACTIONS:
+        raise HTTPException(422, f"unknown action {action!r}; expected one of {sorted(_ALLOWED_PREVIEW_ACTIONS)}")
+    store = load_project_store()
+    project = next((p for p in store.projects if p.project_id == project_id), None)
+    if project is None:
+        raise HTTPException(404, f"project {project_id} not found")
+
+    chat_id = resolve_customer_chat_id_by_phone(_customers_path(), str(project.customer_phone)) or ""
+
+    if action == "close_no_send":
+        # Simulate the post-close state so the canonical copy table fires.
+        # We don't write — just project the state forward to read out the
+        # reason-aware closure copy.
+        simulated_manual = project.manual_review.model_copy(update={"status": "closed_no_send"})
+        simulated = project.model_copy(update={
+            "status": "closed_no_send",
+            "manual_review": simulated_manual,
+        })
+        customer_text = build_closure_customer_text(simulated)
+        return {
+            "action": "close_no_send",
+            "project_id": project_id,
+            "will_notify": bool(chat_id),
+            "customer_text": customer_text,
+            "would_notify_chat_id": chat_id,
+            "note": (
+                "Customer will receive this message on close. "
+                "If no chat_id is on file, the safety net 'any update?' "
+                "reactive reply still surfaces the closure."
+            ),
+            "reason_code": str(project.manual_review.reason_code or ""),
+        }
+
+    if action == "complete":
+        # `complete_manual_project` attaches the uploaded asset as concept
+        # C1 with these literals; `send_flyer_concept_previews` then emits
+        # this exact caption shape on the next preview send.
+        caption = (
+            "C1: Designer Approved\n"
+            "Operator-approved manual review asset\n"
+            "\n"
+            "Reply APPROVE or reply with changes."
+        )
+        return {
+            "action": "complete",
+            "project_id": project_id,
+            "will_notify": False,
+            "customer_text": caption,
+            "would_notify_chat_id": chat_id,
+            "note": (
+                "Complete transitions the project to awaiting_final_approval. "
+                "No immediate proactive push; the customer sees the caption "
+                "above the next time send_flyer_concept_previews fires for "
+                "this project."
+            ),
+            "reason_code": str(project.manual_review.reason_code or ""),
+        }
+
+    # break_glass
+    return {
+        "action": "break_glass",
+        "project_id": project_id,
+        "will_notify": False,
+        "customer_text": None,
+        "would_notify_chat_id": chat_id,
+        "note": (
+            "Break-glass records `manual_review.status=break_glass_sent` "
+            "for audit. No customer message is sent by the agent — operator "
+            "is asserting out-of-band delivery."
+        ),
+        "reason_code": str(project.manual_review.reason_code or ""),
+    }
+
+
+@router.get("/manual-queue/{project_id}/action-preview")
+async def manual_queue_action_preview_endpoint(
+    project_id: str,
+    action: str,
+    _=Depends(require_auth),
+):
+    return manual_queue_action_preview(project_id, action=action)
 
 
 # ─────────────────────────────────────────────────────────────────

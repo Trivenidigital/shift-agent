@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/Button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
 import { cn } from "@/lib/cn";
+import { ManualQueueActions } from "./flyer/ManualQueueActions";
 
 type Tab = "overview" | "customers" | "campaigns" | "projects" | "guests" | "queue";
 
@@ -95,6 +96,20 @@ interface OperatorUploadResult {
   filename: string;
   mime_type: string;
   size_bytes: number;
+}
+
+interface CloseNoSendResult {
+  ok: boolean;
+  project_id: string;
+  status: string;
+  manual_status: string;
+  backup: string;
+  notification: {
+    send_ok: boolean;
+    chat_id: string;
+    outbound_message_id: string;
+    error: string;
+  };
 }
 
 interface FlyerSummary {
@@ -503,6 +518,21 @@ export function FlyerAdmin() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["flyer-manual-queue"] });
       qc.invalidateQueries({ queryKey: ["flyer-summary"] });
+    },
+  });
+  // P0-6: close/no-send mutation. Returns notification result the cockpit
+  // surfaces inline so the operator sees whether the proactive customer
+  // push reached the bridge or fell back to the reactive safety net.
+  const closeNoSendQueueItem = useMutation({
+    mutationFn: ({ projectId, opReason, force }: { projectId: string; opReason: string; force: boolean }) =>
+      api.POST<CloseNoSendResult>(
+        `/flyer/manual-queue/${projectId}/close-no-send`,
+        { reason: opReason, force },
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["flyer-manual-queue"] });
+      qc.invalidateQueries({ queryKey: ["flyer-summary"] });
+      qc.invalidateQueries({ queryKey: ["flyer-projects"] });
     },
   });
 
@@ -1040,17 +1070,25 @@ export function FlyerAdmin() {
                     );
                   }}
                   onBreakGlass={() => {
-                    if (window.confirm(`Break-glass send for ${queueDetail.project_id}? This bypasses QA — audit row will mark break_glass_sent.`)) {
-                      breakGlassQueueItem.mutate(
-                        { projectId: queueDetail.project_id, opReason: drawerReason.trim() },
-                        { onSuccess: () => closeDrawer() },
-                      );
-                    }
+                    breakGlassQueueItem.mutate(
+                      { projectId: queueDetail.project_id, opReason: drawerReason.trim() },
+                      { onSuccess: () => closeDrawer() },
+                    );
+                  }}
+                  onCloseNoSend={({ force }: { force: boolean }) => {
+                    closeNoSendQueueItem.mutate(
+                      { projectId: queueDetail.project_id, opReason: drawerReason.trim(), force },
+                      // Don't auto-close: the operator should see the proactive
+                      // notification result inline before dismissing the drawer.
+                    );
                   }}
                   completePending={completeQueueItem.isPending}
                   breakGlassPending={breakGlassQueueItem.isPending}
+                  closeNoSendPending={closeNoSendQueueItem.isPending}
                   completeError={mutationErrorMessage(completeQueueItem.error)}
                   breakGlassError={mutationErrorMessage(breakGlassQueueItem.error)}
+                  closeNoSendError={mutationErrorMessage(closeNoSendQueueItem.error)}
+                  closeNoSendResult={closeNoSendQueueItem.data ?? null}
                 />
               )}
             </div>
@@ -1072,21 +1110,33 @@ interface ManualQueueDrawerBodyProps {
   onUpload: (file: File) => void;
   onComplete: () => void;
   onBreakGlass: () => void;
+  onCloseNoSend: (opts: { force: boolean }) => void;
   completePending: boolean;
   breakGlassPending: boolean;
+  closeNoSendPending: boolean;
   completeError: string;
   breakGlassError: string;
+  closeNoSendError: string;
+  closeNoSendResult: CloseNoSendResult | null;
 }
 
 function ManualQueueDrawerBody(props: ManualQueueDrawerBodyProps) {
   const {
     detail, playbook, reason, onReasonChange,
     uploadedAsset, uploadError, uploadBusy, onUpload,
-    onComplete, onBreakGlass, completePending, breakGlassPending,
-    completeError, breakGlassError,
+    onComplete, onBreakGlass, onCloseNoSend,
+    completePending, breakGlassPending, closeNoSendPending,
+    completeError, breakGlassError, closeNoSendError, closeNoSendResult,
   } = props;
   const reasonOk = reason.trim().length >= 5;
   const completeOk = reasonOk && !!uploadedAsset && !completePending;
+  const pendingActionKind = completePending
+    ? ("complete" as const)
+    : breakGlassPending
+      ? ("break_glass" as const)
+      : closeNoSendPending
+        ? ("close_no_send" as const)
+        : null;
   const referenceAssets = detail.assets.filter(
     (a) => a.kind === "reference_image" || a.kind === "logo",
   );
@@ -1255,29 +1305,55 @@ function ManualQueueDrawerBody(props: ManualQueueDrawerBodyProps) {
               )}
             </div>
           )}
-          {(completeError || breakGlassError) && (
-            <div className="rounded border border-rose-200 bg-rose-50 px-2 py-1 text-xs text-rose-700">
-              {completeError || breakGlassError}
+          <ManualQueueActions
+            projectId={detail.project_id}
+            reasonCode={detail.manual_review.reason_code}
+            reason={reason}
+            canComplete={completeOk}
+            onCompleteConfirmed={onComplete}
+            onBreakGlassConfirmed={onBreakGlass}
+            onCloseNoSendConfirmed={onCloseNoSend}
+            pendingAction={pendingActionKind}
+            errors={{
+              complete: completeError,
+              breakGlass: breakGlassError,
+              closeNoSend: closeNoSendError,
+            }}
+          />
+          {closeNoSendResult && (
+            <div
+              className={cn(
+                "rounded border px-2 py-2 text-xs",
+                closeNoSendResult.notification.send_ok
+                  ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+                  : "border-amber-200 bg-amber-50 text-amber-900",
+              )}
+            >
+              <div className="font-semibold">
+                {closeNoSendResult.notification.send_ok
+                  ? "Customer notified."
+                  : "Closed; customer notification did NOT send."}
+              </div>
+              <div className="mt-1">
+                Project {closeNoSendResult.project_id} · status {closeNoSendResult.status} · manual {closeNoSendResult.manual_status}
+              </div>
+              {closeNoSendResult.notification.send_ok && (
+                <div className="mt-1 font-mono">
+                  chat_id {closeNoSendResult.notification.chat_id} · outbound {closeNoSendResult.notification.outbound_message_id}
+                </div>
+              )}
+              {!closeNoSendResult.notification.send_ok && closeNoSendResult.notification.error && (
+                <div className="mt-1 font-mono">
+                  {closeNoSendResult.notification.error}
+                </div>
+              )}
+              {!closeNoSendResult.notification.send_ok && (
+                <div className="mt-1 text-xs">
+                  Closure was persisted. The reactive "any update?" reply will still surface the closure on the customer's next inbound — that path is the safety net.
+                </div>
+              )}
             </div>
           )}
-          <div className="flex gap-2">
-            <Button
-              size="sm"
-              disabled={!completeOk}
-              onClick={onComplete}
-            >
-              Complete with uploaded asset
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={!reasonOk || breakGlassPending}
-              onClick={onBreakGlass}
-              className="border-rose-300 text-rose-700 hover:bg-rose-50"
-            >
-              Break-glass
-            </Button>
-          </div>
         </div>
       </div>
 
