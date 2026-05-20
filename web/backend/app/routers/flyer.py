@@ -1000,3 +1000,283 @@ async def campaign_send_csv(
         },
     )
     return result | {"invalid": parsed["invalid"], "duplicate_count": parsed["duplicate_count"]}
+
+
+# ─── P0-7: provider + runtime health ────────────────────────────────────
+#
+# Read-only health surface for the Flyer cockpit. Never returns secret values
+# or prefixes; only key_present + key_source so the operator knows WHICH env
+# file to inspect without revealing anything sensitive. Mirrors the layered
+# env reader convention from src/agents/flyer/workflow.py::_read_env_value
+# (process env -> /root/.hermes/.env -> /opt/shift-agent/.env) but exposes the
+# matching source. Placeholder detection matches workflow.source_edit_provider_ready
+# (any value containing "PLACEHOLDER" counts as missing).
+
+
+def _is_placeholder(value: str) -> bool:
+    return "PLACEHOLDER" in value.upper()
+
+
+def _read_env_layered(name: str) -> tuple[str, str | None]:
+    """Return (value, source) where source is process_env|hermes_env|agent_env or None.
+
+    Honors HERMES_ENV_PATH / SHIFT_AGENT_ENV_PATH overrides so tests can isolate.
+    Process env wins over both files (matches workflow._read_env_value order).
+    """
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value, "process_env"
+    candidates = (
+        ("hermes_env", Path(os.environ.get("HERMES_ENV_PATH", "/root/.hermes/.env"))),
+        ("agent_env", Path(os.environ.get("SHIFT_AGENT_ENV_PATH", "/opt/shift-agent/.env"))),
+    )
+    for source, env_path in candidates:
+        if not env_path.exists():
+            continue
+        try:
+            for line in env_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, raw = line.split("=", 1)
+                if key.strip() == name:
+                    raw = raw.strip().strip('"').strip("'")
+                    if raw:
+                        return raw, source
+        except OSError:
+            continue
+    return "", None
+
+
+def _cockpit_deploy_tag() -> tuple[str | None, str | None]:
+    """Resolve current deploy_tag + commit_hash from on-disk markers.
+
+    /opt/shift-agent/.commit-hash is written by tools/build-deploy-tarball.sh.
+    The newest /opt/shift-agent/deploys/deploy-*.tgz is the active deploy.
+    Both env-overrideable for test isolation. Either or both may be None.
+    """
+    commit_hash: str | None = None
+    deploy_tag: str | None = None
+    hash_path = Path(os.environ.get("COCKPIT_DEPLOY_HASH_PATH", "/opt/shift-agent/.commit-hash"))
+    deploys_dir = Path(os.environ.get("COCKPIT_DEPLOYS_DIR", "/opt/shift-agent/deploys"))
+    if hash_path.exists():
+        try:
+            commit_hash = (hash_path.read_text(encoding="utf-8").strip() or None)
+            if commit_hash:
+                commit_hash = commit_hash[:40]
+        except OSError:
+            commit_hash = None
+    if deploys_dir.exists():
+        try:
+            # Deploy tag names embed a UTC timestamp (deploy-YYYYMMDD-HHMMSS-<sha>),
+            # so name-desc is the authoritative ordering. mtime is a secondary
+            # tiebreaker for tarballs that share an embedded timestamp.
+            tarballs = sorted(
+                (p for p in deploys_dir.iterdir() if p.name.startswith("deploy-") and p.suffix == ".tgz"),
+                key=lambda p: (p.name, p.stat().st_mtime),
+                reverse=True,
+            )
+            if tarballs:
+                deploy_tag = tarballs[0].name[: -len(".tgz")]
+        except OSError:
+            deploy_tag = None
+    return deploy_tag, commit_hash
+
+
+def _source_edit_manual_queue_impact() -> dict[str, Any]:
+    """Count active manual-queue rows with reason_code=source_edit_provider_unavailable.
+
+    Active = manual_status in {queued, in_progress}. Returns
+    {queued_count: int, oldest_age_hours: int | None}. Best-effort: any
+    exception loading the project store returns zero impact (the health
+    endpoint must never raise).
+    """
+    try:
+        rows = list_manual_queue(load_project_store())
+    except Exception:
+        return {"queued_count": 0, "oldest_age_hours": None}
+    matched = [
+        r for r in rows
+        if r.get("manual_reason_code") == "source_edit_provider_unavailable"
+        and r.get("manual_status") in {"queued", "in_progress"}
+    ]
+    if not matched:
+        return {"queued_count": 0, "oldest_age_hours": None}
+    oldest = max(int(r.get("age_hours", 0) or 0) for r in matched)
+    return {"queued_count": len(matched), "oldest_age_hours": oldest}
+
+
+def _flyer_image_model_config() -> dict[str, dict[str, str]]:
+    """Read deployed image-gen model config from config.yaml (not FlyerConfig defaults).
+
+    Falls back to FlyerConfig defaults if config.yaml cannot be loaded -- keeps
+    the health endpoint best-effort and non-raising.
+    """
+    try:
+        from ..state import load_config
+        flyer_cfg = load_config().flyer
+        draft = flyer_cfg.draft_image_model
+        final = flyer_cfg.final_image_model
+        edit = flyer_cfg.edit_image_model
+    except Exception:
+        defaults = FlyerConfig()
+        draft = defaults.draft_image_model
+        final = defaults.final_image_model
+        edit = defaults.edit_image_model
+    return {
+        "openrouter_generation_vision": {"draft_image_model": draft, "final_image_model": final},
+        "openai_source_edit": {"edit_image_model": edit},
+    }
+
+
+async def _platform_runtime_components() -> list[dict[str, Any]]:
+    """Probe gateway / bridge / paired / cockpit deploy. Reuses health.py helpers."""
+    from .health import _bridge_health, _gateway_active, _wa_paired
+
+    components: list[dict[str, Any]] = []
+    now_iso = _now().isoformat()
+
+    gw = _gateway_active()
+    components.append({
+        "name": "gateway",
+        "severity": "green" if gw else "red",
+        "detail": "active" if gw else "inactive",
+        "checked_at": now_iso,
+    })
+
+    bridge_ok, bridge_detail = await _bridge_health()
+    components.append({
+        "name": "whatsapp_bridge",
+        "severity": "green" if bridge_ok else "red",
+        "detail": bridge_detail,
+        "checked_at": now_iso,
+    })
+
+    paired, me_id = _wa_paired()
+    components.append({
+        "name": "whatsapp_paired",
+        "severity": "green" if paired else "red",
+        "detail": me_id or "not paired",
+        "checked_at": now_iso,
+    })
+
+    deploy_tag, commit_hash = _cockpit_deploy_tag()
+    if deploy_tag:
+        cockpit_detail = deploy_tag
+        cockpit_severity = "green"
+    elif commit_hash:
+        cockpit_detail = f"commit {commit_hash}"
+        cockpit_severity = "green"
+    else:
+        cockpit_detail = "deploy marker missing"
+        cockpit_severity = "yellow"
+    components.append({
+        "name": "cockpit_service",
+        "severity": cockpit_severity,
+        "detail": cockpit_detail,
+        "checked_at": now_iso,
+    })
+    return components
+
+
+def _flyer_provider_components() -> list[dict[str, Any]]:
+    """Per-provider posture for OpenRouter (generation/vision) + OpenAI (source-edit).
+
+    NEVER returns secret values or prefixes -- only key_present + key_source.
+    Severity policy:
+      - OpenRouter missing/placeholder => red (hard block on normal generation).
+      - OpenAI source-edit missing/placeholder => yellow (degraded; routes to
+        manual review). Stays yellow even when queued_count > 0 -- the detail
+        string surfaces the manual-queue impact prominently instead.
+    """
+    now_iso = _now().isoformat()
+    models = _flyer_image_model_config()
+
+    # OpenRouter -- generation + vision (normal path).
+    or_value, or_source = _read_env_layered("OPENROUTER_API_KEY")
+    or_placeholder = bool(or_value) and _is_placeholder(or_value)
+    or_present = bool(or_value) and not or_placeholder
+    if or_present:
+        or_severity = "green"
+        or_detail = f"OPENROUTER_API_KEY present ({or_source})"
+    elif or_placeholder:
+        or_severity = "red"
+        or_detail = "OPENROUTER_API_KEY is a placeholder - normal Flyer Studio generation is blocked"
+    else:
+        or_severity = "red"
+        or_detail = "OPENROUTER_API_KEY missing - normal Flyer Studio generation is blocked"
+
+    # OpenAI source-edit. Yellow when missing; queue impact surfaces in detail.
+    oa_value, oa_source = _read_env_layered("OPENAI_API_KEY")
+    oa_placeholder = bool(oa_value) and _is_placeholder(oa_value)
+    oa_present = bool(oa_value) and not oa_placeholder
+    queue_impact = _source_edit_manual_queue_impact()
+    if oa_present:
+        oa_severity = "green"
+        oa_detail = f"OPENAI_API_KEY present ({oa_source})"
+    else:
+        oa_severity = "yellow"
+        queued = queue_impact["queued_count"]
+        oldest = queue_impact["oldest_age_hours"]
+        if queued > 0:
+            oa_detail = (
+                "Exact flyer edits are falling back to manual review because source-edit "
+                f"provider is unavailable ({queued} queued; oldest "
+                f"{oldest if oldest is not None else 0}h)"
+            )
+        elif oa_placeholder:
+            oa_detail = "OPENAI_API_KEY is a placeholder - exact edits will route to manual review"
+        else:
+            oa_detail = "OPENAI_API_KEY missing - exact edits will route to manual review"
+
+    operator_note_oa = (
+        "Source-edit uses the OpenAI Images Edits API; generation/vision uses OpenRouter. "
+        "See backlog tasks/flyer-source-edit-provider-posture-2026-05-20.md."
+    )
+
+    return [
+        {
+            "name": "openrouter_generation_vision",
+            "purpose": "Image generation + vision extraction (normal Flyer Studio path)",
+            "severity": or_severity,
+            "detail": or_detail,
+            "key_present": or_present,
+            "key_source": or_source if or_present else None,
+            "model_config": models["openrouter_generation_vision"],
+            "checked_at": now_iso,
+        },
+        {
+            "name": "openai_source_edit",
+            "purpose": "Exact source-preserving flyer edits (OpenAI Images Edits API)",
+            "severity": oa_severity,
+            "detail": oa_detail,
+            "key_present": oa_present,
+            "key_source": oa_source if oa_present else None,
+            "model_config": models["openai_source_edit"],
+            "manual_queue_impact": queue_impact,
+            "operator_note": operator_note_oa,
+            "checked_at": now_iso,
+        },
+    ]
+
+
+@router.get("/health")
+async def flyer_health(_=Depends(require_auth)):
+    """Read-only flyer provider + platform-runtime health.
+
+    Surfaces gateway / bridge / paired / cockpit deploy plus OpenRouter
+    (generation + vision) and OpenAI source-edit posture. Never returns
+    secret values or prefixes - only key_present + key_source.
+    OpenRouter missing = red (blocks generation); source-edit missing = yellow
+    (degraded; routes to manual review).
+    """
+    components = await _platform_runtime_components()
+    providers = _flyer_provider_components()
+    deploy_tag, commit_hash = _cockpit_deploy_tag()
+    return {
+        "checked_at": _now().isoformat(),
+        "deploy_tag": deploy_tag,
+        "commit_hash": commit_hash,
+        "components": components,
+        "providers": providers,
+    }
