@@ -63,6 +63,7 @@ Hermes-first summary: reuse Hermes/Shift WhatsApp ingress, Flyer `projects.json`
 - [ ] v0.1 report-only wiring: `tools/flyer-self-evaluation.py` reads Flyer project state + decisions.log and emits incidents for stale manual source edits, customer-copy internal leaks, missing source contracts, missing source-aware QA, repeated check-ins, and stuck generation states.
 - [ ] Operator brief integration: optional `--flyer-evaluation-json` section surfaces self-evaluation status, top incidents, eval candidates, and Needs Srini items.
 - [ ] Future slice: optional fixture-generation proposal mode after report output stabilizes; must remain PR/review gated and never mutate production behavior directly.
+- [ ] Next anti-silent-failure slice after v0.1 report hardening: validate PR #147 or merged successor with source-edit provider routing smoke; improve Hermes vision/OCR source-contract extraction; audit legacy projects where source contracts did not project into locked facts; enforce source-aware QA before preview/delivery across every source-edit path; wire Hermes cron/operator brief alerts once report semantics are stable.
 
 ## Active - Operator ops brief via Hermes memory (2026-05-20)
 
