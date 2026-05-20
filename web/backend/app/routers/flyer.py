@@ -47,7 +47,7 @@ try:
         enforce_close_freshness_guard,
         list_manual_queue,
         notify_customer_of_closure,
-        resolve_customer_chat_id_by_phone,
+        resolve_proactive_chat_id_for_project,
         triage_summary,
     )
 except ImportError:
@@ -59,7 +59,7 @@ except ImportError:
         enforce_close_freshness_guard,
         list_manual_queue,
         notify_customer_of_closure,
-        resolve_customer_chat_id_by_phone,
+        resolve_proactive_chat_id_for_project,
         triage_summary,
     )
 
@@ -766,6 +766,12 @@ def manual_queue_close_no_send_action(
     closed_status = ""
     closed_manual_status = ""
     notification: dict[str, Any] = {}
+    # Hold the flock ONLY for the state mutation. The proactive bridge call
+    # below (notify_customer_of_closure → WhatsApp send + audit append) can
+    # take seconds; holding flock through it would block unrelated project
+    # writes. Closure state is already persisted before the bridge call, so
+    # a failure or slow send doesn't roll anything back — the reactive
+    # "any update?" safety net carries when the proactive push misses.
     with safe_io.flock(path):
         backup = _backup_path(path, reason)
         store = load_project_store()
@@ -790,12 +796,13 @@ def manual_queue_close_no_send_action(
         closed = next(p for p in updated.projects if p.project_id == project_id)
         closed_status = closed.status
         closed_manual_status = closed.manual_review.status
-        # Notify the customer proactively. Best-effort; never raises.
-        notification = notify_customer_of_closure(
-            updated, project_id,
-            customers_path=_customers_path(),
-            decisions_log_path=_decisions_log_path(),
-        )
+    # Notify the customer proactively. Best-effort; never raises.
+    # OUTSIDE the flock — bridge calls must not block other state writers.
+    notification = notify_customer_of_closure(
+        updated, project_id,
+        customers_path=_customers_path(),
+        decisions_log_path=_decisions_log_path(),
+    )
     return {
         "ok": True,
         "project_id": project_id,
@@ -858,7 +865,15 @@ def manual_queue_action_preview(project_id: str, *, action: str) -> dict[str, An
     if project is None:
         raise HTTPException(404, f"project {project_id} not found")
 
-    chat_id = resolve_customer_chat_id_by_phone(_customers_path(), str(project.customer_phone)) or ""
+    # Use the same audit-derived resolver `notify_customer_of_closure` will
+    # use at send time so the cockpit preview shows the chat_id the
+    # customer will actually receive on (P0-5 single-source-of-truth +
+    # PR #133 review fix for the LID/authorized-requester misroute).
+    chat_id, chat_id_source = resolve_proactive_chat_id_for_project(
+        project,
+        customers_path=_customers_path(),
+        decisions_log_path=_decisions_log_path(),
+    )
 
     if action == "close_no_send":
         # Simulate the post-close state so the canonical copy table fires.
@@ -875,7 +890,9 @@ def manual_queue_action_preview(project_id: str, *, action: str) -> dict[str, An
             "project_id": project_id,
             "will_notify": bool(chat_id),
             "customer_text": customer_text,
+            "customer_messages": [customer_text],
             "would_notify_chat_id": chat_id,
+            "chat_id_source": chat_id_source,
             "note": (
                 "Customer will receive this message on close. "
                 "If no chat_id is on file, the safety net 'any update?' "
@@ -885,26 +902,41 @@ def manual_queue_action_preview(project_id: str, *, action: str) -> dict[str, An
         }
 
     if action == "complete":
+        # `send_flyer_concept_previews` emits TWO customer-visible messages
+        # on the next preview send: (1) media caption attached to the
+        # concept image, (2) a follow-up text. Both are previewed so the
+        # operator sees the full customer-visible sequence (P0-5 + PR #133
+        # review HIGH-3 fix — caption alone was an incomplete preview).
         # `complete_manual_project` attaches the uploaded asset as concept
-        # C1 with these literals; `send_flyer_concept_previews` then emits
-        # this exact caption shape on the next preview send.
+        # C1 with these exact literals; the caption helper in
+        # `cf-router/actions.py::send_flyer_concept_previews` concatenates
+        # concept_id, title, style_summary, then a separate bridge_post
+        # ships the follow-up.
         caption = (
             "C1: Designer Approved\n"
             "Operator-approved manual review asset\n"
             "\n"
             "Reply APPROVE or reply with changes."
         )
+        followup = "Reply APPROVE to receive final files, or reply with changes."
+        messages = [caption, followup]
         return {
             "action": "complete",
             "project_id": project_id,
             "will_notify": False,
-            "customer_text": caption,
+            # `customer_text` retained for back-compat with any earlier
+            # consumer; joined with an explicit separator so a client
+            # reading only the legacy field still sees both messages.
+            "customer_text": "\n\n--- followed by ---\n\n".join(messages),
+            "customer_messages": messages,
             "would_notify_chat_id": chat_id,
+            "chat_id_source": chat_id_source,
             "note": (
                 "Complete transitions the project to awaiting_final_approval. "
-                "No immediate proactive push; the customer sees the caption "
-                "above the next time send_flyer_concept_previews fires for "
-                "this project."
+                "No immediate proactive push; the customer sees these two "
+                "messages on the next send_flyer_concept_previews fire — "
+                "the caption ships on the concept image, the follow-up "
+                "ships as a separate text."
             ),
             "reason_code": str(project.manual_review.reason_code or ""),
         }
@@ -915,7 +947,9 @@ def manual_queue_action_preview(project_id: str, *, action: str) -> dict[str, An
         "project_id": project_id,
         "will_notify": False,
         "customer_text": None,
+        "customer_messages": [],
         "would_notify_chat_id": chat_id,
+        "chat_id_source": chat_id_source,
         "note": (
             "Break-glass records `manual_review.status=break_glass_sent` "
             "for audit. No customer message is sent by the agent — operator "

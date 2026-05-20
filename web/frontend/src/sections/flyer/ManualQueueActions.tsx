@@ -26,8 +26,15 @@ export interface ActionPreview {
   action: ManualQueueActionKind;
   project_id: string;
   will_notify: boolean;
+  // `customer_text` is the legacy single-string view (kept for back-compat).
+  // `customer_messages` is the multi-message variant — Complete previews
+  // surface TWO messages (caption + follow-up), close surfaces one, and
+  // break_glass surfaces zero. Frontends should prefer `customer_messages`
+  // when present.
   customer_text: string | null;
+  customer_messages: string[];
   would_notify_chat_id: string;
+  chat_id_source: "audit_log" | "primary_chat_id" | "none";
   note?: string;
   reason_code: string;
 }
@@ -193,12 +200,18 @@ function ActionPreviewModal(props: ActionPreviewModalProps) {
     actionPending, actionError, onCancel, onConfirm,
   } = props;
 
+  // PR #133 review HIGH-2: confirm MUST be disabled whenever the operator
+  // hasn't seen the customer-visible outcome — including when the preview
+  // fetch errored. Otherwise the operator can commit blind to "what the
+  // customer will receive", which defeats the P0-5 goal. If the operator
+  // wants to bypass preview they have to first dismiss this modal and
+  // re-trigger the action so they consciously re-attempt the preview.
   const confirmDisabled =
     actionPending
     || !reasonOk
     || (action === "complete" && !canComplete)
     || previewBusy
-    || (preview === null && !previewError);
+    || preview === null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
@@ -260,28 +273,51 @@ function ActionPreviewModal(props: ActionPreviewModalProps) {
 }
 
 function PreviewBody({ preview }: { preview: ActionPreview }) {
-  if (preview.will_notify && preview.customer_text) {
+  const messages = preview.customer_messages.length > 0
+    ? preview.customer_messages
+    : preview.customer_text ? [preview.customer_text] : [];
+
+  if (preview.will_notify && messages.length > 0) {
     return (
       <div className="space-y-2">
-        <div className="rounded border border-emerald-200 bg-emerald-50 px-2 py-2 text-xs">
-          <div className="font-semibold text-emerald-800">Customer will see this WhatsApp message:</div>
-          <pre className="mt-1 whitespace-pre-wrap font-sans text-emerald-900">{preview.customer_text}</pre>
+        <div className="text-xs font-semibold text-emerald-800">
+          Customer will see {messages.length === 1 ? "this WhatsApp message:" : `these ${messages.length} WhatsApp messages, in order:`}
         </div>
+        {messages.map((msg, i) => (
+          <div key={i} className="rounded border border-emerald-200 bg-emerald-50 px-2 py-2 text-xs">
+            {messages.length > 1 && (
+              <div className="text-[10px] uppercase tracking-wide text-emerald-700">Message {i + 1} of {messages.length}</div>
+            )}
+            <pre className="mt-1 whitespace-pre-wrap font-sans text-emerald-900">{msg}</pre>
+          </div>
+        ))}
         <div className="text-xs text-zinc-600">
           Notify chat_id: <span className="font-mono">{preview.would_notify_chat_id || "(none)"}</span>
+          {preview.chat_id_source && (
+            <span className="ml-2 rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-zinc-700">
+              via {preview.chat_id_source}
+            </span>
+          )}
         </div>
         {preview.note && <div className="text-xs text-zinc-500">{preview.note}</div>}
       </div>
     );
   }
-  if (!preview.will_notify && preview.customer_text) {
-    // Complete-style preview: text exists but isn't a proactive push.
+  if (!preview.will_notify && messages.length > 0) {
+    // Complete-style: text exists but isn't a proactive push.
     return (
       <div className="space-y-2">
-        <div className="rounded border border-zinc-200 bg-zinc-50 px-2 py-2 text-xs">
-          <div className="font-semibold text-zinc-800">No proactive push. Customer sees this on the next preview send:</div>
-          <pre className="mt-1 whitespace-pre-wrap font-sans text-zinc-700">{preview.customer_text}</pre>
+        <div className="text-xs font-semibold text-zinc-800">
+          No proactive push. Customer sees {messages.length === 1 ? "this message" : `these ${messages.length} messages, in order,`} on the next preview send:
         </div>
+        {messages.map((msg, i) => (
+          <div key={i} className="rounded border border-zinc-200 bg-zinc-50 px-2 py-2 text-xs">
+            {messages.length > 1 && (
+              <div className="text-[10px] uppercase tracking-wide text-zinc-600">Message {i + 1} of {messages.length}</div>
+            )}
+            <pre className="mt-1 whitespace-pre-wrap font-sans text-zinc-700">{msg}</pre>
+          </div>
+        ))}
         {preview.note && <div className="text-xs text-zinc-500">{preview.note}</div>}
       </div>
     );
