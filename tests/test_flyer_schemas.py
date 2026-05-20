@@ -375,3 +375,117 @@ def test_workflow_status_literal_contains_requested_states():
         "completed",
         "closed_no_send",
     }
+
+
+# ─── F0061 source-contract additions ───────────────────────────────
+
+
+def test_flyer_source_contract_rejects_unknown_fields():
+    from schemas import FlyerSourceContract  # noqa: E402
+
+    FlyerSourceContract(
+        source_business_names=["Triveni Express"],
+        required_headings=["Monday Thali Specials"],
+        sections=[],
+        requested_replacements={"Triveni Express": "Lakshmi's Kitchen"},
+        preserve_layout=True,
+        preserve_unmentioned_text=True,
+        confidence=0.8,
+    )
+    with pytest.raises(ValidationError):
+        FlyerSourceContract(unknown_field=1)  # type: ignore[call-arg]
+
+
+def test_flyer_source_contract_section_accepts_items_without_prices():
+    from schemas import FlyerSourceContract, FlyerSourceContractSection  # noqa: E402
+
+    section = FlyerSourceContractSection(heading="Veg Thali Specials", items=["Rice", "Dal", "Pakora"])
+    contract = FlyerSourceContract(sections=[section])
+    assert contract.sections[0].items == ["Rice", "Dal", "Pakora"]
+
+
+def test_flyer_source_contract_requested_replacements_round_trip():
+    from schemas import FlyerSourceContract  # noqa: E402
+
+    contract = FlyerSourceContract(requested_replacements={"Rice": "Jeera Rice"})
+    payload = contract.model_dump_json()
+    restored = FlyerSourceContract.model_validate_json(payload)
+    assert restored.requested_replacements == {"Rice": "Jeera Rice"}
+
+
+def test_flyer_source_contract_extracted_round_trips_through_log_entry():
+    from schemas import FlyerSourceContractExtracted  # noqa: E402
+
+    now = datetime.now(timezone.utc)
+    entry = FlyerSourceContractExtracted(
+        ts=now,
+        project_id="F0061",
+        asset_id="A0001",
+        asset_sha256="a" * 64,
+        role="source_edit_template",
+        status="ok",
+        headings_count=4,
+        sections_count=3,
+        replacements_count=3,
+        forbidden_substrings_count=2,
+        confidence=0.85,
+        provider="openrouter_vision",
+    )
+    parsed = TypeAdapter(LogEntry).validate_python(entry.model_dump())
+    assert parsed.type == "flyer_source_contract_extracted"
+    assert parsed.headings_count == 4
+
+
+def test_flyer_source_vs_new_chosen_round_trips_through_log_entry():
+    from schemas import FlyerSourceVsNewChosen  # noqa: E402
+
+    now = datetime.now(timezone.utc)
+    entry = FlyerSourceVsNewChosen(
+        ts=now,
+        sender_phone="+17329837841",
+        customer_id="CUST0001",
+        original_intent="exact_source_edit",
+        choice="clarification_sent",
+        pending_age_sec=12,
+    )
+    parsed = TypeAdapter(LogEntry).validate_python(entry.model_dump())
+    assert parsed.type == "flyer_source_vs_new_chosen"
+    assert parsed.original_intent == "exact_source_edit"
+
+
+def test_flyer_source_vs_new_chosen_rejects_invalid_choice():
+    from schemas import FlyerSourceVsNewChosen  # noqa: E402
+
+    now = datetime.now(timezone.utc)
+    with pytest.raises(ValidationError):
+        FlyerSourceVsNewChosen(
+            ts=now,
+            original_intent="exact_source_edit",
+            choice="nonsense",  # type: ignore[arg-type]
+        )
+
+
+def test_flyer_reference_extraction_supports_optional_source_contract():
+    from schemas import FlyerReferenceExtraction, FlyerSourceContract  # noqa: E402
+
+    ext = FlyerReferenceExtraction(
+        asset_id="A0001",
+        role="source_edit_template",
+        status="ok",
+        source_contract=FlyerSourceContract(preserve_layout=True),
+    )
+    payload = ext.model_dump_json()
+    restored = FlyerReferenceExtraction.model_validate_json(payload)
+    assert restored.source_contract is not None
+    assert restored.source_contract.preserve_layout is True
+
+
+def test_flyer_reference_extraction_source_contract_defaults_to_none():
+    from schemas import FlyerReferenceExtraction  # noqa: E402
+
+    ext = FlyerReferenceExtraction(
+        asset_id="A0001",
+        role="menu_reference",
+        status="not_run",
+    )
+    assert ext.source_contract is None

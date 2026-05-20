@@ -1465,6 +1465,33 @@ class FlyerLockedFact(BaseModel):
     source_sha256: str = Field(default="", max_length=64)
 
 
+class FlyerSourceContractSection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    heading: str = Field(default="", max_length=160)
+    items: list[str] = Field(default_factory=list, max_length=50)
+
+
+class FlyerSourceContract(BaseModel):
+    """Strict-shape source-contract for the F0061 exact-edit class.
+
+    Vision/LLM raw output is parsed permissively then projected into this
+    schema (extra="forbid") so downstream QA + locked-fact generation can
+    rely on bounded fields.
+    """
+    model_config = ConfigDict(extra="forbid")
+    source_business_names: list[str] = Field(default_factory=list, max_length=10)
+    target_business_name: str = Field(default="", max_length=160)
+    required_headings: list[str] = Field(default_factory=list, max_length=20)
+    required_text: list[str] = Field(default_factory=list, max_length=100)
+    sections: list[FlyerSourceContractSection] = Field(default_factory=list, max_length=20)
+    requested_replacements: dict[str, str] = Field(default_factory=dict, max_length=50)
+    forbidden_substrings: list[str] = Field(default_factory=list, max_length=50)
+    preserve_layout: bool = False
+    preserve_unmentioned_text: bool = False
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    notes: str = Field(default="", max_length=1000)
+
+
 class FlyerReferenceExtraction(BaseModel):
     model_config = ConfigDict(extra="forbid")
     asset_id: str = Field(min_length=1, max_length=40)
@@ -1474,6 +1501,7 @@ class FlyerReferenceExtraction(BaseModel):
     extracted_facts: list[FlyerLockedFact] = Field(default_factory=list, max_length=100)
     detail: str = Field(default="", max_length=500)
     extracted_at: Optional[datetime] = None
+    source_contract: Optional[FlyerSourceContract] = None
 
 
 class FlyerVisualQAReport(BaseModel):
@@ -3222,6 +3250,46 @@ class FlyerClosureCustomerNotified(_BaseEntry):
     error: str = Field(default="", max_length=500)
 
 
+class FlyerSourceContractExtracted(_BaseEntry):
+    """Audit row emitted once per source-contract extraction attempt.
+
+    Records counts (not the raw contract content) so the audit log stays
+    PII-light. `status="provider_unavailable"` rows are still emitted so
+    operators can see when the source-edit path falls closed silently.
+    """
+    type: Literal["flyer_source_contract_extracted"] = "flyer_source_contract_extracted"
+    project_id: str = Field(min_length=1, max_length=40)
+    asset_id: str = Field(default="", max_length=40)
+    asset_sha256: str = Field(default="", max_length=64)
+    role: FlyerReferenceRole
+    status: FlyerReferenceExtractionStatus
+    headings_count: int = 0
+    sections_count: int = 0
+    replacements_count: int = 0
+    forbidden_substrings_count: int = 0
+    confidence: float = 0.0
+    provider: str = Field(default="", max_length=120)
+
+
+class FlyerSourceVsNewChosen(_BaseEntry):
+    """Audit row when an exact-edit customer picks SOURCE vs NEW.
+
+    `choice` values:
+      - clarification_sent: prompt first issued.
+      - clarification_resent: status check-in re-issued the prompt idempotently.
+      - source: customer chose SOURCE; row consumed; manual-edit project queued.
+      - new: customer chose NEW; row consumed; new project created.
+      - expired: TTL pruning dropped the row unconsumed.
+    """
+    type: Literal["flyer_source_vs_new_chosen"] = "flyer_source_vs_new_chosen"
+    sender_phone: str = Field(default="", max_length=32)
+    customer_id: str = Field(default="", max_length=40)
+    original_intent: Literal["exact_source_edit", "generic_reference", "unknown"]
+    choice: Literal["source", "new", "clarification_sent", "clarification_resent", "expired"]
+    pending_age_sec: int = 0
+    customer_followup_instruction: str = Field(default="", max_length=500)
+
+
 class CateringLeadCreated(_BaseEntry):
     type: Literal["catering_lead_created"]
     lead_id: str = Field(min_length=1)
@@ -4164,6 +4232,9 @@ LogEntry = Annotated[
         Annotated[FlyerUsageRecorded, Tag("flyer_usage_recorded")],
         Annotated[FlyerQuotaBlocked, Tag("flyer_quota_blocked")],
         Annotated[FlyerClosureCustomerNotified, Tag("flyer_closure_customer_notified")],
+        # NEW — source-contract observability (2026-05-20 flyer source-contract-first)
+        Annotated[FlyerSourceContractExtracted, Tag("flyer_source_contract_extracted")],
+        Annotated[FlyerSourceVsNewChosen, Tag("flyer_source_vs_new_chosen")],
         # PR-D1 forward-compat shim — UNKNOWN tags route here
         Annotated[_UnknownLogEntry, Tag("_unknown_")],
     ],
@@ -4223,6 +4294,8 @@ __all__ = [
     "FLYER_AUTHORIZED_REQUESTER_LIMIT",
     "FlyerCustomerProfile", "FlyerOnboardingSession", "FlyerIntakeSession", "FlyerCustomerStore", "FlyerGuestOrderStore",
     "FlyerRequestFields", "FlyerLockedFact", "FlyerReferenceExtraction",
+    "FlyerSourceContractSection", "FlyerSourceContract",
+    "FlyerSourceContractExtracted", "FlyerSourceVsNewChosen",
     "FlyerVisualQAReport", "FlyerManualReview", "FlyerAsset", "FlyerConcept", "FlyerRevision",
     "FlyerBrandKit", "FlyerProject", "FlyerProjectStore",
     # v0.3 status-machine + helpers
