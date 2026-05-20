@@ -22,7 +22,7 @@ def _project(
     *,
     status: str = "manual_edit_required",
     raw_request: str = "Please edit this uploaded flyer. Do not change anything else.",
-    updated_at: str = "2026-05-20T11:00:00Z",
+    updated_at: str = "2026-05-20T10:00:00Z",
     manual_review: dict | None = None,
     assets: list[dict] | None = None,
     reference_extractions: list[dict] | None = None,
@@ -62,6 +62,37 @@ def _reference_asset(asset_id: str = "A0001") -> dict:
         "sha256": "a" * 64,
         "received_at": "2026-05-20T10:00:00Z",
     }
+
+
+def _source_contract_extraction() -> dict:
+    return {
+        "asset_id": "A0001",
+        "role": "source_edit_template",
+        "provider": "test",
+        "status": "succeeded",
+        "extracted_facts": [],
+        "source_contract": {
+            "required_headings": ["Monday Thali Specials"],
+            "required_text": ["Sides: salad, raita, papad"],
+            "sections": [{"heading": "Veg Thali Specials", "items": ["Rice", "Dal"]}],
+            "requested_replacements": {"Triveni Express": "Lakshmi's Kitchen"},
+            "forbidden_substrings": ["Triveni Express"],
+            "preserve_layout": True,
+            "preserve_unmentioned_text": True,
+            "confidence": 0.9,
+        },
+    }
+
+
+def _source_locked_facts() -> list[dict]:
+    return [
+        {"fact_id": "source_heading:0", "label": "Source heading", "value": "Monday Thali Specials", "source": "reference_vision", "required": True},
+        {"fact_id": "source_required_text:0", "label": "Source required text", "value": "Sides: salad, raita, papad", "source": "reference_vision", "required": True},
+        {"fact_id": "source_section:0:heading", "label": "Source section", "value": "Veg Thali Specials", "source": "reference_vision", "required": True},
+        {"fact_id": "source_section:0:item:0", "label": "Source item", "value": "Rice", "source": "reference_vision", "required": True},
+        {"fact_id": "source_section:0:item:1", "label": "Source item", "value": "Dal", "source": "reference_vision", "required": True},
+        {"fact_id": "replacement:0:new", "label": "Required replacement text", "value": "Lakshmi's Kitchen", "source": "customer_text", "required": True},
+    ]
 
 
 def test_manual_source_edit_stale_becomes_incident():
@@ -192,7 +223,7 @@ def test_missing_source_contract_for_exact_edit_is_reported():
 def test_source_contract_without_qa_for_generated_asset_is_reported():
     module = load_module()
     generated = _reference_asset("A0002")
-    generated.update({"kind": "concept_preview", "source": "generated"})
+    generated.update({"kind": "concept_preview", "source": "generated", "sha256": "e" * 64})
     project = _project(
         "F9003",
         status="awaiting_final_approval",
@@ -222,8 +253,9 @@ def test_source_contract_without_qa_for_generated_asset_is_reported():
         now=module.parse_utc("2026-05-20T11:00:00Z"),
     )
 
-    assert [item["type"] for item in report["incidents"]] == ["source_contract_qa_missing"]
-    assert "visual QA" in report["incidents"][0]["suggested_action"]
+    assert "source_contract_qa_missing" in [item["type"] for item in report["incidents"]]
+    qa_missing = next(item for item in report["incidents"] if item["type"] == "source_contract_qa_missing")
+    assert "visual QA" in qa_missing["suggested_action"]
 
 
 def test_generic_passed_ocr_qa_does_not_count_as_source_aware_qa():
@@ -233,7 +265,7 @@ def test_generic_passed_ocr_qa_does_not_count_as_source_aware_qa():
     """
     module = load_module()
     generated = _reference_asset("A0002")
-    generated.update({"kind": "concept_preview", "source": "generated"})
+    generated.update({"kind": "concept_preview", "source": "generated", "sha256": "f" * 64})
     project = _project(
         "F9007",
         status="awaiting_final_approval",
@@ -279,13 +311,13 @@ def test_generic_passed_ocr_qa_does_not_count_as_source_aware_qa():
         now=module.parse_utc("2026-05-20T11:00:00Z"),
     )
 
-    assert [item["type"] for item in report["incidents"]] == ["source_contract_qa_missing"]
+    assert "source_contract_qa_missing" in [item["type"] for item in report["incidents"]]
 
 
-def test_source_contract_named_qa_satisfies_source_aware_check():
+def test_marker_only_source_contract_qa_does_not_satisfy_source_aware_check():
     module = load_module()
     generated = _reference_asset("A0002")
-    generated.update({"kind": "concept_preview", "source": "generated"})
+    generated.update({"kind": "concept_preview", "source": "generated", "sha256": "1" * 64})
     project = _project(
         "F9008",
         status="awaiting_final_approval",
@@ -326,13 +358,376 @@ def test_source_contract_named_qa_satisfies_source_aware_check():
         now=module.parse_utc("2026-05-20T11:00:00Z"),
     )
 
+    assert [item["type"] for item in report["incidents"]] == ["source_contract_qa_missing"]
+
+
+def test_source_contract_qa_with_locked_fact_evidence_satisfies_source_aware_check():
+    module = load_module()
+    generated = _reference_asset("A0002")
+    generated.update({"kind": "concept_preview", "source": "generated", "sha256": "e" * 64})
+    project = _project(
+        "F9010",
+        status="awaiting_final_approval",
+        manual_review={"status": "none", "reason": "", "reason_code": "unclassified"},
+        assets=[_reference_asset(), generated],
+        reference_extractions=[_source_contract_extraction()],
+        qa_reports=[
+            {
+                "project_id": "F9010",
+                "asset_id": "A0002",
+                "artifact_path": "/opt/shift-agent/state/flyer/projects/F9010/preview.png",
+                "artifact_sha256": "e" * 64,
+                "project_version": 1,
+                "output_format": "concept_preview",
+                "provider": "openrouter-vision",
+                "qa_source": "ocr_vision",
+                "status": "passed",
+                "blockers": [],
+                "warnings": [],
+                "extracted_text": "Lakshmis Kitchen Monday Thali Specials Veg Thali Specials Rice Dal Sides: salad, raita, papad",
+                "checked_at": "2026-05-20T10:10:00Z",
+            }
+        ],
+        final_asset_ids=[],
+    )
+    project["locked_facts"] = _source_locked_facts()
+
+    report = module.build_report(
+        projects={"projects": [project]},
+        decision_entries=[],
+        now=module.parse_utc("2026-05-20T11:00:00Z"),
+    )
+
     assert report["incidents"] == []
+
+
+def test_stale_source_qa_report_does_not_satisfy_current_project_version():
+    module = load_module()
+    generated = _reference_asset("A0002")
+    generated.update({"kind": "concept_preview", "source": "generated", "sha256": "2" * 64})
+    project = _project(
+        "F9015",
+        status="awaiting_final_approval",
+        manual_review={"status": "none", "reason": "", "reason_code": "unclassified"},
+        assets=[_reference_asset(), generated],
+        reference_extractions=[_source_contract_extraction()],
+        qa_reports=[
+            {
+                "project_id": "F9015",
+                "asset_id": "A0002",
+                "artifact_sha256": "2" * 64,
+                "project_version": 1,
+                "output_format": "concept_preview",
+                "provider": "openrouter-vision",
+                "qa_source": "ocr_vision",
+                "status": "passed",
+                "blockers": [],
+                "warnings": [],
+                "extracted_text": "Lakshmis Kitchen Monday Thali Specials Veg Thali Specials Rice Dal Sides: salad, raita, papad",
+            }
+        ],
+    )
+    project["version"] = 3
+    project["locked_facts"] = _source_locked_facts()
+
+    report = module.build_report(
+        projects={"projects": [project]},
+        decision_entries=[],
+        now=module.parse_utc("2026-05-20T11:00:00Z"),
+    )
+
+    assert "source_contract_qa_missing" in [item["type"] for item in report["incidents"]]
+
+
+def test_stale_source_qa_report_does_not_satisfy_current_project_timestamp():
+    module = load_module()
+    generated = _reference_asset("A0002")
+    generated.update({"kind": "concept_preview", "source": "generated", "sha256": "4" * 64})
+    project = _project(
+        "F9017",
+        status="awaiting_final_approval",
+        updated_at="2026-05-20T10:30:00Z",
+        manual_review={"status": "none", "reason": "", "reason_code": "unclassified"},
+        assets=[_reference_asset(), generated],
+        reference_extractions=[_source_contract_extraction()],
+        qa_reports=[
+            {
+                "project_id": "F9017",
+                "asset_id": "A0002",
+                "artifact_sha256": "4" * 64,
+                "project_version": 1,
+                "output_format": "concept_preview",
+                "provider": "openrouter-vision",
+                "qa_source": "ocr_vision",
+                "status": "passed",
+                "blockers": [],
+                "warnings": [],
+                "extracted_text": "Lakshmis Kitchen Monday Thali Specials Veg Thali Specials Rice Dal Sides: salad, raita, papad",
+                "checked_at": "2026-05-20T10:10:00Z",
+            }
+        ],
+    )
+    project["version"] = 1
+    project["locked_facts"] = _source_locked_facts()
+
+    report = module.build_report(
+        projects={"projects": [project]},
+        decision_entries=[],
+        now=module.parse_utc("2026-05-20T11:00:00Z"),
+    )
+
+    assert "source_contract_qa_missing" in [item["type"] for item in report["incidents"]]
+
+
+def test_source_qa_report_missing_binding_fields_fails_closed():
+    module = load_module()
+    for missing_field in ("checked_at", "project_id", "project_version", "artifact_sha256"):
+        generated = _reference_asset("A0002")
+        generated.update({"kind": "concept_preview", "source": "generated", "sha256": "6" * 64})
+        qa_report = {
+            "project_id": f"F91{missing_field[:2]}",
+            "asset_id": "A0002",
+            "artifact_sha256": "6" * 64,
+            "project_version": 1,
+            "output_format": "concept_preview",
+            "provider": "openrouter-vision",
+            "qa_source": "ocr_vision",
+            "status": "passed",
+            "blockers": [],
+            "warnings": [],
+            "extracted_text": "Lakshmis Kitchen Monday Thali Specials Veg Thali Specials Rice Dal Sides: salad, raita, papad",
+            "checked_at": "2026-05-20T10:10:00Z",
+        }
+        qa_report.pop(missing_field)
+        project = _project(
+            qa_report.get("project_id") or f"F91{missing_field[:2]}",
+            status="awaiting_final_approval",
+            manual_review={"status": "none", "reason": "", "reason_code": "unclassified"},
+            assets=[_reference_asset(), generated],
+            reference_extractions=[_source_contract_extraction()],
+            qa_reports=[qa_report],
+        )
+        project["version"] = 1
+        project["locked_facts"] = _source_locked_facts()
+
+        report = module.build_report(
+            projects={"projects": [project]},
+            decision_entries=[],
+            now=module.parse_utc("2026-05-20T11:00:00Z"),
+        )
+
+        assert "source_contract_qa_missing" in [item["type"] for item in report["incidents"]], missing_field
+
+
+def test_complete_later_source_qa_report_prevents_false_fact_gap():
+    module = load_module()
+    generated = _reference_asset("A0002")
+    generated.update({"kind": "concept_preview", "source": "generated", "sha256": "3" * 64})
+    partial = {
+        "project_id": "F9016",
+        "asset_id": "A0002",
+        "artifact_sha256": "3" * 64,
+        "project_version": 2,
+        "output_format": "concept_preview",
+        "provider": "openrouter-vision",
+        "qa_source": "ocr_vision",
+        "status": "passed",
+        "blockers": [],
+        "warnings": [],
+        "extracted_text": "Monday Thali Specials",
+        "checked_at": "2026-05-20T10:10:00Z",
+    }
+    complete = dict(partial)
+    complete["extracted_text"] = "Lakshmis Kitchen Monday Thali Specials Veg Thali Specials Rice Dal Sides: salad, raita, papad"
+    project = _project(
+        "F9016",
+        status="awaiting_final_approval",
+        manual_review={"status": "none", "reason": "", "reason_code": "unclassified"},
+        assets=[_reference_asset(), generated],
+        reference_extractions=[_source_contract_extraction()],
+        qa_reports=[partial, complete],
+    )
+    project["version"] = 2
+    project["locked_facts"] = _source_locked_facts()
+
+    report = module.build_report(
+        projects={"projects": [project]},
+        decision_entries=[],
+        now=module.parse_utc("2026-05-20T11:00:00Z"),
+    )
+
+    assert report["incidents"] == []
+
+
+def test_missing_source_contract_locked_facts_are_reported():
+    module = load_module()
+    project = _project(
+        "F9011",
+        status="awaiting_final_approval",
+        manual_review={"status": "none", "reason": "", "reason_code": "unclassified"},
+        assets=[_reference_asset()],
+        reference_extractions=[_source_contract_extraction()],
+        qa_reports=[],
+    )
+    project["locked_facts"] = []
+
+    report = module.build_report(
+        projects={"projects": [project]},
+        decision_entries=[],
+        now=module.parse_utc("2026-05-20T11:00:00Z"),
+    )
+
+    assert "source_contract_locked_fact_gap" in [item["type"] for item in report["incidents"]]
+    gap = next(item for item in report["incidents"] if item["type"] == "source_contract_locked_fact_gap")
+    assert "source_required_text:0" in gap["evidence_details"]["locked_fact_missing"]
+    assert "replacement:0:new" in gap["evidence_details"]["locked_fact_missing"]
+
+
+def test_source_contract_qa_fact_gap_reports_missing_required_text_and_replacement():
+    module = load_module()
+    generated = _reference_asset("A0002")
+    generated.update({"kind": "concept_preview", "source": "generated", "sha256": "f" * 64})
+    project = _project(
+        "F9012",
+        status="awaiting_final_approval",
+        manual_review={"status": "none", "reason": "", "reason_code": "unclassified"},
+        assets=[_reference_asset(), generated],
+        reference_extractions=[_source_contract_extraction()],
+        qa_reports=[
+            {
+                "project_id": "F9012",
+                "asset_id": "A0002",
+                "artifact_path": "/opt/shift-agent/state/flyer/projects/F9012/preview.png",
+                "artifact_sha256": "f" * 64,
+                "project_version": 1,
+                "output_format": "concept_preview",
+                "provider": "openrouter-vision",
+                "qa_source": "ocr_vision",
+                "status": "passed",
+                "blockers": [],
+                "warnings": [],
+                "extracted_text": "Monday Thali Specials Veg Thali Specials Rice Dal",
+                "checked_at": "2026-05-20T10:10:00Z",
+            }
+        ],
+    )
+    project["locked_facts"] = _source_locked_facts()
+
+    report = module.build_report(
+        projects={"projects": [project]},
+        decision_entries=[],
+        now=module.parse_utc("2026-05-20T11:00:00Z"),
+    )
+
+    assert "source_contract_qa_fact_gap" in [item["type"] for item in report["incidents"]]
+    gap = next(item for item in report["incidents"] if item["type"] == "source_contract_qa_fact_gap")
+    assert "source_required_text:0" in gap["evidence_details"]["qa_missing_required_text"]
+    assert "replacement:0:new" in gap["evidence_details"]["qa_missing_required_text"]
+
+
+def test_source_contract_forbidden_text_present_is_reported():
+    module = load_module()
+    generated = _reference_asset("A0002")
+    generated.update({"kind": "concept_preview", "source": "generated", "sha256": "1" * 64})
+    project = _project(
+        "F9013",
+        status="awaiting_final_approval",
+        manual_review={"status": "none", "reason": "", "reason_code": "unclassified"},
+        assets=[_reference_asset(), generated],
+        reference_extractions=[_source_contract_extraction()],
+        qa_reports=[
+            {
+                "project_id": "F9013",
+                "asset_id": "A0002",
+                "artifact_path": "/opt/shift-agent/state/flyer/projects/F9013/preview.png",
+                "artifact_sha256": "1" * 64,
+                "project_version": 1,
+                "output_format": "concept_preview",
+                "provider": "openrouter-vision",
+                "qa_source": "ocr_vision",
+                "status": "passed",
+                "blockers": [],
+                "warnings": [],
+                "extracted_text": "Lakshmi's Kitchen Monday Thali Specials Veg Thali Specials Rice Dal Sides: salad, raita, papad Triveni Express",
+                "checked_at": "2026-05-20T10:10:00Z",
+            }
+        ],
+    )
+    project["locked_facts"] = _source_locked_facts()
+
+    report = module.build_report(
+        projects={"projects": [project]},
+        decision_entries=[],
+        now=module.parse_utc("2026-05-20T11:00:00Z"),
+    )
+
+    assert "source_contract_forbidden_text_present" in [item["type"] for item in report["incidents"]]
+    hit = next(item for item in report["incidents"] if item["type"] == "source_contract_forbidden_text_present")
+    assert hit["evidence_details"]["forbidden_text_hits"] == ["Triveni Express"]
+
+
+def test_report_output_redacts_sensitive_values_from_json_and_markdown(tmp_path):
+    module = load_module()
+    source = tmp_path / "actions.py"
+    source.write_text(
+        """
+def send_flyer_manual_edit_ack(project_id):
+    body = "Original customer request: OPENAI_API_KEY=sk-testsecret123456789 +17329837841 17329837841@lid /opt/shift-agent/state/flyer/private.png"
+    return send_flyer_text(body)
+""",
+        encoding="utf-8",
+    )
+
+    report = module.build_report(
+        projects={"projects": [_project("F9014")]},
+        decision_entries=[
+            {
+                "type": "cf_router_intercepted",
+                "project_id": "F9014",
+                "outbound_text": "Requested edit: Bearer verysecret987 +17329837841 17329837841@s.whatsapp.net C:\\secret\\asset.png",
+            }
+        ],
+        now=module.parse_utc("2026-05-20T11:05:00Z"),
+        source_files=[source],
+    )
+    blob = json.dumps(report) + module.render_markdown(report)
+
+    assert "sk-testsecret123456789" not in blob
+    assert "verysecret987" not in blob
+    assert "+17329837841" not in blob
+    assert "17329837841@lid" not in blob
+    assert "17329837841@s.whatsapp.net" not in blob
+    assert "/opt/shift-agent/state/flyer/private.png" not in blob
+    assert "C:\\secret\\asset.png" not in blob
+    assert "[redacted" in blob
+
+
+def test_redaction_handles_secret_keys_and_formatted_phone_values():
+    module = load_module()
+    report = module.sanitize_report(
+        {
+            "type": "demo",
+            "access_token": "plainsecret",
+            "api_key": "anothersecret",
+            "nested": {
+                "message": "Call 7329837841 or (732) 983-7841 or +17329837841",
+            },
+        }
+    )
+    blob = json.dumps(report)
+
+    assert "plainsecret" not in blob
+    assert "anothersecret" not in blob
+    assert "7329837841" not in blob
+    assert "(732) 983-7841" not in blob
+    assert "+17329837841" not in blob
+    assert "[redacted" in blob
 
 
 def test_operator_review_qa_satisfies_source_aware_check():
     module = load_module()
     generated = _reference_asset("A0002")
-    generated.update({"kind": "concept_preview", "source": "generated"})
+    generated.update({"kind": "concept_preview", "source": "generated", "sha256": "d" * 64})
     project = _project(
         "F9009",
         status="awaiting_final_approval",
@@ -375,6 +770,39 @@ def test_operator_review_qa_satisfies_source_aware_check():
     assert report["incidents"] == []
 
 
+def test_stray_operator_review_without_current_asset_does_not_satisfy_source_aware_check():
+    module = load_module()
+    generated = _reference_asset("A0002")
+    generated.update({"kind": "concept_preview", "source": "generated", "sha256": "5" * 64})
+    project = _project(
+        "F9018",
+        status="awaiting_final_approval",
+        manual_review={"status": "none", "reason": "", "reason_code": "unclassified"},
+        assets=[_reference_asset(), generated],
+        reference_extractions=[_source_contract_extraction()],
+        qa_reports=[
+            {
+                "project_id": "F9018",
+                "artifact_sha256": "5" * 64,
+                "project_version": 1,
+                "provider": "operator-cockpit",
+                "qa_source": "operator_review",
+                "status": "passed",
+                "checked_at": "2026-05-20T10:10:00Z",
+            }
+        ],
+    )
+    project["locked_facts"] = _source_locked_facts()
+
+    report = module.build_report(
+        projects={"projects": [project]},
+        decision_entries=[],
+        now=module.parse_utc("2026-05-20T11:00:00Z"),
+    )
+
+    assert "source_contract_qa_missing" in [item["type"] for item in report["incidents"]]
+
+
 def test_repeated_status_checkins_are_grouped_without_creating_projects():
     module = load_module()
     entries = [
@@ -396,6 +824,7 @@ def test_repeated_status_checkins_are_grouped_without_creating_projects():
 
     assert [item["type"] for item in report["incidents"]] == ["repeated_status_checkins"]
     assert report["incidents"][0]["count"] == 4
+    assert report["incidents"][0]["evidence_details"]["active_customer_risk"] is True
 
 
 def test_clean_state_has_empty_incidents_and_green_status():
@@ -470,6 +899,7 @@ def test_cli_writes_json_report_and_markdown(tmp_path):
     assert markdown.returncode == 0, markdown.stderr
     assert "Flyer Self-Evaluation" in markdown.stdout
     assert "manual_source_edit_stale" in markdown.stdout
+    assert "customer-copy log scan only sees decisions.log rows with outbound text fields" in markdown.stdout
 
 
 def test_static_guard_no_live_mutation_or_network_paths():

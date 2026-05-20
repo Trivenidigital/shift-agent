@@ -45,6 +45,8 @@ INTERNAL_COPY_TERMS = (
     "reason_code",
 )
 SOURCE_QA_MARKERS = ("source", "contract", "integrity", "operator_review")
+SOURCE_POSITIVE_FACT_PREFIXES = ("source_heading:", "source_section:", "source_required_text:")
+REPLACEMENT_NEW_FACT_RE = re.compile(r"^replacement:\d+:new$")
 
 SOURCE_EDIT_CUES = (
     "do not change anything else",
@@ -57,6 +59,17 @@ SOURCE_EDIT_CUES = (
 )
 
 STATUS_CHECK_RE = re.compile(r"\b(any update|updates?|status|ready|done|finished|eta)\b", re.I)
+PHONE_DIGITS_RE = re.compile(r"\D+")
+PHONE_RUN_RE = re.compile(r"[\d\s\-().+/]{8,}")
+SECRET_ASSIGNMENT_RE = re.compile(r"\b[A-Z0-9_]*(?:KEY|TOKEN|SECRET)\s*=\s*['\"]?[^'\"\s,;]+", re.I)
+BEARER_RE = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]+", re.I)
+ACCESS_TOKEN_RE = re.compile(r"\b(?:access_token|refresh_token)\s*[:=]\s*['\"]?[^'\"\s,;]+", re.I)
+SK_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
+E164_RE = re.compile(r"\+\d{10,15}\b")
+US_PHONE_RE = re.compile(r"(?<!\w)(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}|\d{10})(?!\w)")
+CHAT_ID_RE = re.compile(r"\b[\w.+-]+@(?:s\.whatsapp\.net|lid)\b")
+UNIX_ABS_PATH_RE = re.compile(r"(?<!\w)/(?:opt|var|tmp|home|root|Users)/[^\s,'\")]+")
+WINDOWS_ABS_PATH_RE = re.compile(r"\b[A-Za-z]:\\[^\s,'\")]+")
 
 
 def utc_now() -> datetime:
@@ -129,6 +142,17 @@ def has_source_contract(project: dict[str, Any]) -> bool:
     return False
 
 
+def source_contracts(project: dict[str, Any]) -> list[dict[str, Any]]:
+    contracts: list[dict[str, Any]] = []
+    for extraction in project.get("reference_extractions") or []:
+        if not isinstance(extraction, dict):
+            continue
+        contract = extraction.get("source_contract")
+        if isinstance(contract, dict):
+            contracts.append(contract)
+    return contracts
+
+
 def has_generated_or_final_asset(project: dict[str, Any]) -> bool:
     if project.get("final_asset_ids"):
         return True
@@ -142,20 +166,246 @@ def has_generated_or_final_asset(project: dict[str, Any]) -> bool:
     return project.get("status") in {"awaiting_concept_selection", "awaiting_final_approval", "delivered"}
 
 
-def has_source_qa(project: dict[str, Any]) -> bool:
-    reports = project.get("qa_reports") or []
-    for report in reports:
-        if not isinstance(report, dict):
-            continue
-        blockers = " ".join(str(item) for item in report.get("blockers") or [])
-        warnings = " ".join(str(item) for item in report.get("warnings") or [])
-        blob = (
-            f"{report.get('provider', '')} {report.get('qa_source', '')} "
-            f"{report.get('output_format', '')} {blockers} {warnings}"
-        ).lower()
-        if report.get("status") == "passed" and any(marker in blob for marker in SOURCE_QA_MARKERS):
+def normalize_text_for_match(text: str) -> str:
+    lowered = re.sub(r"\s+", " ", str(text or "")).casefold()
+    for ch in ("‘", "’", "ʼ", "`", "'"):
+        lowered = lowered.replace(ch, "")
+    return lowered
+
+
+def looks_like_phone(value: str) -> bool:
+    digits = PHONE_DIGITS_RE.sub("", value)
+    return 10 <= len(digits) <= 15
+
+
+def phone_value_present_in(text: str, fact_value: str) -> bool:
+    value_digits = PHONE_DIGITS_RE.sub("", fact_value)
+    for run in PHONE_RUN_RE.findall(text):
+        run_digits = PHONE_DIGITS_RE.sub("", run)
+        if value_digits in run_digits:
             return True
     return False
+
+
+def text_value_present_in(normalized_text: str, normalized_value: str) -> bool:
+    if not normalized_value:
+        return False
+    left = r"\b" if normalized_value[:1].isalnum() else ""
+    right = r"\b" if normalized_value[-1:].isalnum() else ""
+    return re.search(left + re.escape(normalized_value) + right, normalized_text) is not None
+
+
+def value_present_in(extracted_text: str, fact_value: str) -> bool:
+    if looks_like_phone(fact_value):
+        return phone_value_present_in(extracted_text, fact_value)
+    return text_value_present_in(normalize_text_for_match(extracted_text), normalize_text_for_match(fact_value))
+
+
+def is_positive_source_fact(fact: dict[str, Any]) -> bool:
+    fact_id = str(fact.get("fact_id") or "")
+    if not fact.get("required"):
+        return False
+    return fact_id.startswith(SOURCE_POSITIVE_FACT_PREFIXES) or REPLACEMENT_NEW_FACT_RE.match(fact_id) is not None
+
+
+def positive_source_facts(project: dict[str, Any]) -> list[dict[str, Any]]:
+    return [fact for fact in project.get("locked_facts") or [] if isinstance(fact, dict) and is_positive_source_fact(fact)]
+
+
+def contract_expected_positive_facts(contract: dict[str, Any]) -> dict[str, str]:
+    expected: dict[str, str] = {}
+    require = bool(contract.get("preserve_layout") or contract.get("preserve_unmentioned_text"))
+    if require:
+        for idx, heading in enumerate(contract.get("required_headings") or []):
+            if str(heading).strip():
+                expected[f"source_heading:{idx}"] = str(heading)
+        for idx, text in enumerate(contract.get("required_text") or []):
+            if str(text).strip():
+                expected[f"source_required_text:{idx}"] = str(text)
+        for section_idx, section in enumerate(contract.get("sections") or []):
+            if not isinstance(section, dict):
+                continue
+            heading = str(section.get("heading") or "").strip()
+            if heading:
+                expected[f"source_section:{section_idx}:heading"] = heading
+            for item_idx, item in enumerate(section.get("items") or []):
+                if str(item).strip():
+                    expected[f"source_section:{section_idx}:item:{item_idx}"] = str(item)
+    for repl_idx, (_old, new) in enumerate((contract.get("requested_replacements") or {}).items()):
+        if str(new).strip():
+            expected[f"replacement:{repl_idx}:new"] = str(new)
+    return expected
+
+
+def expected_source_facts(project: dict[str, Any]) -> dict[str, str]:
+    expected: dict[str, str] = {}
+    for contract in source_contracts(project):
+        expected.update(contract_expected_positive_facts(contract))
+    return expected
+
+
+def forbidden_substrings(project: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for contract in source_contracts(project):
+        for item in contract.get("forbidden_substrings") or []:
+            text = str(item).strip()
+            if text and text not in values:
+                values.append(text)
+    return values
+
+
+def qa_missing_required_text(project: dict[str, Any], report: dict[str, Any]) -> list[str]:
+    extracted = str(report.get("extracted_text") or "")
+    missing: list[str] = []
+    for fact in positive_source_facts(project):
+        value = str(fact.get("value") or "")
+        fact_id = str(fact.get("fact_id") or "")
+        if value and not value_present_in(extracted, value):
+            missing.append(fact_id)
+    return missing
+
+
+def forbidden_text_hits(project: dict[str, Any], report: dict[str, Any]) -> list[str]:
+    extracted = str(report.get("extracted_text") or "")
+    hits: list[str] = []
+    for forbidden in forbidden_substrings(project):
+        if value_present_in(extracted, forbidden):
+            hits.append(forbidden)
+    return hits
+
+
+def accepted_source_qa_report(project: dict[str, Any]) -> dict[str, Any] | None:
+    for report in project.get("qa_reports") or []:
+        if not isinstance(report, dict) or report.get("status") != "passed":
+            continue
+        if not qa_report_matches_current_project(project, report):
+            continue
+        if report.get("qa_source") == "operator_review":
+            return report
+        extracted = str(report.get("extracted_text") or "")
+        if not extracted.strip():
+            continue
+        facts = positive_source_facts(project)
+        if not facts:
+            continue
+        if qa_missing_required_text(project, report):
+            continue
+        if forbidden_text_hits(project, report):
+            continue
+        return report
+    return None
+
+
+def report_checked_after_project_update(project: dict[str, Any], report: dict[str, Any]) -> bool:
+    project_updated_at = project.get("updated_at")
+    checked_at = report.get("checked_at")
+    if not checked_at:
+        return False
+    if not project_updated_at:
+        return True
+    try:
+        return parse_utc(str(checked_at)) >= parse_utc(str(project_updated_at))
+    except (TypeError, ValueError):
+        return False
+
+
+def qa_report_matches_current_project(project: dict[str, Any], report: dict[str, Any]) -> bool:
+    project_id = str(project.get("project_id") or "")
+    report_project_id = str(report.get("project_id") or "")
+    if project_id and report_project_id != project_id:
+        return False
+    project_version = project.get("version")
+    report_version = report.get("project_version")
+    if project_version is not None:
+        if report_version is None:
+            return False
+        try:
+            if int(project_version) != int(report_version):
+                return False
+        except (TypeError, ValueError):
+            return False
+    if not report_checked_after_project_update(project, report):
+        return False
+    generated_assets = [
+        asset for asset in project.get("assets") or []
+        if isinstance(asset, dict)
+        and (
+            str(asset.get("kind") or "").startswith("final_")
+            or asset.get("kind") == "concept_preview"
+            or str(asset.get("asset_id") or "") in {str(item) for item in project.get("final_asset_ids") or []}
+        )
+    ]
+    if not generated_assets:
+        return True
+    report_asset_id = str(report.get("asset_id") or "")
+    if not report_asset_id:
+        return False
+    if report_asset_id:
+        matches = [asset for asset in generated_assets if str(asset.get("asset_id") or "") == report_asset_id]
+        if not matches:
+            return False
+        report_sha = str(report.get("artifact_sha256") or "")
+        current_shas = {str(asset.get("sha256") or "") for asset in matches if asset.get("sha256")}
+        if current_shas:
+            return bool(report_sha) and report_sha in current_shas
+    return True
+
+
+def has_source_qa(project: dict[str, Any]) -> bool:
+    return accepted_source_qa_report(project) is not None
+
+
+def source_contract_evidence_details(
+    project: dict[str, Any],
+    *,
+    queued_age_minutes: float | None = None,
+    customer_impact: str = "source preservation risk before customer preview/delivery",
+) -> dict[str, Any]:
+    contracts = source_contracts(project)
+    expected = expected_source_facts(project)
+    locked_ids = {
+        str(fact.get("fact_id") or "")
+        for fact in project.get("locked_facts") or []
+        if isinstance(fact, dict)
+    }
+    accepted = accepted_source_qa_report(project)
+    qa_reports = [r for r in project.get("qa_reports") or [] if isinstance(r, dict)]
+    missing_from_qa: list[str] = []
+    forbidden_hits: list[str] = []
+    accepted = accepted_source_qa_report(project)
+    reports_for_gap = [accepted] if accepted else [
+        report for report in qa_reports
+        if report.get("status") == "passed" and qa_report_matches_current_project(project, report)
+    ]
+    for report in reports_for_gap:
+        if not report:
+            continue
+        missing_from_qa.extend(item for item in qa_missing_required_text(project, report) if item not in missing_from_qa)
+        forbidden_hits.extend(item for item in forbidden_text_hits(project, report) if item not in forbidden_hits)
+    fields_present: list[str] = []
+    for field in ("required_headings", "required_text", "sections", "requested_replacements", "forbidden_substrings"):
+        if any(contract.get(field) for contract in contracts):
+            fields_present.append(field)
+    return {
+        "project_status": str(project.get("status") or ""),
+        "active_customer_risk": active_customer_risk(project),
+        "has_reference_media": has_reference_media(project),
+        "exact_source_edit_cues": looks_like_exact_source_edit(project),
+        "has_source_contract": bool(contracts),
+        "source_contract_fields_present": fields_present,
+        "locked_fact_missing": [fact_id for fact_id in expected if fact_id not in locked_ids],
+        "qa_report_count": len(qa_reports),
+        "accepted_qa_source": str(accepted.get("qa_source") or "") if accepted else "",
+        "qa_missing_required_text": missing_from_qa,
+        "forbidden_text_hits": forbidden_hits,
+        "queued_age_minutes": round(queued_age_minutes, 1) if queued_age_minutes is not None else None,
+        "customer_impact": customer_impact,
+    }
+
+
+def active_customer_risk(project: dict[str, Any]) -> bool:
+    status = str(project.get("status") or "")
+    return status not in {"delivered", "completed", "closed_no_send", "cancelled", "archived"}
 
 
 def looks_like_exact_source_edit(project: dict[str, Any]) -> bool:
@@ -172,6 +422,7 @@ def incident(
     suggested_action: str,
     category: str,
     count: int | None = None,
+    evidence_details: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     item: dict[str, Any] = {
         "type": kind,
@@ -184,6 +435,8 @@ def incident(
     }
     if count is not None:
         item["count"] = count
+    if evidence_details is not None:
+        item["evidence_details"] = evidence_details
     return item
 
 
@@ -219,6 +472,11 @@ def project_incidents(
                         "do not let customers wait silently."
                     ),
                     category="source_edit_provider_posture",
+                    evidence_details=source_contract_evidence_details(
+                        project,
+                        queued_age_minutes=queued_age,
+                        customer_impact="customer is waiting on a source-preserving edit",
+                    ),
                 )
             )
 
@@ -231,8 +489,48 @@ def project_incidents(
                     evidence="reference media + source-preservation language but no source_contract",
                     suggested_action="Add/verify a source-contract golden fixture before trusting generated output.",
                     category="source_contract_visual_qa",
+                    evidence_details=source_contract_evidence_details(project),
                 )
             )
+
+        if has_source_contract(project):
+            details = source_contract_evidence_details(project)
+            if details["locked_fact_missing"]:
+                out.append(
+                    incident(
+                        "source_contract_locked_fact_gap",
+                        severity="high",
+                        project_id=project_id,
+                        evidence="source_contract exists but source-derived required locked facts are missing",
+                        suggested_action="Repair legacy/malformed source-contract rows so source obligations reach locked facts.",
+                        category="source_contract_visual_qa",
+                        evidence_details=details,
+                    )
+                )
+            if details["forbidden_text_hits"]:
+                out.append(
+                    incident(
+                        "source_contract_forbidden_text_present",
+                        severity="high",
+                        project_id=project_id,
+                        evidence="forbidden source text appears in passed QA extracted text",
+                        suggested_action="Block delivery and regenerate/manual-fix the source-preserving edit.",
+                        category="source_contract_visual_qa",
+                        evidence_details=details,
+                    )
+                )
+            if has_generated_or_final_asset(project) and details["qa_report_count"] and details["qa_missing_required_text"]:
+                out.append(
+                    incident(
+                        "source_contract_qa_fact_gap",
+                        severity="high",
+                        project_id=project_id,
+                        evidence="passed QA report does not evidence required source-contract facts",
+                        suggested_action="Harden source-aware QA so required source facts are verified before customer preview/delivery.",
+                        category="source_contract_visual_qa",
+                        evidence_details=details,
+                    )
+                )
 
         if has_source_contract(project) and has_generated_or_final_asset(project) and not has_source_qa(project):
             out.append(
@@ -243,6 +541,7 @@ def project_incidents(
                     evidence="source_contract exists and generated/final asset exists, but no source-aware visual QA report is stored",
                     suggested_action="Harden visual QA so source-contract facts are verified before customer preview/delivery.",
                     category="source_contract_visual_qa",
+                    evidence_details=source_contract_evidence_details(project),
                 )
             )
 
@@ -256,6 +555,12 @@ def project_incidents(
                     evidence=f"status={project.get('status')}; updated_age_minutes={gen_age:.1f}",
                     suggested_action="Investigate provider/runtime logs and send a customer-safe status update if needed.",
                     category="provider_runtime",
+                    evidence_details={
+                        "project_status": str(project.get("status") or ""),
+                        "active_customer_risk": True,
+                        "updated_age_minutes": round(gen_age, 1),
+                        "customer_impact": "customer may be waiting on generation/finalization",
+                    },
                 )
             )
     return out
@@ -358,6 +663,10 @@ def repeated_checkin_incidents(entries: list[dict[str, Any]], *, threshold: int)
                 suggested_action="Review SLA/status-copy loop; repeated check-ins are a customer-visible waiting signal.",
                 category="customer_status_sla",
                 count=len(rows),
+                evidence_details={
+                    "active_customer_risk": True,
+                    "customer_impact": "customer has repeatedly asked for status",
+                },
             )
         )
     return out
@@ -394,6 +703,46 @@ def suggested_fixture_for(category: str) -> str:
     }.get(category, "tasks/todo.md")
 
 
+def redact_text(text: str) -> str:
+    value = str(text)
+    value = SECRET_ASSIGNMENT_RE.sub("[redacted-secret]", value)
+    value = BEARER_RE.sub("Bearer [redacted-secret]", value)
+    value = ACCESS_TOKEN_RE.sub("[redacted-token]", value)
+    value = SK_KEY_RE.sub("[redacted-secret]", value)
+    value = CHAT_ID_RE.sub("[redacted-chat-id]", value)
+    value = E164_RE.sub("[redacted-phone]", value)
+    value = US_PHONE_RE.sub("[redacted-phone]", value)
+
+    def repl_unix(match: re.Match[str]) -> str:
+        return "[redacted-path]/" + Path(match.group(0)).name
+
+    def repl_windows(match: re.Match[str]) -> str:
+        return "[redacted-path]\\" + Path(match.group(0)).name
+
+    value = UNIX_ABS_PATH_RE.sub(repl_unix, value)
+    value = WINDOWS_ABS_PATH_RE.sub(repl_windows, value)
+    return value
+
+
+def sanitize_value(value: Any, *, key: str = "") -> Any:
+    if isinstance(value, dict):
+        return {k: sanitize_value(v, key=str(k)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [sanitize_value(item, key=key) for item in value]
+    if isinstance(value, str):
+        if re.search(r"(?:key|token|secret)$|(?:api_key|access_token|refresh_token)", key, flags=re.I):
+            return "[redacted-secret]"
+        if key in {"type", "severity", "project_id", "eval_category", "category", "reason", "suggested_fixture"}:
+            return value
+        return redact_text(value)
+    return value
+
+
+def sanitize_report(report: dict[str, Any]) -> dict[str, Any]:
+    sanitized = sanitize_value(report)
+    return sanitized if isinstance(sanitized, dict) else report
+
+
 def build_report(
     *,
     projects: dict[str, Any],
@@ -425,7 +774,7 @@ def build_report(
         for item in incidents
         if item.get("human_decision_required")
     ]
-    return {
+    report = {
         "generated_at": now.isoformat().replace("+00:00", "Z"),
         "mode": "read_only_report",
         "status": status,
@@ -445,6 +794,7 @@ def build_report(
             "customer-copy log scan only sees decisions.log rows with outbound text fields; use --scan-source-copy for metadata-only cf-router send paths",
         ],
     }
+    return sanitize_report(report)
 
 
 def render_markdown(report: dict[str, Any]) -> str:
@@ -473,6 +823,9 @@ def render_markdown(report: dict[str, Any]) -> str:
         for item in candidates:
             project = f" {item.get('project_id')}" if item.get("project_id") else ""
             lines.append(f"- {item.get('category')}{project}: {item.get('suggested_fixture')}")
+    lines.extend(["", "## Boundaries", ""])
+    for item in report.get("boundaries") or []:
+        lines.append(f"- {item}")
     return "\n".join(lines).rstrip() + "\n"
 
 

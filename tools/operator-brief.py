@@ -22,6 +22,15 @@ SECTION_NAMES = {
     "handoffs and promises": "handoffs",
     "parking lot": "parking_lot",
 }
+SECRET_ASSIGNMENT_RE = re.compile(r"\b[A-Z0-9_]*(?:KEY|TOKEN|SECRET)\s*=\s*['\"]?[^'\"\s,;]+", re.I)
+BEARER_RE = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]+", re.I)
+ACCESS_TOKEN_RE = re.compile(r"\b(?:access_token|refresh_token)\s*[:=]\s*['\"]?[^'\"\s,;]+", re.I)
+SK_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
+E164_RE = re.compile(r"\+\d{10,15}\b")
+US_PHONE_RE = re.compile(r"(?<!\w)(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}|\d{10})(?!\w)")
+CHAT_ID_RE = re.compile(r"\b[\w.+-]+@(?:s\.whatsapp\.net|lid)\b")
+UNIX_ABS_PATH_RE = re.compile(r"(?<!\w)/(?:opt|var|tmp|home|root|Users)/[^\s,'\")]+")
+WINDOWS_ABS_PATH_RE = re.compile(r"\b[A-Za-z]:\\[^\s,'\")]+")
 
 
 @dataclass
@@ -76,6 +85,20 @@ def clean_open_checklist_item(line: str) -> str | None:
     if not match:
         return None
     return match.group(1).strip() or None
+
+
+def redact_text(text: str) -> str:
+    value = str(text)
+    value = SECRET_ASSIGNMENT_RE.sub("[redacted-secret]", value)
+    value = BEARER_RE.sub("Bearer [redacted-secret]", value)
+    value = ACCESS_TOKEN_RE.sub("[redacted-token]", value)
+    value = SK_KEY_RE.sub("[redacted-secret]", value)
+    value = CHAT_ID_RE.sub("[redacted-chat-id]", value)
+    value = E164_RE.sub("[redacted-phone]", value)
+    value = US_PHONE_RE.sub("[redacted-phone]", value)
+    value = UNIX_ABS_PATH_RE.sub(lambda m: "[redacted-path]/" + Path(m.group(0)).name, value)
+    value = WINDOWS_ABS_PATH_RE.sub(lambda m: "[redacted-path]\\" + Path(m.group(0)).name, value)
+    return value
 
 
 def load_operator_decisions(path: Path) -> OperatorDecisions:
@@ -180,11 +203,11 @@ def summarize_flyer_evaluation_report(path: Path | None) -> list[str]:
     if path is None:
         return []
     if not path.exists():
-        return [f"Flyer self-evaluation report file not found: {path}"]
+        return ["Flyer self-evaluation report file not found."]
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
-        return [f"Flyer self-evaluation report is not valid JSON: {exc}"]
+        return [redact_text(f"Flyer self-evaluation report is not valid JSON: {exc}")]
 
     summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
     lines = [
@@ -193,23 +216,89 @@ def summarize_flyer_evaluation_report(path: Path | None) -> list[str]:
         f"incidents={summary.get('incident_count', 0)}; "
         f"high_or_critical={summary.get('high_or_critical_count', 0)}"
     ]
-    for item in (payload.get("incidents") or [])[:5]:
-        if not isinstance(item, dict):
-            continue
+    incidents = [item for item in (payload.get("incidents") or []) if isinstance(item, dict)]
+    active_risk = 0
+    historical = 0
+    for item in incidents:
+        details = item.get("evidence_details") if isinstance(item.get("evidence_details"), dict) else {}
+        if details.get("active_customer_risk") is True:
+            active_risk += 1
+        elif details.get("active_customer_risk") is False:
+            historical += 1
+    if active_risk or historical:
+        lines.append(f"Customer risk: active={active_risk}; historical_or_audit={historical}")
+
+    def active_state(item: dict) -> bool | None:
+        details = item.get("evidence_details") if isinstance(item.get("evidence_details"), dict) else {}
+        value = details.get("active_customer_risk")
+        return value if isinstance(value, bool) else None
+
+    def active_suffix(items: list[dict]) -> str:
+        active = sum(1 for item in items if active_state(item) is True)
+        old = sum(1 for item in items if active_state(item) is False)
+        if active or old:
+            return f"; active={active}; historical_or_audit={old}"
+        return ""
+
+    stale = [item for item in incidents if item.get("type") == "manual_source_edit_stale"]
+    if stale:
+        ages = [
+            float(details.get("queued_age_minutes"))
+            for item in stale
+            for details in [item.get("evidence_details") if isinstance(item.get("evidence_details"), dict) else {}]
+            if isinstance(details.get("queued_age_minutes"), (int, float))
+        ]
+        oldest = max(ages) if ages else 0
+        lines.append(f"Manual queue: stale_source_edits={len(stale)}; oldest={oldest:g}min{active_suffix(stale)}")
+    source_items = [
+        item for item in incidents
+        if item.get("type") in {"source_contract_missing", "source_contract_locked_fact_gap"}
+    ]
+    source_missing = sum(1 for item in source_items if item.get("type") == "source_contract_missing")
+    locked_gaps = sum(1 for item in source_items if item.get("type") == "source_contract_locked_fact_gap")
+    if source_missing or locked_gaps:
+        lines.append(f"Source contracts: missing={source_missing}; locked_fact_gaps={locked_gaps}{active_suffix(source_items)}")
+    qa_items = [
+        item for item in incidents
+        if item.get("type") in {
+            "source_contract_qa_missing",
+            "source_contract_qa_fact_gap",
+            "source_contract_forbidden_text_present",
+        }
+    ]
+    qa_missing = sum(1 for item in qa_items if item.get("type") == "source_contract_qa_missing")
+    qa_gaps = sum(1 for item in qa_items if item.get("type") == "source_contract_qa_fact_gap")
+    forbidden = sum(1 for item in qa_items if item.get("type") == "source_contract_forbidden_text_present")
+    if qa_missing or qa_gaps or forbidden:
+        lines.append(f"QA gaps: missing={qa_missing}; fact_gaps={qa_gaps}; forbidden_text_hits={forbidden}{active_suffix(qa_items)}")
+    checkin_items = [item for item in incidents if item.get("type") == "repeated_status_checkins"]
+    checkins = len(checkin_items)
+    if checkins:
+        lines.append(f"Customer waiting: repeated_checkins={checkins}{active_suffix(checkin_items)}")
+    severity_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    top_incidents = sorted(
+        incidents,
+        key=lambda item: (
+            severity_rank.get(str(item.get("severity") or "").lower(), 4),
+            {True: 0, None: 1, False: 2}[active_state(item)],
+            str(item.get("type") or ""),
+        ),
+    )[:5]
+    for item in top_incidents:
         severity = str(item.get("severity") or "unknown").upper()
         kind = str(item.get("type") or "unknown")
         project = f" {item.get('project_id')}" if item.get("project_id") else ""
         action = str(item.get("suggested_action") or "review")
-        lines.append(f"{severity}: {kind}{project} - {action}")
+        lines.append(redact_text(f"{severity}: {kind}{project} - {action}"))
     for item in (payload.get("eval_candidates") or [])[:5]:
         if not isinstance(item, dict):
             continue
         category = str(item.get("category") or "unknown")
         project = f" {item.get('project_id')}" if item.get("project_id") else ""
         fixture = str(item.get("suggested_fixture") or "tests/fixtures/flyer_golden/")
-        lines.append(f"Eval: {category}{project} -> {fixture}")
+        lines.append(redact_text(f"Eval: {category}{project} -> {fixture}"))
     for item in payload.get("needs_srini") or []:
-        lines.append(f"Needs Srini: {item}")
+        lines.append(redact_text(f"Needs Srini: {item}"))
     return lines
 
 

@@ -318,6 +318,177 @@ def test_operator_brief_includes_flyer_self_evaluation_incidents(tmp_path):
     assert "Needs Srini: manual_source_edit_stale F0063" in markdown
 
 
+def test_operator_brief_groups_flyer_self_evaluation_and_redacts_sensitive_lines(tmp_path):
+    module = load_module()
+    repo = tmp_path
+    tasks = repo / "tasks"
+    tasks.mkdir()
+    (tasks / "operator-decisions.md").write_text("# Operator Decisions\n", encoding="utf-8")
+    (tasks / "todo.md").write_text("# Backlog\n", encoding="utf-8")
+    evaluation = repo / "flyer-evaluation.json"
+    evaluation.write_text(
+        json.dumps(
+            {
+                "status": "red",
+                "summary": {"incident_count": 5, "high_or_critical_count": 4},
+                "incidents": [
+                    {
+                        "type": "manual_source_edit_stale",
+                        "severity": "high",
+                        "project_id": "F9101",
+                        "suggested_action": "Burn down queue. OPENAI_API_KEY=sk-leaky +17329837841",
+                        "evidence_details": {"queued_age_minutes": 91.5, "active_customer_risk": True},
+                    },
+                    {
+                        "type": "source_contract_missing",
+                        "severity": "high",
+                        "project_id": "F9102",
+                        "suggested_action": "Add source contract. Bearer secret-token 17329837841@lid",
+                        "evidence_details": {"has_reference_media": True, "active_customer_risk": True},
+                    },
+                    {
+                        "type": "source_contract_locked_fact_gap",
+                        "severity": "high",
+                        "project_id": "F9103",
+                        "suggested_action": "Check locked facts.",
+                        "evidence_details": {"locked_fact_missing": ["replacement:0:new"], "active_customer_risk": False},
+                    },
+                    {
+                        "type": "source_contract_qa_fact_gap",
+                        "severity": "high",
+                        "project_id": "F9104",
+                        "suggested_action": "Check QA.",
+                        "evidence_details": {"qa_missing_required_text": ["source_required_text:0"]},
+                    },
+                    {
+                        "type": "repeated_status_checkins",
+                        "severity": "medium",
+                        "project_id": "F9105",
+                        "suggested_action": "Review status loop at C:\\private\\report.json",
+                        "count": 3,
+                    },
+                ],
+                "eval_candidates": [],
+                "needs_srini": ["manual_source_edit_stale F9101 +17329837841"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    brief = module.build_brief(
+        repo_root=repo,
+        decisions_path=tasks / "operator-decisions.md",
+        todo_path=tasks / "todo.md",
+        flyer_evaluation_json_path=evaluation,
+        automations_dir=repo / "missing-automations",
+        generated_date="2026-05-21",
+        include_git=False,
+    )
+    markdown = module.render_markdown(brief)
+
+    assert "Manual queue: stale_source_edits=1; oldest=91.5min" in markdown
+    assert "Customer risk: active=2; historical_or_audit=1" in markdown
+    assert "Source contracts: missing=1; locked_fact_gaps=1" in markdown
+    assert "QA gaps: missing=0; fact_gaps=1; forbidden_text_hits=0" in markdown
+    assert "Customer waiting: repeated_checkins=1" in markdown
+    assert "OPENAI_API_KEY" not in markdown
+    assert "sk-leaky" not in markdown
+    assert "secret-token" not in markdown
+    assert "+17329837841" not in markdown
+    assert "17329837841@lid" not in markdown
+    assert "C:\\private\\report.json" not in markdown
+    assert "[redacted" in markdown
+
+
+def test_operator_brief_orders_high_incidents_and_tolerates_malformed_details(tmp_path):
+    module = load_module()
+    repo = tmp_path
+    tasks = repo / "tasks"
+    tasks.mkdir()
+    (tasks / "operator-decisions.md").write_text("# Operator Decisions\n", encoding="utf-8")
+    (tasks / "todo.md").write_text("# Backlog\n", encoding="utf-8")
+    evaluation = repo / "flyer-evaluation.json"
+    incidents = [
+        {"type": f"medium_{idx}", "severity": "medium", "project_id": f"F92{idx}", "suggested_action": "medium item"}
+        for idx in range(6)
+    ]
+    incidents.append(
+        {
+            "type": "source_contract_forbidden_text_present",
+            "severity": "high",
+            "project_id": "F9999",
+            "suggested_action": "urgent high item call 7329837841",
+            "evidence_details": "malformed",
+        }
+    )
+    evaluation.write_text(
+        json.dumps({"status": "red", "summary": {"incident_count": 7, "high_or_critical_count": 1}, "incidents": incidents}),
+        encoding="utf-8",
+    )
+
+    brief = module.build_brief(
+        repo_root=repo,
+        decisions_path=tasks / "operator-decisions.md",
+        todo_path=tasks / "todo.md",
+        flyer_evaluation_json_path=evaluation,
+        automations_dir=repo / "missing-automations",
+        generated_date="2026-05-21",
+        include_git=False,
+    )
+    markdown = module.render_markdown(brief)
+
+    assert "HIGH: source_contract_forbidden_text_present F9999" in markdown
+    assert "7329837841" not in markdown
+    assert "[redacted-phone]" in markdown
+
+
+def test_operator_brief_prioritizes_active_customer_risk_in_top_incidents(tmp_path):
+    module = load_module()
+    repo = tmp_path
+    tasks = repo / "tasks"
+    tasks.mkdir()
+    (tasks / "operator-decisions.md").write_text("# Operator Decisions\n", encoding="utf-8")
+    (tasks / "todo.md").write_text("# Backlog\n", encoding="utf-8")
+    evaluation = repo / "flyer-evaluation.json"
+    incidents = [
+        {
+            "type": f"a_historical_{idx}",
+            "severity": "high",
+            "project_id": f"F93{idx}",
+            "suggested_action": "historical audit item",
+            "evidence_details": {"active_customer_risk": False},
+        }
+        for idx in range(6)
+    ]
+    incidents.append(
+        {
+            "type": "z_active_customer_waiting",
+            "severity": "high",
+            "project_id": "F9399",
+            "suggested_action": "active customer risk",
+            "evidence_details": {"active_customer_risk": True},
+        }
+    )
+    evaluation.write_text(
+        json.dumps({"status": "red", "summary": {"incident_count": 7, "high_or_critical_count": 7}, "incidents": incidents}),
+        encoding="utf-8",
+    )
+
+    brief = module.build_brief(
+        repo_root=repo,
+        decisions_path=tasks / "operator-decisions.md",
+        todo_path=tasks / "todo.md",
+        flyer_evaluation_json_path=evaluation,
+        automations_dir=repo / "missing-automations",
+        generated_date="2026-05-21",
+        include_git=False,
+    )
+    markdown = module.render_markdown(brief)
+
+    assert "Customer risk: active=1; historical_or_audit=6" in markdown
+    assert "HIGH: z_active_customer_waiting F9399 - active customer risk" in markdown
+
+
 def test_todo_signals_ignore_horizontal_rules_checked_items_and_plain_bullets(tmp_path):
     module = load_module()
     todo = tmp_path / "todo.md"

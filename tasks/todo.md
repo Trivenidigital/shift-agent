@@ -60,9 +60,10 @@ Hermes-first summary: reuse Hermes scheduling, repo-backed task docs, existing F
 
 Hermes-first summary: reuse Hermes/Shift WhatsApp ingress, Flyer `projects.json`, `decisions.log`, existing golden/source-contract/visual-QA tests, and the operator brief. Net-new scope is a deterministic read-only self-evaluation report that turns runtime evidence into incidents and suggested eval/backlog candidates. No production mutation, no customer messaging, and no prompt/SKILL/model/code self-modification is enabled.
 
-- [ ] v0.1 report-only wiring: `tools/flyer-self-evaluation.py` reads Flyer project state + decisions.log and emits incidents for stale manual source edits, customer-copy internal leaks, missing source contracts, missing source-aware QA, repeated check-ins, and stuck generation states.
-- [ ] Operator brief integration: optional `--flyer-evaluation-json` section surfaces self-evaluation status, top incidents, eval candidates, and Needs Srini items.
+- [x] v0.1 report-only wiring: PR #148 adds read-only incidents for stale manual source edits, customer-copy internal leaks, missing source contracts, missing/current source-aware QA, stale QA by version/timestamp, repeated check-ins, stuck generation states, and redacted JSON/Markdown output.
+- [x] Operator brief integration: PR #148 optional `--flyer-evaluation-json` section surfaces self-evaluation status, grouped stale queue/source-contract/QA/customer-waiting buckets, active-vs-historical risk counts, top incidents, eval candidates, and Needs Srini items.
 - [ ] Future slice: optional fixture-generation proposal mode after report output stabilizes; must remain PR/review gated and never mutate production behavior directly.
+- [ ] Next anti-silent-failure slice after v0.1 report hardening: validate PR #147 or merged successor with source-edit provider routing smoke; improve Hermes vision/OCR source-contract extraction; audit legacy projects where source contracts did not project into locked facts; enforce source-aware QA before preview/delivery across every source-edit path; wire Hermes cron/operator brief alerts once report semantics are stable.
 
 ## Active - Operator ops brief via Hermes memory (2026-05-20)
 
