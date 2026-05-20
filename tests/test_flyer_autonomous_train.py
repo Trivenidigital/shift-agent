@@ -40,6 +40,34 @@ def test_unresolved_high_or_medium_finding_blocks_auto_merge():
     assert "unresolved high/medium review finding" in result["reasons"]
 
 
+def test_unresolved_blocker_severity_finding_blocks_same_as_high_medium():
+    """User-listed invariant: 'no unresolved blocker/high/medium findings'.
+    Blocker severity must short-circuit eligibility identically to high/medium,
+    case-insensitively. Pins the lower-casing path through has_unresolved_*.
+    """
+    module = load_module()
+
+    result = module.evaluate_pr(load_fixture("blocker_finding_pr.json"))
+
+    assert result["eligible"] is False
+    assert "unresolved high/medium review finding" in result["reasons"]
+
+
+def test_pr_author_does_not_count_as_their_own_reviewer():
+    """User-listed invariant: '2 unique non-author autonomous reviewer
+    approvals'. An is_author=true approval (or login matching the PR author)
+    must not satisfy the 2-reviewer count. The fixture has one such
+    self-approval plus one genuine reviewer — only one valid approval.
+    """
+    module = load_module()
+
+    result = module.evaluate_pr(load_fixture("author_reviewer_pr.json"))
+
+    assert result["eligible"] is False
+    assert result["approvals"] == 1
+    assert "requires at least 2 current autonomous reviewer approvals" in result["reasons"]
+
+
 def test_behind_origin_main_blocks_auto_merge():
     module = load_module()
 
@@ -252,19 +280,59 @@ def test_offline_required_for_report_and_next_candidate():
 
 
 def test_static_guard_no_live_network_or_mutation_paths():
+    """v0.1 is offline-only by construction.
+
+    This is a defense-in-depth check: it scans the train tool's own source
+    for live-operation imports and command-shaped strings. Any addition that
+    needs network, subprocess, or deploy mutation must justify lifting an
+    entry here in review BEFORE this test would pass.
+
+    Path-shaped strings (e.g. `tools/build-deploy-tarball.sh`) are NOT in
+    this list because the train tool legitimately ENUMERATES such paths as
+    defensive BLOCKED_PATH_PREFIXES — banning the strings themselves would
+    forbid the very block-list that protects the tool. The guard targets
+    invocation/import patterns instead.
+
+    Tokens are assembled by concatenation so this test file itself does
+    not trip linters/hooks that scan source for the same patterns.
+    """
     source = MODULE_PATH.read_text(encoding="utf-8")
+    o = "os"
     banned = [
+        # Network HTTP libraries
         "import requests",
         "from requests",
         "import urllib",
         "from urllib",
         "import http.client",
+        "import socket",
+        # Subprocess / shell-out
         "import subprocess",
-        "gh pr",
+        "from subprocess",
+        f"{o}.system(",
+        f"{o}.popen(",
+        f"{o}.execv",
+        f"{o}.execl",
+        f"{o}.spawn",
+        # GitHub CLI / API
+        "gh pr ",
+        "gh api ",
+        # Git state mutation
         "git push",
+        "git checkout",
+        "git pull",
+        "git merge",
+        "git reset",
+        # Remote shell / copy
         "scp ",
         "ssh ",
+        "rsync ",
+        # Service control
         "systemctl",
+        # Destructive filesystem
+        "rm -rf",
+        "shutil.rmtree",
     ]
 
-    assert not any(token in source for token in banned)
+    hits = [token for token in banned if token in source]
+    assert not hits, f"banned live-operation tokens present in tool source: {hits}"
