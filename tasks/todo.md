@@ -7,6 +7,24 @@ Last updated: 2026-05-20 (pilot-hardening golden live-shape samples and stale Fl
 
 ---
 
+## Active - Hermes fleet upgrade train (2026-05-20)
+
+**Drift-check tag:** extends-Hermes
+
+Hermes-first summary: reuse Hermes source, deployed Shift Agent patch gates, tarball deploy, env/config gates, and current VPS service layout. Net-new scope is fleet-level read-only reporting and weekly promotion planning for Srilu, Main, and VPIN.
+
+- [x] Write plan: `tasks/hermes-fleet-upgrade-train-plan-2026-05-20.md`.
+- [x] Add read-only fleet check + promotion-plan CLI: `tools/hermes-fleet-upgrade.py`.
+- [x] Enhance fleet check with high-risk Hermes upstream path diffing and update-risk classification.
+- [x] Add report-only skill/plugin sync posture report.
+- [x] Add Srilu/VPIN normalization checklist: `tasks/hermes-fleet-normalization-2026-05-20.md`.
+- [x] Add regression coverage for host order, health classification, secret-safe JSON, promotion gates, LF-only remote SSH probe payload, installed patch-gate baseline guard, high-risk path classification, skill-sync report, and normalization report.
+- [x] Create app automations:
+  - Daily Hermes fleet check: active, Srilu/Main/VPIN, 08:00 local daily.
+  - Weekly Hermes promotion plan: active, Monday 09:00 local, report-only.
+- [x] Review first live fleet-check output: Main is yellow (upstream high-risk changes + persistent standalone patch-gate availability); Srilu is red (bridge/env/deploy-marker/patch-gate/cockpit posture); VPIN is red (env/deploy-marker/patch-gate/cockpit posture).
+- [ ] Normalize Srilu/VPIN runtime posture before adding any execute-mode upgrade command.
+
 ## Active - Hermes SMB operating layer strategy (2026-05-14)
 
 **Drift-check tag:** extends-Hermes
