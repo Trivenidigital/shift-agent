@@ -25,6 +25,17 @@ Hermes-first summary: reuse Hermes source, deployed Shift Agent patch gates, tar
 - [x] Review first live fleet-check output: Main is yellow (upstream high-risk changes + persistent standalone patch-gate availability); Srilu is red (bridge/env/deploy-marker/patch-gate/cockpit posture); VPIN is red (env/deploy-marker/patch-gate/cockpit posture).
 - [ ] Normalize Srilu/VPIN runtime posture before adding any execute-mode upgrade command.
 
+## Active - Flyer Studio autonomous improvement train (2026-05-20)
+
+**Drift-check tag:** extends-Hermes
+
+Hermes-first summary: reuse Hermes scheduling, repo-backed task docs, existing Flyer golden/source-contract tests, reviewer-first PR flow, and the operator brief. Net-new scope is deterministic offline policy/report tooling; no deploy, VPS mutation, customer mutation, GitHub mutation, or live auto-merge runner is enabled.
+
+- [ ] v0.1 policy/spec + offline report/eligibility tooling: `docs/superpowers/specs/2026-05-20-autonomous-ops-control-layer-design.md`, `tools/flyer-autonomous-train.py`, and operator brief integration.
+- [ ] Daily/8-hour runner only after report output is stable and reviewed.
+- [ ] Auto-merge runner only after two-reviewer policy gates are proven against trusted, commit-bound metadata.
+- [ ] No autonomous deploy.
+
 ## Active - Operator ops brief via Hermes memory (2026-05-20)
 
 **Drift-check tag:** extends-Hermes

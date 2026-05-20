@@ -7,6 +7,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = REPO_ROOT / "tools" / "hermes-fleet-upgrade.py"
+NORMALIZATION_FIXTURES = REPO_ROOT / "tests" / "fixtures" / "hermes_fleet_normalization"
 
 
 def load_module():
@@ -242,6 +243,103 @@ def test_normalization_report_uses_main_as_reference():
     assert "env symlink" in report
     assert "WhatsApp bridge" in report
     assert "patch gate" in report
+
+
+def test_normalization_report_accepts_offline_snapshots_and_renders_roles():
+    module = load_module()
+
+    snapshots = module.load_normalization_snapshot_payload(NORMALIZATION_FIXTURES / "blocked_snapshots.json")
+    report = module.render_normalization_markdown(snapshots)
+
+    assert "Srilu" in report
+    assert "Main" in report
+    assert "VPIN" in report
+    assert "canary" in report
+
+
+def test_promotion_readiness_requires_srilu_green_before_main_or_vpin():
+    module = load_module()
+
+    payload = module.normalization_payload(
+        module.load_normalization_snapshot_payload(NORMALIZATION_FIXTURES / "blocked_snapshots.json")
+    )
+
+    assert payload["promotion_readiness"]["srilu_to_main"]["ready"] is False
+    assert "Srilu must be green before Main promotion" in payload["promotion_readiness"]["srilu_to_main"]["reasons"]
+
+
+def test_promotion_readiness_turns_green_when_contract_is_green():
+    module = load_module()
+
+    payload = module.normalization_payload(
+        module.load_normalization_snapshot_payload(NORMALIZATION_FIXTURES / "green_snapshots.json")
+    )
+
+    assert payload["promotion_readiness"]["srilu_to_main"]["ready"] is True
+    assert payload["promotion_readiness"]["main_to_vpin"]["ready"] is True
+    assert payload["promotion_readiness"]["docker_decision"]["status"] == "deferred"
+
+
+def test_normalization_report_does_not_include_mutation_commands():
+    module = load_module()
+
+    snapshots = module.load_normalization_snapshot_payload(NORMALIZATION_FIXTURES / "blocked_snapshots.json")
+    report = module.render_normalization_markdown(snapshots)
+    forbidden = ["systemctl restart", "scp ", "rsync", "deploy.sh", "git checkout", "hermes update"]
+
+    assert not any(token in report for token in forbidden)
+
+
+def test_normalization_report_cli_requires_snapshots_json(monkeypatch):
+    module = load_module()
+    monkeypatch.setattr(module, "probe_host", lambda *_args, **_kwargs: pytest.fail("must not SSH in normalization-report v0.1"))
+
+    assert module.main(["normalization-report", "--format", "json"]) == 2
+
+
+def test_normalization_report_cli_uses_snapshot_fixture_without_ssh(monkeypatch, tmp_path):
+    module = load_module()
+    monkeypatch.setattr(module, "probe_host", lambda *_args, **_kwargs: pytest.fail("must not SSH when snapshots are provided"))
+    out = tmp_path / "nested" / "fleet.json"
+
+    code = module.main([
+        "normalization-report",
+        "--format",
+        "json",
+        "--snapshots-json",
+        str(NORMALIZATION_FIXTURES / "blocked_snapshots.json"),
+        "--out",
+        str(out),
+    ])
+
+    assert code == 0
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert "hosts" in payload
+    assert "promotion_readiness" in payload
+    assert payload["hosts"][0]["health"]["status"] == "red"
+
+
+def test_normalization_payload_blocks_stale_snapshot():
+    module = load_module()
+    snapshots = module.load_normalization_snapshot_payload(NORMALIZATION_FIXTURES / "blocked_snapshots.json")
+
+    payload = module.normalization_payload(snapshots)
+
+    vpin = next(host for host in payload["hosts"] if host["label"] == "VPIN")
+    assert any("snapshot stale" in blocker for blocker in vpin["health"]["blockers"])
+    assert payload["promotion_readiness"]["main_to_vpin"]["ready"] is False
+
+
+def test_normalization_json_redacts_secret_like_fields():
+    module = load_module()
+    snapshots = module.load_normalization_snapshot_payload(NORMALIZATION_FIXTURES / "green_snapshots.json")
+    snapshots["hosts"][0]["OPENROUTER_API_KEY"] = "sk-secret"
+
+    payload = module.render_normalization_json(snapshots)
+
+    assert "OPENROUTER_API_KEY" not in payload
+    assert "sk-secret" not in payload
+    assert "secret" not in payload.lower()
 
 
 def test_remote_probe_script_is_lf_only_for_linux_bash():

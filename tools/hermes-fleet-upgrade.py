@@ -12,6 +12,7 @@ import subprocess
 import sys
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Iterable
 
 
@@ -407,6 +408,256 @@ def render_normalization_report(
     return "\n".join(lines) + "\n"
 
 
+def load_normalization_snapshot_payload(path: str | Path) -> dict[str, object]:
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if isinstance(payload, list):
+        return {"mode": "offline_snapshot", "generated_at": utc_now(), "hosts": payload}
+    if not isinstance(payload, dict):
+        return {"mode": "offline_snapshot", "generated_at": utc_now(), "hosts": []}
+    payload.setdefault("mode", "offline_snapshot")
+    payload.setdefault("generated_at", utc_now())
+    payload.setdefault("hosts", [])
+    return payload
+
+
+def _parse_utc(value: object) -> datetime | None:
+    if not value:
+        return None
+    text = str(value)
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _snapshot_age_hours(host: dict[str, object], generated_at: str) -> float | None:
+    checked = _parse_utc(host.get("checked_at"))
+    generated = _parse_utc(generated_at)
+    if checked is None or generated is None:
+        return None
+    return (generated - checked).total_seconds() / 3600
+
+
+def _host_snapshot_from_normalization(host: dict[str, object]) -> HostSnapshot:
+    return HostSnapshot(
+        alias=str(host.get("alias") or ""),
+        label=str(host.get("label") or host.get("alias") or ""),
+        role=str(host.get("role") or ""),
+        promotion_order=parse_int(str(host.get("promotion_order") or "0")),
+        hermes_commit=str(host.get("hermes_commit") or ""),
+        hermes_branch=str(host.get("hermes_branch") or ""),
+        gateway_status=str(host.get("gateway_status") or "unknown"),
+        cockpit_status=str(host.get("cockpit_status") or "unknown"),
+        bridge_status=str(host.get("bridge_status") or "unknown"),
+        env_symlink_status=str(host.get("env_symlink_status") or "unknown"),
+        latest_shift_agent_deploy=str(host.get("latest_shift_agent_deploy") or ""),
+        skills_count=parse_int(str(host.get("skills_count") or "0")),
+        plugins_count=parse_int(str(host.get("plugins_count") or "0")),
+        patch_gate_status=str(host.get("patch_gate_status") or "unknown"),
+        checked_at=str(host.get("checked_at") or ""),
+        changed_paths=tuple(str(path) for path in host.get("changed_paths") or ()),
+        expects_whatsapp=bool(host.get("expects_whatsapp", True)),
+    )
+
+
+def _backup_blockers(host: dict[str, object]) -> list[str]:
+    status = str(host.get("backup_status") or "unknown").lower()
+    age = host.get("backup_age_hours")
+    blockers: list[str] = []
+    if status != "fresh":
+        blockers.append(f"backup status {status}")
+    try:
+        numeric_age = float(age)
+    except (TypeError, ValueError):
+        blockers.append("backup age unknown")
+    else:
+        if numeric_age > 24:
+            blockers.append(f"backup stale: {numeric_age:g}h old")
+    return blockers
+
+
+def _normalization_host_report(host: dict[str, object], generated_at: str) -> dict[str, object]:
+    snapshot = _host_snapshot_from_normalization(host)
+    health = classify_snapshot(snapshot)
+    blockers = list(health.blockers)
+    warnings = list(health.warnings)
+    age = _snapshot_age_hours(host, generated_at)
+    if age is None:
+        blockers.append("snapshot checked_at missing")
+    elif age < 0:
+        warnings.append("snapshot checked_at is newer than generated_at")
+    elif age > 24:
+        blockers.append(f"snapshot stale: {age:g}h old")
+    blockers.extend(_backup_blockers(host))
+    status = "red" if blockers else ("yellow" if warnings else "green")
+    summary = "blocked" if blockers else ("attention" if warnings else "ready")
+    return {
+        "alias": snapshot.alias,
+        "label": snapshot.label,
+        "role": snapshot.role,
+        "promotion_order": snapshot.promotion_order,
+        "hermes_commit": snapshot.hermes_commit,
+        "gateway_status": snapshot.gateway_status,
+        "cockpit_status": snapshot.cockpit_status,
+        "bridge_status": snapshot.bridge_status,
+        "env_symlink_status": snapshot.env_symlink_status,
+        "latest_shift_agent_deploy": snapshot.latest_shift_agent_deploy,
+        "skills_count": snapshot.skills_count,
+        "plugins_count": snapshot.plugins_count,
+        "patch_gate_status": snapshot.patch_gate_status,
+        "checked_at": snapshot.checked_at,
+        "backup_status": str(host.get("backup_status") or "unknown"),
+        "backup_age_hours": host.get("backup_age_hours"),
+        "health": {
+            "status": status,
+            "summary": summary,
+            "blockers": blockers,
+            "warnings": warnings,
+        },
+    }
+
+
+def _required_host_reasons(hosts_by_label: dict[str, dict[str, object]]) -> list[str]:
+    missing = [label for label in ("srilu", "main", "vpin") if label not in hosts_by_label]
+    return [f"required host missing: {label.title()}" for label in missing]
+
+
+def _host_ready_for_promotion(host: dict[str, object] | None) -> tuple[bool, list[str]]:
+    if host is None:
+        return False, ["host missing"]
+    health = host.get("health") if isinstance(host.get("health"), dict) else {}
+    blockers = list(health.get("blockers") or [])
+    if blockers:
+        return False, [str(blocker) for blocker in blockers]
+    return True, []
+
+
+def _promotion_readiness(hosts: list[dict[str, object]]) -> dict[str, object]:
+    hosts_by_label = {str(host.get("label") or "").lower(): host for host in hosts}
+    required_reasons = _required_host_reasons(hosts_by_label)
+    srilu_ok, srilu_reasons = _host_ready_for_promotion(hosts_by_label.get("srilu"))
+    main_ok, main_reasons = _host_ready_for_promotion(hosts_by_label.get("main"))
+    vpin_ok, vpin_reasons = _host_ready_for_promotion(hosts_by_label.get("vpin"))
+
+    srilu_to_main_reasons = []
+    if not srilu_ok:
+        srilu_to_main_reasons.append("Srilu must be green before Main promotion")
+        srilu_to_main_reasons.extend(srilu_reasons)
+    if not main_ok:
+        srilu_to_main_reasons.append("Main normalization contract must be green")
+        srilu_to_main_reasons.extend(main_reasons)
+    srilu_to_main_reasons.extend(required_reasons)
+
+    main_to_vpin_reasons = []
+    if not main_ok:
+        main_to_vpin_reasons.append("Main normalization contract must be green")
+        main_to_vpin_reasons.extend(main_reasons)
+    if not vpin_ok:
+        main_to_vpin_reasons.append("VPIN normalization contract must be green")
+        main_to_vpin_reasons.extend(vpin_reasons)
+    main_to_vpin_reasons.extend(required_reasons)
+
+    return {
+        "srilu_to_main": {
+            "ready": not srilu_to_main_reasons,
+            "reasons": srilu_to_main_reasons,
+        },
+        "main_to_vpin": {
+            "ready": not main_to_vpin_reasons,
+            "reasons": main_to_vpin_reasons,
+        },
+        "docker_decision": {
+            "status": "deferred",
+            "until": [
+                "normalization contract is green",
+                "one clean Srilu -> Main cycle completes",
+                "backup/restore story is proven",
+            ],
+        },
+    }
+
+
+def normalization_payload(snapshot_payload: dict[str, object]) -> dict[str, object]:
+    generated_at = str(snapshot_payload.get("generated_at") or utc_now())
+    raw_hosts = snapshot_payload.get("hosts") if isinstance(snapshot_payload.get("hosts"), list) else []
+    host_reports = [
+        _normalization_host_report(host, generated_at)
+        for host in raw_hosts
+        if isinstance(host, dict)
+    ]
+    host_reports.sort(key=lambda host: parse_int(str(host.get("promotion_order") or "0")))
+    return {
+        "generated_at": generated_at,
+        "mode": "offline_snapshot",
+        "hosts": host_reports,
+        "promotion_readiness": _promotion_readiness(host_reports),
+    }
+
+
+def render_normalization_json(snapshot_payload: dict[str, object]) -> str:
+    return json.dumps(normalization_payload(snapshot_payload), indent=2, sort_keys=True) + "\n"
+
+
+def render_normalization_markdown(snapshot_payload: dict[str, object]) -> str:
+    payload = normalization_payload(snapshot_payload)
+    rows = [
+        "| Host | Role | Health | Gateway | Bridge | Patch gate | Backup |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    details: list[str] = []
+    for host in payload["hosts"]:
+        health = host["health"]
+        rows.append(
+            "| {label} | {role} | {status} - {summary} | {gateway} | {bridge} | {patch} | {backup} |".format(
+                label=host["label"],
+                role=host["role"],
+                status=health["status"],
+                summary=health["summary"],
+                gateway=host["gateway_status"],
+                bridge=host["bridge_status"],
+                patch=host["patch_gate_status"],
+                backup=host["backup_status"],
+            )
+        )
+        for blocker in health["blockers"]:
+            details.append(f"- {host['label']} BLOCKER: {blocker}")
+        for warning in health["warnings"]:
+            details.append(f"- {host['label']} WARN: {warning}")
+
+    readiness = payload["promotion_readiness"]
+    lines = [
+        "# Hermes Fleet Normalization Report",
+        "",
+        f"- Generated: {payload['generated_at']}",
+        "- Mode: offline snapshot; no remote host probe is performed.",
+        "",
+        "## Host Contract",
+        "",
+        *rows,
+        "",
+        "## Promotion Readiness",
+        "",
+    ]
+    for key, label in (("srilu_to_main", "Srilu -> Main"), ("main_to_vpin", "Main -> VPIN")):
+        item = readiness[key]
+        state = "ready" if item["ready"] else "blocked"
+        lines.append(f"- {label}: {state}")
+        for reason in item["reasons"]:
+            lines.append(f"  - {reason}")
+    docker = readiness["docker_decision"]
+    lines.append(f"- Docker: {docker['status']}")
+    for reason in docker["until"]:
+        lines.append(f"  - {reason}")
+    if details:
+        lines.extend(["", "## Details", "", *details])
+    return "\n".join(lines) + "\n"
+
+
 def normalization_gaps(snapshot: HostSnapshot, reference: HostSnapshot | None) -> list[str]:
     gaps: list[str] = []
     if snapshot.env_symlink_status != "ok":
@@ -680,15 +931,21 @@ def run_skill_sync_report(args: argparse.Namespace) -> int:
 
 
 def run_normalization_report(args: argparse.Namespace) -> int:
-    hosts = parse_hosts(args.hosts)
-    snapshots = [probe_host(host, timeout=args.timeout) for host in hosts]
-    output = render_normalization_report(snapshots)
+    if not args.snapshots_json:
+        print("error: normalization-report v0.1 requires --snapshots-json", file=sys.stderr)
+        return 2
+    snapshots = load_normalization_snapshot_payload(args.snapshots_json)
+    if args.format == "json":
+        output = render_normalization_json(snapshots)
+    else:
+        output = render_normalization_markdown(snapshots)
     write_or_print(output, args.out)
     return 0
 
 
 def write_or_print(output: str, path: str | None) -> None:
     if path:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(output)
     else:
@@ -724,6 +981,8 @@ def build_parser() -> argparse.ArgumentParser:
     normalize = subparsers.add_parser("normalization-report", help="render Srilu/Main/VPIN posture alignment checklist")
     normalize.add_argument("--hosts", help="comma-separated SSH aliases; default is Srilu/Main/VPIN")
     normalize.add_argument("--timeout", type=int, default=45)
+    normalize.add_argument("--format", choices=["markdown", "json"], default="markdown")
+    normalize.add_argument("--snapshots-json", type=Path)
     normalize.add_argument("--out")
     normalize.set_defaults(func=run_normalization_report)
 
