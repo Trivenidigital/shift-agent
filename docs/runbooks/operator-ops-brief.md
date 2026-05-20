@@ -31,6 +31,7 @@ The script renders Markdown from existing sources and is safe to run locally or 
 - `tasks/todo.md`: active backlog and unchecked operational signals.
 - Optional fleet JSON from `python tools/hermes-fleet-upgrade.py check --format json`.
 - Optional Flyer autonomous train JSON from `python tools/flyer-autonomous-train.py report --offline --format json`.
+- Optional Flyer self-evaluation JSON from `python tools/flyer-self-evaluation.py --format json`.
 - Optional fleet normalization JSON from `python tools/hermes-fleet-upgrade.py normalization-report --format json --snapshots-json <file>`.
 - Optional automation configs from `$CODEX_HOME/automations` or an explicit directory.
 - Optional git status/log from the checkout where the script runs.
@@ -59,6 +60,14 @@ python tools/hermes-fleet-upgrade.py normalization-report --format json --snapsh
 python tools/operator-brief.py --repo-root . --flyer-train-json .tmp\flyer-train.json --fleet-normalization-json .tmp\fleet-normalization.json --out .operator-brief.md
 ```
 
+Render with Flyer self-evaluation incidents from local state:
+
+```powershell
+New-Item -ItemType Directory -Force .tmp
+python tools/flyer-self-evaluation.py --format json --out .tmp\flyer-self-evaluation.json
+python tools/operator-brief.py --repo-root . --flyer-evaluation-json .tmp\flyer-self-evaluation.json --out .operator-brief.md
+```
+
 Skip git state when running inside a disposable automation worktree:
 
 ```powershell
@@ -72,9 +81,10 @@ For a Hermes skill or scheduled automation, keep the prompt thin:
 1. Pull or use a fresh repo checkout.
 2. Optionally run `tools/hermes-fleet-upgrade.py check --format json` and save the JSON.
 3. Optionally run `tools/flyer-autonomous-train.py report --offline --format json` and save the JSON.
-4. Optionally feed a previously collected fleet normalization snapshot to `tools/hermes-fleet-upgrade.py normalization-report --format json --snapshots-json ...`.
-5. Run `tools/operator-brief.py`.
-6. Return the Markdown to the operator chat.
+4. Optionally run `tools/flyer-self-evaluation.py --format json` and save the JSON.
+5. Optionally feed a previously collected fleet normalization snapshot to `tools/hermes-fleet-upgrade.py normalization-report --format json --snapshots-json ...`.
+6. Run `tools/operator-brief.py`.
+7. Return the Markdown to the operator chat.
 
 Do not let the skill edit `tasks/operator-decisions.md` automatically in v1. The operator or Codex can update that file deliberately in normal PR flow.
 
@@ -84,6 +94,7 @@ Do not let the skill edit `tasks/operator-decisions.md` automatically in v1. The
 - No SSH is performed by this script.
 - No deploy, merge, branch promotion, state repair, or VPS mutation is performed by this script.
 - The autonomous train report is advisory. It does not create PRs, merge PRs, deploy code, or mutate GitHub/VPS/customer state.
+- The Flyer self-evaluation report is advisory. It does not create fixtures, edit prompts, mutate projects, close manual queue rows, or send customer messages.
 - The brief is not evidence by itself. Use the linked task docs, PRs, git history, and fleet report for evidence.
 
 ## Eligibility Command — Strict-Mode Contract

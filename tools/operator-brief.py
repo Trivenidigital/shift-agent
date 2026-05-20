@@ -49,6 +49,7 @@ class Brief:
     todo_signals: list[str]
     fleet_lines: list[str]
     flyer_train_lines: list[str]
+    flyer_evaluation_lines: list[str]
     fleet_normalization_lines: list[str]
     automation_lines: list[str]
     git: GitSummary | None
@@ -175,6 +176,43 @@ def summarize_flyer_train_report(path: Path | None) -> list[str]:
     return lines
 
 
+def summarize_flyer_evaluation_report(path: Path | None) -> list[str]:
+    if path is None:
+        return []
+    if not path.exists():
+        return [f"Flyer self-evaluation report file not found: {path}"]
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return [f"Flyer self-evaluation report is not valid JSON: {exc}"]
+
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    lines = [
+        "Status: "
+        f"{payload.get('status', 'unknown')}; "
+        f"incidents={summary.get('incident_count', 0)}; "
+        f"high_or_critical={summary.get('high_or_critical_count', 0)}"
+    ]
+    for item in (payload.get("incidents") or [])[:5]:
+        if not isinstance(item, dict):
+            continue
+        severity = str(item.get("severity") or "unknown").upper()
+        kind = str(item.get("type") or "unknown")
+        project = f" {item.get('project_id')}" if item.get("project_id") else ""
+        action = str(item.get("suggested_action") or "review")
+        lines.append(f"{severity}: {kind}{project} - {action}")
+    for item in (payload.get("eval_candidates") or [])[:5]:
+        if not isinstance(item, dict):
+            continue
+        category = str(item.get("category") or "unknown")
+        project = f" {item.get('project_id')}" if item.get("project_id") else ""
+        fixture = str(item.get("suggested_fixture") or "tests/fixtures/flyer_golden/")
+        lines.append(f"Eval: {category}{project} -> {fixture}")
+    for item in payload.get("needs_srini") or []:
+        lines.append(f"Needs Srini: {item}")
+    return lines
+
+
 def summarize_fleet_normalization_report(path: Path | None) -> list[str]:
     if path is None:
         return []
@@ -261,6 +299,7 @@ def build_brief(
     todo_path: Path | None = None,
     fleet_json_path: Path | None = None,
     flyer_train_json_path: Path | None = None,
+    flyer_evaluation_json_path: Path | None = None,
     fleet_normalization_json_path: Path | None = None,
     automations_dir: Path | None = None,
     generated_date: str | None = None,
@@ -275,6 +314,7 @@ def build_brief(
         todo_signals=load_todo_signals(todo_file),
         fleet_lines=summarize_fleet_report(fleet_json_path),
         flyer_train_lines=summarize_flyer_train_report(flyer_train_json_path),
+        flyer_evaluation_lines=summarize_flyer_evaluation_report(flyer_evaluation_json_path),
         fleet_normalization_lines=summarize_fleet_normalization_report(fleet_normalization_json_path),
         automation_lines=load_automations(automation_root),
         git=load_git_summary(repo_root) if include_git else None,
@@ -307,6 +347,8 @@ def render_markdown(brief: Brief) -> str:
     append_section(lines, "Fleet Status", brief.fleet_lines, "No fleet status available.")
     if brief.flyer_train_lines:
         append_section(lines, "Flyer Autonomous Train", brief.flyer_train_lines, "No Flyer train report provided.")
+    if brief.flyer_evaluation_lines:
+        append_section(lines, "Flyer Self-Evaluation", brief.flyer_evaluation_lines, "No Flyer self-evaluation report provided.")
     if brief.fleet_normalization_lines:
         append_section(lines, "Fleet Normalization", brief.fleet_normalization_lines, "No fleet normalization report provided.")
     append_section(lines, "Automations", brief.automation_lines, "No automation configs found.")
@@ -341,6 +383,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--todo", type=Path, default=None)
     parser.add_argument("--fleet-json", type=Path, default=None)
     parser.add_argument("--flyer-train-json", type=Path, default=None)
+    parser.add_argument("--flyer-evaluation-json", type=Path, default=None)
     parser.add_argument("--fleet-normalization-json", type=Path, default=None)
     parser.add_argument("--automations-dir", type=Path, default=None)
     parser.add_argument("--date", default=None, help="Brief date, YYYY-MM-DD. Defaults to today.")
@@ -357,6 +400,7 @@ def main(argv: list[str] | None = None) -> int:
         todo_path=args.todo,
         fleet_json_path=args.fleet_json,
         flyer_train_json_path=args.flyer_train_json,
+        flyer_evaluation_json_path=args.flyer_evaluation_json,
         fleet_normalization_json_path=args.fleet_normalization_json,
         automations_dir=args.automations_dir,
         generated_date=args.date,

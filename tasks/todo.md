@@ -36,6 +36,16 @@ Hermes-first summary: reuse Hermes scheduling, repo-backed task docs, existing F
 - [ ] Auto-merge runner only after two-reviewer policy gates are proven against trusted, commit-bound metadata.
 - [ ] No autonomous deploy.
 
+## Active - Flyer Studio self-evaluation loop (2026-05-20)
+
+**Drift-check tag:** extends-Hermes
+
+Hermes-first summary: reuse Hermes/Shift WhatsApp ingress, Flyer `projects.json`, `decisions.log`, existing golden/source-contract/visual-QA tests, and the operator brief. Net-new scope is a deterministic read-only self-evaluation report that turns runtime evidence into incidents and suggested eval/backlog candidates. No production mutation, no customer messaging, and no prompt/SKILL/model/code self-modification is enabled.
+
+- [ ] v0.1 report-only wiring: `tools/flyer-self-evaluation.py` reads Flyer project state + decisions.log and emits incidents for stale manual source edits, customer-copy internal leaks, missing source contracts, missing source-aware QA, repeated check-ins, and stuck generation states.
+- [ ] Operator brief integration: optional `--flyer-evaluation-json` section surfaces self-evaluation status, top incidents, eval candidates, and Needs Srini items.
+- [ ] Future slice: optional fixture-generation proposal mode after report output stabilizes; must remain PR/review gated and never mutate production behavior directly.
+
 ## Active - Operator ops brief via Hermes memory (2026-05-20)
 
 **Drift-check tag:** extends-Hermes
