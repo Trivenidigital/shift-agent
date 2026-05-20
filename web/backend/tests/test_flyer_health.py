@@ -298,6 +298,36 @@ def test_explicit_openai_source_edit_present_is_green(tmp_path, monkeypatch):
     assert source_p["key_present"] is True
 
 
+def test_explicit_openai_source_edit_policy_present_is_green(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-real-openai-key")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    _isolate_env_files(monkeypatch, tmp_path)
+    _isolate_deploy_markers(monkeypatch, tmp_path)
+    _mock_flyer_config(monkeypatch, {
+        "enabled": True,
+        "source_edit_provider_policy": {
+            "default": {
+                "provider": "openai",
+                "model": "gpt-image-1",
+                "quality": "high",
+            },
+            "emergency_fallback": {
+                "provider": "manual_review",
+                "model": "manual_review",
+                "quality": "high",
+            },
+        },
+    })
+
+    from app.routers import flyer
+
+    source_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "source_edit_provider")
+    assert source_p["severity"] == "green"
+    assert source_p["key_present"] is True
+    assert source_p["key_source"] == "process_env"
+    assert source_p["model_config"]["source_edit_provider"] == "openai"
+
+
 def test_explicit_openrouter_source_edit_present_is_green(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-real-openrouter-key")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)

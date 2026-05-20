@@ -126,6 +126,41 @@ def test_source_edit_preflight_accepts_available_image(tmp_path, monkeypatch):
     assert reason_code == ""
 
 
+def test_source_edit_preflight_accepts_explicit_openai_policy(tmp_path, monkeypatch):
+    actions = _load_actions_module()
+    _patch_config(actions, tmp_path, flyer={
+        "enabled": True,
+        "source_edit_provider_policy": {
+            "default": {
+                "provider": "openai",
+                "model": "gpt-image-1",
+                "quality": "high",
+            },
+            "emergency_fallback": {
+                "provider": "manual_review",
+                "model": "manual_review",
+                "quality": "high",
+            },
+        },
+    })
+    image = tmp_path / "reference.png"
+    image.write_bytes(b"png")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    ok, detail, reason_code = actions.flyer_source_edit_preflight({
+        "assets": [{
+            "kind": "reference_image",
+            "path": str(image),
+            "mime_type": "image/png",
+        }]
+    })
+
+    assert ok is True
+    assert detail == "ready"
+    assert reason_code == ""
+
+
 def test_source_edit_preflight_requires_uploaded_reference(tmp_path, monkeypatch):
     """Regression: a project with no reference_image asset must NOT enter the
     source-edit provider path. Missing reference → reference_provider_unavailable
