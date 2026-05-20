@@ -55,6 +55,41 @@ def test_unresolved_blocker_severity_finding_blocks_same_as_high_medium():
     assert "unresolved high/medium review finding" in result["reasons"]
 
 
+def test_strict_mode_help_documents_automation_consumer_requirement():
+    """R1-H1 doc contract: a future contributor must not silently weaken
+    --strict's customer-facing language. The help text must (a) state that
+    automation consumers MUST use it, (b) name the specific non-zero exit
+    code so runners can match exactly, and (c) preserve the advisory-by-
+    default carve-out so operators don't change their workflow."""
+    result = subprocess.run(
+        [sys.executable, str(MODULE_PATH), "eligibility", "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    help_text = result.stdout
+
+    # (a) explicit automation/runner audience callout.
+    assert "automation" in help_text.lower() or "runner" in help_text.lower(), (
+        f"--strict help must explicitly name automation/runner consumers; got:\n{help_text}"
+    )
+    assert "REQUIRED" in help_text, (
+        f"--strict help must mark itself REQUIRED for the runner contract; got:\n{help_text}"
+    )
+
+    # (b) explicit exit code 3 callout.
+    assert "exit 3" in help_text or "exits 3" in help_text, (
+        f"--strict help must name the specific non-zero exit code (3); got:\n{help_text}"
+    )
+
+    # (c) default-mode advisory carve-out still documented.
+    assert "advisory" in help_text.lower() or "default" in help_text.lower(), (
+        f"--strict help must preserve the advisory-default carve-out so operators know they can omit it; got:\n{help_text}"
+    )
+
+
 def test_strict_mode_exits_non_zero_when_ineligible(tmp_path):
     """R1-H1: automation runners need to distinguish 'policy ran cleanly,
     PR eligible' from 'policy ran cleanly, PR rejected' via exit code.

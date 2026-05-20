@@ -575,7 +575,15 @@ def build_parser() -> argparse.ArgumentParser:
     eligibility.add_argument(
         "--strict",
         action="store_true",
-        help="exit 3 when the PR is ineligible (default: always exit 0; advisory only)",
+        help=(
+            "REQUIRED for automation/runner consumers: exit 3 when the PR "
+            "is ineligible so a non-zero exit signals 'do not merge'. "
+            "Eligible PRs still exit 0; argparse errors exit 2. "
+            "DEFAULT (no flag) is report-only/advisory and always exits 0 "
+            "regardless of eligibility — humans reading the JSON output. "
+            "If you are scripting a merge gate around this command, pass "
+            "--strict; if you are an operator inspecting the verdict, omit it."
+        ),
     )
     eligibility.add_argument(
         "--cooldown-state",

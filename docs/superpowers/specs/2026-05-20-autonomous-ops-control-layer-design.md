@@ -63,11 +63,32 @@ File: `tools/flyer-autonomous-train.py`
 
 Commands:
 
-- `eligibility --metadata <path> [--format json]`
+- `eligibility --metadata <path> [--format json] [--strict] [--cooldown-state <path>]`
 - `report --repo-root <path> --offline [--state-json <path>] [--format markdown|json] [--out <path>]`
 - `next-candidate --repo-root <path> --offline [--state-json <path>] [--format json]`
 
 `--offline` is required for `report` and `next-candidate` in v0.1. `--out` creates parent directories and writes UTF-8 with LF line endings.
+
+#### Eligibility Exit-Code Contract (binding for automation consumers)
+
+The `eligibility` subcommand has two distinct consumer modes, distinguished by the `--strict` flag. **Automation/runner consumers MUST pass `--strict`. Human operators inspecting the JSON output MUST NOT.**
+
+| Exit code | Meaning | When |
+|---|---|---|
+| `0` | Policy ran cleanly. | Always, in default (advisory) mode. In `--strict` mode, only when the PR is **eligible**. |
+| `2` | Argparse / invocation error. | Bad/missing flags, unreadable file, etc. Reserved by `argparse`. |
+| `3` | Policy ran cleanly AND the PR is **ineligible**. | Only when `--strict` is set. |
+
+Rationale: a runner that fans this command into a merge gate needs the exit code to encode the verdict. Without `--strict`, a runner cannot distinguish "policy approved" from "policy rejected" without re-parsing JSON, which invites silent bypass. Default-mode (`0` always) is preserved so human operators can pipe `… | jq` without worrying about subshells failing on a normal "this PR isn't ready" verdict.
+
+The `--strict` contract is also pinned by tests:
+
+- `test_strict_mode_exits_non_zero_when_ineligible` exercises:
+  - ineligible + `--strict` → exit 3
+  - eligible + `--strict` → exit 0
+  - ineligible + no flag → exit 0 (backwards-compat / advisory)
+
+If a future change re-routes exit codes (e.g., 1 for ineligible instead of 3), the test must be updated explicitly so this contract is renegotiated, not silently mutated.
 
 #### PR Metadata Contract
 

@@ -86,6 +86,23 @@ Do not let the skill edit `tasks/operator-decisions.md` automatically in v1. The
 - The autonomous train report is advisory. It does not create PRs, merge PRs, deploy code, or mutate GitHub/VPS/customer state.
 - The brief is not evidence by itself. Use the linked task docs, PRs, git history, and fleet report for evidence.
 
+## Eligibility Command — Strict-Mode Contract
+
+`tools/flyer-autonomous-train.py eligibility` has TWO consumer modes:
+
+- **Default (no flag) — for humans.** Always exits `0`. Operator reads the JSON output to see verdict + reasons. Suitable for `… | jq …` pipelines that should not fail on a normal "PR not ready" verdict.
+- **`--strict` — REQUIRED for automation/runners.** Exits `3` when the PR is ineligible, `0` when eligible, `2` on argparse error. A merge-gate script MUST pass `--strict` so its `if !$?; then abort; fi` actually fires when the policy rejects the PR.
+
+If you are wiring this command into a Hermes automation or any CI/runner glue, you MUST pass `--strict`. Omitting it produces a "policy-approved" exit code for every input regardless of verdict, which silently bypasses the gate.
+
+```powershell
+# Automation / runner — strict
+python tools\flyer-autonomous-train.py eligibility --metadata pr.json --strict
+
+# Operator inspecting verdict — advisory
+python tools\flyer-autonomous-train.py eligibility --metadata pr.json
+```
+
 ## Promotion Criteria For Chat Posting
 
 Only add direct chat delivery after this Markdown-only version proves useful for several runs and the operator confirms:
