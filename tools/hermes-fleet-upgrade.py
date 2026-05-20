@@ -531,6 +531,10 @@ def _host_ready_for_promotion(host: dict[str, object] | None) -> tuple[bool, lis
     if host is None:
         return False, ["host missing"]
     health = host.get("health") if isinstance(host.get("health"), dict) else {}
+    if health.get("status") != "green":
+        reasons = [str(blocker) for blocker in health.get("blockers") or []]
+        reasons.extend(str(warning) for warning in health.get("warnings") or [])
+        return False, reasons or [f"host health is {health.get('status', 'unknown')}"]
     blockers = list(health.get("blockers") or [])
     if blockers:
         return False, [str(blocker) for blocker in blockers]

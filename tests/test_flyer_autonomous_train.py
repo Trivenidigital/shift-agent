@@ -85,6 +85,58 @@ def test_unsafe_changed_path_blocks_even_with_safe_category():
     assert "blocked path: tools/build-deploy-tarball.sh" in result["reasons"]
 
 
+def test_non_canonical_changed_path_is_rejected_before_prefix_policy():
+    module = load_module()
+    metadata = load_fixture("eligible_pr.json")
+    metadata["changed_files"] = ["docs/../tools/build-deploy-tarball.sh"]
+    metadata["category"] = "backlog_docs_cleanup"
+
+    result = module.evaluate_pr(metadata)
+
+    assert result["eligible"] is False
+    assert "non-canonical changed path: docs/../tools/build-deploy-tarball.sh" in result["reasons"]
+
+
+def test_missing_changed_files_blocks_trusted_metadata():
+    module = load_module()
+    metadata = load_fixture("eligible_pr.json")
+    metadata["metadata_trusted_for_merge"] = True
+    metadata.pop("changed_files")
+
+    result = module.evaluate_pr(metadata)
+
+    assert result["eligible"] is False
+    assert "changed_files missing or malformed" in result["reasons"]
+    assert result["would_be_auto_merge_eligible_if_live_runner_enabled"] is False
+
+
+def test_stale_self_trusted_metadata_stays_advisory_only():
+    module = load_module()
+    metadata = load_fixture("eligible_pr.json")
+    metadata["metadata_trusted_for_merge"] = True
+    metadata["collected_at"] = "2020-01-01T00:00:00Z"
+
+    result = module.evaluate_pr(metadata)
+
+    assert result["eligible"] is False
+    assert "metadata collected_at is stale" in result["reasons"]
+    assert result["metadata_trusted_for_merge"] is False
+    assert result["would_be_auto_merge_eligible_if_live_runner_enabled"] is False
+
+
+def test_invalid_head_sha_and_wrong_base_branch_block():
+    module = load_module()
+    metadata = load_fixture("eligible_pr.json")
+    metadata["head_sha"] = "not-a-sha"
+    metadata["base"] = "release"
+
+    result = module.evaluate_pr(metadata)
+
+    assert result["eligible"] is False
+    assert "head_sha must be a 40-character hex SHA" in result["reasons"]
+    assert "base branch must be main" in result["reasons"]
+
+
 def test_allowed_fixture_pr_is_policy_eligible_but_advisory_only():
     module = load_module()
 
@@ -164,6 +216,19 @@ def test_next_candidate_does_not_select_landed_pr137_work():
 
     assert decision["id"] == "golden-live-shape-fixtures"
     assert decision["id"] != "pr137-source-contract-first"
+
+
+def test_next_candidate_skips_pr137_by_number_and_normalized_id():
+    module = load_module()
+    decision = module.choose_next_candidate({
+        "backlog": [
+            {"number": 137, "id": "source-contract-first", "category": "source_contract_visual_qa", "status": "open"},
+            {"id": "pr-137-source-contract-followup", "category": "source_contract_visual_qa", "status": "open"},
+            {"id": "copy-polish", "category": "customer_message_copy", "status": "open"},
+        ]
+    })
+
+    assert decision["id"] == "copy-polish"
 
 
 def test_offline_required_for_report_and_next_candidate():

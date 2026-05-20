@@ -280,6 +280,19 @@ def test_promotion_readiness_turns_green_when_contract_is_green():
     assert payload["promotion_readiness"]["docker_decision"]["status"] == "deferred"
 
 
+def test_promotion_readiness_requires_green_not_yellow_hosts():
+    module = load_module()
+    snapshots = module.load_normalization_snapshot_payload(NORMALIZATION_FIXTURES / "green_snapshots.json")
+    snapshots["hosts"][0]["patch_gate_status"] = "missing"
+
+    payload = module.normalization_payload(snapshots)
+
+    srilu = next(host for host in payload["hosts"] if host["label"] == "Srilu")
+    assert srilu["health"]["status"] == "yellow"
+    assert payload["promotion_readiness"]["srilu_to_main"]["ready"] is False
+    assert "Srilu must be green before Main promotion" in payload["promotion_readiness"]["srilu_to_main"]["reasons"]
+
+
 def test_normalization_report_does_not_include_mutation_commands():
     module = load_module()
 

@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -91,6 +92,40 @@ def normalize_path(path: object) -> str:
     return str(path or "").replace("\\", "/").strip()
 
 
+def is_canonical_git_path(path: str) -> bool:
+    if not path or path.startswith("/") or re.match(r"^[A-Za-z]:", path):
+        return False
+    parts = path.split("/")
+    return all(part not in {"", ".", ".."} for part in parts)
+
+
+def is_valid_sha(value: str) -> bool:
+    return bool(re.fullmatch(r"[0-9a-fA-F]{40}", value or ""))
+
+
+def parse_utc(value: object) -> datetime | None:
+    if not value:
+        return None
+    text = str(value)
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def metadata_is_fresh(value: object, *, max_age_hours: int = 24) -> bool:
+    collected = parse_utc(value)
+    if collected is None:
+        return False
+    age_hours = (datetime.now(timezone.utc) - collected).total_seconds() / 3600
+    return 0 <= age_hours <= max_age_hours
+
+
 def is_truthy(value: object) -> bool:
     return value is True or str(value).strip().lower() in {"true", "yes", "1"}
 
@@ -170,11 +205,16 @@ def derive_touched_subsystems(changed_files: Iterable[object]) -> list[str]:
 
 
 def blocked_path_reasons(changed_files: object, category: str) -> list[str]:
-    files = [normalize_path(path) for path in changed_files] if isinstance(changed_files, list) else []
+    if not isinstance(changed_files, list) or not changed_files:
+        return ["changed_files missing or malformed"]
+    files = [normalize_path(path) for path in changed_files]
     reasons: list[str] = []
     allowed_prefixes = CATEGORY_ALLOWED_PREFIXES.get(category, ())
     for path in files:
         if not path:
+            continue
+        if not is_canonical_git_path(path):
+            reasons.append(f"non-canonical changed path: {path}")
             continue
         if any(path.startswith(prefix) for prefix in BLOCKED_PATH_PREFIXES):
             reasons.append(f"blocked path: {path}")
@@ -213,6 +253,12 @@ def evaluate_pr(metadata: dict[str, object]) -> dict[str, object]:
         reasons.append("metadata source missing")
     if not metadata.get("collected_at"):
         reasons.append("metadata collected_at missing")
+    elif not metadata_is_fresh(metadata.get("collected_at")):
+        reasons.append("metadata collected_at is stale")
+    if not is_valid_sha(head_sha):
+        reasons.append("head_sha must be a 40-character hex SHA")
+    if metadata.get("base") not in {None, "main"}:
+        reasons.append("base branch must be main")
     if approvals < 2:
         reasons.append("requires at least 2 current autonomous reviewer approvals")
     if not metadata.get("is_open", True):
@@ -232,7 +278,11 @@ def evaluate_pr(metadata: dict[str, object]) -> dict[str, object]:
     if violates_risky_subsystem_cooldown(metadata):
         reasons.append("risky subsystem cooldown: cf-router hooks touched in back-to-back runs")
     eligible = not reasons
-    trusted = metadata.get("metadata_trusted_for_merge") is True
+    trusted = (
+        metadata.get("metadata_trusted_for_merge") is True
+        and "metadata collected_at is stale" not in reasons
+        and "head_sha must be a 40-character hex SHA" not in reasons
+    )
     return {
         "eligible": eligible,
         "decision": "policy_eligible_no_action" if eligible else "blocked",
@@ -334,7 +384,8 @@ def choose_next_candidate(state: dict[str, object]) -> dict[str, object]:
     for item in state.get("backlog") or []:
         if not isinstance(item, dict):
             continue
-        if item.get("status") == "merged" or str(item.get("id") or "").startswith("pr137"):
+        normalized_id = re.sub(r"[^a-z0-9]+", "", str(item.get("id") or "").lower())
+        if item.get("status") == "merged" or item.get("number") == 137 or normalized_id.startswith("pr137"):
             continue
         category = str(item.get("category") or "")
         if category in BLOCKED_CATEGORIES or category not in ALLOWED_CATEGORIES:
