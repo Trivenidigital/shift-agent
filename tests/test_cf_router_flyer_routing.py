@@ -2622,6 +2622,149 @@ def test_queued_source_edit_status_checkin_does_not_reenter_clarification(monkey
     assert result is None or result.get("action") == "skip"
 
 
+def test_source_vs_new_source_branch_calls_preflight_and_generates_when_ready(monkeypatch):
+    """Regression for PR #137 review finding 3: design said SOURCE routes
+    through the existing exact-edit handler at hooks.py:587-697 (preflight →
+    generate when ready). Initial implementation always sent the manual_edit
+    ack and never reached preflight/generation even with a valid OPENAI_API_KEY.
+    """
+    hooks, actions = _load_plugin_modules()
+
+    if not hasattr(hooks, "_try_flyer_source_vs_new_choice_intercept"):
+        pytest.skip("_try_flyer_source_vs_new_choice_intercept not yet implemented (Task 5)")
+
+    def fake_consume_source_vs_new(choice_token, trailing, *, chat_id, sender_phone):
+        return {
+            "chat_id": chat_id,
+            "sender_phone": sender_phone,
+            "customer": {"business_name": "Lakshmis Kitchen", "customer_id": "CUST0001"},
+            "raw_request": "Edit this flyer for Lakshmi's Kitchen.",
+            "media_path": "/tmp/ref.jpg",
+            "source_organization": "Triveni Express",
+            "original_intent": "exact_source_edit",
+            "customer_followup_instruction": trailing,
+            "choice": "source",
+        }
+
+    if not hasattr(actions, "consume_flyer_source_vs_new_choice"):
+        pytest.skip("consume_flyer_source_vs_new_choice not yet implemented")
+    monkeypatch.setattr(actions, "consume_flyer_source_vs_new_choice", fake_consume_source_vs_new)
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "trigger_create_flyer_project", lambda **_kw: (
+        True, "", {"project_id": "F0099", "status": "manual_edit_required",
+                   "assets": [{"kind": "reference_image", "path": "/tmp/ref.jpg",
+                               "mime_type": "image/jpeg"}]},
+    ))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kw: None)
+    if hasattr(actions, "audit_source_vs_new"):
+        monkeypatch.setattr(actions, "audit_source_vs_new", lambda **_kw: None)
+
+    # Preflight returns ready (valid provider) — must trigger generation, not manual queue.
+    preflight_calls: list = []
+    def fake_preflight(project):
+        preflight_calls.append(project.get("project_id"))
+        return (True, "ready", "")
+    monkeypatch.setattr(actions, "flyer_source_edit_preflight", fake_preflight)
+
+    monkeypatch.setattr(hooks, "_reserve_flyer_access_or_reply",
+                        lambda *_a, **_kw: ({"access_id": "A1", "consumed": True}, None))
+    monkeypatch.setattr(hooks, "_release_flyer_access", lambda *_a, **_kw: (True, ""))
+    monkeypatch.setattr(hooks, "_send_preview_then_finalize_access",
+                        lambda *_a, **_kw: (True, "mid", ""))
+
+    edit_proc_calls: list = []
+    monkeypatch.setattr(actions, "send_flyer_edit_processing_ack",
+                        lambda *_a, **_kw: (edit_proc_calls.append(_a) or (True, "proc-mid", "")))
+    gen_calls: list = []
+    monkeypatch.setattr(actions, "trigger_generate_flyer_concepts",
+                        lambda pid: (gen_calls.append(pid) or (True, "")))
+    # Manual-edit ack MUST NOT be called when preflight is ready.
+    monkeypatch.setattr(actions, "send_flyer_manual_edit_ack",
+                        lambda *_a, **_kw: pytest.fail("manual_edit_ack must NOT fire when provider ready"))
+
+    result = hooks._try_flyer_source_vs_new_choice_intercept(
+        "SOURCE",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "m-source-ready"},
+    )
+    assert result is not None and result.get("action") == "skip"
+    assert preflight_calls == ["F0099"], f"preflight must be called; got {preflight_calls!r}"
+    assert gen_calls == ["F0099"], f"generation must be triggered; got {gen_calls!r}"
+    assert edit_proc_calls, "edit processing ack must be sent (not manual ack)"
+
+
+def test_source_vs_new_source_branch_queues_manual_when_provider_unavailable(monkeypatch):
+    """SOURCE branch must call invoke_update_flyer_project --queue-manual-review +
+    send manual_edit_ack when preflight reports source_edit_provider_unavailable.
+    No generation call should fire.
+    """
+    hooks, actions = _load_plugin_modules()
+
+    if not hasattr(hooks, "_try_flyer_source_vs_new_choice_intercept"):
+        pytest.skip("_try_flyer_source_vs_new_choice_intercept not yet implemented (Task 5)")
+
+    def fake_consume_source_vs_new(choice_token, trailing, *, chat_id, sender_phone):
+        return {
+            "chat_id": chat_id,
+            "sender_phone": sender_phone,
+            "customer": {"business_name": "Lakshmis Kitchen", "customer_id": "CUST0001"},
+            "raw_request": "Edit this flyer for Lakshmi's Kitchen.",
+            "media_path": "/tmp/ref.jpg",
+            "source_organization": "Triveni Express",
+            "original_intent": "exact_source_edit",
+            "customer_followup_instruction": "",
+            "choice": "source",
+        }
+
+    if not hasattr(actions, "consume_flyer_source_vs_new_choice"):
+        pytest.skip("consume_flyer_source_vs_new_choice not yet implemented")
+    monkeypatch.setattr(actions, "consume_flyer_source_vs_new_choice", fake_consume_source_vs_new)
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "trigger_create_flyer_project", lambda **_kw: (
+        True, "", {"project_id": "F0100", "status": "manual_edit_required",
+                   "assets": [{"kind": "reference_image", "path": "/tmp/ref.jpg",
+                               "mime_type": "image/jpeg"}]},
+    ))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kw: None)
+    if hasattr(actions, "audit_source_vs_new"):
+        monkeypatch.setattr(actions, "audit_source_vs_new", lambda **_kw: None)
+
+    monkeypatch.setattr(actions, "flyer_source_edit_preflight",
+                        lambda project: (False, "OPENAI_API_KEY missing", "source_edit_provider_unavailable"))
+
+    monkeypatch.setattr(hooks, "_reserve_flyer_access_or_reply",
+                        lambda *_a, **_kw: ({"access_id": "A1", "consumed": True}, None))
+    monkeypatch.setattr(hooks, "_release_flyer_access", lambda *_a, **_kw: (True, ""))
+
+    queue_calls: list = []
+    def fake_queue(project_id, *flags):
+        queue_calls.append((project_id, flags))
+        return (True, "")
+    monkeypatch.setattr(actions, "invoke_update_flyer_project", fake_queue)
+
+    ack_calls: list = []
+    monkeypatch.setattr(actions, "send_flyer_manual_edit_ack",
+                        lambda *_a, **_kw: (ack_calls.append(_a) or (True, "mid", "")))
+    # trigger_generate_flyer_concepts MUST NOT fire when provider unavailable.
+    monkeypatch.setattr(actions, "trigger_generate_flyer_concepts",
+                        lambda _pid: pytest.fail("generation must NOT fire when provider unavailable"))
+    monkeypatch.setattr(actions, "send_flyer_edit_processing_ack",
+                        lambda *_a, **_kw: pytest.fail("processing ack must NOT fire when provider unavailable"))
+
+    result = hooks._try_flyer_source_vs_new_choice_intercept(
+        "SOURCE",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "m-source-unavail"},
+    )
+    assert result is not None and result.get("action") == "skip"
+    assert queue_calls, "must invoke update_flyer_project with --queue-manual-review"
+    pid, flags = queue_calls[0]
+    assert pid == "F0100"
+    assert "--queue-manual-review" in flags
+    assert "source_edit_provider_unavailable" in flags
+    assert ack_calls, "manual_edit_ack must be sent"
+
+
 def test_parse_source_vs_new_followup_handles_compound_reply():
     actions = _load_actions()
     assert actions.parse_source_vs_new_followup("SOURCE") == ("source", "")

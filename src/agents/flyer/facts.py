@@ -354,6 +354,22 @@ def source_contract_locked_facts(
             if item_fact:
                 facts.append(item_fact.model_copy(update=asset_meta))
 
+    # `required_text` carries arbitrary visible source text the vision pass
+    # flagged as required (e.g. tagline rows, badges, sides rows). Without
+    # locking these as facts, "preserve everything else" survives in the
+    # schema but never reaches QA. Required-flag mirrors headings/sections.
+    for idx, text in enumerate(contract.required_text):
+        text_fact = _fact(
+            f"source_required_text:{idx}",
+            "Source required text",
+            text,
+            "reference_vision",
+            required=require,
+            message_id=message_id,
+        )
+        if text_fact:
+            facts.append(text_fact.model_copy(update=asset_meta))
+
     for repl_idx, (old, new) in enumerate(contract.requested_replacements.items()):
         for suffix, label, value, required in [
             ("old", "Replaced source text", old, False),

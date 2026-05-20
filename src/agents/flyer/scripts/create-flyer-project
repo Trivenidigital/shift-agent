@@ -17,8 +17,18 @@ sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(SRC_ROOT / "platform"))
 sys.path.insert(0, str(SRC_ROOT))
 
-from schemas import FlyerAsset, FlyerCustomerStore, FlyerManualReview, FlyerProject, FlyerProjectStore, FlyerProjectCreated, FlyerReferenceExtraction, FlyerRequestFields  # noqa: E402
+from schemas import FlyerAsset, FlyerCustomerStore, FlyerManualReview, FlyerProject, FlyerProjectStore, FlyerProjectCreated, FlyerReferenceExtraction, FlyerRequestFields, FlyerSourceContractExtracted  # noqa: E402
 from safe_io import FileLock, atomic_write_text  # noqa: E402
+try:
+    # Audit emission for FlyerSourceContractExtracted uses ndjson_append + flock
+    # the same way parse-menu-photo does. Tests stub safe_io down to FileLock +
+    # atomic_write_text, so these may be absent under test; degrade audit-only.
+    from safe_io import flock as _safe_flock  # type: ignore  # noqa: E402
+    from safe_io import ndjson_append as _safe_ndjson_append  # type: ignore  # noqa: E402
+except Exception:
+    _safe_flock = None  # type: ignore
+    _safe_ndjson_append = None  # type: ignore
+from pydantic import TypeAdapter  # noqa: E402
 try:
     from flyer_manual_queue import make_manual_review  # type: ignore  # noqa: E402
 except ImportError:
@@ -50,6 +60,47 @@ except ImportError:
 STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
 CUSTOMERS_PATH = Path("/opt/shift-agent/state/flyer/customers.json")
 ASSET_DIR = Path("/opt/shift-agent/state/flyer/assets")
+LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+
+
+def _emit_source_contract_extracted_audit(
+    *,
+    extraction: FlyerReferenceExtraction,
+    project_id: str,
+    now: datetime,
+) -> None:
+    """Emit the FlyerSourceContractExtracted audit row via the existing
+    ndjson_append chokepoint. Mirrors `parse-menu-photo:_log`. Best-effort:
+    audit failures must not block project creation, but the operator loses
+    observability into source-contract extraction frequency / quality.
+    """
+    if _safe_flock is None or _safe_ndjson_append is None:
+        # Test environment stubbed safe_io without the audit helpers — skip.
+        return
+    try:
+        contract = extraction.source_contract
+        entry = FlyerSourceContractExtracted(
+            type="flyer_source_contract_extracted",
+            ts=now,
+            project_id=project_id,
+            asset_id=extraction.asset_id,
+            asset_sha256="",  # populated below if asset known
+            role=extraction.role,
+            status=extraction.status,
+            headings_count=len(contract.required_headings) if contract else 0,
+            sections_count=len(contract.sections) if contract else 0,
+            replacements_count=len(contract.requested_replacements) if contract else 0,
+            forbidden_substrings_count=len(contract.forbidden_substrings) if contract else 0,
+            confidence=float(contract.confidence) if contract else 0.0,
+            provider=extraction.provider,
+        )
+        adapter = TypeAdapter(FlyerSourceContractExtracted)
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _safe_flock(LOG_PATH):
+            _safe_ndjson_append(LOG_PATH, adapter.dump_json(entry).decode("utf-8"))
+    except Exception:
+        # Audit best-effort. Do not block project creation on a log failure.
+        pass
 MONTHS = {
     "jan": 1, "january": 1,
     "feb": 2, "february": 2,
@@ -575,6 +626,16 @@ def main() -> int:
         raw_request=args.raw_request,
         provider=build_reference_extraction_provider(),
     )
+    # Operator observability: emit FlyerSourceContractExtracted regardless of
+    # success/provider-unavailable/low-confidence. Operator needs to see all
+    # extraction attempts so they can spot provider-availability regressions
+    # without grepping for absence-of-success.
+    if extraction.role == "source_edit_template":
+        _emit_source_contract_extracted_audit(
+            extraction=extraction,
+            project_id=project.project_id,
+            now=datetime.now(timezone.utc),
+        )
     # Convert source-contract into locked facts + populate forbidden substrings
     # before the merge so the project carries source-derived requirements and
     # the negative-assertion list reaches QA via reference_extractions[N].source_contract.

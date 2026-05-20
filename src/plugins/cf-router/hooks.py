@@ -1004,15 +1004,93 @@ def _try_flyer_source_vs_new_choice_intercept(text: str, chat_id: str, event: An
                 subprocess_rc=2, detail=f"source_vs_new_source_failed; {detail[:450]}",
             )
             return None
-        manual = (project or {}).get("manual_review") or {}
-        ack_ok, outbound_message_id, ack_err = actions.send_flyer_manual_edit_ack(
-            chat_id,
-            project_id,
-            new_raw_request,
-            reason=str(manual.get("detail") or manual.get("reason") or "source_edit_provider_unavailable"),
+
+        # Mirror the existing primary exact-edit handler at hooks.py:587-697:
+        # reserve quota → preflight → either run generation OR queue manual review.
+        # Previous shape always sent the manual-edit ack, which means a valid
+        # OPENAI_API_KEY never reached generation from the SOURCE branch.
+        access, quota_result = _reserve_flyer_access_or_reply(
+            chat_id, phone, project_id, message_id, consume_quota=True,
         )
+        if quota_result is not None:
+            return quota_result
+        ready_ok, ready_detail, ready_reason_code = actions.flyer_source_edit_preflight(project or {})
+        if not ready_ok:
+            queue_ok, queue_detail = actions.invoke_update_flyer_project(
+                project_id,
+                "--queue-manual-review",
+                "--manual-reason-code", ready_reason_code,
+                "--manual-reason", ready_reason_code,
+                "--manual-detail", ready_detail[:500],
+            )
+            release_ok, release_detail = _release_flyer_access(
+                access, chat_id, phone, project_id, message_id,
+            )
+            if queue_ok:
+                ack_ok, outbound_message_id, ack_err = actions.send_flyer_manual_edit_ack(
+                    chat_id,
+                    project_id,
+                    new_raw_request,
+                    reason=ready_detail,
+                )
+            else:
+                ack_ok = False
+                outbound_message_id = ""
+                ack_err = f"manual_edit_ack_skipped_because_queue_failed: {queue_detail[:200]}"
+            actions.audit_intercepted(
+                reason="flyer_reference_exact_edit_queued" if (queue_ok and ack_ok) else "flyer_primary_failed",
+                chat_id=chat_id,
+                subprocess_rc=0 if queue_ok and ack_ok and release_ok else 3,
+                detail=(
+                    f"source_vs_new_source; project_id={project_id}; sender_role={role}; "
+                    f"source_edit_preflight_failed={ready_detail[:250]}; "
+                    f"reason_code={ready_reason_code}; access={access}; "
+                    f"queue_ok={queue_ok}; queue_detail={queue_detail[:250]}; "
+                    f"release_ok={release_ok}; release_detail={release_detail[:250]}; "
+                    f"ack_message_id={outbound_message_id}; ack_error={ack_err[:300]}"
+                ),
+            )
+            return {
+                "action": "skip",
+                "reason": f"cf-router flyer source-edit queued: project {project_id}",
+            }
+        proc_ok, proc_mid, proc_err = actions.send_flyer_edit_processing_ack(chat_id, project_id)
+        gen_ok, gen_detail = actions.trigger_generate_flyer_concepts(project_id)
+        if gen_ok:
+            ack_ok, outbound_message_id, ack_err = _send_preview_then_finalize_access(
+                access, chat_id, phone, project_id, message_id,
+                proc_ok=proc_ok, proc_mid=proc_mid, proc_err=proc_err,
+            )
+            reason = (
+                f"cf-router flyer source-edit generated: project {project_id}"
+                if ack_ok else f"cf-router flyer source-edit delivery failed: project {project_id}"
+            )
+            audit_reason = "flyer_primary_project_created"
+        else:
+            actions.invoke_update_flyer_project(
+                project_id,
+                "--queue-manual-review",
+                "--manual-reason", "source_edit_generation_failed",
+                "--manual-detail", gen_detail[:500],
+            )
+            ack_ok, manual_mid, ack_err = actions.send_flyer_manual_edit_ack(
+                chat_id,
+                project_id,
+                new_raw_request,
+                reason=f"automatic edit generation failed: {gen_detail}",
+            )
+            release_ok, release_detail = _release_flyer_access(
+                access, chat_id, phone, project_id, message_id,
+            )
+            outbound_message_id = ",".join(x for x in [proc_mid, manual_mid] if x)
+            ack_err = (
+                f"edit_generation_failed: {gen_detail}; "
+                f"release_ok={release_ok}; release_detail={release_detail[:250]}; ack_error={ack_err}"
+            )
+            reason = f"cf-router flyer source-edit queued: project {project_id}"
+            audit_reason = "flyer_reference_exact_edit_queued"
         actions.audit_intercepted(
-            reason="flyer_reference_exact_edit_queued",
+            reason=audit_reason,
             chat_id=chat_id,
             subprocess_rc=0 if ack_ok else 3,
             detail=(
@@ -1020,7 +1098,7 @@ def _try_flyer_source_vs_new_choice_intercept(text: str, chat_id: str, event: An
                 f"ack_message_id={outbound_message_id}; ack_error={ack_err[:300]}"
             ),
         )
-        return {"action": "skip", "reason": f"cf-router flyer source-edit chosen: project {project_id}"}
+        return {"action": "skip", "reason": reason}
 
     if pending.get("choice") == "new":
         source = str(pending.get("source_organization") or "the source flyer")
