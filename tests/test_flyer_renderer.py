@@ -1878,6 +1878,14 @@ def test_render_customer_facing_footer_has_no_hermes_brand():
         "Legacy 'Hermes Flyer Studio' footer string still present in render.py"
 
 
+def test_deterministic_render_paths_use_campaign_title_not_business_name():
+    render_py = Path(__file__).resolve().parent.parent / "src" / "agents" / "flyer" / "render.py"
+    src = render_py.read_text(encoding="utf-8")
+    assert "title_text = _display_title(project)" in src
+    assert '"title": _display_title(project),' in src
+    assert '"title": fact_value(project, "business_name", fallback=project.fields.event_or_business_name)' not in src
+
+
 # ─── Task 7: word-boundary _context_has + brand/branding edit semantics ──
 
 

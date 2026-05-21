@@ -117,8 +117,8 @@ def _business_title_from_text(value: str) -> str:
 def _explicit_business_override(raw_request: str, profile_business_name: str) -> str:
     text = " ".join((raw_request or "").split())
     patterns = [
-        r"\bbusiness\s+name\s+is\s+(.+?)(?=\.|,|\n|$)",
-        r"\bchange\s+business\s+name\s+to\s+(.+?)(?=\.|,|\n|$)",
+        r"\bbusiness\s+name\s+is\s+(.+?)(?=\s+\b(?:and|with)\s+(?:headline|title|tagline|phone|contact|location|address)\b|\s+\bfor\s+(?:this|the)\s+(?:flyer|flier|poster|banner)\b|\.|,|\n|$)",
+        r"\bchange\s+business\s+name\s+to\s+(.+?)(?=\s+\b(?:and|with)\s+(?:headline|title|tagline|phone|contact|location|address)\b|\s+\bfor\s+(?:this|the)\s+(?:flyer|flier|poster|banner)\b|\.|,|\n|$)",
     ]
     for pattern in patterns:
         match = re.search(pattern, text, flags=re.IGNORECASE)
@@ -127,7 +127,11 @@ def _explicit_business_override(raw_request: str, profile_business_name: str) ->
             if value and not _looks_like_instruction_fragment(value):
                 return value
     if profile_business_name:
-        replace = re.search(r"\breplace\s+(.+?)\s+(?:with|to)\s+(.+?)(?=\.|,|\n|$)", text, flags=re.IGNORECASE)
+        replace = re.search(
+            r"\breplace\s+(.+?)\s+(?:with|to)\s+(.+?)(?=\s+\b(?:and|with)\s+(?:headline|title|tagline|phone|contact|location|address)\b|\s+\bfor\s+(?:this|the)\s+(?:flyer|flier|poster|banner)\b|\.|,|\n|$)",
+            text,
+            flags=re.IGNORECASE,
+        )
         if replace and _norm(replace.group(1)) == _norm(profile_business_name):
             value = _clean(replace.group(2))
             if value and not _looks_like_instruction_fragment(value):

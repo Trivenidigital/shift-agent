@@ -193,7 +193,27 @@ def test_profile_hydration_uses_chat_id_when_phone_does_not_match(tmp_path, monk
     assert facts["location"]["value"] == "90 Brybar Dr St Johns FL"
 
 
-def test_explicit_business_name_override_is_allowed_and_auditable(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize(
+    ("raw_request", "expected_business"),
+    [
+        ("Create flyer for lunch specials. Business name is Lakshmi's Kitchen.", "Lakshmi's Kitchen"),
+        (
+            "Create flyer for lunch specials. Business name is Lakshmi's Kitchen and headline is Lunch Specials.",
+            "Lakshmi's Kitchen",
+        ),
+        (
+            "Create flyer for lunch specials. Replace Lakshmis Kitchn with Lakshmi's Kitchen for this flyer.",
+            "Lakshmi's Kitchen",
+        ),
+    ],
+)
+def test_explicit_business_name_override_is_allowed_and_auditable(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    raw_request,
+    expected_business,
+):
     module = _load_script(monkeypatch)
     customers_path = tmp_path / "customers.json"
     projects_path = tmp_path / "projects.json"
@@ -211,7 +231,7 @@ def test_explicit_business_name_override_is_allowed_and_auditable(tmp_path, monk
         "--customer-phone", "+17329837841",
         "--chat-id", "17329837841@s.whatsapp.net",
         "--message-id", "m-business-override",
-        "--raw-request", "Create flyer for lunch specials. Business name is Lakshmi's Kitchen.",
+        "--raw-request", raw_request,
         "--state-path", str(projects_path),
         "--customer-state-path", str(customers_path),
     ])
@@ -219,7 +239,7 @@ def test_explicit_business_name_override_is_allowed_and_auditable(tmp_path, monk
     assert module.main() == 0
     project = json.loads(capsys.readouterr().out)
     facts = {fact["fact_id"]: fact for fact in project["locked_facts"]}
-    assert facts["business_name"]["value"] == "Lakshmi's Kitchen"
+    assert facts["business_name"]["value"] == expected_business
     assert facts["business_name"]["source"] == "customer_text"
     assert facts["contact_phone"]["source"] == "customer_profile"
     assert facts["location"]["source"] == "customer_profile"

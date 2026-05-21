@@ -2815,6 +2815,8 @@ def flyer_generation_queued_manual_review(detail: str) -> bool:
         return True
     if "source_edit_failed" in (detail or ""):
         return True
+    if "visual_qa_failed" in (detail or ""):
+        return True
     return False
 
 

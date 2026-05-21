@@ -1743,7 +1743,7 @@ def _draw_flyer_pil(project: FlyerProject, *, concept_id: str, size: tuple[int, 
     draw.text((margin, int(height * 0.045)), language_label.upper(), font=small_font, fill=tuple(palette["soft"]))
 
     y = int(height * 0.245)
-    title_text = fact_value(project, "business_name", fallback=project.fields.event_or_business_name) or ""
+    title_text = _display_title(project)
     for line in _wrap(draw, title_text, title_font, width - margin * 2):
         if y + title_font.size > int(height * 0.45):
             raise FlyerRenderError("critical text facts do not fit")
@@ -1865,7 +1865,7 @@ def _render_with_system_pillow(project: FlyerProject, path: Path, *, concept_id:
         "format": "PDF" if size is None else "PNG",
         "palette": PALETTES.get(concept_id, PALETTES["C1"]),
         "language": language,
-        "title": fact_value(project, "business_name", fallback=project.fields.event_or_business_name) or "",
+        "title": _display_title(project),
         "style": project.fields.style_preference,
         "facts": [
             [fact.label.upper(), fact.text]

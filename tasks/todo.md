@@ -1169,4 +1169,6 @@ Review results:
   - [x] Write design: `docs/superpowers/specs/2026-05-21-flyer-contract-lifecycle-design.md`.
   - [x] Get design reviewed by two parallel agents and fold Critical/High findings.
   - [x] Build with transcript-level tests for F0065, profile authority, customer-copy leaks, duplicate initial ack, and self-eval tripwires.
-  - Review: focused acceptance suite `316 passed, 117 skipped`; touched-file `py_compile` passed; `git diff --check` passed. No deploy performed.
+  - [x] Open PR #152 and get two parallel PR reviews.
+  - [x] Fold PR-review High findings: visual-QA failure fallback, deterministic render title path, explicit business override bounds, and SOURCE/NEW pending status phrasing.
+  - Review: focused acceptance suite `323 passed, 117 skipped`; touched-file `py_compile` passed; `git diff --check` passed. No deploy performed.
