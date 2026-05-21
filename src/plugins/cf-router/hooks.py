@@ -2393,7 +2393,7 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         return {"action": "skip",
                 "reason": f"cf-router flyer exact edit already queued for {project_id}"}
 
-    if actions.is_flyer_approval_text(body) and status in {"revising_design", "awaiting_final_approval"}:
+    if actions.is_flyer_approval_text(body):
         pending = active_project.get("pending_revision_confirmation") or {}
         pending_revision_id = str(pending.get("revision_id") or "")
         if pending_revision_id:
@@ -2405,12 +2405,13 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
             )
             ack_ok, mid, err = actions.send_flyer_text(chat_id, reminder)
             actions.audit_intercepted(
-                reason="flyer_reference_exact_edit_queued" if ack_ok else "flyer_primary_failed",
+                reason="flyer_pending_revision_confirmation_reminder" if ack_ok else "flyer_primary_failed",
                 chat_id=chat_id,
                 subprocess_rc=0 if ack_ok else 3,
                 detail=f"project_id={project_id}; pending_revision_confirmation=true; sender_role={role}; ack_message_id={mid}; ack_error={err[:300]}",
             )
             return {"action": "skip", "reason": f"cf-router flyer active: pending revision confirmation for {project_id}"}
+    if actions.is_flyer_approval_text(body) and status in {"revising_design", "awaiting_final_approval"}:
         if status == "revising_design" and not active_project.get("concepts"):
             gen_ok, gen_detail = actions.trigger_generate_flyer_concepts(project_id)
             if gen_ok:

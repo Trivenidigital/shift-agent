@@ -367,6 +367,8 @@ def test_project_defaults_and_revision_cap():
         "contact_info",
     ]
     assert project.version == 1
+    assert project.pending_revision_confirmation is None
+    assert project.last_applied_pending_revision_id == ""
 
     too_many = _base_project_dict()
     too_many["revisions"] = [

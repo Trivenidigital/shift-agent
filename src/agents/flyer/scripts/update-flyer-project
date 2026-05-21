@@ -61,6 +61,16 @@ def _pending_revision_reply(pending: FlyerPendingRevisionConfirmation) -> str:
     )
 
 
+def _mark_revision_applied(revisions: list[FlyerRevision], revision_id: str) -> list[FlyerRevision]:
+    updated: list[FlyerRevision] = []
+    for rev in revisions:
+        if rev.revision_id == revision_id and not rev.applied:
+            updated.append(rev.model_copy(update={"applied": True}))
+        else:
+            updated.append(rev)
+    return updated
+
+
 def _append_source_edit_correction(raw_request: str, correction: str) -> str:
     correction = " ".join((correction or "").split())
     base = (raw_request or "").rstrip()
@@ -155,13 +165,45 @@ def main() -> int:
                 now = datetime.now(timezone.utc)
                 pending = getattr(updated, "pending_revision_confirmation", None)
                 cmd, cmd_revision_id = _parse_pending_confirmation_command(args.revision_text)
+                if cmd == "apply" and cmd_revision_id and updated.last_applied_pending_revision_id == cmd_revision_id:
+                    payload = {
+                        "project_id": updated.project_id,
+                        "version": updated.version,
+                        "revision_patch": {},
+                        "revision_requires_clarification": False,
+                    }
+                    print(json.dumps(payload))
+                    return 0
                 if pending is not None:
                     if pending.expires_at <= now:
-                        updated = updated.model_copy(update={"pending_revision_confirmation": None})
+                        updated = updated.model_copy(update={
+                            "pending_revision_confirmation": None,
+                            "revisions": _mark_revision_applied(updated.revisions, pending.revision_id),
+                        })
                         should_write = True
-                        pending = None
+                        payload = {
+                            "project_id": updated.project_id,
+                            "version": updated.version,
+                            "revision_patch": {},
+                            "revision_requires_clarification": True,
+                        }
+                        payload["revision_patch"]["unresolved_reason"] = "pending confirmation expired"
+                        payload["revision_patch"]["pending_confirmation_message"] = (
+                            "Flyer Studio\n"
+                            "------------\n"
+                            "That change confirmation expired. Please resend the change you want and I'll propose it again."
+                        )
+                        if should_write:
+                            updated = updated.model_copy(update={"updated_at": now})
+                            store.projects[idx] = updated
+                            atomic_write_text(state_path, store.model_dump_json(indent=2))
+                        print(json.dumps(payload))
+                        return 0
                     elif cmd == "cancel":
-                        updated = updated.model_copy(update={"pending_revision_confirmation": None})
+                        updated = updated.model_copy(update={
+                            "pending_revision_confirmation": None,
+                            "revisions": _mark_revision_applied(updated.revisions, pending.revision_id),
+                        })
                         should_write = True
                         payload = {
                             "project_id": updated.project_id,
@@ -248,6 +290,14 @@ def main() -> int:
                             atomic_write_text(state_path, store.model_dump_json(indent=2))
                         print(json.dumps(payload))
                         return 0
+                    else:
+                        # Overwrite pending proposal with the new inbound revision text.
+                        updated = updated.model_copy(update={
+                            "pending_revision_confirmation": None,
+                            "revisions": _mark_revision_applied(updated.revisions, pending.revision_id),
+                        })
+                        should_write = True
+                        pending = None
 
                 patch = extract_revision_patch(updated, args.revision_text)
                 revision_requires_clarification = patch.ambiguous or (not patch.changed and not patch.visual_only)
