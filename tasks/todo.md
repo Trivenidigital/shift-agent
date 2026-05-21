@@ -17,7 +17,7 @@ Hermes-first summary: reuse cf-router active-project routing, Flyer revision sta
 - [x] Extend revision parsing to accept exact visible time text before a duplicate marker when remove/delete/exclude intent is present.
 - [x] Add state-file coverage so `update-flyer-project` returns `revision_requires_clarification=false`.
 - [x] Add cf-router coverage so the customer receives the regeneration acknowledgement, not a clarification prompt.
-- [ ] Open PR; no merge and no deploy.
+- [x] Open PR #157; no merge and no deploy.
 
 ---
 
