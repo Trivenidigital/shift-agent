@@ -212,8 +212,8 @@ def _extract_replace_text(body: str) -> tuple[str, str]:
     if not body:
         return "", ""
     patterns = [
-        r"\b(?:replace|change)\b[^\"'\n]{0,80}[\"'](?P<old>[^\"']{1,160})[\"']\s*(?:with|to)\s*[\"'](?P<new>[^\"']{1,160})[\"']",
-        r"\b(?:replace|change)\b[^“”\n]{0,80}“(?P<old>[^”]{1,160})”\s*(?:with|to)\s*“(?P<new>[^”]{1,160})”",
+        r"\b(?:replace|change)\b[^\"'\n]{0,120}[\"'](?P<old>[^\"']{1,160})[\"']\s*[-–—:|]*\s*(?:with|to|->)\s*[\"'](?P<new>[^\"']{1,160})[\"']",
+        r"\b(?:replace|change)\b[^“”\n]{0,120}“(?P<old>[^”]{1,160})”\s*[-–—:|]*\s*(?:with|to|->)\s*“(?P<new>[^”]{1,160})”",
     ]
     for pattern in patterns:
         match = re.search(pattern, body, flags=re.IGNORECASE)
