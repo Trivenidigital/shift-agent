@@ -190,12 +190,14 @@ def test_duplicate_initial_ack_becomes_incident_from_outbound_audit_text():
             {
                 "type": "cf_router_intercepted",
                 "ts": "2026-05-20T10:05:00Z",
+                "message_id": "outbound-processing-ack",
                 "project_id": "F0065",
                 "outbound_text": "Flyer Studio\n------------\nGot it. I'm creating your flyer now and will send a preview here shortly.",
             },
             {
                 "type": "cf_router_intercepted",
                 "ts": "2026-05-20T10:06:00Z",
+                "message_id": "outbound-intake-ack",
                 "project_id": "F0065",
                 "outbound_text": "Flyer Studio\n------------\nGot it. I have your flyer request and will send an update here shortly.",
             },

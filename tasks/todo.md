@@ -7,6 +7,30 @@ Last updated: 2026-05-20 (pilot-hardening golden live-shape samples and stale Fl
 
 ---
 
+## Active - Flyer replay stability audit (2026-05-21)
+
+**Drift-check tag:** extends-Hermes
+
+Hermes-first summary: reuse Hermes WhatsApp/cf-router ingress, JSON state, audit logs, media cache, LLM/vision gateway boundaries, existing Flyer golden scenarios, self-evaluation, operator brief, and PR #149 SLA watchdog. Net-new scope is deterministic offline replay fixtures, shared Flyer customer-copy policy/lint constants, and read-only reporting guardrails.
+
+Plan: `tasks/flyer-replay-stability-audit-plan-2026-05-21.md`
+
+- [x] Write and review the replay stability audit plan.
+- [x] Write and review the replay harness design. Draft: `tasks/flyer-replay-stability-audit-design-2026-05-21.md`.
+- [x] Add replay fixtures and failing tests first.
+- [x] Consolidate customer-copy policy/lint helper without changing customer behavior.
+- [x] Extend self-eval/operator brief reporting where fixtures expose gaps.
+- [x] Run focused verification and open PR. No deploy. PR #155 opened.
+
+Review:
+- Plan/design review findings folded: reused existing dispatcher replay substrate, added only a Flyer hook replay adapter, kept Hermes substrate boundaries, and preserved #149 SLA watchdog ownership.
+- Final reviewer findings folded: all replay fixtures now traverse `pre_gateway_dispatch`, route assertions reject silent no-ops, temp-state project creation uses temp asset dirs, live `send_flyer_*` helpers are captured via fake `safe_io`, and static self-eval source-copy scans use the shared policy scanner.
+- Final re-review fixes folded: duplicate initial acknowledgement grouping no longer uses outbound `message_id` as identity, and static customer-copy scans now catch dynamic project-id f-strings like `Project {project_id}`.
+- Verified: focused Flyer pytest `262 passed, 7 warnings`; touched Python `py_compile`; self-eval JSON/Markdown CLI smoke with temp fixtures; `git diff --check`.
+- No deploy performed. #149 is merged and deployed.
+
+---
+
 ## Active - Flyer fresh-intent routing + customer deactivation (2026-05-21)
 
 **Drift-check tag:** extends-Hermes

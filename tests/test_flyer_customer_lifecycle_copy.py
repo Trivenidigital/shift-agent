@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
-import re
 import sys
 import types
 from datetime import datetime, timezone
@@ -17,10 +16,10 @@ SRC = REPO / "src"
 ACTIONS = REPO / "src" / "plugins" / "cf-router" / "actions.py"
 PLUGIN_DIR = REPO / "src" / "plugins" / "cf-router"
 
-FORBIDDEN_CUSTOMER_COPY = re.compile(
-    r"\bF\d{4}\b|project\s+F|created flyer project|queued project|operator|provider|reason_code|source-preserving",
-    re.IGNORECASE,
-)
+sys.path.insert(0, str(SRC))
+from agents.flyer.customer_copy_policy import CUSTOMER_COPY_FORBIDDEN_RE
+
+FORBIDDEN_CUSTOMER_COPY = CUSTOMER_COPY_FORBIDDEN_RE
 
 
 def _load_actions(monkeypatch: pytest.MonkeyPatch):
