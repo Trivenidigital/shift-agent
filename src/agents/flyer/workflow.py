@@ -777,6 +777,15 @@ def extract_revision_patch(project: FlyerProject, text: str) -> RevisionPatchRes
                 raw_request_update = replaced_raw
         else:
             notes_update = replaced_notes
+        # If we couldn't match the exact text anywhere, fall back to an explicit
+        # instruction append. This handles template-origin visible text that
+        # doesn't exist in `notes`/`raw_request` yet.
+        if notes_update is None and raw_request_update is None and unresolved:
+            replace_instruction = f"Replace visible text {old_text!r} with {new_text!r} on the flyer. Do not keep {old_text!r} anywhere in the artwork."
+            notes_update, raw_request_update = _append_instruction(notes_update, raw_request_update, project, replace_instruction)
+            # Require confirmation because this is not a precise field edit.
+            fuzzy_confirmation_required = True
+            unresolved.clear()
 
     changed = bool(updates) or notes_update is not None or raw_request_update is not None
     visual_only = _is_visual_only_revision(body)
