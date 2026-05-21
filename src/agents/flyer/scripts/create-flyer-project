@@ -39,6 +39,7 @@ try:
         extract_text_facts,
         merge_locked_facts,
         missing_required_facts,
+        profile_locked_facts,
         source_contract_locked_facts,
         _populate_forbidden_substrings,
     )
@@ -48,6 +49,7 @@ except ImportError:
         extract_text_facts,
         merge_locked_facts,
         missing_required_facts,
+        profile_locked_facts,
         source_contract_locked_facts,
         _populate_forbidden_substrings,
     )
@@ -225,14 +227,21 @@ def _load_customer_store(path: Path) -> FlyerCustomerStore:
     return FlyerCustomerStore.model_validate(json.loads(path.read_text(encoding="utf-8")))
 
 
+def _find_customer_for_sender(
+    *,
+    customer_phone: str,
+    chat_id: str,
+    customers_path: Path,
+):
+    return _load_customer_store(customers_path).find_customer_by_sender(customer_phone, chat_id)
+
+
 def _hydrate_fields_from_customer(
     fields: FlyerRequestFields,
     *,
-    customer_phone: str,
-    customers_path: Path,
+    customer,
 ) -> FlyerRequestFields:
     """Fill missing flyer facts from the registered Flyer Studio account."""
-    customer = _load_customer_store(customers_path).find_customer_by_phone(customer_phone)
     if customer is None or customer.status not in {"trial", "active"}:
         return fields
     updates: dict[str, object] = {}
@@ -421,6 +430,20 @@ def _extract_fields(raw_request: str, *, now: datetime) -> FlyerRequestFields:
 
 def _normalize_event_name(event_name: str, text: str) -> str:
     name = re.sub(r"^\s*(?:a|an|the)\s+", "", (event_name or "").strip(" ."), flags=re.IGNORECASE)
+    help_match = re.search(
+        r"\bhelp\s+me\s+with\s+(.+?)\s+(?:flyer|flier|poster|banner)\b",
+        name,
+        flags=re.IGNORECASE,
+    )
+    if help_match:
+        name = help_match.group(1).strip(" .")
+    name = re.sub(
+        r"^(?:i[?'’]?d\s+like\s+you\s+to\s+)?(?:help\s+me\s+with\s+)?",
+        "",
+        name,
+        flags=re.IGNORECASE,
+    ).strip(" .")
+    name = re.sub(r"\s+\b(?:flyer|flier|poster|banner)\b$", "", name, flags=re.IGNORECASE).strip(" .")
     lower_text = text.lower()
     lower_name = name.lower()
     has_recurring_days = bool(re.search(
@@ -431,7 +454,14 @@ def _normalize_event_name(event_name: str, text: str) -> str:
         return "Weekend Breakfast Specials" if has_recurring_days else "Breakfast Specials"
     if "menu" in lower_text and not name:
         return "Menu Specials"
-    return name
+    return _headline_case_label(name)
+
+
+def _headline_case_label(value: str) -> str:
+    value = (value or "").strip()
+    if not value or value != value.lower():
+        return value
+    return re.sub(r"\b[a-z]", lambda match: match.group(0).upper(), value)
 
 
 def _copy_reference_asset(
@@ -510,6 +540,7 @@ def _needs_reference_extraction(extraction: FlyerReferenceExtraction) -> bool:
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--customer-phone", required=True)
+    p.add_argument("--chat-id", default="")
     p.add_argument("--message-id", required=True)
     p.add_argument("--raw-request", required=True)
     p.add_argument("--reference-media-path", default="")
@@ -532,10 +563,14 @@ def main() -> int:
                 return 0
 
         now = datetime.now(timezone.utc)
+        customer = _find_customer_for_sender(
+            customer_phone=args.customer_phone,
+            chat_id=args.chat_id,
+            customers_path=Path(args.customer_state_path),
+        )
         fields = _hydrate_fields_from_customer(
             _extract_fields(args.raw_request, now=now),
-            customer_phone=args.customer_phone,
-            customers_path=Path(args.customer_state_path),
+            customer=customer,
         )
         project_id = f"F{store.next_sequence:04d}"
         reference_asset = None
@@ -563,7 +598,19 @@ def main() -> int:
                 elif _needs_reference_extraction(extraction) and not args.defer_reference_extraction:
                     pending_reference_asset = reference_asset
                     should_extract_reference = True
-        locked_facts = extract_text_facts(fields, args.raw_request, message_id=args.message_id)
+        profile_facts = []
+        if customer is not None and customer.status in {"trial", "active"}:
+            profile_facts = profile_locked_facts(customer, raw_request=args.raw_request, message_id=args.message_id)
+        locked_facts = merge_locked_facts(
+            profile_facts,
+            extract_text_facts(
+                fields,
+                args.raw_request,
+                message_id=args.message_id,
+                profile_business_name=(customer.business_name if customer is not None else ""),
+                allow_text_identity=not bool(profile_facts),
+            ),
+        )
         # P0-2 missing-required-fact gate: if extraction (customer text + profile +
         # reference) did not surface every required fact slot, queue for manual
         # review rather than rendering a project the system knows is incomplete.

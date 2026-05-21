@@ -78,15 +78,23 @@ def _load_cf_actions(monkeypatch: pytest.MonkeyPatch):
     return module
 
 
-def _write_customer(customers_path: Path, *, category: str, phone: str = "+19802005022") -> None:
+def _write_customer(
+    customers_path: Path,
+    *,
+    category: str,
+    phone: str = "+19802005022",
+    business_name: str = "Demo Business",
+    business_address: str = "90 Bry Bar",
+    primary_chat_id: str = "84593927557152@lid",
+) -> None:
     customers_path.write_text(json.dumps({
         "schema_version": 1,
         "next_customer_sequence": 2,
         "customers": [{
             "customer_id": "CUST0001",
-            "business_name": "Demo Business",
-            "business_address": "90 Bry Bar",
-            "primary_chat_id": "84593927557152@lid",
+            "business_name": business_name,
+            "business_address": business_address,
+            "primary_chat_id": primary_chat_id,
             "onboarded_by_phone": phone,
             "public_phone": phone,
             "business_whatsapp_number": phone,
@@ -104,6 +112,165 @@ def _write_customer(customers_path: Path, *, category: str, phone: str = "+19802
         }],
         "onboarding_sessions": [],
     }), encoding="utf-8")
+
+
+def test_evening_snacks_request_uses_profile_business_and_campaign_title(tmp_path, monkeypatch, capsys):
+    module = _load_script(monkeypatch)
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    _write_customer(
+        customers_path,
+        category="Indian Restaurant",
+        phone="+17329837841",
+        business_name="Lakshmis Kitchn",
+        business_address="90 Brybar Dr St Johns FL",
+        primary_chat_id="17329837841@s.whatsapp.net",
+    )
+
+    raw_request = (
+        "I\u2019d like you to help me with evening snacks flier from 4 PM to 7 PM. "
+        "Include 5 top South Indian snack items. Its Wednesday through Saturday event"
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+17329837841",
+        "--chat-id", "17329837841@s.whatsapp.net",
+        "--message-id", "m-evening-snacks",
+        "--raw-request", raw_request,
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+    facts = {fact["fact_id"]: fact for fact in project["locked_facts"]}
+
+    assert project["status"] == "intake_started"
+    assert project["fields"]["event_or_business_name"] == "Evening Snacks"
+    assert facts["business_name"]["value"] == "Lakshmis Kitchn"
+    assert facts["business_name"]["source"] == "customer_profile"
+    assert facts["contact_phone"]["value"] == "+17329837841"
+    assert facts["contact_phone"]["source"] == "customer_profile"
+    assert facts["location"]["value"] == "90 Brybar Dr St Johns FL"
+    assert facts["location"]["source"] == "customer_profile"
+    assert facts["location"]["required"] is True
+    assert facts["campaign_title"]["value"] == "Evening Snacks"
+    assert facts["campaign_title"]["source"] == "customer_text"
+    assert facts["campaign_title"]["required"] is True
+    poisoned = " ".join(fact["value"].lower() for fact in project["locked_facts"])
+    assert "help me with evening snacks flier" not in poisoned
+    assert "flier from" not in poisoned
+
+
+def test_profile_hydration_uses_chat_id_when_phone_does_not_match(tmp_path, monkeypatch, capsys):
+    module = _load_script(monkeypatch)
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    _write_customer(
+        customers_path,
+        category="Indian Restaurant",
+        phone="+19045550104",
+        business_name="Lakshmis Kitchn",
+        business_address="90 Brybar Dr St Johns FL",
+        primary_chat_id="17329837841@lid",
+    )
+
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+19999999999",
+        "--chat-id", "17329837841@lid",
+        "--message-id", "m-lid-profile",
+        "--raw-request", "Create flyer for weekend lunch specials. Contact from customer profile.",
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+    facts = {fact["fact_id"]: fact for fact in project["locked_facts"]}
+    assert facts["business_name"]["value"] == "Lakshmis Kitchn"
+    assert facts["contact_phone"]["value"] == "+19045550104"
+    assert facts["location"]["value"] == "90 Brybar Dr St Johns FL"
+
+
+@pytest.mark.parametrize(
+    ("raw_request", "expected_business"),
+    [
+        ("Create flyer for lunch specials. Business name is Lakshmi's Kitchen.", "Lakshmi's Kitchen"),
+        (
+            "Create flyer for lunch specials. Business name is Lakshmi's Kitchen and headline is Lunch Specials.",
+            "Lakshmi's Kitchen",
+        ),
+        (
+            "Create flyer for lunch specials. Replace Lakshmis Kitchn with Lakshmi's Kitchen for this flyer.",
+            "Lakshmi's Kitchen",
+        ),
+    ],
+)
+def test_explicit_business_name_override_is_allowed_and_auditable(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    raw_request,
+    expected_business,
+):
+    module = _load_script(monkeypatch)
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    _write_customer(
+        customers_path,
+        category="Indian Restaurant",
+        phone="+17329837841",
+        business_name="Lakshmis Kitchn",
+        business_address="90 Brybar Dr St Johns FL",
+        primary_chat_id="17329837841@s.whatsapp.net",
+    )
+
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+17329837841",
+        "--chat-id", "17329837841@s.whatsapp.net",
+        "--message-id", "m-business-override",
+        "--raw-request", raw_request,
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+    facts = {fact["fact_id"]: fact for fact in project["locked_facts"]}
+    assert facts["business_name"]["value"] == expected_business
+    assert facts["business_name"]["source"] == "customer_text"
+    assert facts["contact_phone"]["source"] == "customer_profile"
+    assert facts["location"]["source"] == "customer_profile"
+
+
+def test_paid_guest_request_can_use_sane_text_business_and_contact(tmp_path, monkeypatch, capsys):
+    module = _load_script(monkeypatch)
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    customers_path.write_text(json.dumps({"schema_version": 1, "customers": [], "onboarding_sessions": []}), encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+15550101010",
+        "--message-id", "m-guest",
+        "--raw-request", (
+            "Create flyer for River Cafe weekend brunch special. "
+            "Contact: +1 555 010 1010. Location: 12 Main St. Include pancakes $9.99."
+        ),
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+    facts = {fact["fact_id"]: fact for fact in project["locked_facts"]}
+    assert project["status"] == "intake_started"
+    assert facts["business_name"]["value"] == "River Cafe"
+    assert facts["business_name"]["source"] == "customer_text"
+    assert facts["contact_phone"]["value"] == "+1 555 010 1010"
+    assert facts["contact_phone"]["source"] == "customer_text"
 
 
 def test_create_project_hydrates_missing_contact_from_trial_customer(tmp_path, monkeypatch, capsys):

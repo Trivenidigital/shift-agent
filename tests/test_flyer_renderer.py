@@ -127,29 +127,66 @@ def test_collect_text_facts_keeps_revised_price_phone_location_and_schedule():
     assert "$12.99" in facts["detail_002"]
 
 
-def test_collect_text_facts_prefers_locked_business_name_over_fields():
-    """P0-2: renderer must use locked_facts["business_name"] over fields.event_or_business_name
-    so a typed customer correction (customer_text source) flows into the rendered title without
-    a separate codepath. Today's bug class: fields hold the stale onboarding value while
-    locked_facts has the customer's latest correction; renderer was reading fields."""
+def test_collect_text_facts_separates_business_brand_from_campaign_title():
+    """Business identity and campaign title are different customer-visible facts.
+
+    The brand must remain visible, but the poster title should be the campaign
+    title/headline rather than duplicating the business name.
+    """
     project = _complete_project().model_copy(update={
         "fields": FlyerRequestFields(
-            event_or_business_name="Old Stale Name",
+            event_or_business_name="Evening Snacks",
             venue_or_location="Old Stale Address",
             contact_info="+19999999999",
             notes="-",
         ),
         "locked_facts": [
-            FlyerLockedFact(fact_id="business_name", label="Business", value="Chloe Hair Studio", source="customer_text"),
-            FlyerLockedFact(fact_id="location", label="Location", value="11111 Gainsborough Ct, Fairfax, VA", source="customer_text"),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+19803826497", source="customer_text"),
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmis Kitchn", source="customer_profile"),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Evening Snacks", source="customer_text"),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile"),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile"),
         ],
     })
 
     facts = {fact.fact_id: fact.text for fact in collect_text_facts(project)}
-    assert facts["title"] == "Chloe Hair Studio"
-    assert facts["location"] == "11111 Gainsborough Ct, Fairfax, VA"
-    assert facts["contact"] == "+19803826497"
+    assert facts["brand"] == "Lakshmis Kitchn"
+    assert facts["title"] == "Evening Snacks"
+    assert facts["location"] == "90 Brybar Dr St Johns FL"
+    assert facts["contact"] == "+17329837841"
+    assert _menu_overlay_payload(project)["title"] == "Evening Snacks"
+    assert "Business/brand: Lakshmis Kitchn" in _image_prompt(
+        project,
+        concept_id="C1",
+        output_format="concept_preview",
+        size=(1080, 1350),
+    )
+    assert "Title: Evening Snacks" in _image_prompt(
+        project,
+        concept_id="C1",
+        output_format="concept_preview",
+        size=(1080, 1350),
+    )
+
+
+def test_collect_text_facts_uses_headline_when_campaign_title_is_absent():
+    project = _complete_project().model_copy(update={
+        "fields": FlyerRequestFields(
+            event_or_business_name="Lakshmis Kitchn",
+            venue_or_location="90 Brybar Dr St Johns FL",
+            contact_info="+17329837841",
+            notes="Headline: Family Combo Feast",
+        ),
+        "locked_facts": [
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmis Kitchn", source="customer_profile"),
+            FlyerLockedFact(fact_id="headline", label="Headline", value="Family Combo Feast", source="customer_text"),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile"),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile"),
+        ],
+    })
+
+    facts = {fact.fact_id: fact.text for fact in collect_text_facts(project)}
+    assert facts["brand"] == "Lakshmis Kitchn"
+    assert facts["title"] == "Family Combo Feast"
 
 
 def test_collect_text_facts_falls_back_to_fields_when_locked_slot_missing():
@@ -1377,6 +1414,56 @@ def test_direct_poster_prompt_uses_registered_business_name_not_reference_brand(
     assert "Do not copy business names or logos from the reference" in prompt
 
 
+def test_explicit_business_override_reaches_direct_and_source_edit_prompts(tmp_path, monkeypatch):
+    import agents.flyer.render as render_mod
+
+    customers_path = tmp_path / "customers.json"
+    customers_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_customer_sequence": 2,
+        "customers": [{
+            "customer_id": "CUST0001",
+            "business_name": "Old Brand",
+            "business_address": "90 Brybar Dr St Johns FL",
+            "primary_chat_id": "201975216009469@lid",
+            "onboarded_by_phone": "+19045550104",
+            "public_phone": "+17329837841",
+            "business_whatsapp_number": "+17329837841",
+            "authorized_request_numbers": ["+17329837841", "+19045550104"],
+            "business_category": "Indian restaurant",
+            "preferred_language": "te",
+            "plan_id": "trial",
+            "status": "trial",
+            "created_at": datetime(2026, 5, 17, tzinfo=timezone.utc).isoformat(),
+            "updated_at": datetime(2026, 5, 17, tzinfo=timezone.utc).isoformat(),
+            "activated_at": datetime(2026, 5, 17, tzinfo=timezone.utc).isoformat(),
+            "monthly_flyers_used": 0,
+            "billing_provider": "manual",
+            "payment_currency": "USD",
+        }],
+        "onboarding_sessions": [],
+    }), encoding="utf-8")
+    monkeypatch.setenv("FLYER_CUSTOMERS_PATH", str(customers_path))
+
+    project = _complete_project().model_copy(update={
+        "customer_phone": "+19045550104",
+        "raw_request": "Create flyer. Business name is New Brand and headline is Evening Snacks.",
+        "locked_facts": [
+            FlyerLockedFact(fact_id="business_name", label="Business", value="New Brand", source="customer_text"),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Evening Snacks", source="customer_text"),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile"),
+        ],
+    })
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+    source_prompt = render_mod._source_edit_prompt(project)
+
+    assert "Business/brand: New Brand" in prompt
+    assert "Business/brand: Old Brand" not in prompt
+    assert "Business/brand to preserve: New Brand" in source_prompt
+    assert "Business/brand to preserve: Old Brand" not in source_prompt
+
+
 def test_real_image_model_concept_uses_direct_poster_output_without_overlay(tmp_path, monkeypatch):
     raw_png = _png_bytes(color=(19, 83, 43))
 
@@ -1839,6 +1926,14 @@ def test_render_customer_facing_footer_has_no_hermes_brand():
     customer_facing_legacy = "Send APPROVE to finalize - Hermes Flyer Studio"
     assert customer_facing_legacy not in src, \
         "Legacy 'Hermes Flyer Studio' footer string still present in render.py"
+
+
+def test_deterministic_render_paths_use_campaign_title_not_business_name():
+    render_py = Path(__file__).resolve().parent.parent / "src" / "agents" / "flyer" / "render.py"
+    src = render_py.read_text(encoding="utf-8")
+    assert "title_text = _display_title(project)" in src
+    assert '"title": _display_title(project),' in src
+    assert '"title": fact_value(project, "business_name", fallback=project.fields.event_or_business_name)' not in src
 
 
 # ─── Task 7: word-boundary _context_has + brand/branding edit semantics ──

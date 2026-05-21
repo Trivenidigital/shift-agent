@@ -20,8 +20,7 @@ ACTIONS_PATH = REPO_ROOT / "src" / "plugins" / "cf-router" / "actions.py"
 MANUAL_REVIEW_EXPECTED_BODY = (
     "Flyer Studio\n"
     "------------\n"
-    "Got it. I need to review the uploaded file before creating the flyer. "
-    "I'll send an update here once it's ready."
+    "I couldn't finish this automatically. I'll review it and send an update here."
 )
 
 EDIT_PROCESSING_EXPECTED_BODY = (

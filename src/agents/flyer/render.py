@@ -470,6 +470,25 @@ def _locked_menu_item_lines(project: FlyerProject) -> list[str]:
     return items[:MAX_DETAIL_FACTS]
 
 
+def _same_text(left: str, right: str) -> bool:
+    norm_left = re.sub(r"[^a-z0-9]+", " ", (left or "").lower()).strip()
+    norm_right = re.sub(r"[^a-z0-9]+", " ", (right or "").lower()).strip()
+    return bool(norm_left and norm_left == norm_right)
+
+
+def _display_title(project: FlyerProject) -> str:
+    business = fact_value(project, "business_name", fallback="")
+    for value in (
+        fact_value(project, "campaign_title", fallback=""),
+        fact_value(project, "headline", fallback=""),
+        project.fields.event_or_business_name or "",
+    ):
+        clean = _clean_fact_text(value)
+        if clean and not _same_text(clean, business):
+            return clean
+    return "Specials"
+
+
 def collect_text_facts(project: FlyerProject) -> list[FlyerTextFact]:
     facts: list[FlyerTextFact] = []
 
@@ -478,11 +497,10 @@ def collect_text_facts(project: FlyerProject) -> list[FlyerTextFact]:
         if clean:
             facts.append(FlyerTextFact(fact_id=fact_id, label=label, text=clean))
 
-    # P0-2: prefer locked_facts over `fields.*` so typed customer corrections
-    # (customer_text source, priority 0) override stale profile values without a
-    # separate codepath per field. `fact_value` falls back to the original
-    # field when the locked-fact slot is missing or empty.
-    title_text = fact_value(project, "business_name", fallback=project.fields.event_or_business_name) or "Flyer"
+    business_text = fact_value(project, "business_name", fallback="")
+    if business_text:
+        add("brand", "Business", business_text)
+    title_text = _display_title(project)
     add("title", "Title", title_text)
     schedule = _schedule_hint(project)
     if project.fields.event_date:
@@ -524,7 +542,7 @@ def _menu_overlay_payload(project: FlyerProject) -> dict[str, object]:
     items = _menu_item_lines(project)
     schedule = _schedule_hint(project)
     return {
-        "title": fact_value(project, "business_name", fallback=project.fields.event_or_business_name) or "Specials",
+        "title": _display_title(project),
         "schedule": schedule,
         "items": items,
         "location": fact_value(project, "location", fallback=project.fields.venue_or_location) or "",
@@ -547,7 +565,7 @@ def _poster_copy_plan(project: FlyerProject) -> PosterCopyPlan:
             continue
         detail_lines.append(detail)
     return PosterCopyPlan(
-        title=fact_value(project, "business_name", fallback=project.fields.event_or_business_name) or "Specials",
+        title=_display_title(project),
         schedule=_schedule_hint(project),
         location=fact_value(project, "location", fallback=project.fields.venue_or_location) or "",
         contact=fact_value(project, "contact_phone", fallback=project.fields.contact_info) or "",
@@ -561,7 +579,7 @@ def _poster_copy_block(project: FlyerProject) -> str:
     lines = [
         "Render the following text exactly. Do not summarize, paraphrase, invent, or omit these customer facts.",
     ]
-    business_name = _registered_business_name(project)
+    business_name = _display_business_name(project)
     if business_name:
         lines.append(f"Business/brand: {business_name}")
     lines.append(f"Title: {plan.title}")
@@ -860,6 +878,15 @@ def _registered_business_name(project: FlyerProject) -> str:
     if not customer:
         return ""
     return customer.business_name.strip()
+
+
+def _display_business_name(project: FlyerProject) -> str:
+    return (
+        fact_value(project, "business_name", fallback="")
+        or _registered_business_name(project)
+        or project.fields.event_or_business_name
+        or ""
+    )
 
 
 def _registered_business_category(project: FlyerProject) -> str:
@@ -1394,8 +1421,7 @@ def _source_edit_reference_asset(project: FlyerProject) -> FlyerAsset:
 
 def _source_edit_prompt(project: FlyerProject) -> str:
     business_name = (
-        _registered_business_name(project)
-        or fact_value(project, "business_name", fallback=project.fields.event_or_business_name)
+        _display_business_name(project)
         or "this business"
     )
     request = " ".join((project.raw_request or project.fields.notes or "").split())[:1200]
@@ -1723,7 +1749,7 @@ def _draw_flyer_pil(project: FlyerProject, *, concept_id: str, size: tuple[int, 
     draw.text((margin, int(height * 0.045)), language_label.upper(), font=small_font, fill=tuple(palette["soft"]))
 
     y = int(height * 0.245)
-    title_text = fact_value(project, "business_name", fallback=project.fields.event_or_business_name) or ""
+    title_text = _display_title(project)
     for line in _wrap(draw, title_text, title_font, width - margin * 2):
         if y + title_font.size > int(height * 0.45):
             raise FlyerRenderError("critical text facts do not fit")
@@ -1845,7 +1871,7 @@ def _render_with_system_pillow(project: FlyerProject, path: Path, *, concept_id:
         "format": "PDF" if size is None else "PNG",
         "palette": PALETTES.get(concept_id, PALETTES["C1"]),
         "language": language,
-        "title": fact_value(project, "business_name", fallback=project.fields.event_or_business_name) or "",
+        "title": _display_title(project),
         "style": project.fields.style_preference,
         "facts": [
             [fact.label.upper(), fact.text]

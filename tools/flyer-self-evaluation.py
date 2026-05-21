@@ -9,6 +9,7 @@ customer/project/VPS state and it does not send messages.
 from __future__ import annotations
 
 import argparse
+import ast
 import importlib.util
 import json
 import re
@@ -30,11 +31,17 @@ DEFAULT_SOURCE_FILES = (
 STATIC_COPY_SCAN_FUNCTIONS = (
     "send_flyer_manual_edit_ack",
     "send_flyer_edit_processing_ack",
+    "send_flyer_processing_ack",
+    "send_flyer_intake_ack",
+    "send_flyer_manual_review_ack",
     "flyer_manual_edit_status_reply",
+    "flyer_project_status_reply",
 )
 
 INTERNAL_COPY_TERMS = (
     "queued project",
+    "created flyer project",
+    "Request processing",
     "Project F",
     "Requested edit:",
     "Original customer request",
@@ -74,6 +81,10 @@ FRESH_FLYER_REVISION_RE = re.compile(
     r"\b(change|replace|update|edit|revise|modify|swap|remove|delete|fix|correct|approve)\b"
     r"|\b(current|existing|old|previous|same|this|that|attached|uploaded)\s+"
     r"(flyer|flier|poster|banner|design|image|artwork)\b",
+    re.I,
+)
+MALFORMED_BUSINESS_NAME_RE = re.compile(
+    r"\b(i(?:'|’)?d like|help me with|create (?:a )?flyer|make (?:a )?flyer|flier from|flyer from|include)\b",
     re.I,
 )
 PHONE_DIGITS_RE = re.compile(r"\D+")
@@ -590,6 +601,30 @@ def project_incidents(
             continue
         project_id = str(project.get("project_id") or "")
         out.extend(project_reflection_incidents(project))
+        business_fact = next(
+            (
+                fact for fact in project.get("locked_facts") or []
+                if isinstance(fact, dict) and fact.get("fact_id") == "business_name"
+            ),
+            {},
+        )
+        business_value = str(business_fact.get("value") or "")
+        if business_value and MALFORMED_BUSINESS_NAME_RE.search(business_value):
+            out.append(
+                incident(
+                    "malformed_business_name_fact",
+                    severity="high",
+                    project_id=project_id,
+                    evidence=f"business_name={business_value[:120]}",
+                    suggested_action="Repair Flyer fact extraction so profile identity wins over natural-language request text.",
+                    category="flyer_fact_contract",
+                    evidence_details={
+                        "fact_id": "business_name",
+                        "source": str(business_fact.get("source") or ""),
+                        "active_customer_risk": True,
+                    },
+                )
+            )
         manual = project.get("manual_review") if isinstance(project.get("manual_review"), dict) else {}
         queued_age = age_minutes(manual.get("queued_at") or project.get("updated_at"), now)
         if (
@@ -732,6 +767,45 @@ def customer_copy_incidents(entries: list[dict[str, Any]]) -> list[dict[str, Any
     return out
 
 
+def duplicate_initial_ack_incidents(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[str, dict[str, Any]] = defaultdict(lambda: {"processing": 0, "intake": 0, "project_id": ""})
+    text_fields = ("outbound_text", "customer_text", "message_text", "sent_text", "reply_text")
+    for entry in entries:
+        text = ""
+        for field in text_fields:
+            if entry.get(field):
+                text = str(entry.get(field) or "")
+                break
+        if not text:
+            continue
+        key = str(entry.get("project_id") or entry.get("chat_id") or entry.get("customer_phone") or "")
+        if not key:
+            continue
+        lowered = text.lower()
+        group = groups[key]
+        if re.fullmatch(r"F\d{4,}", key.upper()):
+            group["project_id"] = key.upper()
+        if "creating your flyer now" in lowered or "request processing" in lowered:
+            group["processing"] += 1
+        if "have your flyer request" in lowered or "created flyer project" in lowered:
+            group["intake"] += 1
+    out: list[dict[str, Any]] = []
+    for key, group in groups.items():
+        if group["processing"] and group["intake"]:
+            out.append(
+                incident(
+                    "duplicate_initial_ack",
+                    severity="high",
+                    project_id=str(group.get("project_id") or ""),
+                    evidence=f"key={key}; processing_ack={group['processing']}; intake_ack={group['intake']}",
+                    suggested_action="Keep one initial Flyer customer ack before preview/fallback; leave project details in audit/Cockpit.",
+                    category="customer-message copy",
+                    count=int(group["processing"]) + int(group["intake"]),
+                )
+            )
+    return out
+
+
 def static_customer_copy_incidents(source_files: list[Path]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for path in source_files:
@@ -739,7 +813,10 @@ def static_customer_copy_incidents(source_files: list[Path]) -> list[dict[str, A
             text = path.read_text(encoding="utf-8")
         except OSError:
             continue
-        scanned = "\n".join(extract_function_block(text, name) for name in STATIC_COPY_SCAN_FUNCTIONS)
+        scanned = "\n".join(
+            extract_customer_copy_literals(extract_function_block(text, name))
+            for name in STATIC_COPY_SCAN_FUNCTIONS
+        )
         if not scanned:
             continue
         matched = [term for term in INTERNAL_COPY_TERMS if term.lower() in scanned.lower()]
@@ -775,6 +852,45 @@ def extract_function_block(source: str, function_name: str) -> str:
             end = index
             break
     return "\n".join(lines[start:end])
+
+
+def extract_customer_copy_literals(function_block: str) -> str:
+    if not function_block.strip():
+        return ""
+    try:
+        tree = ast.parse(function_block)
+    except SyntaxError:
+        return function_block
+    snippets: list[str] = []
+
+    def literal_text(node: ast.AST) -> str:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.JoinedStr):
+            return "".join(literal_text(value) for value in node.values)
+        if isinstance(node, ast.FormattedValue):
+            return "{value}"
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            return literal_text(node.left) + literal_text(node.right)
+        return ""
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            target_names = {
+                target.id for target in node.targets
+                if isinstance(target, ast.Name)
+            }
+            if target_names & {"message", "body", "reply", "text"}:
+                snippets.append(literal_text(node.value))
+        elif isinstance(node, ast.Call):
+            func_name = ""
+            if isinstance(node.func, ast.Name):
+                func_name = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                func_name = node.func.attr
+            if func_name in {"bridge_post", "send_flyer_text"}:
+                snippets.extend(literal_text(arg) for arg in node.args)
+    return "\n".join(part for part in snippets if part)
 
 
 def repeated_checkin_incidents(entries: list[dict[str, Any]], *, threshold: int) -> list[dict[str, Any]]:
@@ -970,6 +1086,7 @@ def build_report(
             generation_stale_minutes=generation_stale_minutes,
         )
         + customer_copy_incidents(decision_entries)
+        + duplicate_initial_ack_incidents(decision_entries)
         + static_customer_copy_incidents(source_files or [])
         + repeated_checkin_incidents(decision_entries, threshold=repeated_checkin_threshold)
         + preview_final_qa_mismatch_incidents(project_rows, decision_entries)

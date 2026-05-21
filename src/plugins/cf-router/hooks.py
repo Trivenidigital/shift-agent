@@ -441,15 +441,13 @@ def _try_flyer_primary_intercept(
             else:
                 if not active_project.get("revisions"):
                     _release_flyer_access(access, chat_id, phone, project_id, message_id)
-                if actions.flyer_generation_queued_manual_review(gen_detail):
-                    ack_ok, outbound_message_id, ack_err = actions.send_flyer_manual_review_ack(
-                        chat_id,
-                        project_id,
-                        text,
-                        reason=gen_detail,
-                    )
-                else:
-                    ack_ok, outbound_message_id, ack_err = actions.send_flyer_intake_ack(chat_id, project_id)
+                ack_ok, outbound_message_id, ack_err = _send_generation_failure_customer_update(
+                    chat_id,
+                    project_id,
+                    text,
+                    gen_detail,
+                    proc_ok=proc_ok,
+                )
                 outbound_message_id = ",".join(x for x in [proc_mid, outbound_message_id] if x)
                 ack_err = f"concept_generation_failed: {gen_detail}; ack_error={ack_err}"
         else:
@@ -551,6 +549,7 @@ def _try_flyer_primary_intercept(
         raw_request = f"Edit uploaded flyer/source artwork. Customer requested: {visible_request}"
     ok, detail, project = actions.trigger_create_flyer_project(
         customer_phone=phone,
+        chat_id=chat_id,
         raw_request=raw_request,
         message_id=message_id,
         reference_media_path=media_path or "",
@@ -691,15 +690,13 @@ def _try_flyer_primary_intercept(
             )
         else:
             _release_flyer_access(access, chat_id, phone, project_id, message_id)
-            if actions.flyer_generation_queued_manual_review(gen_detail):
-                ack_ok, outbound_message_id, ack_err = actions.send_flyer_manual_review_ack(
-                    chat_id,
-                    project_id,
-                    text,
-                    reason=gen_detail,
-                )
-            else:
-                ack_ok, outbound_message_id, ack_err = actions.send_flyer_intake_ack(chat_id, project_id)
+            ack_ok, outbound_message_id, ack_err = _send_generation_failure_customer_update(
+                chat_id,
+                project_id,
+                text,
+                gen_detail,
+                proc_ok=proc_ok,
+            )
             outbound_message_id = ",".join(x for x in [proc_mid, outbound_message_id] if x)
             ack_err = f"concept_generation_failed: {gen_detail}; ack_error={ack_err}"
     else:
@@ -808,6 +805,7 @@ def _try_flyer_reference_scope_choice_intercept(text: str, chat_id: str, event: 
     ).strip()
     ok, detail, project = actions.trigger_create_flyer_project(
         customer_phone=phone,
+        chat_id=chat_id,
         raw_request=raw_request,
         message_id=message_id,
         reference_media_path=str(pending.get("media_path") or ""),
@@ -853,15 +851,13 @@ def _try_flyer_reference_scope_choice_intercept(text: str, chat_id: str, event: 
             )
         else:
             _release_flyer_access(access, chat_id, phone, project_id, message_id)
-            if actions.flyer_generation_queued_manual_review(gen_detail):
-                ack_ok, outbound_message_id, ack_err = actions.send_flyer_manual_review_ack(
-                    chat_id,
-                    project_id,
-                    raw_request,
-                    reason=gen_detail,
-                )
-            else:
-                ack_ok, outbound_message_id, ack_err = actions.send_flyer_intake_ack(chat_id, project_id)
+            ack_ok, outbound_message_id, ack_err = _send_generation_failure_customer_update(
+                chat_id,
+                project_id,
+                raw_request,
+                gen_detail,
+                proc_ok=proc_ok,
+            )
             outbound_message_id = ",".join(x for x in [proc_mid, outbound_message_id] if x)
             ack_err = f"concept_generation_failed: {gen_detail}; ack_error={ack_err}"
     else:
@@ -906,7 +902,7 @@ def _try_flyer_source_vs_new_choice_intercept(text: str, chat_id: str, event: An
     # Branch 2: status check-in re-send.
     if not choice_token:
         existing = actions.peek_flyer_source_vs_new_pending(chat_id=chat_id, sender_phone=phone)
-        if existing and actions.flyer_is_status_checkin(text):
+        if existing and actions.is_flyer_project_status_request(text):
             clarification = (
                 "Flyer Studio\n"
                 "------------\n"
@@ -981,6 +977,7 @@ def _try_flyer_source_vs_new_choice_intercept(text: str, chat_id: str, event: An
         new_raw_request = f"Edit uploaded flyer/source artwork. Customer requested: {visible}"
         ok, detail, project = actions.trigger_create_flyer_project(
             customer_phone=phone,
+            chat_id=chat_id,
             raw_request=new_raw_request,
             message_id=message_id,
             reference_media_path=str(pending.get("media_path") or ""),
@@ -1113,6 +1110,7 @@ def _try_flyer_source_vs_new_choice_intercept(text: str, chat_id: str, event: An
             new_raw_request = f"{new_raw_request}\n\nAdditional customer instruction: {trailing_text}"
         ok, detail, project = actions.trigger_create_flyer_project(
             customer_phone=phone,
+            chat_id=chat_id,
             raw_request=new_raw_request,
             message_id=message_id,
             reference_media_path=str(pending.get("media_path") or ""),
@@ -1181,6 +1179,7 @@ def _try_flyer_reference_scope_authorization_intercept(text: str, chat_id: str, 
         ).strip()
         ok, detail, project = actions.trigger_create_flyer_project(
             customer_phone=phone,
+            chat_id=chat_id,
             raw_request=raw_request,
             message_id=message_id,
             reference_media_path=str(pending.get("media_path") or ""),
@@ -1421,6 +1420,26 @@ def _send_preview_then_finalize_access(
     return proc_ok and preview_ok and access_ok, outbound_message_id, ack_err
 
 
+def _send_generation_failure_customer_update(
+    chat_id: str,
+    project_id: str,
+    request_text: str,
+    gen_detail: str,
+    *,
+    proc_ok: bool,
+) -> tuple[bool, str, str]:
+    if actions.flyer_generation_queued_manual_review(gen_detail):
+        return actions.send_flyer_manual_review_ack(
+            chat_id,
+            project_id,
+            request_text,
+            reason=gen_detail,
+        )
+    if proc_ok:
+        return True, "", ""
+    return actions.send_flyer_intake_ack(chat_id, project_id)
+
+
 def _preview_may_have_delivered(outbound_message_id: str, ack_err: str) -> bool:
     err = (ack_err or "").lower()
     return bool(outbound_message_id) or "partial_delivery" in err or "send_uncertain" in err
@@ -1432,8 +1451,8 @@ def _send_flyer_regeneration_failed_ack(chat_id: str, project_id: str) -> tuple[
         (
             "Flyer Studio\n"
             "------------\n"
-            f"I could not regenerate project {project_id} automatically just now.\n\n"
-            "I kept the edit request open for follow-up instead of sending a mismatched flyer. "
+            "I could not finish the revised flyer automatically just now.\n\n"
+            "I kept the edit request open instead of sending a mismatched flyer. "
             "Please check back here shortly, or send one exact correction if anything else must change."
         ),
     )
@@ -1920,7 +1939,7 @@ def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_
                     ),
                 )
                 return {"action": "skip", "reason": f"cf-router flyer brand asset manual review queued {project_id}"}
-            reply = f"{reply}\n\nSaved. I could not regenerate the flyer automatically yet: {gen_detail[:160] if 'gen_detail' in locals() else ''}"
+            reply = f"{reply}\n\nSaved. I couldn't finish the flyer update automatically yet. I'll send an update here shortly."
 
     ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
     actions.audit_intercepted(
@@ -2132,15 +2151,13 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         else:
             if not active_project.get("revisions"):
                 _release_flyer_access(access, chat_id, phone, project_id, message_id)
-            if actions.flyer_generation_queued_manual_review(gen_detail):
-                ack_ok, outbound_message_id, ack_err = actions.send_flyer_manual_review_ack(
-                    chat_id,
-                    project_id,
-                    body,
-                    reason=gen_detail,
-                )
-            else:
-                ack_ok, outbound_message_id, ack_err = actions.send_flyer_intake_ack(chat_id, project_id)
+            ack_ok, outbound_message_id, ack_err = _send_generation_failure_customer_update(
+                chat_id,
+                project_id,
+                body,
+                gen_detail,
+                proc_ok=proc_ok,
+            )
             outbound_message_id = ",".join(x for x in [proc_mid, outbound_message_id] if x)
             ack_err = f"concept_generation_failed: {gen_detail}; ack_error={ack_err}"
         actions.audit_intercepted(
@@ -2445,7 +2462,7 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
             (
                 "Flyer Studio\n"
                 "------------\n"
-                f"I have project {project_id} open. Please send the full flyer request in one message "
+                "I have your flyer request open. Please send the full flyer request in one message "
                 "or send any logo/photos you want included. If this is a new flyer, start with "
                 "\"Create flyer\" and the offer or event details."
             ),

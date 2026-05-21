@@ -2356,7 +2356,7 @@ def test_status_reply_prefers_recent_closed_no_send_over_older_active(tmp_path, 
         {"message_id": "m-update"},
     )
     assert result is not None and result.get("action") == "skip"
-    assert "F0058" in sent["text"], f"expected status reply about F0058, got: {sent['text']!r}"
+    assert "F0058" not in sent["text"], f"status copy must hide project ids, got: {sent['text']!r}"
     assert "F0034" not in sent["text"]
     # Should be the closed_no_send reason-aware line, not the revising-design line.
     assert "apply that source-flyer edit" in sent["text"] or "closed without delivering" in sent["text"]
@@ -2418,8 +2418,9 @@ def test_status_reply_with_explicit_id_mention_wins_over_latest(tmp_path, monkey
         {"message_id": "m-explicit"},
     )
     assert result is not None
-    assert "F0028" in sent["text"], f"expected reply about F0028 (explicit mention), got: {sent['text']!r}"
+    assert "F0028" not in sent["text"], f"status copy must hide project ids, got: {sent['text']!r}"
     assert "F0058" not in sent["text"]
+    assert "final flyer files have been delivered" in sent["text"]
 
 
 def test_closed_no_send_does_not_swallow_new_flyer_request(tmp_path, monkeypatch):
@@ -2486,9 +2487,8 @@ def test_status_reply_when_only_closed_no_send_exists(tmp_path, monkeypatch):
         {"message_id": "m-update"},
     )
     assert result is not None and result.get("action") == "skip"
-    assert "F0058" in sent["text"], (
-        "expected status reply about F0058 even though active picker returned None"
-    )
+    assert "F0058" not in sent["text"]
+    assert "apply that source-flyer edit" in sent["text"] or "closed without delivering" in sent["text"]
 
 
 def test_status_reply_with_explicit_id_when_no_active_project(tmp_path, monkeypatch):
@@ -2527,7 +2527,8 @@ def test_status_reply_with_explicit_id_when_no_active_project(tmp_path, monkeypa
         {"message_id": "m-explicit"},
     )
     assert result is not None and result.get("action") == "skip"
-    assert "F0058" in sent["text"]
+    assert "F0058" not in sent["text"]
+    assert "apply that source-flyer edit" in sent["text"] or "closed without delivering" in sent["text"]
 
 
 def test_status_reply_returns_none_when_no_projects_at_all(tmp_path, monkeypatch):
@@ -2683,10 +2684,75 @@ def test_source_vs_new_new_choice_creates_project_without_manual_edit(monkeypatc
     assert created.get("manual_edit_required") in (False, None), (
         f"NEW branch must NOT pass manual_edit_required; got {created.get('manual_edit_required')!r}"
     )
-    raw = created.get("raw_request", "")
-    assert "Create a new original" in raw, (
-        f"NEW branch raw_request must contain 'Create a new original'; got {raw!r}"
+
+
+def test_active_intake_generation_failure_does_not_send_duplicate_initial_ack(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    calls = {"processing": 0, "intake": 0}
+    active_project = {
+        "project_id": "F0065",
+        "customer_phone": "+17329837841",
+        "status": "intake_started",
+        "fields": {"event_or_business_name": "Evening Snacks", "contact_info": "+17329837841"},
+        "concepts": [],
+        "revisions": [],
+    }
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
+    monkeypatch.setattr(actions, "flyer_project_has_required_fields", lambda *_a, **_kw: True)
+    monkeypatch.setattr(actions, "send_flyer_processing_ack", lambda *_a, **_kw: (calls.__setitem__("processing", calls["processing"] + 1) or True, "processing-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_intake_ack", lambda *_a, **_kw: (calls.__setitem__("intake", calls["intake"] + 1) or True, "intake-mid", ""))
+    monkeypatch.setattr(actions, "trigger_generate_flyer_concepts", lambda *_a, **_kw: (False, "exit=1 transient provider error"))
+    monkeypatch.setattr(actions, "flyer_generation_queued_manual_review", lambda _detail: False)
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kw: None)
+    monkeypatch.setattr(hooks, "_reserve_flyer_access_or_reply", lambda *_a, **_kw: ("quota:CUST0001", None))
+    monkeypatch.setattr(hooks, "_release_flyer_access", lambda *_a, **_kw: (True, "released"))
+
+    result = hooks._try_flyer_active_project_intercept(
+        "continue",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "m-active-fail"},
     )
+
+    assert result is not None and result.get("action") == "skip"
+    assert calls["processing"] == 1
+    assert calls["intake"] == 0
+
+
+def test_active_intake_visual_qa_failure_sends_manual_review_fallback_after_processing(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    calls = {"processing": 0, "intake": 0, "manual": 0}
+    active_project = {
+        "project_id": "F0065",
+        "customer_phone": "+17329837841",
+        "status": "intake_started",
+        "fields": {"event_or_business_name": "Evening Snacks", "contact_info": "+17329837841"},
+        "concepts": [],
+        "revisions": [],
+    }
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
+    monkeypatch.setattr(actions, "flyer_project_has_required_fields", lambda *_a, **_kw: True)
+    monkeypatch.setattr(actions, "send_flyer_processing_ack", lambda *_a, **_kw: (calls.__setitem__("processing", calls["processing"] + 1) or True, "processing-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_intake_ack", lambda *_a, **_kw: (calls.__setitem__("intake", calls["intake"] + 1) or True, "intake-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_manual_review_ack", lambda *_a, **_kw: (calls.__setitem__("manual", calls["manual"] + 1) or True, "manual-mid", ""))
+    monkeypatch.setattr(actions, "trigger_generate_flyer_concepts", lambda *_a, **_kw: (False, "visual_qa_failed: missing required visible fact: business_name"))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kw: None)
+    monkeypatch.setattr(hooks, "_reserve_flyer_access_or_reply", lambda *_a, **_kw: ("quota:CUST0001", None))
+    monkeypatch.setattr(hooks, "_release_flyer_access", lambda *_a, **_kw: (True, "released"))
+
+    result = hooks._try_flyer_active_project_intercept(
+        "continue",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "m-active-qa-fail"},
+    )
+
+    assert result is not None and result.get("action") == "skip"
+    assert calls == {"processing": 1, "intake": 0, "manual": 1}
 
 
 def test_source_vs_new_source_choice_creates_manual_edit_project(monkeypatch):
@@ -2751,7 +2817,8 @@ def test_source_vs_new_source_choice_creates_manual_edit_project(monkeypatch):
     )
 
 
-def test_queued_source_edit_status_checkin_does_not_reenter_clarification(monkeypatch):
+@pytest.mark.parametrize("status_text", ["any update?", "any updates?", "status please", "what is the status?"])
+def test_queued_source_edit_status_checkin_resends_source_new_clarification(monkeypatch, status_text):
     """After SOURCE-chosen project is queued, follow-up `any update?` MUST
     NOT re-enter the SOURCE/NEW clarification (lessons.md 2026-05-19)."""
     hooks, actions = _load_plugin_modules()
@@ -2765,7 +2832,11 @@ def test_queued_source_edit_status_checkin_does_not_reenter_clarification(monkey
     if hasattr(actions, "consume_flyer_source_vs_new_choice"):
         monkeypatch.setattr(actions, "consume_flyer_source_vs_new_choice", fake_consume_source_vs_new)
     if hasattr(actions, "peek_flyer_source_vs_new_pending"):
-        monkeypatch.setattr(actions, "peek_flyer_source_vs_new_pending", lambda **_kw: None)
+        monkeypatch.setattr(
+            actions,
+            "peek_flyer_source_vs_new_pending",
+            lambda **_kw: {"customer": {"customer_id": "CUST0001"}},
+        )
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+17329837841", "customer"))
     monkeypatch.setattr(
         actions, "trigger_create_flyer_project",
@@ -2775,13 +2846,11 @@ def test_queued_source_edit_status_checkin_does_not_reenter_clarification(monkey
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kw: None)
 
     result = hooks._try_flyer_source_vs_new_choice_intercept(
-        "any update?",
+        status_text,
         "17329837841@s.whatsapp.net",
         {"message_id": "m-status"},
     )
-    # None is acceptable (no pending row); the key invariant is
-    # trigger_create_flyer_project must not be called.
-    assert result is None or result.get("action") == "skip"
+    assert result is not None and result.get("action") == "skip"
 
 
 def test_source_vs_new_source_branch_calls_preflight_and_generates_when_ready(monkeypatch):

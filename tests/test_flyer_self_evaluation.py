@@ -36,6 +36,7 @@ def _project(
     assets: list[dict] | None = None,
     reference_extractions: list[dict] | None = None,
     qa_reports: list[dict] | None = None,
+    locked_facts: list[dict] | None = None,
     final_asset_ids: list[str] | None = None,
     revisions: list[dict] | None = None,
     concepts: list[dict] | None = None,
@@ -59,6 +60,7 @@ def _project(
         "assets": assets or [],
         "reference_extractions": reference_extractions or [],
         "qa_reports": qa_reports or [],
+        "locked_facts": locked_facts or [],
         "final_asset_ids": final_asset_ids or [],
         "revisions": revisions or [],
         "concepts": concepts or [],
@@ -149,6 +151,62 @@ def test_customer_copy_internal_leak_detected_from_decisions_log():
     assert incident["project_id"] == "F0063"
     assert "customer-message copy" in incident["suggested_action"]
     assert "Requested edit:" in incident["evidence"]
+
+
+def test_malformed_business_name_fact_becomes_incident():
+    module = load_module()
+    report = module.build_report(
+        projects={
+            "projects": [
+                _project(
+                    "F0065",
+                    locked_facts=[
+                        {
+                            "fact_id": "business_name",
+                            "label": "Business",
+                            "value": "d like you to help me with evening snacks flier",
+                            "source": "customer_text",
+                            "required": True,
+                        }
+                    ],
+                )
+            ]
+        },
+        decision_entries=[],
+        now=module.parse_utc("2026-05-20T11:00:00Z"),
+    )
+
+    incident = next(item for item in report["incidents"] if item["type"] == "malformed_business_name_fact")
+    assert incident["project_id"] == "F0065"
+    assert incident["eval_category"] == "flyer_fact_contract"
+    assert incident["evidence_details"]["source"] == "customer_text"
+
+
+def test_duplicate_initial_ack_becomes_incident_from_outbound_audit_text():
+    module = load_module()
+    report = module.build_report(
+        projects={"projects": []},
+        decision_entries=[
+            {
+                "type": "cf_router_intercepted",
+                "ts": "2026-05-20T10:05:00Z",
+                "project_id": "F0065",
+                "outbound_text": "Flyer Studio\n------------\nGot it. I'm creating your flyer now and will send a preview here shortly.",
+            },
+            {
+                "type": "cf_router_intercepted",
+                "ts": "2026-05-20T10:06:00Z",
+                "project_id": "F0065",
+                "outbound_text": "Flyer Studio\n------------\nGot it. I have your flyer request and will send an update here shortly.",
+            },
+        ],
+        now=module.parse_utc("2026-05-20T11:00:00Z"),
+    )
+
+    incident = next(item for item in report["incidents"] if item["type"] == "duplicate_initial_ack")
+    assert incident["project_id"] == "F0065"
+    assert incident["count"] == 2
+    assert incident["eval_category"] == "customer-message copy"
 
 
 def test_static_source_scan_finds_current_ack_leaks_when_audit_lacks_body(tmp_path):

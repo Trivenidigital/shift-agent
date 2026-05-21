@@ -1160,3 +1160,15 @@ Review results:
   - [x] Build with TDD and focused verification.
   - [x] Open PR; no merge or deploy. PR #147: https://github.com/Trivenidigital/shift-agent/pull/147
   - Review: red run first produced 19 focused failures across source-edit preflight, renderer provider dispatch, workflow readiness, schema resolver, and script static wiring. Final verification passed: `tests/test_flyer_source_edit_preflight.py tests/test_flyer_renderer.py tests/test_flyer_workflow.py tests/test_flyer_schemas.py` -> `119 passed`; `tests/test_flyer_generate_concepts.py tests/test_cf_router_flyer_routing.py -k "source_edit or preflight"` -> `7 passed, 93 deselected`; `tests/test_flyer_golden_scenarios_real_model.py tests/test_flyer_scripts_static.py` -> `34 passed, 1 skipped`; `tests/ -k "flyer and source_edit"` -> `53 passed, 4 skipped, 2094 deselected`; touched-file `py_compile` passed; `git diff --check` passed. No deploy performed.
+- [x] Flyer Studio contract/lifecycle stabilization (2026-05-21): prevent F0065-class natural requests from poisoning locked business identity, remove project IDs/internal workflow from customer copy, and make initial ack lifecycle single-contract.
+  - Drift-check tag: extends-Hermes
+  - Hermes-first analysis: reused cf-router/Hermes sender identity, audit/log chokepoints, Flyer JSON state/customer profile store, existing visual QA/source-contract gates, and messaging substrate. Net-new scope is Flyer-specific fact contract, customer copy policy, and transcript-level regression coverage.
+  - [x] Read deployed/current Flyer code, recent plans/PR notes, and relevant tests before coding.
+  - [x] Write plan: `docs/superpowers/plans/2026-05-21-flyer-contract-lifecycle.md`.
+  - [x] Get plan reviewed by two parallel agents and fold Critical/High findings.
+  - [x] Write design: `docs/superpowers/specs/2026-05-21-flyer-contract-lifecycle-design.md`.
+  - [x] Get design reviewed by two parallel agents and fold Critical/High findings.
+  - [x] Build with transcript-level tests for F0065, profile authority, customer-copy leaks, duplicate initial ack, and self-eval tripwires.
+  - [x] Open PR #152 and get two parallel PR reviews.
+  - [x] Fold PR-review High findings: visual-QA failure fallback, truthful generic fallback copy, deterministic render title path, explicit business override bounds/prompt propagation, and SOURCE/NEW pending status phrasing.
+  - Review: focused acceptance suite `324 passed, 117 skipped`; touched-file `py_compile` passed; `git diff --check` passed. No deploy performed.
