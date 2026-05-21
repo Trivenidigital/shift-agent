@@ -1,0 +1,346 @@
+#!/usr/bin/env python3
+"""Page the operator when exact source-edit manual queue rows go stale.
+
+Read-only with respect to Flyer projects/customers: this script only reads
+projects.json, writes its own throttle state, and appends operator-alert audit
+rows.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable
+
+
+SRC_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(SRC_ROOT / "platform"))
+sys.path.insert(0, str(SRC_ROOT))
+
+from schemas import FlyerProject, FlyerProjectStore, FlyerSourceEditSlaAlert  # noqa: E402
+
+try:  # pragma: no cover - production path
+    from safe_io import FileLock, atomic_write_json, ndjson_append, notify_owner_with_fallback  # type: ignore  # noqa: E402
+except Exception:  # pragma: no cover - Windows local test fallback for fcntl-less hosts
+    class FileLock:  # type: ignore[no-redef]
+        def __init__(self, lockpath: Path):
+            self.lockpath = Path(lockpath)
+
+        def __enter__(self):
+            self.lockpath.parent.mkdir(parents=True, exist_ok=True)
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    def atomic_write_json(path: Path, obj: Any, mode: int = 0o640) -> None:  # type: ignore[no-redef]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(obj, indent=2, default=str), encoding="utf-8")
+        tmp.replace(path)
+
+    def ndjson_append(path: Path, entry_json: str) -> None:  # type: ignore[no-redef]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(entry_json + "\n")
+
+    def notify_owner_with_fallback(*_args: Any, **_kwargs: Any) -> bool:  # type: ignore[no-redef]
+        return False
+
+
+PROJECTS_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
+ALERT_STATE_PATH = Path("/opt/shift-agent/state/flyer/source-edit-sla-alerts.json")
+DECISIONS_LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+DEFAULT_THRESHOLD_MINUTES = 10
+DEFAULT_REPEAT_MINUTES = 60
+DEFAULT_PRIORITY = 2
+SOURCE = "flyer-source-edit-sla-watchdog"
+TITLE = "Flyer source-edit SLA breach"
+
+
+def parse_utc(value: str) -> datetime:
+    raw = value.strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    dt = datetime.fromisoformat(raw)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _load_projects(path: Path) -> FlyerProjectStore:
+    if not path.exists():
+        return FlyerProjectStore()
+    return FlyerProjectStore.model_validate(json.loads(path.read_text(encoding="utf-8")))
+
+
+def _load_alert_state(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"version": 1, "project_alerts": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"version": 1, "project_alerts": {}}
+    if not isinstance(data, dict):
+        return {"version": 1, "project_alerts": {}}
+    alerts = data.get("project_alerts")
+    if not isinstance(alerts, dict):
+        data["project_alerts"] = {}
+    data["version"] = 1
+    return data
+
+
+def _project_ts(project: FlyerProject) -> datetime:
+    ts = project.manual_review.queued_at or project.updated_at or project.created_at
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone.utc)
+
+
+def _age_minutes(project: FlyerProject, now: datetime) -> float:
+    return max((now - _project_ts(project)).total_seconds() / 60.0, 0.0)
+
+
+def _eligible(project: FlyerProject) -> bool:
+    manual = project.manual_review
+    return (
+        project.status == "manual_edit_required"
+        and manual.status in {"queued", "in_progress"}
+        and manual.reason_code == "source_edit_provider_unavailable"
+    )
+
+
+def _row_key(project: FlyerProject) -> str:
+    queued = _project_ts(project).isoformat()
+    return f"{project.project_id}|{project.manual_review.reason_code}|{queued}"
+
+
+def stale_source_edit_rows(
+    projects: list[FlyerProject],
+    *,
+    now: datetime,
+    threshold_minutes: int,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for project in projects:
+        if not _eligible(project):
+            continue
+        age = _age_minutes(project, now)
+        if age < threshold_minutes:
+            continue
+        queued_at = _project_ts(project)
+        rows.append({
+            "project_id": project.project_id,
+            "reason_code": project.manual_review.reason_code,
+            "manual_status": project.manual_review.status,
+            "queued_at": queued_at.isoformat(),
+            "age_minutes": round(age, 1),
+            "row_key": _row_key(project),
+        })
+    rows.sort(key=lambda row: (-row["age_minutes"], row["project_id"]))
+    return rows
+
+
+def _is_throttled(row: dict[str, Any], state: dict[str, Any], *, now: datetime, repeat_minutes: int) -> bool:
+    entry = state.get("project_alerts", {}).get(row["row_key"])
+    if not isinstance(entry, dict):
+        return False
+    last_raw = str(entry.get("last_alerted_at") or "")
+    if not last_raw:
+        return False
+    try:
+        last = parse_utc(last_raw)
+    except ValueError:
+        return False
+    return (now - last).total_seconds() < repeat_minutes * 60
+
+
+def _build_message(rows: list[dict[str, Any]], *, threshold_minutes: int, repeat_minutes: int) -> str:
+    shown = rows[:8]
+    lines = [
+        f"{len(rows)} Flyer source-edit manual queue row(s) exceeded {threshold_minutes} min.",
+        f"Repeat alerts throttle for {repeat_minutes} min per queue row.",
+        "",
+    ]
+    for row in shown:
+        lines.append(
+            f"- {row['project_id']}: {row['age_minutes']:.1f} min, "
+            f"{row['manual_status']}, {row['reason_code']}"
+        )
+    if len(rows) > len(shown):
+        lines.append(f"- ... {len(rows) - len(shown)} more")
+    lines.append("")
+    lines.append("Run flyer-manual-queue --triage and resolve or intentionally close stale rows.")
+    return "\n".join(lines)
+
+
+def _append_audit(
+    path: Path,
+    *,
+    outcome: str,
+    rows: list[dict[str, Any]],
+    stale_count: int,
+    threshold_minutes: int,
+    repeat_minutes: int,
+    notify_ok: bool,
+    now: datetime,
+) -> None:
+    entry = FlyerSourceEditSlaAlert(
+        type="flyer_source_edit_sla_alert",
+        ts=now,
+        outcome=outcome,
+        project_ids=[row["project_id"] for row in rows[:50]],
+        stale_count=stale_count,
+        alerted_count=len(rows) if outcome == "alerted" else 0,
+        throttled_count=len(rows) if outcome == "throttled" else 0,
+        oldest_age_minutes=max([row["age_minutes"] for row in rows], default=0.0),
+        threshold_minutes=threshold_minutes,
+        repeat_minutes=repeat_minutes,
+        notify_ok=notify_ok,
+    )
+    with FileLock(Path(str(path) + ".lock")):
+        ndjson_append(path, entry.model_dump_json())
+
+
+NotifyFunc = Callable[..., bool]
+
+
+def run_watchdog(
+    *,
+    projects_path: Path,
+    alert_state_path: Path,
+    decisions_log_path: Path,
+    now: datetime,
+    threshold_minutes: int = DEFAULT_THRESHOLD_MINUTES,
+    repeat_minutes: int = DEFAULT_REPEAT_MINUTES,
+    priority: int = DEFAULT_PRIORITY,
+    notify_func: NotifyFunc | None = None,
+) -> dict[str, Any]:
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    now = now.astimezone(timezone.utc)
+    store = _load_projects(projects_path)
+    rows = stale_source_edit_rows(store.projects, now=now, threshold_minutes=threshold_minutes)
+    state = _load_alert_state(alert_state_path)
+    stale_count = len(rows)
+
+    if not rows:
+        return {
+            "status": "ok",
+            "exit_code": 0,
+            "stale_count": 0,
+            "alerted_project_ids": [],
+            "throttled_project_ids": [],
+        }
+
+    alert_rows = [row for row in rows if not _is_throttled(row, state, now=now, repeat_minutes=repeat_minutes)]
+    throttled_rows = [row for row in rows if row not in alert_rows]
+
+    if not alert_rows:
+        _append_audit(
+            decisions_log_path,
+            outcome="throttled",
+            rows=throttled_rows,
+            stale_count=stale_count,
+            threshold_minutes=threshold_minutes,
+            repeat_minutes=repeat_minutes,
+            notify_ok=False,
+            now=now,
+        )
+        return {
+            "status": "throttled",
+            "exit_code": 0,
+            "stale_count": stale_count,
+            "alerted_project_ids": [],
+            "throttled_project_ids": [row["project_id"] for row in throttled_rows],
+            "oldest_age_minutes": max(row["age_minutes"] for row in rows),
+        }
+
+    message = _build_message(alert_rows, threshold_minutes=threshold_minutes, repeat_minutes=repeat_minutes)
+    notify = notify_func or notify_owner_with_fallback
+    notify_ok = bool(notify(title=TITLE, message=message, priority=priority, source=SOURCE))
+
+    if not notify_ok:
+        _append_audit(
+            decisions_log_path,
+            outcome="notify_failed",
+            rows=alert_rows,
+            stale_count=stale_count,
+            threshold_minutes=threshold_minutes,
+            repeat_minutes=repeat_minutes,
+            notify_ok=False,
+            now=now,
+        )
+        return {
+            "status": "notify_failed",
+            "exit_code": 6,
+            "stale_count": stale_count,
+            "alerted_project_ids": [],
+            "throttled_project_ids": [row["project_id"] for row in throttled_rows],
+            "failed_project_ids": [row["project_id"] for row in alert_rows],
+            "oldest_age_minutes": max(row["age_minutes"] for row in rows),
+        }
+
+    with FileLock(Path(str(alert_state_path) + ".lock")):
+        fresh_state = _load_alert_state(alert_state_path)
+        alerts = fresh_state.setdefault("project_alerts", {})
+        for row in alert_rows:
+            alerts[row["row_key"]] = {
+                "project_id": row["project_id"],
+                "reason_code": row["reason_code"],
+                "queued_at": row["queued_at"],
+                "last_alerted_at": now.isoformat(),
+                "last_age_minutes": row["age_minutes"],
+            }
+        atomic_write_json(alert_state_path, fresh_state)
+
+    _append_audit(
+        decisions_log_path,
+        outcome="alerted",
+        rows=alert_rows,
+        stale_count=stale_count,
+        threshold_minutes=threshold_minutes,
+        repeat_minutes=repeat_minutes,
+        notify_ok=True,
+        now=now,
+    )
+    return {
+        "status": "alerted",
+        "exit_code": 0,
+        "stale_count": stale_count,
+        "alerted_project_ids": [row["project_id"] for row in alert_rows],
+        "throttled_project_ids": [row["project_id"] for row in throttled_rows],
+        "oldest_age_minutes": max(row["age_minutes"] for row in rows),
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--projects", "--projects-path", dest="projects_path", default=str(PROJECTS_PATH))
+    parser.add_argument("--alert-state-path", default=str(ALERT_STATE_PATH))
+    parser.add_argument("--decisions-log", default=str(DECISIONS_LOG_PATH))
+    parser.add_argument("--threshold-minutes", type=int, default=DEFAULT_THRESHOLD_MINUTES)
+    parser.add_argument("--repeat-minutes", type=int, default=DEFAULT_REPEAT_MINUTES)
+    parser.add_argument("--priority", type=int, choices=[-2, -1, 0, 1, 2], default=DEFAULT_PRIORITY)
+    parser.add_argument("--now", default="")
+    args = parser.parse_args(argv)
+
+    now = parse_utc(args.now) if args.now else datetime.now(timezone.utc)
+    result = run_watchdog(
+        projects_path=Path(args.projects_path),
+        alert_state_path=Path(args.alert_state_path),
+        decisions_log_path=Path(args.decisions_log),
+        now=now,
+        threshold_minutes=args.threshold_minutes,
+        repeat_minutes=args.repeat_minutes,
+        priority=args.priority,
+    )
+    print(json.dumps(result, sort_keys=True))
+    return int(result.get("exit_code", 0))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
