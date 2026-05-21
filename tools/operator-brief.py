@@ -275,6 +275,22 @@ def summarize_flyer_evaluation_report(path: Path | None) -> list[str]:
     checkins = len(checkin_items)
     if checkins:
         lines.append(f"Customer waiting: repeated_checkins={checkins}{active_suffix(checkin_items)}")
+    routing_items = [
+        item for item in incidents
+        if item.get("type") in {"new_flyer_routed_as_revision", "latest_request_not_reflected"}
+    ]
+    routed_as_revision = sum(1 for item in routing_items if item.get("type") == "new_flyer_routed_as_revision")
+    not_reflected = sum(1 for item in routing_items if item.get("type") == "latest_request_not_reflected")
+    if routed_as_revision or not_reflected:
+        lines.append(
+            "Routing tripwires: "
+            f"new_as_revision={routed_as_revision}; "
+            f"latest_not_reflected={not_reflected}"
+            f"{active_suffix(routing_items)}"
+        )
+    preview_items = [item for item in incidents if item.get("type") == "preview_approved_final_qa_failed"]
+    if preview_items:
+        lines.append(f"Preview/final QA: approved_then_failed={len(preview_items)}{active_suffix(preview_items)}")
     severity_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
     top_incidents = sorted(
         incidents,

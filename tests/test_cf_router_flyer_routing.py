@@ -641,6 +641,83 @@ def test_vague_flyer_start_enters_adaptive_intake_but_complete_request_does_not(
     assert not actions.is_vague_flyer_start("Create flyer using this attached sample", has_media=True)
 
 
+def test_routing_decision_preview_reports_evening_snacks_bypass_read_only():
+    actions = _load_actions()
+    text = (
+        "I'd like you to help me with evening snacks flier from 4 PM to 7 PM. "
+        "Include 5 top South Indian snack items. Its Wednesday through Saturday event"
+    )
+
+    decision = actions.flyer_routing_decision_preview(
+        text,
+        active_project={"project_id": "F0062", "status": "awaiting_final_approval"},
+        latest_message_id="live-evening-snacks",
+    )
+    assert decision["route"] == "new_project"
+    assert decision["selected_project_id"] == "F0062"
+    assert decision["fresh_new_request_detected"] is True
+    assert decision["active_project_bypassed"] is True
+    assert decision["latest_message_id"] == "live-evening-snacks"
+    assert actions.should_start_new_flyer_over_active(text, has_media=False)
+
+
+def test_routing_decision_preview_matches_live_order_for_status_fresh_overlap():
+    actions = _load_actions()
+    text = "any update on flyer for Friday sale?"
+    active = {"project_id": "F0062", "status": "awaiting_final_approval"}
+
+    assert actions.is_flyer_project_status_request(text)
+    assert actions.should_start_new_flyer_over_active(text, has_media=False)
+
+    decision = actions.flyer_routing_decision_preview(text, active_project=active)
+    assert decision["route"] == "new_project"
+    assert decision["reason"] == "fresh_new_request"
+    assert decision["fresh_new_request_detected"] is True
+    assert decision["active_project_bypassed"] is True
+
+
+def test_routing_decision_preview_keeps_similar_open_intake_on_active_project():
+    actions = _load_actions()
+    raw_request = (
+        "Design a premium organic-style flyer for Fresh Meats featuring a whole fresh chicken "
+        "with Premium Amish Organic Chicken, Clean bird. Strong life, Fresh, Healthy, Natural, "
+        "and Halal Certified seal."
+    )
+    active = {
+        "project_id": "F0050",
+        "status": "intake_started",
+        "raw_request": raw_request,
+        "fields": {
+            "event_or_business_name": "Fresh Meats",
+            "notes": raw_request,
+            "style_preference": "premium organic-style grocery product promotion",
+        },
+    }
+
+    assert actions.should_start_new_flyer_over_active(raw_request, has_media=False)
+    assert actions.flyer_project_has_required_fields(active)
+    assert actions.similar_to_active_project_request(raw_request, active)
+
+    decision = actions.flyer_routing_decision_preview(raw_request, active_project=active)
+    assert decision["route"] == "active_intake"
+    assert decision["reason"] == "active_intake_similar_request"
+    assert decision["fresh_new_request_detected"] is True
+    assert decision["active_project_bypassed"] is False
+
+
+def test_routing_decision_preview_keeps_revision_status_and_approval_paths():
+    actions = _load_actions()
+    active = {"project_id": "F0062", "status": "awaiting_final_approval"}
+
+    assert actions.flyer_routing_decision_preview("approve", active_project=active)["route"] == "approval"
+    assert actions.flyer_routing_decision_preview("any update?", active_project=active)["route"] == "status_reply"
+    assert actions.flyer_routing_decision_preview("change phone number", active_project=active)["route"] == "revision"
+    assert actions.flyer_routing_decision_preview("make it red", active_project=active)["route"] == "revision"
+    assert actions.flyer_routing_decision_preview("replace rice with jeera rice", active_project=active)["route"] == "revision"
+    assert actions.flyer_routing_decision_preview("Create flyer", active_project=active)["route"] == "revision"
+    assert actions.flyer_routing_decision_preview("Help me make a flyer", active_project=active)["route"] == "revision"
+
+
 def test_sample_prompt_preference_text_is_account_command():
     actions = _load_actions()
 
