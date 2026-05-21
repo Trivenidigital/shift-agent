@@ -661,6 +661,21 @@ def test_routing_decision_preview_reports_evening_snacks_bypass_read_only():
     assert actions.should_start_new_flyer_over_active(text, has_media=False)
 
 
+def test_routing_decision_preview_matches_live_order_for_status_fresh_overlap():
+    actions = _load_actions()
+    text = "any update on flyer for Friday sale?"
+    active = {"project_id": "F0062", "status": "awaiting_final_approval"}
+
+    assert actions.is_flyer_project_status_request(text)
+    assert actions.should_start_new_flyer_over_active(text, has_media=False)
+
+    decision = actions.flyer_routing_decision_preview(text, active_project=active)
+    assert decision["route"] == "new_project"
+    assert decision["reason"] == "fresh_new_request"
+    assert decision["fresh_new_request_detected"] is True
+    assert decision["active_project_bypassed"] is True
+
+
 def test_routing_decision_preview_keeps_revision_status_and_approval_paths():
     actions = _load_actions()
     active = {"project_id": "F0062", "status": "awaiting_final_approval"}

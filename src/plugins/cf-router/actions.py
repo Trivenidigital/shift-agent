@@ -892,12 +892,12 @@ def flyer_routing_decision_preview(
     if is_flyer_approval_text(body):
         route = "approval"
         reason = "approval_text"
-    elif is_flyer_project_status_request(body):
-        route = "status_reply"
-        reason = "status_request"
     elif fresh:
         route = "new_project"
         reason = "fresh_new_request"
+    elif is_flyer_project_status_request(body):
+        route = "status_reply"
+        reason = "status_request"
     elif active_project and str(active_project.get("status") or "") == "manual_edit_required":
         route = "manual_queue"
         reason = "active_manual_review_project"
