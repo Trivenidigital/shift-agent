@@ -81,9 +81,13 @@ def test_auth_bypass_request_sets_cookie(monkeypatch):
     class Client:
         host = "127.0.0.1"
 
+    class Url:
+        scheme = "http"
+
     class Request:
         client = Client()
         headers = {}
+        url = Url()
 
     response = Response()
     import anyio
@@ -92,6 +96,52 @@ def test_auth_bypass_request_sets_cookie(monkeypatch):
 
     assert body.token == "__bypass__"
     assert "hjwt=" in response.headers["set-cookie"]
+    assert "Secure" not in response.headers["set-cookie"]
+
+
+def test_cookie_secure_only_when_https(monkeypatch):
+    from fastapi import Response
+    from app.routers import auth as auth_router
+
+    class Owner:
+        phone = "+17329837841"
+
+    class Config:
+        owner = Owner()
+
+    monkeypatch.setattr(auth_router.settings, "auth_bypass_enabled", True)
+    monkeypatch.setattr(auth_router.settings, "cookie_secure", True)
+    monkeypatch.setattr(auth_router, "load_config", lambda: Config())
+    monkeypatch.setattr(auth_router, "audit_log", lambda *args, **kwargs: None)
+
+    class Client:
+        host = "127.0.0.1"
+
+    class UrlHttps:
+        scheme = "https"
+
+    class UrlHttp:
+        scheme = "http"
+
+    class RequestHttps:
+        client = Client()
+        headers = {}
+        url = UrlHttps()
+
+    class RequestHttp:
+        client = Client()
+        headers = {}
+        url = UrlHttp()
+
+    import anyio
+
+    response = Response()
+    anyio.run(auth_router.request_otp, RequestHttps(), response)
+    assert "Secure" in response.headers["set-cookie"]
+
+    response2 = Response()
+    anyio.run(auth_router.request_otp, RequestHttp(), response2)
+    assert "Secure" not in response2.headers["set-cookie"]
 
 
 def test_cockpit_service_does_not_ship_auth_bypass_enabled():
