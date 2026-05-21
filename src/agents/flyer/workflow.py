@@ -215,6 +215,8 @@ def _extract_replace_text(body: str) -> tuple[str, str]:
         r"\b(?:replace|change)\b[^\"'\n]{0,120}[\"'](?P<old>[^\"']{1,160})[\"']\s*[-–—:|]*\s*(?:with|to|->)\s*[\"'](?P<new>[^\"']{1,160})[\"']",
         # Curly quotes are often pasted inconsistently on WhatsApp (left/left or right/right).
         r"\b(?:replace|change)\b[^“”\n]{0,120}[“”](?P<old>[^“”]{1,160})[“”]\s*[-–—:|]*\s*(?:with|to|->)\s*[“”](?P<new>[^“”]{1,160})[“”]",
+        # Backticks are common on WhatsApp (customers use them as quotes).
+        r"\b(?:replace|change)\b[^`\n]{0,120}`(?P<old>[^`]{1,160})`\s*[-–—:|]*\s*(?:with|to|->)\s*`(?P<new>[^`]{1,160})`",
     ]
     for pattern in patterns:
         match = re.search(pattern, body, flags=re.IGNORECASE)
