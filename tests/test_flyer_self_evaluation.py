@@ -7,10 +7,19 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = REPO_ROOT / "tools" / "flyer-self-evaluation.py"
+ACTIONS_PATH = REPO_ROOT / "src" / "plugins" / "cf-router" / "actions.py"
 
 
 def load_module():
     spec = importlib.util.spec_from_file_location("flyer_self_evaluation", MODULE_PATH)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_actions():
+    spec = importlib.util.spec_from_file_location("cf_router_actions_for_self_eval_test", ACTIONS_PATH)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
@@ -707,6 +716,41 @@ def test_latest_request_not_reflected_flags_fresh_request_routed_as_revision():
     assert "4 pm" in reflected["evidence_details"]["missing_terms"]
     assert "wednesday" in reflected["evidence_details"]["missing_terms"]
     assert report["status"] == "red"
+
+
+def test_self_eval_fresh_request_detection_matches_router_for_covered_phrase():
+    module = load_module()
+    actions = load_actions()
+    latest = (
+        "Evening snacks flier from 4 PM to 7 PM. "
+        "Include 5 top South Indian snack items. Its Wednesday through Saturday event"
+    )
+    project = _project(
+        "F9305",
+        status="awaiting_final_approval",
+        raw_request="Old Lakshmi's Kitchen thali flyer for lunch specials.",
+        manual_review={"status": "none", "reason": "", "reason_code": "unclassified"},
+        revisions=[{"request_text": latest, "message_id": "evening-snacks-short"}],
+        concepts=[
+            {
+                "concept_id": "C1",
+                "title": "Lakshmi Lunch",
+                "style_summary": "Traditional thali lunch flyer",
+                "prompt": "Create a Lakshmi's Kitchen lunch thali flyer with rice and dal.",
+            }
+        ],
+    )
+
+    assert actions.should_start_new_flyer_over_active(latest, has_media=False) is True
+    assert module.looks_like_fresh_flyer_request(latest) is True
+
+    report = module.build_report(
+        projects={"projects": [project]},
+        decision_entries=[],
+        now=module.parse_utc("2026-05-20T11:00:00Z"),
+    )
+
+    assert "new_flyer_routed_as_revision" in [item["type"] for item in report["incidents"]]
 
 
 def test_new_flyer_routed_as_revision_does_not_depend_on_reflection_threshold():

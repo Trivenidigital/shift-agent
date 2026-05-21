@@ -9,6 +9,7 @@ customer/project/VPS state and it does not send messages.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 import sys
@@ -20,6 +21,7 @@ from typing import Any
 
 DEFAULT_PROJECTS_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
 DEFAULT_DECISIONS_LOG = Path("/opt/shift-agent/logs/decisions.log")
+CF_ROUTER_ACTIONS_PATH = Path(__file__).resolve().parents[1] / "src" / "plugins" / "cf-router" / "actions.py"
 DEFAULT_SOURCE_FILES = (
     Path("src/plugins/cf-router/actions.py"),
     Path("src/plugins/cf-router/hooks.py"),
@@ -85,6 +87,8 @@ US_PHONE_RE = re.compile(r"(?<!\w)(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?\d{3}[\s.
 CHAT_ID_RE = re.compile(r"\b[\w.+-]+@(?:s\.whatsapp\.net|lid)\b")
 UNIX_ABS_PATH_RE = re.compile(r"(?<!\w)/(?:opt|var|tmp|home|root|Users)/[^\s,'\")]+")
 WINDOWS_ABS_PATH_RE = re.compile(r"\b[A-Za-z]:\\[^\s,'\")]+")
+_CF_ROUTER_ACTIONS: Any | None = None
+_CF_ROUTER_ACTIONS_LOAD_ATTEMPTED = False
 
 
 def utc_now() -> datetime:
@@ -428,7 +432,26 @@ def looks_like_exact_source_edit(project: dict[str, Any]) -> bool:
     return has_reference_media(project) and any(cue in text for cue in SOURCE_EDIT_CUES)
 
 
-def looks_like_fresh_flyer_request(text: str) -> bool:
+def cf_router_actions() -> Any | None:
+    global _CF_ROUTER_ACTIONS, _CF_ROUTER_ACTIONS_LOAD_ATTEMPTED
+    if _CF_ROUTER_ACTIONS_LOAD_ATTEMPTED:
+        return _CF_ROUTER_ACTIONS
+    _CF_ROUTER_ACTIONS_LOAD_ATTEMPTED = True
+    if not CF_ROUTER_ACTIONS_PATH.exists():
+        return None
+    spec = importlib.util.spec_from_file_location("flyer_self_eval_cf_router_actions", CF_ROUTER_ACTIONS_PATH)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        return None
+    _CF_ROUTER_ACTIONS = module
+    return module
+
+
+def fallback_fresh_flyer_request(text: str) -> bool:
     body = " ".join(str(text or "").split())
     if not body or STATUS_CHECK_RE.search(body) or FRESH_FLYER_REVISION_RE.search(body):
         return False
@@ -438,6 +461,14 @@ def looks_like_fresh_flyer_request(text: str) -> bool:
         and FRESH_FLYER_DETAIL_RE.search(body)
         and FRESH_FLYER_SCHEDULE_RE.search(body)
     )
+
+
+def looks_like_fresh_flyer_request(text: str) -> bool:
+    actions = cf_router_actions()
+    helper = getattr(actions, "should_start_new_flyer_over_active", None) if actions else None
+    if callable(helper):
+        return bool(helper(text, has_media=False))
+    return fallback_fresh_flyer_request(text)
 
 
 def latest_revision_request(project: dict[str, Any]) -> tuple[str, str]:
