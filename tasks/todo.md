@@ -3,7 +3,29 @@
 Living checklist. Items grouped by priority; each completed item gets `✅` and a date.
 For history of *completed* multi-phase initiatives (platform extract, sender-id, agent #2/4/5, etc.), see git log + `tasks/all-phases-*.md`.
 
-Last updated: 2026-05-20 (pilot-hardening golden live-shape samples and stale Flyer backlog reconciliation; prior note: Hermes SMB operating-layer roadmap added)
+Last updated: 2026-05-21 (Flyer brief builder low-typing intake work added; prior note: pilot-hardening golden live-shape samples and stale Flyer backlog reconciliation)
+
+---
+
+## Active - Flyer brief builder / low-typing customer intake (2026-05-21)
+
+**Drift-check tag:** extends-Hermes
+
+Hermes-first summary: reuse Hermes WhatsApp ingress, sender identity, bridge delivery, JSON state, and cf-router audit substrate. Reuse Flyer’s existing intake store, project parser, profile hydration, and locked-fact/QA pipeline. Net-new scope is deterministic Flyer policy for compact sample ideas, guided/text brief preview, and explicit customer approval before generation.
+
+- [x] Write and review the implementation plan: `docs/superpowers/plans/2026-05-21-flyer-brief-builder.md`.
+- [x] Write and review the design: `docs/superpowers/specs/2026-05-21-flyer-brief-builder-design.md`.
+- [x] Add persisted intake states for sample idea, awaiting typed brief, and pending brief approval.
+- [x] Add compact category idea choices for low-typing customers while preserving the existing full starter prompts.
+- [x] Limit the sample picker to two choices and align the examples with the provided marketing-material / food-specials references.
+- [x] Route active/trial vague `Create flyer` requests into sample choices instead of a standalone starter prompt.
+- [x] Require `APPROVE`/approved aliases before sample, guided, or typed briefs create a project.
+- [x] Preserve `Pick an idea` through free-trial onboarding completion.
+- [x] Resolve LID-only active/trial customers by chat id for sample ideas.
+- [x] Keep old in-flight mode prompt numbering safe while new prompts use `1=idea`, `2=guided`, `3=text`.
+- [x] Preserve approved brief state if project creation fails; clear it only after successful project handoff.
+- [x] Preserve one-time order/payment gating and existing source-edit/provider behavior.
+- [x] Request final PR review and fold findings. Open PR; no deploy.
 
 ---
 

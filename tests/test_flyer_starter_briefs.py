@@ -53,6 +53,36 @@ def test_starter_message_can_include_account_wide_opt_out_hint():
     )
 
     assert 'reply "don\'t show sample prompts"' in message
+
+
+def test_restaurant_starter_idea_choices_are_compact_and_safe():
+    ideas = starter_briefs.starter_idea_choices(
+        "restaurant",
+        business_name="Lakshmi's Kitchen",
+        language="en",
+    )
+
+    assert len(ideas) == 2
+    joined = "\n".join(ideas).lower()
+    assert "thali" in joined
+    assert "evening snacks" in joined
+    for blocked in ("project", "provider", "reason_code", "manual_edit_required", "operator"):
+        assert blocked not in joined
+    assert all(len(idea) <= 280 for idea in ideas)
+
+
+def test_starter_idea_message_uses_selected_language_shell_with_numeric_replies():
+    message = starter_briefs.starter_idea_choices_message(
+        "restaurant",
+        business_name="Lakshmi's Kitchen",
+        language="te",
+    )
+
+    assert "Flyer Studio" in message
+    assert "మీకు నచ్చిన ఐడియా" in message
+    assert "Reply 1 or 2" in message
+    assert "APPROVE" in message
+    assert "Lakshmi's Kitchen" in message
     assert "for this business account" in message
 
 

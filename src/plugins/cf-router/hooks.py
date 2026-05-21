@@ -204,20 +204,39 @@ def pre_gateway_dispatch(event: Any, gateway: Any = None, session_store: Any = N
                             and not actions.flyer_starter_prompt_already_sent(customer)
                             and actions.claim_flyer_starter_prompt_send(str(customer.get("customer_id") or ""))
                         ):
-                            reply = actions.flyer_starter_brief_reply(customer)
+                            ok, detail, intake = actions.trigger_flyer_intake(
+                                chat_id=chat_id,
+                                sender_phone=phone,
+                                message_id=_extract_message_id(event, chat_id, text),
+                                text=text,
+                                media_path=media_path or "",
+                                start_source="sample_idea",
+                                original_text=text,
+                            )
+                            if not ok or not intake:
+                                actions.release_flyer_starter_prompt_claim(str(customer.get("customer_id") or ""))
+                                actions.audit_intercepted(
+                                    reason="flyer_intake_failed",
+                                    chat_id=chat_id,
+                                    subprocess_rc=2,
+                                    detail=f"source=sample_idea; detail={detail[:450]}",
+                                )
+                                return None
+                            reply = str(intake.get("reply_text") or "")
                             ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
                             if not ack_ok and not mid:
                                 actions.release_flyer_starter_prompt_claim(str(customer.get("customer_id") or ""))
                             actions.audit_intercepted(
-                                reason="flyer_starter_brief",
+                                reason="flyer_starter_ideas",
                                 chat_id=chat_id,
                                 subprocess_rc=0 if ack_ok else 3,
                                 detail=(
                                     f"customer_id={customer.get('customer_id') or ''}; sender_role={role}; "
+                                    f"action={intake.get('action') or ''}; "
                                     f"ack_message_id={mid}; ack_error={err[:300]}"
                                 ),
                             )
-                            return {"action": "skip", "reason": "cf-router flyer starter brief sent"}
+                            return {"action": "skip", "reason": "cf-router flyer starter ideas sent"}
                         reply = actions.flyer_vague_request_clarification_reply(customer)
                         ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
                         reason = (
@@ -381,6 +400,7 @@ def _try_flyer_primary_intercept(
     *,
     force_new: bool = False,
     media_path: Optional[str] = None,
+    brief_audit_detail: str = "",
 ) -> Optional[dict]:
     """Create a Flyer Studio project deterministically before LLM dispatch.
 
@@ -390,6 +410,7 @@ def _try_flyer_primary_intercept(
     """
     message_id = _extract_message_id(event, chat_id, text)
     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
+    brief_detail = f"; {brief_audit_detail}" if brief_audit_detail else ""
     customer = actions.find_flyer_customer_by_sender(phone, chat_id)
     if not phone:
         phone = _flyer_customer_sender_phone(customer)
@@ -577,7 +598,7 @@ def _try_flyer_primary_intercept(
             detail=(
                 f"project_id={project_id}; sender_role={role}; "
                 f"manual_reason={manual.get('reason') or ''}; "
-                f"ack_message_id={outbound_message_id}; ack_error={ack_err[:300]}"
+                f"ack_message_id={outbound_message_id}; ack_error={ack_err[:300]}{brief_detail}"
             ),
         )
         return {"action": "skip", "reason": f"cf-router flyer manual review queued: project {project_id}"}
@@ -625,8 +646,8 @@ def _try_flyer_primary_intercept(
                     f"source_edit_preflight_failed={ready_detail[:250]}; "
                     f"reason_code={ready_reason_code}; access={access}; "
                     f"queue_ok={queue_ok}; queue_detail={queue_detail[:250]}; "
-                    f"release_ok={release_ok}; release_detail={release_detail[:250]}; "
-                    f"ack_message_id={outbound_message_id}; ack_error={ack_err[:300]}"
+                f"release_ok={release_ok}; release_detail={release_detail[:250]}; "
+                    f"ack_message_id={outbound_message_id}; ack_error={ack_err[:300]}{brief_detail}"
                 ),
             )
             return {
@@ -671,7 +692,7 @@ def _try_flyer_primary_intercept(
             subprocess_rc=0 if ack_ok else 3,
             detail=(
                 f"project_id={project_id}; sender_role={role}; "
-                f"ack_message_id={outbound_message_id}; ack_error={ack_err[:300]}"
+                f"ack_message_id={outbound_message_id}; ack_error={ack_err[:300]}{brief_detail}"
             ),
         )
         return {"action": "skip", "reason": reason}
@@ -709,7 +730,7 @@ def _try_flyer_primary_intercept(
         subprocess_rc=0 if ack_ok else 3,
         detail=(
             f"project_id={project_id}; sender_role={role}; "
-            f"ack_message_id={outbound_message_id}; ack_error={ack_err[:300]}"
+            f"ack_message_id={outbound_message_id}; ack_error={ack_err[:300]}{brief_detail}"
         ),
     )
     return {"action": "skip",
@@ -1614,12 +1635,24 @@ def _try_flyer_intake_intercept(
     if role == "owner":
         return None
     customer = actions.find_flyer_customer_by_sender(phone, chat_id)
-    if customer and customer.get("status") in {"active", "trial"} and (
+    intake_session = actions.find_flyer_intake_session_by_sender(phone, chat_id)
+    protected_statuses = {
+        "choosing_sample_idea",
+        "text_awaiting_brief",
+        "guided_collecting_goal",
+        "guided_collecting_schedule",
+        "guided_collecting_items",
+        "guided_collecting_location",
+        "guided_collecting_assets",
+        "brief_pending_approval",
+    }
+    status = str((intake_session or {}).get("status") or "")
+    if customer and customer.get("status") in {"active", "trial"} and status not in protected_statuses and (
         actions.classify_flyer_intent(text)[0]
         or actions.should_start_new_flyer_over_active(text, has_media=bool(media_path))
     ):
         return None
-    if not actions.find_flyer_intake_session_by_sender(phone, chat_id):
+    if not intake_session:
         return None
     ok, detail, result = actions.trigger_flyer_intake(
         chat_id=chat_id,
@@ -1643,13 +1676,58 @@ def _try_flyer_intake_intercept(
         raw_request = str(result.get("raw_request") or "").strip()
         reference_media_path = str(result.get("reference_media_path") or "").strip()
         if raw_request:
-            return _try_flyer_primary_intercept(
+            actions.audit_intercepted(
+                reason="flyer_brief_approved",
+                chat_id=chat_id,
+                subprocess_rc=0,
+                detail=(
+                    f"message_id={message_id}; source={result.get('brief_source') or ''}; "
+                    f"approved_message_id={result.get('brief_approved_message_id') or ''}; "
+                    f"approved_at={result.get('brief_approved_at') or ''}; sender_role={role}"
+                ),
+            )
+            project_result = _try_flyer_primary_intercept(
                 raw_request,
                 chat_id,
                 event,
                 force_new=True,
                 media_path=reference_media_path or media_path,
+                brief_audit_detail=(
+                    f"brief_source={result.get('brief_source') or ''}; "
+                    f"brief_approved_message_id={result.get('brief_approved_message_id') or ''}; "
+                    f"brief_approved_at={result.get('brief_approved_at') or ''}"
+                ),
             )
+            if project_result is not None:
+                if not actions.discard_flyer_intake_session_by_sender(phone, chat_id):
+                    actions.audit_intercepted(
+                        reason="flyer_intake_cleanup_failed",
+                        chat_id=chat_id,
+                        subprocess_rc=3,
+                        detail=(
+                            f"message_id={message_id}; source={result.get('brief_source') or ''}; "
+                            f"approved_message_id={result.get('brief_approved_message_id') or ''}; sender_role={role}"
+                        ),
+                    )
+                return project_result
+            reply = (
+                "Flyer Studio\n"
+                "------------\n"
+                "I could not start generation cleanly, but your flyer brief is still saved. "
+                "Reply APPROVE to try again, or send changes to update it."
+            )
+            ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+            actions.audit_intercepted(
+                reason="flyer_brief_project_create_failed",
+                chat_id=chat_id,
+                subprocess_rc=0 if ack_ok else 3,
+                detail=(
+                    f"message_id={message_id}; source={result.get('brief_source') or ''}; "
+                    f"approved_message_id={result.get('brief_approved_message_id') or ''}; "
+                    f"sender_role={role}; ack_message_id={mid}; ack_error={err[:300]}"
+                ),
+            )
+            return {"action": "skip", "reason": "cf-router flyer brief project creation failed"}
     if action == "start_guest_order":
         if not phone:
             reply = (

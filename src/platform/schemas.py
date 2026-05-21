@@ -678,16 +678,19 @@ FlyerLanguage = Literal[
     "other",
 ]
 
-FlyerCreationMode = Literal["guided", "text"]
+FlyerCreationMode = Literal["sample", "guided", "text"]
 
 FlyerIntakeStatus = Literal[
     "choosing_language",
     "choosing_mode",
+    "choosing_sample_idea",
+    "text_awaiting_brief",
     "guided_collecting_goal",
     "guided_collecting_schedule",
     "guided_collecting_items",
     "guided_collecting_location",
     "guided_collecting_assets",
+    "brief_pending_approval",
 ]
 
 FlyerIntakeSource = Literal[
@@ -1214,6 +1217,7 @@ class FlyerIntakeSession(BaseModel):
     last_message_id: str = Field(default="", max_length=200)
     preferred_language: FlyerLanguage = "en"
     creation_mode: str = Field(default="", max_length=20)
+    mode_prompt_version: str = Field(default="", max_length=40)
     original_text: str = Field(default="", max_length=2000)
     goal: str = Field(default="", max_length=500)
     schedule: str = Field(default="", max_length=500)
@@ -1222,6 +1226,11 @@ class FlyerIntakeSession(BaseModel):
     style_assets: str = Field(default="", max_length=500)
     reference_media_path: str = Field(default="", max_length=500)
     reference_media_message_id: str = Field(default="", max_length=200)
+    brief_raw_request: str = Field(default="", max_length=3000)
+    brief_display_request: str = Field(default="", max_length=1500)
+    brief_source: Literal["", "sample", "guided", "text"] = ""
+    brief_approved_at: Optional[datetime] = None
+    brief_approved_message_id: str = Field(default="", max_length=200)
 
 
 class FlyerCustomerStore(BaseModel):

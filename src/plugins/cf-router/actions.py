@@ -1742,6 +1742,40 @@ def find_flyer_intake_session_by_sender(phone: Optional[str], chat_id: str) -> O
         return None
 
 
+def discard_flyer_intake_session_by_sender(phone: Optional[str], chat_id: str) -> bool:
+    """Remove an in-progress Flyer intake session after successful handoff."""
+    canonical = _canonical_phone(phone)
+    if not FLYER_CUSTOMERS_PATH.exists():
+        return False
+    try:
+        _ensure_platform_path()
+        from safe_io import FileLock, atomic_write_text  # type: ignore
+
+        with FileLock(Path(str(FLYER_CUSTOMERS_PATH) + ".lock")):
+            store = json.loads(FLYER_CUSTOMERS_PATH.read_text(encoding="utf-8"))
+            sessions = store.get("intake_sessions") or []
+            kept = []
+            removed = False
+            for session in sessions:
+                if not isinstance(session, dict):
+                    kept.append(session)
+                    continue
+                sender_phone = _canonical_phone(session.get("sender_phone"))
+                matches_phone = bool(canonical and sender_phone == canonical)
+                matches_chat = bool(session.get("sender_phone") is None and session.get("chat_id") == chat_id)
+                if matches_phone or matches_chat:
+                    removed = True
+                    continue
+                kept.append(session)
+            if not removed:
+                return False
+            store["intake_sessions"] = kept
+            atomic_write_text(FLYER_CUSTOMERS_PATH, json.dumps(store, indent=2, ensure_ascii=False))
+            return True
+    except Exception:
+        return False
+
+
 _US_STATE_WORDS = {
     "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR",
     "california": "CA", "colorado": "CO", "connecticut": "CT", "delaware": "DE",
