@@ -1,0 +1,19 @@
+[Unit]
+Description=Notify owner when Flyer source-edit SLA watchdog fails
+
+[Service]
+Type=oneshot
+User=shift-agent
+Group=shift-agent
+EnvironmentFile=/opt/shift-agent/.env
+Environment=HOME=/opt/shift-agent
+Environment=TZ=UTC
+ExecStart=/usr/local/bin/shift-agent-notify-owner --title "Flyer source-edit SLA watchdog failed" --priority 2 "The Flyer source-edit SLA watchdog failed. Check /opt/shift-agent/logs/flyer-source-edit-sla-watchdog.log and systemctl status flyer-source-edit-sla-watchdog.service."
+StandardOutput=append:/opt/shift-agent/logs/flyer-source-edit-sla-watchdog.log
+StandardError=append:/opt/shift-agent/logs/flyer-source-edit-sla-watchdog.log
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/shift-agent
+ProtectHome=read-only
+PrivateTmp=true

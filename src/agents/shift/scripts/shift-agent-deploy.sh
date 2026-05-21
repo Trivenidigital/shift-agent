@@ -316,6 +316,7 @@ install_artifacts() {
             send-flyer-campaign \
             flyer-delivery-report \
             flyer-manual-queue \
+            flyer-source-edit-sla-watchdog \
             smoke-flyer-quality; do
             if [ ! -f "src/agents/flyer/scripts/${flyer_binary}" ]; then
                 rm -f "/usr/local/bin/${flyer_binary}"
@@ -338,9 +339,16 @@ install_artifacts() {
             /usr/local/bin/manage-flyer-guest-order \
             /usr/local/bin/flyer-delivery-report \
             /usr/local/bin/flyer-manual-queue \
+            /usr/local/bin/flyer-source-edit-sla-watchdog \
             /usr/local/bin/send-flyer-campaign \
             /usr/local/bin/send-flyer-package \
             /usr/local/bin/smoke-flyer-quality
+    fi
+    if compgen -G "src/agents/flyer/systemd/*.service" > /dev/null; then
+        install -m 644 src/agents/flyer/systemd/*.service /etc/systemd/system/
+    fi
+    if compgen -G "src/agents/flyer/systemd/*.timer" > /dev/null; then
+        install -m 644 src/agents/flyer/systemd/*.timer /etc/systemd/system/
     fi
     install -d -o shift-agent -g shift-agent -m 0700 /opt/shift-agent/state/flyer 2>/dev/null || true
     install -d -o shift-agent -g shift-agent -m 0700 /opt/shift-agent/state/flyer/assets 2>/dev/null || true
@@ -470,6 +478,7 @@ install_artifacts() {
     systemctl enable --now catering-pattern-report.timer 2>/dev/null || true
     systemctl enable --now eod-reconcile.timer 2>/dev/null || true
     systemctl enable --now send-routing-accuracy-summary.timer 2>/dev/null || true
+    systemctl enable --now flyer-source-edit-sla-watchdog.timer 2>/dev/null || true
     systemctl enable --now prune-expense-receipts.timer 2>/dev/null || true
     # Agent #13 Compliance Calendar (PR-Agent13-v0.1)
     systemctl enable --now check-compliance-deadlines.timer 2>/dev/null || true

@@ -3418,6 +3418,20 @@ class FlyerSourceVsNewChosen(_BaseEntry):
     customer_followup_instruction: str = Field(default="", max_length=500)
 
 
+class FlyerSourceEditSlaAlert(_BaseEntry):
+    """Operator alert audit for stale source-edit manual queue rows."""
+    type: Literal["flyer_source_edit_sla_alert"] = "flyer_source_edit_sla_alert"
+    outcome: Literal["alerted", "throttled", "notify_failed"]
+    project_ids: list[str] = Field(default_factory=list, max_length=50)
+    stale_count: int = Field(default=0, ge=0)
+    alerted_count: int = Field(default=0, ge=0)
+    throttled_count: int = Field(default=0, ge=0)
+    oldest_age_minutes: float = Field(default=0.0, ge=0.0)
+    threshold_minutes: int = Field(default=10, ge=1)
+    repeat_minutes: int = Field(default=60, ge=1)
+    notify_ok: bool = False
+
+
 class CateringLeadCreated(_BaseEntry):
     type: Literal["catering_lead_created"]
     lead_id: str = Field(min_length=1)
@@ -4363,6 +4377,7 @@ LogEntry = Annotated[
         # NEW — source-contract observability (2026-05-20 flyer source-contract-first)
         Annotated[FlyerSourceContractExtracted, Tag("flyer_source_contract_extracted")],
         Annotated[FlyerSourceVsNewChosen, Tag("flyer_source_vs_new_chosen")],
+        Annotated[FlyerSourceEditSlaAlert, Tag("flyer_source_edit_sla_alert")],
         # PR-D1 forward-compat shim — UNKNOWN tags route here
         Annotated[_UnknownLogEntry, Tag("_unknown_")],
     ],

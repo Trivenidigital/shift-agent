@@ -49,6 +49,7 @@ for script in \
     /usr/local/bin/manage-flyer-guest-order \
     /usr/local/bin/flyer-delivery-report \
     /usr/local/bin/flyer-manual-queue \
+    /usr/local/bin/flyer-source-edit-sla-watchdog \
     /usr/local/bin/send-flyer-campaign \
     /usr/local/bin/smoke-flyer-quality \
     /usr/local/bin/send-flyer-package ; do
@@ -193,6 +194,12 @@ if ! sudo -u shift-agent "$PY" /usr/local/bin/flyer-manual-queue --triage > /dev
     exit 1
 fi
 echo "Flyer manual-queue triage smoke passed"
+
+if ! sudo -u shift-agent "$PY" /usr/local/bin/flyer-source-edit-sla-watchdog --threshold-minutes 1000000 > /dev/null; then
+    echo "FAIL: Flyer source-edit SLA watchdog advisory run failed"
+    exit 1
+fi
+echo "Flyer source-edit SLA watchdog smoke passed"
 
 if [ -x /usr/local/bin/credential-minimized-readiness ]; then
     "$PY" /usr/local/bin/credential-minimized-readiness --format text || true
@@ -440,6 +447,7 @@ for unit in \
     shift-agent-fsck.timer \
     send-daily-brief.timer \
     catering-pattern-report.timer \
+    flyer-source-edit-sla-watchdog.timer \
     send-routing-accuracy-summary.timer; do
     if ! systemctl is-enabled --quiet "$unit"; then
         echo "FAIL: $unit not enabled"
@@ -458,6 +466,15 @@ sd_verify_units=(
     /etc/systemd/system/send-routing-accuracy-summary.timer
     /etc/systemd/system/send-routing-accuracy-summary-failure.service
 )
+if [ -f /etc/systemd/system/flyer-source-edit-sla-watchdog.service ]; then
+    sd_verify_units+=( /etc/systemd/system/flyer-source-edit-sla-watchdog.service )
+fi
+if [ -f /etc/systemd/system/flyer-source-edit-sla-watchdog.timer ]; then
+    sd_verify_units+=( /etc/systemd/system/flyer-source-edit-sla-watchdog.timer )
+fi
+if [ -f /etc/systemd/system/flyer-source-edit-sla-watchdog-failure.service ]; then
+    sd_verify_units+=( /etc/systemd/system/flyer-source-edit-sla-watchdog-failure.service )
+fi
 # Include Agent #21 prune timer if installed AND its venv is present.
 # systemd-analyze verify checks ExecStart paths exist at verify time
 # (independent of any ConditionPathIsExecutable directive); skip the unit
