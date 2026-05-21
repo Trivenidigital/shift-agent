@@ -7,6 +7,20 @@ Last updated: 2026-05-20 (pilot-hardening golden live-shape samples and stale Fl
 
 ---
 
+## Active - Flyer visible-text revision acceptance (2026-05-21)
+
+**Drift-check tag:** extends-Hermes
+
+Hermes-first summary: reuse cf-router active-project routing, Flyer revision state updates, bridge/customer-copy substrate, and existing render/regeneration flow. Net-new scope is only Flyer-specific parsing for exact visible-text remove/delete revisions after preview.
+
+- [x] Reproduce the live evening-snacks failure where `Time: 16:00 is duplicated. I'd like you to remove this.` asked for clarification.
+- [x] Extend revision parsing to accept exact visible time text before a duplicate marker when remove/delete/exclude intent is present.
+- [x] Add state-file coverage so `update-flyer-project` returns `revision_requires_clarification=false`.
+- [x] Add cf-router coverage so the customer receives the regeneration acknowledgement, not a clarification prompt.
+- [x] Open PR #157; no merge and no deploy.
+
+---
+
 ## Active - Flyer replay stability audit (2026-05-21)
 
 **Drift-check tag:** extends-Hermes
