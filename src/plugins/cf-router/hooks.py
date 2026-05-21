@@ -2341,28 +2341,33 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         )
         revision_requires_clarification = False
         clarification_reason = ""
+        pending_confirmation_message = ""
         try:
             import json
             update_doc = json.loads(detail)
             patch = update_doc.get("revision_patch") or {}
             revision_requires_clarification = bool(update_doc.get("revision_requires_clarification"))
             clarification_reason = str(patch.get("unresolved_reason") or "I could not match that change to the queued edit.")
+            pending_confirmation_message = str(patch.get("pending_confirmation_message") or "")
         except Exception:
             revision_requires_clarification = not ok
             clarification_reason = detail[:180] or "I could not save that correction."
         if revision_requires_clarification:
-            # Outcome-only customer copy (mirrors send_flyer_manual_edit_ack
-            # tone landed in PR #140). Project ID stays in the audit row's
-            # `detail` field below; the customer reply asks the specific
-            # clarification question without leaking the internal project
-            # identifier. clarification_reason is preserved because it IS
-            # the useful customer-facing signal.
-            reply = (
-                "Flyer Studio\n"
-                "------------\n"
-                f"I need one clarification before adding that: {clarification_reason}\n\n"
-                "Please send the exact text, item, price, date, or area of the flyer to change."
-            )
+            if pending_confirmation_message.strip():
+                reply = pending_confirmation_message.strip()
+            else:
+                # Outcome-only customer copy (mirrors send_flyer_manual_edit_ack
+                # tone landed in PR #140). Project ID stays in the audit row's
+                # `detail` field below; the customer reply asks the specific
+                # clarification question without leaking the internal project
+                # identifier. clarification_reason is preserved because it IS
+                # the useful customer-facing signal.
+                reply = (
+                    "Flyer Studio\n"
+                    "------------\n"
+                    f"I need one clarification before adding that: {clarification_reason}\n\n"
+                    "Please send the exact text, item, price, date, or area of the flyer to change."
+                )
         else:
             # Outcome-only success copy for the queued-followup path. Mirrors
             # send_flyer_manual_edit_ack from PR #140: confirms receipt of the

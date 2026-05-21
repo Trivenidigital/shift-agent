@@ -35,6 +35,9 @@ EXPECTED_SUCCESS_BODY_LINES = (
 )
 
 EXPECTED_CLARIFICATION_BODY_LINES = (
+    "pending_confirmation_message.strip()",
+    "reply = pending_confirmation_message.strip()",
+    "else:",
     '"Flyer Studio\\n"',
     '"------------\\n"',
     'f"I need one clarification before adding that: {clarification_reason}\\n\\n"',
@@ -104,6 +107,9 @@ def test_queued_correction_clarification_body_matches_outcome_only_copy():
     No project ID. clarification_reason is preserved because it IS the
     customer-useful signal. The second sentence (Please send the exact
     text/item/price/date/area) tells the customer what to do next.
+
+    If the backend produced a pending APPLY proposal message, prefer it
+    over asking the customer to restate “exact text to change” again.
     """
     block = _queued_correction_block()
     for line in EXPECTED_CLARIFICATION_BODY_LINES:
