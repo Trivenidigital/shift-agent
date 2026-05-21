@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
@@ -63,6 +64,47 @@ def _pending_required_reference_extractions(project) -> list:
 
 def _asset_for_extraction(project, extraction):
     return next((asset for asset in project.assets if asset.asset_id == extraction.asset_id), None)
+
+
+_DRAFT_RETRYABLE_TOKENS = (
+    "timeout",
+    "timed out",
+    "502",
+    "503",
+    "504",
+    "bad gateway",
+    "service unavailable",
+    "gateway timeout",
+    "connection reset",
+)
+
+_DRAFT_EARLY_STATUSES = {
+    "intake_started",
+    "collecting_required_info",
+    "awaiting_assets",
+    "generating_concepts",
+    "revising_design",
+}
+
+
+def _draft_error_is_visual_qa(detail_lower: str) -> bool:
+    return "quality check" in detail_lower or "failed quality" in detail_lower
+
+
+def _draft_error_retryable(detail_lower: str) -> bool:
+    return any(tok in detail_lower for tok in _DRAFT_RETRYABLE_TOKENS)
+
+
+def _draft_manual_review_detail(exc: Exception, *, attempts: int, retryable_match: bool) -> str:
+    payload = {
+        "stage": "draft_render_concept_previews",
+        "attempts": attempts,
+        "retryable_match": bool(retryable_match),
+        "error_class": exc.__class__.__name__,
+        "error": str(exc)[:260],
+    }
+    encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+    return encoded[:500]
 
 
 # FLYER_QA_ALLOW_SIDECAR=1 is smoke/test-only — must not be enabled in production runtime.
@@ -282,13 +324,53 @@ def main() -> int:
                 return 2
         else:
             draft_provider = cfg.flyer.resolve_draft_render_provider()
-            specs = render_concept_previews(
-                project,
-                asset_dir,
-                model=draft_provider.model,
-                quality=draft_provider.quality,
-                concept_count=cfg.flyer.concept_count,
-            )
+            specs = []
+            retryable_match = False
+            for attempt in range(2):
+                try:
+                    specs = render_concept_previews(
+                        project,
+                        asset_dir,
+                        model=draft_provider.model,
+                        quality=draft_provider.quality,
+                        concept_count=cfg.flyer.concept_count,
+                    )
+                    break
+                except Exception as exc:
+                    detail_lower = str(exc).lower()
+                    retryable_match = _draft_error_retryable(detail_lower)
+                    if attempt == 0 and retryable_match and not _draft_error_is_visual_qa(detail_lower):
+                        time.sleep(0.35)
+                        continue
+                    now = datetime.now(timezone.utc)
+                    reason_code = "visual_qa_failed" if _draft_error_is_visual_qa(detail_lower) else "provider_timeout"
+                    manual = make_manual_review(
+                        reason_code=reason_code,
+                        detail=_draft_manual_review_detail(exc, attempts=attempt + 1, retryable_match=retryable_match),
+                        queued_at=now,
+                    )
+                    with FileLock(Path(str(state_path) + ".lock")):
+                        store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
+                        for idx, current in enumerate(store.projects):
+                            if current.project_id != args.project_id:
+                                continue
+                            existing = current.manual_review
+                            if getattr(existing, "status", "none") == "queued":
+                                break
+                            updates = {"manual_review": manual, "updated_at": now}
+                            if current.status in _DRAFT_EARLY_STATUSES:
+                                updates["status"] = "manual_edit_required"
+                            store.projects[idx] = current.model_copy(update=updates)
+                            break
+                        atomic_write_text(state_path, store.model_dump_json(indent=2))
+                    print(json.dumps({
+                        "project_id": args.project_id,
+                        "draft_render_failed": str(exc)[:260],
+                        "manual_review_reason_code": reason_code,
+                        "attempts": attempt + 1,
+                        "retryable_match": bool(retryable_match),
+                    }))
+                    return 2
 
         with FileLock(Path(str(state_path) + ".lock")):
             store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
