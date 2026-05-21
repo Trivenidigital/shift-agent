@@ -20,7 +20,13 @@ Plan: `tasks/flyer-replay-stability-audit-plan-2026-05-21.md`
 - [x] Add replay fixtures and failing tests first.
 - [x] Consolidate customer-copy policy/lint helper without changing customer behavior.
 - [x] Extend self-eval/operator brief reporting where fixtures expose gaps.
-- [x] Run focused verification and open PR. No deploy. Verification passed locally; PR opening in progress.
+- [x] Run focused verification and open PR. No deploy. PR #155 opened.
+
+Review:
+- Plan/design review findings folded: reused existing dispatcher replay substrate, added only a Flyer hook replay adapter, kept Hermes substrate boundaries, and preserved #149 SLA watchdog ownership.
+- Final reviewer findings folded: all replay fixtures now traverse `pre_gateway_dispatch`, route assertions reject silent no-ops, temp-state project creation uses temp asset dirs, live `send_flyer_*` helpers are captured via fake `safe_io`, and static self-eval source-copy scans use the shared policy scanner.
+- Verified: focused Flyer pytest `261 passed, 7 warnings`; touched Python `py_compile`; self-eval JSON/Markdown CLI smoke with temp fixtures; `git diff --check`.
+- No deploy performed. #149 is merged and deployed.
 
 ---
 
