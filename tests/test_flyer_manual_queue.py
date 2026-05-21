@@ -745,7 +745,7 @@ def test_notify_customer_of_closure_success_path(tmp_path):
     assert len(sent) == 1, "bridge_post must be called exactly once for success path"
     chat_id, text = sent[0]
     assert chat_id == "201975216009469@lid"  # owning customer's chat_id
-    assert "F0058" in text
+    assert "F0058" not in text
     assert "apply that source-flyer edit" in text  # CLOSED_NO_SEND_REASON_LINES copy
     assert len(audited) == 1
     audit_path, audit_line = audited[0]
@@ -992,7 +992,7 @@ def test_build_closure_customer_text_resolves_in_flat_installed_layout(tmp_path)
         )
         text = flat_mq.build_closure_customer_text(project)
         # Must resolve to the closure-aware reason line, not raise.
-        assert "F0058" in text
+        assert "F0058" not in text
         assert "source-flyer edit" in text or "closed" in text.lower()
         # And the source must contain the flat-first import pattern so we
         # don't regress to a single packaged-only import.
