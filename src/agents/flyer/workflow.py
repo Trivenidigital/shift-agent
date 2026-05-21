@@ -215,16 +215,51 @@ def _extract_replace_text(body: str) -> tuple[str, str]:
         r"\b(?:replace|change)\b[^\"'\n]{0,120}[\"'](?P<old>[^\"']{1,160})[\"']\s*[-–—:|]*\s*(?:with|to|->)\s*[\"'](?P<new>[^\"']{1,160})[\"']",
         # Curly quotes are often pasted inconsistently on WhatsApp (left/left or right/right).
         r"\b(?:replace|change)\b[^“”\n]{0,120}[“”](?P<old>[^“”]{1,160})[“”]\s*[-–—:|]*\s*(?:with|to|->)\s*[“”](?P<new>[^“”]{1,160})[“”]",
+        # Backticks show up frequently when users paste “exact” text.
+        r"\b(?:replace|change)\b[^`\n]{0,120}`(?P<old>[^`]{1,160})`\s*[-–—:|]*\s*(?:with|to|->)\s*`(?P<new>[^`]{1,160})`",
     ]
     for pattern in patterns:
         match = re.search(pattern, body, flags=re.IGNORECASE)
         if not match:
             continue
-        old = match.group("old").strip(" .,\"'“”")
-        new = match.group("new").strip(" .,\"'“”")
+        old = match.group("old").strip(" .,\"'“”`")
+        new = match.group("new").strip(" .,\"'“”`")
+        if old and new and old.lower() != new.lower():
+            return old, new
+    fallback = re.search(
+        r"\b(?:replace|change)\s+(?P<old>[^.?!\n]{1,80}?)\s+(?:with|to|->)\s+(?P<new>[^.?!\n]{1,80}?)(?:[.!?]|$)",
+        body,
+        flags=re.IGNORECASE,
+    )
+    if fallback:
+        old = fallback.group("old").strip(" .,:;\"'“”`-–—")
+        new = fallback.group("new").strip(" .,:;\"'“”`-–—")
+        # Avoid stealing structured field edits ("Change X price to $9.99", etc.).
+        # Keep a single exception for the common badge phrase "Price any event".
+        old_lower = old.lower()
+        if (
+            ("$" in new or re.search(r"\b\d+(?:\.\d{2})?\b", new))
+            and ("price" in old_lower)
+            and ("price any event" not in old_lower)
+        ):
+            return "", ""
+        if any(tok in old_lower for tok in ("date", "time", "phone", "contact", "location", "venue", "address")):
+            return "", ""
         if old and new and old.lower() != new.lower():
             return old, new
     return "", ""
+
+
+def _extract_remove_time_instruction(text: str) -> str:
+    """Handle 'remove/delete/exclude 16:00' even when 'extra/duplicate' isn't said."""
+    if not text:
+        return ""
+    if not re.search(r"\b(?:remove|delete|exclude)\b", text, flags=re.IGNORECASE):
+        return ""
+    match = re.search(r"(?<![$\d])\b(?P<time>\d{1,2}:\d{2})\b(?!\.\d)", text)
+    if not match:
+        return ""
+    return f'Remove time text "{match.group("time")}" from the flyer.'
 
 
 def _normalized_text_and_map(text: str) -> tuple[str, list[int]]:
@@ -506,6 +541,11 @@ def _append_instruction(
 
 def _extract_item_swap(text: str) -> tuple[str, str]:
     body = " ".join((text or "").split())
+    # If this looks like a replace-text instruction (not a menu-item swap),
+    # avoid interpreting it as a menu edit.
+    old_text, new_text = _extract_replace_text(body)
+    if old_text and new_text:
+        return "", ""
     patterns = [
         r"\b(?:swap|replace)\s+(?P<old>[A-Za-z][A-Za-z\s/&-]{1,80}?)\s+with\s+(?P<new>[A-Za-z][A-Za-z\s/&-]{1,80}?(?:\s+for\s+\$?\d+(?:\.\d{2})?)?)(?:\s*\(|[.!]|$)",
         r"\b(?:remove|exclude)\s+(?P<old>[A-Za-z][A-Za-z\s/&-]{1,80}?)\s+(?:and\s+)?(?:add|use)\s+(?P<new>[A-Za-z][A-Za-z\s/&-]{1,80}?(?:\s+same\s+price)?)(?:\s*\(|[.!]|$)",
@@ -751,6 +791,9 @@ def extract_revision_patch(project: FlyerProject, text: str) -> RevisionPatchRes
     for instruction in (_extract_extra_time_instruction(body), _extract_item_add_instruction(body)):
         if instruction:
             notes_update, raw_request_update = _append_instruction(notes_update, raw_request_update, project, instruction)
+    remove_time_instruction = _extract_remove_time_instruction(body)
+    if remove_time_instruction:
+        notes_update, raw_request_update = _append_instruction(notes_update, raw_request_update, project, remove_time_instruction)
 
     old_text, new_text = _extract_replace_text(body)
     if old_text and new_text:

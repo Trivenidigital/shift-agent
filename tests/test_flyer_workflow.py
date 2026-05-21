@@ -391,6 +391,31 @@ def test_extract_revision_patch_falls_back_to_instruction_when_old_text_not_in_d
     assert "Replace visible text" in (patch.notes_update or "")
 
 
+def test_extract_revision_patch_parses_replace_with_backticks():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Evening Snacks",
+        contact_info="+17329837841",
+        notes="Green badge text: Price any event - $9.99.",
+    ))
+    patch = extract_revision_patch(project, "Replace `Price any event` with `Any Item`.")
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert "Any Item" in (patch.notes_update or "")
+
+
+def test_extract_revision_patch_parses_replace_without_quotes_confirmation_gated():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Evening Snacks",
+        contact_info="+17329837841",
+        notes="",
+    ))
+    patch = extract_revision_patch(project, "Replace Price any event with Any Item.")
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert patch.requires_confirmation is True
+    assert "Replace visible text" in (patch.notes_update or "")
+
+
 def test_extract_revision_patch_handles_menu_item_swap_without_clarification():
     project = _project(FlyerRequestFields(
         event_or_business_name="Weekend Breakfast Specials",
@@ -447,6 +472,20 @@ def test_extract_revision_patch_handles_visible_time_text_before_duplicate_marke
     assert patch.ambiguous is False
     assert 'Remove duplicate/extra time text "16:00"' in patch.notes_update
     assert patch.unresolved_reason == ""
+
+
+def test_extract_revision_patch_handles_remove_time_without_duplicate_marker():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Evening Snacks",
+        event_time="16:00",
+        venue_or_location="90 Brybar Dr",
+        contact_info="+1 732 983 7841",
+        notes="Evening Snacks. Schedule 4 PM to 7 PM. Preview also shows Time: 16:00.",
+    ))
+    patch = extract_revision_patch(project, "Why that 16:00 in the flyer. Please remove 16:00.")
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert 'Remove time text "16:00"' in patch.notes_update
 
 
 def test_extract_revision_patch_does_not_parse_later_price_as_extra_time():
