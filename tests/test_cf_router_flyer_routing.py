@@ -699,7 +699,7 @@ def test_routing_decision_preview_keeps_similar_open_intake_on_active_project():
     assert actions.similar_to_active_project_request(raw_request, active)
 
     decision = actions.flyer_routing_decision_preview(raw_request, active_project=active)
-    assert decision["route"] == "revision"
+    assert decision["route"] == "active_intake"
     assert decision["reason"] == "active_intake_similar_request"
     assert decision["fresh_new_request_detected"] is True
     assert decision["active_project_bypassed"] is False

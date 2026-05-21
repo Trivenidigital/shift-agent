@@ -902,7 +902,7 @@ def flyer_routing_decision_preview(
         route = "new_project"
         reason = "fresh_new_request"
     elif fresh and active_project:
-        route = "revision"
+        route = "active_intake"
         reason = "active_intake_similar_request"
     elif is_flyer_project_status_request(body):
         route = "status_reply"
