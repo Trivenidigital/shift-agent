@@ -709,6 +709,38 @@ def test_latest_request_not_reflected_flags_fresh_request_routed_as_revision():
     assert report["status"] == "red"
 
 
+def test_new_flyer_routed_as_revision_does_not_depend_on_reflection_threshold():
+    module = load_module()
+    latest = "Please create Diwali poster for Friday sale 11 AM"
+    project = _project(
+        "F9304",
+        status="awaiting_final_approval",
+        raw_request="Old breakfast flyer for a weekend buffet.",
+        manual_review={"status": "none", "reason": "", "reason_code": "unclassified"},
+        revisions=[{"request_text": latest, "message_id": "diwali-friday-sale"}],
+        concepts=[
+            {
+                "concept_id": "C1",
+                "title": "Breakfast Buffet",
+                "style_summary": "Weekend breakfast offer",
+                "prompt": "Create an old breakfast buffet flyer.",
+            }
+        ],
+    )
+
+    report = module.build_report(
+        projects={"projects": [project]},
+        decision_entries=[],
+        now=module.parse_utc("2026-05-20T11:00:00Z"),
+    )
+
+    kinds = [item["type"] for item in report["incidents"]]
+    assert module.looks_like_fresh_flyer_request(latest) is True
+    assert module.salient_request_terms(latest) == ["11 am"]
+    assert "new_flyer_routed_as_revision" in kinds
+    assert "latest_request_not_reflected" not in kinds
+
+
 def test_latest_request_not_reflected_does_not_flag_when_prompt_contains_latest_terms():
     module = load_module()
     latest = (
@@ -740,8 +772,9 @@ def test_latest_request_not_reflected_does_not_flag_when_prompt_contains_latest_
         now=module.parse_utc("2026-05-20T11:00:00Z"),
     )
 
-    assert "latest_request_not_reflected" not in [item["type"] for item in report["incidents"]]
-    assert "new_flyer_routed_as_revision" not in [item["type"] for item in report["incidents"]]
+    kinds = [item["type"] for item in report["incidents"]]
+    assert "latest_request_not_reflected" not in kinds
+    assert "new_flyer_routed_as_revision" in kinds
 
 
 def test_preview_approved_then_final_qa_failed_is_active_customer_risk():

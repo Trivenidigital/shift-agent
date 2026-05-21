@@ -485,16 +485,15 @@ def project_reflection_incidents(project: dict[str, Any]) -> list[dict[str, Any]
     haystack = normalize_text_for_match(latest_concept_text(project))
     terms = salient_request_terms(text)
     missing = [term for term in terms if term and term not in haystack]
-    if len(missing) < max(2, min(3, len(terms))):
-        return []
     details = {
         "project_status": str(project.get("status") or ""),
         "active_customer_risk": active_customer_risk(project),
         "latest_message_id": message_id,
+        "salient_terms": terms,
         "missing_terms": missing,
         "customer_impact": "fresh flyer request appears attached to old project context",
     }
-    return [
+    incidents = [
         incident(
             "new_flyer_routed_as_revision",
             severity="high",
@@ -503,17 +502,21 @@ def project_reflection_incidents(project: dict[str, Any]) -> list[dict[str, Any]
             suggested_action="Bypass active-project revision routing and create a new Flyer project from the latest request.",
             category="routing_tripwire",
             evidence_details=details,
-        ),
-        incident(
-            "latest_request_not_reflected",
-            severity="high",
-            project_id=project_id,
-            evidence="latest request terms missing from raw_request/concept prompt",
-            suggested_action="Regenerate from the latest customer request before sending or approving another preview.",
-            category="routing_tripwire",
-            evidence_details=details,
-        ),
+        )
     ]
+    if len(missing) >= max(2, min(3, len(terms))):
+        incidents.append(
+            incident(
+                "latest_request_not_reflected",
+                severity="high",
+                project_id=project_id,
+                evidence="latest request terms missing from raw_request/concept prompt",
+                suggested_action="Regenerate from the latest customer request before sending or approving another preview.",
+                category="routing_tripwire",
+                evidence_details=details,
+            )
+        )
+    return incidents
 
 
 def incident(
