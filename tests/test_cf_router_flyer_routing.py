@@ -2755,6 +2755,51 @@ def test_active_intake_visual_qa_failure_sends_manual_review_fallback_after_proc
     assert calls == {"processing": 1, "intake": 0, "manual": 1}
 
 
+def test_visible_time_text_revision_does_not_send_clarification(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    active_project = {
+        "project_id": "F0065",
+        "customer_phone": "+17329837841",
+        "status": "awaiting_final_approval",
+        "fields": {"event_or_business_name": "Evening Snacks", "contact_info": "+17329837841"},
+        "concepts": [{"concept_id": "C1"}],
+        "revisions": [],
+    }
+    sent: list[str] = []
+    generated: list[str] = []
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
+
+    def fake_update(project_id, *args):
+        assert project_id == "F0065"
+        assert "--revision-text" in args
+        assert any("Time: 16:00 is duplicated" in arg for arg in args)
+        active_project["concepts"] = []
+        return True, (
+            '{"project_id":"F0065","version":2,'
+            '"revision_requires_clarification":false,'
+            '"revision_patch":{"notes_update":"Remove duplicate/extra time text \\"16:00\\" from the flyer."}}'
+        )
+
+    monkeypatch.setattr(actions, "invoke_update_flyer_project", fake_update)
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "trigger_generate_flyer_concepts", lambda project_id: generated.append(project_id) or (True, "generated"))
+    monkeypatch.setattr(actions, "send_flyer_concept_previews", lambda *_args, **_kwargs: (True, "preview-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+
+    result = hooks._try_flyer_active_project_intercept(
+        "Time: 16:00 is duplicated. I'd like you to remove this.",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "visible-time-revision"},
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer active: revision captured for F0065"}
+    assert sent == ["Revision applied to the flyer details. I am regenerating the design now."]
+    assert generated == ["F0065"]
+
+
 def test_source_vs_new_source_choice_creates_manual_edit_project(monkeypatch):
     """SOURCE branch routes through existing exact-edit handler:
     trigger_create_flyer_project called WITH manual_edit_required=True and

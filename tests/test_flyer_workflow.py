@@ -363,6 +363,26 @@ def test_extract_revision_patch_handles_extra_time_removal_and_item_add():
     assert 'Remove duplicate/extra time text "08:00"' in patch.raw_request_update
 
 
+def test_extract_revision_patch_handles_visible_time_text_before_duplicate_marker():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Evening Snacks",
+        event_time="16:00",
+        venue_or_location="90 Brybar Dr",
+        contact_info="+1 732 983 7841",
+        notes="Evening Snacks. Schedule 4 PM to 7 PM. Preview also shows Time: 16:00.",
+    ))
+
+    patch = extract_revision_patch(
+        project,
+        "Time: 16:00 is duplicated. I'd like you to remove this.",
+    )
+
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert 'Remove duplicate/extra time text "16:00"' in patch.notes_update
+    assert patch.unresolved_reason == ""
+
+
 def test_extract_revision_patch_does_not_parse_later_price_as_extra_time():
     project = _project(FlyerRequestFields(
         event_or_business_name="Weekend Breakfast Specials",

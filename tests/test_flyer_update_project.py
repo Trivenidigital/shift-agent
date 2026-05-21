@@ -142,6 +142,39 @@ def test_noop_revision_preserves_existing_project_state(tmp_path, monkeypatch, c
     assert json.loads(state_path.read_text(encoding="utf-8")) == json.loads(original)
 
 
+def test_visible_time_text_revision_does_not_request_clarification(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    module = _load_script(monkeypatch)
+    state_path = tmp_path / "projects.json"
+    state_path.write_text(
+        _project_store_json(
+            tmp_path,
+            status="awaiting_final_approval",
+            raw_request="Evening snacks flyer from 4 PM to 7 PM.",
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(sys, "argv", [
+        "update-flyer-project",
+        "--project-id", "F9001",
+        "--revision-text", "Time: 16:00 is duplicated. I'd like you to remove this.",
+        "--message-id", "m-visible-time",
+        "--state-path", str(state_path),
+    ])
+
+    assert module.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["revision_requires_clarification"] is False
+    assert 'Remove duplicate/extra time text "16:00"' in payload["revision_patch"]["notes_update"]
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "revising_design"
+    assert persisted["selected_concept_id"] is None
+    assert persisted["concepts"] == []
+    assert persisted["revisions"][0]["request_text"] == "Time: 16:00 is duplicated. I'd like you to remove this."
+
+
 def test_source_artwork_followup_stays_in_manual_edit_queue(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     module = _load_script(monkeypatch)

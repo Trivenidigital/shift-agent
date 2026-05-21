@@ -1,5 +1,10 @@
 # Lessons
 
+## 2026-05-21 - Flyer post-preview visible text revisions
+
+- Post-preview Flyer corrections can reference visible generated text that is not a structured project fact. Exact remove/delete requests such as `Time: 16:00 is duplicated. remove this` should enter the revision/regeneration path instead of asking for "exact item or text" clarification just because the text was not in field state.
+- When hardening revision parsing, pin both the pure workflow parser and the `update-flyer-project` state-file response; the customer-facing cf-router branch depends on `revision_requires_clarification`, not only on intent classification.
+
 ## 2026-05-13 — Hermes-first and deployed-state first
 
 - Before live smoke interpretation or follow-on work, verify the active deployed Hermes mode/config and current code path. Do not infer from an older handoff.
