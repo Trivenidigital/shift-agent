@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import datetime, timezone
+import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sys
 
@@ -14,9 +15,11 @@ sys.path.insert(0, str(SRC_ROOT / "platform"))
 
 from schemas import (  # noqa: E402
     FlyerManualReview,
+    FlyerPendingRevisionConfirmation,
     FlyerProjectStore,
     FlyerRequestFields,
     FlyerRevision,
+    FlyerRevisionPatchPayload,
     is_flyer_transition_allowed,
 )
 from safe_io import FileLock, atomic_write_text  # noqa: E402
@@ -32,6 +35,30 @@ except ImportError:
 
 STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
 RAW_REQUEST_MAX_LEN = 2000
+PENDING_REVISION_TTL_SEC = 4 * 60 * 60
+
+
+def _parse_pending_confirmation_command(text: str) -> tuple[str, str]:
+    body = " ".join((text or "").split())
+    if not body:
+        return "", ""
+    match = re.fullmatch(r"(?i)apply(?:\s+(R\d{3,}))?[.!]*", body)
+    if match:
+        return "apply", (match.group(1) or "")
+    if re.fullmatch(r"(?i)cancel[.!]*", body):
+        return "cancel", ""
+    return "", ""
+
+
+def _pending_revision_reply(pending: FlyerPendingRevisionConfirmation) -> str:
+    return (
+        "Flyer Studio\n"
+        "------------\n"
+        "I understood your change as:\n"
+        f"{pending.proposal_summary.strip()}\n\n"
+        f"Reply APPLY {pending.revision_id} to regenerate a new preview (this does not send final files), "
+        "or reply with corrections."
+    )
 
 
 def _append_source_edit_correction(raw_request: str, correction: str) -> str:
@@ -125,8 +152,142 @@ def main() -> int:
                     or "edit uploaded flyer/source artwork" in (updated.raw_request or "").lower()
                     or "authorized flyer/source artwork update" in (updated.raw_request or "").lower()
                 )
+                now = datetime.now(timezone.utc)
+                pending = getattr(updated, "pending_revision_confirmation", None)
+                cmd, cmd_revision_id = _parse_pending_confirmation_command(args.revision_text)
+                if pending is not None:
+                    if pending.expires_at <= now:
+                        updated = updated.model_copy(update={"pending_revision_confirmation": None})
+                        should_write = True
+                        pending = None
+                    elif cmd == "cancel":
+                        updated = updated.model_copy(update={"pending_revision_confirmation": None})
+                        should_write = True
+                        payload = {
+                            "project_id": updated.project_id,
+                            "version": updated.version,
+                            "revision_patch": {},
+                            "revision_requires_clarification": False,
+                        }
+                        if should_write:
+                            updated = updated.model_copy(update={"updated_at": now})
+                            store.projects[idx] = updated
+                            atomic_write_text(state_path, store.model_dump_json(indent=2))
+                        print(json.dumps(payload))
+                        return 0
+                    elif cmd == "apply":
+                        expected = pending.revision_id
+                        if not cmd_revision_id or cmd_revision_id != expected:
+                            payload = {
+                                "project_id": updated.project_id,
+                                "version": updated.version,
+                                "revision_patch": pending.patch.model_dump(),
+                                "revision_requires_clarification": True,
+                            }
+                            payload["revision_patch"]["unresolved_reason"] = f"pending confirmation requires APPLY {expected}"
+                            payload["revision_patch"]["pending_confirmation_message"] = _pending_revision_reply(pending)
+                            if should_write:
+                                updated = updated.model_copy(update={"updated_at": now})
+                                store.projects[idx] = updated
+                                atomic_write_text(state_path, store.model_dump_json(indent=2))
+                            print(json.dumps(payload))
+                            return 0
+                        if updated.last_applied_pending_revision_id == expected:
+                            payload = {
+                                "project_id": updated.project_id,
+                                "version": updated.version,
+                                "revision_patch": pending.patch.model_dump(),
+                                "revision_requires_clarification": False,
+                            }
+                            print(json.dumps(payload))
+                            return 0
+                        patch = pending.patch
+                        # Apply pending patch now (always non-source-edit path).
+                        target_status = "revising_design"
+                        if updated.status != target_status:
+                            if not is_flyer_transition_allowed(updated.status, target_status):
+                                raise SystemExit(f"invalid transition {updated.status}->{target_status}")
+                            updated = updated.model_copy(update={"status": target_status})
+                        if patch.field_updates or patch.notes_update is not None:
+                            field_update = dict(patch.field_updates)
+                            if patch.notes_update is not None:
+                                field_update["notes"] = patch.notes_update
+                            fields = updated.fields.model_copy(update=field_update)
+                            updated = updated.model_copy(update={"fields": fields})
+                        if patch.raw_request_update is not None:
+                            updated = updated.model_copy(update={"raw_request": patch.raw_request_update})
+                        revisions = []
+                        applied_revision = False
+                        for rev in updated.revisions:
+                            if rev.revision_id == expected and not rev.applied:
+                                revisions.append(rev.model_copy(update={"applied": True, "resulting_version": updated.version + 1}))
+                                applied_revision = True
+                            else:
+                                revisions.append(rev)
+                        if not applied_revision:
+                            raise SystemExit(f"pending revision missing: {expected}")
+                        updated = updated.model_copy(update={
+                            "concepts": [],
+                            "selected_concept_id": None,
+                            "final_asset_ids": [],
+                            "revisions": revisions,
+                            "pending_revision_confirmation": None,
+                            "last_applied_pending_revision_id": expected,
+                            "version": updated.version + 1,
+                        })
+                        should_write = True
+                        payload = {
+                            "project_id": updated.project_id,
+                            "version": updated.version,
+                            "revision_patch": patch.model_dump(),
+                            "revision_requires_clarification": False,
+                        }
+                        if should_write:
+                            updated = updated.model_copy(update={"updated_at": now})
+                            store.projects[idx] = updated
+                            atomic_write_text(state_path, store.model_dump_json(indent=2))
+                        print(json.dumps(payload))
+                        return 0
+
                 patch = extract_revision_patch(updated, args.revision_text)
                 revision_requires_clarification = patch.ambiguous or (not patch.changed and not patch.visual_only)
+                revision_requires_confirmation = bool(getattr(patch, "requires_confirmation", False))
+                if revision_requires_confirmation and not revision_requires_clarification:
+                    revision = FlyerRevision(
+                        revision_id=f"R{len(updated.revisions) + 1:03d}",
+                        message_id=args.message_id,
+                        requested_at=now,
+                        request_text=args.revision_text,
+                        applied=False,
+                    )
+                    pending = FlyerPendingRevisionConfirmation(
+                        revision_id=revision.revision_id,
+                        created_at=now,
+                        expires_at=now + timedelta(seconds=PENDING_REVISION_TTL_SEC),
+                        request_message_id=args.message_id,
+                        request_text=args.revision_text,
+                        proposal_summary=getattr(patch, "confirmation_reason", "") or "Apply the interpreted change.",
+                        patch=FlyerRevisionPatchPayload.model_validate(patch.to_dict()),
+                    )
+                    updated = updated.model_copy(update={
+                        "pending_revision_confirmation": pending,
+                        "revisions": [*updated.revisions, revision],
+                    })
+                    should_write = True
+                    payload = {
+                        "project_id": updated.project_id,
+                        "version": updated.version,
+                        "revision_patch": pending.patch.model_dump(),
+                        "revision_requires_clarification": True,
+                    }
+                    payload["revision_patch"]["unresolved_reason"] = "pending confirmation required"
+                    payload["revision_patch"]["pending_confirmation_message"] = _pending_revision_reply(pending)
+                    if should_write:
+                        updated = updated.model_copy(update={"updated_at": now})
+                        store.projects[idx] = updated
+                        atomic_write_text(state_path, store.model_dump_json(indent=2))
+                    print(json.dumps(payload))
+                    return 0
                 if revision_requires_clarification:
                     payload = {
                         "project_id": updated.project_id,

@@ -190,6 +190,8 @@ class RevisionPatchResult:
     visual_only: bool = False
     ambiguous: bool = False
     unresolved_reason: str = ""
+    requires_confirmation: bool = False
+    confirmation_reason: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -200,7 +202,99 @@ class RevisionPatchResult:
             "visual_only": self.visual_only,
             "ambiguous": self.ambiguous,
             "unresolved_reason": self.unresolved_reason,
+            "requires_confirmation": self.requires_confirmation,
+            "confirmation_reason": self.confirmation_reason,
         }
+
+
+def _extract_replace_text(body: str) -> tuple[str, str]:
+    """Return (old_text, new_text) for simple replace-text instructions."""
+    if not body:
+        return "", ""
+    patterns = [
+        r"\b(?:replace|change)\b[^\"'\n]{0,80}[\"'](?P<old>[^\"']{1,160})[\"']\s*(?:with|to)\s*[\"'](?P<new>[^\"']{1,160})[\"']",
+        r"\b(?:replace|change)\b[^“”\n]{0,80}“(?P<old>[^”]{1,160})”\s*(?:with|to)\s*“(?P<new>[^”]{1,160})”",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, body, flags=re.IGNORECASE)
+        if not match:
+            continue
+        old = match.group("old").strip(" .,\"'“”")
+        new = match.group("new").strip(" .,\"'“”")
+        if old and new and old.lower() != new.lower():
+            return old, new
+    return "", ""
+
+
+def _normalized_text_and_map(text: str) -> tuple[str, list[int]]:
+    """Normalize text for fuzzy substring match while mapping back to original indices."""
+    normalized_chars: list[str] = []
+    index_map: list[int] = []
+    prev_space = False
+    for idx, ch in enumerate(text):
+        if ch.isalnum():
+            normalized_chars.append(ch.lower())
+            index_map.append(idx)
+            prev_space = False
+            continue
+        if ch.isspace():
+            if prev_space:
+                continue
+            normalized_chars.append(" ")
+            index_map.append(idx)
+            prev_space = True
+            continue
+        # drop punctuation/symbols
+    normalized = "".join(normalized_chars).strip()
+    if not normalized:
+        return "", []
+    # adjust map when we stripped leading spaces via .strip()
+    leading = 0
+    for ch in normalized_chars:
+        if ch != " ":
+            break
+        leading += 1
+    if leading:
+        index_map = index_map[leading:]
+        normalized = normalized[leading:]
+    return normalized, index_map
+
+
+def _replace_once_normalized_or_flag(source: str, old: str, new: str) -> tuple[str, str]:
+    if not source:
+        return source, "not found"
+    old_tokens = [tok for tok in re.split(r"\s+", old.strip()) if tok]
+    if len(old_tokens) < 3:
+        return source, "too short for fuzzy match"
+    normalized_source, source_map = _normalized_text_and_map(source)
+    normalized_old, _old_map = _normalized_text_and_map(old)
+    if not normalized_source or not normalized_old:
+        return source, "not found"
+    hits: list[int] = []
+    start = 0
+    while True:
+        pos = normalized_source.find(normalized_old, start)
+        if pos < 0:
+            break
+        hits.append(pos)
+        start = pos + 1
+        if len(hits) > 5:
+            break
+    if not hits:
+        return source, "not found"
+    if len(hits) > 1:
+        return source, "appears multiple times"
+    match_start = hits[0]
+    match_end = match_start + len(normalized_old) - 1
+    if len(normalized_old) > 200:
+        return source, "match too long"
+    if match_end >= len(source_map):
+        return source, "match mapping failed"
+    orig_start = source_map[match_start]
+    orig_end = source_map[match_end] + 1
+    if orig_end - orig_start > 220:
+        return source, "match span too long"
+    return f"{source[:orig_start]}{new}{source[orig_end:]}", ""
 
 
 def build_missing_info_prompt(missing: list[str], *, preferred_language: str = "en") -> str:
@@ -543,6 +637,7 @@ def extract_revision_patch(project: FlyerProject, text: str) -> RevisionPatchRes
     notes_update: str | None = None
     raw_request_update: str | None = None
     unresolved: list[str] = []
+    fuzzy_confirmation_required = False
 
     month_day = re.search(
         r"\b(?:change|move|set|update)?\s*(?:the\s*)?date\s*(?:from\s+[a-z]+\s+\d{1,2}\s+)?(?:to|as|=|:)?\s*"
@@ -656,9 +751,40 @@ def extract_revision_patch(project: FlyerProject, text: str) -> RevisionPatchRes
         if instruction:
             notes_update, raw_request_update = _append_instruction(notes_update, raw_request_update, project, instruction)
 
+    old_text, new_text = _extract_replace_text(body)
+    if old_text and new_text:
+        candidate_notes = project.fields.notes or ""
+        replaced_notes, reason = _replace_once_or_flag(candidate_notes, old_text, new_text)
+        if reason:
+            candidate_raw = project.raw_request or ""
+            replaced_raw, raw_reason = _replace_once_or_flag(candidate_raw, old_text, new_text)
+            if raw_reason:
+                fuzzy_notes, fuzzy_reason = _replace_once_normalized_or_flag(candidate_notes, old_text, new_text)
+                if not fuzzy_reason:
+                    notes_update = fuzzy_notes
+                    fuzzy_confirmation_required = True
+                else:
+                    fuzzy_raw, fuzzy_raw_reason = _replace_once_normalized_or_flag(candidate_raw, old_text, new_text)
+                    if not fuzzy_raw_reason:
+                        raw_request_update = fuzzy_raw
+                        fuzzy_confirmation_required = True
+                    else:
+                        unresolved.append(
+                            f"text {old_text!r} {raw_reason if raw_reason != 'not found' else 'not found in flyer details'}"
+                        )
+            else:
+                raw_request_update = replaced_raw
+        else:
+            notes_update = replaced_notes
+
     changed = bool(updates) or notes_update is not None or raw_request_update is not None
     visual_only = _is_visual_only_revision(body)
     ambiguous = bool(unresolved)
+    requires_confirmation = bool(fuzzy_confirmation_required)
+    unresolved_clean = list(unresolved)
+    confirmation_reason = ""
+    if requires_confirmation:
+        confirmation_reason = f"replace text {old_text!r} -> {new_text!r}"
     return RevisionPatchResult(
         field_updates=updates,
         notes_update=notes_update,
@@ -666,7 +792,9 @@ def extract_revision_patch(project: FlyerProject, text: str) -> RevisionPatchRes
         changed=changed,
         visual_only=visual_only,
         ambiguous=ambiguous,
-        unresolved_reason="; ".join(unresolved),
+        unresolved_reason="; ".join(unresolved_clean),
+        requires_confirmation=requires_confirmation,
+        confirmation_reason=confirmation_reason,
     )
 
 
