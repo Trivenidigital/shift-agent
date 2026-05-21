@@ -2393,6 +2393,24 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         return {"action": "skip",
                 "reason": f"cf-router flyer exact edit already queued for {project_id}"}
 
+    if actions.is_flyer_approval_text(body):
+        pending = active_project.get("pending_revision_confirmation") or {}
+        pending_revision_id = str(pending.get("revision_id") or "")
+        if pending_revision_id:
+            reminder = (
+                "Flyer Studio\n"
+                "------------\n"
+                "You have a pending change proposal.\n\n"
+                f"Reply APPLY {pending_revision_id} to regenerate a new preview, then reply APPROVE for final files."
+            )
+            ack_ok, mid, err = actions.send_flyer_text(chat_id, reminder)
+            actions.audit_intercepted(
+                reason="flyer_pending_revision_confirmation_reminder" if ack_ok else "flyer_primary_failed",
+                chat_id=chat_id,
+                subprocess_rc=0 if ack_ok else 3,
+                detail=f"project_id={project_id}; pending_revision_confirmation=true; sender_role={role}; ack_message_id={mid}; ack_error={err[:300]}",
+            )
+            return {"action": "skip", "reason": f"cf-router flyer active: pending revision confirmation for {project_id}"}
     if actions.is_flyer_approval_text(body) and status in {"revising_design", "awaiting_final_approval"}:
         if status == "revising_design" and not active_project.get("concepts"):
             gen_ok, gen_detail = actions.trigger_generate_flyer_concepts(project_id)
@@ -2475,19 +2493,24 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         )
         revision_requires_clarification = False
         clarification_reason = ""
+        pending_confirmation_message = ""
         try:
             import json
             update_doc = json.loads(detail)
             patch = update_doc.get("revision_patch") or {}
             revision_requires_clarification = bool(update_doc.get("revision_requires_clarification"))
             clarification_reason = str(patch.get("unresolved_reason") or "I could not match that change to the current flyer details.")
+            pending_confirmation_message = str(patch.get("pending_confirmation_message") or "")
         except Exception:
             revision_requires_clarification = not ok
             clarification_reason = detail[:180] or "I could not apply that revision."
         active_after = actions.find_active_flyer_project_by_sender(phone, chat_id) or {}
         needs_regen = not active_after.get("concepts")
         if revision_requires_clarification:
-            ack_message = f"I need one clarification before regenerating: {clarification_reason}. Please send the exact item or text to change."
+            if pending_confirmation_message.strip():
+                ack_message = pending_confirmation_message.strip()
+            else:
+                ack_message = f"I need one clarification before regenerating: {clarification_reason}. Please send the exact item or text to change."
         elif ok and needs_regen:
             ack_message = "Revision applied to the flyer details. I am regenerating the design now."
         else:

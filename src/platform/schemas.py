@@ -1722,6 +1722,31 @@ class FlyerRevision(BaseModel):
     resulting_version: Optional[int] = Field(default=None, ge=1)
 
 
+class FlyerRevisionPatchPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    field_updates: dict[str, str] = Field(default_factory=dict)
+    notes_update: Optional[str] = None
+    raw_request_update: Optional[str] = None
+    changed: bool = False
+    visual_only: bool = False
+    ambiguous: bool = False
+    unresolved_reason: str = ""
+    requires_confirmation: bool = False
+    confirmation_reason: str = ""
+    pending_confirmation_message: str = Field(default="", max_length=2000)
+
+
+class FlyerPendingRevisionConfirmation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    revision_id: str = Field(pattern=r"^R\d{3,}$")
+    created_at: datetime
+    expires_at: datetime
+    request_message_id: str = Field(min_length=1, max_length=200)
+    request_text: str = Field(min_length=1, max_length=2000)
+    proposal_summary: str = Field(min_length=1, max_length=1200)
+    patch: FlyerRevisionPatchPayload
+
+
 class FlyerBrandKit(BaseModel):
     model_config = ConfigDict(extra="ignore")
     customer_phone: E164Phone
@@ -1752,6 +1777,8 @@ class FlyerProject(BaseModel):
     concepts: list[FlyerConcept] = Field(default_factory=list, max_length=3)
     selected_concept_id: Optional[str] = Field(default=None, pattern=r"^C[1-3]$")
     revisions: list[FlyerRevision] = Field(default_factory=list, max_length=50)
+    pending_revision_confirmation: Optional[FlyerPendingRevisionConfirmation] = None
+    last_applied_pending_revision_id: str = Field(default="", max_length=20)
     version: int = Field(default=1, ge=1)
     final_asset_ids: list[str] = Field(default_factory=list, max_length=4)
     approved_message_id: str = Field(default="", max_length=200)

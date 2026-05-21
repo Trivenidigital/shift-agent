@@ -325,6 +325,33 @@ def test_extract_revision_patch_flags_old_text_not_found():
     assert "not found" in patch.unresolved_reason
 
 
+def test_extract_revision_patch_replaces_visible_text_without_confirmation_when_exact():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Evening Snacks",
+        contact_info="+17329837841",
+        notes="Green badge text: Price any event - $9.99.",
+    ))
+    patch = extract_revision_patch(project, 'Replace "Price any event" with "Any Item".')
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert patch.requires_confirmation is False
+    assert "Any Item" in (patch.notes_update or "")
+    assert "Price any event" not in (patch.notes_update or "")
+
+
+def test_extract_revision_patch_flags_fuzzy_visible_text_replace_for_confirmation():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Evening Snacks",
+        contact_info="+17329837841",
+        notes="Green badge text:\nPrice any\nevent - $9.99.",
+    ))
+    patch = extract_revision_patch(project, 'Replace "Price any event" with "Any Item".')
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert patch.requires_confirmation is True
+    assert "replace text" in (patch.confirmation_reason or "").lower()
+
+
 def test_extract_revision_patch_handles_menu_item_swap_without_clarification():
     project = _project(FlyerRequestFields(
         event_or_business_name="Weekend Breakfast Specials",
