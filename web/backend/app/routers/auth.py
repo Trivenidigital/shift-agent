@@ -33,6 +33,20 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 settings = get_settings()
 
 
+def _cookie_secure_for_request(request: Request) -> bool:
+    """Return True only when both config requires it and request is HTTPS.
+
+    Cockpit is sometimes served over HTTP (e.g., direct IP:port during testing).
+    Browsers reject Secure cookies on non-HTTPS, which causes a login loop.
+    """
+    scheme = ""
+    try:
+        scheme = str(getattr(getattr(request, "url", None), "scheme", "") or "")
+    except Exception:
+        scheme = ""
+    return bool(settings.cookie_secure and scheme.lower() == "https")
+
+
 class AuthStatus(BaseModel):
     """Public — drives login screen tab visibility. No sensitive data."""
 
@@ -62,7 +76,7 @@ async def request_otp(request: Request, response: Response):
             value=jwt_token,
             max_age=settings.jwt_ttl_hours * 3600,
             httponly=True,
-            secure=settings.cookie_secure,
+            secure=_cookie_secure_for_request(request),
             samesite="strict",
             path="/",
         )
@@ -82,7 +96,7 @@ async def verify(body: OtpVerifyBody, request: Request, response: Response):
         value=jwt_token,
         max_age=settings.jwt_ttl_hours * 3600,
         httponly=True,
-        secure=settings.cookie_secure,
+        secure=_cookie_secure_for_request(request),
         samesite="strict",
         path="/",
     )
