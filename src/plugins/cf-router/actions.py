@@ -17,6 +17,7 @@ import sys
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Callable, Iterator, Optional
 
@@ -889,12 +890,20 @@ def flyer_routing_decision_preview(
     body = " ".join(flyer_visible_message_text(text).split())
     project_id = str((active_project or {}).get("project_id") or "")
     fresh = should_start_new_flyer_over_active(body, has_media=has_media)
+    fresh_bypasses_active = should_bypass_active_flyer_project_for_fresh_request(
+        body,
+        active_project,
+        has_media=has_media,
+    )
     if is_flyer_approval_text(body):
         route = "approval"
         reason = "approval_text"
-    elif fresh:
+    elif fresh_bypasses_active:
         route = "new_project"
         reason = "fresh_new_request"
+    elif fresh and active_project:
+        route = "revision"
+        reason = "active_intake_similar_request"
     elif is_flyer_project_status_request(body):
         route = "status_reply"
         reason = "status_request"
@@ -918,6 +927,36 @@ def flyer_routing_decision_preview(
         "active_project_bypassed": bool(active_project and route == "new_project"),
         "latest_message_id": latest_message_id,
     }
+
+
+def similar_to_active_project_request(body: str, active_project: dict) -> bool:
+    current = " ".join(str(active_project.get("raw_request") or "").split()).lower()
+    incoming = " ".join((body or "").split()).lower()
+    if not current or not incoming:
+        return False
+    if incoming == current or incoming in current or current in incoming:
+        return True
+    return SequenceMatcher(None, incoming, current).ratio() >= 0.82
+
+
+def should_bypass_active_flyer_project_for_fresh_request(
+    text: str,
+    active_project: Optional[dict],
+    *,
+    has_media: bool = False,
+) -> bool:
+    body = " ".join((text or "").split())
+    if not should_start_new_flyer_over_active(body, has_media=has_media):
+        return False
+    if not active_project:
+        return True
+    status = str(active_project.get("status") or "")
+    return (
+        has_media
+        or status not in {"intake_started", "collecting_required_info", "awaiting_assets"}
+        or not flyer_project_has_required_fields(active_project)
+        or not similar_to_active_project_request(body, active_project)
+    )
 
 
 def should_start_new_flyer_over_active(text: str, *, has_media: bool = False) -> bool:

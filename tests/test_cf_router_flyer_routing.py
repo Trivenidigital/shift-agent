@@ -676,6 +676,35 @@ def test_routing_decision_preview_matches_live_order_for_status_fresh_overlap():
     assert decision["active_project_bypassed"] is True
 
 
+def test_routing_decision_preview_keeps_similar_open_intake_on_active_project():
+    actions = _load_actions()
+    raw_request = (
+        "Design a premium organic-style flyer for Fresh Meats featuring a whole fresh chicken "
+        "with Premium Amish Organic Chicken, Clean bird. Strong life, Fresh, Healthy, Natural, "
+        "and Halal Certified seal."
+    )
+    active = {
+        "project_id": "F0050",
+        "status": "intake_started",
+        "raw_request": raw_request,
+        "fields": {
+            "event_or_business_name": "Fresh Meats",
+            "notes": raw_request,
+            "style_preference": "premium organic-style grocery product promotion",
+        },
+    }
+
+    assert actions.should_start_new_flyer_over_active(raw_request, has_media=False)
+    assert actions.flyer_project_has_required_fields(active)
+    assert actions.similar_to_active_project_request(raw_request, active)
+
+    decision = actions.flyer_routing_decision_preview(raw_request, active_project=active)
+    assert decision["route"] == "revision"
+    assert decision["reason"] == "active_intake_similar_request"
+    assert decision["fresh_new_request_detected"] is True
+    assert decision["active_project_bypassed"] is False
+
+
 def test_routing_decision_preview_keeps_revision_status_and_approval_paths():
     actions = _load_actions()
     active = {"project_id": "F0062", "status": "awaiting_final_approval"}

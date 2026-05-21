@@ -23,7 +23,6 @@ import re
 import threading
 import time
 from datetime import datetime, timezone
-from difflib import SequenceMatcher
 from typing import Any, Optional
 
 from . import actions
@@ -1936,16 +1935,6 @@ def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_
             "reason": f"cf-router flyer brand asset: {result.get('next_status')}"}
 
 
-def _similar_to_active_project_request(body: str, active_project: dict) -> bool:
-    current = " ".join(str(active_project.get("raw_request") or "").split()).lower()
-    incoming = " ".join((body or "").split()).lower()
-    if not current or not incoming:
-        return False
-    if incoming == current or incoming in current or current in incoming:
-        return True
-    return SequenceMatcher(None, incoming, current).ratio() >= 0.82
-
-
 def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, media_path: Optional[str] = None) -> Optional[dict]:
     message_id = _extract_message_id(event, chat_id, text)
     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
@@ -2013,14 +2002,10 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
     status = str(active_project.get("status") or "")
     body = " ".join(actions.flyer_visible_message_text(text).split())
     lower = body.lower()
-    if (
-        actions.should_start_new_flyer_over_active(body, has_media=bool(media_path))
-        and (
-            bool(media_path)
-            or status not in {"intake_started", "collecting_required_info", "awaiting_assets"}
-            or not actions.flyer_project_has_required_fields(active_project)
-            or not _similar_to_active_project_request(body, active_project)
-        )
+    if actions.should_bypass_active_flyer_project_for_fresh_request(
+        body,
+        active_project,
+        has_media=bool(media_path),
     ):
         actions.audit_intercepted(
             reason="flyer_active_project_bypassed",
