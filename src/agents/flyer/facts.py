@@ -6,6 +6,7 @@ from typing import Iterable
 
 from schemas import (
     FlyerAsset,
+    FlyerCustomerProfile,
     FlyerLockedFact,
     FlyerProject,
     FlyerRequestFields,
@@ -73,6 +74,87 @@ def _tagline(text: str) -> str:
     return value
 
 
+def _norm(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (value or "").lower()).strip()
+
+
+def _looks_like_instruction_fragment(value: str) -> bool:
+    text = (value or "").strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    if any(
+        marker in lowered
+        for marker in (
+            "i'd like",
+            "i’d like",
+            "i?d like",
+            "help me with",
+            "create flyer",
+            "create a flyer",
+            "make flyer",
+            "flier from",
+            "flyer from",
+            "include ",
+        )
+    ):
+        return True
+    return len(text.split()) > 8 and bool(re.search(r"\b(?:create|make|design|help|include|flyer|flier)\b", lowered))
+
+
+def _business_title_from_text(value: str) -> str:
+    clean = _clean(value)
+    clean = re.sub(
+        r"\b(?:weekend|weekday|daily|monday|tuesday|wednesday|thursday|friday|saturday|sunday)?\s*"
+        r"(?:breakfast|brunch|lunch|dinner|snacks?)\s+(?:special|menu|offer|promo|event)\b.*$",
+        "",
+        clean,
+        flags=re.IGNORECASE,
+    ).strip(" .")
+    return clean
+
+
+def _explicit_business_override(raw_request: str, profile_business_name: str) -> str:
+    text = " ".join((raw_request or "").split())
+    patterns = [
+        r"\bbusiness\s+name\s+is\s+(.+?)(?=\.|,|\n|$)",
+        r"\bchange\s+business\s+name\s+to\s+(.+?)(?=\.|,|\n|$)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            value = _clean(match.group(1))
+            if value and not _looks_like_instruction_fragment(value):
+                return value
+    if profile_business_name:
+        replace = re.search(r"\breplace\s+(.+?)\s+(?:with|to)\s+(.+?)(?=\.|,|\n|$)", text, flags=re.IGNORECASE)
+        if replace and _norm(replace.group(1)) == _norm(profile_business_name):
+            value = _clean(replace.group(2))
+            if value and not _looks_like_instruction_fragment(value):
+                return value
+    return ""
+
+
+def profile_locked_facts(
+    customer: FlyerCustomerProfile,
+    *,
+    raw_request: str = "",
+    message_id: str = "",
+) -> list[FlyerLockedFact]:
+    facts: list[FlyerLockedFact] = []
+    business_override = _explicit_business_override(raw_request, customer.business_name)
+    business_name = business_override or customer.business_name
+    business_source = "customer_text" if business_override else "customer_profile"
+    for fact in [
+        _fact("business_name", "Business", business_name, business_source, message_id=message_id),
+        _fact("contact_phone", "Contact", str(customer.public_phone), "customer_profile", message_id=message_id),
+        _fact("location", "Location", customer.business_address, "customer_profile", message_id=message_id),
+    ]:
+        if fact:
+            facts.append(fact)
+    return facts
+
+
 def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFact]:
     facts: list[FlyerLockedFact] = []
     name_before_price = re.compile(
@@ -124,15 +206,32 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
     return facts
 
 
-def extract_text_facts(fields: FlyerRequestFields, raw_request: str, *, message_id: str = "") -> list[FlyerLockedFact]:
+def extract_text_facts(
+    fields: FlyerRequestFields,
+    raw_request: str,
+    *,
+    message_id: str = "",
+    profile_business_name: str = "",
+    allow_text_identity: bool = True,
+) -> list[FlyerLockedFact]:
     text = f"{raw_request or ''} {fields.notes or ''}"
     facts: list[FlyerLockedFact] = []
+    event_or_campaign = fields.event_or_business_name or ""
+    campaign_title = event_or_campaign
+    if _norm(campaign_title) == _norm(profile_business_name):
+        campaign_title = ""
+    if _looks_like_instruction_fragment(campaign_title):
+        campaign_title = ""
+    text_business = ""
+    if allow_text_identity and event_or_campaign and not _looks_like_instruction_fragment(event_or_campaign):
+        text_business = _business_title_from_text(event_or_campaign)
     for item in [
-        _fact("business_name", "Business", fields.event_or_business_name or "", "customer_text", message_id=message_id),
+        _fact("business_name", "Business", text_business, "customer_text", message_id=message_id) if text_business else None,
+        _fact("campaign_title", "Campaign", campaign_title, "customer_text", message_id=message_id),
         _fact("headline", "Headline", _headline(text), "customer_text", message_id=message_id),
         _fact("tagline", "Tagline", _tagline(text), "customer_text", message_id=message_id),
-        _fact("location", "Location", fields.venue_or_location or "", "customer_profile", required=False),
-        _fact("contact_phone", "Contact", fields.contact_info or "", "customer_profile"),
+        _fact("location", "Location", fields.venue_or_location or "", "customer_text", required=False) if allow_text_identity else None,
+        _fact("contact_phone", "Contact", fields.contact_info or "", "customer_text") if allow_text_identity else None,
     ]:
         if item:
             facts.append(item)

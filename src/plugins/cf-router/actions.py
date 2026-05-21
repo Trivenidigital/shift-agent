@@ -1262,18 +1262,17 @@ def flyer_customer_not_active_reply(customer: dict) -> str:
 
 def flyer_project_missing_info_reply(project: dict) -> str:
     """Customer-facing prompt for an incomplete Flyer project."""
-    project_id = str(project.get("project_id") or "this project")
     if flyer_project_needs_missing_reference(project):
         return (
             "Flyer Studio\n"
             "------------\n"
-            f"I have {project_id}, but I need the sample/reference flyer before I can create the design.\n\n"
+            "I need the sample/reference flyer before I can create the design.\n\n"
             "Please attach the flyer image/PDF, or type the items, offers, prices, date/time if needed, and contact details."
         )
     return (
         "Flyer Studio\n"
         "------------\n"
-        f"I have {project_id}, but I need a few more details before creating the design.\n\n"
+        "I need a few more details before creating the design.\n\n"
         "What should this flyer promote? Send item/offer/event details, date/time if needed, location/contact, and any logo/photos."
     )
 
@@ -1529,9 +1528,8 @@ def is_flyer_project_status_request(text: str) -> bool:
 
 def flyer_manual_edit_status_reply(project: dict) -> str:
     reply = flyer_project_status_reply(project)
-    project_id = str(project.get("project_id") or "this project")
     generic_fallback = (
-        f"Project {project_id}: I have this flyer project open and am checking the latest status."
+        "I have your flyer request open and am checking the latest status."
     )
     if generic_fallback not in reply:
         return reply
@@ -1556,7 +1554,7 @@ def flyer_manual_edit_status_reply(project: dict) -> str:
         reason_code,
         MANUAL_REVIEW_REASON_LINES["source_edit_provider_unavailable"],
     )
-    return f"Flyer Studio\n------------\nProject {project_id}: {line}"
+    return f"Flyer Studio\n------------\n{line}"
 
 
 def flyer_project_status_reply(project: dict) -> str:
@@ -1570,13 +1568,11 @@ def flyer_project_status_reply(project: dict) -> str:
             from schemas import FlyerProject  # type: ignore
             from agents.flyer.workflow import build_project_status_reply  # type: ignore
         except Exception:
-            project_id = str(project.get("project_id") or "this project")
-            return f"Flyer Studio\n------------\nProject {project_id}: I have this flyer project open and am checking the latest status."
+            return "Flyer Studio\n------------\nI have your flyer request open and am checking the latest status."
     try:
         return build_project_status_reply(FlyerProject.model_validate(project))
     except Exception:
-        project_id = str(project.get("project_id") or "this project")
-        return f"Flyer Studio\n------------\nProject {project_id}: I have this flyer project open and am checking the latest status."
+        return "Flyer Studio\n------------\nI have your flyer request open and am checking the latest status."
 
 
 def _canonical_phone(phone: Optional[str]) -> Optional[str]:
@@ -2166,6 +2162,7 @@ def trigger_store_flyer_brand_asset(
 def trigger_create_flyer_project(
     *,
     customer_phone: str,
+    chat_id: str = "",
     raw_request: str,
     message_id: str,
     reference_media_path: str = "",
@@ -2180,6 +2177,8 @@ def trigger_create_flyer_project(
             "--message-id", message_id,
             "--raw-request", raw_request,
         ]
+        if chat_id:
+            cmd.extend(["--chat-id", chat_id])
         if reference_media_path:
             cmd.extend(["--reference-media-path", reference_media_path])
             cmd.append("--defer-reference-extraction")
@@ -2848,9 +2847,7 @@ def send_flyer_intake_ack(chat_id: str, project_id: str) -> tuple[bool, str, str
     message = (
         "Flyer Studio\n"
         "------------\n"
-        f"Got it. I created flyer project {project_id}. "
-        "I have the request and will prepare design concepts. "
-        "Reply here with a logo or photos if you want them included."
+        "Got it. I have your flyer request and will send an update here shortly."
     )
     ok, message_id, err, status = bridge_post(chat_id, message)
     if ok:
@@ -2868,10 +2865,8 @@ def send_flyer_processing_ack(chat_id: str, project_id: str) -> tuple[bool, str,
     message = (
         "Flyer Studio\n"
         "------------\n"
-        f"Request processing. I created flyer project {project_id} and am creating the design now.\n\n"
-        "Flyer generation is in progress and usually takes 5-6 minutes. "
-        "Please check back here shortly; I will send the preview as soon as it is ready.\n\n"
-        "Reply here if you need to add a logo, photos, or changes while I work on it."
+        "Got it. I'm creating your flyer now and will send a preview here shortly. "
+        "Flyer generation usually takes 5-6 minutes."
     )
     ok, message_id, err, status = bridge_post(chat_id, message)
     if ok:

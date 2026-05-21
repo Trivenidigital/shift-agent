@@ -105,12 +105,13 @@ def test_closed_no_send_reason_lines_covers_every_flyer_manual_review_reason():
 
 @pytest.mark.parametrize("status", sorted(get_args(FlyerWorkflowStatus)))
 def test_every_status_produces_deterministic_reply(status: str):
-    """For each workflow status, the reply is the project-id-prefixed
+    """For each workflow status, the reply is deterministic outcome-only
     STATUS_LINES copy. No state falls through to a generic line."""
     project = _project(status=status, manual_status="none")
     reply = build_project_status_reply(project)
     assert "Flyer Studio" in reply
-    assert "Project F9001" in reply
+    assert "F9001" not in reply
+    assert "project F" not in reply.lower()
     # The status-specific line must be present in the reply body.
     assert STATUS_LINES[status] in reply, (
         f"status {status!r}: expected STATUS_LINES[{status}] in reply, got {reply!r}"

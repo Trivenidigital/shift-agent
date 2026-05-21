@@ -120,6 +120,43 @@ def test_visual_qa_fails_when_required_price_missing(tmp_path):
     assert any("item:0:price" in b for b in report.blockers)
 
 
+def test_visual_qa_requires_business_campaign_contact_and_profile_location(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    now = datetime(2026, 5, 21, tzinfo=timezone.utc)
+    project = FlyerProject(
+        project_id="F0065",
+        status="awaiting_final_approval",
+        customer_phone="+17329837841",
+        created_at=now,
+        updated_at=now,
+        original_message_id="m-evening",
+        raw_request="evening snacks",
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmis Kitchn", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Evening Snacks", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+        ],
+    )
+
+    artifact = _write_sidecar(
+        tmp_path,
+        "Lakshmis Kitchn Evening Snacks Call +1 732 983 7841",
+    )
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+    assert report.status == "failed"
+    assert "missing required visible fact: location" in report.blockers
+
+    artifact = _write_sidecar(
+        tmp_path,
+        "Lakshmis Kitchn Call +1 732 983 7841 90 Brybar Dr St Johns FL",
+    )
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+    assert report.status == "failed"
+    assert "missing required visible fact: campaign_title" in report.blockers
+
+
 def test_visual_qa_fails_on_template_placeholder_strings(tmp_path):
     """Generic template leakage ("YOUR LOGO HERE", "CLICK HERE TO ADD TEXT") must fail QA
     even when every locked fact happens to be present, because the customer would receive

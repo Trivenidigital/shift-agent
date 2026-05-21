@@ -50,7 +50,7 @@ STATUS_LINES = {
     "intake_started": "I have the request open and am checking the flyer details.",
     "collecting_required_info": "I am waiting for the missing flyer details before creating the design.",
     "awaiting_assets": "I am waiting for the logo, photo, menu, or reference image needed for this flyer.",
-    "manual_edit_required": "This is queued for designer-assisted review because automation cannot safely finish it.",
+    "manual_edit_required": "I couldn't finish this automatically. I'll review it and send an update here.",
     "generating_concepts": "The flyer design is being generated now.",
     "awaiting_concept_selection": "The preview is ready. Please choose a concept or send changes.",
     "revising_design": "Your requested changes are saved and the revised design is being prepared.",
@@ -58,7 +58,7 @@ STATUS_LINES = {
     "finalizing_assets": "The final files are being prepared for delivery.",
     "delivered": "The final flyer files have been delivered.",
     "completed": "This flyer project is complete.",
-    "closed_no_send": "This flyer project was closed by the operator without sending final assets.",
+    "closed_no_send": "This flyer request was closed without sending final assets.",
 }
 
 
@@ -252,7 +252,7 @@ def build_project_status_reply(project: FlyerProject) -> str:
     return (
         "Flyer Studio\n"
         "------------\n"
-        f"Project {project.project_id}: {line}"
+        f"{line}"
     )
 
 

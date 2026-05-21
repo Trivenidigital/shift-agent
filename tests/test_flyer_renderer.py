@@ -127,29 +127,66 @@ def test_collect_text_facts_keeps_revised_price_phone_location_and_schedule():
     assert "$12.99" in facts["detail_002"]
 
 
-def test_collect_text_facts_prefers_locked_business_name_over_fields():
-    """P0-2: renderer must use locked_facts["business_name"] over fields.event_or_business_name
-    so a typed customer correction (customer_text source) flows into the rendered title without
-    a separate codepath. Today's bug class: fields hold the stale onboarding value while
-    locked_facts has the customer's latest correction; renderer was reading fields."""
+def test_collect_text_facts_separates_business_brand_from_campaign_title():
+    """Business identity and campaign title are different customer-visible facts.
+
+    The brand must remain visible, but the poster title should be the campaign
+    title/headline rather than duplicating the business name.
+    """
     project = _complete_project().model_copy(update={
         "fields": FlyerRequestFields(
-            event_or_business_name="Old Stale Name",
+            event_or_business_name="Evening Snacks",
             venue_or_location="Old Stale Address",
             contact_info="+19999999999",
             notes="-",
         ),
         "locked_facts": [
-            FlyerLockedFact(fact_id="business_name", label="Business", value="Chloe Hair Studio", source="customer_text"),
-            FlyerLockedFact(fact_id="location", label="Location", value="11111 Gainsborough Ct, Fairfax, VA", source="customer_text"),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+19803826497", source="customer_text"),
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmis Kitchn", source="customer_profile"),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Evening Snacks", source="customer_text"),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile"),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile"),
         ],
     })
 
     facts = {fact.fact_id: fact.text for fact in collect_text_facts(project)}
-    assert facts["title"] == "Chloe Hair Studio"
-    assert facts["location"] == "11111 Gainsborough Ct, Fairfax, VA"
-    assert facts["contact"] == "+19803826497"
+    assert facts["brand"] == "Lakshmis Kitchn"
+    assert facts["title"] == "Evening Snacks"
+    assert facts["location"] == "90 Brybar Dr St Johns FL"
+    assert facts["contact"] == "+17329837841"
+    assert _menu_overlay_payload(project)["title"] == "Evening Snacks"
+    assert "Business/brand: Lakshmis Kitchn" in _image_prompt(
+        project,
+        concept_id="C1",
+        output_format="concept_preview",
+        size=(1080, 1350),
+    )
+    assert "Title: Evening Snacks" in _image_prompt(
+        project,
+        concept_id="C1",
+        output_format="concept_preview",
+        size=(1080, 1350),
+    )
+
+
+def test_collect_text_facts_uses_headline_when_campaign_title_is_absent():
+    project = _complete_project().model_copy(update={
+        "fields": FlyerRequestFields(
+            event_or_business_name="Lakshmis Kitchn",
+            venue_or_location="90 Brybar Dr St Johns FL",
+            contact_info="+17329837841",
+            notes="Headline: Family Combo Feast",
+        ),
+        "locked_facts": [
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmis Kitchn", source="customer_profile"),
+            FlyerLockedFact(fact_id="headline", label="Headline", value="Family Combo Feast", source="customer_text"),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile"),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile"),
+        ],
+    })
+
+    facts = {fact.fact_id: fact.text for fact in collect_text_facts(project)}
+    assert facts["brand"] == "Lakshmis Kitchn"
+    assert facts["title"] == "Family Combo Feast"
 
 
 def test_collect_text_facts_falls_back_to_fields_when_locked_slot_missing():
