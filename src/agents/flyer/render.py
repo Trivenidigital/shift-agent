@@ -300,6 +300,18 @@ def _schedule_hint(project: FlyerProject) -> str:
     return ""
 
 
+def _schedule_includes_time_range(schedule: str) -> bool:
+    if not schedule:
+        return False
+    return bool(
+        re.search(
+            r"\b\d{1,2}(?::\d{2})?\s*(?:AM|PM)\s*(?:TO|-)\s*\d{1,2}(?::\d{2})?\s*(?:AM|PM)\b",
+            schedule,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
 def _normalize_fact_text(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip()).casefold()
 
@@ -507,7 +519,7 @@ def collect_text_facts(project: FlyerProject) -> list[FlyerTextFact]:
         add("date", "Date", project.fields.event_date)
     elif schedule:
         add("schedule", "Schedule", schedule)
-    if project.fields.event_time:
+    if project.fields.event_time and not _schedule_includes_time_range(schedule):
         add("time", "Time", project.fields.event_time)
     location_text = fact_value(project, "location", fallback=project.fields.venue_or_location)
     if location_text:
@@ -587,7 +599,7 @@ def _poster_copy_block(project: FlyerProject) -> str:
         lines.append(f"Schedule: {plan.schedule}")
     elif project.fields.event_date:
         lines.append(f"Date: {project.fields.event_date}")
-    if project.fields.event_time:
+    if project.fields.event_time and not _schedule_includes_time_range(plan.schedule or ""):
         lines.append(f"Time: {project.fields.event_time}")
     if plan.location:
         lines.append(f"Location: {plan.location}")

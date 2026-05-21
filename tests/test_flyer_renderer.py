@@ -127,6 +127,30 @@ def test_collect_text_facts_keeps_revised_price_phone_location_and_schedule():
     assert "$12.99" in facts["detail_002"]
 
 
+def test_collect_text_facts_avoids_duplicate_time_when_schedule_has_time_range():
+    project = _complete_project()
+    fields = FlyerRequestFields(
+        event_or_business_name="Evening Snacks",
+        event_time="16:00",
+        venue_or_location="90 Brybar Dr St Johns FL",
+        contact_info="+17329837841",
+        notes="Evening snacks offer. Schedule 4 PM to 7 PM. Wednesday through Saturday.",
+    )
+    project = project.model_copy(update={"fields": fields})
+
+    facts = {fact.fact_id: fact.text for fact in collect_text_facts(project)}
+
+    assert "schedule" in facts
+    assert "4 PM TO 7 PM" in facts["schedule"]
+    assert "time" not in facts
+    assert "Time: 16:00" not in _image_prompt(
+        project,
+        concept_id="C1",
+        output_format="concept_preview",
+        size=(1080, 1350),
+    )
+
+
 def test_collect_text_facts_separates_business_brand_from_campaign_title():
     """Business identity and campaign title are different customer-visible facts.
 
