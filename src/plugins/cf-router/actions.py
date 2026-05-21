@@ -604,6 +604,17 @@ _FLYER_WORK_OBJECT = re.compile(
     r"marketing\s+material|creative|graphic)\b",
     re.IGNORECASE,
 )
+_FRESH_FLYER_BRIEF_DETAIL = re.compile(
+    r"\b(?:"
+    r"from\s+\d{1,2}\s*(?:am|pm)\s+(?:to|-)\s+\d{1,2}\s*(?:am|pm)|"
+    r"\d{1,2}\s*(?:am|pm)\s+(?:to|-)\s+\d{1,2}\s*(?:am|pm)|"
+    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+    r"today|tomorrow|weekend|event|special|sale|offer|discount|"
+    r"menu|snacks?|items?|top\s+\d+|grand\s+opening|festival|"
+    r"breakfast|lunch|dinner"
+    r")\b",
+    re.IGNORECASE,
+)
 _FLYER_CAMPAIGN_CTA = re.compile(
     r"^\s*(?:"
     r"start\s+free\s+(?:trial|trail)"
@@ -887,6 +898,13 @@ def should_start_new_flyer_over_active(text: str, *, has_media: bool = False) ->
     if _NEW_FLYER_REQUEST.search(body):
         return True
     if _NEW_FLYER_VERB.search(body) and _FLYER_WORK_OBJECT.search(body):
+        return True
+    if (
+        _FLYER_WORK_OBJECT.search(body)
+        and _FRESH_FLYER_BRIEF_DETAIL.search(body)
+        and not is_flyer_project_status_request(body)
+        and not is_flyer_revision_intent(body)
+    ):
         return True
     if _WRONG_FLYER_CORRECTION.search(body):
         return True

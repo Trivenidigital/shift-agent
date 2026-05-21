@@ -2001,6 +2001,91 @@ def test_media_backed_new_work_escapes_stale_active_project(monkeypatch):
     assert result is None
 
 
+def test_evening_snacks_fresh_request_bypasses_old_active_project(monkeypatch):
+    """F0061/F0062 regression: a clearly new flyer brief with time/window
+    details must not be swallowed as a revision to an old active project."""
+    hooks, actions = _load_plugin_modules()
+    phrase = (
+        "I’d like you to help me with evening snacks flier from 4 PM to 7 PM. "
+        "Include 5 top South Indian snack items. Its Wednesday through Saturday event"
+    )
+    active_project = {
+        "project_id": "F0062",
+        "customer_phone": "+17329837841",
+        "status": "awaiting_final_approval",
+        "updated_at": "2026-05-21T00:00:00Z",
+        "created_at": "2026-05-21T00:00:00Z",
+        "raw_request": "Create old breakfast dosa flyer",
+        "fields": {
+            "event_or_business_name": "Old Breakfast Special",
+            "event_date": "Last week",
+            "event_time": "8 AM to 10 AM",
+            "venue_or_location": "Old location",
+            "contact_info": "+17329837841",
+        },
+        "concepts": [{"concept_id": "C1"}],
+        "revisions": [],
+    }
+
+    assert actions.should_start_new_flyer_over_active(phrase, has_media=False)
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
+    monkeypatch.setattr(actions, "send_flyer_text", lambda *_args, **_kwargs: pytest.fail("fresh request must not send revision/status copy"))
+    monkeypatch.setattr(actions, "invoke_update_flyer_project", lambda *_args, **_kwargs: pytest.fail("fresh request must not revise active project"))
+    audits: list[dict] = []
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
+
+    result = hooks._try_flyer_active_project_intercept(
+        phrase,
+        "17329837841@s.whatsapp.net",
+        {"message_id": "m-evening-snacks"},
+    )
+
+    assert result is None
+    assert any(
+        row.get("reason") == "flyer_active_project_bypassed"
+        and "fresh_flyer_intent=true" in row.get("detail", "")
+        and "project_id=F0062" in row.get("detail", "")
+        and "message_id=m-evening-snacks" in row.get("detail", "")
+        for row in audits
+    )
+
+    active_project["status"] = "revising_design"
+    audits.clear()
+    result = hooks._try_flyer_active_project_intercept(
+        phrase,
+        "17329837841@s.whatsapp.net",
+        {"message_id": "m-evening-snacks-2"},
+    )
+
+    assert result is None
+    assert any(
+        row.get("reason") == "flyer_active_project_bypassed"
+        and "fresh_flyer_intent=true" in row.get("detail", "")
+        and "status=revising_design" in row.get("detail", "")
+        and "message_id=m-evening-snacks-2" in row.get("detail", "")
+        for row in audits
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "change phone number",
+        "make it red",
+        "replace rice with jeera rice",
+        "APPROVE",
+        "use option 1",
+        "any update?",
+    ],
+)
+def test_common_active_project_followups_do_not_classify_as_fresh_flyer_intent(text):
+    _hooks, actions = _load_plugin_modules()
+    assert actions.should_start_new_flyer_over_active(text, has_media=False) is False
+
+
 # --------------------------------------------------------------------------
 # closed_no_send status-reply routing (fix for the screenshot bug:
 # customer asked "any update?" on a freshly-closed source-edit and got

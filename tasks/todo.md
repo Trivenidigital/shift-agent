@@ -7,6 +7,36 @@ Last updated: 2026-05-20 (pilot-hardening golden live-shape samples and stale Fl
 
 ---
 
+## Active - Flyer fresh-intent routing + customer deactivation (2026-05-21)
+
+**Drift-check tag:** extends-Hermes
+
+Do not create a new identity/auth/audit substrate. Reuse `identify-sender`, existing active-project helpers, existing fresh-OTP Cockpit mutation pattern, and existing audit chokepoints. If Hermes/cf-router already has a generic fresh-request-vs-followup classifier, reuse or extend it instead of inventing a parallel parser.
+
+| Step | Hermes-owned? | Decision |
+|---|---|---|
+| WhatsApp sender identity and chat routing | yes | reuse existing cf-router/Hermes identity helpers |
+| Active project lookup | no, Flyer-specific | use existing Flyer state helpers |
+| New flyer vs revision intent policy | no, Flyer-specific | implement in Flyer routing helper |
+| Customer deactivation auth | yes-ish | reuse existing Cockpit auth/fresh-OTP guard |
+| Customer lifecycle state | no, Flyer-specific | add minimal Flyer customer status if missing |
+| Audit emission | yes-ish | use existing safe_io / cockpit audit / LogEntry pattern |
+| Messaging/customer copy | yes substrate, copy policy Flyer-specific | no copy changes in this PR |
+
+- [x] Add RED routing regression for the F0061/F0062 evening-snacks phrase with old active projects.
+- [x] Preserve legitimate revision, approval, and status handling tests.
+- [x] Implement minimal fresh-flyer intent strengthening plus active-project bypass audit detail.
+- [x] Add RED backend tests for fresh-OTP customer deactivation, required reason, historical project preservation, list/status behavior, audit, 404, and repeat handling.
+- [x] Implement soft deactivation using existing Flyer customer status semantics and Cockpit audit.
+- [x] Add Cockpit customer safe action with reason-confirm flow and inactive status display.
+- [x] Run focused pytest, py_compile, frontend type/build, and `git diff --check`.
+- [x] Open PR only; no merge and no deploy.
+
+Review:
+- Routing regression covers the exact F0061/F0062 evening-snacks phrase against old `awaiting_final_approval` and `revising_design` projects; it bypasses active-project revision and emits `flyer_active_project_bypassed`.
+- Customer removal is soft deactivation (`cancelled`) guarded by fresh OTP, with reason/audit, and historical projects/audit/media untouched.
+- Verified: cf-router/state-reply pytest, Flyer admin pytest, touched Python py_compile, frontend typecheck/build, and `git diff --check`.
+
 ## Active - Flyer model policy lock-in (2026-05-20)
 
 **Drift-check tag:** extends-Hermes
