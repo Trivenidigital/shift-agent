@@ -386,6 +386,24 @@ def test_image_prompt_uses_schedule_instead_of_blank_date_for_recurring_offer():
     assert "Date: " not in prompt
 
 
+def test_image_prompt_extracts_through_day_range_schedule_for_recurring_offer():
+    project = _complete_project()
+    fields = project.fields.model_copy(update={
+        "event_date": None,
+        "event_time": None,
+        "notes": (
+            "I\u2019d like you to help me with evening snacks flier from 4 PM to 7 PM. "
+            "Include 5 top South Indian snack items. Its Wednesday through Saturday event"
+        ),
+    })
+    project = project.model_copy(update={"fields": fields})
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="whatsapp_image", size=(1080, 1350))
+
+    assert "Schedule: Wednesday Through Saturday | 4 PM TO 7 PM" in prompt
+    assert "Date: " not in prompt
+
+
 def test_image_prompt_skips_blank_optional_fields_for_price_list():
     project = _complete_project()
     fields = FlyerRequestFields(
