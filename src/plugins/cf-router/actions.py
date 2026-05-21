@@ -2794,8 +2794,7 @@ def send_flyer_manual_review_ack(
     message = (
         "Flyer Studio\n"
         "------------\n"
-        "Got it. I need to review the uploaded file before creating the flyer. "
-        "I'll send an update here once it's ready."
+        "I couldn't finish this automatically. I'll review it and send an update here."
     )
     ok, message_id, err, status = bridge_post(chat_id, message)
     if ok:

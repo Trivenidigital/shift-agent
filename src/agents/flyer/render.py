@@ -579,9 +579,7 @@ def _poster_copy_block(project: FlyerProject) -> str:
     lines = [
         "Render the following text exactly. Do not summarize, paraphrase, invent, or omit these customer facts.",
     ]
-    business_name = _registered_business_name(project)
-    if not business_name:
-        business_name = fact_value(project, "business_name", fallback="")
+    business_name = _display_business_name(project)
     if business_name:
         lines.append(f"Business/brand: {business_name}")
     lines.append(f"Title: {plan.title}")
@@ -880,6 +878,15 @@ def _registered_business_name(project: FlyerProject) -> str:
     if not customer:
         return ""
     return customer.business_name.strip()
+
+
+def _display_business_name(project: FlyerProject) -> str:
+    return (
+        fact_value(project, "business_name", fallback="")
+        or _registered_business_name(project)
+        or project.fields.event_or_business_name
+        or ""
+    )
 
 
 def _registered_business_category(project: FlyerProject) -> str:
@@ -1414,8 +1421,7 @@ def _source_edit_reference_asset(project: FlyerProject) -> FlyerAsset:
 
 def _source_edit_prompt(project: FlyerProject) -> str:
     business_name = (
-        _registered_business_name(project)
-        or fact_value(project, "business_name", fallback=project.fields.event_or_business_name)
+        _display_business_name(project)
         or "this business"
     )
     request = " ".join((project.raw_request or project.fields.notes or "").split())[:1200]

@@ -1414,6 +1414,56 @@ def test_direct_poster_prompt_uses_registered_business_name_not_reference_brand(
     assert "Do not copy business names or logos from the reference" in prompt
 
 
+def test_explicit_business_override_reaches_direct_and_source_edit_prompts(tmp_path, monkeypatch):
+    import agents.flyer.render as render_mod
+
+    customers_path = tmp_path / "customers.json"
+    customers_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_customer_sequence": 2,
+        "customers": [{
+            "customer_id": "CUST0001",
+            "business_name": "Old Brand",
+            "business_address": "90 Brybar Dr St Johns FL",
+            "primary_chat_id": "201975216009469@lid",
+            "onboarded_by_phone": "+19045550104",
+            "public_phone": "+17329837841",
+            "business_whatsapp_number": "+17329837841",
+            "authorized_request_numbers": ["+17329837841", "+19045550104"],
+            "business_category": "Indian restaurant",
+            "preferred_language": "te",
+            "plan_id": "trial",
+            "status": "trial",
+            "created_at": datetime(2026, 5, 17, tzinfo=timezone.utc).isoformat(),
+            "updated_at": datetime(2026, 5, 17, tzinfo=timezone.utc).isoformat(),
+            "activated_at": datetime(2026, 5, 17, tzinfo=timezone.utc).isoformat(),
+            "monthly_flyers_used": 0,
+            "billing_provider": "manual",
+            "payment_currency": "USD",
+        }],
+        "onboarding_sessions": [],
+    }), encoding="utf-8")
+    monkeypatch.setenv("FLYER_CUSTOMERS_PATH", str(customers_path))
+
+    project = _complete_project().model_copy(update={
+        "customer_phone": "+19045550104",
+        "raw_request": "Create flyer. Business name is New Brand and headline is Evening Snacks.",
+        "locked_facts": [
+            FlyerLockedFact(fact_id="business_name", label="Business", value="New Brand", source="customer_text"),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Evening Snacks", source="customer_text"),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile"),
+        ],
+    })
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+    source_prompt = render_mod._source_edit_prompt(project)
+
+    assert "Business/brand: New Brand" in prompt
+    assert "Business/brand: Old Brand" not in prompt
+    assert "Business/brand to preserve: New Brand" in source_prompt
+    assert "Business/brand to preserve: Old Brand" not in source_prompt
+
+
 def test_real_image_model_concept_uses_direct_poster_output_without_overlay(tmp_path, monkeypatch):
     raw_png = _png_bytes(color=(19, 83, 43))
 

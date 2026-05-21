@@ -1170,5 +1170,5 @@ Review results:
   - [x] Get design reviewed by two parallel agents and fold Critical/High findings.
   - [x] Build with transcript-level tests for F0065, profile authority, customer-copy leaks, duplicate initial ack, and self-eval tripwires.
   - [x] Open PR #152 and get two parallel PR reviews.
-  - [x] Fold PR-review High findings: visual-QA failure fallback, deterministic render title path, explicit business override bounds, and SOURCE/NEW pending status phrasing.
-  - Review: focused acceptance suite `323 passed, 117 skipped`; touched-file `py_compile` passed; `git diff --check` passed. No deploy performed.
+  - [x] Fold PR-review High findings: visual-QA failure fallback, truthful generic fallback copy, deterministic render title path, explicit business override bounds/prompt propagation, and SOURCE/NEW pending status phrasing.
+  - Review: focused acceptance suite `324 passed, 117 skipped`; touched-file `py_compile` passed; `git diff --check` passed. No deploy performed.
