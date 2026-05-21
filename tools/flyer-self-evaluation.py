@@ -9,7 +9,6 @@ customer/project/VPS state and it does not send messages.
 from __future__ import annotations
 
 import argparse
-import ast
 import importlib.util
 import json
 import re
@@ -23,36 +22,28 @@ from typing import Any
 DEFAULT_PROJECTS_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
 DEFAULT_DECISIONS_LOG = Path("/opt/shift-agent/logs/decisions.log")
 CF_ROUTER_ACTIONS_PATH = Path(__file__).resolve().parents[1] / "src" / "plugins" / "cf-router" / "actions.py"
+SRC_DIR = Path(__file__).resolve().parents[1] / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from agents.flyer.customer_copy_policy import (  # noqa: E402
+    BANNED_CUSTOMER_COPY_TERMS,
+    OUTBOUND_TEXT_FIELDS,
+    STATIC_CUSTOMER_COPY_FUNCTIONS,
+    classify_initial_ack,
+    extract_customer_copy_literals as policy_extract_customer_copy_literals,
+    extract_function_block as policy_extract_function_block,
+    extract_send_call_literals,
+    scan_outbound_entry,
+)
+
 DEFAULT_SOURCE_FILES = (
     Path("src/plugins/cf-router/actions.py"),
     Path("src/plugins/cf-router/hooks.py"),
     Path("src/agents/flyer/workflow.py"),
 )
-STATIC_COPY_SCAN_FUNCTIONS = (
-    "send_flyer_manual_edit_ack",
-    "send_flyer_edit_processing_ack",
-    "send_flyer_processing_ack",
-    "send_flyer_intake_ack",
-    "send_flyer_manual_review_ack",
-    "flyer_manual_edit_status_reply",
-    "flyer_project_status_reply",
-)
-
-INTERNAL_COPY_TERMS = (
-    "queued project",
-    "created flyer project",
-    "Request processing",
-    "Project F",
-    "Requested edit:",
-    "Original customer request",
-    "Authorized relationship",
-    "source-preserving workflow",
-    "source-preserving edit",
-    "operator",
-    "manual_edit_required",
-    "provider",
-    "reason_code",
-)
+STATIC_COPY_SCAN_FUNCTIONS = STATIC_CUSTOMER_COPY_FUNCTIONS
+INTERNAL_COPY_TERMS = BANNED_CUSTOMER_COPY_TERMS
 SOURCE_QA_MARKERS = ("source", "contract", "integrity", "operator_review")
 SOURCE_POSITIVE_FACT_PREFIXES = ("source_heading:", "source_section:", "source_required_text:")
 REPLACEMENT_NEW_FACT_RE = re.compile(r"^replacement:\d+:new$")
@@ -588,6 +579,28 @@ def incident(
     return item
 
 
+def projects_by_id(projects: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {
+        str(project.get("project_id") or "").upper(): project
+        for project in projects
+        if isinstance(project, dict) and project.get("project_id")
+    }
+
+
+def entry_active_customer_risk(
+    entry: dict[str, Any],
+    project_index: dict[str, dict[str, Any]] | None,
+) -> bool:
+    project_id = str(entry.get("project_id") or decision_project_id(entry) or "").upper()
+    project = (project_index or {}).get(project_id)
+    if project:
+        return active_customer_risk(project)
+    historical = str(entry.get("historical") or entry.get("audit_only") or "").lower()
+    if historical in {"1", "true", "yes"}:
+        return False
+    return True
+
+
 def project_incidents(
     projects: list[dict[str, Any]],
     *,
@@ -739,19 +752,17 @@ def project_incidents(
     return out
 
 
-def customer_copy_incidents(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def customer_copy_incidents(
+    entries: list[dict[str, Any]],
+    *,
+    project_index: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    text_fields = ("outbound_text", "customer_text", "message_text", "sent_text", "reply_text")
     for entry in entries:
-        text = ""
-        for field in text_fields:
-            value = entry.get(field)
-            if value:
-                text = str(value)
-                break
-        if not text:
+        scan = scan_outbound_entry(entry)
+        if not scan.text:
             continue
-        matched = [term for term in INTERNAL_COPY_TERMS if term.lower() in text.lower()]
+        matched = list(scan.matched_values)
         if not matched:
             continue
         out.append(
@@ -762,32 +773,51 @@ def customer_copy_incidents(entries: list[dict[str, Any]]) -> list[dict[str, Any
                 evidence=", ".join(matched),
                 suggested_action="Add or update customer-message copy tests so WhatsApp receives outcome-only text.",
                 category="customer-message copy",
+                evidence_details={
+                    "active_customer_risk": entry_active_customer_risk(entry, project_index),
+                    "matched_categories": [hit.category for hit in scan.hits],
+                    "customer_impact": "customer-facing copy exposed internal workflow language",
+                },
             )
         )
     return out
 
 
-def duplicate_initial_ack_incidents(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    groups: dict[str, dict[str, Any]] = defaultdict(lambda: {"processing": 0, "intake": 0, "project_id": ""})
-    text_fields = ("outbound_text", "customer_text", "message_text", "sent_text", "reply_text")
+def duplicate_initial_ack_incidents(
+    entries: list[dict[str, Any]],
+    *,
+    project_index: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    groups: dict[str, dict[str, Any]] = defaultdict(lambda: {"processing": 0, "intake": 0, "project_id": "", "entries": []})
     for entry in entries:
         text = ""
-        for field in text_fields:
+        for field in OUTBOUND_TEXT_FIELDS:
             if entry.get(field):
                 text = str(entry.get(field) or "")
                 break
         if not text:
             continue
-        key = str(entry.get("project_id") or entry.get("chat_id") or entry.get("customer_phone") or "")
+        message_id = str(entry.get("message_id") or entry.get("customer_message_id") or entry.get("inbound_message_id") or "")
+        key = "|".join(
+            part for part in [
+                message_id,
+                str(entry.get("project_id") or ""),
+                str(entry.get("chat_id") or entry.get("customer_phone") or ""),
+            ]
+            if part
+        )
         if not key:
             continue
-        lowered = text.lower()
         group = groups[key]
         if re.fullmatch(r"F\d{4,}", key.upper()):
             group["project_id"] = key.upper()
-        if "creating your flyer now" in lowered or "request processing" in lowered:
+        elif entry.get("project_id"):
+            group["project_id"] = str(entry.get("project_id") or "").upper()
+        markers = classify_initial_ack(text)
+        group["entries"].append(entry)
+        if "processing" in markers:
             group["processing"] += 1
-        if "have your flyer request" in lowered or "created flyer project" in lowered:
+        if "intake" in markers:
             group["intake"] += 1
     out: list[dict[str, Any]] = []
     for key, group in groups.items():
@@ -801,6 +831,13 @@ def duplicate_initial_ack_incidents(entries: list[dict[str, Any]]) -> list[dict[
                     suggested_action="Keep one initial Flyer customer ack before preview/fallback; leave project details in audit/Cockpit.",
                     category="customer-message copy",
                     count=int(group["processing"]) + int(group["intake"]),
+                    evidence_details={
+                        "active_customer_risk": any(
+                            entry_active_customer_risk(entry, project_index)
+                            for entry in group.get("entries", [])
+                        ),
+                        "customer_impact": "customer received more than one initial lifecycle acknowledgement for the same inbound",
+                    },
                 )
             )
     return out
@@ -814,12 +851,18 @@ def static_customer_copy_incidents(source_files: list[Path]) -> list[dict[str, A
         except OSError:
             continue
         scanned = "\n".join(
-            extract_customer_copy_literals(extract_function_block(text, name))
-            for name in STATIC_COPY_SCAN_FUNCTIONS
+            [
+                "\n".join(
+                    extract_customer_copy_literals(extract_function_block(text, name))
+                    for name in STATIC_COPY_SCAN_FUNCTIONS
+                ),
+                extract_send_call_literals(text),
+            ]
         )
         if not scanned:
             continue
-        matched = [term for term in INTERNAL_COPY_TERMS if term.lower() in scanned.lower()]
+        scan = scan_outbound_entry({"outbound_text": scanned})
+        matched = list(scan.matched_values)
         if not matched:
             continue
         out.append(
@@ -831,66 +874,22 @@ def static_customer_copy_incidents(source_files: list[Path]) -> list[dict[str, A
                     "Review source-code customer ack scan; decisions.log may not contain outbound bodies for this path."
                 ),
                 category="customer-message copy",
+                evidence_details={
+                    "active_customer_risk": False,
+                    "matched_categories": [hit.category for hit in scan.hits],
+                    "customer_impact": "static source contains customer-copy policy violations",
+                },
             )
         )
     return out
 
 
 def extract_function_block(source: str, function_name: str) -> str:
-    lines = source.splitlines()
-    start: int | None = None
-    for index, line in enumerate(lines):
-        if re.match(rf"^def {re.escape(function_name)}\b", line):
-            start = index
-            break
-    if start is None:
-        return ""
-    end = len(lines)
-    for index in range(start + 1, len(lines)):
-        line = lines[index]
-        if line.startswith("def ") or line.startswith("class "):
-            end = index
-            break
-    return "\n".join(lines[start:end])
+    return policy_extract_function_block(source, function_name)
 
 
 def extract_customer_copy_literals(function_block: str) -> str:
-    if not function_block.strip():
-        return ""
-    try:
-        tree = ast.parse(function_block)
-    except SyntaxError:
-        return function_block
-    snippets: list[str] = []
-
-    def literal_text(node: ast.AST) -> str:
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return node.value
-        if isinstance(node, ast.JoinedStr):
-            return "".join(literal_text(value) for value in node.values)
-        if isinstance(node, ast.FormattedValue):
-            return "{value}"
-        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-            return literal_text(node.left) + literal_text(node.right)
-        return ""
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            target_names = {
-                target.id for target in node.targets
-                if isinstance(target, ast.Name)
-            }
-            if target_names & {"message", "body", "reply", "text"}:
-                snippets.append(literal_text(node.value))
-        elif isinstance(node, ast.Call):
-            func_name = ""
-            if isinstance(node.func, ast.Name):
-                func_name = node.func.id
-            elif isinstance(node.func, ast.Attribute):
-                func_name = node.func.attr
-            if func_name in {"bridge_post", "send_flyer_text"}:
-                snippets.extend(literal_text(arg) for arg in node.args)
-    return "\n".join(part for part in snippets if part)
+    return policy_extract_customer_copy_literals(function_block)
 
 
 def repeated_checkin_incidents(entries: list[dict[str, Any]], *, threshold: int) -> list[dict[str, Any]]:
@@ -1078,6 +1077,7 @@ def build_report(
 ) -> dict[str, Any]:
     now = now or utc_now()
     project_rows = projects.get("projects") if isinstance(projects.get("projects"), list) else []
+    project_index = projects_by_id(project_rows)
     incidents = (
         project_incidents(
             project_rows,
@@ -1085,8 +1085,8 @@ def build_report(
             manual_stale_minutes=manual_stale_minutes,
             generation_stale_minutes=generation_stale_minutes,
         )
-        + customer_copy_incidents(decision_entries)
-        + duplicate_initial_ack_incidents(decision_entries)
+        + customer_copy_incidents(decision_entries, project_index=project_index)
+        + duplicate_initial_ack_incidents(decision_entries, project_index=project_index)
         + static_customer_copy_incidents(source_files or [])
         + repeated_checkin_incidents(decision_entries, threshold=repeated_checkin_threshold)
         + preview_final_qa_mismatch_incidents(project_rows, decision_entries)
