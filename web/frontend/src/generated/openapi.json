@@ -1890,6 +1890,56 @@
         ]
       }
     },
+    "/flyer/customers/{customer_id}/deactivate": {
+      "post": {
+        "operationId": "customer_deactivate_flyer_customers__customer_id__deactivate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "customer_id",
+            "required": true,
+            "schema": {
+              "title": "Customer Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReasonBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Customer Deactivate",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
     "/flyer/customers/{customer_id}/extend-trial": {
       "post": {
         "operationId": "extend_trial_flyer_customers__customer_id__extend_trial_post",

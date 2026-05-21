@@ -320,6 +320,40 @@ def reset_trial_quota(customer_id: str, *, reason: str) -> dict[str, Any]:
     return {"ok": True, "customer_id": customer_id, "released": released, "backup": backup}
 
 
+def deactivate_customer(customer_id: str, *, reason: str) -> dict[str, Any]:
+    """Soft-remove a Flyer customer from active use without deleting history.
+
+    Historical projects, audit rows, media assets, and usage records remain
+    untouched. `cancelled` is the existing inactive lifecycle state used by
+    the Flyer creation paths to block future work.
+    """
+    path = _customers_path()
+    with safe_io.flock(path):
+        store = load_customer_store()
+        customer = _find_customer_or_404(store, customer_id)
+        backup = _backup_path(path, reason)
+        previous_status = customer.status
+        already_inactive = previous_status == "cancelled"
+        now = _now()
+        if not already_inactive:
+            existing_notes = customer.notes.strip()
+            note = f"Deactivated by Cockpit: {reason}"
+            notes = f"{existing_notes}\n{note}".strip() if existing_notes else note
+            customer.status = "cancelled"
+            customer.notes = notes[-1000:]
+            customer.updated_at = now
+        FlyerCustomerStore.model_validate(store.model_dump())
+        _dump_store(path, store)
+    return {
+        "ok": True,
+        "customer_id": customer_id,
+        "previous_status": previous_status,
+        "status": "cancelled",
+        "already_inactive": already_inactive,
+        "backup": backup,
+    }
+
+
 def _formula_guard(value: str, *, row: int = 1, col: str = "phone") -> None:
     stripped = value.lstrip()
     if not stripped:
@@ -508,6 +542,13 @@ async def extend_trial(customer_id: str, body: ExtendTrialBody, request: Request
 async def reset_trial(customer_id: str, body: ReasonBody, request: Request, _=Depends(require_fresh_otp)):
     result = reset_trial_quota(customer_id, reason=body.reason)
     audit_log("flyer.customer.reset_trial", ip=client_ip(request), ua=client_ua(request), details=result | {"reason": body.reason})
+    return result
+
+
+@router.post("/customers/{customer_id}/deactivate")
+async def customer_deactivate(customer_id: str, body: ReasonBody, request: Request, _=Depends(require_fresh_otp)):
+    result = deactivate_customer(customer_id, reason=body.reason)
+    audit_log("flyer.customer.deactivate", ip=client_ip(request), ua=client_ua(request), details=result | {"reason": body.reason})
     return result
 
 

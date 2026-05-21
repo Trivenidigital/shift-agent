@@ -230,6 +230,215 @@ def test_reset_trial_quota_releases_counted_usage(tmp_path):
     assert customer.quota_remaining(FlyerConfig().plan_tiers) == 3
 
 
+def test_deactivate_customer_soft_cancels_and_preserves_projects(tmp_path):
+    from app.routers import flyer
+
+    settings = flyer.get_settings()
+    settings.state_dir = tmp_path / "state"
+    settings.cockpit_audit_log = tmp_path / "logs" / "audit.log"
+    _write_json(
+        settings.state_dir / "flyer" / "customers.json",
+        {
+            "schema_version": 1,
+            "next_customer_sequence": 2,
+            "customers": [_customer("CUST0001", status="active", plan_id="starter")],
+        },
+    )
+    _write_json(
+        settings.state_dir / "flyer" / "projects.json",
+        {
+            "schema_version": 1,
+            "next_sequence": 2,
+            "projects": [_project("F0061", status="awaiting_final_approval")],
+        },
+    )
+
+    result = flyer.deactivate_customer("CUST0001", reason="customer asked to stop flyer studio")
+
+    store = flyer.load_customer_store()
+    customer = store.find_customer_by_id("CUST0001")
+    projects = flyer.load_project_store().projects
+    assert result["ok"] is True
+    assert result["customer_id"] == "CUST0001"
+    assert result["previous_status"] == "active"
+    assert result["status"] == "cancelled"
+    assert customer is not None
+    assert customer.status == "cancelled"
+    assert "Deactivated by Cockpit" in customer.notes
+    assert projects and projects[0].project_id == "F0061"
+    assert projects[0].status == "awaiting_final_approval"
+    assert list((settings.state_dir / "flyer").glob("customers.json.pre-admin-*"))
+
+
+def test_deactivate_customer_is_idempotent(tmp_path):
+    from app.routers import flyer
+
+    settings = flyer.get_settings()
+    settings.state_dir = tmp_path / "state"
+    settings.cockpit_audit_log = tmp_path / "logs" / "audit.log"
+    _write_json(
+        settings.state_dir / "flyer" / "customers.json",
+        {
+            "schema_version": 1,
+            "next_customer_sequence": 2,
+            "customers": [_customer("CUST0001", status="cancelled", plan_id="starter")],
+        },
+    )
+
+    result = flyer.deactivate_customer("CUST0001", reason="repeat operator click")
+
+    assert result["ok"] is True
+    assert result["status"] == "cancelled"
+    assert result["already_inactive"] is True
+
+
+def test_deactivate_customer_unknown_returns_404(tmp_path):
+    from fastapi import HTTPException
+    from app.routers import flyer
+
+    settings = flyer.get_settings()
+    settings.state_dir = tmp_path / "state"
+    _write_json(
+        settings.state_dir / "flyer" / "customers.json",
+        {"schema_version": 1, "next_customer_sequence": 1, "customers": []},
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        flyer.deactivate_customer("CUST9999", reason="not present")
+    assert exc.value.status_code == 404
+
+
+def test_deactivated_customer_moves_to_inactive_segment(tmp_path):
+    from app.routers import flyer
+
+    settings = flyer.get_settings()
+    settings.state_dir = tmp_path / "state"
+    _write_json(
+        settings.state_dir / "flyer" / "customers.json",
+        {
+            "schema_version": 1,
+            "next_customer_sequence": 3,
+            "customers": [
+                _customer("CUST0001", status="cancelled", plan_id="starter"),
+                _customer("CUST0002", phone="+18479155253", status="trial", plan_id="trial"),
+            ],
+        },
+    )
+    _write_json(
+        settings.state_dir / "flyer" / "projects.json",
+        {"schema_version": 1, "next_sequence": 1, "projects": []},
+    )
+
+    inactive = asyncio.run(flyer.customers(segment="inactive", _=None))
+    free_trial = asyncio.run(flyer.customers(segment="free_trial", _=None))
+
+    assert [row["customer_id"] for row in inactive["customers"]] == ["CUST0001"]
+    assert [row["customer_id"] for row in free_trial["customers"]] == ["CUST0002"]
+
+
+def _build_test_client_with_fresh_otp():
+    from fastapi.testclient import TestClient
+    from app import auth as auth_mod
+    from app.main import app
+
+    async def _bypass_fresh():
+        return {"sub": "test-operator", "iat": 9_999_999_999}
+
+    app.dependency_overrides[auth_mod.require_fresh_otp] = _bypass_fresh
+
+    class _Ctx:
+        def __enter__(self):
+            self.client = TestClient(app)
+            return self.client
+
+        def __exit__(self, *args):
+            self.client.close()
+            app.dependency_overrides.clear()
+
+    return _Ctx()
+
+
+def test_deactivate_customer_endpoint_requires_reason_auth_and_fresh_otp(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from jose import jwt
+    from app import auth as auth_mod
+    from app.main import app
+    from app.routers import flyer
+
+    settings = flyer.get_settings()
+    settings.state_dir = tmp_path / "state"
+    _write_json(
+        settings.state_dir / "flyer" / "customers.json",
+        {
+            "schema_version": 1,
+            "next_customer_sequence": 2,
+            "customers": [_customer("CUST0001", status="active", plan_id="starter")],
+        },
+    )
+
+    with TestClient(app) as client:
+        unauth = client.post("/flyer/customers/CUST0001/deactivate", json={"reason": "operator request"})
+        assert unauth.status_code == 401
+
+        missing_reason = client.post("/flyer/customers/CUST0001/deactivate", json={"reason": ""})
+        assert missing_reason.status_code in {401, 422}
+
+        stale_claims = {
+            "sub": "+19045550100",
+            "iat": 1_700_000_000,
+            "exp": 1_800_000_000,
+            "jti": "stale-test",
+            "auth_method": "pushover",
+        }
+        token = jwt.encode(stale_claims, auth_mod.settings.jwt_secret, algorithm=auth_mod.settings.jwt_algo)
+        client.cookies.set(auth_mod.settings.cookie_name, token)
+        monkeypatch.setattr(auth_mod, "_now", lambda: 1_700_000_400)
+        stale = client.post("/flyer/customers/CUST0001/deactivate", json={"reason": "operator request"})
+        assert stale.status_code == 403
+
+
+def test_deactivate_customer_endpoint_audits_action(tmp_path):
+    from app import audit as audit_mod
+    from app.routers import flyer
+
+    settings = flyer.get_settings()
+    settings.state_dir = tmp_path / "state"
+    settings.cockpit_audit_log = tmp_path / "logs" / "audit.log"
+    audit_mod.settings.cockpit_audit_log = settings.cockpit_audit_log
+    _write_json(
+        settings.state_dir / "flyer" / "customers.json",
+        {
+            "schema_version": 1,
+            "next_customer_sequence": 2,
+            "customers": [_customer("CUST0001", status="trial", plan_id="trial")],
+        },
+    )
+
+    with _build_test_client_with_fresh_otp() as client:
+        missing_reason = client.post(
+            "/flyer/customers/CUST0001/deactivate",
+            json={"reason": ""},
+        )
+        assert missing_reason.status_code == 422
+
+        resp = client.post(
+            "/flyer/customers/CUST0001/deactivate",
+            json={"reason": "customer requested removal"},
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "cancelled"
+    rows = [
+        json.loads(line)
+        for line in settings.cockpit_audit_log.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert rows[-1]["event"] == "flyer.customer.deactivate"
+    assert rows[-1]["details"]["customer_id"] == "CUST0001"
+    assert rows[-1]["details"]["reason"] == "customer requested removal"
+
+
 def test_flyer_customers_caps_at_300_sorted_by_updated_at(tmp_path):
     """BUG-FLYER-QA-002: /flyer/customers must cap results at 300 and sort
     by updated_at desc, matching /projects and /guest-orders.

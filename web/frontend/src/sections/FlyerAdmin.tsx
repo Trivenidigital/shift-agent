@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, AlertTriangle, FileUp, Gift, Megaphone, RefreshCw, Search, Send, Users } from "lucide-react";
+import { Activity, AlertTriangle, FileUp, Gift, Megaphone, RefreshCw, Search, Send, UserX, Users } from "lucide-react";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
@@ -120,6 +120,15 @@ interface CloseNoSendResult {
     outbound_message_id: string;
     error: string;
   };
+}
+
+interface DeactivateCustomerResult {
+  ok: boolean;
+  customer_id: string;
+  previous_status: string;
+  status: string;
+  already_inactive: boolean;
+  backup: string;
 }
 
 interface FlyerSummary {
@@ -525,6 +534,7 @@ export function FlyerAdmin() {
   const [reason, setReason] = useState("operator dashboard action");
   const [selectedCustomer, setSelectedCustomer] = useState<FlyerCustomer | null>(null);
   const [extensionCount, setExtensionCount] = useState(1);
+  const [deactivateConfirmOpen, setDeactivateConfirmOpen] = useState(false);
   const [customerOffset, setCustomerOffset] = useState(0);
   const CUSTOMER_PAGE_SIZE = 300;
   // P0-1 Manual Queue drawer + filter state
@@ -723,6 +733,17 @@ export function FlyerAdmin() {
       qc.invalidateQueries({ queryKey: ["flyer-customers"] });
     },
   });
+  const deactivateCustomer = useMutation({
+    mutationFn: (customerId: string) =>
+      api.POST<DeactivateCustomerResult>(`/flyer/customers/${customerId}/deactivate`, { reason }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["flyer-summary"] });
+      qc.invalidateQueries({ queryKey: ["flyer-customers"] });
+      qc.invalidateQueries({ queryKey: ["flyer-projects"] });
+      setDeactivateConfirmOpen(false);
+      setSelectedCustomer(null);
+    },
+  });
 
   const latestProjectByPhone = useMemo(() => {
     const out = new Map<string, FlyerProject>();
@@ -840,7 +861,12 @@ export function FlyerAdmin() {
                           <div className="font-medium">{customer.business_name}</div>
                           <div className="text-xs text-zinc-500">{customer.customer_id}</div>
                         </td>
-                        <td className="px-3 py-2"><Badge tone={categoryTone(customer.category)}>{customer.plan_id}</Badge></td>
+                        <td className="px-3 py-2">
+                          <div className="flex flex-wrap items-center gap-1">
+                            <Badge tone={categoryTone(customer.category)}>{customer.plan_id}</Badge>
+                            {customer.category === "inactive" && <Badge tone="red">{customer.status}</Badge>}
+                          </div>
+                        </td>
                         <td className="px-3 py-2">{customer.usage_used} / {customer.usage_remaining == null ? "unlimited" : customer.usage_used + customer.usage_remaining}</td>
                         <td className="px-3 py-2 font-mono text-xs">{customer.business_whatsapp_number}</td>
                         <td className="px-3 py-2 text-xs text-zinc-500">{latest ? `${latest.project_id} ${latest.status}` : `${customer.project_count} projects`}</td>
@@ -888,6 +914,7 @@ export function FlyerAdmin() {
                   <div>
                     <div className="font-medium">{selectedCustomer.business_name}</div>
                     <div className="text-xs text-zinc-500">{selectedCustomer.customer_id} · {selectedCustomer.business_whatsapp_number}</div>
+                    <div className="mt-1"><Badge tone={categoryTone(selectedCustomer.category)}>{selectedCustomer.status}</Badge></div>
                   </div>
                   <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason for audit log" />
                   <div className="flex items-center gap-2">
@@ -899,6 +926,19 @@ export function FlyerAdmin() {
                   <Button variant="outline" onClick={() => resetTrial.mutate(selectedCustomer.customer_id)} loading={resetTrial.isPending}>
                     <RefreshCw size={14} /> Reset used trial quota
                   </Button>
+                  <Button
+                    variant="destructive"
+                    onClick={() => setDeactivateConfirmOpen(true)}
+                    disabled={selectedCustomer.status === "cancelled"}
+                    loading={deactivateCustomer.isPending}
+                  >
+                    <UserX size={14} /> Deactivate customer
+                  </Button>
+                  {deactivateCustomer.error && (
+                    <div className="rounded-md bg-red-50 px-3 py-2 text-xs text-red-700">
+                      {mutationErrorMessage(deactivateCustomer.error)}
+                    </div>
+                  )}
                   <div className="text-xs text-zinc-500">Current bonus: {selectedCustomer.trial_bonus_flyers}. Every action writes a backup and cockpit audit event.</div>
                 </>
               ) : (
@@ -906,6 +946,44 @@ export function FlyerAdmin() {
               )}
             </CardContent>
           </Card>
+        </div>
+      )}
+
+      {deactivateConfirmOpen && selectedCustomer && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-950/40 p-4">
+          <div className="w-full max-w-md rounded-md border border-zinc-200 bg-white shadow-xl">
+            <div className="border-b border-zinc-200 px-5 py-4">
+              <div className="flex items-center gap-2 text-base font-semibold text-zinc-900">
+                <UserX size={18} className="text-red-600" />
+                Deactivate Flyer customer
+              </div>
+              <div className="mt-1 text-sm text-zinc-500">
+                {selectedCustomer.business_name} will be marked inactive. Historical projects, audit rows, and media remain preserved.
+              </div>
+            </div>
+            <div className="space-y-3 px-5 py-4">
+              <div className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-800">
+                Future flyer creation for this customer is blocked unless the account is reactivated separately.
+              </div>
+              <div>
+                <div className="mb-1 text-xs font-medium uppercase tracking-wide text-zinc-500">Required reason</div>
+                <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason for audit log" />
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t border-zinc-200 px-5 py-3">
+              <Button variant="outline" onClick={() => setDeactivateConfirmOpen(false)}>
+                Cancel
+              </Button>
+              <Button
+                variant="destructive"
+                disabled={reason.trim().length < 5}
+                loading={deactivateCustomer.isPending}
+                onClick={() => deactivateCustomer.mutate(selectedCustomer.customer_id)}
+              >
+                <UserX size={14} /> Deactivate
+              </Button>
+            </div>
+          </div>
         </div>
       )}
 

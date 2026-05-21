@@ -2022,6 +2022,15 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
             or not _similar_to_active_project_request(body, active_project)
         )
     ):
+        actions.audit_intercepted(
+            reason="flyer_active_project_bypassed",
+            chat_id=chat_id,
+            subprocess_rc=0,
+            detail=(
+                f"project_id={project_id}; message_id={message_id}; fresh_flyer_intent=true; status={status}; "
+                f"sender_role={role}; has_media={'1' if media_path else '0'}"
+            ),
+        )
         return None
     # P0-1 stale-project guard: when the active project has been idle past
     # its per-status threshold (actions._FLYER_STALE_HOURS) AND the inbound
@@ -2041,6 +2050,15 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         actions.is_stale_for_new_request(active_project)
         and actions.should_start_new_flyer_over_active(body, has_media=bool(media_path))
     ):
+        actions.audit_intercepted(
+            reason="flyer_active_project_bypassed",
+            chat_id=chat_id,
+            subprocess_rc=0,
+            detail=(
+                f"project_id={project_id}; message_id={message_id}; fresh_flyer_intent=true; stale_for_new_request=true; "
+                f"status={status}; sender_role={role}; has_media={'1' if media_path else '0'}"
+            ),
+        )
         return None
     if actions.is_flyer_project_status_request(body) and status not in {"completed"}:
         # Project resolution for status replies is DISTINCT from active-project
@@ -2758,13 +2776,23 @@ def _extract_message_id(event: Any, chat_id: str, text: str = "") -> str:
         val = getattr(event, attr, None)
         if isinstance(val, str) and val:
             return val
+        if isinstance(event, dict):
+            val = event.get(attr)
+            if isinstance(val, str) and val:
+                return val
     # Nested via source (same shape as _extract_chat_id)
     source = getattr(event, "source", None)
+    if source is None and isinstance(event, dict):
+        source = event.get("source")
     if source is not None:
         for attr in ("message_id", "id", "msg_id"):
             val = getattr(source, attr, None)
             if isinstance(val, str) and val:
                 return val
+            if isinstance(source, dict):
+                val = source.get(attr)
+                if isinstance(val, str) and val:
+                    return val
     # Hash-based fallback (chat_id + text) — deterministic across instances
     import hashlib
     digest = hashlib.sha1(f"{chat_id}|{text}".encode("utf-8")).hexdigest()[:12]
