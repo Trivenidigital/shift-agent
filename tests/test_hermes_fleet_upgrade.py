@@ -271,9 +271,11 @@ def test_promotion_readiness_requires_srilu_green_before_main_or_vpin():
 
 def test_promotion_readiness_turns_green_when_contract_is_green():
     module = load_module()
+    just_after_generated = datetime(2026, 5, 20, 13, 0, 0, tzinfo=timezone.utc)
 
     payload = module.normalization_payload(
-        module.load_normalization_snapshot_payload(NORMALIZATION_FIXTURES / "green_snapshots.json")
+        module.load_normalization_snapshot_payload(NORMALIZATION_FIXTURES / "green_snapshots.json"),
+        now=just_after_generated,
     )
 
     assert payload["promotion_readiness"]["srilu_to_main"]["ready"] is True
@@ -285,8 +287,9 @@ def test_promotion_readiness_requires_green_not_yellow_hosts():
     module = load_module()
     snapshots = module.load_normalization_snapshot_payload(NORMALIZATION_FIXTURES / "green_snapshots.json")
     snapshots["hosts"][0]["patch_gate_status"] = "missing"
+    just_after_generated = datetime(2026, 5, 20, 13, 0, 0, tzinfo=timezone.utc)
 
-    payload = module.normalization_payload(snapshots)
+    payload = module.normalization_payload(snapshots, now=just_after_generated)
 
     srilu = next(host for host in payload["hosts"] if host["label"] == "Srilu")
     assert srilu["health"]["status"] == "yellow"
