@@ -36,6 +36,16 @@ from agents.flyer.customer_copy_policy import (  # noqa: E402
     extract_send_call_literals,
     scan_outbound_entry,
 )
+from agents.flyer.rollout_readiness import (  # noqa: E402
+    SEVERITY_RANK,
+    RolloutInputFixture,
+    build_rollout_section,
+    incident_color,
+    load_rollout_input,
+    merge_replay_summary_override,
+    render_rollout_banner,
+    render_rollout_section,
+)
 
 DEFAULT_SOURCE_FILES = (
     Path("src/plugins/cf-router/actions.py"),
@@ -634,7 +644,7 @@ def project_incidents(
                     evidence_details={
                         "fact_id": "business_name",
                         "source": str(business_fact.get("source") or ""),
-                        "active_customer_risk": True,
+                        "active_customer_risk": active_customer_risk(project),
                     },
                 )
             )
@@ -1079,6 +1089,9 @@ def build_report(
     generation_stale_minutes: int = 15,
     repeated_checkin_threshold: int = 3,
     source_files: list[Path] | None = None,
+    rollout_mode: bool = False,
+    rollout_fixture: RolloutInputFixture | None = None,
+    manual_stale_red_minutes: int = 30,
 ) -> dict[str, Any]:
     now = now or utc_now()
     project_rows = projects.get("projects") if isinstance(projects.get("projects"), list) else []
@@ -1096,9 +1109,8 @@ def build_report(
         + repeated_checkin_incidents(decision_entries, threshold=repeated_checkin_threshold)
         + preview_final_qa_mismatch_incidents(project_rows, decision_entries)
     )
-    severity_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1}
-    worst = max((severity_rank.get(str(item.get("severity")), 0) for item in incidents), default=0)
-    status = "red" if worst >= 3 else ("yellow" if worst >= 2 else "green")
+    # Color threshold is single-sourced via incident_color (from rollout_readiness).
+    status = incident_color(incidents)
     needs_srini = [
         f"{item['type']} {item.get('project_id') or ''}".strip()
         for item in incidents
@@ -1124,20 +1136,31 @@ def build_report(
             "customer-copy log scan only sees decisions.log rows with outbound text fields; use --scan-source-copy for metadata-only cf-router send paths",
         ],
     }
+    if rollout_mode:
+        report["rollout"] = build_rollout_section(
+            incidents=incidents,
+            fixture=rollout_fixture,
+            manual_stale_red_minutes=manual_stale_red_minutes,
+        )
     return sanitize_report(report)
 
 
 def render_markdown(report: dict[str, Any]) -> str:
-    lines = [
-        "# Flyer Self-Evaluation",
-        "",
-        f"- Status: {report.get('status', 'unknown')}",
-        f"- Generated: {report.get('generated_at', 'unknown')}",
-        f"- Incidents: {report.get('summary', {}).get('incident_count', 0)}",
-        "",
-        "## Incidents",
-        "",
-    ]
+    lines: list[str] = ["# Flyer Self-Evaluation", ""]
+    rollout = report.get("rollout") if isinstance(report.get("rollout"), dict) else None
+    if rollout is not None:
+        lines.append(render_rollout_banner(rollout))
+        lines.append("")
+    lines.extend(
+        [
+            f"- Status: {report.get('status', 'unknown')}",
+            f"- Generated: {report.get('generated_at', 'unknown')}",
+            f"- Incidents: {report.get('summary', {}).get('incident_count', 0)}",
+            "",
+            "## Incidents",
+            "",
+        ]
+    )
     incidents = report.get("incidents") or []
     if not incidents:
         lines.append("- None.")
@@ -1156,6 +1179,8 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines.extend(["", "## Boundaries", ""])
     for item in report.get("boundaries") or []:
         lines.append(f"- {item}")
+    if rollout is not None:
+        lines.extend(render_rollout_section(rollout))
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -1188,11 +1213,41 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Also scan known source files for customer-copy internal terms when audit rows do not include outbound bodies.",
     )
+    parser.add_argument(
+        "--rollout-readiness",
+        action="store_true",
+        help="Emit the rollout-readiness block layered on top of incident detection.",
+    )
+    parser.add_argument(
+        "--rollout-input",
+        type=Path,
+        default=None,
+        help="Path to a RolloutInputFixture JSON file (host-supplied posture).",
+    )
+    parser.add_argument(
+        "--rollout-replay-summary-json",
+        type=Path,
+        default=None,
+        help="Replace fixture.replay_summary with the JSON at this path (ad-hoc operator runs).",
+    )
+    parser.add_argument(
+        "--manual-stale-red-minutes",
+        type=int,
+        default=30,
+        help="RED threshold for manual_source_edit_stale rollout reason (default 30 min, matches detector).",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
+    rollout_fixture = None
+    if args.rollout_readiness:
+        rollout_fixture = load_rollout_input(str(args.rollout_input) if args.rollout_input else None)
+        if args.rollout_replay_summary_json:
+            rollout_fixture = merge_replay_summary_override(
+                rollout_fixture, str(args.rollout_replay_summary_json)
+            )
     report = build_report(
         projects=load_json_file(args.projects),
         decision_entries=load_decisions_log(args.decisions_log),
@@ -1201,6 +1256,9 @@ def main(argv: list[str] | None = None) -> int:
         generation_stale_minutes=args.generation_stale_minutes,
         repeated_checkin_threshold=args.repeated_checkin_threshold,
         source_files=[Path.cwd() / path for path in DEFAULT_SOURCE_FILES] if args.scan_source_copy else [],
+        rollout_mode=args.rollout_readiness,
+        rollout_fixture=rollout_fixture,
+        manual_stale_red_minutes=args.manual_stale_red_minutes,
     )
     if args.format == "json":
         output = json.dumps(report, indent=2) + "\n"

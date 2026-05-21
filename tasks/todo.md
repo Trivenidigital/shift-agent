@@ -3,7 +3,34 @@
 Living checklist. Items grouped by priority; each completed item gets `✅` and a date.
 For history of *completed* multi-phase initiatives (platform extract, sender-id, agent #2/4/5, etc.), see git log + `tasks/all-phases-*.md`.
 
-Last updated: 2026-05-21 (Flyer brief builder low-typing intake work added; prior note: pilot-hardening golden live-shape samples and stale Flyer backlog reconciliation)
+Last updated: 2026-05-21 (Flyer customer-readiness stabilization gate work added; prior note: Flyer brief builder low-typing intake)
+
+---
+
+## Active - Flyer customer-readiness stabilization gate (2026-05-21)
+
+**Drift-check tag:** extends-Hermes
+
+Hermes-first summary: reuse Hermes JSON state, `decisions.log` audit chain, operator-brief substrate, the existing `tools/flyer-self-evaluation.py` + `customer_copy_policy.py` scanner, and the cf-router `pre_gateway_dispatch` replay harness. Net-new scope is product policy: rollout-decision verdict rules, host-supplied posture input fixture, source-edit yellow rule, 7 net-new replay fixtures (sample-idea / onboarding-sample / text-brief / guided-brief / visible-text-removal / LID-only / duplicate-phone), and a shared replay-helpers module.
+
+Plan: `tasks/flyer-customer-readiness-gate-plan.md`
+Design: `tasks/flyer-customer-readiness-gate-design.md`
+
+- [x] Write and review the implementation plan (2 parallel reviewers; APPROVE WITH CHANGES; findings folded).
+- [x] Write and review the design (2 parallel reviewers; APPROVE WITH CHANGES; findings folded — echo-leak loop-order bug fixed; Pydantic `Optional[X]` convention restored; SEVERITY_RANK single-sourced; fixture format aligned to top-level array; `--rollout-input` rename).
+- [x] C1: extract `_install_common_replay_mocks` + supporting helpers into `tests/_flyer_replay_helpers.py`; add `onboarding`, `intake_consumed`, `account_intercept` route branches to `assert_expected_route`. Behaviour-preserving against existing `tests/test_flyer_incident_replay.py`.
+- [x] C2-C3: add `src/agents/flyer/rollout_readiness.py` with input-fixture schema, single-sourced `SEVERITY_RANK` + `incident_color`, 5-state `compute_source_edit_posture`, `compute_rollout_verdict`, `build_rollout_section`, and Markdown render helpers.
+- [x] C4: wire `--rollout-readiness`, `--rollout-input`, `--rollout-replay-summary-json`, `--manual-stale-red-minutes` into `tools/flyer-self-evaluation.py` (banner above incidents, full Rollout Readiness section at bottom). `tools/operator-brief.py` surfaces a `Rollout: …` summary line when present. Replaced local severity-rank literal with the shared import.
+- [x] C5-C6: ship 7 net-new rollout-replay fixtures + cross-refs to 4 existing incident-replay fixtures, all asserted via `pre_gateway_dispatch`; rollout-replay test installs per-fixture intercept overrides for brief-builder, LID-only, and account-recognition paths.
+- [ ] Sequencing for PR #154 (open, `fix/flyer-schedule-through-smoke`): orthogonal — touches `src/agents/flyer/render.py` + `tests/test_flyer_renderer.py`; no overlap with self-eval, operator-brief, replay harness, or rollout_readiness. Ship #154 first; rebase this PR if needed.
+- [ ] Deferred — spend-gated 5-10 case source-edit visual-quality smoke. Blocks green rollout posture on source-edit path. Owner: next operator authorization. (Also tracked under "Flyer model policy lock-in".)
+- [ ] Deferred — multi-turn co-owner reference-scope-memory rollout-replay variant. Current source-edit fixture (`F0063-source-choice-queues-manual-edit`) is single-turn `SOURCE`; the 2026-05-19 lesson on remembered relationships is not exercised.
+- [ ] Deferred — optional live on-VPS posture probe that replaces the host-supplied input fixture (pilot-readiness-check integration).
+- [ ] Deferred — conservative-bias gate for `configured_with_smoke`: cross-check `source_edit_smoke_evidence_age_days` and `provider_routing_changed_at`. A hand-edited fixture claiming `configured_with_smoke` without supplying or with a stale age currently passes. Demote to YELLOW with `"claimed configured_with_smoke but evidence age unverifiable"` when either field is missing or evidence is older than the latest provider-routing change. (PR-reviewer Rollout I1 + Hermes-first H1; non-blocking.)
+- [ ] Deferred — real-intercept rollout-replay layer for PR #158 brief-builder scenarios. Current rollout fixtures verify the cf-router contract (intercept dict ⇒ cf-router returns dict, no fall-through) but do not call the real `_try_flyer_intake_intercept` logic; PR #158's own unit tests still gate lifecycle correctness. (PR-reviewer Rollout H1.)
+- [ ] Deferred — rollout-replay fixture for the 2026-05-21 "routing previews must mirror live exception gates" lesson. The gate currently does not exercise a divergence between `should_start_new_flyer_over_active` and a stricter local-regex variant. (PR-reviewer Rollout I3.)
+- [ ] Run focused verification (pytest + py_compile + git diff --check + CLI smoke for green / yellow / red).
+- [ ] Request final PR review (rollout-behavior + Hermes-first/runtime). Fold findings. Open PR. No deploy.
 
 ---
 
