@@ -730,7 +730,7 @@ def test_sample_prompt_preference_text_is_account_command():
     assert not actions.is_flyer_starter_prompt_preference_command("status")
 
 
-def test_vague_flyer_start_for_active_customer_sends_starter_brief(monkeypatch):
+def test_vague_flyer_start_for_active_customer_sends_starter_ideas(monkeypatch):
     hooks, actions = _load_plugin_modules()
     sent = {}
     created = {"called": False}
@@ -754,6 +754,17 @@ def test_vague_flyer_start_for_active_customer_sends_starter_brief(monkeypatch):
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
     monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
     monkeypatch.setattr(actions, "claim_flyer_starter_prompt_send", lambda _customer_id: True)
+    monkeypatch.setattr(actions, "trigger_flyer_intake", lambda **_kwargs: (True, "", {
+        "reply_text": (
+            "Flyer Studio\n------------\n"
+            "Pick one idea and I will turn it into a flyer brief.\n\n"
+            "1. Grow Your Business with Modern Marketing\n"
+            "2. Weekly Service Spotlight\n"
+            "3. Limited-Time Offer\n\n"
+            "Reply 1 or 2."
+        ),
+        "action": "choose_sample_idea",
+    }))
     monkeypatch.setattr(actions, "trigger_create_flyer_project", lambda **_kwargs: created.update(called=True) or (True, "", {}))
     monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "starter-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
@@ -764,10 +775,10 @@ def test_vague_flyer_start_for_active_customer_sends_starter_brief(monkeypatch):
         message_id="m1",
     ))
 
-    assert result == {"action": "skip", "reason": "cf-router flyer starter brief sent"}
+    assert result == {"action": "skip", "reason": "cf-router flyer starter ideas sent"}
     assert created["called"] is False
     assert sent["chat_id"] == "17329837841@s.whatsapp.net"
-    assert "Here is a starter flyer request" in sent["text"]
+    assert "Pick one idea" in sent["text"]
     assert "Grow Your Business with Modern Marketing" in sent["text"]
 
 
@@ -2023,6 +2034,88 @@ def test_lid_only_sender_can_continue_intake_and_onboarding(monkeypatch):
     assert onboarding_result == {"action": "skip", "reason": "cf-router flyer onboarding: collecting_business_name"}
     assert calls["intake"]["sender_phone"] is None
     assert calls["onboarding"]["sender_phone"] is None
+
+
+def test_approved_brief_intake_routes_to_project_creation_with_audit(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    audits = []
+    created = {}
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {
+        "customer_id": "CUST0001",
+        "status": "trial",
+    })
+    monkeypatch.setattr(actions, "find_flyer_intake_session_by_sender", lambda _phone, _chat_id: {
+        "status": "brief_pending_approval",
+    })
+    monkeypatch.setattr(actions, "trigger_flyer_intake", lambda **_kwargs: (True, "", {
+        "action": "create_project",
+        "raw_request": "Create a professional flyer for Lakshmis Kitchn. Customer request: evening snacks.",
+        "reference_media_path": "",
+        "brief_source": "text",
+        "brief_approved_at": "2026-05-21T00:00:00+00:00",
+        "brief_approved_message_id": "approve-mid",
+    }))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
+    def fake_discard(phone, chat_id):
+        audits.append({"reason": "discarded", "phone": phone, "chat_id": chat_id})
+        return True
+
+    monkeypatch.setattr(actions, "discard_flyer_intake_session_by_sender", fake_discard)
+    monkeypatch.setattr(hooks, "_try_flyer_primary_intercept", lambda raw_request, *_args, **_kwargs: created.update({"raw_request": raw_request}) or {
+        "action": "skip",
+        "reason": "created",
+    })
+
+    result = hooks._try_flyer_intake_intercept(
+        "APPROVE",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "approve-mid"},
+    )
+
+    assert result == {"action": "skip", "reason": "created"}
+    assert "evening snacks" in created["raw_request"]
+    assert audits[0]["reason"] == "flyer_brief_approved"
+    assert "source=text" in audits[0]["detail"]
+    assert "approved_message_id=approve-mid" in audits[0]["detail"]
+    assert audits[1]["reason"] == "discarded"
+
+
+def test_approved_brief_project_creation_failure_keeps_pending_brief(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    sent = []
+    audits = []
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {
+        "customer_id": "CUST0001",
+        "status": "trial",
+    })
+    monkeypatch.setattr(actions, "find_flyer_intake_session_by_sender", lambda _phone, _chat_id: {
+        "status": "brief_pending_approval",
+    })
+    monkeypatch.setattr(actions, "trigger_flyer_intake", lambda **_kwargs: (True, "", {
+        "action": "create_project",
+        "raw_request": "Create a professional flyer for Lakshmis Kitchn. Customer request: evening snacks.",
+        "brief_source": "text",
+        "brief_approved_at": "2026-05-21T00:00:00+00:00",
+        "brief_approved_message_id": "approve-mid",
+    }))
+    monkeypatch.setattr(hooks, "_try_flyer_primary_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(actions, "discard_flyer_intake_session_by_sender", lambda *_args: (_ for _ in ()).throw(AssertionError("pending brief must survive failure")))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "retry-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
+
+    result = hooks._try_flyer_intake_intercept(
+        "APPROVE",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "approve-mid"},
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer brief project creation failed"}
+    assert "still saved" in sent[0]
+    assert audits[-1]["reason"] == "flyer_brief_project_create_failed"
 
 
 def test_flyer_approval_text_is_case_insensitive_and_sender_block_safe():

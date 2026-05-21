@@ -21,6 +21,32 @@ STARTER_PROMPT_OPT_OUT_HINT = (
 )
 
 
+_RESTAURANT_IDEAS = (
+    "Create a daily thali specials flyer. Include veg, chicken, and goat specials, sides, catering note, address, phone, and delivery/payment badges. Use saved address, phone, and logo.",
+    "Create an evening snacks flyer from 4 PM to 7 PM, Wednesday to Saturday. Include samosa, mirchi bajji, punugulu, masala vada, and tea. Use saved address, phone, and logo.",
+)
+
+_LOCAL_BUSINESS_IDEAS = (
+    "Create a WhatsApp-ready marketing material flyer. Highlight what my business offers, how customers can text requests, available formats, pricing or offer details, and a clear call to action. Use saved address, phone, and logo.",
+    "Create a clean menu-board or schedule-style flyer. Show 2 to 4 active offers, times, locations or screens, and a simple call to action. Use saved address, phone, and logo.",
+)
+
+_IDEA_SHELLS = {
+    "en": {
+        "lead": "Pick a sample idea to start:",
+        "reply": "Reply 1 or 2. I will show the final brief before generating. Reply APPROVE only after the brief looks right.",
+    },
+    "te": {
+        "lead": "మీకు నచ్చిన ఐడియా ఎంచుకోండి:",
+        "reply": "Reply 1 or 2. I will show the final brief before generating. Reply APPROVE only after the brief looks right.",
+    },
+    "hi": {
+        "lead": "अपनी पसंद का आइडिया चुनें:",
+        "reply": "Reply 1 or 2. I will show the final brief before generating. Reply APPROVE only after the brief looks right.",
+    },
+}
+
+
 def _briefs() -> tuple[StarterBrief, ...]:
     return (
         StarterBrief(
@@ -223,4 +249,38 @@ def starter_brief_message(
         f"{body}\n\n"
         f"{opt_out_hint}"
         "Reply with your edited version, or replace it with your own flyer request."
+    )
+
+
+def starter_idea_choices(
+    category: str,
+    *,
+    business_name: str = "",
+    language: str = "en",
+) -> list[str]:
+    brief = starter_brief_for_category(category)
+    ideas = _RESTAURANT_IDEAS if brief.category_id in {"restaurant", "grocery"} else _LOCAL_BUSINESS_IDEAS
+    if not business_name.strip():
+        return list(ideas)
+    return [idea.replace("Use saved address, phone, and logo.", "Use saved address, phone, and logo.") for idea in ideas]
+
+
+def starter_idea_choices_message(
+    category: str,
+    *,
+    business_name: str = "",
+    language: str = "en",
+) -> str:
+    shell = _IDEA_SHELLS.get(language, _IDEA_SHELLS["en"])
+    name_line = f"Business: {business_name.strip()}\n" if business_name and business_name.strip() else ""
+    ideas = starter_idea_choices(category, business_name=business_name, language=language)
+    numbered = "\n\n".join(f"{idx}. {idea}" for idx, idea in enumerate(ideas, start=1))
+    return (
+        "Flyer Studio\n"
+        "------------\n"
+        f"{shell['lead']}\n\n"
+        f"{name_line}"
+        f"{numbered}\n\n"
+        f"{shell['reply']}\n"
+        f"{STARTER_PROMPT_OPT_OUT_HINT}"
     )

@@ -20,6 +20,7 @@ from schemas import (  # noqa: E402
     FlyerConfig,
     FlyerGuestOrder,
     FlyerGuestOrderStore,
+    FlyerIntakeSession,
     FlyerProject,
     FlyerProjectCreated,
     FlyerProjectStore,
@@ -208,6 +209,49 @@ def test_guest_order_store_tracks_payment_first_one_off_order():
     assert paid.can_create_flyer() is True
     assert store.find_open_order_by_sender("+17329837841", "17329837841@s.whatsapp.net").order_id == "GUEST0001"
     assert FlyerGuestOrder.model_validate(paid.model_dump()).remaining() == 1
+
+
+def test_flyer_intake_session_accepts_brief_builder_statuses_and_fields():
+    now = datetime(2026, 5, 21, tzinfo=timezone.utc)
+    for status in ("text_awaiting_brief", "choosing_sample_idea", "brief_pending_approval"):
+        session = FlyerIntakeSession(
+            chat_id="17329837841@s.whatsapp.net",
+            sender_phone="+17329837841",
+            status=status,
+            source="new_flyer",
+            started_at=now,
+            updated_at=now,
+            last_message_id="m1",
+            preferred_language="en",
+            creation_mode="text",
+            mode_prompt_version="brief_builder_v1",
+            brief_raw_request="Create an evening snacks flyer from 4 PM to 7 PM.",
+            brief_display_request="Evening snacks, 4 PM to 7 PM.",
+            brief_source="text",
+            brief_approved_at=None,
+            brief_approved_message_id="",
+        )
+        assert session.status == status
+        assert session.brief_raw_request.startswith("Create an evening snacks")
+        assert session.brief_display_request == "Evening snacks, 4 PM to 7 PM."
+        assert session.brief_source == "text"
+
+
+def test_flyer_intake_session_still_rejects_unknown_brief_fields():
+    now = datetime(2026, 5, 21, tzinfo=timezone.utc)
+    with pytest.raises(ValidationError):
+        FlyerIntakeSession.model_validate({
+            "chat_id": "17329837841@s.whatsapp.net",
+            "sender_phone": "+17329837841",
+            "status": "brief_pending_approval",
+            "source": "new_flyer",
+            "started_at": now,
+            "updated_at": now,
+            "brief_raw_request": "Create flyer",
+            "brief_display_request": "Create flyer",
+            "brief_source": "text",
+            "brief_unreviewed_extra": "must fail",
+        })
 
 
 def test_request_fields_track_required_info_and_missing_essentials():
