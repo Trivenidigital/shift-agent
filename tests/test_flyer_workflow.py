@@ -378,6 +378,19 @@ def test_extract_revision_patch_parses_replace_with_mismatched_curly_quotes():
     assert "Any Item" in (patch.notes_update or "")
 
 
+def test_extract_revision_patch_falls_back_to_instruction_when_old_text_not_in_details():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Evening Snacks",
+        contact_info="+17329837841",
+        notes="",
+    ))
+    patch = extract_revision_patch(project, 'Replace "Price any event -" with "Any Item".')
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert patch.requires_confirmation is True
+    assert "Replace visible text" in (patch.notes_update or "")
+
+
 def test_extract_revision_patch_handles_menu_item_swap_without_clarification():
     project = _project(FlyerRequestFields(
         event_or_business_name="Weekend Breakfast Specials",
