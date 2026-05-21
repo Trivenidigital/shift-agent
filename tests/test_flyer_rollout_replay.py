@@ -113,6 +113,23 @@ def _install_intercept_override(monkeypatch, hooks, fixture):
     if not target:
         return
     result = fixture["intercept_result"]
+    reply_text = fixture.get("intercept_reply_text")
+
+    if target == "intake_with_reply":
+        # Intake intercept that ALSO produces an outbound message before
+        # returning the dispatch dict. Used by the fixture that exercises
+        # the raw_request_echo guard against real outbound text (the
+        # other intake/onboarding/account fixtures produce empty `sent`,
+        # which is honest but means the echo guard runs on []).
+        def intercept_with_reply(*_args, **_kwargs):
+            sent_list = fixture.get("_sent_recorder")
+            if sent_list is not None:
+                sent_list.append(reply_text)
+            return result
+
+        monkeypatch.setattr(hooks, "_try_flyer_intake_intercept", intercept_with_reply)
+        return
+
     attr_by_target = {
         "intake": "_try_flyer_intake_intercept",
         "onboarding": "_try_flyer_existing_onboarding_intercept",
@@ -167,7 +184,12 @@ def test_rollout_replay_fixture(fixture, tmp_path, monkeypatch):
         monkeypatch.setattr(actions, "consume_flyer_source_vs_new_choice", lambda *_a, **_kw: fixture["pending"])
         monkeypatch.setattr(actions, "flyer_project_has_manual_review_queued", lambda _p: True)
 
-    _install_intercept_override(monkeypatch, hooks, fixture)
+    # Allow the intake_with_reply variant to record its outbound message
+    # into the same `sent` list the harness uses, so the echo guard below
+    # sees it.
+    fixture_local = dict(fixture)
+    fixture_local["_sent_recorder"] = sent
+    _install_intercept_override(monkeypatch, hooks, fixture_local)
 
     result = hooks.pre_gateway_dispatch(build_event(fixture))
 

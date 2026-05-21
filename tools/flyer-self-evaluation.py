@@ -644,7 +644,7 @@ def project_incidents(
                     evidence_details={
                         "fact_id": "business_name",
                         "source": str(business_fact.get("source") or ""),
-                        "active_customer_risk": True,
+                        "active_customer_risk": active_customer_risk(project),
                     },
                 )
             )

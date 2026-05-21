@@ -37,14 +37,33 @@ SEVERITY_RANK: dict[str, int] = {"critical": 4, "high": 3, "medium": 2, "low": 1
 def incident_color(incidents: list[dict]) -> Literal["green", "yellow", "red"]:
     """Map a list of self-eval incidents to a single color.
 
-    Imported by ``tools/flyer-self-evaluation.py``; do not re-implement
-    the threshold inline elsewhere.
+    Operator-incident view: ALL incidents count, including historical /
+    audit-only ones. Imported by ``tools/flyer-self-evaluation.py``; do
+    not re-implement the threshold inline elsewhere.
     """
     worst = max(
         (SEVERITY_RANK.get(str(it.get("severity")), 0) for it in incidents),
         default=0,
     )
     return "red" if worst >= 3 else ("yellow" if worst >= 2 else "green")
+
+
+def active_incident_color(incidents: list[dict]) -> Literal["green", "yellow", "red"]:
+    """Rollout-decision view: only count active customer-risk incidents.
+
+    The rollout verdict must not flip RED on a historical / audit-only
+    high-severity incident -- e.g., a `customer_copy_static_internal_leak`
+    in source-scan mode or a closed project with a poisoned business-name
+    fact. Pre-filters by `evidence_details.active_customer_risk` (None or
+    True both count; only explicit False is excluded) and then reuses the
+    single-sourced threshold from `incident_color`.
+    """
+    filtered = [
+        it
+        for it in incidents
+        if (it.get("evidence_details") or {}).get("active_customer_risk") is not False
+    ]
+    return incident_color(filtered)
 
 
 # --------------------------------------------------------------------------- #
@@ -191,7 +210,10 @@ def compute_rollout_verdict(
     red_reasons: list[dict] = []
     yellow_reasons: list[dict] = []
 
-    color = incident_color(incidents)
+    # Rollout-decision color is active-only. The operator-incident `report.status`
+    # field continues to use `incident_color` (full set) for visibility; the
+    # rollout verdict refuses to flip RED on a historical / audit-only incident.
+    color = active_incident_color(incidents)
     if color == "red":
         red_reasons.append(
             {"severity": "red", "text": "self-eval incident severity is red"}

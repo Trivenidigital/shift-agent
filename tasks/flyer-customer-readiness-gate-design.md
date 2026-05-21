@@ -565,6 +565,31 @@ Unchanged from plan:
 
 No deploy. No WhatsApp sends. No mutation of customer / payment / manual-queue state. No provider routing changes. No new paid-model smoke. No dashboard UI. No broad refactor of `flyer-self-evaluation.py` (extension is additive: new helper functions + 1 mode flag).
 
+## Intercept-harness coverage caveat (PR-review H1/H2 honest labelling)
+
+The 4 brief-builder rollout fixtures (sample-idea / new-trial-sample-before-onboarding / text-brief / guided-brief) re-enable `_try_flyer_intake_intercept` / `_try_flyer_existing_onboarding_intercept` / `_try_flyer_account_intercept` to return a stub dispatch dict. They do **not** call PR #158's real intercept logic; they verify the cf-router contract that, when an intercept returns a dict, `pre_gateway_dispatch` returns that dict and does NOT fall through to `trigger_create_flyer_project` / `invoke_update_flyer_project`. The lifecycle / copy correctness of the brief-builder's own logic is covered by PR #158's own unit tests (e.g. `tests/test_flyer_onboarding.py`, `tests/test_flyer_routing.py` via cf-router), not by this rollout-replay set.
+
+The intercept-with-reply variant fixture (`rollout-intercept-reply-exercises-echo-guard`) is the **one** scenario where the intake intercept produces a real outbound `sent` message and the `raw_request_echo` guard runs against non-empty text. The other intercept-consumed scenarios run the echo guard against `sent == []` (trivially clean).
+
+Deferred follow-up: a real-intercept rollout-replay layer that calls the actual `_try_flyer_intake_intercept` after staging realistic state, so brief-builder lifecycle and copy are gated by the rollout verdict directly. Owner: next session.
+
+## PR-review findings folded
+
+Both PR reviewers returned APPROVE / APPROVE WITH CHANGES. Folds:
+
+| Reviewer | Severity | Finding | Folded into |
+|---|---|---|---|
+| Rollout | Critical C1 | `incident_color` ignores `active_customer_risk` — rollout would flip RED on historical incidents | New `active_incident_color` helper in `rollout_readiness.py`; `compute_rollout_verdict` calls it; `report.status` keeps `incident_color` (full set) for operator-incident view |
+| Rollout | H1 | Brief-builder rollout fixtures are intercept-dict smokes, not real PR #158 traversal | Honest labelling above + deferred-item for real-intercept layer |
+| Rollout | H2 | Echo guard runs on empty `sent` for intercept-consumed fixtures | Added `rollout-intercept-reply-exercises-echo-guard` fixture; intake_with_reply mode records outbound reply into shared `sent` list |
+| Rollout | H3 | `malformed_business_name_fact` hardcoded `active_customer_risk: True` regardless of project status | Patched `tools/flyer-self-evaluation.py:647` to use `active_customer_risk(project)` |
+| Rollout | I1 | `configured_with_smoke_stale` schema fields never validated against `provider_routing_changed_at` | Deferred — conservative-bias follow-up filed in tasks/todo.md |
+| Rollout | I3 | 2026-05-21 routing-preview-mirrors-live-exception-gates lesson not exercised | Deferred follow-up filed in tasks/todo.md |
+| Rollout | I4 | `merged_not_deployed` RED labels expanded vs design table (schema-migration/deploy-gate/security/auth) | Acknowledged in `risky_labels` set; design risk-label Literal lists all 8 |
+| Hermes-first | H1 | Conservative-bias on `configured_with_smoke` not cross-checking age | Deferred — same item as Rollout I1 |
+| Hermes-first | Nit | Local `import json as _json` / `import Path as _Path` inside functions | Acceptable (no shadowing); kept |
+| Hermes-first | Nit | `compute_source_edit_posture` called twice in `build_rollout_section` | Cached once; the verdict aggregator re-resolves the reason string but the cost is trivial |
+
 ## Design-review findings folded
 
 Both design reviewers returned APPROVE WITH CHANGES; all Critical / High / Important findings have been folded into the sections above. Brief receipt:

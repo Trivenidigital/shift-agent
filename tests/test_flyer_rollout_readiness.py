@@ -24,6 +24,7 @@ from agents.flyer.rollout_readiness import (  # noqa: E402
     RolloutMergedNotDeployed,
     RolloutOpenPR,
     RolloutReplaySummary,
+    active_incident_color,
     build_rollout_section,
     compute_rollout_verdict,
     compute_source_edit_posture,
@@ -114,6 +115,56 @@ def test_incident_color_uses_severity_rank():
     assert incident_color([{"severity": "medium"}]) == "yellow"
     assert incident_color([{"severity": "high"}]) == "red"
     assert incident_color([{"severity": "critical"}, {"severity": "low"}]) == "red"
+
+
+def test_active_incident_color_filters_historical():
+    """Rollout-decision color must ignore historical / audit-only incidents."""
+    incidents = [
+        {
+            "severity": "high",
+            "evidence_details": {"active_customer_risk": False},
+        }
+    ]
+    # incident_color (operator-incident view) still flags red...
+    assert incident_color(incidents) == "red"
+    # ...but active_incident_color (rollout-decision view) ignores it.
+    assert active_incident_color(incidents) == "green"
+
+
+def test_active_incident_color_counts_true_and_none():
+    """None and True count; only explicit False is filtered."""
+    assert (
+        active_incident_color([{"severity": "high", "evidence_details": {}}])
+        == "red"
+    )
+    assert (
+        active_incident_color(
+            [{"severity": "high", "evidence_details": {"active_customer_risk": True}}]
+        )
+        == "red"
+    )
+
+
+def test_verdict_does_not_flip_red_on_historical_high_severity():
+    """The rollout verdict must NOT flip RED on a historical incident.
+
+    Regression: pre-fix, `compute_rollout_verdict` called `incident_color`
+    directly which would force RED on any high-severity row regardless of
+    active_customer_risk -- breaking the active-vs-historical separation
+    the plan/design promised.
+    """
+    historical_high = [
+        {
+            "type": "customer_copy_static_internal_leak",
+            "severity": "high",
+            "evidence_details": {"active_customer_risk": False},
+        }
+    ]
+    verdict, reasons = compute_rollout_verdict(
+        incidents=historical_high, fixture=_green_fixture()
+    )
+    assert verdict == "green"
+    assert reasons == []
 
 
 def test_verdict_uses_shared_severity_rank():
