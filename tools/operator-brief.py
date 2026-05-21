@@ -210,12 +210,28 @@ def summarize_flyer_evaluation_report(path: Path | None) -> list[str]:
         return [redact_text(f"Flyer self-evaluation report is not valid JSON: {exc}")]
 
     summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
-    lines = [
+    lines: list[str] = []
+    rollout = payload.get("rollout") if isinstance(payload.get("rollout"), dict) else None
+    if rollout is not None:
+        verdict = str(rollout.get("verdict") or "unknown").upper()
+        reasons = rollout.get("reasons") or []
+        if reasons:
+            n = len(reasons)
+            lines.append(
+                f"Rollout: {verdict} - {n} reason{'s' if n != 1 else ''}"
+            )
+            top_reasons = [str(r.get("text") or "").strip() for r in reasons[:2]]
+            for text in top_reasons:
+                if text:
+                    lines.append(f"  - {text}")
+        else:
+            lines.append(f"Rollout: {verdict}")
+    lines.append(
         "Status: "
         f"{payload.get('status', 'unknown')}; "
         f"incidents={summary.get('incident_count', 0)}; "
         f"high_or_critical={summary.get('high_or_critical_count', 0)}"
-    ]
+    )
     incidents = [item for item in (payload.get("incidents") or []) if isinstance(item, dict)]
     active_risk = 0
     historical = 0

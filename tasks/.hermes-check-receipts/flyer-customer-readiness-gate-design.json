@@ -1,0 +1,17 @@
+{
+  "topic": "flyer-customer-readiness-gate-design",
+  "task_text": "Flyer Studio customer-readiness stabilization gate: extend self-eval/operator-brief CLIs with green/yellow/red gate, add 8 deterministic replay fixtures for rollout paths, customer-copy guard against operator-jargon leaks, source-edit yellow language",
+  "completed_at": "2026-05-21T00:30:00Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 6,
+  "hermes_step_count": 7,
+  "files_to_read_first": [
+    "tasks/flyer-customer-readiness-gate-plan.md",
+    "tools/flyer-self-evaluation.py",
+    "tools/operator-brief.py",
+    "src/agents/flyer/customer_copy_policy.py",
+    "src/platform/schemas.py",
+    "tests/test_flyer_incident_replay.py",
+    "tests/fixtures/flyer_incident_replay/flyer_incidents.json"
+  ]
+}
