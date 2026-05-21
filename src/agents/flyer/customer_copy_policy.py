@@ -52,8 +52,12 @@ DUPLICATE_INITIAL_ACK_MARKERS = {
 }
 
 PROJECT_ID_RE = re.compile(r"\b(?:project\s+)?F[-\s]?\d{4,}\b", re.IGNORECASE)
+PROJECT_PLACEHOLDER_RE = re.compile(
+    r"\bproject\s+\{[^}]+\}|\bF[-\s]?\{[^}]+\}",
+    re.IGNORECASE,
+)
 CUSTOMER_COPY_FORBIDDEN_RE = re.compile(
-    r"\b(?:F[-\s]?\d{4,}|project\s+F[-\s]?\d{4,})\b"
+    r"\b(?:F[-\s]?\d{4,}|project\s+F[-\s]?\d{4,}|project\s+\{[^}]+\}|F[-\s]?\{[^}]+\})\b"
     r"|created flyer project|queued project|operator|provider|reason_code|source-preserving",
     re.IGNORECASE,
 )
@@ -96,6 +100,8 @@ def scan_customer_text(text: str, *, raw_request: str = "") -> CustomerCopyScan:
             add("internal_term", term)
 
     for match in PROJECT_ID_RE.finditer(body):
+        add("project_id", match.group(0))
+    for match in PROJECT_PLACEHOLDER_RE.finditer(body):
         add("project_id", match.group(0))
 
     normalized_raw = normalize_for_copy_policy(raw_request)
@@ -154,6 +160,10 @@ def literal_text(node: ast.AST) -> str:
     if isinstance(node, ast.JoinedStr):
         return "".join(literal_text(value) for value in node.values)
     if isinstance(node, ast.FormattedValue):
+        if isinstance(node.value, ast.Name):
+            return "{" + node.value.id + "}"
+        if isinstance(node.value, ast.Attribute):
+            return "{" + node.value.attr + "}"
         return "{value}"
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         return literal_text(node.left) + literal_text(node.right)

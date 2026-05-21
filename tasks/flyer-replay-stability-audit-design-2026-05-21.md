@@ -209,6 +209,8 @@ The replay suite must not require network, SSH, VPS state, WhatsApp bridge, prov
 - Runtime reviewer found `_real_create_project` did not bind `--asset-dir`; real temp-state creation now passes a temp asset directory.
 - Runtime reviewer found replay copy capture used canned helper strings; replay now uses the live `send_flyer_*` helper bodies through fake `safe_io.bridge_post`.
 - Runtime reviewer found static self-eval source-copy scanning used only literal terms; static scans now use the shared `scan_customer_text` policy so project-id and raw-request echo patterns are included.
+- Live-behavior reviewer found duplicate-ack grouping treated outbound `message_id` as the replay identity; grouping now keys by inbound/source/trigger id when available, otherwise project/chat, so distinct outbound ack ids cannot hide duplicate initial acknowledgements.
+- Live-behavior reviewer found static copy scanning missed dynamic f-string project id leaks such as `Project {project_id}`; AST literal extraction now preserves placeholder names and the shared scanner flags dynamic project-id placeholders.
 
 ## Deferred Items
 

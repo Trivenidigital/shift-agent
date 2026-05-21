@@ -51,3 +51,18 @@ def helper(actions, chat_id):
     scanned = policy.extract_send_call_literals(source)
     assert "Project F0065 provider reason_code leaked" in scanned
     assert policy.scan_customer_text(scanned).hits
+
+
+def test_static_send_literal_scan_catches_dynamic_project_id_copy():
+    source = """
+def helper(actions, chat_id, project_id):
+    actions.send_flyer_text(
+        chat_id,
+        f"Flyer Studio\\n------------\\nProject {project_id} is ready.",
+    )
+"""
+
+    scanned = policy.extract_send_call_literals(source)
+    assert "Project {project_id} is ready" in scanned
+    hits = policy.scan_customer_text(scanned).hits
+    assert any(hit.category == "project_id" for hit in hits)

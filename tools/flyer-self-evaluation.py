@@ -797,10 +797,15 @@ def duplicate_initial_ack_incidents(
                 break
         if not text:
             continue
-        message_id = str(entry.get("message_id") or entry.get("customer_message_id") or entry.get("inbound_message_id") or "")
+        inbound_message_id = str(
+            entry.get("inbound_message_id")
+            or entry.get("source_message_id")
+            or entry.get("trigger_message_id")
+            or ""
+        )
         key = "|".join(
             part for part in [
-                message_id,
+                inbound_message_id,
                 str(entry.get("project_id") or ""),
                 str(entry.get("chat_id") or entry.get("customer_phone") or ""),
             ]
