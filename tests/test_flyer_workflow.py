@@ -64,7 +64,8 @@ def test_build_project_status_reply_covers_all_flyer_states():
         reply = build_project_status_reply(project)
 
         assert "Flyer Studio" in reply
-        assert "F9003" in reply
+        assert "F9003" not in reply
+        assert "project F" not in reply.lower()
         assert "resend" not in reply.lower()
 
 

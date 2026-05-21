@@ -246,9 +246,9 @@ def test_flyer_complete_requests_send_processing_ack_before_generation():
     actions = (REPO / "src" / "plugins" / "cf-router" / "actions.py").read_text(encoding="utf-8")
     hooks = (REPO / "src" / "plugins" / "cf-router" / "hooks.py").read_text(encoding="utf-8")
     assert "def send_flyer_processing_ack" in actions
-    assert "Request processing." in actions
+    assert "I'm creating your flyer now" in actions
     assert "5-6 minutes" in actions
-    assert "check back" in actions
+    assert "send a preview here shortly" in actions
     assert hooks.index("send_flyer_processing_ack(chat_id, project_id)") < hooks.index("trigger_generate_flyer_concepts(project_id)")
 
 
