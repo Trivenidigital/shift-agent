@@ -489,6 +489,70 @@ def test_operator_brief_prioritizes_active_customer_risk_in_top_incidents(tmp_pa
     assert "HIGH: z_active_customer_waiting F9399 - active customer risk" in markdown
 
 
+def test_operator_brief_groups_routing_tripwires_and_preview_final_qa(tmp_path):
+    module = load_module()
+    repo = tmp_path
+    tasks = repo / "tasks"
+    tasks.mkdir()
+    (tasks / "operator-decisions.md").write_text("# Operator Decisions\n", encoding="utf-8")
+    (tasks / "todo.md").write_text("# Backlog\n", encoding="utf-8")
+    evaluation = repo / "flyer-evaluation.json"
+    evaluation.write_text(
+        json.dumps(
+            {
+                "status": "red",
+                "summary": {"incident_count": 4, "high_or_critical_count": 3},
+                "incidents": [
+                    {
+                        "type": "new_flyer_routed_as_revision",
+                        "severity": "high",
+                        "project_id": "F9301",
+                        "suggested_action": "Bypass active project routing.",
+                        "evidence_details": {"active_customer_risk": True},
+                    },
+                    {
+                        "type": "latest_request_not_reflected",
+                        "severity": "high",
+                        "project_id": "F9301",
+                        "suggested_action": "Regenerate from latest request.",
+                        "evidence_details": {"active_customer_risk": True},
+                    },
+                    {
+                        "type": "new_flyer_routed_as_revision",
+                        "severity": "medium",
+                        "project_id": "F9299",
+                        "suggested_action": "Audit historical routing.",
+                        "evidence_details": {"active_customer_risk": False},
+                    },
+                    {
+                        "type": "preview_approved_final_qa_failed",
+                        "severity": "high",
+                        "project_id": "F9303",
+                        "suggested_action": "Review failed finalization.",
+                        "evidence_details": {"active_customer_risk": True},
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    brief = module.build_brief(
+        repo_root=repo,
+        decisions_path=tasks / "operator-decisions.md",
+        todo_path=tasks / "todo.md",
+        flyer_evaluation_json_path=evaluation,
+        automations_dir=repo / "missing-automations",
+        generated_date="2026-05-21",
+        include_git=False,
+    )
+    markdown = module.render_markdown(brief)
+
+    assert "Routing tripwires: new_as_revision=2; latest_not_reflected=1; active=2; historical_or_audit=1" in markdown
+    assert "Preview/final QA: approved_then_failed=1; active=1; historical_or_audit=0" in markdown
+    assert markdown.index("HIGH: latest_request_not_reflected F9301") < markdown.index("MEDIUM: new_flyer_routed_as_revision F9299")
+
+
 def test_todo_signals_ignore_horizontal_rules_checked_items_and_plain_bullets(tmp_path):
     module = load_module()
     todo = tmp_path / "todo.md"

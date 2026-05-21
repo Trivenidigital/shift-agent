@@ -878,6 +878,48 @@ def is_flyer_approval_text(text: str) -> bool:
     return body.lower().strip(" .!,:;") == "approve"
 
 
+def flyer_routing_decision_preview(
+    text: str,
+    *,
+    active_project: Optional[dict] = None,
+    latest_message_id: str = "",
+    has_media: bool = False,
+) -> dict:
+    """Compute a read-only Flyer routing decision summary for tests/reports."""
+    body = " ".join(flyer_visible_message_text(text).split())
+    project_id = str((active_project or {}).get("project_id") or "")
+    fresh = should_start_new_flyer_over_active(body, has_media=has_media)
+    if is_flyer_approval_text(body):
+        route = "approval"
+        reason = "approval_text"
+    elif is_flyer_project_status_request(body):
+        route = "status_reply"
+        reason = "status_request"
+    elif fresh:
+        route = "new_project"
+        reason = "fresh_new_request"
+    elif active_project and str(active_project.get("status") or "") == "manual_edit_required":
+        route = "manual_queue"
+        reason = "active_manual_review_project"
+    elif active_project and is_flyer_revision_intent(body):
+        route = "revision"
+        reason = "revision_intent"
+    elif active_project and body:
+        route = "revision"
+        reason = "active_project_default"
+    else:
+        route = "passthrough"
+        reason = "no_flyer_route"
+    return {
+        "route": route,
+        "selected_project_id": project_id,
+        "reason": reason,
+        "fresh_new_request_detected": fresh,
+        "active_project_bypassed": bool(active_project and route == "new_project"),
+        "latest_message_id": latest_message_id,
+    }
+
+
 def should_start_new_flyer_over_active(text: str, *, has_media: bool = False) -> bool:
     """Return True when inbound content should not attach to old flyer state.
 

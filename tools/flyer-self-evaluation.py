@@ -59,6 +59,21 @@ SOURCE_EDIT_CUES = (
 )
 
 STATUS_CHECK_RE = re.compile(r"\b(any update|updates?|status|ready|done|finished|eta)\b", re.I)
+FRESH_FLYER_OBJECT_RE = re.compile(r"\b(flyer|flier|poster|banner)\b", re.I)
+FRESH_FLYER_START_RE = re.compile(r"\b(help\s+me\s+with|help\s+me\s+(make|create|design)|create|make|design|build|generate|need)\b", re.I)
+FRESH_FLYER_DETAIL_RE = re.compile(r"\b(event|sale|special|offer|promo|menu|items?|snacks?|breakfast|lunch|dinner|south\s+indian)\b", re.I)
+FRESH_FLYER_SCHEDULE_RE = re.compile(
+    r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{1,2}\s*(am|pm)|"
+    r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
+    r"aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b",
+    re.I,
+)
+FRESH_FLYER_REVISION_RE = re.compile(
+    r"\b(change|replace|update|edit|revise|modify|swap|remove|delete|fix|correct|approve)\b"
+    r"|\b(current|existing|old|previous|same|this|that|attached|uploaded)\s+"
+    r"(flyer|flier|poster|banner|design|image|artwork)\b",
+    re.I,
+)
 PHONE_DIGITS_RE = re.compile(r"\D+")
 PHONE_RUN_RE = re.compile(r"[\d\s\-().+/]{8,}")
 SECRET_ASSIGNMENT_RE = re.compile(r"\b[A-Z0-9_]*(?:KEY|TOKEN|SECRET)\s*=\s*['\"]?[^'\"\s,;]+", re.I)
@@ -413,6 +428,94 @@ def looks_like_exact_source_edit(project: dict[str, Any]) -> bool:
     return has_reference_media(project) and any(cue in text for cue in SOURCE_EDIT_CUES)
 
 
+def looks_like_fresh_flyer_request(text: str) -> bool:
+    body = " ".join(str(text or "").split())
+    if not body or STATUS_CHECK_RE.search(body) or FRESH_FLYER_REVISION_RE.search(body):
+        return False
+    return bool(
+        FRESH_FLYER_OBJECT_RE.search(body)
+        and FRESH_FLYER_START_RE.search(body)
+        and FRESH_FLYER_DETAIL_RE.search(body)
+        and FRESH_FLYER_SCHEDULE_RE.search(body)
+    )
+
+
+def latest_revision_request(project: dict[str, Any]) -> tuple[str, str]:
+    revisions = [item for item in project.get("revisions") or [] if isinstance(item, dict)]
+    if not revisions:
+        return "", ""
+    latest = revisions[-1]
+    for key in ("request_text", "revision_text", "text", "body", "message"):
+        value = str(latest.get(key) or "").strip()
+        if value:
+            return value, str(latest.get("message_id") or latest.get("customer_message_id") or "")
+    return "", str(latest.get("message_id") or latest.get("customer_message_id") or "")
+
+
+def latest_concept_text(project: dict[str, Any]) -> str:
+    chunks = [str(project.get("raw_request") or "")]
+    for concept in project.get("concepts") or []:
+        if not isinstance(concept, dict):
+            continue
+        for key in ("prompt", "title", "style_summary", "rationale"):
+            value = concept.get(key)
+            if value:
+                chunks.append(str(value))
+    return " ".join(chunks)
+
+
+def salient_request_terms(text: str) -> list[str]:
+    normalized = normalize_text_for_match(text)
+    terms: list[str] = []
+    for phrase in ("evening snacks", "south indian", "snack items", "wednesday", "saturday"):
+        if phrase in normalized:
+            terms.append(phrase)
+    for match in re.finditer(r"\b\d{1,2}\s*(?:am|pm)\b", normalized):
+        term = " ".join(match.group(0).split())
+        if term not in terms:
+            terms.append(term)
+    return terms
+
+
+def project_reflection_incidents(project: dict[str, Any]) -> list[dict[str, Any]]:
+    text, message_id = latest_revision_request(project)
+    if not looks_like_fresh_flyer_request(text):
+        return []
+    project_id = str(project.get("project_id") or "")
+    haystack = normalize_text_for_match(latest_concept_text(project))
+    terms = salient_request_terms(text)
+    missing = [term for term in terms if term and term not in haystack]
+    if len(missing) < max(2, min(3, len(terms))):
+        return []
+    details = {
+        "project_status": str(project.get("status") or ""),
+        "active_customer_risk": active_customer_risk(project),
+        "latest_message_id": message_id,
+        "missing_terms": missing,
+        "customer_impact": "fresh flyer request appears attached to old project context",
+    }
+    return [
+        incident(
+            "new_flyer_routed_as_revision",
+            severity="high",
+            project_id=project_id,
+            evidence="fresh flyer request appears in revision history",
+            suggested_action="Bypass active-project revision routing and create a new Flyer project from the latest request.",
+            category="routing_tripwire",
+            evidence_details=details,
+        ),
+        incident(
+            "latest_request_not_reflected",
+            severity="high",
+            project_id=project_id,
+            evidence="latest request terms missing from raw_request/concept prompt",
+            suggested_action="Regenerate from the latest customer request before sending or approving another preview.",
+            category="routing_tripwire",
+            evidence_details=details,
+        ),
+    ]
+
+
 def incident(
     kind: str,
     *,
@@ -452,6 +555,7 @@ def project_incidents(
         if not isinstance(project, dict):
             continue
         project_id = str(project.get("project_id") or "")
+        out.extend(project_reflection_incidents(project))
         manual = project.get("manual_review") if isinstance(project.get("manual_review"), dict) else {}
         queued_age = age_minutes(manual.get("queued_at") or project.get("updated_at"), now)
         if (
@@ -672,6 +776,73 @@ def repeated_checkin_incidents(entries: list[dict[str, Any]], *, threshold: int)
     return out
 
 
+PROJECT_ID_IN_TEXT_RE = re.compile(r"\b(F\d{4,})\b", re.I)
+
+
+def decision_project_id(entry: dict[str, Any]) -> str:
+    direct = str(entry.get("project_id") or "").upper()
+    if direct:
+        return direct
+    for field in ("detail", "evidence", "message", "body"):
+        match = PROJECT_ID_IN_TEXT_RE.search(str(entry.get(field) or ""))
+        if match:
+            return match.group(1).upper()
+    return ""
+
+
+def preview_final_qa_mismatch_incidents(projects: list[dict[str, Any]], entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    project_by_id = {
+        str(project.get("project_id") or "").upper(): project
+        for project in projects
+        if isinstance(project, dict) and project.get("project_id")
+    }
+    preview_sent: set[str] = set()
+    approved_final_failed: dict[str, str] = {}
+    for entry in entries:
+        project_id = decision_project_id(entry)
+        if not project_id:
+            continue
+        reason = str(entry.get("reason") or "")
+        detail = str(entry.get("detail") or "")
+        text = f"{reason} {detail}".lower()
+        if "ack_message_id" in text and ("flyer_primary_project_created" in text or "preview" in text):
+            preview_sent.add(project_id)
+        if "approve=true" in text and (
+            "visual_qa_failed" in text
+            or "text_qa_failed" in text
+            or "finalize-flyer-assets" in text
+            or "finalization" in text
+        ):
+            approved_final_failed[project_id] = detail[:300]
+
+    out: list[dict[str, Any]] = []
+    for project_id in sorted(preview_sent & set(approved_final_failed)):
+        project = project_by_id.get(project_id) or {}
+        manual = project.get("manual_review") if isinstance(project.get("manual_review"), dict) else {}
+        status = str(project.get("status") or "")
+        reason_code = str(manual.get("reason_code") or "")
+        if status != "manual_edit_required" and reason_code not in {"visual_qa_failed", "missing_required_facts"}:
+            continue
+        out.append(
+            incident(
+                "preview_approved_final_qa_failed",
+                severity="high",
+                project_id=project_id,
+                evidence="preview sent, approval observed, final QA/finalization failed",
+                suggested_action="Review the failed finalization before the customer sees a stale approval loop.",
+                category="preview_final_qa",
+                evidence_details={
+                    "project_status": status,
+                    "manual_reason_code": reason_code,
+                    "active_customer_risk": active_customer_risk(project) if project else True,
+                    "failure_detail": approved_final_failed[project_id],
+                    "customer_impact": "customer approved a preview but final files did not pass QA",
+                },
+            )
+        )
+    return out
+
+
 def eval_candidates(incidents: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: set[tuple[str, str]] = set()
     out: list[dict[str, Any]] = []
@@ -700,6 +871,8 @@ def suggested_fixture_for(category: str) -> str:
         "source_edit_provider_posture": "tests/test_flyer_source_edit_preflight.py",
         "customer_status_sla": "tests/test_cf_router_flyer_routing.py",
         "provider_runtime": "src/agents/flyer/scripts/smoke-flyer-quality",
+        "routing_tripwire": "tests/test_cf_router_flyer_routing.py",
+        "preview_final_qa": "tests/test_flyer_self_evaluation.py",
     }.get(category, "tasks/todo.md")
 
 
@@ -765,6 +938,7 @@ def build_report(
         + customer_copy_incidents(decision_entries)
         + static_customer_copy_incidents(source_files or [])
         + repeated_checkin_incidents(decision_entries, threshold=repeated_checkin_threshold)
+        + preview_final_qa_mismatch_incidents(project_rows, decision_entries)
     )
     severity_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1}
     worst = max((severity_rank.get(str(item.get("severity")), 0) for item in incidents), default=0)

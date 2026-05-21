@@ -28,6 +28,8 @@ def _project(
     reference_extractions: list[dict] | None = None,
     qa_reports: list[dict] | None = None,
     final_asset_ids: list[str] | None = None,
+    revisions: list[dict] | None = None,
+    concepts: list[dict] | None = None,
 ) -> dict:
     return {
         "project_id": project_id,
@@ -49,6 +51,8 @@ def _project(
         "reference_extractions": reference_extractions or [],
         "qa_reports": qa_reports or [],
         "final_asset_ids": final_asset_ids or [],
+        "revisions": revisions or [],
+        "concepts": concepts or [],
     }
 
 
@@ -664,6 +668,126 @@ def test_source_contract_forbidden_text_present_is_reported():
     assert "source_contract_forbidden_text_present" in [item["type"] for item in report["incidents"]]
     hit = next(item for item in report["incidents"] if item["type"] == "source_contract_forbidden_text_present")
     assert hit["evidence_details"]["forbidden_text_hits"] == ["Triveni Express"]
+
+
+def test_latest_request_not_reflected_flags_fresh_request_routed_as_revision():
+    module = load_module()
+    latest = (
+        "I'd like you to help me with evening snacks flier from 4 PM to 7 PM. "
+        "Include 5 top South Indian snack items. Its Wednesday through Saturday event"
+    )
+    project = _project(
+        "F9301",
+        status="awaiting_final_approval",
+        raw_request="Old Lakshmi's Kitchen thali flyer for lunch specials.",
+        manual_review={"status": "none", "reason": "", "reason_code": "unclassified"},
+        revisions=[{"request_text": latest, "message_id": "live-evening-snacks", "created_at": "2026-05-20T10:05:00Z"}],
+        concepts=[
+            {
+                "concept_id": "C1",
+                "title": "Lakshmi Lunch",
+                "style_summary": "Traditional thali lunch flyer",
+                "prompt": "Create a Lakshmi's Kitchen lunch thali flyer with rice and dal.",
+            }
+        ],
+    )
+
+    report = module.build_report(
+        projects={"projects": [project]},
+        decision_entries=[],
+        now=module.parse_utc("2026-05-20T11:00:00Z"),
+    )
+
+    kinds = [item["type"] for item in report["incidents"]]
+    assert "latest_request_not_reflected" in kinds
+    assert "new_flyer_routed_as_revision" in kinds
+    reflected = next(item for item in report["incidents"] if item["type"] == "latest_request_not_reflected")
+    assert reflected["evidence_details"]["active_customer_risk"] is True
+    assert "evening snacks" in reflected["evidence_details"]["missing_terms"]
+    assert "4 pm" in reflected["evidence_details"]["missing_terms"]
+    assert "wednesday" in reflected["evidence_details"]["missing_terms"]
+    assert report["status"] == "red"
+
+
+def test_latest_request_not_reflected_does_not_flag_when_prompt_contains_latest_terms():
+    module = load_module()
+    latest = (
+        "I'd like you to help me with evening snacks flier from 4 PM to 7 PM. "
+        "Include 5 top South Indian snack items. Its Wednesday through Saturday event"
+    )
+    project = _project(
+        "F9302",
+        status="awaiting_final_approval",
+        raw_request=latest,
+        manual_review={"status": "none", "reason": "", "reason_code": "unclassified"},
+        revisions=[{"request_text": latest, "message_id": "live-evening-snacks"}],
+        concepts=[
+            {
+                "concept_id": "C1",
+                "title": "Evening Snacks",
+                "style_summary": "South Indian snack event flyer",
+                "prompt": (
+                    "Create evening snacks flier from 4 PM to 7 PM, Wednesday through "
+                    "Saturday, with South Indian snack items."
+                ),
+            }
+        ],
+    )
+
+    report = module.build_report(
+        projects={"projects": [project]},
+        decision_entries=[],
+        now=module.parse_utc("2026-05-20T11:00:00Z"),
+    )
+
+    assert "latest_request_not_reflected" not in [item["type"] for item in report["incidents"]]
+    assert "new_flyer_routed_as_revision" not in [item["type"] for item in report["incidents"]]
+
+
+def test_preview_approved_then_final_qa_failed_is_active_customer_risk():
+    module = load_module()
+    project = _project(
+        "F9303",
+        status="manual_edit_required",
+        raw_request="Create evening snacks flyer.",
+        manual_review={
+            "status": "queued",
+            "reason": "visual QA failed during finalization",
+            "reason_code": "visual_qa_failed",
+            "detail": "final package QA failed after approval",
+            "queued_at": "2026-05-20T10:10:00Z",
+        },
+        assets=[{"asset_id": "A0002", "kind": "concept_preview", "source": "generated", "sha256": "9" * 64}],
+        concepts=[{"concept_id": "C1", "preview_asset_id": "A0002", "prompt": "Create evening snacks flyer."}],
+    )
+
+    report = module.build_report(
+        projects={"projects": [project]},
+        decision_entries=[
+            {
+                "type": "cf_router_intercepted",
+                "ts": "2026-05-20T10:01:00Z",
+                "project_id": "F9303",
+                "reason": "flyer_primary_project_created",
+                "detail": "project_id=F9303; ack_message_id=preview-mid",
+            },
+            {
+                "type": "cf_router_intercepted",
+                "ts": "2026-05-20T10:03:00Z",
+                "project_id": "F9303",
+                "reason": "flyer_primary_failed",
+                "detail": "project_id=F9303; approve=true; finalize-flyer-assets exit=1: visual_qa_failed",
+            },
+        ],
+        now=module.parse_utc("2026-05-20T11:00:00Z"),
+    )
+
+    kinds = [item["type"] for item in report["incidents"]]
+    assert "preview_approved_final_qa_failed" in kinds
+    item = next(item for item in report["incidents"] if item["type"] == "preview_approved_final_qa_failed")
+    assert item["severity"] == "high"
+    assert item["evidence_details"]["active_customer_risk"] is True
+    assert item["project_id"] == "F9303"
 
 
 def test_report_output_redacts_sensitive_values_from_json_and_markdown(tmp_path):

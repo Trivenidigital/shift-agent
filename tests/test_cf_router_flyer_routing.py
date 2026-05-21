@@ -641,6 +641,39 @@ def test_vague_flyer_start_enters_adaptive_intake_but_complete_request_does_not(
     assert not actions.is_vague_flyer_start("Create flyer using this attached sample", has_media=True)
 
 
+def test_routing_decision_preview_reports_evening_snacks_bypass_read_only():
+    actions = _load_actions()
+    text = (
+        "I'd like you to help me with evening snacks flier from 4 PM to 7 PM. "
+        "Include 5 top South Indian snack items. Its Wednesday through Saturday event"
+    )
+
+    decision = actions.flyer_routing_decision_preview(
+        text,
+        active_project={"project_id": "F0062", "status": "awaiting_final_approval"},
+        latest_message_id="live-evening-snacks",
+    )
+    assert decision["route"] == "new_project"
+    assert decision["selected_project_id"] == "F0062"
+    assert decision["fresh_new_request_detected"] is True
+    assert decision["active_project_bypassed"] is True
+    assert decision["latest_message_id"] == "live-evening-snacks"
+    assert actions.should_start_new_flyer_over_active(text, has_media=False)
+
+
+def test_routing_decision_preview_keeps_revision_status_and_approval_paths():
+    actions = _load_actions()
+    active = {"project_id": "F0062", "status": "awaiting_final_approval"}
+
+    assert actions.flyer_routing_decision_preview("approve", active_project=active)["route"] == "approval"
+    assert actions.flyer_routing_decision_preview("any update?", active_project=active)["route"] == "status_reply"
+    assert actions.flyer_routing_decision_preview("change phone number", active_project=active)["route"] == "revision"
+    assert actions.flyer_routing_decision_preview("make it red", active_project=active)["route"] == "revision"
+    assert actions.flyer_routing_decision_preview("replace rice with jeera rice", active_project=active)["route"] == "revision"
+    assert actions.flyer_routing_decision_preview("Create flyer", active_project=active)["route"] == "revision"
+    assert actions.flyer_routing_decision_preview("Help me make a flyer", active_project=active)["route"] == "revision"
+
+
 def test_sample_prompt_preference_text_is_account_command():
     actions = _load_actions()
 
