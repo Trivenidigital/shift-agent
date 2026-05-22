@@ -79,6 +79,148 @@ def _reference_asset(asset_id: str = "A0001") -> dict:
     }
 
 
+def test_hermes_intent_shadow_coverage_missing_when_expected():
+    module = load_module()
+    report = module.build_report(
+        projects={"projects": []},
+        decision_entries=[
+            {
+                "type": "cf_router_intercepted",
+                "reason": "flyer_primary_project_created",
+                "detail": "project_id=F0065",
+            }
+        ],
+        expected_hermes_intent_mode="shadow",
+    )
+
+    incident = next(item for item in report["incidents"] if item["type"] == "hermes_intent_shadow_coverage_missing")
+    assert incident["severity"] == "high"
+    assert incident["evidence_details"]["shadow_sample_count"] == 0
+
+
+def test_hermes_intent_shadow_coverage_not_masked_by_unrelated_row():
+    module = load_module()
+    report = module.build_report(
+        projects={"projects": []},
+        decision_entries=[
+            {
+                "type": "cf_router_intercepted",
+                "reason": "flyer_primary_project_created",
+                "detail": "project_id=F0065",
+            },
+            {
+                "type": "flyer_hermes_intent_decision",
+                "mode": "shadow",
+                "decision_source": "none",
+                "validator_ok": True,
+                "actual_action": "passthrough",
+                "actual_route": "llm_passthrough",
+                "route_sequence": [],
+                "message_id_hash": "different-message",
+                "risk_scope": "none",
+                "active_customer_risk": False,
+            },
+        ],
+        expected_hermes_intent_mode="shadow",
+    )
+
+    assert any(item["type"] == "hermes_intent_shadow_coverage_missing" for item in report["incidents"])
+
+
+def test_hermes_intent_shadow_coverage_handles_bypass_then_create_sequence():
+    module = load_module()
+    report = module.build_report(
+        projects={"projects": []},
+        decision_entries=[
+            {
+                "type": "cf_router_intercepted",
+                "reason": "flyer_active_project_bypassed",
+                "detail": "project_id=F0062",
+            },
+            {
+                "type": "cf_router_intercepted",
+                "reason": "flyer_primary_project_created",
+                "detail": "project_id=F0065",
+            },
+            {
+                "type": "flyer_hermes_intent_decision",
+                "mode": "shadow",
+                "decision_source": "none",
+                "validator_ok": True,
+                "actual_action": "new_project",
+                "actual_route": "flyer_primary_project_created",
+                "route_sequence": ["flyer_active_project_bypassed", "flyer_primary_project_created"],
+                "message_id_hash": "same-message",
+                "risk_scope": "active_project",
+                "active_customer_risk": True,
+            },
+        ],
+        expected_hermes_intent_mode="shadow",
+    )
+
+    assert not any(item["type"] == "hermes_intent_shadow_coverage_missing" for item in report["incidents"])
+
+
+def test_hermes_intent_incidents_do_not_flag_intentional_off_mode():
+    module = load_module()
+    report = module.build_report(
+        projects={"projects": []},
+        decision_entries=[
+            {"type": "cf_router_intercepted", "reason": "flyer_primary_project_created"}
+        ],
+        expected_hermes_intent_mode="off",
+    )
+
+    assert not any(item["type"] == "hermes_intent_shadow_coverage_missing" for item in report["incidents"])
+
+
+def test_hermes_intent_validator_rejection_and_disagreement_surface():
+    module = load_module()
+    report = module.build_report(
+        projects={"projects": []},
+        decision_entries=[
+            {
+                "type": "flyer_hermes_intent_decision",
+                "mode": "shadow",
+                "decision_source": "fixture",
+                "validator_ok": False,
+                "validator_reasons": ["customer_copy_policy_violation"],
+                "advisory_action": "clarify",
+                "actual_action": "new_project",
+                "actual_route": "flyer_primary_project_created",
+                "risk_scope": "pre_project_customer_visible",
+                "active_customer_risk": True,
+            }
+        ],
+    )
+
+    kinds = {item["type"] for item in report["incidents"]}
+    assert "hermes_intent_rejected_by_validator" in kinds
+    assert "hermes_intent_would_clarify_but_router_mutated" in kinds
+
+
+def test_hermes_intent_unsupported_active_mode_surfaces():
+    module = load_module()
+    report = module.build_report(
+        projects={"projects": []},
+        decision_entries=[
+            {
+                "type": "flyer_hermes_intent_decision",
+                "mode": "unsupported_active_mode",
+                "decision_source": "none",
+                "validator_ok": True,
+                "advisory_action": "observe",
+                "actual_action": "passthrough",
+                "actual_route": "llm_passthrough",
+                "risk_scope": "pre_project_customer_visible",
+                "active_customer_risk": True,
+            }
+        ],
+    )
+
+    assert any(item["type"] == "hermes_intent_unsupported_active_mode" for item in report["incidents"])
+
+
 def _source_contract_extraction() -> dict:
     return {
         "asset_id": "A0001",

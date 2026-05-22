@@ -299,6 +299,11 @@ install_artifacts() {
     else
         rm -f /opt/shift-agent/flyer_manual_queue.py
     fi
+    if [ -f src/agents/flyer/intent.py ]; then
+        install -m 644 src/agents/flyer/intent.py /opt/shift-agent/flyer_intent.py
+    else
+        rm -f /opt/shift-agent/flyer_intent.py
+    fi
     if [ -d src/agents/flyer/scripts ] && compgen -G "src/agents/flyer/scripts/*" > /dev/null; then
         install -m 755 src/agents/flyer/scripts/* /usr/local/bin/
         for flyer_binary in \

@@ -1,0 +1,31 @@
+{
+  "topic": "flyer-studio-hermes-first-intent-layer-contract-validator",
+  "task_text": "Flyer Studio Hermes-first intent layer + contract validator",
+  "completed_at": "2026-05-22T04:06:59Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 5,
+  "hermes_step_count": 7,
+  "files_to_read_first": [
+    "AGENTS.md",
+    "tasks/lessons.md",
+    "tasks/todo.md",
+    "docs/hermes-alignment.md",
+    "docs/runbooks/flyer-model-policy.md",
+    "src/platform/schemas.py",
+    "src/platform/safe_io.py",
+    "src/plugins/cf-router/actions.py",
+    "src/plugins/cf-router/hooks.py",
+    "src/agents/flyer/account.py",
+    "src/agents/flyer/intake.py",
+    "src/agents/flyer/onboarding.py",
+    "src/agents/flyer/workflow.py",
+    "src/agents/flyer/facts.py",
+    "src/agents/flyer/customer_copy_policy.py",
+    "src/agents/flyer/rollout_readiness.py",
+    "src/agents/shift/skills/dispatch_shift_agent/SKILL.md",
+    "tools/flyer-self-evaluation.py",
+    "tools/operator-brief.py",
+    "tests/test_catering_v02_scripts.py",
+    "tests/test_catering_b1_cases.py"
+  ]
+}

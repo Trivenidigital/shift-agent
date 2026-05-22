@@ -1012,6 +1012,148 @@ def preview_final_qa_mismatch_incidents(projects: list[dict[str, Any]], entries:
     return out
 
 
+def hermes_intent_incidents(
+    entries: list[dict[str, Any]],
+    *,
+    expected_mode: str = "",
+) -> list[dict[str, Any]]:
+    cf_rows = [
+        entry for entry in entries
+        if entry.get("type") == "cf_router_intercepted" and str(entry.get("reason") or "").startswith("flyer_")
+    ]
+    intent_rows = [
+        entry for entry in entries
+        if entry.get("type") == "flyer_hermes_intent_decision"
+    ]
+    out: list[dict[str, Any]] = []
+
+    expected = str(expected_mode or "").strip().lower()
+    uncovered_cf_rows = uncovered_flyer_cf_router_rows(cf_rows, intent_rows)
+    if expected == "shadow" and uncovered_cf_rows:
+        out.append(
+            incident(
+                "hermes_intent_shadow_coverage_missing",
+                severity="high",
+                evidence=f"uncovered flyer cf-router rows={len(uncovered_cf_rows)}; intent shadow rows={len(intent_rows)}",
+                suggested_action="Verify FLYER_HERMES_INTENT_MODE and the flyer_hermes_intent_decision audit path before trusting shadow metrics.",
+                category="hermes_intent",
+                count=len(uncovered_cf_rows),
+                evidence_details={
+                    "active_customer_risk": True,
+                    "risk_scope": "pre_project_customer_visible",
+                    "flyer_cf_router_sample_count": len(cf_rows),
+                    "shadow_sample_count": len(intent_rows),
+                    "uncovered_reasons": sorted({str(row.get("reason") or "") for row in uncovered_cf_rows}),
+                },
+            )
+        )
+
+    for row in intent_rows:
+        mode = str(row.get("mode") or "")
+        source = str(row.get("decision_source") or "none")
+        active = bool(row.get("active_customer_risk"))
+        details = {
+            "active_customer_risk": active,
+            "risk_scope": str(row.get("risk_scope") or "none"),
+            "actual_route": str(row.get("actual_route") or ""),
+            "actual_action": str(row.get("actual_action") or ""),
+            "decision_source": source,
+            "validator_reasons": row.get("validator_reasons") or [],
+        }
+        if mode == "unsupported_active_mode":
+            out.append(
+                incident(
+                    "hermes_intent_unsupported_active_mode",
+                    severity="medium",
+                    evidence="active/low-risk intent mode was requested but forced inert",
+                    suggested_action="Leave active Hermes routing disabled until a separate promotion PR lands.",
+                    category="hermes_intent",
+                    evidence_details=details,
+                )
+            )
+        if source != "none" and row.get("validator_ok") is False:
+            out.append(
+                incident(
+                    "hermes_intent_rejected_by_validator",
+                    severity="high" if active else "medium",
+                    evidence="advisory Hermes intent failed deterministic validator",
+                    suggested_action="Review the rejected intent before promoting this route family.",
+                    category="hermes_intent",
+                    evidence_details=details,
+                )
+            )
+        if source == "none":
+            continue
+        advisory_action = str(row.get("advisory_action") or "")
+        actual_action = str(row.get("actual_action") or "")
+        if advisory_action == "clarify" and actual_action in {"new_project", "revision", "approval", "account_update"}:
+            out.append(
+                incident(
+                    "hermes_intent_would_clarify_but_router_mutated",
+                    severity="high" if active else "medium",
+                    evidence=f"advisory=clarify; actual_action={actual_action}",
+                    suggested_action="Inspect the transcript and add a replay case before promoting active routing.",
+                    category="hermes_intent",
+                    evidence_details=details,
+                )
+            )
+        elif advisory_action in {"create_project", "revise_project", "approve_project", "account_update", "manual_review"}:
+            expected_action = {
+                "create_project": "new_project",
+                "revise_project": "revision",
+                "approve_project": "approval",
+                "account_update": "account_update",
+                "manual_review": "manual_review",
+            }.get(advisory_action)
+            if expected_action and expected_action != actual_action:
+                out.append(
+                    incident(
+                        "hermes_intent_live_route_disagreement",
+                        severity="high" if active else "medium",
+                        evidence=f"advisory_action={advisory_action}; actual_action={actual_action}",
+                        suggested_action="Compare Hermes intent with the terminal cf-router route before promotion.",
+                        category="hermes_intent",
+                        evidence_details=details,
+                    )
+                )
+    return out
+
+
+def uncovered_flyer_cf_router_rows(
+    cf_rows: list[dict[str, Any]],
+    intent_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return cf-router Flyer rows not covered by terminal intent shadow rows.
+
+    One inbound can legitimately emit multiple cf-router rows (for example
+    bypass -> create). A single intent row covers every route in its
+    `route_sequence` and its terminal `actual_route`.
+    """
+    covered_by_hash = {
+        str(row.get("message_id_hash") or "")
+        for row in intent_rows
+        if row.get("message_id_hash")
+    }
+    covered_routes: set[str] = set()
+    for row in intent_rows:
+        if row.get("actual_route"):
+            covered_routes.add(str(row.get("actual_route")))
+        for item in row.get("route_sequence") or []:
+            if item:
+                covered_routes.add(str(item))
+
+    uncovered: list[dict[str, Any]] = []
+    for row in cf_rows:
+        message_hash = str(row.get("message_id_hash") or "")
+        if message_hash and message_hash in covered_by_hash:
+            continue
+        reason = str(row.get("reason") or "")
+        if not message_hash and reason and reason in covered_routes:
+            continue
+        uncovered.append(row)
+    return uncovered
+
+
 def eval_candidates(incidents: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: set[tuple[str, str]] = set()
     out: list[dict[str, Any]] = []
@@ -1042,6 +1184,7 @@ def suggested_fixture_for(category: str) -> str:
         "provider_runtime": "src/agents/flyer/scripts/smoke-flyer-quality",
         "routing_tripwire": "tests/test_cf_router_flyer_routing.py",
         "preview_final_qa": "tests/test_flyer_self_evaluation.py",
+        "hermes_intent": "tests/test_flyer_intent_layer.py",
     }.get(category, "tasks/todo.md")
 
 
@@ -1111,6 +1254,7 @@ def build_report(
     rollout_mode: bool = False,
     rollout_fixture: RolloutInputFixture | None = None,
     operating_layer_input: dict[str, Any] | None = None,
+    expected_hermes_intent_mode: str = "",
     manual_stale_red_minutes: int = 30,
 ) -> dict[str, Any]:
     now = now or utc_now()
@@ -1128,6 +1272,7 @@ def build_report(
         + static_customer_copy_incidents(source_files or [])
         + repeated_checkin_incidents(decision_entries, threshold=repeated_checkin_threshold)
         + preview_final_qa_mismatch_incidents(project_rows, decision_entries)
+        + hermes_intent_incidents(decision_entries, expected_mode=expected_hermes_intent_mode)
     )
     # Color threshold is single-sourced via incident_color (from rollout_readiness).
     status = incident_color(incidents)
@@ -1276,6 +1421,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=None,
         help="Path to a Flyer operating-layer readiness JSON fixture.",
     )
+    parser.add_argument(
+        "--expected-hermes-intent-mode",
+        choices=("off", "shadow", ""),
+        default="",
+        help="Expected Flyer Hermes intent mode for coverage checks. Use shadow to alert when Flyer traffic lacks shadow rows.",
+    )
     return parser.parse_args(argv)
 
 
@@ -1299,6 +1450,7 @@ def main(argv: list[str] | None = None) -> int:
         rollout_mode=args.rollout_readiness,
         rollout_fixture=rollout_fixture,
         operating_layer_input=load_json_file(args.operating_layer_input) if args.operating_layer_input else None,
+        expected_hermes_intent_mode=args.expected_hermes_intent_mode,
         manual_stale_red_minutes=args.manual_stale_red_minutes,
     )
     if args.format == "json":

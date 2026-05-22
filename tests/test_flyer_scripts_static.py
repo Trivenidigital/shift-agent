@@ -167,6 +167,18 @@ def test_starter_briefs_module_installed_and_smoked():
     assert "flyer_starter_briefs" in smoke
 
 
+def test_flyer_intent_module_installed_and_smoked_for_cf_router_shadow():
+    deploy = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh").read_text(encoding="utf-8")
+    smoke = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-smoke-test.sh").read_text(encoding="utf-8")
+    actions = (REPO / "src" / "plugins" / "cf-router" / "actions.py").read_text(encoding="utf-8")
+
+    assert "src/agents/flyer/intent.py" in deploy
+    assert "/opt/shift-agent/flyer_intent.py" in deploy
+    assert "flyer_intent" in smoke
+    assert "_import_flyer_intent_contract" in actions
+    assert "import flyer_intent" in actions
+
+
 def test_starter_prompt_claims_use_locked_account_script():
     script = (SCRIPTS / "manage-flyer-account").read_text(encoding="utf-8")
     actions = (REPO / "src" / "plugins" / "cf-router" / "actions.py").read_text(encoding="utf-8")
