@@ -335,6 +335,7 @@ def summarize_flyer_evaluation_report(path: Path | None) -> list[str]:
     hermes_items = [
         item for item in incidents
         if str(item.get("type") or "").startswith("hermes_intent_")
+        or str(item.get("type") or "").startswith("flyer_intent_training_export_")
     ]
     if hermes_items:
         rejected = sum(1 for item in hermes_items if item.get("type") == "hermes_intent_rejected_by_validator")
@@ -342,10 +343,11 @@ def summarize_flyer_evaluation_report(path: Path | None) -> list[str]:
         clarify = sum(1 for item in hermes_items if item.get("type") == "hermes_intent_would_clarify_but_router_mutated")
         coverage = sum(1 for item in hermes_items if item.get("type") == "hermes_intent_shadow_coverage_missing")
         unsupported = sum(1 for item in hermes_items if item.get("type") == "hermes_intent_unsupported_active_mode")
+        training = sum(1 for item in hermes_items if str(item.get("type") or "").startswith("flyer_intent_training_export_"))
         lines.append(
             "Hermes intent: "
             f"rejected={rejected}; disagreements={disagree}; clarify_vs_mutate={clarify}; "
-            f"coverage_missing={coverage}; unsupported_active_mode={unsupported}"
+            f"coverage_missing={coverage}; unsupported_active_mode={unsupported}; training_export={training}"
             f"{active_suffix(hermes_items)}"
         )
     severity_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}

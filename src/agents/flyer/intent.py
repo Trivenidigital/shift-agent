@@ -6,12 +6,18 @@ contract and safety harness.
 """
 from __future__ import annotations
 
+import concurrent.futures
+import json
+import time
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from agents.flyer.customer_copy_policy import scan_customer_text
+try:
+    from agents.flyer.customer_copy_policy import scan_customer_text
+except Exception:  # pragma: no cover - deployed flat-module fallback
+    from flyer_customer_copy_policy import scan_customer_text  # type: ignore
 
 
 class FlyerIntentMode(StrEnum):
@@ -63,6 +69,17 @@ ActualAction = Literal[
     "passthrough",
     "failure",
     "unknown",
+]
+ClassifierStatus = Literal[
+    "off",
+    "skipped_not_candidate",
+    "skipped_passthrough",
+    "skipped_no_gateway",
+    "skipped_budget",
+    "success",
+    "timeout",
+    "invalid",
+    "error",
 ]
 
 MUTATING_ACTIONS = {
@@ -119,6 +136,32 @@ class FlyerIntentValidationResult(BaseModel):
     risk_scope: RiskScope = "none"
 
 
+class FlyerClassifierRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    text: str = Field(default="", max_length=4000)
+    has_media: bool = False
+    actual_route: str = Field(default="", max_length=120)
+    actual_action: ActualAction = "unknown"
+    route_sequence: list[str] = Field(default_factory=list, max_length=20)
+    branch_return_reason: str = Field(default="", max_length=300)
+    customer_status: str = Field(default="", max_length=80)
+    project_status: str = Field(default="", max_length=80)
+    intake_status: str = Field(default="", max_length=80)
+    risk_scope: RiskScope = "none"
+
+
+class FlyerClassifierResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: ClassifierStatus
+    decision: FlyerIntentDecision = Field(default_factory=FlyerIntentDecision)
+    error_kind: str = Field(default="", max_length=80)
+    error_detail: str = Field(default="", max_length=300)
+    latency_ms: int = Field(default=0, ge=0)
+
+
 def mode_from_value(value: str | None) -> FlyerIntentMode:
     normalized = str(value or "").strip().lower()
     if normalized == "off":
@@ -126,6 +169,71 @@ def mode_from_value(value: str | None) -> FlyerIntentMode:
     if normalized in {"", "shadow"}:
         return FlyerIntentMode.SHADOW
     return FlyerIntentMode.UNSUPPORTED_ACTIVE_MODE
+
+
+def classifier_setting_from_env(value: str | None) -> Literal["off", "shadow"]:
+    return "shadow" if str(value or "").strip().lower() == "shadow" else "off"
+
+
+def parse_classifier_payload(payload: Any) -> FlyerIntentDecision:
+    if isinstance(payload, FlyerIntentDecision):
+        data = payload.model_dump()
+    elif isinstance(payload, str):
+        data = json.loads(payload)
+    elif isinstance(payload, dict):
+        data = dict(payload)
+    else:
+        raise TypeError(f"unsupported classifier payload: {type(payload).__name__}")
+    data["decision_source"] = "hermes_gateway_future"
+    return FlyerIntentDecision.model_validate(data)
+
+
+def _classifier_result(
+    status: ClassifierStatus,
+    *,
+    start: float,
+    decision: FlyerIntentDecision | None = None,
+    error_kind: str = "",
+    error_detail: str = "",
+) -> FlyerClassifierResult:
+    latency_ms = max(0, int((time.monotonic() - start) * 1000))
+    return FlyerClassifierResult(
+        status=status,
+        decision=decision or FlyerIntentDecision(decision_source="none"),
+        error_kind=error_kind[:80],
+        error_detail=error_detail[:300],
+        latency_ms=latency_ms,
+    )
+
+
+def run_classifier_shadow(
+    classifier: Callable[[FlyerClassifierRequest], Any] | None,
+    request: FlyerClassifierRequest,
+    *,
+    timeout_ms: int = 250,
+) -> FlyerClassifierResult:
+    start = time.monotonic()
+    if classifier is None:
+        return _classifier_result("skipped_no_gateway", start=start)
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(classifier, request)
+    try:
+        payload = future.result(timeout=max(0.001, timeout_ms / 1000.0))
+    except concurrent.futures.TimeoutError:
+        future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        return _classifier_result("timeout", start=start, error_kind="timeout")
+    except Exception as exc:
+        executor.shutdown(wait=False, cancel_futures=True)
+        return _classifier_result("error", start=start, error_kind=type(exc).__name__)
+    executor.shutdown(wait=False, cancel_futures=False)
+
+    try:
+        decision = parse_classifier_payload(payload)
+    except Exception as exc:
+        return _classifier_result("invalid", start=start, error_kind=type(exc).__name__)
+    return _classifier_result("success", start=start, decision=decision)
 
 
 def validate_flyer_intent_decision(
@@ -194,7 +302,23 @@ def build_training_example(
         "schema_version": 1,
         "message_id_hash": message_id_hash,
         "chat_key_hash": chat_key_hash,
-        "decision": decision.model_dump(),
-        "validation": validation.model_dump(),
+        "intent": decision.intent,
+        "action": decision.action,
+        "decision_source": decision.decision_source,
+        "confidence_bucket": _confidence_bucket(decision.confidence),
+        "validator_ok": validation.ok,
+        "validator_reasons": list(validation.reasons),
+        "would_mutate": validation.would_mutate,
+        "risk_scope": validation.risk_scope,
         "actual_action": actual_action,
+        "route_label": actual_action,
+        "outcome_label": "accepted" if validation.ok else "validator_rejected",
     }
+
+
+def _confidence_bucket(confidence: float) -> Literal["low", "medium", "high"]:
+    if confidence >= 0.85:
+        return "high"
+    if confidence >= 0.55:
+        return "medium"
+    return "low"

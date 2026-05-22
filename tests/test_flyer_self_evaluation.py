@@ -221,6 +221,171 @@ def test_hermes_intent_unsupported_active_mode_surfaces():
     assert any(item["type"] == "hermes_intent_unsupported_active_mode" for item in report["incidents"])
 
 
+def test_hermes_intent_classifier_runtime_failures_surface():
+    module = load_module()
+    report = module.build_report(
+        projects={"projects": []},
+        decision_entries=[
+            {
+                "type": "flyer_hermes_intent_decision",
+                "mode": "shadow",
+                "decision_source": "none",
+                "classifier_status": "timeout",
+                "classifier_latency_ms": 251,
+                "classifier_error_kind": "timeout",
+                "validator_ok": True,
+                "validator_reasons": [],
+                "advisory_action": "observe",
+                "actual_route": "flyer_primary_project_created",
+                "actual_action": "new_project",
+                "route_sequence": ["flyer_primary_project_created"],
+                "active_customer_risk": True,
+                "risk_scope": "pre_project_customer_visible",
+            },
+            {
+                "type": "flyer_hermes_intent_decision",
+                "mode": "shadow",
+                "decision_source": "none",
+                "classifier_status": "invalid",
+                "classifier_error_kind": "ValidationError",
+                "validator_ok": True,
+                "validator_reasons": [],
+                "advisory_action": "observe",
+                "actual_route": "flyer_revision_applied",
+                "actual_action": "revision",
+                "route_sequence": ["flyer_revision_applied"],
+                "active_customer_risk": True,
+                "risk_scope": "active_project",
+            },
+        ],
+    )
+
+    kinds = [item["type"] for item in report["incidents"]]
+    assert kinds.count("hermes_intent_classifier_runtime_failure") == 2
+    failure = next(item for item in report["incidents"] if item["type"] == "hermes_intent_classifier_runtime_failure")
+    assert failure["severity"] == "medium"
+    assert failure["evidence_details"]["classifier_status"] in {"timeout", "invalid"}
+
+
+def test_flyer_intent_training_export_missing_when_expected():
+    module = load_module()
+    report = module.build_report(
+        projects={"projects": []},
+        decision_entries=[
+            {
+                "type": "flyer_hermes_intent_decision",
+                "mode": "shadow",
+                "decision_source": "hermes_gateway_future",
+                "classifier_status": "success",
+                "message_id_hash": "m1",
+                "chat_key_hash": "c1",
+                "validator_ok": True,
+                "validator_reasons": [],
+                "advisory_action": "create_project",
+                "actual_action": "new_project",
+                "actual_route": "flyer_primary_project_created",
+                "route_sequence": ["flyer_primary_project_created"],
+                "risk_scope": "pre_project_customer_visible",
+                "active_customer_risk": True,
+            }
+        ],
+        expect_flyer_intent_training_export=True,
+    )
+
+    incident = next(item for item in report["incidents"] if item["type"] == "flyer_intent_training_export_missing")
+    assert incident["severity"] == "medium"
+    assert incident["evidence_details"]["intent_shadow_rows"] == 1
+
+
+def test_flyer_intent_training_export_redaction_failure(tmp_path):
+    module = load_module()
+    artifact = tmp_path / "training.jsonl"
+    artifact.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "dedupe_key": "k",
+                "message_id_hash": "m1",
+                "chat_key_hash": "c1",
+                "intent": "new_flyer",
+                "action": "create_project",
+                "input_features": {
+                    "raw_request": "Call me +19045551234 at 123 Main St",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    report = module.build_report(
+        projects={"projects": []},
+        decision_entries=[],
+        expect_flyer_intent_training_export=True,
+        flyer_intent_training_json=artifact,
+    )
+
+    assert any(item["type"] == "flyer_intent_training_export_redaction_failed" for item in report["incidents"])
+
+
+def test_flyer_intent_training_export_stale_when_expected(tmp_path):
+    module = load_module()
+    artifact = tmp_path / "training.jsonl"
+    artifact.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "dedupe_key": "k",
+                "message_id_hash": "m1",
+                "chat_key_hash": "c1",
+                "decision_source": "hermes_gateway_future",
+                "classifier_status": "success",
+                "intent": "new_flyer",
+                "action": "create_project",
+                "confidence_bucket": "high",
+                "validator_ok": True,
+                "validator_reasons": [],
+                "route_label": "new_project",
+                "outcome_label": "route_matched",
+                "input_features": {"has_media": False, "route_sequence": ["flyer_primary_project_created"]},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    stale_now = module.parse_utc("2026-05-22T12:00:00Z")
+    old_epoch = 946684800
+    artifact.touch()
+    import os
+
+    os.utime(artifact, (old_epoch, old_epoch))
+    report = module.build_report(
+        projects={"projects": []},
+        decision_entries=[
+            {
+                "type": "flyer_hermes_intent_decision",
+                "mode": "shadow",
+                "decision_source": "hermes_gateway_future",
+                "classifier_status": "success",
+                "message_id_hash": "m1",
+                "chat_key_hash": "c1",
+                "validator_ok": True,
+                "validator_reasons": [],
+                "advisory_action": "create_project",
+                "actual_action": "new_project",
+                "actual_route": "flyer_primary_project_created",
+                "route_sequence": ["flyer_primary_project_created"],
+                "risk_scope": "pre_project_customer_visible",
+                "active_customer_risk": True,
+            }
+        ],
+        now=stale_now,
+        expect_flyer_intent_training_export=True,
+        flyer_intent_training_json=artifact,
+    )
+
+    assert any(item["type"] == "flyer_intent_training_export_stale" for item in report["incidents"])
+
+
 def _source_contract_extraction() -> dict:
     return {
         "asset_id": "A0001",

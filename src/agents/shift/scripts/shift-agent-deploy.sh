@@ -269,6 +269,21 @@ install_artifacts() {
     else
         rm -f /opt/shift-agent/flyer_starter_briefs.py
     fi
+    if [ -f src/agents/flyer/customer_copy_policy.py ]; then
+        install -m 644 src/agents/flyer/customer_copy_policy.py /opt/shift-agent/flyer_customer_copy_policy.py
+    else
+        rm -f /opt/shift-agent/flyer_customer_copy_policy.py
+    fi
+    if [ -f src/agents/flyer/intent.py ]; then
+        install -m 644 src/agents/flyer/intent.py /opt/shift-agent/flyer_intent.py
+    else
+        rm -f /opt/shift-agent/flyer_intent.py
+    fi
+    if [ -f src/agents/flyer/intent_training.py ]; then
+        install -m 644 src/agents/flyer/intent_training.py /opt/shift-agent/flyer_intent_training.py
+    else
+        rm -f /opt/shift-agent/flyer_intent_training.py
+    fi
     if [ -f src/agents/flyer/account.py ]; then
         install -m 644 src/agents/flyer/account.py /opt/shift-agent/flyer_account.py
     else
@@ -317,6 +332,7 @@ install_artifacts() {
             flyer-delivery-report \
             flyer-manual-queue \
             flyer-source-edit-sla-watchdog \
+            flyer-intent-training-export \
             smoke-flyer-quality; do
             if [ ! -f "src/agents/flyer/scripts/${flyer_binary}" ]; then
                 rm -f "/usr/local/bin/${flyer_binary}"
@@ -340,6 +356,7 @@ install_artifacts() {
             /usr/local/bin/flyer-delivery-report \
             /usr/local/bin/flyer-manual-queue \
             /usr/local/bin/flyer-source-edit-sla-watchdog \
+            /usr/local/bin/flyer-intent-training-export \
             /usr/local/bin/send-flyer-campaign \
             /usr/local/bin/send-flyer-package \
             /usr/local/bin/smoke-flyer-quality

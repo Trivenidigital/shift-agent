@@ -50,6 +50,7 @@ for script in \
     /usr/local/bin/flyer-delivery-report \
     /usr/local/bin/flyer-manual-queue \
     /usr/local/bin/flyer-source-edit-sla-watchdog \
+    /usr/local/bin/flyer-intent-training-export \
     /usr/local/bin/send-flyer-campaign \
     /usr/local/bin/smoke-flyer-quality \
     /usr/local/bin/send-flyer-package ; do
@@ -91,6 +92,9 @@ import flyer_workflow
 import flyer_onboarding
 import flyer_account
 import flyer_starter_briefs
+import flyer_customer_copy_policy
+import flyer_intent
+import flyer_intent_training
 import flyer_facts
 import flyer_reference_extract
 import flyer_visual_qa
@@ -201,6 +205,12 @@ if ! sudo -u shift-agent "$PY" /usr/local/bin/flyer-source-edit-sla-watchdog --t
 fi
 echo "Flyer source-edit SLA watchdog smoke passed"
 
+if ! sudo -u shift-agent "$PY" /usr/local/bin/flyer-intent-training-export --help > /dev/null; then
+    echo "FAIL: Flyer intent training export CLI failed"
+    exit 1
+fi
+echo "Flyer intent training export CLI smoke passed"
+
 if [ -x /usr/local/bin/credential-minimized-readiness ]; then
     "$PY" /usr/local/bin/credential-minimized-readiness --format text || true
 fi
@@ -246,6 +256,8 @@ flyer_ok, flyer_signals = ma.classify_flyer_intent('Need flyer for Ugadi Special
 assert flyer_ok is True, f'flyer classifier regressed: signals={flyer_signals}'
 generic_flyer_ok, _ = ma.classify_flyer_intent('Need catering for 80 people event Saturday food delivered')
 assert generic_flyer_ok is False, 'flyer classifier stole generic catering'
+assert hasattr(ma, 'begin_flyer_intent_shadow')
+assert hasattr(ma, 'finalize_flyer_intent_shadow')
 print('cf-router plugin: actions.py importable + classifiers OK')
 " > /dev/null; then
         echo "FAIL: cf-router plugin actions.py broken — would silently fail at first inbound"
@@ -254,6 +266,55 @@ print('cf-router plugin: actions.py importable + classifiers OK')
     echo "✓ cf-router plugin compiles + actions importable + classifier sanity"
 else
     echo "⚠  cf-router plugin not installed — skipping plugin smoke check"
+fi
+
+if [ -d /root/.hermes/plugins/cf-router ]; then
+    INTENT_SMOKE_DIR="$(mktemp -d /tmp/flyer-intent-smoke.XXXXXX)"
+    if ! "$PY" - "$INTENT_SMOKE_DIR/decisions.log" <<'PY' > /dev/null; then
+import importlib.util
+import json
+import sys
+from pathlib import Path
+from pydantic import TypeAdapter
+
+sys.path.insert(0, '/opt/shift-agent')
+from schemas import LogEntry  # noqa: E402
+
+spec_a = importlib.util.spec_from_file_location(
+    'cf_router_smoke_actions_intent',
+    '/root/.hermes/plugins/cf-router/actions.py',
+)
+ma = importlib.util.module_from_spec(spec_a)
+spec_a.loader.exec_module(ma)
+ma.LOG_PATH = Path(sys.argv[1])
+token = ma.begin_flyer_intent_shadow(
+    text='Create flyer for smoke specials',
+    chat_id='smoke@s.whatsapp.net',
+    message_id='smoke-message',
+    has_media=False,
+)
+try:
+    ma.record_flyer_intent_route_event(
+        reason='flyer_primary_project_created',
+        subprocess_rc=0,
+        detail='project_id=F0001; status=awaiting_final_approval',
+    )
+    ma.finalize_flyer_intent_shadow(
+        hook_result={'action': 'skip', 'reason': 'cf-router flyer primary created'},
+    )
+finally:
+    ma.reset_flyer_intent_shadow(token)
+
+rows = [json.loads(line) for line in ma.LOG_PATH.read_text(encoding='utf-8').splitlines()]
+assert rows and rows[-1]['type'] == 'flyer_hermes_intent_decision'
+assert rows[-1]['classifier_status'] == 'off'
+TypeAdapter(LogEntry).validate_python(rows[-1])
+PY
+        rm -rf "$INTENT_SMOKE_DIR"
+        echo "FAIL: cf-router begin_flyer_intent_shadow / flyer_hermes_intent_decision smoke failed"
+        exit 1
+    fi
+    rm -rf "$INTENT_SMOKE_DIR"
 fi
 
 # 2c. Agent #3 closest-location.py importable + CLI parses (PR-Agent3-v0.1)

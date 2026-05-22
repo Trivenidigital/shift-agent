@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+"""Export redacted Flyer Hermes intent examples for offline self-evolution."""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+
+SRC_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(SRC_ROOT / "platform"))
+sys.path.insert(0, str(SRC_ROOT))
+
+try:
+    from agents.flyer.intent_training import export_training_examples  # noqa: E402
+except Exception:  # pragma: no cover - deployed flat-module fallback
+    from flyer_intent_training import export_training_examples  # type: ignore  # noqa: E402
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--decisions-log", type=Path, default=Path("/opt/shift-agent/logs/decisions.log"))
+    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--format", choices=["jsonl"], default="jsonl")
+    args = parser.parse_args(argv)
+
+    summary = export_training_examples(
+        decisions_log=args.decisions_log,
+        out_path=args.out,
+        output_format=args.format,
+    )
+    print(
+        f"flyer-intent-training-export: input_rows={summary['input_rows']} "
+        f"written={summary['written']} out={summary['out']}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -25,8 +25,10 @@ Design: `docs/superpowers/specs/2026-05-22-flyer-hermes-intent-layer-design.md`
 - [x] Add cf-router shadow context wrapper with terminal route-event accumulation and ContextVar reset.
 - [x] Add self-eval incidents and operator-brief grouping for Hermes intent rejection, disagreement, coverage, and unsupported active mode.
 - [x] Add static cf-router audit-reason parity test so Flyer audit reason schema drift is loud.
-- [ ] Follow-up - live Hermes classifier call through the existing gateway, behind shadow only. Do not create a new router or LLM client.
-- [ ] Follow-up - memory/self-learning ingestion of accepted/rejected intent examples through Hermes memory, not production code/prompt mutation.
+- [x] PR in progress 2026-05-22 - live Hermes classifier shadow adapter through an injected existing gateway callable, post-route only, no new router or LLM/provider client.
+- [x] PR in progress 2026-05-22 - offline Flyer intent training export for Hermes self-evolution input; renamed from "memory ingestion" because this PR writes a redacted operator-reviewed artifact, not live Hermes memory.
+- [ ] Follow-up - actual Hermes memory ingestion receipt after operator review of training export artifacts; must remain state/memory only and never mutate code/SKILL/prompt/model/config at runtime.
+- [ ] Follow-up - shadow soak evidence gate: require per-route-family sample counts, classifier success rate, validator-ok rate, and disagreement review before any active-routing proposal.
 - [ ] Follow-up - active low-risk status-check route only after per-family shadow sample thresholds, validator-ok rate, and replay coverage pass.
 - [ ] Follow-up - dashboard/operator lane for Hermes intent incidents if self-eval/operator brief noise is manageable.
 - [ ] Follow-up - multilingual route examples for Telugu/Hindi/Malayalam/Tamil/Kannada customer phrasing.
