@@ -7,6 +7,33 @@ Last updated: 2026-05-21 (Flyer customer-readiness stabilization gate work added
 
 ---
 
+## Active - Flyer Hermes intent layer (2026-05-22)
+
+**Drift-check tag:** extends-Hermes
+
+Hermes-first summary: Hermes owns WhatsApp ingress, identity, bridge delivery, media cache, future LLM/gateway classification, memory/session learning, and background task substrate. Flyer owns the strict intent schema, validator, legal route/action contract, source-edit safety boundary, customer-copy policy, and operator-visible incidents. This slice is shadow/observability only; it does not enable Hermes to route live traffic.
+
+Plan: `docs/superpowers/plans/2026-05-22-flyer-hermes-intent-layer.md`
+Design: `docs/superpowers/specs/2026-05-22-flyer-hermes-intent-layer-design.md`
+
+- [x] Investigate stopped session: branch was at `origin/main`; no usable plan/design/build existed beyond a Hermes-check receipt.
+- [x] Write plan and fold 2 reviewer passes (Hermes-first/scope + runtime/silent-failure).
+- [x] Write design and fold 2 reviewer passes (code-path coverage + fixture/statistical validity).
+- [x] Add strict Flyer intent contract/validator and canonical Hermes prompt scaffold.
+- [x] Add inert mode handling: `off` and `shadow` only; `active`/`low_risk_active` become `unsupported_active_mode`.
+- [x] Add typed `flyer_hermes_intent_decision` audit row with hashed ids and terminal route evidence.
+- [x] Add cf-router shadow context wrapper with terminal route-event accumulation and ContextVar reset.
+- [x] Add self-eval incidents and operator-brief grouping for Hermes intent rejection, disagreement, coverage, and unsupported active mode.
+- [x] Add static cf-router audit-reason parity test so Flyer audit reason schema drift is loud.
+- [ ] Follow-up - live Hermes classifier call through the existing gateway, behind shadow only. Do not create a new router or LLM client.
+- [ ] Follow-up - memory/self-learning ingestion of accepted/rejected intent examples through Hermes memory, not production code/prompt mutation.
+- [ ] Follow-up - active low-risk status-check route only after per-family shadow sample thresholds, validator-ok rate, and replay coverage pass.
+- [ ] Follow-up - dashboard/operator lane for Hermes intent incidents if self-eval/operator brief noise is manageable.
+- [ ] Follow-up - multilingual route examples for Telugu/Hindi/Malayalam/Tamil/Kannada customer phrasing.
+- [ ] Superseded by this track - avoid new standalone regex-only patches for broad new-vs-revision/status/account judgment unless they are urgent customer-copy or safety hotfixes. File them as intent-layer replay/training examples instead.
+
+---
+
 ## Active - Flyer Hermes operating layer backlog (2026-05-21)
 
 **Drift-check tag:** extends-Hermes

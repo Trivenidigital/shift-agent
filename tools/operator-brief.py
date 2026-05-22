@@ -332,6 +332,22 @@ def summarize_flyer_evaluation_report(path: Path | None) -> list[str]:
     preview_items = [item for item in incidents if item.get("type") == "preview_approved_final_qa_failed"]
     if preview_items:
         lines.append(f"Preview/final QA: approved_then_failed={len(preview_items)}{active_suffix(preview_items)}")
+    hermes_items = [
+        item for item in incidents
+        if str(item.get("type") or "").startswith("hermes_intent_")
+    ]
+    if hermes_items:
+        rejected = sum(1 for item in hermes_items if item.get("type") == "hermes_intent_rejected_by_validator")
+        disagree = sum(1 for item in hermes_items if item.get("type") == "hermes_intent_live_route_disagreement")
+        clarify = sum(1 for item in hermes_items if item.get("type") == "hermes_intent_would_clarify_but_router_mutated")
+        coverage = sum(1 for item in hermes_items if item.get("type") == "hermes_intent_shadow_coverage_missing")
+        unsupported = sum(1 for item in hermes_items if item.get("type") == "hermes_intent_unsupported_active_mode")
+        lines.append(
+            "Hermes intent: "
+            f"rejected={rejected}; disagreements={disagree}; clarify_vs_mutate={clarify}; "
+            f"coverage_missing={coverage}; unsupported_active_mode={unsupported}"
+            f"{active_suffix(hermes_items)}"
+        )
     severity_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
     top_incidents = sorted(
         incidents,

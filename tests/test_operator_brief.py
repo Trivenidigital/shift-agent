@@ -17,6 +17,43 @@ def load_module():
     return module
 
 
+def test_flyer_eval_summary_groups_hermes_intent_incidents(tmp_path):
+    module = load_module()
+    report = tmp_path / "flyer-eval.json"
+    report.write_text(
+        json.dumps(
+            {
+                "status": "yellow",
+                "summary": {"incident_count": 2, "high_or_critical_count": 1},
+                "incidents": [
+                    {
+                        "type": "hermes_intent_rejected_by_validator",
+                        "severity": "high",
+                        "suggested_action": "review",
+                        "evidence_details": {"active_customer_risk": True},
+                    },
+                    {
+                        "type": "hermes_intent_shadow_coverage_missing",
+                        "severity": "high",
+                        "suggested_action": "verify",
+                        "evidence_details": {"active_customer_risk": True},
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    lines = module.summarize_flyer_evaluation_report(report)
+
+    assert any(
+        line.startswith("Hermes intent:")
+        and "rejected=1" in line
+        and "coverage_missing=1" in line
+        and "active=2" in line
+        for line in lines
+    )
+
+
 def test_operator_decision_doc_parser_groups_checklist_sections(tmp_path):
     module = load_module()
     decisions = tmp_path / "operator-decisions.md"
