@@ -2,6 +2,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -21,7 +22,21 @@ def load_module():
 
 
 def load_fixture(name: str) -> dict:
-    return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
+    data = json.loads((FIXTURES / name).read_text(encoding="utf-8"))
+    if "collected_at" in data:
+        data["collected_at"] = _fresh_collected_at()
+    return data
+
+
+def _fresh_collected_at() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def fresh_fixture_path(tmp_path: Path, name: str) -> Path:
+    data = load_fixture(name)
+    path = tmp_path / name
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
 
 
 def test_two_autonomous_reviewer_approvals_are_required():
@@ -118,7 +133,7 @@ def test_strict_mode_exits_non_zero_when_ineligible(tmp_path):
             str(MODULE_PATH),
             "eligibility",
             "--metadata",
-            str(FIXTURES / "eligible_pr.json"),
+            str(fresh_fixture_path(tmp_path, "eligible_pr.json")),
             "--strict",
         ],
         capture_output=True,

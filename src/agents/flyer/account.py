@@ -53,6 +53,7 @@ ACCOUNT_COMMAND_RE = re.compile(
     r"bring back sample prompts|show examples again|bring back examples|"
     r"add (?:authorized )?(?:number|auth)|add authorized number|"
     r"remove authorized number|remove number|"
+    r"update business name|change business name|set business name|"
     r"update phone|update business phone|"
     r"update whatsapp|update business whatsapp|"
     r"change plan|confirm update"
@@ -498,6 +499,9 @@ def _usage_event(
 
 def _parse_mutating_command(text: str) -> tuple[str, str]:
     lower = text.lower()
+    for prefix in ("update business name", "change business name", "set business name"):
+        if lower.startswith(prefix):
+            return "update_business_name", _strip_account_value_prefix(text[len(prefix):].strip())
     for prefix in ("add authorized number", "add number", "add auth"):
         if lower.startswith(prefix):
             return "add_authorized", text[len(prefix):].strip()
@@ -513,6 +517,10 @@ def _parse_mutating_command(text: str) -> tuple[str, str]:
     if lower.startswith("change plan"):
         return "change_plan", text[len("change plan"):].strip()
     return "", ""
+
+
+def _strip_account_value_prefix(value: str) -> str:
+    return re.sub(r"^(?:to|as|is|:|-)\s+", "", value.strip(), flags=re.IGNORECASE).strip()
 
 
 def _confirm_pending_update(**kwargs: object) -> AccountResult:
@@ -617,6 +625,14 @@ def _apply_account_update(
             "authorized_request_numbers": numbers,
             "updated_at": now,
         }), "Flyer Studio\n------------\nBusiness WhatsApp number updated.", "business_whatsapp_updated"
+    if command == "update_business_name":
+        name = " ".join(value.split()).strip()
+        if not name:
+            raise ValueError("Please include the new business name.")
+        return customer.model_copy(update={
+            "business_name": name,
+            "updated_at": now,
+        }), "Flyer Studio\n------------\nBusiness name updated.", "business_name_updated"
     if command == "change_plan":
         plan_id = _parse_plan_choice(value, tiers)
         url = _checkout_url(payment_checkout_url_template, customer.customer_id, plan_id, chat_id)

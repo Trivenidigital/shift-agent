@@ -1955,6 +1955,28 @@ def test_lid_only_customer_can_turn_sample_prompts_off(tmp_path):
     assert store.starter_prompt_mode(customer.customer_id) == "off"
 
 
+def test_account_admin_can_update_business_name_from_whatsapp(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 22, tzinfo=timezone.utc)
+    customer = _trial_customer(customer_id="CUST0001", business_name="Lakshmis Kitchn", phone="+17329837841", now=now)
+    state_path.write_text(FlyerCustomerStore(customers=[customer]).model_dump_json(), encoding="utf-8")
+
+    result = handle_account_command(
+        state_path=state_path,
+        sender_phone="+17329837841",
+        sender_role="customer",
+        chat_id="17329837841@s.whatsapp.net",
+        text="update business name to Lakshmi's Kitchen",
+        now=now,
+    )
+
+    assert result.ok is True
+    assert result.handled is True
+    assert "Business name updated" in result.reply_text
+    store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert store.customers[0].business_name == "Lakshmi's Kitchen"
+
+
 def test_quota_counts_latest_reservation_state_once(tmp_path):
     state_path = tmp_path / "customers.json"
     now = datetime(2026, 5, 15, tzinfo=timezone.utc)

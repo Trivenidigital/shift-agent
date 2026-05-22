@@ -1878,7 +1878,9 @@ def is_flyer_account_command(text: str) -> bool:
         r"show sample prompts again|enable sample prompts|turn on sample prompts|"
         r"bring back sample prompts|show examples again|bring back examples|"
         r"add (authorized )?(number|auth)|add authorized number|"
-        r"remove authorized number|remove number|update phone|update business phone|"
+        r"remove authorized number|remove number|"
+        r"update business name|change business name|set business name|"
+        r"update phone|update business phone|"
         r"update whatsapp|update business whatsapp|change plan|confirm update)\b",
         body or "",
         flags=re.IGNORECASE,
