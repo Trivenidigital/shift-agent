@@ -132,3 +132,4 @@
 - Pattern: Hermes self-learning work can accidentally overclaim by naming a redacted JSONL export as "memory ingestion."
 - Rule: If a change only writes an operator-reviewed artifact, name it `training_export` and keep live Hermes memory ingestion as a separate follow-up with an explicit receipt/proof path.
 - Applies to: Flyer Hermes intent/self-learning PRs and any future agent self-evolution loop.
+- 2026-05-22 Flyer Studio final approval must deliver the approved core WhatsApp final when it passes QA, even if optional Instagram/PDF derivatives fail OCR/visual QA. Optional derivative failures should be skipped and preserved for operator inspection, not block the customer from receiving the approved flyer.

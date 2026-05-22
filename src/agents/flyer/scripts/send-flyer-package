@@ -135,8 +135,10 @@ def _caption_for_asset(asset, fallback: str = "") -> str:
 def _resolve_project_assets(project):
     if project.status != "finalizing_assets":
         raise SystemExit(f"project must be finalizing_assets before delivery, got {project.status}")
-    if len(project.final_asset_ids) != 4:
-        raise SystemExit(f"project must have 4 final assets before delivery, got {len(project.final_asset_ids)}")
+    if not project.final_asset_ids:
+        raise SystemExit("project has no final assets ready for delivery")
+    if len(set(project.final_asset_ids)) != len(project.final_asset_ids):
+        raise SystemExit("project final asset ids contain duplicates")
     by_id = {asset.asset_id: asset for asset in project.assets}
     missing_ids = [asset_id for asset_id in project.final_asset_ids if asset_id not in by_id]
     if missing_ids:
@@ -144,8 +146,10 @@ def _resolve_project_assets(project):
     project_assets = [by_id[asset_id] for asset_id in project.final_asset_ids]
     kinds = {asset.kind for asset in project_assets}
     expected_kinds = set(FINAL_KIND_TO_FORMAT)
-    if kinds != expected_kinds:
+    if not kinds <= expected_kinds:
         raise SystemExit(f"final asset kinds mismatch: {sorted(kinds)}")
+    if "final_whatsapp_image" not in kinds:
+        raise SystemExit("final package must include final_whatsapp_image before delivery")
     return project_assets
 
 
