@@ -120,6 +120,33 @@ def test_extract_text_facts_handles_price_first_without_prompt_prefix_pollution(
     assert all("Create flyer" not in fact.value for fact in facts)
 
 
+def test_extract_text_facts_applies_generic_any_item_price_to_all_included_items():
+    from agents.flyer.facts import extract_text_facts, facts_by_id
+
+    raw_request = (
+        "Create a flyer for Weekend Breakfast Specials from 8 AM to 11 AM, Friday to Sunday. "
+        "Include Idli, Dosa, Vada, Pongal, Poori. Price any item $9.99."
+    )
+    fields = FlyerRequestFields(
+        event_or_business_name="Weekend Breakfast Specials",
+        contact_info="+17329837841",
+        notes=raw_request,
+    )
+
+    facts = extract_text_facts(fields, raw_request, message_id="m-breakfast")
+    by_id = facts_by_id(type("P", (), {"locked_facts": facts})())
+
+    assert [by_id[f"item:{idx}:name"].value for idx in range(5)] == [
+        "Idli",
+        "Dosa",
+        "Vada",
+        "Pongal",
+        "Poori",
+    ]
+    assert [by_id[f"item:{idx}:price"].value for idx in range(5)] == ["$9.99"] * 5
+    assert all("price any" not in fact.value.lower() for fact in facts)
+
+
 def test_context_isolation_blocks_stale_project_provenance():
     from agents.flyer.facts import context_isolation_blockers
 

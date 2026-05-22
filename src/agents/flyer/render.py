@@ -251,6 +251,22 @@ def _telugu_hint(project: FlyerProject) -> str:
     return " ".join(hints)
 
 
+def _language_constraint_hint(project: FlyerProject) -> str:
+    text = f"{project.raw_request or ''} {project.fields.notes or ''}".lower()
+    english_only = bool(
+        re.search(r"\b(?:language\s*:\s*)?english\s+only\b", text)
+        or re.search(r"\b(?:do\s+not|don't|dont|no)\s+use\s+(?:telugu|hindi|tamil|malayalam|kannada|gujarati|marathi|punjabi|regional)", text)
+        or "no regional indian language" in text
+        or "no regional languages" in text
+    )
+    if english_only:
+        return (
+            "Use English only. Do not use Telugu, Hindi, or any regional Indian language. "
+            "Do not add non-English script accents."
+        )
+    return _telugu_hint(project)
+
+
 def _sanitize_visual_context(text: str) -> str:
     text = re.sub(r"\+?\d[\d\s().-]{7,}\d", "[phone]", text or "")
     text = re.sub(r"\$\s*\d+(?:\.\d{2})?", "[price]", text)
@@ -1050,7 +1066,7 @@ Quality bar:
 - If an uploaded reference image/template is attached, preserve its visual identity and offer category but replace stale readable facts with the controlled customer copy above.
 - If there is no one-time date, present the recurring schedule clearly instead of inventing a date.
 - Avoid QR codes, fake logos, watermarks, unreadable microtext, and placeholder glyph boxes.
-{_telugu_hint(project)}
+{_language_constraint_hint(project)}
 """
 
 

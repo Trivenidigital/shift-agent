@@ -245,6 +245,8 @@ def _extract_replace_text(body: str) -> tuple[str, str]:
             return "", ""
         if any(tok in old_lower for tok in ("date", "time", "phone", "contact", "location", "venue", "address")):
             return "", ""
+        if old_lower in {"it", "this", "that"}:
+            return "", ""
         if old and new and old.lower() != new.lower():
             return old, new
     return "", ""
@@ -506,6 +508,7 @@ MONTHS = {
     "nov": 11, "november": 11,
     "dec": 12, "december": 12,
 }
+DAY_PATTERN = r"(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
 
 
 def _replace_once_or_flag(source: str, old: str, new: str) -> tuple[str, str]:
@@ -537,6 +540,43 @@ def _append_instruction(
         _append_once(notes_update if notes_update is not None else (project.fields.notes or ""), instruction),
         _append_once(raw_request_update if raw_request_update is not None else (project.raw_request or ""), instruction),
     )
+
+
+def _title_day_range(start: str, end: str) -> str:
+    return f"{start.strip().title()} to {end.strip().title()}"
+
+
+def _extract_existing_day_range(project: FlyerProject) -> str:
+    source = f"{project.fields.notes or ''} {project.raw_request or ''}"
+    match = re.search(
+        rf"\b(?P<start>{DAY_PATTERN})\s*(?:to|through|-)\s*(?P<end>{DAY_PATTERN})\b",
+        source,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    return _title_day_range(match.group("start"), match.group("end"))
+
+
+def _extract_day_range_instruction(project: FlyerProject, text: str) -> str:
+    if not text:
+        return ""
+    if not re.search(r"\b(?:change|update|set|make|switch)\b", text, flags=re.IGNORECASE):
+        return ""
+    match = re.search(
+        rf"\b(?:change|update|set|make|switch)\b[^.?!]{{0,80}}?\b(?:to|as)\s+"
+        rf"(?P<start>{DAY_PATTERN})\s*(?:to|through|-)\s*(?P<end>{DAY_PATTERN})\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    new_range = _title_day_range(match.group("start"), match.group("end"))
+    instruction = f"Use schedule {new_range}."
+    old_range = _extract_existing_day_range(project)
+    if old_range and old_range.lower() != new_range.lower():
+        instruction += f" Do not use {old_range}."
+    return instruction
 
 
 def _extract_item_swap(text: str) -> tuple[str, str]:
@@ -794,6 +834,10 @@ def extract_revision_patch(project: FlyerProject, text: str) -> RevisionPatchRes
     remove_time_instruction = _extract_remove_time_instruction(body)
     if remove_time_instruction:
         notes_update, raw_request_update = _append_instruction(notes_update, raw_request_update, project, remove_time_instruction)
+
+    day_range_instruction = _extract_day_range_instruction(project, body)
+    if day_range_instruction:
+        notes_update, raw_request_update = _append_instruction(notes_update, raw_request_update, project, day_range_instruction)
 
     old_text, new_text = _extract_replace_text(body)
     if old_text and new_text:

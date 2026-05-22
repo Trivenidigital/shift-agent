@@ -210,6 +210,17 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
     return facts
 
 
+def _generic_item_price(text: str) -> str:
+    match = re.search(
+        r"\bprice\s+(?:any|every|each|all)\s+(?:item|items?)\s*\$?\s*(?P<price>\d+(?:\.\d{2})?)\b",
+        text or "",
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    return f"${match.group('price')}"
+
+
 def _item_name_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFact]:
     facts: list[FlyerLockedFact] = []
     seen: set[str] = set()
@@ -289,8 +300,26 @@ def extract_text_facts(
     ]:
         if item:
             facts.append(item)
-    facts.extend(_item_price_facts(text, message_id=message_id))
-    facts.extend(_item_name_facts(text, message_id=message_id))
+    item_name_facts = _item_name_facts(text, message_id=message_id)
+    generic_price = _generic_item_price(text)
+    item_price_facts = _item_price_facts(text, message_id=message_id)
+    if generic_price and item_name_facts:
+        item_price_facts = []
+        for name_fact in item_name_facts:
+            match = re.match(r"^item:(?P<index>\d+):name$", name_fact.fact_id)
+            if not match:
+                continue
+            price_fact = _fact(
+                f"item:{match.group('index')}:price",
+                "Price",
+                generic_price,
+                "customer_text",
+                message_id=message_id,
+            )
+            if price_fact:
+                item_price_facts.append(price_fact)
+    facts.extend(item_price_facts)
+    facts.extend(item_name_facts)
     return merge_locked_facts(facts)
 
 

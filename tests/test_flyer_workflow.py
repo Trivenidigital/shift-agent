@@ -589,3 +589,28 @@ def test_location_from_to_revision_does_not_change_title():
     ))
     patch = extract_revision_patch(project, "In the flyer, change location from Triveni Pineville to Lakshmi's Kitchen.")
     assert patch.field_updates == {"venue_or_location": "Lakshmi's Kitchen"}
+
+
+def test_extract_revision_patch_updates_day_range_without_corrupting_business_name():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="MK kitchen",
+        contact_info="+1 571 383 0763",
+        venue_or_location="23596 prosperity ridge pl Ashburn Va 20148",
+        notes=(
+            "Create a professional flyer for MK kitchen. Evening snacks from 4 PM to 7 PM, "
+            "Wednesday to Saturday. Include samosa, mirchi bajji, punugulu, masala vada, and tea."
+        ),
+    ))
+
+    patch = extract_revision_patch(
+        project,
+        "Can you add the prices and make changes to the backdrop. Also change it to Tuesday to Sunday",
+    )
+
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert patch.field_updates == {}
+    assert "Use schedule Tuesday to Sunday" in (patch.notes_update or "")
+    assert "Do not use Wednesday to Saturday" in (patch.notes_update or "")
+    assert "MK kitchen" in (patch.notes_update or "")
+    assert "kTuesday to Sundaychen" not in (patch.notes_update or "")
