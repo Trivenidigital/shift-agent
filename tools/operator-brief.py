@@ -205,7 +205,7 @@ def summarize_flyer_evaluation_report(path: Path | None) -> list[str]:
     if not path.exists():
         return ["Flyer self-evaluation report file not found."]
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
     except json.JSONDecodeError as exc:
         return [redact_text(f"Flyer self-evaluation report is not valid JSON: {exc}")]
 
@@ -243,6 +243,20 @@ def summarize_flyer_evaluation_report(path: Path | None) -> list[str]:
             historical += 1
     if active_risk or historical:
         lines.append(f"Customer risk: active={active_risk}; historical_or_audit={historical}")
+    operating_layer = payload.get("operating_layer") if isinstance(payload.get("operating_layer"), dict) else None
+    if operating_layer is not None:
+        brand = operating_layer.get("brand_memory") if isinstance(operating_layer.get("brand_memory"), dict) else {}
+        source_edit = operating_layer.get("source_edit") if isinstance(operating_layer.get("source_edit"), dict) else {}
+        next_action = operating_layer.get("next_action") if isinstance(operating_layer.get("next_action"), dict) else {}
+        lines.append(
+            "Operating layer: "
+            f"{operating_layer.get('status', 'unknown')}; "
+            f"brand_memory={brand.get('status', 'unknown')} "
+            f"({brand.get('ready_customer_count', 0)}/{brand.get('total_customer_count', 0)}); "
+            f"source_edit={source_edit.get('status', 'unknown')} ({source_edit.get('posture', 'unknown')})"
+        )
+        if next_action.get("summary"):
+            lines.append(redact_text(str(next_action.get("summary"))))
 
     def active_state(item: dict) -> bool | None:
         details = item.get("evidence_details") if isinstance(item.get("evidence_details"), dict) else {}

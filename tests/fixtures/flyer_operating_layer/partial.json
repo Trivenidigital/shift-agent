@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "collected_at": "2026-05-21T23:30:00Z",
+  "customers": [
+    {
+      "customer_id": "CUST0002",
+      "business_name": "Fresh Meats",
+      "business_category": "grocery",
+      "preferred_language": "en",
+      "status": "trial",
+      "active_brand_assets": 0
+    }
+  ],
+  "campaigns": [],
+  "rollout": {
+    "verdict": "green",
+    "source_edit_posture": "configured_with_smoke",
+    "reasons": []
+  },
+  "platform_truthfulness": {
+    "instagram_story_truthful": true,
+    "reason": ""
+  }
+}

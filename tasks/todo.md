@@ -7,6 +7,40 @@ Last updated: 2026-05-21 (Flyer customer-readiness stabilization gate work added
 
 ---
 
+## Active - Flyer Hermes operating layer backlog (2026-05-21)
+
+**Drift-check tag:** extends-Hermes
+
+Hermes-first summary: reuse Hermes memory/session search, background jobs, gateway/provider routing, task orchestration, and operator brief/self-eval substrate. Flyer owns product policy: brand memory readiness, campaign/flyer lifecycle, customer copy, source-edit proof, deterministic final asset truthfulness, approval gates, and backlog evidence. This slice is read-only reporting plus backlog filing; no customer behavior, provider routing, social posting, video generation, or production state changes.
+
+Plan: `docs/superpowers/plans/2026-05-21-flyer-hermes-operating-layer.md`
+Design: `docs/superpowers/specs/2026-05-21-flyer-hermes-operating-layer-design.md`
+
+- [x] Drift-check existing self-eval, operator brief, rollout readiness, customer-copy policy, and model/provider posture docs before adding anything.
+- [x] Hermes-first review: mark Hermes-owned substrate (memory, background, X/Grok/Codex/video/Kanban orchestration) separately from Flyer product policy.
+- [x] Add read-only Flyer operating-layer readiness helper and fixture schema.
+- [x] Wire optional `--operating-layer-input` into `tools/flyer-self-evaluation.py`.
+- [x] Surface operating-layer status and next action in `tools/operator-brief.py`.
+- [x] File every Hermes-update option as a deferred backlog key with owner and guardrail.
+- [ ] Deferred - `source_edit_smoke_proof`: run a spend-gated 5-10 case source-preserving edit smoke before enabling automated source-edit reliance.
+- [ ] Deferred - `persistent_brand_memory_activation`: turn the readiness signal into customer-visible brand memory only after enough QA-passed delivered assets exist.
+- [ ] Deferred - `session_search_campaign_history`: use Hermes memory/session search to retrieve prior campaign styles, edits, and outcomes.
+- [ ] Deferred - `background_render_qa_exports`: use Hermes background tasks for render, QA, resize/export, translation, and caption work after state-machine gates are stable.
+- [ ] Deferred - `xai_grok_provider_posture`: evaluate Grok/xAI OAuth as an orchestration provider without changing production routing.
+- [ ] Deferred - `x_search_fetching`: evaluate Hermes X fetching for campaign research, trend discovery, and customer-approved social monitoring.
+- [ ] Deferred - `x_social_posting_approval`: add approval gates before any X/social publishing or reply automation.
+- [ ] Deferred - `codex_offline_self_improvement`: use Codex/Hermes only for offline PR-gated template/test improvements; no runtime code/prompt/model self-modification.
+- [ ] Deferred - `native_video_conversion`: design flyer-to-reel/video exports as an approved media lane with paid-generation gates.
+- [ ] Deferred - `auto_kanban_operator_work`: use Hermes Kanban/task decomposition for operator backlog management, not autonomous production mutation.
+- [ ] Deferred - `multi_format_export_truthfulness`: prove WhatsApp image, Instagram post/story, and printable PDF artifact shapes before advertising them as supported outputs.
+- [ ] Deferred - `autonomous_campaigns_with_approval`: define "run Friday specials campaign" as a multi-step plan with explicit customer/operator approval gates.
+- [ ] Deferred - `campaign_analytics_memory`: store campaign performance/outcome memory before ranking designs or sources.
+- [ ] Deferred - `publishing_engine_approval_gates`: design social/email publishing connectors with identity, approval, and audit gates.
+- [ ] Deferred - `hybrid_layout_final_renderer`: move toward structured layout plus deterministic text renderer for final assets where feasible.
+- [ ] Deferred - `marketing_os_long_term`: package Flyer Studio as an autonomous local business marketing OS only after memory, exports, approvals, publishing, and analytics are proven.
+
+---
+
 ## Active - Flyer customer-readiness stabilization gate (2026-05-21)
 
 **Drift-check tag:** extends-Hermes
