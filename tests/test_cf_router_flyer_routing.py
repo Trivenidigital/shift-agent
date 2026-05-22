@@ -721,6 +721,7 @@ def test_routing_decision_preview_keeps_revision_status_and_approval_paths():
 def test_sample_prompt_preference_text_is_account_command():
     actions = _load_actions()
 
+    assert actions.is_flyer_account_command("update business name to Lakshmi's Kitchen")
     assert actions.is_flyer_account_command("don't show sample prompts")
     assert actions.is_flyer_account_command("show sample prompts again")
     assert actions.is_flyer_account_command("[shift-agent-sender v=1 role=customer]\nstop showing examples")
@@ -944,6 +945,46 @@ def test_vague_start_during_active_project_routes_to_project_not_starter(monkeyp
     ))
 
     assert result == {"action": "skip", "reason": "active project"}
+
+
+def test_business_name_update_command_runs_before_active_project_revision(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    sent = []
+
+    monkeypatch.setattr(actions, "is_flyer_enabled", lambda: True)
+    monkeypatch.setattr(actions, "flyer_campaign_cta_text", lambda _text: "")
+    monkeypatch.setattr(hooks, "_try_flyer_intake_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_reference_scope_choice_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_reference_scope_authorization_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_existing_onboarding_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        hooks,
+        "_try_flyer_active_project_intercept",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("account command must not route as queued flyer edit")),
+    )
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {
+        "customer_id": "CUST0001",
+        "status": "trial",
+        "business_name": "Lakshmis Kitchn",
+    })
+    monkeypatch.setattr(actions, "trigger_flyer_account_command", lambda **_kwargs: (True, "ok", {
+        "handled": True,
+        "reply_text": "Flyer Studio\n------------\nBusiness name updated.",
+        "customer_id": "CUST0001",
+        "status": "trial",
+    }))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+
+    result = hooks.pre_gateway_dispatch(SimpleNamespace(
+        text="update business name to Lakshmi's Kitchen",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="m-business-name",
+    ))
+
+    assert result == {"action": "skip", "reason": "cf-router flyer account command"}
+    assert sent == ["Flyer Studio\n------------\nBusiness name updated."]
 
 
 def test_repeated_full_request_during_open_intake_generates_existing_project(monkeypatch):
