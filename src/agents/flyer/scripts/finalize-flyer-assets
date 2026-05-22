@@ -76,7 +76,15 @@ def main() -> int:
                 write_visual_qa_report(report, spec.path)
                 qa_reports.append(report)
             failed_qa = [report for report in qa_reports if report.status != "passed"]
-            if failed_qa:
+            failed_core_qa = [
+                report for report in failed_qa if report.output_format == "whatsapp_image"
+            ]
+            passed_asset_ids = [
+                asset.asset_id
+                for asset, report in zip(assets, qa_reports)
+                if report.status == "passed"
+            ]
+            if failed_core_qa or not any(report.output_format == "whatsapp_image" for report in qa_reports if report.status == "passed"):
                 manual = make_manual_review(
                     reason_code="visual_qa_failed",
                     detail="; ".join(blocker for report in failed_qa for blocker in report.blockers)[:500],
@@ -96,16 +104,25 @@ def main() -> int:
                     "visual_qa_failed": [report.model_dump(mode="json") for report in failed_qa],
                 }))
                 return 2
+            skipped_optional_qa = [
+                report for report in failed_qa if report.output_format != "whatsapp_image"
+            ]
             store.projects[idx] = project.model_copy(update={
                 "status": "finalizing_assets",
                 "approved_message_id": args.approved_message_id,
                 "assets": [*project.assets, *assets],
                 "qa_reports": [*project.qa_reports, *qa_reports],
-                "final_asset_ids": [asset.asset_id for asset in assets],
+                "final_asset_ids": passed_asset_ids,
                 "updated_at": now,
             })
             atomic_write_text(state_path, store.model_dump_json(indent=2))
-            print(json.dumps({"project_id": args.project_id, "final_asset_count": 4}))
+            print(json.dumps({
+                "project_id": args.project_id,
+                "final_asset_count": len(passed_asset_ids),
+                "skipped_optional_final_asset_count": len(skipped_optional_qa),
+                "skipped_optional_final_assets": [report.asset_id for report in skipped_optional_qa],
+                "optional_visual_qa_failed": [report.model_dump(mode="json") for report in skipped_optional_qa],
+            }))
             return 0
     raise SystemExit(f"project not found: {args.project_id}")
 
