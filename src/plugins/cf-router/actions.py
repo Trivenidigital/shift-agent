@@ -16,6 +16,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -496,10 +497,22 @@ _FLYER_INTENT_CONTEXT: contextvars.ContextVar[dict[str, Any] | None] = contextva
 
 
 def _ensure_src_path() -> None:
-    for path in (SRC_DIR, Path(__file__).resolve().parents[2]):
+    for path in (PLATFORM_DIR, SRC_DIR, Path(__file__).resolve().parents[2]):
         text = str(path)
         if text not in sys.path and path.exists():
             sys.path.insert(0, text)
+
+
+def _import_flyer_intent_module():
+    _ensure_src_path()
+    try:
+        from agents.flyer import intent as flyer_intent  # type: ignore
+
+        return flyer_intent
+    except Exception:
+        import flyer_intent  # type: ignore
+
+        return flyer_intent
 
 
 def _short_hash(value: str) -> str:
@@ -529,30 +542,29 @@ def begin_flyer_intent_shadow(
     project_status: str = "",
     intake_status: str = "",
 ) -> contextvars.Token | None:
-    _ensure_src_path()
     try:
-        from agents.flyer.intent import (
-            FlyerIntentContext,
-            FlyerIntentDecision,
-            mode_from_value,
-            validate_flyer_intent_decision,
-        )
+        flyer_intent = _import_flyer_intent_module()
     except Exception:
         return None
 
     requested_mode = os.environ.get("FLYER_HERMES_INTENT_MODE", "shadow")
-    mode = mode_from_value(requested_mode)
+    mode = flyer_intent.mode_from_value(requested_mode)
     if str(mode) == "off":
         return None
     candidate = flyer_intent_shadow_candidate(text, has_media=has_media)
-    decision = FlyerIntentDecision(decision_source="none")
-    validation = validate_flyer_intent_decision(
+    decision = flyer_intent.FlyerIntentDecision(decision_source="none")
+    validation = flyer_intent.validate_flyer_intent_decision(
         decision,
-        FlyerIntentContext(mode=mode, raw_request="", risk_scope="pre_project_customer_visible" if candidate else "none"),
+        flyer_intent.FlyerIntentContext(
+            mode=mode,
+            raw_request=text if candidate else "",
+            risk_scope="pre_project_customer_visible" if candidate else "none",
+        ),
     )
     context = {
         "mode": str(mode),
         "requested_mode": requested_mode or "shadow",
+        "text": str(text or "")[:4000],
         "decision": decision,
         "validation": validation,
         "message_id_hash": _short_hash(message_id),
@@ -566,6 +578,10 @@ def begin_flyer_intent_shadow(
         "risk_scope": "pre_project_customer_visible" if candidate else "none",
         "route_events": [],
         "candidate": candidate,
+        "classifier_status": "off",
+        "classifier_latency_ms": 0,
+        "classifier_error_kind": "",
+        "classifier_error_detail": "",
     }
     return _FLYER_INTENT_CONTEXT.set(context)
 
@@ -635,6 +651,7 @@ def finalize_flyer_intent_shadow(
     *,
     hook_result: Optional[dict] = None,
     error: Exception | None = None,
+    gateway: Any = None,
 ) -> None:
     context = _FLYER_INTENT_CONTEXT.get()
     if not context:
@@ -652,17 +669,87 @@ def finalize_flyer_intent_shadow(
     selected_project_id = str(terminal.get("project_id") or "")
     project_status = str(terminal.get("status") or context.get("project_status") or "")
 
-    _ensure_src_path()
     try:
-        from agents.flyer.intent import normalize_actual_action
+        flyer_intent = _import_flyer_intent_module()
     except Exception:
         return
-    actual_action = normalize_actual_action(actual_route, branch_reason)
+    actual_action = flyer_intent.normalize_actual_action(actual_route, branch_reason)
     risk_scope = _risk_scope_from_action(actual_action, route_events, candidate)
+    decision = context["decision"]
+    validation = context["validation"]
+    classifier_status = "off"
+    classifier_latency_ms = 0
+    classifier_error_kind = ""
+    classifier_error_detail = ""
+    classifier_setting = flyer_intent.classifier_setting_from_env(os.environ.get("FLYER_HERMES_INTENT_CLASSIFIER"))
+    if classifier_setting == "shadow":
+        if not route_events:
+            classifier_status = "skipped_passthrough" if candidate else "skipped_not_candidate"
+        else:
+            try:
+                classifier = _flyer_classifier_callable_from_gateway(gateway)
+            except Exception as exc:
+                classifier = None
+                classifier_status = "error"
+                classifier_error_kind = type(exc).__name__
+            if classifier is None:
+                if classifier_status != "error":
+                    classifier_status = "skipped_no_gateway"
+            else:
+                request = flyer_intent.FlyerClassifierRequest(
+                    text=str(context.get("text") or ""),
+                    has_media=bool(context.get("has_media")),
+                    actual_route=actual_route,
+                    actual_action=actual_action,
+                    route_sequence=[str(event.get("reason") or "") for event in route_events],
+                    branch_return_reason=branch_reason,
+                    customer_status=str(context.get("customer_status") or ""),
+                    project_status=project_status,
+                    intake_status=str(context.get("intake_status") or ""),
+                    risk_scope=risk_scope,
+                )
+                audit_kwargs = dict(
+                    mode=mode,
+                    message_id_hash=str(context.get("message_id_hash") or ""),
+                    chat_key_hash=str(context.get("chat_key_hash") or ""),
+                    has_media=bool(context.get("has_media")),
+                    actual_route=actual_route,
+                    actual_reason=actual_reason,
+                    actual_action=actual_action,
+                    route_sequence=[str(event.get("reason") or "") for event in route_events],
+                    subprocess_rc=subprocess_rc if isinstance(subprocess_rc, int) else None,
+                    branch_return_reason=branch_reason,
+                    selected_project_id=selected_project_id,
+                    prior_active_project_id=str(context.get("prior_active_project_id") or ""),
+                    project_status=project_status,
+                    customer_status=str(context.get("customer_status") or ""),
+                    intake_status=str(context.get("intake_status") or ""),
+                    risk_scope=risk_scope,
+                    active_customer_risk=risk_scope != "none",
+                )
+                worker = threading.Thread(
+                    target=_run_flyer_classifier_shadow_worker,
+                    kwargs={
+                        "classifier": classifier,
+                        "request": request,
+                        "requested_mode": str(context.get("requested_mode") or "shadow"),
+                        "raw_request": str(context.get("text") or ""),
+                        "risk_scope": risk_scope,
+                        "timeout_ms": _flyer_classifier_timeout_ms(),
+                        "audit_kwargs": audit_kwargs,
+                    },
+                    daemon=True,
+                )
+                worker.start()
+                return
     audit_flyer_hermes_intent_decision(
         mode=mode,
-        decision=context["decision"],
-        validation=context["validation"],
+        decision=decision,
+        validation=validation,
+        classifier_status=classifier_status,
+        classifier_latency_ms=classifier_latency_ms,
+        classifier_error_kind=classifier_error_kind,
+        classifier_error_detail=classifier_error_detail,
         message_id_hash=str(context.get("message_id_hash") or ""),
         chat_key_hash=str(context.get("chat_key_hash") or ""),
         has_media=bool(context.get("has_media")),
@@ -682,6 +769,58 @@ def finalize_flyer_intent_shadow(
     )
 
 
+def _flyer_classifier_timeout_ms() -> int:
+    try:
+        return max(1, min(250, int(os.environ.get("FLYER_HERMES_INTENT_CLASSIFIER_TIMEOUT_MS", "50"))))
+    except Exception:
+        return 50
+
+
+def _flyer_classifier_callable_from_gateway(gateway: Any) -> Any:
+    if gateway is None:
+        return None
+    for name in ("flyer_intent_classifier", "classify_flyer_intent"):
+        candidate = getattr(gateway, name, None)
+        if callable(candidate):
+            return candidate
+    return None
+
+
+def _run_flyer_classifier_shadow_worker(
+    *,
+    classifier: Any,
+    request: Any,
+    requested_mode: str,
+    raw_request: str,
+    risk_scope: str,
+    timeout_ms: int,
+    audit_kwargs: dict[str, Any],
+) -> None:
+    try:
+        flyer_intent = _import_flyer_intent_module()
+        result = flyer_intent.run_classifier_shadow(classifier, request, timeout_ms=timeout_ms)
+        decision = result.decision
+        validation = flyer_intent.validate_flyer_intent_decision(
+            decision,
+            flyer_intent.FlyerIntentContext(
+                mode=flyer_intent.mode_from_value(requested_mode),
+                raw_request=raw_request,
+                risk_scope=risk_scope,
+            ),
+        )
+        audit_flyer_hermes_intent_decision(
+            decision=decision,
+            validation=validation,
+            classifier_status=str(result.status),
+            classifier_latency_ms=int(result.latency_ms),
+            classifier_error_kind=str(result.error_kind),
+            classifier_error_detail=str(result.error_detail),
+            **audit_kwargs,
+        )
+    except Exception as exc:
+        sys.stderr.write(f"cf-router: flyer intent classifier worker failed (non-fatal): {exc}\n")
+
+
 def audit_flyer_hermes_intent_decision(
     *,
     mode: str,
@@ -696,6 +835,10 @@ def audit_flyer_hermes_intent_decision(
     route_sequence: list[str],
     subprocess_rc: Optional[int],
     branch_return_reason: str,
+    classifier_status: str = "off",
+    classifier_latency_ms: int = 0,
+    classifier_error_kind: str = "",
+    classifier_error_detail: str = "",
     selected_project_id: str = "",
     prior_active_project_id: str = "",
     project_status: str = "",
@@ -716,6 +859,10 @@ def audit_flyer_hermes_intent_decision(
             schema_version=1,
             mode=mode,
             decision_source=getattr(decision, "decision_source", "none"),
+            classifier_status=classifier_status,  # type: ignore[arg-type]
+            classifier_latency_ms=classifier_latency_ms,
+            classifier_error_kind=classifier_error_kind,
+            classifier_error_detail=classifier_error_detail,
             message_id_hash=message_id_hash or "unknown",
             chat_key_hash=chat_key_hash,
             has_media=has_media,

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 import sys
+import time
+import json
 from pathlib import Path
 from typing import get_args
 
@@ -16,12 +18,16 @@ sys.path.insert(0, str(SRC))
 sys.path.insert(0, str(PLATFORM))
 
 from agents.flyer.intent import (  # noqa: E402
+    FlyerClassifierRequest,
     FlyerIntentContext,
     FlyerIntentDecision,
     FlyerIntentMode,
     build_training_example,
+    classifier_setting_from_env,
     mode_from_value,
     normalize_actual_action,
+    parse_classifier_payload,
+    run_classifier_shadow,
     validate_flyer_intent_decision,
 )
 from schemas import CfRouterIntercepted, FlyerHermesIntentDecision, LogEntry  # noqa: E402
@@ -124,6 +130,10 @@ def test_training_example_is_pii_light_and_hash_based():
         intent="new_flyer",
         action="create_project",
         confidence=0.92,
+        customer_reply="Got it. I can create that flyer.",
+        clarifying_question="What date should I use?",
+        target_project_id="F0065",
+        reason="customer asked for Weekend Breakfast Specials",
         evidence=["has flyer request"],
     )
     validation = validate_flyer_intent_decision(decision, FlyerIntentContext(mode=FlyerIntentMode.SHADOW))
@@ -139,7 +149,76 @@ def test_training_example_is_pii_light_and_hash_based():
     assert example["message_id_hash"] == "abc123"
     assert example["chat_key_hash"] == "def456"
     assert "raw_request" not in example
-    assert example["decision"]["intent"] == "new_flyer"
+    assert example["intent"] == "new_flyer"
+    assert example["action"] == "create_project"
+    assert "decision" not in example
+    assert "customer_reply" not in json.dumps(example)
+    assert "clarifying_question" not in json.dumps(example)
+    assert "target_project_id" not in json.dumps(example)
+    assert "Weekend Breakfast" not in json.dumps(example)
+
+
+def test_classifier_payload_parser_marks_hermes_gateway_source():
+    decision = parse_classifier_payload(
+        {
+            "schema_version": 1,
+            "decision_source": "fixture",
+            "intent": "new_flyer",
+            "action": "create_project",
+            "confidence": 0.93,
+        }
+    )
+
+    assert decision.decision_source == "hermes_gateway_future"
+    assert decision.intent == "new_flyer"
+
+
+def test_classifier_setting_only_enables_shadow():
+    assert classifier_setting_from_env("shadow") == "shadow"
+    assert classifier_setting_from_env("off") == "off"
+    assert classifier_setting_from_env("active") == "off"
+    assert classifier_setting_from_env("") == "off"
+
+
+def test_classifier_shadow_reports_invalid_and_timeout_without_throwing():
+    request = FlyerClassifierRequest(
+        text="Create flyer for lunch",
+        has_media=False,
+        actual_route="flyer_primary_project_created",
+        actual_action="new_project",
+    )
+
+    invalid = run_classifier_shadow(lambda _request: {"unexpected": "shape"}, request, timeout_ms=50)
+    assert invalid.status == "invalid"
+    assert invalid.decision.decision_source == "none"
+
+    def slow(_request):
+        time.sleep(0.2)
+        return {"intent": "new_flyer", "action": "create_project", "confidence": 0.95}
+
+    timeout = run_classifier_shadow(slow, request, timeout_ms=10)
+    assert timeout.status == "timeout"
+    assert timeout.decision.decision_source == "none"
+    assert timeout.latency_ms >= 0
+
+
+def test_classifier_shadow_success_validates_decision():
+    request = FlyerClassifierRequest(
+        text="Approve",
+        has_media=False,
+        actual_route="flyer_project_finalized",
+        actual_action="approval",
+    )
+
+    result = run_classifier_shadow(
+        lambda _request: {"intent": "approve_final", "action": "approve_project", "confidence": 0.96},
+        request,
+        timeout_ms=100,
+    )
+
+    assert result.status == "success"
+    assert result.decision.decision_source == "hermes_gateway_future"
+    assert result.decision.intent == "approve_final"
 
 
 def test_cf_router_flyer_reason_literals_match_schema():
@@ -164,6 +243,10 @@ def test_flyer_hermes_intent_decision_schema_round_trips():
         "schema_version": 1,
         "mode": "shadow",
         "decision_source": "fixture",
+        "classifier_status": "success",
+        "classifier_latency_ms": 12,
+        "classifier_error_kind": "",
+        "classifier_error_detail": "",
         "message_id_hash": "mhash",
         "chat_key_hash": "chash",
         "has_media": False,
@@ -200,6 +283,7 @@ def test_flyer_hermes_intent_decision_schema_round_trips():
 def test_shadow_context_emits_terminal_route_not_intermediate_bypass(monkeypatch):
     actions = _load_actions()
     emitted: list[dict] = []
+    monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER", "shadow")
     monkeypatch.setattr(actions, "audit_flyer_hermes_intent_decision", lambda **kw: emitted.append(kw))
 
     token = actions.begin_flyer_intent_shadow(
@@ -229,6 +313,154 @@ def test_shadow_context_emits_terminal_route_not_intermediate_bypass(monkeypatch
     assert emitted[0]["actual_route"] == "flyer_primary_project_created"
     assert emitted[0]["route_sequence"] == ["flyer_active_project_bypassed", "flyer_primary_project_created"]
     assert emitted[0]["message_id_hash"] != "wamid.test"
+    assert emitted[0]["classifier_status"] == "skipped_no_gateway"
+
+
+def test_shadow_context_uses_injected_gateway_classifier_after_route(monkeypatch):
+    actions = _load_actions()
+    emitted: list[dict] = []
+    monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER", "shadow")
+    monkeypatch.setattr(actions, "audit_flyer_hermes_intent_decision", lambda **kw: emitted.append(kw))
+
+    class FakeGateway:
+        def flyer_intent_classifier(self, request):
+            return {
+                "schema_version": 1,
+                "intent": "new_flyer",
+                "action": "create_project",
+                "confidence": 0.95,
+            }
+
+    token = actions.begin_flyer_intent_shadow(
+        text="Create flyer for evening snacks",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="wamid.test",
+        has_media=False,
+    )
+    try:
+        actions.record_flyer_intent_route_event(
+            reason="flyer_primary_project_created",
+            subprocess_rc=0,
+            detail="project_id=F0065",
+        )
+        actions.finalize_flyer_intent_shadow(
+            hook_result={"action": "skip", "reason": "cf-router flyer primary created"},
+            gateway=FakeGateway(),
+        )
+    finally:
+        actions.reset_flyer_intent_shadow(token)
+
+    _wait_for(lambda: bool(emitted))
+    assert emitted[0]["classifier_status"] == "success"
+    assert emitted[0]["decision"].decision_source == "hermes_gateway_future"
+    assert emitted[0]["validation"].ok is True
+
+
+def test_shadow_context_classifier_runs_after_finalizer_returns(monkeypatch):
+    actions = _load_actions()
+    emitted: list[dict] = []
+    monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER", "shadow")
+    monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER_TIMEOUT_MS", "250")
+    monkeypatch.setattr(actions, "audit_flyer_hermes_intent_decision", lambda **kw: emitted.append(kw))
+
+    class SlowGateway:
+        def flyer_intent_classifier(self, request):
+            time.sleep(0.2)
+            return {"intent": "new_flyer", "action": "create_project", "confidence": 0.95}
+
+    token = actions.begin_flyer_intent_shadow(
+        text="Create flyer for evening snacks",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="wamid.test",
+        has_media=False,
+    )
+    try:
+        actions.record_flyer_intent_route_event(
+            reason="flyer_primary_project_created",
+            subprocess_rc=0,
+            detail="project_id=F0065",
+        )
+        start = time.monotonic()
+        actions.finalize_flyer_intent_shadow(
+            hook_result={"action": "skip", "reason": "cf-router flyer primary created"},
+            gateway=SlowGateway(),
+        )
+        elapsed_ms = (time.monotonic() - start) * 1000
+    finally:
+        actions.reset_flyer_intent_shadow(token)
+
+    assert elapsed_ms < 50
+    _wait_for(lambda: bool(emitted), timeout=1.0)
+    assert emitted[0]["classifier_status"] == "success"
+
+
+def test_shadow_context_does_not_call_classifier_for_passthrough_candidate(monkeypatch):
+    actions = _load_actions()
+    emitted: list[dict] = []
+    called = False
+    monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER", "shadow")
+    monkeypatch.setattr(actions, "audit_flyer_hermes_intent_decision", lambda **kw: emitted.append(kw))
+
+    class FakeGateway:
+        def flyer_intent_classifier(self, request):
+            nonlocal called
+            called = True
+            return {"intent": "new_flyer", "action": "create_project", "confidence": 0.95}
+
+    token = actions.begin_flyer_intent_shadow(
+        text="Create flyer maybe later",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="wamid.test",
+        has_media=False,
+    )
+    try:
+        actions.finalize_flyer_intent_shadow(hook_result=None, gateway=FakeGateway())
+    finally:
+        actions.reset_flyer_intent_shadow(token)
+
+    assert called is False
+    assert emitted[0]["classifier_status"] == "skipped_passthrough"
+
+
+def test_shadow_context_contains_gateway_classifier_failures(monkeypatch):
+    actions = _load_actions()
+    emitted: list[dict] = []
+    monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER", "shadow")
+    monkeypatch.setattr(actions, "audit_flyer_hermes_intent_decision", lambda **kw: emitted.append(kw))
+
+    class BadGateway:
+        @property
+        def flyer_intent_classifier(self):
+            raise RuntimeError("gateway property exploded")
+
+    token = actions.begin_flyer_intent_shadow(
+        text="Create flyer for evening snacks",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="wamid.test",
+        has_media=False,
+    )
+    try:
+        actions.record_flyer_intent_route_event(
+            reason="flyer_primary_project_created",
+            subprocess_rc=0,
+            detail="project_id=F0065",
+        )
+        actions.finalize_flyer_intent_shadow(
+            hook_result={"action": "skip", "reason": "cf-router flyer primary created"},
+            gateway=BadGateway(),
+        )
+    finally:
+        actions.reset_flyer_intent_shadow(token)
+
+    assert emitted[0]["classifier_status"] == "error"
+    assert emitted[0]["classifier_error_kind"] == "RuntimeError"
+
+
+def test_shadow_classifier_timeout_is_hard_capped(monkeypatch):
+    actions = _load_actions()
+    monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER_TIMEOUT_MS", "5000")
+
+    assert actions._flyer_classifier_timeout_ms() == 250
 
 
 def test_shadow_context_off_mode_emits_nothing(monkeypatch):
@@ -246,3 +478,25 @@ def test_shadow_context_off_mode_emits_nothing(monkeypatch):
 
     assert token is None
     assert emitted == []
+
+
+def _wait_for(predicate, *, timeout: float = 0.5) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.01)
+    assert predicate()
+
+
+def test_static_no_provider_client_in_intent_or_cf_router_classifier_glue():
+    forbidden = ("openai", "openrouter", "urllib.request", "requests.", "api_key")
+    intent_source = (REPO / "src" / "agents" / "flyer" / "intent.py").read_text(encoding="utf-8").lower()
+    actions_source = (REPO / "src" / "plugins" / "cf-router" / "actions.py").read_text(encoding="utf-8").lower()
+    classifier_glue = actions_source[
+        actions_source.index("# === flyer hermes intent shadow context ===") :
+        actions_source.index("# === audit ===")
+    ]
+    for name, source in (("intent.py", intent_source), ("actions classifier glue", classifier_glue)):
+        for term in forbidden:
+            assert term not in source, f"{name} must not contain provider client term {term!r}"

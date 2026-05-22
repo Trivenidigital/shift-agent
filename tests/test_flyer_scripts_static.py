@@ -471,12 +471,19 @@ def test_production_readiness_modules_installed_and_smoked():
         "flyer_reference_extract",
         "flyer_visual_qa",
         "flyer_manual_queue",
+        "flyer_intent",
+        "flyer_intent_training",
+        "flyer_customer_copy_policy",
     ]:
         assert f"/opt/shift-agent/{module}.py" in deploy
         assert f"import {module}" in smoke
 
     assert "flyer-manual-queue" in deploy
     assert "flyer-manual-queue" in smoke
+    assert "flyer-intent-training-export" in deploy
+    assert "/usr/local/bin/flyer-intent-training-export" in smoke
+    assert "begin_flyer_intent_shadow" in smoke
+    assert "flyer_hermes_intent_decision" in smoke
 
 
 def test_cockpit_deploy_restart_uses_health_probe_without_systemctl_wait():

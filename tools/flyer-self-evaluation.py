@@ -34,6 +34,7 @@ from agents.flyer.customer_copy_policy import (  # noqa: E402
     extract_customer_copy_literals as policy_extract_customer_copy_literals,
     extract_function_block as policy_extract_function_block,
     extract_send_call_literals,
+    scan_customer_text,
     scan_outbound_entry,
 )
 from agents.flyer.rollout_readiness import (  # noqa: E402
@@ -51,6 +52,7 @@ from agents.flyer.operating_layer import (  # noqa: E402
     build_operating_layer_section,
     render_operating_layer_markdown,
 )
+from agents.flyer.intent_training import FlyerIntentTrainingExample  # noqa: E402
 
 DEFAULT_SOURCE_FILES = (
     Path("src/plugins/cf-router/actions.py"),
@@ -62,6 +64,13 @@ INTERNAL_COPY_TERMS = BANNED_CUSTOMER_COPY_TERMS
 SOURCE_QA_MARKERS = ("source", "contract", "integrity", "operator_review")
 SOURCE_POSITIVE_FACT_PREFIXES = ("source_heading:", "source_section:", "source_required_text:")
 REPLACEMENT_NEW_FACT_RE = re.compile(r"^replacement:\d+:new$")
+TRAINING_EXPORT_STALE_HOURS = 24
+PHONE_LIKE_RE = re.compile(r"(?:\+\d{8,15}|\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b)")
+ADDRESS_LIKE_RE = re.compile(
+    r"\b\d{1,6}\s+[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,5}\s+"
+    r"(?:st|street|rd|road|dr|drive|ave|avenue|ln|lane|blvd|way)\b",
+    re.IGNORECASE,
+)
 
 SOURCE_EDIT_CUES = (
     "do not change anything else",
@@ -1058,8 +1067,23 @@ def hermes_intent_incidents(
             "actual_route": str(row.get("actual_route") or ""),
             "actual_action": str(row.get("actual_action") or ""),
             "decision_source": source,
+            "classifier_status": str(row.get("classifier_status") or "off"),
+            "classifier_latency_ms": row.get("classifier_latency_ms") or 0,
+            "classifier_error_kind": str(row.get("classifier_error_kind") or ""),
             "validator_reasons": row.get("validator_reasons") or [],
         }
+        classifier_status = str(row.get("classifier_status") or "off")
+        if classifier_status in {"timeout", "invalid", "error"}:
+            out.append(
+                incident(
+                    "hermes_intent_classifier_runtime_failure",
+                    severity="medium",
+                    evidence=f"classifier_status={classifier_status}; actual_action={details['actual_action']}",
+                    suggested_action="Inspect the Hermes classifier adapter before trusting shadow comparisons for this route family.",
+                    category="hermes_intent",
+                    evidence_details=details,
+                )
+            )
         if mode == "unsupported_active_mode":
             out.append(
                 incident(
@@ -1117,6 +1141,119 @@ def hermes_intent_incidents(
                     )
                 )
     return out
+
+
+def flyer_intent_training_export_incidents(
+    entries: list[dict[str, Any]],
+    *,
+    expect_export: bool,
+    artifact_path: Path | None = None,
+) -> list[dict[str, Any]]:
+    if not expect_export:
+        return []
+    intent_rows = [row for row in entries if row.get("type") == "flyer_hermes_intent_decision"]
+    out: list[dict[str, Any]] = []
+    if artifact_path is None or not artifact_path.exists():
+        if intent_rows:
+            out.append(
+                incident(
+                    "flyer_intent_training_export_missing",
+                    severity="medium",
+                    evidence="intent shadow rows exist but no training export artifact was supplied",
+                    suggested_action="Run flyer-intent-training-export and attach the JSONL artifact before using Hermes self-learning metrics.",
+                    category="hermes_intent",
+                    evidence_details={
+                        "active_customer_risk": True,
+                        "risk_scope": "pre_project_customer_visible",
+                        "intent_shadow_rows": len(intent_rows),
+                        "artifact_path": str(artifact_path or ""),
+                    },
+                )
+            )
+        return out
+
+    age_hours = max(0.0, (utc_now() - datetime.fromtimestamp(artifact_path.stat().st_mtime, tz=timezone.utc)).total_seconds() / 3600.0)
+    if intent_rows and age_hours > TRAINING_EXPORT_STALE_HOURS:
+        out.append(
+            incident(
+                "flyer_intent_training_export_stale",
+                severity="medium",
+                evidence=f"training export artifact age={age_hours:.1f}h",
+                suggested_action="Regenerate flyer-intent-training-export before using Hermes self-learning metrics.",
+                category="hermes_intent",
+                evidence_details={
+                    "active_customer_risk": False,
+                    "artifact_age_hours": round(age_hours, 2),
+                    "threshold_hours": TRAINING_EXPORT_STALE_HOURS,
+                    "artifact_path": str(artifact_path),
+                },
+            )
+        )
+
+    redaction_hits: list[str] = []
+    malformed = 0
+    for idx, line in enumerate(artifact_path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except Exception:
+            malformed += 1
+            continue
+        if not isinstance(row, dict):
+            malformed += 1
+            continue
+        try:
+            FlyerIntentTrainingExample.model_validate(row)
+        except Exception as exc:
+            redaction_hits.append(f"line {idx}: schema violation {type(exc).__name__}")
+        serialized = json.dumps(row, sort_keys=True)
+        scan = scan_customer_text(serialized, raw_request="")
+        if scan.hits:
+            redaction_hits.append(f"line {idx}: {', '.join(scan.matched_values[:5])}")
+        if PHONE_LIKE_RE.search(serialized):
+            redaction_hits.append(f"line {idx}: phone-like value")
+        if ADDRESS_LIKE_RE.search(serialized):
+            redaction_hits.append(f"line {idx}: address-like value")
+        for forbidden in ("customer_reply", "clarifying_question", "actual_reason", "selected_project_id", "target_project_id"):
+            if _contains_key(row, forbidden):
+                redaction_hits.append(f"line {idx}: forbidden field {forbidden}")
+    if malformed:
+        out.append(
+            incident(
+                "flyer_intent_training_export_malformed",
+                severity="medium",
+                evidence=f"malformed training export rows={malformed}",
+                suggested_action="Regenerate the Flyer intent training export before ingestion.",
+                category="hermes_intent",
+                evidence_details={"active_customer_risk": False, "malformed_rows": malformed},
+            )
+        )
+    if redaction_hits:
+        out.append(
+            incident(
+                "flyer_intent_training_export_redaction_failed",
+                severity="high",
+                evidence="; ".join(redaction_hits[:5]),
+                suggested_action="Fix the training export allowlist before sharing it with Hermes self-evolution workflows.",
+                category="hermes_intent",
+                evidence_details={
+                    "active_customer_risk": True,
+                    "risk_scope": "pre_project_customer_visible",
+                    "redaction_hit_count": len(redaction_hits),
+                    "artifact_path": str(artifact_path),
+                },
+            )
+        )
+    return out
+
+
+def _contains_key(value: Any, key: str) -> bool:
+    if isinstance(value, dict):
+        return key in value or any(_contains_key(item, key) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_key(item, key) for item in value)
+    return False
 
 
 def uncovered_flyer_cf_router_rows(
@@ -1255,6 +1392,8 @@ def build_report(
     rollout_fixture: RolloutInputFixture | None = None,
     operating_layer_input: dict[str, Any] | None = None,
     expected_hermes_intent_mode: str = "",
+    expect_flyer_intent_training_export: bool = False,
+    flyer_intent_training_json: Path | None = None,
     manual_stale_red_minutes: int = 30,
 ) -> dict[str, Any]:
     now = now or utc_now()
@@ -1273,6 +1412,11 @@ def build_report(
         + repeated_checkin_incidents(decision_entries, threshold=repeated_checkin_threshold)
         + preview_final_qa_mismatch_incidents(project_rows, decision_entries)
         + hermes_intent_incidents(decision_entries, expected_mode=expected_hermes_intent_mode)
+        + flyer_intent_training_export_incidents(
+            decision_entries,
+            expect_export=expect_flyer_intent_training_export,
+            artifact_path=flyer_intent_training_json,
+        )
     )
     # Color threshold is single-sourced via incident_color (from rollout_readiness).
     status = incident_color(incidents)
@@ -1427,6 +1571,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default="",
         help="Expected Flyer Hermes intent mode for coverage checks. Use shadow to alert when Flyer traffic lacks shadow rows.",
     )
+    parser.add_argument(
+        "--expect-flyer-intent-training-export",
+        action="store_true",
+        help="Alert when Flyer Hermes intent shadow rows exist but no redacted training export artifact is supplied.",
+    )
+    parser.add_argument(
+        "--flyer-intent-training-json",
+        type=Path,
+        default=None,
+        help="Path to a flyer-intent-training-export JSONL artifact to validate for redaction.",
+    )
     return parser.parse_args(argv)
 
 
@@ -1451,6 +1606,8 @@ def main(argv: list[str] | None = None) -> int:
         rollout_fixture=rollout_fixture,
         operating_layer_input=load_json_file(args.operating_layer_input) if args.operating_layer_input else None,
         expected_hermes_intent_mode=args.expected_hermes_intent_mode,
+        expect_flyer_intent_training_export=args.expect_flyer_intent_training_export,
+        flyer_intent_training_json=args.flyer_intent_training_json,
         manual_stale_red_minutes=args.manual_stale_red_minutes,
     )
     if args.format == "json":

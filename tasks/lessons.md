@@ -127,3 +127,8 @@
 - 2026-05-21 Flyer Studio routing previews must mirror live exception gates as well as branch order. Open intake projects with required fields and similar repeated text should stay on the active project instead of previewing a new-project bypass.
 - 2026-05-21 Flyer Studio routing preview route labels must describe the live outcome, not the nearest generic bucket. Repeated complete requests on an open intake project generate the active project; label that as active intake, not revision.
 - 2026-05-22 Flyer Studio account/profile update commands must outrank active flyer project routing. Explicit phrases like `update business name to ...` are account-state changes, not queued flyer revisions; keep them in the account command family so stale/manual projects cannot swallow profile repairs.
+# 2026-05-22 - Do not call offline training export "memory ingestion"
+
+- Pattern: Hermes self-learning work can accidentally overclaim by naming a redacted JSONL export as "memory ingestion."
+- Rule: If a change only writes an operator-reviewed artifact, name it `training_export` and keep live Hermes memory ingestion as a separate follow-up with an explicit receipt/proof path.
+- Applies to: Flyer Hermes intent/self-learning PRs and any future agent self-evolution loop.

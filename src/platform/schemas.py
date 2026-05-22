@@ -3478,6 +3478,20 @@ class FlyerHermesIntentDecision(_BaseEntry):
     schema_version: Literal[1] = 1
     mode: Literal["off", "shadow", "unsupported_active_mode"]
     decision_source: Literal["none", "fixture", "deterministic_baseline", "hermes_gateway_future"]
+    classifier_status: Literal[
+        "off",
+        "skipped_not_candidate",
+        "skipped_passthrough",
+        "skipped_no_gateway",
+        "skipped_budget",
+        "success",
+        "timeout",
+        "invalid",
+        "error",
+    ] = "off"
+    classifier_latency_ms: int = Field(default=0, ge=0)
+    classifier_error_kind: str = Field(default="", max_length=80)
+    classifier_error_detail: str = Field(default="", max_length=300)
     message_id_hash: str = Field(min_length=1, max_length=64)
     chat_key_hash: str = Field(default="", max_length=64)
     has_media: bool = False

@@ -119,7 +119,10 @@ def pre_gateway_dispatch(event: Any, gateway: Any = None, session_store: Any = N
         raise
     finally:
         try:
-            actions.finalize_flyer_intent_shadow(hook_result=result, error=error)
+            try:
+                actions.finalize_flyer_intent_shadow(hook_result=result, error=error, gateway=gateway)
+            except Exception as shadow_exc:
+                actions.sys.stderr.write(f"cf-router: flyer intent shadow finalizer failed (non-fatal): {shadow_exc}\n")
         finally:
             actions.reset_flyer_intent_shadow(token)
 
