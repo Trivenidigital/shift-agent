@@ -95,6 +95,7 @@ import flyer_facts
 import flyer_reference_extract
 import flyer_visual_qa
 import flyer_manual_queue
+import flyer_intent
 print('schema classes:', [c for c in dir(schemas) if not c.startswith('_')][:5])
 " > /dev/null; then
     echo "FAIL: Python modules don't import"

@@ -496,10 +496,22 @@ _FLYER_INTENT_CONTEXT: contextvars.ContextVar[dict[str, Any] | None] = contextva
 
 
 def _ensure_src_path() -> None:
-    for path in (SRC_DIR, Path(__file__).resolve().parents[2]):
+    for path in (SRC_DIR, PLATFORM_DIR, Path(__file__).resolve().parents[2]):
         text = str(path)
         if text not in sys.path and path.exists():
             sys.path.insert(0, text)
+
+
+def _import_flyer_intent_contract() -> Any:
+    _ensure_src_path()
+    try:
+        from agents.flyer import intent as module  # type: ignore
+
+        return module
+    except Exception:
+        import flyer_intent as module  # type: ignore
+
+        return module
 
 
 def _short_hash(value: str) -> str:
@@ -529,26 +541,24 @@ def begin_flyer_intent_shadow(
     project_status: str = "",
     intake_status: str = "",
 ) -> contextvars.Token | None:
-    _ensure_src_path()
     try:
-        from agents.flyer.intent import (
-            FlyerIntentContext,
-            FlyerIntentDecision,
-            mode_from_value,
-            validate_flyer_intent_decision,
-        )
+        intent_contract = _import_flyer_intent_contract()
     except Exception:
         return None
 
     requested_mode = os.environ.get("FLYER_HERMES_INTENT_MODE", "shadow")
-    mode = mode_from_value(requested_mode)
+    mode = intent_contract.mode_from_value(requested_mode)
     if str(mode) == "off":
         return None
     candidate = flyer_intent_shadow_candidate(text, has_media=has_media)
-    decision = FlyerIntentDecision(decision_source="none")
-    validation = validate_flyer_intent_decision(
+    decision = intent_contract.FlyerIntentDecision(decision_source="none")
+    validation = intent_contract.validate_flyer_intent_decision(
         decision,
-        FlyerIntentContext(mode=mode, raw_request="", risk_scope="pre_project_customer_visible" if candidate else "none"),
+        intent_contract.FlyerIntentContext(
+            mode=mode,
+            raw_request="",
+            risk_scope="pre_project_customer_visible" if candidate else "none",
+        ),
     )
     context = {
         "mode": str(mode),
@@ -652,12 +662,11 @@ def finalize_flyer_intent_shadow(
     selected_project_id = str(terminal.get("project_id") or "")
     project_status = str(terminal.get("status") or context.get("project_status") or "")
 
-    _ensure_src_path()
     try:
-        from agents.flyer.intent import normalize_actual_action
+        intent_contract = _import_flyer_intent_contract()
     except Exception:
         return
-    actual_action = normalize_actual_action(actual_route, branch_reason)
+    actual_action = intent_contract.normalize_actual_action(actual_route, branch_reason)
     risk_scope = _risk_scope_from_action(actual_action, route_events, candidate)
     audit_flyer_hermes_intent_decision(
         mode=mode,
