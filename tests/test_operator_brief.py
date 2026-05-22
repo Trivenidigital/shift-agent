@@ -209,6 +209,70 @@ def test_operator_brief_includes_flyer_autonomous_train_status(tmp_path):
     assert "Needs Srini: provider posture decision" in markdown
 
 
+def test_operator_brief_surfaces_flyer_operating_layer_next_action(tmp_path):
+    module = load_module()
+    repo = tmp_path
+    tasks = repo / "tasks"
+    tasks.mkdir()
+    (tasks / "operator-decisions.md").write_text("# Operator Decisions\n", encoding="utf-8")
+    (tasks / "todo.md").write_text("# Backlog\n", encoding="utf-8")
+    flyer_eval = repo / "flyer-self-eval.json"
+    flyer_eval.write_text(
+        json.dumps(
+            {
+                "status": "green",
+                "summary": {"incident_count": 0, "high_or_critical_count": 0},
+                "incidents": [],
+                "operating_layer": {
+                    "status": "yellow",
+                    "brand_memory": {
+                        "status": "ready_for_at_least_one_customer",
+                        "ready_customer_count": 1,
+                        "total_customer_count": 1,
+                    },
+                    "source_edit": {
+                        "status": "deferred",
+                        "posture": "manual_review",
+                    },
+                    "deferred_backlog": [
+                        {
+                            "key": "source_edit_smoke_proof",
+                            "status": "blocked",
+                            "guardrail": "Run a spend-gated 5-10 case smoke.",
+                        },
+                        {
+                            "key": "multi_format_export_truthfulness",
+                            "status": "blocked",
+                            "guardrail": "Instagram story/post/export claims remain blocked.",
+                        },
+                    ],
+                    "next_action": {
+                        "key": "source_edit_smoke_proof",
+                        "summary": "Next: source_edit_smoke_proof - operator - Run a spend-gated 5-10 case smoke.",
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    brief = module.build_brief(
+        repo_root=repo,
+        decisions_path=tasks / "operator-decisions.md",
+        todo_path=tasks / "todo.md",
+        flyer_evaluation_json_path=flyer_eval,
+        automations_dir=repo / "missing-automations",
+        generated_date="2026-05-21",
+        include_git=False,
+    )
+    markdown = module.render_markdown(brief)
+
+    assert "Operating layer: yellow; brand_memory=ready_for_at_least_one_customer (1/1); source_edit=deferred (manual_review)" in markdown
+    assert "Next: source_edit_smoke_proof - operator - Run a spend-gated 5-10 case smoke." in markdown
+    assert "Blocked: source_edit_smoke_proof - Run a spend-gated 5-10 case smoke." in markdown
+    assert "Blocked: multi_format_export_truthfulness - Instagram story/post/export claims remain blocked." in markdown
+
+
 def test_operator_brief_includes_fleet_normalization_readiness(tmp_path):
     module = load_module()
     repo = tmp_path

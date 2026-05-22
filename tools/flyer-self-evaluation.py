@@ -46,6 +46,11 @@ from agents.flyer.rollout_readiness import (  # noqa: E402
     render_rollout_banner,
     render_rollout_section,
 )
+from agents.flyer.operating_layer import (  # noqa: E402
+    OPERATING_LAYER_KEYS,
+    build_operating_layer_section,
+    render_operating_layer_markdown,
+)
 
 DEFAULT_SOURCE_FILES = (
     Path("src/plugins/cf-router/actions.py"),
@@ -1067,9 +1072,23 @@ def sanitize_value(value: Any, *, key: str = "") -> Any:
     if isinstance(value, list):
         return [sanitize_value(item, key=key) for item in value]
     if isinstance(value, str):
+        if key == "key" and value in OPERATING_LAYER_KEYS:
+            return value
         if re.search(r"(?:key|token|secret)$|(?:api_key|access_token|refresh_token)", key, flags=re.I):
             return "[redacted-secret]"
         if key in {"type", "severity", "project_id", "eval_category", "category", "reason", "suggested_fixture"}:
+            return value
+        return redact_text(value)
+    return value
+
+
+def sanitize_operating_layer_value(value: Any, *, key: str = "") -> Any:
+    if isinstance(value, dict):
+        return {k: sanitize_operating_layer_value(v, key=str(k)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [sanitize_operating_layer_value(item, key=key) for item in value]
+    if isinstance(value, str):
+        if key == "key" and value in OPERATING_LAYER_KEYS:
             return value
         return redact_text(value)
     return value
@@ -1091,6 +1110,7 @@ def build_report(
     source_files: list[Path] | None = None,
     rollout_mode: bool = False,
     rollout_fixture: RolloutInputFixture | None = None,
+    operating_layer_input: dict[str, Any] | None = None,
     manual_stale_red_minutes: int = 30,
 ) -> dict[str, Any]:
     now = now or utc_now()
@@ -1142,7 +1162,18 @@ def build_report(
             fixture=rollout_fixture,
             manual_stale_red_minutes=manual_stale_red_minutes,
         )
-    return sanitize_report(report)
+    sanitized = sanitize_report(report)
+    if operating_layer_input is not None:
+        rollout_section = sanitized.get("rollout") if isinstance(sanitized.get("rollout"), dict) else None
+        operating_layer = build_operating_layer_section(
+            operating_layer_input,
+            rollout=rollout_section,
+        )
+        redacted_operating_layer = sanitize_operating_layer_value(operating_layer)
+        sanitized["operating_layer"] = (
+            redacted_operating_layer if isinstance(redacted_operating_layer, dict) else operating_layer
+        )
+    return sanitized
 
 
 def render_markdown(report: dict[str, Any]) -> str:
@@ -1181,6 +1212,9 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.append(f"- {item}")
     if rollout is not None:
         lines.extend(render_rollout_section(rollout))
+    operating_layer = report.get("operating_layer") if isinstance(report.get("operating_layer"), dict) else None
+    if operating_layer is not None:
+        lines.extend(render_operating_layer_markdown(operating_layer))
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -1236,6 +1270,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=30,
         help="RED threshold for manual_source_edit_stale rollout reason (default 30 min, matches detector).",
     )
+    parser.add_argument(
+        "--operating-layer-input",
+        type=Path,
+        default=None,
+        help="Path to a Flyer operating-layer readiness JSON fixture.",
+    )
     return parser.parse_args(argv)
 
 
@@ -1258,6 +1298,7 @@ def main(argv: list[str] | None = None) -> int:
         source_files=[Path.cwd() / path for path in DEFAULT_SOURCE_FILES] if args.scan_source_copy else [],
         rollout_mode=args.rollout_readiness,
         rollout_fixture=rollout_fixture,
+        operating_layer_input=load_json_file(args.operating_layer_input) if args.operating_layer_input else None,
         manual_stale_red_minutes=args.manual_stale_red_minutes,
     )
     if args.format == "json":
