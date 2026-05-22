@@ -57,6 +57,13 @@ def _looks_like_phone(value: str) -> bool:
     return 10 <= len(digits) <= 15
 
 
+def _locked_fact_uses_phone_match(*, fact_id: str, label: str, value: str) -> bool:
+    if not _looks_like_phone(value):
+        return False
+    context = f"{fact_id} {label}".casefold()
+    return any(token in context for token in ("phone", "contact", "whatsapp", "mobile", "tel"))
+
+
 def _phone_value_present_in(text: str, fact_value: str) -> bool:
     """Phone presence: locked digits must appear inside a contiguous OCR
     digit-bearing run (digits + spaces/hyphens/parens/dots/plus). Prevents
@@ -85,7 +92,7 @@ def _text_value_present_in(normalized_text: str, normalized_value: str) -> bool:
     return re.search(pattern, normalized_text) is not None
 
 
-def _value_present_in(normalized_text: str, fact_value: str) -> bool:
+def _value_present_in(normalized_text: str, fact_value: str, *, phone_match: bool = False) -> bool:
     """Smart presence check for a locked-fact value in the OCR'd text.
 
     Phones: digits-only within a contiguous OCR digit-run (see
@@ -95,7 +102,7 @@ def _value_present_in(normalized_text: str, fact_value: str) -> bool:
     boundary (see `_text_value_present_in`) so locked "Lakshmi's Kitchen"
     matches "Lakshmis Kitchen" but locked "Idly" does NOT match "Idlysugar".
     """
-    if _looks_like_phone(fact_value):
+    if phone_match:
         return _phone_value_present_in(normalized_text, fact_value)
     normalized_value = _normalize_text_for_match(fact_value)
     return _text_value_present_in(normalized_text, normalized_value)
@@ -240,10 +247,17 @@ def run_visual_qa(
     for fact in project.locked_facts:
         if not fact.required:
             continue
-        # _value_present_in handles phone-digit-only matching and apostrophe-
-        # tolerant text matching so locked '+17329837841' / "Lakshmi's Kitchen"
-        # don't false-fail against OCR '+1 732 983 7841' / 'Lakshmis Kitchen'.
-        if not _value_present_in(normalized, fact.value):
+        # Phone/contact facts use digit-run matching; other locked facts use
+        # text matching even if they contain address/ZIP digits.
+        if not _value_present_in(
+            normalized,
+            fact.value,
+            phone_match=_locked_fact_uses_phone_match(
+                fact_id=fact.fact_id,
+                label=fact.label,
+                value=fact.value,
+            ),
+        ):
             blockers.append(f"missing required visible fact: {fact.fact_id}")
     # Source-contract negative-assertion gate: any value in
     # forbidden_substrings (populated upstream from brand/phone/address

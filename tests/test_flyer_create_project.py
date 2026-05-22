@@ -162,6 +162,50 @@ def test_evening_snacks_request_uses_profile_business_and_campaign_title(tmp_pat
     assert "flier from" not in poisoned
 
 
+def test_sample_snacks_request_locks_unpriced_menu_items(tmp_path, monkeypatch, capsys):
+    module = _load_script(monkeypatch)
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    _write_customer(
+        customers_path,
+        category="Indian Restaurant",
+        phone="+15713830763",
+        business_name="MK kitchen",
+        business_address="23596 prosperity ridge pl Ashburn Va 20148",
+        primary_chat_id="104805909434618@lid",
+    )
+
+    raw_request = (
+        "Create a professional flyer for MK kitchen. Customer request: "
+        "Create an evening snacks flyer from 4 PM to 7 PM, Wednesday to Saturday. "
+        "Include samosa, mirchi bajji, punugulu, masala vada, and tea. "
+        "Use saved address, phone, and logo."
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+15713830763",
+        "--chat-id", "104805909434618@lid",
+        "--message-id", "m-mk-snacks",
+        "--raw-request", raw_request,
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+    facts = {fact["fact_id"]: fact for fact in project["locked_facts"]}
+
+    assert [facts[f"item:{idx}:name"]["value"] for idx in range(5)] == [
+        "samosa",
+        "mirchi bajji",
+        "punugulu",
+        "masala vada",
+        "tea",
+    ]
+    assert all(facts[f"item:{idx}:name"]["required"] is True for idx in range(5))
+    assert "item:0:price" not in facts
+
+
 def test_profile_hydration_uses_chat_id_when_phone_does_not_match(tmp_path, monkeypatch, capsys):
     module = _load_script(monkeypatch)
     customers_path = tmp_path / "customers.json"

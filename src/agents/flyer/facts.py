@@ -210,6 +210,56 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
     return facts
 
 
+def _item_name_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFact]:
+    facts: list[FlyerLockedFact] = []
+    seen: set[str] = set()
+    skip_exact = {
+        "address",
+        "phone",
+        "logo",
+        "saved address",
+        "saved phone",
+        "saved logo",
+        "catering note",
+        "delivery/payment badges",
+        "delivery badges",
+        "payment badges",
+    }
+
+    def add_item(name: str) -> None:
+        name = _clean(name)
+        name = re.sub(r"^(?:and|with|include|includes|feature|features|featuring)\s+", "", name, flags=re.IGNORECASE)
+        if not name:
+            return
+        normalized = name.lower()
+        if normalized in skip_exact:
+            return
+        if any(term in normalized for term in ("address", "phone", "logo")):
+            return
+        if len(name.split()) > 5:
+            return
+        key = _norm(name)
+        if not key or key in seen:
+            return
+        seen.add(key)
+        fact = _fact(f"item:{len(seen)-1}:name", "Item", name, "customer_text", message_id=message_id)
+        if fact:
+            facts.append(fact)
+
+    for match in re.finditer(
+        r"\binclude\s+(?P<items>.+?)(?=\.|\b(?:use|timings?|time|style|location|address|phone|contact)\b|$)",
+        text or "",
+        flags=re.IGNORECASE,
+    ):
+        clause = match.group("items")
+        if not ("," in clause or re.search(r"\band\b", clause, flags=re.IGNORECASE)):
+            continue
+        clause = re.sub(r"\b(?:and|plus)\b", ",", clause, flags=re.IGNORECASE)
+        for part in re.split(r"[,;/]+", clause):
+            add_item(part)
+    return facts
+
+
 def extract_text_facts(
     fields: FlyerRequestFields,
     raw_request: str,
@@ -240,6 +290,7 @@ def extract_text_facts(
         if item:
             facts.append(item)
     facts.extend(_item_price_facts(text, message_id=message_id))
+    facts.extend(_item_name_facts(text, message_id=message_id))
     return merge_locked_facts(facts)
 
 

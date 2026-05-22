@@ -157,6 +157,41 @@ def test_visual_qa_requires_business_campaign_contact_and_profile_location(tmp_p
     assert "missing required visible fact: campaign_title" in report.blockers
 
 
+def test_visual_qa_accepts_digit_heavy_location_split_across_ocr_lines(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    now = datetime(2026, 5, 22, tzinfo=timezone.utc)
+    project = FlyerProject(
+        project_id="F0080",
+        status="awaiting_final_approval",
+        customer_phone="+15713830763",
+        created_at=now,
+        updated_at=now,
+        original_message_id="m-mk-kitchen",
+        raw_request="evening snacks",
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="MK kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15713830763", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="location", label="Location", value="23596 prosperity ridge pl Ashburn Va 20148", source="customer_profile", required=True),
+        ],
+    )
+
+    artifact = _write_sidecar(
+        tmp_path,
+        "MK kitchen\n"
+        "Specials\n"
+        "Wednesday To Saturday | 4 PM TO 7 PM\n"
+        "23596 prosperity ridge pl\n"
+        "Ashburn Va 20148\n"
+        "+15713830763",
+    )
+
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert report.status == "passed", report.blockers
+    assert "missing required visible fact: location" not in report.blockers
+
+
 def test_visual_qa_fails_on_template_placeholder_strings(tmp_path):
     """Generic template leakage ("YOUR LOGO HERE", "CLICK HERE TO ADD TEXT") must fail QA
     even when every locked fact happens to be present, because the customer would receive
