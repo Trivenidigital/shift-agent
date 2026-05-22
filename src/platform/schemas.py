@@ -794,9 +794,9 @@ class FlyerDraftProviderPolicy(BaseModel):
     """Provider routing for new flyer drafts. PR-1 wires only default automatic use."""
     model_config = ConfigDict(extra="forbid")
     default: FlyerRenderProviderConfig = Field(default_factory=lambda: FlyerRenderProviderConfig(
-        provider="openrouter",
-        model="openai/gpt-5.4-image-2",
-        quality="high",
+        provider="local",
+        model="deterministic-renderer",
+        quality="low",
     ))
     cost_sensitive: FlyerRenderProviderConfig = Field(default_factory=lambda: FlyerRenderProviderConfig(
         provider="openrouter",
@@ -872,8 +872,8 @@ class FlyerConfig(BaseModel):
     enabled: bool = False
     conversation_model: str = Field(default="default_hermes_gateway", min_length=1, max_length=120)
     prompt_model: str = Field(default="default_hermes_gateway", min_length=1, max_length=120)
-    draft_image_model: str = Field(default="openai/gpt-5.4-image-2", min_length=1, max_length=120)
-    draft_image_quality: FlyerImageQuality = "high"
+    draft_image_model: str = Field(default="deterministic-renderer", min_length=1, max_length=120)
+    draft_image_quality: FlyerImageQuality = "low"
     final_image_model: str = Field(default="deterministic-renderer", min_length=1, max_length=120)
     final_image_quality: FlyerImageQuality = "high"
     edit_image_model: str = Field(default="gpt-image-1", min_length=1, max_length=120)
