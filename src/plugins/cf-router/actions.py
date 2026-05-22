@@ -9,6 +9,8 @@ Test override: set the module-level path constants before invoking hooks
 from __future__ import annotations
 
 import json
+import contextvars
+import hashlib
 import mimetypes
 import os
 import re
@@ -19,7 +21,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Callable, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional
 
 # Deployed-system paths (mutable for tests)
 CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
@@ -50,6 +52,7 @@ CHECK_FLYER_REFERENCE_SCOPE_BIN = Path("/usr/local/bin/check-flyer-reference-sco
 
 PYTHON_BIN = Path("/usr/local/lib/hermes-agent/venv/bin/python")
 PLATFORM_DIR = Path("/opt/shift-agent")  # Where schemas.py lives
+SRC_DIR = Path("/opt/shift-agent/src")
 IDENTIFY_SENDER_BIN = Path("/usr/local/bin/identify-sender")
 SEND_CATERING_ACK_BIN = Path("/usr/local/bin/send-catering-ack")
 
@@ -484,6 +487,266 @@ def mark_alerted(chat_id: str, kind: str) -> None:
         pass
 
 
+# === Flyer Hermes intent shadow context ===
+
+_FLYER_INTENT_CONTEXT: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "flyer_intent_context",
+    default=None,
+)
+
+
+def _ensure_src_path() -> None:
+    for path in (SRC_DIR, Path(__file__).resolve().parents[2]):
+        text = str(path)
+        if text not in sys.path and path.exists():
+            sys.path.insert(0, text)
+
+
+def _short_hash(value: str) -> str:
+    return hashlib.sha256(str(value or "").encode("utf-8", errors="ignore")).hexdigest()[:32]
+
+
+def flyer_intent_shadow_candidate(text: str, *, has_media: bool = False) -> bool:
+    body = str(text or "").lower()
+    if has_media:
+        return True
+    return bool(
+        re.search(
+            r"\b(flyer|flier|poster|banner|design|logo|approve|status|update|change|replace|"
+            r"business name|phone number|address|free trial|start free|pick an idea)\b",
+            body,
+        )
+    )
+
+
+def begin_flyer_intent_shadow(
+    *,
+    text: str,
+    chat_id: str,
+    message_id: str,
+    has_media: bool = False,
+    customer_status: str = "",
+    project_status: str = "",
+    intake_status: str = "",
+) -> contextvars.Token | None:
+    _ensure_src_path()
+    try:
+        from agents.flyer.intent import (
+            FlyerIntentContext,
+            FlyerIntentDecision,
+            mode_from_value,
+            validate_flyer_intent_decision,
+        )
+    except Exception:
+        return None
+
+    requested_mode = os.environ.get("FLYER_HERMES_INTENT_MODE", "shadow")
+    mode = mode_from_value(requested_mode)
+    if str(mode) == "off":
+        return None
+    candidate = flyer_intent_shadow_candidate(text, has_media=has_media)
+    decision = FlyerIntentDecision(decision_source="none")
+    validation = validate_flyer_intent_decision(
+        decision,
+        FlyerIntentContext(mode=mode, raw_request="", risk_scope="pre_project_customer_visible" if candidate else "none"),
+    )
+    context = {
+        "mode": str(mode),
+        "requested_mode": requested_mode or "shadow",
+        "decision": decision,
+        "validation": validation,
+        "message_id_hash": _short_hash(message_id),
+        "chat_key_hash": _short_hash(chat_id),
+        "has_media": bool(has_media),
+        "customer_status": customer_status,
+        "project_status": project_status,
+        "intake_status": intake_status,
+        "selected_project_id": "",
+        "prior_active_project_id": "",
+        "risk_scope": "pre_project_customer_visible" if candidate else "none",
+        "route_events": [],
+        "candidate": candidate,
+    }
+    return _FLYER_INTENT_CONTEXT.set(context)
+
+
+def reset_flyer_intent_shadow(token: contextvars.Token | None) -> None:
+    if token is not None:
+        _FLYER_INTENT_CONTEXT.reset(token)
+
+
+def record_flyer_intent_route_event(
+    *,
+    reason: str,
+    subprocess_rc: Optional[int] = None,
+    detail: str = "",
+) -> None:
+    context = _FLYER_INTENT_CONTEXT.get()
+    if not context or not str(reason or "").startswith("flyer_"):
+        return
+    project_match = re.search(r"\bproject_id=([A-Z]\d{4,})\b", detail or "")
+    status_match = re.search(r"\bstatus=([^;]+)", detail or "")
+    context["route_events"].append(
+        {
+            "reason": str(reason or "")[:120],
+            "subprocess_rc": subprocess_rc,
+            "project_id": project_match.group(1) if project_match else "",
+            "status": status_match.group(1).strip()[:80] if status_match else "",
+            "detail_hint": _detail_action_hint(detail),
+        }
+    )
+
+
+def _detail_action_hint(detail: str) -> str:
+    text = str(detail or "").lower()
+    for marker in (
+        "approve=true",
+        "revision=true",
+        "status_check=true",
+        "queued_status_check=true",
+        "intake_ready=true",
+        "fresh_flyer_intent=true",
+    ):
+        if marker in text:
+            return marker
+    return ""
+
+
+def _terminal_route_event(events: list[dict[str, Any]]) -> dict[str, Any]:
+    if not events:
+        return {}
+    for event in reversed(events):
+        if event.get("reason") != "flyer_active_project_bypassed":
+            return event
+    return events[-1]
+
+
+def _risk_scope_from_action(actual_action: str, route_events: list[dict[str, Any]], candidate: bool) -> str:
+    if actual_action in {"new_project", "revision", "approval", "manual_review", "status", "failure"}:
+        return "active_project" if any(e.get("project_id") for e in route_events) else "pre_project_customer_visible"
+    if actual_action in {"account_update", "onboarding_or_intake"}:
+        return "active_customer"
+    if candidate:
+        return "pre_project_customer_visible"
+    return "none"
+
+
+def finalize_flyer_intent_shadow(
+    *,
+    hook_result: Optional[dict] = None,
+    error: Exception | None = None,
+) -> None:
+    context = _FLYER_INTENT_CONTEXT.get()
+    if not context:
+        return
+    route_events = list(context.get("route_events") or [])
+    candidate = bool(context.get("candidate"))
+    mode = str(context.get("mode") or "shadow")
+    if not route_events and not candidate and mode != "unsupported_active_mode":
+        return
+    terminal = _terminal_route_event(route_events)
+    branch_reason = str((hook_result or {}).get("reason") or "")
+    actual_route = str(terminal.get("reason") or ("plugin_error_passthrough" if error else "llm_passthrough"))
+    actual_reason = str(terminal.get("detail_hint") or branch_reason or actual_route)[:200]
+    subprocess_rc = terminal.get("subprocess_rc")
+    selected_project_id = str(terminal.get("project_id") or "")
+    project_status = str(terminal.get("status") or context.get("project_status") or "")
+
+    _ensure_src_path()
+    try:
+        from agents.flyer.intent import normalize_actual_action
+    except Exception:
+        return
+    actual_action = normalize_actual_action(actual_route, branch_reason)
+    risk_scope = _risk_scope_from_action(actual_action, route_events, candidate)
+    audit_flyer_hermes_intent_decision(
+        mode=mode,
+        decision=context["decision"],
+        validation=context["validation"],
+        message_id_hash=str(context.get("message_id_hash") or ""),
+        chat_key_hash=str(context.get("chat_key_hash") or ""),
+        has_media=bool(context.get("has_media")),
+        actual_route=actual_route,
+        actual_reason=actual_reason,
+        actual_action=actual_action,
+        route_sequence=[str(event.get("reason") or "") for event in route_events],
+        subprocess_rc=subprocess_rc if isinstance(subprocess_rc, int) else None,
+        branch_return_reason=branch_reason,
+        selected_project_id=selected_project_id,
+        prior_active_project_id=str(context.get("prior_active_project_id") or ""),
+        project_status=project_status,
+        customer_status=str(context.get("customer_status") or ""),
+        intake_status=str(context.get("intake_status") or ""),
+        risk_scope=risk_scope,
+        active_customer_risk=risk_scope != "none",
+    )
+
+
+def audit_flyer_hermes_intent_decision(
+    *,
+    mode: str,
+    decision: Any,
+    validation: Any,
+    message_id_hash: str,
+    chat_key_hash: str,
+    has_media: bool,
+    actual_route: str,
+    actual_reason: str,
+    actual_action: str,
+    route_sequence: list[str],
+    subprocess_rc: Optional[int],
+    branch_return_reason: str,
+    selected_project_id: str = "",
+    prior_active_project_id: str = "",
+    project_status: str = "",
+    customer_status: str = "",
+    intake_status: str = "",
+    risk_scope: str = "none",
+    active_customer_risk: bool = False,
+) -> None:
+    try:
+        _ensure_platform_path()
+        _ensure_src_path()
+        from safe_io import ndjson_append  # type: ignore
+        from schemas import FlyerHermesIntentDecision  # type: ignore
+
+        entry = FlyerHermesIntentDecision(
+            type="flyer_hermes_intent_decision",
+            ts=datetime.now(timezone.utc),
+            schema_version=1,
+            mode=mode,
+            decision_source=getattr(decision, "decision_source", "none"),
+            message_id_hash=message_id_hash or "unknown",
+            chat_key_hash=chat_key_hash,
+            has_media=has_media,
+            validator_ok=bool(getattr(validation, "ok", False)),
+            validator_reasons=list(getattr(validation, "reasons", ()) or []),
+            advisory_intent=str(getattr(decision, "intent", "unknown")),
+            advisory_action=str(getattr(decision, "action", "observe")),
+            confidence=float(getattr(decision, "confidence", 0.0) or 0.0),
+            would_mutate=bool(getattr(validation, "would_mutate", False)),
+            actual_route=actual_route,
+            actual_reason=actual_reason,
+            actual_action=actual_action,  # type: ignore[arg-type]
+            route_sequence=[item[:120] for item in route_sequence[:20]],
+            route_terminal=True,
+            subprocess_rc=subprocess_rc,
+            branch_return_reason=branch_return_reason[:300],
+            selected_project_id=selected_project_id,
+            prior_active_project_id=prior_active_project_id,
+            project_status=project_status,
+            customer_status=customer_status,
+            intake_status=intake_status,
+            preview_source="actual",
+            live_route_changed=False,
+            active_customer_risk=active_customer_risk,
+            risk_scope=risk_scope,  # type: ignore[arg-type]
+        )
+        ndjson_append(LOG_PATH, entry.model_dump_json())
+    except Exception as e:
+        sys.stderr.write(f"cf-router: flyer intent audit emit failed (non-fatal): {e}\n")
+
+
 # === Audit ===
 
 def audit_intercepted(reason: str, chat_id: str, code: Optional[str] = None,
@@ -496,6 +759,7 @@ def audit_intercepted(reason: str, chat_id: str, code: Optional[str] = None,
     critical — if this raises, the outer plugin try/except converts a
     successful skip into a `None` (LLM re-runs after apply already fired).
     """
+    record_flyer_intent_route_event(reason=reason, subprocess_rc=subprocess_rc, detail=detail)
     try:
         _ensure_platform_path()
         from safe_io import ndjson_append  # type: ignore

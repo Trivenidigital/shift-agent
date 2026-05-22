@@ -1,5 +1,11 @@
 # Lessons
 
+## 2026-05-22 - Flyer Hermes intent layer
+
+- When working in isolated worktrees, verify the plan/design file landed in the intended worktree before dispatching reviewers. A plan written to the dirty root checkout can make reviewers correctly report "file missing" even though the main session sees it.
+- Flyer route observability must capture the terminal customer-visible route, not the first audit row. `flyer_active_project_bypassed` can be an intermediate event before `flyer_primary_project_created`; self-eval should compare against the final route sequence.
+- Do not let a shadow classifier become a third router. For PR-1, Hermes intent evidence should be schema/validator/route-trace infrastructure only; live active routing needs separate promotion criteria and per-family shadow data.
+
 ## 2026-05-21 - Flyer post-preview visible text revisions
 
 - Post-preview Flyer corrections can reference visible generated text that is not a structured project fact. Exact remove/delete requests such as `Time: 16:00 is duplicated. remove this` should enter the revision/regeneration path instead of asking for "exact item or text" clarification just because the text was not in field state.

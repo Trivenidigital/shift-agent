@@ -96,6 +96,36 @@ def _is_sick_call(text: str) -> bool:
 
 def pre_gateway_dispatch(event: Any, gateway: Any = None, session_store: Any = None,
                          **_kwargs: Any) -> Optional[dict]:
+    """Wrapper that owns Flyer intent shadow context for this inbound."""
+    token = None
+    result: Optional[dict] = None
+    error: Exception | None = None
+    try:
+        text = _extract_text(event) or ""
+        media_path = _extract_media_path(event)
+        chat_id = _extract_chat_id(event)
+        if chat_id and (text or media_path) and actions.is_flyer_enabled():
+            message_id = _extract_message_id(event, chat_id, text)
+            token = actions.begin_flyer_intent_shadow(
+                text=text,
+                chat_id=chat_id,
+                message_id=message_id,
+                has_media=bool(media_path),
+            )
+        result = _pre_gateway_dispatch_impl(event, gateway, session_store, **_kwargs)
+        return result
+    except Exception as exc:
+        error = exc
+        raise
+    finally:
+        try:
+            actions.finalize_flyer_intent_shadow(hook_result=result, error=error)
+        finally:
+            actions.reset_flyer_intent_shadow(token)
+
+
+def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: Any = None,
+                               **_kwargs: Any) -> Optional[dict]:
     """Main hook — dispatched by Hermes for every user-originated inbound.
 
     Returns None for the common case (let LLM handle normally). Only returns

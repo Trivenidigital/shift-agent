@@ -3468,6 +3468,61 @@ class FlyerSourceEditSlaAlert(_BaseEntry):
     notify_ok: bool = False
 
 
+class FlyerHermesIntentDecision(_BaseEntry):
+    """Read-only shadow audit for the Flyer Hermes intent contract.
+
+    PII-light by construction: hashes instead of raw chat/message ids, route
+    families instead of raw customer text, and no provider/customer copy fields.
+    """
+    type: Literal["flyer_hermes_intent_decision"] = "flyer_hermes_intent_decision"
+    schema_version: Literal[1] = 1
+    mode: Literal["off", "shadow", "unsupported_active_mode"]
+    decision_source: Literal["none", "fixture", "deterministic_baseline", "hermes_gateway_future"]
+    message_id_hash: str = Field(min_length=1, max_length=64)
+    chat_key_hash: str = Field(default="", max_length=64)
+    has_media: bool = False
+    validator_ok: bool
+    validator_reasons: list[str] = Field(default_factory=list, max_length=20)
+    advisory_intent: str = Field(default="", max_length=80)
+    advisory_action: str = Field(default="", max_length=80)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    would_mutate: bool = False
+    actual_route: str = Field(default="", max_length=120)
+    actual_reason: str = Field(default="", max_length=200)
+    actual_action: Literal[
+        "new_project",
+        "revision",
+        "approval",
+        "status",
+        "manual_review",
+        "account_update",
+        "onboarding_or_intake",
+        "passthrough",
+        "failure",
+        "unknown",
+    ]
+    route_sequence: list[str] = Field(default_factory=list, max_length=20)
+    route_terminal: bool = True
+    subprocess_rc: Optional[int] = None
+    branch_return_reason: str = Field(default="", max_length=300)
+    selected_project_id: str = Field(default="", max_length=40)
+    prior_active_project_id: str = Field(default="", max_length=40)
+    project_status: str = Field(default="", max_length=80)
+    customer_status: str = Field(default="", max_length=80)
+    intake_status: str = Field(default="", max_length=80)
+    preview_source: Literal["actual", "simulated", "none"] = "actual"
+    live_route_changed: Literal[False] = False
+    active_customer_risk: bool = False
+    risk_scope: Literal[
+        "active_project",
+        "active_customer",
+        "active_intake",
+        "pre_project_customer_visible",
+        "historical_audit",
+        "none",
+    ] = "none"
+
+
 class CateringLeadCreated(_BaseEntry):
     type: Literal["catering_lead_created"]
     lead_id: str = Field(min_length=1)
@@ -3983,32 +4038,41 @@ class CfRouterIntercepted(_BaseEntry):
         "f7_proposal_selection",
         "flyer_primary_project_created",
         "flyer_primary_failed",
+        "flyer_project_status",
         "flyer_intake_started",
         "flyer_intake",
         "flyer_intake_failed",
+        "flyer_intake_cleanup_failed",
         "flyer_onboarding",
         "flyer_onboarding_failed",
         "flyer_starter_brief",
+        "flyer_starter_ideas",
         "flyer_customer_not_active",
         "flyer_quota_blocked",
         "flyer_brand_asset_saved",
         "flyer_brand_asset_failed",
+        "flyer_reference_manual_review_queued",
         "flyer_reference_scope_blocked",
         "flyer_reference_scope_use_reference",
         "flyer_reference_scope_authorization_requested",
         "flyer_reference_scope_authorization_followup",
         "flyer_reference_scope_authorized_generated",
         "flyer_reference_exact_edit_queued",
+        "flyer_reference_exact_edit_status",
         "flyer_location_blocked",
         "flyer_account_command",
         "flyer_account_failed",
         "flyer_account_customer_not_found",
         "flyer_account_unhandled",
         "flyer_active_project_bypassed",
+        "flyer_brief_approved",
+        "flyer_brief_project_create_failed",
         "flyer_starter_preference_off",
         "flyer_starter_already_sent",
         "flyer_guest_order_started",
         "flyer_guest_order_failed",
+        "flyer_access_release_failed",
+        "flyer_pending_revision_confirmation_reminder",
         "error",
     ]
     chat_id: str = Field(min_length=1, max_length=200)
@@ -4415,6 +4479,7 @@ LogEntry = Annotated[
         Annotated[FlyerSourceContractExtracted, Tag("flyer_source_contract_extracted")],
         Annotated[FlyerSourceVsNewChosen, Tag("flyer_source_vs_new_chosen")],
         Annotated[FlyerSourceEditSlaAlert, Tag("flyer_source_edit_sla_alert")],
+        Annotated[FlyerHermesIntentDecision, Tag("flyer_hermes_intent_decision")],
         # PR-D1 forward-compat shim — UNKNOWN tags route here
         Annotated[_UnknownLogEntry, Tag("_unknown_")],
     ],
@@ -4478,7 +4543,7 @@ __all__ = [
     "FlyerCustomerProfile", "FlyerOnboardingSession", "FlyerIntakeSession", "FlyerCustomerStore", "FlyerGuestOrderStore",
     "FlyerRequestFields", "FlyerLockedFact", "FlyerReferenceExtraction",
     "FlyerSourceContractSection", "FlyerSourceContract",
-    "FlyerSourceContractExtracted", "FlyerSourceVsNewChosen",
+    "FlyerSourceContractExtracted", "FlyerSourceVsNewChosen", "FlyerHermesIntentDecision",
     "FlyerVisualQAReport", "FlyerManualReview", "FlyerAsset", "FlyerConcept", "FlyerRevision",
     "FlyerBrandKit", "FlyerProject", "FlyerProjectStore",
     # v0.3 status-machine + helpers
