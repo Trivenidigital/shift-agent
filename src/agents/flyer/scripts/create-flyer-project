@@ -211,6 +211,16 @@ def _invalid_venue(value: str) -> bool:
     )
 
 
+def _explicit_english_only(text: str) -> bool:
+    lower = (text or "").lower()
+    return bool(
+        re.search(r"\b(?:language\s*:\s*)?english\s+only\b", lower)
+        or re.search(r"\b(?:do\s+not|don't|dont|no)\s+use\s+(?:telugu|hindi|tamil|malayalam|kannada|gujarati|marathi|punjabi|regional)", lower)
+        or "no regional indian language" in lower
+        or "no regional languages" in lower
+    )
+
+
 def _load_store(path: Path) -> FlyerProjectStore:
     if not path.exists():
         return FlyerProjectStore()
@@ -251,7 +261,7 @@ def _hydrate_fields_from_customer(
         updates["venue_or_location"] = customer.business_address
     if not (fields.contact_info or "").strip():
         updates["contact_info"] = str(customer.public_phone)
-    if fields.preferred_language == "en" and customer.preferred_language != "en":
+    if fields.preferred_language == "en" and customer.preferred_language != "en" and not _explicit_english_only(fields.notes or ""):
         updates["preferred_language"] = customer.preferred_language
     if not updates:
         return fields
@@ -368,7 +378,9 @@ def _extract_fields(raw_request: str, *, now: datetime) -> FlyerRequestFields:
         event_name = ""
     if "uploaded template/reference" in lower and event_name.lower() in {"flyer", "create flyer", "uploaded flyer template"}:
         event_name = ""
-    if "telugu" in lower:
+    if _explicit_english_only(text):
+        language = "en"
+    elif "telugu" in lower:
         language = "te"
     elif "hindi" in lower:
         language = "hi"

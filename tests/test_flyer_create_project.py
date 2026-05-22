@@ -808,6 +808,54 @@ def test_create_project_parses_chloe_salon_service_request_without_prompt_leak(m
     assert fields.style_preference == "modern US salon and beauty studio promotion"
 
 
+def test_explicit_english_only_overrides_forbidden_language_mentions(monkeypatch):
+    module = _load_script(monkeypatch)
+    fields = module._extract_fields(
+        (
+            "Create a Ganesh festival flyer. Preferred flyer language: Mixed / Other. "
+            "Customer update before generation: Language: English only. "
+            "Do NOT use Telugu, Hindi, or any regional Indian language."
+        ),
+        now=datetime(2026, 5, 22, tzinfo=timezone.utc),
+    )
+
+    assert fields.preferred_language == "en"
+
+
+def test_create_project_keeps_explicit_english_only_over_profile_language(tmp_path, monkeypatch, capsys):
+    module = _load_script(monkeypatch)
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    _write_customer(
+        customers_path,
+        category="Indian Restaurant",
+        phone="+17329837841",
+        business_name="Lakshmis Kitchn",
+        business_address="90 Brybar Dr St Johns FL",
+        primary_chat_id="17329837841@s.whatsapp.net",
+    )
+    store = json.loads(customers_path.read_text(encoding="utf-8"))
+    store["customers"][0]["preferred_language"] = "te"
+    customers_path.write_text(json.dumps(store), encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+17329837841",
+        "--chat-id", "17329837841@s.whatsapp.net",
+        "--message-id", "m-english-only",
+        "--raw-request", (
+            "Create a Ganesh festival flyer. Language: English only. "
+            "Do NOT use Telugu, Hindi, or any regional Indian language."
+        ),
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+    assert project["fields"]["preferred_language"] == "en"
+
+
 def test_create_project_can_queue_exact_reference_edit_without_template_title(tmp_path, monkeypatch, capsys):
     module = _load_script(monkeypatch)
     customers_path = tmp_path / "customers.json"

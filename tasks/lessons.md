@@ -132,3 +132,7 @@
 - Pattern: Hermes self-learning work can accidentally overclaim by naming a redacted JSONL export as "memory ingestion."
 - Rule: If a change only writes an operator-reviewed artifact, name it `training_export` and keep live Hermes memory ingestion as a separate follow-up with an explicit receipt/proof path.
 - Applies to: Flyer Hermes intent/self-learning PRs and any future agent self-evolution loop.
+- 2026-05-22 Flyer Studio final approval must deliver the approved core WhatsApp final when it passes QA, even if optional Instagram/PDF derivatives fail OCR/visual QA. Optional derivative failures should be skipped and preserved for operator inspection, not block the customer from receiving the approved flyer.
+- 2026-05-22 Flyer Studio generic pricing phrases such as `Price any item $9.99` are pricing policy, not menu item names. Apply the price to each explicitly included item and never lock `Price any item` / `Price any event` as a customer-visible item.
+- 2026-05-22 Flyer Studio revision parsing must not fuzzy-replace pronouns like `it`, `this`, or `that` inside existing text. For schedule changes like `change it to Tuesday to Sunday`, append an explicit schedule instruction and preserve existing business names/notes.
+- 2026-05-22 Flyer Studio negative language constraints outrank language-name mentions. `English only` / `do not use Telugu` must force English in extraction, render prompting, and visual QA even though the request contains the forbidden language name.

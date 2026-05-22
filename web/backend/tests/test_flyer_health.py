@@ -464,7 +464,7 @@ def test_model_config_present_in_provider_block(tmp_path, monkeypatch):
     source_p = next(p for p in providers if p["name"] == "source_edit_provider")
     assert "draft_image_model" in or_p["model_config"]
     assert "final_image_model" in or_p["model_config"]
-    assert or_p["model_config"]["draft_provider_model"] == "openai/gpt-5.4-image-2"
+    assert or_p["model_config"]["draft_provider_model"] == "deterministic-renderer"
     assert or_p["model_config"]["final_provider_model"] == "deterministic-renderer"
     assert "edit_image_model" in source_p["model_config"]
     assert source_p["model_config"]["source_edit_provider"] == "manual_review"

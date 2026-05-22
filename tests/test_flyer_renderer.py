@@ -426,6 +426,29 @@ def test_image_prompt_skips_blank_optional_fields_for_price_list():
     assert "Venue: " not in prompt
 
 
+def test_image_prompt_enforces_explicit_english_only_language_constraint():
+    project = _complete_project().model_copy(update={
+        "raw_request": (
+            "Create a Ganesh festival flyer. Language: English only. "
+            "Do NOT use Telugu, Hindi, or any regional Indian language."
+        ),
+        "fields": FlyerRequestFields(
+            event_or_business_name="Ganesh Festival",
+            venue_or_location="Community Hall",
+            contact_info="+17329837841",
+            preferred_language="en",
+            notes=(
+                "Language: English only. Do NOT use Telugu, Hindi, or any regional Indian language."
+            ),
+        ),
+    })
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+
+    assert "Use English only" in prompt
+    assert "Do not use Telugu, Hindi, or any regional Indian language" in prompt
+
+
 def test_image_prompt_does_not_turn_weekend_special_badge_into_schedule():
     project = _complete_project().model_copy(update={
         "fields": FlyerRequestFields(

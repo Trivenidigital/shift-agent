@@ -39,6 +39,7 @@ _PHONE_DIGITS_RE = re.compile(r"\D+")
 # Anchors the digit-only comparison to a contiguous visual phone block so a
 # stray "17" elsewhere in the OCR doesn't glue onto the locked phone's digits.
 _PHONE_RUN_RE = re.compile(r"[\d\s\-().+/]{8,}")
+REGIONAL_SCRIPT_RE = re.compile(r"[\u0900-\u097F\u0A00-\u0A7F\u0A80-\u0AFF\u0B80-\u0BFF\u0C00-\u0C7F\u0C80-\u0CFF\u0D00-\u0D7F]")
 
 
 def _normalize_text_for_match(text: str) -> str:
@@ -106,6 +107,16 @@ def _value_present_in(normalized_text: str, fact_value: str, *, phone_match: boo
         return _phone_value_present_in(normalized_text, fact_value)
     normalized_value = _normalize_text_for_match(fact_value)
     return _text_value_present_in(normalized_text, normalized_value)
+
+
+def _requires_english_only(project: FlyerProject) -> bool:
+    text = f"{project.raw_request or ''} {getattr(project.fields, 'notes', '') or ''}".lower()
+    return bool(
+        re.search(r"\b(?:language\s*:\s*)?english\s+only\b", text)
+        or re.search(r"\b(?:do\s+not|don't|dont|no)\s+use\s+(?:telugu|hindi|tamil|malayalam|kannada|gujarati|marathi|punjabi|regional)", text)
+        or "no regional indian language" in text
+        or "no regional languages" in text
+    )
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_TIMEOUT_SEC = 60
 VISION_QA_MODEL = os.environ.get("FLYER_VISUAL_QA_MODEL") or os.environ.get("VISION_MODEL") or "openai/gpt-4o-mini"
@@ -243,6 +254,8 @@ def run_visual_qa(
     normalized = _normalize_text_for_match(extracted_text)
     if PLACEHOLDER_RE.search(extracted_text):
         blockers.append("placeholder text is visible in generated flyer")
+    if _requires_english_only(project) and REGIONAL_SCRIPT_RE.search(extracted_text):
+        blockers.append("English-only flyer contains regional/non-English script")
     blockers.extend(note for note in provider_notes if "placeholder" in note.lower() or "unreadable" in note.lower() or "garbled" in note.lower())
     for fact in project.locked_facts:
         if not fact.required:
