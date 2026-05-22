@@ -257,6 +257,17 @@ def summarize_flyer_evaluation_report(path: Path | None) -> list[str]:
         )
         if next_action.get("summary"):
             lines.append(redact_text(str(next_action.get("summary"))))
+        blocked = [
+            item
+            for item in operating_layer.get("deferred_backlog", [])
+            if isinstance(item, dict) and item.get("status") == "blocked"
+        ]
+        for item in blocked[:5]:
+            lines.append(
+                redact_text(
+                    f"Blocked: {item.get('key', 'unknown')} - {item.get('guardrail', 'review before rollout')}"
+                )
+            )
 
     def active_state(item: dict) -> bool | None:
         details = item.get("evidence_details") if isinstance(item.get("evidence_details"), dict) else {}

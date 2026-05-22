@@ -21,7 +21,8 @@ Design: `docs/superpowers/specs/2026-05-21-flyer-hermes-operating-layer-design.m
 - [x] Add read-only Flyer operating-layer readiness helper and fixture schema.
 - [x] Wire optional `--operating-layer-input` into `tools/flyer-self-evaluation.py`.
 - [x] Surface operating-layer status and next action in `tools/operator-brief.py`.
-- [x] File every Hermes-update option as a deferred backlog key with owner and guardrail.
+- [x] File every Hermes-update option as either an implemented readiness-signal key or a deferred backlog key with owner and guardrail.
+- [x] Implemented readiness signal - `persistent_brand_memory_readiness_signal`: report-only proof that at least one trial/active customer has profile identity, active brand assets, and a QA-passed delivered campaign. Activation remains deferred.
 - [ ] Deferred - `source_edit_smoke_proof`: run a spend-gated 5-10 case source-preserving edit smoke before enabling automated source-edit reliance.
 - [ ] Deferred - `persistent_brand_memory_activation`: turn the readiness signal into customer-visible brand memory only after enough QA-passed delivered assets exist.
 - [ ] Deferred - `session_search_campaign_history`: use Hermes memory/session search to retrieve prior campaign styles, edits, and outcomes.

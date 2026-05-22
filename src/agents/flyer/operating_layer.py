@@ -6,6 +6,10 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
+CAPABILITY_KEYS: tuple[str, ...] = (
+    "persistent_brand_memory_readiness_signal",
+)
+
 BACKLOG_KEYS: tuple[str, ...] = (
     "source_edit_smoke_proof",
     "persistent_brand_memory_activation",
@@ -24,11 +28,12 @@ BACKLOG_KEYS: tuple[str, ...] = (
     "hybrid_layout_final_renderer",
     "marketing_os_long_term",
 )
+OPERATING_LAYER_KEYS: tuple[str, ...] = CAPABILITY_KEYS + BACKLOG_KEYS
 
 _ROLLUP_RANK = {"green": 0, "yellow": 1, "red": 2}
 _SOURCE_EDIT_READY = "configured_with_smoke"
 _COMPLETED_CAMPAIGN_STATUSES = {"delivered", "completed", "closed_sent"}
-_ACTIVE_CUSTOMER_STATUSES = {"trial", "active", "payment_pending"}
+_ACTIVE_CUSTOMER_STATUSES = {"trial", "active"}
 
 _BACKLOG_META: dict[str, tuple[str, str, str]] = {
     "source_edit_smoke_proof": (
@@ -229,9 +234,9 @@ def _ready_campaigns_by_customer(campaigns: list[CampaignSnapshot]) -> dict[str,
 def _brand_memory_section(model: OperatingLayerReadinessInput) -> dict[str, Any]:
     active_customers = [customer for customer in model.customers if customer.status in _ACTIVE_CUSTOMER_STATUSES]
     ready_campaigns = _ready_campaigns_by_customer(model.campaigns)
-    ready_ids: list[str] = []
+    ready_count = 0
     reasons: list[str] = []
-    for customer in active_customers:
+    for index, customer in enumerate(active_customers, start=1):
         missing: list[str] = []
         if not customer.business_name:
             missing.append("business name")
@@ -254,16 +259,15 @@ def _brand_memory_section(model: OperatingLayerReadinessInput) -> dict[str, Any]
         if has_timestamp_gap:
             missing.append("QA timestamp")
         if missing:
-            reasons.append(f"{customer.customer_id} missing " + ", ".join(missing))
+            reasons.append(f"customer {index} missing " + ", ".join(missing))
         else:
-            ready_ids.append(customer.customer_id)
+            ready_count += 1
     total = len(active_customers)
     return {
-        "status": "ready_for_at_least_one_customer" if ready_ids else "yellow",
-        "ready_customer_count": len(ready_ids),
+        "status": "ready_for_at_least_one_customer" if ready_count else "yellow",
+        "ready_customer_count": ready_count,
         "total_customer_count": total,
-        "coverage_ratio": round(len(ready_ids) / total, 3) if total else 0.0,
-        "ready_customer_ids": ready_ids,
+        "coverage_ratio": round(ready_count / total, 3) if total else 0.0,
         "reasons": reasons,
     }
 
@@ -354,7 +358,7 @@ def build_operating_layer_section(payload: dict[str, Any], rollout: dict[str, An
             "reason": model.platform_truthfulness.reason,
         },
         "rollout_guard": {
-            "status": "clear" if not conflict_reasons and resolved_rollout.verdict == "green" else status,
+            "status": "clear" if not yellow_reasons and resolved_rollout.verdict == "green" else status,
             "verdict": resolved_rollout.verdict,
             "reasons": yellow_reasons,
         },

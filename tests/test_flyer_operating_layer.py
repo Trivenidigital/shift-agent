@@ -16,6 +16,7 @@ if str(SRC) not in sys.path:
 
 from agents.flyer.operating_layer import (  # noqa: E402
     BACKLOG_KEYS,
+    OPERATING_LAYER_KEYS,
     OperatingLayerReadinessInput,
     build_operating_layer_section,
 )
@@ -51,6 +52,17 @@ def test_missing_asset_campaign_or_qa_keeps_brand_memory_yellow():
     assert any("QA timestamp" in reason for reason in missing_qa_timestamp["brand_memory"]["reasons"])
 
 
+def test_payment_pending_customer_does_not_make_brand_memory_ready():
+    payload = _load(READY_FIXTURE)
+    payload["customers"][0]["status"] = "payment_pending"
+
+    section = build_operating_layer_section(payload)
+
+    assert section["brand_memory"]["status"] == "yellow"
+    assert section["brand_memory"]["ready_customer_count"] == 0
+    assert section["brand_memory"]["total_customer_count"] == 0
+
+
 def test_rollout_input_used_when_self_eval_rollout_absent_and_conflicts_are_conservative():
     from_input = build_operating_layer_section(_load(READY_FIXTURE), rollout=None)
     assert from_input["source_edit"]["status"] == "deferred"
@@ -66,6 +78,20 @@ def test_rollout_input_used_when_self_eval_rollout_absent_and_conflicts_are_cons
     assert any("conflict" in reason.lower() for reason in conflict["rollout_guard"]["reasons"])
 
 
+def test_rollout_guard_is_not_clear_when_non_rollout_blockers_exist():
+    payload = _load(READY_FIXTURE)
+    payload["rollout"] = {
+        "verdict": "green",
+        "source_edit_posture": "configured_no_smoke",
+        "reasons": [],
+    }
+
+    section = build_operating_layer_section(payload)
+
+    assert section["rollout_guard"]["status"] == "yellow"
+    assert any("source-edit posture is configured_no_smoke" in reason for reason in section["rollout_guard"]["reasons"])
+
+
 def test_platform_truthfulness_false_blocks_multiformat_export_claims():
     section = build_operating_layer_section(_load(READY_FIXTURE))
 
@@ -77,9 +103,12 @@ def test_platform_truthfulness_false_blocks_multiformat_export_claims():
 def test_deferred_backlog_keys_cover_every_hermes_update_option():
     section = build_operating_layer_section(_load(READY_FIXTURE))
     keys = {item["key"] for item in section["deferred_backlog"]}
+    capability_keys = {item["key"] for item in section["capabilities"]}
 
     assert keys == set(BACKLOG_KEYS)
+    assert keys | capability_keys == set(OPERATING_LAYER_KEYS)
     assert "persistent_brand_memory_activation" in keys
+    assert "persistent_brand_memory_readiness_signal" in capability_keys
     assert "native_video_conversion" in keys
     assert "x_social_posting_approval" in keys
     assert "auto_kanban_operator_work" in keys
@@ -143,3 +172,37 @@ def test_self_evaluation_cli_injects_operating_layer_json(tmp_path):
 
     assert payload["operating_layer"]["brand_memory"]["status"] == "ready_for_at_least_one_customer"
     assert payload["operating_layer"]["next_action"]["key"] == "source_edit_smoke_proof"
+
+
+def test_self_evaluation_redacts_operating_layer_customer_identifiers(tmp_path):
+    projects = tmp_path / "projects.json"
+    decisions = tmp_path / "decisions.log"
+    operating_input = tmp_path / "operating.json"
+    projects.write_text('{"projects":[]}\n', encoding="utf-8")
+    decisions.write_text("", encoding="utf-8")
+    payload = _load(PARTIAL_FIXTURE)
+    payload["customers"][0]["customer_id"] = "+17329837841"
+    payload["platform_truthfulness"]["reason"] = "operator note for +17329837841"
+    operating_input.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "tools/flyer-self-evaluation.py",
+            "--projects",
+            str(projects),
+            "--decisions-log",
+            str(decisions),
+            "--operating-layer-input",
+            str(operating_input),
+            "--format",
+            "json",
+        ],
+        cwd=REPO,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    assert "+17329837841" not in result.stdout
+    assert "[redacted-phone]" in result.stdout

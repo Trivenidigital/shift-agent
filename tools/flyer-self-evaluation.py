@@ -47,6 +47,7 @@ from agents.flyer.rollout_readiness import (  # noqa: E402
     render_rollout_section,
 )
 from agents.flyer.operating_layer import (  # noqa: E402
+    OPERATING_LAYER_KEYS,
     build_operating_layer_section,
     render_operating_layer_markdown,
 )
@@ -1071,9 +1072,23 @@ def sanitize_value(value: Any, *, key: str = "") -> Any:
     if isinstance(value, list):
         return [sanitize_value(item, key=key) for item in value]
     if isinstance(value, str):
+        if key == "key" and value in OPERATING_LAYER_KEYS:
+            return value
         if re.search(r"(?:key|token|secret)$|(?:api_key|access_token|refresh_token)", key, flags=re.I):
             return "[redacted-secret]"
         if key in {"type", "severity", "project_id", "eval_category", "category", "reason", "suggested_fixture"}:
+            return value
+        return redact_text(value)
+    return value
+
+
+def sanitize_operating_layer_value(value: Any, *, key: str = "") -> Any:
+    if isinstance(value, dict):
+        return {k: sanitize_operating_layer_value(v, key=str(k)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [sanitize_operating_layer_value(item, key=key) for item in value]
+    if isinstance(value, str):
+        if key == "key" and value in OPERATING_LAYER_KEYS:
             return value
         return redact_text(value)
     return value
@@ -1150,9 +1165,13 @@ def build_report(
     sanitized = sanitize_report(report)
     if operating_layer_input is not None:
         rollout_section = sanitized.get("rollout") if isinstance(sanitized.get("rollout"), dict) else None
-        sanitized["operating_layer"] = build_operating_layer_section(
+        operating_layer = build_operating_layer_section(
             operating_layer_input,
             rollout=rollout_section,
+        )
+        redacted_operating_layer = sanitize_operating_layer_value(operating_layer)
+        sanitized["operating_layer"] = (
+            redacted_operating_layer if isinstance(redacted_operating_layer, dict) else operating_layer
         )
     return sanitized
 

@@ -234,6 +234,18 @@ def test_operator_brief_surfaces_flyer_operating_layer_next_action(tmp_path):
                         "status": "deferred",
                         "posture": "manual_review",
                     },
+                    "deferred_backlog": [
+                        {
+                            "key": "source_edit_smoke_proof",
+                            "status": "blocked",
+                            "guardrail": "Run a spend-gated 5-10 case smoke.",
+                        },
+                        {
+                            "key": "multi_format_export_truthfulness",
+                            "status": "blocked",
+                            "guardrail": "Instagram story/post/export claims remain blocked.",
+                        },
+                    ],
                     "next_action": {
                         "key": "source_edit_smoke_proof",
                         "summary": "Next: source_edit_smoke_proof - operator - Run a spend-gated 5-10 case smoke.",
@@ -257,6 +269,8 @@ def test_operator_brief_surfaces_flyer_operating_layer_next_action(tmp_path):
 
     assert "Operating layer: yellow; brand_memory=ready_for_at_least_one_customer (1/1); source_edit=deferred (manual_review)" in markdown
     assert "Next: source_edit_smoke_proof - operator - Run a spend-gated 5-10 case smoke." in markdown
+    assert "Blocked: source_edit_smoke_proof - Run a spend-gated 5-10 case smoke." in markdown
+    assert "Blocked: multi_format_export_truthfulness - Instagram story/post/export claims remain blocked." in markdown
 
 
 def test_operator_brief_includes_fleet_normalization_readiness(tmp_path):
