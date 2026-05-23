@@ -550,6 +550,24 @@ def test_extract_revision_patch_handles_item_specific_price_to_new_price():
     assert "Poori with Chicken $14.99" in patch.notes_update
 
 
+def test_extract_revision_patch_handles_category_price_to_new_price():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Mid-Night Biryani",
+        contact_info="+1 732 983 7841",
+        notes=(
+            "Create a flyer for mid-night biryani. Include all famous biryanis, "
+            "all you can eat @ $25.99"
+        ),
+    ))
+
+    patch = extract_revision_patch(project, "Update Prices of any biryani to $22.99")
+
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert "Set all biryani prices to $22.99" in patch.notes_update
+    assert "all you can eat @ $25.99" in patch.notes_update
+
+
 def test_extract_revision_patch_replaces_decimal_price_before_period():
     project = _project(FlyerRequestFields(
         event_or_business_name="Weekend Breakfast Specials",

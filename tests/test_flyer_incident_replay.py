@@ -112,7 +112,7 @@ def test_preview_approved_final_qa_replay_feeds_self_eval_active_risk(tmp_path, 
     hooks, actions, _calls, audits, _sent, _identity_calls = install_common_replay_mocks(monkeypatch, tmp_path, fixture)
     monkeypatch.setattr(actions, "finalize_and_send_flyer", lambda *_a, **_kw: (False, "visual_qa_failed: missing required visible fact: business_name"))
     result = hooks.pre_gateway_dispatch(build_event(fixture))
-    assert result is None
+    assert result == {"action": "skip", "reason": "cf-router flyer active: finalization failed for F0065"}
     assert any(
         row.get("reason") == "flyer_primary_failed"
         and "approve=true" in str(row.get("detail") or "")

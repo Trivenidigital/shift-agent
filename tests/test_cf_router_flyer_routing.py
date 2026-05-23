@@ -1777,12 +1777,61 @@ def test_manual_source_edit_status_check_gets_queue_update_not_clarification(mon
     assert "Please send the exact text" not in sent[0][1]
 
 
+def test_manual_review_where_is_update_flyer_routes_as_status(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    active_project = {
+        "project_id": "F0085",
+        "customer_phone": "+17329837841",
+        "status": "manual_edit_required",
+        "created_at": "2026-05-23T00:16:00Z",
+        "original_message_id": "m-f0085",
+        "raw_request": "Create a flyer for mid-night biryani. Include all famous biryanis.",
+        "fields": {"event_or_business_name": "Mid-Night Biryani", "contact_info": "+17329837841"},
+        "updated_at": "2026-05-23T00:18:00Z",
+        "manual_review": {
+            "status": "queued",
+            "reason": "visual_qa_failed",
+            "reason_code": "visual_qa_failed",
+            "detail": "final visual QA failed",
+            "queued_at": "2026-05-23T00:18:00Z",
+        },
+    }
+    sent: list[str] = []
+    audit_reasons: list[str] = []
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
+    monkeypatch.setattr(actions, "find_latest_flyer_project_for_status_by_sender", lambda _phone, _chat_id: active_project)
+    monkeypatch.setattr(
+        actions,
+        "invoke_update_flyer_project",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("status check must not become a queued edit")),
+    )
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "status-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audit_reasons.append(kwargs.get("reason", "")))
+
+    result = hooks._try_flyer_active_project_intercept(
+        "Where is the update flyer?",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "where-update"},
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer status for F0085"}
+    assert sent
+    assert "review" in sent[0].lower()
+    assert "Please send the exact text" not in sent[0]
+    assert "flyer_project_status" in audit_reasons
+    assert "flyer_reference_exact_edit_status" not in audit_reasons
+
+
 def test_flyer_project_status_request_classifier_keeps_edits_separate():
     actions = _load_actions()
 
     for text in [
         "any update",
         "Any updates?",
+        "where is the update flyer?",
         "what's the status",
         "is the flyer ready",
         "still waiting",
@@ -2900,6 +2949,8 @@ def test_visible_time_text_revision_does_not_send_clarification(monkeypatch):
         "revisions": [],
     }
     sent: list[str] = []
+    audit_reasons: list[str] = []
+    audit_reasons: list[str] = []
     generated: list[str] = []
 
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+17329837841", "customer"))
@@ -2921,7 +2972,7 @@ def test_visible_time_text_revision_does_not_send_clarification(monkeypatch):
     monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
     monkeypatch.setattr(actions, "trigger_generate_flyer_concepts", lambda project_id: generated.append(project_id) or (True, "generated"))
     monkeypatch.setattr(actions, "send_flyer_concept_previews", lambda *_args, **_kwargs: (True, "preview-mid", ""))
-    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audit_reasons.append(kwargs.get("reason", "")))
 
     result = hooks._try_flyer_active_project_intercept(
         "Time: 16:00 is duplicated. I'd like you to remove this.",
@@ -2966,6 +3017,43 @@ def test_pending_revision_confirmation_blocks_approve_and_reminds_apply(monkeypa
 
     assert result == {"action": "skip", "reason": "cf-router flyer active: pending revision confirmation for F0065"}
     assert sent and "Reply APPLY R001" in sent[0]
+
+
+def test_final_visual_qa_failure_after_approve_gets_review_ack(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    active_project = {
+        "project_id": "F0085",
+        "customer_phone": "+17329837841",
+        "status": "awaiting_final_approval",
+        "fields": {"event_or_business_name": "Mid-Night Biryani", "contact_info": "+17329837841"},
+        "concepts": [{"concept_id": "C1"}],
+    }
+    sent: list[str] = []
+    audit_reasons: list[str] = []
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
+    monkeypatch.setattr(actions, "finalize_and_send_flyer", lambda *_args: (False, "visual_qa_failed: missing required visible facts"))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "final-failed-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audit_reasons.append(kwargs.get("reason", "")))
+
+    result = hooks._try_flyer_active_project_intercept(
+        "APPROVE",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "approve-fail-final-qa"},
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer active: finalization failed for F0085"}
+    assert sent == [
+        "Flyer Studio\n"
+        "------------\n"
+        "I hit an issue preparing the final files. I'll review it and send an update here."
+    ]
+    assert "approval has been processed" not in sent[0].lower()
+    assert audit_reasons
+    assert audit_reasons[-1] == "flyer_primary_failed"
+    assert "flyer_reference_exact_edit_queued" not in audit_reasons
 
 
 def test_pending_confirmation_message_is_sent_verbatim(monkeypatch):

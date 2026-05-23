@@ -1512,6 +1512,17 @@ def _send_flyer_regeneration_failed_ack(chat_id: str, project_id: str) -> tuple[
     )
 
 
+def _send_flyer_finalization_failed_ack(chat_id: str, project_id: str) -> tuple[bool, str, str]:
+    return actions.send_flyer_text(
+        chat_id,
+        (
+            "Flyer Studio\n"
+            "------------\n"
+            "I hit an issue preparing the final files. I'll review it and send an update here."
+        ),
+    )
+
+
 def _try_flyer_account_intercept(text: str, chat_id: str, event: Any) -> Optional[dict]:
     if not actions.is_flyer_account_command(text):
         return None
@@ -2211,8 +2222,12 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         else:
             reply = actions.flyer_project_status_reply(status_project)
         ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+        is_source_edit_manual_status = (
+            status_project_status == "manual_edit_required"
+            and manual_reason_code == "source_edit_provider_unavailable"
+        )
         actions.audit_intercepted(
-            reason=("flyer_reference_exact_edit_status" if status_project_status == "manual_edit_required" and ack_ok else ("flyer_project_status" if ack_ok else "flyer_primary_failed")),
+            reason=("flyer_reference_exact_edit_status" if is_source_edit_manual_status and ack_ok else ("flyer_project_status" if ack_ok else "flyer_primary_failed")),
             chat_id=chat_id,
             subprocess_rc=0 if ack_ok else 3,
             detail=(
@@ -2225,7 +2240,7 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
             "action": "skip",
             "reason": (
                 f"cf-router flyer exact edit status for {status_project_id}"
-                if status_project_status == "manual_edit_required" else
+                if is_source_edit_manual_status else
                 f"cf-router flyer status for {status_project_id}"
             ),
         }
@@ -2521,7 +2536,19 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         if ok:
             return {"action": "skip",
                     "reason": f"cf-router flyer active: finalized {project_id}"}
-        return None
+        fail_ack_ok, fail_mid, fail_err = _send_flyer_finalization_failed_ack(chat_id, project_id)
+        actions.audit_intercepted(
+            reason="flyer_primary_failed",
+            chat_id=chat_id,
+            subprocess_rc=0 if fail_ack_ok else 3,
+            detail=(
+                f"project_id={project_id}; approve_finalization_failed=true; "
+                f"sender_role={role}; finalize_detail={detail[:300]}; "
+                f"ack_message_id={fail_mid}; ack_error={fail_err[:300]}"
+            ),
+        )
+        return {"action": "skip",
+                "reason": f"cf-router flyer active: finalization failed for {project_id}"}
 
     if status in {"revising_design", "awaiting_final_approval", "delivered"} and body:
         ok, detail = actions.invoke_update_flyer_project(

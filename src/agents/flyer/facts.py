@@ -221,6 +221,25 @@ def _generic_item_price(text: str) -> str:
     return f"${match.group('price')}"
 
 
+def _offer_price_fact(text: str, *, message_id: str = "") -> FlyerLockedFact | None:
+    patterns = [
+        r"\ball\s+you\s+can\s+eat\s*(?:@|for|at|:)?\s*\$?\s*(?P<price>\d+(?:\.\d{2})?)\b",
+        r"\b(?:offer|special|deal)\s+price\s*(?:is|@|for|at|:)?\s*\$?\s*(?P<price>\d+(?:\.\d{2})?)\b",
+        r"\bset\s+all\s+[a-z][a-z0-9 '&/-]{1,40}?\s+prices?\s+to\s+\$?\s*(?P<price>\d+(?:\.\d{2})?)\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text or "", flags=re.IGNORECASE)
+        if match:
+            return _fact(
+                "offer_price",
+                "Offer price",
+                f"${match.group('price')}",
+                "customer_text",
+                message_id=message_id,
+            )
+    return None
+
+
 def _item_name_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFact]:
     facts: list[FlyerLockedFact] = []
     seen: set[str] = set()
@@ -300,6 +319,9 @@ def extract_text_facts(
     ]:
         if item:
             facts.append(item)
+    offer_price = _offer_price_fact(text, message_id=message_id)
+    if offer_price:
+        facts.append(offer_price)
     item_name_facts = _item_name_facts(text, message_id=message_id)
     generic_price = _generic_item_price(text)
     item_price_facts = _item_price_facts(text, message_id=message_id)
