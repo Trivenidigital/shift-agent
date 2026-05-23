@@ -221,6 +221,32 @@ def test_reference_scope_no_spend_exact_source_edit_skips_ownership_prompt(monke
     assert "reply_text" not in doc
 
 
+def test_reference_scope_no_spend_deferred_copy_stays_scope_only(monkeypatch):
+    actions = _load_actions()
+    monkeypatch.delenv("FLYER_REFERENCE_SCOPE_ALLOW_SPEND", raising=False)
+    monkeypatch.setattr(
+        actions.subprocess,
+        "run",
+        lambda *_a, **_kw: pytest.fail("no-spend deferred scope path must not call scope subprocess"),
+    )
+
+    ok, detail, doc = actions.trigger_check_flyer_reference_scope(
+        customer={"business_name": "Lakshmis Kitchen"},
+        media_path="/opt/shift-agent/.hermes/image_cache/source.jpg",
+        raw_request="Use this uploaded flyer style for a new ad this week.",
+    )
+
+    assert ok is True
+    assert detail == "scope_check_deferred_no_spend"
+    assert doc is not None
+    assert doc["decision"] == "clarify"
+    assert doc["reason"] == "scope_check_requires_provider_after_quota"
+    reply_text = str(doc.get("reply_text") or "")
+    assert "I need to confirm whether the attached flyer belongs to Lakshmis Kitchen." in reply_text
+    assert "free trial" not in reply_text.lower()
+    assert "quota" not in reply_text.lower()
+
+
 def test_reference_scope_pending_choice_consumes_option_two(tmp_path):
     actions = _load_actions()
     actions.FLYER_REFERENCE_SCOPE_PATH = tmp_path / "reference_scope_pending.json"
