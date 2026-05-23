@@ -1228,7 +1228,20 @@ def test_returning_customer_concierge_can_enter_guided_mode(tmp_path):
     assert store.intake_sessions[0].creation_mode == "guided"
 
 
-@pytest.mark.parametrize("reply", ["yes", "ok", "sure", "help me", "please", "yes help me"])
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "yes",
+        "ok",
+        "sure",
+        "help me",
+        "please",
+        "yes help me",
+        "one message",
+        "text mode",
+        "I'll type it",
+    ],
+)
 def test_returning_customer_concierge_still_vague_followup_asks_open_prompt(tmp_path, reply):
     state_path = tmp_path / "customers.json"
     now = datetime(2026, 5, 23, tzinfo=timezone.utc)

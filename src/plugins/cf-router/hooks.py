@@ -1664,6 +1664,21 @@ def _send_flyer_concierge_choice(
             subprocess_rc=2,
             detail=f"source=concierge; detail={detail[:450]}",
         )
+        ack_ok, mid, err = actions.send_flyer_text(
+            chat_id,
+            (
+                "Flyer Studio\n"
+                "------------\n"
+                "I could not start the flyer conversation cleanly. "
+                "Please send what the flyer is for, or reply START FREE TRIAL to restart setup."
+            ),
+        )
+        actions.audit_intercepted(
+            reason="flyer_intake_failed",
+            chat_id=chat_id,
+            subprocess_rc=0 if ack_ok else 3,
+            detail=f"source=concierge_recovery; ack_message_id={mid}; ack_error={err[:300]}",
+        )
         return {"action": "skip", "reason": "cf-router flyer concierge failed"}
     reply = str(intake.get("reply_text") or "")
     ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
@@ -1705,6 +1720,13 @@ def _try_flyer_intake_intercept(
         "brief_pending_approval",
     }
     status = str((intake_session or {}).get("status") or "")
+    if status == "concierge_awaiting_choice":
+        body = " ".join(actions.flyer_visible_message_text(text).split())
+        if actions.find_active_flyer_project_by_sender(phone, chat_id) and (
+            actions.is_flyer_project_status_request(body)
+            or actions.is_flyer_approval_text(body)
+        ):
+            return None
     if customer and customer.get("status") in {"active", "trial"} and status not in protected_statuses and (
         actions.classify_flyer_intent(text)[0]
         or actions.should_start_new_flyer_over_active(text, has_media=bool(media_path))

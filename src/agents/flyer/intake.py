@@ -610,6 +610,18 @@ def parse_concierge_choice(text: str) -> str:
         "walk me through it",
     }
     vague_phrases = {
+        "i can tell you in one message",
+        "i will type",
+        "i will type it",
+        "ill type",
+        "ill type it",
+        "in one message",
+        "let me type",
+        "one message",
+        "text",
+        "text mode",
+        "type",
+        "type it",
         "yes",
         "ok",
         "okay",
@@ -624,6 +636,8 @@ def parse_concierge_choice(text: str) -> str:
         "make flyer",
         "make a flyer",
         "i need a flyer",
+        "i ll type",
+        "i ll type it",
         "need flyer",
     }
     if choice in guided_phrases:

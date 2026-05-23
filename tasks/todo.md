@@ -1335,11 +1335,12 @@ Review results:
   - Drift-check tag: extends-Hermes
   - Hermes-first analysis: reuse Hermes/cf-router WhatsApp ingress, Flyer sender identity, existing `FlyerIntakeSession`, brief approval, project creation, quota, and render flow. Net-new scope is one returning-customer intake status and customer-facing copy.
   - [x] Write implementation plan: `docs/superpowers/plans/2026-05-23-flyer-concierge-intake.md`.
-  - [ ] Get implementation plan reviewed by two parallel agents.
+  - [x] Get implementation plan reviewed by two parallel agents.
   - [x] Fix plan review findings.
   - [x] Write design spec: `docs/superpowers/specs/2026-05-23-flyer-concierge-intake-design.md`.
   - [x] Get design spec reviewed by two parallel agents.
   - [x] Fix design review findings.
   - [x] Build with TDD and focused verification.
-  - Review: red concierge tests first failed across schema/intake/router, then passed. Focused suite `tests/test_flyer_onboarding.py tests/test_cf_router_flyer_routing.py tests/test_flyer_schemas.py tests/test_flyer_starter_briefs.py` -> `245 passed`; plugin/static suite `tests/test_cf_router_plugin.py tests/test_flyer_scripts_static.py` -> `33 passed, 119 skipped`; touched-file `py_compile` and `git diff --check` passed.
-  - [ ] Open PR and get two parallel PR reviews.
+  - [x] Open PR: https://github.com/Trivenidigital/shift-agent/pull/187
+  - [x] Get two parallel PR reviews and fix findings.
+  - Review: red concierge tests first failed across schema/intake/router, then passed. Initial focused suite `tests/test_flyer_onboarding.py tests/test_cf_router_flyer_routing.py tests/test_flyer_schemas.py tests/test_flyer_starter_briefs.py` -> `245 passed`; plugin/static suite `tests/test_cf_router_plugin.py tests/test_flyer_scripts_static.py` -> `33 passed, 119 skipped`; touched-file `py_compile` and `git diff --check` passed. PR review hardening added scoped customer recovery on concierge startup failure, passed active-project status/approval commands through while concierge is waiting, treated "one message"/text-mode replies as a choice instead of a brief, and removed a misleading active-project test parameter. Final focused suite after PR-review fixes -> `249 passed`; plugin/static remained `33 passed, 119 skipped`; touched-file `py_compile` and `git diff --check` passed.
