@@ -3443,7 +3443,9 @@ def test_consume_flyer_source_vs_new_choice_round_trip(tmp_path):
 def test_flyer_is_status_checkin_matches_expected_phrases():
     actions = _load_actions()
     assert actions.flyer_is_status_checkin("any update?")
+    assert actions.flyer_is_status_checkin("any updates?")
     assert actions.flyer_is_status_checkin("is it ready?")
+    assert actions.flyer_is_status_checkin("where are the updates?")
     assert actions.flyer_is_status_checkin("status")
     assert not actions.flyer_is_status_checkin("source please")
     assert not actions.flyer_is_status_checkin("change the date")

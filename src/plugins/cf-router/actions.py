@@ -1923,6 +1923,8 @@ def is_flyer_project_status_request(text: str) -> bool:
         return False
     if re.fullmatch(r"(status|any update|any updates|update|updates|eta|ready|done|finished)\??", body):
         return True
+    if re.fullmatch(r"where\s+(?:is|are|s)\s+(?:the\s+)?updates?\??", body):
+        return True
     return bool(re.search(
         r"\b("
         r"any\s+updates?|"
@@ -3083,7 +3085,7 @@ def parse_source_vs_new_followup(text: str) -> tuple[str, str]:
 
 
 _STATUS_CHECKIN_RE = re.compile(
-    r"^(?:any\s+update|is\s+it\s+ready|what'?s?\s+(?:the\s+)?status|update\??|status\??|ready\??)\??$",
+    r"^(?:any\s+updates?|is\s+it\s+ready|what'?s?\s+(?:the\s+)?status|where\s+(?:is|are|s)\s+(?:the\s+)?updates?|update\??|status\??|ready\??)\??$",
     flags=re.IGNORECASE,
 )
 
