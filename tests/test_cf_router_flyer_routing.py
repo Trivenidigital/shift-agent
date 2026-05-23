@@ -3142,6 +3142,51 @@ def test_visible_time_text_revision_does_not_send_clarification(monkeypatch):
     assert generated == ["F0065"]
 
 
+def test_category_price_revision_does_not_send_clarification(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    active_project = {
+        "project_id": "F0071",
+        "customer_phone": "+17329837841",
+        "status": "awaiting_final_approval",
+        "fields": {"event_or_business_name": "Mid-Night Biryani", "contact_info": "+17329837841"},
+        "concepts": [{"concept_id": "C1"}],
+        "revisions": [],
+    }
+    sent: list[str] = []
+    generated: list[str] = []
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
+
+    def fake_update(project_id, *args):
+        assert project_id == "F0071"
+        assert "--revision-text" in args
+        assert any("Update prices of any biryani to $22.99" in arg for arg in args)
+        active_project["concepts"] = []
+        return True, (
+            '{"project_id":"F0071","version":2,'
+            '"revision_requires_clarification":false,'
+            '"revision_patch":{"notes_update":"Set all biryani prices to $22.99"}}'
+        )
+
+    monkeypatch.setattr(actions, "invoke_update_flyer_project", fake_update)
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "trigger_generate_flyer_concepts", lambda project_id: generated.append(project_id) or (True, "generated"))
+    monkeypatch.setattr(actions, "send_flyer_concept_previews", lambda *_args, **_kwargs: (True, "preview-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+
+    result = hooks._try_flyer_active_project_intercept(
+        "Update prices of any biryani to $22.99",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "category-price-revision"},
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer active: revision captured for F0071"}
+    assert sent == ["Revision applied to the flyer details. I am regenerating the design now."]
+    assert generated == ["F0071"]
+
+
 def test_pending_revision_confirmation_blocks_approve_and_reminds_apply(monkeypatch):
     hooks, actions = _load_plugin_modules()
     active_project = {
