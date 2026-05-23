@@ -13,11 +13,10 @@
 #
 # Fields are shell-sourceable (KEY=VALUE, no spaces).
 #
-# 2026-05-14 re-baseline: live Hermes had advanced to 486b692d during the
-# catering autonomous-proposals deploy. Verified patch-hermes.py against a
-# copied tree, applied sender-id markers live, and captured the post-patch
-# bridge.js sha256 below. Hermes' module version currently reports unknown;
-# commit hash remains the authoritative pin.
-HERMES_COMMIT=486b692ddd801f8f665d3fff023149fb1cb6509e
-HERMES_VERSION=unknown
-BRIDGE_POST_PATCH_SHA256=de178b6fa6227f923f479ff2d34a3419b4a2e5f83bc5e5408137712cd25ed7ec
+# 2026-05-23 re-baseline: fleet Hermes upgrade moved Main to v0.14.0
+# commit 1e71b718. Verified check-shift-agent-patch.sh with an explicit
+# one-run override against the live Main gateway/bridge after the upgrade;
+# captured the post-upgrade bridge.js sha256 below.
+HERMES_COMMIT=1e71b7180e5b4e84905b9a3086cf9cecca139562
+HERMES_VERSION=0.14.0
+BRIDGE_POST_PATCH_SHA256=94a13a926798d5c2e6e69dd4f227ef940f88e3076bab60333d1b92fa55680913
