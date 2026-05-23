@@ -268,6 +268,7 @@ def assert_expected_route(
         "manual_edit_queued",
         "revision",
         "status_reply",
+        "finalize_failed",
     }:
         assert result is not None and result.get("action") == "skip", (fixture["id"], result, calls, audits, sent)
     if route == "new_project":
@@ -283,11 +284,12 @@ def assert_expected_route(
         assert "flyer_reference_exact_edit_queued" in audit_reasons
         assert any("--manual-reason-code" in args and expect.get("manual_review_reason_code") in args for args in update_calls)
     elif route == "finalize_failed":
-        assert result is None
+        assert "finalization failed" in reason
         assert "finalize_and_send_flyer" in calls
         assert "flyer_primary_failed" in audit_reasons
         assert "approve=true" in audit_details
         assert "visual_qa_failed" in audit_details
+        assert any("issue preparing the final files" in text for text in sent)
     elif route == "clarification":
         assert sent
         assert "trigger_create_flyer_project" not in calls

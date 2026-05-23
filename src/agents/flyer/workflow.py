@@ -688,6 +688,29 @@ def _extract_item_price_to_new(text: str) -> tuple[str, str]:
     return item, f"${match.group('price')}"
 
 
+def _extract_category_price_instruction(text: str) -> str:
+    match = re.search(
+        r"\b(?:change|update|set)\s+prices\s+of\s+(?:any|all|every|the)?\s*"
+        r"(?P<category>[A-Za-z][A-Za-z0-9 '&/-]{1,40}?)\s+(?:to|as|=|:)\s+\$?(?P<price>\d+(?:\.\d{2})?)\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        match = re.search(
+            r"\b(?:change|update|set)\s+(?:any|all|every|the)?\s*"
+            r"(?P<category>[A-Za-z][A-Za-z0-9 '&/-]{1,40}?)\s+prices\s+(?:to|as|=|:)\s+\$?(?P<price>\d+(?:\.\d{2})?)\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+    if not match:
+        return ""
+    category = match.group("category").strip(" .,\"'")
+    category = re.sub(r"\b(?:item|items|any|all|every|the)\b", "", category, flags=re.IGNORECASE).strip(" .,\"'")
+    if not category:
+        return ""
+    return f"Set all {category} prices to ${match.group('price')}."
+
+
 def _extract_phone(text: str) -> str:
     phone = re.search(r"(?:phone|contact|number)\D{0,30}(\+?\d[\d\s().-]{7,}\d)", text, re.IGNORECASE)
     if not phone:
@@ -804,7 +827,10 @@ def extract_revision_patch(project: FlyerProject, text: str) -> RevisionPatchRes
             notes_update = replaced_notes
 
     item_for_price, new_item_price = _extract_item_price_to_new(body)
-    if item_for_price and new_item_price:
+    category_price_instruction = _extract_category_price_instruction(body)
+    if category_price_instruction:
+        notes_update, raw_request_update = _append_instruction(notes_update, raw_request_update, project, category_price_instruction)
+    elif item_for_price and new_item_price:
         replaced_notes, reason = _replace_item_price_once(project.fields.notes or "", item_for_price, new_item_price)
         if reason:
             replaced_raw, raw_reason = _replace_item_price_once(project.raw_request or "", item_for_price, new_item_price)

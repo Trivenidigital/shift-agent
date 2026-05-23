@@ -1325,3 +1325,9 @@ Review results:
   - [x] Open PR #152 and get two parallel PR reviews.
   - [x] Fold PR-review High findings: visual-QA failure fallback, truthful generic fallback copy, deterministic render title path, explicit business override bounds/prompt propagation, and SOURCE/NEW pending status phrasing.
   - Review: focused acceptance suite `324 passed, 117 skipped`; touched-file `py_compile` passed; `git diff --check` passed. No deploy performed.
+- [x] Flyer Studio price/lifecycle contract repair (2026-05-23): fix F0085-class offer-price QA miss, category-price revision parsing, manual-review status check priority, and finalization-failure customer copy without moving judgment out of Hermes.
+  - Drift-check tag: extends-Hermes
+  - Hermes-first analysis: Hermes remains the judgment/classification brain. This slice only adds deterministic Flyer contracts: locked offer-price fact extraction, category price revision instruction, status phrase coverage, and approval/finalization fail-closed copy.
+  - [x] Add red regressions for `all you can eat @ $25.99`, `Update Prices of any biryani to $22.99`, `Where is the update flyer?`, and final visual-QA failure after `APPROVE`.
+  - [x] Implement minimal code fixes and verify focused Flyer facts/workflow/visual-QA/router suite.
+  - Review: focused regression tests first failed, then passed; broader focused suite `198 passed`.
