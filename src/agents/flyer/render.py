@@ -291,7 +291,7 @@ def _schedule_hint(project: FlyerProject) -> str:
             flags=re.IGNORECASE,
         )
     days_match = re.search(
-        r"\b((?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s*(?:to|-)\s*(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|weekends?|weekdays?|daily)\b",
+        r"\b((?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s*(?:to|through|-)\s*(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|weekends?|weekdays?|daily)\b",
         text,
         flags=re.IGNORECASE,
     )
