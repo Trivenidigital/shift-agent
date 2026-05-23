@@ -3083,7 +3083,7 @@ def parse_source_vs_new_followup(text: str) -> tuple[str, str]:
 
 
 _STATUS_CHECKIN_RE = re.compile(
-    r"^(?:any\s+update|is\s+it\s+ready|what'?s?\s+(?:the\s+)?status|update\??|status\??|ready\??)\??$",
+    r"^(?:any\s+updates?|is\s+it\s+ready|what'?s?\s+(?:the\s+)?status|update\??|status\??|ready\??)\??$",
     flags=re.IGNORECASE,
 )
 
