@@ -452,3 +452,94 @@ def test_generate_missing_required_facts_project_does_not_enter_source_edit_rend
         pass  # downstream paths may SystemExit on empty specs; tolerated.
     # If we got here without AssertionError, the source-edit branch was
     # correctly avoided.
+
+
+def test_generate_draft_provider_timeout_queues_manual_review(monkeypatch, tmp_path, capsys):
+    """Draft (non-source-edit) rendering must never stall silently. When
+    render_concept_previews raises (timeout/5xx), queue manual review with
+    reason_code=provider_timeout and persist manual_edit_required for early
+    statuses."""
+    module = _load_script(monkeypatch)
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    state_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    reference = asset_dir / "F0001-reference.png"
+    reference.write_bytes(b"fake image bytes")
+    project = _project_with_pending_reference(reference)
+    project["reference_extractions"][0]["provider"] = "openai"
+    project["reference_extractions"][0]["status"] = "ok"
+    project["reference_extractions"][0]["detail"] = "extracted"
+    project["status"] = "generating_concepts"
+    state_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_sequence": 2,
+        "projects": [project],
+    }), encoding="utf-8")
+
+    def fake_render(*_args, **_kwargs):
+        raise module.FlyerRenderError("HTTP 502 Bad Gateway")
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts",
+        "--project-id", "F0001",
+        "--state-path", str(state_path),
+        "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+    ])
+
+    rc = module.main()
+    assert rc == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["manual_review_reason_code"] == "provider_timeout"
+    assert out["attempts"] == 2  # includes the single retry
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "manual_edit_required"
+    assert persisted["manual_review"]["status"] == "queued"
+    assert persisted["manual_review"]["reason_code"] == "provider_timeout"
+
+
+def test_generate_draft_quality_failure_does_not_retry(monkeypatch, tmp_path, capsys):
+    module = _load_script(monkeypatch)
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    state_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    reference = asset_dir / "F0001-reference.png"
+    reference.write_bytes(b"fake image bytes")
+    project = _project_with_pending_reference(reference)
+    project["reference_extractions"][0]["provider"] = "openai"
+    project["reference_extractions"][0]["status"] = "ok"
+    project["reference_extractions"][0]["detail"] = "extracted"
+    project["status"] = "generating_concepts"
+    state_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_sequence": 2,
+        "projects": [project],
+    }), encoding="utf-8")
+
+    calls = {"n": 0}
+
+    def fake_render(*_args, **_kwargs):
+        calls["n"] += 1
+        raise module.FlyerRenderError("draft concept failed quality check: width mismatch")
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts",
+        "--project-id", "F0001",
+        "--state-path", str(state_path),
+        "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+    ])
+
+    rc = module.main()
+    assert rc == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["manual_review_reason_code"] == "visual_qa_failed"
+    assert out["attempts"] == 1
+    assert calls["n"] == 1
