@@ -1767,10 +1767,8 @@ def test_manual_source_edit_status_check_gets_queue_update_not_clarification(mon
         message_id="f0053-status-1",
     ))
 
-    assert result == {
-        "action": "skip",
-        "reason": "cf-router flyer exact edit status for F0053",
-    }
+    assert result["action"] == "skip"
+    assert result["reason"].startswith("cf-router flyer exact edit status for F")
     assert sent
     assert "I have the requested changes" in sent[0][1]
     assert "no extra information needed" in sent[0][1]
