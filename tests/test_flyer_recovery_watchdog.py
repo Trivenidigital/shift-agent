@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import subprocess
 import sys
@@ -75,12 +76,14 @@ flyer:
     mode: observe
     enable_timer: true
     scan_window_minutes: 240
-""".strip(),
+    """.strip(),
         encoding="utf-8",
     )
+    current_ts = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat().replace("+00:00", "Z")
+    old_ts = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat().replace("+00:00", "Z")
     log.write_text(
-        '{"type":"cf_router_intercepted","ts":"2026-05-23T16:00:00Z","reason":"flyer_primary_failed","chat_id":"17329837841@s.whatsapp.net","message_id":"wamid.current","subprocess_rc":2,"detail":"project_id=F0065; concept_generation_failed: exit=2 provider down"}\n'
-        '{"type":"cf_router_intercepted","ts":"2026-05-20T16:00:00Z","reason":"flyer_primary_failed","chat_id":"17329837841@s.whatsapp.net","message_id":"wamid.old","subprocess_rc":2,"detail":"project_id=F0001; concept_generation_failed: exit=2 old provider down"}\n',
+        f'{{"type":"cf_router_intercepted","ts":"{current_ts}","reason":"flyer_primary_failed","chat_id":"17329837841@s.whatsapp.net","message_id":"wamid.current","subprocess_rc":2,"detail":"project_id=F0065; concept_generation_failed: exit=2 provider down"}}\n'
+        f'{{"type":"cf_router_intercepted","ts":"{old_ts}","reason":"flyer_primary_failed","chat_id":"17329837841@s.whatsapp.net","message_id":"wamid.old","subprocess_rc":2,"detail":"project_id=F0001; concept_generation_failed: exit=2 old provider down"}}\n',
         encoding="utf-8",
     )
     projects.write_text('{"projects":[]}', encoding="utf-8")

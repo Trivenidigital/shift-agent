@@ -232,6 +232,21 @@ def install_common_replay_mocks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda *_a, **_kw: fixture.get("customer"))
     monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda *_a, **_kw: fixture.get("active_project"))
     monkeypatch.setattr(actions, "send_flyer_text", send_text)
+    if (fixture.get("expect") or {}).get("route") == "concierge_choice":
+        def fake_trigger_flyer_intake(**kwargs):
+            calls.append("trigger_flyer_intake")
+            return True, "", {
+                "reply_text": (
+                    "Flyer Studio\n"
+                    "------------\n"
+                    "Welcome back, your business. Yes, I am here to help. What are we creating today?\n\n"
+                    "You can tell me in one message, or I can guide you step by step."
+                ),
+                "action": "concierge_choice",
+                "source": kwargs.get("start_source") or "",
+            }
+
+        monkeypatch.setattr(actions, "trigger_flyer_intake", fake_trigger_flyer_intake)
     monkeypatch.setattr(actions, "send_flyer_concept_previews", lambda *_a, **_kw: calls.append("send_previews") or (True, "preview-mid", ""))
     monkeypatch.setattr(hooks, "_reserve_flyer_access_or_reply", lambda *_a, **_kw: ("quota:CUST0001", None))
     monkeypatch.setattr(hooks, "_release_flyer_access", lambda *_a, **_kw: (True, "released"))
@@ -254,7 +269,7 @@ def assert_expected_route(
     Routes:
       new_project | clarification | source_new_clarification | source_new_status
       manual_edit_queued | revision | status_reply | finalize_failed
-      onboarding (added 2026-05-21 for LID-only rollout fixture)
+      concierge_choice | onboarding (added 2026-05-21 for LID-only rollout fixture)
     """
     route = expect.get("route")
     reason = str((result or {}).get("reason") or "")
@@ -263,6 +278,7 @@ def assert_expected_route(
     if route in {
         "new_project",
         "clarification",
+        "concierge_choice",
         "source_new_clarification",
         "source_new_status",
         "manual_edit_queued",
@@ -293,6 +309,12 @@ def assert_expected_route(
     elif route == "clarification":
         assert sent
         assert "trigger_create_flyer_project" not in calls
+    elif route == "concierge_choice":
+        assert "trigger_flyer_intake" in calls
+        assert "send_flyer_text" in calls
+        assert any("You can tell me in one message" in text for text in sent)
+        assert "trigger_create_flyer_project" not in calls
+        assert "invoke_update_flyer_project" not in calls
     elif route == "revision":
         assert "invoke_update_flyer_project" in calls
         assert "trigger_create_flyer_project" not in calls

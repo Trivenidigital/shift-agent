@@ -10,7 +10,7 @@ must protect:
  5.  visible text removal like duplicated HH:MM time stays revision (PR #157)
  6.  LID-only sender taps Start Free Trial -> onboarding (no phone resolution)
  7.  duplicate-phone second sender recognized as authorized requester
- 8.  vague "create flyer" -> idea picker, not blank project  (cross-ref)
+ 8.  vague "create flyer" -> concierge choice, not blank project  (cross-ref)
  9.  small revision like "make it red" stays revision  (cross-ref)
  10. source edit / co-owner path stays manual-review / provider-gated (cross-ref)
  11. status check does not create / revise a project  (cross-ref)
@@ -50,7 +50,7 @@ from _flyer_replay_helpers import (  # noqa: E402
 
 
 INCIDENT_REPLAY_CROSS_REFS = (
-    "vague-create-flyer-clarifies-without-project",
+    "vague-create-flyer-enters-concierge-without-project",
     "small-revision-make-it-red-stays-revision",
     "F0063-source-choice-queues-manual-edit",
     "status-check-does-not-create-or-revise",
@@ -91,7 +91,7 @@ def test_rollout_replay_includes_all_task_listed_scenarios():
         "rollout-visible-text-removal-stays-revision",
         "rollout-lid-only-start-free-trial-into-onboarding",
         "rollout-duplicate-phone-second-sender-recognized-as-authorized-requester",
-        "vague-create-flyer-clarifies-without-project",
+        "vague-create-flyer-enters-concierge-without-project",
         "small-revision-make-it-red-stays-revision",
         "F0063-source-choice-queues-manual-edit",
         "status-check-does-not-create-or-revise",

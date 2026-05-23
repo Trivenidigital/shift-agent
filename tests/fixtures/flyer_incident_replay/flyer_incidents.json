@@ -46,13 +46,17 @@
     "expect": {"route": "finalize_failed", "must_audit": ["flyer_primary_failed"], "self_eval_incident": "preview_approved_final_qa_failed", "active_customer_risk": true}
   },
   {
-    "id": "vague-create-flyer-clarifies-without-project",
+    "id": "vague-create-flyer-enters-concierge-without-project",
     "mode": "vague_start",
     "text": "create flyer",
     "chat_id": "17329837841@lid",
     "resolved_identity": {"phone": "+17329837841", "role": "customer"},
     "customer": {"customer_id": "CUST0001", "status": "trial", "starter_prompt_preferences": {"mode": "off"}},
-    "expect": {"route": "clarification", "forbidden_calls": ["trigger_create_flyer_project", "invoke_update_flyer_project"]}
+    "expect": {
+      "route": "concierge_choice",
+      "forbidden_calls": ["trigger_create_flyer_project", "invoke_update_flyer_project"],
+      "must_send_contains": ["You can tell me in one message, or I can guide you step by step."]
+    }
   },
   {
     "id": "small-revision-make-it-red-stays-revision",
