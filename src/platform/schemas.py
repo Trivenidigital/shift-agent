@@ -866,6 +866,25 @@ def is_flyer_transition_allowed(from_s: str, to_s: str) -> bool:
     return to_s in FLYER_TRANSITIONS.get(from_s, set())  # type: ignore[arg-type]
 
 
+class FlyerRecoveryConfig(BaseModel):
+    """Flyer recovery watchdog settings. Default inert until explicitly enabled."""
+    model_config = ConfigDict(extra="forbid")
+    mode: Literal["off", "observe", "customer_ack"] = "off"
+    enable_timer: bool = False
+    scan_window_minutes: int = Field(default=30, ge=5, le=240)
+    ack_cooldown_minutes: int = Field(default=60, ge=5, le=1440)
+    ack_reservation_stale_minutes: int = Field(default=10, ge=1, le=120)
+    max_incidents_per_run: int = Field(default=20, ge=1, le=200)
+    manual_queue_stale_minutes: int = Field(default=30, ge=5, le=1440)
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _yaml_bool_off(cls, v):
+        if v is False:
+            return "off"
+        return v
+
+
 class FlyerConfig(BaseModel):
     """Hermes Flyer Studio settings. Default off; opt-in per customer."""
     model_config = ConfigDict(extra="forbid")
@@ -898,6 +917,7 @@ class FlyerConfig(BaseModel):
         min_length=1,
         max_length=4,
     )
+    recovery: FlyerRecoveryConfig = Field(default_factory=FlyerRecoveryConfig)
 
     @staticmethod
     def _legacy_provider_for_model(model: str) -> FlyerModelProviderName:
@@ -3394,6 +3414,96 @@ class FlyerQuotaBlocked(_BaseEntry):
     limit: int = Field(ge=1)
 
 
+FlyerRecoverySeverity = Literal["info", "warning", "critical"]
+FlyerRecoveryEvidenceQuality = Literal["strong", "weak", "missing"]
+
+
+class FlyerRecoveryIncidentOpened(_BaseEntry):
+    type: Literal["flyer_recovery_incident_opened"]
+    incident_id: str = Field(min_length=1, max_length=80)
+    failure_class: str = Field(min_length=1, max_length=80)
+    severity: FlyerRecoverySeverity
+    project_id: str = Field(default="", max_length=40)
+    source_fingerprint: str = Field(min_length=1, max_length=120)
+    ack_dedupe_key: str = Field(default="", max_length=120)
+    chat_id_hash: str = Field(default="", max_length=120)
+    evidence_quality: FlyerRecoveryEvidenceQuality = "missing"
+    mode: str = Field(default="", max_length=40)
+
+
+class FlyerRecoveryCustomerAckAttempted(_BaseEntry):
+    type: Literal["flyer_recovery_customer_ack_attempted"]
+    incident_id: str = Field(min_length=1, max_length=80)
+    ack_attempt_id: str = Field(min_length=1, max_length=80)
+    ack_dedupe_key: str = Field(min_length=1, max_length=120)
+    source_fingerprint: str = Field(min_length=1, max_length=120)
+    chat_id_hash: str = Field(min_length=1, max_length=120)
+    evidence_quality: FlyerRecoveryEvidenceQuality
+    mode: str = Field(min_length=1, max_length=40)
+    copy_policy_template_id: str = Field(min_length=1, max_length=80)
+    message_sha256: str = Field(min_length=1, max_length=120)
+
+
+class FlyerRecoveryCustomerAckSent(_BaseEntry):
+    type: Literal["flyer_recovery_customer_ack_sent"]
+    incident_id: str = Field(min_length=1, max_length=80)
+    ack_attempt_id: str = Field(min_length=1, max_length=80)
+    ack_dedupe_key: str = Field(min_length=1, max_length=120)
+    source_fingerprint: str = Field(min_length=1, max_length=120)
+    chat_id_hash: str = Field(min_length=1, max_length=120)
+    evidence_quality: FlyerRecoveryEvidenceQuality
+    mode: str = Field(min_length=1, max_length=40)
+    outbound_message_id: str = Field(min_length=1, max_length=200)
+
+
+class FlyerRecoveryCustomerAckFailed(_BaseEntry):
+    type: Literal["flyer_recovery_customer_ack_failed"]
+    incident_id: str = Field(min_length=1, max_length=80)
+    ack_attempt_id: str = Field(min_length=1, max_length=80)
+    ack_dedupe_key: str = Field(min_length=1, max_length=120)
+    source_fingerprint: str = Field(min_length=1, max_length=120)
+    chat_id_hash: str = Field(min_length=1, max_length=120)
+    evidence_quality: FlyerRecoveryEvidenceQuality
+    mode: str = Field(min_length=1, max_length=40)
+    status: str = Field(min_length=1, max_length=80)
+    error: str = Field(default="", max_length=1000)
+
+
+class FlyerRecoveryCustomerAckUncertain(FlyerRecoveryCustomerAckFailed):
+    type: Literal["flyer_recovery_customer_ack_uncertain"]
+
+
+class FlyerRecoveryCustomerAckSuppressed(_BaseEntry):
+    type: Literal["flyer_recovery_customer_ack_suppressed"]
+    incident_id: str = Field(min_length=1, max_length=80)
+    ack_dedupe_key: str = Field(default="", max_length=120)
+    source_fingerprint: str = Field(default="", max_length=120)
+    chat_id_hash: str = Field(default="", max_length=120)
+    evidence_quality: FlyerRecoveryEvidenceQuality = "missing"
+    mode: str = Field(default="", max_length=40)
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class FlyerRecoveryRepairBundleWritten(_BaseEntry):
+    type: Literal["flyer_recovery_repair_bundle_written"]
+    incident_id: str = Field(min_length=1, max_length=80)
+    bundle_path: str = Field(min_length=1, max_length=500)
+
+
+class FlyerRecoveryDeployGate(_BaseEntry):
+    type: Literal["flyer_recovery_deploy_gate"]
+    incident_id: str = Field(min_length=1, max_length=80)
+    gate: str = Field(min_length=1, max_length=120)
+    passed: bool
+    detail: str = Field(default="", max_length=1000)
+
+
+class FlyerRecoveryResolved(_BaseEntry):
+    type: Literal["flyer_recovery_resolved"]
+    incident_id: str = Field(min_length=1, max_length=80)
+    resolution: Literal["suppressed", "customer_ack_sent", "repair_queued", "manual_required", "deployed"]
+
+
 class FlyerClosureCustomerNotified(_BaseEntry):
     """Operator-driven `flyer-manual-queue --close` proactive customer push.
 
@@ -4488,6 +4598,15 @@ LogEntry = Annotated[
         Annotated[FlyerAccountUpdated, Tag("flyer_account_updated")],
         Annotated[FlyerUsageRecorded, Tag("flyer_usage_recorded")],
         Annotated[FlyerQuotaBlocked, Tag("flyer_quota_blocked")],
+        Annotated[FlyerRecoveryIncidentOpened, Tag("flyer_recovery_incident_opened")],
+        Annotated[FlyerRecoveryCustomerAckAttempted, Tag("flyer_recovery_customer_ack_attempted")],
+        Annotated[FlyerRecoveryCustomerAckSent, Tag("flyer_recovery_customer_ack_sent")],
+        Annotated[FlyerRecoveryCustomerAckFailed, Tag("flyer_recovery_customer_ack_failed")],
+        Annotated[FlyerRecoveryCustomerAckUncertain, Tag("flyer_recovery_customer_ack_uncertain")],
+        Annotated[FlyerRecoveryCustomerAckSuppressed, Tag("flyer_recovery_customer_ack_suppressed")],
+        Annotated[FlyerRecoveryRepairBundleWritten, Tag("flyer_recovery_repair_bundle_written")],
+        Annotated[FlyerRecoveryDeployGate, Tag("flyer_recovery_deploy_gate")],
+        Annotated[FlyerRecoveryResolved, Tag("flyer_recovery_resolved")],
         Annotated[FlyerClosureCustomerNotified, Tag("flyer_closure_customer_notified")],
         # NEW — source-contract observability (2026-05-20 flyer source-contract-first)
         Annotated[FlyerSourceContractExtracted, Tag("flyer_source_contract_extracted")],
@@ -4544,6 +4663,8 @@ __all__ = [
     "CateringLearningSource", "CateringLearningProposalHealth",
     "CateringLearningSummary",
     "is_catering_terminal", "CATERING_TERMINAL_STATUSES",
+    "FlyerConfig", "FlyerRecoveryConfig", "FlyerWorkflowStatus", "FlyerOnboardingStatus", "FlyerLanguage", "FlyerCreationMode",
+    "FlyerIntakeStatus", "FlyerIntakeSource", "FlyerOutputFormat", "FlyerImageQuality",
     "FlyerConfig", "FlyerRenderProviderConfig", "FlyerDraftProviderPolicy", "FlyerFinalProviderPolicy",
     "FlyerSourceEditProviderPolicy",
     "FlyerTextHeavyDraftPolicy", "FlyerVisualHeavyDraftPolicy",
@@ -4586,6 +4707,11 @@ __all__ = [
     "FlyerProjectCreated", "FlyerStatusChange",
     "FlyerAssetsDelivered", "FlyerDeliveryFailed",
     "FlyerCustomerCreated", "FlyerCustomerActivated", "FlyerAccountUpdated",
+    "FlyerUsageRecorded", "FlyerQuotaBlocked",
+    "FlyerRecoveryIncidentOpened", "FlyerRecoveryCustomerAckAttempted",
+    "FlyerRecoveryCustomerAckSent", "FlyerRecoveryCustomerAckFailed",
+    "FlyerRecoveryCustomerAckUncertain", "FlyerRecoveryCustomerAckSuppressed",
+    "FlyerRecoveryRepairBundleWritten", "FlyerRecoveryDeployGate", "FlyerRecoveryResolved",
     "FlyerUsageRecorded", "FlyerQuotaBlocked", "FlyerClosureCustomerNotified",
     "Proposal", "ProposalId", "ProposalCode",
     "AwaitingProposal", "ApprovedProposal", "ReconcilingProposal", "SentProposal",

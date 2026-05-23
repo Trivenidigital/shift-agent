@@ -48,6 +48,8 @@ for script in \
     /usr/local/bin/manage-flyer-account \
     /usr/local/bin/manage-flyer-guest-order \
     /usr/local/bin/flyer-delivery-report \
+    /usr/local/bin/flyer-recovery-watchdog \
+    /usr/local/bin/flyer-recovery-preflight \
     /usr/local/bin/flyer-manual-queue \
     /usr/local/bin/flyer-source-edit-sla-watchdog \
     /usr/local/bin/flyer-intent-training-export \
@@ -92,6 +94,7 @@ import flyer_workflow
 import flyer_onboarding
 import flyer_account
 import flyer_starter_briefs
+import flyer_recovery
 import flyer_customer_copy_policy
 import flyer_intent
 import flyer_intent_training
@@ -192,6 +195,16 @@ if ! sudo -u shift-agent "$PY" /usr/local/bin/flyer-delivery-report --json > /de
     exit 1
 fi
 echo "Flyer delivery report smoke passed"
+
+if ! sudo -u shift-agent "$PY" /usr/local/bin/flyer-recovery-watchdog --mode off --text > /dev/null; then
+    echo "FAIL: Flyer recovery watchdog failed"
+    exit 1
+fi
+if ! sudo -u shift-agent "$PY" /usr/local/bin/flyer-recovery-preflight --text > /dev/null; then
+    echo "FAIL: Flyer recovery preflight failed"
+    exit 1
+fi
+echo "Flyer recovery smoke passed"
 
 if ! sudo -u shift-agent "$PY" /usr/local/bin/flyer-manual-queue --triage > /dev/null; then
     echo "FAIL: Flyer manual-queue triage view failed"
@@ -526,6 +539,8 @@ sd_verify_units=(
     /etc/systemd/system/send-routing-accuracy-summary.service
     /etc/systemd/system/send-routing-accuracy-summary.timer
     /etc/systemd/system/send-routing-accuracy-summary-failure.service
+    /etc/systemd/system/flyer-recovery-watchdog.service
+    /etc/systemd/system/flyer-recovery-watchdog.timer
 )
 if [ -f /etc/systemd/system/flyer-source-edit-sla-watchdog.service ]; then
     sd_verify_units+=( /etc/systemd/system/flyer-source-edit-sla-watchdog.service )

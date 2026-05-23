@@ -8,6 +8,7 @@ Test override: set the module-level path constants before invoking hooks
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import contextvars
 import hashlib
@@ -33,6 +34,9 @@ FLYER_PROJECTS_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
 FLYER_CUSTOMERS_PATH = Path("/opt/shift-agent/state/flyer/customers.json")
 FLYER_GUEST_ORDERS_PATH = Path("/opt/shift-agent/state/flyer/guest_orders.json")
 FLYER_REFERENCE_SCOPE_PATH = Path("/opt/shift-agent/state/flyer/reference_scope_pending.json")
+FLYER_OUTBOUND_DEDUPE_PATH = Path("/opt/shift-agent/state/flyer/outbound_dedupe.json")
+_DEFAULT_CF_ROUTER_INBOUND_DEDUPE_PATH = Path("/opt/shift-agent/state/cf-router-inbound-dedupe.json")
+CF_ROUTER_INBOUND_DEDUPE_PATH = _DEFAULT_CF_ROUTER_INBOUND_DEDUPE_PATH
 ROSTER_PATH = Path("/opt/shift-agent/roster.json")
 LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
 THROTTLE_PATH = Path("/opt/shift-agent/state/cf-router-throttle.json")
@@ -63,6 +67,10 @@ ALERT_THROTTLE_SEC = 300  # Suppress duplicate Pushover alerts within 5 min
 F7_DISPATCHER_LOOKBACK_SEC = 5  # Grace window when scanning audit log
                                  # for dispatcher_routed (matches deployed F7
                                  # daemon's `since_ts - 5` clock-skew tolerance)
+FLYER_OUTBOUND_DEDUPE_TTL_SEC = 600
+FLYER_OUTBOUND_DEDUPE_MAX = 256
+CF_ROUTER_INBOUND_DEDUPE_TTL_SEC = 3600
+CF_ROUTER_INBOUND_DEDUPE_MAX = 2048
 
 
 def _ensure_platform_path() -> None:
@@ -3436,15 +3444,157 @@ def send_flyer_concept_previews(chat_id: str, project_id: str) -> tuple[bool, st
     return True, ",".join(outbound_ids), ""
 
 
+def _flyer_outbound_dedupe_key(chat_id: str, message: str) -> str:
+    normalized_message = "\n".join((message or "").replace("\r\n", "\n").replace("\r", "\n").splitlines()).strip()
+    raw = f"{chat_id}\0{normalized_message}".encode("utf-8", errors="replace")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _load_flyer_outbound_dedupe(now: float) -> dict[str, dict[str, object]]:
+    try:
+        if not FLYER_OUTBOUND_DEDUPE_PATH.exists():
+            return {}
+        data = json.loads(FLYER_OUTBOUND_DEDUPE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    entries = data.get("entries") if isinstance(data, dict) else None
+    if not isinstance(entries, dict):
+        return {}
+    cutoff = now - FLYER_OUTBOUND_DEDUPE_TTL_SEC
+    pruned: dict[str, dict[str, object]] = {}
+    for key, entry in entries.items():
+        if not isinstance(key, str) or not isinstance(entry, dict):
+            continue
+        try:
+            sent_at = float(entry.get("ts", 0))
+        except (TypeError, ValueError):
+            continue
+        if sent_at >= cutoff:
+            pruned[key] = entry
+    return pruned
+
+
+def _write_flyer_outbound_dedupe(entries: dict[str, dict[str, object]]) -> None:
+    try:
+        if len(entries) > FLYER_OUTBOUND_DEDUPE_MAX:
+            entries = dict(
+                sorted(
+                    entries.items(),
+                    key=lambda item: float(item[1].get("ts", 0)) if isinstance(item[1], dict) else 0,
+                    reverse=True,
+                )[:FLYER_OUTBOUND_DEDUPE_MAX]
+            )
+        _atomic_write_dedupe_json(FLYER_OUTBOUND_DEDUPE_PATH, {"version": 1, "entries": entries})
+    except Exception:
+        return
+
+
+def _write_dedupe_file(path: Path, entries: dict[str, dict[str, object]], max_entries: int) -> None:
+    if len(entries) > max_entries:
+        entries = dict(
+            sorted(
+                entries.items(),
+                key=lambda item: float(item[1].get("ts", 0)) if isinstance(item[1], dict) else 0,
+                reverse=True,
+            )[:max_entries]
+        )
+    _atomic_write_dedupe_json(path, {"version": 1, "entries": entries})
+
+
+def _atomic_write_dedupe_json(path: Path, doc: dict) -> None:
+    try:
+        _ensure_platform_path()
+        from safe_io import atomic_write_text  # type: ignore
+    except Exception:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+        tmp_path.write_text(json.dumps(doc, sort_keys=True), encoding="utf-8")
+        os.replace(tmp_path, path)
+        return
+    atomic_write_text(path, json.dumps(doc, sort_keys=True))
+
+
+@contextmanager
+def _dedupe_file_lock(path: Path) -> Iterator[None]:
+    try:
+        _ensure_platform_path()
+        from safe_io import FileLock  # type: ignore
+    except Exception:
+        yield
+        return
+    with FileLock(Path(str(path) + ".lock")):
+        yield
+
+
+def _cf_router_inbound_dedupe_key(chat_id: str, message_id: str, text: str) -> str:
+    message_key = message_id.strip() if message_id else ""
+    if not message_key:
+        normalized = "\n".join((text or "").replace("\r\n", "\n").replace("\r", "\n").splitlines()).strip()
+        message_key = hashlib.sha256(normalized.encode("utf-8", errors="replace")).hexdigest()
+    raw = f"{chat_id}\0{message_key}".encode("utf-8", errors="replace")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def mark_cf_router_inbound_seen(chat_id: str, message_id: str, text: str, *, now: Optional[float] = None) -> bool:
+    """Return True when this inbound event was already processed recently.
+
+    The guard is intentionally stateful across gateway restarts. WhatsApp/Hermes
+    can replay an already-handled upsert after a restart or resume; processing
+    the same event again is exactly how a single inbound turns into repeated
+    customer-visible replies.
+    """
+    if os.environ.get("PYTEST_CURRENT_TEST") and CF_ROUTER_INBOUND_DEDUPE_PATH == _DEFAULT_CF_ROUTER_INBOUND_DEDUPE_PATH:
+        return False
+    ts = time.time() if now is None else now
+    key = _cf_router_inbound_dedupe_key(chat_id, message_id, text)
+    try:
+        with _dedupe_file_lock(CF_ROUTER_INBOUND_DEDUPE_PATH):
+            if CF_ROUTER_INBOUND_DEDUPE_PATH.exists():
+                data = json.loads(CF_ROUTER_INBOUND_DEDUPE_PATH.read_text(encoding="utf-8"))
+                entries = data.get("entries") if isinstance(data, dict) else {}
+            else:
+                entries = {}
+            if not isinstance(entries, dict):
+                entries = {}
+            cutoff = ts - CF_ROUTER_INBOUND_DEDUPE_TTL_SEC
+            pruned: dict[str, dict[str, object]] = {}
+            for existing_key, entry in entries.items():
+                if not isinstance(existing_key, str) or not isinstance(entry, dict):
+                    continue
+                try:
+                    seen_at = float(entry.get("ts", 0))
+                except (TypeError, ValueError):
+                    continue
+                if seen_at >= cutoff:
+                    pruned[existing_key] = entry
+            if key in pruned:
+                return True
+            pruned[key] = {"ts": ts, "chat_id": chat_id, "message_id": message_id}
+            _write_dedupe_file(CF_ROUTER_INBOUND_DEDUPE_PATH, pruned, CF_ROUTER_INBOUND_DEDUPE_MAX)
+    except Exception:
+        return False
+    return False
+
+
 def send_flyer_text(chat_id: str, message: str) -> tuple[bool, str, str]:
     _ensure_platform_path()
     try:
         from safe_io import bridge_post  # type: ignore
     except Exception as e:
         return False, "", f"safe_io_import_failed: {type(e).__name__}: {e}"
-    ok, mid, err, status = bridge_post(chat_id, message)
-    if ok:
-        return True, mid, ""
+    now = time.time()
+    dedupe_key = _flyer_outbound_dedupe_key(chat_id, message)
+    with _dedupe_file_lock(FLYER_OUTBOUND_DEDUPE_PATH):
+        dedupe_entries = _load_flyer_outbound_dedupe(now)
+        existing = dedupe_entries.get(dedupe_key)
+        if existing:
+            mid = str(existing.get("mid") or "recent")
+            return True, f"deduped:{mid}", ""
+        ok, mid, err, status = bridge_post(chat_id, message)
+        if ok:
+            dedupe_entries[dedupe_key] = {"ts": now, "mid": mid}
+            _write_flyer_outbound_dedupe(dedupe_entries)
+            return True, mid, ""
     return False, mid, f"{status}: {err}"
 
 

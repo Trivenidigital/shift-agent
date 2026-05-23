@@ -607,6 +607,20 @@ def validate_bridge_url(url: str) -> Optional[str]:
     return None
 
 
+def bridge_send_blocked_by_test_context() -> Optional[str]:
+    """Refuse live bridge sends from pytest unless explicitly overridden."""
+    if os.environ.get("FLYER_RECOVERY_NO_LIVE_SEND") == "1":
+        return "refusing bridge send under FLYER_RECOVERY_NO_LIVE_SEND"
+    if os.environ.get("SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS") == "1":
+        return None
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return "refusing bridge send from pytest context"
+    argv = " ".join(sys.argv[:3]).lower()
+    if "pytest" in argv:
+        return "refusing bridge send from pytest context"
+    return None
+
+
 def bridge_post(jid: str, message: str) -> Tuple[bool, str, str, str]:
     """POST to local Hermes bridge. Returns (success, message_id, error_str, status).
 
@@ -618,6 +632,9 @@ def bridge_post(jid: str, message: str) -> Tuple[bool, str, str, str]:
     bad = validate_bridge_url(BRIDGE_URL)
     if bad:
         return False, "", bad, "connect_failed"
+    blocked = bridge_send_blocked_by_test_context()
+    if blocked:
+        return False, "", blocked, "connect_failed"
     payload = json.dumps({"chatId": jid, "message": message}).encode("utf-8")
     req = urllib.request.Request(
         BRIDGE_URL, data=payload,
@@ -677,6 +694,9 @@ def bridge_send_media(
     bad = validate_bridge_url(url)
     if bad:
         return False, "", bad, "connect_failed"
+    blocked = bridge_send_blocked_by_test_context()
+    if blocked:
+        return False, "", blocked, "connect_failed"
 
     payload_doc = {
         "chatId": jid,
@@ -750,6 +770,9 @@ def bridge_send_cta(
     bad = validate_bridge_url(url)
     if bad:
         return False, "", bad, "connect_failed"
+    blocked = bridge_send_blocked_by_test_context()
+    if blocked:
+        return False, "", blocked, "connect_failed"
 
     payload_doc: dict[str, Any] = {
         "chatId": jid,

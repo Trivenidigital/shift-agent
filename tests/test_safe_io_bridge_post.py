@@ -64,6 +64,46 @@ class TestValidateBridgeUrl:
 
 class TestBridgePost:
     @patch("urllib.request.urlopen")
+    def test_pytest_context_refuses_live_bridge_send(self, urlopen, safe_io_module, monkeypatch):
+        monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/test_live.py::test_bad_live_send (call)")
+
+        ok, mid, err, status = safe_io_module.bridge_post("jid@s.whatsapp.net", "msg")
+
+        assert ok is False
+        assert mid == ""
+        assert status == "connect_failed"
+        assert "refusing bridge send from pytest context" in err
+        urlopen.assert_not_called()
+
+    @patch("urllib.request.urlopen")
+    def test_recovery_no_live_send_refuses_bridge_send_outside_pytest(self, urlopen, safe_io_module, monkeypatch):
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+        monkeypatch.setenv("FLYER_RECOVERY_NO_LIVE_SEND", "1")
+
+        ok, mid, err, status = safe_io_module.bridge_post("jid@s.whatsapp.net", "msg")
+
+        assert ok is False
+        assert mid == ""
+        assert status == "connect_failed"
+        assert "FLYER_RECOVERY_NO_LIVE_SEND" in err
+        urlopen.assert_not_called()
+
+    @patch("urllib.request.urlopen")
+    def test_pytest_context_can_be_explicitly_overridden(self, urlopen, safe_io_module, monkeypatch):
+        monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/test_live.py::test_bad_live_send (call)")
+        monkeypatch.setenv("SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS", "1")
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"id": "wamid.123abc"}'
+        urlopen.return_value.__enter__.return_value = mock_resp
+
+        ok, mid, err, status = safe_io_module.bridge_post("jid@s.whatsapp.net", "msg")
+
+        assert ok is True
+        assert mid == "wamid.123abc"
+        assert err == ""
+        assert status == "sent"
+
+    @patch("urllib.request.urlopen")
     def test_send_uncertain_on_unparseable_body(self, urlopen, safe_io_module):
         mock_resp = MagicMock()
         mock_resp.read.return_value = b"not-json"

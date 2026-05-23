@@ -1,0 +1,222 @@
+#!/usr/bin/env python3
+"""Flyer recovery watchdog.
+
+V1 is deliberately conservative: the timer can observe/open incidents and, when
+explicitly enabled, send guarded acknowledgements. Repair bundles are written
+only through an explicit operator CLI flag.
+"""
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timedelta, timezone
+import importlib.util
+import json
+from pathlib import Path
+import sys
+
+import yaml
+
+SRC_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(SRC_ROOT))
+sys.path.insert(0, str(SRC_ROOT / "platform"))
+
+from schemas import Config  # noqa: E402
+try:
+    from agents.flyer import recovery  # type: ignore  # noqa: E402
+except ImportError:
+    import flyer_recovery as recovery  # type: ignore  # noqa: E402
+
+
+CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
+LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+PROJECT_STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
+CUSTOMER_STATE_PATH = Path("/opt/shift-agent/state/flyer/customers.json")
+RECOVERY_STATE_PATH = Path("/opt/shift-agent/state/flyer/recovery_incidents.json")
+BUNDLE_DIR = Path("/opt/shift-agent/state/flyer/recovery_bundles")
+
+
+def _load_config(path: Path) -> Config:
+    return Config.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")) or {})
+
+
+def _read_rows(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    rows: list[dict] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def _row_ts(row: dict) -> datetime | None:
+    raw = str(row.get("ts") or "")
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts
+
+
+def _load_cf_router_actions():
+    for path in [
+        SRC_ROOT / "plugins" / "cf-router" / "actions.py",
+        Path("/root/.hermes/plugins/cf-router/actions.py"),
+    ]:
+        if not path.exists():
+            continue
+        spec = importlib.util.spec_from_file_location("flyer_recovery_cf_actions", path)
+        if spec and spec.loader:
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+    return None
+
+
+def _send_ack(chat_id: str, message: str) -> tuple[bool, str, str]:
+    actions = _load_cf_router_actions()
+    if actions is not None and hasattr(actions, "send_flyer_text"):
+        return actions.send_flyer_text(chat_id, message)
+    from safe_io import bridge_post  # type: ignore
+    ok, mid, err, status = bridge_post(chat_id, message)
+    return ok, mid, "" if ok else f"{status}: {err}"
+
+
+def _write_bundle(args: argparse.Namespace) -> int:
+    state_path = Path(args.recovery_state_path)
+    with recovery.recovery_state_lock(state_path):
+        state = recovery.load_recovery_state(state_path)
+        incident = next((item for item in state.get("incidents", []) if item.get("incident_id") == args.incident_id), None)
+        if incident is None:
+            print(f"incident not found: {args.incident_id}", file=sys.stderr)
+            return 2
+        path = recovery.write_repair_bundle(incident, Path(args.bundle_dir))
+        incident.setdefault("codex", {})["status"] = "bundle_written"
+        incident.setdefault("codex", {})["bundle_path"] = str(path)
+        recovery.write_recovery_state(state_path, state)
+    print(f"bundle_written={path}")
+    return 0
+
+
+def _process_customer_acks(state_path: Path, cfg: Config, now: datetime, *, dry_run: bool = False) -> int:
+    sent_count = 0
+    for incident in list(recovery.load_recovery_state(state_path).get("incidents", []))[: cfg.flyer.recovery.max_incidents_per_run]:
+        with recovery.recovery_state_lock(state_path):
+            state = recovery.load_recovery_state(state_path)
+            current = next((item for item in state.get("incidents", []) if item.get("incident_id") == incident.get("incident_id")), None)
+            if current is None:
+                continue
+            decision = recovery.ack_send_decision(
+                current,
+                flyer_enabled=cfg.flyer.enabled,
+                mode=cfg.flyer.recovery.mode,
+                now=now,
+                ack_cooldown=timedelta(minutes=cfg.flyer.recovery.ack_cooldown_minutes),
+            )
+            if not decision.allowed:
+                continue
+            template_id, message = recovery.render_recovery_ack(followup_recorded=False)
+            attempt_id = f"FRA{now:%Y%m%d%H%M%S}-{current['incident_id'][-6:]}"
+            current["ack"] = {
+                "status": "reserved",
+                "attempt_id": attempt_id,
+                "reserved_at": now.isoformat(),
+                "message_sha256": recovery.sha256_text(message),
+                "copy_policy_template_id": template_id,
+            }
+            recovery.write_recovery_state(state_path, state)
+        if dry_run:
+            continue
+        ok, mid, err = _send_ack(str(current.get("chat_id") or ""), message)
+        with recovery.recovery_state_lock(state_path):
+            state = recovery.load_recovery_state(state_path)
+            current = next((item for item in state.get("incidents", []) if item.get("incident_id") == incident.get("incident_id")), None)
+            if current is None:
+                continue
+            if ok:
+                current["ack"]["status"] = "sent"
+                current["ack"]["outbound_message_id"] = mid
+                sent_count += 1
+            elif "send_uncertain" in err:
+                current["ack"]["status"] = "uncertain"
+                current["ack"]["status_detail"] = err
+            else:
+                current["ack"]["status"] = "failed"
+                current["ack"]["status_detail"] = err
+            recovery.write_recovery_state(state_path, state)
+    return sent_count
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config-path", default=str(CONFIG_PATH))
+    parser.add_argument("--log-path", default=str(LOG_PATH))
+    parser.add_argument("--project-state-path", default=str(PROJECT_STATE_PATH))
+    parser.add_argument("--customer-state-path", default=str(CUSTOMER_STATE_PATH))
+    parser.add_argument("--recovery-state-path", default=str(RECOVERY_STATE_PATH))
+    parser.add_argument("--bundle-dir", default=str(BUNDLE_DIR))
+    parser.add_argument("--mode", default="", help="Test-only override.")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--write-repair-bundle", action="store_true")
+    parser.add_argument("--incident-id", default="")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--text", action="store_true")
+    args = parser.parse_args()
+
+    if args.write_repair_bundle:
+        if not args.incident_id:
+            print("--incident-id required with --write-repair-bundle", file=sys.stderr)
+            return 2
+        return _write_bundle(args)
+
+    cfg = _load_config(Path(args.config_path))
+    mode = args.mode or cfg.flyer.recovery.mode
+    if mode == "off":
+        print("mode=off opened=0")
+        return 0
+
+    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(minutes=cfg.flyer.recovery.scan_window_minutes)
+    rows = [
+        row for row in _read_rows(Path(args.log_path))
+        if (ts := _row_ts(row)) is not None and since <= ts <= now + timedelta(minutes=5)
+    ]
+    signals = [
+        signal for row in rows
+        if (signal := recovery.classify_decision(row, {})) is not None
+    ][: cfg.flyer.recovery.max_incidents_per_run]
+    state_path = Path(args.recovery_state_path)
+    with recovery.recovery_state_lock(state_path):
+        state = recovery.load_recovery_state(state_path)
+        recovery.finalize_stale_reservations(
+            state,
+            now=now,
+            stale_after=timedelta(minutes=cfg.flyer.recovery.ack_reservation_stale_minutes),
+        )
+        opened = recovery.merge_signals(state, signals, now)
+        if not args.dry_run:
+            recovery.write_recovery_state(state_path, state)
+    ack_sent = 0
+    if mode == "customer_ack":
+        ack_sent = _process_customer_acks(state_path, cfg, now, dry_run=args.dry_run)
+    state = recovery.load_recovery_state(state_path) if state_path.exists() else {"incidents": []}
+    summary = {"mode": mode, "opened": opened, "ack_sent": ack_sent, "incidents": len(state.get("incidents", []))}
+    if args.json:
+        print(json.dumps(summary))
+    else:
+        print(f"mode={mode} opened={opened} ack_sent={ack_sent} incidents={summary['incidents']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
