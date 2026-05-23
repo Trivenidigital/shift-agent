@@ -2731,6 +2731,11 @@ def trigger_check_flyer_reference_scope(
         return True, "scope_check_not_applicable", {"decision": "allow", "reason": "not_applicable"}
     if os.environ.get("FLYER_REFERENCE_SCOPE_ALLOW_SPEND") != "1":
         lower = " ".join((raw_request or "").lower().split())
+        if _looks_like_exact_source_edit_request(lower):
+            return True, "scope_check_skipped_no_spend", {
+                "decision": "allow",
+                "reason": "no_spend_exact_source_edit_known_account",
+            }
         if re.search(r"\b(?:logo|menu|price\s*list|items?|prices?)\b", lower):
             return True, "scope_check_skipped_no_spend", {"decision": "allow", "reason": "no_spend_menu_or_logo"}
         return True, "scope_check_deferred_no_spend", {
@@ -2776,6 +2781,25 @@ def trigger_check_flyer_reference_scope(
     except json.JSONDecodeError:
         return False, f"scope_check_json_parse_failed: {detail[:500]}", None
     return True, detail[:500], doc
+
+
+def _looks_like_exact_source_edit_request(text: str) -> bool:
+    """Return true for edit-this-uploaded-flyer requests from a known account.
+
+    The no-spend fallback cannot run vision/OCR. For exact edits ("remove the
+    extra 16:00 from this flyer"), asking the customer to prove ownership makes
+    Flyer Studio look blind when the flyer itself already carries the account
+    masthead. Keep the bypass narrow: it must be an edit verb plus source-flyer
+    language or a concrete text/date/time/extra correction.
+    """
+    body = " ".join((text or "").lower().split())
+    has_edit_verb = bool(re.search(r"\b(?:remove|delete|change|replace|fix|correct|edit|update)\b", body))
+    has_source_marker = bool(re.search(
+        r"\b(?:this|attached|uploaded|source|existing).{0,30}\b(?:flyer|poster|image|artwork)\b",
+        body,
+    ))
+    has_text_correction_marker = bool(re.search(r"\b(?:date|time|extra|text|typo|spelling)\b", body))
+    return has_edit_verb and (has_source_marker or has_text_correction_marker)
 
 
 def _reference_scope_choice(text: str) -> str:
