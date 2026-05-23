@@ -1825,6 +1825,50 @@ def test_manual_review_where_is_update_flyer_routes_as_status(monkeypatch):
     assert "flyer_reference_exact_edit_status" not in audit_reasons
 
 
+def test_manual_review_where_is_updated_flyer_routes_as_status(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    active_project = {
+        "project_id": "F0086",
+        "customer_phone": "+17329837841",
+        "status": "manual_edit_required",
+        "created_at": "2026-05-23T00:20:00Z",
+        "original_message_id": "m-f0086",
+        "raw_request": "Create a flyer for weekend snacks.",
+        "fields": {"event_or_business_name": "Weekend Snacks", "contact_info": "+17329837841"},
+        "updated_at": "2026-05-23T00:22:00Z",
+        "manual_review": {
+            "status": "queued",
+            "reason": "visual_qa_failed",
+            "reason_code": "visual_qa_failed",
+            "detail": "final visual QA failed",
+            "queued_at": "2026-05-23T00:22:00Z",
+        },
+    }
+    sent: list[str] = []
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
+    monkeypatch.setattr(actions, "find_latest_flyer_project_for_status_by_sender", lambda _phone, _chat_id: active_project)
+    monkeypatch.setattr(
+        actions,
+        "invoke_update_flyer_project",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("status check must not become a queued edit")),
+    )
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "status-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+
+    result = hooks._try_flyer_active_project_intercept(
+        "Where is the updated flyer?",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "where-updated"},
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer status for F0086"}
+    assert sent
+    assert "please send the exact text" not in sent[0].lower()
+
+
 def test_flyer_project_status_request_classifier_keeps_edits_separate():
     actions = _load_actions()
 
@@ -1832,6 +1876,7 @@ def test_flyer_project_status_request_classifier_keeps_edits_separate():
         "any update",
         "Any updates?",
         "where is the update flyer?",
+        "where is the updated flyer?",
         "what's the status",
         "is the flyer ready",
         "still waiting",

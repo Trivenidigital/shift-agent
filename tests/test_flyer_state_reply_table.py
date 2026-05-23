@@ -355,6 +355,7 @@ def test_status_request_classifier_recognizes_common_check_in_phrases():
         "is it ready",
         "is the flyer ready?",
         "is my flyer done",
+        "where is the updated flyer?",
         "what is the status",
         "what's the status?",
         "eta?",
