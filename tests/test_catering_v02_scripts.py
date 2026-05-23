@@ -131,22 +131,19 @@ sys.argv = [
     "--fields-json", {json.dumps(fields)!r},
 ]
 import pathlib
+import importlib.machinery
 import importlib.util
-spec = importlib.util.spec_from_file_location("ccl", {str(CREATE)!r})
+loader = importlib.machinery.SourceFileLoader("ccl_test_loaded", {str(CREATE)!r})
+spec = importlib.util.spec_from_file_location("ccl_test_loaded", {str(CREATE)!r}, loader=loader)
 mod = importlib.util.module_from_spec(spec)
-# Use a NON-"__main__" name so the bottom `if __name__ == "__main__": main()`
-# block does NOT fire during exec_module. We call main() ourselves AFTER
-# applying all patches. This is the only way to inject customer_now overrides
-# before main() runs.
-mod.__name__ = "ccl_test_loaded"
+sys.path.insert(0, str(pathlib.Path({str(Path(__file__).resolve().parent.parent / 'src' / 'platform')!r})))
+spec.loader.exec_module(mod)
 mod.CONFIG_PATH = pathlib.Path({str(env_dir / 'config.yaml')!r})
 mod.LEADS_PATH = pathlib.Path({str(env_dir / 'state' / 'catering-leads.json')!r})
 mod.LEADS_LOCK = pathlib.Path({str(env_dir / 'state' / 'catering-leads.json.lock')!r})
 mod.LOG_PATH = pathlib.Path({str(env_dir / 'logs' / 'decisions.log')!r})
 mod.TEMPLATE_DIR = pathlib.Path({str(env_dir / 'templates')!r})
 mod.BRIDGE_URL = "http://127.0.0.1:{bridge_port}/send"
-sys.path.insert(0, str(pathlib.Path({str(Path(__file__).resolve().parent.parent / 'src' / 'platform')!r})))
-spec.loader.exec_module(mod)
 
 if {use_now_override!r}:
     from datetime import datetime as _dt
@@ -183,18 +180,20 @@ sys.argv = [
     "--sender-role", {sender_role!r},
 ] + {extra!r}
 import pathlib
+import importlib.machinery
 import importlib.util
-spec = importlib.util.spec_from_file_location("acod", {str(APPLY)!r})
+loader = importlib.machinery.SourceFileLoader("acod_test_loaded", {str(APPLY)!r})
+spec = importlib.util.spec_from_file_location("acod_test_loaded", {str(APPLY)!r}, loader=loader)
 mod = importlib.util.module_from_spec(spec)
-mod.__name__ = "__main__"
+sys.path.insert(0, str(pathlib.Path({str(Path(__file__).resolve().parent.parent / 'src' / 'platform')!r})))
+spec.loader.exec_module(mod)
 mod.CONFIG_PATH = pathlib.Path({str(env_dir / 'config.yaml')!r})
 mod.LEADS_PATH = pathlib.Path({str(env_dir / 'state' / 'catering-leads.json')!r})
 mod.LEADS_LOCK = pathlib.Path({str(env_dir / 'state' / 'catering-leads.json.lock')!r})
 mod.LOG_PATH = pathlib.Path({str(env_dir / 'logs' / 'decisions.log')!r})
 mod.TEMPLATE_DIR = pathlib.Path({str(env_dir / 'templates')!r})
 mod.BRIDGE_URL = "http://127.0.0.1:{bridge_port}/send"
-sys.path.insert(0, str(pathlib.Path({str(Path(__file__).resolve().parent.parent / 'src' / 'platform')!r})))
-spec.loader.exec_module(mod)
+sys.exit(mod.main())
 """
     return subprocess.run(
         [sys.executable, "-c", wrapper],

@@ -4,6 +4,7 @@ Linux-only (depends on safe_io which uses fcntl).
 """
 from __future__ import annotations
 
+import importlib.machinery
 import importlib.util
 import json
 import os
@@ -25,7 +26,8 @@ SCRIPT_PATH = REPO_ROOT / "src" / "agents" / "daily_brief" / "scripts" / "send-d
 
 
 def _import_brief_module():
-    spec = importlib.util.spec_from_file_location("sdb", SCRIPT_PATH)
+    loader = importlib.machinery.SourceFileLoader("sdb", str(SCRIPT_PATH))
+    spec = importlib.util.spec_from_file_location("sdb", str(SCRIPT_PATH), loader=loader)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod

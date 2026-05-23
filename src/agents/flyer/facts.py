@@ -408,9 +408,9 @@ def merge_locked_facts(*fact_lists: Iterable[FlyerLockedFact]) -> list[FlyerLock
     for index, record in enumerate(item_records):
         name_fact = record["name"]
         price_fact = record["price"]
-        if isinstance(name_fact, FlyerLockedFact):
+        if hasattr(name_fact, "model_copy"):
             result.append(name_fact.model_copy(update={"fact_id": f"item:{index}:name"}))
-        if isinstance(price_fact, FlyerLockedFact):
+        if hasattr(price_fact, "model_copy"):
             result.append(price_fact.model_copy(update={"fact_id": f"item:{index}:price"}))
     return result
 

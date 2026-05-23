@@ -28,7 +28,8 @@ from qbo_client import (
 
 
 @pytest.fixture
-def lead():
+def lead(monkeypatch):
+    monkeypatch.setenv("EXPENSE_RECEIPTS_DIR", "/tmp/test/")
     return ExpenseLead.model_validate({
         "expense_id": "E0042", "original_message_id": "wa_xyz",
         "sender_phone": "+19045550000",

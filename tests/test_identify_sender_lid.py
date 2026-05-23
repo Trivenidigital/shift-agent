@@ -20,7 +20,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-SCRIPT = Path(__file__).resolve().parent.parent / "src" / "scripts" / "identify-sender"
+SCRIPT = Path(__file__).resolve().parent.parent / "src" / "platform" / "scripts" / "identify-sender"
 
 
 @pytest.fixture

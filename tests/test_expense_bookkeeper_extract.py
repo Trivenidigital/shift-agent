@@ -23,6 +23,11 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _isolate_receipts_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXPENSE_RECEIPTS_DIR", "/tmp/test/")
+
+
 pytestmark = pytest.mark.skipif(
     platform.system() == "Windows",
     reason="extract-receipt imports fcntl-using safe_io",

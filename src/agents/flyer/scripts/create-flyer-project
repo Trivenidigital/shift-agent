@@ -651,6 +651,14 @@ def main() -> int:
                 queued_at=now,
             )
         status = "manual_edit_required" if args.manual_edit_required or reference_manual_required or missing_required_fact_queue else "intake_started"
+        # Normalize model instances at the persistence boundary. Test and
+        # script-loader paths can import the same schema file under different
+        # module identities; dicts keep Pydantic validation independent of
+        # that import identity while preserving runtime behavior.
+        locked_fact_payloads = [
+            fact.model_dump(mode="json") if hasattr(fact, "model_dump") else fact
+            for fact in locked_facts
+        ]
         project = FlyerProject(
             project_id=project_id,
             status=status,
@@ -660,7 +668,7 @@ def main() -> int:
             original_message_id=args.message_id,
             raw_request=args.raw_request,
             fields=fields,
-            locked_facts=locked_facts,
+            locked_facts=locked_fact_payloads,
             reference_extractions=reference_extractions,
             manual_review=manual_review,
             assets=[reference_asset] if reference_asset else [],

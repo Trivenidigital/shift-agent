@@ -4,11 +4,18 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
 import yaml
 
 
 REPO = Path(__file__).resolve().parent.parent
 ACTIONS = REPO / "src" / "plugins" / "cf-router" / "actions.py"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_provider_env_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("HERMES_ENV_PATH", str(tmp_path / "missing-hermes.env"))
+    monkeypatch.setenv("SHIFT_AGENT_ENV_PATH", str(tmp_path / "missing-shift-agent.env"))
 
 
 def _load_actions_module():

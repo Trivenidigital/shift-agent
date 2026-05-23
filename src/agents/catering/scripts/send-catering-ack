@@ -130,9 +130,11 @@ def main() -> int:
     jid = args.customer_jid.strip()
     body = args.message_text.strip()
 
-    if not jid or not any(jid.endswith(s) for s in _VALID_JID_SUFFIXES):
+    matching_suffix = next((suffix for suffix in _VALID_JID_SUFFIXES if jid.endswith(suffix)), "")
+    jid_local = jid[: -len(matching_suffix)] if matching_suffix else ""
+    if not matching_suffix or not jid_local.isdigit():
         _emit_ack_failed(jid or "<empty>", "bad_input",
-                         f"jid must end with one of {_VALID_JID_SUFFIXES}")
+                         f"jid must be digits plus one of {_VALID_JID_SUFFIXES}")
         sys.stderr.write(f"invalid --customer-jid: {jid!r}\n")
         return EXIT_INVALID_INPUT
 

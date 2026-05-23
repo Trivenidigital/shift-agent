@@ -98,10 +98,11 @@ def _run_script(env_dir, bridge_port, customer_jid, message_text, lead_id=""):
 import sys, pathlib, json, io
 sys.argv = {args!r}
 sys.path.insert(0, {str(PLATFORM_DIR)!r})
+import importlib.machinery
 import importlib.util
-spec = importlib.util.spec_from_file_location("sca", {str(SCRIPT)!r})
+loader = importlib.machinery.SourceFileLoader("sca_test_loaded", {str(SCRIPT)!r})
+spec = importlib.util.spec_from_file_location("sca_test_loaded", {str(SCRIPT)!r}, loader=loader)
 mod = importlib.util.module_from_spec(spec)
-mod.__name__ = "sca_test_loaded"
 spec.loader.exec_module(mod)
 mod.LOG_PATH = pathlib.Path({str(log_path)!r})
 mod.BRIDGE_URL = "http://127.0.0.1:{bridge_port}/send"
