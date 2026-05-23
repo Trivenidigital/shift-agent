@@ -198,6 +198,29 @@ def test_reference_scope_clarifies_when_reference_owner_is_unreadable():
     assert "could not confirm" in result["reply_text"]
 
 
+def test_reference_scope_no_spend_exact_source_edit_skips_ownership_prompt(monkeypatch):
+    actions = _load_actions()
+    monkeypatch.delenv("FLYER_REFERENCE_SCOPE_ALLOW_SPEND", raising=False)
+    monkeypatch.setattr(
+        actions.subprocess,
+        "run",
+        lambda *_a, **_kw: pytest.fail("exact source-edit no-spend path must not call scope subprocess"),
+    )
+
+    ok, detail, doc = actions.trigger_check_flyer_reference_scope(
+        customer={"business_name": "Lakshmis Kitchen"},
+        media_path="/opt/shift-agent/.hermes/image_cache/source.jpg",
+        raw_request="Please update this flyer. Remove extra 08:00 and change date to May 22.",
+    )
+
+    assert ok is True
+    assert detail == "scope_check_skipped_no_spend"
+    assert doc is not None
+    assert doc["decision"] == "allow"
+    assert doc["reason"] == "no_spend_exact_source_edit_known_account"
+    assert "reply_text" not in doc
+
+
 def test_reference_scope_pending_choice_consumes_option_two(tmp_path):
     actions = _load_actions()
     actions.FLYER_REFERENCE_SCOPE_PATH = tmp_path / "reference_scope_pending.json"
