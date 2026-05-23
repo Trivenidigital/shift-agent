@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 
 import pytest
@@ -42,6 +43,11 @@ def _customer(
 def _write_json(path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def _write_ndjson(path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(json.dumps(row, separators=(",", ":")) for row in rows) + "\n", encoding="utf-8")
 
 
 def _project(project_id: str, *, status: str, updated_at: str = "2000-01-01T00:00:00Z") -> dict:
@@ -222,6 +228,215 @@ def test_reset_trial_quota_releases_counted_usage(tmp_path):
     assert customer is not None
     assert customer.usage_count_for_current_period() == 0
     assert customer.quota_remaining(FlyerConfig().plan_tiers) == 3
+
+
+def test_deactivate_customer_soft_cancels_and_preserves_projects(tmp_path):
+    from app.routers import flyer
+
+    settings = flyer.get_settings()
+    settings.state_dir = tmp_path / "state"
+    settings.cockpit_audit_log = tmp_path / "logs" / "audit.log"
+    _write_json(
+        settings.state_dir / "flyer" / "customers.json",
+        {
+            "schema_version": 1,
+            "next_customer_sequence": 2,
+            "customers": [_customer("CUST0001", status="active", plan_id="starter")],
+        },
+    )
+    _write_json(
+        settings.state_dir / "flyer" / "projects.json",
+        {
+            "schema_version": 1,
+            "next_sequence": 2,
+            "projects": [_project("F0061", status="awaiting_final_approval")],
+        },
+    )
+
+    result = flyer.deactivate_customer("CUST0001", reason="customer asked to stop flyer studio")
+
+    store = flyer.load_customer_store()
+    customer = store.find_customer_by_id("CUST0001")
+    projects = flyer.load_project_store().projects
+    assert result["ok"] is True
+    assert result["customer_id"] == "CUST0001"
+    assert result["previous_status"] == "active"
+    assert result["status"] == "cancelled"
+    assert customer is not None
+    assert customer.status == "cancelled"
+    assert "Deactivated by Cockpit" in customer.notes
+    assert projects and projects[0].project_id == "F0061"
+    assert projects[0].status == "awaiting_final_approval"
+    assert list((settings.state_dir / "flyer").glob("customers.json.pre-admin-*"))
+
+
+def test_deactivate_customer_is_idempotent(tmp_path):
+    from app.routers import flyer
+
+    settings = flyer.get_settings()
+    settings.state_dir = tmp_path / "state"
+    settings.cockpit_audit_log = tmp_path / "logs" / "audit.log"
+    _write_json(
+        settings.state_dir / "flyer" / "customers.json",
+        {
+            "schema_version": 1,
+            "next_customer_sequence": 2,
+            "customers": [_customer("CUST0001", status="cancelled", plan_id="starter")],
+        },
+    )
+
+    result = flyer.deactivate_customer("CUST0001", reason="repeat operator click")
+
+    assert result["ok"] is True
+    assert result["status"] == "cancelled"
+    assert result["already_inactive"] is True
+
+
+def test_deactivate_customer_unknown_returns_404(tmp_path):
+    from fastapi import HTTPException
+    from app.routers import flyer
+
+    settings = flyer.get_settings()
+    settings.state_dir = tmp_path / "state"
+    _write_json(
+        settings.state_dir / "flyer" / "customers.json",
+        {"schema_version": 1, "next_customer_sequence": 1, "customers": []},
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        flyer.deactivate_customer("CUST9999", reason="not present")
+    assert exc.value.status_code == 404
+
+
+def test_deactivated_customer_moves_to_inactive_segment(tmp_path):
+    from app.routers import flyer
+
+    settings = flyer.get_settings()
+    settings.state_dir = tmp_path / "state"
+    _write_json(
+        settings.state_dir / "flyer" / "customers.json",
+        {
+            "schema_version": 1,
+            "next_customer_sequence": 3,
+            "customers": [
+                _customer("CUST0001", status="cancelled", plan_id="starter"),
+                _customer("CUST0002", phone="+18479155253", status="trial", plan_id="trial"),
+            ],
+        },
+    )
+    _write_json(
+        settings.state_dir / "flyer" / "projects.json",
+        {"schema_version": 1, "next_sequence": 1, "projects": []},
+    )
+
+    inactive = asyncio.run(flyer.customers(segment="inactive", _=None))
+    free_trial = asyncio.run(flyer.customers(segment="free_trial", _=None))
+
+    assert [row["customer_id"] for row in inactive["customers"]] == ["CUST0001"]
+    assert [row["customer_id"] for row in free_trial["customers"]] == ["CUST0002"]
+
+
+def _build_test_client_with_fresh_otp():
+    from fastapi.testclient import TestClient
+    from app import auth as auth_mod
+    from app.main import app
+
+    async def _bypass_fresh():
+        return {"sub": "test-operator", "iat": 9_999_999_999}
+
+    app.dependency_overrides[auth_mod.require_fresh_otp] = _bypass_fresh
+
+    class _Ctx:
+        def __enter__(self):
+            self.client = TestClient(app)
+            return self.client
+
+        def __exit__(self, *args):
+            self.client.close()
+            app.dependency_overrides.clear()
+
+    return _Ctx()
+
+
+def test_deactivate_customer_endpoint_requires_reason_auth_and_fresh_otp(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from jose import jwt
+    from app import auth as auth_mod
+    from app.main import app
+    from app.routers import flyer
+
+    settings = flyer.get_settings()
+    settings.state_dir = tmp_path / "state"
+    _write_json(
+        settings.state_dir / "flyer" / "customers.json",
+        {
+            "schema_version": 1,
+            "next_customer_sequence": 2,
+            "customers": [_customer("CUST0001", status="active", plan_id="starter")],
+        },
+    )
+
+    with TestClient(app) as client:
+        unauth = client.post("/flyer/customers/CUST0001/deactivate", json={"reason": "operator request"})
+        assert unauth.status_code == 401
+
+        missing_reason = client.post("/flyer/customers/CUST0001/deactivate", json={"reason": ""})
+        assert missing_reason.status_code in {401, 422}
+
+        stale_claims = {
+            "sub": "+19045550100",
+            "iat": 1_700_000_000,
+            "exp": 1_800_000_000,
+            "jti": "stale-test",
+            "auth_method": "pushover",
+        }
+        token = jwt.encode(stale_claims, auth_mod.settings.jwt_secret, algorithm=auth_mod.settings.jwt_algo)
+        client.cookies.set(auth_mod.settings.cookie_name, token)
+        monkeypatch.setattr(auth_mod, "_now", lambda: 1_700_000_400)
+        stale = client.post("/flyer/customers/CUST0001/deactivate", json={"reason": "operator request"})
+        assert stale.status_code == 403
+
+
+def test_deactivate_customer_endpoint_audits_action(tmp_path):
+    from app import audit as audit_mod
+    from app.routers import flyer
+
+    settings = flyer.get_settings()
+    settings.state_dir = tmp_path / "state"
+    settings.cockpit_audit_log = tmp_path / "logs" / "audit.log"
+    audit_mod.settings.cockpit_audit_log = settings.cockpit_audit_log
+    _write_json(
+        settings.state_dir / "flyer" / "customers.json",
+        {
+            "schema_version": 1,
+            "next_customer_sequence": 2,
+            "customers": [_customer("CUST0001", status="trial", plan_id="trial")],
+        },
+    )
+
+    with _build_test_client_with_fresh_otp() as client:
+        missing_reason = client.post(
+            "/flyer/customers/CUST0001/deactivate",
+            json={"reason": ""},
+        )
+        assert missing_reason.status_code == 422
+
+        resp = client.post(
+            "/flyer/customers/CUST0001/deactivate",
+            json={"reason": "customer requested removal"},
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "cancelled"
+    rows = [
+        json.loads(line)
+        for line in settings.cockpit_audit_log.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert rows[-1]["event"] == "flyer.customer.deactivate"
+    assert rows[-1]["details"]["customer_id"] == "CUST0001"
+    assert rows[-1]["details"]["reason"] == "customer requested removal"
 
 
 def test_flyer_customers_caps_at_300_sorted_by_updated_at(tmp_path):
@@ -438,3 +653,434 @@ def test_campaign_sender_uses_allowlisted_cli_wrapper(monkeypatch):
             60,
         )
     ]
+
+
+# --- manual-queue triage / complete / break-glass (S2 P0-8b) ---
+
+def _queued_project(
+    project_id: str,
+    *,
+    phone: str = "+17329837841",
+    reason_code: str = "source_edit_provider_unavailable",
+    updated_at: str = "2026-05-18T20:00:00Z",
+) -> dict:
+    return {
+        "project_id": project_id,
+        "status": "manual_edit_required",
+        "customer_phone": phone,
+        "created_at": "2026-05-18T19:00:00Z",
+        "updated_at": updated_at,
+        "original_message_id": f"msg-{project_id}",
+        "raw_request": "Authorized flyer/source artwork update. Replace phone number.",
+        "fields": {"event_or_business_name": "Lakshmis Kitchen", "contact_info": phone},
+        "manual_review": {
+            "status": "queued",
+            "reason": reason_code,
+            "reason_code": reason_code,
+            "detail": "legacy source-edit project queued before reason was tracked",
+            "queued_at": updated_at,
+        },
+        "assets": [],
+        "concepts": [],
+        "selected_concept_id": None,
+        "revisions": [],
+        "version": 1,
+        "final_asset_ids": [],
+        "approved_message_id": "",
+    }
+
+
+def _seed_queue(tmp_path, projects: list[dict]) -> None:
+    from app.routers import flyer
+
+    settings = flyer.get_settings()
+    settings.state_dir = tmp_path / "state"
+    settings.cockpit_audit_log = tmp_path / "logs" / "audit.log"
+    _write_json(
+        settings.state_dir / "flyer" / "projects.json",
+        {"schema_version": 1, "next_sequence": len(projects) + 1, "projects": projects},
+    )
+
+
+def test_manual_queue_triage_groups_and_aggregates(tmp_path):
+    from app.routers import flyer
+
+    _seed_queue(tmp_path, [
+        _queued_project("F0052", phone="+19045550104", reason_code="source_edit_provider_unavailable"),
+        _queued_project("F0053", phone="+19045550104", reason_code="source_edit_provider_unavailable", updated_at="2026-05-18T19:30:00Z"),
+        _queued_project("F0036", phone="+19803826497", reason_code="legacy_unknown", updated_at="2026-05-18T15:00:00Z"),
+    ])
+
+    summary = flyer.manual_queue_triage_action()
+
+    assert summary["total"] == 3
+    assert summary["reason_counts"] == {
+        "source_edit_provider_unavailable": 2,
+        "legacy_unknown": 1,
+    }
+    phones = [g["customer_phone"] for g in summary["groups"]]
+    assert "+19045550104" in phones and "+19803826497" in phones
+
+
+def _seed_operator_upload(tmp_path, filename: str, *, content: bytes = b"approved bytes") -> str:
+    from app.routers import flyer
+    upload_dir = flyer.get_settings().state_dir / "flyer" / "operator-uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    asset = upload_dir / filename
+    asset.write_bytes(content)
+    return str(asset)
+
+
+def test_manual_queue_complete_attaches_operator_asset_and_backs_up(tmp_path):
+    from app.routers import flyer
+
+    _seed_queue(tmp_path, [_queued_project("F0052", phone="+19045550104")])
+    asset_path = _seed_operator_upload(tmp_path, "operator_approved.png")
+
+    result = flyer.manual_queue_complete_action(
+        "F0052",
+        asset_path=asset_path,
+        reason="operator-approved designer asset",
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "awaiting_final_approval"
+    assert result["manual_status"] == "completed"
+    assert result["operator_asset_ids"]
+    # backup of pre-mutation state is recorded next to projects.json
+    flyer_dir = flyer.get_settings().state_dir / "flyer"
+    assert list(flyer_dir.glob("projects.json.pre-admin-*"))
+
+
+def test_manual_queue_complete_rejects_asset_outside_upload_root(tmp_path):
+    from fastapi import HTTPException
+    from app.routers import flyer
+
+    _seed_queue(tmp_path, [_queued_project("F0052", phone="+19045550104")])
+    # Asset exists, is absolute, has a valid image extension — but lives
+    # outside the allowed operator-uploads root.
+    outside = tmp_path / "secrets" / "env.png"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_bytes(b"secret bytes")
+
+    with pytest.raises(HTTPException) as ei:
+        flyer.manual_queue_complete_action(
+            "F0052",
+            asset_path=str(outside),
+            reason="should fail — outside upload root",
+        )
+    assert ei.value.status_code == 422
+
+
+def test_manual_queue_complete_rejects_disallowed_mime(tmp_path):
+    from fastapi import HTTPException
+    from app.routers import flyer
+
+    _seed_queue(tmp_path, [_queued_project("F0052", phone="+19045550104")])
+    asset_path = _seed_operator_upload(tmp_path, "secret.env", content=b"DB_PASSWORD=...")
+
+    with pytest.raises(HTTPException) as ei:
+        flyer.manual_queue_complete_action(
+            "F0052",
+            asset_path=asset_path,
+            reason="should fail — .env mime not in allowlist",
+        )
+    assert ei.value.status_code == 415
+
+
+def test_manual_queue_complete_is_idempotent_failure(tmp_path):
+    """Calling complete twice on the same project must 409 the second time."""
+    from fastapi import HTTPException
+    from app.routers import flyer
+
+    _seed_queue(tmp_path, [_queued_project("F0052", phone="+19045550104")])
+    asset_path = _seed_operator_upload(tmp_path, "first.png")
+
+    first = flyer.manual_queue_complete_action(
+        "F0052",
+        asset_path=asset_path,
+        reason="operator-approved first call",
+    )
+    assert first["ok"] is True
+
+    with pytest.raises(HTTPException) as ei:
+        flyer.manual_queue_complete_action(
+            "F0052",
+            asset_path=asset_path,
+            reason="operator-approved second call",
+        )
+    assert ei.value.status_code == 409
+
+
+def test_manual_queue_complete_rejects_missing_asset(tmp_path):
+    from fastapi import HTTPException
+    from app.routers import flyer
+
+    _seed_queue(tmp_path, [_queued_project("F0052", phone="+19045550104")])
+
+    with pytest.raises(HTTPException) as ei:
+        flyer.manual_queue_complete_action(
+            "F0052",
+            asset_path=str(tmp_path / "does-not-exist.png"),
+            reason="operator-approved",
+        )
+    assert ei.value.status_code == 404
+
+
+def test_manual_queue_complete_rejects_relative_asset_path(tmp_path):
+    from fastapi import HTTPException
+    from app.routers import flyer
+
+    _seed_queue(tmp_path, [_queued_project("F0052", phone="+19045550104")])
+
+    with pytest.raises(HTTPException) as ei:
+        flyer.manual_queue_complete_action(
+            "F0052",
+            asset_path="relative/path.png",
+            reason="operator-approved",
+        )
+    assert ei.value.status_code == 422
+
+
+def test_manual_queue_complete_rejects_nonqueued_project(tmp_path):
+    from fastapi import HTTPException
+    from app.routers import flyer
+
+    delivered = _queued_project("F0052", phone="+19045550104")
+    delivered["status"] = "delivered"
+    delivered["manual_review"]["status"] = "completed"
+    _seed_queue(tmp_path, [delivered])
+    asset_path = _seed_operator_upload(tmp_path, "approved.png")
+
+    with pytest.raises(HTTPException) as ei:
+        flyer.manual_queue_complete_action(
+            "F0052",
+            asset_path=asset_path,
+            reason="should fail",
+        )
+    assert ei.value.status_code == 409
+
+
+def test_manual_queue_break_glass_marks_status_and_backs_up(tmp_path):
+    from app.routers import flyer
+
+    _seed_queue(tmp_path, [_queued_project("F0052", phone="+19045550104")])
+
+    result = flyer.manual_queue_break_glass_action(
+        "F0052",
+        reason="customer received deliverable via designer email; logging for audit",
+    )
+
+    assert result["ok"] is True
+    assert result["manual_status"] == "break_glass_sent"
+    flyer_dir = flyer.get_settings().state_dir / "flyer"
+    assert list(flyer_dir.glob("projects.json.pre-admin-*"))
+    # project status stays manual_edit_required by design — operator is signalling
+    # out-of-band resolution, not bypassing the state machine quietly.
+    persisted = flyer.load_project_store().projects[0]
+    assert persisted.status == "manual_edit_required"
+    assert persisted.manual_review.status == "break_glass_sent"
+    assert "customer received deliverable" in persisted.manual_review.break_glass_reason
+
+
+def test_manual_queue_break_glass_rejects_unknown_project(tmp_path):
+    from fastapi import HTTPException
+    from app.routers import flyer
+
+    _seed_queue(tmp_path, [_queued_project("F0052", phone="+19045550104")])
+
+    with pytest.raises(HTTPException) as ei:
+        flyer.manual_queue_break_glass_action("F9999", reason="not present")
+    assert ei.value.status_code == 404
+
+
+def test_manual_queue_break_glass_rejects_nonqueued_project(tmp_path):
+    from fastapi import HTTPException
+    from app.routers import flyer
+
+    delivered = _queued_project("F0052", phone="+19045550104")
+    delivered["status"] = "delivered"
+    delivered["manual_review"]["status"] = "completed"
+    _seed_queue(tmp_path, [delivered])
+
+    with pytest.raises(HTTPException) as ei:
+        flyer.manual_queue_break_glass_action("F0052", reason="too late, already delivered")
+    assert ei.value.status_code == 409
+
+
+def test_break_glass_row_is_dropped_from_triage_and_summary_counters(tmp_path):
+    """Regression: after break-glass, the row must NOT remain in list_manual_queue or in
+    build_summary's manual_edit_count / stuck_edit_count. The operator signal is
+    "I resolved this out-of-band" — a recurring ghost in the queue/badges defeats that intent.
+    """
+    from app.routers import flyer
+
+    _seed_queue(tmp_path, [_queued_project("F0052", phone="+19045550104")])
+
+    pre = flyer.build_summary()
+    assert pre["manual_edit_count"] == 1
+
+    flyer.manual_queue_break_glass_action(
+        "F0052",
+        reason="customer received deliverable via designer email — out-of-band resolution",
+    )
+
+    post_triage = flyer.manual_queue_triage_action()
+    assert post_triage["total"] == 0, "break-glass row must not surface in triage"
+    post_summary = flyer.build_summary()
+    assert post_summary["manual_edit_count"] == 0, "break-glass row must not count in manual_edit_count"
+    assert post_summary["stuck_edit_count"] == 0, "break-glass row must not count in stuck_edit_count"
+
+
+def _tiny_png_bytes(width: int = 2, height: int = 1) -> bytes:
+    # Valid PNG header + IHDR. The metadata reader only needs the IHDR fields.
+    import struct
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + struct.pack(">I", 13)
+        + b"IHDR"
+        + struct.pack(">II", width, height)
+        + b"\x08\x02\x00\x00\x00"
+        + b"\x00\x00\x00\x00"
+    )
+
+
+def test_manual_queue_detail_joins_decisions_and_cockpit_audit_logs(tmp_path):
+    from app.routers import flyer
+
+    _seed_queue(tmp_path, [_queued_project("F0052", phone="+19045550104")])
+    settings = flyer.get_settings()
+    settings.decisions_path = tmp_path / "logs" / "decisions.log"
+    settings.cockpit_audit_log = tmp_path / "logs" / "cockpit-audit.log"
+    _write_ndjson(
+        settings.decisions_path,
+        [
+            {
+                "ts": "2026-05-18T20:01:00Z",
+                "type": "flyer_status_change",
+                "project_id": "F0052",
+                "from_status": "generating_concepts",
+                "to_status": "manual_edit_required",
+                "actor": "system",
+                "reason": "visual qa failed",
+            },
+            {
+                "ts": "2026-05-18T20:02:00Z",
+                "type": "flyer_assets_delivered",
+                "project_id": "F9999",
+                "asset_ids": ["A0009"],
+            },
+        ],
+    )
+    _write_ndjson(
+        settings.cockpit_audit_log,
+        [
+            {
+                "ts": "2026-05-18T20:03:00+00:00",
+                "event": "flyer.manual_queue.break_glass",
+                "actor": "owner",
+                "details": {"project_id": "F0052", "reason": "operator review"},
+            }
+        ],
+    )
+
+    detail = flyer.manual_queue_detail_action("F0052")
+
+    events = [(row["source"], row["event"]) for row in detail["timeline"]]
+    assert ("project_state", "project_created") in events
+    assert ("decisions", "flyer_status_change") in events
+    assert ("cockpit_audit", "flyer.manual_queue.break_glass") in events
+    assert ("decisions", "flyer_assets_delivered") not in events
+    timestamps = [row["ts"] for row in detail["timeline"]]
+    assert timestamps == sorted(timestamps)
+    status_change = next(row for row in detail["timeline"] if row["event"] == "flyer_status_change")
+    assert "generating_concepts->manual_edit_required" in status_change["detail"]
+    cockpit = next(row for row in detail["timeline"] if row["source"] == "cockpit_audit")
+    assert "operator review" in cockpit["detail"]
+
+
+def test_manual_queue_detail_exposes_final_asset_metadata_by_output_format(tmp_path, monkeypatch):
+    from app.routers import flyer
+
+    settings = flyer.get_settings()
+    settings.state_dir = tmp_path / "state"
+    flyer_root = settings.state_dir / "flyer"
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(flyer_root))
+    image_path = flyer_root / "projects" / "F0052" / "final-whatsapp.png"
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    image_bytes = _tiny_png_bytes(width=2, height=1)
+    image_path.write_bytes(image_bytes)
+    pdf_path = flyer_root / "projects" / "F0052" / "final-print.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n% test\n")
+    image_sha = hashlib.sha256(image_bytes).hexdigest()
+    pdf_sha = hashlib.sha256(pdf_path.read_bytes()).hexdigest()
+    project = _queued_project("F0052", phone="+19045550104")
+    project["assets"] = [
+        {
+            "asset_id": "A0001",
+            "kind": "final_whatsapp_image",
+            "source": "rendered",
+            "path": str(image_path),
+            "mime_type": "image/png",
+            "sha256": image_sha,
+            "original_message_id": "msg-F0052",
+            "received_at": "2026-05-18T20:10:00Z",
+            "delivery_status": "sent",
+            "outbound_message_id": "wamid.final.1",
+            "delivered_at": "2026-05-18T20:15:00Z",
+        },
+        {
+            "asset_id": "A0002",
+            "kind": "final_printable_pdf",
+            "source": "rendered",
+            "path": str(pdf_path),
+            "mime_type": "application/pdf",
+            "sha256": pdf_sha,
+            "original_message_id": "msg-F0052",
+            "received_at": "2026-05-18T20:11:00Z",
+            "delivery_status": "pending",
+        },
+        {
+            "asset_id": "A0003",
+            "kind": "final_instagram_post",
+            "source": "rendered",
+            "path": str(image_path),
+            "mime_type": "image/png",
+            "sha256": image_sha,
+            "original_message_id": "msg-F0052",
+            "received_at": "2026-05-18T20:12:00Z",
+            "delivery_status": "pending",
+        },
+        {
+            "asset_id": "A0004",
+            "kind": "final_instagram_story",
+            "source": "rendered",
+            "path": str(image_path),
+            "mime_type": "image/png",
+            "sha256": image_sha,
+            "original_message_id": "msg-F0052",
+            "received_at": "2026-05-18T20:13:00Z",
+            "delivery_status": "pending",
+        },
+    ]
+    project["final_asset_ids"] = ["A0001", "A0002", "A0003", "A0004"]
+    _seed_queue(tmp_path, [project])
+
+    detail = flyer.manual_queue_detail_action("F0052")
+
+    by_format = {asset["output_format"]: asset for asset in detail["final_assets"]}
+    whatsapp = by_format["whatsapp_image"]
+    assert whatsapp["asset_id"] == "A0001"
+    assert whatsapp["sha256"] == image_sha
+    assert whatsapp["sha256_short"] == image_sha[:16]
+    assert whatsapp["width"] == 2
+    assert whatsapp["height"] == 1
+    assert whatsapp["size_bytes"] == len(image_bytes)
+    assert whatsapp["delivery_status"] == "sent"
+    assert whatsapp["source"] == "rendered"
+    assert whatsapp["media_url"] == "/api/flyer/projects/F0052/assets/A0001"
+    assert by_format["printable_pdf"]["sha256"] == pdf_sha
+    assert by_format["printable_pdf"]["width"] is None
+    assert by_format["printable_pdf"]["height"] is None
+    assert by_format["instagram_post"]["asset_id"] == "A0003"
+    assert by_format["instagram_story"]["asset_id"] == "A0004"

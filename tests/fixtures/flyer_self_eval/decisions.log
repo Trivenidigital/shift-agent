@@ -1,0 +1,5 @@
+{"type":"cf_router_intercepted","ts":"2026-05-20T09:50:00Z","project_id":"F9201","body":"any update?","reason":"flyer_reference_exact_edit_status"}
+{"type":"cf_router_intercepted","ts":"2026-05-20T09:51:00Z","project_id":"F9201","visible_body":"is it ready?","reason":"flyer_reference_exact_edit_status"}
+{"type":"cf_router_intercepted","ts":"2026-05-20T09:52:00Z","project_id":"F9201","message":"status?","reason":"flyer_reference_exact_edit_status"}
+{"type":"cf_router_intercepted","ts":"2026-05-20T09:53:00Z","project_id":"F9201","body":"please make the date Saturday","reason":"flyer_revision"}
+{"type":"cf_router_intercepted","ts":"2026-05-20T09:54:00Z","project_id":"F9206","outbound_text":"Requested edit: OPENAI_API_KEY=sk-fixture-secret Bearer fixture-token +17329837841 17329837841@lid /opt/shift-agent/state/flyer/private.png"}

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
@@ -12,17 +14,158 @@ SRC_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(SRC_ROOT / "platform"))
 
-from schemas import Config, FlyerConcept, FlyerProjectStore  # noqa: E402
+from schemas import Config, FlyerConcept, FlyerManualReview, FlyerProjectStore, FlyerReferenceExtraction  # noqa: E402
 from safe_io import FileLock, atomic_write_text, load_yaml_model  # noqa: E402
 try:
-    from flyer_render import build_asset_manifest, next_asset_number, render_concept_previews, render_source_edit_preview  # type: ignore  # noqa: E402
+    from flyer_manual_queue import make_manual_review  # type: ignore  # noqa: E402
 except ImportError:
-    from agents.flyer.render import build_asset_manifest, next_asset_number, render_concept_previews, render_source_edit_preview  # noqa: E402
+    from agents.flyer.manual_queue import make_manual_review  # noqa: E402
+try:
+    from flyer_facts import merge_locked_facts  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.facts import merge_locked_facts  # noqa: E402
+try:
+    from flyer_reference_extract import build_reference_extraction_provider, extract_reference  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.reference_extract import build_reference_extraction_provider, extract_reference  # noqa: E402
+try:
+    from flyer_render import FlyerRenderError, build_asset_manifest, next_asset_number, render_concept_previews, render_source_edit_preview  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.render import FlyerRenderError, build_asset_manifest, next_asset_number, render_concept_previews, render_source_edit_preview  # noqa: E402
+try:
+    from flyer_visual_qa import run_visual_qa, write_visual_qa_report  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.visual_qa import run_visual_qa, write_visual_qa_report  # noqa: E402
 
 
 STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
 ASSET_DIR = Path("/opt/shift-agent/state/flyer/assets")
 CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
+REFERENCE_BLOCKING_ROLES = {"menu_reference", "old_flyer_reference", "source_edit_template", "unsupported"}
+REFERENCE_BLOCKING_STATUSES = {"provider_unavailable", "unsupported", "low_confidence"}
+REFERENCE_PENDING_ROLES = {"menu_reference", "old_flyer_reference"}
+
+
+def _failed_required_reference_extractions(project) -> list:
+    return [
+        extraction
+        for extraction in project.reference_extractions
+        if extraction.role in REFERENCE_BLOCKING_ROLES and extraction.status in REFERENCE_BLOCKING_STATUSES
+    ]
+
+
+def _pending_required_reference_extractions(project) -> list:
+    return [
+        extraction
+        for extraction in project.reference_extractions
+        if extraction.role in REFERENCE_PENDING_ROLES and extraction.status == "not_run"
+    ]
+
+
+def _asset_for_extraction(project, extraction):
+    return next((asset for asset in project.assets if asset.asset_id == extraction.asset_id), None)
+
+
+_DRAFT_RETRYABLE_TOKENS = (
+    "timeout",
+    "timed out",
+    "502",
+    "503",
+    "504",
+    "bad gateway",
+    "service unavailable",
+    "gateway timeout",
+    "connection reset",
+)
+
+_DRAFT_EARLY_STATUSES = {
+    "intake_started",
+    "collecting_required_info",
+    "awaiting_assets",
+    "generating_concepts",
+    "revising_design",
+}
+
+
+def _draft_error_is_visual_qa(detail_lower: str) -> bool:
+    return "quality check" in detail_lower or "failed quality" in detail_lower
+
+
+def _draft_error_retryable(detail_lower: str) -> bool:
+    return any(tok in detail_lower for tok in _DRAFT_RETRYABLE_TOKENS)
+
+
+def _draft_manual_review_detail(exc: Exception, *, attempts: int, retryable_match: bool) -> str:
+    payload = {
+        "stage": "draft_render_concept_previews",
+        "attempts": attempts,
+        "retryable_match": bool(retryable_match),
+        "error_class": exc.__class__.__name__,
+        "error": str(exc)[:260],
+    }
+    encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+    return encoded[:500]
+
+
+# FLYER_QA_ALLOW_SIDECAR=1 is smoke/test-only — must not be enabled in production runtime.
+def _write_sidecar_visual_qa_fixture(project, artifact_path: Path) -> None:
+    if os.environ.get("FLYER_QA_ALLOW_SIDECAR") != "1":
+        return
+    sidecar = Path(str(artifact_path) + ".ocr.txt")
+    if sidecar.exists():
+        return
+    lines: list[str] = []
+    seen: set[str] = set()
+    for fact in project.locked_facts:
+        value = " ".join((fact.value or "").split())
+        key = value.casefold()
+        if not value or key in seen:
+            continue
+        seen.add(key)
+        lines.append(value)
+    if lines:
+        atomic_write_text(sidecar, "\n".join(lines) + "\n")
+
+
+def _persist_reference_extraction_results(state_path: Path, project_id: str, extractions: list[FlyerReferenceExtraction]):
+    now = datetime.now(timezone.utc)
+    with FileLock(Path(str(state_path) + ".lock")):
+        store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
+        for idx, current in enumerate(store.projects):
+            if current.project_id != project_id:
+                continue
+            replacements = {extraction.asset_id: extraction for extraction in extractions}
+            reference_extractions = [
+                replacements.get(item.asset_id, item)
+                for item in current.reference_extractions
+            ]
+            locked_facts = merge_locked_facts(
+                current.locked_facts,
+                *(extraction.extracted_facts for extraction in extractions),
+            )
+            failed = [
+                extraction
+                for extraction in extractions
+                if extraction.role in REFERENCE_BLOCKING_ROLES and extraction.status in REFERENCE_BLOCKING_STATUSES
+            ]
+            updates = {
+                "reference_extractions": reference_extractions,
+                "locked_facts": locked_facts,
+                "updated_at": now,
+            }
+            if failed:
+                first = failed[0]
+                updates["status"] = "manual_edit_required"
+                updates["manual_review"] = make_manual_review(
+                    reason_code=f"reference_{first.status}",
+                    detail=first.detail,
+                    queued_at=now,
+                )
+            updated = current.model_copy(update=updates)
+            store.projects[idx] = updated
+            atomic_write_text(state_path, store.model_dump_json(indent=2))
+            return updated, failed
+    raise SystemExit(f"project not found while persisting reference extraction: {project_id}")
 
 
 def main() -> int:
@@ -48,30 +191,186 @@ def main() -> int:
     if project is None:
         raise SystemExit(f"project not found: {args.project_id}")
 
+    pending_reference_extractions = _pending_required_reference_extractions(project)
+    if pending_reference_extractions:
+        provider = build_reference_extraction_provider()
+        extracted: list[FlyerReferenceExtraction] = []
+        now = datetime.now(timezone.utc)
+        for pending in pending_reference_extractions:
+            asset = _asset_for_extraction(project, pending)
+            if asset is None:
+                extracted.append(FlyerReferenceExtraction(
+                    asset_id=pending.asset_id,
+                    role=pending.role,
+                    provider="not_run",
+                    status="provider_unavailable",
+                    detail="reference asset is unavailable on this server",
+                    extracted_at=now,
+                ))
+                continue
+            extracted.append(extract_reference(asset, raw_request=project.raw_request, provider=provider))
+        project, failed = _persist_reference_extraction_results(state_path, args.project_id, extracted)
+        if failed:
+            print(json.dumps({
+                "project_id": args.project_id,
+                "reference_extraction_failed": [item.model_dump(mode="json") for item in failed],
+            }))
+            return 2
+
+    failed_reference_extractions = _failed_required_reference_extractions(project)
+    if failed_reference_extractions:
+        now = datetime.now(timezone.utc)
+        first = failed_reference_extractions[0]
+        manual = make_manual_review(
+            reason_code=f"reference_{first.status}",
+            detail=first.detail,
+            queued_at=now,
+        )
+        with FileLock(Path(str(state_path) + ".lock")):
+            store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
+            for idx, current in enumerate(store.projects):
+                if current.project_id == args.project_id:
+                    store.projects[idx] = current.model_copy(update={
+                        "status": "manual_edit_required",
+                        "manual_review": manual,
+                        "updated_at": now,
+                    })
+                    break
+            atomic_write_text(state_path, store.model_dump_json(indent=2))
+        print(json.dumps({
+            "project_id": args.project_id,
+            "reference_extraction_failed": [item.model_dump(mode="json") for item in failed_reference_extractions],
+        }))
+        return 2
+
     asset_dir = Path(args.asset_dir)
     with FileLock(asset_dir / f".{args.project_id}.generate.lock"):
+        # P0-5: source-edit detection must require an explicit raw_request
+        # marker OR (manual_edit_required AND a reference_image asset). The
+        # bare `status == "manual_edit_required"` disjunct previously caught
+        # projects queued for OTHER reasons (e.g. missing_required_facts
+        # from S4) and pushed them down the source-edit renderer path, which
+        # then failed inside `_source_edit_reference_asset` and rewrote
+        # manual_review with a misleading provider/quality reason_code,
+        # losing the original context.
+        raw_lower = (project.raw_request or "").lower()
+        has_source_edit_marker = (
+            "edit uploaded flyer/source artwork" in raw_lower
+            or "authorized flyer/source artwork update" in raw_lower
+        )
+        has_reference_image = any(
+            getattr(asset, "kind", "") == "reference_image" for asset in (project.assets or [])
+        )
         source_edit_requested = (
-            project.status == "manual_edit_required"
-            or "edit uploaded flyer/source artwork" in (project.raw_request or "").lower()
-            or "authorized flyer/source artwork update" in (project.raw_request or "").lower()
+            has_source_edit_marker
+            or (project.status == "manual_edit_required" and has_reference_image)
         )
         if source_edit_requested:
-            specs = [
-                render_source_edit_preview(
-                    project,
-                    asset_dir,
-                    model=cfg.flyer.edit_image_model,
-                    quality=cfg.flyer.edit_image_quality,
+            # P0-5: render_source_edit_preview raises FlyerRenderError when the
+            # provider key is missing or the image edit endpoint fails. The cf-
+            # router preflight catches this at routing time, but operator CLI
+            # invocations and retries bypass that gate. Catch here so the
+            # project lands in manual_edit_required with the typed reason_code
+            # instead of crashing the script (which would leave the project
+            # mid-transition with no manual_review row).
+            try:
+                source_edit_provider = cfg.flyer.resolve_source_edit_render_provider()
+                specs = [
+                    render_source_edit_preview(
+                        project,
+                        asset_dir,
+                        provider=source_edit_provider.provider,
+                        model=source_edit_provider.model,
+                        quality=source_edit_provider.quality,
+                    )
+                ]
+            except FlyerRenderError as exc:
+                now = datetime.now(timezone.utc)
+                detail = str(exc)
+                lower = detail.lower()
+                # Quality-check failures are structural (wrong dimensions /
+                # mime / corrupt bytes) — not transient. Map to
+                # `visual_qa_failed` so operator triage doesn't waste time on
+                # provider retries. Provider key / endpoint failures map to
+                # `source_edit_provider_unavailable`. Everything else falls to
+                # `provider_timeout` for transient network/5xx issues.
+                if "quality check" in lower or "failed quality" in lower:
+                    reason_code = "visual_qa_failed"
+                elif "openai" in lower or "openrouter" in lower or "api_key" in lower or "provider" in lower or "manual review" in lower:
+                    reason_code = "source_edit_provider_unavailable"
+                else:
+                    reason_code = "provider_timeout"
+                manual = make_manual_review(
+                    reason_code=reason_code,
+                    detail=detail[:500],
+                    queued_at=now,
                 )
-            ]
+                with FileLock(Path(str(state_path) + ".lock")):
+                    store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
+                    for idx, current in enumerate(store.projects):
+                        if current.project_id == args.project_id:
+                            store.projects[idx] = current.model_copy(update={
+                                "status": "manual_edit_required",
+                                "manual_review": manual,
+                                "updated_at": now,
+                            })
+                            break
+                    atomic_write_text(state_path, store.model_dump_json(indent=2))
+                print(json.dumps({
+                    "project_id": args.project_id,
+                    "source_edit_failed": detail[:500],
+                    "manual_review_reason_code": reason_code,
+                }))
+                return 2
         else:
-            specs = render_concept_previews(
-                project,
-                asset_dir,
-                model=cfg.flyer.draft_image_model,
-                quality=cfg.flyer.draft_image_quality,
-                concept_count=cfg.flyer.concept_count,
-            )
+            draft_provider = cfg.flyer.resolve_draft_render_provider()
+            specs = []
+            retryable_match = False
+            for attempt in range(2):
+                try:
+                    specs = render_concept_previews(
+                        project,
+                        asset_dir,
+                        model=draft_provider.model,
+                        quality=draft_provider.quality,
+                        concept_count=cfg.flyer.concept_count,
+                    )
+                    break
+                except Exception as exc:
+                    detail_lower = str(exc).lower()
+                    retryable_match = _draft_error_retryable(detail_lower)
+                    if attempt == 0 and retryable_match and not _draft_error_is_visual_qa(detail_lower):
+                        time.sleep(0.35)
+                        continue
+                    now = datetime.now(timezone.utc)
+                    reason_code = "visual_qa_failed" if _draft_error_is_visual_qa(detail_lower) else "provider_timeout"
+                    manual = make_manual_review(
+                        reason_code=reason_code,
+                        detail=_draft_manual_review_detail(exc, attempts=attempt + 1, retryable_match=retryable_match),
+                        queued_at=now,
+                    )
+                    with FileLock(Path(str(state_path) + ".lock")):
+                        store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
+                        for idx, current in enumerate(store.projects):
+                            if current.project_id != args.project_id:
+                                continue
+                            existing = current.manual_review
+                            if getattr(existing, "status", "none") == "queued":
+                                break
+                            updates = {"manual_review": manual, "updated_at": now}
+                            if current.status in _DRAFT_EARLY_STATUSES:
+                                updates["status"] = "manual_edit_required"
+                            store.projects[idx] = current.model_copy(update=updates)
+                            break
+                        atomic_write_text(state_path, store.model_dump_json(indent=2))
+                    print(json.dumps({
+                        "project_id": args.project_id,
+                        "draft_render_failed": str(exc)[:260],
+                        "manual_review_reason_code": reason_code,
+                        "attempts": attempt + 1,
+                        "retryable_match": bool(retryable_match),
+                    }))
+                    return 2
 
         with FileLock(Path(str(state_path) + ".lock")):
             store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
@@ -106,17 +405,49 @@ def main() -> int:
                 for asset, (concept_id, title, summary) in zip(assets, concept_meta)
             ]
             one_shot = len(concepts) == 1
+            qa_reports = []
+            for asset, spec in zip(assets, specs):
+                _write_sidecar_visual_qa_fixture(current, spec.path)
+                report = run_visual_qa(
+                    current,
+                    spec.path,
+                    output_format=spec.output_format,
+                    asset_id=asset.asset_id,
+                )
+                write_visual_qa_report(report, spec.path)
+                qa_reports.append(report)
+            failed_qa = [report for report in qa_reports if report.status != "passed"]
             revisions = [
                 revision.model_copy(update={"applied": True})
                 if (not revision.applied and revision.resulting_version == current.version)
                 else revision
                 for revision in current.revisions
             ]
+            if failed_qa:
+                manual = make_manual_review(
+                    reason_code="visual_qa_failed",
+                    detail="; ".join(blocker for report in failed_qa for blocker in report.blockers)[:500],
+                    queued_at=now,
+                )
+                store.projects[snapshot_idx] = current.model_copy(update={
+                    "status": "manual_edit_required",
+                    "assets": [*current.assets, *assets],
+                    "qa_reports": [*current.qa_reports, *qa_reports],
+                    "manual_review": manual,
+                    "updated_at": now,
+                })
+                atomic_write_text(state_path, store.model_dump_json(indent=2))
+                print(json.dumps({
+                    "project_id": args.project_id,
+                    "visual_qa_failed": [report.model_dump(mode="json") for report in failed_qa],
+                }))
+                return 2
             store.projects[snapshot_idx] = current.model_copy(update={
                 "status": "awaiting_final_approval" if one_shot else "awaiting_concept_selection",
                 "concepts": concepts,
                 "selected_concept_id": "C1" if one_shot else None,
                 "assets": [*current.assets, *assets],
+                "qa_reports": [*current.qa_reports, *qa_reports],
                 "revisions": revisions,
                 "updated_at": now,
             })

@@ -1,0 +1,30 @@
+{
+  "status": "attention",
+  "generated_at": "2026-05-20T00:00:00Z",
+  "open_autonomous_prs": [
+    {"number": 139, "title": "test: add flyer golden fixtures"}
+  ],
+  "merged_not_deployed": [
+    {"number": 137, "title": "source contract first"}
+  ],
+  "blocked_candidates": [
+    {"id": "provider-posture-openrouter-edits", "reason": "human decision required"},
+    {"id": "manual-queue-closure", "reason": "blocked category"}
+  ],
+  "needs_srini": [
+    "provider/model posture changes require product decision"
+  ],
+  "skipped": [
+    {"id": "pr137-source-contract-first", "reason": "do not duplicate PR #137 landed changes"}
+  ],
+  "residual_backlog": [
+    "F0061/source-contract residuals",
+    "Exact source edit must never downgrade into generic reference generation",
+    "Source-contract QA must verify source facts"
+  ],
+  "backlog": [
+    {"id": "pr137-source-contract-first", "category": "source_contract_visual_qa", "status": "merged"},
+    {"id": "provider-posture-openrouter-edits", "category": "provider_model_posture", "status": "open"},
+    {"id": "golden-live-shape-fixtures", "category": "golden_fixture_tests", "status": "open"}
+  ]
+}

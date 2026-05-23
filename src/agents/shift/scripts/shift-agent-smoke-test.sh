@@ -50,6 +50,9 @@ for script in \
     /usr/local/bin/flyer-delivery-report \
     /usr/local/bin/flyer-recovery-watchdog \
     /usr/local/bin/flyer-recovery-preflight \
+    /usr/local/bin/flyer-manual-queue \
+    /usr/local/bin/flyer-source-edit-sla-watchdog \
+    /usr/local/bin/flyer-intent-training-export \
     /usr/local/bin/send-flyer-campaign \
     /usr/local/bin/smoke-flyer-quality \
     /usr/local/bin/send-flyer-package ; do
@@ -92,6 +95,13 @@ import flyer_onboarding
 import flyer_account
 import flyer_starter_briefs
 import flyer_recovery
+import flyer_customer_copy_policy
+import flyer_intent
+import flyer_intent_training
+import flyer_facts
+import flyer_reference_extract
+import flyer_visual_qa
+import flyer_manual_queue
 print('schema classes:', [c for c in dir(schemas) if not c.startswith('_')][:5])
 " > /dev/null; then
     echo "FAIL: Python modules don't import"
@@ -117,6 +127,69 @@ if ! sudo -u shift-agent "$PY" /usr/local/bin/smoke-flyer-quality --final-packag
 fi
 echo "Flyer quality deterministic smoke passed"
 
+REF_SMOKE_DIR="$(mktemp -d /tmp/flyer-reference-smoke.XXXXXX)"
+cleanup_ref_smoke() { rm -rf "$REF_SMOKE_DIR"; }
+trap cleanup_ref_smoke EXIT
+mkdir -p "$REF_SMOKE_DIR/assets"
+printf 'fake image bytes' > "$REF_SMOKE_DIR/menu.png"
+cat > "$REF_SMOKE_DIR/config.yaml" <<'YAML'
+schema_version: 1
+customer:
+  name: Smoke
+  location_id: smoke
+  timezone: America/New_York
+owner:
+  name: Owner
+  phone: "+19045550000"
+limits: {}
+alerting:
+  pushover_user_key: k
+  pushover_app_token: t
+backup:
+  gpg_recipient_email: owner@example.com
+flyer:
+  enabled: true
+  draft_image_model: deterministic-renderer
+  draft_image_quality: low
+  concept_count: 1
+YAML
+chown -R shift-agent:shift-agent "$REF_SMOKE_DIR"
+if ! sudo -u shift-agent env FLYER_STATE_ROOT="$REF_SMOKE_DIR" "$PY" /usr/local/bin/create-flyer-project \
+    --customer-phone +19045550123 \
+    --message-id smoke-reference-menu \
+    --raw-request "Create a flyer for Smoke Menu. Contact +19045550123. Create a flyer from this attached menu." \
+    --reference-media-path "$REF_SMOKE_DIR/menu.png" \
+    --state-path "$REF_SMOKE_DIR/projects.json" \
+    --customer-state-path "$REF_SMOKE_DIR/customers.json" \
+    --asset-dir "$REF_SMOKE_DIR/assets" \
+    --defer-reference-extraction > "$REF_SMOKE_DIR/create.json"; then
+    echo "FAIL: Flyer deferred reference create smoke failed"
+    exit 1
+fi
+REF_ASSET_PATH="$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1]))["assets"][0]["path"])' "$REF_SMOKE_DIR/create.json")"
+printf 'Idly $7\nDosa $8\n' > "${REF_ASSET_PATH}.ocr.txt"
+if ! sudo -u shift-agent env FLYER_STATE_ROOT="$REF_SMOKE_DIR" FLYER_REFERENCE_ALLOW_SIDECAR=1 FLYER_QA_ALLOW_SIDECAR=1 "$PY" /usr/local/bin/generate-flyer-concepts \
+    --project-id F0001 \
+    --state-path "$REF_SMOKE_DIR/projects.json" \
+    --asset-dir "$REF_SMOKE_DIR/assets" \
+    --config-path "$REF_SMOKE_DIR/config.yaml" > "$REF_SMOKE_DIR/generate.json"; then
+    echo "FAIL: Flyer deferred reference generate smoke failed"
+    exit 1
+fi
+if ! "$PY" - "$REF_SMOKE_DIR/projects.json" <<'PY' > /dev/null; then
+import json, sys
+project = json.load(open(sys.argv[1], encoding="utf-8"))["projects"][0]
+values = {fact["value"] for fact in project.get("locked_facts", [])}
+assert {"Idly", "$7", "Dosa", "$8"}.issubset(values)
+assert project["reference_extractions"][0]["status"] == "ok"
+PY
+    echo "FAIL: Flyer deferred reference facts smoke failed"
+    exit 1
+fi
+trap - EXIT
+cleanup_ref_smoke
+echo "Flyer deferred reference extraction smoke passed"
+
 if ! sudo -u shift-agent "$PY" /usr/local/bin/flyer-delivery-report --json > /dev/null; then
     echo "FAIL: Flyer delivery report failed"
     exit 1
@@ -132,6 +205,24 @@ if ! sudo -u shift-agent "$PY" /usr/local/bin/flyer-recovery-preflight --text > 
     exit 1
 fi
 echo "Flyer recovery smoke passed"
+
+if ! sudo -u shift-agent "$PY" /usr/local/bin/flyer-manual-queue --triage > /dev/null; then
+    echo "FAIL: Flyer manual-queue triage view failed"
+    exit 1
+fi
+echo "Flyer manual-queue triage smoke passed"
+
+if ! sudo -u shift-agent "$PY" /usr/local/bin/flyer-source-edit-sla-watchdog --threshold-minutes 1000000 > /dev/null; then
+    echo "FAIL: Flyer source-edit SLA watchdog advisory run failed"
+    exit 1
+fi
+echo "Flyer source-edit SLA watchdog smoke passed"
+
+if ! sudo -u shift-agent "$PY" /usr/local/bin/flyer-intent-training-export --help > /dev/null; then
+    echo "FAIL: Flyer intent training export CLI failed"
+    exit 1
+fi
+echo "Flyer intent training export CLI smoke passed"
 
 if [ -x /usr/local/bin/credential-minimized-readiness ]; then
     "$PY" /usr/local/bin/credential-minimized-readiness --format text || true
@@ -178,6 +269,8 @@ flyer_ok, flyer_signals = ma.classify_flyer_intent('Need flyer for Ugadi Special
 assert flyer_ok is True, f'flyer classifier regressed: signals={flyer_signals}'
 generic_flyer_ok, _ = ma.classify_flyer_intent('Need catering for 80 people event Saturday food delivered')
 assert generic_flyer_ok is False, 'flyer classifier stole generic catering'
+assert hasattr(ma, 'begin_flyer_intent_shadow')
+assert hasattr(ma, 'finalize_flyer_intent_shadow')
 print('cf-router plugin: actions.py importable + classifiers OK')
 " > /dev/null; then
         echo "FAIL: cf-router plugin actions.py broken — would silently fail at first inbound"
@@ -186,6 +279,55 @@ print('cf-router plugin: actions.py importable + classifiers OK')
     echo "✓ cf-router plugin compiles + actions importable + classifier sanity"
 else
     echo "⚠  cf-router plugin not installed — skipping plugin smoke check"
+fi
+
+if [ -d /root/.hermes/plugins/cf-router ]; then
+    INTENT_SMOKE_DIR="$(mktemp -d /tmp/flyer-intent-smoke.XXXXXX)"
+    if ! "$PY" - "$INTENT_SMOKE_DIR/decisions.log" <<'PY' > /dev/null; then
+import importlib.util
+import json
+import sys
+from pathlib import Path
+from pydantic import TypeAdapter
+
+sys.path.insert(0, '/opt/shift-agent')
+from schemas import LogEntry  # noqa: E402
+
+spec_a = importlib.util.spec_from_file_location(
+    'cf_router_smoke_actions_intent',
+    '/root/.hermes/plugins/cf-router/actions.py',
+)
+ma = importlib.util.module_from_spec(spec_a)
+spec_a.loader.exec_module(ma)
+ma.LOG_PATH = Path(sys.argv[1])
+token = ma.begin_flyer_intent_shadow(
+    text='Create flyer for smoke specials',
+    chat_id='smoke@s.whatsapp.net',
+    message_id='smoke-message',
+    has_media=False,
+)
+try:
+    ma.record_flyer_intent_route_event(
+        reason='flyer_primary_project_created',
+        subprocess_rc=0,
+        detail='project_id=F0001; status=awaiting_final_approval',
+    )
+    ma.finalize_flyer_intent_shadow(
+        hook_result={'action': 'skip', 'reason': 'cf-router flyer primary created'},
+    )
+finally:
+    ma.reset_flyer_intent_shadow(token)
+
+rows = [json.loads(line) for line in ma.LOG_PATH.read_text(encoding='utf-8').splitlines()]
+assert rows and rows[-1]['type'] == 'flyer_hermes_intent_decision'
+assert rows[-1]['classifier_status'] == 'off'
+TypeAdapter(LogEntry).validate_python(rows[-1])
+PY
+        rm -rf "$INTENT_SMOKE_DIR"
+        echo "FAIL: cf-router begin_flyer_intent_shadow / flyer_hermes_intent_decision smoke failed"
+        exit 1
+    fi
+    rm -rf "$INTENT_SMOKE_DIR"
 fi
 
 # 2c. Agent #3 closest-location.py importable + CLI parses (PR-Agent3-v0.1)
@@ -379,6 +521,7 @@ for unit in \
     shift-agent-fsck.timer \
     send-daily-brief.timer \
     catering-pattern-report.timer \
+    flyer-source-edit-sla-watchdog.timer \
     send-routing-accuracy-summary.timer; do
     if ! systemctl is-enabled --quiet "$unit"; then
         echo "FAIL: $unit not enabled"
@@ -399,6 +542,15 @@ sd_verify_units=(
     /etc/systemd/system/flyer-recovery-watchdog.service
     /etc/systemd/system/flyer-recovery-watchdog.timer
 )
+if [ -f /etc/systemd/system/flyer-source-edit-sla-watchdog.service ]; then
+    sd_verify_units+=( /etc/systemd/system/flyer-source-edit-sla-watchdog.service )
+fi
+if [ -f /etc/systemd/system/flyer-source-edit-sla-watchdog.timer ]; then
+    sd_verify_units+=( /etc/systemd/system/flyer-source-edit-sla-watchdog.timer )
+fi
+if [ -f /etc/systemd/system/flyer-source-edit-sla-watchdog-failure.service ]; then
+    sd_verify_units+=( /etc/systemd/system/flyer-source-edit-sla-watchdog-failure.service )
+fi
 # Include Agent #21 prune timer if installed AND its venv is present.
 # systemd-analyze verify checks ExecStart paths exist at verify time
 # (independent of any ConditionPathIsExecutable directive); skip the unit

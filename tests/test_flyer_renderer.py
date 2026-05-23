@@ -27,7 +27,7 @@ from agents.flyer.render import (  # noqa: E402
     validate_text_manifest_file,
     write_text_manifest,
 )
-from schemas import FlyerAsset, FlyerConcept, FlyerProject, FlyerRequestFields, FlyerRevision  # noqa: E402
+from schemas import FlyerAsset, FlyerConcept, FlyerLockedFact, FlyerProject, FlyerRequestFields, FlyerRevision  # noqa: E402
 
 
 def _complete_project() -> FlyerProject:
@@ -125,6 +125,136 @@ def test_collect_text_facts_keeps_revised_price_phone_location_and_schedule():
     assert facts["contact"] == "+1 980 200 5022"
     assert "$16.99" in facts["detail_001"]
     assert "$12.99" in facts["detail_002"]
+
+
+def test_collect_text_facts_avoids_duplicate_time_when_schedule_has_time_range():
+    project = _complete_project()
+    fields = FlyerRequestFields(
+        event_or_business_name="Evening Snacks",
+        event_time="16:00",
+        venue_or_location="90 Brybar Dr St Johns FL",
+        contact_info="+17329837841",
+        notes="Evening snacks offer. Schedule 4 PM to 7 PM. Wednesday through Saturday.",
+    )
+    project = project.model_copy(update={"fields": fields})
+
+    facts = {fact.fact_id: fact.text for fact in collect_text_facts(project)}
+
+    assert "schedule" in facts
+    assert "4 PM TO 7 PM" in facts["schedule"]
+    assert "time" not in facts
+    assert "Time: 16:00" not in _image_prompt(
+        project,
+        concept_id="C1",
+        output_format="concept_preview",
+        size=(1080, 1350),
+    )
+
+
+def test_collect_text_facts_separates_business_brand_from_campaign_title():
+    """Business identity and campaign title are different customer-visible facts.
+
+    The brand must remain visible, but the poster title should be the campaign
+    title/headline rather than duplicating the business name.
+    """
+    project = _complete_project().model_copy(update={
+        "fields": FlyerRequestFields(
+            event_or_business_name="Evening Snacks",
+            venue_or_location="Old Stale Address",
+            contact_info="+19999999999",
+            notes="-",
+        ),
+        "locked_facts": [
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmis Kitchn", source="customer_profile"),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Evening Snacks", source="customer_text"),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile"),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile"),
+        ],
+    })
+
+    facts = {fact.fact_id: fact.text for fact in collect_text_facts(project)}
+    assert facts["brand"] == "Lakshmis Kitchn"
+    assert facts["title"] == "Evening Snacks"
+    assert facts["location"] == "90 Brybar Dr St Johns FL"
+    assert facts["contact"] == "+17329837841"
+    assert _menu_overlay_payload(project)["title"] == "Evening Snacks"
+    assert "Business/brand: Lakshmis Kitchn" in _image_prompt(
+        project,
+        concept_id="C1",
+        output_format="concept_preview",
+        size=(1080, 1350),
+    )
+    assert "Title: Evening Snacks" in _image_prompt(
+        project,
+        concept_id="C1",
+        output_format="concept_preview",
+        size=(1080, 1350),
+    )
+
+
+def test_collect_text_facts_uses_headline_when_campaign_title_is_absent():
+    project = _complete_project().model_copy(update={
+        "fields": FlyerRequestFields(
+            event_or_business_name="Lakshmis Kitchn",
+            venue_or_location="90 Brybar Dr St Johns FL",
+            contact_info="+17329837841",
+            notes="Headline: Family Combo Feast",
+        ),
+        "locked_facts": [
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmis Kitchn", source="customer_profile"),
+            FlyerLockedFact(fact_id="headline", label="Headline", value="Family Combo Feast", source="customer_text"),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile"),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile"),
+        ],
+    })
+
+    facts = {fact.fact_id: fact.text for fact in collect_text_facts(project)}
+    assert facts["brand"] == "Lakshmis Kitchn"
+    assert facts["title"] == "Family Combo Feast"
+
+
+def test_collect_text_facts_falls_back_to_fields_when_locked_slot_missing():
+    """P0-2: if locked_facts has no entry for a slot, the existing field is used unchanged.
+    Regression guard so the locked-fact preference doesn't blank out projects that only
+    populated the legacy fields path."""
+    project = _complete_project().model_copy(update={
+        "fields": FlyerRequestFields(
+            event_or_business_name="Lakshmis Kitchn",
+            venue_or_location="St Johns FL",
+            contact_info="+17329837841",
+            notes="-",
+        ),
+        "locked_facts": [],  # no locked facts at all
+    })
+
+    facts = {fact.fact_id: fact.text for fact in collect_text_facts(project)}
+    assert facts["title"] == "Lakshmis Kitchn"
+    assert facts["location"] == "St Johns FL"
+    assert facts["contact"] == "+17329837841"
+
+
+def test_collect_text_facts_uses_locked_reference_items_before_raw_request():
+    project = _complete_project().model_copy(update={
+        "raw_request": "Create a flyer from this attached menu.",
+        "fields": FlyerRequestFields(
+            event_or_business_name="Menu Specials",
+            contact_info="+1 904 555 0123",
+            notes="Create a flyer from this attached menu.",
+        ),
+        "locked_facts": [
+            FlyerLockedFact(fact_id="item:0:name", label="Item", value="Idly", source="reference_vision"),
+            FlyerLockedFact(fact_id="item:0:price", label="Price", value="$7", source="reference_vision"),
+            FlyerLockedFact(fact_id="item:1:name", label="Item", value="Dosa", source="reference_vision"),
+            FlyerLockedFact(fact_id="item:1:price", label="Price", value="$8", source="reference_vision"),
+        ],
+    })
+
+    facts = {fact.fact_id: fact.text for fact in collect_text_facts(project)}
+    payload = _menu_overlay_payload(project)
+
+    assert facts["detail_001"] == "Idly $7"
+    assert facts["detail_002"] == "Dosa $8"
+    assert payload["items"] == ["Idly $7", "Dosa $8"]
 
 
 def test_collect_text_facts_suppresses_old_phone_from_notes_after_revision():
@@ -280,6 +410,24 @@ def test_image_prompt_uses_schedule_instead_of_blank_date_for_recurring_offer():
     assert "Date: " not in prompt
 
 
+def test_image_prompt_extracts_through_day_range_schedule_for_recurring_offer():
+    project = _complete_project()
+    fields = project.fields.model_copy(update={
+        "event_date": None,
+        "event_time": None,
+        "notes": (
+            "I\u2019d like you to help me with evening snacks flier from 4 PM to 7 PM. "
+            "Include 5 top South Indian snack items. Its Wednesday through Saturday event"
+        ),
+    })
+    project = project.model_copy(update={"fields": fields})
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="whatsapp_image", size=(1080, 1350))
+
+    assert "Schedule: Wednesday Through Saturday | 4 PM TO 7 PM" in prompt
+    assert "Date: " not in prompt
+
+
 def test_image_prompt_skips_blank_optional_fields_for_price_list():
     project = _complete_project()
     fields = FlyerRequestFields(
@@ -294,6 +442,29 @@ def test_image_prompt_skips_blank_optional_fields_for_price_list():
     assert "Date: " not in prompt
     assert "Time: " not in prompt
     assert "Venue: " not in prompt
+
+
+def test_image_prompt_enforces_explicit_english_only_language_constraint():
+    project = _complete_project().model_copy(update={
+        "raw_request": (
+            "Create a Ganesh festival flyer. Language: English only. "
+            "Do NOT use Telugu, Hindi, or any regional Indian language."
+        ),
+        "fields": FlyerRequestFields(
+            event_or_business_name="Ganesh Festival",
+            venue_or_location="Community Hall",
+            contact_info="+17329837841",
+            preferred_language="en",
+            notes=(
+                "Language: English only. Do NOT use Telugu, Hindi, or any regional Indian language."
+            ),
+        ),
+    })
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+
+    assert "Use English only" in prompt
+    assert "Do not use Telugu, Hindi, or any regional Indian language" in prompt
 
 
 def test_image_prompt_does_not_turn_weekend_special_badge_into_schedule():
@@ -776,6 +947,7 @@ def test_source_edit_preview_calls_openai_edit_api_with_reference_image(tmp_path
     spec = render_source_edit_preview(
         project,
         tmp_path,
+        provider="openai",
         model="gpt-image-1",
         quality="medium",
     )
@@ -803,6 +975,359 @@ def test_source_edit_preview_calls_openai_edit_api_with_reference_image(tmp_path
     )
     assert qa.ok is True
     assert any("integrity only" in warning for warning in qa.warnings)
+
+
+def test_source_edit_preview_calls_openrouter_with_reference_image(tmp_path, monkeypatch):
+    reference = tmp_path / "reference.png"
+    reference.write_bytes(_png_bytes())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    project = _complete_project().model_copy(update={
+        "status": "manual_edit_required",
+        "raw_request": "Edit uploaded flyer/source artwork. Customer requested: Remove extra 08:00. Add Any Item for $9.99.",
+        "assets": [
+            FlyerAsset(
+                asset_id="A0001",
+                kind="reference_image",
+                source="whatsapp",
+                path=str(reference),
+                mime_type="image/png",
+                sha256="a" * 64,
+                original_message_id="wamid.reference",
+                received_at=datetime.now(timezone.utc),
+            )
+        ],
+    })
+    requests = []
+
+    class _Resp:
+        def __enter__(self):
+            data_url = "data:image/png;base64," + base64.b64encode(_png_bytes(color=(40, 90, 50))).decode("ascii")
+            self._body = json.dumps({
+                "choices": [{
+                    "message": {
+                        "images": [{"image_url": {"url": data_url}}],
+                    },
+                }],
+            }).encode("utf-8")
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return self._body
+
+    def _fake_urlopen(req, timeout):
+        requests.append((req, timeout, json.loads(req.data.decode("utf-8"))))
+        return _Resp()
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", _fake_urlopen)
+
+    spec = render_source_edit_preview(
+        project,
+        tmp_path,
+        provider="openrouter",
+        model="openai/gpt-5.4-image-2",
+        quality="high",
+    )
+
+    assert spec.kind == "concept_preview"
+    assert spec.path.read_bytes().startswith(b"\x89PNG")
+    assert len(requests) == 1
+    req, timeout, payload = requests[0]
+    assert "openrouter.ai" in req.full_url
+    assert timeout == 180
+    assert req.headers["Authorization"] == "Bearer sk-or-test"
+    assert payload["model"] == "openai/gpt-5.4-image-2"
+    assert payload["modalities"] == ["image", "text"]
+    content = payload["messages"][0]["content"]
+    assert content[0]["type"] == "text"
+    assert "Remove extra 08:00" in content[0]["text"]
+    assert content[1]["type"] == "image_url"
+    assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+    manifest = json.loads(Path(f"{spec.path}.text.json").read_text(encoding="utf-8"))
+    assert manifest["verification_mode"] == "source_edit_integrity_only"
+
+
+def test_source_edit_preview_omitted_provider_fails_closed_to_manual_review(tmp_path, monkeypatch):
+    reference = tmp_path / "reference.png"
+    reference.write_bytes(_png_bytes())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    project = _complete_project().model_copy(update={
+        "status": "manual_edit_required",
+        "raw_request": "Edit uploaded flyer/source artwork. Customer requested: Change date.",
+        "assets": [
+            FlyerAsset(
+                asset_id="A0001",
+                kind="reference_image",
+                source="whatsapp",
+                path=str(reference),
+                mime_type="image/png",
+                sha256="a" * 64,
+                original_message_id="wamid.reference",
+                received_at=datetime.now(timezone.utc),
+            )
+        ],
+    })
+    urls = []
+
+    class _Resp:
+        def __enter__(self):
+            data_url = "data:image/png;base64," + base64.b64encode(_png_bytes()).decode("ascii")
+            self._body = json.dumps({
+                "choices": [{
+                    "message": {"images": [{"image_url": {"url": data_url}}]},
+                }],
+            }).encode("utf-8")
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return self._body
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", lambda req, timeout=None: urls.append(req.full_url) or _Resp())
+
+    import pytest as _pytest
+    with _pytest.raises(FlyerRenderError, match="manual review"):
+        render_source_edit_preview(project, tmp_path, model="openai/gpt-5.4-image-2", quality="high")
+
+    assert urls == []
+
+
+def test_openrouter_source_edit_fails_closed_on_remote_url_response(tmp_path, monkeypatch):
+    reference = tmp_path / "reference.png"
+    reference.write_bytes(_png_bytes())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    project = _complete_project().model_copy(update={
+        "status": "manual_edit_required",
+        "raw_request": "Edit uploaded flyer/source artwork. Customer requested: Change date.",
+        "assets": [
+            FlyerAsset(
+                asset_id="A0001",
+                kind="reference_image",
+                source="whatsapp",
+                path=str(reference),
+                mime_type="image/png",
+                sha256="a" * 64,
+                original_message_id="wamid.reference",
+                received_at=datetime.now(timezone.utc),
+            )
+        ],
+    })
+
+    class _Resp:
+        def __enter__(self):
+            self._body = json.dumps({
+                "choices": [{
+                    "message": {
+                        "images": [{"image_url": {"url": "https://example.com/generated.png"}}],
+                    },
+                }],
+            }).encode("utf-8")
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return self._body
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", lambda _req, timeout=None: _Resp())
+
+    import pytest as _pytest
+    with _pytest.raises(FlyerRenderError, match="base64 image data"):
+        render_source_edit_preview(
+            project,
+            tmp_path,
+            provider="openrouter",
+            model="openai/gpt-5.4-image-2",
+            quality="high",
+        )
+
+
+def test_openrouter_source_edit_fails_closed_on_malformed_json_shape(tmp_path, monkeypatch):
+    reference = tmp_path / "reference.png"
+    reference.write_bytes(_png_bytes())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    project = _complete_project().model_copy(update={
+        "status": "manual_edit_required",
+        "raw_request": "Edit uploaded flyer/source artwork. Customer requested: Change date.",
+        "assets": [
+            FlyerAsset(
+                asset_id="A0001",
+                kind="reference_image",
+                source="whatsapp",
+                path=str(reference),
+                mime_type="image/png",
+                sha256="a" * 64,
+                original_message_id="wamid.reference",
+                received_at=datetime.now(timezone.utc),
+            )
+        ],
+    })
+
+    class _Resp:
+        def __enter__(self):
+            self._body = json.dumps({
+                "choices": [{
+                    "message": {
+                        "images": ["not-a-dict"],
+                    },
+                }],
+            }).encode("utf-8")
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return self._body
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", lambda _req, timeout=None: _Resp())
+
+    import pytest as _pytest
+    with _pytest.raises(FlyerRenderError, match="invalid image shape"):
+        render_source_edit_preview(
+            project,
+            tmp_path,
+            provider="openrouter",
+            model="openai/gpt-5.4-image-2",
+            quality="high",
+        )
+
+
+def test_openrouter_source_edit_fails_closed_on_placeholder_key(tmp_path, monkeypatch):
+    import agents.flyer.render as render_mod
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    reference = tmp_path / "reference.png"
+    reference.write_bytes(_png_bytes())
+    project = _complete_project().model_copy(update={
+        "status": "manual_edit_required",
+        "raw_request": "Edit uploaded flyer/source artwork. Customer requested: Change date.",
+        "assets": [
+            FlyerAsset(
+                asset_id="A0001",
+                kind="reference_image",
+                source="whatsapp",
+                path=str(reference),
+                mime_type="image/png",
+                sha256="a" * 64,
+                original_message_id="wamid.reference",
+                received_at=datetime.now(timezone.utc),
+            )
+        ],
+    })
+
+    def tripwire(*_args, **_kwargs):
+        raise AssertionError("network request issued with PLACEHOLDER OpenRouter key")
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "PLACEHOLDER-key")
+    monkeypatch.setattr(render_mod.urllib.request, "urlopen", tripwire)
+
+    import pytest as _pytest
+    with _pytest.raises(FlyerRenderError, match="OPENROUTER_API_KEY"):
+        render_source_edit_preview(
+            project,
+            tmp_path,
+            provider="openrouter",
+            model="openai/gpt-5.4-image-2",
+            quality="high",
+        )
+
+
+def test_openai_source_edit_bytes_fails_closed_on_lowercase_placeholder_key(tmp_path, monkeypatch):
+    import agents.flyer.render as render_mod
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    ref_path = tmp_path / "F9102-ref.png"
+    ref_path.write_bytes(b"fake")
+
+    now = datetime(2026, 5, 19, tzinfo=timezone.utc)
+    project = FlyerProject.model_validate({
+        "project_id": "F9102",
+        "status": "manual_edit_required",
+        "customer_phone": "+17329837841",
+        "created_at": now,
+        "updated_at": now,
+        "original_message_id": "m-1",
+        "raw_request": "Edit uploaded flyer/source artwork. Change date.",
+        "fields": {"event_or_business_name": "Lakshmis", "contact_info": "+17329837841"},
+        "assets": [{
+            "asset_id": "A0001",
+            "kind": "reference_image",
+            "source": "whatsapp",
+            "path": str(ref_path),
+            "mime_type": "image/png",
+            "sha256": "a" * 64,
+            "received_at": now,
+        }],
+    })
+
+    def tripwire(*_args, **_kwargs):
+        raise AssertionError("network request issued with lowercase placeholder OpenAI key")
+
+    monkeypatch.setattr(render_mod.urllib.request, "urlopen", tripwire)
+    monkeypatch.setattr(render_mod, "_read_env_value", lambda _name: "placeholder-key")
+
+    import pytest as _pytest
+    with _pytest.raises(FlyerRenderError, match="placeholder"):
+        render_mod._openai_source_edit_bytes(project, size=(1080, 1350), model="gpt-image-1", quality="medium")
+
+
+def test_openai_source_edit_bytes_fails_closed_on_malformed_json_shape(tmp_path, monkeypatch):
+    import agents.flyer.render as render_mod
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    ref_path = tmp_path / "F9103-ref.png"
+    ref_path.write_bytes(b"fake")
+
+    now = datetime(2026, 5, 19, tzinfo=timezone.utc)
+    project = FlyerProject.model_validate({
+        "project_id": "F9103",
+        "status": "manual_edit_required",
+        "customer_phone": "+17329837841",
+        "created_at": now,
+        "updated_at": now,
+        "original_message_id": "m-1",
+        "raw_request": "Edit uploaded flyer/source artwork. Change date.",
+        "fields": {"event_or_business_name": "Lakshmis", "contact_info": "+17329837841"},
+        "assets": [{
+            "asset_id": "A0001",
+            "kind": "reference_image",
+            "source": "whatsapp",
+            "path": str(ref_path),
+            "mime_type": "image/png",
+            "sha256": "a" * 64,
+            "received_at": now,
+        }],
+    })
+
+    class _Resp:
+        def __enter__(self):
+            self._body = json.dumps({"data": ["not-a-dict"]}).encode("utf-8")
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return self._body
+
+    monkeypatch.setattr(render_mod, "_read_env_value", lambda _name: "sk-test")
+    monkeypatch.setattr(render_mod.urllib.request, "urlopen", lambda _req, timeout=None: _Resp())
+
+    import pytest as _pytest
+    with _pytest.raises(FlyerRenderError, match="invalid item shape"):
+        render_mod._openai_source_edit_bytes(project, size=(1080, 1350), model="gpt-image-1", quality="medium")
 
 
 def test_source_edit_rejects_pdf_reference_before_provider_call(tmp_path, monkeypatch):
@@ -833,7 +1358,7 @@ def test_source_edit_rejects_pdf_reference_before_provider_call(tmp_path, monkey
     monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", _fail_urlopen)
 
     try:
-        render_source_edit_preview(project, tmp_path, model="gpt-image-1", quality="medium")
+        render_source_edit_preview(project, tmp_path, provider="openai", model="gpt-image-1", quality="medium")
     except FlyerRenderError as e:
         assert "must be an image" in str(e)
     else:
@@ -889,7 +1414,7 @@ def test_source_edit_reference_uses_latest_reference_asset(tmp_path, monkeypatch
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", lambda req, timeout: requests.append(req.data) or _Resp())
 
-    render_source_edit_preview(project, tmp_path, model="gpt-image-1", quality="medium")
+    render_source_edit_preview(project, tmp_path, provider="openai", model="gpt-image-1", quality="medium")
 
     assert b'filename="latest.png"' in requests[0]
     assert b'filename="old.png"' not in requests[0]
@@ -952,6 +1477,56 @@ def test_direct_poster_prompt_uses_registered_business_name_not_reference_brand(
 
     assert "Business/brand: Lakshmis Kitchn" in prompt
     assert "Do not copy business names or logos from the reference" in prompt
+
+
+def test_explicit_business_override_reaches_direct_and_source_edit_prompts(tmp_path, monkeypatch):
+    import agents.flyer.render as render_mod
+
+    customers_path = tmp_path / "customers.json"
+    customers_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_customer_sequence": 2,
+        "customers": [{
+            "customer_id": "CUST0001",
+            "business_name": "Old Brand",
+            "business_address": "90 Brybar Dr St Johns FL",
+            "primary_chat_id": "201975216009469@lid",
+            "onboarded_by_phone": "+19045550104",
+            "public_phone": "+17329837841",
+            "business_whatsapp_number": "+17329837841",
+            "authorized_request_numbers": ["+17329837841", "+19045550104"],
+            "business_category": "Indian restaurant",
+            "preferred_language": "te",
+            "plan_id": "trial",
+            "status": "trial",
+            "created_at": datetime(2026, 5, 17, tzinfo=timezone.utc).isoformat(),
+            "updated_at": datetime(2026, 5, 17, tzinfo=timezone.utc).isoformat(),
+            "activated_at": datetime(2026, 5, 17, tzinfo=timezone.utc).isoformat(),
+            "monthly_flyers_used": 0,
+            "billing_provider": "manual",
+            "payment_currency": "USD",
+        }],
+        "onboarding_sessions": [],
+    }), encoding="utf-8")
+    monkeypatch.setenv("FLYER_CUSTOMERS_PATH", str(customers_path))
+
+    project = _complete_project().model_copy(update={
+        "customer_phone": "+19045550104",
+        "raw_request": "Create flyer. Business name is New Brand and headline is Evening Snacks.",
+        "locked_facts": [
+            FlyerLockedFact(fact_id="business_name", label="Business", value="New Brand", source="customer_text"),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Evening Snacks", source="customer_text"),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile"),
+        ],
+    })
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+    source_prompt = render_mod._source_edit_prompt(project)
+
+    assert "Business/brand: New Brand" in prompt
+    assert "Business/brand: Old Brand" not in prompt
+    assert "Business/brand to preserve: New Brand" in source_prompt
+    assert "Business/brand to preserve: Old Brand" not in source_prompt
 
 
 def test_real_image_model_concept_uses_direct_poster_output_without_overlay(tmp_path, monkeypatch):
@@ -1182,6 +1757,44 @@ def test_final_package_exports_from_selected_generated_concept_without_new_model
     assert all(s.path.exists() and s.path.stat().st_size > 1000 for s in specs)
 
 
+def test_final_package_reuses_selected_concept_with_deterministic_model(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    approved = tmp_path / "F0001-C1-preview.png"
+    approved.write_bytes(_png_bytes(size=(1080, 1350), color=(60, 20, 160)))
+    asset = FlyerAsset(
+        asset_id="A0001",
+        kind="concept_preview",
+        source="rendered",
+        path=str(approved),
+        mime_type="image/png",
+        sha256="a" * 64,
+        original_message_id="wamid.flyer.1",
+        received_at=datetime.now(timezone.utc),
+    )
+    project = _complete_project().model_copy(update={
+        "assets": [asset],
+        "concepts": [
+            FlyerConcept(
+                concept_id="C1",
+                title="Approved Flyer",
+                style_summary="Approved preview",
+                preview_asset_id="A0001",
+                prompt="",
+                created_at=datetime.now(timezone.utc),
+                selected_at=datetime.now(timezone.utc),
+            )
+        ],
+        "selected_concept_id": "C1",
+    })
+
+    specs = render_final_package(project, tmp_path / "finals", model="deterministic-renderer", quality="high")
+
+    from PIL import Image
+    whatsapp = next(spec for spec in specs if spec.output_format == "whatsapp_image")
+    with Image.open(whatsapp.path) as final_img, Image.open(approved) as approved_img:
+        assert final_img.getpixel((20, 20)) == approved_img.getpixel((20, 20))
+
+
 def test_source_edit_final_package_reuses_approved_preview_even_with_deterministic_model(tmp_path, monkeypatch):
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     approved = tmp_path / "F0001-C1-preview.png"
@@ -1261,6 +1874,104 @@ def test_authorized_source_artwork_update_is_treated_as_source_edit_for_finals(t
     assert manifest["verification_mode"] == "source_edit_integrity_only"
 
 
+def test_is_source_edit_project_requires_marker_or_reference_image(tmp_path, monkeypatch):
+    """Fix D: `_is_source_edit_project` must not return True for every
+    manual_edit_required project. It needs either the explicit raw_request
+    marker OR a reference_image asset alongside manual_edit_required.
+    Missing_required_facts projects (no marker, no reference image) at
+    manual_edit_required must NOT be classified as source-edit."""
+    from agents.flyer.render import _is_source_edit_project
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    now = datetime(2026, 5, 19, tzinfo=timezone.utc)
+    base = {
+        "project_id": "F9100",
+        "customer_phone": "+17329837841",
+        "created_at": now,
+        "updated_at": now,
+        "original_message_id": "m-1",
+        "raw_request": "Make a flyer please.",
+        "fields": {"event_or_business_name": "Bare", "contact_info": "+17329837841"},
+    }
+
+    # 1) manual_edit_required + no marker + no reference_image -> NOT source-edit.
+    bare = FlyerProject.model_validate({**base, "status": "manual_edit_required", "assets": []})
+    assert _is_source_edit_project(bare) is False
+
+    # 2) Explicit marker in raw_request -> source-edit (regardless of status / assets).
+    marked = FlyerProject.model_validate({
+        **base,
+        "status": "intake_started",
+        "raw_request": "Edit uploaded flyer/source artwork. Change date.",
+        "assets": [],
+    })
+    assert _is_source_edit_project(marked) is True
+
+    # 3) manual_edit_required + reference_image asset -> source-edit.
+    ref_path = tmp_path / "F9100-ref.png"
+    ref_path.write_bytes(b"fake")
+    with_ref = FlyerProject.model_validate({
+        **base,
+        "status": "manual_edit_required",
+        "assets": [{
+            "asset_id": "A0001",
+            "kind": "reference_image",
+            "source": "whatsapp",
+            "path": str(ref_path),
+            "mime_type": "image/png",
+            "sha256": "a" * 64,
+            "received_at": now,
+        }],
+    })
+    assert _is_source_edit_project(with_ref) is True
+
+
+def test_openai_source_edit_bytes_fails_closed_on_placeholder_key(tmp_path, monkeypatch):
+    """Fix F: a PLACEHOLDER OPENAI key must NOT make a network request.
+    Mirror visual_qa / workflow defense-in-depth: missing OR placeholder
+    fails closed before urlopen is called, raising FlyerRenderError that
+    generate-flyer-concepts catches and classifies as
+    source_edit_provider_unavailable."""
+    import agents.flyer.render as render_mod
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    ref_path = tmp_path / "F9101-ref.png"
+    ref_path.write_bytes(b"fake")
+
+    now = datetime(2026, 5, 19, tzinfo=timezone.utc)
+    project = FlyerProject.model_validate({
+        "project_id": "F9101",
+        "status": "manual_edit_required",
+        "customer_phone": "+17329837841",
+        "created_at": now,
+        "updated_at": now,
+        "original_message_id": "m-1",
+        "raw_request": "Edit uploaded flyer/source artwork. Change date.",
+        "fields": {"event_or_business_name": "Lakshmis", "contact_info": "+17329837841"},
+        "assets": [{
+            "asset_id": "A0001",
+            "kind": "reference_image",
+            "source": "whatsapp",
+            "path": str(ref_path),
+            "mime_type": "image/png",
+            "sha256": "a" * 64,
+            "received_at": now,
+        }],
+    })
+
+    # If a network request were attempted with a PLACEHOLDER key, urlopen would
+    # be called. Patch it to a tripwire so any call fails the test.
+    def tripwire(*_args, **_kwargs):
+        raise AssertionError("network request issued with PLACEHOLDER key — defense-in-depth violated")
+
+    monkeypatch.setattr(render_mod.urllib.request, "urlopen", tripwire)
+    monkeypatch.setattr(render_mod, "_read_env_value", lambda _name: "PLACEHOLDER-key")
+
+    import pytest as _pytest
+    with _pytest.raises(FlyerRenderError, match="placeholder"):
+        render_mod._openai_source_edit_bytes(project, size=(1080, 1350), model="gpt-image-1", quality="medium")
+
+
 def test_render_customer_facing_footer_has_no_hermes_brand():
     """BUG-FLYER-QA-004: customer-facing footer text in both render paths
     must read 'Flyer Studio', not 'Hermes Flyer Studio'. The Hermes name is
@@ -1280,3 +1991,34 @@ def test_render_customer_facing_footer_has_no_hermes_brand():
     customer_facing_legacy = "Send APPROVE to finalize - Hermes Flyer Studio"
     assert customer_facing_legacy not in src, \
         "Legacy 'Hermes Flyer Studio' footer string still present in render.py"
+
+
+def test_deterministic_render_paths_use_campaign_title_not_business_name():
+    render_py = Path(__file__).resolve().parent.parent / "src" / "agents" / "flyer" / "render.py"
+    src = render_py.read_text(encoding="utf-8")
+    assert "title_text = _display_title(project)" in src
+    assert '"title": _display_title(project),' in src
+    assert '"title": fact_value(project, "business_name", fallback=project.fields.event_or_business_name)' not in src
+
+
+# ─── Task 7: word-boundary _context_has + brand/branding edit semantics ──
+
+
+def test_context_has_word_boundary_does_not_match_substring():
+    """Pre-fix, `spa` matched inside `space`, `transparent`, `Hispanic`.
+    Post-fix the helper uses word boundaries for single-word terms."""
+    import agents.flyer.render as render_mod
+
+    assert render_mod._context_has("modern spa retreat", {"spa"}) is True
+    assert render_mod._context_has("clean space for address", {"spa"}) is False
+    assert render_mod._context_has("transparent design", {"spa"}) is False
+    assert render_mod._context_has("Hispanic restaurant", {"spa"}) is False
+
+
+def test_context_has_multi_word_term_keeps_substring_semantics():
+    import agents.flyer.render as render_mod
+
+    # Multi-word terms (containing spaces or hyphens) still match by substring,
+    # because regex word boundaries don't help with embedded punctuation.
+    assert render_mod._context_has("our deep clean service", {"deep clean"}) is True
+    assert render_mod._context_has("hand-made noodles", {"hand-made"}) is True

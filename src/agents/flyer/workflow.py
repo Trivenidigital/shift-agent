@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
+import os
 import re
 
 from schemas import FlyerProject, FlyerWorkflowStatus
@@ -44,6 +46,133 @@ FIELD_LABELS = {
     "contact_info": "contact info",
 }
 
+STATUS_LINES = {
+    "intake_started": "I have the request open and am checking the flyer details.",
+    "collecting_required_info": "I am waiting for the missing flyer details before creating the design.",
+    "awaiting_assets": "I am waiting for the logo, photo, menu, or reference image needed for this flyer.",
+    "manual_edit_required": "I couldn't finish this automatically. I'll review it and send an update here.",
+    "generating_concepts": "The flyer design is being generated now.",
+    "awaiting_concept_selection": "The preview is ready. Please choose a concept or send changes.",
+    "revising_design": "Your requested changes are saved and the revised design is being prepared.",
+    "awaiting_final_approval": "The preview is ready for approval. Reply APPROVE when it looks right.",
+    "finalizing_assets": "The final files are being prepared for delivery.",
+    "delivered": "The final flyer files have been delivered.",
+    "completed": "This flyer project is complete.",
+    "closed_no_send": "This flyer request was closed without sending final assets.",
+}
+
+
+# Per-reason customer-facing copy for projects sitting at manual_edit_required.
+# Keyed on FlyerManualReviewReason (S1 enum). Falls back to STATUS_LINES
+# generic line when the project's reason_code is not in this table.
+# Every reason_code in src/platform/schemas.py::FlyerManualReviewReason MUST
+# have an entry here — enforced by test_state_reply_table.py structural
+# coverage test.
+MANUAL_REVIEW_REASON_LINES: dict[str, str] = {
+    "unclassified": (
+        "This project is queued for designer review. I'll follow up here when it's ready."
+    ),
+    "legacy_unknown": (
+        "This project is queued for designer review. I'll follow up here when it's ready."
+    ),
+    "source_edit_provider_unavailable": (
+        "Your edit is queued for a designer to apply by hand. "
+        "I have the requested changes and the saved account details — no extra information needed from you."
+    ),
+    "reference_unsupported": (
+        "The file you uploaded isn't a supported format for an exact edit. "
+        "Please re-upload the source flyer as a JPG or PNG image — once we have it, our designer can pick this up."
+    ),
+    "reference_provider_unavailable": (
+        "I can't find the source flyer to edit. "
+        "Please re-upload the flyer image and our designer will continue from there."
+    ),
+    "reference_low_confidence": (
+        "I'm having trouble reading the details from your uploaded reference. "
+        "If you can, re-upload a clearer copy, or describe the details you'd like included."
+    ),
+    "reference_not_run": (
+        "I haven't been able to extract the details from your uploaded reference yet. "
+        "I'll follow up here as soon as that's done."
+    ),
+    "visual_qa_failed": (
+        "The generated flyer didn't pass our quality checks. "
+        "It's queued for designer review and I'll send the corrected version here when it's ready."
+    ),
+    "missing_required_facts": (
+        "I'm missing a couple of required details before I can finish this flyer. "
+        "Please send the remaining info and I'll continue."
+    ),
+    "operator_request": (
+        "This project is being reviewed by our team. I'll follow up here when it's ready."
+    ),
+    "policy_block": (
+        "This project is paused for a quick review. I'll follow up here once it's cleared."
+    ),
+    "provider_timeout": (
+        "I hit a temporary issue generating this. It's queued for retry/designer review and I'll follow up here when it's ready."
+    ),
+}
+
+
+# Per-reason customer-facing copy for projects sitting at `closed_no_send`.
+# Closed projects are operator-aborted — the customer must learn the project
+# won't be delivered AND what to do next (typically: re-send a fresh
+# request). Keyed on FlyerManualReviewReason; falls back to
+# STATUS_LINES["closed_no_send"] for any unknown code.
+# Every reason_code in src/platform/schemas.py::FlyerManualReviewReason MUST
+# have an entry here — enforced by test_flyer_state_reply_table.py.
+CLOSED_NO_SEND_REASON_LINES: dict[str, str] = {
+    "unclassified": (
+        "This flyer project was closed without delivering. "
+        "Please re-send your request and I'll start a fresh one."
+    ),
+    "legacy_unknown": (
+        "This flyer project was closed without delivering. "
+        "Please re-send your request and I'll start a fresh one."
+    ),
+    "source_edit_provider_unavailable": (
+        "I wasn't able to apply that source-flyer edit on this project. "
+        "Please re-send the flyer with the changes you want and I'll start a fresh request."
+    ),
+    "reference_unsupported": (
+        "This source-flyer edit couldn't be completed — the file format wasn't supported. "
+        "Please re-upload the source flyer as a JPG or PNG image to start a fresh request."
+    ),
+    "reference_provider_unavailable": (
+        "This source-flyer edit couldn't be completed because the source flyer wasn't available. "
+        "Please re-upload the flyer image to start a fresh request."
+    ),
+    "reference_low_confidence": (
+        "This flyer project was closed without delivering. "
+        "Please re-upload a clearer source flyer, or describe the details you'd like included, and I'll start fresh."
+    ),
+    "reference_not_run": (
+        "This flyer project was closed without delivering. "
+        "Please re-send your source flyer and I'll start a fresh request."
+    ),
+    "visual_qa_failed": (
+        "This flyer project was closed without delivering — the generated flyer didn't pass our quality checks. "
+        "Please re-send your request and I'll start a fresh one."
+    ),
+    "missing_required_facts": (
+        "This flyer project was closed without delivering because required details were missing. "
+        "Please re-send your request with the missing info and I'll start a fresh one."
+    ),
+    "operator_request": (
+        "This flyer project was closed by our team. "
+        "Please re-send your request if you'd like us to try again."
+    ),
+    "policy_block": (
+        "This flyer project was closed during review. "
+        "Please re-send your request and we'll take another look."
+    ),
+    "provider_timeout": (
+        "This flyer project was closed without delivering due to a temporary issue. "
+        "Please re-send your request and I'll try again."
+    ),
+}
+
 
 @dataclass(frozen=True)
 class FlyerQualityResult:
@@ -61,6 +190,8 @@ class RevisionPatchResult:
     visual_only: bool = False
     ambiguous: bool = False
     unresolved_reason: str = ""
+    requires_confirmation: bool = False
+    confirmation_reason: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -71,7 +202,137 @@ class RevisionPatchResult:
             "visual_only": self.visual_only,
             "ambiguous": self.ambiguous,
             "unresolved_reason": self.unresolved_reason,
+            "requires_confirmation": self.requires_confirmation,
+            "confirmation_reason": self.confirmation_reason,
         }
+
+
+def _extract_replace_text(body: str) -> tuple[str, str]:
+    """Return (old_text, new_text) for simple replace-text instructions."""
+    if not body:
+        return "", ""
+    patterns = [
+        r"\b(?:replace|change)\b[^\"'\n]{0,120}[\"'](?P<old>[^\"']{1,160})[\"']\s*[-–—:|]*\s*(?:with|to|->)\s*[\"'](?P<new>[^\"']{1,160})[\"']",
+        # Curly quotes are often pasted inconsistently on WhatsApp (left/left or right/right).
+        r"\b(?:replace|change)\b[^“”\n]{0,120}[“”](?P<old>[^“”]{1,160})[“”]\s*[-–—:|]*\s*(?:with|to|->)\s*[“”](?P<new>[^“”]{1,160})[“”]",
+        # Backticks show up frequently when users paste “exact” text.
+        r"\b(?:replace|change)\b[^`\n]{0,120}`(?P<old>[^`]{1,160})`\s*[-–—:|]*\s*(?:with|to|->)\s*`(?P<new>[^`]{1,160})`",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, body, flags=re.IGNORECASE)
+        if not match:
+            continue
+        old = match.group("old").strip(" .,\"'“”`")
+        new = match.group("new").strip(" .,\"'“”`")
+        if old and new and old.lower() != new.lower():
+            return old, new
+    fallback = re.search(
+        r"\b(?:replace|change)\s+(?P<old>[^.?!\n]{1,80}?)\s+(?:with|to|->)\s+(?P<new>[^.?!\n]{1,80}?)(?:[.!?]|$)",
+        body,
+        flags=re.IGNORECASE,
+    )
+    if fallback:
+        old = fallback.group("old").strip(" .,:;\"'“”`-–—")
+        new = fallback.group("new").strip(" .,:;\"'“”`-–—")
+        # Avoid stealing structured field edits ("Change X price to $9.99", etc.).
+        # Keep a single exception for the common badge phrase "Price any event".
+        old_lower = old.lower()
+        if (
+            ("$" in new or re.search(r"\b\d+(?:\.\d{2})?\b", new))
+            and ("price" in old_lower)
+            and ("price any event" not in old_lower)
+        ):
+            return "", ""
+        if any(tok in old_lower for tok in ("date", "time", "phone", "contact", "location", "venue", "address")):
+            return "", ""
+        if old_lower in {"it", "this", "that"}:
+            return "", ""
+        if old and new and old.lower() != new.lower():
+            return old, new
+    return "", ""
+
+
+def _extract_remove_time_instruction(text: str) -> str:
+    """Handle 'remove/delete/exclude 16:00' even when 'extra/duplicate' isn't said."""
+    if not text:
+        return ""
+    if not re.search(r"\b(?:remove|delete|exclude)\b", text, flags=re.IGNORECASE):
+        return ""
+    match = re.search(r"(?<![$\d])\b(?P<time>\d{1,2}:\d{2})\b(?!\.\d)", text)
+    if not match:
+        return ""
+    return f'Remove time text "{match.group("time")}" from the flyer.'
+
+
+def _normalized_text_and_map(text: str) -> tuple[str, list[int]]:
+    """Normalize text for fuzzy substring match while mapping back to original indices."""
+    normalized_chars: list[str] = []
+    index_map: list[int] = []
+    prev_space = False
+    for idx, ch in enumerate(text):
+        if ch.isalnum():
+            normalized_chars.append(ch.lower())
+            index_map.append(idx)
+            prev_space = False
+            continue
+        if ch.isspace():
+            if prev_space:
+                continue
+            normalized_chars.append(" ")
+            index_map.append(idx)
+            prev_space = True
+            continue
+        # drop punctuation/symbols
+    normalized = "".join(normalized_chars).strip()
+    if not normalized:
+        return "", []
+    # adjust map when we stripped leading spaces via .strip()
+    leading = 0
+    for ch in normalized_chars:
+        if ch != " ":
+            break
+        leading += 1
+    if leading:
+        index_map = index_map[leading:]
+        normalized = normalized[leading:]
+    return normalized, index_map
+
+
+def _replace_once_normalized_or_flag(source: str, old: str, new: str) -> tuple[str, str]:
+    if not source:
+        return source, "not found"
+    old_tokens = [tok for tok in re.split(r"\s+", old.strip()) if tok]
+    if len(old_tokens) < 3:
+        return source, "too short for fuzzy match"
+    normalized_source, source_map = _normalized_text_and_map(source)
+    normalized_old, _old_map = _normalized_text_and_map(old)
+    if not normalized_source or not normalized_old:
+        return source, "not found"
+    hits: list[int] = []
+    start = 0
+    while True:
+        pos = normalized_source.find(normalized_old, start)
+        if pos < 0:
+            break
+        hits.append(pos)
+        start = pos + 1
+        if len(hits) > 5:
+            break
+    if not hits:
+        return source, "not found"
+    if len(hits) > 1:
+        return source, "appears multiple times"
+    match_start = hits[0]
+    match_end = match_start + len(normalized_old) - 1
+    if len(normalized_old) > 200:
+        return source, "match too long"
+    if match_end >= len(source_map):
+        return source, "match mapping failed"
+    orig_start = source_map[match_start]
+    orig_end = source_map[match_end] + 1
+    if orig_end - orig_start > 220:
+        return source, "match span too long"
+    return f"{source[:orig_start]}{new}{source[orig_end:]}", ""
 
 
 def build_missing_info_prompt(missing: list[str], *, preferred_language: str = "en") -> str:
@@ -86,6 +347,131 @@ def build_missing_info_prompt(missing: list[str], *, preferred_language: str = "
     else:
         joined = ", ".join(labels[:-1]) + f", and {labels[-1]}"
     return f"Please send the {joined}. I will keep the flyer copy in {language}."
+
+
+def build_project_status_reply(project: FlyerProject) -> str:
+    """Return the deterministic customer-facing status reply for the project.
+
+    Rules:
+      - For manual_edit_required projects with an actively-queued
+        manual_review, the reason_code (S1 enum) drives the copy via
+        MANUAL_REVIEW_REASON_LINES.
+      - For closed_no_send projects with manual_review.status=closed_no_send,
+        the reason_code drives the copy via CLOSED_NO_SEND_REASON_LINES so
+        the customer learns why the project was aborted and what to do next.
+      - For all other statuses, STATUS_LINES is the source of truth.
+      - manual_review with status `break_glass_sent` or `completed` is no
+        longer a customer-blocking signal; the project's own status drives
+        the reply (the operator already acted).
+    """
+    line = STATUS_LINES.get(project.status, "I have this flyer project open.")
+    manual = getattr(project, "manual_review", None)
+    manual_status = getattr(manual, "status", "none") if manual is not None else "none"
+    if (
+        project.status == "manual_edit_required"
+        and manual is not None
+        and manual_status in {"queued", "in_progress"}
+    ):
+        reason_code = (getattr(manual, "reason_code", "") or "unclassified").strip() or "unclassified"
+        line = MANUAL_REVIEW_REASON_LINES.get(reason_code, STATUS_LINES["manual_edit_required"])
+    elif (
+        project.status == "closed_no_send"
+        and manual is not None
+        and manual_status == "closed_no_send"
+    ):
+        reason_code = (getattr(manual, "reason_code", "") or "unclassified").strip() or "unclassified"
+        line = CLOSED_NO_SEND_REASON_LINES.get(reason_code, STATUS_LINES["closed_no_send"])
+    return (
+        "Flyer Studio\n"
+        "------------\n"
+        f"{line}"
+    )
+
+
+def _read_env_value(name: str, *, env_path: Path | None = None) -> str:
+    """Lookup an env value: process env first, then file-based env stores.
+
+    P0-5 follow-up: align with `visual_qa.py::_openrouter_key` which checks
+    BOTH `/root/.hermes/.env` and `/opt/shift-agent/.env`. Source-edit had
+    historically only checked the agent .env, missing keys provisioned via
+    Hermes' own env store. When the caller passes `env_path` explicitly, only
+    that file is consulted (preserves test isolation).
+    """
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value
+    if env_path is not None:
+        candidates = [env_path]
+    else:
+        # Order matters: Hermes-managed env first (operator-provisioned),
+        # then agent-local env (legacy fallback). The first file that holds
+        # a non-empty value wins.
+        candidates = [
+            Path(os.environ.get("HERMES_ENV_PATH", "/root/.hermes/.env")),
+            Path(os.environ.get("SHIFT_AGENT_ENV_PATH", "/opt/shift-agent/.env")),
+        ]
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip() or line.lstrip().startswith("#") or "=" not in line:
+                    continue
+                key, raw = line.split("=", 1)
+                if key.strip() == name:
+                    extracted = raw.strip().strip('"').strip("'")
+                    if extracted:
+                        return extracted
+        except OSError:
+            continue
+    return ""
+
+
+def _source_edit_provider_parts(provider) -> tuple[str, str]:
+    if provider is None:
+        return "manual_review", "manual_review"
+    if isinstance(provider, str):
+        return provider.strip().lower(), ""
+    if isinstance(provider, dict):
+        return (
+            str(provider.get("provider") or "manual_review").strip().lower(),
+            str(provider.get("model") or "").strip(),
+        )
+    return (
+        str(getattr(provider, "provider", "manual_review") or "manual_review").strip().lower(),
+        str(getattr(provider, "model", "") or "").strip(),
+    )
+
+
+def source_edit_provider_ready(project_or_asset, *, provider=None, env_path: Path | None = None) -> tuple[bool, str]:
+    provider_name, model = _source_edit_provider_parts(provider)
+    if provider_name == "openrouter":
+        key_name = "OPENROUTER_API_KEY"
+    elif provider_name == "openai":
+        key_name = "OPENAI_API_KEY"
+    elif provider_name == "manual_review":
+        return False, "source edit provider configured for manual review"
+    else:
+        return False, f"source edit provider is unsupported: {provider_name or 'unknown'}"
+    key = _read_env_value(key_name, env_path=env_path)
+    if not key or "PLACEHOLDER" in key.upper():
+        return False, f"source edit provider is not configured: {key_name} missing"
+    assets = []
+    if isinstance(project_or_asset, dict):
+        if "assets" in project_or_asset:
+            assets = list(project_or_asset.get("assets") or [])
+        else:
+            assets = [project_or_asset]
+    else:
+        assets = list(getattr(project_or_asset, "assets", []) or [])
+    reference = next((asset for asset in reversed(assets) if (asset.get("kind") if isinstance(asset, dict) else getattr(asset, "kind", "")) == "reference_image"), None)
+    if reference is None:
+        return False, "source edit needs an uploaded reference image"
+    mime = reference.get("mime_type", "") if isinstance(reference, dict) else getattr(reference, "mime_type", "")
+    if mime and not str(mime).startswith("image/"):
+        return False, f"source edit reference must be an image, got {mime}"
+    detail_model = model or "openai/gpt-5.4-image-2"
+    return True, f"source edit provider configured: {provider_name}/{detail_model}"
 
 
 def next_status_for_project(
@@ -122,6 +508,7 @@ MONTHS = {
     "nov": 11, "november": 11,
     "dec": 12, "december": 12,
 }
+DAY_PATTERN = r"(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
 
 
 def _replace_once_or_flag(source: str, old: str, new: str) -> tuple[str, str]:
@@ -155,8 +542,50 @@ def _append_instruction(
     )
 
 
+def _title_day_range(start: str, end: str) -> str:
+    return f"{start.strip().title()} to {end.strip().title()}"
+
+
+def _extract_existing_day_range(project: FlyerProject) -> str:
+    source = f"{project.fields.notes or ''} {project.raw_request or ''}"
+    match = re.search(
+        rf"\b(?P<start>{DAY_PATTERN})\s*(?:to|through|-)\s*(?P<end>{DAY_PATTERN})\b",
+        source,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    return _title_day_range(match.group("start"), match.group("end"))
+
+
+def _extract_day_range_instruction(project: FlyerProject, text: str) -> str:
+    if not text:
+        return ""
+    if not re.search(r"\b(?:change|update|set|make|switch)\b", text, flags=re.IGNORECASE):
+        return ""
+    match = re.search(
+        rf"\b(?:change|update|set|make|switch)\b[^.?!]{{0,80}}?\b(?:to|as)\s+"
+        rf"(?P<start>{DAY_PATTERN})\s*(?:to|through|-)\s*(?P<end>{DAY_PATTERN})\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    new_range = _title_day_range(match.group("start"), match.group("end"))
+    instruction = f"Use schedule {new_range}."
+    old_range = _extract_existing_day_range(project)
+    if old_range and old_range.lower() != new_range.lower():
+        instruction += f" Do not use {old_range}."
+    return instruction
+
+
 def _extract_item_swap(text: str) -> tuple[str, str]:
     body = " ".join((text or "").split())
+    # If this looks like a replace-text instruction (not a menu-item swap),
+    # avoid interpreting it as a menu edit.
+    old_text, new_text = _extract_replace_text(body)
+    if old_text and new_text:
+        return "", ""
     patterns = [
         r"\b(?:swap|replace)\s+(?P<old>[A-Za-z][A-Za-z\s/&-]{1,80}?)\s+with\s+(?P<new>[A-Za-z][A-Za-z\s/&-]{1,80}?(?:\s+for\s+\$?\d+(?:\.\d{2})?)?)(?:\s*\(|[.!]|$)",
         r"\b(?:remove|exclude)\s+(?P<old>[A-Za-z][A-Za-z\s/&-]{1,80}?)\s+(?:and\s+)?(?:add|use)\s+(?P<new>[A-Za-z][A-Za-z\s/&-]{1,80}?(?:\s+same\s+price)?)(?:\s*\(|[.!]|$)",
@@ -175,6 +604,15 @@ def _extract_item_swap(text: str) -> tuple[str, str]:
 
 
 def _extract_extra_time_instruction(text: str) -> str:
+    if re.search(r"\b(?:remove|delete|exclude)\b", text, flags=re.IGNORECASE):
+        time_before_marker = re.search(
+            r"(?<![$\d])(?:\btime\s*[:=]?\s*)?(?P<time>\d{1,2}:\d{2})\b(?!\.\d)"
+            r"[^.?!]{0,80}\b(?:duplicated|duplicate|extra)\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if time_before_marker:
+            return f'Remove duplicate/extra time text "{time_before_marker.group("time")}" from the flyer.'
     marker = re.search(r"\b(?:extra|duplicate)\b(?P<tail>[^.?!]*)", text, flags=re.IGNORECASE)
     if not marker:
         return ""
@@ -250,6 +688,29 @@ def _extract_item_price_to_new(text: str) -> tuple[str, str]:
     return item, f"${match.group('price')}"
 
 
+def _extract_category_price_instruction(text: str) -> str:
+    match = re.search(
+        r"\b(?:change|update|set)\s+prices\s+of\s+(?:any|all|every|the)?\s*"
+        r"(?P<category>[A-Za-z][A-Za-z0-9 '&/-]{1,40}?)\s+(?:to|as|=|:)\s+\$?(?P<price>\d+(?:\.\d{2})?)\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        match = re.search(
+            r"\b(?:change|update|set)\s+(?:any|all|every|the)?\s*"
+            r"(?P<category>[A-Za-z][A-Za-z0-9 '&/-]{1,40}?)\s+prices\s+(?:to|as|=|:)\s+\$?(?P<price>\d+(?:\.\d{2})?)\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+    if not match:
+        return ""
+    category = match.group("category").strip(" .,\"'")
+    category = re.sub(r"\b(?:item|items|any|all|every|the)\b", "", category, flags=re.IGNORECASE).strip(" .,\"'")
+    if not category:
+        return ""
+    return f"Set all {category} prices to ${match.group('price')}."
+
+
 def _extract_phone(text: str) -> str:
     phone = re.search(r"(?:phone|contact|number)\D{0,30}(\+?\d[\d\s().-]{7,}\d)", text, re.IGNORECASE)
     if not phone:
@@ -280,6 +741,7 @@ def extract_revision_patch(project: FlyerProject, text: str) -> RevisionPatchRes
     notes_update: str | None = None
     raw_request_update: str | None = None
     unresolved: list[str] = []
+    fuzzy_confirmation_required = False
 
     month_day = re.search(
         r"\b(?:change|move|set|update)?\s*(?:the\s*)?date\s*(?:from\s+[a-z]+\s+\d{1,2}\s+)?(?:to|as|=|:)?\s*"
@@ -365,7 +827,10 @@ def extract_revision_patch(project: FlyerProject, text: str) -> RevisionPatchRes
             notes_update = replaced_notes
 
     item_for_price, new_item_price = _extract_item_price_to_new(body)
-    if item_for_price and new_item_price:
+    category_price_instruction = _extract_category_price_instruction(body)
+    if category_price_instruction:
+        notes_update, raw_request_update = _append_instruction(notes_update, raw_request_update, project, category_price_instruction)
+    elif item_for_price and new_item_price:
         replaced_notes, reason = _replace_item_price_once(project.fields.notes or "", item_for_price, new_item_price)
         if reason:
             replaced_raw, raw_reason = _replace_item_price_once(project.raw_request or "", item_for_price, new_item_price)
@@ -392,10 +857,57 @@ def extract_revision_patch(project: FlyerProject, text: str) -> RevisionPatchRes
     for instruction in (_extract_extra_time_instruction(body), _extract_item_add_instruction(body)):
         if instruction:
             notes_update, raw_request_update = _append_instruction(notes_update, raw_request_update, project, instruction)
+    remove_time_instruction = _extract_remove_time_instruction(body)
+    if remove_time_instruction:
+        notes_update, raw_request_update = _append_instruction(notes_update, raw_request_update, project, remove_time_instruction)
+
+    day_range_instruction = _extract_day_range_instruction(project, body)
+    if day_range_instruction:
+        notes_update, raw_request_update = _append_instruction(notes_update, raw_request_update, project, day_range_instruction)
+
+    old_text, new_text = _extract_replace_text(body)
+    if old_text and new_text:
+        candidate_notes = project.fields.notes or ""
+        replaced_notes, reason = _replace_once_or_flag(candidate_notes, old_text, new_text)
+        if reason:
+            candidate_raw = project.raw_request or ""
+            replaced_raw, raw_reason = _replace_once_or_flag(candidate_raw, old_text, new_text)
+            if raw_reason:
+                fuzzy_notes, fuzzy_reason = _replace_once_normalized_or_flag(candidate_notes, old_text, new_text)
+                if not fuzzy_reason:
+                    notes_update = fuzzy_notes
+                    fuzzy_confirmation_required = True
+                else:
+                    fuzzy_raw, fuzzy_raw_reason = _replace_once_normalized_or_flag(candidate_raw, old_text, new_text)
+                    if not fuzzy_raw_reason:
+                        raw_request_update = fuzzy_raw
+                        fuzzy_confirmation_required = True
+                    else:
+                        unresolved.append(
+                            f"text {old_text!r} {raw_reason if raw_reason != 'not found' else 'not found in flyer details'}"
+                        )
+            else:
+                raw_request_update = replaced_raw
+        else:
+            notes_update = replaced_notes
+        # If we couldn't match the exact text anywhere, fall back to an explicit
+        # instruction append. This handles template-origin visible text that
+        # doesn't exist in `notes`/`raw_request` yet.
+        if notes_update is None and raw_request_update is None and unresolved:
+            replace_instruction = f"Replace visible text {old_text!r} with {new_text!r} on the flyer. Do not keep {old_text!r} anywhere in the artwork."
+            notes_update, raw_request_update = _append_instruction(notes_update, raw_request_update, project, replace_instruction)
+            # Require confirmation because this is not a precise field edit.
+            fuzzy_confirmation_required = True
+            unresolved.clear()
 
     changed = bool(updates) or notes_update is not None or raw_request_update is not None
     visual_only = _is_visual_only_revision(body)
     ambiguous = bool(unresolved)
+    requires_confirmation = bool(fuzzy_confirmation_required)
+    unresolved_clean = list(unresolved)
+    confirmation_reason = ""
+    if requires_confirmation:
+        confirmation_reason = f"replace text {old_text!r} -> {new_text!r}"
     return RevisionPatchResult(
         field_updates=updates,
         notes_update=notes_update,
@@ -403,7 +915,9 @@ def extract_revision_patch(project: FlyerProject, text: str) -> RevisionPatchRes
         changed=changed,
         visual_only=visual_only,
         ambiguous=ambiguous,
-        unresolved_reason="; ".join(unresolved),
+        unresolved_reason="; ".join(unresolved_clean),
+        requires_confirmation=requires_confirmation,
+        confirmation_reason=confirmation_reason,
     )
 
 

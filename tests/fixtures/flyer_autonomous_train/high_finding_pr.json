@@ -1,0 +1,53 @@
+{
+  "number": 141,
+  "title": "test: high finding blocks",
+  "author": "codex-worker",
+  "metadata_source": "offline_fixture",
+  "collected_at": "2026-05-21T00:00:00Z",
+  "metadata_trusted_for_merge": false,
+  "head_sha": "cccccccccccccccccccccccccccccccccccccccc",
+  "is_open": true,
+  "behind_origin_main": false,
+  "category": "customer_message_copy",
+  "changed_files": [
+    "src/agents/flyer/workflow.py",
+    "tests/test_flyer_state_reply_table.py"
+  ],
+  "touched_subsystems": [
+    "flyer-customer-copy"
+  ],
+  "reviewers": [
+    {
+      "login": "a",
+      "role": "autonomous",
+      "state": "approved",
+      "commit_sha": "cccccccccccccccccccccccccccccccccccccccc",
+      "is_stale": false,
+      "is_author": false
+    },
+    {
+      "login": "b",
+      "role": "autonomous",
+      "state": "approved",
+      "commit_sha": "cccccccccccccccccccccccccccccccccccccccc",
+      "is_stale": false,
+      "is_author": false
+    }
+  ],
+  "findings": [
+    {
+      "severity": "HIGH",
+      "status": "open",
+      "commit_sha": "cccccccccccccccccccccccccccccccccccccccc",
+      "summary": "copy over-promises"
+    }
+  ],
+  "verification": [
+    {
+      "name": "focused pytest",
+      "state": "passed",
+      "commit_sha": "cccccccccccccccccccccccccccccccccccccccc"
+    }
+  ],
+  "base": "main"
+}

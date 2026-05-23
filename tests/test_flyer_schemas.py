@@ -22,6 +22,7 @@ from schemas import (  # noqa: E402
     FlyerRecoveryIncidentOpened,
     FlyerGuestOrder,
     FlyerGuestOrderStore,
+    FlyerIntakeSession,
     FlyerProject,
     FlyerProjectCreated,
     FlyerProjectStore,
@@ -52,12 +53,30 @@ def test_flyer_config_defaults_are_safe_and_cost_bounded():
     assert cfg.enabled is False
     assert cfg.concept_count == 1
     assert cfg.max_revision_rounds == 6
-    assert cfg.draft_image_model == "gpt-image-1-mini"
+    assert cfg.draft_image_model == "deterministic-renderer"
     assert cfg.draft_image_quality == "low"
-    assert cfg.final_image_model == "gpt-image-1.5"
-    assert cfg.final_image_quality == "medium"
+    assert cfg.final_image_model == "deterministic-renderer"
+    assert cfg.final_image_quality == "high"
     assert cfg.edit_image_model == "gpt-image-1"
     assert cfg.edit_image_quality == "medium"
+    assert cfg.draft_provider_policy.default.provider == "local"
+    assert cfg.draft_provider_policy.default.model == "deterministic-renderer"
+    assert cfg.draft_provider_policy.default.quality == "low"
+    assert cfg.draft_provider_policy.text_heavy.primary.model == "recraft/recraft-v4.1"
+    assert cfg.draft_provider_policy.text_heavy.premium.model == "sourceful/riverflow-v2-pro"
+    assert cfg.draft_provider_policy.visual_heavy.primary.model == "black-forest-labs/flux.2-pro"
+    assert cfg.final_provider_policy.default.provider == "local"
+    assert cfg.final_provider_policy.default.model == "deterministic-renderer"
+    assert cfg.final_provider_policy.fallback.model == "openai/gpt-5.4-image-2"
+    assert cfg.source_edit_provider_policy.default.provider == "openrouter"
+    assert cfg.source_edit_provider_policy.default.model == "openai/gpt-5.4-image-2"
+    assert cfg.source_edit_provider_policy.emergency_fallback.provider == "manual_review"
+    assert cfg.resolve_draft_render_provider().provider == "local"
+    assert cfg.resolve_draft_render_provider().model == "deterministic-renderer"
+    assert cfg.resolve_draft_render_provider().quality == "low"
+    assert cfg.resolve_final_render_provider().model == "deterministic-renderer"
+    assert cfg.resolve_source_edit_render_provider().provider == "manual_review"
+    assert cfg.resolve_source_edit_render_provider().model == "manual_review"
     assert [(t.plan_id, t.monthly_price_usd, t.included_flyers) for t in cfg.plan_tiers] == [
         ("trial", 0.00, 3),
         ("starter", 49.99, 30),
@@ -73,6 +92,92 @@ def test_flyer_config_defaults_are_safe_and_cost_bounded():
         "instagram_story",
         "printable_pdf",
     ]
+
+
+def test_flyer_config_legacy_model_fields_still_resolve_when_policy_absent():
+    cfg = FlyerConfig.model_validate({
+        "enabled": True,
+        "draft_image_model": "deterministic-renderer",
+        "draft_image_quality": "low",
+        "final_image_model": "openai/gpt-5.4-image-2",
+        "final_image_quality": "high",
+    })
+
+    draft = cfg.resolve_draft_render_provider()
+    final = cfg.resolve_final_render_provider()
+
+    assert draft.provider == "local"
+    assert draft.model == "deterministic-renderer"
+    assert draft.quality == "low"
+    assert final.provider == "openrouter"
+    assert final.model == "openai/gpt-5.4-image-2"
+    assert final.quality == "high"
+
+
+def test_flyer_config_provider_policy_overrides_legacy_model_fields():
+    cfg = FlyerConfig.model_validate({
+        "enabled": True,
+        "draft_image_model": "deterministic-renderer",
+        "draft_provider_policy": {
+            "default": {
+                "provider": "openrouter",
+                "model": "recraft/recraft-v4.1",
+                "quality": "balanced",
+            }
+        },
+        "final_image_model": "openai/gpt-5.4-image-2",
+        "final_provider_policy": {
+            "default": {
+                "provider": "local",
+                "model": "deterministic-renderer",
+                "quality": "high",
+            }
+        },
+    })
+
+    assert cfg.resolve_draft_render_provider().model == "recraft/recraft-v4.1"
+    assert cfg.resolve_draft_render_provider().quality == "balanced"
+    assert cfg.resolve_final_render_provider().model == "deterministic-renderer"
+
+
+def test_flyer_config_source_edit_policy_overrides_legacy_model_fields():
+    cfg = FlyerConfig.model_validate({
+        "enabled": True,
+        "edit_image_model": "gpt-image-1",
+        "edit_image_quality": "medium",
+        "source_edit_provider_policy": {
+            "default": {
+                "provider": "openrouter",
+                "model": "openai/gpt-5.4-image-2",
+                "quality": "high",
+            },
+            "emergency_fallback": {
+                "provider": "manual_review",
+                "model": "manual_review",
+                "quality": "high",
+            },
+        },
+    })
+
+    source = cfg.resolve_source_edit_render_provider()
+
+    assert source.provider == "openrouter"
+    assert source.model == "openai/gpt-5.4-image-2"
+    assert source.quality == "high"
+
+
+def test_flyer_config_source_edit_legacy_fields_preserve_openai_when_policy_absent():
+    cfg = FlyerConfig.model_validate({
+        "enabled": True,
+        "edit_image_model": "gpt-image-1",
+        "edit_image_quality": "medium",
+    })
+
+    source = cfg.resolve_source_edit_render_provider()
+
+    assert source.provider == "openai"
+    assert source.model == "gpt-image-1"
+    assert source.quality == "medium"
 
 
 def test_config_includes_flyer_default_disabled():
@@ -158,6 +263,49 @@ def test_guest_order_store_tracks_payment_first_one_off_order():
     assert FlyerGuestOrder.model_validate(paid.model_dump()).remaining() == 1
 
 
+def test_flyer_intake_session_accepts_brief_builder_statuses_and_fields():
+    now = datetime(2026, 5, 21, tzinfo=timezone.utc)
+    for status in ("text_awaiting_brief", "choosing_sample_idea", "brief_pending_approval"):
+        session = FlyerIntakeSession(
+            chat_id="17329837841@s.whatsapp.net",
+            sender_phone="+17329837841",
+            status=status,
+            source="new_flyer",
+            started_at=now,
+            updated_at=now,
+            last_message_id="m1",
+            preferred_language="en",
+            creation_mode="text",
+            mode_prompt_version="brief_builder_v1",
+            brief_raw_request="Create an evening snacks flyer from 4 PM to 7 PM.",
+            brief_display_request="Evening snacks, 4 PM to 7 PM.",
+            brief_source="text",
+            brief_approved_at=None,
+            brief_approved_message_id="",
+        )
+        assert session.status == status
+        assert session.brief_raw_request.startswith("Create an evening snacks")
+        assert session.brief_display_request == "Evening snacks, 4 PM to 7 PM."
+        assert session.brief_source == "text"
+
+
+def test_flyer_intake_session_still_rejects_unknown_brief_fields():
+    now = datetime(2026, 5, 21, tzinfo=timezone.utc)
+    with pytest.raises(ValidationError):
+        FlyerIntakeSession.model_validate({
+            "chat_id": "17329837841@s.whatsapp.net",
+            "sender_phone": "+17329837841",
+            "status": "brief_pending_approval",
+            "source": "new_flyer",
+            "started_at": now,
+            "updated_at": now,
+            "brief_raw_request": "Create flyer",
+            "brief_display_request": "Create flyer",
+            "brief_source": "text",
+            "brief_unreviewed_extra": "must fail",
+        })
+
+
 def test_request_fields_track_required_info_and_missing_essentials():
     fields = FlyerRequestFields(
         event_or_business_name="Bathukamma",
@@ -239,12 +387,15 @@ def test_project_state_machine_allows_only_expected_transitions():
         ("awaiting_assets", "generating_concepts"),
         ("manual_edit_required", "generating_concepts"),
         ("manual_edit_required", "revising_design"),
+        ("manual_edit_required", "closed_no_send"),
         ("generating_concepts", "awaiting_concept_selection"),
         ("generating_concepts", "awaiting_final_approval"),
+        ("generating_concepts", "manual_edit_required"),
         ("awaiting_concept_selection", "revising_design"),
         ("revising_design", "awaiting_final_approval"),
         ("revising_design", "generating_concepts"),
         ("awaiting_final_approval", "finalizing_assets"),
+        ("finalizing_assets", "manual_edit_required"),
         ("finalizing_assets", "delivered"),
         ("delivered", "revising_design"),
         ("delivered", "completed"),
@@ -254,6 +405,7 @@ def test_project_state_machine_allows_only_expected_transitions():
     assert not is_flyer_transition_allowed("awaiting_final_approval", "completed")
     assert not is_flyer_transition_allowed("manual_edit_required", "delivered")
     assert not is_flyer_transition_allowed("manual_edit_required", "completed")
+    assert not is_flyer_transition_allowed("closed_no_send", "revising_design")
     assert not is_flyer_transition_allowed("completed", "revising_design")
 
 
@@ -267,6 +419,8 @@ def test_project_defaults_and_revision_cap():
         "contact_info",
     ]
     assert project.version == 1
+    assert project.pending_revision_confirmation is None
+    assert project.last_applied_pending_revision_id == ""
 
     too_many = _base_project_dict()
     too_many["revisions"] = [
@@ -417,4 +571,119 @@ def test_workflow_status_literal_contains_requested_states():
         "finalizing_assets",
         "delivered",
         "completed",
+        "closed_no_send",
     }
+
+
+# ─── F0061 source-contract additions ───────────────────────────────
+
+
+def test_flyer_source_contract_rejects_unknown_fields():
+    from schemas import FlyerSourceContract  # noqa: E402
+
+    FlyerSourceContract(
+        source_business_names=["Triveni Express"],
+        required_headings=["Monday Thali Specials"],
+        sections=[],
+        requested_replacements={"Triveni Express": "Lakshmi's Kitchen"},
+        preserve_layout=True,
+        preserve_unmentioned_text=True,
+        confidence=0.8,
+    )
+    with pytest.raises(ValidationError):
+        FlyerSourceContract(unknown_field=1)  # type: ignore[call-arg]
+
+
+def test_flyer_source_contract_section_accepts_items_without_prices():
+    from schemas import FlyerSourceContract, FlyerSourceContractSection  # noqa: E402
+
+    section = FlyerSourceContractSection(heading="Veg Thali Specials", items=["Rice", "Dal", "Pakora"])
+    contract = FlyerSourceContract(sections=[section])
+    assert contract.sections[0].items == ["Rice", "Dal", "Pakora"]
+
+
+def test_flyer_source_contract_requested_replacements_round_trip():
+    from schemas import FlyerSourceContract  # noqa: E402
+
+    contract = FlyerSourceContract(requested_replacements={"Rice": "Jeera Rice"})
+    payload = contract.model_dump_json()
+    restored = FlyerSourceContract.model_validate_json(payload)
+    assert restored.requested_replacements == {"Rice": "Jeera Rice"}
+
+
+def test_flyer_source_contract_extracted_round_trips_through_log_entry():
+    from schemas import FlyerSourceContractExtracted  # noqa: E402
+
+    now = datetime.now(timezone.utc)
+    entry = FlyerSourceContractExtracted(
+        ts=now,
+        project_id="F0061",
+        asset_id="A0001",
+        asset_sha256="a" * 64,
+        role="source_edit_template",
+        status="ok",
+        headings_count=4,
+        sections_count=3,
+        replacements_count=3,
+        forbidden_substrings_count=2,
+        confidence=0.85,
+        provider="openrouter_vision",
+    )
+    parsed = TypeAdapter(LogEntry).validate_python(entry.model_dump())
+    assert parsed.type == "flyer_source_contract_extracted"
+    assert parsed.headings_count == 4
+
+
+def test_flyer_source_vs_new_chosen_round_trips_through_log_entry():
+    from schemas import FlyerSourceVsNewChosen  # noqa: E402
+
+    now = datetime.now(timezone.utc)
+    entry = FlyerSourceVsNewChosen(
+        ts=now,
+        sender_phone="+17329837841",
+        customer_id="CUST0001",
+        original_intent="exact_source_edit",
+        choice="clarification_sent",
+        pending_age_sec=12,
+    )
+    parsed = TypeAdapter(LogEntry).validate_python(entry.model_dump())
+    assert parsed.type == "flyer_source_vs_new_chosen"
+    assert parsed.original_intent == "exact_source_edit"
+
+
+def test_flyer_source_vs_new_chosen_rejects_invalid_choice():
+    from schemas import FlyerSourceVsNewChosen  # noqa: E402
+
+    now = datetime.now(timezone.utc)
+    with pytest.raises(ValidationError):
+        FlyerSourceVsNewChosen(
+            ts=now,
+            original_intent="exact_source_edit",
+            choice="nonsense",  # type: ignore[arg-type]
+        )
+
+
+def test_flyer_reference_extraction_supports_optional_source_contract():
+    from schemas import FlyerReferenceExtraction, FlyerSourceContract  # noqa: E402
+
+    ext = FlyerReferenceExtraction(
+        asset_id="A0001",
+        role="source_edit_template",
+        status="ok",
+        source_contract=FlyerSourceContract(preserve_layout=True),
+    )
+    payload = ext.model_dump_json()
+    restored = FlyerReferenceExtraction.model_validate_json(payload)
+    assert restored.source_contract is not None
+    assert restored.source_contract.preserve_layout is True
+
+
+def test_flyer_reference_extraction_source_contract_defaults_to_none():
+    from schemas import FlyerReferenceExtraction  # noqa: E402
+
+    ext = FlyerReferenceExtraction(
+        asset_id="A0001",
+        role="menu_reference",
+        status="not_run",
+    )
+    assert ext.source_contract is None

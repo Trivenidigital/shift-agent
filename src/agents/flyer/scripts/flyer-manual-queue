@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""List and disposition Flyer Studio manual-review queue items."""
+from __future__ import annotations
+
+import argparse
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+import sys
+
+SRC_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(SRC_ROOT / "platform"))
+sys.path.insert(0, str(SRC_ROOT))
+
+from schemas import FlyerProjectStore  # noqa: E402
+from safe_io import FileLock, atomic_write_text  # noqa: E402
+try:
+    from flyer_manual_queue import (  # type: ignore  # noqa: E402
+        close_manual_project,
+        complete_manual_project,
+        enforce_close_freshness_guard,
+        list_manual_queue,
+        notify_customer_of_closure,
+        triage_summary,
+    )
+except ImportError:
+    from agents.flyer.manual_queue import (  # noqa: E402
+        close_manual_project,
+        complete_manual_project,
+        enforce_close_freshness_guard,
+        list_manual_queue,
+        notify_customer_of_closure,
+        triage_summary,
+    )
+
+
+STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
+CUSTOMERS_PATH = Path("/opt/shift-agent/state/flyer/customers.json")
+DECISIONS_LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+
+
+def _load(path: Path) -> FlyerProjectStore:
+    if not path.exists():
+        return FlyerProjectStore()
+    return FlyerProjectStore.model_validate(json.loads(path.read_text(encoding="utf-8")))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--state-path", default=str(STATE_PATH))
+    parser.add_argument("--list", action="store_true")
+    parser.add_argument("--triage", action="store_true", help="grouped + reason-tallied operator view")
+    parser.add_argument("--complete", metavar="PROJECT_ID")
+    parser.add_argument("--close", metavar="PROJECT_ID", help="operator-close without sending assets")
+    parser.add_argument("--asset")
+    parser.add_argument("--reason", default="")
+    parser.add_argument("--force", action="store_true",
+                        help="bypass the --close freshness guard (still requires --reason)")
+    args = parser.parse_args()
+
+    state_path = Path(args.state_path)
+    if args.triage:
+        print(json.dumps(triage_summary(_load(state_path)), default=str))
+        return 0
+    if args.list:
+        print(json.dumps({"queue": list_manual_queue(_load(state_path))}, default=str))
+        return 0
+    if args.complete:
+        if not args.asset:
+            raise SystemExit("--complete requires --asset")
+        if not args.reason.strip():
+            raise SystemExit("--complete requires --reason")
+        with FileLock(Path(str(state_path) + ".lock")):
+            store = complete_manual_project(_load(state_path), args.complete, Path(args.asset), reason=args.reason)
+            atomic_write_text(state_path, store.model_dump_json(indent=2))
+        print(json.dumps({"project_id": args.complete, "status": "awaiting_final_approval"}))
+        return 0
+    if args.close:
+        if not args.reason.strip():
+            raise SystemExit("--close requires --reason")
+        with FileLock(Path(str(state_path) + ".lock")):
+            store = _load(state_path)
+            try:
+                enforce_close_freshness_guard(
+                    store, args.close,
+                    reason=args.reason,
+                    force=args.force,
+                    now=datetime.now(timezone.utc),
+                )
+            except ValueError as exc:
+                raise SystemExit(str(exc))
+            store = close_manual_project(store, args.close, reason=args.reason)
+            atomic_write_text(state_path, store.model_dump_json(indent=2))
+        # Closure state is now committed. Proactive customer notification is
+        # best-effort: never raises into the script, always audits. The
+        # reactive "any update?" path (PR #129) is the safety net for missed
+        # sends.
+        notify_customer_of_closure(
+            store, args.close,
+            customers_path=CUSTOMERS_PATH,
+            decisions_log_path=DECISIONS_LOG_PATH,
+        )
+        print(json.dumps({"project_id": args.close, "status": "closed_no_send"}))
+        return 0
+    raise SystemExit("pass --list, --triage, --complete, or --close")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

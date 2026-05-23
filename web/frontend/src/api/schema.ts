@@ -429,6 +429,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/flyer/customers/{customer_id}/deactivate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Customer Deactivate */
+        post: operations["customer_deactivate_flyer_customers__customer_id__deactivate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/flyer/customers/{customer_id}/extend-trial": {
         parameters: {
             query?: never;
@@ -480,6 +497,182 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/flyer/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Flyer Health
+         * @description Read-only flyer provider + platform-runtime health.
+         *
+         *     Surfaces gateway / bridge / paired / cockpit deploy plus OpenRouter
+         *     (generation + vision) and configured source-edit posture. Never returns
+         *     secret values or prefixes - only key_present + key_source.
+         *     OpenRouter missing = red (blocks generation); source-edit missing = yellow
+         *     (degraded; routes to manual review).
+         */
+        get: operations["flyer_health_flyer_health_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/flyer/manual-queue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Manual Queue */
+        get: operations["manual_queue_flyer_manual_queue_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/flyer/manual-queue/{project_id}/action-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Manual Queue Action Preview Endpoint */
+        get: operations["manual_queue_action_preview_endpoint_flyer_manual_queue__project_id__action_preview_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/flyer/manual-queue/{project_id}/break-glass": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Manual Queue Break Glass */
+        post: operations["manual_queue_break_glass_flyer_manual_queue__project_id__break_glass_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/flyer/manual-queue/{project_id}/close-no-send": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Manual Queue Close No Send */
+        post: operations["manual_queue_close_no_send_flyer_manual_queue__project_id__close_no_send_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/flyer/manual-queue/{project_id}/complete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Manual Queue Complete */
+        post: operations["manual_queue_complete_flyer_manual_queue__project_id__complete_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/flyer/manual-queue/{project_id}/detail": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Manual Queue Detail */
+        get: operations["manual_queue_detail_flyer_manual_queue__project_id__detail_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/flyer/operator-uploads": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Operator Upload
+         * @description Upload an approved operator/designer asset to operator-uploads/.
+         *
+         *     P0-2: replaces the SCP-then-type-absolute-path UX with a cockpit
+         *     multipart upload. The returned `asset_path` is what the complete
+         *     endpoint expects; the operator does not type or see the file system
+         *     layout.
+         */
+        post: operations["operator_upload_flyer_operator_uploads_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/flyer/operator-uploads/{filename}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Operator Upload Media
+         * @description Serve a cockpit-uploaded file back to the operator for preview before
+         *     they commit Complete. Read-only; auth (not OTP) gated. Filename must
+         *     match the server-generated pattern so the operator cannot probe
+         *     arbitrary files under operator-uploads/.
+         */
+        get: operations["operator_upload_media_flyer_operator_uploads__filename__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/flyer/projects": {
         parameters: {
             query?: never;
@@ -489,6 +682,31 @@ export interface paths {
         };
         /** Projects */
         get: operations["projects_flyer_projects_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/flyer/projects/{project_id}/assets/{asset_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Project Asset Media
+         * @description Serve a project asset's bytes for thumbnail/preview rendering (P0-3).
+         *
+         *     Authorization: project + asset_id pair must exist in the live store.
+         *     Path is validated by the FlyerAsset schema to be under
+         *     /opt/shift-agent/state/flyer/, so we additionally ensure the resolved
+         *     file is under the flyer state root before serving.
+         */
+        get: operations["project_asset_media_flyer_projects__project_id__assets__asset_id__get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -882,6 +1100,13 @@ export interface components {
             /** File */
             file: string;
         };
+        /** Body_operator_upload_flyer_operator_uploads_post */
+        Body_operator_upload_flyer_operator_uploads_post: {
+            /** File */
+            file: string;
+            /** Reason */
+            reason: string;
+        };
         /** CampaignSendBody */
         CampaignSendBody: {
             /**
@@ -1024,6 +1249,33 @@ export interface components {
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /** ManualQueueBreakGlassBody */
+        ManualQueueBreakGlassBody: {
+            /** Reason */
+            reason: string;
+        };
+        /**
+         * ManualQueueCloseNoSendBody
+         * @description Operator-close request body. `force=True` bypasses the freshness
+         *     guard; the agent helper `enforce_close_freshness_guard` accepts force
+         *     OR a documented bypass token in the reason string.
+         */
+        ManualQueueCloseNoSendBody: {
+            /**
+             * Force
+             * @default false
+             */
+            force: boolean;
+            /** Reason */
+            reason: string;
+        };
+        /** ManualQueueCompleteBody */
+        ManualQueueCompleteBody: {
+            /** Operator Asset Path */
+            operator_asset_path: string;
+            /** Reason */
+            reason: string;
         };
         /** MeResponse */
         MeResponse: {
@@ -1832,6 +2084,41 @@ export interface operations {
             };
         };
     };
+    customer_deactivate_flyer_customers__customer_id__deactivate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                customer_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReasonBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     extend_trial_flyer_customers__customer_id__extend_trial_post: {
         parameters: {
             query?: never;
@@ -1922,6 +2209,279 @@ export interface operations {
             };
         };
     };
+    flyer_health_flyer_health_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    manual_queue_flyer_manual_queue_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    manual_queue_action_preview_endpoint_flyer_manual_queue__project_id__action_preview_get: {
+        parameters: {
+            query: {
+                action: string;
+            };
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    manual_queue_break_glass_flyer_manual_queue__project_id__break_glass_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ManualQueueBreakGlassBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    manual_queue_close_no_send_flyer_manual_queue__project_id__close_no_send_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ManualQueueCloseNoSendBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    manual_queue_complete_flyer_manual_queue__project_id__complete_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ManualQueueCompleteBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    manual_queue_detail_flyer_manual_queue__project_id__detail_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    operator_upload_flyer_operator_uploads_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_operator_upload_flyer_operator_uploads_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    operator_upload_media_flyer_operator_uploads__filename__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                filename: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     projects_flyer_projects_get: {
         parameters: {
             query?: {
@@ -1930,6 +2490,38 @@ export interface operations {
             };
             header?: never;
             path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    project_asset_media_flyer_projects__project_id__assets__asset_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+                asset_id: string;
+            };
             cookie?: never;
         };
         requestBody?: never;

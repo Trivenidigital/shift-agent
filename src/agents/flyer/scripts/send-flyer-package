@@ -19,6 +19,10 @@ try:
     from flyer_render import validate_text_manifest_file  # type: ignore  # noqa: E402
 except ImportError:
     from agents.flyer.render import validate_text_manifest_file  # noqa: E402
+try:
+    from flyer_visual_qa import validate_visual_qa_report  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.visual_qa import validate_visual_qa_report  # noqa: E402
 
 
 STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
@@ -40,7 +44,33 @@ FINAL_KIND_TO_CAPTION = {
 
 
 def _load_runtime_io():
-    from safe_io import FileLock, atomic_write_text, bridge_post, bridge_send_media, ndjson_append  # type: ignore
+    try:
+        from safe_io import FileLock, atomic_write_text, bridge_post, bridge_send_media, ndjson_append  # type: ignore
+    except ModuleNotFoundError:
+        class FileLock:  # type: ignore[no-redef]
+            def __init__(self, _path: Path) -> None:
+                pass
+
+            def __enter__(self) -> "FileLock":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+        def atomic_write_text(path: Path, text: str) -> None:  # type: ignore[no-redef]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+
+        def ndjson_append(path: Path, line: str) -> None:  # type: ignore[no-redef]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+
+        def bridge_post(*_args, **_kwargs):  # type: ignore[no-redef]
+            return False, "", "bridge unavailable", "bridge_unavailable"
+
+        def bridge_send_media(*_args, **_kwargs):  # type: ignore[no-redef]
+            return False, "", "bridge unavailable", "bridge_unavailable"
     return FileLock, atomic_write_text, bridge_post, bridge_send_media, ndjson_append
 
 
@@ -105,8 +135,10 @@ def _caption_for_asset(asset, fallback: str = "") -> str:
 def _resolve_project_assets(project):
     if project.status != "finalizing_assets":
         raise SystemExit(f"project must be finalizing_assets before delivery, got {project.status}")
-    if len(project.final_asset_ids) != 4:
-        raise SystemExit(f"project must have 4 final assets before delivery, got {len(project.final_asset_ids)}")
+    if not project.final_asset_ids:
+        raise SystemExit("project has no final assets ready for delivery")
+    if len(set(project.final_asset_ids)) != len(project.final_asset_ids):
+        raise SystemExit("project final asset ids contain duplicates")
     by_id = {asset.asset_id: asset for asset in project.assets}
     missing_ids = [asset_id for asset_id in project.final_asset_ids if asset_id not in by_id]
     if missing_ids:
@@ -114,8 +146,10 @@ def _resolve_project_assets(project):
     project_assets = [by_id[asset_id] for asset_id in project.final_asset_ids]
     kinds = {asset.kind for asset in project_assets}
     expected_kinds = set(FINAL_KIND_TO_FORMAT)
-    if kinds != expected_kinds:
+    if not kinds <= expected_kinds:
         raise SystemExit(f"final asset kinds mismatch: {sorted(kinds)}")
+    if "final_whatsapp_image" not in kinds:
+        raise SystemExit("final package must include final_whatsapp_image before delivery")
     return project_assets
 
 
@@ -198,6 +232,7 @@ def main() -> int:
     p.add_argument("--asset", action="append", default=[])
     p.add_argument("--caption", default="Your final flyer package is ready.")
     p.add_argument("--allow-unverified-asset", action="store_true")
+    p.add_argument("--allow-sidecar-visual-qa", action="store_true")
     p.add_argument("--break-glass-reason", default="")
     p.add_argument("--dry-run-bridge", action="store_true")
     args = p.parse_args()
@@ -225,6 +260,10 @@ def main() -> int:
         assets.extend(Path(asset.path) for asset in pending_project_assets)
     if not assets:
         raise SystemExit("no assets to send; pass --asset or --project-id")
+    if project is None and not args.allow_unverified_asset:
+        raise SystemExit("direct --asset sends require --allow-unverified-asset and break-glass reason")
+    if args.allow_sidecar_visual_qa and not args.dry_run_bridge:
+        raise SystemExit("--allow-sidecar-visual-qa is only allowed with --dry-run-bridge")
 
     failures = []
     outbound_ids = []
@@ -252,11 +291,12 @@ def main() -> int:
             for asset in pending_project_assets if project is not None
         }
         for asset in assets:
+            expected_output_format = expected_formats.get(str(asset)) or None
             result = validate_text_manifest_file(
                 asset,
                 project_id=project.project_id if project is not None else None,
                 project_version=project.version if project is not None else None,
-                output_format=expected_formats.get(str(asset)) or None,
+                output_format=expected_output_format,
             )
             if not result.ok:
                 if project is not None:
@@ -266,11 +306,32 @@ def main() -> int:
                         project_id=project.project_id,
                         customer_phone=project.customer_phone,
                         asset_id=asset.name,
-                        status=0,
+                        status="blocked",
                         error="text_qa_failed: " + "; ".join(result.blockers),
                     ).model_dump_json())
                 print(json.dumps({"text_qa_failed": str(asset), "blockers": result.blockers}))
                 return 2
+            if project is not None and expected_output_format:
+                visual = validate_visual_qa_report(
+                    asset,
+                    project_id=project.project_id,
+                    project_version=project.version,
+                    output_format=expected_output_format,
+                    allow_sidecar=args.allow_sidecar_visual_qa,
+                )
+                if not visual.ok:
+                    project_asset = next((row for row in pending_project_assets if Path(row.path) == Path(asset)), None)
+                    ndjson_append(log_path, FlyerDeliveryFailed(
+                        type="flyer_delivery_failed",
+                        ts=datetime.now(timezone.utc),
+                        project_id=project.project_id,
+                        customer_phone=project.customer_phone,
+                        asset_id=project_asset.asset_id if project_asset is not None else asset.name,
+                        status="blocked",
+                        error="visual_qa_failed: " + "; ".join(visual.blockers),
+                    ).model_dump_json())
+                    print(json.dumps({"visual_qa_failed": str(asset), "blockers": visual.blockers}))
+                    return 2
     path_to_project_asset = {str(Path(asset.path)): asset for asset in pending_project_assets} if project is not None else {}
     for asset in assets:
         if args.dry_run_bridge:
@@ -332,7 +393,7 @@ def main() -> int:
                             project_id=project.project_id,
                             customer_phone=project.customer_phone,
                             asset_id="final_package",
-                            status=0,
+                            status="blocked",
                             error="project changed during delivery; sent_message_ids=" + ",".join(outbound_ids),
                         ).model_dump_json())
                         print(json.dumps({"failure": "project_changed_during_delivery", "sent_before_failure": outbound_ids}))

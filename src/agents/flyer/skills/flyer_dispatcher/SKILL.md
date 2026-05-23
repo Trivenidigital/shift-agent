@@ -26,6 +26,7 @@ Valid states:
 - `finalizing_assets`
 - `delivered`
 - `completed`
+- `closed_no_send`
 
 ## Inputs from `dispatch_shift_agent`
 
@@ -35,25 +36,22 @@ Expect: `sender_phone`, `sender_lid`, `sender_role`, `sender_name`,
 ## Dispatch rules
 
 1. If `cfg.flyer.enabled` is false, politely say Flyer Studio is not enabled.
-2. If no active project exists and the text matches flyer intent, call
-   `/usr/local/bin/create-flyer-project`.
-3. If required fields are missing, delegate to `flyer_intake`.
-4. If the state is `awaiting_assets` and an image/document is present, store
-   the asset and continue.
-5. If the state is `generating_concepts`, call
-   `/usr/local/bin/generate-flyer-concepts`. It generates one best design,
-   selects `C1`, and moves directly to `awaiting_final_approval`.
-6. If a legacy project is in `awaiting_concept_selection`, interpret `1`,
-   `2`, `3`, or natural equivalents as the selected concept.
-7. If the state is `revising_design`, append the customer revision and
-   regenerate previews.
-8. If the state is `awaiting_final_approval`, only exact `APPROVE` advances to
-   `finalizing_assets`. Anything else is a revision request.
-9. If the state is `finalizing_assets`, call
-   `/usr/local/bin/finalize-flyer-assets` then
-   `/usr/local/bin/send-flyer-package`.
-10. Delivery scripts use `bridge_send_media` through `send-flyer-package`; do
-    not hand-write WhatsApp media payloads in the SKILL.
+2. Customer-bound project creation, generation, approval, finalization, and
+   delivery MUST be handled by the deterministic `cf-router` pre-gateway path.
+   That path owns account status, quota/guest-order reservation, manual-review
+   state, and visual-QA gates. If a normal WhatsApp flyer request reaches this
+   SKILL, treat it as a routing miss: send a short Flyer Studio recovery reply
+   and do not call project/render/delivery scripts directly.
+3. Operator-only diagnostics may inspect state, but must not call
+   `/usr/local/bin/create-flyer-project`, `/usr/local/bin/generate-flyer-concepts`,
+   `/usr/local/bin/finalize-flyer-assets`, or `/usr/local/bin/send-flyer-package`
+   for a customer delivery unless the caller is an operator using an explicit
+   break-glass runbook.
+4. If a customer asks for status, reply that the request is being routed through
+   Flyer Studio and ask them to send `STATUS` again if no update arrives.
+5. If a customer sends `APPROVE` here, do not finalize. Reply that the approval
+   must be handled by Flyer Studio's tracked project flow and ask them to resend
+   `APPROVE` after the project preview message.
 
 Always audit state transitions through script chokepoints. Do not send final
 assets until the customer has replied exact `APPROVE`.

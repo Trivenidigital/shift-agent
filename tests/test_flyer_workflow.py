@@ -32,6 +32,184 @@ def _project(fields: FlyerRequestFields) -> FlyerProject:
     )
 
 
+def test_build_project_status_reply_covers_all_flyer_states():
+    from agents.flyer.workflow import build_project_status_reply
+
+    now = datetime(2026, 5, 19, tzinfo=timezone.utc)
+    statuses = [
+        "intake_started",
+        "collecting_required_info",
+        "awaiting_assets",
+        "manual_edit_required",
+        "generating_concepts",
+        "awaiting_concept_selection",
+        "revising_design",
+        "awaiting_final_approval",
+        "finalizing_assets",
+        "delivered",
+        "completed",
+        "closed_no_send",
+    ]
+    for status in statuses:
+        project = FlyerProject(
+            project_id="F9003",
+            status=status,
+            customer_phone="+17329837841",
+            created_at=now,
+            updated_at=now,
+            original_message_id="m-status",
+            raw_request="Create flyer",
+        )
+
+        reply = build_project_status_reply(project)
+
+        assert "Flyer Studio" in reply
+        assert "F9003" not in reply
+        assert "project F" not in reply.lower()
+        assert "resend" not in reply.lower()
+
+
+def test_source_edit_provider_ready_reads_shift_agent_env_file(tmp_path, monkeypatch):
+    from agents.flyer.workflow import source_edit_provider_ready
+
+    env_path = tmp_path / ".env"
+    env_path.write_text("OPENROUTER_API_KEY=sk-or-test\n", encoding="utf-8")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    ok, detail = source_edit_provider_ready(
+        {"assets": [{"kind": "reference_image", "mime_type": "image/png", "path": "x.png"}]},
+        provider={"provider": "openrouter", "model": "openai/gpt-5.4-image-2"},
+        env_path=env_path,
+    )
+
+    assert ok
+    assert detail == "source edit provider configured: openrouter/openai/gpt-5.4-image-2"
+
+
+def test_source_edit_provider_ready_openrouter_does_not_require_openai(tmp_path, monkeypatch):
+    from agents.flyer.workflow import source_edit_provider_ready
+
+    env_path = tmp_path / ".env"
+    env_path.write_text("OPENROUTER_API_KEY=sk-or-test\n", encoding="utf-8")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    ok, detail = source_edit_provider_ready(
+        {"assets": [{"kind": "reference_image", "mime_type": "image/png", "path": "x.png"}]},
+        provider={"provider": "openrouter", "model": "openai/gpt-5.4-image-2"},
+        env_path=env_path,
+    )
+
+    assert ok is True
+    assert detail == "source edit provider configured: openrouter/openai/gpt-5.4-image-2"
+
+
+def test_source_edit_provider_ready_without_explicit_provider_fails_closed(tmp_path, monkeypatch):
+    from agents.flyer.workflow import source_edit_provider_ready
+
+    env_path = tmp_path / ".env"
+    env_path.write_text("OPENROUTER_API_KEY=sk-or-test\nOPENAI_API_KEY=sk-test\n", encoding="utf-8")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    ok, detail = source_edit_provider_ready(
+        {"assets": [{"kind": "reference_image", "mime_type": "image/png", "path": "x.png"}]},
+        env_path=env_path,
+    )
+
+    assert ok is False
+    assert detail == "source edit provider configured for manual review"
+
+
+def test_source_edit_provider_ready_openrouter_missing_key_fails(tmp_path, monkeypatch):
+    from agents.flyer.workflow import source_edit_provider_ready
+
+    env_path = tmp_path / ".env"
+    env_path.write_text("OPENROUTER_API_KEY=PLACEHOLDER-key\n", encoding="utf-8")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    ok, detail = source_edit_provider_ready(
+        {"assets": [{"kind": "reference_image", "mime_type": "image/png", "path": "x.png"}]},
+        provider={"provider": "openrouter", "model": "openai/gpt-5.4-image-2"},
+        env_path=env_path,
+    )
+
+    assert ok is False
+    assert detail == "source edit provider is not configured: OPENROUTER_API_KEY missing"
+
+
+def test_source_edit_provider_ready_explicit_openai_still_requires_openai(tmp_path, monkeypatch):
+    from agents.flyer.workflow import source_edit_provider_ready
+
+    env_path = tmp_path / ".env"
+    env_path.write_text("OPENROUTER_API_KEY=sk-or-test\n", encoding="utf-8")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    ok, detail = source_edit_provider_ready(
+        {"assets": [{"kind": "reference_image", "mime_type": "image/png", "path": "x.png"}]},
+        provider={"provider": "openai", "model": "gpt-image-1"},
+        env_path=env_path,
+    )
+
+    assert ok is False
+    assert detail == "source edit provider is not configured: OPENAI_API_KEY missing"
+
+
+def test_read_env_value_checks_hermes_env_before_shift_agent_env(tmp_path, monkeypatch):
+    """P0-5 follow-up: source-edit env lookup must mirror visual_qa's lookup
+    order — Hermes-managed `/root/.hermes/.env` is checked before the
+    agent-local `/opt/shift-agent/.env`. Operators who provision OPENAI_API_KEY
+    via the Hermes env store should not have their key missed by source-edit.
+    """
+    from agents.flyer.workflow import _read_env_value
+
+    hermes_env = tmp_path / "hermes.env"
+    agent_env = tmp_path / "agent.env"
+    hermes_env.write_text("OPENAI_API_KEY=sk-from-hermes\n", encoding="utf-8")
+    agent_env.write_text("OPENAI_API_KEY=sk-from-agent\n", encoding="utf-8")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("HERMES_ENV_PATH", str(hermes_env))
+    monkeypatch.setenv("SHIFT_AGENT_ENV_PATH", str(agent_env))
+
+    # Hermes env wins because it's checked first.
+    assert _read_env_value("OPENAI_API_KEY") == "sk-from-hermes"
+
+
+def test_read_env_value_falls_back_to_shift_agent_env_when_hermes_missing(tmp_path, monkeypatch):
+    """When the Hermes env file doesn't exist, the agent-local .env still
+    works — preserves backward compatibility with VPSes that haven't yet
+    provisioned the Hermes path."""
+    from agents.flyer.workflow import _read_env_value
+
+    agent_env = tmp_path / "agent.env"
+    agent_env.write_text("OPENAI_API_KEY=sk-from-agent\n", encoding="utf-8")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("HERMES_ENV_PATH", str(tmp_path / "does-not-exist.env"))
+    monkeypatch.setenv("SHIFT_AGENT_ENV_PATH", str(agent_env))
+
+    assert _read_env_value("OPENAI_API_KEY") == "sk-from-agent"
+
+
+def test_read_env_value_explicit_env_path_overrides_lookup_chain(tmp_path, monkeypatch):
+    """When the caller explicitly passes `env_path=`, only that file is
+    consulted (preserves test isolation; matches the pre-S8 contract used
+    by `source_edit_provider_ready`)."""
+    from agents.flyer.workflow import _read_env_value
+
+    explicit_env = tmp_path / "explicit.env"
+    explicit_env.write_text("OPENAI_API_KEY=sk-explicit\n", encoding="utf-8")
+    other_env = tmp_path / "other.env"
+    other_env.write_text("OPENAI_API_KEY=sk-other\n", encoding="utf-8")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("HERMES_ENV_PATH", str(other_env))
+    monkeypatch.setenv("SHIFT_AGENT_ENV_PATH", str(other_env))
+
+    assert _read_env_value("OPENAI_API_KEY", env_path=explicit_env) == "sk-explicit"
+
+
 def test_intent_regex_catches_flyer_requests_without_generic_event():
     assert FLYER_INTENT_RE.search("Need flyer for Bathukamma Oct 10")
     assert FLYER_INTENT_RE.search("Can you make an Instagram poster?")
@@ -147,6 +325,97 @@ def test_extract_revision_patch_flags_old_text_not_found():
     assert "not found" in patch.unresolved_reason
 
 
+def test_extract_revision_patch_replaces_visible_text_without_confirmation_when_exact():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Evening Snacks",
+        contact_info="+17329837841",
+        notes="Green badge text: Price any event - $9.99.",
+    ))
+    patch = extract_revision_patch(project, 'Replace "Price any event" with "Any Item".')
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert patch.requires_confirmation is False
+    assert "Any Item" in (patch.notes_update or "")
+    assert "Price any event" not in (patch.notes_update or "")
+
+
+def test_extract_revision_patch_flags_fuzzy_visible_text_replace_for_confirmation():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Evening Snacks",
+        contact_info="+17329837841",
+        notes="Green badge text:\nPrice any\nevent - $9.99.",
+    ))
+    patch = extract_revision_patch(project, 'Replace "Price any event" with "Any Item".')
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert patch.requires_confirmation is True
+    assert "replace text" in (patch.confirmation_reason or "").lower()
+
+
+def test_extract_revision_patch_parses_replace_with_hyphen_variant():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Evening Snacks",
+        contact_info="+17329837841",
+        notes="Green badge text: Price any event - $9.99.",
+    ))
+    patch = extract_revision_patch(project, 'Replace "Price any event" - with " Any Item".')
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert patch.requires_confirmation is False
+    assert "Any Item" in (patch.notes_update or "")
+
+
+def test_extract_revision_patch_parses_replace_with_mismatched_curly_quotes():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Evening Snacks",
+        contact_info="+17329837841",
+        notes="Green badge text: Price any event - $9.99.",
+    ))
+    patch = extract_revision_patch(project, "Replace “Price any event -“ with “ Any Item”.")
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert patch.requires_confirmation is False
+    assert "Any Item" in (patch.notes_update or "")
+
+
+def test_extract_revision_patch_falls_back_to_instruction_when_old_text_not_in_details():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Evening Snacks",
+        contact_info="+17329837841",
+        notes="",
+    ))
+    patch = extract_revision_patch(project, 'Replace "Price any event -" with "Any Item".')
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert patch.requires_confirmation is True
+    assert "Replace visible text" in (patch.notes_update or "")
+
+
+def test_extract_revision_patch_parses_replace_with_backticks():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Evening Snacks",
+        contact_info="+17329837841",
+        notes="Green badge text: Price any event - $9.99.",
+    ))
+    patch = extract_revision_patch(project, "Replace `Price any event` with `Any Item`.")
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert "Any Item" in (patch.notes_update or "")
+
+
+def test_extract_revision_patch_parses_replace_without_quotes_confirmation_gated():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Evening Snacks",
+        contact_info="+17329837841",
+        notes="",
+    ))
+    patch = extract_revision_patch(project, "Replace Price any event with Any Item.")
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert patch.requires_confirmation is True
+    assert "Replace visible text" in (patch.notes_update or "")
+
+
 def test_extract_revision_patch_handles_menu_item_swap_without_clarification():
     project = _project(FlyerRequestFields(
         event_or_business_name="Weekend Breakfast Specials",
@@ -183,6 +452,40 @@ def test_extract_revision_patch_handles_extra_time_removal_and_item_add():
     assert 'Remove duplicate/extra time text "08:00"' in patch.notes_update
     assert "Add menu item Any Item for $9.99" in patch.notes_update
     assert 'Remove duplicate/extra time text "08:00"' in patch.raw_request_update
+
+
+def test_extract_revision_patch_handles_visible_time_text_before_duplicate_marker():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Evening Snacks",
+        event_time="16:00",
+        venue_or_location="90 Brybar Dr",
+        contact_info="+1 732 983 7841",
+        notes="Evening Snacks. Schedule 4 PM to 7 PM. Preview also shows Time: 16:00.",
+    ))
+
+    patch = extract_revision_patch(
+        project,
+        "Time: 16:00 is duplicated. I'd like you to remove this.",
+    )
+
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert 'Remove duplicate/extra time text "16:00"' in patch.notes_update
+    assert patch.unresolved_reason == ""
+
+
+def test_extract_revision_patch_handles_remove_time_without_duplicate_marker():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Evening Snacks",
+        event_time="16:00",
+        venue_or_location="90 Brybar Dr",
+        contact_info="+1 732 983 7841",
+        notes="Evening Snacks. Schedule 4 PM to 7 PM. Preview also shows Time: 16:00.",
+    ))
+    patch = extract_revision_patch(project, "Why that 16:00 in the flyer. Please remove 16:00.")
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert 'Remove time text "16:00"' in patch.notes_update
 
 
 def test_extract_revision_patch_does_not_parse_later_price_as_extra_time():
@@ -247,6 +550,24 @@ def test_extract_revision_patch_handles_item_specific_price_to_new_price():
     assert "Poori with Chicken $14.99" in patch.notes_update
 
 
+def test_extract_revision_patch_handles_category_price_to_new_price():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Mid-Night Biryani",
+        contact_info="+1 732 983 7841",
+        notes=(
+            "Create a flyer for mid-night biryani. Include all famous biryanis, "
+            "all you can eat @ $25.99"
+        ),
+    ))
+
+    patch = extract_revision_patch(project, "Update Prices of any biryani to $22.99")
+
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert "Set all biryani prices to $22.99" in patch.notes_update
+    assert "all you can eat @ $25.99" in patch.notes_update
+
+
 def test_extract_revision_patch_replaces_decimal_price_before_period():
     project = _project(FlyerRequestFields(
         event_or_business_name="Weekend Breakfast Specials",
@@ -286,3 +607,28 @@ def test_location_from_to_revision_does_not_change_title():
     ))
     patch = extract_revision_patch(project, "In the flyer, change location from Triveni Pineville to Lakshmi's Kitchen.")
     assert patch.field_updates == {"venue_or_location": "Lakshmi's Kitchen"}
+
+
+def test_extract_revision_patch_updates_day_range_without_corrupting_business_name():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="MK kitchen",
+        contact_info="+1 571 383 0763",
+        venue_or_location="23596 prosperity ridge pl Ashburn Va 20148",
+        notes=(
+            "Create a professional flyer for MK kitchen. Evening snacks from 4 PM to 7 PM, "
+            "Wednesday to Saturday. Include samosa, mirchi bajji, punugulu, masala vada, and tea."
+        ),
+    ))
+
+    patch = extract_revision_patch(
+        project,
+        "Can you add the prices and make changes to the backdrop. Also change it to Tuesday to Sunday",
+    )
+
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert patch.field_updates == {}
+    assert "Use schedule Tuesday to Sunday" in (patch.notes_update or "")
+    assert "Do not use Wednesday to Saturday" in (patch.notes_update or "")
+    assert "MK kitchen" in (patch.notes_update or "")
+    assert "kTuesday to Sundaychen" not in (patch.notes_update or "")

@@ -29,17 +29,55 @@ def test_scripts_use_atomic_writes_and_locks():
             assert "atomic_write_text" in text
 
 
+def test_manual_queue_exposes_triage_and_backfill():
+    queue_cli = (SCRIPTS / "flyer-manual-queue").read_text(encoding="utf-8")
+    assert "--triage" in queue_cli
+    assert "triage_summary" in queue_cli
+
+    backfill = SCRIPTS / "backfill-flyer-manual-reasons"
+    assert backfill.is_file(), "backfill-flyer-manual-reasons script missing"
+    body = backfill.read_text(encoding="utf-8")
+    assert "backfill_manual_reasons" in body
+    assert "--apply" in body
+    assert "FileLock" in body
+    assert "atomic_write_text" in body
+
+
+def test_manual_transition_sites_use_helper():
+    """Every code-path transition into manual_edit_required goes through make_manual_review()."""
+    for name in ["create-flyer-project", "generate-flyer-concepts", "finalize-flyer-assets", "update-flyer-project"]:
+        text = (SCRIPTS / name).read_text(encoding="utf-8")
+        assert "make_manual_review" in text, f"{name} should call make_manual_review"
+
+    update_text = (SCRIPTS / "update-flyer-project").read_text(encoding="utf-8")
+    assert "--manual-reason-code" in update_text
+    assert "reason_code" in update_text
+
+
+def test_create_flyer_project_manual_edit_path_populates_reason_code():
+    """The forward-path bug that produced the 6 prod dead-letter projects:
+    --manual-edit-required without a reference failure must still populate manual_review.reason_code,
+    not leave it at the default 'unclassified'."""
+    text = (SCRIPTS / "create-flyer-project").read_text(encoding="utf-8")
+    # The fix: when args.manual_edit_required is set but no reference failure,
+    # build a manual_review via the helper with a concrete reason_code.
+    assert "args.manual_edit_required and not reference_manual_required" in text
+    assert "source_edit_provider_unavailable" in text
+
+
 def test_delivery_script_can_send_by_project_id():
     text = (SCRIPTS / "send-flyer-package").read_text(encoding="utf-8")
     finalize = (SCRIPTS / "finalize-flyer-assets").read_text(encoding="utf-8")
     assert "--project-id" in text
     assert "validate_text_manifest_file" in text
     assert "--allow-unverified-asset" in text
+    assert "--allow-sidecar-visual-qa" in text
     assert "--dry-run-bridge" in text
     assert "FLYER_TEXT_QA_BREAK_GLASS" in text
     assert "project.status != \"finalizing_assets\"" in text
     assert "FINAL_KIND_TO_FORMAT" in text
-    assert "output_format=expected_formats.get(str(asset)) or None" in text
+    assert "validate_visual_qa_report" in text
+    assert "output_format=expected_output_format" in text
     assert "project_changed_during_delivery" in text
     assert "_record_asset_delivery" in text
     assert "_pending_project_assets" in text
@@ -51,6 +89,9 @@ def test_delivery_script_can_send_by_project_id():
     assert '"status": "delivered"' in text
     assert '"status": "delivered"' not in finalize
     assert "audit_uncertain_delivery_block" in text
+    smoke = (SCRIPTS / "smoke-flyer-quality").read_text(encoding="utf-8")
+    assert "write_visual_qa_report" in smoke
+    assert "--allow-sidecar-visual-qa" in smoke
 
 
 def test_delivery_report_installed_and_smoked_for_operator_visibility():
@@ -105,13 +146,24 @@ def test_guest_order_script_installed_for_quick_flyer_path():
     assert "--release" in script
     assert "--consume" in script
     assert "--find-paid" in script
+    assert "--find-reserved" in script
     assert "is_quick_flyer_campaign_cta" in actions
     assert "trigger_start_flyer_guest_order" in actions
     assert "trigger_reserve_flyer_guest_order" in actions
     assert "trigger_release_flyer_guest_order" in actions
     assert "trigger_consume_flyer_guest_order" in actions
     assert "find_paid_flyer_guest_order" in actions
+    assert "find_reserved_flyer_guest_order" in actions
     assert "quick_flyer_payment" in hooks
+
+
+def test_flyer_dispatcher_skill_does_not_bypass_cf_router_quota_gate():
+    skill = (SCRIPTS.parent / "skills" / "flyer_dispatcher" / "SKILL.md").read_text(encoding="utf-8")
+
+    assert "cf-router" in skill
+    assert "do not call project/render/delivery scripts directly" in skill
+    assert "account status, quota/guest-order reservation" in skill
+    assert "Do not send final" in skill
 
 
 def test_intake_script_installed_for_language_and_guided_mode():
@@ -218,10 +270,29 @@ def test_flyer_complete_requests_send_processing_ack_before_generation():
     actions = (REPO / "src" / "plugins" / "cf-router" / "actions.py").read_text(encoding="utf-8")
     hooks = (REPO / "src" / "plugins" / "cf-router" / "hooks.py").read_text(encoding="utf-8")
     assert "def send_flyer_processing_ack" in actions
-    assert "Request processing." in actions
+    assert "I'm creating your flyer now" in actions
     assert "5-6 minutes" in actions
-    assert "check back" in actions
+    assert "send a preview here shortly" in actions
     assert hooks.index("send_flyer_processing_ack(chat_id, project_id)") < hooks.index("trigger_generate_flyer_concepts(project_id)")
+
+
+def test_reference_manual_fallback_copy_reaches_resume_paths_and_releases_source_edit_quota():
+    hooks = (REPO / "src" / "plugins" / "cf-router" / "hooks.py").read_text(encoding="utf-8")
+    actions = (REPO / "src" / "plugins" / "cf-router" / "actions.py").read_text(encoding="utf-8")
+
+    assert "def send_flyer_manual_review_ack" in actions
+    assert hooks.count("flyer_generation_queued_manual_review(gen_detail)") >= 4
+    assert hooks.count("send_flyer_manual_review_ack(") >= 4
+    assert "source_edit_preflight_failed" in hooks
+    assert "release_ok={release_ok}; release_detail={release_detail[:250]}" in hooks
+
+
+def test_deploy_smoke_exercises_deferred_reference_extraction():
+    smoke = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-smoke-test.sh").read_text(encoding="utf-8")
+
+    assert "--defer-reference-extraction" in smoke
+    assert "FLYER_REFERENCE_ALLOW_SIDECAR=1" in smoke
+    assert "Flyer deferred reference extraction smoke passed" in smoke
 
 
 def test_intake_script_handles_menu_fliers_with_location_phone_and_address():
@@ -263,8 +334,8 @@ def test_router_starts_new_work_over_active_state_for_explicit_or_media_template
     assert "Please resend the flyer request" not in hooks
     assert "Authorized flyer/source artwork" in hooks
     assert "manual_edit_required=True" in hooks
-    assert hooks.index("_try_flyer_reference_scope_choice_intercept(text, chat_id, event)") < hooks.index("_try_flyer_active_project_intercept(text, chat_id, event)")
-    assert hooks.index("_try_flyer_reference_scope_authorization_intercept(text, chat_id, event)") < hooks.index("_try_flyer_active_project_intercept(text, chat_id, event)")
+    assert hooks.index("_try_flyer_reference_scope_choice_intercept(text, chat_id, event)") < hooks.index("_try_flyer_active_project_intercept(text, chat_id, event, media_path)")
+    assert hooks.index("_try_flyer_reference_scope_authorization_intercept(text, chat_id, event)") < hooks.index("_try_flyer_active_project_intercept(text, chat_id, event, media_path)")
 
 
 def test_onboarding_is_whatsapp_native_and_plan_config_driven():
@@ -285,6 +356,13 @@ def test_onboarding_is_whatsapp_native_and_plan_config_driven():
     assert hooks.index("_try_flyer_existing_onboarding_intercept(text, chat_id, event)") < hooks.index("should_start_new_flyer_over_active(text, has_media=bool(media_path))")
     assert hooks.index("_try_flyer_existing_onboarding_intercept(text, chat_id, event)") < hooks.index("_try_flyer_active_project_intercept")
     assert hooks.index("_try_flyer_active_project_intercept") < hooks.index("_try_flyer_onboarding_intercept")
+
+
+def test_manual_queue_cli_has_no_send_close_action():
+    script = (SCRIPTS / "flyer-manual-queue").read_text(encoding="utf-8")
+    assert "close_manual_project" in script
+    assert 'parser.add_argument("--close"' in script
+    assert '"status": "closed_no_send"' in script
 
 
 def test_flyer_launch_marketing_pack_exists_and_has_trial_ctas():
@@ -378,6 +456,66 @@ def test_phase2_quality_smoke_and_workflow_deploy_contracts():
     assert f".{{args.project_id}}.generate.lock" in generate
     assert "source_edit_requested" in generate
     assert "authorized flyer/source artwork update" in generate
+
+
+def test_flyer_generation_scripts_resolve_draft_and_final_provider_policy():
+    generate = (SCRIPTS / "generate-flyer-concepts").read_text(encoding="utf-8")
+    finalize = (SCRIPTS / "finalize-flyer-assets").read_text(encoding="utf-8")
+
+    assert "source_edit_provider = cfg.flyer.resolve_source_edit_render_provider()" in generate
+    assert "provider=source_edit_provider.provider" in generate
+    assert "model=source_edit_provider.model" in generate
+    assert "quality=source_edit_provider.quality" in generate
+    assert "cfg.flyer.edit_image_model" not in generate
+
+    assert "draft_provider = cfg.flyer.resolve_draft_render_provider()" in generate
+    assert "model=draft_provider.model" in generate
+    assert "quality=draft_provider.quality" in generate
+    assert "cfg.flyer.draft_image_model" not in generate
+
+    assert "final_provider = cfg.flyer.resolve_final_render_provider()" in finalize
+    assert "model=final_provider.model" in finalize
+    assert "quality=final_provider.quality" in finalize
+    assert "cfg.flyer.final_image_model" not in finalize
+
+
+def test_source_edit_generation_failure_does_not_overwrite_script_manual_review_state():
+    hooks = (REPO / "src" / "plugins" / "cf-router" / "hooks.py").read_text(encoding="utf-8")
+
+    assert "if not actions.flyer_generation_queued_manual_review(gen_detail):" in hooks
+    assert '"--manual-reason", "source_edit_generation_failed"' in hooks
+
+
+def test_production_readiness_modules_installed_and_smoked():
+    deploy = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh").read_text(encoding="utf-8")
+    smoke = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-smoke-test.sh").read_text(encoding="utf-8")
+
+    for module in [
+        "flyer_facts",
+        "flyer_reference_extract",
+        "flyer_visual_qa",
+        "flyer_manual_queue",
+        "flyer_intent",
+        "flyer_intent_training",
+        "flyer_customer_copy_policy",
+    ]:
+        assert f"/opt/shift-agent/{module}.py" in deploy
+        assert f"import {module}" in smoke
+
+    assert "flyer-manual-queue" in deploy
+    assert "flyer-manual-queue" in smoke
+    assert "flyer-intent-training-export" in deploy
+    assert "/usr/local/bin/flyer-intent-training-export" in smoke
+    assert "begin_flyer_intent_shadow" in smoke
+    assert "flyer_hermes_intent_decision" in smoke
+
+
+def test_cockpit_deploy_restart_uses_health_probe_without_systemctl_wait():
+    deploy = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh").read_text(encoding="utf-8")
+
+    assert "systemctl restart --wait shift-agent-cockpit.service" not in deploy
+    assert "systemctl restart shift-agent-cockpit.service" in deploy
+    assert "http://127.0.0.1:8081/health" in deploy
 
 
 def test_generation_does_not_hold_file_lock_during_render():

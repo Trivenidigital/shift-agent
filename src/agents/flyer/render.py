@@ -28,6 +28,11 @@ import uuid
 
 from schemas import FlyerAsset, FlyerCustomerStore, FlyerOutputFormat, FlyerProject
 
+try:
+    from flyer_facts import fact_value  # type: ignore
+except ImportError:  # pragma: no cover - src layout fallback
+    from agents.flyer.facts import fact_value
+
 
 class FlyerRenderError(RuntimeError):
     pass
@@ -171,20 +176,26 @@ def _read_env_value(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if value:
         return value
-    env_path = Path(os.environ.get("SHIFT_AGENT_ENV_PATH", "/opt/shift-agent/.env"))
-    if not env_path.exists():
-        return ""
-    try:
-        for line in env_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, raw = line.split("=", 1)
-            if key.strip() != name:
-                continue
-            return raw.strip().strip('"').strip("'")
-    except OSError:
-        return ""
+    candidates = [
+        Path(os.environ.get("HERMES_ENV_PATH", "/root/.hermes/.env")),
+        Path(os.environ.get("SHIFT_AGENT_ENV_PATH", "/opt/shift-agent/.env")),
+    ]
+    for env_path in candidates:
+        if not env_path.exists():
+            continue
+        try:
+            for line in env_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, raw = line.split("=", 1)
+                if key.strip() != name:
+                    continue
+                extracted = raw.strip().strip('"').strip("'")
+                if extracted:
+                    return extracted
+        except OSError:
+            continue
     return ""
 
 
@@ -240,6 +251,22 @@ def _telugu_hint(project: FlyerProject) -> str:
     return " ".join(hints)
 
 
+def _language_constraint_hint(project: FlyerProject) -> str:
+    text = f"{project.raw_request or ''} {project.fields.notes or ''}".lower()
+    english_only = bool(
+        re.search(r"\b(?:language\s*:\s*)?english\s+only\b", text)
+        or re.search(r"\b(?:do\s+not|don't|dont|no)\s+use\s+(?:telugu|hindi|tamil|malayalam|kannada|gujarati|marathi|punjabi|regional)", text)
+        or "no regional indian language" in text
+        or "no regional languages" in text
+    )
+    if english_only:
+        return (
+            "Use English only. Do not use Telugu, Hindi, or any regional Indian language. "
+            "Do not add non-English script accents."
+        )
+    return _telugu_hint(project)
+
+
 def _sanitize_visual_context(text: str) -> str:
     text = re.sub(r"\+?\d[\d\s().-]{7,}\d", "[phone]", text or "")
     text = re.sub(r"\$\s*\d+(?:\.\d{2})?", "[price]", text)
@@ -264,7 +291,7 @@ def _schedule_hint(project: FlyerProject) -> str:
             flags=re.IGNORECASE,
         )
     days_match = re.search(
-        r"\b((?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s*(?:to|-)\s*(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|weekends?|weekdays?|daily)\b",
+        r"\b((?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s*(?:to|through|-)\s*(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|weekends?|weekdays?|daily)\b",
         text,
         flags=re.IGNORECASE,
     )
@@ -287,6 +314,18 @@ def _schedule_hint(project: FlyerProject) -> str:
     if recurring_match:
         return recurring_match.group(1).strip(" .")
     return ""
+
+
+def _schedule_includes_time_range(schedule: str) -> bool:
+    if not schedule:
+        return False
+    return bool(
+        re.search(
+            r"\b\d{1,2}(?::\d{2})?\s*(?:AM|PM)\s*(?:TO|-)\s*\d{1,2}(?::\d{2})?\s*(?:AM|PM)\b",
+            schedule,
+            flags=re.IGNORECASE,
+        )
+    )
 
 
 def _normalize_fact_text(text: str) -> str:
@@ -375,6 +414,9 @@ def _detail_clauses(project: FlyerProject) -> list[str]:
 
 
 def _menu_item_lines(project: FlyerProject) -> list[str]:
+    locked_items = _locked_menu_item_lines(project)
+    if locked_items:
+        return locked_items
     text = (project.fields.notes or project.raw_request or "").strip()
     if not text:
         return []
@@ -428,6 +470,53 @@ def _menu_item_lines(project: FlyerProject) -> list[str]:
     return items[:MAX_DETAIL_FACTS]
 
 
+def _locked_menu_item_lines(project: FlyerProject) -> list[str]:
+    grouped: dict[int, dict[str, str]] = {}
+    order: list[int] = []
+    for fact in project.locked_facts:
+        match = re.match(r"^item:(\d+):(name|price)$", fact.fact_id)
+        if not match:
+            continue
+        index = int(match.group(1))
+        if index not in grouped:
+            grouped[index] = {}
+            order.append(index)
+        grouped[index][match.group(2)] = _clean_fact_text(fact.value)
+    items: list[str] = []
+    seen: set[str] = set()
+    for index in order:
+        name = grouped[index].get("name", "")
+        price = grouped[index].get("price", "")
+        if not name:
+            continue
+        line = f"{name} {price}".strip()
+        key = _normalize_fact_text(line)
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(line)
+    return items[:MAX_DETAIL_FACTS]
+
+
+def _same_text(left: str, right: str) -> bool:
+    norm_left = re.sub(r"[^a-z0-9]+", " ", (left or "").lower()).strip()
+    norm_right = re.sub(r"[^a-z0-9]+", " ", (right or "").lower()).strip()
+    return bool(norm_left and norm_left == norm_right)
+
+
+def _display_title(project: FlyerProject) -> str:
+    business = fact_value(project, "business_name", fallback="")
+    for value in (
+        fact_value(project, "campaign_title", fallback=""),
+        fact_value(project, "headline", fallback=""),
+        project.fields.event_or_business_name or "",
+    ):
+        clean = _clean_fact_text(value)
+        if clean and not _same_text(clean, business):
+            return clean
+    return "Specials"
+
+
 def collect_text_facts(project: FlyerProject) -> list[FlyerTextFact]:
     facts: list[FlyerTextFact] = []
 
@@ -436,18 +525,24 @@ def collect_text_facts(project: FlyerProject) -> list[FlyerTextFact]:
         if clean:
             facts.append(FlyerTextFact(fact_id=fact_id, label=label, text=clean))
 
-    add("title", "Title", project.fields.event_or_business_name or "Flyer")
+    business_text = fact_value(project, "business_name", fallback="")
+    if business_text:
+        add("brand", "Business", business_text)
+    title_text = _display_title(project)
+    add("title", "Title", title_text)
     schedule = _schedule_hint(project)
     if project.fields.event_date:
         add("date", "Date", project.fields.event_date)
     elif schedule:
         add("schedule", "Schedule", schedule)
-    if project.fields.event_time:
+    if project.fields.event_time and not _schedule_includes_time_range(schedule):
         add("time", "Time", project.fields.event_time)
-    if project.fields.venue_or_location:
-        add("location", "Location", project.fields.venue_or_location)
-    if project.fields.contact_info:
-        add("contact", "Contact", project.fields.contact_info)
+    location_text = fact_value(project, "location", fallback=project.fields.venue_or_location)
+    if location_text:
+        add("location", "Location", location_text)
+    contact_text = fact_value(project, "contact_phone", fallback=project.fields.contact_info)
+    if contact_text:
+        add("contact", "Contact", contact_text)
     for idx, clause in enumerate(_detail_clauses(project), start=1):
         add(f"detail_{idx:03d}", "Detail", clause)
     if len(facts) > MAX_TEXT_FACTS:
@@ -469,18 +564,24 @@ def _fact_lines(project: FlyerProject) -> list[str]:
 
 
 def _menu_overlay_payload(project: FlyerProject) -> dict[str, object]:
+    # P0-2: must mirror collect_text_facts() so the drawn image matches the
+    # text manifest S5 will OCR-validate against. Same locked-fact preference
+    # for title/location/contact.
     items = _menu_item_lines(project)
     schedule = _schedule_hint(project)
     return {
-        "title": project.fields.event_or_business_name or "Specials",
+        "title": _display_title(project),
         "schedule": schedule,
         "items": items,
-        "location": project.fields.venue_or_location or "",
-        "contact": project.fields.contact_info or "",
+        "location": fact_value(project, "location", fallback=project.fields.venue_or_location) or "",
+        "contact": fact_value(project, "contact_phone", fallback=project.fields.contact_info) or "",
     }
 
 
 def _poster_copy_plan(project: FlyerProject) -> PosterCopyPlan:
+    # P0-2: must mirror collect_text_facts() — same locked-fact preference for
+    # title/location/contact so the OpenRouter prompt's "Render the following
+    # text exactly" block names the same values the text manifest expects.
     items: list[tuple[str, str]] = []
     for item in _menu_item_lines(project):
         name, price = _split_item_price(item)
@@ -492,10 +593,10 @@ def _poster_copy_plan(project: FlyerProject) -> PosterCopyPlan:
             continue
         detail_lines.append(detail)
     return PosterCopyPlan(
-        title=project.fields.event_or_business_name or "Specials",
+        title=_display_title(project),
         schedule=_schedule_hint(project),
-        location=project.fields.venue_or_location or "",
-        contact=project.fields.contact_info or "",
+        location=fact_value(project, "location", fallback=project.fields.venue_or_location) or "",
+        contact=fact_value(project, "contact_phone", fallback=project.fields.contact_info) or "",
         items=items,
         detail_lines=detail_lines,
     )
@@ -506,7 +607,7 @@ def _poster_copy_block(project: FlyerProject) -> str:
     lines = [
         "Render the following text exactly. Do not summarize, paraphrase, invent, or omit these customer facts.",
     ]
-    business_name = _registered_business_name(project)
+    business_name = _display_business_name(project)
     if business_name:
         lines.append(f"Business/brand: {business_name}")
     lines.append(f"Title: {plan.title}")
@@ -514,7 +615,7 @@ def _poster_copy_block(project: FlyerProject) -> str:
         lines.append(f"Schedule: {plan.schedule}")
     elif project.fields.event_date:
         lines.append(f"Date: {project.fields.event_date}")
-    if project.fields.event_time:
+    if project.fields.event_time and not _schedule_includes_time_range(plan.schedule or ""):
         lines.append(f"Time: {project.fields.event_time}")
     if plan.location:
         lines.append(f"Location: {plan.location}")
@@ -643,6 +744,15 @@ def write_text_manifest(
         "artifact_sha256": _sha256(artifact) if artifact.exists() else "",
         "source_sha256": _sha256(Path(source_path)) if source_path and Path(source_path).exists() else "",
         "verification_mode": verification_mode,
+        # Additive honesty fields (2026-05-20): `rendered_facts` is a copy of
+        # `expected_facts` because this manifest declares the facts the
+        # renderer was asked to draw, not the facts proven present in
+        # rendered pixels. Image-pixel verification is the QA report's job
+        # (run_visual_qa). Field-rename to `declared_facts` deferred to keep
+        # this PR scoped; the bool surface lets readers know to look at
+        # the QA report for ground truth.
+        "is_rendered_proof": False,
+        "verification_method": "declared_render_facts",
         "expected_facts": _facts_for_manifest(expected),
         "rendered_facts": _facts_for_manifest(rendered),
         "missing_fact_labels": sorted(set(missing)),
@@ -798,6 +908,15 @@ def _registered_business_name(project: FlyerProject) -> str:
     return customer.business_name.strip()
 
 
+def _display_business_name(project: FlyerProject) -> str:
+    return (
+        fact_value(project, "business_name", fallback="")
+        or _registered_business_name(project)
+        or project.fields.event_or_business_name
+        or ""
+    )
+
+
 def _registered_business_category(project: FlyerProject) -> str:
     if "FLYER_CUSTOMERS_PATH" in os.environ:
         customers_path = Path(os.environ["FLYER_CUSTOMERS_PATH"])
@@ -828,7 +947,21 @@ def _category_context(project: FlyerProject) -> str:
 
 
 def _context_has(context: str, terms: set[str]) -> bool:
-    return any(term in context for term in terms)
+    """Word-boundary-aware presence check for category-routing terms.
+
+    Pre-fix: bare substring match — `spa` matched inside `space`,
+    `transparent`, `Hispanic`. Multi-word terms (spaces or hyphens)
+    keep substring semantics because regex word-boundary doesn't help
+    when the term itself contains punctuation; single-word terms use
+    `\\bterm\\b`.
+    """
+    for term in terms:
+        if " " in term or "-" in term:
+            if term in context:
+                return True
+        elif re.search(rf"\b{re.escape(term)}\b", context):
+            return True
+    return False
 
 
 def _is_food_or_grocery_project(project: FlyerProject) -> bool:
@@ -906,7 +1039,7 @@ Controlled customer copy:
 {_poster_copy_block(project)}
 
 Visual context for style and imagery:
-- theme/category: {_sanitize_visual_context(project.fields.event_or_business_name or project.raw_request or "local SMB promotion")}
+- theme/category: {_sanitize_visual_context(fact_value(project, "business_name", fallback=project.fields.event_or_business_name) or project.raw_request or "local SMB promotion")}
 - style: {sanitized_style}
 
 Layout requirements:
@@ -933,7 +1066,7 @@ Quality bar:
 - If an uploaded reference image/template is attached, preserve its visual identity and offer category but replace stale readable facts with the controlled customer copy above.
 - If there is no one-time date, present the recurring schedule clearly instead of inventing a date.
 - Avoid QR codes, fake logos, watermarks, unreadable microtext, and placeholder glyph boxes.
-{_telugu_hint(project)}
+{_language_constraint_hint(project)}
 """
 
 
@@ -1216,6 +1349,94 @@ def _openrouter_image_bytes(project: FlyerProject, *, concept_id: str, output_fo
     return _decode_data_url(url)
 
 
+def _openrouter_source_edit_bytes(
+    project: FlyerProject,
+    *,
+    size: tuple[int, int] | None,
+    model: str,
+    quality: str,
+) -> bytes:
+    api_key = _read_env_value("OPENROUTER_API_KEY")
+    if not api_key or "PLACEHOLDER" in api_key.upper():
+        raise FlyerRenderError("OPENROUTER_API_KEY is missing or placeholder")
+    reference = _source_edit_reference_asset(project)
+    reference_path = Path(reference.path)
+    mime = reference.mime_type or mimetypes.guess_type(str(reference_path))[0] or "image/png"
+    data_url = (
+        f"data:{mime};base64,"
+        + base64.b64encode(reference_path.read_bytes()).decode("ascii")
+    )
+    payload = {
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": _source_edit_prompt(project)},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ],
+        }],
+        "modalities": ["image", "text"],
+        "stream": False,
+        "image_config": {
+            "aspect_ratio": _aspect_ratio(size),
+            "image_size": "2K" if quality == "high" else "1K",
+        },
+    }
+    req = urllib.request.Request(
+        OPENROUTER_IMAGE_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/Trivenidigital/SME-Agents",
+            "X-Title": "Hermes Flyer Studio",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=OPENROUTER_TIMEOUT_SEC) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        err = e.read().decode("utf-8", errors="replace")[:1000]
+        raise FlyerRenderError(f"OpenRouter source edit HTTP {e.code}: {err}") from e
+    except (urllib.error.URLError, http.client.IncompleteRead, TimeoutError) as e:
+        if isinstance(e, urllib.error.URLError):
+            raise FlyerRenderError(f"OpenRouter source edit connection failed: {e.reason}") from e
+        raise FlyerRenderError(f"OpenRouter source edit response failed: {type(e).__name__}: {e}") from e
+    try:
+        doc = json.loads(body)
+    except json.JSONDecodeError as e:
+        raise FlyerRenderError(f"OpenRouter source edit invalid JSON response: {body[:500]}") from e
+    if not isinstance(doc, dict):
+        raise FlyerRenderError(f"OpenRouter source edit invalid response shape: {body[:500]}")
+    choices = doc.get("choices") or []
+    if not isinstance(choices, list):
+        raise FlyerRenderError(f"OpenRouter source edit invalid choices shape: {body[:500]}")
+    if not choices:
+        raise FlyerRenderError(f"OpenRouter source edit response had no choices: {body[:500]}")
+    first_choice = choices[0]
+    if not isinstance(first_choice, dict):
+        raise FlyerRenderError(f"OpenRouter source edit invalid choice shape: {body[:500]}")
+    message = first_choice.get("message") or {}
+    if not isinstance(message, dict):
+        raise FlyerRenderError(f"OpenRouter source edit invalid message shape: {body[:500]}")
+    images = message.get("images") or []
+    if not isinstance(images, list):
+        raise FlyerRenderError(f"OpenRouter source edit invalid images shape: {body[:500]}")
+    if not images:
+        raise FlyerRenderError(f"OpenRouter source edit response had no images: {body[:500]}")
+    first_image = images[0]
+    if not isinstance(first_image, dict):
+        raise FlyerRenderError(f"OpenRouter source edit invalid image shape: {body[:500]}")
+    image_url = first_image.get("image_url") or {}
+    if not isinstance(image_url, dict):
+        raise FlyerRenderError(f"OpenRouter source edit invalid image_url shape: {body[:500]}")
+    url = image_url.get("url") or ""
+    if not url.startswith("data:image/"):
+        raise FlyerRenderError("OpenRouter source edit response did not include base64 image data")
+    return _decode_data_url(url)
+
+
 def _source_edit_reference_asset(project: FlyerProject) -> FlyerAsset:
     for asset in reversed(project.assets):
         if asset.kind == "reference_image" and Path(asset.path).exists():
@@ -1227,7 +1448,10 @@ def _source_edit_reference_asset(project: FlyerProject) -> FlyerAsset:
 
 
 def _source_edit_prompt(project: FlyerProject) -> str:
-    business_name = _registered_business_name(project) or project.fields.event_or_business_name or "this business"
+    business_name = (
+        _display_business_name(project)
+        or "this business"
+    )
     request = " ".join((project.raw_request or project.fields.notes or "").split())[:1200]
     return f"""Edit the attached flyer image. Preserve the existing flyer design.
 
@@ -1287,9 +1511,13 @@ def _openai_source_edit_bytes(
     model: str,
     quality: str,
 ) -> bytes:
+    # P0-5 defense-in-depth: mirror workflow.py::source_edit_provider_ready —
+    # treat PLACEHOLDER as missing so an operator CLI / retry path that
+    # bypassed the cf-router preflight doesn't waste an OpenAI request and
+    # surface a 401 mid-customer-flow.
     api_key = _read_env_value("OPENAI_API_KEY")
-    if not api_key:
-        raise FlyerRenderError("OPENAI_API_KEY is missing")
+    if not api_key or "PLACEHOLDER" in api_key.upper():
+        raise FlyerRenderError("OPENAI_API_KEY is missing or placeholder")
     reference = _source_edit_reference_asset(project)
     reference_path = Path(reference.path)
     mime = reference.mime_type or mimetypes.guess_type(str(reference_path))[0] or "image/png"
@@ -1327,17 +1555,27 @@ def _openai_source_edit_bytes(
         raise FlyerRenderError(f"OpenAI image edit HTTP {e.code}: {err}") from e
     except urllib.error.URLError as e:
         raise FlyerRenderError(f"OpenAI image edit connection failed: {e.reason}") from e
-    doc = json.loads(raw_body)
+    try:
+        doc = json.loads(raw_body)
+    except json.JSONDecodeError as e:
+        raise FlyerRenderError(f"OpenAI image edit invalid JSON response: {raw_body[:500]}") from e
+    if not isinstance(doc, dict):
+        raise FlyerRenderError(f"OpenAI image edit invalid response shape: {raw_body[:500]}")
     data = doc.get("data") or []
+    if not isinstance(data, list):
+        raise FlyerRenderError(f"OpenAI image edit invalid data shape: {raw_body[:500]}")
     if not data:
         raise FlyerRenderError(f"OpenAI image edit response had no data: {raw_body[:500]}")
-    encoded = data[0].get("b64_json") or ""
+    first = data[0]
+    if not isinstance(first, dict):
+        raise FlyerRenderError(f"OpenAI image edit invalid item shape: {raw_body[:500]}")
+    encoded = first.get("b64_json") or ""
     if encoded:
         try:
             return base64.b64decode(encoded)
         except Exception as e:
             raise FlyerRenderError(f"OpenAI image edit base64 decode failed: {e}") from e
-    url = str(data[0].get("url") or "")
+    url = str(first.get("url") or "")
     if url.startswith("data:image/"):
         return _decode_data_url(url)
     raise FlyerRenderError("OpenAI image edit response did not include image data")
@@ -1492,12 +1730,23 @@ def _export_from_source_image_contained(source: Path, path: Path, *, size: tuple
 
 
 def _is_source_edit_project(project: FlyerProject) -> bool:
+    # P0-5: a project is source-edit only when there's positive evidence —
+    # either an explicit raw_request/notes marker, or it's queued for manual
+    # review WITH an uploaded reference image to edit. The bare
+    # `status == "manual_edit_required"` disjunct previously misclassified
+    # missing_required_facts / visual_qa_failed projects as source-edit,
+    # which sent them down the source-preservation rendering path and lost
+    # their original manual_review context.
     text = f"{project.raw_request} {project.fields.notes}".lower()
-    return (
-        project.status == "manual_edit_required"
-        or "edit uploaded flyer/source artwork" in text
+    has_marker = (
+        "edit uploaded flyer/source artwork" in text
         or "authorized flyer/source artwork update" in text
     )
+    if has_marker:
+        return True
+    if project.status != "manual_edit_required":
+        return False
+    return any(asset.kind == "reference_image" for asset in (project.assets or []))
 
 
 def _draw_flyer_pil(project: FlyerProject, *, concept_id: str, size: tuple[int, int], pil_modules):
@@ -1528,7 +1777,8 @@ def _draw_flyer_pil(project: FlyerProject, *, concept_id: str, size: tuple[int, 
     draw.text((margin, int(height * 0.045)), language_label.upper(), font=small_font, fill=tuple(palette["soft"]))
 
     y = int(height * 0.245)
-    for line in _wrap(draw, project.fields.event_or_business_name or "", title_font, width - margin * 2):
+    title_text = _display_title(project)
+    for line in _wrap(draw, title_text, title_font, width - margin * 2):
         if y + title_font.size > int(height * 0.45):
             raise FlyerRenderError("critical text facts do not fit")
         draw.text((margin, y), line, font=title_font, fill=tuple(palette["primary"]))
@@ -1649,7 +1899,7 @@ def _render_with_system_pillow(project: FlyerProject, path: Path, *, concept_id:
         "format": "PDF" if size is None else "PNG",
         "palette": PALETTES.get(concept_id, PALETTES["C1"]),
         "language": language,
-        "title": project.fields.event_or_business_name or "",
+        "title": _display_title(project),
         "style": project.fields.style_preference,
         "facts": [
             [fact.label.upper(), fact.text]
@@ -1696,15 +1946,31 @@ def render_concept_previews(project: FlyerProject, output_dir: Path | str, *, mo
     return specs
 
 
-def render_source_edit_preview(project: FlyerProject, output_dir: Path | str, *, model: str, quality: str = "medium") -> RenderedAssetSpec:
+def render_source_edit_preview(project: FlyerProject, output_dir: Path | str, *, model: str, quality: str = "medium", provider: str | None = None) -> RenderedAssetSpec:
     output_dir = Path(output_dir)
     concept_id = "C1"
     path = output_dir / f"{project.project_id}-{concept_id}-preview.png"
-    raw = _openai_source_edit_bytes(project, size=(1080, 1350), model=model, quality=quality)
+    provider_name = (provider or "manual_review").strip().lower()
+    if provider_name == "openrouter":
+        raw = _openrouter_source_edit_bytes(project, size=(1080, 1350), model=model, quality=quality)
+    elif provider_name == "openai":
+        raw = _openai_source_edit_bytes(project, size=(1080, 1350), model=model, quality=quality)
+    elif provider_name == "manual_review":
+        raise FlyerRenderError("source edit provider configured for manual review")
+    else:
+        raise FlyerRenderError(f"unsupported source edit provider: {provider_name or 'unknown'}")
     _raw_background_path(path).unlink(missing_ok=True)
     _write_generated_image_contained(raw, path, size=(1080, 1350))
     quality_report = inspect_rendered_asset(path, expected_width=1080, expected_height=1350, mime_type="image/png")
     if not quality_report.ok:
+        # P0-5 follow-up: clean up the orphan preview + raw-background files
+        # before propagating the FlyerRenderError. Otherwise every quality-
+        # check retry left a stale png in asset_dir (bounded but unbounded
+        # over many retries on the same project). The generate-flyer-concepts
+        # FlyerRenderError handler downstream rewrites manual_review state
+        # but doesn't touch disk artifacts; this is the right place.
+        path.unlink(missing_ok=True)
+        _raw_background_path(path).unlink(missing_ok=True)
         raise FlyerRenderError(f"edited concept failed quality check: {quality_report.blockers}")
     reference = _source_edit_reference_asset(project)
     write_text_manifest(
@@ -1745,7 +2011,7 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
         suffix = "pdf" if size is None else "png"
         path = output_dir / f"{project.project_id}-{output_format}.{suffix}"
         source_for_manifest: Path | None = None
-        if selected_preview is not None and (_is_source_edit_project(project) or model.strip().lower() not in DETERMINISTIC_MODEL_NAMES):
+        if selected_preview is not None:
             source = _raw_background_path(selected_preview)
             direct_poster_source = (
                 not source.exists()

@@ -274,6 +274,21 @@ install_artifacts() {
     else
         rm -f /opt/shift-agent/flyer_recovery.py
     fi
+    if [ -f src/agents/flyer/customer_copy_policy.py ]; then
+        install -m 644 src/agents/flyer/customer_copy_policy.py /opt/shift-agent/flyer_customer_copy_policy.py
+    else
+        rm -f /opt/shift-agent/flyer_customer_copy_policy.py
+    fi
+    if [ -f src/agents/flyer/intent.py ]; then
+        install -m 644 src/agents/flyer/intent.py /opt/shift-agent/flyer_intent.py
+    else
+        rm -f /opt/shift-agent/flyer_intent.py
+    fi
+    if [ -f src/agents/flyer/intent_training.py ]; then
+        install -m 644 src/agents/flyer/intent_training.py /opt/shift-agent/flyer_intent_training.py
+    else
+        rm -f /opt/shift-agent/flyer_intent_training.py
+    fi
     if [ -f src/agents/flyer/account.py ]; then
         install -m 644 src/agents/flyer/account.py /opt/shift-agent/flyer_account.py
     else
@@ -283,6 +298,26 @@ install_artifacts() {
         install -m 644 src/agents/flyer/guest_order.py /opt/shift-agent/flyer_guest_order.py
     else
         rm -f /opt/shift-agent/flyer_guest_order.py
+    fi
+    if [ -f src/agents/flyer/facts.py ]; then
+        install -m 644 src/agents/flyer/facts.py /opt/shift-agent/flyer_facts.py
+    else
+        rm -f /opt/shift-agent/flyer_facts.py
+    fi
+    if [ -f src/agents/flyer/reference_extract.py ]; then
+        install -m 644 src/agents/flyer/reference_extract.py /opt/shift-agent/flyer_reference_extract.py
+    else
+        rm -f /opt/shift-agent/flyer_reference_extract.py
+    fi
+    if [ -f src/agents/flyer/visual_qa.py ]; then
+        install -m 644 src/agents/flyer/visual_qa.py /opt/shift-agent/flyer_visual_qa.py
+    else
+        rm -f /opt/shift-agent/flyer_visual_qa.py
+    fi
+    if [ -f src/agents/flyer/manual_queue.py ]; then
+        install -m 644 src/agents/flyer/manual_queue.py /opt/shift-agent/flyer_manual_queue.py
+    else
+        rm -f /opt/shift-agent/flyer_manual_queue.py
     fi
     if [ -d src/agents/flyer/scripts ] && compgen -G "src/agents/flyer/scripts/*" > /dev/null; then
         install -m 755 src/agents/flyer/scripts/* /usr/local/bin/
@@ -302,6 +337,9 @@ install_artifacts() {
             flyer-delivery-report \
             flyer-recovery-watchdog \
             flyer-recovery-preflight \
+            flyer-manual-queue \
+            flyer-source-edit-sla-watchdog \
+            flyer-intent-training-export \
             smoke-flyer-quality; do
             if [ ! -f "src/agents/flyer/scripts/${flyer_binary}" ]; then
                 rm -f "/usr/local/bin/${flyer_binary}"
@@ -325,6 +363,9 @@ install_artifacts() {
             /usr/local/bin/flyer-delivery-report \
             /usr/local/bin/flyer-recovery-watchdog \
             /usr/local/bin/flyer-recovery-preflight \
+            /usr/local/bin/flyer-manual-queue \
+            /usr/local/bin/flyer-source-edit-sla-watchdog \
+            /usr/local/bin/flyer-intent-training-export \
             /usr/local/bin/send-flyer-campaign \
             /usr/local/bin/send-flyer-package \
             /usr/local/bin/smoke-flyer-quality
@@ -483,6 +524,7 @@ PY
     systemctl enable --now catering-pattern-report.timer 2>/dev/null || true
     systemctl enable --now eod-reconcile.timer 2>/dev/null || true
     systemctl enable --now send-routing-accuracy-summary.timer 2>/dev/null || true
+    systemctl enable --now flyer-source-edit-sla-watchdog.timer 2>/dev/null || true
     systemctl enable --now prune-expense-receipts.timer 2>/dev/null || true
     # Agent #13 Compliance Calendar (PR-Agent13-v0.1)
     systemctl enable --now check-compliance-deadlines.timer 2>/dev/null || true
@@ -865,13 +907,15 @@ PY
         # restart cleared the stale module cache.
         #
         # Unit-presence-gated so VPSes without the cockpit installed aren't
-        # affected. Inside the gate: restart --wait + /health probe so a real
-        # cockpit failure fails the deploy + rolls back instead of being
-        # masked by `|| true` — the silent-failure mode this hook exists to
-        # prevent. Mirrors the rotate-jwt-secret.sh pattern.
+        # affected. Inside the gate: restart + /health probe so a real cockpit
+        # failure fails the deploy + rolls back instead of being masked by
+        # `|| true` — the silent-failure mode this hook exists to prevent.
+        # Do not use `systemctl restart --wait` here: on main-vps it can hang
+        # even after the unit is active and no jobs remain; the HTTP health
+        # probe below is the readiness check.
         if systemctl list-unit-files shift-agent-cockpit.service >/dev/null 2>&1; then
             cockpit_fail_reason=""
-            if ! systemctl restart --wait shift-agent-cockpit.service; then
+            if ! systemctl restart shift-agent-cockpit.service; then
                 cockpit_fail_reason="restart"
             else
                 cockpit_healthy=0
@@ -883,6 +927,32 @@ PY
                     sleep 1
                 done
                 [ "$cockpit_healthy" -ne 1 ] && cockpit_fail_reason="health probe"
+                # Per-route mount probe for the manual-queue surface. The route
+                # uses a conditional import (flyer_manual_queue vs
+                # agents.flyer.manual_queue) that fails silently if either
+                # module is missing — /health alone wouldn't catch that.
+                # 401/403 here is success: it proves the route is mounted and
+                # the import resolved; connection-refused or 5xx is the fail
+                # mode we care about. Run only after /health passed so we
+                # don't mask a plain restart fail.
+                #
+                # URL note (S2 deploy regression, fixed here): the cockpit
+                # uvicorn at port 8081 serves routes at /flyer/... directly.
+                # The /api/ prefix is added externally by Caddy when proxying
+                # browser requests; it is NOT part of the uvicorn path. The
+                # initial S2 deploy script used /api/flyer/manual-queue and
+                # would return 404 on every subsequent deploy, blocking it.
+                if [ "$cockpit_healthy" -eq 1 ] && [ -z "$cockpit_fail_reason" ]; then
+                    manual_queue_code=$(curl -s -o /dev/null --max-time 2 -w '%{http_code}' http://127.0.0.1:8081/flyer/manual-queue || echo "000")
+                    case "$manual_queue_code" in
+                        200|401|403)
+                            : # route mounted (auth gate is the only thing in our way)
+                            ;;
+                        *)
+                            cockpit_fail_reason="manual-queue route probe (got $manual_queue_code)"
+                            ;;
+                    esac
+                fi
             fi
             if [ -n "$cockpit_fail_reason" ]; then
                 echo "FAIL: cockpit $cockpit_fail_reason failed after restart — rolling back" >&2
@@ -985,7 +1055,7 @@ PY
         # cascaded into another rollback — we're already in rollback.
         if systemctl list-unit-files shift-agent-cockpit.service >/dev/null 2>&1; then
             cockpit_fail_reason=""
-            if ! systemctl restart --wait shift-agent-cockpit.service; then
+            if ! systemctl restart shift-agent-cockpit.service; then
                 cockpit_fail_reason="restart"
             else
                 cockpit_healthy=0

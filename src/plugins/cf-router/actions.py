@@ -10,16 +10,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import contextvars
+import hashlib
 import mimetypes
 import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Callable, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional
 
 # Deployed-system paths (mutable for tests)
 CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
@@ -53,6 +57,7 @@ CHECK_FLYER_REFERENCE_SCOPE_BIN = Path("/usr/local/bin/check-flyer-reference-sco
 
 PYTHON_BIN = Path("/usr/local/lib/hermes-agent/venv/bin/python")
 PLATFORM_DIR = Path("/opt/shift-agent")  # Where schemas.py lives
+SRC_DIR = Path("/opt/shift-agent/src")
 IDENTIFY_SENDER_BIN = Path("/usr/local/bin/identify-sender")
 SEND_CATERING_ACK_BIN = Path("/usr/local/bin/send-catering-ack")
 
@@ -491,6 +496,412 @@ def mark_alerted(chat_id: str, kind: str) -> None:
         pass
 
 
+# === Flyer Hermes intent shadow context ===
+
+_FLYER_INTENT_CONTEXT: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "flyer_intent_context",
+    default=None,
+)
+
+
+def _ensure_src_path() -> None:
+    for path in (PLATFORM_DIR, SRC_DIR, Path(__file__).resolve().parents[2]):
+        text = str(path)
+        if text not in sys.path and path.exists():
+            sys.path.insert(0, text)
+
+
+def _import_flyer_intent_module():
+    _ensure_src_path()
+    try:
+        from agents.flyer import intent as flyer_intent  # type: ignore
+
+        return flyer_intent
+    except Exception:
+        import flyer_intent  # type: ignore
+
+        return flyer_intent
+
+
+def _short_hash(value: str) -> str:
+    return hashlib.sha256(str(value or "").encode("utf-8", errors="ignore")).hexdigest()[:32]
+
+
+def flyer_intent_shadow_candidate(text: str, *, has_media: bool = False) -> bool:
+    body = str(text or "").lower()
+    if has_media:
+        return True
+    return bool(
+        re.search(
+            r"\b(flyer|flier|poster|banner|design|logo|approve|status|update|change|replace|"
+            r"business name|phone number|address|free trial|start free|pick an idea)\b",
+            body,
+        )
+    )
+
+
+def begin_flyer_intent_shadow(
+    *,
+    text: str,
+    chat_id: str,
+    message_id: str,
+    has_media: bool = False,
+    customer_status: str = "",
+    project_status: str = "",
+    intake_status: str = "",
+) -> contextvars.Token | None:
+    try:
+        flyer_intent = _import_flyer_intent_module()
+    except Exception:
+        return None
+
+    requested_mode = os.environ.get("FLYER_HERMES_INTENT_MODE", "shadow")
+    mode = flyer_intent.mode_from_value(requested_mode)
+    if str(mode) == "off":
+        return None
+    candidate = flyer_intent_shadow_candidate(text, has_media=has_media)
+    decision = flyer_intent.FlyerIntentDecision(decision_source="none")
+    validation = flyer_intent.validate_flyer_intent_decision(
+        decision,
+        flyer_intent.FlyerIntentContext(
+            mode=mode,
+            raw_request=text if candidate else "",
+            risk_scope="pre_project_customer_visible" if candidate else "none",
+        ),
+    )
+    context = {
+        "mode": str(mode),
+        "requested_mode": requested_mode or "shadow",
+        "text": str(text or "")[:4000],
+        "decision": decision,
+        "validation": validation,
+        "message_id_hash": _short_hash(message_id),
+        "chat_key_hash": _short_hash(chat_id),
+        "has_media": bool(has_media),
+        "customer_status": customer_status,
+        "project_status": project_status,
+        "intake_status": intake_status,
+        "selected_project_id": "",
+        "prior_active_project_id": "",
+        "risk_scope": "pre_project_customer_visible" if candidate else "none",
+        "route_events": [],
+        "candidate": candidate,
+        "classifier_status": "off",
+        "classifier_latency_ms": 0,
+        "classifier_error_kind": "",
+        "classifier_error_detail": "",
+    }
+    return _FLYER_INTENT_CONTEXT.set(context)
+
+
+def reset_flyer_intent_shadow(token: contextvars.Token | None) -> None:
+    if token is not None:
+        _FLYER_INTENT_CONTEXT.reset(token)
+
+
+def record_flyer_intent_route_event(
+    *,
+    reason: str,
+    subprocess_rc: Optional[int] = None,
+    detail: str = "",
+) -> None:
+    context = _FLYER_INTENT_CONTEXT.get()
+    if not context or not str(reason or "").startswith("flyer_"):
+        return
+    project_match = re.search(r"\bproject_id=([A-Z]\d{4,})\b", detail or "")
+    status_match = re.search(r"\bstatus=([^;]+)", detail or "")
+    context["route_events"].append(
+        {
+            "reason": str(reason or "")[:120],
+            "subprocess_rc": subprocess_rc,
+            "project_id": project_match.group(1) if project_match else "",
+            "status": status_match.group(1).strip()[:80] if status_match else "",
+            "detail_hint": _detail_action_hint(detail),
+        }
+    )
+
+
+def _detail_action_hint(detail: str) -> str:
+    text = str(detail or "").lower()
+    for marker in (
+        "approve=true",
+        "revision=true",
+        "status_check=true",
+        "queued_status_check=true",
+        "intake_ready=true",
+        "fresh_flyer_intent=true",
+    ):
+        if marker in text:
+            return marker
+    return ""
+
+
+def _terminal_route_event(events: list[dict[str, Any]]) -> dict[str, Any]:
+    if not events:
+        return {}
+    for event in reversed(events):
+        if event.get("reason") != "flyer_active_project_bypassed":
+            return event
+    return events[-1]
+
+
+def _risk_scope_from_action(actual_action: str, route_events: list[dict[str, Any]], candidate: bool) -> str:
+    if actual_action in {"new_project", "revision", "approval", "manual_review", "status", "failure"}:
+        return "active_project" if any(e.get("project_id") for e in route_events) else "pre_project_customer_visible"
+    if actual_action in {"account_update", "onboarding_or_intake"}:
+        return "active_customer"
+    if candidate:
+        return "pre_project_customer_visible"
+    return "none"
+
+
+def finalize_flyer_intent_shadow(
+    *,
+    hook_result: Optional[dict] = None,
+    error: Exception | None = None,
+    gateway: Any = None,
+) -> None:
+    context = _FLYER_INTENT_CONTEXT.get()
+    if not context:
+        return
+    route_events = list(context.get("route_events") or [])
+    candidate = bool(context.get("candidate"))
+    mode = str(context.get("mode") or "shadow")
+    if not route_events and not candidate and mode != "unsupported_active_mode":
+        return
+    terminal = _terminal_route_event(route_events)
+    branch_reason = str((hook_result or {}).get("reason") or "")
+    actual_route = str(terminal.get("reason") or ("plugin_error_passthrough" if error else "llm_passthrough"))
+    actual_reason = str(terminal.get("detail_hint") or branch_reason or actual_route)[:200]
+    subprocess_rc = terminal.get("subprocess_rc")
+    selected_project_id = str(terminal.get("project_id") or "")
+    project_status = str(terminal.get("status") or context.get("project_status") or "")
+
+    try:
+        flyer_intent = _import_flyer_intent_module()
+    except Exception:
+        return
+    actual_action = flyer_intent.normalize_actual_action(actual_route, branch_reason)
+    risk_scope = _risk_scope_from_action(actual_action, route_events, candidate)
+    decision = context["decision"]
+    validation = context["validation"]
+    classifier_status = "off"
+    classifier_latency_ms = 0
+    classifier_error_kind = ""
+    classifier_error_detail = ""
+    classifier_setting = flyer_intent.classifier_setting_from_env(os.environ.get("FLYER_HERMES_INTENT_CLASSIFIER"))
+    if classifier_setting == "shadow":
+        if not route_events:
+            classifier_status = "skipped_passthrough" if candidate else "skipped_not_candidate"
+        else:
+            try:
+                classifier = _flyer_classifier_callable_from_gateway(gateway)
+            except Exception as exc:
+                classifier = None
+                classifier_status = "error"
+                classifier_error_kind = type(exc).__name__
+            if classifier is None:
+                if classifier_status != "error":
+                    classifier_status = "skipped_no_gateway"
+            else:
+                request = flyer_intent.FlyerClassifierRequest(
+                    text=str(context.get("text") or ""),
+                    has_media=bool(context.get("has_media")),
+                    actual_route=actual_route,
+                    actual_action=actual_action,
+                    route_sequence=[str(event.get("reason") or "") for event in route_events],
+                    branch_return_reason=branch_reason,
+                    customer_status=str(context.get("customer_status") or ""),
+                    project_status=project_status,
+                    intake_status=str(context.get("intake_status") or ""),
+                    risk_scope=risk_scope,
+                )
+                audit_kwargs = dict(
+                    mode=mode,
+                    message_id_hash=str(context.get("message_id_hash") or ""),
+                    chat_key_hash=str(context.get("chat_key_hash") or ""),
+                    has_media=bool(context.get("has_media")),
+                    actual_route=actual_route,
+                    actual_reason=actual_reason,
+                    actual_action=actual_action,
+                    route_sequence=[str(event.get("reason") or "") for event in route_events],
+                    subprocess_rc=subprocess_rc if isinstance(subprocess_rc, int) else None,
+                    branch_return_reason=branch_reason,
+                    selected_project_id=selected_project_id,
+                    prior_active_project_id=str(context.get("prior_active_project_id") or ""),
+                    project_status=project_status,
+                    customer_status=str(context.get("customer_status") or ""),
+                    intake_status=str(context.get("intake_status") or ""),
+                    risk_scope=risk_scope,
+                    active_customer_risk=risk_scope != "none",
+                )
+                worker = threading.Thread(
+                    target=_run_flyer_classifier_shadow_worker,
+                    kwargs={
+                        "classifier": classifier,
+                        "request": request,
+                        "requested_mode": str(context.get("requested_mode") or "shadow"),
+                        "raw_request": str(context.get("text") or ""),
+                        "risk_scope": risk_scope,
+                        "timeout_ms": _flyer_classifier_timeout_ms(),
+                        "audit_kwargs": audit_kwargs,
+                    },
+                    daemon=True,
+                )
+                worker.start()
+                return
+    audit_flyer_hermes_intent_decision(
+        mode=mode,
+        decision=decision,
+        validation=validation,
+        classifier_status=classifier_status,
+        classifier_latency_ms=classifier_latency_ms,
+        classifier_error_kind=classifier_error_kind,
+        classifier_error_detail=classifier_error_detail,
+        message_id_hash=str(context.get("message_id_hash") or ""),
+        chat_key_hash=str(context.get("chat_key_hash") or ""),
+        has_media=bool(context.get("has_media")),
+        actual_route=actual_route,
+        actual_reason=actual_reason,
+        actual_action=actual_action,
+        route_sequence=[str(event.get("reason") or "") for event in route_events],
+        subprocess_rc=subprocess_rc if isinstance(subprocess_rc, int) else None,
+        branch_return_reason=branch_reason,
+        selected_project_id=selected_project_id,
+        prior_active_project_id=str(context.get("prior_active_project_id") or ""),
+        project_status=project_status,
+        customer_status=str(context.get("customer_status") or ""),
+        intake_status=str(context.get("intake_status") or ""),
+        risk_scope=risk_scope,
+        active_customer_risk=risk_scope != "none",
+    )
+
+
+def _flyer_classifier_timeout_ms() -> int:
+    try:
+        return max(1, min(250, int(os.environ.get("FLYER_HERMES_INTENT_CLASSIFIER_TIMEOUT_MS", "50"))))
+    except Exception:
+        return 50
+
+
+def _flyer_classifier_callable_from_gateway(gateway: Any) -> Any:
+    if gateway is None:
+        return None
+    for name in ("flyer_intent_classifier", "classify_flyer_intent"):
+        candidate = getattr(gateway, name, None)
+        if callable(candidate):
+            return candidate
+    return None
+
+
+def _run_flyer_classifier_shadow_worker(
+    *,
+    classifier: Any,
+    request: Any,
+    requested_mode: str,
+    raw_request: str,
+    risk_scope: str,
+    timeout_ms: int,
+    audit_kwargs: dict[str, Any],
+) -> None:
+    try:
+        flyer_intent = _import_flyer_intent_module()
+        result = flyer_intent.run_classifier_shadow(classifier, request, timeout_ms=timeout_ms)
+        decision = result.decision
+        validation = flyer_intent.validate_flyer_intent_decision(
+            decision,
+            flyer_intent.FlyerIntentContext(
+                mode=flyer_intent.mode_from_value(requested_mode),
+                raw_request=raw_request,
+                risk_scope=risk_scope,
+            ),
+        )
+        audit_flyer_hermes_intent_decision(
+            decision=decision,
+            validation=validation,
+            classifier_status=str(result.status),
+            classifier_latency_ms=int(result.latency_ms),
+            classifier_error_kind=str(result.error_kind),
+            classifier_error_detail=str(result.error_detail),
+            **audit_kwargs,
+        )
+    except Exception as exc:
+        sys.stderr.write(f"cf-router: flyer intent classifier worker failed (non-fatal): {exc}\n")
+
+
+def audit_flyer_hermes_intent_decision(
+    *,
+    mode: str,
+    decision: Any,
+    validation: Any,
+    message_id_hash: str,
+    chat_key_hash: str,
+    has_media: bool,
+    actual_route: str,
+    actual_reason: str,
+    actual_action: str,
+    route_sequence: list[str],
+    subprocess_rc: Optional[int],
+    branch_return_reason: str,
+    classifier_status: str = "off",
+    classifier_latency_ms: int = 0,
+    classifier_error_kind: str = "",
+    classifier_error_detail: str = "",
+    selected_project_id: str = "",
+    prior_active_project_id: str = "",
+    project_status: str = "",
+    customer_status: str = "",
+    intake_status: str = "",
+    risk_scope: str = "none",
+    active_customer_risk: bool = False,
+) -> None:
+    try:
+        _ensure_platform_path()
+        _ensure_src_path()
+        from safe_io import ndjson_append  # type: ignore
+        from schemas import FlyerHermesIntentDecision  # type: ignore
+
+        entry = FlyerHermesIntentDecision(
+            type="flyer_hermes_intent_decision",
+            ts=datetime.now(timezone.utc),
+            schema_version=1,
+            mode=mode,
+            decision_source=getattr(decision, "decision_source", "none"),
+            classifier_status=classifier_status,  # type: ignore[arg-type]
+            classifier_latency_ms=classifier_latency_ms,
+            classifier_error_kind=classifier_error_kind,
+            classifier_error_detail=classifier_error_detail,
+            message_id_hash=message_id_hash or "unknown",
+            chat_key_hash=chat_key_hash,
+            has_media=has_media,
+            validator_ok=bool(getattr(validation, "ok", False)),
+            validator_reasons=list(getattr(validation, "reasons", ()) or []),
+            advisory_intent=str(getattr(decision, "intent", "unknown")),
+            advisory_action=str(getattr(decision, "action", "observe")),
+            confidence=float(getattr(decision, "confidence", 0.0) or 0.0),
+            would_mutate=bool(getattr(validation, "would_mutate", False)),
+            actual_route=actual_route,
+            actual_reason=actual_reason,
+            actual_action=actual_action,  # type: ignore[arg-type]
+            route_sequence=[item[:120] for item in route_sequence[:20]],
+            route_terminal=True,
+            subprocess_rc=subprocess_rc,
+            branch_return_reason=branch_return_reason[:300],
+            selected_project_id=selected_project_id,
+            prior_active_project_id=prior_active_project_id,
+            project_status=project_status,
+            customer_status=customer_status,
+            intake_status=intake_status,
+            preview_source="actual",
+            live_route_changed=False,
+            active_customer_risk=active_customer_risk,
+            risk_scope=risk_scope,  # type: ignore[arg-type]
+        )
+        ndjson_append(LOG_PATH, entry.model_dump_json())
+    except Exception as e:
+        sys.stderr.write(f"cf-router: flyer intent audit emit failed (non-fatal): {e}\n")
+
+
 # === Audit ===
 
 def audit_intercepted(reason: str, chat_id: str, code: Optional[str] = None,
@@ -503,6 +914,7 @@ def audit_intercepted(reason: str, chat_id: str, code: Optional[str] = None,
     critical — if this raises, the outer plugin try/except converts a
     successful skip into a `None` (LLM re-runs after apply already fired).
     """
+    record_flyer_intent_route_event(reason=reason, subprocess_rc=subprocess_rc, detail=detail)
     try:
         _ensure_platform_path()
         from safe_io import ndjson_append  # type: ignore
@@ -519,6 +931,40 @@ def audit_intercepted(reason: str, chat_id: str, code: Optional[str] = None,
         ndjson_append(LOG_PATH, entry.model_dump_json())
     except Exception as e:
         sys.stderr.write(f"cf-router: audit emit failed (non-fatal): {e}\n")
+
+
+def audit_source_vs_new(
+    *,
+    sender_phone: str = "",
+    customer_id: str = "",
+    original_intent: str = "exact_source_edit",
+    choice: str = "clarification_sent",
+    pending_age_sec: int = 0,
+    customer_followup_instruction: str = "",
+) -> None:
+    """Emit a `flyer_source_vs_new_chosen` audit row via the deployed
+    safe_io.ndjson_append chokepoint.
+
+    Best-effort: failures are logged to stderr so a broken audit pipeline
+    cannot regress the customer-facing behavior.
+    """
+    try:
+        _ensure_platform_path()
+        from safe_io import ndjson_append  # type: ignore
+        from schemas import FlyerSourceVsNewChosen  # type: ignore
+        entry = FlyerSourceVsNewChosen(
+            type="flyer_source_vs_new_chosen",
+            ts=datetime.now(timezone.utc),
+            sender_phone=sender_phone,
+            customer_id=customer_id,
+            original_intent=original_intent,  # type: ignore
+            choice=choice,  # type: ignore
+            pending_age_sec=pending_age_sec,
+            customer_followup_instruction=customer_followup_instruction[:500],
+        )
+        ndjson_append(LOG_PATH, entry.model_dump_json())
+    except Exception as e:
+        sys.stderr.write(f"cf-router: source_vs_new audit emit failed (non-fatal): {e}\n")
 
 
 # === F7 path: catering-dispatcher-watchdog (PR-CF7) ===
@@ -576,6 +1022,17 @@ _NEW_FLYER_VERB = re.compile(r"\b(?:need|create|creare|make|generate|design|buil
 _FLYER_WORK_OBJECT = re.compile(
     r"\b(?:flyer|flyers|flier|fliers|poster|posters|banner|banners|"
     r"marketing\s+material|creative|graphic)\b",
+    re.IGNORECASE,
+)
+_FRESH_FLYER_BRIEF_DETAIL = re.compile(
+    r"\b(?:"
+    r"from\s+\d{1,2}\s*(?:am|pm)\s+(?:to|-)\s+\d{1,2}\s*(?:am|pm)|"
+    r"\d{1,2}\s*(?:am|pm)\s+(?:to|-)\s+\d{1,2}\s*(?:am|pm)|"
+    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+    r"today|tomorrow|weekend|event|special|sale|offer|discount|"
+    r"menu|snacks?|items?|top\s+\d+|grand\s+opening|festival|"
+    r"breakfast|lunch|dinner"
+    r")\b",
     re.IGNORECASE,
 )
 _FLYER_CAMPAIGN_CTA = re.compile(
@@ -841,6 +1298,86 @@ def is_flyer_approval_text(text: str) -> bool:
     return body.lower().strip(" .!,:;") == "approve"
 
 
+def flyer_routing_decision_preview(
+    text: str,
+    *,
+    active_project: Optional[dict] = None,
+    latest_message_id: str = "",
+    has_media: bool = False,
+) -> dict:
+    """Compute a read-only Flyer routing decision summary for tests/reports."""
+    body = " ".join(flyer_visible_message_text(text).split())
+    project_id = str((active_project or {}).get("project_id") or "")
+    fresh = should_start_new_flyer_over_active(body, has_media=has_media)
+    fresh_bypasses_active = should_bypass_active_flyer_project_for_fresh_request(
+        body,
+        active_project,
+        has_media=has_media,
+    )
+    if is_flyer_approval_text(body):
+        route = "approval"
+        reason = "approval_text"
+    elif fresh_bypasses_active:
+        route = "new_project"
+        reason = "fresh_new_request"
+    elif fresh and active_project:
+        route = "active_intake"
+        reason = "active_intake_similar_request"
+    elif is_flyer_project_status_request(body):
+        route = "status_reply"
+        reason = "status_request"
+    elif active_project and str(active_project.get("status") or "") == "manual_edit_required":
+        route = "manual_queue"
+        reason = "active_manual_review_project"
+    elif active_project and is_flyer_revision_intent(body):
+        route = "revision"
+        reason = "revision_intent"
+    elif active_project and body:
+        route = "revision"
+        reason = "active_project_default"
+    else:
+        route = "passthrough"
+        reason = "no_flyer_route"
+    return {
+        "route": route,
+        "selected_project_id": project_id,
+        "reason": reason,
+        "fresh_new_request_detected": fresh,
+        "active_project_bypassed": bool(active_project and route == "new_project"),
+        "latest_message_id": latest_message_id,
+    }
+
+
+def similar_to_active_project_request(body: str, active_project: dict) -> bool:
+    current = " ".join(str(active_project.get("raw_request") or "").split()).lower()
+    incoming = " ".join((body or "").split()).lower()
+    if not current or not incoming:
+        return False
+    if incoming == current or incoming in current or current in incoming:
+        return True
+    return SequenceMatcher(None, incoming, current).ratio() >= 0.82
+
+
+def should_bypass_active_flyer_project_for_fresh_request(
+    text: str,
+    active_project: Optional[dict],
+    *,
+    has_media: bool = False,
+) -> bool:
+    body = " ".join((text or "").split())
+    if not should_start_new_flyer_over_active(body, has_media=has_media):
+        return False
+    if not active_project:
+        return True
+    status = str(active_project.get("status") or "")
+    return (
+        has_media
+        or status not in {"intake_started", "collecting_required_info", "awaiting_assets"}
+        or not flyer_project_has_required_fields(active_project)
+        or not similar_to_active_project_request(body, active_project)
+    )
+
+
 def should_start_new_flyer_over_active(text: str, *, has_media: bool = False) -> bool:
     """Return True when inbound content should not attach to old flyer state.
 
@@ -861,6 +1398,13 @@ def should_start_new_flyer_over_active(text: str, *, has_media: bool = False) ->
     if _NEW_FLYER_REQUEST.search(body):
         return True
     if _NEW_FLYER_VERB.search(body) and _FLYER_WORK_OBJECT.search(body):
+        return True
+    if (
+        _FLYER_WORK_OBJECT.search(body)
+        and _FRESH_FLYER_BRIEF_DETAIL.search(body)
+        and not is_flyer_project_status_request(body)
+        and not is_flyer_revision_intent(body)
+    ):
         return True
     if _WRONG_FLYER_CORRECTION.search(body):
         return True
@@ -1137,18 +1681,17 @@ def flyer_customer_not_active_reply(customer: dict) -> str:
 
 def flyer_project_missing_info_reply(project: dict) -> str:
     """Customer-facing prompt for an incomplete Flyer project."""
-    project_id = str(project.get("project_id") or "this project")
     if flyer_project_needs_missing_reference(project):
         return (
             "Flyer Studio\n"
             "------------\n"
-            f"I have {project_id}, but I need the sample/reference flyer before I can create the design.\n\n"
+            "I need the sample/reference flyer before I can create the design.\n\n"
             "Please attach the flyer image/PDF, or type the items, offers, prices, date/time if needed, and contact details."
         )
     return (
         "Flyer Studio\n"
         "------------\n"
-        f"I have {project_id}, but I need a few more details before creating the design.\n\n"
+        "I need a few more details before creating the design.\n\n"
         "What should this flyer promote? Send item/offer/event details, date/time if needed, location/contact, and any logo/photos."
     )
 
@@ -1164,35 +1707,61 @@ def is_flyer_enabled() -> bool:
         return False
 
 
-def find_active_flyer_project_by_sender(phone: Optional[str], chat_id: str) -> Optional[dict]:
-    """Look up a non-terminal flyer project by sender phone.
+def _flyer_account_phones(phone: Optional[str], chat_id: str) -> set[str]:
+    """All canonical phone identifiers tied to the sender's flyer account.
 
-    Flyer projects currently store canonical customer_phone. LID senders are
-    mapped to phone by the caller via identify-sender before invoking this.
+    Used by every flyer project selector so the picker matches a project's
+    `customer_phone` against any number registered on the customer record,
+    not just the inbound sender's number.
+    """
+    account_phones: set[str] = set()
+    canonical_sender = _canonical_phone(phone) or phone
+    if canonical_sender:
+        account_phones.add(canonical_sender)
+    customer = find_flyer_customer_by_sender(phone, chat_id)
+    if customer:
+        for key in ("public_phone", "business_whatsapp_number", "onboarded_by_phone"):
+            value = customer.get(key)
+            canonical = _canonical_phone(value)
+            if canonical:
+                account_phones.add(canonical)
+        for value in customer.get("authorized_request_numbers") or []:
+            canonical = _canonical_phone(value)
+            if canonical:
+                account_phones.add(canonical)
+    return account_phones
+
+
+def _load_flyer_projects() -> list[dict]:
+    if not FLYER_PROJECTS_PATH.exists():
+        return []
+    try:
+        with FLYER_PROJECTS_PATH.open(encoding="utf-8") as f:
+            store = json.load(f)
+    except Exception:
+        return []
+    projects = store.get("projects", [])
+    return projects if isinstance(projects, list) else []
+
+
+def find_active_flyer_project_by_sender(phone: Optional[str], chat_id: str) -> Optional[dict]:
+    """Look up a non-terminal flyer project by sender phone, for routing
+    new-request / revision / approval flow.
+
+    `closed_no_send` is intentionally excluded: an operator-closed row must
+    not swallow legitimate new flyer requests from the same customer. Use
+    `find_latest_flyer_project_for_status_by_sender` for status replies,
+    which DOES need to surface closures.
     """
     if not phone or not FLYER_PROJECTS_PATH.exists():
         return None
-    terminal = {"completed"}
+    terminal = {"completed", "closed_no_send"}
     try:
-        account_phones = {_canonical_phone(phone) or phone}
-        customer = find_flyer_customer_by_sender(phone, chat_id)
-        if customer:
-            for key in ("public_phone", "business_whatsapp_number", "onboarded_by_phone"):
-                value = customer.get(key)
-                canonical = _canonical_phone(value)
-                if canonical:
-                    account_phones.add(canonical)
-            for value in customer.get("authorized_request_numbers") or []:
-                canonical = _canonical_phone(value)
-                if canonical:
-                    account_phones.add(canonical)
-        with FLYER_PROJECTS_PATH.open(encoding="utf-8") as f:
-            store = json.load(f)
-        projects = store.get("projects", [])
-        if not isinstance(projects, list):
+        account_phones = _flyer_account_phones(phone, chat_id)
+        if not account_phones:
             return None
         matches = [
-            row for row in projects
+            row for row in _load_flyer_projects()
             if isinstance(row, dict)
             and row.get("customer_phone") in account_phones
             and row.get("status") not in terminal
@@ -1204,9 +1773,136 @@ def find_active_flyer_project_by_sender(phone: Optional[str], chat_id: str) -> O
         return None
 
 
+_FLYER_PROJECT_ID_RE = re.compile(r"\bF\d{4}\b", re.IGNORECASE)
+
+
+def extract_flyer_project_id_mention(text: str) -> Optional[str]:
+    """Return the FXXXX project id mentioned in the message body, if any.
+
+    Customers asking "any update on F0058?" should reach the specific
+    project they referenced, not whichever project the latest-updated
+    heuristic happens to pick. Returns the upper-cased canonical id.
+    """
+    if not text:
+        return None
+    match = _FLYER_PROJECT_ID_RE.search(text)
+    return match.group(0).upper() if match else None
+
+
+def find_flyer_project_by_id_for_sender(
+    phone: Optional[str], chat_id: str, project_id: str,
+) -> Optional[dict]:
+    """Return the project with `project_id` IF it belongs to this sender's
+    account (any phone in `_flyer_account_phones`). Returns None otherwise —
+    we do NOT leak project state across customers.
+    """
+    if not phone or not project_id or not FLYER_PROJECTS_PATH.exists():
+        return None
+    try:
+        account_phones = _flyer_account_phones(phone, chat_id)
+        if not account_phones:
+            return None
+        target = project_id.upper()
+        for row in _load_flyer_projects():
+            if (
+                isinstance(row, dict)
+                and str(row.get("project_id") or "").upper() == target
+                and row.get("customer_phone") in account_phones
+            ):
+                return row
+        return None
+    except Exception:
+        return None
+
+
+def find_latest_flyer_project_for_status_by_sender(
+    phone: Optional[str], chat_id: str,
+) -> Optional[dict]:
+    """Status-reply selector: includes closed_no_send, delivered, and every
+    other non-`completed` status. Picks by max(updated_at).
+
+    Distinct from `find_active_flyer_project_by_sender` (active-routing
+    selector) because closed_no_send and delivered need to surface for
+    "any update?" replies but MUST stay out of new-request / revision /
+    approval routing.
+    """
+    if not phone or not FLYER_PROJECTS_PATH.exists():
+        return None
+    try:
+        account_phones = _flyer_account_phones(phone, chat_id)
+        if not account_phones:
+            return None
+        matches = [
+            row for row in _load_flyer_projects()
+            if isinstance(row, dict)
+            and row.get("customer_phone") in account_phones
+            and row.get("status") != "completed"
+        ]
+        if not matches:
+            return None
+        return max(matches, key=lambda row: str(row.get("updated_at") or row.get("created_at") or ""))
+    except Exception:
+        return None
+
+
 def has_non_delivered_flyer_project_by_sender(phone: Optional[str], chat_id: str) -> bool:
     project = find_active_flyer_project_by_sender(phone, chat_id)
     return bool(project and project.get("status") != "delivered")
+
+
+# Per-status thresholds in hours beyond which an active project is "stale" — a
+# new inbound that is NOT a clear status check or revision will bypass the
+# active-project attach path. Empirical baseline: F0036/F0043/F0045 on prod
+# sat at manual_edit_required for ~19h before any operator action; we don't
+# want a 19h-old project swallowing today's distinct new flyer request.
+_FLYER_STALE_HOURS: dict[str, float] = {
+    "intake_started": 2.0,
+    "collecting_required_info": 2.0,
+    "awaiting_assets": 2.0,
+    "generating_concepts": 2.0,
+    "finalizing_assets": 2.0,
+    "awaiting_concept_selection": 6.0,
+    "awaiting_final_approval": 6.0,
+    "revising_design": 6.0,
+    "manual_edit_required": 24.0,
+    "delivered": 24.0,
+}
+
+
+def is_stale_for_new_request(
+    project: dict,
+    *,
+    now: Optional[datetime] = None,
+    overrides: Optional[dict[str, float]] = None,
+) -> bool:
+    """Return True when an active project is old enough that a new inbound
+    must NOT silently attach to it.
+
+    Status check + revision-intent inbound continue to attach (the caller is
+    expected to re-check those gates); anything else should bypass this
+    project so the new-project path takes over.
+    """
+    status = str(project.get("status") or "")
+    thresholds = {**_FLYER_STALE_HOURS, **(overrides or {})}
+    threshold_hours = thresholds.get(status)
+    if threshold_hours is None:
+        return False
+    raw = project.get("updated_at") or project.get("created_at")
+    if not raw:
+        return False
+    try:
+        if isinstance(raw, datetime):
+            updated_at = raw
+        else:
+            # Pydantic emits ISO8601 with trailing 'Z' or '+00:00'; both parse.
+            updated_at = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except Exception:
+        return False
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    age_hours = (now - updated_at).total_seconds() / 3600.0
+    return age_hours >= threshold_hours
 
 
 def is_flyer_revision_intent(text: str) -> bool:
@@ -1223,6 +1919,8 @@ def is_flyer_project_status_request(text: str) -> bool:
     body = " ".join(flyer_visible_message_text(text).lower().split())
     if not body:
         return False
+    if re.search(r"\bwhere(?:'s|\s+is)\s+(?:the\s+)?(?:update\s+)?(?:flyer|flier|design|preview)\b", body):
+        return True
     edit_starter = re.search(
         r"\b(update|change|edit|modify|replace|remove|add|swap|fix|correct)\s+"
         r"(this|the|my|that|current|attached)?\s*"
@@ -1237,6 +1935,7 @@ def is_flyer_project_status_request(text: str) -> bool:
         r"\b("
         r"any\s+updates?|"
         r"(what'?s|whats|what\s+is)\s+the\s+status|"
+        r"where(?:'s|\s+is)\s+(?:the\s+)?(?:update\s+)?(?:flyer|flier|design|preview)|"
         r"status\s+(please|pls|update)|"
         r"is\s+(it|the\s+flyer|my\s+flyer)\s+(ready|done|finished)|"
         r"when\s+(will|can)\s+(it|the\s+flyer|my\s+flyer)\s+be\s+(ready|done|finished)|"
@@ -1250,22 +1949,52 @@ def is_flyer_project_status_request(text: str) -> bool:
 
 
 def flyer_manual_edit_status_reply(project: dict) -> str:
-    project_id = str(project.get("project_id") or "this project")
-    fields = project.get("fields") if isinstance(project.get("fields"), dict) else {}
-    business_name = str(fields.get("event_or_business_name") or "").strip()
-    detail_line = (
-        f"I already have the requested changes and the saved {business_name} account details."
-        if business_name else
-        "I already have the requested changes and the saved account details."
+    reply = flyer_project_status_reply(project)
+    generic_fallback = (
+        "I have your flyer request open and am checking the latest status."
     )
-    return (
-        "Flyer Studio\n"
-        "------------\n"
-        f"Project {project_id} is still in the source-preserving edit queue.\n\n"
-        f"{detail_line} No more details are needed from you right now.\n\n"
-        "This edit must preserve the original flyer design, so it is handled as an exact artwork update "
-        "instead of a new flyer. I will send the corrected flyer here as soon as it is ready."
+    if generic_fallback not in reply:
+        return reply
+    manual = project.get("manual_review") if isinstance(project.get("manual_review"), dict) else {}
+    reason_code = str(manual.get("reason_code") or "source_edit_provider_unavailable")
+    try:
+        _ensure_platform_path()
+        from flyer_workflow import MANUAL_REVIEW_REASON_LINES  # type: ignore
+    except Exception:
+        try:
+            _ensure_local_src_path()
+            from agents.flyer.workflow import MANUAL_REVIEW_REASON_LINES  # type: ignore
+        except Exception:
+            MANUAL_REVIEW_REASON_LINES = {
+                "source_edit_provider_unavailable": (
+                    "Your edit is queued for a designer to apply by hand. "
+                    "I have the requested changes and the saved account details "
+                    "\u2014 no extra information needed from you."
+                )
+            }
+    line = MANUAL_REVIEW_REASON_LINES.get(
+        reason_code,
+        MANUAL_REVIEW_REASON_LINES["source_edit_provider_unavailable"],
     )
+    return f"Flyer Studio\n------------\n{line}"
+
+
+def flyer_project_status_reply(project: dict) -> str:
+    try:
+        _ensure_platform_path()
+        from schemas import FlyerProject  # type: ignore
+        from flyer_workflow import build_project_status_reply  # type: ignore
+    except Exception:
+        try:
+            _ensure_local_src_path()
+            from schemas import FlyerProject  # type: ignore
+            from agents.flyer.workflow import build_project_status_reply  # type: ignore
+        except Exception:
+            return "Flyer Studio\n------------\nI have your flyer request open and am checking the latest status."
+    try:
+        return build_project_status_reply(FlyerProject.model_validate(project))
+    except Exception:
+        return "Flyer Studio\n------------\nI have your flyer request open and am checking the latest status."
 
 
 def _canonical_phone(phone: Optional[str]) -> Optional[str]:
@@ -1435,6 +2164,40 @@ def find_flyer_intake_session_by_sender(phone: Optional[str], chat_id: str) -> O
         return None
 
 
+def discard_flyer_intake_session_by_sender(phone: Optional[str], chat_id: str) -> bool:
+    """Remove an in-progress Flyer intake session after successful handoff."""
+    canonical = _canonical_phone(phone)
+    if not FLYER_CUSTOMERS_PATH.exists():
+        return False
+    try:
+        _ensure_platform_path()
+        from safe_io import FileLock, atomic_write_text  # type: ignore
+
+        with FileLock(Path(str(FLYER_CUSTOMERS_PATH) + ".lock")):
+            store = json.loads(FLYER_CUSTOMERS_PATH.read_text(encoding="utf-8"))
+            sessions = store.get("intake_sessions") or []
+            kept = []
+            removed = False
+            for session in sessions:
+                if not isinstance(session, dict):
+                    kept.append(session)
+                    continue
+                sender_phone = _canonical_phone(session.get("sender_phone"))
+                matches_phone = bool(canonical and sender_phone == canonical)
+                matches_chat = bool(session.get("sender_phone") is None and session.get("chat_id") == chat_id)
+                if matches_phone or matches_chat:
+                    removed = True
+                    continue
+                kept.append(session)
+            if not removed:
+                return False
+            store["intake_sessions"] = kept
+            atomic_write_text(FLYER_CUSTOMERS_PATH, json.dumps(store, indent=2, ensure_ascii=False))
+            return True
+    except Exception:
+        return False
+
+
 _US_STATE_WORDS = {
     "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR",
     "california": "CA", "colorado": "CO", "connecticut": "CT", "delaware": "DE",
@@ -1537,7 +2300,9 @@ def is_flyer_account_command(text: str) -> bool:
         r"show sample prompts again|enable sample prompts|turn on sample prompts|"
         r"bring back sample prompts|show examples again|bring back examples|"
         r"add (authorized )?(number|auth)|add authorized number|"
-        r"remove authorized number|remove number|update phone|update business phone|"
+        r"remove authorized number|remove number|"
+        r"update business name|change business name|set business name|"
+        r"update phone|update business phone|"
         r"update whatsapp|update business whatsapp|change plan|confirm update)\b",
         body or "",
         flags=re.IGNORECASE,
@@ -1710,6 +2475,20 @@ def trigger_release_flyer_guest_order(*, sender_phone: Optional[str], chat_id: s
     )
 
 
+def find_reserved_flyer_guest_order(sender_phone: Optional[str], chat_id: str, project_id: str) -> Optional[dict]:
+    if not sender_phone:
+        return None
+    ok, _detail, doc = _trigger_flyer_guest_order(
+        "--find-reserved",
+        "--sender-phone", sender_phone,
+        "--chat-id", chat_id,
+        "--project-id", project_id,
+    )
+    if ok and doc and doc.get("reserved_order"):
+        return doc
+    return None
+
+
 def find_paid_flyer_guest_order(sender_phone: Optional[str], chat_id: str) -> Optional[dict]:
     if not sender_phone:
         return None
@@ -1841,6 +2620,7 @@ def trigger_store_flyer_brand_asset(
 def trigger_create_flyer_project(
     *,
     customer_phone: str,
+    chat_id: str = "",
     raw_request: str,
     message_id: str,
     reference_media_path: str = "",
@@ -1855,8 +2635,11 @@ def trigger_create_flyer_project(
             "--message-id", message_id,
             "--raw-request", raw_request,
         ]
+        if chat_id:
+            cmd.extend(["--chat-id", chat_id])
         if reference_media_path:
             cmd.extend(["--reference-media-path", reference_media_path])
+            cmd.append("--defer-reference-extraction")
         if manual_edit_required:
             cmd.append("--manual-edit-required")
         result = subprocess.run(
@@ -1875,26 +2658,76 @@ def trigger_create_flyer_project(
     return True, detail[:500], project
 
 
-def flyer_source_edit_preflight(project: dict) -> tuple[bool, str]:
-    """Return whether source-preserving edit generation can run for project."""
+def _resolve_flyer_source_edit_provider_for_preflight():
+    try:
+        _ensure_platform_path()
+        from schemas import Config  # type: ignore
+    except Exception:
+        _ensure_local_src_path()
+        platform = Path(__file__).resolve().parents[2] / "platform"
+        p = str(platform)
+        if p not in sys.path:
+            sys.path.insert(0, p)
+        from schemas import Config  # type: ignore
+    import yaml  # type: ignore
+    cfg = Config.model_validate(yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {})
+    return cfg.flyer.resolve_source_edit_render_provider()
+
+
+def flyer_source_edit_preflight(project: dict) -> tuple[bool, str, str]:
+    """Return ``(ok, detail, reason_code)`` for source-preserving edit readiness.
+
+    On success: ``(True, "ready", "")``.
+
+    On failure, ``reason_code`` is a `FlyerManualReviewReason` enum value that
+    cockpit triage groups + tallies on, so callers MUST NOT hardcode a single
+    code for every failure mode. Mapping:
+
+      - ``source_edit_provider_unavailable`` — configured provider key
+        absent/placeholder, manual-review sentinel selected, or the workflow
+        helper failed to import (provider stack broken).
+      - ``reference_unsupported`` — reference media is PDF / non-image type
+        the source-edit endpoint cannot consume.
+      - ``reference_provider_unavailable`` — no reference image attached to
+        the project, OR the attached image is no longer on disk (retention,
+        failover). Operator action is "re-upload the source flyer."
+    """
+    try:
+        _ensure_platform_path()
+        from flyer_workflow import source_edit_provider_ready  # type: ignore
+    except Exception:
+        try:
+            _ensure_local_src_path()
+            from agents.flyer.workflow import source_edit_provider_ready  # type: ignore
+        except Exception as e:
+            return (
+                False,
+                f"source edit readiness helper unavailable: {type(e).__name__}: {e}",
+                "source_edit_provider_unavailable",
+            )
+    try:
+        provider = _resolve_flyer_source_edit_provider_for_preflight()
+    except Exception as e:
+        return (
+            False,
+            f"source edit provider config unavailable: {type(e).__name__}: {e}",
+            "source_edit_provider_unavailable",
+        )
+    ok, detail = source_edit_provider_ready(project, provider=provider)
+    if not ok:
+        if "uploaded reference image" in detail:
+            return ok, detail, "reference_provider_unavailable"
+        if "must be an image" in detail:
+            return ok, detail, "reference_unsupported"
+        return ok, detail, "source_edit_provider_unavailable"
     assets = project.get("assets") or []
-    reference = next(
-        (asset for asset in reversed(assets) if (asset or {}).get("kind") == "reference_image"),
-        None,
-    )
-    if not reference:
-        return False, "source edit needs an uploaded reference image"
+    reference = next((asset for asset in reversed(assets) if (asset or {}).get("kind") == "reference_image"), None)
     path = str((reference or {}).get("path") or "")
-    mime = str((reference or {}).get("mime_type") or mimetypes.guess_type(path)[0] or "")
-    if mime and not mime.startswith("image/"):
-        return False, f"source edit reference must be an image, got {mime}"
     if path.lower().endswith(".pdf"):
-        return False, "source edit from PDF is not supported yet"
+        return False, "source edit from PDF is not supported yet", "reference_unsupported"
     if path and not Path(path).exists():
-        return False, "source edit reference image is not available on this server"
-    if not os.environ.get("OPENAI_API_KEY"):
-        return False, "source edit provider is not configured"
-    return True, "ready"
+        return False, "source edit reference image is not available on this server", "reference_provider_unavailable"
+    return True, "ready", ""
 
 
 def trigger_check_flyer_reference_scope(
@@ -1907,6 +2740,28 @@ def trigger_check_flyer_reference_scope(
     business_name = str(customer.get("business_name") or "").strip()
     if not business_name or not media_path:
         return True, "scope_check_not_applicable", {"decision": "allow", "reason": "not_applicable"}
+    if os.environ.get("FLYER_REFERENCE_SCOPE_ALLOW_SPEND") != "1":
+        lower = " ".join((raw_request or "").lower().split())
+        if _looks_like_exact_source_edit_request(lower):
+            return True, "scope_check_skipped_no_spend", {
+                "decision": "allow",
+                "reason": "no_spend_exact_source_edit_known_account",
+            }
+        if re.search(r"\b(?:logo|menu|price\s*list|items?|prices?)\b", lower):
+            return True, "scope_check_skipped_no_spend", {"decision": "allow", "reason": "no_spend_menu_or_logo"}
+        return True, "scope_check_deferred_no_spend", {
+            "decision": "clarify",
+            "reason": "scope_check_requires_provider_after_quota",
+            "reply_text": (
+                "Flyer Studio\n"
+                "------------\n"
+                f"I need to confirm whether the attached flyer belongs to {business_name}.\n\n"
+                f"If you own or are authorized to use this flyer, reply with how it is connected to {business_name}, "
+                f"and send the {business_name} logo/details to use.\n"
+                f"If this is only a reference, reply \"use as reference\" and Flyer Studio can create a new original "
+                f"{business_name} flyer using it as inspiration without copying another business's branding/layout exactly."
+            ),
+        }
     cmd = [
         str(PYTHON_BIN),
         str(CHECK_FLYER_REFERENCE_SCOPE_BIN),
@@ -1937,6 +2792,25 @@ def trigger_check_flyer_reference_scope(
     except json.JSONDecodeError:
         return False, f"scope_check_json_parse_failed: {detail[:500]}", None
     return True, detail[:500], doc
+
+
+def _looks_like_exact_source_edit_request(text: str) -> bool:
+    """Return true for edit-this-uploaded-flyer requests from a known account.
+
+    The no-spend fallback cannot run vision/OCR. For exact edits ("remove the
+    extra 16:00 from this flyer"), asking the customer to prove ownership makes
+    Flyer Studio look blind when the flyer itself already carries the account
+    masthead. Keep the bypass narrow: it must be an edit verb plus source-flyer
+    language or a concrete text/date/time/extra correction.
+    """
+    body = " ".join((text or "").lower().split())
+    has_edit_verb = bool(re.search(r"\b(?:remove|delete|change|replace|fix|correct|edit|update)\b", body))
+    has_source_marker = bool(re.search(
+        r"\b(?:this|attached|uploaded|source|existing).{0,30}\b(?:flyer|poster|image|artwork)\b",
+        body,
+    ))
+    has_text_correction_marker = bool(re.search(r"\b(?:date|time|extra|text|typo|spelling)\b", body))
+    return has_edit_verb and (has_source_marker or has_text_correction_marker)
 
 
 def _reference_scope_choice(text: str) -> str:
@@ -2019,8 +2893,17 @@ def save_flyer_reference_scope_pending(
     ttl_sec: int = 1800,
     status: str = "awaiting_choice",
     authorization_note: str = "",
+    original_intent: str = "unknown",
 ) -> None:
-    """Remember that the last unrelated-reference reply is awaiting option 1/2."""
+    """Remember that the last unrelated-reference reply is awaiting option 1/2.
+
+    `original_intent` records whether the original raw request was an
+    exact-source-edit ('exact_source_edit') or a generic reference use
+    ('generic_reference'). Downstream intercepts branch on this to decide
+    whether `use as reference` triggers the SOURCE/NEW clarification path
+    instead of immediate generic generation. Defaults to 'unknown' for
+    callers that have not been updated.
+    """
     if not chat_id or not media_path:
         return
     now_ts = time.time()
@@ -2047,6 +2930,7 @@ def save_flyer_reference_scope_pending(
             "source_organization": source_names[0] if source_names else "",
             "status": status,
             "authorization_note": authorization_note,
+            "original_intent": original_intent,
             "created_at": now_ts,
             "expires_at": now_ts + max(60, ttl_sec),
         })
@@ -2075,8 +2959,17 @@ def consume_flyer_reference_scope_choice(
     *,
     chat_id: str,
     sender_phone: str,
+    transition_to_status: Optional[str] = None,
 ) -> Optional[dict]:
-    """Return pending reference-scope choice for option 1/2 replies, consuming it."""
+    """Return pending reference-scope choice for option 1/2 replies, consuming it.
+
+    When `transition_to_status` is provided AND the matched row's choice is
+    `use_reference` AND its `original_intent == 'exact_source_edit'`, the row
+    is REWRITTEN in-place with the new status under the same lock instead of
+    being removed. This eliminates the race window between the
+    `_try_flyer_reference_scope_choice_intercept` consume step and the
+    SOURCE/NEW intercept's lookup of the awaiting-source-vs-new-choice row.
+    """
     choice = _reference_scope_choice(text)
     if not choice:
         return None
@@ -2084,6 +2977,7 @@ def consume_flyer_reference_scope_choice(
         state = _read_reference_scope_state()
         pending = state.get("pending", [])
         matched: Optional[dict] = None
+        matched_index: int = -1
         remaining: list[dict] = []
         for item in pending:
             if str(item.get("status") or "awaiting_choice") != "awaiting_choice":
@@ -2093,15 +2987,152 @@ def consume_flyer_reference_scope_choice(
             same_phone = sender_phone and item.get("sender_phone") == sender_phone
             if matched is None and (same_chat or same_phone):
                 matched = dict(item)
+                matched_index = len(remaining)
                 continue
             remaining.append(item)
         if matched is None:
             if remaining != pending:
                 _write_reference_scope_state({"schema_version": 1, "pending": remaining})
             return None
-        _write_reference_scope_state({"schema_version": 1, "pending": remaining})
+        if (
+            transition_to_status
+            and choice == "use_reference"
+            and str(matched.get("original_intent") or "") == "exact_source_edit"
+        ):
+            transitioned = dict(matched)
+            transitioned["status"] = transition_to_status
+            remaining.insert(matched_index, transitioned)
+            _write_reference_scope_state({"schema_version": 1, "pending": remaining})
+        else:
+            _write_reference_scope_state({"schema_version": 1, "pending": remaining})
     matched["choice"] = choice
     return matched
+
+
+def consume_flyer_source_vs_new_choice(
+    choice_token: str,
+    trailing: str,
+    *,
+    chat_id: str,
+    sender_phone: str,
+) -> Optional[dict]:
+    """Consume a pending awaiting_source_vs_new_choice row for SOURCE/NEW reply.
+
+    Returns the row (with `choice` and `customer_followup_instruction`
+    attached) if a matching row exists, else None. Removes the row from the
+    state file inside the same lock that scopes the read.
+    """
+    if choice_token not in {"source", "new"}:
+        return None
+    with _reference_scope_state_lock():
+        state = _read_reference_scope_state()
+        pending = state.get("pending", [])
+        matched: Optional[dict] = None
+        remaining: list[dict] = []
+        for item in pending:
+            if str(item.get("status") or "") != "awaiting_source_vs_new_choice":
+                remaining.append(item)
+                continue
+            same_chat = chat_id and item.get("chat_id") == chat_id
+            same_phone = sender_phone and item.get("sender_phone") == sender_phone
+            if matched is None and (same_chat or same_phone):
+                matched = dict(item)
+                continue
+            remaining.append(item)
+        if matched is None:
+            return None
+        _write_reference_scope_state({"schema_version": 1, "pending": remaining})
+    matched["choice"] = choice_token
+    matched["customer_followup_instruction"] = trailing or ""
+    return matched
+
+
+def peek_flyer_source_vs_new_pending(
+    *,
+    chat_id: str,
+    sender_phone: str,
+) -> Optional[dict]:
+    """Read-only lookup for the awaiting_source_vs_new_choice row.
+
+    Used by the status check-in branch so it can re-send the clarification
+    without consuming the pending row.
+    """
+    with _reference_scope_state_lock():
+        state = _read_reference_scope_state()
+        for item in state.get("pending", []):
+            if str(item.get("status") or "") != "awaiting_source_vs_new_choice":
+                continue
+            same_chat = chat_id and item.get("chat_id") == chat_id
+            same_phone = sender_phone and item.get("sender_phone") == sender_phone
+            if same_chat or same_phone:
+                return dict(item)
+    return None
+
+
+_SOURCE_TOKEN_RE = re.compile(
+    r"^\s*(?P<token>source|keep\s+source|same\s+flyer|exact\s+edit|option\s*1|1)\b[\s.,:;!\-—]*(?P<trailing>.*)$",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+_NEW_TOKEN_RE = re.compile(
+    r"^\s*(?P<token>new|new\s+flyer|inspired(?:\s+by)?|option\s*2|2)\b[\s.,:;!\-—]*(?P<trailing>.*)$",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+
+
+def parse_source_vs_new_followup(text: str) -> tuple[str, str]:
+    """Return (choice, trailing). choice is 'source'|'new'|''."""
+    body = " ".join(flyer_visible_message_text(text).split())
+    for choice, pattern in (("source", _SOURCE_TOKEN_RE), ("new", _NEW_TOKEN_RE)):
+        match = pattern.match(body)
+        if match:
+            trailing = " ".join(match.group("trailing").strip(" .,:;-—").split())
+            return choice, trailing[:500]
+    return "", ""
+
+
+_STATUS_CHECKIN_RE = re.compile(
+    r"^(?:any\s+update|is\s+it\s+ready|what'?s?\s+(?:the\s+)?status|update\??|status\??|ready\??)\??$",
+    flags=re.IGNORECASE,
+)
+
+
+def flyer_is_status_checkin(text: str) -> bool:
+    body = " ".join(flyer_visible_message_text(text).split()).strip(" .!,:;-—")
+    return bool(_STATUS_CHECKIN_RE.match(body))
+
+
+def find_recent_flyer_manual_edit_project(
+    customer_phone: str,
+    *,
+    window_sec: int = 60,
+) -> Optional[dict]:
+    """Return the most recent manual_edit_required project for this customer
+    created within `window_sec` seconds. Used by the idempotent-retry
+    branch of the SOURCE/NEW intercept."""
+    try:
+        doc = json.loads(Path(str(FLYER_PROJECTS_PATH)).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    now_ts = time.time()
+    candidates = []
+    for project in doc.get("projects", []) or []:
+        if not isinstance(project, dict):
+            continue
+        if project.get("customer_phone") != customer_phone:
+            continue
+        if project.get("status") != "manual_edit_required":
+            continue
+        created_at = project.get("created_at") or ""
+        try:
+            ts = datetime.fromisoformat(str(created_at).replace("Z", "+00:00")).timestamp()
+        except (ValueError, TypeError):
+            continue
+        if now_ts - ts <= max(1, window_sec):
+            candidates.append((ts, project))
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return candidates[0][1]
 
 
 def _consume_flyer_reference_authorization_reply_locked(
@@ -2114,11 +3145,45 @@ def _consume_flyer_reference_authorization_reply_locked(
     pending = state.get("pending", [])
     matched: Optional[dict] = None
     remaining: list[dict] = []
+    # The bot's scope-check prompt invites a narrative reply ("reply with how
+    # it is connected to <Business>"). A reply like "Co-owner" / "Family
+    # business" / "Founder's sister" doesn't match any of the keyword tokens
+    # in `_reference_scope_choice` (i_own / we_own / authorized / connected),
+    # so it never consumes the `awaiting_choice` row at the choice intercept.
+    # Pre-fix it then fell through to `_try_flyer_active_project_intercept`
+    # and got routed as a revision against the source-edit project, returning
+    # "I could not match that change to the queued edit" — the exact prod bug
+    # observed on F0050.
+    #
+    # Fix: this consumer ALSO matches `awaiting_choice` rows when the body
+    # looks like a substantive relationship answer rather than a trivial
+    # acknowledgement. Definition of "substantive":
+    #   - at least 4 alphabetic characters after stripping (rejects "ok",
+    #     "yes", "yep", "k", "ya")
+    #   - AND not in a small ack-only set (rejects "yeah", "okay", "sure",
+    #     "fine", "thanks", "cool" — these are intent-ambiguous, route
+    #     elsewhere)
+    # The caller (`consume_flyer_reference_authorization_reply`) has already
+    # filtered explicit "1" / "2" / "use as reference" replies via
+    # `_reference_scope_explicit_choice`, so those still route through the
+    # choice intercept rather than landing here. Conservative threshold:
+    # false-negative (narrative reply misses the new path) keeps today's
+    # behavior; false-positive (ack consumes a choice row) would silently
+    # start a source-edit the customer didn't authorize.
+    _ACK_ONLY = {"yeah", "okay", "sure", "fine", "thanks", "cool", "ok", "yes", "yep", "yup"}
+    body_alpha = "".join(ch for ch in body if ch.isalpha())
+    body_lower = body.lower().strip(" .!,:;-")
+    body_is_substantive = len(body_alpha) >= 4 and body_lower not in _ACK_ONLY
+    consumable_statuses = {"awaiting_authorization_details"}
+    if body_is_substantive:
+        consumable_statuses.add("awaiting_choice")
+
     for item in pending:
         same_chat = chat_id and item.get("chat_id") == chat_id
         same_phone = sender_phone and item.get("sender_phone") == sender_phone
-        is_auth_pending = str(item.get("status") or "") == "awaiting_authorization_details"
-        if matched is None and is_auth_pending and (same_chat or same_phone):
+        item_status = str(item.get("status") or "")
+        is_consumable = item_status in consumable_statuses
+        if matched is None and is_consumable and (same_chat or same_phone):
             matched = dict(item)
             continue
         remaining.append(item)
@@ -2167,24 +3232,27 @@ def send_flyer_manual_edit_ack(
     request_text: str = "",
     reason: str = "",
 ) -> tuple[bool, str, str]:
-    """Acknowledge source-preserving flyer edits without auto-generating."""
+    """Acknowledge a queued source-preserving flyer edit on WhatsApp.
+
+    The WhatsApp body is deliberately outcome-only: it confirms receipt and
+    promises delivery, nothing more. Workflow internals (source-preserving,
+    edit queue, operator/provider language, raw customer request echo,
+    project ID) live in the audit log and Cockpit, not the customer reply.
+    Reason: echoing the request text was the F0063 drift surface; explaining
+    the queue is workflow leakage. `request_text`, `project_id`, and `reason`
+    remain on the signature for caller compatibility (7 sites in cf-router/
+    hooks.py) but no longer reach the WhatsApp message body.
+    """
     _ensure_platform_path()
     try:
         from safe_io import bridge_post  # type: ignore
     except Exception as e:
         return False, "", f"safe_io_import_failed: {type(e).__name__}: {e}"
-    body = flyer_visible_message_text(request_text).strip()
-    requested = f"\n\nRequested edit: {body}" if body else ""
-    queue_reason = "\n\nThis edit needs the source-preserving workflow, so it is in the operator edit queue." if reason.strip() else ""
     message = (
         "Flyer Studio\n"
         "------------\n"
-        f"I received your uploaded flyer and queued project {project_id} for a source-preserving edit."
-        f"{requested}\n\n"
-        "This should preserve the existing design and change only the requested text/artwork, "
-        "so I am holding it in the edit queue instead of generating a new flyer from scratch."
-        f"{queue_reason}\n\n"
-        "I will send the updated flyer here once it is ready."
+        "Got it. This needs a careful flyer edit. "
+        "I'll send the updated flyer here once it's ready."
     )
     ok, message_id, err, status = bridge_post(chat_id, message)
     if ok:
@@ -2192,20 +3260,59 @@ def send_flyer_manual_edit_ack(
     return False, message_id, f"{status}: {err}"
 
 
-def send_flyer_edit_processing_ack(chat_id: str, project_id: str) -> tuple[bool, str, str]:
-    """Acknowledge source-preserving edit generation before the model call."""
+def send_flyer_manual_review_ack(
+    chat_id: str,
+    project_id: str,
+    request_text: str = "",
+    reason: str = "",
+) -> tuple[bool, str, str]:
+    """Acknowledge fail-closed manual review without exposing workflow internals."""
     _ensure_platform_path()
     try:
         from safe_io import bridge_post  # type: ignore
     except Exception as e:
         return False, "", f"safe_io_import_failed: {type(e).__name__}: {e}"
+    del project_id, request_text, reason
     message = (
         "Flyer Studio\n"
         "------------\n"
-        f"I received your uploaded flyer as project {project_id} and am editing the source artwork now.\n\n"
-        "This is a source-preserving edit, so I will keep the existing design and change only the requested text/artwork. "
-        "It usually takes 5-6 minutes. I will send the edited preview here when it is ready.\n\n"
-        "Reply here if you need to add another correction while I work on it."
+        "I couldn't finish this automatically. I'll review it and send an update here."
+    )
+    ok, message_id, err, status = bridge_post(chat_id, message)
+    if ok:
+        return True, message_id, ""
+    return False, message_id, f"{status}: {err}"
+
+
+def flyer_project_has_manual_review_queued(project: Optional[dict]) -> bool:
+    if not project:
+        return False
+    manual = project.get("manual_review") or {}
+    return project.get("status") == "manual_edit_required" and manual.get("status") == "queued"
+
+
+def flyer_generation_queued_manual_review(detail: str) -> bool:
+    if "reference_extraction_failed" in (detail or ""):
+        return True
+    if "source_edit_failed" in (detail or ""):
+        return True
+    if "visual_qa_failed" in (detail or ""):
+        return True
+    return False
+
+
+def send_flyer_edit_processing_ack(chat_id: str, project_id: str) -> tuple[bool, str, str]:
+    """Acknowledge source-edit generation before the model call."""
+    _ensure_platform_path()
+    try:
+        from safe_io import bridge_post  # type: ignore
+    except Exception as e:
+        return False, "", f"safe_io_import_failed: {type(e).__name__}: {e}"
+    del project_id
+    message = (
+        "Flyer Studio\n"
+        "------------\n"
+        "Got it. I'm updating your flyer now and will send the revised version here when it's ready."
     )
     ok, message_id, err, status = bridge_post(chat_id, message)
     if ok:
@@ -2223,9 +3330,7 @@ def send_flyer_intake_ack(chat_id: str, project_id: str) -> tuple[bool, str, str
     message = (
         "Flyer Studio\n"
         "------------\n"
-        f"Got it. I created flyer project {project_id}. "
-        "I have the request and will prepare design concepts. "
-        "Reply here with a logo or photos if you want them included."
+        "Got it. I have your flyer request and will send an update here shortly."
     )
     ok, message_id, err, status = bridge_post(chat_id, message)
     if ok:
@@ -2243,10 +3348,8 @@ def send_flyer_processing_ack(chat_id: str, project_id: str) -> tuple[bool, str,
     message = (
         "Flyer Studio\n"
         "------------\n"
-        f"Request processing. I created flyer project {project_id} and am creating the design now.\n\n"
-        "Flyer generation is in progress and usually takes 5-6 minutes. "
-        "Please check back here shortly; I will send the preview as soon as it is ready.\n\n"
-        "Reply here if you need to add a logo, photos, or changes while I work on it."
+        "Got it. I'm creating your flyer now and will send a preview here shortly. "
+        "Flyer generation usually takes 5-6 minutes."
     )
     ok, message_id, err, status = bridge_post(chat_id, message)
     if ok:
@@ -2280,6 +3383,14 @@ def send_flyer_concept_previews(chat_id: str, project_id: str) -> tuple[bool, st
     except Exception as e:
         return False, "", f"flyer_render_import_failed: {type(e).__name__}: {e}"
     try:
+        from flyer_visual_qa import validate_visual_qa_report  # type: ignore
+    except Exception:
+        try:
+            _ensure_local_src_path()
+            from agents.flyer.visual_qa import validate_visual_qa_report  # type: ignore
+        except Exception as e:
+            return False, "", f"flyer_visual_qa_import_failed: {type(e).__name__}: {e}"
+    try:
         store = json.loads(FLYER_PROJECTS_PATH.read_text(encoding="utf-8"))
         project = next((p for p in store.get("projects", []) if p.get("project_id") == project_id), None)
     except Exception as e:
@@ -2300,6 +3411,15 @@ def send_flyer_concept_previews(chat_id: str, project_id: str) -> tuple[bool, st
         )
         if not qa.ok:
             return False, "", "text_qa_failed: " + "; ".join(qa.blockers)
+        visual = validate_visual_qa_report(
+            asset.get("path", ""),
+            project_id=project_id,
+            project_version=int(project.get("version") or 1),
+            output_format="concept_preview",
+            allow_sidecar=False,
+        )
+        if not visual.ok:
+            return False, "", "visual_qa_failed: " + "; ".join(visual.blockers)
         caption = (
             f"{concept.get('concept_id')}: {concept.get('title')}\n"
             f"{concept.get('style_summary')}\n\n"

@@ -1519,6 +1519,43 @@ class TestF7PrimaryMode:
         mock_preview.assert_called_once_with("201975216009469@lid", "F0029")
         mock_manual_ack.assert_not_called()
 
+    def test_reference_scope_no_spend_allows_exact_source_edit_without_confirmation(self, mods, monkeypatch):
+        _, actions_mod = mods
+        monkeypatch.delenv("FLYER_REFERENCE_SCOPE_ALLOW_SPEND", raising=False)
+
+        with patch.object(actions_mod.subprocess, "run") as mock_run:
+            ok, detail, scope = actions_mod.trigger_check_flyer_reference_scope(
+                customer={"business_name": "Lakshmis Kitchen"},
+                media_path="/opt/shift-agent/.hermes/image_cache/lakshmis-evening-snacks.jpg",
+                raw_request="Remove the extra 16:00 from this flyer",
+            )
+
+        assert ok is True
+        assert detail == "scope_check_skipped_no_spend"
+        assert scope == {
+            "decision": "allow",
+            "reason": "no_spend_exact_source_edit_known_account",
+        }
+        mock_run.assert_not_called()
+
+    def test_reference_scope_no_spend_still_clarifies_generic_reference(self, mods, monkeypatch):
+        _, actions_mod = mods
+        monkeypatch.delenv("FLYER_REFERENCE_SCOPE_ALLOW_SPEND", raising=False)
+
+        with patch.object(actions_mod.subprocess, "run") as mock_run:
+            ok, detail, scope = actions_mod.trigger_check_flyer_reference_scope(
+                customer={"business_name": "Lakshmis Kitchen"},
+                media_path="/opt/shift-agent/.hermes/image_cache/unknown-reference.jpg",
+                raw_request="Make a flyer like this",
+            )
+
+        assert ok is True
+        assert detail == "scope_check_deferred_no_spend"
+        assert scope is not None
+        assert scope["decision"] == "clarify"
+        assert "I need to confirm whether the attached flyer belongs to Lakshmis Kitchen" in scope["reply_text"]
+        mock_run.assert_not_called()
+
     def test_media_exact_reference_edit_preflight_queues_before_quota_and_processing(self, mods, state_env):
         hooks_mod, actions_mod = mods
         _seed_config(state_env, flyer_enabled=True)

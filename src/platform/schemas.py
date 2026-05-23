@@ -646,6 +646,7 @@ FlyerWorkflowStatus = Literal[
     "finalizing_assets",
     "delivered",
     "completed",
+    "closed_no_send",
 ]
 
 FlyerOnboardingStatus = Literal[
@@ -677,16 +678,19 @@ FlyerLanguage = Literal[
     "other",
 ]
 
-FlyerCreationMode = Literal["guided", "text"]
+FlyerCreationMode = Literal["sample", "guided", "text"]
 
 FlyerIntakeStatus = Literal[
     "choosing_language",
     "choosing_mode",
+    "choosing_sample_idea",
+    "text_awaiting_brief",
     "guided_collecting_goal",
     "guided_collecting_schedule",
     "guided_collecting_items",
     "guided_collecting_location",
     "guided_collecting_assets",
+    "brief_pending_approval",
 ]
 
 FlyerIntakeSource = Literal[
@@ -704,6 +708,133 @@ FlyerOutputFormat = Literal[
 ]
 
 FlyerImageQuality = Literal["low", "medium", "high"]
+FlyerProviderQuality = Literal["low", "medium", "high", "balanced"]
+FlyerModelProviderName = Literal["openrouter", "openai", "local", "manual_review"]
+FlyerFactSource = Literal[
+    "customer_text",
+    "customer_profile",
+    "reference_ocr",
+    "reference_vision",
+    "uploaded_asset",
+    "operator",
+    "system",
+]
+FlyerReferenceRole = Literal[
+    "logo",
+    "menu_reference",
+    "old_flyer_reference",
+    "source_edit_template",
+    "inspiration",
+    "unsupported",
+]
+FlyerReferenceExtractionStatus = Literal["not_run", "ok", "low_confidence", "provider_unavailable", "unsupported"]
+FlyerVisualQAStatus = Literal["passed", "failed", "not_run", "provider_unavailable"]
+FlyerVisualQASource = Literal["ocr_vision", "sidecar_test", "operator_review"]
+FlyerManualReviewStatus = Literal["none", "queued", "in_progress", "completed", "break_glass_sent", "closed_no_send"]
+FlyerManualReviewReason = Literal[
+    "unclassified",
+    "legacy_unknown",
+    "reference_low_confidence",
+    "reference_provider_unavailable",
+    "reference_unsupported",
+    "reference_not_run",
+    "visual_qa_failed",
+    "source_edit_provider_unavailable",
+    "operator_request",
+    "policy_block",
+    "provider_timeout",
+    "missing_required_facts",
+]
+
+
+class FlyerRenderProviderConfig(BaseModel):
+    """Single Flyer Studio render provider target."""
+    model_config = ConfigDict(extra="forbid")
+    provider: FlyerModelProviderName
+    model: str = Field(min_length=1, max_length=120)
+    quality: FlyerProviderQuality = "balanced"
+
+
+class FlyerTextHeavyDraftPolicy(BaseModel):
+    """Rollout-safe text-heavy flyer candidates; only primary is automatic."""
+    model_config = ConfigDict(extra="forbid")
+    primary: FlyerRenderProviderConfig = Field(default_factory=lambda: FlyerRenderProviderConfig(
+        provider="openrouter",
+        model="recraft/recraft-v4.1",
+        quality="balanced",
+    ))
+    premium: FlyerRenderProviderConfig = Field(default_factory=lambda: FlyerRenderProviderConfig(
+        provider="openrouter",
+        model="sourceful/riverflow-v2-pro",
+        quality="high",
+    ))
+    fallback: FlyerRenderProviderConfig = Field(default_factory=lambda: FlyerRenderProviderConfig(
+        provider="openrouter",
+        model="openai/gpt-5.4-image-2",
+        quality="high",
+    ))
+
+
+class FlyerVisualHeavyDraftPolicy(BaseModel):
+    """Visual-heavy challenger policy for operator bakeoffs."""
+    model_config = ConfigDict(extra="forbid")
+    primary: FlyerRenderProviderConfig = Field(default_factory=lambda: FlyerRenderProviderConfig(
+        provider="openrouter",
+        model="black-forest-labs/flux.2-pro",
+        quality="high",
+    ))
+    fallback: FlyerRenderProviderConfig = Field(default_factory=lambda: FlyerRenderProviderConfig(
+        provider="openrouter",
+        model="openai/gpt-5.4-image-2",
+        quality="high",
+    ))
+
+
+class FlyerDraftProviderPolicy(BaseModel):
+    """Provider routing for new flyer drafts. PR-1 wires only default automatic use."""
+    model_config = ConfigDict(extra="forbid")
+    default: FlyerRenderProviderConfig = Field(default_factory=lambda: FlyerRenderProviderConfig(
+        provider="local",
+        model="deterministic-renderer",
+        quality="low",
+    ))
+    cost_sensitive: FlyerRenderProviderConfig = Field(default_factory=lambda: FlyerRenderProviderConfig(
+        provider="openrouter",
+        model="openai/gpt-5-image-mini",
+        quality="balanced",
+    ))
+    text_heavy: FlyerTextHeavyDraftPolicy = Field(default_factory=FlyerTextHeavyDraftPolicy)
+    visual_heavy: FlyerVisualHeavyDraftPolicy = Field(default_factory=FlyerVisualHeavyDraftPolicy)
+
+
+class FlyerFinalProviderPolicy(BaseModel):
+    """Final asset policy. Default is deterministic export; model fallback is manual/operator-triggered."""
+    model_config = ConfigDict(extra="forbid")
+    default: FlyerRenderProviderConfig = Field(default_factory=lambda: FlyerRenderProviderConfig(
+        provider="local",
+        model="deterministic-renderer",
+        quality="high",
+    ))
+    fallback: FlyerRenderProviderConfig = Field(default_factory=lambda: FlyerRenderProviderConfig(
+        provider="openrouter",
+        model="openai/gpt-5.4-image-2",
+        quality="high",
+    ))
+
+
+class FlyerSourceEditProviderPolicy(BaseModel):
+    """Provider routing for source-preserving uploaded-flyer edits."""
+    model_config = ConfigDict(extra="forbid")
+    default: FlyerRenderProviderConfig = Field(default_factory=lambda: FlyerRenderProviderConfig(
+        provider="openrouter",
+        model="openai/gpt-5.4-image-2",
+        quality="high",
+    ))
+    emergency_fallback: FlyerRenderProviderConfig = Field(default_factory=lambda: FlyerRenderProviderConfig(
+        provider="manual_review",
+        model="manual_review",
+        quality="high",
+    ))
 FlyerAssetKind = Literal[
     "logo",
     "reference_image",
@@ -719,14 +850,15 @@ FLYER_TRANSITIONS: dict[FlyerWorkflowStatus, set[FlyerWorkflowStatus]] = {
     "intake_started": {"collecting_required_info"},
     "collecting_required_info": {"awaiting_assets", "generating_concepts"},
     "awaiting_assets": {"generating_concepts"},
-    "manual_edit_required": {"generating_concepts", "revising_design"},
-    "generating_concepts": {"awaiting_concept_selection", "awaiting_final_approval"},
+    "manual_edit_required": {"generating_concepts", "revising_design", "awaiting_final_approval", "closed_no_send"},
+    "generating_concepts": {"awaiting_concept_selection", "awaiting_final_approval", "manual_edit_required"},
     "awaiting_concept_selection": {"revising_design"},
     "revising_design": {"generating_concepts", "awaiting_final_approval"},
     "awaiting_final_approval": {"finalizing_assets", "revising_design"},
-    "finalizing_assets": {"delivered"},
+    "finalizing_assets": {"delivered", "manual_edit_required"},
     "delivered": {"completed", "revising_design"},
     "completed": set(),
+    "closed_no_send": set(),
 }
 
 
@@ -759,12 +891,15 @@ class FlyerConfig(BaseModel):
     enabled: bool = False
     conversation_model: str = Field(default="default_hermes_gateway", min_length=1, max_length=120)
     prompt_model: str = Field(default="default_hermes_gateway", min_length=1, max_length=120)
-    draft_image_model: str = Field(default="gpt-image-1-mini", min_length=1, max_length=120)
+    draft_image_model: str = Field(default="deterministic-renderer", min_length=1, max_length=120)
     draft_image_quality: FlyerImageQuality = "low"
-    final_image_model: str = Field(default="gpt-image-1.5", min_length=1, max_length=120)
-    final_image_quality: FlyerImageQuality = "medium"
+    final_image_model: str = Field(default="deterministic-renderer", min_length=1, max_length=120)
+    final_image_quality: FlyerImageQuality = "high"
     edit_image_model: str = Field(default="gpt-image-1", min_length=1, max_length=120)
     edit_image_quality: FlyerImageQuality = "medium"
+    draft_provider_policy: FlyerDraftProviderPolicy = Field(default_factory=FlyerDraftProviderPolicy)
+    final_provider_policy: FlyerFinalProviderPolicy = Field(default_factory=FlyerFinalProviderPolicy)
+    source_edit_provider_policy: FlyerSourceEditProviderPolicy = Field(default_factory=FlyerSourceEditProviderPolicy)
     concept_count: int = Field(default=1, ge=1, le=3)
     max_revision_rounds: int = Field(default=6, ge=1, le=20)
     payment_provider: Literal["manual", "stripe", "razorpay", "other"] = "manual"
@@ -783,6 +918,39 @@ class FlyerConfig(BaseModel):
         max_length=4,
     )
     recovery: FlyerRecoveryConfig = Field(default_factory=FlyerRecoveryConfig)
+
+    @staticmethod
+    def _legacy_provider_for_model(model: str) -> FlyerModelProviderName:
+        return "local" if model.strip().lower() in {"", "deterministic-renderer", "pillow", "local-pillow"} else "openrouter"
+
+    def resolve_draft_render_provider(self) -> FlyerRenderProviderConfig:
+        if "draft_provider_policy" in self.model_fields_set:
+            return self.draft_provider_policy.default
+        return FlyerRenderProviderConfig(
+            provider=self._legacy_provider_for_model(self.draft_image_model),
+            model=self.draft_image_model,
+            quality=self.draft_image_quality,
+        )
+
+    def resolve_final_render_provider(self) -> FlyerRenderProviderConfig:
+        if "final_provider_policy" in self.model_fields_set:
+            return self.final_provider_policy.default
+        return FlyerRenderProviderConfig(
+            provider=self._legacy_provider_for_model(self.final_image_model),
+            model=self.final_image_model,
+            quality=self.final_image_quality,
+        )
+
+    def resolve_source_edit_render_provider(self) -> FlyerRenderProviderConfig:
+        if "source_edit_provider_policy" in self.model_fields_set:
+            return self.source_edit_provider_policy.default
+        if {"edit_image_model", "edit_image_quality"} & self.model_fields_set:
+            return FlyerRenderProviderConfig(
+                provider="openai",
+                model=self.edit_image_model,
+                quality=self.edit_image_quality,
+            )
+        return self.source_edit_provider_policy.emergency_fallback
 
 
 class FlyerPlanTier(BaseModel):
@@ -1069,6 +1237,7 @@ class FlyerIntakeSession(BaseModel):
     last_message_id: str = Field(default="", max_length=200)
     preferred_language: FlyerLanguage = "en"
     creation_mode: str = Field(default="", max_length=20)
+    mode_prompt_version: str = Field(default="", max_length=40)
     original_text: str = Field(default="", max_length=2000)
     goal: str = Field(default="", max_length=500)
     schedule: str = Field(default="", max_length=500)
@@ -1077,6 +1246,11 @@ class FlyerIntakeSession(BaseModel):
     style_assets: str = Field(default="", max_length=500)
     reference_media_path: str = Field(default="", max_length=500)
     reference_media_message_id: str = Field(default="", max_length=200)
+    brief_raw_request: str = Field(default="", max_length=3000)
+    brief_display_request: str = Field(default="", max_length=1500)
+    brief_source: Literal["", "sample", "guided", "text"] = ""
+    brief_approved_at: Optional[datetime] = None
+    brief_approved_message_id: str = Field(default="", max_length=200)
 
 
 class FlyerCustomerStore(BaseModel):
@@ -1434,6 +1608,88 @@ class FlyerRequestFields(BaseModel):
         )
 
 
+class FlyerLockedFact(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    fact_id: str = Field(min_length=1, max_length=120)
+    label: str = Field(min_length=1, max_length=80)
+    value: str = Field(min_length=1, max_length=500)
+    source: FlyerFactSource
+    required: bool = False
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    source_project_id: str = Field(default="", max_length=40)
+    source_asset_id: str = Field(default="", max_length=40)
+    source_message_id: str = Field(default="", max_length=200)
+    source_sha256: str = Field(default="", max_length=64)
+
+
+class FlyerSourceContractSection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    heading: str = Field(default="", max_length=160)
+    items: list[str] = Field(default_factory=list, max_length=50)
+
+
+class FlyerSourceContract(BaseModel):
+    """Strict-shape source-contract for the F0061 exact-edit class.
+
+    Vision/LLM raw output is parsed permissively then projected into this
+    schema (extra="forbid") so downstream QA + locked-fact generation can
+    rely on bounded fields.
+    """
+    model_config = ConfigDict(extra="forbid")
+    source_business_names: list[str] = Field(default_factory=list, max_length=10)
+    target_business_name: str = Field(default="", max_length=160)
+    required_headings: list[str] = Field(default_factory=list, max_length=20)
+    required_text: list[str] = Field(default_factory=list, max_length=100)
+    sections: list[FlyerSourceContractSection] = Field(default_factory=list, max_length=20)
+    requested_replacements: dict[str, str] = Field(default_factory=dict, max_length=50)
+    forbidden_substrings: list[str] = Field(default_factory=list, max_length=50)
+    preserve_layout: bool = False
+    preserve_unmentioned_text: bool = False
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    notes: str = Field(default="", max_length=1000)
+
+
+class FlyerReferenceExtraction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    asset_id: str = Field(min_length=1, max_length=40)
+    role: FlyerReferenceRole
+    provider: str = Field(default="", max_length=120)
+    status: FlyerReferenceExtractionStatus = "not_run"
+    extracted_facts: list[FlyerLockedFact] = Field(default_factory=list, max_length=100)
+    detail: str = Field(default="", max_length=500)
+    extracted_at: Optional[datetime] = None
+    source_contract: Optional[FlyerSourceContract] = None
+
+
+class FlyerVisualQAReport(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project_id: str = Field(min_length=1, max_length=40)
+    asset_id: str = Field(default="", max_length=40)
+    artifact_path: str = Field(min_length=1, max_length=500)
+    artifact_sha256: str = Field(pattern=r"^[a-fA-F0-9]{64}$")
+    project_version: int = Field(ge=1)
+    output_format: str = Field(min_length=1, max_length=80)
+    provider: str = Field(min_length=1, max_length=120)
+    qa_source: FlyerVisualQASource
+    status: FlyerVisualQAStatus
+    blockers: list[str] = Field(default_factory=list, max_length=50)
+    warnings: list[str] = Field(default_factory=list, max_length=50)
+    extracted_text: str = Field(default="", max_length=5000)
+    checked_at: datetime
+
+
+class FlyerManualReview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: FlyerManualReviewStatus = "none"
+    reason: str = Field(default="", max_length=120)
+    reason_code: FlyerManualReviewReason = "unclassified"
+    detail: str = Field(default="", max_length=500)
+    queued_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    operator_asset_ids: list[str] = Field(default_factory=list, max_length=20)
+    break_glass_reason: str = Field(default="", max_length=500)
+
+
 class FlyerAsset(BaseModel):
     model_config = ConfigDict(extra="forbid")
     asset_id: str = Field(pattern=r"^A\d{4,}$")
@@ -1486,6 +1742,31 @@ class FlyerRevision(BaseModel):
     resulting_version: Optional[int] = Field(default=None, ge=1)
 
 
+class FlyerRevisionPatchPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    field_updates: dict[str, str] = Field(default_factory=dict)
+    notes_update: Optional[str] = None
+    raw_request_update: Optional[str] = None
+    changed: bool = False
+    visual_only: bool = False
+    ambiguous: bool = False
+    unresolved_reason: str = ""
+    requires_confirmation: bool = False
+    confirmation_reason: str = ""
+    pending_confirmation_message: str = Field(default="", max_length=2000)
+
+
+class FlyerPendingRevisionConfirmation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    revision_id: str = Field(pattern=r"^R\d{3,}$")
+    created_at: datetime
+    expires_at: datetime
+    request_message_id: str = Field(min_length=1, max_length=200)
+    request_text: str = Field(min_length=1, max_length=2000)
+    proposal_summary: str = Field(min_length=1, max_length=1200)
+    patch: FlyerRevisionPatchPayload
+
+
 class FlyerBrandKit(BaseModel):
     model_config = ConfigDict(extra="ignore")
     customer_phone: E164Phone
@@ -1508,10 +1789,16 @@ class FlyerProject(BaseModel):
     original_message_id: str = Field(min_length=1, max_length=200)
     raw_request: str = Field(min_length=1, max_length=2000)
     fields: FlyerRequestFields = Field(default_factory=FlyerRequestFields)
+    locked_facts: list[FlyerLockedFact] = Field(default_factory=list, max_length=100)
+    reference_extractions: list[FlyerReferenceExtraction] = Field(default_factory=list, max_length=20)
+    qa_reports: list[FlyerVisualQAReport] = Field(default_factory=list, max_length=100)
+    manual_review: FlyerManualReview = Field(default_factory=FlyerManualReview)
     assets: list[FlyerAsset] = Field(default_factory=list, max_length=50)
     concepts: list[FlyerConcept] = Field(default_factory=list, max_length=3)
     selected_concept_id: Optional[str] = Field(default=None, pattern=r"^C[1-3]$")
     revisions: list[FlyerRevision] = Field(default_factory=list, max_length=50)
+    pending_revision_confirmation: Optional[FlyerPendingRevisionConfirmation] = None
+    last_applied_pending_revision_id: str = Field(default="", max_length=20)
     version: int = Field(default=1, ge=1)
     final_asset_ids: list[str] = Field(default_factory=list, max_length=4)
     approved_message_id: str = Field(default="", max_length=200)
@@ -3217,6 +3504,149 @@ class FlyerRecoveryResolved(_BaseEntry):
     resolution: Literal["suppressed", "customer_ack_sent", "repair_queued", "manual_required", "deployed"]
 
 
+class FlyerClosureCustomerNotified(_BaseEntry):
+    """Operator-driven `flyer-manual-queue --close` proactive customer push.
+
+    Closure state write is the primary operation; this audit row records the
+    outcome of the best-effort notification that follows it. `send_ok=False`
+    rows mean the customer will learn via the reactive "any update?" safety
+    net instead. Distinct from `FlyerAssetsDelivered` because closure pushes
+    carry no asset and signal a non-completion outcome.
+    """
+    type: Literal["flyer_closure_customer_notified"]
+    project_id: str = Field(pattern=r"^F\d{4,}$")
+    customer_phone: E164Phone
+    reason_code: str = Field(min_length=1, max_length=80)
+    chat_id: str = Field(default="", max_length=200)
+    chat_id_source: Literal["audit_log", "primary_chat_id", "none", ""] = ""
+    send_ok: bool
+    outbound_message_id: str = Field(default="", max_length=200)
+    error: str = Field(default="", max_length=500)
+
+
+class FlyerSourceContractExtracted(_BaseEntry):
+    """Audit row emitted once per source-contract extraction attempt.
+
+    Records counts (not the raw contract content) so the audit log stays
+    PII-light. `status="provider_unavailable"` rows are still emitted so
+    operators can see when the source-edit path falls closed silently.
+    """
+    type: Literal["flyer_source_contract_extracted"] = "flyer_source_contract_extracted"
+    project_id: str = Field(min_length=1, max_length=40)
+    asset_id: str = Field(default="", max_length=40)
+    asset_sha256: str = Field(default="", max_length=64)
+    role: FlyerReferenceRole
+    status: FlyerReferenceExtractionStatus
+    headings_count: int = 0
+    sections_count: int = 0
+    replacements_count: int = 0
+    forbidden_substrings_count: int = 0
+    confidence: float = 0.0
+    provider: str = Field(default="", max_length=120)
+
+
+class FlyerSourceVsNewChosen(_BaseEntry):
+    """Audit row when an exact-edit customer picks SOURCE vs NEW.
+
+    `choice` values:
+      - clarification_sent: prompt first issued.
+      - clarification_resent: status check-in re-issued the prompt idempotently.
+      - source: customer chose SOURCE; row consumed; manual-edit project queued.
+      - new: customer chose NEW; row consumed; new project created.
+      - expired: TTL pruning dropped the row unconsumed.
+    """
+    type: Literal["flyer_source_vs_new_chosen"] = "flyer_source_vs_new_chosen"
+    sender_phone: str = Field(default="", max_length=32)
+    customer_id: str = Field(default="", max_length=40)
+    original_intent: Literal["exact_source_edit", "generic_reference", "unknown"]
+    choice: Literal["source", "new", "clarification_sent", "clarification_resent", "expired"]
+    pending_age_sec: int = 0
+    customer_followup_instruction: str = Field(default="", max_length=500)
+
+
+class FlyerSourceEditSlaAlert(_BaseEntry):
+    """Operator alert audit for stale source-edit manual queue rows."""
+    type: Literal["flyer_source_edit_sla_alert"] = "flyer_source_edit_sla_alert"
+    outcome: Literal["alerted", "throttled", "notify_failed"]
+    project_ids: list[str] = Field(default_factory=list, max_length=50)
+    stale_count: int = Field(default=0, ge=0)
+    alerted_count: int = Field(default=0, ge=0)
+    throttled_count: int = Field(default=0, ge=0)
+    oldest_age_minutes: float = Field(default=0.0, ge=0.0)
+    threshold_minutes: int = Field(default=10, ge=1)
+    repeat_minutes: int = Field(default=60, ge=1)
+    notify_ok: bool = False
+
+
+class FlyerHermesIntentDecision(_BaseEntry):
+    """Read-only shadow audit for the Flyer Hermes intent contract.
+
+    PII-light by construction: hashes instead of raw chat/message ids, route
+    families instead of raw customer text, and no provider/customer copy fields.
+    """
+    type: Literal["flyer_hermes_intent_decision"] = "flyer_hermes_intent_decision"
+    schema_version: Literal[1] = 1
+    mode: Literal["off", "shadow", "unsupported_active_mode"]
+    decision_source: Literal["none", "fixture", "deterministic_baseline", "hermes_gateway_future"]
+    classifier_status: Literal[
+        "off",
+        "skipped_not_candidate",
+        "skipped_passthrough",
+        "skipped_no_gateway",
+        "skipped_budget",
+        "success",
+        "timeout",
+        "invalid",
+        "error",
+    ] = "off"
+    classifier_latency_ms: int = Field(default=0, ge=0)
+    classifier_error_kind: str = Field(default="", max_length=80)
+    classifier_error_detail: str = Field(default="", max_length=300)
+    message_id_hash: str = Field(min_length=1, max_length=64)
+    chat_key_hash: str = Field(default="", max_length=64)
+    has_media: bool = False
+    validator_ok: bool
+    validator_reasons: list[str] = Field(default_factory=list, max_length=20)
+    advisory_intent: str = Field(default="", max_length=80)
+    advisory_action: str = Field(default="", max_length=80)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    would_mutate: bool = False
+    actual_route: str = Field(default="", max_length=120)
+    actual_reason: str = Field(default="", max_length=200)
+    actual_action: Literal[
+        "new_project",
+        "revision",
+        "approval",
+        "status",
+        "manual_review",
+        "account_update",
+        "onboarding_or_intake",
+        "passthrough",
+        "failure",
+        "unknown",
+    ]
+    route_sequence: list[str] = Field(default_factory=list, max_length=20)
+    route_terminal: bool = True
+    subprocess_rc: Optional[int] = None
+    branch_return_reason: str = Field(default="", max_length=300)
+    selected_project_id: str = Field(default="", max_length=40)
+    prior_active_project_id: str = Field(default="", max_length=40)
+    project_status: str = Field(default="", max_length=80)
+    customer_status: str = Field(default="", max_length=80)
+    intake_status: str = Field(default="", max_length=80)
+    preview_source: Literal["actual", "simulated", "none"] = "actual"
+    live_route_changed: Literal[False] = False
+    active_customer_risk: bool = False
+    risk_scope: Literal[
+        "active_project",
+        "active_customer",
+        "active_intake",
+        "pre_project_customer_visible",
+        "historical_audit",
+        "none",
+    ] = "none"
+
+
 class CateringLeadCreated(_BaseEntry):
     type: Literal["catering_lead_created"]
     lead_id: str = Field(min_length=1)
@@ -3732,31 +4162,41 @@ class CfRouterIntercepted(_BaseEntry):
         "f7_proposal_selection",
         "flyer_primary_project_created",
         "flyer_primary_failed",
+        "flyer_project_status",
         "flyer_intake_started",
         "flyer_intake",
         "flyer_intake_failed",
+        "flyer_intake_cleanup_failed",
         "flyer_onboarding",
         "flyer_onboarding_failed",
         "flyer_starter_brief",
+        "flyer_starter_ideas",
         "flyer_customer_not_active",
         "flyer_quota_blocked",
         "flyer_brand_asset_saved",
         "flyer_brand_asset_failed",
+        "flyer_reference_manual_review_queued",
         "flyer_reference_scope_blocked",
         "flyer_reference_scope_use_reference",
         "flyer_reference_scope_authorization_requested",
         "flyer_reference_scope_authorization_followup",
         "flyer_reference_scope_authorized_generated",
         "flyer_reference_exact_edit_queued",
+        "flyer_reference_exact_edit_status",
         "flyer_location_blocked",
         "flyer_account_command",
         "flyer_account_failed",
         "flyer_account_customer_not_found",
         "flyer_account_unhandled",
+        "flyer_active_project_bypassed",
+        "flyer_brief_approved",
+        "flyer_brief_project_create_failed",
         "flyer_starter_preference_off",
         "flyer_starter_already_sent",
         "flyer_guest_order_started",
         "flyer_guest_order_failed",
+        "flyer_access_release_failed",
+        "flyer_pending_revision_confirmation_reminder",
         "error",
     ]
     chat_id: str = Field(min_length=1, max_length=200)
@@ -4167,6 +4607,12 @@ LogEntry = Annotated[
         Annotated[FlyerRecoveryRepairBundleWritten, Tag("flyer_recovery_repair_bundle_written")],
         Annotated[FlyerRecoveryDeployGate, Tag("flyer_recovery_deploy_gate")],
         Annotated[FlyerRecoveryResolved, Tag("flyer_recovery_resolved")],
+        Annotated[FlyerClosureCustomerNotified, Tag("flyer_closure_customer_notified")],
+        # NEW — source-contract observability (2026-05-20 flyer source-contract-first)
+        Annotated[FlyerSourceContractExtracted, Tag("flyer_source_contract_extracted")],
+        Annotated[FlyerSourceVsNewChosen, Tag("flyer_source_vs_new_chosen")],
+        Annotated[FlyerSourceEditSlaAlert, Tag("flyer_source_edit_sla_alert")],
+        Annotated[FlyerHermesIntentDecision, Tag("flyer_hermes_intent_decision")],
         # PR-D1 forward-compat shim — UNKNOWN tags route here
         Annotated[_UnknownLogEntry, Tag("_unknown_")],
     ],
@@ -4219,11 +4665,21 @@ __all__ = [
     "is_catering_terminal", "CATERING_TERMINAL_STATUSES",
     "FlyerConfig", "FlyerRecoveryConfig", "FlyerWorkflowStatus", "FlyerOnboardingStatus", "FlyerLanguage", "FlyerCreationMode",
     "FlyerIntakeStatus", "FlyerIntakeSource", "FlyerOutputFormat", "FlyerImageQuality",
+    "FlyerConfig", "FlyerRenderProviderConfig", "FlyerDraftProviderPolicy", "FlyerFinalProviderPolicy",
+    "FlyerSourceEditProviderPolicy",
+    "FlyerTextHeavyDraftPolicy", "FlyerVisualHeavyDraftPolicy",
+    "FlyerWorkflowStatus", "FlyerOnboardingStatus", "FlyerLanguage", "FlyerCreationMode",
+    "FlyerIntakeStatus", "FlyerIntakeSource", "FlyerOutputFormat", "FlyerImageQuality", "FlyerProviderQuality",
+    "FlyerFactSource", "FlyerReferenceRole", "FlyerReferenceExtractionStatus",
+    "FlyerVisualQAStatus", "FlyerVisualQASource", "FlyerManualReviewStatus", "FlyerManualReviewReason",
     "FlyerAssetKind", "FLYER_TRANSITIONS", "is_flyer_transition_allowed",
     "FlyerPlanTier", "FlyerBrandAsset", "FlyerUsageEvent", "FlyerPaymentRecord", "FlyerGuestOrder",
     "FLYER_AUTHORIZED_REQUESTER_LIMIT",
     "FlyerCustomerProfile", "FlyerOnboardingSession", "FlyerIntakeSession", "FlyerCustomerStore", "FlyerGuestOrderStore",
-    "FlyerRequestFields", "FlyerAsset", "FlyerConcept", "FlyerRevision",
+    "FlyerRequestFields", "FlyerLockedFact", "FlyerReferenceExtraction",
+    "FlyerSourceContractSection", "FlyerSourceContract",
+    "FlyerSourceContractExtracted", "FlyerSourceVsNewChosen", "FlyerHermesIntentDecision",
+    "FlyerVisualQAReport", "FlyerManualReview", "FlyerAsset", "FlyerConcept", "FlyerRevision",
     "FlyerBrandKit", "FlyerProject", "FlyerProjectStore",
     # v0.3 status-machine + helpers
     "CATERING_TRANSITIONS", "is_catering_transition_allowed",
@@ -4256,6 +4712,7 @@ __all__ = [
     "FlyerRecoveryCustomerAckSent", "FlyerRecoveryCustomerAckFailed",
     "FlyerRecoveryCustomerAckUncertain", "FlyerRecoveryCustomerAckSuppressed",
     "FlyerRecoveryRepairBundleWritten", "FlyerRecoveryDeployGate", "FlyerRecoveryResolved",
+    "FlyerUsageRecorded", "FlyerQuotaBlocked", "FlyerClosureCustomerNotified",
     "Proposal", "ProposalId", "ProposalCode",
     "AwaitingProposal", "ApprovedProposal", "ReconcilingProposal", "SentProposal",
     "SendFailedProposal", "AcceptedProposal", "DeclinedProposal", "DeniedByOwnerProposal",

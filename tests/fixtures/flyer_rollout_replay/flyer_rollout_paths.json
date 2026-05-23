@@ -1,0 +1,86 @@
+[
+  {
+    "id": "rollout-active-trial-sample-idea-approves-into-project",
+    "mode": "brief_intake_consumed",
+    "text": "APPROVE. Make this flyer for evening snacks Friday 5 PM",
+    "chat_id": "17329837841@lid",
+    "resolved_identity": {"phone": "+17329837841", "role": "customer"},
+    "customer": {"customer_id": "CUST0001", "status": "trial", "business_name": "Lakshmis Kitchn", "phone": "+17329837841", "primary_chat_id": "17329837841@lid"},
+    "intercept": "intake",
+    "intercept_result": {"action": "skip", "reason": "flyer_brief_approval_consumed", "project_id": "F9001"},
+    "expect": {"route": "intake_consumed", "forbidden_calls": ["trigger_create_flyer_project", "invoke_update_flyer_project"]}
+  },
+  {
+    "id": "rollout-new-trial-sample-before-onboarding-into-compact-ideas",
+    "mode": "onboarding_intake_consumed",
+    "text": "1",
+    "chat_id": "19045550104@lid",
+    "resolved_identity": {"phone": "+19045550104", "role": "customer"},
+    "intercept": "onboarding",
+    "intercept_result": {"action": "skip", "reason": "flyer_sample_idea_selected_pre_onboarding"},
+    "expect": {"route": "onboarding", "forbidden_calls": ["trigger_create_flyer_project", "invoke_update_flyer_project"]}
+  },
+  {
+    "id": "rollout-text-request-intelligent-brief-approves-into-project",
+    "mode": "brief_intake_consumed",
+    "text": "Help me make a flyer for weekend tiffin specials Saturday Sunday",
+    "chat_id": "17329837841@lid",
+    "resolved_identity": {"phone": "+17329837841", "role": "customer"},
+    "customer": {"customer_id": "CUST0001", "status": "trial", "business_name": "Lakshmis Kitchn", "phone": "+17329837841", "primary_chat_id": "17329837841@lid"},
+    "intercept": "intake",
+    "intercept_result": {"action": "skip", "reason": "flyer_text_brief_preview_sent"},
+    "expect": {"route": "intake_consumed", "forbidden_calls": ["trigger_create_flyer_project", "invoke_update_flyer_project"]}
+  },
+  {
+    "id": "rollout-guided-flow-brief-approves",
+    "mode": "brief_intake_consumed",
+    "text": "Guided flow option for weekend specials brief confirmation",
+    "chat_id": "17329837841@lid",
+    "resolved_identity": {"phone": "+17329837841", "role": "customer"},
+    "customer": {"customer_id": "CUST0001", "status": "trial", "business_name": "Lakshmis Kitchn", "phone": "+17329837841", "primary_chat_id": "17329837841@lid"},
+    "intercept": "intake",
+    "intercept_result": {"action": "skip", "reason": "flyer_guided_brief_confirmed"},
+    "expect": {"route": "intake_consumed", "forbidden_calls": ["trigger_create_flyer_project", "invoke_update_flyer_project"]}
+  },
+  {
+    "id": "rollout-visible-text-removal-stays-revision",
+    "mode": "active_revision",
+    "text": "Time: 16:00 is duplicated. remove this duplicate time from poster",
+    "chat_id": "17329837841@lid",
+    "resolved_identity": {"phone": "+17329837841", "role": "customer"},
+    "active_project": {"project_id": "F0070", "customer_phone": "+17329837841", "status": "awaiting_final_approval", "fields": {"event_or_business_name": "Weekend Sale"}, "concepts": [{"concept_id": "C1"}], "revisions": []},
+    "expect": {"route": "revision", "forbidden_calls": ["trigger_create_flyer_project"], "must_call": ["invoke_update_flyer_project"]}
+  },
+  {
+    "id": "rollout-lid-only-start-free-trial-into-onboarding",
+    "mode": "onboarding_intake_consumed",
+    "text": "Start Free Trial",
+    "chat_id": "17329900000@lid",
+    "resolved_identity": {"phone": null, "role": "customer"},
+    "intercept": "onboarding",
+    "intercept_result": {"action": "skip", "reason": "flyer_lid_only_start_free_trial"},
+    "expect": {"route": "onboarding", "forbidden_calls": ["trigger_create_flyer_project", "invoke_update_flyer_project"]}
+  },
+  {
+    "id": "rollout-duplicate-phone-second-sender-recognized-as-authorized-requester",
+    "mode": "account_intercept_consumed",
+    "text": "Help me create a flyer for our weekend specials menu",
+    "chat_id": "17329850010@lid",
+    "resolved_identity": {"phone": "+17329850010", "role": "customer"},
+    "intercept": "account",
+    "intercept_result": {"action": "skip", "reason": "flyer_authorized_requester_recognized"},
+    "expect": {"route": "account_intercept", "forbidden_calls": ["trigger_create_flyer_project", "invoke_update_flyer_project"]}
+  },
+  {
+    "id": "rollout-intercept-reply-exercises-echo-guard",
+    "mode": "intake_intercept_with_reply",
+    "text": "Help me create a flyer for evening snacks Friday at 5 PM with our usual items",
+    "chat_id": "17329837841@lid",
+    "resolved_identity": {"phone": "+17329837841", "role": "customer"},
+    "customer": {"customer_id": "CUST0001", "status": "trial", "business_name": "Lakshmis Kitchn", "phone": "+17329837841", "primary_chat_id": "17329837841@lid"},
+    "intercept": "intake_with_reply",
+    "intercept_result": {"action": "skip", "reason": "flyer_intake_reply_sent"},
+    "intercept_reply_text": "Got your flyer request. Reply APPROVE when you're ready or tell me what to change.",
+    "expect": {"route": "intake_consumed", "forbidden_calls": ["trigger_create_flyer_project", "invoke_update_flyer_project"]}
+  }
+]
