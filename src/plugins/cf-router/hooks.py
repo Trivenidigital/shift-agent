@@ -112,6 +112,12 @@ def pre_gateway_dispatch(event: Any, gateway: Any = None, session_store: Any = N
         chat_id = _extract_chat_id(event)
         if (not text and not media_path) or not chat_id:
             return None
+        if _extract_from_me(event):
+            return None
+        native_message_id = _extract_native_message_id(event)
+        message_id = native_message_id or _extract_message_id(event, chat_id, text)
+        if native_message_id and actions.mark_cf_router_inbound_seen(chat_id, native_message_id, text):
+            return {"action": "skip", "reason": "cf-router duplicate inbound"}
 
         # F8 path — owner self-chat + #XXXXX code → bypass LLM
         if actions.is_owner_chat(chat_id):
@@ -2016,6 +2022,20 @@ def _extract_media_path(event: Any) -> Optional[str]:
     return None
 
 
+def _extract_from_me(event: Any) -> bool:
+    """Return True only from adapter metadata, never from message text."""
+    for obj in (event, getattr(event, "source", None)):
+        if obj is None:
+            continue
+        for attr in ("fromMe", "from_me", "is_from_me"):
+            val = getattr(obj, attr, None)
+            if val is True:
+                return True
+            if isinstance(val, str) and val.strip().lower() == "true":
+                return True
+    return False
+
+
 def _extract_message_id(event: Any, chat_id: str, text: str = "") -> str:
     """Defensive message_id extraction with deterministic fallback.
 
@@ -2031,21 +2051,27 @@ def _extract_message_id(event: Any, chat_id: str, text: str = "") -> str:
     different message_ids per instance and break idempotency in the
     multi-instance deploy edge case.
     """
+    native = _extract_native_message_id(event)
+    if native:
+        return native
+    # Hash-based fallback (chat_id + text) — deterministic across instances
+    import hashlib
+    digest = hashlib.sha1(f"{chat_id}|{text}".encode("utf-8")).hexdigest()[:12]
+    return f"cf_router_f7_{chat_id}_{digest}"
+
+
+def _extract_native_message_id(event: Any) -> str:
     for attr in ("message_id", "id", "msg_id"):
         val = getattr(event, attr, None)
         if isinstance(val, str) and val:
             return val
-    # Nested via source (same shape as _extract_chat_id)
     source = getattr(event, "source", None)
     if source is not None:
         for attr in ("message_id", "id", "msg_id"):
             val = getattr(source, attr, None)
             if isinstance(val, str) and val:
                 return val
-    # Hash-based fallback (chat_id + text) — deterministic across instances
-    import hashlib
-    digest = hashlib.sha1(f"{chat_id}|{text}".encode("utf-8")).hexdigest()[:12]
-    return f"cf_router_f7_{chat_id}_{digest}"
+    return ""
 
 
 def _schedule_f7_rescue(text: str, chat_id: str, message_id: str,

@@ -1,0 +1,11 @@
+[Unit]
+Description=Flyer Studio recovery watchdog timer
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=flyer-recovery-watchdog.service
+
+[Install]
+WantedBy=timers.target

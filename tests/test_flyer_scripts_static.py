@@ -65,6 +65,30 @@ def test_delivery_report_installed_and_smoked_for_operator_visibility():
     assert "uncertain_asset_ids" in report
 
 
+def test_recovery_watchdog_installed_but_not_enabled_by_default():
+    deploy = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh").read_text(encoding="utf-8")
+    smoke = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-smoke-test.sh").read_text(encoding="utf-8")
+    watchdog = (SCRIPTS / "flyer-recovery-watchdog").read_text(encoding="utf-8")
+    preflight = (SCRIPTS / "flyer-recovery-preflight").read_text(encoding="utf-8")
+    service = (REPO / "src" / "agents" / "flyer" / "systemd" / "flyer-recovery-watchdog.service").read_text(encoding="utf-8")
+    smoke = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-smoke-test.sh").read_text(encoding="utf-8")
+
+    assert "flyer-recovery-watchdog" in deploy
+    assert "flyer-recovery-watchdog" in smoke
+    assert "flyer-recovery-watchdog.timer" in deploy
+    assert "enable_timer" in deploy
+    assert "systemctl enable --now flyer-recovery-watchdog.timer" in deploy
+    assert "systemctl daemon-reload" in deploy
+    assert "systemctl is-active --quiet flyer-recovery-watchdog.timer" in deploy
+    assert "mode != \"off\"" in deploy or 'mode != "off"' in deploy
+    assert "/usr/local/lib/hermes-agent/venv/bin/python /usr/local/bin/flyer-recovery-watchdog" in service
+    assert "/etc/systemd/system/flyer-recovery-watchdog.service" in smoke
+    assert "/etc/systemd/system/flyer-recovery-watchdog.timer" in smoke
+    assert "--write-repair-bundle" in watchdog
+    assert "flyer-codex-recovery-runner" not in deploy
+    assert "FLYER_RECOVERY_NO_LIVE_SEND" in preflight
+
+
 def test_guest_order_script_installed_for_quick_flyer_path():
     deploy = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh").read_text(encoding="utf-8")
     smoke = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-smoke-test.sh").read_text(encoding="utf-8")

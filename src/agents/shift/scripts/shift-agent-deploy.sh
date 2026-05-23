@@ -269,6 +269,11 @@ install_artifacts() {
     else
         rm -f /opt/shift-agent/flyer_starter_briefs.py
     fi
+    if [ -f src/agents/flyer/recovery.py ]; then
+        install -m 644 src/agents/flyer/recovery.py /opt/shift-agent/flyer_recovery.py
+    else
+        rm -f /opt/shift-agent/flyer_recovery.py
+    fi
     if [ -f src/agents/flyer/account.py ]; then
         install -m 644 src/agents/flyer/account.py /opt/shift-agent/flyer_account.py
     else
@@ -295,6 +300,8 @@ install_artifacts() {
             send-flyer-package \
             send-flyer-campaign \
             flyer-delivery-report \
+            flyer-recovery-watchdog \
+            flyer-recovery-preflight \
             smoke-flyer-quality; do
             if [ ! -f "src/agents/flyer/scripts/${flyer_binary}" ]; then
                 rm -f "/usr/local/bin/${flyer_binary}"
@@ -316,9 +323,17 @@ install_artifacts() {
             /usr/local/bin/manage-flyer-account \
             /usr/local/bin/manage-flyer-guest-order \
             /usr/local/bin/flyer-delivery-report \
+            /usr/local/bin/flyer-recovery-watchdog \
+            /usr/local/bin/flyer-recovery-preflight \
             /usr/local/bin/send-flyer-campaign \
             /usr/local/bin/send-flyer-package \
             /usr/local/bin/smoke-flyer-quality
+    fi
+    if compgen -G "src/agents/flyer/systemd/*.service" > /dev/null; then
+        install -m 644 src/agents/flyer/systemd/*.service /etc/systemd/system/
+    fi
+    if compgen -G "src/agents/flyer/systemd/*.timer" > /dev/null; then
+        install -m 644 src/agents/flyer/systemd/*.timer /etc/systemd/system/
     fi
     install -d -o shift-agent -g shift-agent -m 0700 /opt/shift-agent/state/flyer 2>/dev/null || true
     install -d -o shift-agent -g shift-agent -m 0700 /opt/shift-agent/state/flyer/assets 2>/dev/null || true
@@ -328,6 +343,26 @@ install_artifacts() {
         install -m 0640 -o shift-agent -g shift-agent src/agents/flyer/assets/Flyer.png /opt/shift-agent/state/flyer/marketing/Flyer.png
     fi
     chown -R shift-agent:shift-agent /opt/shift-agent/state/flyer 2>/dev/null || true
+    systemctl daemon-reload
+    if /usr/local/lib/hermes-agent/venv/bin/python - <<'PY' 2>/dev/null
+import sys, yaml
+sys.path.insert(0, "/opt/shift-agent")
+from schemas import Config
+cfg = Config.model_validate(yaml.safe_load(open("/opt/shift-agent/config.yaml")) or {})
+raise SystemExit(0 if cfg.flyer.recovery.enable_timer and cfg.flyer.recovery.mode != "off" else 1)
+PY
+    then
+        if ! systemctl enable --now flyer-recovery-watchdog.timer; then
+            echo "FAIL: flyer-recovery-watchdog.timer enable/start failed" >&2
+            exit 1
+        fi
+        if ! systemctl is-active --quiet flyer-recovery-watchdog.timer; then
+            echo "FAIL: flyer-recovery-watchdog.timer not active after enable" >&2
+            exit 1
+        fi
+    else
+        systemctl disable --now flyer-recovery-watchdog.timer 2>/dev/null || true
+    fi
 
     # Tier 2 agents — SKILL-only stubs
     for tier2_agent in inventory supplier vip catering_followup hiring compliance employee_docs cash_ar sales_tax; do

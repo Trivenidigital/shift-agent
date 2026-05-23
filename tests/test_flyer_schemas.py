@@ -18,6 +18,8 @@ from schemas import (  # noqa: E402
     FlyerCustomerProfile,
     FlyerConcept,
     FlyerConfig,
+    FlyerRecoveryCustomerAckAttempted,
+    FlyerRecoveryIncidentOpened,
     FlyerGuestOrder,
     FlyerGuestOrderStore,
     FlyerProject,
@@ -87,6 +89,52 @@ def test_config_includes_flyer_default_disabled():
         "backup": {"gpg_recipient_email": "owner@example.com"},
     })
     assert cfg.flyer.enabled is False
+    assert cfg.flyer.recovery.mode == "off"
+    assert cfg.flyer.recovery.enable_timer is False
+
+
+def test_flyer_recovery_config_rejects_unknown_fields():
+    with pytest.raises(ValidationError):
+        FlyerConfig.model_validate({
+            "recovery": {
+                "mode": "observe",
+                "enable_timer": True,
+                "unexpected": True,
+            }
+        })
+
+
+def test_flyer_recovery_audit_variants_dispatch_through_log_entry():
+    opened = {
+        "type": "flyer_recovery_incident_opened",
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "incident_id": "FRI20260523-0001",
+        "failure_class": "concept_generation_failed",
+        "severity": "warning",
+        "project_id": "F0065",
+        "source_fingerprint": "sha256:fp",
+        "ack_dedupe_key": "sha256:ack",
+        "chat_id_hash": "sha256:chat",
+        "evidence_quality": "strong",
+        "mode": "observe",
+    }
+    attempted = {
+        "type": "flyer_recovery_customer_ack_attempted",
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "incident_id": "FRI20260523-0001",
+        "ack_attempt_id": "FRA20260523-0001",
+        "ack_dedupe_key": "sha256:ack",
+        "source_fingerprint": "sha256:fp",
+        "chat_id_hash": "sha256:chat",
+        "evidence_quality": "strong",
+        "mode": "customer_ack",
+        "copy_policy_template_id": "generic_tracked",
+        "message_sha256": "sha256:msg",
+    }
+
+    adapter = TypeAdapter(LogEntry)
+    assert isinstance(adapter.validate_python(opened), FlyerRecoveryIncidentOpened)
+    assert isinstance(adapter.validate_python(attempted), FlyerRecoveryCustomerAckAttempted)
 
 
 def test_guest_order_store_tracks_payment_first_one_off_order():

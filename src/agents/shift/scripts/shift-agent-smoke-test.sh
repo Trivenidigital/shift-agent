@@ -48,6 +48,8 @@ for script in \
     /usr/local/bin/manage-flyer-account \
     /usr/local/bin/manage-flyer-guest-order \
     /usr/local/bin/flyer-delivery-report \
+    /usr/local/bin/flyer-recovery-watchdog \
+    /usr/local/bin/flyer-recovery-preflight \
     /usr/local/bin/send-flyer-campaign \
     /usr/local/bin/smoke-flyer-quality \
     /usr/local/bin/send-flyer-package ; do
@@ -89,6 +91,7 @@ import flyer_workflow
 import flyer_onboarding
 import flyer_account
 import flyer_starter_briefs
+import flyer_recovery
 print('schema classes:', [c for c in dir(schemas) if not c.startswith('_')][:5])
 " > /dev/null; then
     echo "FAIL: Python modules don't import"
@@ -119,6 +122,16 @@ if ! sudo -u shift-agent "$PY" /usr/local/bin/flyer-delivery-report --json > /de
     exit 1
 fi
 echo "Flyer delivery report smoke passed"
+
+if ! sudo -u shift-agent "$PY" /usr/local/bin/flyer-recovery-watchdog --mode off --text > /dev/null; then
+    echo "FAIL: Flyer recovery watchdog failed"
+    exit 1
+fi
+if ! sudo -u shift-agent "$PY" /usr/local/bin/flyer-recovery-preflight --text > /dev/null; then
+    echo "FAIL: Flyer recovery preflight failed"
+    exit 1
+fi
+echo "Flyer recovery smoke passed"
 
 if [ -x /usr/local/bin/credential-minimized-readiness ]; then
     "$PY" /usr/local/bin/credential-minimized-readiness --format text || true
@@ -383,6 +396,8 @@ sd_verify_units=(
     /etc/systemd/system/send-routing-accuracy-summary.service
     /etc/systemd/system/send-routing-accuracy-summary.timer
     /etc/systemd/system/send-routing-accuracy-summary-failure.service
+    /etc/systemd/system/flyer-recovery-watchdog.service
+    /etc/systemd/system/flyer-recovery-watchdog.timer
 )
 # Include Agent #21 prune timer if installed AND its venv is present.
 # systemd-analyze verify checks ExecStart paths exist at verify time

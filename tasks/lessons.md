@@ -1,5 +1,12 @@
 # Lessons
 
+## 2026-05-22 - Flyer Hermes-first pivot
+
+- Flyer Studio should move judgment out of scattered regex/custom routing and into one Hermes intent layer. Deterministic code remains the contract/safety harness: state legality, account/quota/payment boundaries, provider posture, copy lint, audit, and safe IO.
+- Do not keep adding one-off phrase patches for new-vs-revision, account updates, status checks, source-edit/reference classification, or clarification loops unless it is an emergency production hotfix. Durable fixes should add replay/training examples and improve the Hermes intent layer + validator.
+- Hermes may propose customer replies, but customer-visible WhatsApp copy must pass deterministic Flyer copy policy before sending. Audit/Cockpit can keep full internal detail.
+- Keep current deterministic routing as fallback during the pivot. Promote Hermes from shadow to low-risk active only with replay evidence, validator proof, and live shadow disagreement checks.
+
 ## 2026-05-13 — Hermes-first and deployed-state first
 
 - Before live smoke interpretation or follow-on work, verify the active deployed Hermes mode/config and current code path. Do not infer from an older handoff.
@@ -88,6 +95,10 @@
 - Admin dashboard campaign sends must surface backend errors in the UI and visually separate "dry run" from a real WhatsApp send. A silent 401/403 or a primary-looking dry-run button makes the operator think the campaign system is broken even when the backend send path is healthy.
 - Media-backed event flyer edits such as "update this flyer, change name/date" are flyer work, not permanent brand-template replacement. Router heuristics must be business-category neutral and allow attached reference flyers to become project-level reference assets for any authorized requester.
 - Flyer Studio exact edits to uploaded artwork are not the same as new flyer generation with a reference image. Requests like "remove the extra 08:00" or "change this date/name" must preserve the source flyer and should be queued for source-preserving/manual edit handling until a true image-edit pipeline exists; never send a recreated poster titled or framed as "Uploaded Flyer Template."
+- Flyer Studio source-preserving edits queued as `source_edit_provider_unavailable` are operator work items, not slow background renders. If a customer waits on one, burn it down through manual completion or close/no-send, and treat missing provider-health/SLA alerts as a product defect.
+- Flyer Studio customer-facing replies should be short, outcome-first, and free of internal workflow detail. Do not expose raw requests, project IDs, provider state, source-preserving workflow, manual queue, or operator/audit language unless the customer explicitly needs that identifier; keep rich details in Cockpit and audit logs.
+- Flyer Studio manual/operator completions must send previews to the original inbound chat ID, including LID chats from cf-router audit/state, not a guessed phone JID. A bridge send can return ok for the wrong related JID while the customer-visible WhatsApp thread receives nothing.
+- Flyer Studio provider assumptions must distinguish OpenRouter generation/vision from the direct OpenAI source-edit path currently hardcoded in `render_source_edit_preview`. If the product posture is OpenRouter-only, source-edit provider selection/preflight is a backlog bug, not an operator misunderstanding.
 - Flyer Studio reference-scope authorization must be a continuation state, not a chat clarification loop. After the customer chooses authorized use, explains the relationship, and says to use saved account details, continue from the saved original request and uploaded media; do not ask them to resend details already present in state.
 - Flyer Studio one-time paid orders must fail closed without a nonblank payment reference. Dashboard/CLI activation paths are money gates, so `--activate` without proof must never mark an order paid.
 - Flyer Studio quick-flyer intake must treat unresolved LID-only sender identity as a scoped recovery prompt, not a subprocess call. Never pass `None` into guest-order CLI argv.
@@ -104,3 +115,10 @@
 - Flyer Studio queued source-preserving edits must treat customer check-ins such as `any update`, `is it ready`, and `what's the status` as queue-status requests, not as new edit corrections. Never send those through revision parsing or ask for exact text again after the original change request is already queued.
 - 2026-05-19 Flyer Studio E2E QA must visually inspect delivered pixels, not only text manifests. The manifest can self-report requested facts while the rendered poster still shows placeholders like `[price]` or ignores reference/menu content.
 - 2026-05-19 Flyer Studio parser fields are a quality gate. Before blaming image generation, verify `event_or_business_name`, `venue_or_location`, schedule, item names, prices, and reference assets; poisoned fields make premium-looking flyers wrong.
+- 2026-05-19 Codex config changes must be validated with a config-loading Codex command before handoff. Do not add partial `[mcp_servers.*]` override blocks for plugin-provided MCP servers unless the full required transport/server definition is present; incomplete overrides can break every session during skills refresh.
+- 2026-05-21 PR reviews of shadow helpers, previews, classifiers, tripwires, and self-eval code must validate the whole live-behavior contract in one pass. Build the live branch-order/exception/label truth table first, probe representative overlaps, and report all mismatches together instead of iterating one narrow mismatch per review round.
+- 2026-05-23 Flyer Studio WhatsApp loops must be debugged from live event/audit shape, not inferred from the visible chat bubble. A `fromMe` guard only fixes outbound-echo loops when the adapter actually exposes that metadata; if the loop continues, inspect message IDs/routes and add a replay/branch idempotency guard at the customer-visible send site.
+
+- 2026-05-23 Continued Flyer Studio WhatsApp looping after a send-site dedupe means the assumed send function was not the controlling live emitter or the runtime was replaying through another path. For customer-visible loops, first stop outbound blast radius, then prove the active emitter with live logs/process/timer/audit evidence before changing code.
+- 2026-05-23 Never run production-local pytest/replay jobs with access to the live WhatsApp bridge. `safe_io` must refuse bridge sends under `PYTEST_CURRENT_TEST`, and production source checkouts should carry that guard even if automation timers are disabled.
+- 2026-05-23 Hermes gateway restarts are part of the message-delivery data path. If `TimeoutStopSec` is shorter than Hermes' drain timeout, systemd can interrupt active agents and create resume/replay pressure; fix the unit before claiming a loop is solved.
