@@ -11,6 +11,7 @@ from pydantic import ValidationError, TypeAdapter
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src" / "platform"))
 
 from schemas import (  # noqa: E402
+    CfRouterIntercepted,
     Config,
     FlyerAsset,
     FlyerBrandKit,
@@ -287,6 +288,33 @@ def test_flyer_intake_session_accepts_brief_builder_statuses_and_fields():
         assert session.brief_raw_request.startswith("Create an evening snacks")
         assert session.brief_display_request == "Evening snacks, 4 PM to 7 PM."
         assert session.brief_source == "text"
+
+
+def test_flyer_intake_accepts_concierge_awaiting_choice_status():
+    session = FlyerIntakeSession(
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        status="concierge_awaiting_choice",
+        source="new_flyer",
+        started_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+    )
+
+    assert session.status == "concierge_awaiting_choice"
+
+
+def test_cf_router_allows_flyer_concierge_choice_audit_reason():
+    row = CfRouterIntercepted(
+        type="cf_router_intercepted",
+        ts=datetime(2026, 5, 23, tzinfo=timezone.utc),
+        reason="flyer_concierge_choice",
+        chat_id="17329837841@s.whatsapp.net",
+        subprocess_rc=0,
+        detail="customer_id=CUST0001; action=concierge_choice",
+    )
+
+    assert row.reason == "flyer_concierge_choice"
+    assert isinstance(TypeAdapter(LogEntry).validate_python(row.model_dump()), CfRouterIntercepted)
 
 
 def test_flyer_intake_session_still_rejects_unknown_brief_fields():

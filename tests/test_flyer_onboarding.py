@@ -1115,6 +1115,194 @@ def test_sample_idea_flow_previews_before_project_creation(tmp_path):
     assert "Use saved business name, address, phone, and logo" in approved.raw_request
 
 
+def test_returning_customer_vague_start_opens_concierge_choice(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 23, tzinfo=timezone.utc)
+    customer = _trial_customer(
+        customer_id="CUST0001",
+        business_name="Lakshmi's Kitchen",
+        phone="+17329837841",
+        now=now,
+    ).model_copy(update={"business_category": "restaurant", "preferred_language": "en"})
+    state_path.write_text(FlyerCustomerStore(customers=[customer]).model_dump_json(indent=2), encoding="utf-8")
+
+    result = handle_intake_message(
+        state_path=state_path,
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        message_id="welcome-back",
+        text="Hey Flyer-Studio, I'd like you to help me create a flyer",
+        start_source="concierge",
+        now=now,
+    )
+
+    assert result.action == "concierge_choice"
+    assert result.source == "new_flyer"
+    assert "Welcome back, Lakshmi's Kitchen" in result.reply_text
+    assert "What are we creating today?" in result.reply_text
+    assert "You can tell me in one message, or I can guide you step by step." in result.reply_text
+    assert "Pick a sample idea" not in result.reply_text
+    for internal in ("concierge", "intake", "brief_pending", "project_id", "source", "audit", "workflow"):
+        assert internal not in result.reply_text.lower()
+
+    store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert store.intake_sessions[0].status == "concierge_awaiting_choice"
+    assert store.intake_sessions[0].source == "new_flyer"
+    assert store.intake_sessions[0].creation_mode == ""
+
+
+def test_returning_customer_concierge_accepts_one_message_brief(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 23, tzinfo=timezone.utc)
+    customer = _trial_customer(
+        customer_id="CUST0001",
+        business_name="Lakshmi's Kitchen",
+        phone="+17329837841",
+        now=now,
+    ).model_copy(update={"business_category": "restaurant", "preferred_language": "en"})
+    state_path.write_text(FlyerCustomerStore(customers=[customer]).model_dump_json(indent=2), encoding="utf-8")
+
+    handle_intake_message(
+        state_path=state_path,
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        message_id="welcome-back",
+        text="Create flyer",
+        start_source="concierge",
+        now=now,
+    )
+
+    preview = handle_intake_message(
+        state_path=state_path,
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        message_id="brief",
+        text="Create a breakfast specials flyer Saturday 8 AM to 11 AM with Idli $4.99 and Dosa $8.99",
+        now=now,
+    )
+
+    assert preview.action == "brief_preview"
+    assert "I will create this flyer" in preview.reply_text
+    assert "breakfast specials" in preview.reply_text
+    assert "Reply APPROVE to start" in preview.reply_text
+    store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert store.intake_sessions[0].brief_source == "text"
+    for internal in ("concierge", "intake", "brief_pending", "project_id", "source", "audit", "workflow"):
+        assert internal not in preview.reply_text.lower()
+
+
+def test_returning_customer_concierge_can_enter_guided_mode(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 23, tzinfo=timezone.utc)
+    customer = _trial_customer(
+        customer_id="CUST0001",
+        business_name="Lakshmi's Kitchen",
+        phone="+17329837841",
+        now=now,
+    ).model_copy(update={"business_category": "restaurant", "preferred_language": "en"})
+    state_path.write_text(FlyerCustomerStore(customers=[customer]).model_dump_json(indent=2), encoding="utf-8")
+
+    handle_intake_message(
+        state_path=state_path,
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        message_id="welcome-back",
+        text="Create flyer",
+        start_source="concierge",
+        now=now,
+    )
+
+    guided = handle_intake_message(
+        state_path=state_path,
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        message_id="guide",
+        text="guide me step by step",
+        now=now,
+    )
+
+    assert guided.action == "guided_question"
+    assert "First, what are you promoting?" in guided.reply_text
+    store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert store.intake_sessions[0].status == "guided_collecting_goal"
+    assert store.intake_sessions[0].creation_mode == "guided"
+
+
+@pytest.mark.parametrize("reply", ["yes", "ok", "sure", "help me", "please", "yes help me"])
+def test_returning_customer_concierge_still_vague_followup_asks_open_prompt(tmp_path, reply):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 23, tzinfo=timezone.utc)
+    customer = _trial_customer(
+        customer_id="CUST0001",
+        business_name="Lakshmi's Kitchen",
+        phone="+17329837841",
+        now=now,
+    ).model_copy(update={"business_category": "restaurant", "preferred_language": "en"})
+    state_path.write_text(FlyerCustomerStore(customers=[customer]).model_dump_json(indent=2), encoding="utf-8")
+
+    handle_intake_message(
+        state_path=state_path,
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        message_id="welcome-back",
+        text="Create flyer",
+        start_source="concierge",
+        now=now,
+    )
+
+    followup = handle_intake_message(
+        state_path=state_path,
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        message_id="still-vague",
+        text=reply,
+        now=now,
+    )
+
+    assert followup.action == "concierge_choice"
+    assert "What is the flyer for?" in followup.reply_text
+    assert "event, offer, items/prices, date" in followup.reply_text
+    store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert store.intake_sessions[0].status == "concierge_awaiting_choice"
+    assert store.intake_sessions[0].creation_mode == ""
+
+
+@pytest.mark.parametrize("reply", ["ask questions", "you guide me", "guide me please", "walk me through it", "step by step please"])
+def test_returning_customer_concierge_guided_variants_enter_guided_mode(tmp_path, reply):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 23, tzinfo=timezone.utc)
+    customer = _trial_customer(
+        customer_id="CUST0001",
+        business_name="Lakshmi's Kitchen",
+        phone="+17329837841",
+        now=now,
+    ).model_copy(update={"business_category": "restaurant", "preferred_language": "en"})
+    state_path.write_text(FlyerCustomerStore(customers=[customer]).model_dump_json(indent=2), encoding="utf-8")
+
+    handle_intake_message(
+        state_path=state_path,
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        message_id="welcome-back",
+        text="Create flyer",
+        start_source="concierge",
+        now=now,
+    )
+
+    guided = handle_intake_message(
+        state_path=state_path,
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        message_id="guide",
+        text=reply,
+        now=now,
+    )
+
+    assert guided.action == "guided_question"
+    store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert store.intake_sessions[0].status == "guided_collecting_goal"
+
+
 def test_lid_only_active_customer_sample_idea_uses_saved_profile(tmp_path):
     state_path = tmp_path / "customers.json"
     now = datetime(2026, 5, 21, tzinfo=timezone.utc)

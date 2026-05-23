@@ -731,14 +731,15 @@ def test_sample_prompt_preference_text_is_account_command():
     assert not actions.is_flyer_starter_prompt_preference_command("status")
 
 
-def test_vague_flyer_start_for_active_customer_sends_starter_ideas(monkeypatch):
+def test_vague_flyer_start_for_active_customer_sends_concierge_choice(monkeypatch):
     hooks, actions = _load_plugin_modules()
     sent = {}
     created = {"called": False}
+    intake_calls = {}
     customer = {
         "customer_id": "CUST0001",
-        "business_name": "Spark Growth",
-        "business_category": "digital marketing agency",
+        "business_name": "Lakshmi's Kitchen",
+        "business_category": "restaurant",
         "status": "trial",
         "_starter_prompt_mode": "auto",
         "_starter_prompt_sent_count": 0,
@@ -754,20 +755,78 @@ def test_vague_flyer_start_for_active_customer_sends_starter_ideas(monkeypatch):
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
     monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
-    monkeypatch.setattr(actions, "claim_flyer_starter_prompt_send", lambda _customer_id: True)
+    monkeypatch.setattr(actions, "claim_flyer_starter_prompt_send", lambda _customer_id: (_ for _ in ()).throw(AssertionError("concierge must not claim starter prompt quota")))
+
+    def fake_intake(**kwargs):
+        intake_calls.update(kwargs)
+        return True, "", {
+            "reply_text": (
+                "Flyer Studio\n------------\n"
+                "Welcome back, Lakshmi's Kitchen. Yes, I am here to help. What are we creating today?\n\n"
+                "You can tell me in one message, or I can guide you step by step."
+            ),
+            "action": "concierge_choice",
+            "source": kwargs.get("start_source"),
+        }
+
+    monkeypatch.setattr(actions, "trigger_flyer_intake", fake_intake)
+    monkeypatch.setattr(actions, "trigger_create_flyer_project", lambda **_kwargs: created.update(called=True) or (True, "", {}))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "concierge-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+
+    result = hooks.pre_gateway_dispatch(SimpleNamespace(
+        text="Hey Flyer-Studio, I'd like you to help me create a flyer",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="m1",
+    ))
+
+    assert result == {"action": "skip", "reason": "cf-router flyer concierge choice sent"}
+    assert created["called"] is False
+    assert sent["chat_id"] == "17329837841@s.whatsapp.net"
+    assert "Welcome back, Lakshmi's Kitchen" in sent["text"]
+    assert "You can tell me in one message, or I can guide you step by step." in sent["text"]
+    assert "Pick one idea" not in sent["text"]
+    assert intake_calls["start_source"] == "concierge"
+    assert intake_calls["original_text"] == "Hey Flyer-Studio, I'd like you to help me create a flyer"
+
+
+@pytest.mark.parametrize(
+    ("mode", "sent_count"),
+    [("off", 0), ("auto", 1)],
+)
+def test_vague_flyer_start_sends_concierge_even_when_starter_prompts_unavailable(monkeypatch, mode, sent_count):
+    hooks, actions = _load_plugin_modules()
+    sent = {}
+    customer = {
+        "customer_id": "CUST0001",
+        "business_name": "Lakshmi's Kitchen",
+        "business_category": "restaurant",
+        "status": "trial",
+        "_starter_prompt_mode": mode,
+        "_starter_prompt_sent_count": sent_count,
+    }
+
+    monkeypatch.setattr(actions, "is_flyer_enabled", lambda: True)
+    monkeypatch.setattr(actions, "flyer_campaign_cta_text", lambda _text: "")
+    monkeypatch.setattr(hooks, "_try_flyer_intake_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_account_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_reference_scope_choice_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_source_vs_new_choice_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_reference_scope_authorization_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_existing_onboarding_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
+    monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
+    monkeypatch.setattr(actions, "claim_flyer_starter_prompt_send", lambda _customer_id: (_ for _ in ()).throw(AssertionError("concierge must not claim starter prompt quota")))
     monkeypatch.setattr(actions, "trigger_flyer_intake", lambda **_kwargs: (True, "", {
         "reply_text": (
             "Flyer Studio\n------------\n"
-            "Pick one idea and I will turn it into a flyer brief.\n\n"
-            "1. Grow Your Business with Modern Marketing\n"
-            "2. Weekly Service Spotlight\n"
-            "3. Limited-Time Offer\n\n"
-            "Reply 1 or 2."
+            "Welcome back, Lakshmi's Kitchen. Yes, I am here to help. What are we creating today?\n\n"
+            "You can tell me in one message, or I can guide you step by step."
         ),
-        "action": "choose_sample_idea",
+        "action": "concierge_choice",
     }))
-    monkeypatch.setattr(actions, "trigger_create_flyer_project", lambda **_kwargs: created.update(called=True) or (True, "", {}))
-    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "starter-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "concierge-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
     result = hooks.pre_gateway_dispatch(SimpleNamespace(
@@ -776,11 +835,83 @@ def test_vague_flyer_start_for_active_customer_sends_starter_ideas(monkeypatch):
         message_id="m1",
     ))
 
-    assert result == {"action": "skip", "reason": "cf-router flyer starter ideas sent"}
-    assert created["called"] is False
-    assert sent["chat_id"] == "17329837841@s.whatsapp.net"
-    assert "Pick one idea" in sent["text"]
-    assert "Grow Your Business with Modern Marketing" in sent["text"]
+    assert result == {"action": "skip", "reason": "cf-router flyer concierge choice sent"}
+    assert "Welcome back, Lakshmi's Kitchen" in sent["text"]
+
+
+def test_concierge_awaiting_choice_is_protected_from_new_project_bypass(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    sent = {}
+    primary_called = {"called": False}
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"status": "trial", "customer_id": "CUST0001"})
+    monkeypatch.setattr(actions, "find_flyer_intake_session_by_sender", lambda _phone, _chat_id: {"status": "concierge_awaiting_choice"})
+    monkeypatch.setattr(actions, "trigger_flyer_intake", lambda **_kwargs: (True, "", {
+        "action": "brief_preview",
+        "reply_text": "Flyer Studio\n------------\nI will create this flyer.\n\nReply APPROVE to start.",
+    }))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "preview-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_primary_intercept", lambda *_args, **_kwargs: primary_called.update(called=True) or {"action": "skip", "reason": "unexpected primary"})
+
+    result = hooks._try_flyer_intake_intercept(
+        "Create a breakfast specials flyer Saturday 8 AM to 11 AM with Idli $4.99",
+        "17329837841@s.whatsapp.net",
+        SimpleNamespace(message_id="brief"),
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer intake: brief_preview"}
+    assert primary_called["called"] is False
+    assert "I will create this flyer" in sent["text"]
+
+
+@pytest.mark.parametrize("status", ["awaiting_concept_selection", "awaiting_final_approval", "manual_edit_required"])
+def test_vague_start_for_active_customer_routes_to_concierge_before_active_project(monkeypatch, status):
+    hooks, actions = _load_plugin_modules()
+    sent = {}
+    customer = {
+        "customer_id": "CUST0001",
+        "business_name": "Lakshmi's Kitchen",
+        "business_category": "restaurant",
+        "status": "trial",
+    }
+
+    monkeypatch.setattr(actions, "is_flyer_enabled", lambda: True)
+    monkeypatch.setattr(actions, "flyer_campaign_cta_text", lambda _text: "")
+    monkeypatch.setattr(hooks, "_try_flyer_intake_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_account_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_reference_scope_choice_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_source_vs_new_choice_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_reference_scope_authorization_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_existing_onboarding_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
+    monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
+    monkeypatch.setattr(actions, "trigger_flyer_intake", lambda **_kwargs: (True, "", {
+        "reply_text": (
+            "Flyer Studio\n------------\n"
+            "Welcome back, Lakshmi's Kitchen. Yes, I am here to help. What are we creating today?\n\n"
+            "You can tell me in one message, or I can guide you step by step."
+        ),
+        "action": "concierge_choice",
+    }))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "concierge-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        hooks,
+        "_try_flyer_active_project_intercept",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError(f"active project {status} must not swallow vague start")),
+    )
+
+    result = hooks.pre_gateway_dispatch(SimpleNamespace(
+        text="Create flyer",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id=f"m-active-{status}",
+    ))
+
+    assert result == {"action": "skip", "reason": "cf-router flyer concierge choice sent"}
+    assert "Welcome back, Lakshmi's Kitchen" in sent["text"]
 
 
 def test_vague_flyer_start_for_ineligible_customer_status_does_not_send_starter(monkeypatch):
@@ -851,7 +982,7 @@ def test_explicit_flyer_request_for_ineligible_customer_status_does_not_create_p
     assert "waiting for payment" in sent[0].lower()
 
 
-def test_vague_flyer_start_for_opted_out_customer_asks_short_clarification(monkeypatch):
+def test_vague_flyer_start_for_opted_out_customer_sends_concierge(monkeypatch):
     hooks, actions = _load_plugin_modules()
     sent = []
     customer = {
@@ -874,6 +1005,14 @@ def test_vague_flyer_start_for_opted_out_customer_asks_short_clarification(monke
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
     monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
+    monkeypatch.setattr(actions, "trigger_flyer_intake", lambda **_kwargs: (True, "", {
+        "reply_text": (
+            "Flyer Studio\n------------\n"
+            "Welcome back, Demo Salon. Yes, I am here to help. What are we creating today?\n\n"
+            "You can tell me in one message, or I can guide you step by step."
+        ),
+        "action": "concierge_choice",
+    }))
     monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
@@ -883,12 +1022,13 @@ def test_vague_flyer_start_for_opted_out_customer_asks_short_clarification(monke
         message_id="m-vague",
     ))
 
-    assert result == {"action": "skip", "reason": "cf-router flyer starter preference off clarification sent"}
+    assert result == {"action": "skip", "reason": "cf-router flyer concierge choice sent"}
     assert "Here is a starter flyer request" not in sent[0]
-    assert "What should this flyer promote?" in sent[0]
+    assert "Welcome back, Demo Salon" in sent[0]
+    assert "You can tell me in one message, or I can guide you step by step." in sent[0]
 
 
-def test_vague_flyer_start_after_first_starter_asks_short_clarification(monkeypatch):
+def test_vague_flyer_start_after_first_starter_sends_concierge(monkeypatch):
     hooks, actions = _load_plugin_modules()
     sent = []
     customer = {
@@ -911,6 +1051,14 @@ def test_vague_flyer_start_after_first_starter_asks_short_clarification(monkeypa
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
     monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
+    monkeypatch.setattr(actions, "trigger_flyer_intake", lambda **_kwargs: (True, "", {
+        "reply_text": (
+            "Flyer Studio\n------------\n"
+            "Welcome back, Demo Salon. Yes, I am here to help. What are we creating today?\n\n"
+            "You can tell me in one message, or I can guide you step by step."
+        ),
+        "action": "concierge_choice",
+    }))
     monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
@@ -920,13 +1068,20 @@ def test_vague_flyer_start_after_first_starter_asks_short_clarification(monkeypa
         message_id="m-vague",
     ))
 
-    assert result == {"action": "skip", "reason": "cf-router flyer starter already sent clarification sent"}
+    assert result == {"action": "skip", "reason": "cf-router flyer concierge choice sent"}
     assert "Here is a starter flyer request" not in sent[0]
-    assert "What should this flyer promote?" in sent[0]
+    assert "Welcome back, Demo Salon" in sent[0]
+    assert "You can tell me in one message, or I can guide you step by step." in sent[0]
 
 
-def test_vague_start_during_active_project_routes_to_project_not_starter(monkeypatch):
+def test_vague_start_during_active_project_routes_to_concierge_not_project(monkeypatch):
     hooks, actions = _load_plugin_modules()
+    customer = {
+        "customer_id": "CUST0001",
+        "business_name": "Demo Salon",
+        "business_category": "salon",
+        "status": "trial",
+    }
     monkeypatch.setattr(actions, "is_flyer_enabled", lambda: True)
     monkeypatch.setattr(actions, "is_vague_flyer_start", lambda _text, has_media=False: True)
     monkeypatch.setattr(actions, "flyer_campaign_cta_text", lambda _text: "")
@@ -935,8 +1090,20 @@ def test_vague_start_during_active_project_routes_to_project_not_starter(monkeyp
     monkeypatch.setattr(hooks, "_try_flyer_reference_scope_choice_intercept", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(hooks, "_try_flyer_reference_scope_authorization_intercept", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(hooks, "_try_flyer_existing_onboarding_intercept", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(hooks, "_try_flyer_active_project_intercept", lambda *_args: {"action": "skip", "reason": "active project"})
-    monkeypatch.setattr(actions, "send_flyer_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not send starter")))
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
+    monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
+    monkeypatch.setattr(actions, "trigger_flyer_intake", lambda **_kwargs: (True, "", {
+        "reply_text": (
+            "Flyer Studio\n------------\n"
+            "Welcome back, Demo Salon. Yes, I am here to help. What are we creating today?\n\n"
+            "You can tell me in one message, or I can guide you step by step."
+        ),
+        "action": "concierge_choice",
+    }))
+    monkeypatch.setattr(hooks, "_try_flyer_active_project_intercept", lambda *_args: (_ for _ in ()).throw(AssertionError("vague start must not route to active project")))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda *_args, **_kwargs: (True, "mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
     result = hooks.pre_gateway_dispatch(SimpleNamespace(
         text="Create flyer",
@@ -944,7 +1111,7 @@ def test_vague_start_during_active_project_routes_to_project_not_starter(monkeyp
         message_id="m-active",
     ))
 
-    assert result == {"action": "skip", "reason": "active project"}
+    assert result == {"action": "skip", "reason": "cf-router flyer concierge choice sent"}
 
 
 def test_from_me_flyer_messages_are_ignored_before_router_branches(monkeypatch):

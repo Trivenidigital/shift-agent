@@ -1331,3 +1331,15 @@ Review results:
   - [x] Add red regressions for `all you can eat @ $25.99`, `Update Prices of any biryani to $22.99`, `Where is the update flyer?`, and final visual-QA failure after `APPROVE`.
   - [x] Implement minimal code fixes and verify focused Flyer facts/workflow/visual-QA/router suite.
   - Review: focused regression tests first failed, then passed; broader focused suite `198 passed`.
+- [ ] Flyer Studio concierge intake for returning vague starts (2026-05-23): warm welcome back prompt should offer "one message" or "guide me step by step" instead of defaulting to sample ideas.
+  - Drift-check tag: extends-Hermes
+  - Hermes-first analysis: reuse Hermes/cf-router WhatsApp ingress, Flyer sender identity, existing `FlyerIntakeSession`, brief approval, project creation, quota, and render flow. Net-new scope is one returning-customer intake status and customer-facing copy.
+  - [x] Write implementation plan: `docs/superpowers/plans/2026-05-23-flyer-concierge-intake.md`.
+  - [ ] Get implementation plan reviewed by two parallel agents.
+  - [x] Fix plan review findings.
+  - [x] Write design spec: `docs/superpowers/specs/2026-05-23-flyer-concierge-intake-design.md`.
+  - [x] Get design spec reviewed by two parallel agents.
+  - [x] Fix design review findings.
+  - [x] Build with TDD and focused verification.
+  - Review: red concierge tests first failed across schema/intake/router, then passed. Focused suite `tests/test_flyer_onboarding.py tests/test_cf_router_flyer_routing.py tests/test_flyer_schemas.py tests/test_flyer_starter_briefs.py` -> `245 passed`; plugin/static suite `tests/test_cf_router_plugin.py tests/test_flyer_scripts_static.py` -> `33 passed, 119 skipped`; touched-file `py_compile` and `git diff --check` passed.
+  - [ ] Open PR and get two parallel PR reviews.

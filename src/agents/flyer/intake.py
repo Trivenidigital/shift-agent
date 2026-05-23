@@ -100,6 +100,30 @@ def handle_intake_message(
 
     if start_source:
         source = _normalize_source(start_source)
+        if start_source == "concierge" and customer and customer.status in {"trial", "active"}:
+            session = FlyerIntakeSession(
+                chat_id=chat_id,
+                sender_phone=_phone_or_none(sender_phone),
+                status="concierge_awaiting_choice",
+                source=source,
+                started_at=now,
+                updated_at=now,
+                last_message_id=message_id,
+                original_text=original_text or normalized_text,
+                preferred_language=customer.preferred_language,
+                reference_media_path=media_path or "",
+                reference_media_message_id=message_id if media_path else "",
+            )
+            store.replace_intake_session(session)
+            write_customer_store(state_path, store)
+            return IntakeResult(
+                True,
+                _concierge_choice_reply(customer),
+                "concierge_choice",
+                source=source,
+                preferred_language=customer.preferred_language,
+                customer_id=customer.customer_id,
+            )
         if start_source in {"sample_idea", "starter_idea"} and customer and customer.status in {"trial", "active"}:
             session = FlyerIntakeSession(
                 chat_id=chat_id,
@@ -152,6 +176,71 @@ def handle_intake_message(
         return IntakeResult(False, "")
 
     media_update = _reference_media_update(media_path, message_id)
+
+    if session.status == "concierge_awaiting_choice":
+        if _is_cancel_reply(text):
+            store.discard_intake_session(session)
+            write_customer_store(state_path, store)
+            return IntakeResult(True, _brief_cancelled_reply(), "brief_cancelled")
+        mode = parse_concierge_choice(normalized_text)
+        if mode == "guided":
+            session = session.model_copy(update={
+                "creation_mode": "guided",
+                "status": "guided_collecting_goal",
+                "last_message_id": message_id,
+                "updated_at": now,
+                **media_update,
+            })
+            store.replace_intake_session(session)
+            write_customer_store(state_path, store)
+            return IntakeResult(
+                True,
+                _guided_goal_prompt(session.preferred_language),
+                "guided_question",
+                source=session.source,
+                preferred_language=session.preferred_language,
+                creation_mode="guided",
+                customer_id=customer.customer_id if customer else "",
+            )
+        if mode == "vague":
+            session = session.model_copy(update={
+                "last_message_id": message_id,
+                "updated_at": now,
+                **media_update,
+            })
+            store.replace_intake_session(session)
+            write_customer_store(state_path, store)
+            return IntakeResult(
+                True,
+                _concierge_still_vague_reply(customer),
+                "concierge_choice",
+                source=session.source,
+                preferred_language=session.preferred_language,
+                customer_id=customer.customer_id if customer else "",
+            )
+        raw_request = _build_pending_brief_request(session, customer, text, source="text")
+        session = session.model_copy(update={
+            "creation_mode": "text",
+            "brief_raw_request": raw_request,
+            "brief_display_request": _visible_reply_text(text),
+            "brief_source": "text",
+            "status": "brief_pending_approval",
+            "last_message_id": message_id,
+            "updated_at": now,
+            **media_update,
+        })
+        store.replace_intake_session(session)
+        write_customer_store(state_path, store)
+        return IntakeResult(
+            True,
+            _brief_preview_reply(session, customer),
+            "brief_preview",
+            source=session.source,
+            preferred_language=session.preferred_language,
+            creation_mode="text",
+            customer_id=customer.customer_id if customer else "",
+            reference_media_path=session.reference_media_path,
+        )
 
     if session.status == "choosing_language":
         language = parse_language_choice(normalized_text)
@@ -505,6 +594,45 @@ def parse_mode_choice(text: str, *, prompt_version: str = "brief_builder_v1") ->
     return ""
 
 
+def parse_concierge_choice(text: str) -> str:
+    choice = " ".join(re.sub(r"[^a-z0-9 ]+", " ", (text or "").lower()).split())
+    guided_phrases = {
+        "guide",
+        "guided",
+        "guide me",
+        "guide me step by step",
+        "guide me please",
+        "you guide me",
+        "step by step",
+        "step by step please",
+        "ask me questions",
+        "ask questions",
+        "walk me through it",
+    }
+    vague_phrases = {
+        "yes",
+        "ok",
+        "okay",
+        "sure",
+        "please",
+        "help",
+        "help me",
+        "please help",
+        "yes help me",
+        "create flyer",
+        "create a flyer",
+        "make flyer",
+        "make a flyer",
+        "i need a flyer",
+        "need flyer",
+    }
+    if choice in guided_phrases:
+        return "guided"
+    if choice in vague_phrases:
+        return "vague"
+    return "text"
+
+
 def language_label(code: str) -> str:
     for language_code, label, _aliases in LANGUAGES:
         if language_code == code:
@@ -525,6 +653,8 @@ def _reference_media_update(media_path: str, message_id: str) -> dict[str, str]:
 def _normalize_source(source: str) -> FlyerIntakeSource:
     if source in {"start_trial", "act_now", "quick_flyer", "new_flyer"}:
         return source  # type: ignore[return-value]
+    if source == "concierge":
+        return "new_flyer"
     return "new_flyer"
 
 
@@ -580,6 +710,26 @@ def _mode_prompt(language: str, *, prefix: str = "") -> str:
         "Reply 1, 2, or 3.",
     ])
     return "\n".join(lines)
+
+
+def _concierge_choice_reply(customer: FlyerCustomerProfile) -> str:
+    business_name = customer.business_name.strip() or "your business"
+    return (
+        "Flyer Studio\n"
+        "------------\n"
+        f"Welcome back, {business_name}. Yes, I am here to help. What are we creating today?\n\n"
+        "You can tell me in one message, or I can guide you step by step."
+    )
+
+
+def _concierge_still_vague_reply(customer: Optional[FlyerCustomerProfile]) -> str:
+    del customer
+    return (
+        "Flyer Studio\n"
+        "------------\n"
+        "Sure. What is the flyer for? You can send the event, offer, items/prices, date, "
+        "or anything you already have."
+    )
 
 
 def _text_mode_ready_reply(
@@ -810,6 +960,7 @@ def _brief_preview_reply(
         f"Business: {_business_name(customer)}\n"
         f"Request: {request}\n"
         f"Language: {language_label(session.preferred_language)}\n\n"
+        f"{'I will use the attached reference or image if it is relevant. ' if session.reference_media_path else ''}"
         "Reply APPROVE to start, or tell me what to change."
     )
 

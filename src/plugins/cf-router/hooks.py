@@ -224,6 +224,9 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
                 )
                 if flyer_result is not None:
                     return flyer_result
+            concierge_result = _try_flyer_concierge_vague_start_intercept(text, chat_id, event, media_path=media_path)
+            if concierge_result is not None:
+                return concierge_result
             flyer_result = _try_flyer_active_project_intercept(text, chat_id, event, media_path)
             if flyer_result is not None:
                 return flyer_result
@@ -238,63 +241,7 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
                 if role != "owner":
                     customer = actions.find_flyer_customer_by_sender(phone, chat_id)
                     if customer and customer.get("status") in {"trial", "active"}:
-                        if (
-                            actions.flyer_starter_prompts_enabled(customer)
-                            and not actions.flyer_starter_prompt_already_sent(customer)
-                            and actions.claim_flyer_starter_prompt_send(str(customer.get("customer_id") or ""))
-                        ):
-                            ok, detail, intake = actions.trigger_flyer_intake(
-                                chat_id=chat_id,
-                                sender_phone=phone,
-                                message_id=_extract_message_id(event, chat_id, text),
-                                text=text,
-                                media_path=media_path or "",
-                                start_source="sample_idea",
-                                original_text=text,
-                            )
-                            if not ok or not intake:
-                                actions.release_flyer_starter_prompt_claim(str(customer.get("customer_id") or ""))
-                                actions.audit_intercepted(
-                                    reason="flyer_intake_failed",
-                                    chat_id=chat_id,
-                                    subprocess_rc=2,
-                                    detail=f"source=sample_idea; detail={detail[:450]}",
-                                )
-                                return None
-                            reply = str(intake.get("reply_text") or "")
-                            ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
-                            if not ack_ok and not mid:
-                                actions.release_flyer_starter_prompt_claim(str(customer.get("customer_id") or ""))
-                            actions.audit_intercepted(
-                                reason="flyer_starter_ideas",
-                                chat_id=chat_id,
-                                subprocess_rc=0 if ack_ok else 3,
-                                detail=(
-                                    f"customer_id={customer.get('customer_id') or ''}; sender_role={role}; "
-                                    f"action={intake.get('action') or ''}; "
-                                    f"ack_message_id={mid}; ack_error={err[:300]}"
-                                ),
-                            )
-                            return {"action": "skip", "reason": "cf-router flyer starter ideas sent"}
-                        reply = actions.flyer_vague_request_clarification_reply(customer)
-                        ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
-                        reason = (
-                            "flyer_starter_preference_off"
-                            if not actions.flyer_starter_prompts_enabled(customer)
-                            else "flyer_starter_already_sent"
-                        )
-                        actions.audit_intercepted(
-                            reason=reason,
-                            chat_id=chat_id,
-                            subprocess_rc=0 if ack_ok else 3,
-                            detail=(
-                                f"customer_id={customer.get('customer_id') or ''}; sender_role={role}; "
-                                f"ack_message_id={mid}; ack_error={err[:300]}"
-                            ),
-                        )
-                        if reason == "flyer_starter_preference_off":
-                            return {"action": "skip", "reason": "cf-router flyer starter preference off clarification sent"}
-                        return {"action": "skip", "reason": "cf-router flyer starter already sent clarification sent"}
+                        return _send_flyer_concierge_choice(text, chat_id, event, phone, role, customer, media_path=media_path)
                     elif customer:
                         reply = actions.flyer_customer_not_active_reply(customer)
                         ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
@@ -1673,6 +1620,66 @@ def _start_flyer_intake(
     return {"action": "skip", "reason": f"cf-router flyer intake started: {source}"}
 
 
+def _try_flyer_concierge_vague_start_intercept(
+    text: str,
+    chat_id: str,
+    event: Any,
+    *,
+    media_path: Optional[str] = None,
+) -> Optional[dict]:
+    if not actions.is_vague_flyer_start(text, has_media=bool(media_path)):
+        return None
+    phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
+    if role == "owner":
+        return None
+    customer = actions.find_flyer_customer_by_sender(phone, chat_id)
+    if not customer or customer.get("status") not in {"trial", "active"}:
+        return None
+    return _send_flyer_concierge_choice(text, chat_id, event, phone, role, customer, media_path=media_path)
+
+
+def _send_flyer_concierge_choice(
+    text: str,
+    chat_id: str,
+    event: Any,
+    phone: str,
+    role: str,
+    customer: dict,
+    *,
+    media_path: Optional[str] = None,
+) -> dict:
+    ok, detail, intake = actions.trigger_flyer_intake(
+        chat_id=chat_id,
+        sender_phone=phone,
+        message_id=_extract_message_id(event, chat_id, text),
+        text=text,
+        media_path=media_path or "",
+        start_source="concierge",
+        original_text=text,
+    )
+    if not ok or not intake:
+        actions.audit_intercepted(
+            reason="flyer_intake_failed",
+            chat_id=chat_id,
+            subprocess_rc=2,
+            detail=f"source=concierge; detail={detail[:450]}",
+        )
+        return {"action": "skip", "reason": "cf-router flyer concierge failed"}
+    reply = str(intake.get("reply_text") or "")
+    ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+    actions.audit_intercepted(
+        reason="flyer_concierge_choice",
+        chat_id=chat_id,
+        subprocess_rc=0 if ack_ok else 3,
+        detail=(
+            f"customer_id={customer.get('customer_id') or ''}; sender_role={role}; "
+            f"action={intake.get('action') or ''}; "
+            f"ack_message_id={mid}; ack_error={err[:300]}"
+        ),
+    )
+    return {"action": "skip", "reason": "cf-router flyer concierge choice sent"}
+
+
 def _try_flyer_intake_intercept(
     text: str,
     chat_id: str,
@@ -1687,6 +1694,7 @@ def _try_flyer_intake_intercept(
     customer = actions.find_flyer_customer_by_sender(phone, chat_id)
     intake_session = actions.find_flyer_intake_session_by_sender(phone, chat_id)
     protected_statuses = {
+        "concierge_awaiting_choice",
         "choosing_sample_idea",
         "text_awaiting_brief",
         "guided_collecting_goal",
