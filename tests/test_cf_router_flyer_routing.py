@@ -2153,6 +2153,8 @@ def test_flyer_project_status_request_classifier_keeps_edits_separate():
         "where's the update flyer?",
         "what's the status",
         "is the flyer ready",
+        "is it ready yet?",
+        "ready yet?",
         "still waiting",
         "how long will it take",
     ]:

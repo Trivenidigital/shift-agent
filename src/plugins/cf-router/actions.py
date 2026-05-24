@@ -1929,7 +1929,7 @@ def is_flyer_project_status_request(text: str) -> bool:
     )
     if edit_starter:
         return False
-    if re.fullmatch(r"(status|any update|any updates|update|updates|eta|ready|done|finished)\??", body):
+    if re.fullmatch(r"(status|any update|any updates|update|updates|eta|ready(?:\s+yet)?|done|finished)\??", body):
         return True
     return bool(re.search(
         r"\b("
@@ -1938,7 +1938,7 @@ def is_flyer_project_status_request(text: str) -> bool:
         r"(what'?s|whats|what\s+is)\s+the\s+status|"
         r"where(?:'s|\s+is)\s+(?:the\s+)?(?:update\s+)?(?:flyer|flier|design|preview)|"
         r"status\s+(please|pls|update)|"
-        r"is\s+(it|the\s+flyer|my\s+flyer)\s+(ready|done|finished)|"
+        r"is\s+(it|the\s+flyer|my\s+flyer)\s+(ready(?:\s+yet)?|done|finished)|"
         r"when\s+(will|can)\s+(it|the\s+flyer|my\s+flyer)\s+be\s+(ready|done|finished)|"
         r"how\s+long|"
         r"still\s+waiting|"
