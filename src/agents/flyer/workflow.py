@@ -259,9 +259,12 @@ def _extract_remove_time_instruction(text: str) -> str:
     if not re.search(r"\b(?:remove|delete|exclude)\b", text, flags=re.IGNORECASE):
         return ""
     match = re.search(r"(?<![$\d])\b(?P<time>\d{1,2}:\d{2})\b(?!\.\d)", text)
-    if not match:
+    if match:
+        return f'Remove time text "{match.group("time")}" from the flyer.'
+    ampm_match = re.search(r"(?<![$\d])\b(?P<time>\d{1,2}\s*(?:am|pm))\b", text, flags=re.IGNORECASE)
+    if not ampm_match:
         return ""
-    return f'Remove time text "{match.group("time")}" from the flyer.'
+    return f'Remove time text "{ampm_match.group("time").upper()}" from the flyer.'
 
 
 def _normalized_text_and_map(text: str) -> tuple[str, list[int]]:
@@ -620,9 +623,21 @@ def _extract_extra_time_instruction(text: str) -> str:
         r"(?<![$\d])\b(?P<time>\d{1,2}(?::\d{2})?)\b(?!\.\d)",
         marker.group("tail"),
     )
-    if not match or not re.search(r"\b(?:remove|delete|exclude)\b", text[:marker.start()], flags=re.IGNORECASE):
+    if not match:
+        ampm_match = re.search(
+            r"(?<![$\d])\b(?P<time>\d{1,2}\s*(?:am|pm))\b",
+            marker.group("tail"),
+            flags=re.IGNORECASE,
+        )
+        if ampm_match:
+            match_time = ampm_match.group("time").upper()
+        else:
+            match_time = ""
+    else:
+        match_time = match.group("time")
+    if not match_time or not re.search(r"\b(?:remove|delete|exclude)\b", text[:marker.start()], flags=re.IGNORECASE):
         return ""
-    return f'Remove duplicate/extra time text "{match.group("time")}" from the flyer.'
+    return f'Remove duplicate/extra time text "{match_time}" from the flyer.'
 
 
 def _extract_item_add_instruction(text: str) -> str:
