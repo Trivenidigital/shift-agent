@@ -66,6 +66,13 @@ F7_WATCHDOG_TIMEOUT_SEC = 30
 # No IGNORECASE: codes are emitted uppercase by generate_unique_code; the
 # dispatcher rejects lowercase, so matching lowercase here just adds surface.
 _CODE_PATTERN = re.compile(r"#([A-HJ-NP-Z2-9]{5})")
+_SAMPLE_PROMPT_REQUEST = re.compile(
+    r"\b(?:sample|example|starter)\s+(?:prompt|prompts|idea|ideas)\b"
+    r"|\b(?:give|send|show|share|suggest|provide)\b.{0,60}"
+    r"\b(?:sample|example|starter)?\s*(?:prompt|prompts|idea|ideas|examples)\b.{0,60}"
+    r"\b(?:flyer|flier|poster|marketing)\b",
+    re.IGNORECASE,
+)
 
 # Verb classifier — mirrors the F8 watchdog's accepted verb set so plugin
 # coverage matches the watchdog it replaces. Past-tense forms ("approved",
@@ -193,6 +200,9 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
             account_result = _try_flyer_account_intercept(text, chat_id, event)
             if account_result is not None:
                 return account_result
+            sample_prompt_result = _try_flyer_sample_prompt_request_intercept(text, chat_id, event, media_path)
+            if sample_prompt_result is not None:
+                return sample_prompt_result
             intake_result = _try_flyer_intake_intercept(text, chat_id, event, media_path=media_path)
             if intake_result is not None:
                 return intake_result
@@ -430,6 +440,64 @@ def _try_f8_intercept(text: str, chat_id: str) -> Optional[dict]:
     # Code didn't match any open lead/pending — let LLM handle (might be
     # a stale reference; LLM can tell the owner)
     return None
+
+
+def _try_flyer_sample_prompt_request_intercept(text: str, chat_id: str, event: Any, media_path: Optional[str]) -> Optional[dict]:
+    if actions.is_flyer_starter_prompt_preference_command(text):
+        return None
+    body = " ".join(actions.flyer_visible_message_text(text).split())
+    if not _SAMPLE_PROMPT_REQUEST.search(body):
+        return None
+
+    phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
+    if role == "owner":
+        return None
+    customer = actions.find_flyer_customer_by_sender(phone, chat_id)
+    if not customer:
+        return None
+    if customer.get("status") not in {"trial", "active"}:
+        reply = actions.flyer_customer_not_active_reply(customer)
+        ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+        actions.audit_intercepted(
+            reason="flyer_customer_not_active",
+            chat_id=chat_id,
+            subprocess_rc=0 if ack_ok else 3,
+            detail=(
+                f"customer_id={customer.get('customer_id') or ''}; status={customer.get('status') or ''}; "
+                f"sender_role={role}; sample_prompt_request=true; ack_message_id={mid}; ack_error={err[:300]}"
+            ),
+        )
+        return {"action": "skip", "reason": "cf-router flyer customer not active"}
+
+    ok, detail, intake = actions.trigger_flyer_intake(
+        chat_id=chat_id,
+        sender_phone=phone,
+        message_id=_extract_message_id(event, chat_id, text),
+        text=text,
+        media_path=media_path or "",
+        start_source="sample_idea",
+        original_text=text,
+    )
+    if not ok or not intake:
+        actions.audit_intercepted(
+            reason="flyer_intake_failed",
+            chat_id=chat_id,
+            subprocess_rc=2,
+            detail=f"source=explicit_sample_prompt; detail={detail[:450]}",
+        )
+        return None
+    reply = str(intake.get("reply_text") or "")
+    ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+    actions.audit_intercepted(
+        reason="flyer_sample_prompt_requested",
+        chat_id=chat_id,
+        subprocess_rc=0 if ack_ok else 3,
+        detail=(
+            f"customer_id={customer.get('customer_id') or ''}; sender_role={role}; "
+            f"action={intake.get('action') or ''}; ack_message_id={mid}; ack_error={err[:300]}"
+        ),
+    )
+    return {"action": "skip", "reason": "cf-router flyer sample prompts sent"}
 
 
 def _try_flyer_primary_intercept(
