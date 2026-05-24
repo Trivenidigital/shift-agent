@@ -249,6 +249,46 @@ def test_visual_qa_allows_english_text_when_customer_requested_english_only(tmp_
     assert report.status == "passed", report.blockers
 
 
+def test_visual_qa_blocks_regional_script_when_request_says_only_english(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    now = datetime(2026, 5, 24, tzinfo=timezone.utc)
+    project = FlyerProject(
+        project_id="F0082",
+        status="awaiting_final_approval",
+        customer_phone="+17329837841",
+        created_at=now,
+        updated_at=now,
+        original_message_id="m-only-english",
+        raw_request="Create poster for weekend offer. Use only English for all text.",
+        locked_facts=[
+            FlyerLockedFact(
+                fact_id="business_name",
+                label="Business",
+                value="Lakshmis Kitchn",
+                source="customer_profile",
+                required=True,
+            ),
+            FlyerLockedFact(
+                fact_id="contact_phone",
+                label="Contact",
+                value="+17329837841",
+                source="customer_profile",
+                required=True,
+            ),
+        ],
+    )
+    artifact = _write_sidecar(
+        tmp_path,
+        "Lakshmis Kitchn Weekend Offer Call +17329837841 \u0c17\u0c23\u0c47\u0c36",
+    )
+
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert report.status == "failed"
+    assert any("English-only" in blocker for blocker in report.blockers)
+
+
 def test_visual_qa_fails_on_template_placeholder_strings(tmp_path):
     """Generic template leakage ("YOUR LOGO HERE", "CLICK HERE TO ADD TEXT") must fail QA
     even when every locked fact happens to be present, because the customer would receive
