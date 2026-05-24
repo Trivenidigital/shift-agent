@@ -112,6 +112,8 @@ def _phone_matches(visible: list[str], account: list[str]) -> bool:
         if not found_digits:
             continue
         for acct in account_digits:
+            if acct in found_digits or found_digits in acct:
+                return True
             if found_digits.endswith(acct[-10:]) or acct.endswith(found_digits[-10:]):
                 return True
     return False
