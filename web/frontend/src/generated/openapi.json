@@ -4,6 +4,11 @@
       "AuthStatus": {
         "description": "Public \u2014 drives login screen tab visibility. No sensitive data.",
         "properties": {
+          "auth_bypass_enabled": {
+            "default": false,
+            "title": "Auth Bypass Enabled",
+            "type": "boolean"
+          },
           "pushover_configured": {
             "title": "Pushover Configured",
             "type": "boolean"

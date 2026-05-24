@@ -1073,6 +1073,11 @@ export interface components {
          * @description Public — drives login screen tab visibility. No sensitive data.
          */
         AuthStatus: {
+            /**
+             * Auth Bypass Enabled
+             * @default false
+             */
+            auth_bypass_enabled: boolean;
             /** Pushover Configured */
             pushover_configured: boolean;
             /** Totp Enrolled */
