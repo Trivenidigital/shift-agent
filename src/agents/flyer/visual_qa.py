@@ -113,6 +113,7 @@ def _requires_english_only(project: FlyerProject) -> bool:
     text = f"{project.raw_request or ''} {getattr(project.fields, 'notes', '') or ''}".lower()
     return bool(
         re.search(r"\b(?:language\s*:\s*)?english\s+only\b", text)
+        or re.search(r"\bonly\s+english\b", text)
         or re.search(r"\b(?:do\s+not|don't|dont|no)\s+use\s+(?:telugu|hindi|tamil|malayalam|kannada|gujarati|marathi|punjabi|regional)", text)
         or "no regional indian language" in text
         or "no regional languages" in text
