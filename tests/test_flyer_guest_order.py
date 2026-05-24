@@ -43,6 +43,27 @@ def test_guest_order_starts_pending_payment_with_four_dollar_link(tmp_path):
     assert store.orders[0].sender_phone == "+17329837841"
 
 
+
+def test_guest_order_malformed_checkout_template_fails_closed(tmp_path):
+    state = tmp_path / "guest_orders.json"
+    now = datetime(2026, 5, 24, tzinfo=timezone.utc)
+
+    result = start_guest_order(
+        state_path=state,
+        sender_phone="+17329837841",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="cta-bad-template",
+        checkout_url_template="https://pay.example/quick/{missing_placeholder}",
+        now=now,
+    )
+
+    assert result.ok is True
+    assert result.status == "pending_payment"
+    assert result.payment_checkout_url == ""
+    assert "Payment link is not configured yet" in result.reply_text
+    store = load_guest_order_store(state)
+    assert store.orders[0].payment_checkout_url == ""
+
 def test_guest_order_activation_then_single_use_consumes_order(tmp_path):
     state = tmp_path / "guest_orders.json"
     now = datetime(2026, 5, 17, tzinfo=timezone.utc)
