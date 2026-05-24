@@ -239,6 +239,23 @@ def test_reference_scope_allows_phone_match_even_if_name_differs():
     assert result["reason"] == "reference_matches_account"
 
 
+def test_reference_scope_allows_related_attached_flyer_by_phone_match():
+    scope = _load_reference_scope_script()
+
+    result = scope.decide_scope(
+        business_name="Lakshmis Kitchen",
+        business_address="90 Brybar Dr",
+        account_phones=["+1 (732) 983-7841"],
+        raw_request="Please update this flyer date.",
+        extraction={
+            "visible_organization_names": ["Community Food Fest"],
+            "visible_phone_numbers": ["732-983-7841"],
+            "confidence": "high",
+        },
+    )
+
+    assert result["decision"] == "allow"
+
 def test_reference_scope_clarifies_when_reference_owner_is_unreadable():
     scope = _load_reference_scope_script()
 
