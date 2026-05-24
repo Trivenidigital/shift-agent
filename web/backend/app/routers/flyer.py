@@ -622,9 +622,19 @@ async def campaign_send(body: CampaignSendBody, request: Request, _=Depends(requ
     return result | {"invalid": parsed["invalid"], "duplicate_count": parsed["duplicate_count"]}
 
 
+def _manual_queue_stale_minutes_threshold() -> int:
+    """Read manual-queue stale threshold from deployed config, with schema default fallback."""
+    try:
+        from ..state import load_config
+
+        return int(load_config().flyer.recovery.manual_queue_stale_minutes)
+    except Exception:
+        return int(FlyerConfig().recovery.manual_queue_stale_minutes)
+
+
 def manual_queue_triage_action() -> dict[str, Any]:
     """Read-only triage view for the Flyer manual-review queue."""
-    threshold = int(get_settings().config.flyer.recovery.manual_queue_stale_minutes)
+    threshold = _manual_queue_stale_minutes_threshold()
     return triage_summary(load_project_store(), stale_minutes_threshold=threshold)
 
 
@@ -1582,7 +1592,7 @@ def _source_edit_manual_queue_impact() -> dict[str, Any]:
     exception loading the project store returns zero impact (the health
     endpoint must never raise).
     """
-    threshold = int(get_settings().config.flyer.recovery.manual_queue_stale_minutes)
+    threshold = _manual_queue_stale_minutes_threshold()
     try:
         rows = list_manual_queue(
             load_project_store(),
