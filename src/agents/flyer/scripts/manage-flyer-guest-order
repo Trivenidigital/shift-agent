@@ -55,16 +55,17 @@ STATE_PATH = Path("/opt/shift-agent/state/flyer/guest_orders.json")
 CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
 
 
-def _load_flyer_config(path: Path) -> tuple[int, str, str]:
+def _load_flyer_config(path: Path) -> tuple[int, str, str, str]:
     try:
         cfg = load_yaml_model(path, Config)
         return (
             cfg.flyer.quick_flyer_price_cents,
             cfg.flyer.quick_flyer_checkout_url_template,
             cfg.flyer.payment_checkout_url_template,
+            cfg.flyer.payment_provider,
         )
     except Exception:
-        return 400, "", ""
+        return 400, "", "", "manual"
 
 
 def _emit(result) -> int:
@@ -94,14 +95,17 @@ def main() -> int:
     p.add_argument("--chat-id", default="")
     p.add_argument("--message-id", default="")
     p.add_argument("--order-id", default="")
+    p.add_argument("--provider", default="")
     p.add_argument("--payment-reference", default="")
+    p.add_argument("--amount-cents", type=int, default=None)
+    p.add_argument("--currency", default="")
     p.add_argument("--project-id", default="")
     p.add_argument("--state-path", default=str(STATE_PATH))
     p.add_argument("--config-path", default=str(CONFIG_PATH))
     args = p.parse_args()
 
     state_path = Path(args.state_path)
-    price_cents, checkout_template, fallback_template = _load_flyer_config(Path(args.config_path))
+    price_cents, checkout_template, fallback_template, config_provider = _load_flyer_config(Path(args.config_path))
     with FileLock(Path(str(state_path) + ".lock")):
         try:
             if args.start:
@@ -113,6 +117,7 @@ def main() -> int:
                     checkout_url_template=checkout_template,
                     fallback_checkout_url_template=fallback_template,
                     unit_price_cents=price_cents,
+                    payment_provider=config_provider,
                 )
             elif args.activate:
                 if not " ".join((args.payment_reference or "").split()):
@@ -130,7 +135,10 @@ def main() -> int:
                     state_path=state_path,
                     order_id=args.order_id,
                     sender_phone=args.sender_phone,
+                    provider=args.provider or config_provider,
                     payment_reference=args.payment_reference,
+                    amount_cents=args.amount_cents,
+                    currency=args.currency,
                 )
             elif args.reserve:
                 result = reserve_guest_order(
