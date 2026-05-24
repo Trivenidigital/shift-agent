@@ -73,6 +73,15 @@
     "expect": {"route": "status_reply", "forbidden_calls": ["trigger_create_flyer_project", "invoke_update_flyer_project", "trigger_generate_flyer_concepts"]}
   },
   {
+    "id": "status-check-where-is-the-update-flyer-stays-status",
+    "mode": "active_status",
+    "text": "Where is the update flyer?",
+    "chat_id": "17329837841@lid",
+    "resolved_identity": {"phone": "+17329837841", "role": "customer"},
+    "active_project": {"project_id": "F0069", "customer_phone": "+17329837841", "status": "manual_edit_required", "fields": {"event_or_business_name": "Weekend Sale"}, "manual_review": {"status": "queued", "reason_code": "source_edit_provider_unavailable"}, "concepts": []},
+    "expect": {"route": "status_reply", "forbidden_calls": ["trigger_create_flyer_project", "invoke_update_flyer_project", "trigger_generate_flyer_concepts"]}
+  },
+  {
     "id": "complete-red-sale-poster-is-new-not-revision-control",
     "mode": "fresh_new_over_active",
     "text": "Make a new red sale poster for Diwali sweets Friday 5 PM to 9 PM",
