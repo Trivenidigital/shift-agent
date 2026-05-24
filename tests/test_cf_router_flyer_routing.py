@@ -179,6 +179,26 @@ def test_reference_scope_allows_related_attached_flyer():
     assert result["decision"] == "allow"
 
 
+def test_reference_scope_allows_related_attached_flyer_by_address():
+    scope = _load_reference_scope_script()
+
+    result = scope.decide_scope(
+        business_name="Lakshmis Kitchen",
+        business_address="90 Brybar Dr St Johns FL",
+        account_phones=["+17329837841"],
+        raw_request="Please update this flyer date and timing.",
+        extraction={
+            "visible_organization_names": [],
+            "visible_phone_numbers": [],
+            "visible_addresses": ["90 Brybar Dr, St Johns, FL 32259"],
+            "confidence": "high",
+        },
+    )
+
+    assert result["decision"] == "allow"
+    assert result["reason"] == "reference_matches_account"
+
+
 def test_reference_scope_clarifies_when_reference_owner_is_unreadable():
     scope = _load_reference_scope_script()
 

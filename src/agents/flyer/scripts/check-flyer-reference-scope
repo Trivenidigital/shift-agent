@@ -31,6 +31,7 @@ Read the attached image/PDF. Return STRICT JSON only:
 {{
   "visible_organization_names": ["business, organization, association, temple, school, or event owner names visible on the flyer"],
   "visible_phone_numbers": ["phone numbers visible on the flyer"],
+  "visible_addresses": ["address lines visible on the flyer"],
   "visible_event_names": ["event names or titles visible on the flyer"],
   "appears_related_to_account": true | false | null,
   "confidence": "high" | "medium" | "low",
@@ -117,6 +118,19 @@ def _phone_matches(visible: list[str], account: list[str]) -> bool:
     return False
 
 
+def _address_matches(visible: list[str], account_address: str) -> bool:
+    account_tokens = re.findall(r"[a-z0-9]+", (account_address or "").lower())
+    account_tokens = [tok for tok in account_tokens if len(tok) >= 3]
+    if len(account_tokens) < 2:
+        return False
+    account_set = set(account_tokens)
+    for found in visible:
+        found_set = set(tok for tok in re.findall(r"[a-z0-9]+", (found or "").lower()) if len(tok) >= 3)
+        if len(found_set & account_set) >= 2:
+            return True
+    return False
+
+
 def decide_scope(
     *,
     business_name: str,
@@ -127,14 +141,20 @@ def decide_scope(
 ) -> dict:
     visible_names = [str(x).strip() for x in extraction.get("visible_organization_names") or [] if str(x).strip()]
     visible_phones = [str(x).strip() for x in extraction.get("visible_phone_numbers") or [] if str(x).strip()]
+    visible_addresses = [str(x).strip() for x in extraction.get("visible_addresses") or [] if str(x).strip()]
     confidence = str(extraction.get("confidence") or "low").lower()
 
-    if any(_names_match(name, business_name) for name in visible_names) or _phone_matches(visible_phones, account_phones):
+    if (
+        any(_names_match(name, business_name) for name in visible_names)
+        or _phone_matches(visible_phones, account_phones)
+        or _address_matches(visible_addresses, business_address)
+    ):
         return {
             "decision": "allow",
             "reason": "reference_matches_account",
             "visible_organization_names": visible_names,
             "visible_phone_numbers": visible_phones,
+            "visible_addresses": visible_addresses,
         }
 
     if visible_names and confidence in {"high", "medium"}:
@@ -144,6 +164,7 @@ def decide_scope(
             "reply_text": unrelated_reply(business_name, visible_names),
             "visible_organization_names": visible_names,
             "visible_phone_numbers": visible_phones,
+            "visible_addresses": visible_addresses,
         }
 
     if business_name and _names_match(raw_request, business_name):
@@ -152,6 +173,7 @@ def decide_scope(
             "reason": "request_names_account_but_reference_unclear",
             "visible_organization_names": visible_names,
             "visible_phone_numbers": visible_phones,
+            "visible_addresses": visible_addresses,
         }
 
     return {
@@ -160,6 +182,7 @@ def decide_scope(
         "reply_text": unclear_reply(business_name),
         "visible_organization_names": visible_names,
         "visible_phone_numbers": visible_phones,
+        "visible_addresses": visible_addresses,
     }
 
 
