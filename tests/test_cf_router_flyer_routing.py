@@ -275,6 +275,25 @@ def test_reference_scope_allows_related_attached_flyer_phone_with_extension_digi
     assert result["decision"] == "allow"
     assert result["reason"] == "reference_matches_account"
 
+
+def test_reference_scope_does_not_allow_short_phone_fragment_match():
+    scope = _load_reference_scope_script()
+
+    result = scope.decide_scope(
+        business_name="Lakshmis Kitchen",
+        business_address="90 Brybar Dr",
+        account_phones=["+17329837841"],
+        raw_request="Please update this flyer date.",
+        extraction={
+            "visible_organization_names": ["Unrelated Organization"],
+            "visible_phone_numbers": ["841"],
+            "confidence": "high",
+        },
+    )
+
+    assert result["decision"] == "block"
+    assert result["reason"] == "reference_appears_unrelated"
+
 def test_reference_scope_clarifies_when_reference_owner_is_unreadable():
     scope = _load_reference_scope_script()
 
