@@ -1,14 +1,15 @@
 # Flyer24 Hackathon Latest Report
 
-Updated: 2026-05-24T21:50:00Z
+Updated: 2026-05-24T22:44:00Z
 
 ## Batch
-- Branch: `codex/flyer24-batch-reference-scope-202605242145`
-- Scope: reference-scope false-block reduction for exact source-edit requests.
-- Risk: low to medium (routing decision heuristics only, no payment/quota mutation, no provider writes).
-- Hermes/MCP-first: Hermes continues to own ingress, dispatch, state, and sends; this batch changes only Flyer decision heuristics inside existing scope-check script and tests.
+- Branch: `codex/flyer24-batch-manual-queue-visibility-202605242236`
+- Scope: manual-queue stale visibility + minute-level age precision across helper, health payload, and Cockpit UI.
+- Risk: low (read-only diagnostics/UI; no payment/quota/provider/project mutation behavior changes).
+- Hermes/MCP-first: Hermes continues to own ingress/routing/state/audit; this batch adds only read-only Flyer diagnostics and Cockpit rendering.
 
 ## Running PR list
+- #210 - fix(flyer): manual-queue stale visibility + minute precision
 - #208 - fix(flyer): fail closed for payment readiness
 - #207 - fix(flyer): route explicit sample-idea asks through intake
 - #192 - fix(flyer): classify 'my updated flyer' as status check
