@@ -1934,6 +1934,7 @@ def is_flyer_project_status_request(text: str) -> bool:
     return bool(re.search(
         r"\b("
         r"any\s+updates?|"
+        r"any\s+news(?:\s+on\s+(?:the\s+)?(?:flyer|flier|design|preview))?|"
         r"(what'?s|whats|what\s+is)\s+the\s+status|"
         r"where(?:'s|\s+is)\s+(?:the\s+)?(?:update\s+)?(?:flyer|flier|design|preview)|"
         r"status\s+(please|pls|update)|"
