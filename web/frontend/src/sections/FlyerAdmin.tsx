@@ -22,7 +22,9 @@ interface ManualQueueRow {
   manual_reason: string;
   manual_reason_code: string;
   manual_detail: string;
+  age_minutes?: number;
   age_hours: number;
+  is_stale?: boolean;
   asset_ids: string[];
   verification_modes?: string[];
   locked_facts: unknown[];
@@ -32,12 +34,16 @@ interface ManualQueueRow {
 interface ManualQueueGroup {
   customer_phone: string;
   count: number;
+  stale_count?: number;
+  oldest_age_minutes?: number;
   oldest_age_hours: number;
   projects: ManualQueueRow[];
 }
 
 interface ManualQueueSummary {
   total: number;
+  stale_total?: number;
+  stale_minutes_threshold?: number;
   reason_counts: Record<string, number>;
   groups: ManualQueueGroup[];
 }
@@ -160,7 +166,17 @@ interface FlyerHealthProvider {
   key_present: boolean;
   key_source: "process_env" | "hermes_env" | "agent_env" | null;
   model_config: Record<string, string>;
-  manual_queue_impact?: { queued_count: number; oldest_age_hours: number | null };
+  manual_queue_impact?: {
+    queued_count: number;
+    oldest_age_hours: number | null;
+    oldest_age_minutes?: number | null;
+    all_queued_count?: number;
+    all_oldest_age_hours?: number | null;
+    all_oldest_age_minutes?: number | null;
+    reason_counts?: Record<string, number>;
+    stale_count?: number;
+    stale_minutes_threshold?: number;
+  };
   operator_note?: string;
   checked_at: string;
 }
@@ -356,7 +372,22 @@ function FlyerHealthPanel({ data }: { data: FlyerHealth | undefined }) {
               {sourceEdit.manual_queue_impact && sourceEdit.manual_queue_impact.queued_count > 0 && (
                 <div className="mt-2 rounded bg-amber-50 px-2 py-1 text-xs text-amber-800">
                   <strong>{sourceEdit.manual_queue_impact.queued_count}</strong> queued; oldest{" "}
-                  <strong>{sourceEdit.manual_queue_impact.oldest_age_hours ?? 0}h</strong>
+                  <strong>
+                    {sourceEdit.manual_queue_impact.oldest_age_minutes !== undefined && sourceEdit.manual_queue_impact.oldest_age_minutes !== null && sourceEdit.manual_queue_impact.oldest_age_minutes < 60
+                      ? `${sourceEdit.manual_queue_impact.oldest_age_minutes}m`
+                      : `${sourceEdit.manual_queue_impact.oldest_age_hours ?? 0}h`}
+                  </strong>
+                  {sourceEdit.manual_queue_impact.all_queued_count !== undefined && (
+                    <span> · total active queue <strong>{sourceEdit.manual_queue_impact.all_queued_count}</strong></span>
+                  )}
+                  {sourceEdit.manual_queue_impact.stale_count !== undefined && sourceEdit.manual_queue_impact.stale_minutes_threshold !== undefined && (
+                    <span> · stale {sourceEdit.manual_queue_impact.stale_count} (≥{sourceEdit.manual_queue_impact.stale_minutes_threshold}m)</span>
+                  )}
+                </div>
+              )}
+              {sourceEdit.manual_queue_impact?.reason_counts && Object.keys(sourceEdit.manual_queue_impact.reason_counts).length > 0 && (
+                <div className="mt-1 text-xs text-zinc-600">
+                  reasons: {Object.entries(sourceEdit.manual_queue_impact.reason_counts).map(([k, v]) => `${k}=${v}`).join(", ")}
                 </div>
               )}
               {sourceEdit.operator_note && (
@@ -550,6 +581,11 @@ export function FlyerAdmin() {
   const [drawerUploadedAsset, setDrawerUploadedAsset] = useState<OperatorUploadResult | null>(null);
   const [drawerUploadError, setDrawerUploadError] = useState<string | null>(null);
   const [drawerUploadBusy, setDrawerUploadBusy] = useState(false);
+  const formatQueueAge = (row: ManualQueueRow): string => {
+    const mins = row.age_minutes ?? (row.age_hours * 60);
+    if (mins < 60) return `${mins}m`;
+    return `${Math.floor(mins / 60)}h`;
+  };
 
   // Reset to page 1 whenever the filter changes — otherwise an offset
   // set against the old result set may overshoot the new total.
@@ -1216,7 +1252,9 @@ export function FlyerAdmin() {
                   <div key={group.customer_phone} className="rounded-md border border-zinc-200">
                     <div className="flex items-center justify-between border-b border-zinc-100 bg-zinc-50 px-3 py-2 text-sm">
                       <div className="font-mono">{group.customer_phone}</div>
-                      <div className="text-xs text-zinc-500">{group.count} project{group.count === 1 ? "" : "s"} · oldest {group.oldest_age_hours}h</div>
+                      <div className="text-xs text-zinc-500">
+                        {group.count} project{group.count === 1 ? "" : "s"} · oldest {group.oldest_age_minutes !== undefined && group.oldest_age_minutes < 60 ? `${group.oldest_age_minutes}m` : `${group.oldest_age_hours}h`}
+                      </div>
                     </div>
                     <table className="w-full text-sm">
                       <thead className="text-xs uppercase text-zinc-500">
@@ -1249,7 +1287,10 @@ export function FlyerAdmin() {
                                 </div>
                               )}
                             </td>
-                            <td className="px-3 py-2 text-xs">{row.age_hours}h</td>
+                            <td className="px-3 py-2 text-xs">
+                              {formatQueueAge(row)}
+                              {row.is_stale && <span className="ml-1 text-rose-700">(stale)</span>}
+                            </td>
                             <td className="px-3 py-2 text-xs">
                               <div className="text-zinc-700">{row.manual_detail || "—"}</div>
                               {row.qa_blockers.length > 0 && (

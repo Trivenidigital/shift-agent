@@ -44,7 +44,9 @@ def test_manual_queue_lists_queued_projects_with_reason():
 
     assert rows[0]["project_id"] == "F9100"
     assert rows[0]["manual_reason"] == "source_edit_provider_unavailable"
+    assert rows[0]["age_minutes"] == 24 * 60
     assert rows[0]["age_hours"] == 24
+    assert rows[0]["is_stale"] is True
 
 
 def test_complete_manual_project_attaches_operator_asset(tmp_path, monkeypatch):
@@ -214,6 +216,8 @@ def test_triage_summary_groups_by_customer_and_aggregates_reasons():
     summary = triage_summary(store, now=datetime(2026, 5, 19, 12, 0, tzinfo=timezone.utc))
 
     assert summary["total"] == 5
+    assert summary["stale_total"] == 5
+    assert summary["stale_minutes_threshold"] == 30
     assert summary["reason_counts"] == {
         "visual_qa_failed": 2,
         "source_edit_provider_unavailable": 2,
@@ -222,7 +226,9 @@ def test_triage_summary_groups_by_customer_and_aggregates_reasons():
     assert [g["customer_phone"] for g in summary["groups"]] == ["+19803826497", "+19045550104", "+17329837841"]
     chloe = summary["groups"][0]
     assert chloe["count"] == 3
+    assert chloe["stale_count"] == 3
     assert chloe["oldest_age_hours"] == 19
+    assert chloe["oldest_age_minutes"] == 19 * 60
     assert [p["project_id"] for p in chloe["projects"]] == ["F0036", "F0043", "F0045"]
 
 

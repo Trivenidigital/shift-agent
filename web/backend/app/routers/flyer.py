@@ -624,7 +624,8 @@ async def campaign_send(body: CampaignSendBody, request: Request, _=Depends(requ
 
 def manual_queue_triage_action() -> dict[str, Any]:
     """Read-only triage view for the Flyer manual-review queue."""
-    return triage_summary(load_project_store())
+    threshold = int(get_settings().config.flyer.recovery.manual_queue_stale_minutes)
+    return triage_summary(load_project_store(), stale_minutes_threshold=threshold)
 
 
 def _operator_upload_root() -> Path:
@@ -1567,23 +1568,66 @@ def _source_edit_manual_queue_impact() -> dict[str, Any]:
     """Count active manual-queue rows with reason_code=source_edit_provider_unavailable.
 
     Active = manual_status in {queued, in_progress}. Returns
-    {queued_count: int, oldest_age_hours: int | None}. Best-effort: any
+    {
+      queued_count: int,
+      oldest_age_hours: int | None,
+      oldest_age_minutes: int | None,
+      all_queued_count: int,
+      all_oldest_age_hours: int | None,
+      all_oldest_age_minutes: int | None,
+      reason_counts: dict[str, int],
+      stale_count: int,
+      stale_minutes_threshold: int,
+    }. Best-effort: any
     exception loading the project store returns zero impact (the health
     endpoint must never raise).
     """
+    threshold = int(get_settings().config.flyer.recovery.manual_queue_stale_minutes)
     try:
-        rows = list_manual_queue(load_project_store())
+        rows = list_manual_queue(
+            load_project_store(),
+            stale_minutes_threshold=threshold,
+        )
     except Exception:
-        return {"queued_count": 0, "oldest_age_hours": None}
+        return {
+            "queued_count": 0,
+            "oldest_age_hours": None,
+            "oldest_age_minutes": None,
+            "all_queued_count": 0,
+            "all_oldest_age_hours": None,
+            "all_oldest_age_minutes": None,
+            "reason_counts": {},
+            "stale_count": 0,
+            "stale_minutes_threshold": threshold,
+        }
+    active_rows = [r for r in rows if r.get("manual_status") in {"queued", "in_progress"}]
+    reason_counts: dict[str, int] = {}
+    for row in active_rows:
+        reason = str(row.get("manual_reason_code") or "unclassified")
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
     matched = [
-        r for r in rows
+        r for r in active_rows
         if r.get("manual_reason_code") == "source_edit_provider_unavailable"
-        and r.get("manual_status") in {"queued", "in_progress"}
     ]
-    if not matched:
-        return {"queued_count": 0, "oldest_age_hours": None}
-    oldest = max(int(r.get("age_hours", 0) or 0) for r in matched)
-    return {"queued_count": len(matched), "oldest_age_hours": oldest}
+    all_oldest_minutes = (
+        max(int(r.get("age_minutes", 0) or 0) for r in active_rows)
+        if active_rows else None
+    )
+    oldest_minutes = (
+        max(int(r.get("age_minutes", 0) or 0) for r in matched)
+        if matched else None
+    )
+    return {
+        "queued_count": len(matched),
+        "oldest_age_hours": (oldest_minutes // 60) if oldest_minutes is not None else None,
+        "oldest_age_minutes": oldest_minutes,
+        "all_queued_count": len(active_rows),
+        "all_oldest_age_hours": (all_oldest_minutes // 60) if all_oldest_minutes is not None else None,
+        "all_oldest_age_minutes": all_oldest_minutes,
+        "reason_counts": dict(sorted(reason_counts.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "stale_count": sum(1 for r in active_rows if bool(r.get("is_stale"))),
+        "stale_minutes_threshold": threshold,
+    }
 
 
 def _flyer_image_model_config() -> dict[str, dict[str, str]]:

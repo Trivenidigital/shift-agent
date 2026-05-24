@@ -157,7 +157,12 @@ def _verification_modes(project: FlyerProject) -> list[str]:
     return sorted(modes)
 
 
-def list_manual_queue(store: FlyerProjectStore, *, now: datetime | None = None) -> list[dict]:
+def list_manual_queue(
+    store: FlyerProjectStore,
+    *,
+    now: datetime | None = None,
+    stale_minutes_threshold: int = 30,
+) -> list[dict]:
     now = now or datetime.now(timezone.utc)
     rows: list[dict] = []
     for project in store.projects:
@@ -170,7 +175,8 @@ def list_manual_queue(store: FlyerProjectStore, *, now: datetime | None = None) 
         if project.status != "manual_edit_required" and manual.status not in {"queued", "in_progress"} and not has_failed_qa:
             continue
         queued_at = manual.queued_at or project.updated_at
-        age_hours = int((now - queued_at).total_seconds() // 3600)
+        age_minutes = max(int((now - queued_at).total_seconds() // 60), 0)
+        age_hours = age_minutes // 60
         rows.append({
             "project_id": project.project_id,
             "customer_phone": str(project.customer_phone),
@@ -179,7 +185,9 @@ def list_manual_queue(store: FlyerProjectStore, *, now: datetime | None = None) 
             "manual_reason": manual.reason,
             "manual_reason_code": manual.reason_code,
             "manual_detail": manual.detail,
+            "age_minutes": age_minutes,
             "age_hours": max(age_hours, 0),
+            "is_stale": age_minutes >= max(stale_minutes_threshold, 1),
             "asset_ids": [asset.asset_id for asset in project.assets],
             "verification_modes": _verification_modes(project),
             "locked_facts": [fact.model_dump(mode="json") for fact in project.locked_facts],
@@ -188,9 +196,14 @@ def list_manual_queue(store: FlyerProjectStore, *, now: datetime | None = None) 
     return rows
 
 
-def triage_summary(store: FlyerProjectStore, *, now: datetime | None = None) -> dict:
+def triage_summary(
+    store: FlyerProjectStore,
+    *,
+    now: datetime | None = None,
+    stale_minutes_threshold: int = 30,
+) -> dict:
     """Triage-oriented view: groups by customer_phone, sorts by oldest age, with a reason histogram."""
-    rows = list_manual_queue(store, now=now)
+    rows = list_manual_queue(store, now=now, stale_minutes_threshold=stale_minutes_threshold)
     groups: dict[str, list[dict]] = defaultdict(list)
     reason_counts: dict[str, int] = defaultdict(int)
     for row in rows:
@@ -202,12 +215,16 @@ def triage_summary(store: FlyerProjectStore, *, now: datetime | None = None) -> 
         ordered_groups.append({
             "customer_phone": phone,
             "count": len(items),
+            "stale_count": sum(1 for r in items if bool(r.get("is_stale"))),
             "oldest_age_hours": items[0]["age_hours"] if items else 0,
+            "oldest_age_minutes": items[0]["age_minutes"] if items else 0,
             "projects": items,
         })
     ordered_groups.sort(key=lambda g: g["oldest_age_hours"], reverse=True)
     return {
         "total": len(rows),
+        "stale_total": sum(1 for r in rows if bool(r.get("is_stale"))),
+        "stale_minutes_threshold": stale_minutes_threshold,
         "reason_counts": dict(sorted(reason_counts.items(), key=lambda kv: (-kv[1], kv[0]))),
         "groups": ordered_groups,
     }
