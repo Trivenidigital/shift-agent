@@ -313,6 +313,82 @@ def test_reference_scope_clarifies_when_reference_owner_is_unreadable():
     assert "could not confirm" in result["reply_text"]
 
 
+def test_reference_scope_generic_heading_does_not_hard_block():
+    scope = _load_reference_scope_script()
+
+    result = scope.decide_scope(
+        business_name="Lakshmis Kitchen",
+        business_address="90 Brybar Dr",
+        account_phones=["+17329837841"],
+        raw_request="Please update this flyer date.",
+        extraction={
+            "visible_organization_names": ["Weekend Specials"],
+            "visible_phone_numbers": [],
+            "confidence": "high",
+        },
+    )
+
+    assert result["decision"] == "clarify"
+    assert result["reason"] == "reference_relationship_unclear"
+
+
+def test_reference_scope_request_account_identity_overrides_generic_owner_guess():
+    scope = _load_reference_scope_script()
+
+    result = scope.decide_scope(
+        business_name="Lakshmis Kitchen",
+        business_address="90 Brybar Dr",
+        account_phones=["+17329837841"],
+        raw_request="Please update this Lakshmis Kitchen flyer date.",
+        extraction={
+            "visible_organization_names": ["Grand Opening Special"],
+            "visible_phone_numbers": [],
+            "confidence": "high",
+        },
+    )
+
+    assert result["decision"] == "allow"
+    assert result["reason"] == "request_names_account_but_reference_unclear"
+
+
+def test_reference_scope_allows_and_ampersand_name_variant():
+    scope = _load_reference_scope_script()
+
+    result = scope.decide_scope(
+        business_name="Lakshmis Kitchen",
+        business_address="90 Brybar Dr",
+        account_phones=["+17329837841"],
+        raw_request="Please update this flyer date.",
+        extraction={
+            "visible_organization_names": ["Lakshmi and Kitchen"],
+            "visible_phone_numbers": [],
+            "confidence": "high",
+        },
+    )
+
+    assert result["decision"] == "allow"
+    assert result["reason"] == "reference_matches_account"
+
+
+def test_reference_scope_still_blocks_distinct_organization_name():
+    scope = _load_reference_scope_script()
+
+    result = scope.decide_scope(
+        business_name="Lakshmis Kitchen",
+        business_address="90 Brybar Dr",
+        account_phones=["+17329837841"],
+        raw_request="Please update this flyer date.",
+        extraction={
+            "visible_organization_names": ["Community Telugu Association"],
+            "visible_phone_numbers": [],
+            "confidence": "high",
+        },
+    )
+
+    assert result["decision"] == "block"
+    assert result["reason"] == "reference_appears_unrelated"
+
+
 def test_reference_scope_pending_choice_consumes_option_two(tmp_path):
     actions = _load_actions()
     actions.FLYER_REFERENCE_SCOPE_PATH = tmp_path / "reference_scope_pending.json"
