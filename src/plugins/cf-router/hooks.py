@@ -68,8 +68,10 @@ F7_WATCHDOG_TIMEOUT_SEC = 30
 _CODE_PATTERN = re.compile(r"#([A-HJ-NP-Z2-9]{5})")
 _SAMPLE_PROMPT_REQUEST = re.compile(
     r"\b(?:sample|example|starter)\s+(?:prompt|prompts|idea|ideas)\b"
+    r"|\b(?:sample|example|starter|prompt|idea|ideas|inspiration)\b.{0,40}\b(?:for|of)\b.{0,20}\b(?:flyer|flier|poster|marketing)\b"
+    r"|\b(?:give|send|show|share|suggest|provide)\b.{0,50}\b(?:flyer|flier|poster|marketing)\b.{0,30}\b(?:idea|ideas|prompt|prompts|examples|inspiration)\b"
     r"|\b(?:give|send|show|share|suggest|provide)\b.{0,60}"
-    r"\b(?:sample|example|starter)?\s*(?:prompt|prompts|idea|ideas|examples)\b.{0,60}"
+    r"\b(?:sample|example|starter|inspiration)?\s*(?:prompt|prompts|idea|ideas|examples|inspiration)\b.{0,60}"
     r"\b(?:flyer|flier|poster|marketing)\b",
     re.IGNORECASE,
 )
@@ -454,7 +456,35 @@ def _try_flyer_sample_prompt_request_intercept(text: str, chat_id: str, event: A
         return None
     customer = actions.find_flyer_customer_by_sender(phone, chat_id)
     if not customer:
-        return None
+        ok, detail, intake = actions.trigger_flyer_intake(
+            chat_id=chat_id,
+            sender_phone=phone,
+            message_id=_extract_message_id(event, chat_id, text),
+            text=text,
+            media_path=media_path or "",
+            start_source="sample_idea",
+            original_text=text,
+        )
+        if not ok or not intake:
+            actions.audit_intercepted(
+                reason="flyer_intake_failed",
+                chat_id=chat_id,
+                subprocess_rc=2,
+                detail=f"source=sample_idea_new_customer; detail={detail[:450]}",
+            )
+            return None
+        reply = str(intake.get("reply_text") or "")
+        ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+        actions.audit_intercepted(
+            reason="flyer_sample_prompt_requested",
+            chat_id=chat_id,
+            subprocess_rc=0 if ack_ok else 3,
+            detail=(
+                f"customer_id=; sender_role={role}; action={intake.get('action') or ''}; "
+                f"ack_message_id={mid}; ack_error={err[:300]}"
+            ),
+        )
+        return {"action": "skip", "reason": "cf-router flyer sample prompts sent"}
     if customer.get("status") not in {"trial", "active"}:
         reply = actions.flyer_customer_not_active_reply(customer)
         ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
