@@ -1987,6 +1987,7 @@ def test_flyer_project_status_request_classifier_keeps_edits_separate():
     for text in [
         "any update",
         "Any updates?",
+        "any news on the flyer?",
         "where is the update flyer?",
         "where's the update flyer?",
         "what's the status",
