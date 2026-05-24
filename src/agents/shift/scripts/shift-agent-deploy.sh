@@ -796,6 +796,20 @@ case "$ACTION" in
         fi
 
         install_artifacts "$STAGING"
+        if ! cmp -s src/platform/schemas.py /opt/shift-agent/schemas.py; then
+            echo "FAIL: installed schemas.py does not match staging - refusing to restart hermes-gateway" >&2
+            if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                "$0" rollback "$PREV_TAG"
+                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+            else
+                /usr/local/bin/shift-agent-notify-owner \
+                    --title "Deploy FAILED at installed schema parity gate" \
+                    --priority 2 \
+                    "Deploy $NEW_TAG installed a schemas.py that does not match staging. Gateway not restarted. SSH immediately." 2>/dev/null || true
+                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+            fi
+            exit 1
+        fi
 
         # Pre-restart cf-router compile gate: hooks.py is imported by the
         # gateway at startup, so a syntax error can make systemctl restart
@@ -1045,6 +1059,10 @@ PY
 
         # Re-install from restored staging
         install_artifacts "$STAGING"
+        if ! cmp -s src/platform/schemas.py /opt/shift-agent/schemas.py; then
+            echo "FAIL: installed schemas.py does not match staging during rollback - refusing to restart hermes-gateway" >&2
+            exit 1
+        fi
 
         systemctl restart shift-agent-tail-logger.timer 2>/dev/null || true
         systemctl restart hermes-gateway

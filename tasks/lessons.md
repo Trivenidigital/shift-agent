@@ -1,5 +1,9 @@
 # Lessons
 
+## 2026-05-24 - Flyer concierge live-path verification
+
+- A deployed binary smoke with a temporary state file is not enough for Flyer Studio routing changes. Also smoke the full cf-router path against production-shaped existing-customer state, because the user-visible behavior depends on plugin routing, sender identity, live customer rows, active project state, and the subprocess wrapper together.
+
 ## 2026-05-22 - Flyer Hermes intent layer
 
 - When working in isolated worktrees, verify the plan/design file landed in the intended worktree before dispatching reviewers. A plan written to the dirty root checkout can make reviewers correctly report "file missing" even though the main session sees it.
