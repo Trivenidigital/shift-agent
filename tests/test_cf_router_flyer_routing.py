@@ -3364,6 +3364,46 @@ def test_queued_source_edit_status_checkin_resends_source_new_clarification(monk
     assert result is not None and result.get("action") == "skip"
 
 
+def test_source_vs_new_status_checkin_clarification_has_no_trial_or_quota_copy(monkeypatch):
+    """Status check-ins on awaiting SOURCE/NEW choice must resend only the
+    SOURCE/NEW decision prompt, without trial/quota/payment upsell copy."""
+    hooks, actions = _load_plugin_modules()
+
+    if not hasattr(hooks, "_try_flyer_source_vs_new_choice_intercept"):
+        pytest.skip("_try_flyer_source_vs_new_choice_intercept not yet implemented (Task 5)")
+
+    if hasattr(actions, "consume_flyer_source_vs_new_choice"):
+        monkeypatch.setattr(actions, "consume_flyer_source_vs_new_choice", lambda *_a, **_kw: None)
+    if hasattr(actions, "peek_flyer_source_vs_new_pending"):
+        monkeypatch.setattr(
+            actions,
+            "peek_flyer_source_vs_new_pending",
+            lambda **_kw: {"customer": {"customer_id": "CUST0001"}},
+        )
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+17329837841", "customer"))
+    sent: dict[str, str] = {}
+    monkeypatch.setattr(
+        actions,
+        "send_flyer_text",
+        lambda _chat_id, text: sent.update({"text": text}) or (True, "mid", ""),
+    )
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kw: None)
+
+    result = hooks._try_flyer_source_vs_new_choice_intercept(
+        "any update?",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "m-status"},
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer source-vs-new status check-in"}
+    reply = sent["text"].lower()
+    assert "reply source" in reply
+    assert "reply new" in reply
+    assert "trial" not in reply
+    assert "quota" not in reply
+    assert "create one flyer - $4" not in reply
+
+
 def test_source_vs_new_source_branch_calls_preflight_and_generates_when_ready(monkeypatch):
     """Regression for PR #137 review finding 3: design said SOURCE routes
     through the existing exact-edit handler at hooks.py:587-697 (preflight →
