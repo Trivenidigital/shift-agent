@@ -1,14 +1,15 @@
 # Flyer24 Hackathon Latest Report
 
-Updated: 2026-05-24T22:44:00Z
+Updated: 2026-05-24T23:40:00Z
 
 ## Batch
-- Branch: `codex/flyer24-batch-manual-queue-visibility-202605242236`
-- Scope: manual-queue stale visibility + minute-level age precision across helper, health payload, and Cockpit UI.
-- Risk: low (read-only diagnostics/UI; no payment/quota/provider/project mutation behavior changes).
-- Hermes/MCP-first: Hermes continues to own ingress/routing/state/audit; this batch adds only read-only Flyer diagnostics and Cockpit rendering.
+- Branch: `codex/flyer24-batch-guest-payment-safety-202605242334`
+- Scope: guest-order payment activation contract hardening (provider-scoped dedupe, idempotent replay checks, amount/currency mismatch fail-closed, CLI evidence wiring).
+- Risk: money-adjacent runtime behavior change.
+- Hermes/MCP-first: Hermes continues to own ingress/routing/state substrate; this batch adds provider-neutral local billing guardrails only (no live Stripe/Razorpay API calls).
 
 ## Running PR list
+- #211 - fix(flyer): harden guest payment activation safety
 - #210 - fix(flyer): manual-queue stale visibility + minute precision
 - #208 - fix(flyer): fail closed for payment readiness
 - #207 - fix(flyer): route explicit sample-idea asks through intake
