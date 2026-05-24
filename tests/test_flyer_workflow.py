@@ -488,6 +488,20 @@ def test_extract_revision_patch_handles_remove_time_without_duplicate_marker():
     assert 'Remove time text "16:00"' in patch.notes_update
 
 
+def test_extract_revision_patch_handles_remove_time_with_ampm_without_duplicate_marker():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Evening Snacks",
+        event_time="16:00",
+        venue_or_location="90 Brybar Dr",
+        contact_info="+1 732 983 7841",
+        notes="Evening Snacks. Schedule 4 PM to 7 PM. Preview also shows Time: 4 PM.",
+    ))
+    patch = extract_revision_patch(project, "Why that 4 PM in the flyer. Please remove 4 PM.")
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert 'Remove time text "4 PM"' in patch.notes_update
+
+
 def test_extract_revision_patch_does_not_parse_later_price_as_extra_time():
     project = _project(FlyerRequestFields(
         event_or_business_name="Weekend Breakfast Specials",
