@@ -257,6 +257,53 @@ def test_collect_text_facts_uses_locked_reference_items_before_raw_request():
     assert payload["items"] == ["Idly $7", "Dosa $8"]
 
 
+def test_collect_text_facts_preserves_multi_offer_celebration_contract():
+    fields = FlyerRequestFields(
+        event_or_business_name="One Year Grand Celebration",
+        event_date="2026-05-30",
+        venue_or_location="90 Brybar Dr St Johns FL",
+        contact_info="+17329837841",
+        notes=(
+            "Create a one year grand celebration flyer, which must include "
+            "grand sale 30% of all dine-In orders and 20% on all Take Away orders. "
+            "All Biryani's Buy one get one free. Special Lunch Thali for $12.99. "
+            "Dates both May 30 and 31st"
+        ),
+    )
+    project = _complete_project().model_copy(update={"fields": fields})
+
+    facts = {fact.fact_id: fact.text for fact in collect_text_facts(project)}
+    rendered_text = "\n".join(facts.values())
+
+    assert facts["date"] == "May 30 and May 31, 2026"
+    assert "grand sale 30% of all dine-In orders and 20% on all Take Away orders" in rendered_text
+    assert "All Biryani's Buy one get one free" in rendered_text
+    assert "Special Lunch Thali for $12.99" in rendered_text
+
+
+def test_image_prompt_preserves_multi_offer_celebration_contract():
+    fields = FlyerRequestFields(
+        event_or_business_name="One Year Grand Celebration",
+        event_date="2026-05-30",
+        venue_or_location="90 Brybar Dr St Johns FL",
+        contact_info="+17329837841",
+        notes=(
+            "Create a one year grand celebration flyer, which must include "
+            "grand sale 30% of all dine-In orders and 20% on all Take Away orders. "
+            "All Biryani's Buy one get one free. Special Lunch Thali for $12.99. "
+            "Dates both May 30 and 31st"
+        ),
+    )
+    project = _complete_project().model_copy(update={"fields": fields})
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+
+    assert "Date: May 30 and May 31, 2026" in prompt
+    assert "grand sale 30% of all dine-In orders and 20% on all Take Away orders" in prompt
+    assert "All Biryani's Buy one get one free" in prompt
+    assert "Special Lunch Thali - $12.99" in prompt
+
+
 def test_collect_text_facts_suppresses_old_phone_from_notes_after_revision():
     project = _complete_project()
     fields = FlyerRequestFields(

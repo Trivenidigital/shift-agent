@@ -1,15 +1,14 @@
 [Unit]
-Description=Agent #21 Expense Bookkeeper — prune expired receipts + expire stale leads
+Description=Agent #21 Expense Bookkeeper - prune expired receipts + expire stale leads
 After=network.target
-# Agent #21 ships disabled-default and uses an optional Expense-Bookkeeper-
-# specific venv at /opt/shift-agent/venv/. On VPS where Agent #21 is not
-# enabled (no venv created), the service silently no-ops on activation
-# instead of failing systemd-analyze verify.
-ConditionPathIsExecutable=/opt/shift-agent/venv/bin/python
 
 [Service]
 Type=oneshot
-ExecStart=/opt/shift-agent/venv/bin/python /usr/local/bin/prune-and-expire-expenses.py
+# Agent #21 is optional on some VPSes. ExecCondition skips cleanly when the
+# customer config is absent, instead of failing the timer.
+ExecCondition=/usr/bin/test -f /opt/shift-agent/config.yaml
+ExecCondition=/usr/bin/test -x /usr/local/lib/hermes-agent/venv/bin/python
+ExecStart=/usr/local/lib/hermes-agent/venv/bin/python /usr/local/bin/prune-and-expire-expenses.py
 User=shift-agent
 Group=shift-agent
 StandardOutput=append:/opt/shift-agent/logs/prune-expense.log

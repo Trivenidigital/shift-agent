@@ -135,6 +135,46 @@ DETERMINISTIC_MODEL_NAMES = {"", "deterministic-renderer", "pillow", "local-pill
 TEXT_MANIFEST_SCHEMA_VERSION = 1
 MAX_DETAIL_FACTS = 10
 MAX_TEXT_FACTS = 16
+MONTH_NAME_TO_NUMBER = {
+    "jan": 1,
+    "january": 1,
+    "feb": 2,
+    "february": 2,
+    "mar": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "may": 5,
+    "jun": 6,
+    "june": 6,
+    "jul": 7,
+    "july": 7,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "sept": 9,
+    "september": 9,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "dec": 12,
+    "december": 12,
+}
+MONTH_NUMBER_TO_NAME = {
+    1: "January",
+    2: "February",
+    3: "March",
+    4: "April",
+    5: "May",
+    6: "June",
+    7: "July",
+    8: "August",
+    9: "September",
+    10: "October",
+    11: "November",
+    12: "December",
+}
 
 
 def _require_ready(project: FlyerProject) -> None:
@@ -348,6 +388,12 @@ def _price_or_phone_clause(text: str) -> bool:
         re.search(r"\$\s*\d+(?:\.\d{1,2})?", text)
         or re.search(r"\b\d+(?:\.\d{1,2})?\s*/\s*(?:piece|pc|lb|pcs)\b", text, flags=re.IGNORECASE)
         or re.search(r"\+?\d[\d\s().-]{7,}\d", text)
+        or re.search(r"\b\d+(?:\.\d+)?\s*%\b", text)
+        or re.search(
+            r"\b(?:buy\s+one\s+get\s+one|bogo|free|sale|discount|off|dine-?in|take\s*away|takeaway)\b",
+            text,
+            flags=re.IGNORECASE,
+        )
     )
 
 
@@ -366,6 +412,12 @@ def _strip_request_instruction_prefix(text: str) -> str:
     clean = re.sub(r"\s+", " ", text or "").strip()
     clean = re.sub(
         r"^\s*(?:hey!?\s*)?(?:please\s+)?(?:create|make|generate|need)\s+(?:a\s+)?(?:flyer|flier|poster|banner)\s+for\s+[^.;:]{2,100}?\s+\b(?:promoting|offering|featuring|advertising|announcing)\b\s+(?:the\s+)?",
+        "",
+        clean,
+        flags=re.IGNORECASE,
+    )
+    clean = re.sub(
+        r"^\s*(?:hey!?\s*)?(?:please\s+)?(?:create|make|generate|need)\s+(?:a\s+)?[^.;:]{0,140}?\b(?:flyer|flier|poster|banner)\b\s*(?:,?\s*(?:which\s+must\s+include|with\s+these\s+items|including|include)\s*)?",
         "",
         clean,
         flags=re.IGNORECASE,
@@ -390,17 +442,29 @@ def _detail_clauses(project: FlyerProject) -> list[str]:
     if not details:
         return []
     menu_items = _menu_item_lines(project)
-    if menu_items:
-        return menu_items
     compact = re.sub(r"\s+", " ", details)
     clauses = [part.strip(" .") for part in re.split(r";|\n|•|-{2,}|(?<=\.)\s+", compact) if part.strip(" .")]
     selected: list[str] = []
     seen: set[str] = set()
     current_contact_digits = _digits(project.fields.contact_info or "")
     for clause in clauses:
+        clause = _strip_request_instruction_prefix(clause)
+        if not clause:
+            continue
         if not _price_or_phone_clause(clause):
             continue
         phones = _phones_in_text(clause)
+        has_offer_or_price = bool(
+            re.search(r"\$\s*\d+(?:\.\d{1,2})?", clause)
+            or re.search(r"\b\d+(?:\.\d+)?\s*%\b", clause)
+            or re.search(
+                r"\b(?:buy\s+one\s+get\s+one|bogo|free|sale|discount|off|dine-?in|take\s*away|takeaway)\b",
+                clause,
+                flags=re.IGNORECASE,
+            )
+        )
+        if phones and current_contact_digits and current_contact_digits in phones and not has_offer_or_price:
+            continue
         if phones and current_contact_digits and all(phone != current_contact_digits for phone in phones):
             continue
         normalized = _normalize_fact_text(clause)
@@ -408,9 +472,52 @@ def _detail_clauses(project: FlyerProject) -> list[str]:
             continue
         seen.add(normalized)
         selected.append(_clean_fact_text(clause))
+    for item in menu_items:
+        normalized = _normalize_fact_text(item)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        selected.append(_clean_fact_text(item))
     if len(selected) > MAX_DETAIL_FACTS:
         raise FlyerRenderError("critical text facts do not fit")
     return selected
+
+
+def _display_date_text(project: FlyerProject) -> str:
+    """Return the customer-visible date text, preserving simple two-day ranges."""
+    date_value = project.fields.event_date or ""
+    if not date_value:
+        return ""
+    text = project.fields.notes or project.raw_request or ""
+    year = date_value[:4]
+    month_names = {name: num for name, num in MONTH_NAME_TO_NUMBER.items()}
+    month_pattern = "|".join(sorted(month_names, key=len, reverse=True))
+    same_month = re.search(
+        rf"\b({month_pattern})\s+(\d{{1,2}})(?:st|nd|rd|th)?\s*(?:and|&|to|-|through)\s*(\d{{1,2}})(?:st|nd|rd|th)?\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if same_month:
+        month_raw = same_month.group(1)
+        month_num = month_names[month_raw.lower()]
+        month_label = MONTH_NUMBER_TO_NAME[month_num]
+        day_one = int(same_month.group(2))
+        day_two = int(same_month.group(3))
+        return f"{month_label} {day_one} and {month_label} {day_two}, {year}"
+    numeric_pair = re.search(
+        r"\b(\d{1,2})/(\d{1,2})(?:/\d{2,4})?\s*(?:and|&|to|-|through)\s*(\d{1,2})/(\d{1,2})(?:/\d{2,4})?\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if numeric_pair:
+        first_month = int(numeric_pair.group(1))
+        first_day = int(numeric_pair.group(2))
+        second_month = int(numeric_pair.group(3))
+        second_day = int(numeric_pair.group(4))
+        first_label = MONTH_NUMBER_TO_NAME.get(first_month, f"{first_month:02d}")
+        second_label = MONTH_NUMBER_TO_NAME.get(second_month, f"{second_month:02d}")
+        return f"{first_label} {first_day} and {second_label} {second_day}, {year}"
+    return date_value
 
 
 def _menu_item_lines(project: FlyerProject) -> list[str]:
@@ -532,7 +639,7 @@ def collect_text_facts(project: FlyerProject) -> list[FlyerTextFact]:
     add("title", "Title", title_text)
     schedule = _schedule_hint(project)
     if project.fields.event_date:
-        add("date", "Date", project.fields.event_date)
+        add("date", "Date", _display_date_text(project))
     elif schedule:
         add("schedule", "Schedule", schedule)
     if project.fields.event_time and not _schedule_includes_time_range(schedule):
@@ -614,7 +721,7 @@ def _poster_copy_block(project: FlyerProject) -> str:
     if plan.schedule:
         lines.append(f"Schedule: {plan.schedule}")
     elif project.fields.event_date:
-        lines.append(f"Date: {project.fields.event_date}")
+        lines.append(f"Date: {_display_date_text(project)}")
     if project.fields.event_time and not _schedule_includes_time_range(plan.schedule or ""):
         lines.append(f"Time: {project.fields.event_time}")
     if plan.location:
@@ -625,7 +732,7 @@ def _poster_copy_block(project: FlyerProject) -> str:
         lines.append("Menu item cards:")
         for name, price in plan.items:
             lines.append(f"- {name} - {price}")
-    elif plan.detail_lines:
+    if plan.detail_lines:
         lines.append("Offer details:")
         for detail in plan.detail_lines:
             lines.append(f"- {detail}")
@@ -1209,7 +1316,8 @@ def _split_item_price(item: str) -> tuple[str, str]:
     match = re.search(r"(.+?)\s+(\$\s*\d+(?:\.\d{1,2})?)$", item.strip())
     if not match:
         return item.strip(), ""
-    return match.group(1).strip(), match.group(2).replace(" ", "")
+    name = re.sub(r"\bfor$", "", match.group(1).strip(), flags=re.IGNORECASE).strip()
+    return name, match.group(2).replace(" ", "")
 
 
 OVERLAY_RENDERER = r'''
