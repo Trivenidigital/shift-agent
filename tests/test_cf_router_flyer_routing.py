@@ -968,6 +968,87 @@ def test_explicit_sample_prompt_request_sends_starter_ideas(monkeypatch):
     assert "evening snacks" in sent["text"]
 
 
+@pytest.mark.parametrize(
+    "message_text",
+    [
+        "show sample prompt for grocery flyer",
+        "give me flyer ideas for weekend special",
+        "share example ideas for marketing flyer",
+        "Need inspiration for flyer design",
+    ],
+)
+def test_sample_prompt_variants_route_to_sample_idea_intake(monkeypatch, message_text):
+    hooks, actions = _load_plugin_modules()
+    sent = {}
+    intake_calls = []
+    customer = {
+        "customer_id": "CUST0001",
+        "business_name": "Lakshmis Kitchen",
+        "business_category": "restaurant",
+        "status": "trial",
+        "_starter_prompt_mode": "auto",
+        "_starter_prompt_sent_count": 1,
+    }
+
+    monkeypatch.setattr(actions, "is_flyer_enabled", lambda: True)
+    monkeypatch.setattr(actions, "flyer_campaign_cta_text", lambda _text: "")
+    monkeypatch.setattr(hooks, "_try_flyer_account_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_intake_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
+    monkeypatch.setattr(
+        actions,
+        "trigger_flyer_intake",
+        lambda **kwargs: intake_calls.append(kwargs) or (True, "", {"reply_text": "Pick a sample idea to start:", "action": "choose_sample_idea"}),
+    )
+    monkeypatch.setattr(actions, "trigger_create_flyer_project", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("sample prompt path must not create project")))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "sample-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+
+    result = hooks.pre_gateway_dispatch(SimpleNamespace(
+        text=message_text,
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="sample-prompt-variant",
+    ))
+
+    assert result == {"action": "skip", "reason": "cf-router flyer sample prompts sent"}
+    assert intake_calls
+    assert intake_calls[0]["start_source"] == "sample_idea"
+    assert sent["chat_id"] == "17329837841@s.whatsapp.net"
+
+
+def test_sample_prompt_request_from_new_sender_starts_sample_intake(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    sent = {}
+    intake_calls = []
+
+    monkeypatch.setattr(actions, "is_flyer_enabled", lambda: True)
+    monkeypatch.setattr(actions, "flyer_campaign_cta_text", lambda _text: "")
+    monkeypatch.setattr(hooks, "_try_flyer_account_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_intake_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: None)
+    monkeypatch.setattr(
+        actions,
+        "trigger_flyer_intake",
+        lambda **kwargs: intake_calls.append(kwargs) or (True, "", {"reply_text": "Choose your language first.", "action": "choose_language"}),
+    )
+    monkeypatch.setattr(actions, "trigger_create_flyer_project", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("new sender sample prompt must not create project")))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "sample-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+
+    result = hooks.pre_gateway_dispatch(SimpleNamespace(
+        text="Can you send sample prompts for my flyer?",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="sample-prompt-new-customer",
+    ))
+
+    assert result == {"action": "skip", "reason": "cf-router flyer sample prompts sent"}
+    assert intake_calls
+    assert intake_calls[0]["start_source"] == "sample_idea"
+    assert "language" in sent["text"].lower()
+
+
 def test_vague_flyer_start_for_active_customer_sends_starter_ideas(monkeypatch):
     hooks, actions = _load_plugin_modules()
     sent = {}
