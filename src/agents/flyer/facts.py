@@ -114,6 +114,61 @@ def _business_title_from_text(value: str) -> str:
     return clean
 
 
+def _headline_case(value: str) -> str:
+    return " ".join(word[:1].upper() + word[1:].lower() for word in _clean(value).split())
+
+
+def _customer_visible_request(text: str) -> str:
+    """Return the customer brief, excluding routing/profile wrapper text."""
+    compact = re.sub(r"\s+", " ", text or "").strip()
+    if not compact:
+        return ""
+    request_wrapped = False
+    update = ""
+    update_match = re.search(r"\bCustomer update before generation:\s*(.+)$", compact, flags=re.IGNORECASE)
+    if update_match:
+        update = update_match.group(1).strip()
+        compact = compact[: update_match.start()].strip(" .")
+    request_match = re.search(r"\bCustomer request:\s*(.+)$", compact, flags=re.IGNORECASE)
+    if request_match:
+        request_wrapped = True
+        compact = request_match.group(1).strip()
+    if request_wrapped:
+        compact = re.split(
+            r"\bUse saved business name\b|\bPreferred flyer language\b|\bBrief source\b",
+            compact,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0].strip(" .")
+    else:
+        compact = re.split(
+            r"\bPreferred flyer language\b|\bBrief source\b",
+            compact,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0].strip(" .")
+    if update:
+        compact = f"{compact}. {update}" if compact else update
+    return re.sub(r"\.{2,}", ".", compact).strip(" .")
+
+
+def _campaign_title_from_text(text: str, profile_business_name: str) -> str:
+    for match in re.finditer(
+        r"\bcreate\s+(?:a|an)?\s*(?P<title>[A-Za-z0-9][^.!?]{1,80}?)\s+(?:flyer|flier|poster|banner)\b",
+        text or "",
+        flags=re.IGNORECASE,
+    ):
+        title = _clean(match.group("title"))
+        title = re.sub(r"^(?:professional|premium|beautiful|new|original)\s+", "", title, flags=re.IGNORECASE)
+        title = re.sub(r"^(?:for\s+)?", "", title, flags=re.IGNORECASE).strip()
+        if not title or _norm(title) == _norm(profile_business_name):
+            continue
+        if _looks_like_instruction_fragment(title):
+            continue
+        return _headline_case(title)
+    return ""
+
+
 def _explicit_business_override(raw_request: str, profile_business_name: str) -> str:
     text = " ".join((raw_request or "").split())
     patterns = [
@@ -162,7 +217,7 @@ def profile_locked_facts(
 def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFact]:
     facts: list[FlyerLockedFact] = []
     name_before_price = re.compile(
-        r"(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,60}?)\s*(?:-|:)?\s*\$\s*(?P<price>\d+(?:\.\d{2})?)",
+        r"(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,60}?)\s*(?:-|:|for|at|@)?\s*\$\s*(?P<price>\d+(?:\.\d{2})?)",
         flags=re.IGNORECASE,
     )
     price_before_name = re.compile(
@@ -170,11 +225,13 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
         flags=re.IGNORECASE,
     )
     seen: set[str] = set()
-    promo_name = re.compile(r"^(?:save|coupon|discount|offer|deal|special|cashback|credit)\b", flags=re.IGNORECASE)
+    promo_name = re.compile(r"^(?:save|coupon|discount|offer|deal|cashback|credit)\b", flags=re.IGNORECASE)
     bad_context = re.compile(r"\b(?:create|make|generate|design|flyer|flier|poster|banner|promoting|promote|promotion)\b", flags=re.IGNORECASE)
 
     def add_item(name: str, price: str) -> None:
         name = _clean(name)
+        name = re.sub(r"^.*\bbuy\s+one\s+get\s+one\s+free\s+and\s+", "", name, flags=re.IGNORECASE).strip()
+        name = re.sub(r"\s+(?:for|at|@)$", "", name, flags=re.IGNORECASE).strip()
         name = re.sub(
             r"^(?:create|make|generate|design)\s+(?:a\s+)?(?:menu\s+)?(?:flyer|flier|poster|banner)\s+(?:with|for)?\s*",
             "",
@@ -184,9 +241,9 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
         name = re.sub(r"^(?:and|with|include|includes|feature|features|featuring)\s+", "", name, flags=re.IGNORECASE)
         if not name or name.lower() in seen:
             return
-        if name.lower() in {"and", "with", "include", "includes", "for", "on", "at"}:
+        if name.lower() in {"and", "with", "include", "includes", "for", "on", "at", "special"}:
             return
-        if promo_name.search(name) or bad_context.search(name):
+        if promo_name.search(name) or bad_context.search(name) or re.search(r"\bcoupon\b", name, flags=re.IGNORECASE):
             return
         if len(name.split()) > 5:
             return
@@ -198,7 +255,7 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
         if price_fact:
             facts.append(price_fact)
 
-    for segment in re.split(r"[\n\r,;]+", text or ""):
+    for segment in re.split(r"[\n\r,;]+|(?<=[.!?])\s+", text or ""):
         for match in name_before_price.finditer(segment):
             add_item(match.group("name"), f"${match.group('price')}")
         for match in price_before_name.finditer(segment):
@@ -207,6 +264,55 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
             if not name.strip():
                 continue
             add_item(name, f"${match.group('price')}")
+    return facts
+
+
+def _event_date_fact(text: str, *, message_id: str = "") -> FlyerLockedFact | None:
+    values: list[str] = []
+    for match in re.finditer(
+        r"\b(?:date|dates|dated|when|which\s+is\s+on|on)\b[^.!?]{0,40}?"
+        r"(?P<dates>\d{1,2}/\d{1,2}(?:/\d{2,4})?(?:\s*(?:and|&|,)\s*\d{1,2}/\d{1,2}(?:/\d{2,4})?)*)",
+        text or "",
+        flags=re.IGNORECASE,
+    ):
+        values.extend(re.findall(r"\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b", match.group("dates")))
+    if not values:
+        return None
+    unique: list[str] = []
+    for value in values:
+        if value not in unique:
+            unique.append(value)
+    return _fact("event_date", "Date", " and ".join(unique[:3]), "customer_text", message_id=message_id)
+
+
+def _offer_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFact]:
+    candidates: list[tuple[int, str]] = []
+    patterns: list[tuple[str, str]] = [
+        (
+            r"\b(?P<pct>\d{1,2})\s*%\s*(?:off\s+)?(?:of\s+)?all\s+dine[-\s]?in\s+orders\b",
+            "{pct}% off dine-in orders",
+        ),
+        (
+            r"\b(?P<pct>\d{1,2})\s*%\s*(?:off\s+)?(?:on\s+)?all\s+take\s*away\s+orders\b",
+            "{pct}% off take away orders",
+        ),
+    ]
+    for pattern, template in patterns:
+        for match in re.finditer(pattern, text or "", flags=re.IGNORECASE):
+            candidates.append((match.start(), template.format(**match.groupdict())))
+    for match in re.finditer(r"\ball\s+biryani'?s?\s+buy\s+one\s+get\s+one\s+free\b", text or "", flags=re.IGNORECASE):
+        candidates.append((match.start(), "Biryani Buy One Get One Free"))
+
+    facts: list[FlyerLockedFact] = []
+    seen: set[str] = set()
+    for _pos, value in sorted(candidates, key=lambda item: item[0]):
+        key = _norm(value)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        fact = _fact(f"offer:{len(facts)}", "Offer", value, "customer_text", message_id=message_id)
+        if fact:
+            facts.append(fact)
     return facts
 
 
@@ -298,7 +404,9 @@ def extract_text_facts(
     profile_business_name: str = "",
     allow_text_identity: bool = True,
 ) -> list[FlyerLockedFact]:
-    text = f"{raw_request or ''} {fields.notes or ''}"
+    source_text = _customer_visible_request(raw_request or "")
+    notes_text = _customer_visible_request(fields.notes or "")
+    text = f"{source_text or raw_request or ''} {notes_text or fields.notes or ''}"
     facts: list[FlyerLockedFact] = []
     event_or_campaign = fields.event_or_business_name or ""
     campaign_title = event_or_campaign
@@ -306,6 +414,8 @@ def extract_text_facts(
         campaign_title = ""
     if _looks_like_instruction_fragment(campaign_title):
         campaign_title = ""
+    if not campaign_title:
+        campaign_title = _campaign_title_from_text(text, profile_business_name)
     text_business = ""
     if allow_text_identity and event_or_campaign and not _looks_like_instruction_fragment(event_or_campaign):
         text_business = _business_title_from_text(event_or_campaign)
@@ -322,6 +432,10 @@ def extract_text_facts(
     offer_price = _offer_price_fact(text, message_id=message_id)
     if offer_price:
         facts.append(offer_price)
+    event_date = _event_date_fact(text, message_id=message_id)
+    if event_date:
+        facts.append(event_date)
+    facts.extend(_offer_facts(text, message_id=message_id))
     item_name_facts = _item_name_facts(text, message_id=message_id)
     generic_price = _generic_item_price(text)
     item_price_facts = _item_price_facts(text, message_id=message_id)

@@ -498,6 +498,21 @@ def _locked_menu_item_lines(project: FlyerProject) -> list[str]:
     return items[:MAX_DETAIL_FACTS]
 
 
+def _locked_offer_lines(project: FlyerProject) -> list[str]:
+    lines: list[str] = []
+    seen: set[str] = set()
+    for fact in project.locked_facts:
+        if not re.match(r"^offer:\d+$", fact.fact_id):
+            continue
+        clean = _clean_fact_text(fact.value)
+        key = _normalize_fact_text(clean)
+        if not clean or key in seen:
+            continue
+        seen.add(key)
+        lines.append(clean)
+    return lines[:MAX_DETAIL_FACTS]
+
+
 def _same_text(left: str, right: str) -> bool:
     norm_left = re.sub(r"[^a-z0-9]+", " ", (left or "").lower()).strip()
     norm_right = re.sub(r"[^a-z0-9]+", " ", (right or "").lower()).strip()
@@ -531,7 +546,9 @@ def collect_text_facts(project: FlyerProject) -> list[FlyerTextFact]:
     title_text = _display_title(project)
     add("title", "Title", title_text)
     schedule = _schedule_hint(project)
-    if project.fields.event_date:
+    if fact_value(project, "event_date", fallback=""):
+        add("date", "Date", fact_value(project, "event_date", fallback=""))
+    elif project.fields.event_date:
         add("date", "Date", project.fields.event_date)
     elif schedule:
         add("schedule", "Schedule", schedule)
@@ -543,7 +560,7 @@ def collect_text_facts(project: FlyerProject) -> list[FlyerTextFact]:
     contact_text = fact_value(project, "contact_phone", fallback=project.fields.contact_info)
     if contact_text:
         add("contact", "Contact", contact_text)
-    for idx, clause in enumerate(_detail_clauses(project), start=1):
+    for idx, clause in enumerate([*_locked_offer_lines(project), *_detail_clauses(project)], start=1):
         add(f"detail_{idx:03d}", "Detail", clause)
     if len(facts) > MAX_TEXT_FACTS:
         raise FlyerRenderError("critical text facts do not fit")
@@ -588,8 +605,12 @@ def _poster_copy_plan(project: FlyerProject) -> PosterCopyPlan:
         items.append((name, price))
     menu_item_text = {f"{name} {price}".strip() for name, price in items}
     detail_lines = []
+    for offer in _locked_offer_lines(project):
+        detail_lines.append(offer)
     for detail in _detail_clauses(project):
         if detail in menu_item_text:
+            continue
+        if _normalize_fact_text(detail) in {_normalize_fact_text(line) for line in detail_lines}:
             continue
         detail_lines.append(detail)
     return PosterCopyPlan(
@@ -611,10 +632,11 @@ def _poster_copy_block(project: FlyerProject) -> str:
     if business_name:
         lines.append(f"Business/brand: {business_name}")
     lines.append(f"Title: {plan.title}")
-    if plan.schedule:
+    display_date = fact_value(project, "event_date", fallback=project.fields.event_date)
+    if display_date:
+        lines.append(f"Date: {display_date}")
+    elif plan.schedule:
         lines.append(f"Schedule: {plan.schedule}")
-    elif project.fields.event_date:
-        lines.append(f"Date: {project.fields.event_date}")
     if project.fields.event_time and not _schedule_includes_time_range(plan.schedule or ""):
         lines.append(f"Time: {project.fields.event_time}")
     if plan.location:
@@ -625,7 +647,7 @@ def _poster_copy_block(project: FlyerProject) -> str:
         lines.append("Menu item cards:")
         for name, price in plan.items:
             lines.append(f"- {name} - {price}")
-    elif plan.detail_lines:
+    if plan.detail_lines:
         lines.append("Offer details:")
         for detail in plan.detail_lines:
             lines.append(f"- {detail}")
@@ -1453,13 +1475,18 @@ def _source_edit_prompt(project: FlyerProject) -> str:
         or "this business"
     )
     request = " ".join((project.raw_request or project.fields.notes or "").split())[:1200]
+    required_copy = _poster_copy_block(project)
     return f"""Edit the attached flyer image. Preserve the existing flyer design.
 
 Business/brand to preserve: {business_name}
 Requested edits: {request}
 
+Required customer-visible text:
+{required_copy}
+
 Rules:
 - Make only the requested changes to the uploaded flyer.
+- Include every required customer-visible text line above when it is relevant to the requested edit.
 - Preserve the original layout, colors, logo, food/product imagery, typography style, contact area, and overall composition.
 - Do not redesign from scratch.
 - Do not add a title such as "Uploaded Flyer Template".

@@ -168,6 +168,107 @@ def test_extract_text_facts_locks_all_you_can_eat_offer_price():
     assert by_id["offer_price"].source == "customer_text"
 
 
+def test_extract_text_facts_locks_live_grand_celebration_offers_and_dates():
+    from agents.flyer.facts import extract_text_facts, facts_by_id
+
+    raw_request = (
+        "Create a professional flyer for Lakshmi's Kitchen. Customer request: "
+        "Create a one year grand celebration flyer, which must include grand sale 30% of all dine-In orders "
+        "and 20% on all Take Away orders. All Biryani's Buy one get one free. "
+        "Special Lunch Thali for $12.99.. Use saved business name, address, phone, and logo. "
+        "Preferred flyer language: English. Brief source: text. "
+        "Customer update before generation: I forgot to add dates, which is on 05/30 and 05/31."
+    )
+    fields = FlyerRequestFields(
+        event_or_business_name="Lakshmi's Kitchen",
+        contact_info="+17329837841",
+        notes=raw_request,
+    )
+
+    facts = extract_text_facts(
+        fields,
+        raw_request,
+        profile_business_name="Lakshmi's Kitchen",
+        message_id="m-grand",
+    )
+    by_id = facts_by_id(type("P", (), {"locked_facts": facts})())
+
+    assert by_id["campaign_title"].value == "One Year Grand Celebration"
+    assert by_id["event_date"].value == "05/30 and 05/31"
+    assert by_id["offer:0"].value == "30% off dine-in orders"
+    assert by_id["offer:1"].value == "20% off take away orders"
+    assert by_id["offer:2"].value == "Biryani Buy One Get One Free"
+    assert by_id["item:0:name"].value == "Special Lunch Thali"
+    assert by_id["item:0:price"].value == "$12.99"
+
+
+def test_extract_text_facts_avoids_false_campaign_title_and_date_for_fraction_offer():
+    from agents.flyer.facts import extract_text_facts, facts_by_id
+
+    raw_request = "Create a flyer. 1/2 price on all appetizers. Special Lunch Thali for $12.99."
+    fields = FlyerRequestFields(contact_info="+17329837841", notes=raw_request)
+
+    facts = extract_text_facts(fields, raw_request, profile_business_name="Lakshmi's Kitchen", message_id="m-half")
+    by_id = facts_by_id(type("P", (), {"locked_facts": facts})())
+
+    assert "campaign_title" not in by_id
+    assert "event_date" not in by_id
+    assert by_id["item:0:name"].value == "Special Lunch Thali"
+    assert by_id["item:0:price"].value == "$12.99"
+
+
+def test_extract_text_facts_preserves_direct_customer_facts_after_use_saved_business_name():
+    from agents.flyer.facts import extract_text_facts, facts_by_id
+
+    raw_request = (
+        "Create a flyer. Use saved business name and show 30% of all dine-in orders. "
+        "Special Lunch Thali for $12.99."
+    )
+    fields = FlyerRequestFields(event_or_business_name="Lakshmi's Kitchen", notes=raw_request)
+
+    facts = extract_text_facts(
+        fields,
+        raw_request,
+        profile_business_name="Lakshmi's Kitchen",
+        message_id="m-saved",
+    )
+    by_id = facts_by_id(type("P", (), {"locked_facts": facts})())
+
+    assert by_id["offer:0"].value == "30% off dine-in orders"
+    assert by_id["item:0:name"].value == "Special Lunch Thali"
+    assert by_id["item:0:price"].value == "$12.99"
+
+
+def test_extract_text_facts_handles_run_on_bogo_and_priced_item():
+    from agents.flyer.facts import extract_text_facts, facts_by_id
+
+    raw_request = (
+        "Create a one year grand celebration flyer. "
+        "All Biryanis Buy one get one free and Special Lunch Thali for $12.99."
+    )
+    fields = FlyerRequestFields(event_or_business_name="One Year Grand Celebration", notes=raw_request)
+
+    facts = extract_text_facts(fields, raw_request, message_id="m-run-on")
+    by_id = facts_by_id(type("P", (), {"locked_facts": facts})())
+
+    assert by_id["offer:0"].value == "Biryani Buy One Get One Free"
+    assert by_id["item:0:name"].value == "Special Lunch Thali"
+    assert by_id["item:0:price"].value == "$12.99"
+
+
+def test_extract_text_facts_does_not_turn_coupon_discount_into_menu_item():
+    from agents.flyer.facts import extract_text_facts, facts_by_id
+
+    raw_request = "Create a flyer. Special $5 off coupon for lunch. Special Lunch Thali for $12.99."
+    fields = FlyerRequestFields(notes=raw_request)
+
+    facts = extract_text_facts(fields, raw_request, message_id="m-coupon")
+    by_id = facts_by_id(type("P", (), {"locked_facts": facts})())
+
+    assert [fact.value for fact in facts if fact.fact_id.endswith(":name")] == ["Special Lunch Thali"]
+    assert by_id["item:0:price"].value == "$12.99"
+
+
 def test_context_isolation_blocks_stale_project_provenance():
     from agents.flyer.facts import context_isolation_blockers
 

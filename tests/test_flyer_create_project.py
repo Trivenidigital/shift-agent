@@ -206,6 +206,51 @@ def test_sample_snacks_request_locks_unpriced_menu_items(tmp_path, monkeypatch, 
     assert "item:0:price" not in facts
 
 
+def test_live_grand_celebration_request_locks_all_customer_visible_facts(tmp_path, monkeypatch, capsys):
+    module = _load_script(monkeypatch)
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    _write_customer(
+        customers_path,
+        category="Indian Restaurant",
+        phone="+19045550104",
+        business_name="Lakshmi's Kitchen",
+        business_address="90 Brybar Dr St Johns FL",
+        primary_chat_id="17329837841@lid",
+    )
+
+    raw_request = (
+        "Create a professional flyer for Lakshmi's Kitchen. Customer request: "
+        "Create a one year grand celebration flyer, which must include grand sale 30% of all dine-In orders "
+        "and 20% on all Take Away orders. All Biryani's Buy one get one free. "
+        "Special Lunch Thali for $12.99.. Use saved business name, address, phone, and logo. "
+        "Preferred flyer language: English. Brief source: text. "
+        "Customer update before generation: I forgot to add dates, which is on 05/30 and 05/31."
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+19045550104",
+        "--chat-id", "17329837841@lid",
+        "--message-id", "m-grand",
+        "--raw-request", raw_request,
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+    facts = {fact["fact_id"]: fact for fact in project["locked_facts"]}
+
+    assert facts["business_name"]["value"] == "Lakshmi's Kitchen"
+    assert facts["campaign_title"]["value"] == "One Year Grand Celebration"
+    assert facts["event_date"]["value"] == "05/30 and 05/31"
+    assert facts["offer:0"]["value"] == "30% off dine-in orders"
+    assert facts["offer:1"]["value"] == "20% off take away orders"
+    assert facts["offer:2"]["value"] == "Biryani Buy One Get One Free"
+    assert facts["item:0:name"]["value"] == "Special Lunch Thali"
+    assert facts["item:0:price"]["value"] == "$12.99"
+
+
 def test_profile_hydration_uses_chat_id_when_phone_does_not_match(tmp_path, monkeypatch, capsys):
     module = _load_script(monkeypatch)
     customers_path = tmp_path / "customers.json"

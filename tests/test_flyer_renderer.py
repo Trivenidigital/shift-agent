@@ -257,6 +257,122 @@ def test_collect_text_facts_uses_locked_reference_items_before_raw_request():
     assert payload["items"] == ["Idly $7", "Dosa $8"]
 
 
+def test_collect_text_facts_includes_locked_offer_and_display_date_facts():
+    project = _complete_project().model_copy(update={
+        "raw_request": "Create a grand celebration flyer.",
+        "fields": FlyerRequestFields(
+            event_or_business_name="Lakshmi's Kitchen",
+            venue_or_location="90 Brybar Dr St Johns FL",
+            contact_info="+17329837841",
+            notes="Create a grand celebration flyer.",
+        ),
+        "locked_facts": [
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile"),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="One Year Grand Celebration", source="customer_text"),
+            FlyerLockedFact(fact_id="event_date", label="Date", value="05/30 and 05/31", source="customer_text"),
+            FlyerLockedFact(fact_id="offer:0", label="Offer", value="30% off dine-in orders", source="customer_text"),
+            FlyerLockedFact(fact_id="offer:1", label="Offer", value="20% off take away orders", source="customer_text"),
+            FlyerLockedFact(fact_id="offer:2", label="Offer", value="Biryani Buy One Get One Free", source="customer_text"),
+            FlyerLockedFact(fact_id="item:0:name", label="Item", value="Special Lunch Thali", source="customer_text"),
+            FlyerLockedFact(fact_id="item:0:price", label="Price", value="$12.99", source="customer_text"),
+        ],
+    })
+
+    facts = {fact.fact_id: fact.text for fact in collect_text_facts(project)}
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+
+    assert facts["date"] == "05/30 and 05/31"
+    assert "30% off dine-in orders" in facts.values()
+    assert "20% off take away orders" in facts.values()
+    assert "Biryani Buy One Get One Free" in facts.values()
+    assert "Date: 05/30 and 05/31" in prompt
+    assert "- 30% off dine-in orders" in prompt
+    assert "- 20% off take away orders" in prompt
+    assert "- Biryani Buy One Get One Free" in prompt
+    assert "- Special Lunch Thali - $12.99" in prompt
+
+
+def test_collect_text_facts_and_prompt_prefer_same_locked_date_over_stale_field_date():
+    project = _complete_project().model_copy(update={
+        "fields": FlyerRequestFields(
+            event_or_business_name="Grand Celebration",
+            event_date="2026-05-30",
+            venue_or_location="90 Brybar Dr St Johns FL",
+            contact_info="+17329837841",
+            notes="Date changed to 05/30 and 05/31.",
+        ),
+        "locked_facts": [
+            FlyerLockedFact(fact_id="event_date", label="Date", value="05/30 and 05/31", source="customer_text"),
+        ],
+    })
+
+    facts = {fact.fact_id: fact.text for fact in collect_text_facts(project)}
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+
+    assert facts["date"] == "05/30 and 05/31"
+    assert "Date: 05/30 and 05/31" in prompt
+    assert "Date: 2026-05-30" not in prompt
+
+
+def test_collect_text_facts_does_not_treat_offer_price_as_offer_detail():
+    project = _complete_project().model_copy(update={
+        "fields": FlyerRequestFields(
+            event_or_business_name="Mid-night Biryani",
+            contact_info="+17329837841",
+            notes="Create a flyer for mid-night biryani. Include all famous biryanis, all you can eat @ $25.99.",
+        ),
+        "locked_facts": [
+            FlyerLockedFact(fact_id="offer_price", label="Offer price", value="$25.99", source="customer_text"),
+            FlyerLockedFact(fact_id="item:0:name", label="Item", value="all famous biryanis", source="customer_text"),
+            FlyerLockedFact(fact_id="item:0:price", label="Price", value="$25.99", source="customer_text"),
+        ],
+    })
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+
+    assert "- all famous biryanis - $25.99" in prompt
+    assert "Offer details:\n- $25.99" not in prompt
+
+
+def test_source_edit_prompt_includes_locked_customer_copy_block(tmp_path):
+    from agents.flyer import render as render_mod
+
+    project = _complete_project().model_copy(update={
+        "raw_request": "Edit uploaded flyer/source artwork. Please update the sale details.",
+        "fields": FlyerRequestFields(
+            event_or_business_name="Lakshmi's Kitchen",
+            venue_or_location="90 Brybar Dr St Johns FL",
+            contact_info="+17329837841",
+            notes="Please update the sale details.",
+        ),
+        "assets": [
+            FlyerAsset(
+                asset_id="A0001",
+                kind="reference_image",
+                source="whatsapp",
+                path="/opt/shift-agent/state/flyer/assets/source.png",
+                mime_type="image/png",
+                sha256="0" * 64,
+                received_at=datetime.now(timezone.utc),
+            )
+        ],
+        "locked_facts": [
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile"),
+            FlyerLockedFact(fact_id="event_date", label="Date", value="05/30 and 05/31", source="customer_text"),
+            FlyerLockedFact(fact_id="offer:0", label="Offer", value="30% off dine-in orders", source="customer_text"),
+            FlyerLockedFact(fact_id="offer:1", label="Offer", value="20% off take away orders", source="customer_text"),
+        ],
+    })
+
+    prompt = render_mod._source_edit_prompt(project)
+
+    assert "Required customer-visible text:" in prompt
+    assert "Business/brand: Lakshmi's Kitchen" in prompt
+    assert "Date: 05/30 and 05/31" in prompt
+    assert "- 30% off dine-in orders" in prompt
+    assert "- 20% off take away orders" in prompt
+
+
 def test_collect_text_facts_suppresses_old_phone_from_notes_after_revision():
     project = _complete_project()
     fields = FlyerRequestFields(
