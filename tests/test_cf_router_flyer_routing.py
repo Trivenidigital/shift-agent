@@ -179,6 +179,121 @@ def test_reference_scope_allows_related_attached_flyer():
     assert result["decision"] == "allow"
 
 
+def test_reference_scope_allows_when_event_title_carries_account_identity():
+    scope = _load_reference_scope_script()
+
+    result = scope.decide_scope(
+        business_name="Lakshmis Kitchen",
+        business_address="90 Brybar Dr",
+        account_phones=["+17329837841"],
+        raw_request="Please update this flyer date.",
+        extraction={
+            "visible_organization_names": [],
+            "visible_phone_numbers": [],
+            "visible_event_names": ["Lakshmis Kitchen Ugadi Specials 2026"],
+            "confidence": "high",
+        },
+    )
+
+    assert result["decision"] == "allow"
+    assert result["reason"] == "reference_matches_account"
+
+
+def test_reference_scope_allows_address_match_even_if_name_differs():
+    scope = _load_reference_scope_script()
+
+    result = scope.decide_scope(
+        business_name="Lakshmis Kitchen",
+        business_address="90 Brybar Dr, Houston, TX",
+        account_phones=["+17329837841"],
+        raw_request="Please update this flyer date.",
+        extraction={
+            "visible_organization_names": ["Weekly Grocery Deals"],
+            "visible_phone_numbers": [],
+            "visible_addresses": ["90 Brybar Drive Houston TX"],
+            "confidence": "high",
+        },
+    )
+
+    assert result["decision"] == "allow"
+    assert result["reason"] == "reference_matches_account"
+
+
+def test_reference_scope_allows_phone_match_even_if_name_differs():
+    scope = _load_reference_scope_script()
+
+    result = scope.decide_scope(
+        business_name="Lakshmis Kitchen",
+        business_address="90 Brybar Dr, Houston, TX",
+        account_phones=["+17329837841"],
+        raw_request="Please update this flyer date.",
+        extraction={
+            "visible_organization_names": ["Weekly Grocery Deals"],
+            "visible_phone_numbers": ["(732) 983-7841"],
+            "visible_addresses": [],
+            "confidence": "high",
+        },
+    )
+
+    assert result["decision"] == "allow"
+    assert result["reason"] == "reference_matches_account"
+
+
+def test_reference_scope_allows_related_attached_flyer_by_phone_match():
+    scope = _load_reference_scope_script()
+
+    result = scope.decide_scope(
+        business_name="Lakshmis Kitchen",
+        business_address="90 Brybar Dr",
+        account_phones=["+1 (732) 983-7841"],
+        raw_request="Please update this flyer date.",
+        extraction={
+            "visible_organization_names": ["Community Food Fest"],
+            "visible_phone_numbers": ["732-983-7841"],
+            "confidence": "high",
+        },
+    )
+
+    assert result["decision"] == "allow"
+
+
+def test_reference_scope_allows_related_attached_flyer_phone_with_extension_digits():
+    scope = _load_reference_scope_script()
+
+    result = scope.decide_scope(
+        business_name="Lakshmis Kitchen",
+        business_address="90 Brybar Dr",
+        account_phones=["+17329837841"],
+        raw_request="Please update this flyer date.",
+        extraction={
+            "visible_organization_names": ["Community Event"],
+            "visible_phone_numbers": ["Call +1 (732) 983-7841 ext 204"],
+            "confidence": "high",
+        },
+    )
+
+    assert result["decision"] == "allow"
+    assert result["reason"] == "reference_matches_account"
+
+
+def test_reference_scope_does_not_allow_short_phone_fragment_match():
+    scope = _load_reference_scope_script()
+
+    result = scope.decide_scope(
+        business_name="Lakshmis Kitchen",
+        business_address="90 Brybar Dr",
+        account_phones=["+17329837841"],
+        raw_request="Please update this flyer date.",
+        extraction={
+            "visible_organization_names": ["Unrelated Organization"],
+            "visible_phone_numbers": ["841"],
+            "confidence": "high",
+        },
+    )
+
+    assert result["decision"] == "block"
+    assert result["reason"] == "reference_appears_unrelated"
+
 def test_reference_scope_clarifies_when_reference_owner_is_unreadable():
     scope = _load_reference_scope_script()
 
