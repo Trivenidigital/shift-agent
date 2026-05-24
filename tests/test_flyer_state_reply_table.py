@@ -351,6 +351,7 @@ def test_status_request_classifier_recognizes_common_check_in_phrases():
         "status",
         "any update",
         "any updates?",
+        "where are the updates?",
         "any update?",
         "is it ready",
         "is it ready yet?",
