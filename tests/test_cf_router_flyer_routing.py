@@ -846,6 +846,52 @@ def test_sample_prompt_preference_text_is_account_command():
     assert not actions.is_flyer_starter_prompt_preference_command("status")
 
 
+def test_explicit_sample_prompt_request_sends_starter_ideas(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    sent = {}
+    created = {"called": False}
+    customer = {
+        "customer_id": "CUST0001",
+        "business_name": "Lakshmis Kitchen",
+        "business_category": "restaurant",
+        "status": "trial",
+        "_starter_prompt_mode": "auto",
+        "_starter_prompt_sent_count": 1,
+    }
+
+    monkeypatch.setattr(actions, "is_flyer_enabled", lambda: True)
+    monkeypatch.setattr(actions, "flyer_campaign_cta_text", lambda _text: "")
+    monkeypatch.setattr(hooks, "_try_flyer_account_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_intake_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
+    monkeypatch.setattr(actions, "trigger_flyer_intake", lambda **_kwargs: (True, "", {
+        "reply_text": (
+            "Flyer Studio\n------------\n"
+            "Pick a sample idea to start:\n\n"
+            "1. Create an evening snacks flyer from 4 PM to 7 PM.\n"
+            "2. Create a daily thali specials flyer.\n\n"
+            "Reply 1 or 2."
+        ),
+        "action": "choose_sample_idea",
+    }))
+    monkeypatch.setattr(actions, "trigger_create_flyer_project", lambda **_kwargs: created.update(called=True) or (True, "", {}))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "sample-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+
+    result = hooks.pre_gateway_dispatch(SimpleNamespace(
+        text="Can you give me sample prompt for evening snacks flyer",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="sample-prompt-1",
+    ))
+
+    assert result == {"action": "skip", "reason": "cf-router flyer sample prompts sent"}
+    assert created["called"] is False
+    assert sent["chat_id"] == "17329837841@s.whatsapp.net"
+    assert "Pick a sample idea" in sent["text"]
+    assert "evening snacks" in sent["text"]
+
+
 def test_vague_flyer_start_for_active_customer_sends_starter_ideas(monkeypatch):
     hooks, actions = _load_plugin_modules()
     sent = {}
