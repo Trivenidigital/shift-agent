@@ -332,8 +332,12 @@ def activate_customer(
                 and record.currency == currency
             )
             if same:
+                if other.status not in {"active", "trial"}:
+                    return AccountResult(False, True, "", other.customer_id, other.status, detail="payment_reference_replay_not_active")
                 _audit_activation(audit_log_path, other, provider, payment_reference, amount_cents, currency, idempotent=True)
                 return AccountResult(True, True, _activation_reply(other, tiers), other.customer_id, other.status)
+            if other.customer_id == customer.customer_id:
+                return AccountResult(False, True, "", customer.customer_id, customer.status, detail="payment_reference_replay_mismatch")
             return AccountResult(False, True, "", customer.customer_id, customer.status, detail="payment_reference_already_used")
 
     target_plan = customer.plan_id
@@ -704,7 +708,8 @@ def _quota_blocked_reply(customer: FlyerCustomerProfile, tiers: list[FlyerPlanTi
 
 
 def _pending_plan_reply(plan_id: str, url: str, provider: str) -> str:
-    pay = f"Pay here: {url}" if url else f"We will send a secure {provider} payment link shortly."
+    del provider
+    pay = f"Pay here: {url}" if url else "Payment link is not configured yet. I saved this plan request for checkout setup."
     return f"Flyer Studio\n------------\nPlan change requested: {plan_id}.\n{pay}\nYour current plan remains active until payment is confirmed."
 
 
@@ -764,7 +769,10 @@ def _parse_plan_choice(text: str, tiers: list[FlyerPlanTier]) -> str:
 def _checkout_url(template: str, customer_id: str, plan_id: str, chat_id: str) -> str:
     if not template:
         return ""
-    return template.format(customer_id=customer_id, plan_id=plan_id, chat_id=chat_id)
+    try:
+        return template.format(customer_id=customer_id, plan_id=plan_id, chat_id=chat_id)
+    except (KeyError, IndexError, ValueError):
+        return ""
 
 
 def _phone_or_none(text: Optional[str]) -> Optional[str]:

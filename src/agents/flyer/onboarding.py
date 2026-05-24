@@ -697,7 +697,7 @@ def _payment_reply(customer_id: str, plan_id: str, checkout_url: str) -> str:
     payment_line = (
         f"Pay here: {checkout_url}"
         if checkout_url
-        else "Payment link is pending. We will send a secure Stripe/Razorpay link shortly."
+        else "Payment link is not configured yet. Your registration is saved; payment can be confirmed once the checkout link is ready."
     )
     return (
         "Flyer Studio\n------------\n"
@@ -962,7 +962,10 @@ def _is_skip_optional_reply(text: str) -> bool:
 def _checkout_url(*, template: str, customer_id: str, plan_id: str, chat_id: str) -> str:
     if not template:
         return ""
-    return template.format(customer_id=customer_id, plan_id=plan_id, chat_id=chat_id)
+    try:
+        return template.format(customer_id=customer_id, plan_id=plan_id, chat_id=chat_id)
+    except (KeyError, IndexError, ValueError):
+        return ""
 
 
 def _is_trial_start(text: str) -> bool:

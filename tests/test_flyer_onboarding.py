@@ -138,6 +138,78 @@ def test_onboarding_collects_required_business_and_plan_fields(tmp_path):
     assert customer.onboarded_by_phone == "+19045550123"
 
 
+
+def test_onboarding_malformed_checkout_template_fails_closed(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 24, tzinfo=timezone.utc)
+    flow = [
+        ("m1", "hello"),
+        ("m2", "Triveni Pineville"),
+        ("m3", "300 S Polk St, Pineville, NC 28134"),
+        ("m4", "+1 704 324 3322"),
+        ("m5", "+1 704 324 3322"),
+        ("m6", "+1 904 555 0104"),
+        ("m7", "Indian grocery and food court, English"),
+        ("m8", "2"),
+        ("m9", "CONFIRM"),
+    ]
+
+    for message_id, text in flow:
+        result = handle_onboarding_message(
+            state_path=state_path,
+            chat_id="19045550123@s.whatsapp.net",
+            sender_phone="+19045550123",
+            message_id=message_id,
+            text=text,
+            now=now,
+            payment_provider="stripe",
+            payment_checkout_url_template="https://pay.example/{missing_placeholder}",
+        )
+
+    assert result.next_status == "payment_pending"
+    assert "Payment link is not configured yet" in result.reply_text
+    assert "Stripe/Razorpay" not in result.reply_text
+    store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert store.customers[0].payment_checkout_url == ""
+
+
+def test_change_plan_malformed_checkout_template_fails_closed(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 24, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    customer = store.new_customer(
+        business_name="Triveni",
+        business_address="300 S Polk St",
+        public_phone="+17043243322",
+        business_whatsapp_number="+17043243322",
+        authorized_request_number="+17043243322",
+        business_category="restaurant",
+        preferred_language="en",
+        plan_id="starter",
+        now=now,
+        onboarded_by_phone="+17043243322",
+    ).model_copy(update={"status": "active"})
+    store.customers.append(customer)
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    request = handle_account_command(
+        state_path=state_path, sender_phone="+17043243322", sender_role="customer",
+        chat_id="17043243322@s.whatsapp.net", text="CHANGE PLAN GROWTH", now=now,
+    )
+    assert request.ok is True
+    confirm = handle_account_command(
+        state_path=state_path, sender_phone="+17043243322", sender_role="customer",
+        chat_id="17043243322@s.whatsapp.net", text="CONFIRM UPDATE", now=now,
+        payment_provider="stripe",
+        payment_checkout_url_template="https://pay.example/{missing_placeholder}",
+    )
+    assert confirm.ok is True
+    assert "Plan change requested: growth" in confirm.reply_text
+    assert "Payment link is not configured yet" in confirm.reply_text
+    assert "secure stripe payment link shortly" not in confirm.reply_text.lower()
+    store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert store.customers[0].pending_plan_checkout_url == ""
+
 def test_free_trial_onboarding_skips_paid_plan_choice_and_activates_trial(tmp_path):
     state_path = tmp_path / "customers.json"
     now = datetime(2026, 5, 16, tzinfo=timezone.utc)
@@ -1791,6 +1863,89 @@ def test_account_activation_is_idempotent_and_reference_unique(tmp_path):
     assert duplicate.ok is False
     assert duplicate.detail == "payment_reference_already_used"
 
+
+
+def test_account_activation_replay_mismatch_on_same_customer_is_rejected(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 24, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    customer = store.new_customer(
+        business_name="A",
+        business_address="1 Main",
+        public_phone="+17043243322",
+        business_whatsapp_number="+17043243322",
+        authorized_request_number="+19045550104",
+        business_category="restaurant",
+        preferred_language="en",
+        plan_id="starter",
+        now=now,
+    )
+    store.customers.append(customer)
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    first = activate_customer(
+        state_path=state_path,
+        customer_id="CUST0001",
+        provider="stripe",
+        payment_reference="pi_same_customer",
+        expected_plan="starter",
+        amount_cents=4999,
+        currency="USD",
+        now=now,
+    )
+    assert first.ok is True
+
+    for kwargs in [
+        {"expected_plan": "growth", "amount_cents": 4999, "currency": "USD"},
+        {"expected_plan": "starter", "amount_cents": 6999, "currency": "USD"},
+        {"expected_plan": "starter", "amount_cents": 4999, "currency": "INR"},
+    ]:
+        replay = activate_customer(
+            state_path=state_path,
+            customer_id="CUST0001",
+            provider="stripe",
+            payment_reference="pi_same_customer",
+            now=now,
+            **kwargs,
+        )
+        assert replay.ok is False
+        assert replay.detail == "payment_reference_replay_mismatch"
+
+
+def test_account_activation_replay_requires_active_or_trial_customer(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 24, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    customer = store.new_customer(
+        business_name="A",
+        business_address="1 Main",
+        public_phone="+17043243322",
+        business_whatsapp_number="+17043243322",
+        authorized_request_number="+19045550104",
+        business_category="restaurant",
+        preferred_language="en",
+        plan_id="starter",
+        now=now,
+    )
+    store.customers.append(customer)
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+    first = activate_customer(
+        state_path=state_path, customer_id="CUST0001", provider="stripe",
+        payment_reference="pi_inactive_replay", expected_plan="starter",
+        amount_cents=4999, currency="USD", now=now,
+    )
+    assert first.ok is True
+    store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    store.customers[0] = store.customers[0].model_copy(update={"status": "suspended"})
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    replay = activate_customer(
+        state_path=state_path, customer_id="CUST0001", provider="stripe",
+        payment_reference="pi_inactive_replay", expected_plan="starter",
+        amount_cents=4999, currency="USD", now=now,
+    )
+    assert replay.ok is False
+    assert replay.detail == "payment_reference_replay_not_active"
 
 def test_non_admin_cannot_mutate_account_but_can_status(tmp_path):
     state_path = tmp_path / "customers.json"

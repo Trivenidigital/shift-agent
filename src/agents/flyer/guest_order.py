@@ -325,12 +325,15 @@ def _find_reserved_guest_order(
 def _checkout_url(template: str, *, order_id: str, chat_id: str, amount_cents: int, currency: str) -> str:
     if not template:
         return ""
-    return template.format(
-        order_id=order_id,
-        customer_id=order_id,
-        plan_id="quick_flyer",
-        chat_id=chat_id,
-        amount_cents=amount_cents,
-        price_usd=f"{amount_cents / 100:.2f}",
-        currency=currency,
-    )
+    try:
+        return template.format(
+            order_id=order_id,
+            customer_id=order_id,
+            plan_id="quick_flyer",
+            chat_id=chat_id,
+            amount_cents=amount_cents,
+            price_usd=f"{amount_cents / 100:.2f}",
+            currency=currency,
+        )
+    except (KeyError, IndexError, ValueError):
+        return ""

@@ -87,7 +87,7 @@ def _norm_name(value: str) -> str:
     words = re.findall(r"[a-z0-9]+", (value or "").lower())
     noise = {
         "the", "a", "an", "llc", "inc", "co", "company", "restaurant",
-        "kitchen", "kitchens", "cafe", "bakery", "express", "indian",
+        "kitchen", "kitchens", "cafe", "bakery", "express", "indian", "and",
     }
     return "".join(word for word in words if word not in noise)
 
@@ -144,6 +144,24 @@ def _address_matches(visible: list[str], account_address: str) -> bool:
     return False
 
 
+def _looks_like_generic_heading(name: str) -> bool:
+    tokens = re.findall(r"[a-z0-9]+", (name or "").lower())
+    if not tokens:
+        return True
+    generic = {
+        "special", "specials", "offer", "offers", "sale", "deals", "deal",
+        "discount", "menu", "menus", "breakfast", "lunch", "dinner", "brunch",
+        "combo", "combos", "festival", "event", "events", "grand", "opening",
+        "today", "weekend", "weekly", "new",
+    }
+    meaningful = [tok for tok in tokens if tok not in generic]
+    return not meaningful
+
+
+def _has_distinct_visible_org_name(visible_names: list[str]) -> bool:
+    return any(not _looks_like_generic_heading(name) for name in visible_names)
+
+
 def decide_scope(
     *,
     business_name: str,
@@ -173,21 +191,21 @@ def decide_scope(
             "visible_event_names": visible_events,
         }
 
-    if visible_names and confidence in {"high", "medium"}:
+    if business_name and _names_match(raw_request, business_name):
         return {
-            "decision": "block",
-            "reason": "reference_appears_unrelated",
-            "reply_text": unrelated_reply(business_name, visible_names),
+            "decision": "allow",
+            "reason": "request_names_account_but_reference_unclear",
             "visible_organization_names": visible_names,
             "visible_phone_numbers": visible_phones,
             "visible_addresses": visible_addresses,
             "visible_event_names": visible_events,
         }
 
-    if business_name and _names_match(raw_request, business_name):
+    if _has_distinct_visible_org_name(visible_names) and confidence in {"high", "medium"}:
         return {
-            "decision": "allow",
-            "reason": "request_names_account_but_reference_unclear",
+            "decision": "block",
+            "reason": "reference_appears_unrelated",
+            "reply_text": unrelated_reply(business_name, visible_names),
             "visible_organization_names": visible_names,
             "visible_phone_numbers": visible_phones,
             "visible_addresses": visible_addresses,

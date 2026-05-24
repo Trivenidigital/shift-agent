@@ -1919,7 +1919,7 @@ def is_flyer_project_status_request(text: str) -> bool:
     body = " ".join(flyer_visible_message_text(text).lower().split())
     if not body:
         return False
-    if re.search(r"\bwhere(?:'s|\s+is)\s+(?:the\s+)?(?:update\s+)?(?:flyer|flier|design|preview)\b", body):
+    if re.search(r"\bwhere(?:'s|\s+is)\s+(?:(?:the|my)\s+)?(?:updated?\s+)?(?:flyer|flier|design|preview)\b", body):
         return True
     edit_starter = re.search(
         r"\b(update|change|edit|modify|replace|remove|add|swap|fix|correct)\s+"
@@ -1931,12 +1931,14 @@ def is_flyer_project_status_request(text: str) -> bool:
         return False
     if re.fullmatch(r"(status|any update|any updates|update|updates|eta|ready(?:\s+yet)?|done|finished)\??", body):
         return True
+    if re.fullmatch(r"where\s+(?:is|are|s)\s+(?:the\s+)?updates?\??", body):
+        return True
     return bool(re.search(
         r"\b("
         r"any\s+updates?|"
         r"any\s+news(?:\s+on\s+(?:the\s+)?(?:flyer|flier|design|preview))?|"
         r"(what'?s|whats|what\s+is)\s+the\s+status|"
-        r"where(?:'s|\s+is)\s+(?:the\s+)?(?:update\s+)?(?:flyer|flier|design|preview)|"
+        r"where(?:'s|\s+is)\s+(?:(?:the|my)\s+)?(?:updated?\s+)?(?:flyer|flier|design|preview)|"
         r"status\s+(please|pls|update)|"
         r"is\s+(it|the\s+flyer|my\s+flyer)\s+(ready(?:\s+yet)?|done|finished)|"
         r"when\s+(will|can)\s+(it|the\s+flyer|my\s+flyer)\s+be\s+(ready|done|finished)|"
@@ -3092,7 +3094,7 @@ def parse_source_vs_new_followup(text: str) -> tuple[str, str]:
 
 
 _STATUS_CHECKIN_RE = re.compile(
-    r"^(?:any\s+update|is\s+it\s+ready|what'?s?\s+(?:the\s+)?status|update\??|status\??|ready\??)\??$",
+    r"^(?:any\s+updates?|is\s+it\s+ready|what'?s?\s+(?:the\s+)?status|where\s+(?:is|are|s)\s+(?:the\s+)?updates?|update\??|status\??|ready\??)\??$",
     flags=re.IGNORECASE,
 )
 

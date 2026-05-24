@@ -47,6 +47,11 @@ FORBIDDEN_TERMS = (
     "generating a new flyer from scratch",
     "needs the source-preserving workflow",
     "provider",
+    "free trial",
+    "trial active",
+    "quota",
+    "credits",
+    "samples remaining",
 )
 
 

@@ -63,6 +63,11 @@ FORBIDDEN_CUSTOMER_TERMS = (
     "08:00",
     "careful flyer edit",
     "updated flyer",
+    "free trial",
+    "trial active",
+    "quota",
+    "credits",
+    "samples remaining",
 )
 
 
