@@ -127,14 +127,20 @@ def decide_scope(
 ) -> dict:
     visible_names = [str(x).strip() for x in extraction.get("visible_organization_names") or [] if str(x).strip()]
     visible_phones = [str(x).strip() for x in extraction.get("visible_phone_numbers") or [] if str(x).strip()]
+    visible_events = [str(x).strip() for x in extraction.get("visible_event_names") or [] if str(x).strip()]
     confidence = str(extraction.get("confidence") or "low").lower()
 
-    if any(_names_match(name, business_name) for name in visible_names) or _phone_matches(visible_phones, account_phones):
+    if (
+        any(_names_match(name, business_name) for name in visible_names)
+        or any(_names_match(name, business_name) for name in visible_events)
+        or _phone_matches(visible_phones, account_phones)
+    ):
         return {
             "decision": "allow",
             "reason": "reference_matches_account",
             "visible_organization_names": visible_names,
             "visible_phone_numbers": visible_phones,
+            "visible_event_names": visible_events,
         }
 
     if visible_names and confidence in {"high", "medium"}:
@@ -144,6 +150,7 @@ def decide_scope(
             "reply_text": unrelated_reply(business_name, visible_names),
             "visible_organization_names": visible_names,
             "visible_phone_numbers": visible_phones,
+            "visible_event_names": visible_events,
         }
 
     if business_name and _names_match(raw_request, business_name):
@@ -152,6 +159,7 @@ def decide_scope(
             "reason": "request_names_account_but_reference_unclear",
             "visible_organization_names": visible_names,
             "visible_phone_numbers": visible_phones,
+            "visible_event_names": visible_events,
         }
 
     return {
@@ -160,6 +168,7 @@ def decide_scope(
         "reply_text": unclear_reply(business_name),
         "visible_organization_names": visible_names,
         "visible_phone_numbers": visible_phones,
+        "visible_event_names": visible_events,
     }
 
 
