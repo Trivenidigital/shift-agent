@@ -1919,7 +1919,7 @@ def is_flyer_project_status_request(text: str) -> bool:
     body = " ".join(flyer_visible_message_text(text).lower().split())
     if not body:
         return False
-    if re.search(r"\bwhere(?:'s|\s+is)\s+(?:the\s+)?(?:update\s+)?(?:flyer|flier|design|preview)\b", body):
+    if re.search(r"\bwhere(?:'s|\s+is)\s+(?:(?:the|my)\s+)?(?:updated?\s+)?(?:flyer|flier|design|preview)\b", body):
         return True
     edit_starter = re.search(
         r"\b(update|change|edit|modify|replace|remove|add|swap|fix|correct)\s+"
@@ -1936,7 +1936,7 @@ def is_flyer_project_status_request(text: str) -> bool:
         r"any\s+updates?|"
         r"any\s+news(?:\s+on\s+(?:the\s+)?(?:flyer|flier|design|preview))?|"
         r"(what'?s|whats|what\s+is)\s+the\s+status|"
-        r"where(?:'s|\s+is)\s+(?:the\s+)?(?:update\s+)?(?:flyer|flier|design|preview)|"
+        r"where(?:'s|\s+is)\s+(?:(?:the|my)\s+)?(?:updated?\s+)?(?:flyer|flier|design|preview)|"
         r"status\s+(please|pls|update)|"
         r"is\s+(it|the\s+flyer|my\s+flyer)\s+(ready(?:\s+yet)?|done|finished)|"
         r"when\s+(will|can)\s+(it|the\s+flyer|my\s+flyer)\s+be\s+(ready|done|finished)|"
