@@ -869,13 +869,21 @@ def is_flyer_transition_allowed(from_s: str, to_s: str) -> bool:
 class FlyerRecoveryConfig(BaseModel):
     """Flyer recovery watchdog settings. Default inert until explicitly enabled."""
     model_config = ConfigDict(extra="forbid")
-    mode: Literal["off", "observe", "customer_ack"] = "off"
+    mode: Literal["off", "observe", "customer_ack", "bundle", "worker_draft", "pr_ready"] = "off"
     enable_timer: bool = False
     scan_window_minutes: int = Field(default=30, ge=5, le=240)
     ack_cooldown_minutes: int = Field(default=60, ge=5, le=1440)
     ack_reservation_stale_minutes: int = Field(default=10, ge=1, le=120)
     max_incidents_per_run: int = Field(default=20, ge=1, le=200)
     manual_queue_stale_minutes: int = Field(default=30, ge=5, le=1440)
+    worker_runner: Literal["codex", "claude"] = "codex"
+    worker_repo_path: str = Field(default="/opt/shift-agent-source", min_length=1, max_length=500)
+    worker_queue_dir: str = Field(default="/opt/shift-agent/state/flyer/recovery_worker_queue", min_length=1, max_length=500)
+    worker_drafts_dir: str = Field(default="/opt/shift-agent/state/flyer/recovery_worker_drafts", min_length=1, max_length=500)
+    worker_auto_run: bool = False
+    max_worker_runs_per_run: int = Field(default=1, ge=0, le=10)
+    worker_model: str = Field(default="gpt-5.3-codex", min_length=1, max_length=120)
+    worker_max_budget_usd: float = Field(default=2.0, ge=0.01, le=25.0)
 
     @field_validator("mode", mode="before")
     @classmethod

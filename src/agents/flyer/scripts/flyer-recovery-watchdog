@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Flyer recovery watchdog.
 
-V1 is deliberately conservative: the timer can observe/open incidents and, when
-explicitly enabled, send guarded acknowledgements. Repair bundles are written
-only through an explicit operator CLI flag.
+The watchdog observes Flyer failures and can progress incidents through guarded
+autonomous repair stages: sanitized bundle, durable worker queue, and bounded
+no-live-send worker drafts. Production deploy remains outside this timer.
 """
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import sys
 
 import yaml
@@ -22,6 +23,15 @@ sys.path.insert(0, str(SRC_ROOT))
 sys.path.insert(0, str(SRC_ROOT / "platform"))
 
 from schemas import Config  # noqa: E402
+from schemas import (  # noqa: E402
+    FlyerRecoveryCustomerAckAttempted,
+    FlyerRecoveryCustomerAckFailed,
+    FlyerRecoveryCustomerAckSent,
+    FlyerRecoveryCustomerAckSuppressed,
+    FlyerRecoveryCustomerAckUncertain,
+    FlyerRecoveryIncidentOpened,
+    FlyerRecoveryRepairBundleWritten,
+)
 try:
     from agents.flyer import recovery  # type: ignore  # noqa: E402
 except ImportError:
@@ -34,6 +44,14 @@ PROJECT_STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
 CUSTOMER_STATE_PATH = Path("/opt/shift-agent/state/flyer/customers.json")
 RECOVERY_STATE_PATH = Path("/opt/shift-agent/state/flyer/recovery_incidents.json")
 BUNDLE_DIR = Path("/opt/shift-agent/state/flyer/recovery_bundles")
+WORKER_QUEUE_DIR = Path("/opt/shift-agent/state/flyer/recovery_worker_queue")
+WORKER_DRAFTS_DIR = Path("/opt/shift-agent/state/flyer/recovery_worker_drafts")
+WORKER_REPO_PATH = Path("/opt/shift-agent-source")
+WORKER_SCRIPT_PATH = Path(__file__).resolve().with_name("flyer-recovery-worker-draft")
+
+ACK_MODES = {"customer_ack"}
+BUNDLE_MODES = {"bundle", "worker_draft", "pr_ready"}
+WORKER_RUN_MODES = {"worker_draft", "pr_ready"}
 
 
 def _load_config(path: Path) -> Config:
@@ -82,6 +100,27 @@ def _load_cf_router_actions():
     return None
 
 
+def _append_audit(log_path: Path, entry) -> None:
+    try:
+        from safe_io import ndjson_append  # type: ignore
+    except Exception:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(entry.model_dump_json() + "\n")
+        return
+    ndjson_append(log_path, entry.model_dump_json())
+
+
+def _incident_common(incident: dict) -> dict:
+    return {
+        "incident_id": str(incident.get("incident_id") or ""),
+        "ack_dedupe_key": str(incident.get("ack_dedupe_key") or ""),
+        "source_fingerprint": str(incident.get("source_fingerprint") or ""),
+        "chat_id_hash": str(incident.get("chat_id_hash") or ""),
+        "evidence_quality": str(incident.get("evidence_quality") or "missing"),
+    }
+
+
 def _send_ack(chat_id: str, message: str) -> tuple[bool, str, str]:
     actions = _load_cf_router_actions()
     if actions is not None and hasattr(actions, "send_flyer_text"):
@@ -103,13 +142,154 @@ def _write_bundle(args: argparse.Namespace) -> int:
         incident.setdefault("codex", {})["status"] = "bundle_written"
         incident.setdefault("codex", {})["bundle_path"] = str(path)
         recovery.write_recovery_state(state_path, state)
+    _append_audit(Path(args.log_path), FlyerRecoveryRepairBundleWritten(
+        type="flyer_recovery_repair_bundle_written",
+        ts=datetime.now(timezone.utc),
+        incident_id=str(incident.get("incident_id") or args.incident_id),
+        bundle_path=str(path),
+    ))
     print(f"bundle_written={path}")
     return 0
 
 
-def _process_customer_acks(state_path: Path, cfg: Config, now: datetime, *, dry_run: bool = False) -> int:
+def _select_signals_for_merge(state: dict, signals: list[recovery.RecoverySignal], limit: int) -> list[recovery.RecoverySignal]:
+    existing = {
+        item.get("source_fingerprint")
+        for item in state.get("incidents", [])
+        if isinstance(item, dict)
+    }
+    selected: list[recovery.RecoverySignal] = []
+    new_count = 0
+    for signal in signals:
+        fingerprint = recovery.fingerprint_signal(signal)
+        if fingerprint in existing:
+            selected.append(signal)
+            continue
+        if new_count >= limit:
+            continue
+        selected.append(signal)
+        new_count += 1
+    return selected
+
+
+def _process_repair_queue(
+    state_path: Path,
+    log_path: Path,
+    cfg: Config,
+    mode: str,
+    now: datetime,
+    args: argparse.Namespace,
+    *,
+    dry_run: bool = False,
+) -> dict[str, int]:
+    queued = 0
+    worker_runs = 0
+    if mode not in BUNDLE_MODES:
+        return {"queued": 0, "worker_runs": 0}
+    with recovery.recovery_state_lock(state_path):
+        state = recovery.load_recovery_state(state_path)
+        for incident in state.get("incidents", []):
+            if queued >= cfg.flyer.recovery.max_incidents_per_run:
+                break
+            if not isinstance(incident, dict) or incident.get("status") != "open":
+                continue
+            codex = incident.setdefault("codex", {})
+            if codex.get("status") in {"queued", "running", "completed"} and codex.get("queue_path"):
+                continue
+            if dry_run:
+                queued += 1
+                continue
+            bundle_path_raw = str(codex.get("bundle_path") or "")
+            if bundle_path_raw and Path(bundle_path_raw).exists():
+                bundle_path = Path(bundle_path_raw)
+                bundle_written = False
+            else:
+                bundle_path = recovery.write_repair_bundle(incident, Path(args.bundle_dir))
+                bundle_written = True
+            queue_path = recovery.write_worker_queue_request(
+                incident,
+                Path(args.worker_queue_dir),
+                bundle_path=bundle_path,
+                worker_mode=mode,
+                runner=cfg.flyer.recovery.worker_runner,
+                repo_path=str(Path(args.worker_repo_path)),
+                now=now,
+            )
+            codex.update({
+                "status": "queued",
+                "bundle_path": str(bundle_path),
+                "queue_path": str(queue_path),
+                "queued_at": now.isoformat(),
+                "runner": cfg.flyer.recovery.worker_runner,
+                "worker_mode": mode,
+            })
+            queued += 1
+            if bundle_written:
+                _append_audit(log_path, FlyerRecoveryRepairBundleWritten(
+                    type="flyer_recovery_repair_bundle_written",
+                    ts=now,
+                    incident_id=str(incident.get("incident_id") or ""),
+                    bundle_path=str(bundle_path),
+                ))
+            recovery.write_recovery_state(state_path, state)
+
+    should_run = mode in WORKER_RUN_MODES and (args.run_worker or cfg.flyer.recovery.worker_auto_run)
+    if dry_run or not should_run:
+        return {"queued": queued, "worker_runs": 0}
+
+    state = recovery.load_recovery_state(state_path)
+    for incident in state.get("incidents", []):
+        if worker_runs >= cfg.flyer.recovery.max_worker_runs_per_run:
+            break
+        if not isinstance(incident, dict):
+            continue
+        codex = incident.get("codex") or {}
+        if codex.get("status") != "queued":
+            continue
+        bundle_path = str(codex.get("bundle_path") or "")
+        if not bundle_path:
+            continue
+        command = [
+            sys.executable,
+            str(args.worker_script_path),
+            "--bundle-path", bundle_path,
+            "--repo-path", str(args.worker_repo_path),
+            "--out-dir", str(args.worker_drafts_dir),
+            "--runner", cfg.flyer.recovery.worker_runner,
+            "--model", cfg.flyer.recovery.worker_model,
+            "--max-budget-usd", str(cfg.flyer.recovery.worker_max_budget_usd),
+            "--audit-log-path", str(log_path),
+            "--json",
+        ]
+        if mode == "pr_ready":
+            command.append("--allow-pr")
+        with recovery.recovery_state_lock(state_path):
+            locked = recovery.load_recovery_state(state_path)
+            current = next((item for item in locked.get("incidents", []) if item.get("incident_id") == incident.get("incident_id")), None)
+            if current is None:
+                continue
+            current.setdefault("codex", {}).update({"status": "running", "started_at": now.isoformat()})
+            recovery.write_recovery_state(state_path, locked)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=2100)
+        worker_runs += 1
+        with recovery.recovery_state_lock(state_path):
+            locked = recovery.load_recovery_state(state_path)
+            current = next((item for item in locked.get("incidents", []) if item.get("incident_id") == incident.get("incident_id")), None)
+            if current is None:
+                continue
+            current.setdefault("codex", {}).update({
+                "status": "completed" if result.returncode == 0 else "failed",
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "returncode": result.returncode,
+            })
+            recovery.write_recovery_state(state_path, locked)
+    return {"queued": queued, "worker_runs": worker_runs}
+
+
+def _process_customer_acks(state_path: Path, log_path: Path, cfg: Config, mode: str, now: datetime, *, dry_run: bool = False) -> int:
     sent_count = 0
-    for incident in list(recovery.load_recovery_state(state_path).get("incidents", []))[: cfg.flyer.recovery.max_incidents_per_run]:
+    considered = 0
+    for incident in list(recovery.load_recovery_state(state_path).get("incidents", [])):
         with recovery.recovery_state_lock(state_path):
             state = recovery.load_recovery_state(state_path)
             current = next((item for item in state.get("incidents", []) if item.get("incident_id") == incident.get("incident_id")), None)
@@ -118,14 +298,37 @@ def _process_customer_acks(state_path: Path, cfg: Config, now: datetime, *, dry_
             decision = recovery.ack_send_decision(
                 current,
                 flyer_enabled=cfg.flyer.enabled,
-                mode=cfg.flyer.recovery.mode,
+                mode="customer_ack" if mode in ACK_MODES else mode,
                 now=now,
                 ack_cooldown=timedelta(minutes=cfg.flyer.recovery.ack_cooldown_minutes),
             )
             if not decision.allowed:
+                ack = current.get("ack") or {}
+                if str(decision.reason).startswith(("terminal_ack:", "ack_reserved", "mode:", "flyer_disabled")):
+                    continue
+                considered += 1
+                if considered > cfg.flyer.recovery.max_incidents_per_run:
+                    break
+                if ack.get("status") == "none" and not decision.reason.startswith("terminal_ack:"):
+                    if dry_run:
+                        continue
+                    current["ack"] = {"status": "suppressed", "status_detail": decision.reason}
+                    recovery.write_recovery_state(state_path, state)
+                    _append_audit(log_path, FlyerRecoveryCustomerAckSuppressed(
+                        type="flyer_recovery_customer_ack_suppressed",
+                        ts=now,
+                        **_incident_common(current),
+                        mode=mode,
+                        reason=decision.reason,
+                    ))
                 continue
+            considered += 1
+            if considered > cfg.flyer.recovery.max_incidents_per_run:
+                break
             template_id, message = recovery.render_recovery_ack(followup_recorded=False)
             attempt_id = f"FRA{now:%Y%m%d%H%M%S}-{current['incident_id'][-6:]}"
+            if dry_run:
+                continue
             current["ack"] = {
                 "status": "reserved",
                 "attempt_id": attempt_id,
@@ -134,8 +337,15 @@ def _process_customer_acks(state_path: Path, cfg: Config, now: datetime, *, dry_
                 "copy_policy_template_id": template_id,
             }
             recovery.write_recovery_state(state_path, state)
-        if dry_run:
-            continue
+            _append_audit(log_path, FlyerRecoveryCustomerAckAttempted(
+                type="flyer_recovery_customer_ack_attempted",
+                ts=now,
+                **_incident_common(current),
+                mode=mode,
+                ack_attempt_id=attempt_id,
+                copy_policy_template_id=template_id,
+                message_sha256=recovery.sha256_text(message),
+            ))
         ok, mid, err = _send_ack(str(current.get("chat_id") or ""), message)
         with recovery.recovery_state_lock(state_path):
             state = recovery.load_recovery_state(state_path)
@@ -146,13 +356,40 @@ def _process_customer_acks(state_path: Path, cfg: Config, now: datetime, *, dry_
                 current["ack"]["status"] = "sent"
                 current["ack"]["outbound_message_id"] = mid
                 sent_count += 1
+                entry = FlyerRecoveryCustomerAckSent(
+                    type="flyer_recovery_customer_ack_sent",
+                    ts=now,
+                    **_incident_common(current),
+                    mode=mode,
+                    ack_attempt_id=str(current["ack"].get("attempt_id") or ""),
+                    outbound_message_id=mid,
+                )
             elif "send_uncertain" in err:
                 current["ack"]["status"] = "uncertain"
                 current["ack"]["status_detail"] = err
+                entry = FlyerRecoveryCustomerAckUncertain(
+                    type="flyer_recovery_customer_ack_uncertain",
+                    ts=now,
+                    **_incident_common(current),
+                    mode=mode,
+                    ack_attempt_id=str(current["ack"].get("attempt_id") or ""),
+                    status="uncertain",
+                    error=err,
+                )
             else:
                 current["ack"]["status"] = "failed"
                 current["ack"]["status_detail"] = err
+                entry = FlyerRecoveryCustomerAckFailed(
+                    type="flyer_recovery_customer_ack_failed",
+                    ts=now,
+                    **_incident_common(current),
+                    mode=mode,
+                    ack_attempt_id=str(current["ack"].get("attempt_id") or ""),
+                    status="failed",
+                    error=err,
+                )
             recovery.write_recovery_state(state_path, state)
+            _append_audit(log_path, entry)
     return sent_count
 
 
@@ -164,6 +401,11 @@ def main() -> int:
     parser.add_argument("--customer-state-path", default=str(CUSTOMER_STATE_PATH))
     parser.add_argument("--recovery-state-path", default=str(RECOVERY_STATE_PATH))
     parser.add_argument("--bundle-dir", default=str(BUNDLE_DIR))
+    parser.add_argument("--worker-queue-dir", default="")
+    parser.add_argument("--worker-drafts-dir", default="")
+    parser.add_argument("--worker-repo-path", default="")
+    parser.add_argument("--worker-script-path", default=str(WORKER_SCRIPT_PATH))
+    parser.add_argument("--run-worker", action="store_true")
     parser.add_argument("--mode", default="", help="Test-only override.")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--write-repair-bundle", action="store_true")
@@ -180,11 +422,16 @@ def main() -> int:
 
     cfg = _load_config(Path(args.config_path))
     mode = args.mode or cfg.flyer.recovery.mode
+    if not args.worker_queue_dir:
+        args.worker_queue_dir = cfg.flyer.recovery.worker_queue_dir
+    if not args.worker_drafts_dir:
+        args.worker_drafts_dir = cfg.flyer.recovery.worker_drafts_dir
+    if not args.worker_repo_path:
+        args.worker_repo_path = cfg.flyer.recovery.worker_repo_path
     if mode == "off":
         print("mode=off opened=0")
         return 0
 
-    now = datetime.now(timezone.utc)
     now = datetime.now(timezone.utc)
     since = now - timedelta(minutes=cfg.flyer.recovery.scan_window_minutes)
     rows = [
@@ -194,27 +441,69 @@ def main() -> int:
     signals = [
         signal for row in rows
         if (signal := recovery.classify_decision(row, {})) is not None
-    ][: cfg.flyer.recovery.max_incidents_per_run]
+    ]
     state_path = Path(args.recovery_state_path)
     with recovery.recovery_state_lock(state_path):
         state = recovery.load_recovery_state(state_path)
+        before = {item.get("source_fingerprint") for item in state.get("incidents", []) if isinstance(item, dict)}
         recovery.finalize_stale_reservations(
             state,
             now=now,
             stale_after=timedelta(minutes=cfg.flyer.recovery.ack_reservation_stale_minutes),
         )
-        opened = recovery.merge_signals(state, signals, now)
+        opened = recovery.merge_signals(
+            state,
+            _select_signals_for_merge(state, signals, cfg.flyer.recovery.max_incidents_per_run),
+            now,
+        )
+        opened_incidents = [
+            item for item in state.get("incidents", [])
+            if isinstance(item, dict) and item.get("source_fingerprint") not in before
+        ]
         if not args.dry_run:
             recovery.write_recovery_state(state_path, state)
+            for incident in opened_incidents:
+                _append_audit(Path(args.log_path), FlyerRecoveryIncidentOpened(
+                    type="flyer_recovery_incident_opened",
+                    ts=now,
+                    incident_id=str(incident.get("incident_id") or ""),
+                    failure_class=str(incident.get("failure_class") or ""),
+                    severity=str(incident.get("severity") or "warning"),
+                    project_id=str(incident.get("project_id") or ""),
+                    source_fingerprint=str(incident.get("source_fingerprint") or ""),
+                    ack_dedupe_key=str(incident.get("ack_dedupe_key") or ""),
+                    chat_id_hash=str(incident.get("chat_id_hash") or ""),
+                    evidence_quality=str(incident.get("evidence_quality") or "missing"),
+                    mode=mode,
+                ))
     ack_sent = 0
+    repair = _process_repair_queue(
+        state_path,
+        Path(args.log_path),
+        cfg,
+        mode,
+        now,
+        args,
+        dry_run=args.dry_run,
+    )
     if mode == "customer_ack":
-        ack_sent = _process_customer_acks(state_path, cfg, now, dry_run=args.dry_run)
+        ack_sent = _process_customer_acks(state_path, Path(args.log_path), cfg, mode, now, dry_run=args.dry_run)
     state = recovery.load_recovery_state(state_path) if state_path.exists() else {"incidents": []}
-    summary = {"mode": mode, "opened": opened, "ack_sent": ack_sent, "incidents": len(state.get("incidents", []))}
+    summary = {
+        "mode": mode,
+        "opened": opened,
+        "ack_sent": ack_sent,
+        "queued": repair["queued"],
+        "worker_runs": repair["worker_runs"],
+        "incidents": len(state.get("incidents", [])),
+    }
     if args.json:
         print(json.dumps(summary))
     else:
-        print(f"mode={mode} opened={opened} ack_sent={ack_sent} incidents={summary['incidents']}")
+        print(
+            f"mode={mode} opened={opened} ack_sent={ack_sent} "
+            f"queued={repair['queued']} worker_runs={repair['worker_runs']} incidents={summary['incidents']}"
+        )
     return 0
 
 

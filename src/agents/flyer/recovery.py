@@ -88,6 +88,33 @@ def _canonical_detail(detail: str) -> str:
     return body[:120]
 
 
+def _parse_detail_field(detail: str, key: str) -> str:
+    match = re.search(rf"(?:^|[;\s]){re.escape(key)}=([^;\s]+)", detail or "")
+    return match.group(1).strip() if match else ""
+
+
+def _parse_inbound_message_id(row: dict, detail: str) -> str:
+    for key in ["message_id", "provider_message_id", "inbound_message_id", "root_message_id"]:
+        value = str(row.get(key) or "").strip()
+        if value:
+            return value
+    return _parse_detail_field(detail, "message_id") or _parse_detail_field(detail, "provider_message_id")
+
+
+def _has_customer_origin_evidence(row: dict, detail: str, provider_message_id: str) -> bool:
+    if provider_message_id:
+        return True
+    sender_role = str(row.get("sender_role") or _parse_detail_field(detail, "sender_role") or "").strip().lower()
+    if sender_role in {"customer", "owner", "staff", "employee"}:
+        return True
+    return bool(str(row.get("chat_id") or "").strip() and str(row.get("from_me") or "").lower() in {"false", "0"})
+
+
+def _has_nonblank_ack_error(detail: str) -> bool:
+    match = re.search(r"(?:^|[;\s])ack_error=([^;]*)", detail or "", flags=re.IGNORECASE)
+    return bool(match and match.group(1).strip())
+
+
 def classify_decision(row: dict, projects: dict[str, dict]) -> RecoverySignal | None:
     if row.get("type") != "cf_router_intercepted":
         return None
@@ -101,15 +128,16 @@ def classify_decision(row: dict, projects: dict[str, dict]) -> RecoverySignal | 
     failure_class = ""
     if any(marker in lower for marker in ["concept_generation_failed", "revision_regeneration_failed", "regeneration_failed"]):
         failure_class = "concept_generation_failed"
-    elif "ack_error=" in lower or "bridge" in lower:
-        failure_class = "bridge_send_failed"
     elif "source edit provider" in lower or "source edit reference" in lower:
         failure_class = "provider_unavailable"
+    elif _has_nonblank_ack_error(detail) or "bridge" in lower:
+        failure_class = "bridge_send_failed"
     elif any(marker in lower for marker in ["json_parse_failed", "select_failed", "status_failed", "exit="]):
         failure_class = "state_transition_failed"
     if not failure_class:
         return None
-    evidence = "strong" if str(row.get("message_id") or row.get("provider_message_id") or "").strip() else "weak"
+    provider_message_id = _parse_inbound_message_id(row, detail)
+    evidence = "strong" if _has_customer_origin_evidence(row, detail, provider_message_id) else "weak"
     return RecoverySignal(
         failure_class=failure_class,
         severity="warning",
@@ -118,7 +146,7 @@ def classify_decision(row: dict, projects: dict[str, dict]) -> RecoverySignal | 
         detail=detail,
         canonical_source=_canonical_detail(detail),
         evidence_quality=evidence,  # type: ignore[arg-type]
-        provider_message_id=str(row.get("message_id") or row.get("provider_message_id") or ""),
+        provider_message_id=provider_message_id,
     )
 
 
@@ -203,7 +231,7 @@ def ack_send_decision(
         return AckDecision(False, "flyer_disabled")
     ack = incident.get("ack") or {}
     status = str(ack.get("status") or "none")
-    if status in {"sent", "failed", "uncertain"}:
+    if status in {"sent", "failed", "uncertain", "suppressed"}:
         return AckDecision(False, f"terminal_ack:{status}")
     if status == "reserved":
         return AckDecision(False, "ack_reserved")
@@ -238,14 +266,23 @@ def finalize_stale_reservations(state: dict, *, now: datetime, stale_after: time
 
 def merge_signals(state: dict, signals: Iterable[RecoverySignal], now: datetime) -> int:
     incidents = state.setdefault("incidents", [])
-    existing = {item.get("source_fingerprint") for item in incidents if isinstance(item, dict)}
+    existing = {item.get("source_fingerprint"): item for item in incidents if isinstance(item, dict)}
     opened = 0
     for signal in signals:
         incident = incident_from_signal(signal, now)
-        if incident["source_fingerprint"] in existing:
+        current = existing.get(incident["source_fingerprint"])
+        if current is not None:
+            current["last_seen"] = now.isoformat()
+            if current.get("evidence_quality") != "strong" and incident.get("evidence_quality") == "strong":
+                current["evidence_quality"] = "strong"
+                current["root_message_id"] = incident.get("root_message_id", "")
+                current["provider_message_id_hash"] = incident.get("provider_message_id_hash", "")
+                ack = current.get("ack") or {}
+                if ack.get("status") == "suppressed" and ack.get("status_detail") == "missing_strong_customer_origin_evidence":
+                    current["ack"] = {"status": "none"}
             continue
         incidents.append(incident)
-        existing.add(incident["source_fingerprint"])
+        existing[incident["source_fingerprint"]] = incident
         opened += 1
     state.setdefault("schema_version", 1)
     return opened
@@ -336,4 +373,50 @@ def write_repair_bundle(
         path.write_text(json.dumps(doc, indent=2, sort_keys=True), encoding="utf-8")
     else:
         atomic_write_text(path, json.dumps(doc, indent=2, sort_keys=True))
+    return path
+
+
+def write_worker_queue_request(
+    incident: dict,
+    queue_dir: Path,
+    *,
+    bundle_path: Path,
+    worker_mode: str,
+    runner: str,
+    repo_path: str,
+    now: datetime,
+) -> Path:
+    queue_dir.mkdir(parents=True, exist_ok=True)
+    incident_id = str(incident.get("incident_id") or "incident")
+    doc = {
+        "schema_version": 1,
+        "incident_id": incident_id,
+        "failure_class": incident.get("failure_class", ""),
+        "severity": incident.get("severity", "warning"),
+        "project_id": incident.get("project_id", ""),
+        "created_at": now.isoformat(),
+        "bundle_path": str(bundle_path),
+        "runner": runner,
+        "repo_path": repo_path,
+        "worker_mode": worker_mode,
+        "no_live_send_env": {"FLYER_RECOVERY_NO_LIVE_SEND": "1"},
+        "required_gates": [
+            "local_tests_pass",
+            "human_pr_review_before_merge",
+            "tarball_deploy_smoke_before_production",
+        ],
+        "sanitized_context": {
+            "chat_id_hash": incident.get("chat_id_hash", ""),
+            "sender_phone_hash": incident.get("sender_phone_hash", ""),
+            "source_fingerprint": incident.get("source_fingerprint", ""),
+        },
+    }
+    path = queue_dir / f"{incident_id}.json"
+    text = json.dumps(doc, indent=2, sort_keys=True)
+    try:
+        from safe_io import atomic_write_text  # type: ignore
+    except Exception:
+        path.write_text(text, encoding="utf-8")
+    else:
+        atomic_write_text(path, text)
     return path

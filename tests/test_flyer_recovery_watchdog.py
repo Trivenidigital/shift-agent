@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import json
 import subprocess
 import sys
 
@@ -78,11 +80,29 @@ flyer:
 """.strip(),
         encoding="utf-8",
     )
-    log.write_text(
-        '{"type":"cf_router_intercepted","ts":"2026-05-23T16:00:00Z","reason":"flyer_primary_failed","chat_id":"17329837841@s.whatsapp.net","message_id":"wamid.current","subprocess_rc":2,"detail":"project_id=F0065; concept_generation_failed: exit=2 provider down"}\n'
-        '{"type":"cf_router_intercepted","ts":"2026-05-20T16:00:00Z","reason":"flyer_primary_failed","chat_id":"17329837841@s.whatsapp.net","message_id":"wamid.old","subprocess_rc":2,"detail":"project_id=F0001; concept_generation_failed: exit=2 old provider down"}\n',
-        encoding="utf-8",
-    )
+    current_ts = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+    old_ts = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat().replace("+00:00", "Z")
+    rows = [
+        {
+            "type": "cf_router_intercepted",
+            "ts": current_ts,
+            "reason": "flyer_primary_failed",
+            "chat_id": "17329837841@s.whatsapp.net",
+            "message_id": "wamid.current",
+            "subprocess_rc": 2,
+            "detail": "project_id=F0065; concept_generation_failed: exit=2 provider down",
+        },
+        {
+            "type": "cf_router_intercepted",
+            "ts": old_ts,
+            "reason": "flyer_primary_failed",
+            "chat_id": "17329837841@s.whatsapp.net",
+            "message_id": "wamid.old",
+            "subprocess_rc": 2,
+            "detail": "project_id=F0001; concept_generation_failed: exit=2 old provider down",
+        },
+    ]
+    log.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
     projects.write_text('{"projects":[]}', encoding="utf-8")
     customers.write_text('{"customers":[],"onboarding_sessions":[],"intake_sessions":[]}', encoding="utf-8")
 
