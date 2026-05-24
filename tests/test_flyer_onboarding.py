@@ -1240,6 +1240,7 @@ def test_returning_customer_concierge_can_enter_guided_mode(tmp_path):
         "one message",
         "text mode",
         "I'll type it",
+        "I am an existing customer",
     ],
 )
 def test_returning_customer_concierge_still_vague_followup_asks_open_prompt(tmp_path, reply):

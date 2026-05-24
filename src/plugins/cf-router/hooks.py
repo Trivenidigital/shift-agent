@@ -1627,7 +1627,10 @@ def _try_flyer_concierge_vague_start_intercept(
     *,
     media_path: Optional[str] = None,
 ) -> Optional[dict]:
-    if not actions.is_vague_flyer_start(text, has_media=bool(media_path)):
+    if not (
+        actions.is_vague_flyer_start(text, has_media=bool(media_path))
+        or actions.is_flyer_existing_customer_reply(text)
+    ):
         return None
     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
     if role == "owner":

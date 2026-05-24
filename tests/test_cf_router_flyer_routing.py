@@ -976,6 +976,53 @@ def test_vague_start_for_active_customer_routes_to_concierge_before_active_proje
     assert "Welcome back, Lakshmi's Kitchen" in sent["text"]
 
 
+def test_existing_customer_reply_routes_to_concierge_before_active_project(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    sent = {}
+    customer = {
+        "customer_id": "CUST0001",
+        "business_name": "Lakshmi's Kitchen",
+        "business_category": "restaurant",
+        "status": "trial",
+    }
+
+    monkeypatch.setattr(actions, "is_flyer_enabled", lambda: True)
+    monkeypatch.setattr(actions, "flyer_campaign_cta_text", lambda _text: "")
+    monkeypatch.setattr(hooks, "_try_flyer_intake_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_account_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_reference_scope_choice_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_source_vs_new_choice_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_reference_scope_authorization_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_existing_onboarding_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
+    monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
+    monkeypatch.setattr(actions, "trigger_flyer_intake", lambda **_kwargs: (True, "", {
+        "reply_text": (
+            "Flyer Studio\n------------\n"
+            "Welcome back, Lakshmi's Kitchen. Yes, I am here to help. What are we creating today?\n\n"
+            "You can tell me in one message, or I can guide you step by step."
+        ),
+        "action": "concierge_choice",
+    }))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "concierge-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        hooks,
+        "_try_flyer_active_project_intercept",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("active project must not swallow existing-customer reply")),
+    )
+
+    result = hooks.pre_gateway_dispatch(SimpleNamespace(
+        text="I am an existing customer",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="existing-customer",
+    ))
+
+    assert result == {"action": "skip", "reason": "cf-router flyer concierge choice sent"}
+    assert "Welcome back, Lakshmi's Kitchen" in sent["text"]
+
+
 def test_vague_flyer_start_for_ineligible_customer_status_does_not_send_starter(monkeypatch):
     for status in ("payment_pending", "suspended", "cancelled"):
         hooks, actions = _load_plugin_modules()

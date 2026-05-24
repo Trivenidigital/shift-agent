@@ -611,8 +611,14 @@ def parse_concierge_choice(text: str) -> str:
     }
     vague_phrases = {
         "i can tell you in one message",
+        "i am already registered",
+        "i am an existing customer",
+        "i am existing customer",
         "i will type",
         "i will type it",
+        "im already registered",
+        "im an existing customer",
+        "im existing customer",
         "ill type",
         "ill type it",
         "in one message",

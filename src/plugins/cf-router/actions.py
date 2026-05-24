@@ -1487,6 +1487,19 @@ def is_vague_flyer_start(text: str, *, has_media: bool = False) -> bool:
     return bool(re.search(r"\b(?:create|make|need|help|start|try|get)\b.*\b(?:flyer|flier|poster|marketing|flyer studio)\b", lower))
 
 
+def is_flyer_existing_customer_reply(text: str) -> bool:
+    """Return True for short account-continuation replies from registered customers."""
+    body = " ".join(flyer_visible_message_text(text).split())
+    lower = body.lower().strip(" .!,:;")
+    if not lower or len(lower) > 80:
+        return False
+    return bool(re.search(
+        r"\b(?:i\s+am|i'?m|we\s+are|already|existing)\b.*\b(?:existing\s+)?(?:customer|client|registered|signed\s*up)\b"
+        r"|\b(?:existing\s+customer|already\s+registered|already\s+signed\s*up)\b",
+        lower,
+    ))
+
+
 def extract_flyer_request_after_confirm(text: str) -> str:
     """Return a flyer brief trailing a compound onboarding CONFIRM reply."""
     body = flyer_visible_message_text(text)
