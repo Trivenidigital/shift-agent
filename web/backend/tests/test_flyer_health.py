@@ -485,7 +485,15 @@ def test_manual_queue_impact_zero_by_default(tmp_path, monkeypatch):
     )
 
     impact = flyer._source_edit_manual_queue_impact()
-    assert impact == {"queued_count": 0, "oldest_age_hours": None}
+    assert impact["queued_count"] == 0
+    assert impact["oldest_age_hours"] is None
+    assert impact["oldest_age_minutes"] is None
+    assert impact["all_queued_count"] == 0
+    assert impact["all_oldest_age_hours"] is None
+    assert impact["all_oldest_age_minutes"] is None
+    assert impact["reason_counts"] == {}
+    assert impact["stale_count"] == 0
+    assert impact["stale_minutes_threshold"] >= 5
 
 
 def test_manual_queue_impact_counts_source_edit_unavailable_rows(tmp_path, monkeypatch):
@@ -510,7 +518,7 @@ def test_manual_queue_impact_counts_source_edit_unavailable_rows(tmp_path, monke
                 _manual_edit_project("F0060", manual_status="queued", queued_at=queued_old),
                 _manual_edit_project("F0061", manual_status="in_progress", queued_at=queued_new),
                 _manual_edit_project("F0062", manual_status="completed", queued_at=queued_new),
-                _manual_edit_project("F0063", reason_code="reference_unsupported", queued_at=queued_new),
+                _manual_edit_project("F0063", reason_code="visual_qa_failed", queued_at=queued_new),
             ],
         },
     )
@@ -518,6 +526,13 @@ def test_manual_queue_impact_counts_source_edit_unavailable_rows(tmp_path, monke
     impact = flyer._source_edit_manual_queue_impact()
     assert impact["queued_count"] == 2
     assert impact["oldest_age_hours"] is not None and impact["oldest_age_hours"] >= 4
+    assert impact["oldest_age_minutes"] is not None and impact["oldest_age_minutes"] >= 300
+    assert impact["all_queued_count"] == 3
+    assert impact["all_oldest_age_minutes"] is not None and impact["all_oldest_age_minutes"] >= 300
+    assert impact["reason_counts"] == {
+        "source_edit_provider_unavailable": 2,
+        "visual_qa_failed": 1,
+    }
 
 
 def test_source_edit_detail_surfaces_queue_impact_when_present(tmp_path, monkeypatch):
