@@ -52,6 +52,7 @@ class AuthStatus(BaseModel):
 
     totp_enrolled: bool
     pushover_configured: bool
+    auth_bypass_enabled: bool = False
 
 
 class TotpVerifyBody(BaseModel):
@@ -132,6 +133,7 @@ async def auth_status() -> AuthStatus:
         pushover_configured=bool(
             cfg.alerting.pushover_user_key and cfg.alerting.pushover_app_token
         ),
+        auth_bypass_enabled=bool(settings.auth_bypass_enabled),
     )
 
 

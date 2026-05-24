@@ -6,7 +6,7 @@ import { api } from "@/lib/api";
 import { cn } from "@/lib/cn";
 
 interface OtpRequestResponse { token: string; expires_in_seconds: number }
-interface AuthStatus { totp_enrolled: boolean; pushover_configured: boolean }
+interface AuthStatus { totp_enrolled: boolean; pushover_configured: boolean; auth_bypass_enabled?: boolean }
 
 type Tab = "pushover" | "totp";
 
@@ -18,18 +18,6 @@ export function LoginScreen({ onAuthed }: { onAuthed: () => void }) {
   const [code, setCode] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    api.GET<AuthStatus>("/auth/status")
-      .then((s) => {
-        setAuthStatus(s);
-        // Default to Pushover if configured, else TOTP. If neither, surface error.
-        if (s.pushover_configured) setTab("pushover");
-        else if (s.totp_enrolled) setTab("totp");
-        else setError("No login methods configured. Server admin must enable Pushover OTP or TOTP.");
-      })
-      .catch(() => setError("Cannot reach server"));
-  }, []);
 
   const requestOtp = async () => {
     setLoading(true); setError(null);
@@ -45,6 +33,23 @@ export function LoginScreen({ onAuthed }: { onAuthed: () => void }) {
       setError((e as Error).message);
     } finally { setLoading(false); }
   };
+
+  useEffect(() => {
+    api.GET<AuthStatus>("/auth/status")
+      .then((s) => {
+        setAuthStatus(s);
+        if (s.auth_bypass_enabled) {
+          // Test-only fast path: backend will mint a bypass JWT on request-otp.
+          requestOtp();
+          return;
+        }
+        // Default to Pushover if configured, else TOTP. If neither, surface error.
+        if (s.pushover_configured) setTab("pushover");
+        else if (s.totp_enrolled) setTab("totp");
+        else setError("No login methods configured. Server admin must enable Pushover OTP or TOTP.");
+      })
+      .catch(() => setError("Cannot reach server"));
+  }, []);
 
   const verifyOtp = async () => {
     setLoading(true); setError(null);
