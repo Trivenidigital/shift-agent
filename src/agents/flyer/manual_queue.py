@@ -171,8 +171,7 @@ def list_manual_queue(
         # ghost stuck rows in the queue counters.
         if manual.status in {"break_glass_sent", "closed_no_send"}:
             continue
-        has_failed_qa = any(report.status != "passed" for report in project.qa_reports)
-        if project.status != "manual_edit_required" and manual.status not in {"queued", "in_progress"} and not has_failed_qa:
+        if project.status != "manual_edit_required" and manual.status not in {"queued", "in_progress"}:
             continue
         queued_at = manual.queued_at or project.updated_at
         age_minutes = max(int((now - queued_at).total_seconds() // 60), 0)
