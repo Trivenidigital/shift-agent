@@ -1370,12 +1370,32 @@ def should_bypass_active_flyer_project_for_fresh_request(
     if not active_project:
         return True
     status = str(active_project.get("status") or "")
+    if _media_revision_targets_delivered_active_project(body, status=status, has_media=has_media):
+        return False
     return (
         has_media
         or status not in {"intake_started", "collecting_required_info", "awaiting_assets"}
         or not flyer_project_has_required_fields(active_project)
         or not similar_to_active_project_request(body, active_project)
     )
+
+
+def _media_revision_targets_delivered_active_project(text: str, *, status: str, has_media: bool) -> bool:
+    if status != "delivered" or not has_media:
+        return False
+    body = " ".join(flyer_visible_message_text(text).split())
+    if not body:
+        return False
+    if not is_exact_reference_edit_request(body, has_media=True):
+        return False
+    if not is_flyer_revision_intent(body):
+        return False
+    return bool(re.search(
+        r"\b(?:existing|current|same|this|attached|uploaded)\s+"
+        r"(?:flyer|flier|poster|banner|image|artwork|creative|graphic)\b",
+        body,
+        flags=re.IGNORECASE,
+    ))
 
 
 def should_start_new_flyer_over_active(text: str, *, has_media: bool = False) -> bool:
@@ -1908,7 +1928,7 @@ def is_stale_for_new_request(
 def is_flyer_revision_intent(text: str) -> bool:
     body = flyer_visible_message_text(text).lower()
     return bool(re.search(
-        r"\b(change|replace|swap|remove|exclude|add|fix|correct|problem|wrong|still|instead|not\s+in|looks?\s+great|design)\b",
+        r"\b(apply|change|replace|swap|remove|exclude|add|fix|correct|problem|wrong|still|instead|not\s+in|looks?\s+great|design)\b",
         body,
         flags=re.IGNORECASE,
     ))

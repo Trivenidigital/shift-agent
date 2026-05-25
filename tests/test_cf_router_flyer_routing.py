@@ -97,6 +97,60 @@ def test_media_price_change_is_new_template_work_not_logo_upload():
     assert not actions.should_start_new_flyer_over_active("replace logo", has_media=True)
 
 
+def test_delivered_existing_flyer_media_revision_stays_on_active_project(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    text = (
+        "Apply these changes to the existing flyer: change the background to rich golden color "
+        "and keep the pictures if 2 male and 2 female celebrities with different hairstyles each "
+        "and keep prices as $40,$60,$80,100"
+    )
+    before_update = {
+        "project_id": "F0048",
+        "customer_phone": "+19803826497",
+        "status": "delivered",
+        "updated_at": "2026-05-25T18:09:56Z",
+        "raw_request": "Create flyer for Chloe Hair Studio promoting men haircut $20 and perms $80.",
+        "fields": {
+            "event_or_business_name": "Chloe Hair Studio",
+            "venue_or_location": "11111 Gainsborough Ct, Fairfax, VA",
+            "contact_info": "+19803826497",
+        },
+        "concepts": [{"concept_id": "C1"}],
+        "revisions": [],
+    }
+    after_update = {**before_update, "status": "revising_design", "concepts": []}
+    active_projects = [before_update, after_update]
+    update_calls: list[tuple] = []
+    preview_calls: list[str] = []
+    audits: list[dict] = []
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+19803826497", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0004", "status": "trial"})
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_projects.pop(0) if active_projects else after_update)
+    monkeypatch.setattr(actions, "invoke_update_flyer_project", lambda *args: update_calls.append(args) or (True, json.dumps({
+        "project_id": "F0048",
+        "version": 4,
+        "revision_patch": {"changed": True, "visual_only": False, "ambiguous": False},
+        "revision_requires_clarification": False,
+    })))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, _message: (True, "ack-mid", ""))
+    monkeypatch.setattr(actions, "trigger_generate_flyer_concepts", lambda project_id: (True, f"generated {project_id}"))
+    monkeypatch.setattr(actions, "send_flyer_concept_previews", lambda _chat_id, project_id: preview_calls.append(project_id) or (True, "preview-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
+
+    result = hooks._try_flyer_active_project_intercept(
+        text,
+        "74290284261595@lid",
+        {"message_id": "m-chloe-existing-media"},
+        media_path="C:/tmp/chloe-existing.jpg",
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer active: revision captured for F0048"}
+    assert update_calls
+    assert preview_calls == ["F0048"]
+    assert not any(row.get("reason") == "flyer_active_project_bypassed" for row in audits)
+
+
 def test_media_exact_reference_edit_is_not_new_poster_generation():
     actions = _load_actions()
 
@@ -3901,6 +3955,48 @@ def test_pending_confirmation_message_is_sent_verbatim(monkeypatch):
     assert result == {"action": "skip", "reason": "cf-router flyer active: revision captured for F0065"}
     assert sent == [pending_message]
     assert generated == []
+
+
+def test_revision_clarification_reply_includes_request_excerpt_to_avoid_dedupe(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    active_project = {
+        "project_id": "F0048",
+        "customer_phone": "+19803826497",
+        "status": "delivered",
+        "fields": {"event_or_business_name": "Chloe Hair Studio", "contact_info": "+19803826497"},
+        "concepts": [{"concept_id": "C1"}],
+        "revisions": [],
+    }
+    sent: list[str] = []
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+19803826497", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0004", "status": "trial"})
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
+    monkeypatch.setattr(
+        actions,
+        "invoke_update_flyer_project",
+        lambda *_args: (True, json.dumps({
+            "project_id": "F0048",
+            "version": 3,
+            "revision_requires_clarification": True,
+            "revision_patch": {
+                "unresolved_reason": "I could not match that change to the current flyer details."
+            },
+        })),
+    )
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+
+    result = hooks._try_flyer_active_project_intercept(
+        "Apply these changes: use richer gold near the price boxes.",
+        "19803826497@s.whatsapp.net",
+        {"message_id": "clarify-gold-boxes"},
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer active: revision captured for F0048"}
+    assert sent
+    assert "I saw: Apply these changes: use richer gold near the price boxes." in sent[0]
+    assert "F0048" not in sent[0]
 
 
 def test_source_vs_new_source_choice_creates_manual_edit_project(monkeypatch):
