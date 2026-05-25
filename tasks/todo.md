@@ -1345,3 +1345,14 @@ Review results:
 ### Review Notes
 
 Root cause from F0095: source-edit config was unset at runtime and recovery classified a successful manual-queue row as provider failure because it keyed on detail text without checking `subprocess_rc`. Follow-up code fix prevents new false incidents and records concept-preview delivery ids after media send.
+
+## Flyer Source-Edit Autonomous Repair - 2026-05-25T19:30Z
+
+- [x] Reproduced F0097 post-deploy failure: source edit generated a preview but write_text_manifest rejected the long edit instruction as critical text facts do not fit.
+- [x] Added regression for source-edit fit failures mapping to isual_qa_failed, not provider_timeout.
+- [x] Added regression for source_edit_integrity_only manifests accepting long edit instructions without enforcing poster copy-fit gates.
+- [x] Implemented the minimal classifier and manifest changes.
+- [x] Verified focused generator/recovery/renderer slice.
+- [ ] Merge/deploy, then repair F0097 customer-visible state using the existing good preview or a regenerated one.
+
+Review: red tests first failed with provider_timeout and critical text facts do not fit; green targeted suite passed 27 passed, 70 deselected plus py_compile for the touched scripts.

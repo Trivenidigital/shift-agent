@@ -817,23 +817,29 @@ def write_text_manifest(
     warnings: list[str] | None = None,
 ) -> Path:
     artifact = Path(artifact_path)
-    expected = collect_text_facts(project)
-    rendered = list(expected)
-    missing: list[str] = []
-    expected_by_id = {fact.fact_id: fact for fact in expected}
-    rendered_by_id: dict[str, FlyerTextFact] = {}
-    duplicate_ids: list[str] = []
-    for fact in rendered:
-        if fact.fact_id in rendered_by_id:
-            duplicate_ids.append(fact.fact_id)
-        rendered_by_id[fact.fact_id] = fact
-    for fact_id, fact in expected_by_id.items():
-        rendered_fact = rendered_by_id.get(fact_id)
-        if rendered_fact is None:
-            missing.append(fact_id)
-            continue
-        if _normalize_fact_text(rendered_fact.text) != _normalize_fact_text(fact.text):
-            missing.append(fact_id)
+    if verification_mode == "source_edit_integrity_only":
+        expected: list[FlyerTextFact] = []
+        rendered: list[FlyerTextFact] = []
+        missing: list[str] = []
+        duplicate_ids: list[str] = []
+    else:
+        expected = collect_text_facts(project)
+        rendered = list(expected)
+        missing = []
+        expected_by_id = {fact.fact_id: fact for fact in expected}
+        rendered_by_id: dict[str, FlyerTextFact] = {}
+        duplicate_ids = []
+        for fact in rendered:
+            if fact.fact_id in rendered_by_id:
+                duplicate_ids.append(fact.fact_id)
+            rendered_by_id[fact.fact_id] = fact
+        for fact_id, fact in expected_by_id.items():
+            rendered_fact = rendered_by_id.get(fact_id)
+            if rendered_fact is None:
+                missing.append(fact_id)
+                continue
+            if _normalize_fact_text(rendered_fact.text) != _normalize_fact_text(fact.text):
+                missing.append(fact_id)
     blockers = []
     if missing:
         blockers.append("missing critical text facts: " + ", ".join(sorted(set(missing))))
