@@ -433,6 +433,66 @@ def test_manual_source_edit_stale_becomes_incident():
     assert report["eval_candidates"][0]["category"] == "source_edit_provider_posture"
 
 
+def test_manual_visual_qa_stale_becomes_general_manual_incident():
+    module = load_module()
+    report = module.build_report(
+        projects={
+            "projects": [
+                _project(
+                    "F9002",
+                    manual_review={
+                        "status": "queued",
+                        "reason": "visual QA failed during finalization",
+                        "reason_code": "visual_qa_failed",
+                        "detail": "headline contrast unreadable",
+                        "queued_at": "2026-05-20T10:00:00Z",
+                    },
+                )
+            ]
+        },
+        decision_entries=[],
+        now=module.parse_utc("2026-05-20T11:05:00Z"),
+    )
+
+    incident = report["incidents"][0]
+    assert incident["type"] == "manual_review_stale"
+    assert incident["project_id"] == "F9002"
+    assert incident["severity"] == "high"
+    assert incident["eval_category"] == "manual_queue_sla"
+    assert incident["evidence"].endswith("reason_code=visual_qa_failed")
+    assert incident["evidence_details"]["manual_reason_code"] == "visual_qa_failed"
+    assert "OpenRouter" not in incident["suggested_action"]
+
+
+def test_manual_provider_timeout_stale_becomes_general_manual_incident():
+    module = load_module()
+    report = module.build_report(
+        projects={
+            "projects": [
+                _project(
+                    "F9003",
+                    manual_review={
+                        "status": "in_progress",
+                        "reason": "provider timed out repeatedly",
+                        "reason_code": "provider_timeout",
+                        "detail": "generation retries exhausted",
+                        "queued_at": "2026-05-20T10:00:00Z",
+                    },
+                )
+            ]
+        },
+        decision_entries=[],
+        now=module.parse_utc("2026-05-20T11:05:00Z"),
+    )
+
+    incident = report["incidents"][0]
+    assert incident["type"] == "manual_review_stale"
+    assert incident["project_id"] == "F9003"
+    assert incident["eval_category"] == "manual_queue_sla"
+    assert incident["evidence"].endswith("reason_code=provider_timeout")
+    assert incident["evidence_details"]["manual_reason_code"] == "provider_timeout"
+
+
 def test_customer_copy_internal_leak_detected_from_decisions_log():
     module = load_module()
     report = module.build_report(

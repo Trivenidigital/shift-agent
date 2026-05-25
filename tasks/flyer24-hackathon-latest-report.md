@@ -1,15 +1,15 @@
 # Flyer24 Hackathon Latest Report
 
-Updated: 2026-05-25T06:36:01Z
+Updated: 2026-05-25T07:39:00Z
 
 ## Batch
-- Branch: `codex/flyer24-batch-manual-sla-reason-coverage-202605250640`
-- Scope: manual-queue SLA watchdog reason-code coverage expansion and alert visibility hardening.
-- Risk: low (read-only watchdog policy and audit metadata; no payment/account/quota mutation).
-- Hermes/MCP-first: Hermes continues to own ingress/state/audit/notify substrate; this batch only extends Flyer-local stale-row policy from one reason code to a configurable allow-list.
+- Branch: `codex/flyer24-batch-manual-queue-stale-generalization-202605250735`
+- Scope: generalized stale manual-queue incident/reporting coverage across self-eval, rollout readiness, and operator brief.
+- Risk: low-medium (read-only reporting/readiness logic; no payment/account/quota/customer-runtime mutation).
+- Hermes/MCP-first: Hermes continues to own ingress/routing/state/audit substrate; this batch only extends Flyer-local stale-incident policy and visibility.
 
 ## Running PR list
-- #216 - fix(flyer): harden guest-order payment activation contracts
-- #187 - feat: add Flyer Studio concierge intake
-- #185 - test-repair-tarball-gate-harness-drift
-- #NEW (this batch) - fix(flyer): expand manual queue SLA reason coverage
+- #216 - fix(flyer): harden guest-order payment activation contracts (operator-review-required; payment-adjacent)
+- #187 - feat: add Flyer Studio concierge intake (non-merge-qualified; dirty/conflict broad scope)
+- #185 - test-repair-tarball-gate-harness-drift (non-merge-qualified draft)
+- #219 - fix(flyer): generalize stale manual queue readiness/reporting

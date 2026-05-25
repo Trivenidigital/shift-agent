@@ -102,6 +102,12 @@ MALFORMED_BUSINESS_NAME_RE = re.compile(
     r"\b(i(?:'|’)?d like|help me with|create (?:a )?flyer|make (?:a )?flyer|flier from|flyer from|include)\b",
     re.I,
 )
+
+STALE_MANUAL_REVIEW_REASONS = {
+    "source_edit_provider_unavailable",
+    "visual_qa_failed",
+    "provider_timeout",
+}
 PHONE_DIGITS_RE = re.compile(r"\D+")
 PHONE_RUN_RE = re.compile(r"[\d\s\-().+/]{8,}")
 SECRET_ASSIGNMENT_RE = re.compile(r"\b[A-Z0-9_]*(?:KEY|TOKEN|SECRET)\s*=\s*['\"]?[^'\"\s,;]+", re.I)
@@ -664,29 +670,52 @@ def project_incidents(
             )
         manual = project.get("manual_review") if isinstance(project.get("manual_review"), dict) else {}
         queued_age = age_minutes(manual.get("queued_at") or project.get("updated_at"), now)
+        manual_reason_code = str(manual.get("reason_code") or "")
+        manual_status = str(manual.get("status") or "")
         if (
             project.get("status") == "manual_edit_required"
-            and manual.get("reason_code") == "source_edit_provider_unavailable"
-            and manual.get("status") in {"queued", "in_progress", None, ""}
+            and manual_reason_code in STALE_MANUAL_REVIEW_REASONS
+            and manual_status in {"queued", "in_progress", ""}
             and queued_age is not None
             and queued_age >= manual_stale_minutes
         ):
+            details = source_contract_evidence_details(
+                project,
+                queued_age_minutes=queued_age,
+                customer_impact="customer is waiting on a manual-review resolution",
+            )
+            details["manual_reason_code"] = manual_reason_code
+            details["manual_status"] = manual_status or "queued"
+            if manual_reason_code == "source_edit_provider_unavailable":
+                incident_type = "manual_source_edit_stale"
+                suggested_action = (
+                    "Burn down the manual queue row or finish the OpenRouter source-edit provider path; "
+                    "do not let customers wait silently."
+                )
+                category = "source_edit_provider_posture"
+            elif manual_reason_code == "visual_qa_failed":
+                incident_type = "manual_review_stale"
+                suggested_action = (
+                    "Burn down the visual-QA manual queue row and send the corrected asset; "
+                    "do not leave approved-ready customers waiting."
+                )
+                category = "manual_queue_sla"
+            else:
+                incident_type = "manual_review_stale"
+                suggested_action = (
+                    "Burn down the stale manual queue row and resolve the provider timeout path; "
+                    "do not let customers wait silently."
+                )
+                category = "manual_queue_sla"
             out.append(
                 incident(
-                    "manual_source_edit_stale",
+                    incident_type,
                     severity="high",
                     project_id=project_id,
-                    evidence=f"queued_age_minutes={queued_age:.1f}; reason_code=source_edit_provider_unavailable",
-                    suggested_action=(
-                        "Burn down the manual queue row or finish the OpenRouter source-edit provider path; "
-                        "do not let customers wait silently."
-                    ),
-                    category="source_edit_provider_posture",
-                    evidence_details=source_contract_evidence_details(
-                        project,
-                        queued_age_minutes=queued_age,
-                        customer_impact="customer is waiting on a source-preserving edit",
-                    ),
+                    evidence=f"queued_age_minutes={queued_age:.1f}; reason_code={manual_reason_code}",
+                    suggested_action=suggested_action,
+                    category=category,
+                    evidence_details=details,
                 )
             )
 
