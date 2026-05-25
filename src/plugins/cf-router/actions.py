@@ -2240,7 +2240,7 @@ _US_STATE_WORDS = {
 
 _BUSINESS_SCOPE_TERMS = {
     "academy", "bakery", "barber", "bazaar", "bazar", "cafe", "clinic",
-    "company", "dental", "grocery", "groceries", "hotel", "inc", "kitchen",
+    "company", "dental", "grocery", "hotel", "inc", "kitchen",
     "llc", "market", "mart", "realty", "restaurant", "salon", "school",
     "spa", "store", "studio", "supermarket", "temple",
 }
@@ -2254,6 +2254,7 @@ def _extract_requested_business_scope(raw_request: str) -> str:
     text = " ".join(flyer_visible_message_text(raw_request).split())
     if not text:
         return ""
+    candidates: list[str] = []
     patterns = [
         r"\b(?:create|make|generate|design|build|need)\s+(?:a\s+|an\s+)?(?:new\s+)?(?:flyer|flier|poster|banner|creative|graphic)\s+for\s+(.+?)(?=\s*(?:[.!?]|,?\s+\b(?:include|with|promoting|offering|featuring|advertising|announcing|about)\b|$))",
         r"\b(?:flyer|flier|poster|banner|creative|graphic)\s+for\s+(.+?)(?=\s*(?:[.!?]|,?\s+\b(?:include|with|promoting|offering|featuring|advertising|announcing|about)\b|$))",
@@ -2261,9 +2262,25 @@ def _extract_requested_business_scope(raw_request: str) -> str:
     for pattern in patterns:
         match = re.search(pattern, text, flags=re.IGNORECASE)
         if match:
-            label = re.sub(r"[*_`]+", "", match.group(1) or "")
-            label = re.sub(r"^(?:customer|business|client)\s+", "", label, flags=re.IGNORECASE)
-            return label.strip(" .,:;-'\"")
+            candidates.append(match.group(1) or "")
+    for match in re.finditer(r"\bfor\s+", text, flags=re.IGNORECASE):
+        label = text[match.end():]
+        label = re.split(
+            r"\s*(?:[.!?]|,?\s+\b(?:include|with|promoting|offering|featuring|advertising|announcing|about)\b)",
+            label,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0]
+        # Requests like "sales for Memorial Day on groceries for Triveni supermarket"
+        # contain an offer-level "for" before the account-scope "for".
+        nested_for = re.split(r"\bfor\s+", label, flags=re.IGNORECASE)
+        candidates.append(nested_for[-1] if nested_for else label)
+    for candidate in reversed(candidates):
+        label = re.sub(r"[*_`]+", "", candidate or "")
+        label = re.sub(r"^(?:customer|business|client)\s+", "", label, flags=re.IGNORECASE)
+        label = label.strip(" .,:;-'\"")
+        if _looks_like_business_scope(label):
+            return label
     return ""
 
 
