@@ -289,6 +289,32 @@ def test_mixed_visual_and_price_revision_is_actionable():
     assert "$40, $60, $80, $100" in update
 
 
+def test_layout_focus_revision_with_create_new_wording_is_actionable():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Chloe Hair Studio",
+        venue_or_location="11111 Gainsborough Ct, Fairfax, VA, 22030",
+        contact_info="+19803826497",
+        notes=(
+            "Create flyer for Chloe Hair Studio with service cards for men haircut, "
+            "perms, beard trim, and other hair services. Show contact number and address."
+        ),
+    ))
+    text = (
+        "Create a new flyer for chloe hair studio with contact number and address look smaller "
+        "and the main focus should be on the services that we provide."
+    )
+
+    patch = extract_revision_patch(project, text)
+
+    assert patch.changed is True
+    assert patch.visual_only is False
+    assert patch.ambiguous is False
+    assert patch.requires_confirmation is False
+    update = f"{patch.notes_update or ''} {patch.raw_request_update or ''}"
+    assert "contact number and address look smaller" in update
+    assert "main focus should be on the services" in update
+
+
 def test_extract_revision_field_updates_handles_date_and_time_change():
     project = _project(FlyerRequestFields(
         event_or_business_name="Holi Celebrations",
