@@ -2495,7 +2495,7 @@ def is_flyer_account_command(text: str) -> bool:
         r"remove authorized number|remove number|"
         r"update business name|change business name|set business name|"
         r"update phone|update business phone|"
-        r"update whatsapp|update business whatsapp|change plan|confirm update)\b",
+        r"update whatsapp|update business whatsapp|change plan|upgrade plan|show flyer studio plans|confirm update)\b",
         body or "",
         flags=re.IGNORECASE,
     ))
