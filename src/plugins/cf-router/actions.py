@@ -2716,7 +2716,8 @@ def flyer_source_edit_preflight(project: dict) -> tuple[bool, str, str]:
             f"source edit provider config unavailable: {type(e).__name__}: {e}",
             "source_edit_provider_unavailable",
         )
-    ok, detail = source_edit_provider_ready(project, provider=provider)
+    env_path = CONFIG_PATH.parent / ".env"
+    ok, detail = source_edit_provider_ready(project, provider=provider, env_path=env_path)
     if not ok:
         if "uploaded reference image" in detail:
             return ok, detail, "reference_provider_unavailable"

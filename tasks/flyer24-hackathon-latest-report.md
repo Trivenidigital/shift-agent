@@ -1,14 +1,17 @@
 # Flyer24 Hackathon Latest Report
 
-Updated: 2026-05-24T22:44:00Z
+Updated: 2026-05-25T01:36:11Z
 
 ## Batch
-- Branch: `codex/flyer24-batch-manual-queue-visibility-202605242236`
-- Scope: manual-queue stale visibility + minute-level age precision across helper, health payload, and Cockpit UI.
-- Risk: low (read-only diagnostics/UI; no payment/quota/provider/project mutation behavior changes).
-- Hermes/MCP-first: Hermes continues to own ingress/routing/state/audit; this batch adds only read-only Flyer diagnostics and Cockpit rendering.
+- Branch: `codex/flyer24-batch-preflight-parity-202605250210`
+- Scope: source-edit preflight fail-closed behavior + cf-router Flyer reason schema parity.
+- Risk: low-medium (Flyer routing policy + schema literal parity; no payment/account/quota mutation).
+- Hermes/MCP-first: Hermes continues to own ingress/routing/state/audit/delivery; this batch only hardens Flyer-local preflight policy and schema contract.
 
 ## Running PR list
+- #213 - fix(flyer): harden source-edit preflight fail-closed and reason parity
+- #212 - fix(flyer): expose billing checkout readiness in health panel
+- #211 - fix(flyer): harden guest payment activation safety
 - #210 - fix(flyer): manual-queue stale visibility + minute precision
 - #208 - fix(flyer): fail closed for payment readiness
 - #207 - fix(flyer): route explicit sample-idea asks through intake
