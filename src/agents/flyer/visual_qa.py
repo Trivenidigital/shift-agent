@@ -93,11 +93,52 @@ def _text_value_present_in(normalized_text: str, normalized_value: str) -> bool:
     return re.search(pattern, normalized_text) is not None
 
 
-def _value_present_in(normalized_text: str, fact_value: str, *, phone_match: bool = False) -> bool:
+_ADDRESS_TOKEN_ALIASES = {
+    "saint": "st",
+    "street": "st",
+    "st.": "st",
+    "drive": "dr",
+    "dr.": "dr",
+    "road": "rd",
+    "rd.": "rd",
+    "avenue": "ave",
+    "ave.": "ave",
+    "boulevard": "blvd",
+    "blvd.": "blvd",
+    "place": "pl",
+    "pl.": "pl",
+    "florida": "fl",
+    "virginia": "va",
+}
+
+
+def _normalize_address_for_match(value: str) -> str:
+    tokens = re.findall(r"[a-z0-9]+", _normalize_text_for_match(value))
+    return " ".join(_ADDRESS_TOKEN_ALIASES.get(token, token) for token in tokens)
+
+
+def _address_value_present_in(normalized_text: str, fact_value: str) -> bool:
+    normalized_address_text = _normalize_address_for_match(normalized_text)
+    normalized_address_value = _normalize_address_for_match(fact_value)
+    if not normalized_address_value:
+        return False
+    return _text_value_present_in(normalized_address_text, normalized_address_value)
+
+
+def _value_present_in(
+    normalized_text: str,
+    fact_value: str,
+    *,
+    phone_match: bool = False,
+    address_match: bool = False,
+) -> bool:
     """Smart presence check for a locked-fact value in the OCR'd text.
 
     Phones: digits-only within a contiguous OCR digit-run (see
     `_phone_value_present_in`).
+
+    Addresses: tokenized matching with common OCR/address aliases (`Saint` vs
+    `St`, punctuation/newline differences).
 
     Other text: apostrophe-strip + whitespace-collapse + casefold + word-
     boundary (see `_text_value_present_in`) so locked "Lakshmi's Kitchen"
@@ -105,6 +146,8 @@ def _value_present_in(normalized_text: str, fact_value: str, *, phone_match: boo
     """
     if phone_match:
         return _phone_value_present_in(normalized_text, fact_value)
+    if address_match:
+        return _address_value_present_in(normalized_text, fact_value)
     normalized_value = _normalize_text_for_match(fact_value)
     return _text_value_present_in(normalized_text, normalized_value)
 
@@ -271,6 +314,7 @@ def run_visual_qa(
                 label=fact.label,
                 value=fact.value,
             ),
+            address_match=fact.fact_id == "location" or "address" in fact.label.casefold() or "location" in fact.label.casefold(),
         ):
             blockers.append(f"missing required visible fact: {fact.fact_id}")
     # Source-contract negative-assertion gate: any value in
