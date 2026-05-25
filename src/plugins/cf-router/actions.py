@@ -1035,6 +1035,13 @@ _FRESH_FLYER_BRIEF_DETAIL = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+_REGISTERED_CONTEXTUAL_FLYER_DETAIL = re.compile(
+    r"\b(?:combo|combos|curries|biryani|pulav|pulao|menu|sale|special|offer|"
+    r"discount|memorial\s+day|weekend|occasion|banner|visual\s+pictures?|"
+    r"pictures?|photos?|logo)\b",
+    re.IGNORECASE,
+)
+_PRICE_AMOUNT = re.compile(r"(?:\$|rs\.?\s*)?\b\d{1,4}(?:\.\d{2})\b", re.IGNORECASE)
 _FLYER_CAMPAIGN_CTA = re.compile(
     r"^\s*(?:"
     r"start\s+free\s+(?:trial|trail)"
@@ -1235,6 +1242,32 @@ def classify_flyer_intent(text: str) -> tuple[bool, list[str]]:
     if _FLYER_INTENT.search(text):
         return True, ["flyer_intent"]
     return False, ["rejected:no_flyer_intent"]
+
+
+def is_registered_customer_contextual_flyer_brief(text: str) -> bool:
+    """Return True for natural promo details from an already-active Flyer customer.
+
+    Registered customers often continue a Flyer Studio request with
+    business-promotion details rather than repeating the word "flyer" in every
+    message. Keep this scoped to strong menu/promo signals so generic chat does
+    not get stolen before Hermes.
+    """
+    body = " ".join(flyer_visible_message_text(text).split())
+    if not body:
+        return False
+    if is_flyer_campaign_cta(body) or is_flyer_project_status_request(body):
+        return False
+    if classify_catering(body)[0]:
+        return False
+    lower = body.lower()
+    if classify_flyer_intent(body)[0] and _REGISTERED_CONTEXTUAL_FLYER_DETAIL.search(body):
+        return True
+    if _PRICE_AMOUNT.search(body) and _REGISTERED_CONTEXTUAL_FLYER_DETAIL.search(body):
+        return True
+    return bool(
+        re.search(r"\bget\s+the\s+(?:flyer|flier|poster|banner)\s+ready\b", lower)
+        and _REGISTERED_CONTEXTUAL_FLYER_DETAIL.search(body)
+    )
 
 
 def is_flyer_onboarding_intent(text: str) -> bool:
@@ -1500,7 +1533,7 @@ def is_vague_flyer_start(text: str, *, has_media: bool = False) -> bool:
         "$" in lower
         or ":" in body
         or bool(re.search(r"\b\d{1,2}\s*(?:am|pm)\b", lower))
-        or bool(re.search(r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|today|weekend|special|menu|sale|offer|discount|grand opening|class|event|seo|aeo|geo|paid ads|content creation)\b", lower))
+        or bool(re.search(r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|today|weekend|special|menu|sale|offer|discount|grand opening|class|event|seo|aeo|geo|paid ads|content creation|combo|combos|banner|visual pictures?|photos?|pictures?)\b", lower))
     )
     if has_detail:
         return False

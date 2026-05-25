@@ -250,6 +250,19 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
             flyer_result = _try_flyer_active_project_intercept(text, chat_id, event, media_path)
             if flyer_result is not None:
                 return flyer_result
+            context_phone, context_role = actions.lid_to_phone_via_identify_sender(chat_id)
+            if context_role != "owner":
+                context_customer = actions.find_flyer_customer_by_sender(context_phone, chat_id)
+                if (
+                    context_customer
+                    and context_customer.get("status") in {"trial", "active"}
+                    and actions.is_registered_customer_contextual_flyer_brief(text)
+                ):
+                    flyer_result = _try_flyer_primary_intercept(
+                        text, chat_id, event, force_new=True, media_path=media_path,
+                    )
+                    if flyer_result is not None:
+                        return flyer_result
             if actions.should_start_new_flyer_over_active(text, has_media=bool(media_path)):
                 flyer_result = _try_flyer_primary_intercept(
                     text, chat_id, event, force_new=True, media_path=media_path,
