@@ -168,6 +168,7 @@ def test_notification_failure_returns_error_and_does_not_advance_state(tmp_path)
         now=module.parse_utc("2026-05-21T00:30:00Z"),
         threshold_minutes=10,
         repeat_minutes=60,
+        customer_update_minutes=0,
         notify_func=lambda **_: False,
     )
 
@@ -315,3 +316,70 @@ def test_deploy_installs_and_enables_sla_watchdog_timer():
     assert "flyer-source-edit-sla-watchdog" in deploy
     assert "flyer-source-edit-sla-watchdog.timer" in deploy
     assert "flyer-source-edit-sla-watchdog.timer" in smoke
+
+
+def test_stale_manual_queue_sends_customer_update_after_customer_threshold(tmp_path):
+    module = load_module()
+    projects = tmp_path / "projects.json"
+    state = tmp_path / "sla-alerts.json"
+    decisions = tmp_path / "decisions.log"
+    projects.write_text(json.dumps({"projects": [_project("F9012", reason_code="visual_qa_failed")]}), encoding="utf-8")
+    customer_calls: list[dict] = []
+
+    result = module.run_watchdog(
+        projects_path=projects,
+        alert_state_path=state,
+        decisions_log_path=decisions,
+        customers_path=tmp_path / "customers.json",
+        now=module.parse_utc("2026-05-21T00:45:00Z"),
+        threshold_minutes=10,
+        repeat_minutes=60,
+        customer_update_minutes=30,
+        customer_repeat_minutes=120,
+        notify_func=lambda **_: True,
+        customer_chat_resolver=lambda project: ("17329837841@lid", "audit"),
+        customer_notify_func=lambda chat_id, message: (customer_calls.append({"chat_id": chat_id, "message": message}) or (True, "m-customer", "")),
+    )
+
+    assert result["status"] == "alerted"
+    assert result["customer_updates"]["sent_project_ids"] == ["F9012"]
+    assert customer_calls[0]["chat_id"] == "17329837841@lid"
+    assert "still in progress" in customer_calls[0]["message"]
+    assert "visual_qa_failed" not in customer_calls[0]["message"]
+    saved = json.loads(state.read_text(encoding="utf-8"))
+    key = "F9012|visual_qa_failed|2026-05-21T00:00:00+00:00"
+    assert saved["project_alerts"][key]["last_customer_updated_at"] == "2026-05-21T00:45:00+00:00"
+    audit_rows = [json.loads(line) for line in decisions.read_text(encoding="utf-8").splitlines()]
+    assert any(row.get("type") == "flyer_manual_queue_customer_update" and row.get("outcome") == "sent" for row in audit_rows)
+
+
+def test_recent_customer_update_is_throttled_independently_of_operator_alert(tmp_path):
+    module = load_module()
+    projects = tmp_path / "projects.json"
+    state = tmp_path / "sla-alerts.json"
+    projects.write_text(json.dumps({"projects": [_project("F9013", reason_code="visual_qa_failed")]}), encoding="utf-8")
+    state.write_text(json.dumps({
+        "version": 1,
+        "project_alerts": {
+            "F9013|visual_qa_failed|2026-05-21T00:00:00+00:00": {
+                "last_customer_updated_at": "2026-05-21T00:40:00Z",
+                "project_id": "F9013",
+            }
+        },
+    }), encoding="utf-8")
+
+    result = module.run_watchdog(
+        projects_path=projects,
+        alert_state_path=state,
+        decisions_log_path=tmp_path / "decisions.log",
+        now=module.parse_utc("2026-05-21T01:00:00Z"),
+        threshold_minutes=10,
+        repeat_minutes=60,
+        customer_update_minutes=30,
+        customer_repeat_minutes=120,
+        notify_func=lambda **_: True,
+        customer_chat_resolver=lambda project: (_ for _ in ()).throw(AssertionError("unexpected chat resolver")),
+        customer_notify_func=lambda *_: (_ for _ in ()).throw(AssertionError("unexpected customer notify")),
+    )
+
+    assert result["customer_updates"]["throttled_project_ids"] == ["F9013"]
