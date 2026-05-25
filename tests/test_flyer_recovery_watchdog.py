@@ -420,7 +420,7 @@ backup: {gpg_recipient_email: owner@example.com}
 flyer:
   enabled: true
   recovery:
-    mode: observe
+    mode: bundle
     enable_timer: true
     scan_window_minutes: 240
 """.strip(),
@@ -628,7 +628,7 @@ flyer:
     assert by_id["FRI20260525-OLDCHAT"]["status"] == "resolved"
     assert by_id["FRI20260525-OLDCHAT"]["resolution"] == "outcome_repaired"
     assert by_id["FRI20260525-NEWCHAT"]["status"] == "open"
-    assert by_id["FRI20260525-OTHER"]["status"] == "open"
+    assert by_id["FRI20260525-OTHER"]["status"] == "operator_action_required"
     text = log.read_text(encoding="utf-8")
     assert '"type":"flyer_recovery_resolved"' in text
     assert '"incident_id":"FRI20260525-OLDCHAT"' in text
@@ -730,3 +730,202 @@ flyer:
     incident = state["incidents"][0]
     assert incident["status"] == "resolved"
     assert incident["resolution"] == "customer_visible_success"
+
+
+def test_watchdog_escalates_completed_repair_without_visible_success_before_queue(tmp_path):
+    config = tmp_path / "config.yaml"
+    log = tmp_path / "decisions.log"
+    projects = tmp_path / "projects.json"
+    customers = tmp_path / "customers.json"
+    recovery_state = tmp_path / "recovery.json"
+    bundle_dir = tmp_path / "bundles"
+    worker_queue_dir = tmp_path / "queue"
+    config.write_text(
+        """
+schema_version: 1
+customer: {name: Triveni, location_id: loc_pineville_01, timezone: America/New_York}
+owner: {name: Owner, phone: '+19045550000'}
+limits: {}
+alerting: {pushover_user_key: k, pushover_app_token: t}
+backup: {gpg_recipient_email: owner@example.com}
+flyer:
+  enabled: true
+  recovery:
+    mode: bundle
+    enable_timer: true
+    scan_window_minutes: 240
+    operator_escalation_stale_minutes: 30
+""".strip(),
+        encoding="utf-8",
+    )
+    now = datetime.now(timezone.utc)
+    old_seen = (now - timedelta(hours=2)).isoformat()
+    completed_at = (now - timedelta(hours=1)).isoformat()
+    recovery_state.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "incidents": [
+                    {
+                        "incident_id": "FRI20260525-NOEVIDENCE",
+                        "status": "open",
+                        "failure_class": "concept_generation_failed",
+                        "severity": "warning",
+                        "source_fingerprint": "fp-no-evidence",
+                        "ack_dedupe_key": "ack-no-evidence",
+                        "project_id": "F0097",
+                        "chat_id": "74290284261595@lid",
+                        "chat_id_hash": recovery.sha256_text("74290284261595@lid"),
+                        "sender_phone_hash": "",
+                        "root_message_id": "wamid.old",
+                        "provider_message_id_hash": "sha256:msg",
+                        "evidence_quality": "strong",
+                        "first_seen": old_seen,
+                        "last_seen": old_seen,
+                        "ack": {"status": "none"},
+                        "codex": {
+                            "status": "completed",
+                            "completed_at": completed_at,
+                            "bundle_path": "/tmp/bundle.json",
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    log.write_text("", encoding="utf-8")
+    projects.write_text('{"projects":[]}', encoding="utf-8")
+    customers.write_text('{"customers":[],"onboarding_sessions":[],"intake_sessions":[]}', encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--config-path",
+            str(config),
+            "--log-path",
+            str(log),
+            "--project-state-path",
+            str(projects),
+            "--customer-state-path",
+            str(customers),
+            "--recovery-state-path",
+            str(recovery_state),
+            "--bundle-dir",
+            str(bundle_dir),
+            "--worker-queue-dir",
+            str(worker_queue_dir),
+            "--text",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "operator_action_required=1" in result.stdout
+    assert "queued=0" in result.stdout
+    assert not bundle_dir.exists() or not any(bundle_dir.iterdir())
+    assert not worker_queue_dir.exists() or not any(worker_queue_dir.iterdir())
+    state = json.loads(recovery_state.read_text(encoding="utf-8"))
+    incident = state["incidents"][0]
+    assert incident["status"] == "operator_action_required"
+    assert incident["operator_action"]["reason"] == "worker_completed_no_customer_visible_success"
+    text = log.read_text(encoding="utf-8")
+    assert '"type":"flyer_recovery_operator_action_required"' in text
+    assert '"incident_id":"FRI20260525-NOEVIDENCE"' in text
+
+
+def test_watchdog_dry_run_reports_operator_escalation_without_mutation(tmp_path):
+    config = tmp_path / "config.yaml"
+    log = tmp_path / "decisions.log"
+    projects = tmp_path / "projects.json"
+    customers = tmp_path / "customers.json"
+    recovery_state = tmp_path / "recovery.json"
+    config.write_text(
+        """
+schema_version: 1
+customer: {name: Triveni, location_id: loc_pineville_01, timezone: America/New_York}
+owner: {name: Owner, phone: '+19045550000'}
+limits: {}
+alerting: {pushover_user_key: k, pushover_app_token: t}
+backup: {gpg_recipient_email: owner@example.com}
+flyer:
+  enabled: true
+  recovery:
+    mode: bundle
+    enable_timer: true
+    scan_window_minutes: 240
+    operator_escalation_stale_minutes: 30
+""".strip(),
+        encoding="utf-8",
+    )
+    now = datetime.now(timezone.utc)
+    old_seen = (now - timedelta(hours=2)).isoformat()
+    completed_at = (now - timedelta(hours=1)).isoformat()
+    recovery_state.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "incidents": [
+                    {
+                        "incident_id": "FRI20260525-DRYRUN",
+                        "status": "open",
+                        "failure_class": "concept_generation_failed",
+                        "severity": "warning",
+                        "source_fingerprint": "fp-dryrun",
+                        "ack_dedupe_key": "ack-dryrun",
+                        "project_id": "F0098",
+                        "chat_id": "74290284261595@lid",
+                        "chat_id_hash": recovery.sha256_text("74290284261595@lid"),
+                        "sender_phone_hash": "",
+                        "root_message_id": "wamid.old",
+                        "provider_message_id_hash": "sha256:msg",
+                        "evidence_quality": "strong",
+                        "first_seen": old_seen,
+                        "last_seen": old_seen,
+                        "ack": {"status": "none"},
+                        "codex": {
+                            "status": "completed",
+                            "completed_at": completed_at,
+                            "bundle_path": "/tmp/bundle.json",
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    before = recovery_state.read_text(encoding="utf-8")
+    log.write_text("", encoding="utf-8")
+    projects.write_text('{"projects":[]}', encoding="utf-8")
+    customers.write_text('{"customers":[],"onboarding_sessions":[],"intake_sessions":[]}', encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--config-path",
+            str(config),
+            "--log-path",
+            str(log),
+            "--project-state-path",
+            str(projects),
+            "--customer-state-path",
+            str(customers),
+            "--recovery-state-path",
+            str(recovery_state),
+            "--dry-run",
+            "--text",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "operator_action_required=1" in result.stdout
+    assert "queued=0" in result.stdout
+    assert recovery_state.read_text(encoding="utf-8") == before
+    assert log.read_text(encoding="utf-8") == ""
