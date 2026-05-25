@@ -107,6 +107,10 @@ STALE_MANUAL_REVIEW_REASONS = {
     "source_edit_provider_unavailable",
     "visual_qa_failed",
     "provider_timeout",
+    "missing_required_facts",
+    "reference_provider_unavailable",
+    "reference_low_confidence",
+    "reference_unsupported",
 }
 PHONE_DIGITS_RE = re.compile(r"\D+")
 PHONE_RUN_RE = re.compile(r"[\d\s\-().+/]{8,}")
@@ -700,10 +704,24 @@ def project_incidents(
                     "do not leave approved-ready customers waiting."
                 )
                 category = "manual_queue_sla"
+            elif manual_reason_code == "missing_required_facts":
+                incident_type = "manual_review_stale"
+                suggested_action = (
+                    "Burn down the stale required-facts manual queue row and complete missing business facts; "
+                    "do not let customers wait silently."
+                )
+                category = "manual_queue_sla"
+            elif manual_reason_code in {"reference_provider_unavailable", "reference_low_confidence", "reference_unsupported"}:
+                incident_type = "manual_review_stale"
+                suggested_action = (
+                    "Burn down the stale reference-media manual queue row and resolve source reference gaps; "
+                    "do not let customers wait silently."
+                )
+                category = "manual_queue_sla"
             else:
                 incident_type = "manual_review_stale"
                 suggested_action = (
-                    "Burn down the stale manual queue row and resolve the provider timeout path; "
+                    "Burn down the stale manual queue row and resolve the blocking reason path; "
                     "do not let customers wait silently."
                 )
                 category = "manual_queue_sla"
@@ -1586,7 +1604,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--manual-stale-red-minutes",
         type=int,
         default=30,
-        help="RED threshold for manual_source_edit_stale rollout reason (default 30 min, matches detector).",
+        help="RED threshold for stale manual-queue rollout reasons (manual_source_edit_stale/manual_review_stale).",
     )
     parser.add_argument(
         "--operating-layer-input",
