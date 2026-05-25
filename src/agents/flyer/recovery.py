@@ -56,9 +56,45 @@ FORBIDDEN_CUSTOMER_TERMS = [
     "deploy",
 ]
 
+BUNDLE_SENSITIVE_KEYS = {
+    "chat_id",
+    "sender_phone",
+    "customer_phone",
+    "phone",
+    "contact_phone",
+    "contact_info",
+}
+
 
 def sha256_text(text: str) -> str:
     return "sha256:" + hashlib.sha256((text or "").encode("utf-8", errors="replace")).hexdigest()
+
+
+def _redact_identifier(value: str) -> str:
+    digest = sha256_text(value).split(":", 1)[1][:12]
+    return f"[redacted:{digest}]"
+
+
+def redact_text_for_bundle(text: str) -> str:
+    redacted = re.sub(r"\+?\d{7,15}@s\.whatsapp\.net", lambda m: _redact_identifier(m.group(0)), text or "")
+    redacted = re.sub(r"\+\d[\d .()-]{6,}\d", lambda m: _redact_identifier(m.group(0)), redacted)
+    return redacted
+
+
+def sanitize_for_repair_bundle(value):
+    if isinstance(value, dict):
+        safe = {}
+        for key, item in value.items():
+            if str(key) in BUNDLE_SENSITIVE_KEYS:
+                safe[f"{key}_hash"] = sha256_text(str(item or "")) if item else ""
+                continue
+            safe[key] = sanitize_for_repair_bundle(item)
+        return safe
+    if isinstance(value, list):
+        return [sanitize_for_repair_bundle(item) for item in value]
+    if isinstance(value, str):
+        return redact_text_for_bundle(value)
+    return value
 
 
 def _parse_project_id(detail: str) -> str:
@@ -356,8 +392,7 @@ def write_repair_bundle(
 ) -> Path:
     bundle_dir.mkdir(parents=True, exist_ok=True)
     incident_id = str(incident.get("incident_id") or "incident")
-    safe_project = dict(project_excerpt or {})
-    safe_project.pop("customer_phone", None)
+    safe_project = sanitize_for_repair_bundle(dict(project_excerpt or {}))
     safe_audit_rows = []
     for row in audit_rows or []:
         safe_row = dict(row)
@@ -365,7 +400,7 @@ def write_repair_bundle(
             safe_row["chat_id_hash"] = sha256_text(str(safe_row.pop("chat_id") or ""))
         if "sender_phone" in safe_row:
             safe_row["sender_phone_hash"] = sha256_text(str(safe_row.pop("sender_phone") or ""))
-        safe_audit_rows.append(safe_row)
+        safe_audit_rows.append(sanitize_for_repair_bundle(safe_row))
     doc = {
         "schema_version": 1,
         "incident_id": incident_id,

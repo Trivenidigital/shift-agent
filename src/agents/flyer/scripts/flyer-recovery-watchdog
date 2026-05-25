@@ -74,6 +74,95 @@ def _read_rows(path: Path) -> list[dict]:
     return rows
 
 
+def _load_projects_by_id(path: Path) -> dict[str, dict]:
+    if not path.exists():
+        return {}
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    projects = doc.get("projects") if isinstance(doc, dict) else []
+    if not isinstance(projects, list):
+        return {}
+    result = {}
+    for project in projects:
+        if not isinstance(project, dict):
+            continue
+        project_id = str(project.get("project_id") or "").strip()
+        if project_id:
+            result[project_id] = project
+    return result
+
+
+def _audit_rows_for_incident(incident: dict, rows: list[dict], *, limit: int = 12) -> list[dict]:
+    source_fingerprint = str(incident.get("source_fingerprint") or "")
+    project_id = str(incident.get("project_id") or "")
+    matched: list[dict] = []
+    fallback: list[dict] = []
+    for row in rows:
+        detail = str(row.get("detail") or "")
+        if project_id and project_id in detail:
+            fallback.append(row)
+        signal = recovery.classify_decision(row, {})
+        if signal is None:
+            continue
+        if recovery.fingerprint_signal(signal) == source_fingerprint:
+            matched.append(row)
+    selected = matched or fallback
+    return selected[-limit:]
+
+
+def _project_excerpt_for_incident(incident: dict, projects_by_id: dict[str, dict]) -> dict:
+    project_id = str(incident.get("project_id") or "").strip()
+    project = projects_by_id.get(project_id) or {}
+    if not project:
+        return {}
+    excerpt = {
+        "project_id": project.get("project_id", ""),
+        "status": project.get("status", ""),
+        "created_at": project.get("created_at", ""),
+        "updated_at": project.get("updated_at", ""),
+        "manual_review": project.get("manual_review") or {},
+        "reference_extractions": project.get("reference_extractions") or [],
+    }
+    if project.get("raw_request"):
+        excerpt["raw_request"] = str(project.get("raw_request") or "")[:1000]
+    if isinstance(project.get("fields"), dict):
+        fields = dict(project.get("fields") or {})
+        excerpt["fields"] = fields
+    qa_reports = []
+    for report in project.get("qa_reports") or []:
+        if not isinstance(report, dict):
+            continue
+        qa_reports.append({
+            "asset_id": report.get("asset_id", ""),
+            "output_format": report.get("output_format", ""),
+            "provider": report.get("provider", ""),
+            "qa_source": report.get("qa_source", ""),
+            "status": report.get("status", ""),
+            "blockers": report.get("blockers", []),
+            "warnings": report.get("warnings", []),
+            "checked_at": report.get("checked_at", ""),
+        })
+    excerpt["qa_reports"] = qa_reports[-6:]
+    assets = []
+    for asset in project.get("assets") or []:
+        if not isinstance(asset, dict):
+            continue
+        assets.append({
+            "asset_id": asset.get("asset_id", ""),
+            "kind": asset.get("kind", ""),
+            "source": asset.get("source", ""),
+            "path": asset.get("path", ""),
+            "mime_type": asset.get("mime_type", ""),
+            "delivery_status": asset.get("delivery_status", ""),
+            "delivery_attempt_count": asset.get("delivery_attempt_count", 0),
+            "delivery_error": asset.get("delivery_error", ""),
+        })
+    excerpt["assets"] = assets[-8:]
+    return excerpt
+
+
 def _row_ts(row: dict) -> datetime | None:
     raw = str(row.get("ts") or "")
     if not raw:
@@ -282,7 +371,14 @@ def _write_bundle(args: argparse.Namespace) -> int:
         if incident is None:
             print(f"incident not found: {args.incident_id}", file=sys.stderr)
             return 2
-        path = recovery.write_repair_bundle(incident, Path(args.bundle_dir))
+        rows = _read_rows(Path(args.log_path))
+        projects_by_id = _load_projects_by_id(Path(args.project_state_path))
+        path = recovery.write_repair_bundle(
+            incident,
+            Path(args.bundle_dir),
+            audit_rows=_audit_rows_for_incident(incident, rows),
+            project_excerpt=_project_excerpt_for_incident(incident, projects_by_id),
+        )
         incident.setdefault("codex", {})["status"] = "bundle_written"
         incident.setdefault("codex", {})["bundle_path"] = str(path)
         recovery.write_recovery_state(state_path, state)
@@ -324,6 +420,8 @@ def _process_repair_queue(
     now: datetime,
     args: argparse.Namespace,
     *,
+    audit_rows: list[dict] | None = None,
+    projects_by_id: dict[str, dict] | None = None,
     dry_run: bool = False,
 ) -> dict[str, int]:
     queued = 0
@@ -348,7 +446,12 @@ def _process_repair_queue(
                 bundle_path = Path(bundle_path_raw)
                 bundle_written = False
             else:
-                bundle_path = recovery.write_repair_bundle(incident, Path(args.bundle_dir))
+                bundle_path = recovery.write_repair_bundle(
+                    incident,
+                    Path(args.bundle_dir),
+                    audit_rows=_audit_rows_for_incident(incident, audit_rows or []),
+                    project_excerpt=_project_excerpt_for_incident(incident, projects_by_id or {}),
+                )
                 bundle_written = True
             queue_path = recovery.write_worker_queue_request(
                 incident,
@@ -608,6 +711,7 @@ def main() -> int:
         signal for row in rows
         if (signal := recovery.classify_decision(row, {})) is not None
     ]
+    projects_by_id = _load_projects_by_id(Path(args.project_state_path))
     state_path = Path(args.recovery_state_path)
     with recovery.recovery_state_lock(state_path):
         state = recovery.load_recovery_state(state_path)
@@ -657,6 +761,8 @@ def main() -> int:
         mode,
         now,
         args,
+        audit_rows=rows,
+        projects_by_id=projects_by_id,
         dry_run=args.dry_run,
     )
     if mode == "customer_ack":

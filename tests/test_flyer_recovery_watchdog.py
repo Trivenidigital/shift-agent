@@ -8,6 +8,10 @@ import sys
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "src" / "agents" / "flyer" / "scripts" / "flyer-recovery-watchdog"
+sys.path.insert(0, str(REPO / "src"))
+sys.path.insert(0, str(REPO / "src" / "platform"))
+
+from agents.flyer import recovery  # noqa: E402
 
 
 def test_watchdog_off_exits_without_state_write(tmp_path):
@@ -134,8 +138,49 @@ flyer:
 def test_watchdog_write_repair_bundle_is_explicit_operator_action(tmp_path):
     recovery_state = tmp_path / "recovery.json"
     bundle_dir = tmp_path / "bundles"
-    recovery_state.write_text(
-        '{"schema_version":1,"incidents":[{"incident_id":"FRI20260523-0001","status":"open","failure_class":"concept_generation_failed","severity":"warning","source_fingerprint":"fp","ack_dedupe_key":"ak","project_id":"F0065","chat_id_hash":"sha256:chat","sender_phone_hash":"sha256:phone","root_message_id":"","evidence_quality":"weak","first_seen":"2026-05-23T16:00:00+00:00","last_seen":"2026-05-23T16:00:00+00:00","ack":{"status":"none"},"codex":{"status":"none"}}]}',
+    log = tmp_path / "decisions.log"
+    projects = tmp_path / "projects.json"
+    row = {
+        "type": "cf_router_intercepted",
+        "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "reason": "flyer_primary_failed",
+        "chat_id": "17329837841@s.whatsapp.net",
+        "message_id": "wamid.current",
+        "subprocess_rc": 2,
+        "detail": "project_id=F0065; concept_generation_failed: exit=2 provider down",
+    }
+    signal = recovery.classify_decision(row, {})
+    assert signal is not None
+    incident = recovery.incident_from_signal(signal, datetime(2026, 5, 23, 16, 0, tzinfo=timezone.utc))
+    incident["incident_id"] = "FRI20260523-0001"
+    recovery_state.write_text(json.dumps({"schema_version": 1, "incidents": [incident]}), encoding="utf-8")
+    log.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    projects.write_text(
+        json.dumps(
+            {
+                "projects": [
+                    {
+                        "project_id": "F0065",
+                        "status": "manual_edit_required",
+                        "customer_phone": "+17329837841",
+                        "raw_request": "Create flyer with contact +17329837841",
+                        "manual_review": {
+                            "status": "queued",
+                            "reason_code": "source_edit_generation_failed",
+                            "detail": "exit=-15",
+                        },
+                        "assets": [
+                            {
+                                "asset_id": "A0001",
+                                "kind": "reference_image",
+                                "path": "/opt/shift-agent/state/flyer/assets/F0065-reference.jpg",
+                                "delivery_status": "pending",
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -145,6 +190,8 @@ def test_watchdog_write_repair_bundle_is_explicit_operator_action(tmp_path):
             str(SCRIPT),
             "--recovery-state-path", str(recovery_state),
             "--bundle-dir", str(bundle_dir),
+            "--log-path", str(log),
+            "--project-state-path", str(projects),
             "--write-repair-bundle",
             "--incident-id", "FRI20260523-0001",
             "--text",
@@ -156,7 +203,14 @@ def test_watchdog_write_repair_bundle_is_explicit_operator_action(tmp_path):
 
     assert result.returncode == 0
     assert "bundle_written=" in result.stdout
-    assert (bundle_dir / "FRI20260523-0001.json").exists()
+    doc = json.loads((bundle_dir / "FRI20260523-0001.json").read_text(encoding="utf-8"))
+    serialized = json.dumps(doc)
+    assert "+17329837841" not in serialized
+    assert "17329837841@s.whatsapp.net" not in serialized
+    assert doc["audit_excerpt"][0]["chat_id_hash"].startswith("sha256:")
+    assert "chat_id" not in doc["audit_excerpt"][0]
+    assert doc["project_excerpt"]["project_id"] == "F0065"
+    assert doc["project_excerpt"]["manual_review"]["status"] == "queued"
 
 
 def test_watchdog_customer_ack_marks_stale_incident_suppressed(tmp_path):
