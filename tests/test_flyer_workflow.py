@@ -261,6 +261,34 @@ def test_quality_check_flags_missing_and_ready_fields():
     assert result.blockers == []
 
 
+def test_mixed_visual_and_price_revision_is_actionable():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Chloe Hair Studio",
+        venue_or_location="11111 Gainsborough Ct, Fairfax, VA, 22030",
+        contact_info="+19803826497",
+        notes=(
+            "Create flyer for Chloe Hair Studio promoting men haircut $20, perms $80, "
+            "and other hair services."
+        ),
+    ))
+    text = (
+        "Apply these changes to the existing flyer: change the background to rich golden color "
+        "and keep the pictures if 2 male and 2 female celebrities with different hairstyles each "
+        "and keep prices as $40,$60,$80,100"
+    )
+
+    patch = extract_revision_patch(project, text)
+
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert patch.requires_confirmation is False
+    update = f"{patch.notes_update or ''} {patch.raw_request_update or ''}"
+    assert "rich golden color" in update
+    assert "2 male and 2 female celebrities" in update
+    assert "different hairstyles" in update
+    assert "$40, $60, $80, $100" in update
+
+
 def test_extract_revision_field_updates_handles_date_and_time_change():
     project = _project(FlyerRequestFields(
         event_or_business_name="Holi Celebrations",

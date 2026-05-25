@@ -80,6 +80,13 @@ _SAMPLE_PROMPT_REQUEST = re.compile(
     re.IGNORECASE,
 )
 
+
+def _flyer_request_excerpt_for_reply(text: str, *, limit: int = 140) -> str:
+    excerpt = " ".join(actions.flyer_visible_message_text(text).split())
+    if len(excerpt) > limit:
+        excerpt = excerpt[: limit - 3].rstrip() + "..."
+    return excerpt
+
 # Verb classifier — mirrors the F8 watchdog's accepted verb set so plugin
 # coverage matches the watchdog it replaces. Past-tense forms ("approved",
 # "rejected") are common in owner replies and were handled by the watchdog.
@@ -2545,11 +2552,14 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
                 # clarification question without leaking the internal project
                 # identifier. clarification_reason is preserved because it IS
                 # the useful customer-facing signal.
+                excerpt = _flyer_request_excerpt_for_reply(body)
+                seen_line = f"\n\nI saw: {excerpt}" if excerpt else ""
                 reply = (
                     "Flyer Studio\n"
                     "------------\n"
                     f"I need one clarification before adding that: {clarification_reason}\n\n"
                     "Please send the exact text, item, price, date, or area of the flyer to change."
+                    f"{seen_line}"
                 )
         else:
             # Outcome-only success copy for the queued-followup path. Mirrors
@@ -2710,7 +2720,12 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
             if pending_confirmation_message.strip():
                 ack_message = pending_confirmation_message.strip()
             else:
-                ack_message = f"I need one clarification before regenerating: {clarification_reason}. Please send the exact item or text to change."
+                excerpt = _flyer_request_excerpt_for_reply(body)
+                seen_line = f"\n\nI saw: {excerpt}" if excerpt else ""
+                ack_message = (
+                    f"I need one clarification before regenerating: {clarification_reason}. "
+                    f"Please send the exact item or text to change.{seen_line}"
+                )
         elif ok and needs_regen:
             ack_message = "Revision applied to the flyer details. I am regenerating the design now."
         else:
