@@ -79,9 +79,10 @@ def test_stale_source_edit_queue_row_pages_operator_and_writes_alert_state(tmp_p
     assert result["status"] == "alerted"
     assert result["stale_count"] == 1
     assert result["alerted_project_ids"] == ["F9001"]
-    assert calls[0]["title"] == "Flyer source-edit SLA breach"
+    assert calls[0]["title"] == "Flyer manual queue SLA breach"
     assert calls[0]["priority"] == 2
     assert "F9001" in calls[0]["message"]
+    assert "visual_qa_failed" in calls[0]["message"]
     assert "+17329837841" not in calls[0]["message"]
     assert "Secret phone" not in calls[0]["message"]
 
@@ -89,6 +90,7 @@ def test_stale_source_edit_queue_row_pages_operator_and_writes_alert_state(tmp_p
     assert saved["project_alerts"]["F9001|source_edit_provider_unavailable|2026-05-21T00:00:00+00:00"]["last_alerted_at"] == "2026-05-21T00:11:00+00:00"
     audit = json.loads(decisions.read_text(encoding="utf-8").strip())
     assert audit["type"] == "flyer_source_edit_sla_alert"
+    assert sorted(audit["reason_codes"]) == ["source_edit_provider_unavailable", "visual_qa_failed"]
     assert audit["project_ids"] == ["F9001"]
     assert audit["notify_ok"] is True
     assert audit["outcome"] == "alerted"
@@ -219,9 +221,10 @@ def test_requeued_same_project_alerts_despite_old_throttle_entry(tmp_path):
     assert "F9003|source_edit_provider_unavailable|2026-05-21T00:30:00+00:00" in saved["project_alerts"]
 
 
-def test_watchdog_ignores_non_source_edit_or_closed_manual_rows(tmp_path):
+def test_watchdog_alerts_visual_qa_and_ignores_closed_or_non_manual_rows(tmp_path):
     module = load_module()
     projects = tmp_path / "projects.json"
+    calls: list[dict] = []
     projects.write_text(
         json.dumps({
             "projects": [
@@ -240,11 +243,15 @@ def test_watchdog_ignores_non_source_edit_or_closed_manual_rows(tmp_path):
         now=module.parse_utc("2026-05-21T01:00:00Z"),
         threshold_minutes=10,
         repeat_minutes=60,
-        notify_func=lambda **_: (_ for _ in ()).throw(AssertionError("unexpected notify")),
+        notify_func=lambda title, message, priority, source: calls.append(
+            {"title": title, "message": message, "priority": priority, "source": source}
+        ) is None or True,
     )
 
-    assert result["status"] == "ok"
-    assert result["stale_count"] == 0
+    assert result["status"] == "alerted"
+    assert result["stale_count"] == 1
+    assert result["alerted_project_ids"] == ["F9005"]
+    assert "visual_qa_failed" in calls[0]["message"]
 
 
 def test_age_uses_manual_queued_at_before_project_created_at(tmp_path):
@@ -266,6 +273,39 @@ def test_age_uses_manual_queued_at_before_project_created_at(tmp_path):
 
     assert result["status"] == "ok"
     assert result["stale_count"] == 0
+
+
+def test_reason_code_override_scopes_alert_rows(tmp_path):
+    module = load_module()
+    projects = tmp_path / "projects.json"
+    projects.write_text(
+        json.dumps(
+            {
+                "projects": [
+                    _project("F9010", reason_code="source_edit_provider_unavailable"),
+                    _project("F9011", reason_code="visual_qa_failed"),
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls: list[dict] = []
+    result = module.run_watchdog(
+        projects_path=projects,
+        alert_state_path=tmp_path / "sla-alerts.json",
+        decisions_log_path=tmp_path / "decisions.log",
+        now=module.parse_utc("2026-05-21T01:00:00Z"),
+        threshold_minutes=10,
+        repeat_minutes=60,
+        reason_codes=("source_edit_provider_unavailable",),
+        notify_func=lambda title, message, priority, source: calls.append(
+            {"title": title, "message": message, "priority": priority, "source": source}
+        ) is None or True,
+    )
+    assert result["status"] == "alerted"
+    assert result["stale_count"] == 1
+    assert result["alerted_project_ids"] == ["F9010"]
+    assert "Monitored reason codes: source_edit_provider_unavailable." in calls[0]["message"]
 
 
 def test_deploy_installs_and_enables_sla_watchdog_timer():

@@ -3576,6 +3576,7 @@ class FlyerSourceEditSlaAlert(_BaseEntry):
     """Operator alert audit for stale source-edit manual queue rows."""
     type: Literal["flyer_source_edit_sla_alert"] = "flyer_source_edit_sla_alert"
     outcome: Literal["alerted", "throttled", "notify_failed"]
+    reason_codes: list[str] = Field(default_factory=list, max_length=20)
     project_ids: list[str] = Field(default_factory=list, max_length=50)
     stale_count: int = Field(default=0, ge=0)
     alerted_count: int = Field(default=0, ge=0)

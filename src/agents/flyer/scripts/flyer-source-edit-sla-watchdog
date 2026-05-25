@@ -57,8 +57,9 @@ DECISIONS_LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
 DEFAULT_THRESHOLD_MINUTES = 10
 DEFAULT_REPEAT_MINUTES = 60
 DEFAULT_PRIORITY = 2
+DEFAULT_REASON_CODES = ("source_edit_provider_unavailable", "visual_qa_failed")
 SOURCE = "flyer-source-edit-sla-watchdog"
-TITLE = "Flyer source-edit SLA breach"
+TITLE = "Flyer manual queue SLA breach"
 
 
 def parse_utc(value: str) -> datetime:
@@ -104,12 +105,17 @@ def _age_minutes(project: FlyerProject, now: datetime) -> float:
     return max((now - _project_ts(project)).total_seconds() / 60.0, 0.0)
 
 
-def _eligible(project: FlyerProject) -> bool:
+def _normalize_reason_codes(raw: list[str] | tuple[str, ...]) -> tuple[str, ...]:
+    cleaned = tuple(dict.fromkeys(code.strip() for code in raw if code and code.strip()))
+    return cleaned or DEFAULT_REASON_CODES
+
+
+def _eligible(project: FlyerProject, reason_codes: tuple[str, ...]) -> bool:
     manual = project.manual_review
     return (
         project.status == "manual_edit_required"
         and manual.status in {"queued", "in_progress"}
-        and manual.reason_code == "source_edit_provider_unavailable"
+        and manual.reason_code in reason_codes
     )
 
 
@@ -123,10 +129,11 @@ def stale_source_edit_rows(
     *,
     now: datetime,
     threshold_minutes: int,
+    reason_codes: tuple[str, ...],
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for project in projects:
-        if not _eligible(project):
+        if not _eligible(project, reason_codes):
             continue
         age = _age_minutes(project, now)
         if age < threshold_minutes:
@@ -158,10 +165,17 @@ def _is_throttled(row: dict[str, Any], state: dict[str, Any], *, now: datetime, 
     return (now - last).total_seconds() < repeat_minutes * 60
 
 
-def _build_message(rows: list[dict[str, Any]], *, threshold_minutes: int, repeat_minutes: int) -> str:
+def _build_message(
+    rows: list[dict[str, Any]],
+    *,
+    threshold_minutes: int,
+    repeat_minutes: int,
+    reason_codes: tuple[str, ...],
+) -> str:
     shown = rows[:8]
     lines = [
-        f"{len(rows)} Flyer source-edit manual queue row(s) exceeded {threshold_minutes} min.",
+        f"{len(rows)} Flyer manual queue row(s) exceeded {threshold_minutes} min.",
+        f"Monitored reason codes: {', '.join(reason_codes)}.",
         f"Repeat alerts throttle for {repeat_minutes} min per queue row.",
         "",
     ]
@@ -186,12 +200,14 @@ def _append_audit(
     threshold_minutes: int,
     repeat_minutes: int,
     notify_ok: bool,
+    reason_codes: tuple[str, ...],
     now: datetime,
 ) -> None:
     entry = FlyerSourceEditSlaAlert(
         type="flyer_source_edit_sla_alert",
         ts=now,
         outcome=outcome,
+        reason_codes=list(reason_codes),
         project_ids=[row["project_id"] for row in rows[:50]],
         stale_count=stale_count,
         alerted_count=len(rows) if outcome == "alerted" else 0,
@@ -217,13 +233,20 @@ def run_watchdog(
     threshold_minutes: int = DEFAULT_THRESHOLD_MINUTES,
     repeat_minutes: int = DEFAULT_REPEAT_MINUTES,
     priority: int = DEFAULT_PRIORITY,
+    reason_codes: tuple[str, ...] = DEFAULT_REASON_CODES,
     notify_func: NotifyFunc | None = None,
 ) -> dict[str, Any]:
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
     now = now.astimezone(timezone.utc)
+    reason_codes = _normalize_reason_codes(reason_codes)
     store = _load_projects(projects_path)
-    rows = stale_source_edit_rows(store.projects, now=now, threshold_minutes=threshold_minutes)
+    rows = stale_source_edit_rows(
+        store.projects,
+        now=now,
+        threshold_minutes=threshold_minutes,
+        reason_codes=reason_codes,
+    )
     state = _load_alert_state(alert_state_path)
     stale_count = len(rows)
 
@@ -248,6 +271,7 @@ def run_watchdog(
             threshold_minutes=threshold_minutes,
             repeat_minutes=repeat_minutes,
             notify_ok=False,
+            reason_codes=reason_codes,
             now=now,
         )
         return {
@@ -259,7 +283,12 @@ def run_watchdog(
             "oldest_age_minutes": max(row["age_minutes"] for row in rows),
         }
 
-    message = _build_message(alert_rows, threshold_minutes=threshold_minutes, repeat_minutes=repeat_minutes)
+    message = _build_message(
+        alert_rows,
+        threshold_minutes=threshold_minutes,
+        repeat_minutes=repeat_minutes,
+        reason_codes=reason_codes,
+    )
     notify = notify_func or notify_owner_with_fallback
     notify_ok = bool(notify(title=TITLE, message=message, priority=priority, source=SOURCE))
 
@@ -272,6 +301,7 @@ def run_watchdog(
             threshold_minutes=threshold_minutes,
             repeat_minutes=repeat_minutes,
             notify_ok=False,
+            reason_codes=reason_codes,
             now=now,
         )
         return {
@@ -305,6 +335,7 @@ def run_watchdog(
         threshold_minutes=threshold_minutes,
         repeat_minutes=repeat_minutes,
         notify_ok=True,
+        reason_codes=reason_codes,
         now=now,
     )
     return {
@@ -324,11 +355,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--decisions-log", default=str(DECISIONS_LOG_PATH))
     parser.add_argument("--threshold-minutes", type=int, default=DEFAULT_THRESHOLD_MINUTES)
     parser.add_argument("--repeat-minutes", type=int, default=DEFAULT_REPEAT_MINUTES)
+    parser.add_argument(
+        "--reason-codes",
+        default=",".join(DEFAULT_REASON_CODES),
+        help="Comma-separated manual reason_code values to monitor.",
+    )
     parser.add_argument("--priority", type=int, choices=[-2, -1, 0, 1, 2], default=DEFAULT_PRIORITY)
     parser.add_argument("--now", default="")
     args = parser.parse_args(argv)
 
     now = parse_utc(args.now) if args.now else datetime.now(timezone.utc)
+    reason_codes = _normalize_reason_codes(tuple(args.reason_codes.split(",")))
     result = run_watchdog(
         projects_path=Path(args.projects_path),
         alert_state_path=Path(args.alert_state_path),
@@ -337,6 +374,7 @@ def main(argv: list[str] | None = None) -> int:
         threshold_minutes=args.threshold_minutes,
         repeat_minutes=args.repeat_minutes,
         priority=args.priority,
+        reason_codes=reason_codes,
     )
     print(json.dumps(result, sort_keys=True))
     return int(result.get("exit_code", 0))
