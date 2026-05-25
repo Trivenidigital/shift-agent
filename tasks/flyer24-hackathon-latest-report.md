@@ -1,12 +1,12 @@
 # Flyer24 Hackathon Latest Report
 
-Updated: 2026-05-25T11:39:00Z
+Updated: 2026-05-25T12:45:00Z
 
 ## Batch
-- Branch: `codex/flyer24-batch-self-eval-stale-reason-coverage-202605251145`
-- Scope: broadened self-eval stale manual-queue incident coverage to include `missing_required_facts` and `reference_*` queue reasons, with reason-aware suggested actions and updated rollout-threshold CLI help text.
-- Risk: low (read-only self-eval/reporting behavior + tests only; no payment/account/quota/runtime mutation).
-- Hermes/MCP-first: Hermes continues to own ingress/routing/audit/state substrate; this batch only updates Flyer read-only incident taxonomy/reporting policy.
+- Branch: `codex/flyer24-batch-recovery-terminal-nosend-202605251240`
+- Scope: harden Flyer recovery watchdog so terminal no-send decisions (`stale_incident`, `missing_chat_id`, terminal status/ack reasons) are durably persisted as suppressed ack outcomes with audit visibility, preventing silent re-evaluation loops.
+- Risk: low (recovery-state/audit observability only; no payment/account/quota/customer-send mutation).
+- Hermes/MCP-first: Hermes continues owning ingress/routing/bridge/audit substrate; this batch only adjusts Flyer deterministic no-send policy and regression tests.
 
 ## Running PR list
 - #216 - fix(flyer): harden guest-order payment activation contracts (operator-review-required; payment-adjacent)
@@ -15,3 +15,4 @@ Updated: 2026-05-25T11:39:00Z
 - #185 - test-repair-tarball-gate-harness-drift (non-merge-qualified draft)
 - #219 - fix(flyer): generalize stale manual queue readiness/reporting (merged)
 - #220 - fix(flyer): route business idea asks to sample prompts (merged)
+- (pending) codex/flyer24-batch-recovery-terminal-nosend-202605251240 - recovery terminal no-send hygiene

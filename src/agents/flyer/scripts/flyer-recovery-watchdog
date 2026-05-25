@@ -289,6 +289,16 @@ def _process_repair_queue(
 def _process_customer_acks(state_path: Path, log_path: Path, cfg: Config, mode: str, now: datetime, *, dry_run: bool = False) -> int:
     sent_count = 0
     considered = 0
+    terminal_no_send_prefixes = (
+        "terminal_ack:",
+        "terminal_incident_status:",
+        "ack_reserved",
+        "mode:",
+        "flyer_disabled",
+        "missing_chat_id",
+        "stale_incident",
+        "invalid_last_seen",
+    )
     for incident in list(recovery.load_recovery_state(state_path).get("incidents", [])):
         with recovery.recovery_state_lock(state_path):
             state = recovery.load_recovery_state(state_path)
@@ -304,18 +314,17 @@ def _process_customer_acks(state_path: Path, log_path: Path, cfg: Config, mode: 
             )
             if not decision.allowed:
                 ack = current.get("ack") or {}
-                if str(decision.reason).startswith(
-                    (
-                        "terminal_ack:",
-                        "terminal_incident_status:",
-                        "ack_reserved",
-                        "mode:",
-                        "flyer_disabled",
-                        "missing_chat_id",
-                        "stale_incident",
-                        "invalid_last_seen",
-                    )
-                ):
+                if str(decision.reason).startswith(terminal_no_send_prefixes):
+                    if ack.get("status") == "none" and not dry_run:
+                        current["ack"] = {"status": "suppressed", "status_detail": decision.reason}
+                        recovery.write_recovery_state(state_path, state)
+                        _append_audit(log_path, FlyerRecoveryCustomerAckSuppressed(
+                            type="flyer_recovery_customer_ack_suppressed",
+                            ts=now,
+                            **_incident_common(current),
+                            mode=mode,
+                            reason=decision.reason,
+                        ))
                     continue
                 considered += 1
                 if considered > cfg.flyer.recovery.max_incidents_per_run:
