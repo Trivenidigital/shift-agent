@@ -250,6 +250,79 @@ def test_upgrade_plan_shows_plan_menu_without_mutating_customer(tmp_path):
     assert updated.pending_plan_id == ""
 
 
+def test_upgrade_plan_for_authorized_requester_does_not_offer_billing_commands(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 25, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    customer = store.new_customer(
+        business_name="Lakshmi's Kitchen",
+        business_address="90 Brybar Dr, St Johns, FL",
+        public_phone="+17329837841",
+        business_whatsapp_number="+17329837841",
+        authorized_request_number="+19045550104",
+        business_category="restaurant",
+        preferred_language="en",
+        plan_id="trial",
+        now=now,
+        onboarded_by_phone="+17329837841",
+    ).model_copy(update={"status": "trial"})
+    store.customers.append(customer)
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    result = handle_account_command(
+        state_path=state_path,
+        sender_phone="+19045550104",
+        sender_role="customer",
+        chat_id="19045550104@s.whatsapp.net",
+        text="UPGRADE PLAN - show Flyer Studio plans",
+        now=now,
+    )
+
+    assert result.ok is True
+    assert "$49.99/month" in result.reply_text
+    assert "$69.99/month" in result.reply_text
+    assert "$199/month" in result.reply_text
+    assert "Plan changes must be requested from the business WhatsApp number" in result.reply_text
+    assert "CHANGE PLAN STARTER" not in result.reply_text
+
+
+def test_change_plan_from_authorized_requester_gets_owner_path_not_dead_end(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 25, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    customer = store.new_customer(
+        business_name="Lakshmi's Kitchen",
+        business_address="90 Brybar Dr, St Johns, FL",
+        public_phone="+17329837841",
+        business_whatsapp_number="+17329837841",
+        authorized_request_number="+19045550104",
+        business_category="restaurant",
+        preferred_language="en",
+        plan_id="trial",
+        now=now,
+        onboarded_by_phone="+17329837841",
+    ).model_copy(update={"status": "trial"})
+    store.customers.append(customer)
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    result = handle_account_command(
+        state_path=state_path,
+        sender_phone="+19045550104",
+        sender_role="customer",
+        chat_id="19045550104@s.whatsapp.net",
+        text="CHANGE PLAN GROWTH",
+        now=now,
+    )
+
+    assert result.ok is True
+    assert result.handled is True
+    assert "Plan changes must be requested from the business WhatsApp number" in result.reply_text
+    assert "+17329837841" in result.reply_text
+    assert "Only the business WhatsApp number" not in result.reply_text
+    updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8")).customers[0]
+    assert updated.pending_plan_id == ""
+
+
 def test_free_trial_onboarding_skips_paid_plan_choice_and_activates_trial(tmp_path):
     state_path = tmp_path / "customers.json"
     now = datetime(2026, 5, 16, tzinfo=timezone.utc)

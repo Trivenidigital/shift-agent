@@ -157,7 +157,13 @@ def handle_account_command(
     if lower == "help":
         return AccountResult(True, True, _help_reply(customer), customer.customer_id, customer.status)
     if _is_plan_menu_request(lower):
-        return AccountResult(True, True, _plan_menu_reply(customer, tiers), customer.customer_id, customer.status)
+        return AccountResult(
+            True,
+            True,
+            _plan_menu_reply(customer, tiers, is_admin=customer.is_account_admin(sender_phone, chat_id, sender_role)),
+            customer.customer_id,
+            customer.status,
+        )
     if lower == "confirm update":
         return _confirm_pending_update(
             store=store,
@@ -193,6 +199,14 @@ def handle_account_command(
             allowed=False,
             reason="admin_required",
         )
+        if command == "change_plan":
+            return AccountResult(
+                True,
+                True,
+                _plan_change_admin_required_reply(customer),
+                customer.customer_id,
+                customer.status,
+            )
         return AccountResult(
             True,
             True,
@@ -693,20 +707,31 @@ def _help_reply(customer: FlyerCustomerProfile) -> str:
     )
 
 
-def _plan_menu_reply(customer: FlyerCustomerProfile, tiers: list[FlyerPlanTier]) -> str:
+def _plan_menu_reply(customer: FlyerCustomerProfile, tiers: list[FlyerPlanTier], *, is_admin: bool) -> str:
     paid_tiers = [tier for tier in tiers if tier.plan_id != "trial"]
     lines = []
     for tier in paid_tiers:
         price = f"{tier.monthly_price_usd:.2f}".rstrip("0").rstrip(".")
         quota = "unlimited flyers/month" if tier.included_flyers is None else f"{tier.included_flyers} flyers/month"
         lines.append(f"{tier.label} - ${price}/month - {quota}")
-    commands = ", ".join(f"CHANGE PLAN {tier.plan_id.upper()}" for tier in paid_tiers)
-    return (
+    message = (
         "Flyer Studio\n------------\n"
         f"Plans for {customer.business_name}:\n"
         + "\n".join(lines)
         + f"\n\nCurrent plan: {customer.plan_id}.\n"
-        + f"Reply {commands}."
+    )
+    if is_admin:
+        commands = ", ".join(f"CHANGE PLAN {tier.plan_id.upper()}" for tier in paid_tiers)
+        return message + f"Reply {commands}."
+    return message + _plan_change_admin_required_reply(customer).split("------------\n", 1)[1]
+
+
+def _plan_change_admin_required_reply(customer: FlyerCustomerProfile) -> str:
+    return (
+        "Flyer Studio\n------------\n"
+        "Plan changes must be requested from the business WhatsApp number "
+        f"{customer.business_whatsapp_number} or the account owner.\n\n"
+        "This chat can still request flyers for the business."
     )
 
 
