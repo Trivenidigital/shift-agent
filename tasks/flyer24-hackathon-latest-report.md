@@ -1,6 +1,6 @@
 # Flyer24 Hackathon Latest Report
 
-Updated: 2026-05-25T11:52:00Z
+Updated: 2026-05-25T11:39:00Z
 
 ## Batch
 - Branch: `codex/flyer24-batch-self-eval-stale-reason-coverage-202605251145`
@@ -10,7 +10,7 @@ Updated: 2026-05-25T11:52:00Z
 
 ## Running PR list
 - #216 - fix(flyer): harden guest-order payment activation contracts (operator-review-required; payment-adjacent)
-- #223 - fix(flyer): broaden stale manual-queue self-eval coverage (open; low-risk read-only reporting, merge/deploy eligible after checks/review)
+- #223 - fix(flyer): broaden stale manual-queue self-eval coverage (merged + deployed in `deploy-20260525-113843-be846ebf`)
 - #187 - feat: add Flyer Studio concierge intake (non-merge-qualified; dirty/conflict broad scope)
 - #185 - test-repair-tarball-gate-harness-drift (non-merge-qualified draft)
 - #219 - fix(flyer): generalize stale manual queue readiness/reporting (merged)
