@@ -70,6 +70,18 @@ _CAMPAIGN_CSV_MAX_BYTES = 512_000
 _CAMPAIGN_SEND_BIN = Path("/usr/local/bin/send-flyer-campaign")
 
 
+async def _require_auth_dep(request: Request):
+    from ..auth import require_auth
+
+    return await require_auth(request)
+
+
+async def _require_fresh_otp_dep(request: Request):
+    from ..auth import require_fresh_otp
+
+    return await require_fresh_otp(request)
+
+
 
 
 class ReasonBody(BaseModel):
@@ -1030,7 +1042,7 @@ def manual_queue_action_preview(project_id: str, *, action: str) -> dict[str, An
 async def manual_queue_action_preview_endpoint(
     project_id: str,
     action: str,
-    _=Depends(require_auth),
+    _=Depends(_require_auth_dep),
 ):
     return manual_queue_action_preview(project_id, action=action)
 
@@ -1126,7 +1138,7 @@ async def operator_upload(
     request: Request,
     file: UploadFile = File(...),
     reason: str = Form(..., min_length=5, max_length=300),
-    _=Depends(require_fresh_otp),
+    _=Depends(_require_fresh_otp_dep),
 ):
     """Upload an approved operator/designer asset to operator-uploads/.
 
@@ -1161,7 +1173,7 @@ async def operator_upload(
 @router.get("/operator-uploads/{filename}")
 async def operator_upload_media(
     filename: str,
-    _=Depends(require_auth),
+    _=Depends(_require_auth_dep),
 ):
     """Serve a cockpit-uploaded file back to the operator for preview before
     they commit Complete. Read-only; auth (not OTP) gated. Filename must
@@ -1427,7 +1439,7 @@ def manual_queue_detail_action(project_id: str) -> dict[str, Any]:
 @router.get("/manual-queue/{project_id}/detail")
 async def manual_queue_detail(
     project_id: str,
-    _=Depends(require_auth),
+    _=Depends(_require_auth_dep),
 ):
     return manual_queue_detail_action(project_id)
 
@@ -1436,7 +1448,7 @@ async def manual_queue_detail(
 async def project_asset_media(
     project_id: str,
     asset_id: str,
-    _=Depends(require_auth),
+    _=Depends(_require_auth_dep),
 ):
     """Serve a project asset's bytes for thumbnail/preview rendering (P0-3).
 
@@ -1475,7 +1487,7 @@ async def campaign_send_csv(
     file: UploadFile = File(...),
     reason: str = Form(..., min_length=5, max_length=300),
     dry_run: bool = Form(True),
-    _=Depends(require_fresh_otp),
+    _=Depends(_require_fresh_otp_dep),
 ):
     parsed = await parse_campaign_csv(file)
     result = send_campaign_to_targets(parsed["valid_targets"], dry_run=dry_run, reason=reason)
@@ -1890,7 +1902,7 @@ def _flyer_provider_components() -> list[dict[str, Any]]:
 
 
 @router.get("/health")
-async def flyer_health(_=Depends(require_auth)):
+async def flyer_health(_=Depends(_require_auth_dep)):
     """Read-only flyer provider + platform-runtime health.
 
     Surfaces gateway / bridge / paired / cockpit deploy plus OpenRouter
@@ -1911,13 +1923,3 @@ async def flyer_health(_=Depends(require_auth)):
         "components": components,
         "providers": providers,
     }
-async def _require_auth_dep(request: Request):
-    from ..auth import require_auth
-
-    return await require_auth(request)
-
-
-async def _require_fresh_otp_dep(request: Request):
-    from ..auth import require_fresh_otp
-
-    return await require_fresh_otp(request)
