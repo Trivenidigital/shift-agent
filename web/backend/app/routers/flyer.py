@@ -21,9 +21,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from ..audit import log as audit_log
-from ..auth import require_auth, require_fresh_otp
 from ..config import get_settings
-from ..deps import client_ip, client_ua
 from ..shell import run_cli
 
 _AGENT_ROOT = Path("/opt/shift-agent")
@@ -70,6 +68,20 @@ router = APIRouter(prefix="/flyer", tags=["flyer"])
 _FORMULA_PREFIXES: frozenset[str] = frozenset({"=", "+", "-", "@", "\t"})
 _CAMPAIGN_CSV_MAX_BYTES = 512_000
 _CAMPAIGN_SEND_BIN = Path("/usr/local/bin/send-flyer-campaign")
+
+
+async def _require_auth_dep(request: Request):
+    from ..auth import require_auth
+
+    return await require_auth(request)
+
+
+async def _require_fresh_otp_dep(request: Request):
+    from ..auth import require_fresh_otp
+
+    return await require_fresh_otp(request)
+
+
 
 
 class ReasonBody(BaseModel):
@@ -123,6 +135,14 @@ def _marketing_flyer_path() -> Path:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def client_ip(request: Request) -> str:
+    return request.client.host if request.client else ""
+
+
+def client_ua(request: Request) -> str:
+    return request.headers.get("user-agent", "")[:300]
 
 
 def _safe_load(path: Path, model_cls, default):
@@ -459,7 +479,7 @@ def send_campaign_to_targets(targets: list[str], *, dry_run: bool, reason: str) 
 
 
 @router.get("/summary")
-async def summary(_=Depends(require_auth)):
+async def summary(_=Depends(_require_auth_dep)):
     return build_summary()
 
 
@@ -469,7 +489,7 @@ async def customers(
     segment: str = "",
     offset: int = 0,
     limit: int = 300,
-    _=Depends(require_auth),
+    _=Depends(_require_auth_dep),
 ):
     # BUG-FLYER-QA-002 (review follow-up): pagination via offset+limit so
     # rows beyond the first page are reachable. limit is capped at 300 to
@@ -520,7 +540,7 @@ async def customers(
 
 
 @router.get("/customers/{customer_id}")
-async def customer_detail(customer_id: str, _=Depends(require_auth)):
+async def customer_detail(customer_id: str, _=Depends(_require_auth_dep)):
     store = load_customer_store()
     customer = _find_customer_or_404(store, customer_id)
     projects = [
@@ -532,28 +552,28 @@ async def customer_detail(customer_id: str, _=Depends(require_auth)):
 
 
 @router.post("/customers/{customer_id}/extend-trial")
-async def extend_trial(customer_id: str, body: ExtendTrialBody, request: Request, _=Depends(require_fresh_otp)):
+async def extend_trial(customer_id: str, body: ExtendTrialBody, request: Request, _=Depends(_require_fresh_otp_dep)):
     result = extend_trial_quota(customer_id, extra_flyers=body.extra_flyers, reason=body.reason)
     audit_log("flyer.customer.extend_trial", ip=client_ip(request), ua=client_ua(request), details=result | {"reason": body.reason})
     return result
 
 
 @router.post("/customers/{customer_id}/reset-trial")
-async def reset_trial(customer_id: str, body: ReasonBody, request: Request, _=Depends(require_fresh_otp)):
+async def reset_trial(customer_id: str, body: ReasonBody, request: Request, _=Depends(_require_fresh_otp_dep)):
     result = reset_trial_quota(customer_id, reason=body.reason)
     audit_log("flyer.customer.reset_trial", ip=client_ip(request), ua=client_ua(request), details=result | {"reason": body.reason})
     return result
 
 
 @router.post("/customers/{customer_id}/deactivate")
-async def customer_deactivate(customer_id: str, body: ReasonBody, request: Request, _=Depends(require_fresh_otp)):
+async def customer_deactivate(customer_id: str, body: ReasonBody, request: Request, _=Depends(_require_fresh_otp_dep)):
     result = deactivate_customer(customer_id, reason=body.reason)
     audit_log("flyer.customer.deactivate", ip=client_ip(request), ua=client_ua(request), details=result | {"reason": body.reason})
     return result
 
 
 @router.get("/projects")
-async def projects(status: str = "", query: str = "", _=Depends(require_auth)):
+async def projects(status: str = "", query: str = "", _=Depends(_require_auth_dep)):
     q = query.strip().lower()
     rows = []
     now = _now()
@@ -580,14 +600,14 @@ async def projects(status: str = "", query: str = "", _=Depends(require_auth)):
 
 
 @router.get("/guest-orders")
-async def guest_orders(_=Depends(require_auth)):
+async def guest_orders(_=Depends(_require_auth_dep)):
     orders = [order.model_dump(mode="json") for order in load_guest_order_store().orders]
     orders.sort(key=lambda o: o.get("updated_at", ""), reverse=True)
     return {"orders": orders[:300]}
 
 
 @router.post("/campaigns/preview")
-async def campaign_preview(body: CampaignSendBody, _=Depends(require_auth)):
+async def campaign_preview(body: CampaignSendBody, _=Depends(_require_auth_dep)):
     try:
         parsed = parse_campaign_targets(body.targets_text)
     except ValueError as exc:
@@ -596,12 +616,12 @@ async def campaign_preview(body: CampaignSendBody, _=Depends(require_auth)):
 
 
 @router.post("/campaigns/preview-csv")
-async def campaign_preview_csv(file: UploadFile = File(...), _=Depends(require_auth)):
+async def campaign_preview_csv(file: UploadFile = File(...), _=Depends(_require_auth_dep)):
     return await parse_campaign_csv(file)
 
 
 @router.post("/campaigns/send")
-async def campaign_send(body: CampaignSendBody, request: Request, _=Depends(require_fresh_otp)):
+async def campaign_send(body: CampaignSendBody, request: Request, _=Depends(_require_fresh_otp_dep)):
     try:
         parsed = parse_campaign_targets(body.targets_text)
     except ValueError as exc:
@@ -743,7 +763,7 @@ def manual_queue_break_glass_action(project_id: str, *, reason: str) -> dict[str
 
 
 @router.get("/manual-queue")
-async def manual_queue(_=Depends(require_auth)):
+async def manual_queue(_=Depends(_require_auth_dep)):
     return manual_queue_triage_action()
 
 
@@ -752,7 +772,7 @@ async def manual_queue_complete(
     project_id: str,
     body: ManualQueueCompleteBody,
     request: Request,
-    _=Depends(require_fresh_otp),
+    _=Depends(_require_fresh_otp_dep),
 ):
     result = manual_queue_complete_action(project_id, asset_path=body.operator_asset_path, reason=body.reason)
     audit_log(
@@ -769,7 +789,7 @@ async def manual_queue_break_glass(
     project_id: str,
     body: ManualQueueBreakGlassBody,
     request: Request,
-    _=Depends(require_fresh_otp),
+    _=Depends(_require_fresh_otp_dep),
 ):
     result = manual_queue_break_glass_action(project_id, reason=body.reason)
     audit_log(
@@ -882,7 +902,7 @@ async def manual_queue_close_no_send(
     project_id: str,
     body: ManualQueueCloseNoSendBody,
     request: Request,
-    _=Depends(require_fresh_otp),
+    _=Depends(_require_fresh_otp_dep),
 ):
     result = manual_queue_close_no_send_action(
         project_id, reason=body.reason, force=body.force,
@@ -1022,7 +1042,7 @@ def manual_queue_action_preview(project_id: str, *, action: str) -> dict[str, An
 async def manual_queue_action_preview_endpoint(
     project_id: str,
     action: str,
-    _=Depends(require_auth),
+    _=Depends(_require_auth_dep),
 ):
     return manual_queue_action_preview(project_id, action=action)
 
@@ -1118,7 +1138,7 @@ async def operator_upload(
     request: Request,
     file: UploadFile = File(...),
     reason: str = Form(..., min_length=5, max_length=300),
-    _=Depends(require_fresh_otp),
+    _=Depends(_require_fresh_otp_dep),
 ):
     """Upload an approved operator/designer asset to operator-uploads/.
 
@@ -1153,7 +1173,7 @@ async def operator_upload(
 @router.get("/operator-uploads/{filename}")
 async def operator_upload_media(
     filename: str,
-    _=Depends(require_auth),
+    _=Depends(_require_auth_dep),
 ):
     """Serve a cockpit-uploaded file back to the operator for preview before
     they commit Complete. Read-only; auth (not OTP) gated. Filename must
@@ -1419,7 +1439,7 @@ def manual_queue_detail_action(project_id: str) -> dict[str, Any]:
 @router.get("/manual-queue/{project_id}/detail")
 async def manual_queue_detail(
     project_id: str,
-    _=Depends(require_auth),
+    _=Depends(_require_auth_dep),
 ):
     return manual_queue_detail_action(project_id)
 
@@ -1428,7 +1448,7 @@ async def manual_queue_detail(
 async def project_asset_media(
     project_id: str,
     asset_id: str,
-    _=Depends(require_auth),
+    _=Depends(_require_auth_dep),
 ):
     """Serve a project asset's bytes for thumbnail/preview rendering (P0-3).
 
@@ -1467,7 +1487,7 @@ async def campaign_send_csv(
     file: UploadFile = File(...),
     reason: str = Form(..., min_length=5, max_length=300),
     dry_run: bool = Form(True),
-    _=Depends(require_fresh_otp),
+    _=Depends(_require_fresh_otp_dep),
 ):
     parsed = await parse_campaign_csv(file)
     result = send_campaign_to_targets(parsed["valid_targets"], dry_run=dry_run, reason=reason)
@@ -1882,7 +1902,7 @@ def _flyer_provider_components() -> list[dict[str, Any]]:
 
 
 @router.get("/health")
-async def flyer_health(_=Depends(require_auth)):
+async def flyer_health(_=Depends(_require_auth_dep)):
     """Read-only flyer provider + platform-runtime health.
 
     Surfaces gateway / bridge / paired / cockpit deploy plus OpenRouter

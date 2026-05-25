@@ -7,6 +7,8 @@ import json
 
 import pytest
 
+pytest.importorskip("fastapi")
+
 
 def _customer(
     customer_id: str,
@@ -359,6 +361,7 @@ def _build_test_client_with_fresh_otp():
 
 
 def test_deactivate_customer_endpoint_requires_reason_auth_and_fresh_otp(tmp_path, monkeypatch):
+    pytest.importorskip("jose")
     from fastapi.testclient import TestClient
     from jose import jwt
     from app import auth as auth_mod
@@ -398,6 +401,7 @@ def test_deactivate_customer_endpoint_requires_reason_auth_and_fresh_otp(tmp_pat
 
 
 def test_deactivate_customer_endpoint_audits_action(tmp_path):
+    pytest.importorskip("jose")
     from app import audit as audit_mod
     from app.routers import flyer
 
