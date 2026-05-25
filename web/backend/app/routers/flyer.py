@@ -1803,6 +1803,43 @@ def _flyer_provider_components() -> list[dict[str, Any]]:
         "Customer-grade reliance still requires spend-gated source-preservation smoke."
     )
 
+    try:
+        from ..state import load_config
+
+        flyer_cfg = load_config().flyer
+        payment_provider = flyer_cfg.payment_provider
+        plan_checkout_template = flyer_cfg.payment_checkout_url_template
+        quick_checkout_template = flyer_cfg.quick_flyer_checkout_url_template
+        quick_price_cents = flyer_cfg.quick_flyer_price_cents
+    except Exception:
+        defaults = FlyerConfig()
+        payment_provider = defaults.payment_provider
+        plan_checkout_template = defaults.payment_checkout_url_template
+        quick_checkout_template = defaults.quick_flyer_checkout_url_template
+        quick_price_cents = defaults.quick_flyer_price_cents
+
+    def _configured_template(value: str) -> bool:
+        candidate = str(value or "").strip()
+        return bool(candidate) and not _is_placeholder(candidate)
+
+    plan_configured = _configured_template(plan_checkout_template)
+    quick_configured = _configured_template(quick_checkout_template)
+    if plan_configured and quick_configured:
+        billing_severity = "green"
+        billing_detail = "Plan and quick-flyer checkout templates are configured."
+    elif plan_configured or quick_configured:
+        billing_severity = "yellow"
+        billing_detail = (
+            "Checkout templates are partially configured. Missing templates fail closed "
+            "with 'payment link not configured' copy."
+        )
+    else:
+        billing_severity = "red"
+        billing_detail = (
+            "Plan and quick-flyer checkout templates are missing or placeholders. "
+            "Payment link creation is not configured."
+        )
+
     return [
         {
             "name": "openrouter_generation_vision",
@@ -1824,6 +1861,21 @@ def _flyer_provider_components() -> list[dict[str, Any]]:
             "model_config": source_model,
             "manual_queue_impact": queue_impact,
             "operator_note": operator_note_source,
+            "checked_at": now_iso,
+        },
+        {
+            "name": "billing_checkout_provider",
+            "purpose": "Plan + one-time checkout link readiness (provider-neutral)",
+            "severity": billing_severity,
+            "detail": billing_detail,
+            "key_present": plan_configured or quick_configured,
+            "key_source": None,
+            "model_config": {
+                "payment_provider": str(payment_provider),
+                "payment_checkout_url_template_configured": "true" if plan_configured else "false",
+                "quick_flyer_checkout_url_template_configured": "true" if quick_configured else "false",
+                "quick_flyer_price_cents": str(quick_price_cents),
+            },
             "checked_at": now_iso,
         },
     ]

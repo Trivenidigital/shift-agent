@@ -159,7 +159,7 @@ interface FlyerHealthComponent {
 }
 
 interface FlyerHealthProvider {
-  name: "openrouter_generation_vision" | "source_edit_provider";
+  name: "openrouter_generation_vision" | "source_edit_provider" | "billing_checkout_provider";
   purpose: string;
   severity: HealthSeverity;
   detail: string;
@@ -307,6 +307,7 @@ function FlyerHealthPanel({ data }: { data: FlyerHealth | undefined }) {
     data.providers.find((p) => p.name === name);
   const openrouter = provider("openrouter_generation_vision");
   const sourceEdit = provider("source_edit_provider");
+  const billing = provider("billing_checkout_provider");
 
   return (
     <Card>
@@ -395,6 +396,28 @@ function FlyerHealthPanel({ data }: { data: FlyerHealth | undefined }) {
               )}
             </div>
           )}
+          {billing && (
+            <div className="rounded-md border-2 border-zinc-200 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-sm font-semibold">
+                  <HealthDot severity={billing.severity} />
+                  Billing checkout readiness
+                </div>
+                <Badge tone={severityTone(billing.severity)}>{billing.severity}</Badge>
+              </div>
+              <div className="mt-2 text-xs text-zinc-600">{billing.detail}</div>
+              <div className="mt-2 text-xs text-zinc-500">
+                provider: <span className="font-mono">{billing.model_config.payment_provider ?? "?"}</span> ·
+                {" "}quick price: <span className="font-mono">
+                  {billing.model_config.quick_flyer_price_cents ? `$${(Number(billing.model_config.quick_flyer_price_cents) / 100).toFixed(2)}` : "?"}
+                </span>
+              </div>
+              <div className="mt-1 text-xs text-zinc-600">
+                plan template: <strong>{billing.model_config.payment_checkout_url_template_configured === "true" ? "configured" : "missing"}</strong> ·
+                {" "}quick template: <strong>{billing.model_config.quick_flyer_checkout_url_template_configured === "true" ? "configured" : "missing"}</strong>
+              </div>
+            </div>
+          )}
         </div>
       </CardContent>
     </Card>
@@ -470,7 +493,7 @@ const REASON_PLAYBOOK: Record<string, { title: string; next_steps: string[] }> =
   source_edit_provider_unavailable: {
     title: "Source-edit provider down",
     next_steps: [
-      "Provision/verify OPENAI_API_KEY on the VPS, OR",
+      "Provision/verify the configured source-edit provider key on the VPS (OPENAI_API_KEY or OPENROUTER_API_KEY), OR",
       "Upload an approved designer flyer here and click Complete, OR",
       "Close with reason containing `provider_unavailable_after_retry` if the row is genuinely stuck.",
     ],
