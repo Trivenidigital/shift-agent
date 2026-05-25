@@ -157,3 +157,167 @@ def test_watchdog_write_repair_bundle_is_explicit_operator_action(tmp_path):
     assert result.returncode == 0
     assert "bundle_written=" in result.stdout
     assert (bundle_dir / "FRI20260523-0001.json").exists()
+
+
+def test_watchdog_customer_ack_marks_stale_incident_suppressed(tmp_path):
+    config = tmp_path / "config.yaml"
+    log = tmp_path / "decisions.log"
+    projects = tmp_path / "projects.json"
+    customers = tmp_path / "customers.json"
+    recovery_state = tmp_path / "recovery.json"
+    config.write_text(
+        """
+schema_version: 1
+customer: {name: Triveni, location_id: loc_pineville_01, timezone: America/New_York}
+owner: {name: Owner, phone: '+19045550000'}
+limits: {}
+alerting: {pushover_user_key: k, pushover_app_token: t}
+backup: {gpg_recipient_email: owner@example.com}
+flyer:
+  enabled: true
+  recovery:
+    mode: customer_ack
+    enable_timer: true
+    scan_window_minutes: 240
+    ack_cooldown_minutes: 30
+""".strip(),
+        encoding="utf-8",
+    )
+    log.write_text("", encoding="utf-8")
+    projects.write_text('{"projects":[]}', encoding="utf-8")
+    customers.write_text('{"customers":[],"onboarding_sessions":[],"intake_sessions":[]}', encoding="utf-8")
+    old_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    recovery_state.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "incidents": [
+                    {
+                        "incident_id": "FRI20260525-STALE01",
+                        "status": "open",
+                        "failure_class": "concept_generation_failed",
+                        "severity": "warning",
+                        "source_fingerprint": "fp-stale",
+                        "ack_dedupe_key": "ack-stale",
+                        "project_id": "F1234",
+                        "chat_id": "17329837841@s.whatsapp.net",
+                        "chat_id_hash": "sha256:chat",
+                        "sender_phone_hash": "",
+                        "root_message_id": "wamid.stale",
+                        "provider_message_id_hash": "sha256:msg",
+                        "evidence_quality": "strong",
+                        "first_seen": old_ts,
+                        "last_seen": old_ts,
+                        "ack": {"status": "none"},
+                        "codex": {"status": "none", "bundle_path": ""},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--config-path", str(config),
+            "--log-path", str(log),
+            "--project-state-path", str(projects),
+            "--customer-state-path", str(customers),
+            "--recovery-state-path", str(recovery_state),
+            "--text",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0
+    assert "ack_sent=0" in result.stdout
+    state = json.loads(recovery_state.read_text(encoding="utf-8"))
+    incident = state["incidents"][0]
+    assert incident["ack"]["status"] == "suppressed"
+    assert incident["ack"]["status_detail"] == "stale_incident"
+
+
+def test_watchdog_customer_ack_marks_missing_chat_id_suppressed(tmp_path):
+    config = tmp_path / "config.yaml"
+    log = tmp_path / "decisions.log"
+    projects = tmp_path / "projects.json"
+    customers = tmp_path / "customers.json"
+    recovery_state = tmp_path / "recovery.json"
+    config.write_text(
+        """
+schema_version: 1
+customer: {name: Triveni, location_id: loc_pineville_01, timezone: America/New_York}
+owner: {name: Owner, phone: '+19045550000'}
+limits: {}
+alerting: {pushover_user_key: k, pushover_app_token: t}
+backup: {gpg_recipient_email: owner@example.com}
+flyer:
+  enabled: true
+  recovery:
+    mode: customer_ack
+    enable_timer: true
+    scan_window_minutes: 240
+    ack_cooldown_minutes: 60
+""".strip(),
+        encoding="utf-8",
+    )
+    log.write_text("", encoding="utf-8")
+    projects.write_text('{"projects":[]}', encoding="utf-8")
+    customers.write_text('{"customers":[],"onboarding_sessions":[],"intake_sessions":[]}', encoding="utf-8")
+    now_ts = datetime.now(timezone.utc).isoformat()
+    recovery_state.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "incidents": [
+                    {
+                        "incident_id": "FRI20260525-CHAT00",
+                        "status": "open",
+                        "failure_class": "concept_generation_failed",
+                        "severity": "warning",
+                        "source_fingerprint": "fp-chat",
+                        "ack_dedupe_key": "ack-chat",
+                        "project_id": "F1235",
+                        "chat_id": "",
+                        "chat_id_hash": "sha256:chat",
+                        "sender_phone_hash": "",
+                        "root_message_id": "wamid.chat",
+                        "provider_message_id_hash": "sha256:msg",
+                        "evidence_quality": "strong",
+                        "first_seen": now_ts,
+                        "last_seen": now_ts,
+                        "ack": {"status": "none"},
+                        "codex": {"status": "none", "bundle_path": ""},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--config-path", str(config),
+            "--log-path", str(log),
+            "--project-state-path", str(projects),
+            "--customer-state-path", str(customers),
+            "--recovery-state-path", str(recovery_state),
+            "--text",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0
+    assert "ack_sent=0" in result.stdout
+    state = json.loads(recovery_state.read_text(encoding="utf-8"))
+    incident = state["incidents"][0]
+    assert incident["ack"]["status"] == "suppressed"
+    assert incident["ack"]["status_detail"] == "missing_chat_id"
