@@ -524,6 +524,7 @@ def main() -> int:
                 "assets": [*current.assets, *assets],
                 "qa_reports": [*current.qa_reports, *qa_reports],
                 "revisions": revisions,
+                "manual_review": FlyerManualReview(),
                 "updated_at": now,
             })
             atomic_write_text(state_path, store.model_dump_json(indent=2))

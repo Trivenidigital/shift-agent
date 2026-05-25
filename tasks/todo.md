@@ -1362,6 +1362,7 @@ Review: red tests first failed with provider_timeout and critical text facts do 
 - [x] Reproduced F0098: saved active logo asset for Lakshmi's Kitchen contained Desi Chowrastha branding, and the generated flyer copied the wrong brand.
 - [x] Added regression that a missing required `business_name` visual-QA failure on a saved-logo request retries once with saved brand assets suppressed.
 - [x] Implemented bounded retry and restored `FLYER_DISABLE_BRAND_ASSETS` after render.
+- [x] Added regression and fix so a successful autonomous regeneration clears stale queued `manual_review` state.
 - [ ] Merge/deploy and regenerate F0098 so the customer gets a clean preview.
 
 Review: focused retry/source-edit generator slice passed `5 passed, 71 deselected`; touched-script `py_compile` and `git diff --check` passed.
