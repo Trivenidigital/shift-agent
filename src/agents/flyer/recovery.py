@@ -237,12 +237,27 @@ def ack_send_decision(
         return AckDecision(False, f"mode:{mode}")
     if not flyer_enabled:
         return AckDecision(False, "flyer_disabled")
+    incident_status = str(incident.get("status") or "open").strip().lower()
+    if incident_status != "open":
+        return AckDecision(False, f"terminal_incident_status:{incident_status or 'unknown'}")
+    if not str(incident.get("chat_id") or "").strip():
+        return AckDecision(False, "missing_chat_id")
     ack = incident.get("ack") or {}
     status = str(ack.get("status") or "none")
     if status in {"sent", "failed", "uncertain", "suppressed"}:
         return AckDecision(False, f"terminal_ack:{status}")
     if status == "reserved":
         return AckDecision(False, "ack_reserved")
+    last_seen_raw = str(incident.get("last_seen") or "").strip()
+    if last_seen_raw:
+        try:
+            last_seen = datetime.fromisoformat(last_seen_raw.replace("Z", "+00:00"))
+        except ValueError:
+            return AckDecision(False, "invalid_last_seen")
+        if last_seen.tzinfo is None:
+            last_seen = last_seen.replace(tzinfo=timezone.utc)
+        if now - last_seen > ack_cooldown:
+            return AckDecision(False, "stale_incident")
     if incident.get("evidence_quality") != "strong":
         return AckDecision(False, "missing_strong_customer_origin_evidence")
     template_id, message = render_recovery_ack(followup_recorded=False)
