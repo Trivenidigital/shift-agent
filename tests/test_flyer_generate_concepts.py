@@ -566,10 +566,16 @@ def test_generate_retries_without_saved_brand_assets_when_business_name_missing(
     reference = asset_dir / "F0001-reference.png"
     reference.write_bytes(b"fake image bytes")
     project = _project_with_pending_reference(reference)
-    project["reference_extractions"][0]["provider"] = "openai"
-    project["reference_extractions"][0]["status"] = "ok"
-    project["reference_extractions"][0]["detail"] = "extracted"
-    project["status"] = "generating_concepts"
+    project["reference_extractions"] = []
+    project["assets"] = []
+    project["status"] = "manual_edit_required"
+    project["manual_review"] = {
+        "status": "queued",
+        "reason": "visual_qa_failed",
+        "reason_code": "visual_qa_failed",
+        "detail": "missing required visible fact: business_name",
+        "queued_at": datetime.now(timezone.utc).isoformat(),
+    }
     project["raw_request"] = "Create an evening snacks flyer. Use saved business name, address, phone, and logo."
     state_path.write_text(json.dumps({
         "schema_version": 1,
@@ -628,6 +634,7 @@ def test_generate_retries_without_saved_brand_assets_when_business_name_missing(
 
     persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
     assert persisted["status"] == "awaiting_final_approval"
+    assert persisted["manual_review"]["status"] == "none"
     assert persisted["assets"][-1]["path"].endswith("F0001-C1-retry.png")
 
 def test_generate_draft_quality_failure_does_not_retry(monkeypatch, tmp_path, capsys):
