@@ -28,7 +28,8 @@ except ImportError:
 STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
 CUSTOMER_STATE_PATH = Path("/opt/shift-agent/state/flyer/customers.json")
 LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
-TRIAL_UPGRADE_LINK = "https://wa.me/918522041562?text=START%20FREE%20TRIAL%20-%20I%20want%20to%20try%20Flyer%20Studio"
+CREATE_ANOTHER_FLYER_LINK = "https://wa.me/918522041562?text=CREATE%20ANOTHER%20FLYER"
+UPGRADE_PLAN_LINK = "https://wa.me/918522041562?text=UPGRADE%20PLAN%20-%20show%20Flyer%20Studio%20plans"
 FINAL_KIND_TO_FORMAT = {
     "final_whatsapp_image": "whatsapp_image",
     "final_instagram_post": "instagram_post",
@@ -102,18 +103,20 @@ def _trial_upsell_message(customer) -> str:
             "Flyer Studio\n------------\n"
             "Your 3 free sample flyers are complete. To keep creating flyers, choose a plan: "
             "$49.99/month for 30, $69.99/month for 60, or $199/month unlimited.\n"
-            f"Start here: {TRIAL_UPGRADE_LINK}"
+            f"Upgrade plan: {UPGRADE_PLAN_LINK}"
         )
     if remaining == 1:
         return (
             "Flyer Studio\n------------\n"
             "Second sample done. You have 1 free sample flyer left. "
-            f"Paid plans start at $49.99/month for 30 flyers: {TRIAL_UPGRADE_LINK}"
+            f"Create another flyer: {CREATE_ANOTHER_FLYER_LINK}\n"
+            f"Upgrade plan: {UPGRADE_PLAN_LINK}"
         )
     return (
         "Flyer Studio\n------------\n"
-        f"Your sample flyer is ready. You have {remaining} free sample flyers left. "
-        f"Upgrade anytime: {TRIAL_UPGRADE_LINK}"
+        f"Your sample flyer is ready. You have {remaining} free sample flyers left.\n\n"
+        f"Create another flyer: {CREATE_ANOTHER_FLYER_LINK}\n"
+        f"Upgrade plan: {UPGRADE_PLAN_LINK}"
     )
 
 

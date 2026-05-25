@@ -313,6 +313,21 @@ def test_verdict_yellow_on_manual_source_edit_stale_at_29_min():
     assert verdict == "yellow"
 
 
+def test_verdict_red_on_manual_review_stale_at_30_min():
+    incidents = [
+        {
+            "type": "manual_review_stale",
+            "severity": "high",
+            "evidence_details": {"queued_age_minutes": 30.0, "active_customer_risk": True},
+        }
+    ]
+    verdict, reasons = compute_rollout_verdict(
+        incidents=incidents, fixture=_green_fixture()
+    )
+    assert verdict == "red"
+    assert any("manual review queue stale >=" in r["text"] for r in reasons)
+
+
 def test_verdict_red_reasons_appear_before_yellow():
     incidents = [
         {
@@ -342,12 +357,20 @@ def test_verdict_yellow_when_fixture_missing():
 
 
 def test_build_rollout_section_shape():
-    section = build_rollout_section(incidents=[], fixture=_green_fixture())
-    assert section["verdict"] == "green"
-    assert section["reasons"] == []
+    section = build_rollout_section(
+        incidents=[
+            {"type": "manual_source_edit_stale"},
+            {"type": "manual_review_stale"},
+        ],
+        fixture=_green_fixture(),
+    )
+    assert section["verdict"] == "yellow"
+    assert any("manual source-edit queue rows present" in reason["text"] for reason in section["reasons"])
+    assert any("manual review queue rows present" in reason["text"] for reason in section["reasons"])
     assert section["source_edit_posture"] == "configured_with_smoke"
     assert section["source_edit_posture_reason"] == ""
     assert section["bridge_status"] == "connected"
+    assert section["stale_manual_queue_incidents"] == 2
     assert section["replay_summary"]["passed"] == 11
     assert section["replay_summary"]["total"] == 11
 

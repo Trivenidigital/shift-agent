@@ -726,6 +726,80 @@ def _extract_category_price_instruction(text: str) -> str:
     return f"Set all {category} prices to ${match.group('price')}."
 
 
+def _format_revision_price_list(raw_prices: str) -> str:
+    values: list[str] = []
+    for match in re.finditer(r"\$?\s*(\d+(?:\.\d{1,2})?)", raw_prices or ""):
+        value = match.group(1)
+        if "." in value:
+            whole, cents = value.split(".", 1)
+            value = f"{whole}.{cents.ljust(2, '0')[:2]}"
+        values.append(f"${value}")
+    return ", ".join(values)
+
+
+def _extract_service_price_list_instruction(text: str) -> str:
+    match = re.search(
+        r"\b(?:keep|set|change|update|use)?\s*prices?\s*(?:to|as|=|:)\s*"
+        r"(?P<prices>\$?\s*\d+(?:\.\d{1,2})?(?:\s*,\s*\$?\s*\d+(?:\.\d{1,2})?){1,8})\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    prices = _format_revision_price_list(match.group("prices"))
+    if prices.count("$") < 2:
+        return ""
+    return f"Set flyer service prices to {prices}."
+
+
+def _extract_visual_design_revision_instruction(text: str) -> str:
+    lower = text.lower()
+    if not re.search(r"\b(?:apply|change|update|edit|modify|revise|keep|use|make|set)\b", lower):
+        return ""
+    if not re.search(
+        r"\b(?:background|color|colour|photo|photos|picture|pictures|image|images|"
+        r"celebrity|celebrities|hairstyle|hairstyles|layout|font|template)\b",
+        lower,
+    ):
+        return ""
+    instruction = " ".join(text.split())
+    instruction = re.sub(
+        r"^\s*apply\s+(?:these\s+)?changes(?:\s+to\s+(?:the\s+)?(?:existing|current|same)\s+flyer)?\s*:?\s*",
+        "",
+        instruction,
+        flags=re.IGNORECASE,
+    )
+    instruction = re.sub(
+        r"\s*(?:and\s+)?(?:keep|set|change|update|use)?\s*prices?\s*(?:to|as|=|:)\s*"
+        r"\$?\s*\d+(?:\.\d{1,2})?(?:\s*,\s*\$?\s*\d+(?:\.\d{1,2})?){1,8}\b.*$",
+        "",
+        instruction,
+        flags=re.IGNORECASE,
+    ).strip(" .")
+    if not instruction:
+        return ""
+    if len(instruction) > 240:
+        instruction = instruction[:237].rstrip() + "..."
+    return f"Apply visual design change: {instruction}."
+
+
+def _extract_layout_emphasis_revision_instruction(text: str) -> str:
+    lower = text.lower()
+    has_size_request = bool(
+        re.search(r"\b(?:look|make|keep|show)\b.{0,80}\b(?:smaller|less\s+prominent|tiny|smaller\s+font)\b", lower)
+        or re.search(r"\b(?:smaller|less\s+prominent|tiny|smaller\s+font)\b.{0,80}\b(?:contact|phone|number|address|location)\b", lower)
+    )
+    targets_contact = bool(re.search(r"\b(?:contact|phone|number|address|location)\b", lower))
+    has_focus_request = bool(re.search(r"\b(?:main\s+focus|focus\s+should\s+be|focus\s+on|highlight|emphasize|emphasis)\b", lower))
+    targets_offer = bool(re.search(r"\b(?:service|services|offer|offers|items|menu|products|specials)\b", lower))
+    if not ((has_size_request and targets_contact) or (has_focus_request and targets_offer)):
+        return ""
+    instruction = " ".join(text.split()).strip(" .")
+    if len(instruction) > 240:
+        instruction = instruction[:237].rstrip() + "..."
+    return f"Apply layout/emphasis revision: {instruction}."
+
+
 def _extract_phone(text: str) -> str:
     phone = re.search(r"(?:phone|contact|number)\D{0,30}(\+?\d[\d\s().-]{7,}\d)", text, re.IGNORECASE)
     if not phone:
@@ -855,6 +929,18 @@ def extract_revision_patch(project: FlyerProject, text: str) -> RevisionPatchRes
                 raw_request_update = replaced_raw
         else:
             notes_update = replaced_notes
+
+    service_price_instruction = _extract_service_price_list_instruction(body)
+    if service_price_instruction:
+        notes_update, raw_request_update = _append_instruction(notes_update, raw_request_update, project, service_price_instruction)
+
+    visual_design_instruction = _extract_visual_design_revision_instruction(body)
+    if visual_design_instruction:
+        notes_update, raw_request_update = _append_instruction(notes_update, raw_request_update, project, visual_design_instruction)
+
+    layout_emphasis_instruction = _extract_layout_emphasis_revision_instruction(body)
+    if layout_emphasis_instruction:
+        notes_update, raw_request_update = _append_instruction(notes_update, raw_request_update, project, layout_emphasis_instruction)
 
     old_item, new_item = _extract_item_swap(body)
     if old_item and new_item:

@@ -1024,6 +1024,49 @@ def test_source_edit_preview_calls_openai_edit_api_with_reference_image(tmp_path
     assert any("integrity only" in warning for warning in qa.warnings)
 
 
+
+def test_source_edit_integrity_manifest_allows_long_edit_instruction(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    long_instruction = (
+        "Edit uploaded flyer/source artwork. Customer requested: Apply these changes to the existing flyer: "
+        "change the background to rich golden color and keep the pictures of 2 male and 2 female celebrities "
+        "with different hairstyles each and keep prices as $40, $60, $80, $100"
+    )
+    project = _complete_project().model_copy(update={
+        "status": "manual_edit_required",
+        "raw_request": long_instruction,
+        "fields": FlyerRequestFields(
+            event_or_business_name="Chloe hair studio",
+            venue_or_location="11111 Gainsborough Ct, Fairfax, VA, 22030",
+            contact_info="+19803826497",
+            preferred_language="en",
+            notes=long_instruction,
+        ),
+    })
+    artifact = tmp_path / "F0001-C1-preview.png"
+    artifact.write_bytes(b"edited image bytes")
+
+    manifest_path = write_text_manifest(
+        project,
+        artifact,
+        output_format="concept_preview",
+        selected_concept_id="C1",
+        source_path=artifact,
+        verification_mode="source_edit_integrity_only",
+        warnings=["inspect visually"],
+    )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["verification_mode"] == "source_edit_integrity_only"
+    qa = validate_text_manifest_file(
+        artifact,
+        project_id=project.project_id,
+        project_version=project.version,
+        output_format="concept_preview",
+    )
+    assert qa.ok is True
+
+
 def test_source_edit_preview_calls_openrouter_with_reference_image(tmp_path, monkeypatch):
     reference = tmp_path / "reference.png"
     reference.write_bytes(_png_bytes())

@@ -164,7 +164,11 @@ def test_flyer_health_returns_expected_shape(tmp_path, monkeypatch):
     assert "deploy_tag" not in body, "deploy_tag is mis-named; use shift_agent_deploy_tag"
     assert "commit_hash" not in body, "commit_hash is mis-named; use shift_agent_commit_hash"
     provider_names = {p["name"] for p in body["providers"]}
-    assert provider_names == {"openrouter_generation_vision", "source_edit_provider"}
+    assert provider_names == {
+        "openrouter_generation_vision",
+        "source_edit_provider",
+        "billing_checkout_provider",
+    }
 
 
 # ─── Secret redaction ────────────────────────────────────────────────────
@@ -559,3 +563,70 @@ def test_source_edit_detail_surfaces_queue_impact_when_present(tmp_path, monkeyp
     assert source_p["manual_queue_impact"]["queued_count"] == 1
     assert "manual review" in source_p["detail"]
     assert source_p["severity"] == "yellow"
+
+
+def test_billing_checkout_provider_missing_templates_is_red(tmp_path, monkeypatch):
+    _clear_provider_env(monkeypatch)
+    _isolate_env_files(monkeypatch, tmp_path)
+    _isolate_deploy_markers(monkeypatch, tmp_path)
+    _mock_flyer_config(monkeypatch, {
+        "enabled": True,
+        "payment_provider": "stripe",
+        "payment_checkout_url_template": "",
+        "quick_flyer_checkout_url_template": "",
+        "quick_flyer_price_cents": 4999,
+    })
+
+    from app.routers import flyer
+
+    billing_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "billing_checkout_provider")
+    assert billing_p["severity"] == "red"
+    assert "missing" in billing_p["detail"].lower()
+    assert billing_p["model_config"]["payment_provider"] == "stripe"
+    assert billing_p["model_config"]["quick_flyer_price_cents"] == "4999"
+    assert billing_p["model_config"]["payment_checkout_url_template_configured"] == "false"
+    assert billing_p["model_config"]["quick_flyer_checkout_url_template_configured"] == "false"
+
+
+def test_billing_checkout_provider_partial_template_is_yellow(tmp_path, monkeypatch):
+    _clear_provider_env(monkeypatch)
+    _isolate_env_files(monkeypatch, tmp_path)
+    _isolate_deploy_markers(monkeypatch, tmp_path)
+    _mock_flyer_config(monkeypatch, {
+        "enabled": True,
+        "payment_provider": "razorpay",
+        "payment_checkout_url_template": "https://pay.example/sub/{customer_id}",
+        "quick_flyer_checkout_url_template": "",
+        "quick_flyer_price_cents": 6999,
+    })
+
+    from app.routers import flyer
+
+    billing_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "billing_checkout_provider")
+    assert billing_p["severity"] == "yellow"
+    assert "partially configured" in billing_p["detail"].lower()
+    assert billing_p["model_config"]["payment_provider"] == "razorpay"
+    assert billing_p["model_config"]["payment_checkout_url_template_configured"] == "true"
+    assert billing_p["model_config"]["quick_flyer_checkout_url_template_configured"] == "false"
+
+
+def test_billing_checkout_provider_full_templates_is_green(tmp_path, monkeypatch):
+    _clear_provider_env(monkeypatch)
+    _isolate_env_files(monkeypatch, tmp_path)
+    _isolate_deploy_markers(monkeypatch, tmp_path)
+    _mock_flyer_config(monkeypatch, {
+        "enabled": True,
+        "payment_provider": "stripe",
+        "payment_checkout_url_template": "https://pay.example/sub/{customer_id}",
+        "quick_flyer_checkout_url_template": "https://pay.example/quick/{order_id}",
+        "quick_flyer_price_cents": 19900,
+    })
+
+    from app.routers import flyer
+
+    billing_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "billing_checkout_provider")
+    assert billing_p["severity"] == "green"
+    assert "configured" in billing_p["detail"].lower()
+    assert billing_p["model_config"]["payment_provider"] == "stripe"
+    assert billing_p["model_config"]["payment_checkout_url_template_configured"] == "true"
+    assert billing_p["model_config"]["quick_flyer_checkout_url_template_configured"] == "true"

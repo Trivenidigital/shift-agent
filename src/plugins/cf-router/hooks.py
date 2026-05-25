@@ -72,9 +72,20 @@ _SAMPLE_PROMPT_REQUEST = re.compile(
     r"|\b(?:give|send|show|share|suggest|provide)\b.{0,50}\b(?:flyer|flier|poster|marketing)\b.{0,30}\b(?:idea|ideas|prompt|prompts|examples|inspiration)\b"
     r"|\b(?:give|send|show|share|suggest|provide)\b.{0,60}"
     r"\b(?:sample|example|starter|inspiration)?\s*(?:prompt|prompts|idea|ideas|examples|inspiration)\b.{0,60}"
-    r"\b(?:flyer|flier|poster|marketing)\b",
+    r"\b(?:flyer|flier|poster|marketing)\b"
+    r"|\b(?:give|send|show|share|suggest|provide|need)\b.{0,70}"
+    r"\b(?:ad|ads|promo|promotional|campaign|marketing|creative)\b.{0,40}"
+    r"\b(?:idea|ideas|suggestion|suggestions|concept|concepts|example|examples|prompt|prompts|inspiration)\b.{0,40}"
+    r"\b(?:business|shop|store|brand|service|offer)\b",
     re.IGNORECASE,
 )
+
+
+def _flyer_request_excerpt_for_reply(text: str, *, limit: int = 140) -> str:
+    excerpt = " ".join(actions.flyer_visible_message_text(text).split())
+    if len(excerpt) > limit:
+        excerpt = excerpt[: limit - 3].rstrip() + "..."
+    return excerpt
 
 # Verb classifier — mirrors the F8 watchdog's accepted verb set so plugin
 # coverage matches the watchdog it replaces. Past-tense forms ("approved",
@@ -239,6 +250,19 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
             flyer_result = _try_flyer_active_project_intercept(text, chat_id, event, media_path)
             if flyer_result is not None:
                 return flyer_result
+            context_phone, context_role = actions.lid_to_phone_via_identify_sender(chat_id)
+            if context_role != "owner":
+                context_customer = actions.find_flyer_customer_by_sender(context_phone, chat_id)
+                if (
+                    context_customer
+                    and context_customer.get("status") in {"trial", "active"}
+                    and actions.is_registered_customer_contextual_flyer_brief(text)
+                ):
+                    flyer_result = _try_flyer_primary_intercept(
+                        text, chat_id, event, force_new=True, media_path=media_path,
+                    )
+                    if flyer_result is not None:
+                        return flyer_result
             if actions.should_start_new_flyer_over_active(text, has_media=bool(media_path)):
                 flyer_result = _try_flyer_primary_intercept(
                     text, chat_id, event, force_new=True, media_path=media_path,
@@ -250,6 +274,8 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
                 if role != "owner":
                     customer = actions.find_flyer_customer_by_sender(phone, chat_id)
                     if customer and customer.get("status") in {"trial", "active"}:
+                        if actions.is_flyer_legacy_trial_link_followup(text):
+                            return _send_flyer_active_customer_trial_link_recovery(chat_id, customer, role=role)
                         if (
                             actions.flyer_starter_prompts_enabled(customer)
                             and not actions.flyer_starter_prompt_already_sent(customer)
@@ -571,6 +597,20 @@ def _try_flyer_primary_intercept(
             ),
         )
         return {"action": "skip", "reason": "cf-router flyer customer not active"}
+
+    scope_block = actions.flyer_business_scope_block_message(customer or {}, text)
+    if scope_block:
+        ack_ok, mid, err = actions.send_flyer_text(chat_id, scope_block)
+        actions.audit_intercepted(
+            reason="flyer_business_scope_blocked",
+            chat_id=chat_id,
+            subprocess_rc=0 if ack_ok else 3,
+            detail=(
+                f"customer_id={(customer or {}).get('customer_id') or ''}; sender_role={role}; "
+                f"ack_message_id={mid}; ack_error={err[:300]}"
+            ),
+        )
+        return {"action": "skip", "reason": "cf-router flyer business scope blocked"}
 
     active_project = None if force_new else actions.find_active_flyer_project_by_sender(phone, chat_id)
     if active_project is not None:
@@ -1708,6 +1748,8 @@ def _try_flyer_campaign_cta_intercept(text: str, chat_id: str, event: Any) -> Op
         return None
     customer = actions.find_flyer_customer_by_sender(phone, chat_id)
     if customer and customer.get("status") in {"active", "trial"}:
+        if source == "start_trial":
+            return _send_flyer_active_customer_trial_link_recovery(chat_id, customer, role=role)
         return _send_flyer_active_customer_ready(chat_id, customer, role=role)
     if customer:
         reply = actions.flyer_customer_not_active_reply(customer)
@@ -1985,6 +2027,29 @@ def _send_flyer_active_customer_ready(chat_id: str, customer: dict, *, role: str
     return {"action": "skip", "reason": "cf-router flyer active customer ready"}
 
 
+def _send_flyer_active_customer_trial_link_recovery(chat_id: str, customer: dict, *, role: str = "") -> dict:
+    business_name = str(customer.get("business_name") or "this business")
+    status = str(customer.get("status") or "trial").lower()
+    plan_label = "Free plan" if status == "trial" else "active plan"
+    reply = (
+        "Flyer Studio\n"
+        "------------\n"
+        f"You're already on the {plan_label} for {business_name}.\n\n"
+        "Create another flyer by sending the full request here, or reply UPGRADE PLAN to see paid plans."
+    )
+    ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+    actions.audit_intercepted(
+        reason="flyer_trial_link_recovery",
+        chat_id=chat_id,
+        subprocess_rc=0 if ack_ok else 3,
+        detail=(
+            f"status={customer.get('status') or ''}; customer_id={customer.get('customer_id') or ''}; "
+            f"sender_role={role}; ack_message_id={mid}; ack_error={err[:300]}"
+        ),
+    )
+    return {"action": "skip", "reason": "cf-router flyer active customer trial link recovery"}
+
+
 def _try_flyer_onboarding_intercept(text: str, chat_id: str, event: Any) -> Optional[dict]:
     """Start or advance WhatsApp-native customer onboarding for new senders."""
     message_id = _extract_message_id(event, chat_id, text)
@@ -2247,6 +2312,19 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
     status = str(active_project.get("status") or "")
     body = " ".join(actions.flyer_visible_message_text(text).split())
     lower = body.lower()
+    scope_block = actions.flyer_business_scope_block_message(customer or {}, body)
+    if scope_block:
+        ack_ok, mid, err = actions.send_flyer_text(chat_id, scope_block)
+        actions.audit_intercepted(
+            reason="flyer_business_scope_blocked",
+            chat_id=chat_id,
+            subprocess_rc=0 if ack_ok else 3,
+            detail=(
+                f"project_id={project_id}; status={status}; sender_role={role}; "
+                f"ack_message_id={mid}; ack_error={err[:300]}"
+            ),
+        )
+        return {"action": "skip", "reason": "cf-router flyer business scope blocked"}
     if actions.should_bypass_active_flyer_project_for_fresh_request(
         body,
         active_project,
@@ -2514,11 +2592,14 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
                 # clarification question without leaking the internal project
                 # identifier. clarification_reason is preserved because it IS
                 # the useful customer-facing signal.
+                excerpt = _flyer_request_excerpt_for_reply(body)
+                seen_line = f"\n\nI saw: {excerpt}" if excerpt else ""
                 reply = (
                     "Flyer Studio\n"
                     "------------\n"
                     f"I need one clarification before adding that: {clarification_reason}\n\n"
                     "Please send the exact text, item, price, date, or area of the flyer to change."
+                    f"{seen_line}"
                 )
         else:
             # Outcome-only success copy for the queued-followup path. Mirrors
@@ -2679,7 +2760,12 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
             if pending_confirmation_message.strip():
                 ack_message = pending_confirmation_message.strip()
             else:
-                ack_message = f"I need one clarification before regenerating: {clarification_reason}. Please send the exact item or text to change."
+                excerpt = _flyer_request_excerpt_for_reply(body)
+                seen_line = f"\n\nI saw: {excerpt}" if excerpt else ""
+                ack_message = (
+                    f"I need one clarification before regenerating: {clarification_reason}. "
+                    f"Please send the exact item or text to change.{seen_line}"
+                )
         elif ok and needs_regen:
             ack_message = "Revision applied to the flyer details. I am regenerating the design now."
         else:

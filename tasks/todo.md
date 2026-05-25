@@ -1345,3 +1345,24 @@ Review results:
 ### Review Notes
 
 Root cause from F0095: source-edit config was unset at runtime and recovery classified a successful manual-queue row as provider failure because it keyed on detail text without checking `subprocess_rc`. Follow-up code fix prevents new false incidents and records concept-preview delivery ids after media send.
+
+## Flyer Source-Edit Autonomous Repair - 2026-05-25T19:30Z
+
+- [x] Reproduced F0097 post-deploy failure: source edit generated a preview but write_text_manifest rejected the long edit instruction as critical text facts do not fit.
+- [x] Added regression for source-edit fit failures mapping to isual_qa_failed, not provider_timeout.
+- [x] Added regression for source_edit_integrity_only manifests accepting long edit instructions without enforcing poster copy-fit gates.
+- [x] Implemented the minimal classifier and manifest changes.
+- [x] Verified focused generator/recovery/renderer slice.
+- [ ] Merge/deploy, then repair F0097 customer-visible state using the existing good preview or a regenerated one.
+
+Review: red tests first failed with provider_timeout and critical text facts do not fit; green targeted suite passed 27 passed, 70 deselected plus py_compile for the touched scripts.
+
+## Flyer Brand-Asset Contamination Retry - 2026-05-25T20:00Z
+
+- [x] Reproduced F0098: saved active logo asset for Lakshmi's Kitchen contained Desi Chowrastha branding, and the generated flyer copied the wrong brand.
+- [x] Added regression that a missing required `business_name` visual-QA failure on a saved-logo request retries once with saved brand assets suppressed.
+- [x] Implemented bounded retry and restored `FLYER_DISABLE_BRAND_ASSETS` after render.
+- [x] Added regression and fix so a successful autonomous regeneration clears stale queued `manual_review` state.
+- [ ] Merge/deploy and regenerate F0098 so the customer gets a clean preview.
+
+Review: focused retry/source-edit generator slice passed `5 passed, 71 deselected`; touched-script `py_compile` and `git diff --check` passed.

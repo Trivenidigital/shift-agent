@@ -20,6 +20,9 @@ from schemas import (  # noqa: E402
     FlyerConfig,
     FlyerRecoveryCustomerAckAttempted,
     FlyerRecoveryIncidentOpened,
+    FlyerRecoveryOperatorActionRequired,
+    FlyerRecoveryOutcomeRepaired,
+    FlyerRecoveryResolved,
     FlyerGuestOrder,
     FlyerGuestOrderStore,
     FlyerIntakeSession,
@@ -237,9 +240,40 @@ def test_flyer_recovery_audit_variants_dispatch_through_log_entry():
         "message_sha256": "sha256:msg",
     }
 
+    outcome = {
+        "type": "flyer_recovery_outcome_repaired",
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "repair_type": "reference_scope_false_positive",
+        "status": "sent",
+        "chat_id_hash": "sha256:chat",
+        "customer_id": "CUST0004",
+        "business_name": "Chloe hair studio",
+        "scope_reason": "no_spend_exact_source_edit_known_account",
+        "outbound_message_id": "mid-1",
+        "error": "",
+    }
+    resolved = {
+        "type": "flyer_recovery_resolved",
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "incident_id": "FRI20260523-0001",
+        "resolution": "customer_visible_success",
+    }
+    operator_action = {
+        "type": "flyer_recovery_operator_action_required",
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "incident_id": "FRI20260523-0001",
+        "failure_class": "concept_generation_failed",
+        "project_id": "F0065",
+        "reason": "worker_completed_no_customer_visible_success",
+        "required_action": "verify_customer_outcome_or_repair_manually",
+    }
+
     adapter = TypeAdapter(LogEntry)
     assert isinstance(adapter.validate_python(opened), FlyerRecoveryIncidentOpened)
     assert isinstance(adapter.validate_python(attempted), FlyerRecoveryCustomerAckAttempted)
+    assert isinstance(adapter.validate_python(outcome), FlyerRecoveryOutcomeRepaired)
+    assert isinstance(adapter.validate_python(resolved), FlyerRecoveryResolved)
+    assert isinstance(adapter.validate_python(operator_action), FlyerRecoveryOperatorActionRequired)
 
 
 def test_guest_order_store_tracks_payment_first_one_off_order():

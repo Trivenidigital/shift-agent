@@ -98,6 +98,37 @@ def test_hermes_intent_shadow_coverage_missing_when_expected():
     assert incident["evidence_details"]["shadow_sample_count"] == 0
 
 
+def test_recovery_operator_action_required_surfaces_as_active_customer_risk():
+    module = load_module()
+    report = module.build_report(
+        projects={"projects": []},
+        decision_entries=[],
+        recovery_state={
+            "schema_version": 1,
+            "incidents": [
+                {
+                    "incident_id": "FRI20260525-NOEVIDENCE",
+                    "status": "operator_action_required",
+                    "failure_class": "concept_generation_failed",
+                    "project_id": "F0097",
+                    "last_seen": "2026-05-25T18:57:34Z",
+                    "operator_action": {
+                        "reason": "worker_completed_no_customer_visible_success",
+                        "required_action": "verify_customer_outcome_or_repair_manually",
+                        "marked_at": "2026-05-25T21:57:34Z",
+                    },
+                }
+            ],
+        },
+    )
+
+    incident = next(item for item in report["incidents"] if item["type"] == "recovery_operator_action_required")
+    assert incident["severity"] == "high"
+    assert incident["project_id"] == "F0097"
+    assert incident["evidence_details"]["active_customer_risk"] is True
+    assert "verify_customer_outcome_or_repair_manually" in incident["suggested_action"]
+
+
 def test_hermes_intent_shadow_coverage_not_masked_by_unrelated_row():
     module = load_module()
     report = module.build_report(
@@ -431,6 +462,183 @@ def test_manual_source_edit_stale_becomes_incident():
     assert incident["severity"] == "high"
     assert "OpenRouter" in incident["suggested_action"] or "manual queue" in incident["suggested_action"]
     assert report["eval_candidates"][0]["category"] == "source_edit_provider_posture"
+
+
+def test_manual_visual_qa_stale_becomes_general_manual_incident():
+    module = load_module()
+    report = module.build_report(
+        projects={
+            "projects": [
+                _project(
+                    "F9002",
+                    manual_review={
+                        "status": "queued",
+                        "reason": "visual QA failed during finalization",
+                        "reason_code": "visual_qa_failed",
+                        "detail": "headline contrast unreadable",
+                        "queued_at": "2026-05-20T10:00:00Z",
+                    },
+                )
+            ]
+        },
+        decision_entries=[],
+        now=module.parse_utc("2026-05-20T11:05:00Z"),
+    )
+
+    incident = report["incidents"][0]
+    assert incident["type"] == "manual_review_stale"
+    assert incident["project_id"] == "F9002"
+    assert incident["severity"] == "high"
+    assert incident["eval_category"] == "manual_queue_sla"
+    assert incident["evidence"].endswith("reason_code=visual_qa_failed")
+    assert incident["evidence_details"]["manual_reason_code"] == "visual_qa_failed"
+    assert "OpenRouter" not in incident["suggested_action"]
+
+
+def test_manual_provider_timeout_stale_becomes_general_manual_incident():
+    module = load_module()
+    report = module.build_report(
+        projects={
+            "projects": [
+                _project(
+                    "F9003",
+                    manual_review={
+                        "status": "in_progress",
+                        "reason": "provider timed out repeatedly",
+                        "reason_code": "provider_timeout",
+                        "detail": "generation retries exhausted",
+                        "queued_at": "2026-05-20T10:00:00Z",
+                    },
+                )
+            ]
+        },
+        decision_entries=[],
+        now=module.parse_utc("2026-05-20T11:05:00Z"),
+    )
+
+    incident = report["incidents"][0]
+    assert incident["type"] == "manual_review_stale"
+    assert incident["project_id"] == "F9003"
+    assert incident["eval_category"] == "manual_queue_sla"
+    assert incident["evidence"].endswith("reason_code=provider_timeout")
+    assert incident["evidence_details"]["manual_reason_code"] == "provider_timeout"
+
+
+def test_manual_missing_required_facts_stale_becomes_general_manual_incident():
+    module = load_module()
+    report = module.build_report(
+        projects={
+            "projects": [
+                _project(
+                    "F9004",
+                    manual_review={
+                        "status": "queued",
+                        "reason": "required locked facts missing",
+                        "reason_code": "missing_required_facts",
+                        "detail": "missing business_name and phone",
+                        "queued_at": "2026-05-20T10:00:00Z",
+                    },
+                )
+            ]
+        },
+        decision_entries=[],
+        now=module.parse_utc("2026-05-20T11:05:00Z"),
+    )
+
+    incident = report["incidents"][0]
+    assert incident["type"] == "manual_review_stale"
+    assert incident["project_id"] == "F9004"
+    assert incident["eval_category"] == "manual_queue_sla"
+    assert incident["evidence"].endswith("reason_code=missing_required_facts")
+    assert incident["evidence_details"]["manual_reason_code"] == "missing_required_facts"
+    assert "required-facts" in incident["suggested_action"]
+
+
+def test_manual_reference_provider_unavailable_stale_becomes_general_manual_incident():
+    module = load_module()
+    report = module.build_report(
+        projects={
+            "projects": [
+                _project(
+                    "F9005",
+                    manual_review={
+                        "status": "in_progress",
+                        "reason": "reference provider unavailable",
+                        "reason_code": "reference_provider_unavailable",
+                        "detail": "source reference image unavailable",
+                        "queued_at": "2026-05-20T10:00:00Z",
+                    },
+                )
+            ]
+        },
+        decision_entries=[],
+        now=module.parse_utc("2026-05-20T11:05:00Z"),
+    )
+
+    incident = report["incidents"][0]
+    assert incident["type"] == "manual_review_stale"
+    assert incident["project_id"] == "F9005"
+    assert incident["evidence"].endswith("reason_code=reference_provider_unavailable")
+    assert incident["evidence_details"]["manual_reason_code"] == "reference_provider_unavailable"
+    assert "reference-media" in incident["suggested_action"]
+
+
+def test_manual_reference_unsupported_stale_becomes_general_manual_incident():
+    module = load_module()
+    report = module.build_report(
+        projects={
+            "projects": [
+                _project(
+                    "F9006",
+                    manual_review={
+                        "status": "queued",
+                        "reason": "unsupported reference media",
+                        "reason_code": "reference_unsupported",
+                        "detail": "PDF is not supported for source-preserving path",
+                        "queued_at": "2026-05-20T10:00:00Z",
+                    },
+                )
+            ]
+        },
+        decision_entries=[],
+        now=module.parse_utc("2026-05-20T11:05:00Z"),
+    )
+
+    incident = report["incidents"][0]
+    assert incident["type"] == "manual_review_stale"
+    assert incident["project_id"] == "F9006"
+    assert incident["evidence"].endswith("reason_code=reference_unsupported")
+    assert incident["evidence_details"]["manual_reason_code"] == "reference_unsupported"
+    assert "reference-media" in incident["suggested_action"]
+
+
+def test_manual_reference_low_confidence_stale_becomes_general_manual_incident():
+    module = load_module()
+    report = module.build_report(
+        projects={
+            "projects": [
+                _project(
+                    "F9007",
+                    manual_review={
+                        "status": "queued",
+                        "reason": "reference extraction confidence too low",
+                        "reason_code": "reference_low_confidence",
+                        "detail": "could not confidently parse source text blocks",
+                        "queued_at": "2026-05-20T10:00:00Z",
+                    },
+                )
+            ]
+        },
+        decision_entries=[],
+        now=module.parse_utc("2026-05-20T11:05:00Z"),
+    )
+
+    incident = report["incidents"][0]
+    assert incident["type"] == "manual_review_stale"
+    assert incident["project_id"] == "F9007"
+    assert incident["evidence"].endswith("reason_code=reference_low_confidence")
+    assert incident["evidence_details"]["manual_reason_code"] == "reference_low_confidence"
+    assert "reference-media" in incident["suggested_action"]
 
 
 def test_customer_copy_internal_leak_detected_from_decisions_log():

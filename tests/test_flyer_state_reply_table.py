@@ -362,6 +362,12 @@ def test_status_request_classifier_recognizes_common_check_in_phrases():
         "what's the status?",
         "eta?",
         "ready?",
+        "what's the update on flyer",
+        "did you finish the flyer",
+        "can i get an update",
+        "update on F1234",
+        "status for F1234",
+        "is the update ready",
     ]:
         assert mod.is_flyer_project_status_request(text), (
             f"expected {text!r} to classify as a status check"

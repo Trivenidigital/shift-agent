@@ -87,12 +87,52 @@ _DRAFT_EARLY_STATUSES = {
 }
 
 
+_VISUAL_QA_ERROR_TOKENS = (
+    "quality check",
+    "failed quality",
+    "critical text facts do not fit",
+)
+
+
 def _draft_error_is_visual_qa(detail_lower: str) -> bool:
-    return "quality check" in detail_lower or "failed quality" in detail_lower
+    return any(tok in detail_lower for tok in _VISUAL_QA_ERROR_TOKENS)
 
 
 def _draft_error_retryable(detail_lower: str) -> bool:
     return any(tok in detail_lower for tok in _DRAFT_RETRYABLE_TOKENS)
+
+
+def _mentions_saved_brand_assets(project) -> bool:
+    text = f"{getattr(project, 'raw_request', '')} {getattr(getattr(project, 'fields', None), 'notes', '')}".casefold()
+    return any(token in text for token in (
+        "saved logo",
+        "saved business name",
+        "saved address",
+        "saved phone",
+        "brand asset",
+        "use logo",
+        "use the logo",
+    ))
+
+
+def _qa_failed_missing_business_name(reports) -> bool:
+    for report in reports:
+        for blocker in getattr(report, "blockers", []) or []:
+            if str(blocker).strip().casefold() == "missing required visible fact: business_name":
+                return True
+    return False
+
+
+def _render_with_brand_assets_disabled(render_call):
+    previous = os.environ.get("FLYER_DISABLE_BRAND_ASSETS")
+    os.environ["FLYER_DISABLE_BRAND_ASSETS"] = "1"
+    try:
+        return render_call()
+    finally:
+        if previous is None:
+            os.environ.pop("FLYER_DISABLE_BRAND_ASSETS", None)
+        else:
+            os.environ["FLYER_DISABLE_BRAND_ASSETS"] = previous
 
 
 def _draft_manual_review_detail(exc: Exception, *, attempts: int, retryable_match: bool) -> str:
@@ -294,7 +334,7 @@ def main() -> int:
                 # provider retries. Provider key / endpoint failures map to
                 # `source_edit_provider_unavailable`. Everything else falls to
                 # `provider_timeout` for transient network/5xx issues.
-                if "quality check" in lower or "failed quality" in lower:
+                if _draft_error_is_visual_qa(lower):
                     reason_code = "visual_qa_failed"
                 elif "openai" in lower or "openrouter" in lower or "api_key" in lower or "provider" in lower or "manual review" in lower:
                     reason_code = "source_edit_provider_unavailable"
@@ -417,6 +457,41 @@ def main() -> int:
                 write_visual_qa_report(report, spec.path)
                 qa_reports.append(report)
             failed_qa = [report for report in qa_reports if report.status != "passed"]
+            if (
+                failed_qa
+                and _qa_failed_missing_business_name(failed_qa)
+                and _mentions_saved_brand_assets(current)
+                and os.environ.get("FLYER_DISABLE_BRAND_ASSETS") != "1"
+            ):
+                for spec in specs:
+                    spec.path.unlink(missing_ok=True)
+                    raw = spec.path.with_name(f"{spec.path.stem}.raw.png")
+                    raw.unlink(missing_ok=True)
+                specs = _render_with_brand_assets_disabled(lambda: render_concept_previews(
+                    current,
+                    asset_dir,
+                    model=draft_provider.model,
+                    quality=draft_provider.quality,
+                    concept_count=cfg.flyer.concept_count,
+                ))
+                assets = build_asset_manifest(
+                    specs,
+                    first_asset_number=next_asset_number(current),
+                    source="rendered",
+                    original_message_id=current.original_message_id,
+                )
+                qa_reports = []
+                for asset, spec in zip(assets, specs):
+                    _write_sidecar_visual_qa_fixture(current, spec.path)
+                    report = run_visual_qa(
+                        current,
+                        spec.path,
+                        output_format=spec.output_format,
+                        asset_id=asset.asset_id,
+                    )
+                    write_visual_qa_report(report, spec.path)
+                    qa_reports.append(report)
+                failed_qa = [report for report in qa_reports if report.status != "passed"]
             revisions = [
                 revision.model_copy(update={"applied": True})
                 if (not revision.applied and revision.resulting_version == current.version)
@@ -449,6 +524,7 @@ def main() -> int:
                 "assets": [*current.assets, *assets],
                 "qa_reports": [*current.qa_reports, *qa_reports],
                 "revisions": revisions,
+                "manual_review": FlyerManualReview(),
                 "updated_at": now,
             })
             atomic_write_text(state_path, store.model_dump_json(indent=2))

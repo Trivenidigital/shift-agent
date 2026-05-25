@@ -518,6 +518,16 @@ def test_cockpit_deploy_restart_uses_health_probe_without_systemctl_wait():
     assert "http://127.0.0.1:8081/health" in deploy
 
 
+def test_deploy_waits_for_active_flyer_generation_before_gateway_restart():
+    deploy = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh").read_text(encoding="utf-8")
+
+    assert "wait_for_flyer_generation_drain" in deploy
+    assert "generate-flyer-concepts" in deploy
+    restart_idx = deploy.index("systemctl restart hermes-gateway")
+    pre_restart = deploy[max(0, restart_idx - 600):restart_idx]
+    assert "wait_for_flyer_generation_drain" in pre_restart
+
+
 def test_generation_does_not_hold_file_lock_during_render():
     generate = (SCRIPTS / "generate-flyer-concepts").read_text(encoding="utf-8")
     first_lock_start = generate.index("with FileLock")

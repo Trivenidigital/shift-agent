@@ -8,6 +8,7 @@ no-live-send worker drafts. Production deploy remains outside this timer.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import importlib.util
 import json
@@ -30,7 +31,9 @@ from schemas import (  # noqa: E402
     FlyerRecoveryCustomerAckSuppressed,
     FlyerRecoveryCustomerAckUncertain,
     FlyerRecoveryIncidentOpened,
+    FlyerRecoveryOperatorActionRequired,
     FlyerRecoveryRepairBundleWritten,
+    FlyerRecoveryResolved,
 )
 try:
     from agents.flyer import recovery  # type: ignore  # noqa: E402
@@ -43,6 +46,7 @@ LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
 PROJECT_STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
 CUSTOMER_STATE_PATH = Path("/opt/shift-agent/state/flyer/customers.json")
 RECOVERY_STATE_PATH = Path("/opt/shift-agent/state/flyer/recovery_incidents.json")
+REFERENCE_SCOPE_PATH = Path("/opt/shift-agent/state/flyer/reference_scope_pending.json")
 BUNDLE_DIR = Path("/opt/shift-agent/state/flyer/recovery_bundles")
 WORKER_QUEUE_DIR = Path("/opt/shift-agent/state/flyer/recovery_worker_queue")
 WORKER_DRAFTS_DIR = Path("/opt/shift-agent/state/flyer/recovery_worker_drafts")
@@ -72,6 +76,95 @@ def _read_rows(path: Path) -> list[dict]:
     return rows
 
 
+def _load_projects_by_id(path: Path) -> dict[str, dict]:
+    if not path.exists():
+        return {}
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    projects = doc.get("projects") if isinstance(doc, dict) else []
+    if not isinstance(projects, list):
+        return {}
+    result = {}
+    for project in projects:
+        if not isinstance(project, dict):
+            continue
+        project_id = str(project.get("project_id") or "").strip()
+        if project_id:
+            result[project_id] = project
+    return result
+
+
+def _audit_rows_for_incident(incident: dict, rows: list[dict], *, limit: int = 12) -> list[dict]:
+    source_fingerprint = str(incident.get("source_fingerprint") or "")
+    project_id = str(incident.get("project_id") or "")
+    matched: list[dict] = []
+    fallback: list[dict] = []
+    for row in rows:
+        detail = str(row.get("detail") or "")
+        if project_id and project_id in detail:
+            fallback.append(row)
+        signal = recovery.classify_decision(row, {})
+        if signal is None:
+            continue
+        if recovery.fingerprint_signal(signal) == source_fingerprint:
+            matched.append(row)
+    selected = matched or fallback
+    return selected[-limit:]
+
+
+def _project_excerpt_for_incident(incident: dict, projects_by_id: dict[str, dict]) -> dict:
+    project_id = str(incident.get("project_id") or "").strip()
+    project = projects_by_id.get(project_id) or {}
+    if not project:
+        return {}
+    excerpt = {
+        "project_id": project.get("project_id", ""),
+        "status": project.get("status", ""),
+        "created_at": project.get("created_at", ""),
+        "updated_at": project.get("updated_at", ""),
+        "manual_review": project.get("manual_review") or {},
+        "reference_extractions": project.get("reference_extractions") or [],
+    }
+    if project.get("raw_request"):
+        excerpt["raw_request"] = str(project.get("raw_request") or "")[:1000]
+    if isinstance(project.get("fields"), dict):
+        fields = dict(project.get("fields") or {})
+        excerpt["fields"] = fields
+    qa_reports = []
+    for report in project.get("qa_reports") or []:
+        if not isinstance(report, dict):
+            continue
+        qa_reports.append({
+            "asset_id": report.get("asset_id", ""),
+            "output_format": report.get("output_format", ""),
+            "provider": report.get("provider", ""),
+            "qa_source": report.get("qa_source", ""),
+            "status": report.get("status", ""),
+            "blockers": report.get("blockers", []),
+            "warnings": report.get("warnings", []),
+            "checked_at": report.get("checked_at", ""),
+        })
+    excerpt["qa_reports"] = qa_reports[-6:]
+    assets = []
+    for asset in project.get("assets") or []:
+        if not isinstance(asset, dict):
+            continue
+        assets.append({
+            "asset_id": asset.get("asset_id", ""),
+            "kind": asset.get("kind", ""),
+            "source": asset.get("source", ""),
+            "path": asset.get("path", ""),
+            "mime_type": asset.get("mime_type", ""),
+            "delivery_status": asset.get("delivery_status", ""),
+            "delivery_attempt_count": asset.get("delivery_attempt_count", 0),
+            "delivery_error": asset.get("delivery_error", ""),
+        })
+    excerpt["assets"] = assets[-8:]
+    return excerpt
+
+
 def _row_ts(row: dict) -> datetime | None:
     raw = str(row.get("ts") or "")
     if not raw:
@@ -85,11 +178,15 @@ def _row_ts(row: dict) -> datetime | None:
     return ts
 
 
-def _load_cf_router_actions():
-    for path in [
+def _load_cf_router_actions(actions_path: str = ""):
+    candidates = []
+    if actions_path:
+        candidates.append(Path(actions_path))
+    candidates.extend([
         SRC_ROOT / "plugins" / "cf-router" / "actions.py",
         Path("/root/.hermes/plugins/cf-router/actions.py"),
-    ]:
+    ])
+    for path in candidates:
         if not path.exists():
             continue
         spec = importlib.util.spec_from_file_location("flyer_recovery_cf_actions", path)
@@ -130,6 +227,144 @@ def _send_ack(chat_id: str, message: str) -> tuple[bool, str, str]:
     return ok, mid, "" if ok else f"{status}: {err}"
 
 
+@contextmanager
+def _state_file_lock(path: Path):
+    try:
+        from safe_io import FileLock  # type: ignore
+    except Exception:
+        yield
+        return
+    with FileLock(Path(str(path) + ".lock")):
+        yield
+
+
+def _read_json_doc(path: Path, default: dict) -> dict:
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return dict(default)
+    return doc if isinstance(doc, dict) else dict(default)
+
+
+def _write_json_doc(path: Path, doc: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(doc, separators=(",", ":"), sort_keys=True)
+    try:
+        from safe_io import atomic_write_text  # type: ignore
+    except Exception:
+        path.write_text(payload, encoding="utf-8")
+        return
+    atomic_write_text(path, payload)
+
+
+def _append_raw_audit(log_path: Path, entry: dict) -> None:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(entry, separators=(",", ":"), sort_keys=True)
+    try:
+        from safe_io import ndjson_append  # type: ignore
+    except Exception:
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(payload + "\n")
+        return
+    ndjson_append(log_path, payload)
+
+
+def _reference_scope_repair_text(business_name: str) -> str:
+    business = business_name.strip() or "your business"
+    return (
+        "Flyer Studio\n"
+        "------------\n"
+        f"You're right - the attached flyer already belongs to {business}. "
+        "Sorry about the extra question.\n\n"
+        "I can use this flyer. Please send the exact change you want me to make, "
+        "and I'll update it."
+    )
+
+
+def _process_reference_scope_outcome_repairs(
+    *,
+    reference_scope_path: Path,
+    log_path: Path,
+    actions_path: str,
+    now: datetime,
+    dry_run: bool = False,
+) -> int:
+    if not reference_scope_path.exists():
+        return 0
+    actions = _load_cf_router_actions(actions_path)
+    if actions is None:
+        return 0
+    repaired = 0
+    with _state_file_lock(reference_scope_path):
+        doc = _read_json_doc(reference_scope_path, {"schema_version": 1, "pending": []})
+        pending = doc.get("pending") if isinstance(doc.get("pending"), list) else []
+        kept: list = []
+        changed = False
+        for item in pending:
+            if not isinstance(item, dict):
+                kept.append(item)
+                continue
+            customer = item.get("customer") if isinstance(item.get("customer"), dict) else {}
+            business_name = str(customer.get("business_name") or "").strip()
+            chat_id = str(item.get("chat_id") or "").strip()
+            media_path = str(item.get("media_path") or "").strip()
+            raw_request = str(item.get("raw_request") or "").strip()
+            original_intent = str(item.get("original_intent") or "").strip()
+            status = str(item.get("status") or "awaiting_choice").strip()
+            if (
+                status != "awaiting_choice"
+                or original_intent != "exact_source_edit"
+                or not chat_id
+                or not business_name
+                or not media_path
+                or not raw_request
+                or not hasattr(actions, "trigger_check_flyer_reference_scope")
+                or not hasattr(actions, "send_flyer_text")
+            ):
+                kept.append(item)
+                continue
+            try:
+                scope_ok, scope_detail, scope = actions.trigger_check_flyer_reference_scope(
+                    customer=customer,
+                    media_path=media_path,
+                    raw_request=raw_request,
+                )
+            except Exception as exc:
+                scope_ok, scope_detail, scope = False, f"{type(exc).__name__}: {exc}", None
+            decision = str((scope or {}).get("decision") or "") if isinstance(scope, dict) else ""
+            if not scope_ok or decision != "allow":
+                kept.append(item)
+                continue
+            message = _reference_scope_repair_text(business_name)
+            if dry_run:
+                repaired += 1
+                kept.append(item)
+                continue
+            ok, outbound_message_id, err = actions.send_flyer_text(chat_id, message)
+            _append_raw_audit(log_path, {
+                "type": "flyer_recovery_outcome_repaired",
+                "ts": now.isoformat(),
+                "repair_type": "reference_scope_false_positive",
+                "status": "sent" if ok else "failed",
+                "chat_id_hash": recovery.sha256_text(chat_id),
+                "customer_id": str(customer.get("customer_id") or ""),
+                "business_name": business_name,
+                "scope_reason": str((scope or {}).get("reason") or scope_detail or "")[:200] if isinstance(scope, dict) else str(scope_detail)[:200],
+                "outbound_message_id": str(outbound_message_id or ""),
+                "error": str(err or "")[:500],
+            })
+            if ok:
+                repaired += 1
+                changed = True
+                continue
+            kept.append(item)
+        if changed:
+            doc["pending"] = kept
+            doc["schema_version"] = doc.get("schema_version") or 1
+            _write_json_doc(reference_scope_path, doc)
+    return repaired
+
+
 def _write_bundle(args: argparse.Namespace) -> int:
     state_path = Path(args.recovery_state_path)
     with recovery.recovery_state_lock(state_path):
@@ -138,7 +373,14 @@ def _write_bundle(args: argparse.Namespace) -> int:
         if incident is None:
             print(f"incident not found: {args.incident_id}", file=sys.stderr)
             return 2
-        path = recovery.write_repair_bundle(incident, Path(args.bundle_dir))
+        rows = _read_rows(Path(args.log_path))
+        projects_by_id = _load_projects_by_id(Path(args.project_state_path))
+        path = recovery.write_repair_bundle(
+            incident,
+            Path(args.bundle_dir),
+            audit_rows=_audit_rows_for_incident(incident, rows),
+            project_excerpt=_project_excerpt_for_incident(incident, projects_by_id),
+        )
         incident.setdefault("codex", {})["status"] = "bundle_written"
         incident.setdefault("codex", {})["bundle_path"] = str(path)
         recovery.write_recovery_state(state_path, state)
@@ -180,10 +422,14 @@ def _process_repair_queue(
     now: datetime,
     args: argparse.Namespace,
     *,
+    audit_rows: list[dict] | None = None,
+    projects_by_id: dict[str, dict] | None = None,
+    skip_incident_ids: set[str] | None = None,
     dry_run: bool = False,
 ) -> dict[str, int]:
     queued = 0
     worker_runs = 0
+    skip_incident_ids = skip_incident_ids or set()
     if mode not in BUNDLE_MODES:
         return {"queued": 0, "worker_runs": 0}
     with recovery.recovery_state_lock(state_path):
@@ -192,6 +438,8 @@ def _process_repair_queue(
             if queued >= cfg.flyer.recovery.max_incidents_per_run:
                 break
             if not isinstance(incident, dict) or incident.get("status") != "open":
+                continue
+            if str(incident.get("incident_id") or "") in skip_incident_ids:
                 continue
             codex = incident.setdefault("codex", {})
             if codex.get("status") in {"queued", "running", "completed"} and codex.get("queue_path"):
@@ -204,7 +452,12 @@ def _process_repair_queue(
                 bundle_path = Path(bundle_path_raw)
                 bundle_written = False
             else:
-                bundle_path = recovery.write_repair_bundle(incident, Path(args.bundle_dir))
+                bundle_path = recovery.write_repair_bundle(
+                    incident,
+                    Path(args.bundle_dir),
+                    audit_rows=_audit_rows_for_incident(incident, audit_rows or []),
+                    project_excerpt=_project_excerpt_for_incident(incident, projects_by_id or {}),
+                )
                 bundle_written = True
             queue_path = recovery.write_worker_queue_request(
                 incident,
@@ -289,6 +542,16 @@ def _process_repair_queue(
 def _process_customer_acks(state_path: Path, log_path: Path, cfg: Config, mode: str, now: datetime, *, dry_run: bool = False) -> int:
     sent_count = 0
     considered = 0
+    terminal_no_send_prefixes = (
+        "terminal_ack:",
+        "terminal_incident_status:",
+        "ack_reserved",
+        "mode:",
+        "flyer_disabled",
+        "missing_chat_id",
+        "stale_incident",
+        "invalid_last_seen",
+    )
     for incident in list(recovery.load_recovery_state(state_path).get("incidents", [])):
         with recovery.recovery_state_lock(state_path):
             state = recovery.load_recovery_state(state_path)
@@ -304,7 +567,17 @@ def _process_customer_acks(state_path: Path, log_path: Path, cfg: Config, mode: 
             )
             if not decision.allowed:
                 ack = current.get("ack") or {}
-                if str(decision.reason).startswith(("terminal_ack:", "ack_reserved", "mode:", "flyer_disabled")):
+                if str(decision.reason).startswith(terminal_no_send_prefixes):
+                    if ack.get("status") == "none" and not dry_run:
+                        current["ack"] = {"status": "suppressed", "status_detail": decision.reason}
+                        recovery.write_recovery_state(state_path, state)
+                        _append_audit(log_path, FlyerRecoveryCustomerAckSuppressed(
+                            type="flyer_recovery_customer_ack_suppressed",
+                            ts=now,
+                            **_incident_common(current),
+                            mode=mode,
+                            reason=decision.reason,
+                        ))
                     continue
                 considered += 1
                 if considered > cfg.flyer.recovery.max_incidents_per_run:
@@ -393,6 +666,65 @@ def _process_customer_acks(state_path: Path, log_path: Path, cfg: Config, mode: 
     return sent_count
 
 
+def _resolve_recovered_incidents(
+    state_path: Path,
+    log_path: Path,
+    repair_rows: list[dict],
+    now: datetime,
+    *,
+    dry_run: bool = False,
+) -> int:
+    if not repair_rows:
+        return 0
+    with recovery.recovery_state_lock(state_path):
+        state = recovery.load_recovery_state(state_path)
+        resolved = recovery.resolve_incidents_from_customer_visible_repairs(state, repair_rows, now)
+        if dry_run:
+            return len(resolved)
+        if not resolved:
+            return 0
+        recovery.write_recovery_state(state_path, state)
+    for incident in resolved:
+        _append_audit(log_path, FlyerRecoveryResolved(
+            type="flyer_recovery_resolved",
+            ts=now,
+            incident_id=str(incident.get("incident_id") or ""),
+            resolution=str(incident.get("resolution") or "customer_visible_success"),
+        ))
+    return len(resolved)
+
+
+def _escalate_unrepaired_incidents(
+    state_path: Path,
+    log_path: Path,
+    now: datetime,
+    *,
+    stale_after: timedelta,
+    dry_run: bool = False,
+) -> tuple[int, set[str]]:
+    with recovery.recovery_state_lock(state_path):
+        state = recovery.load_recovery_state(state_path)
+        escalated = recovery.escalate_unrepaired_incidents(state, now=now, stale_after=stale_after)
+        escalated_ids = {str(incident.get("incident_id") or "") for incident in escalated}
+        if dry_run:
+            return len(escalated), escalated_ids
+        if not escalated:
+            return 0, set()
+        recovery.write_recovery_state(state_path, state)
+    for incident in escalated:
+        operator_action = incident.get("operator_action") if isinstance(incident.get("operator_action"), dict) else {}
+        _append_audit(log_path, FlyerRecoveryOperatorActionRequired(
+            type="flyer_recovery_operator_action_required",
+            ts=now,
+            incident_id=str(incident.get("incident_id") or ""),
+            failure_class=str(incident.get("failure_class") or ""),
+            project_id=str(incident.get("project_id") or ""),
+            reason=str(operator_action.get("reason") or "worker_completed_no_customer_visible_success"),
+            required_action=str(operator_action.get("required_action") or "verify_customer_outcome_or_repair_manually"),
+        ))
+    return len(escalated), escalated_ids
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config-path", default=str(CONFIG_PATH))
@@ -400,6 +732,8 @@ def main() -> int:
     parser.add_argument("--project-state-path", default=str(PROJECT_STATE_PATH))
     parser.add_argument("--customer-state-path", default=str(CUSTOMER_STATE_PATH))
     parser.add_argument("--recovery-state-path", default=str(RECOVERY_STATE_PATH))
+    parser.add_argument("--reference-scope-path", default=str(REFERENCE_SCOPE_PATH))
+    parser.add_argument("--cf-actions-path", default="")
     parser.add_argument("--bundle-dir", default=str(BUNDLE_DIR))
     parser.add_argument("--worker-queue-dir", default="")
     parser.add_argument("--worker-drafts-dir", default="")
@@ -442,6 +776,7 @@ def main() -> int:
         signal for row in rows
         if (signal := recovery.classify_decision(row, {})) is not None
     ]
+    projects_by_id = _load_projects_by_id(Path(args.project_state_path))
     state_path = Path(args.recovery_state_path)
     with recovery.recovery_state_lock(state_path):
         state = recovery.load_recovery_state(state_path)
@@ -477,6 +812,31 @@ def main() -> int:
                     mode=mode,
                 ))
     ack_sent = 0
+    outcome_repairs = _process_reference_scope_outcome_repairs(
+        reference_scope_path=Path(args.reference_scope_path),
+        log_path=Path(args.log_path),
+        actions_path=args.cf_actions_path,
+        now=now,
+        dry_run=args.dry_run,
+    )
+    rows_after_outcome_repairs = [
+        row for row in _read_rows(Path(args.log_path))
+        if (ts := _row_ts(row)) is not None and since <= ts <= now + timedelta(minutes=5)
+    ]
+    resolved = _resolve_recovered_incidents(
+        state_path,
+        Path(args.log_path),
+        rows_after_outcome_repairs,
+        now,
+        dry_run=args.dry_run,
+    )
+    operator_action_required, operator_action_required_ids = _escalate_unrepaired_incidents(
+        state_path,
+        Path(args.log_path),
+        now,
+        stale_after=timedelta(minutes=cfg.flyer.recovery.operator_escalation_stale_minutes),
+        dry_run=args.dry_run,
+    )
     repair = _process_repair_queue(
         state_path,
         Path(args.log_path),
@@ -484,6 +844,9 @@ def main() -> int:
         mode,
         now,
         args,
+        audit_rows=rows,
+        projects_by_id=projects_by_id,
+        skip_incident_ids=operator_action_required_ids,
         dry_run=args.dry_run,
     )
     if mode == "customer_ack":
@@ -493,6 +856,9 @@ def main() -> int:
         "mode": mode,
         "opened": opened,
         "ack_sent": ack_sent,
+        "outcome_repairs": outcome_repairs,
+        "resolved": resolved,
+        "operator_action_required": operator_action_required,
         "queued": repair["queued"],
         "worker_runs": repair["worker_runs"],
         "incidents": len(state.get("incidents", [])),
@@ -502,6 +868,9 @@ def main() -> int:
     else:
         print(
             f"mode={mode} opened={opened} ack_sent={ack_sent} "
+            f"outcome_repairs={outcome_repairs} "
+            f"resolved={resolved} "
+            f"operator_action_required={operator_action_required} "
             f"queued={repair['queued']} worker_runs={repair['worker_runs']} incidents={summary['incidents']}"
         )
     return 0

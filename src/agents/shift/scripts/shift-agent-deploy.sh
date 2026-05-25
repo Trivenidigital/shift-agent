@@ -578,6 +578,34 @@ list_deploys() {
     fi
 }
 
+active_flyer_generation_pids() {
+    pgrep -f '/usr/local/bin/generate-flyer-concepts|/usr/local/bin/finalize-flyer-assets|/usr/local/bin/send-flyer-package' 2>/dev/null || true
+}
+
+wait_for_flyer_generation_drain() {
+    local timeout_sec="${FLYER_DEPLOY_DRAIN_TIMEOUT_SEC:-900}"
+    local poll_sec="${FLYER_DEPLOY_DRAIN_POLL_SEC:-10}"
+    local elapsed=0
+    local pids=""
+
+    while true; do
+        pids=$(active_flyer_generation_pids | tr '
+' ' ' | sed 's/[[:space:]]*$//')
+        if [ -z "$pids" ]; then
+            return 0
+        fi
+        if [ "$elapsed" -ge "$timeout_sec" ]; then
+            echo "FAIL: active Flyer generation still running after ${timeout_sec}s; refusing gateway restart" >&2
+            # shellcheck disable=SC2086  # intentionally expands PID list for ps.
+            ps -fp $pids >&2 || true
+            return 1
+        fi
+        echo "Waiting for active Flyer generation before gateway restart: pids=$pids elapsed=${elapsed}s/${timeout_sec}s"
+        sleep "$poll_sec"
+        elapsed=$((elapsed + poll_sec))
+    done
+}
+
 case "$ACTION" in
     deploy)
         if [ ! -d "$STAGING/src" ]; then
@@ -894,7 +922,14 @@ PY
             exit 1
         fi
 
-        # Restart services (in order: tail-logger first, gateway last)
+        # Restart services (in order: tail-logger first, gateway last).
+        # Do not cut off long Flyer image generation/source-edit jobs mid-flight;
+        # a restart sends SIGTERM through the gateway process tree and can turn a
+        # real customer request into exit=-15 plus a failed WhatsApp ack.
+        if ! wait_for_flyer_generation_drain; then
+            /usr/local/bin/shift-agent-notify-owner                 --title "Deploy paused: active Flyer generation"                 --priority 2                 "Deploy $NEW_TAG refused to restart Hermes while Flyer generation was still active. Retry after the active job drains." 2>/dev/null || true
+            exit 1
+        fi
         systemctl restart shift-agent-tail-logger.timer 2>/dev/null || true
         systemctl restart shift-agent-health.timer 2>/dev/null || true
         systemctl restart hermes-gateway

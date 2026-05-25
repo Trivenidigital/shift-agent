@@ -157,6 +157,40 @@ def test_visual_qa_requires_business_campaign_contact_and_profile_location(tmp_p
     assert "missing required visible fact: campaign_title" in report.blockers
 
 
+def test_visual_qa_accepts_saint_johns_address_variant(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    now = datetime(2026, 5, 25, tzinfo=timezone.utc)
+    project = FlyerProject(
+        project_id="F0096",
+        status="awaiting_final_approval",
+        customer_phone="+19045550104",
+        created_at=now,
+        updated_at=now,
+        original_message_id="m-lakshmi",
+        raw_request="source edit",
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+        ],
+    )
+
+    artifact = _write_sidecar(
+        tmp_path,
+        "Lakshmi's Kitchen\n"
+        "Veg Thali Special\n"
+        "Moringa Dal\nJeera Rice\n"
+        "90 Brybar Dr,\nSaint Johns, FL\n"
+        "+17329837841",
+    )
+
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert report.status == "passed", report.blockers
+    assert "missing required visible fact: location" not in report.blockers
+
+
 def test_visual_qa_accepts_digit_heavy_location_split_across_ocr_lines(tmp_path):
     from agents.flyer.visual_qa import run_visual_qa
 

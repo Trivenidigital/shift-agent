@@ -89,6 +89,23 @@ def test_empty_ack_error_does_not_create_bridge_incident():
     assert recovery.classify_decision(row, {}) is None
 
 
+def test_edit_generation_failure_takes_precedence_over_trailing_ack_connect_failure():
+    row = _row(
+        "project_id=F0097; sender_role=unknown; ack_message_id=3EB0B09A33D1BF7008E7CC; "
+        "ack_error=edit_generation_failed: exit=-15 ; access_held_for_manual_review=true; "
+        "ack_error=connect_failed: URLError: [Errno 111] Connection refused",
+        reason="flyer_reference_exact_edit_queued",
+        chat_id="74290284261595@lid",
+    )
+    row["subprocess_rc"] = 3
+
+    signal = recovery.classify_decision(row, {})
+
+    assert signal is not None
+    assert signal.failure_class == "concept_generation_failed"
+    assert signal.project_id == "F0097"
+
+
 def test_customer_copy_lint_blocks_internal_terms_and_project_ids():
     bad = recovery.lint_recovery_copy("Project F0065 is in the manual queue", "manual_queue_stale", False)
 
@@ -163,6 +180,298 @@ def test_flyer_disabled_suppresses_all_customer_acks():
 
     assert decision.allowed is False
     assert decision.reason == "flyer_disabled"
+
+
+def test_closed_incident_is_terminal_no_send():
+    incident = _incident(status="resolved", ack_status="none")
+
+    decision = recovery.ack_send_decision(
+        incident,
+        flyer_enabled=True,
+        mode="customer_ack",
+        now=NOW,
+        ack_cooldown=timedelta(minutes=60),
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == "terminal_incident_status:resolved"
+
+
+def test_missing_chat_id_is_terminal_no_send():
+    incident = _incident()
+    incident["chat_id"] = ""
+
+    decision = recovery.ack_send_decision(
+        incident,
+        flyer_enabled=True,
+        mode="customer_ack",
+        now=NOW,
+        ack_cooldown=timedelta(minutes=60),
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == "missing_chat_id"
+
+
+def test_stale_incident_is_terminal_no_send():
+    incident = _incident()
+    incident["last_seen"] = (NOW - timedelta(hours=2)).isoformat()
+
+    decision = recovery.ack_send_decision(
+        incident,
+        flyer_enabled=True,
+        mode="customer_ack",
+        now=NOW,
+        ack_cooldown=timedelta(minutes=30),
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == "stale_incident"
+
+
+def test_invalid_last_seen_is_terminal_no_send():
+    incident = _incident()
+    incident["last_seen"] = "not-a-timestamp"
+
+    decision = recovery.ack_send_decision(
+        incident,
+        flyer_enabled=True,
+        mode="customer_ack",
+        now=NOW,
+        ack_cooldown=timedelta(minutes=30),
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == "invalid_last_seen"
+
+
+def test_customer_visible_asset_delivery_resolves_older_project_incident_only():
+    old = _incident()
+    old["incident_id"] = "FRI20260525-OLD"
+    old["project_id"] = "F0097"
+    old["first_seen"] = (NOW - timedelta(minutes=30)).isoformat()
+    old["last_seen"] = (NOW - timedelta(minutes=20)).isoformat()
+    newer = _incident()
+    newer["incident_id"] = "FRI20260525-NEW"
+    newer["project_id"] = "F0097"
+    newer["first_seen"] = (NOW + timedelta(minutes=1)).isoformat()
+    newer["last_seen"] = (NOW + timedelta(minutes=1)).isoformat()
+    refired = _incident()
+    refired["incident_id"] = "FRI20260525-REFIRED"
+    refired["project_id"] = "F0097"
+    refired["first_seen"] = (NOW - timedelta(minutes=30)).isoformat()
+    refired["last_seen"] = (NOW + timedelta(minutes=1)).isoformat()
+    other = _incident()
+    other["incident_id"] = "FRI20260525-OTHER"
+    other["project_id"] = "F0098"
+    other["first_seen"] = (NOW - timedelta(minutes=30)).isoformat()
+    other["last_seen"] = (NOW - timedelta(minutes=20)).isoformat()
+    unknown_ts = _incident()
+    unknown_ts["incident_id"] = "FRI20260525-UNKNOWN"
+    unknown_ts["project_id"] = "F0097"
+    unknown_ts["first_seen"] = "not-a-timestamp"
+    unknown_ts["last_seen"] = (NOW - timedelta(minutes=20)).isoformat()
+    state = {"schema_version": 1, "incidents": [old, newer, refired, other, unknown_ts]}
+
+    resolved = recovery.resolve_incidents_from_customer_visible_repairs(
+        state,
+        [
+            {
+                "type": "flyer_assets_delivered",
+                "ts": NOW.isoformat(),
+                "project_id": "F0097",
+                "asset_ids": ["A0001"],
+                "outbound_message_ids": ["mid-preview"],
+            }
+        ],
+        NOW,
+    )
+
+    assert [item["incident_id"] for item in resolved] == ["FRI20260525-OLD"]
+    assert old["status"] == "resolved"
+    assert old["resolution"] == "customer_visible_success"
+    assert old["resolution_detail"] == "flyer_assets_delivered"
+    assert newer["status"] == "open"
+    assert refired["status"] == "open"
+    assert other["status"] == "open"
+    assert unknown_ts["status"] == "open"
+
+
+def test_outcome_repair_resolves_only_matching_chat_level_bridge_incident():
+    chat_hash = recovery.sha256_text("74290284261595@lid")
+    old_chat = _incident()
+    old_chat["incident_id"] = "FRI20260525-CHAT"
+    old_chat["project_id"] = ""
+    old_chat["chat_id_hash"] = chat_hash
+    old_chat["failure_class"] = "bridge_send_failed"
+    old_chat["first_seen"] = (NOW - timedelta(minutes=30)).isoformat()
+    old_chat["last_seen"] = (NOW - timedelta(minutes=20)).isoformat()
+    project_scoped = _incident()
+    project_scoped["incident_id"] = "FRI20260525-PROJECT"
+    project_scoped["project_id"] = "F0097"
+    project_scoped["chat_id_hash"] = chat_hash
+    project_scoped["failure_class"] = "bridge_send_failed"
+    project_scoped["first_seen"] = (NOW - timedelta(minutes=30)).isoformat()
+    project_scoped["last_seen"] = (NOW - timedelta(minutes=20)).isoformat()
+    wrong_class = _incident()
+    wrong_class["incident_id"] = "FRI20260525-CLASS"
+    wrong_class["project_id"] = ""
+    wrong_class["chat_id_hash"] = chat_hash
+    wrong_class["failure_class"] = "concept_generation_failed"
+    wrong_class["first_seen"] = (NOW - timedelta(minutes=30)).isoformat()
+    wrong_class["last_seen"] = (NOW - timedelta(minutes=20)).isoformat()
+    state = {"schema_version": 1, "incidents": [old_chat, project_scoped, wrong_class]}
+
+    resolved = recovery.resolve_incidents_from_customer_visible_repairs(
+        state,
+        [
+            {
+                "type": "flyer_recovery_outcome_repaired",
+                "ts": NOW.isoformat(),
+                "repair_type": "reference_scope_false_positive",
+                "status": "sent",
+                "chat_id_hash": chat_hash,
+            }
+        ],
+        NOW,
+    )
+
+    assert [item["incident_id"] for item in resolved] == ["FRI20260525-CHAT"]
+    assert old_chat["status"] == "resolved"
+    assert project_scoped["status"] == "open"
+    assert wrong_class["status"] == "open"
+
+
+def test_dry_run_asset_delivery_does_not_resolve_incident():
+    incident = _incident()
+    incident["incident_id"] = "FRI20260525-DRYRUN"
+    incident["project_id"] = "F0097"
+    incident["first_seen"] = (NOW - timedelta(minutes=30)).isoformat()
+    incident["last_seen"] = (NOW - timedelta(minutes=20)).isoformat()
+    state = {"schema_version": 1, "incidents": [incident]}
+
+    resolved = recovery.resolve_incidents_from_customer_visible_repairs(
+        state,
+        [
+            {
+                "type": "flyer_assets_delivered",
+                "ts": NOW.isoformat(),
+                "project_id": "F0097",
+                "asset_ids": ["A0001"],
+                "outbound_message_ids": ["dry-run:wa.png"],
+            }
+        ],
+        NOW,
+    )
+
+    assert resolved == []
+    assert incident["status"] == "open"
+
+
+def test_merge_signals_refreshes_last_seen_from_audit_row_timestamp():
+    first_row = _row("project_id=F0065; concept_generation_failed: exit=2 provider down")
+    later_row = dict(first_row)
+    later_row["ts"] = (NOW + timedelta(minutes=5)).isoformat()
+    signal = recovery.classify_decision(first_row, {})
+    later_signal = recovery.classify_decision(later_row, {})
+    assert signal is not None
+    assert later_signal is not None
+    state = {"schema_version": 1, "incidents": [recovery.incident_from_signal(signal, NOW)]}
+
+    recovery.merge_signals(state, [later_signal], NOW + timedelta(hours=1))
+
+    assert state["incidents"][0]["last_seen"] == (NOW + timedelta(minutes=5)).isoformat()
+
+
+def test_merge_signals_ignores_old_replay_after_resolution_but_opens_new_failure():
+    first_row = _row("project_id=F0065; concept_generation_failed: exit=2 provider down")
+    signal = recovery.classify_decision(first_row, {})
+    assert signal is not None
+    resolved = recovery.incident_from_signal(signal, NOW)
+    resolved["status"] = "resolved"
+    resolved["resolved_at"] = NOW.isoformat()
+    state = {"schema_version": 1, "incidents": [resolved]}
+
+    old_replay = dict(first_row)
+    old_replay["ts"] = (NOW - timedelta(minutes=5)).isoformat()
+    old_signal = recovery.classify_decision(old_replay, {})
+    assert old_signal is not None
+    opened = recovery.merge_signals(state, [old_signal], NOW + timedelta(hours=1))
+
+    assert opened == 0
+    assert len(state["incidents"]) == 1
+
+    new_failure = dict(first_row)
+    new_failure["ts"] = (NOW + timedelta(minutes=5)).isoformat()
+    new_signal = recovery.classify_decision(new_failure, {})
+    assert new_signal is not None
+    opened = recovery.merge_signals(state, [new_signal], NOW + timedelta(hours=1))
+
+    assert opened == 1
+    assert len(state["incidents"]) == 2
+    assert state["incidents"][0]["status"] == "resolved"
+    assert state["incidents"][1]["status"] == "open"
+    assert state["incidents"][1]["incident_id"] != state["incidents"][0]["incident_id"]
+    assert state["incidents"][1]["last_seen"] == (NOW + timedelta(minutes=5)).isoformat()
+
+
+def test_escalates_completed_repair_without_customer_visible_success_once():
+    incident = _incident()
+    incident["incident_id"] = "FRI20260525-NOEVIDENCE"
+    incident["last_seen"] = (NOW - timedelta(hours=2)).isoformat()
+    incident["codex"] = {
+        "status": "completed",
+        "completed_at": (NOW - timedelta(hours=1)).isoformat(),
+        "bundle_path": "/tmp/bundle.json",
+    }
+    state = {"schema_version": 1, "incidents": [incident]}
+
+    escalated = recovery.escalate_unrepaired_incidents(
+        state,
+        now=NOW,
+        stale_after=timedelta(minutes=30),
+    )
+
+    assert [item["incident_id"] for item in escalated] == ["FRI20260525-NOEVIDENCE"]
+    assert incident["status"] == "operator_action_required"
+    assert incident["operator_action"]["reason"] == "worker_completed_no_customer_visible_success"
+    assert incident["operator_action"]["required_action"] == "verify_customer_outcome_or_repair_manually"
+
+    escalated_again = recovery.escalate_unrepaired_incidents(
+        state,
+        now=NOW + timedelta(minutes=5),
+        stale_after=timedelta(minutes=30),
+    )
+
+    assert escalated_again == []
+
+
+def test_does_not_escalate_recent_or_already_resolved_incidents():
+    recent = _incident()
+    recent["incident_id"] = "FRI20260525-RECENT"
+    recent["codex"] = {
+        "status": "completed",
+        "completed_at": (NOW - timedelta(minutes=5)).isoformat(),
+        "bundle_path": "/tmp/bundle.json",
+    }
+    resolved = _incident(status="resolved")
+    resolved["incident_id"] = "FRI20260525-RESOLVED"
+    resolved["codex"] = {
+        "status": "completed",
+        "completed_at": (NOW - timedelta(hours=1)).isoformat(),
+        "bundle_path": "/tmp/bundle.json",
+    }
+    state = {"schema_version": 1, "incidents": [recent, resolved]}
+
+    escalated = recovery.escalate_unrepaired_incidents(
+        state,
+        now=NOW,
+        stale_after=timedelta(minutes=30),
+    )
+
+    assert escalated == []
+    assert recent["status"] == "open"
+    assert resolved["status"] == "resolved"
 
 
 def test_repeated_timer_cycles_do_not_resend_after_first_terminal_state():

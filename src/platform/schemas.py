@@ -874,6 +874,7 @@ class FlyerRecoveryConfig(BaseModel):
     scan_window_minutes: int = Field(default=30, ge=5, le=240)
     ack_cooldown_minutes: int = Field(default=60, ge=5, le=1440)
     ack_reservation_stale_minutes: int = Field(default=10, ge=1, le=120)
+    operator_escalation_stale_minutes: int = Field(default=30, ge=5, le=1440)
     max_incidents_per_run: int = Field(default=20, ge=1, le=200)
     manual_queue_stale_minutes: int = Field(default=30, ge=5, le=1440)
     worker_runner: Literal["codex", "claude"] = "codex"
@@ -1169,18 +1170,40 @@ class FlyerCustomerProfile(BaseModel):
         return phones
 
     def is_account_admin(self, phone: Optional[str], chat_id: str = "", sender_role: str = "") -> bool:
-        del chat_id
         if sender_role == "owner":
             return True
+        admin_phones: set[str] = {str(self.business_whatsapp_number)}
+        if self.onboarded_by_phone is not None:
+            admin_phones.add(str(self.onboarded_by_phone))
+        canonical = self._canonical_phone_string(phone)
+        if canonical in admin_phones:
+            return True
+        chat_id = (chat_id or "").strip()
+        if chat_id and self.primary_chat_id and chat_id == self.primary_chat_id:
+            return True
+        chat_phone = self._phone_from_chat_id(chat_id)
+        return chat_phone in admin_phones
+
+    @staticmethod
+    def _canonical_phone_string(phone: Optional[str]) -> Optional[str]:
         if not phone:
-            return False
+            return None
         try:
-            canonical = E164Phone.from_any(phone, country_code="US")
+            return str(E164Phone.from_any(phone, country_code="US"))
         except ValueError:
-            return False
-        return canonical == self.business_whatsapp_number or (
-            self.onboarded_by_phone is not None and canonical == self.onboarded_by_phone
-        )
+            return None
+
+    @classmethod
+    def _phone_from_chat_id(cls, chat_id: str) -> Optional[str]:
+        if "@" not in chat_id:
+            return None
+        local, domain = chat_id.split("@", 1)
+        if domain not in {"s.whatsapp.net", "c.us"}:
+            return None
+        local = local.split(":", 1)[0].strip()
+        if not local.isdigit():
+            return None
+        return cls._canonical_phone_string(f"+{local}")
 
     def included_flyer_limit(self, plan_tiers: list["FlyerPlanTier"]) -> Optional[int]:
         for tier in plan_tiers:
@@ -3503,6 +3526,18 @@ class FlyerRecoveryRepairBundleWritten(_BaseEntry):
     bundle_path: str = Field(min_length=1, max_length=500)
 
 
+class FlyerRecoveryOutcomeRepaired(_BaseEntry):
+    type: Literal["flyer_recovery_outcome_repaired"]
+    repair_type: Literal["reference_scope_false_positive"]
+    status: Literal["sent", "failed"]
+    chat_id_hash: str = Field(min_length=1, max_length=120)
+    customer_id: str = Field(default="", max_length=40)
+    business_name: str = Field(default="", max_length=160)
+    scope_reason: str = Field(default="", max_length=200)
+    outbound_message_id: str = Field(default="", max_length=200)
+    error: str = Field(default="", max_length=500)
+
+
 class FlyerRecoveryDeployGate(_BaseEntry):
     type: Literal["flyer_recovery_deploy_gate"]
     incident_id: str = Field(min_length=1, max_length=80)
@@ -3514,7 +3549,27 @@ class FlyerRecoveryDeployGate(_BaseEntry):
 class FlyerRecoveryResolved(_BaseEntry):
     type: Literal["flyer_recovery_resolved"]
     incident_id: str = Field(min_length=1, max_length=80)
-    resolution: Literal["suppressed", "customer_ack_sent", "repair_queued", "manual_required", "deployed"]
+    resolution: Literal[
+        "suppressed",
+        "customer_ack_sent",
+        "repair_queued",
+        "manual_required",
+        "deployed",
+        "outcome_repaired",
+        "customer_visible_success",
+    ]
+
+
+class FlyerRecoveryOperatorActionRequired(_BaseEntry):
+    type: Literal["flyer_recovery_operator_action_required"]
+    incident_id: str = Field(min_length=1, max_length=80)
+    failure_class: str = Field(default="", max_length=80)
+    project_id: str = Field(default="", max_length=40)
+    reason: Literal[
+        "worker_completed_no_customer_visible_success",
+        "worker_failed_no_customer_visible_success",
+    ]
+    required_action: Literal["verify_customer_outcome_or_repair_manually"]
 
 
 class FlyerClosureCustomerNotified(_BaseEntry):
@@ -3581,6 +3636,7 @@ class FlyerSourceEditSlaAlert(_BaseEntry):
     """Operator alert audit for stale source-edit manual queue rows."""
     type: Literal["flyer_source_edit_sla_alert"] = "flyer_source_edit_sla_alert"
     outcome: Literal["alerted", "throttled", "notify_failed"]
+    reason_codes: list[str] = Field(default_factory=list, max_length=20)
     project_ids: list[str] = Field(default_factory=list, max_length=50)
     stale_count: int = Field(default=0, ge=0)
     alerted_count: int = Field(default=0, ge=0)
@@ -4188,6 +4244,7 @@ class CfRouterIntercepted(_BaseEntry):
         "flyer_quota_blocked",
         "flyer_brand_asset_saved",
         "flyer_brand_asset_failed",
+        "flyer_business_scope_blocked",
         "flyer_reference_manual_review_queued",
         "flyer_reference_scope_blocked",
         "flyer_reference_scope_use_reference",
@@ -4207,6 +4264,7 @@ class CfRouterIntercepted(_BaseEntry):
         "flyer_starter_preference_off",
         "flyer_starter_already_sent",
         "flyer_sample_prompt_requested",
+        "flyer_trial_link_recovery",
         "flyer_guest_order_started",
         "flyer_guest_order_failed",
         "flyer_access_release_failed",
@@ -4619,8 +4677,10 @@ LogEntry = Annotated[
         Annotated[FlyerRecoveryCustomerAckUncertain, Tag("flyer_recovery_customer_ack_uncertain")],
         Annotated[FlyerRecoveryCustomerAckSuppressed, Tag("flyer_recovery_customer_ack_suppressed")],
         Annotated[FlyerRecoveryRepairBundleWritten, Tag("flyer_recovery_repair_bundle_written")],
+        Annotated[FlyerRecoveryOutcomeRepaired, Tag("flyer_recovery_outcome_repaired")],
         Annotated[FlyerRecoveryDeployGate, Tag("flyer_recovery_deploy_gate")],
         Annotated[FlyerRecoveryResolved, Tag("flyer_recovery_resolved")],
+        Annotated[FlyerRecoveryOperatorActionRequired, Tag("flyer_recovery_operator_action_required")],
         Annotated[FlyerClosureCustomerNotified, Tag("flyer_closure_customer_notified")],
         # NEW — source-contract observability (2026-05-20 flyer source-contract-first)
         Annotated[FlyerSourceContractExtracted, Tag("flyer_source_contract_extracted")],
@@ -4725,7 +4785,8 @@ __all__ = [
     "FlyerRecoveryIncidentOpened", "FlyerRecoveryCustomerAckAttempted",
     "FlyerRecoveryCustomerAckSent", "FlyerRecoveryCustomerAckFailed",
     "FlyerRecoveryCustomerAckUncertain", "FlyerRecoveryCustomerAckSuppressed",
-    "FlyerRecoveryRepairBundleWritten", "FlyerRecoveryDeployGate", "FlyerRecoveryResolved",
+    "FlyerRecoveryRepairBundleWritten", "FlyerRecoveryOutcomeRepaired", "FlyerRecoveryDeployGate", "FlyerRecoveryResolved",
+    "FlyerRecoveryOperatorActionRequired",
     "FlyerUsageRecorded", "FlyerQuotaBlocked", "FlyerClosureCustomerNotified",
     "Proposal", "ProposalId", "ProposalCode",
     "AwaitingProposal", "ApprovedProposal", "ReconcilingProposal", "SentProposal",
