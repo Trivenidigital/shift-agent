@@ -481,3 +481,252 @@ flyer:
     assert second.returncode == 0, second.stderr
     assert "outcome_repairs=0" in second.stdout
     assert len(json.loads(sent_path.read_text(encoding="utf-8"))) == 1
+
+
+def test_watchdog_resolves_open_incident_after_successful_customer_outcome_repair(tmp_path):
+    config = tmp_path / "config.yaml"
+    log = tmp_path / "decisions.log"
+    projects = tmp_path / "projects.json"
+    customers = tmp_path / "customers.json"
+    recovery_state = tmp_path / "recovery.json"
+    config.write_text(
+        """
+schema_version: 1
+customer: {name: Triveni, location_id: loc_pineville_01, timezone: America/New_York}
+owner: {name: Owner, phone: '+19045550000'}
+limits: {}
+alerting: {pushover_user_key: k, pushover_app_token: t}
+backup: {gpg_recipient_email: owner@example.com}
+flyer:
+  enabled: true
+  recovery:
+    mode: observe
+    enable_timer: true
+    scan_window_minutes: 240
+""".strip(),
+        encoding="utf-8",
+    )
+    now = datetime.now(timezone.utc)
+    repair_ts = (now - timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+    chat_hash = recovery.sha256_text("74290284261595@lid")
+    other_chat_hash = recovery.sha256_text("17329837841@s.whatsapp.net")
+    log.write_text(
+        json.dumps(
+            {
+                "type": "flyer_recovery_outcome_repaired",
+                "ts": repair_ts,
+                "repair_type": "reference_scope_false_positive",
+                "status": "sent",
+                "chat_id_hash": chat_hash,
+                "customer_id": "CUST0004",
+                "business_name": "Chloe hair studio",
+                "scope_reason": "no_spend_exact_source_edit_known_account",
+                "outbound_message_id": "mid-corrective",
+                "error": "",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    projects.write_text('{"projects":[]}', encoding="utf-8")
+    customers.write_text('{"customers":[],"onboarding_sessions":[],"intake_sessions":[]}', encoding="utf-8")
+    old_seen = (now - timedelta(minutes=30)).isoformat()
+    new_seen = (now + timedelta(minutes=1)).isoformat()
+    recovery_state.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "incidents": [
+                    {
+                        "incident_id": "FRI20260525-OLDCHAT",
+                        "status": "open",
+                        "failure_class": "bridge_send_failed",
+                        "severity": "warning",
+                        "source_fingerprint": "fp-old",
+                        "ack_dedupe_key": "ack-old",
+                        "project_id": "",
+                        "chat_id": "74290284261595@lid",
+                        "chat_id_hash": chat_hash,
+                        "sender_phone_hash": "",
+                        "root_message_id": "wamid.old",
+                        "provider_message_id_hash": "sha256:msg",
+                        "evidence_quality": "strong",
+                        "first_seen": old_seen,
+                        "last_seen": old_seen,
+                        "ack": {"status": "none"},
+                        "codex": {"status": "completed", "bundle_path": "/tmp/bundle.json"},
+                    },
+                    {
+                        "incident_id": "FRI20260525-NEWCHAT",
+                        "status": "open",
+                        "failure_class": "concept_generation_failed",
+                        "severity": "warning",
+                        "source_fingerprint": "fp-new",
+                        "ack_dedupe_key": "ack-new",
+                        "project_id": "F0100",
+                        "chat_id": "74290284261595@lid",
+                        "chat_id_hash": chat_hash,
+                        "sender_phone_hash": "",
+                        "root_message_id": "wamid.new",
+                        "provider_message_id_hash": "sha256:msg",
+                        "evidence_quality": "strong",
+                        "first_seen": new_seen,
+                        "last_seen": new_seen,
+                        "ack": {"status": "none"},
+                        "codex": {"status": "none", "bundle_path": ""},
+                    },
+                    {
+                        "incident_id": "FRI20260525-OTHER",
+                        "status": "open",
+                        "failure_class": "bridge_send_failed",
+                        "severity": "warning",
+                        "source_fingerprint": "fp-other",
+                        "ack_dedupe_key": "ack-other",
+                        "project_id": "F0098",
+                        "chat_id": "17329837841@s.whatsapp.net",
+                        "chat_id_hash": other_chat_hash,
+                        "sender_phone_hash": "",
+                        "root_message_id": "wamid.other",
+                        "provider_message_id_hash": "sha256:msg",
+                        "evidence_quality": "strong",
+                        "first_seen": old_seen,
+                        "last_seen": old_seen,
+                        "ack": {"status": "none"},
+                        "codex": {"status": "completed", "bundle_path": "/tmp/bundle.json"},
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--config-path",
+            str(config),
+            "--log-path",
+            str(log),
+            "--project-state-path",
+            str(projects),
+            "--customer-state-path",
+            str(customers),
+            "--recovery-state-path",
+            str(recovery_state),
+            "--text",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "resolved=1" in result.stdout
+    state = json.loads(recovery_state.read_text(encoding="utf-8"))
+    by_id = {item["incident_id"]: item for item in state["incidents"]}
+    assert by_id["FRI20260525-OLDCHAT"]["status"] == "resolved"
+    assert by_id["FRI20260525-OLDCHAT"]["resolution"] == "outcome_repaired"
+    assert by_id["FRI20260525-NEWCHAT"]["status"] == "open"
+    assert by_id["FRI20260525-OTHER"]["status"] == "open"
+    text = log.read_text(encoding="utf-8")
+    assert '"type":"flyer_recovery_resolved"' in text
+    assert '"incident_id":"FRI20260525-OLDCHAT"' in text
+
+
+def test_watchdog_resolves_delivered_project_before_live_repair_queue(tmp_path):
+    config = tmp_path / "config.yaml"
+    log = tmp_path / "decisions.log"
+    projects = tmp_path / "projects.json"
+    customers = tmp_path / "customers.json"
+    recovery_state = tmp_path / "recovery.json"
+    bundle_dir = tmp_path / "bundles"
+    worker_queue_dir = tmp_path / "queue"
+    config.write_text(
+        """
+schema_version: 1
+customer: {name: Triveni, location_id: loc_pineville_01, timezone: America/New_York}
+owner: {name: Owner, phone: '+19045550000'}
+limits: {}
+alerting: {pushover_user_key: k, pushover_app_token: t}
+backup: {gpg_recipient_email: owner@example.com}
+flyer:
+  enabled: true
+  recovery:
+    mode: bundle
+    enable_timer: true
+    scan_window_minutes: 240
+""".strip(),
+        encoding="utf-8",
+    )
+    now = datetime.now(timezone.utc)
+    failure_ts = (now - timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
+    delivered_ts = (now - timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+    failure_row = {
+        "type": "cf_router_intercepted",
+        "ts": failure_ts,
+        "reason": "flyer_primary_failed",
+        "chat_id": "74290284261595@lid",
+        "message_id": "wamid.old",
+        "subprocess_rc": 2,
+        "detail": "project_id=F0097; concept_generation_failed: exit=2 provider down",
+    }
+    delivered_row = {
+        "type": "flyer_assets_delivered",
+        "ts": delivered_ts,
+        "project_id": "F0097",
+        "customer_phone": "+19803826497",
+        "asset_ids": ["A0001"],
+        "outbound_message_ids": ["wamid.delivered"],
+    }
+    log.write_text(json.dumps(failure_row) + "\n" + json.dumps(delivered_row) + "\n", encoding="utf-8")
+    projects.write_text('{"projects":[]}', encoding="utf-8")
+    customers.write_text('{"customers":[],"onboarding_sessions":[],"intake_sessions":[]}', encoding="utf-8")
+    signal = recovery.classify_decision(failure_row, {})
+    assert signal is not None
+    incident = recovery.incident_from_signal(signal, now)
+    incident["incident_id"] = "FRI20260525-DELIVERED"
+    recovery_state.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "incidents": [incident],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--config-path",
+            str(config),
+            "--log-path",
+            str(log),
+            "--project-state-path",
+            str(projects),
+            "--customer-state-path",
+            str(customers),
+            "--recovery-state-path",
+            str(recovery_state),
+            "--bundle-dir",
+            str(bundle_dir),
+            "--worker-queue-dir",
+            str(worker_queue_dir),
+            "--text",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "resolved=1" in result.stdout
+    assert "queued=0" in result.stdout
+    assert not bundle_dir.exists() or not any(bundle_dir.iterdir())
+    assert not worker_queue_dir.exists() or not any(worker_queue_dir.iterdir())
+    state = json.loads(recovery_state.read_text(encoding="utf-8"))
+    incident = state["incidents"][0]
+    assert incident["status"] == "resolved"
+    assert incident["resolution"] == "customer_visible_success"

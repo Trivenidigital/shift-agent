@@ -21,6 +21,7 @@ from schemas import (  # noqa: E402
     FlyerRecoveryCustomerAckAttempted,
     FlyerRecoveryIncidentOpened,
     FlyerRecoveryOutcomeRepaired,
+    FlyerRecoveryResolved,
     FlyerGuestOrder,
     FlyerGuestOrderStore,
     FlyerIntakeSession,
@@ -250,11 +251,18 @@ def test_flyer_recovery_audit_variants_dispatch_through_log_entry():
         "outbound_message_id": "mid-1",
         "error": "",
     }
+    resolved = {
+        "type": "flyer_recovery_resolved",
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "incident_id": "FRI20260523-0001",
+        "resolution": "customer_visible_success",
+    }
 
     adapter = TypeAdapter(LogEntry)
     assert isinstance(adapter.validate_python(opened), FlyerRecoveryIncidentOpened)
     assert isinstance(adapter.validate_python(attempted), FlyerRecoveryCustomerAckAttempted)
     assert isinstance(adapter.validate_python(outcome), FlyerRecoveryOutcomeRepaired)
+    assert isinstance(adapter.validate_python(resolved), FlyerRecoveryResolved)
 
 
 def test_guest_order_store_tracks_payment_first_one_off_order():

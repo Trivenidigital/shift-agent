@@ -32,6 +32,7 @@ from schemas import (  # noqa: E402
     FlyerRecoveryCustomerAckUncertain,
     FlyerRecoveryIncidentOpened,
     FlyerRecoveryRepairBundleWritten,
+    FlyerRecoveryResolved,
 )
 try:
     from agents.flyer import recovery  # type: ignore  # noqa: E402
@@ -660,6 +661,34 @@ def _process_customer_acks(state_path: Path, log_path: Path, cfg: Config, mode: 
     return sent_count
 
 
+def _resolve_recovered_incidents(
+    state_path: Path,
+    log_path: Path,
+    repair_rows: list[dict],
+    now: datetime,
+    *,
+    dry_run: bool = False,
+) -> int:
+    if not repair_rows:
+        return 0
+    with recovery.recovery_state_lock(state_path):
+        state = recovery.load_recovery_state(state_path)
+        resolved = recovery.resolve_incidents_from_customer_visible_repairs(state, repair_rows, now)
+        if dry_run:
+            return len(resolved)
+        if not resolved:
+            return 0
+        recovery.write_recovery_state(state_path, state)
+    for incident in resolved:
+        _append_audit(log_path, FlyerRecoveryResolved(
+            type="flyer_recovery_resolved",
+            ts=now,
+            incident_id=str(incident.get("incident_id") or ""),
+            resolution=str(incident.get("resolution") or "customer_visible_success"),
+        ))
+    return len(resolved)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config-path", default=str(CONFIG_PATH))
@@ -754,6 +783,17 @@ def main() -> int:
         now=now,
         dry_run=args.dry_run,
     )
+    rows_after_outcome_repairs = [
+        row for row in _read_rows(Path(args.log_path))
+        if (ts := _row_ts(row)) is not None and since <= ts <= now + timedelta(minutes=5)
+    ]
+    resolved = _resolve_recovered_incidents(
+        state_path,
+        Path(args.log_path),
+        rows_after_outcome_repairs,
+        now,
+        dry_run=args.dry_run,
+    )
     repair = _process_repair_queue(
         state_path,
         Path(args.log_path),
@@ -773,6 +813,7 @@ def main() -> int:
         "opened": opened,
         "ack_sent": ack_sent,
         "outcome_repairs": outcome_repairs,
+        "resolved": resolved,
         "queued": repair["queued"],
         "worker_runs": repair["worker_runs"],
         "incidents": len(state.get("incidents", [])),
@@ -783,6 +824,7 @@ def main() -> int:
         print(
             f"mode={mode} opened={opened} ack_sent={ack_sent} "
             f"outcome_repairs={outcome_repairs} "
+            f"resolved={resolved} "
             f"queued={repair['queued']} worker_runs={repair['worker_runs']} incidents={summary['incidents']}"
         )
     return 0

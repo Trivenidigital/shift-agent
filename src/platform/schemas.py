@@ -3521,7 +3521,15 @@ class FlyerRecoveryDeployGate(_BaseEntry):
 class FlyerRecoveryResolved(_BaseEntry):
     type: Literal["flyer_recovery_resolved"]
     incident_id: str = Field(min_length=1, max_length=80)
-    resolution: Literal["suppressed", "customer_ack_sent", "repair_queued", "manual_required", "deployed"]
+    resolution: Literal[
+        "suppressed",
+        "customer_ack_sent",
+        "repair_queued",
+        "manual_required",
+        "deployed",
+        "outcome_repaired",
+        "customer_visible_success",
+    ]
 
 
 class FlyerClosureCustomerNotified(_BaseEntry):
@@ -4216,6 +4224,7 @@ class CfRouterIntercepted(_BaseEntry):
         "flyer_starter_preference_off",
         "flyer_starter_already_sent",
         "flyer_sample_prompt_requested",
+        "flyer_trial_link_recovery",
         "flyer_guest_order_started",
         "flyer_guest_order_failed",
         "flyer_access_release_failed",
