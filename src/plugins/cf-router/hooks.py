@@ -72,7 +72,11 @@ _SAMPLE_PROMPT_REQUEST = re.compile(
     r"|\b(?:give|send|show|share|suggest|provide)\b.{0,50}\b(?:flyer|flier|poster|marketing)\b.{0,30}\b(?:idea|ideas|prompt|prompts|examples|inspiration)\b"
     r"|\b(?:give|send|show|share|suggest|provide)\b.{0,60}"
     r"\b(?:sample|example|starter|inspiration)?\s*(?:prompt|prompts|idea|ideas|examples|inspiration)\b.{0,60}"
-    r"\b(?:flyer|flier|poster|marketing)\b",
+    r"\b(?:flyer|flier|poster|marketing)\b"
+    r"|\b(?:give|send|show|share|suggest|provide|need)\b.{0,70}"
+    r"\b(?:ad|ads|promo|promotional|campaign|marketing|creative)\b.{0,40}"
+    r"\b(?:idea|ideas|suggestion|suggestions|concept|concepts|example|examples|prompt|prompts|inspiration)\b.{0,40}"
+    r"\b(?:business|shop|store|brand|service|offer)\b",
     re.IGNORECASE,
 )
 
