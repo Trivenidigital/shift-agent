@@ -1538,6 +1538,25 @@ class TestF7PrimaryMode:
         }
         mock_run.assert_not_called()
 
+    def test_reference_scope_no_spend_allows_existing_flyer_add_change_typo(self, mods, monkeypatch):
+        _, actions_mod = mods
+        monkeypatch.delenv("FLYER_REFERENCE_SCOPE_ALLOW_SPEND", raising=False)
+
+        with patch.object(actions_mod.subprocess, "run") as mock_run:
+            ok, detail, scope = actions_mod.trigger_check_flyer_reference_scope(
+                customer={"business_name": "Chloe hair studio"},
+                media_path="/opt/shift-agent/.hermes/image_cache/chloe-existing-flyer.jpg",
+                raw_request="Existing flyer add the chsnge to this flyer",
+            )
+
+        assert ok is True
+        assert detail == "scope_check_skipped_no_spend"
+        assert scope == {
+            "decision": "allow",
+            "reason": "no_spend_exact_source_edit_known_account",
+        }
+        mock_run.assert_not_called()
+
     def test_reference_scope_no_spend_still_clarifies_generic_reference(self, mods, monkeypatch):
         _, actions_mod = mods
         monkeypatch.delenv("FLYER_REFERENCE_SCOPE_ALLOW_SPEND", raising=False)

@@ -2901,13 +2901,14 @@ def _looks_like_exact_source_edit_request(text: str) -> bool:
     language or a concrete text/date/time/extra correction.
     """
     body = " ".join((text or "").lower().split())
-    has_edit_verb = bool(re.search(r"\b(?:remove|delete|change|replace|fix|correct|edit|update)\b", body))
+    has_edit_verb = bool(re.search(r"\b(?:remove|delete|change|replace|fix|correct|edit|update|add|modify|revise)\b", body))
     has_source_marker = bool(re.search(
         r"\b(?:this|attached|uploaded|source|existing).{0,30}\b(?:flyer|poster|image|artwork)\b",
         body,
     ))
+    has_change_marker = bool(re.search(r"\b(?:change|changes?|chg|chng|chsng|chsnge|correction|revision)\b", body))
     has_text_correction_marker = bool(re.search(r"\b(?:date|time|extra|text|typo|spelling)\b", body))
-    return has_edit_verb and (has_source_marker or has_text_correction_marker)
+    return (has_edit_verb or has_change_marker) and (has_source_marker or has_text_correction_marker)
 
 
 def _reference_scope_choice(text: str) -> str:
