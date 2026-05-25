@@ -20,6 +20,7 @@ from schemas import (  # noqa: E402
     FlyerConfig,
     FlyerRecoveryCustomerAckAttempted,
     FlyerRecoveryIncidentOpened,
+    FlyerRecoveryOutcomeRepaired,
     FlyerGuestOrder,
     FlyerGuestOrderStore,
     FlyerIntakeSession,
@@ -237,9 +238,23 @@ def test_flyer_recovery_audit_variants_dispatch_through_log_entry():
         "message_sha256": "sha256:msg",
     }
 
+    outcome = {
+        "type": "flyer_recovery_outcome_repaired",
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "repair_type": "reference_scope_false_positive",
+        "status": "sent",
+        "chat_id_hash": "sha256:chat",
+        "customer_id": "CUST0004",
+        "business_name": "Chloe hair studio",
+        "scope_reason": "no_spend_exact_source_edit_known_account",
+        "outbound_message_id": "mid-1",
+        "error": "",
+    }
+
     adapter = TypeAdapter(LogEntry)
     assert isinstance(adapter.validate_python(opened), FlyerRecoveryIncidentOpened)
     assert isinstance(adapter.validate_python(attempted), FlyerRecoveryCustomerAckAttempted)
+    assert isinstance(adapter.validate_python(outcome), FlyerRecoveryOutcomeRepaired)
 
 
 def test_guest_order_store_tracks_payment_first_one_off_order():

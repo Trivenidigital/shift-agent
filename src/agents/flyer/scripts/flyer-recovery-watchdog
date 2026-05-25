@@ -8,6 +8,7 @@ no-live-send worker drafts. Production deploy remains outside this timer.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import importlib.util
 import json
@@ -43,6 +44,7 @@ LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
 PROJECT_STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
 CUSTOMER_STATE_PATH = Path("/opt/shift-agent/state/flyer/customers.json")
 RECOVERY_STATE_PATH = Path("/opt/shift-agent/state/flyer/recovery_incidents.json")
+REFERENCE_SCOPE_PATH = Path("/opt/shift-agent/state/flyer/reference_scope_pending.json")
 BUNDLE_DIR = Path("/opt/shift-agent/state/flyer/recovery_bundles")
 WORKER_QUEUE_DIR = Path("/opt/shift-agent/state/flyer/recovery_worker_queue")
 WORKER_DRAFTS_DIR = Path("/opt/shift-agent/state/flyer/recovery_worker_drafts")
@@ -85,11 +87,15 @@ def _row_ts(row: dict) -> datetime | None:
     return ts
 
 
-def _load_cf_router_actions():
-    for path in [
+def _load_cf_router_actions(actions_path: str = ""):
+    candidates = []
+    if actions_path:
+        candidates.append(Path(actions_path))
+    candidates.extend([
         SRC_ROOT / "plugins" / "cf-router" / "actions.py",
         Path("/root/.hermes/plugins/cf-router/actions.py"),
-    ]:
+    ])
+    for path in candidates:
         if not path.exists():
             continue
         spec = importlib.util.spec_from_file_location("flyer_recovery_cf_actions", path)
@@ -128,6 +134,144 @@ def _send_ack(chat_id: str, message: str) -> tuple[bool, str, str]:
     from safe_io import bridge_post  # type: ignore
     ok, mid, err, status = bridge_post(chat_id, message)
     return ok, mid, "" if ok else f"{status}: {err}"
+
+
+@contextmanager
+def _state_file_lock(path: Path):
+    try:
+        from safe_io import FileLock  # type: ignore
+    except Exception:
+        yield
+        return
+    with FileLock(Path(str(path) + ".lock")):
+        yield
+
+
+def _read_json_doc(path: Path, default: dict) -> dict:
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return dict(default)
+    return doc if isinstance(doc, dict) else dict(default)
+
+
+def _write_json_doc(path: Path, doc: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(doc, separators=(",", ":"), sort_keys=True)
+    try:
+        from safe_io import atomic_write_text  # type: ignore
+    except Exception:
+        path.write_text(payload, encoding="utf-8")
+        return
+    atomic_write_text(path, payload)
+
+
+def _append_raw_audit(log_path: Path, entry: dict) -> None:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(entry, separators=(",", ":"), sort_keys=True)
+    try:
+        from safe_io import ndjson_append  # type: ignore
+    except Exception:
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(payload + "\n")
+        return
+    ndjson_append(log_path, payload)
+
+
+def _reference_scope_repair_text(business_name: str) -> str:
+    business = business_name.strip() or "your business"
+    return (
+        "Flyer Studio\n"
+        "------------\n"
+        f"You're right - the attached flyer already belongs to {business}. "
+        "Sorry about the extra question.\n\n"
+        "I can use this flyer. Please send the exact change you want me to make, "
+        "and I'll update it."
+    )
+
+
+def _process_reference_scope_outcome_repairs(
+    *,
+    reference_scope_path: Path,
+    log_path: Path,
+    actions_path: str,
+    now: datetime,
+    dry_run: bool = False,
+) -> int:
+    if not reference_scope_path.exists():
+        return 0
+    actions = _load_cf_router_actions(actions_path)
+    if actions is None:
+        return 0
+    repaired = 0
+    with _state_file_lock(reference_scope_path):
+        doc = _read_json_doc(reference_scope_path, {"schema_version": 1, "pending": []})
+        pending = doc.get("pending") if isinstance(doc.get("pending"), list) else []
+        kept: list = []
+        changed = False
+        for item in pending:
+            if not isinstance(item, dict):
+                kept.append(item)
+                continue
+            customer = item.get("customer") if isinstance(item.get("customer"), dict) else {}
+            business_name = str(customer.get("business_name") or "").strip()
+            chat_id = str(item.get("chat_id") or "").strip()
+            media_path = str(item.get("media_path") or "").strip()
+            raw_request = str(item.get("raw_request") or "").strip()
+            original_intent = str(item.get("original_intent") or "").strip()
+            status = str(item.get("status") or "awaiting_choice").strip()
+            if (
+                status != "awaiting_choice"
+                or original_intent != "exact_source_edit"
+                or not chat_id
+                or not business_name
+                or not media_path
+                or not raw_request
+                or not hasattr(actions, "trigger_check_flyer_reference_scope")
+                or not hasattr(actions, "send_flyer_text")
+            ):
+                kept.append(item)
+                continue
+            try:
+                scope_ok, scope_detail, scope = actions.trigger_check_flyer_reference_scope(
+                    customer=customer,
+                    media_path=media_path,
+                    raw_request=raw_request,
+                )
+            except Exception as exc:
+                scope_ok, scope_detail, scope = False, f"{type(exc).__name__}: {exc}", None
+            decision = str((scope or {}).get("decision") or "") if isinstance(scope, dict) else ""
+            if not scope_ok or decision != "allow":
+                kept.append(item)
+                continue
+            message = _reference_scope_repair_text(business_name)
+            if dry_run:
+                repaired += 1
+                kept.append(item)
+                continue
+            ok, outbound_message_id, err = actions.send_flyer_text(chat_id, message)
+            _append_raw_audit(log_path, {
+                "type": "flyer_recovery_outcome_repaired",
+                "ts": now.isoformat(),
+                "repair_type": "reference_scope_false_positive",
+                "status": "sent" if ok else "failed",
+                "chat_id_hash": recovery.sha256_text(chat_id),
+                "customer_id": str(customer.get("customer_id") or ""),
+                "business_name": business_name,
+                "scope_reason": str((scope or {}).get("reason") or scope_detail or "")[:200] if isinstance(scope, dict) else str(scope_detail)[:200],
+                "outbound_message_id": str(outbound_message_id or ""),
+                "error": str(err or "")[:500],
+            })
+            if ok:
+                repaired += 1
+                changed = True
+                continue
+            kept.append(item)
+        if changed:
+            doc["pending"] = kept
+            doc["schema_version"] = doc.get("schema_version") or 1
+            _write_json_doc(reference_scope_path, doc)
+    return repaired
 
 
 def _write_bundle(args: argparse.Namespace) -> int:
@@ -420,6 +564,8 @@ def main() -> int:
     parser.add_argument("--project-state-path", default=str(PROJECT_STATE_PATH))
     parser.add_argument("--customer-state-path", default=str(CUSTOMER_STATE_PATH))
     parser.add_argument("--recovery-state-path", default=str(RECOVERY_STATE_PATH))
+    parser.add_argument("--reference-scope-path", default=str(REFERENCE_SCOPE_PATH))
+    parser.add_argument("--cf-actions-path", default="")
     parser.add_argument("--bundle-dir", default=str(BUNDLE_DIR))
     parser.add_argument("--worker-queue-dir", default="")
     parser.add_argument("--worker-drafts-dir", default="")
@@ -497,6 +643,13 @@ def main() -> int:
                     mode=mode,
                 ))
     ack_sent = 0
+    outcome_repairs = _process_reference_scope_outcome_repairs(
+        reference_scope_path=Path(args.reference_scope_path),
+        log_path=Path(args.log_path),
+        actions_path=args.cf_actions_path,
+        now=now,
+        dry_run=args.dry_run,
+    )
     repair = _process_repair_queue(
         state_path,
         Path(args.log_path),
@@ -513,6 +666,7 @@ def main() -> int:
         "mode": mode,
         "opened": opened,
         "ack_sent": ack_sent,
+        "outcome_repairs": outcome_repairs,
         "queued": repair["queued"],
         "worker_runs": repair["worker_runs"],
         "incidents": len(state.get("incidents", [])),
@@ -522,6 +676,7 @@ def main() -> int:
     else:
         print(
             f"mode={mode} opened={opened} ack_sent={ack_sent} "
+            f"outcome_repairs={outcome_repairs} "
             f"queued={repair['queued']} worker_runs={repair['worker_runs']} incidents={summary['incidents']}"
         )
     return 0

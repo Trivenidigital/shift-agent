@@ -321,3 +321,109 @@ flyer:
     incident = state["incidents"][0]
     assert incident["ack"]["status"] == "suppressed"
     assert incident["ack"]["status_detail"] == "missing_chat_id"
+
+
+def test_watchdog_repairs_reference_scope_false_positive_customer_outcome(tmp_path):
+    config = tmp_path / "config.yaml"
+    log = tmp_path / "decisions.log"
+    projects = tmp_path / "projects.json"
+    customers = tmp_path / "customers.json"
+    recovery_state = tmp_path / "recovery.json"
+    reference_scope = tmp_path / "reference_scope_pending.json"
+    fake_actions = tmp_path / "fake_actions.py"
+    sent_path = tmp_path / "sent.json"
+    fake_actions.write_text(
+        f'''
+import json
+from pathlib import Path
+
+SENT_PATH = Path({str(sent_path)!r})
+
+def trigger_check_flyer_reference_scope(*, customer, media_path, raw_request):
+    assert customer["business_name"] == "Chloe hair studio"
+    assert "Existing flyer" in raw_request
+    return True, "scope_check_skipped_no_spend", {{
+        "decision": "allow",
+        "reason": "no_spend_exact_source_edit_known_account",
+    }}
+
+def send_flyer_text(chat_id, text):
+    rows = json.loads(SENT_PATH.read_text(encoding="utf-8")) if SENT_PATH.exists() else []
+    rows.append({{"chat_id": chat_id, "text": text}})
+    SENT_PATH.write_text(json.dumps(rows), encoding="utf-8")
+    return True, "mid-corrective", ""
+'''.strip(),
+        encoding="utf-8",
+    )
+    config.write_text(
+        """
+schema_version: 1
+customer: {name: Triveni, location_id: loc_pineville_01, timezone: America/New_York}
+owner: {name: Owner, phone: '+19045550000'}
+limits: {}
+alerting: {pushover_user_key: k, pushover_app_token: t}
+backup: {gpg_recipient_email: owner@example.com}
+flyer:
+  enabled: true
+  recovery:
+    mode: observe
+    enable_timer: true
+    scan_window_minutes: 240
+""".strip(),
+        encoding="utf-8",
+    )
+    log.write_text("", encoding="utf-8")
+    projects.write_text('{"projects":[]}', encoding="utf-8")
+    customers.write_text('{"customers":[],"onboarding_sessions":[],"intake_sessions":[]}', encoding="utf-8")
+    reference_scope.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "pending": [
+                    {
+                        "chat_id": "74290284261595@lid",
+                        "sender_phone": "+19803826497",
+                        "customer": {"customer_id": "CUST0004", "business_name": "Chloe hair studio"},
+                        "media_path": "/tmp/chloe.jpg",
+                        "raw_request": "Existing flyer add the chsnge to this flyer",
+                        "original_intent": "exact_source_edit",
+                        "status": "awaiting_choice",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--config-path", str(config),
+            "--log-path", str(log),
+            "--project-state-path", str(projects),
+            "--customer-state-path", str(customers),
+            "--recovery-state-path", str(recovery_state),
+            "--reference-scope-path", str(reference_scope),
+            "--cf-actions-path", str(fake_actions),
+            "--text",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "outcome_repairs=1" in result.stdout
+    assert json.loads(reference_scope.read_text(encoding="utf-8"))["pending"] == []
+    sent = json.loads(sent_path.read_text(encoding="utf-8"))
+    assert len(sent) == 1
+    assert sent[0]["chat_id"] == "74290284261595@lid"
+    assert "already" in sent[0]["text"].lower()
+    assert "Chloe hair studio" in sent[0]["text"]
+    assert '"type":"flyer_recovery_outcome_repaired"' in log.read_text(encoding="utf-8")
+
+    second = subprocess.run(result.args, capture_output=True, text=True, timeout=30)
+    assert second.returncode == 0, second.stderr
+    assert "outcome_repairs=0" in second.stdout
+    assert len(json.loads(sent_path.read_text(encoding="utf-8"))) == 1
