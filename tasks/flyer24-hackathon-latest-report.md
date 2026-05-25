@@ -12,4 +12,4 @@ Updated: 2026-05-25T07:39:00Z
 - #216 - fix(flyer): harden guest-order payment activation contracts (operator-review-required; payment-adjacent)
 - #187 - feat: add Flyer Studio concierge intake (non-merge-qualified; dirty/conflict broad scope)
 - #185 - test-repair-tarball-gate-harness-drift (non-merge-qualified draft)
-- #NEW (this batch) - fix(flyer): generalize stale manual queue readiness/reporting
+- #219 - fix(flyer): generalize stale manual queue readiness/reporting
