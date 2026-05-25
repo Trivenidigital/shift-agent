@@ -386,6 +386,60 @@ def test_business_whatsapp_chat_can_change_plan_when_sender_phone_missing(tmp_pa
     assert confirmed_store.customers[0].pending_plan_id == "growth"
 
 
+def test_natural_upgrade_to_growth_uses_guarded_plan_change_flow(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 25, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    customer = store.new_customer(
+        business_name="Lakshmi's Kitchen",
+        business_address="90 Brybar Dr, St Johns, FL",
+        public_phone="+17329837841",
+        business_whatsapp_number="+17329837841",
+        authorized_request_number="+17329837841",
+        business_category="restaurant",
+        preferred_language="en",
+        plan_id="trial",
+        now=now,
+        primary_chat_id="17329837841@s.whatsapp.net",
+        onboarded_by_phone="+17329837841",
+    ).model_copy(update={"status": "trial"})
+    store.customers.append(customer)
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    result = handle_account_command(
+        state_path=state_path,
+        sender_phone="+17329837841",
+        sender_role="customer",
+        chat_id="17329837841@s.whatsapp.net",
+        text="Upgrade to Growth",
+        now=now,
+    )
+
+    assert result.ok is True
+    assert "Please reply CONFIRM UPDATE" in result.reply_text
+    updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8")).customers[0]
+    assert updated.plan_id == "trial"
+    assert updated.pending_plan_id == ""
+    assert updated.pending_account_command == "change_plan"
+    assert updated.pending_account_value == "Growth"
+
+    confirmed = handle_account_command(
+        state_path=state_path,
+        sender_phone="+17329837841",
+        sender_role="customer",
+        chat_id="17329837841@s.whatsapp.net",
+        text="CONFIRM UPDATE",
+        now=now,
+    )
+
+    assert confirmed.ok is True
+    assert "Plan change requested: growth." in confirmed.reply_text
+    assert "current plan remains active until payment is confirmed" in confirmed.reply_text.lower()
+    confirmed_store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert confirmed_store.customers[0].plan_id == "trial"
+    assert confirmed_store.customers[0].pending_plan_id == "growth"
+
+
 def test_primary_lid_chat_can_change_plan_when_sender_phone_missing(tmp_path):
     state_path = tmp_path / "customers.json"
     now = datetime(2026, 5, 25, tzinfo=timezone.utc)

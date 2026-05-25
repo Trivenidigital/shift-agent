@@ -2483,6 +2483,37 @@ _FLYER_OPTIONAL_POLITE_PREFIX = (
     r"hey[, ]+|hi[, ]+|hello[, ]+)?"
 )
 
+_FLYER_NATURAL_PLAN_CHANGE_PATTERN = (
+    r"(?:"
+    r"\b(?:upgrade|downgrade|switch|move|start|select|choose)(?:\s+me)?\s+"
+    r"(?:(?:my|our)\s+)?(?:flyer\s+studio\s+)?(?:plan\s+)?(?:to\s+)?"
+    r"(?:starter|growth|unlimited|49\.99|69\.99|199(?:\.99)?|30\s+flyers?|60\s+flyers?|unlimited\s+flyers?)\b|"
+    r"\bi\s+(?:want|would\s+like|need)\s+(?:the\s+)?"
+    r"(?:starter|growth|unlimited|49\.99|69\.99|199(?:\.99)?|30\s+flyers?|60\s+flyers?|unlimited\s+flyers?)"
+    r"(?:\s+plan)?\b"
+    r")"
+)
+
+_FLYER_REGULATED_ACCOUNT_PATTERN = re.compile(
+    r"\b(?:"
+    r"billing|checkout|invoice|card|stripe|razorpay|refund|"
+    r"plan|starter|growth|unlimited|upgrade|downgrade|"
+    r"account\s+owner|account\s+settings|business\s+name|business\s+address|"
+    r"business\s+phone|business\s+whatsapp|whatsapp\s+number|authorized\s+(?:number|requester)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_FLYER_REGULATED_PAYMENT_PATTERN = re.compile(
+    r"\b(?:"
+    r"payment\s+(?:go\s+through|went\s+through|status|link|method|details?|failed|complete|completed|done)|"
+    r"(?:paid|pay|paying)\s+(?:for|the|my|this|now|already)|"
+    r"how\s+(?:do|can)\s+i\s+pay|"
+    r"send\s+(?:me\s+)?(?:a\s+)?payment\s+link"
+    r")\b",
+    re.IGNORECASE,
+)
+
 
 def is_flyer_account_command(text: str) -> bool:
     body = flyer_visible_message_text(text)
@@ -2495,10 +2526,29 @@ def is_flyer_account_command(text: str) -> bool:
         r"remove authorized number|remove number|"
         r"update business name|change business name|set business name|"
         r"update phone|update business phone|"
-        r"update whatsapp|update business whatsapp|change plan|upgrade plan|show flyer studio plans|confirm update)\b",
+        r"update whatsapp|update business whatsapp|change plan|upgrade plan|upgrade to|downgrade to|"
+        r"switch to|switch plan|move me to|select plan|choose plan|show flyer studio plans|confirm update|"
+        + _FLYER_NATURAL_PLAN_CHANGE_PATTERN
+        + r")\b",
         body or "",
         flags=re.IGNORECASE,
     ))
+
+
+def is_flyer_regulated_account_intent(text: str) -> bool:
+    """Return true for account/billing-shaped text that must not hit generic LLM.
+
+    This is intentionally broader than `is_flyer_account_command`: command
+    text routes to the deterministic account handler; regulated but unclear
+    text gets a safe no-action clarification instead of an improvised success
+    acknowledgement from generic Hermes chat.
+    """
+    body = flyer_visible_message_text(text)
+    if is_flyer_account_command(body):
+        return True
+    if not body:
+        return False
+    return bool(_FLYER_REGULATED_ACCOUNT_PATTERN.search(body) or _FLYER_REGULATED_PAYMENT_PATTERN.search(body))
 
 
 def is_flyer_starter_prompt_preference_command(text: str) -> bool:

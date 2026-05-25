@@ -56,8 +56,23 @@ ACCOUNT_COMMAND_RE = re.compile(
     r"update business name|change business name|set business name|"
     r"update phone|update business phone|"
     r"update whatsapp|update business whatsapp|"
-    r"change plan|upgrade plan|show flyer studio plans|confirm update"
+    r"change plan|upgrade plan|upgrade to|downgrade to|switch to|switch plan|"
+    r"move me to|select plan|choose plan|show flyer studio plans|confirm update"
     r")\b",
+    re.IGNORECASE,
+)
+
+NATURAL_PLAN_CHANGE_RE = re.compile(
+    r"^\s*(?:"
+    r"i\s+(?:want|would\s+like|need)\s+|"
+    r"(?:please\s+)?(?:upgrade|downgrade|switch|move|start|select|choose)(?:\s+me)?\s+"
+    r")(?:(?:my|our)\s+)?(?:flyer\s+studio\s+)?(?:plan\s+)?(?:to\s+)?(?P<value>.+)$",
+    re.IGNORECASE,
+)
+
+PLAN_VALUE_MARKER_RE = re.compile(
+    r"\b(?:starter|growth|unlimited|plan|flyers?/month|60\s+flyers?|30\s+flyers?|"
+    r"unlimited\s+flyers?|49\.99|69\.99|199(?:\.99)?)\b",
     re.IGNORECASE,
 )
 
@@ -92,7 +107,8 @@ def write_customer_store(path: Path, store: FlyerCustomerStore) -> None:
 
 
 def is_account_command(text: str) -> bool:
-    return bool(ACCOUNT_COMMAND_RE.search(_visible_message_text(text)))
+    body = _visible_message_text(text)
+    return bool(ACCOUNT_COMMAND_RE.search(body) or _parse_natural_plan_change(body))
 
 
 def handle_account_command(
@@ -537,6 +553,9 @@ def _parse_mutating_command(text: str) -> tuple[str, str]:
     for prefix in ("change plan", "upgrade plan"):
         if lower.startswith(prefix):
             return "change_plan", _strip_account_value_prefix(text[len(prefix):].strip())
+    natural_plan = _parse_natural_plan_change(text)
+    if natural_plan:
+        return "change_plan", natural_plan
     return "", ""
 
 
@@ -552,6 +571,16 @@ def _is_plan_menu_request(lower: str) -> bool:
 
 def _strip_account_value_prefix(value: str) -> str:
     return re.sub(r"^(?:to|as|is|:|-)\s+", "", value.strip(), flags=re.IGNORECASE).strip()
+
+
+def _parse_natural_plan_change(text: str) -> str:
+    match = NATURAL_PLAN_CHANGE_RE.match(text or "")
+    if not match:
+        return ""
+    value = _strip_account_value_prefix(match.group("value"))
+    if not PLAN_VALUE_MARKER_RE.search(value):
+        return ""
+    return value
 
 
 def _confirm_pending_update(**kwargs: object) -> AccountResult:
