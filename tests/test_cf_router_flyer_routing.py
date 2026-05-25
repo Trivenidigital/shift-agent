@@ -916,10 +916,14 @@ def test_sample_prompt_preference_text_is_account_command():
     assert actions.is_flyer_account_command("update business name to Lakshmi's Kitchen")
     assert actions.is_flyer_account_command("don't show sample prompts")
     assert actions.is_flyer_account_command("show sample prompts again")
+    assert actions.is_flyer_account_command("please don't show sample prompts")
+    assert actions.is_flyer_account_command("can you show me sample prompts again")
     assert actions.is_flyer_account_command("[shift-agent-sender v=1 role=customer]\nstop showing examples")
     assert actions.is_flyer_account_command("no examples")
     assert actions.is_flyer_starter_prompt_preference_command("don't show sample prompts")
     assert actions.is_flyer_starter_prompt_preference_command("show sample prompts again")
+    assert actions.is_flyer_starter_prompt_preference_command("please don't show sample prompts")
+    assert actions.is_flyer_starter_prompt_preference_command("hello, show me sample prompts again")
     assert not actions.is_flyer_starter_prompt_preference_command("status")
 
 
@@ -985,12 +989,15 @@ def test_explicit_sample_prompt_request_sends_starter_ideas(monkeypatch):
         "give me ad ideas for my business",
         "send promotional ideas for my shop",
         "show me example prompts for my business",
+        "show me example flyer prompts for this week",
         "can you share marketing ideas for today",
         "need sample ideas for my business offer",
         "suggest some promo ideas for my business",
         "give me creative ideas for my business",
         "send me promo suggestions for my shop",
         "i need ad concepts for my business",
+        "give ad caption ideas for my store",
+        "send poster caption ideas for my offer",
     ],
 )
 def test_sample_prompt_variants_route_to_sample_idea_intake(monkeypatch, message_text):
@@ -1031,6 +1038,41 @@ def test_sample_prompt_variants_route_to_sample_idea_intake(monkeypatch, message
     assert intake_calls
     assert intake_calls[0]["start_source"] == "sample_idea"
     assert sent["chat_id"] == "17329837841@s.whatsapp.net"
+
+
+def test_preference_command_with_polite_prefix_does_not_route_to_sample_ideas(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    account_calls = []
+
+    monkeypatch.setattr(actions, "is_flyer_enabled", lambda: True)
+    monkeypatch.setattr(actions, "flyer_campaign_cta_text", lambda _text: "")
+    monkeypatch.setattr(actions, "is_flyer_account_command", lambda _text: True)
+    monkeypatch.setattr(actions, "is_flyer_starter_prompt_preference_command", lambda _text: True)
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(
+        actions,
+        "trigger_flyer_account_command",
+        lambda **kwargs: account_calls.append(kwargs) or (True, "", {"handled": True, "reply_text": "Preference saved."}),
+    )
+    monkeypatch.setattr(actions, "send_flyer_text", lambda *_args, **_kwargs: (True, "mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        actions,
+        "trigger_flyer_intake",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("preference command must not trigger sample-idea intake")),
+    )
+
+    result = hooks.pre_gateway_dispatch(
+        SimpleNamespace(
+            text="please don't show sample prompts",
+            chat_id="17329837841@s.whatsapp.net",
+            message_id="sample-pref-polite",
+        )
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer account command"}
+    assert account_calls
 
 
 def test_sample_prompt_request_from_new_sender_starts_sample_intake(monkeypatch):
