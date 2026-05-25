@@ -4201,6 +4201,7 @@ class CfRouterIntercepted(_BaseEntry):
         "flyer_brief_project_create_failed",
         "flyer_starter_preference_off",
         "flyer_starter_already_sent",
+        "flyer_sample_prompt_requested",
         "flyer_guest_order_started",
         "flyer_guest_order_failed",
         "flyer_access_release_failed",
