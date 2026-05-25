@@ -552,6 +552,84 @@ def test_generate_draft_provider_timeout_queues_manual_review(monkeypatch, tmp_p
     assert persisted["manual_review"]["reason_code"] == "provider_timeout"
 
 
+
+
+def test_generate_retries_without_saved_brand_assets_when_business_name_missing(monkeypatch, tmp_path, capsys):
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+    from schemas import FlyerVisualQAReport
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    state_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    reference = asset_dir / "F0001-reference.png"
+    reference.write_bytes(b"fake image bytes")
+    project = _project_with_pending_reference(reference)
+    project["reference_extractions"][0]["provider"] = "openai"
+    project["reference_extractions"][0]["status"] = "ok"
+    project["reference_extractions"][0]["detail"] = "extracted"
+    project["status"] = "generating_concepts"
+    project["raw_request"] = "Create an evening snacks flyer. Use saved business name, address, phone, and logo."
+    state_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_sequence": 2,
+        "projects": [project],
+    }), encoding="utf-8")
+
+    render_env_values = []
+
+    def fake_render(_project, output_dir, **_kwargs):
+        disabled = module.os.environ.get("FLYER_DISABLE_BRAND_ASSETS", "")
+        render_env_values.append(disabled)
+        suffix = "retry" if disabled == "1" else "first"
+        path = Path(output_dir) / f"F0001-C1-{suffix}.png"
+        path.write_bytes(f"image-{suffix}".encode("ascii"))
+        return [RenderedAssetSpec(
+            path=path,
+            kind="concept_preview",
+            output_format="concept_preview",
+            width=1080,
+            height=1350,
+            concept_id="C1",
+        )]
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        failed = render_env_values[-1] != "1"
+        return FlyerVisualQAReport(
+            project_id=project_obj.project_id,
+            asset_id=asset_id,
+            artifact_path=str(artifact_path),
+            artifact_sha256="0" * 64,
+            project_version=project_obj.version,
+            output_format=output_format,
+            provider="test",
+            qa_source="ocr_vision",
+            status="failed" if failed else "passed",
+            blockers=["missing required visible fact: business_name"] if failed else [],
+            extracted_text="DESI CHOWRASTHA" if failed else "Lakshmi's Kitchen",
+            checked_at=datetime.now(timezone.utc),
+        )
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts",
+        "--project-id", "F0001",
+        "--state-path", str(state_path),
+        "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+    ])
+
+    rc = module.main()
+    assert rc == 0
+    assert render_env_values == ["", "1"]
+    assert module.os.environ.get("FLYER_DISABLE_BRAND_ASSETS") is None
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "awaiting_final_approval"
+    assert persisted["assets"][-1]["path"].endswith("F0001-C1-retry.png")
+
 def test_generate_draft_quality_failure_does_not_retry(monkeypatch, tmp_path, capsys):
     module = _load_script(monkeypatch)
 

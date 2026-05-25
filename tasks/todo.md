@@ -1356,3 +1356,12 @@ Root cause from F0095: source-edit config was unset at runtime and recovery clas
 - [ ] Merge/deploy, then repair F0097 customer-visible state using the existing good preview or a regenerated one.
 
 Review: red tests first failed with provider_timeout and critical text facts do not fit; green targeted suite passed 27 passed, 70 deselected plus py_compile for the touched scripts.
+
+## Flyer Brand-Asset Contamination Retry - 2026-05-25T20:00Z
+
+- [x] Reproduced F0098: saved active logo asset for Lakshmi's Kitchen contained Desi Chowrastha branding, and the generated flyer copied the wrong brand.
+- [x] Added regression that a missing required `business_name` visual-QA failure on a saved-logo request retries once with saved brand assets suppressed.
+- [x] Implemented bounded retry and restored `FLYER_DISABLE_BRAND_ASSETS` after render.
+- [ ] Merge/deploy and regenerate F0098 so the customer gets a clean preview.
+
+Review: focused retry/source-edit generator slice passed `5 passed, 71 deselected`; touched-script `py_compile` and `git diff --check` passed.
