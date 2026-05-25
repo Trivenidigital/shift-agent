@@ -63,6 +63,7 @@ def test_guest_order_malformed_checkout_template_fails_closed(tmp_path):
     assert "Payment link is not configured yet" in result.reply_text
     store = load_guest_order_store(state)
     assert store.orders[0].payment_checkout_url == ""
+    assert store.orders[0].payment_state == "checkout_missing"
 
 def test_guest_order_activation_then_single_use_consumes_order(tmp_path):
     state = tmp_path / "guest_orders.json"
@@ -83,6 +84,7 @@ def test_guest_order_activation_then_single_use_consumes_order(tmp_path):
     )
     assert active.ok is True
     assert "Payment received" in active.reply_text
+    assert load_guest_order_store(state).orders[0].payment_state == "payment_confirmed"
     assert find_paid_guest_order(
         state_path=state,
         sender_phone="+17329837841",
