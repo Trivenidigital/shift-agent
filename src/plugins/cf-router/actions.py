@@ -2299,16 +2299,31 @@ def _location_matches_allowed(requested: str, allowed_labels: list[str]) -> bool
     return False
 
 
+_FLYER_SAMPLE_PROMPT_PREFERENCE_PATTERN = (
+    r"(?:"
+    r"don'?t show sample prompts|do not show sample prompts|stop sample prompts|"
+    r"hide sample prompts|turn off sample prompts|disable sample prompts|"
+    r"stop showing examples|no sample prompts|no examples|"
+    r"don'?t show examples|hide examples|stop examples|"
+    r"show sample prompts again|show me sample prompts again|"
+    r"enable sample prompts|turn on sample prompts|"
+    r"bring back sample prompts|show examples again|bring back examples"
+    r")"
+)
+
+_FLYER_OPTIONAL_POLITE_PREFIX = (
+    r"^\s*(?:please\s+|can you\s+|could you\s+|kindly\s+|"
+    r"hey[, ]+|hi[, ]+|hello[, ]+)?"
+)
+
+
 def is_flyer_account_command(text: str) -> bool:
     body = flyer_visible_message_text(text)
     return bool(re.search(
-        r"^\s*(status|plan status|help|"
-        r"don'?t show sample prompts|do not show sample prompts|stop sample prompts|"
-        r"hide sample prompts|turn off sample prompts|disable sample prompts|"
-        r"stop showing examples|no sample prompts|no examples|"
-        r"don'?t show examples|hide examples|stop examples|"
-        r"show sample prompts again|enable sample prompts|turn on sample prompts|"
-        r"bring back sample prompts|show examples again|bring back examples|"
+        _FLYER_OPTIONAL_POLITE_PREFIX
+        + r"(?:status|plan status|help|"
+        + _FLYER_SAMPLE_PROMPT_PREFERENCE_PATTERN
+        + r"|"
         r"add (authorized )?(number|auth)|add authorized number|"
         r"remove authorized number|remove number|"
         r"update business name|change business name|set business name|"
@@ -2322,14 +2337,7 @@ def is_flyer_account_command(text: str) -> bool:
 def is_flyer_starter_prompt_preference_command(text: str) -> bool:
     body = flyer_visible_message_text(text)
     return bool(re.search(
-        r"^\s*(?:"
-        r"don'?t show sample prompts|do not show sample prompts|stop sample prompts|"
-        r"hide sample prompts|turn off sample prompts|disable sample prompts|"
-        r"stop showing examples|no sample prompts|no examples|"
-        r"don'?t show examples|hide examples|stop examples|"
-        r"show sample prompts again|enable sample prompts|turn on sample prompts|"
-        r"bring back sample prompts|show examples again|bring back examples"
-        r")\b",
+        _FLYER_OPTIONAL_POLITE_PREFIX + _FLYER_SAMPLE_PROMPT_PREFERENCE_PATTERN + r"\b",
         body or "",
         flags=re.IGNORECASE,
     ))
