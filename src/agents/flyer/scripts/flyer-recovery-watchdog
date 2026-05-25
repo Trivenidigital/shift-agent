@@ -304,7 +304,18 @@ def _process_customer_acks(state_path: Path, log_path: Path, cfg: Config, mode: 
             )
             if not decision.allowed:
                 ack = current.get("ack") or {}
-                if str(decision.reason).startswith(("terminal_ack:", "ack_reserved", "mode:", "flyer_disabled")):
+                if str(decision.reason).startswith(
+                    (
+                        "terminal_ack:",
+                        "terminal_incident_status:",
+                        "ack_reserved",
+                        "mode:",
+                        "flyer_disabled",
+                        "missing_chat_id",
+                        "stale_incident",
+                        "invalid_last_seen",
+                    )
+                ):
                     continue
                 considered += 1
                 if considered > cfg.flyer.recovery.max_incidents_per_run:

@@ -165,6 +165,69 @@ def test_flyer_disabled_suppresses_all_customer_acks():
     assert decision.reason == "flyer_disabled"
 
 
+def test_closed_incident_is_terminal_no_send():
+    incident = _incident(status="resolved", ack_status="none")
+
+    decision = recovery.ack_send_decision(
+        incident,
+        flyer_enabled=True,
+        mode="customer_ack",
+        now=NOW,
+        ack_cooldown=timedelta(minutes=60),
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == "terminal_incident_status:resolved"
+
+
+def test_missing_chat_id_is_terminal_no_send():
+    incident = _incident()
+    incident["chat_id"] = ""
+
+    decision = recovery.ack_send_decision(
+        incident,
+        flyer_enabled=True,
+        mode="customer_ack",
+        now=NOW,
+        ack_cooldown=timedelta(minutes=60),
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == "missing_chat_id"
+
+
+def test_stale_incident_is_terminal_no_send():
+    incident = _incident()
+    incident["last_seen"] = (NOW - timedelta(hours=2)).isoformat()
+
+    decision = recovery.ack_send_decision(
+        incident,
+        flyer_enabled=True,
+        mode="customer_ack",
+        now=NOW,
+        ack_cooldown=timedelta(minutes=30),
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == "stale_incident"
+
+
+def test_invalid_last_seen_is_terminal_no_send():
+    incident = _incident()
+    incident["last_seen"] = "not-a-timestamp"
+
+    decision = recovery.ack_send_decision(
+        incident,
+        flyer_enabled=True,
+        mode="customer_ack",
+        now=NOW,
+        ack_cooldown=timedelta(minutes=30),
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == "invalid_last_seen"
+
+
 def test_repeated_timer_cycles_do_not_resend_after_first_terminal_state():
     incident = _incident(ack_status="sent")
     state = {"schema_version": 1, "incidents": [incident]}
