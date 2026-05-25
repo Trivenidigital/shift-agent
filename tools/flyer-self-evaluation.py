@@ -21,6 +21,7 @@ from typing import Any
 
 DEFAULT_PROJECTS_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
 DEFAULT_DECISIONS_LOG = Path("/opt/shift-agent/logs/decisions.log")
+DEFAULT_RECOVERY_STATE_PATH = Path("/opt/shift-agent/state/flyer/recovery_incidents.json")
 CF_ROUTER_ACTIONS_PATH = Path(__file__).resolve().parents[1] / "src" / "plugins" / "cf-router" / "actions.py"
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 if str(SRC_DIR) not in sys.path:
@@ -1190,6 +1191,41 @@ def hermes_intent_incidents(
     return out
 
 
+def recovery_state_incidents(recovery_state: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = recovery_state.get("incidents") if isinstance(recovery_state.get("incidents"), list) else []
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("status") or "").strip() != "operator_action_required":
+            continue
+        operator_action = row.get("operator_action") if isinstance(row.get("operator_action"), dict) else {}
+        reason = str(operator_action.get("reason") or "unknown")
+        required_action = str(operator_action.get("required_action") or "verify_customer_outcome_or_repair_manually")
+        incident_id = str(row.get("incident_id") or "")
+        project_id = str(row.get("project_id") or "")
+        out.append(
+            incident(
+                "recovery_operator_action_required",
+                severity="high",
+                project_id=project_id,
+                evidence=f"incident_id={incident_id}; reason={reason}",
+                suggested_action=(
+                    f"{required_action}; recovery worker finished without safe customer-visible success evidence."
+                ),
+                category="autonomous_recovery_customer_outcome",
+                evidence_details={
+                    "incident_id": incident_id,
+                    "failure_class": str(row.get("failure_class") or ""),
+                    "reason": reason,
+                    "required_action": required_action,
+                    "active_customer_risk": True,
+                },
+            )
+        )
+    return out
+
+
 def flyer_intent_training_export_incidents(
     entries: list[dict[str, Any]],
     *,
@@ -1438,6 +1474,7 @@ def build_report(
     rollout_mode: bool = False,
     rollout_fixture: RolloutInputFixture | None = None,
     operating_layer_input: dict[str, Any] | None = None,
+    recovery_state: dict[str, Any] | None = None,
     expected_hermes_intent_mode: str = "",
     expect_flyer_intent_training_export: bool = False,
     flyer_intent_training_json: Path | None = None,
@@ -1459,6 +1496,7 @@ def build_report(
         + repeated_checkin_incidents(decision_entries, threshold=repeated_checkin_threshold)
         + preview_final_qa_mismatch_incidents(project_rows, decision_entries)
         + hermes_intent_incidents(decision_entries, expected_mode=expected_hermes_intent_mode)
+        + recovery_state_incidents(recovery_state or {})
         + flyer_intent_training_export_incidents(
             decision_entries,
             expect_export=expect_flyer_intent_training_export,
@@ -1572,6 +1610,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Render a read-only Flyer Studio self-evaluation report.")
     parser.add_argument("--projects", type=Path, default=DEFAULT_PROJECTS_PATH)
     parser.add_argument("--decisions-log", type=Path, default=DEFAULT_DECISIONS_LOG)
+    parser.add_argument("--recovery-state", type=Path, default=DEFAULT_RECOVERY_STATE_PATH)
     parser.add_argument("--now", default=None, help="UTC timestamp for deterministic tests, e.g. 2026-05-20T11:00:00Z")
     parser.add_argument("--format", choices=("json", "markdown"), default="markdown")
     parser.add_argument("--out", type=Path, default=None)
@@ -1652,6 +1691,7 @@ def main(argv: list[str] | None = None) -> int:
         rollout_mode=args.rollout_readiness,
         rollout_fixture=rollout_fixture,
         operating_layer_input=load_json_file(args.operating_layer_input) if args.operating_layer_input else None,
+        recovery_state=load_json_file(args.recovery_state),
         expected_hermes_intent_mode=args.expected_hermes_intent_mode,
         expect_flyer_intent_training_export=args.expect_flyer_intent_training_export,
         flyer_intent_training_json=args.flyer_intent_training_json,

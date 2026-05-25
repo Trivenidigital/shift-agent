@@ -31,6 +31,7 @@ from schemas import (  # noqa: E402
     FlyerRecoveryCustomerAckSuppressed,
     FlyerRecoveryCustomerAckUncertain,
     FlyerRecoveryIncidentOpened,
+    FlyerRecoveryOperatorActionRequired,
     FlyerRecoveryRepairBundleWritten,
     FlyerRecoveryResolved,
 )
@@ -423,10 +424,12 @@ def _process_repair_queue(
     *,
     audit_rows: list[dict] | None = None,
     projects_by_id: dict[str, dict] | None = None,
+    skip_incident_ids: set[str] | None = None,
     dry_run: bool = False,
 ) -> dict[str, int]:
     queued = 0
     worker_runs = 0
+    skip_incident_ids = skip_incident_ids or set()
     if mode not in BUNDLE_MODES:
         return {"queued": 0, "worker_runs": 0}
     with recovery.recovery_state_lock(state_path):
@@ -435,6 +438,8 @@ def _process_repair_queue(
             if queued >= cfg.flyer.recovery.max_incidents_per_run:
                 break
             if not isinstance(incident, dict) or incident.get("status") != "open":
+                continue
+            if str(incident.get("incident_id") or "") in skip_incident_ids:
                 continue
             codex = incident.setdefault("codex", {})
             if codex.get("status") in {"queued", "running", "completed"} and codex.get("queue_path"):
@@ -689,6 +694,37 @@ def _resolve_recovered_incidents(
     return len(resolved)
 
 
+def _escalate_unrepaired_incidents(
+    state_path: Path,
+    log_path: Path,
+    now: datetime,
+    *,
+    stale_after: timedelta,
+    dry_run: bool = False,
+) -> tuple[int, set[str]]:
+    with recovery.recovery_state_lock(state_path):
+        state = recovery.load_recovery_state(state_path)
+        escalated = recovery.escalate_unrepaired_incidents(state, now=now, stale_after=stale_after)
+        escalated_ids = {str(incident.get("incident_id") or "") for incident in escalated}
+        if dry_run:
+            return len(escalated), escalated_ids
+        if not escalated:
+            return 0, set()
+        recovery.write_recovery_state(state_path, state)
+    for incident in escalated:
+        operator_action = incident.get("operator_action") if isinstance(incident.get("operator_action"), dict) else {}
+        _append_audit(log_path, FlyerRecoveryOperatorActionRequired(
+            type="flyer_recovery_operator_action_required",
+            ts=now,
+            incident_id=str(incident.get("incident_id") or ""),
+            failure_class=str(incident.get("failure_class") or ""),
+            project_id=str(incident.get("project_id") or ""),
+            reason=str(operator_action.get("reason") or "worker_completed_no_customer_visible_success"),
+            required_action=str(operator_action.get("required_action") or "verify_customer_outcome_or_repair_manually"),
+        ))
+    return len(escalated), escalated_ids
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config-path", default=str(CONFIG_PATH))
@@ -794,6 +830,13 @@ def main() -> int:
         now,
         dry_run=args.dry_run,
     )
+    operator_action_required, operator_action_required_ids = _escalate_unrepaired_incidents(
+        state_path,
+        Path(args.log_path),
+        now,
+        stale_after=timedelta(minutes=cfg.flyer.recovery.operator_escalation_stale_minutes),
+        dry_run=args.dry_run,
+    )
     repair = _process_repair_queue(
         state_path,
         Path(args.log_path),
@@ -803,6 +846,7 @@ def main() -> int:
         args,
         audit_rows=rows,
         projects_by_id=projects_by_id,
+        skip_incident_ids=operator_action_required_ids,
         dry_run=args.dry_run,
     )
     if mode == "customer_ack":
@@ -814,6 +858,7 @@ def main() -> int:
         "ack_sent": ack_sent,
         "outcome_repairs": outcome_repairs,
         "resolved": resolved,
+        "operator_action_required": operator_action_required,
         "queued": repair["queued"],
         "worker_runs": repair["worker_runs"],
         "incidents": len(state.get("incidents", [])),
@@ -825,6 +870,7 @@ def main() -> int:
             f"mode={mode} opened={opened} ack_sent={ack_sent} "
             f"outcome_repairs={outcome_repairs} "
             f"resolved={resolved} "
+            f"operator_action_required={operator_action_required} "
             f"queued={repair['queued']} worker_runs={repair['worker_runs']} incidents={summary['incidents']}"
         )
     return 0

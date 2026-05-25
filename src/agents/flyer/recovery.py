@@ -480,6 +480,42 @@ def resolve_incidents_from_outcome_repairs(
     return resolve_incidents_from_customer_visible_repairs(state, repair_rows, now)
 
 
+def escalate_unrepaired_incidents(
+    state: dict,
+    *,
+    now: datetime,
+    stale_after: timedelta,
+) -> list[dict]:
+    escalated: list[dict] = []
+    for incident in state.get("incidents", []):
+        if not isinstance(incident, dict):
+            continue
+        if str(incident.get("status") or "open").lower() != "open":
+            continue
+        codex = incident.get("codex") if isinstance(incident.get("codex"), dict) else {}
+        codex_status = str(codex.get("status") or "").strip().lower()
+        if codex_status not in {"completed", "failed"}:
+            continue
+        completed_at = _parse_recovery_ts(str(codex.get("completed_at") or codex.get("failed_at") or ""))
+        last_seen = _parse_recovery_ts(str(incident.get("last_seen") or ""))
+        age_anchor = completed_at or last_seen
+        if age_anchor is None or now - age_anchor < stale_after:
+            continue
+        reason = (
+            "worker_completed_no_customer_visible_success"
+            if codex_status == "completed"
+            else "worker_failed_no_customer_visible_success"
+        )
+        incident["status"] = "operator_action_required"
+        incident["operator_action"] = {
+            "reason": reason,
+            "required_action": "verify_customer_outcome_or_repair_manually",
+            "marked_at": now.isoformat(),
+        }
+        escalated.append(incident)
+    return escalated
+
+
 def _unique_incident_id(base_id: str, incidents: list[dict]) -> str:
     existing_ids = {str(item.get("incident_id") or "") for item in incidents if isinstance(item, dict)}
     if base_id not in existing_ids:

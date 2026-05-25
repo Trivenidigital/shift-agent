@@ -415,6 +415,65 @@ def test_merge_signals_ignores_old_replay_after_resolution_but_opens_new_failure
     assert state["incidents"][1]["last_seen"] == (NOW + timedelta(minutes=5)).isoformat()
 
 
+def test_escalates_completed_repair_without_customer_visible_success_once():
+    incident = _incident()
+    incident["incident_id"] = "FRI20260525-NOEVIDENCE"
+    incident["last_seen"] = (NOW - timedelta(hours=2)).isoformat()
+    incident["codex"] = {
+        "status": "completed",
+        "completed_at": (NOW - timedelta(hours=1)).isoformat(),
+        "bundle_path": "/tmp/bundle.json",
+    }
+    state = {"schema_version": 1, "incidents": [incident]}
+
+    escalated = recovery.escalate_unrepaired_incidents(
+        state,
+        now=NOW,
+        stale_after=timedelta(minutes=30),
+    )
+
+    assert [item["incident_id"] for item in escalated] == ["FRI20260525-NOEVIDENCE"]
+    assert incident["status"] == "operator_action_required"
+    assert incident["operator_action"]["reason"] == "worker_completed_no_customer_visible_success"
+    assert incident["operator_action"]["required_action"] == "verify_customer_outcome_or_repair_manually"
+
+    escalated_again = recovery.escalate_unrepaired_incidents(
+        state,
+        now=NOW + timedelta(minutes=5),
+        stale_after=timedelta(minutes=30),
+    )
+
+    assert escalated_again == []
+
+
+def test_does_not_escalate_recent_or_already_resolved_incidents():
+    recent = _incident()
+    recent["incident_id"] = "FRI20260525-RECENT"
+    recent["codex"] = {
+        "status": "completed",
+        "completed_at": (NOW - timedelta(minutes=5)).isoformat(),
+        "bundle_path": "/tmp/bundle.json",
+    }
+    resolved = _incident(status="resolved")
+    resolved["incident_id"] = "FRI20260525-RESOLVED"
+    resolved["codex"] = {
+        "status": "completed",
+        "completed_at": (NOW - timedelta(hours=1)).isoformat(),
+        "bundle_path": "/tmp/bundle.json",
+    }
+    state = {"schema_version": 1, "incidents": [recent, resolved]}
+
+    escalated = recovery.escalate_unrepaired_incidents(
+        state,
+        now=NOW,
+        stale_after=timedelta(minutes=30),
+    )
+
+    assert escalated == []
+    assert recent["status"] == "open"
+    assert resolved["status"] == "resolved"
+
+
 def test_repeated_timer_cycles_do_not_resend_after_first_terminal_state():
     incident = _incident(ack_status="sent")
     state = {"schema_version": 1, "incidents": [incident]}

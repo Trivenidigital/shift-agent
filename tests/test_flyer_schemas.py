@@ -20,6 +20,7 @@ from schemas import (  # noqa: E402
     FlyerConfig,
     FlyerRecoveryCustomerAckAttempted,
     FlyerRecoveryIncidentOpened,
+    FlyerRecoveryOperatorActionRequired,
     FlyerRecoveryOutcomeRepaired,
     FlyerRecoveryResolved,
     FlyerGuestOrder,
@@ -257,12 +258,22 @@ def test_flyer_recovery_audit_variants_dispatch_through_log_entry():
         "incident_id": "FRI20260523-0001",
         "resolution": "customer_visible_success",
     }
+    operator_action = {
+        "type": "flyer_recovery_operator_action_required",
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "incident_id": "FRI20260523-0001",
+        "failure_class": "concept_generation_failed",
+        "project_id": "F0065",
+        "reason": "worker_completed_no_customer_visible_success",
+        "required_action": "verify_customer_outcome_or_repair_manually",
+    }
 
     adapter = TypeAdapter(LogEntry)
     assert isinstance(adapter.validate_python(opened), FlyerRecoveryIncidentOpened)
     assert isinstance(adapter.validate_python(attempted), FlyerRecoveryCustomerAckAttempted)
     assert isinstance(adapter.validate_python(outcome), FlyerRecoveryOutcomeRepaired)
     assert isinstance(adapter.validate_python(resolved), FlyerRecoveryResolved)
+    assert isinstance(adapter.validate_python(operator_action), FlyerRecoveryOperatorActionRequired)
 
 
 def test_guest_order_store_tracks_payment_first_one_off_order():
