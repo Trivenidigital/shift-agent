@@ -1168,18 +1168,40 @@ class FlyerCustomerProfile(BaseModel):
         return phones
 
     def is_account_admin(self, phone: Optional[str], chat_id: str = "", sender_role: str = "") -> bool:
-        del chat_id
         if sender_role == "owner":
             return True
+        admin_phones: set[str] = {str(self.business_whatsapp_number)}
+        if self.onboarded_by_phone is not None:
+            admin_phones.add(str(self.onboarded_by_phone))
+        canonical = self._canonical_phone_string(phone)
+        if canonical in admin_phones:
+            return True
+        chat_id = (chat_id or "").strip()
+        if chat_id and self.primary_chat_id and chat_id == self.primary_chat_id:
+            return True
+        chat_phone = self._phone_from_chat_id(chat_id)
+        return chat_phone in admin_phones
+
+    @staticmethod
+    def _canonical_phone_string(phone: Optional[str]) -> Optional[str]:
         if not phone:
-            return False
+            return None
         try:
-            canonical = E164Phone.from_any(phone, country_code="US")
+            return str(E164Phone.from_any(phone, country_code="US"))
         except ValueError:
-            return False
-        return canonical == self.business_whatsapp_number or (
-            self.onboarded_by_phone is not None and canonical == self.onboarded_by_phone
-        )
+            return None
+
+    @classmethod
+    def _phone_from_chat_id(cls, chat_id: str) -> Optional[str]:
+        if "@" not in chat_id:
+            return None
+        local, domain = chat_id.split("@", 1)
+        if domain not in {"s.whatsapp.net", "c.us"}:
+            return None
+        local = local.split(":", 1)[0].strip()
+        if not local.isdigit():
+            return None
+        return cls._canonical_phone_string(f"+{local}")
 
     def included_flyer_limit(self, plan_tiers: list["FlyerPlanTier"]) -> Optional[int]:
         for tier in plan_tiers:

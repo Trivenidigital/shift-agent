@@ -323,6 +323,119 @@ def test_change_plan_from_authorized_requester_gets_owner_path_not_dead_end(tmp_
     assert updated.pending_plan_id == ""
 
 
+def test_business_whatsapp_chat_can_change_plan_when_sender_phone_missing(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 25, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    customer = store.new_customer(
+        business_name="Lakshmi's Kitchen",
+        business_address="90 Brybar Dr, St Johns, FL",
+        public_phone="+17329837841",
+        business_whatsapp_number="+17329837841",
+        authorized_request_number="+19045550104",
+        business_category="restaurant",
+        preferred_language="en",
+        plan_id="trial",
+        now=now,
+        primary_chat_id="17329837841@s.whatsapp.net",
+        onboarded_by_phone="+17329837841",
+    ).model_copy(update={"status": "trial"})
+    store.customers.append(customer)
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    menu = handle_account_command(
+        state_path=state_path,
+        sender_phone=None,
+        sender_role="customer",
+        chat_id="17329837841@s.whatsapp.net",
+        text="UPGRADE PLAN - show Flyer Studio plans",
+        now=now,
+    )
+
+    assert menu.ok is True
+    assert "Reply CHANGE PLAN STARTER, CHANGE PLAN GROWTH, CHANGE PLAN UNLIMITED." in menu.reply_text
+
+    result = handle_account_command(
+        state_path=state_path,
+        sender_phone=None,
+        sender_role="customer",
+        chat_id="17329837841@s.whatsapp.net",
+        text="Upgrade plan to Growth",
+        now=now,
+    )
+
+    assert result.ok is True
+    assert result.handled is True
+    assert "Please reply CONFIRM UPDATE" in result.reply_text
+    updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8")).customers[0]
+    assert updated.pending_account_command == "change_plan"
+    assert updated.pending_account_value == "Growth"
+
+    confirmed = handle_account_command(
+        state_path=state_path,
+        sender_phone=None,
+        sender_role="customer",
+        chat_id="17329837841@s.whatsapp.net",
+        text="CONFIRM UPDATE",
+        now=now,
+    )
+
+    assert confirmed.ok is True
+    assert "Plan change requested: growth." in confirmed.reply_text
+    confirmed_store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert confirmed_store.customers[0].pending_plan_id == "growth"
+
+
+def test_primary_lid_chat_can_change_plan_when_sender_phone_missing(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 25, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    customer = store.new_customer(
+        business_name="Chloe Hair Studio",
+        business_address="11111 Gainsborough Ct, Fairfax, VA",
+        public_phone="+19803826497",
+        business_whatsapp_number="+19803826497",
+        authorized_request_number="+19045550104",
+        business_category="salon",
+        preferred_language="en",
+        plan_id="trial",
+        now=now,
+        primary_chat_id="84593927557152@lid",
+        onboarded_by_phone="+19803826497",
+    ).model_copy(update={"status": "trial"})
+    store.customers.append(customer)
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    result = handle_account_command(
+        state_path=state_path,
+        sender_phone=None,
+        sender_role="customer",
+        chat_id="84593927557152@lid",
+        text="CHANGE PLAN GROWTH",
+        now=now,
+    )
+
+    assert result.ok is True
+    assert "Please reply CONFIRM UPDATE" in result.reply_text
+    updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8")).customers[0]
+    assert updated.pending_account_command == "change_plan"
+    assert updated.pending_account_value == "GROWTH"
+
+    confirmed = handle_account_command(
+        state_path=state_path,
+        sender_phone=None,
+        sender_role="customer",
+        chat_id="84593927557152@lid",
+        text="CONFIRM UPDATE",
+        now=now,
+    )
+
+    assert confirmed.ok is True
+    assert "Plan change requested: growth." in confirmed.reply_text
+    confirmed_store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert confirmed_store.customers[0].pending_plan_id == "growth"
+
+
 def test_free_trial_onboarding_skips_paid_plan_choice_and_activates_trial(tmp_path):
     state_path = tmp_path / "customers.json"
     now = datetime(2026, 5, 16, tzinfo=timezone.utc)
