@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import re
 import time
 from enum import StrEnum
 from typing import Any, Callable, Literal
@@ -23,6 +24,7 @@ except Exception:  # pragma: no cover - deployed flat-module fallback
 class FlyerIntentMode(StrEnum):
     OFF = "off"
     SHADOW = "shadow"
+    ACTIVE = "active"
     UNSUPPORTED_ACTIVE_MODE = "unsupported_active_mode"
 
 
@@ -166,13 +168,18 @@ def mode_from_value(value: str | None) -> FlyerIntentMode:
     normalized = str(value or "").strip().lower()
     if normalized == "off":
         return FlyerIntentMode.OFF
+    if normalized == "active":
+        return FlyerIntentMode.ACTIVE
     if normalized in {"", "shadow"}:
         return FlyerIntentMode.SHADOW
     return FlyerIntentMode.UNSUPPORTED_ACTIVE_MODE
 
 
-def classifier_setting_from_env(value: str | None) -> Literal["off", "shadow"]:
-    return "shadow" if str(value or "").strip().lower() == "shadow" else "off"
+def classifier_setting_from_env(value: str | None) -> Literal["off", "shadow", "active"]:
+    normalized = str(value or "").strip().lower()
+    if normalized == "active":
+        return "active"
+    return "shadow" if normalized == "shadow" else "off"
 
 
 def parse_classifier_payload(payload: Any) -> FlyerIntentDecision:
@@ -264,6 +271,75 @@ def validate_flyer_intent_decision(
         would_mutate=would_mutate,
         risk_scope=context.risk_scope,
     )
+
+
+def deterministic_baseline_decision(request: FlyerClassifierRequest) -> FlyerIntentDecision:
+    """Return a local semantic classification when no Hermes classifier exists.
+
+    This is intentionally conservative. It can identify account/billing/status
+    intents for deterministic handlers, but it does not authorize mutation by
+    itself; the action registry and account/payment state machine still decide.
+    """
+    text = " ".join((request.text or "").split())
+    lower = text.lower()
+    try:
+        from agents.flyer.action_registry import normalize_account_command_text
+    except Exception:  # pragma: no cover - deployed flat-module fallback
+        try:
+            from flyer_action_registry import normalize_account_command_text  # type: ignore
+        except Exception:
+            normalize_account_command_text = None  # type: ignore
+
+    if normalize_account_command_text is not None and normalize_account_command_text(text):
+        return FlyerIntentDecision(
+            decision_source="deterministic_baseline",
+            intent="account_update",
+            action="account_update",
+            confidence=0.9,
+            reason="semantic account or billing command matched action registry",
+        )
+    if re.search(r"\b(?:payment|checkout|invoice|card|refund|stripe|razorpay|billing)\b", lower):
+        return FlyerIntentDecision(
+            decision_source="deterministic_baseline",
+            intent="account_update",
+            action="clarify",
+            confidence=0.82,
+            needs_clarification=True,
+            reason="regulated billing language without executable command",
+        )
+    if lower.strip(" .!,:;") in {"status", "where is my flyer", "is my flyer ready"}:
+        return FlyerIntentDecision(
+            decision_source="deterministic_baseline",
+            intent="status_check",
+            action="route_current",
+            confidence=0.82,
+            reason="status phrasing",
+        )
+    if lower.strip(" .!,:;") == "approve":
+        return FlyerIntentDecision(
+            decision_source="deterministic_baseline",
+            intent="approve_final",
+            action="approve_project",
+            confidence=0.92,
+            reason="exact approval token",
+        )
+    if re.search(r"\b(?:revise|change|replace|fix|edit|update)\b.*\b(?:flyer|poster|banner|image|logo|text|price)\b", lower):
+        return FlyerIntentDecision(
+            decision_source="deterministic_baseline",
+            intent="revise_flyer",
+            action="revise_project",
+            confidence=0.78,
+            reason="revision language",
+        )
+    if re.search(r"\b(?:create|make|design|generate|need|want)\b.*\b(?:flyer|flier|poster|banner|marketing material)\b", lower):
+        return FlyerIntentDecision(
+            decision_source="deterministic_baseline",
+            intent="new_flyer",
+            action="create_project",
+            confidence=0.8,
+            reason="new flyer language",
+        )
+    return FlyerIntentDecision(decision_source="deterministic_baseline", intent="unknown", action="observe", confidence=0.0)
 
 
 def normalize_actual_action(actual_route: str, branch_return_reason: str = "") -> ActualAction:

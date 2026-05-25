@@ -690,7 +690,7 @@ def finalize_flyer_intent_shadow(
     classifier_error_kind = ""
     classifier_error_detail = ""
     classifier_setting = flyer_intent.classifier_setting_from_env(os.environ.get("FLYER_HERMES_INTENT_CLASSIFIER"))
-    if classifier_setting == "shadow":
+    if classifier_setting in {"shadow", "active"}:
         if not route_events:
             classifier_status = "skipped_passthrough" if candidate else "skipped_not_candidate"
         else:
@@ -700,22 +700,33 @@ def finalize_flyer_intent_shadow(
                 classifier = None
                 classifier_status = "error"
                 classifier_error_kind = type(exc).__name__
-            if classifier is None:
+            request = flyer_intent.FlyerClassifierRequest(
+                text=str(context.get("text") or ""),
+                has_media=bool(context.get("has_media")),
+                actual_route=actual_route,
+                actual_action=actual_action,
+                route_sequence=[str(event.get("reason") or "") for event in route_events],
+                branch_return_reason=branch_reason,
+                customer_status=str(context.get("customer_status") or ""),
+                project_status=project_status,
+                intake_status=str(context.get("intake_status") or ""),
+                risk_scope=risk_scope,
+            )
+            if classifier is None and classifier_setting == "active":
+                decision = flyer_intent.deterministic_baseline_decision(request)
+                validation = flyer_intent.validate_flyer_intent_decision(
+                    decision,
+                    flyer_intent.FlyerIntentContext(
+                        mode=flyer_intent.mode_from_value(str(context.get("requested_mode") or "active")),
+                        raw_request=str(context.get("text") or ""),
+                        risk_scope=risk_scope,
+                    ),
+                )
+                classifier_status = "success"
+            elif classifier is None:
                 if classifier_status != "error":
                     classifier_status = "skipped_no_gateway"
             else:
-                request = flyer_intent.FlyerClassifierRequest(
-                    text=str(context.get("text") or ""),
-                    has_media=bool(context.get("has_media")),
-                    actual_route=actual_route,
-                    actual_action=actual_action,
-                    route_sequence=[str(event.get("reason") or "") for event in route_events],
-                    branch_return_reason=branch_reason,
-                    customer_status=str(context.get("customer_status") or ""),
-                    project_status=project_status,
-                    intake_status=str(context.get("intake_status") or ""),
-                    risk_scope=risk_scope,
-                )
                 audit_kwargs = dict(
                     mode=mode,
                     message_id_hash=str(context.get("message_id_hash") or ""),

@@ -24,6 +24,7 @@ from agents.flyer.intent import (  # noqa: E402
     FlyerIntentMode,
     build_training_example,
     classifier_setting_from_env,
+    deterministic_baseline_decision,
     mode_from_value,
     normalize_actual_action,
     parse_classifier_payload,
@@ -111,8 +112,8 @@ def test_validator_rejects_source_edit_automation_in_pr1():
     assert "source_edit_automation_not_enabled" in result.reasons
 
 
-@pytest.mark.parametrize("value", ["active", "low_risk_active", "nonsense"])
-def test_active_modes_are_mechanically_inert_for_pr1(value):
+@pytest.mark.parametrize("value", ["low_risk_active", "nonsense"])
+def test_unsupported_active_modes_are_mechanically_inert(value):
     mode = mode_from_value(value)
     assert mode == FlyerIntentMode.UNSUPPORTED_ACTIVE_MODE
 
@@ -175,9 +176,25 @@ def test_classifier_payload_parser_marks_hermes_gateway_source():
 
 def test_classifier_setting_only_enables_shadow():
     assert classifier_setting_from_env("shadow") == "shadow"
+    assert classifier_setting_from_env("active") == "active"
     assert classifier_setting_from_env("off") == "off"
-    assert classifier_setting_from_env("active") == "off"
     assert classifier_setting_from_env("") == "off"
+
+
+def test_active_mode_is_supported_but_still_registry_gated():
+    assert mode_from_value("active") == FlyerIntentMode.ACTIVE
+    request = FlyerClassifierRequest(text="I want the 60 flyers per month plan")
+
+    decision = deterministic_baseline_decision(request)
+    validation = validate_flyer_intent_decision(
+        decision,
+        FlyerIntentContext(mode=FlyerIntentMode.ACTIVE, raw_request=request.text, risk_scope="active_customer"),
+    )
+
+    assert decision.decision_source == "deterministic_baseline"
+    assert decision.intent == "account_update"
+    assert decision.action == "account_update"
+    assert validation.ok is True
 
 
 def test_classifier_shadow_reports_invalid_and_timeout_without_throwing():
@@ -354,6 +371,38 @@ def test_shadow_context_uses_injected_gateway_classifier_after_route(monkeypatch
     assert emitted[0]["classifier_status"] == "success"
     assert emitted[0]["decision"].decision_source == "hermes_gateway_future"
     assert emitted[0]["validation"].ok is True
+
+
+def test_active_context_uses_deterministic_baseline_without_gateway(monkeypatch):
+    actions = _load_actions()
+    emitted: list[dict] = []
+    monkeypatch.setenv("FLYER_HERMES_INTENT_MODE", "active")
+    monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER", "active")
+    monkeypatch.setattr(actions, "audit_flyer_hermes_intent_decision", lambda **kw: emitted.append(kw))
+
+    token = actions.begin_flyer_intent_shadow(
+        text="I want the 60 flyers per month plan",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="wamid.plan",
+        has_media=False,
+    )
+    try:
+        actions.record_flyer_intent_route_event(
+            reason="flyer_account_command",
+            subprocess_rc=0,
+            detail="customer_id=CUST0001; status=trial",
+        )
+        actions.finalize_flyer_intent_shadow(
+            hook_result={"action": "skip", "reason": "cf-router flyer account command"}
+        )
+    finally:
+        actions.reset_flyer_intent_shadow(token)
+
+    assert emitted
+    assert emitted[0]["mode"] == "active"
+    assert emitted[0]["classifier_status"] == "success"
+    assert emitted[0]["decision"].decision_source == "deterministic_baseline"
+    assert emitted[0]["decision"].intent == "account_update"
 
 
 def test_shadow_context_classifier_runs_after_finalizer_returns(monkeypatch):

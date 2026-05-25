@@ -11,6 +11,11 @@ from typing import Optional
 from schemas import E164Phone, FlyerGuestOrder, FlyerGuestOrderStore
 
 try:
+    from agents.flyer.payment_state import activation_event_state
+except ModuleNotFoundError:
+    from flyer_payment_state import activation_event_state  # type: ignore
+
+try:
     if os.name == "nt":
         raise ModuleNotFoundError("use simple atomic write fallback on Windows")
     from safe_io import atomic_write_text  # type: ignore
@@ -121,6 +126,16 @@ def activate_guest_order(
     payment_reference = " ".join((payment_reference or "").split())
     if not payment_reference:
         return GuestOrderResult(False, True, "", order.order_id, order.status, detail="payment_reference_required")
+    event_state = activation_event_state(
+        provider=provider,
+        payment_reference=payment_reference,
+        amount_cents=amount_cents,
+        currency=check_currency,
+        expected_amount_cents=expected_amount,
+        expected_currency=expected_currency,
+    )
+    if event_state != "payment_confirmed":
+        return GuestOrderResult(False, True, "", order.order_id, order.status, detail="payment_not_confirmed")
     if any(
         other.payment_reference == payment_reference
         and other.payment_provider == provider
@@ -145,6 +160,7 @@ def activate_guest_order(
     updated = order.model_copy(update={
         "status": "paid",
         "payment_provider": provider,
+        "payment_state": "payment_confirmed",
         "payment_reference": payment_reference,
         "payment_amount_cents": amount_cents if amount_cents is not None else expected_amount,
         "paid_at": now,

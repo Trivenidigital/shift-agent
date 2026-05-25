@@ -438,6 +438,80 @@ def test_natural_upgrade_to_growth_uses_guarded_plan_change_flow(tmp_path):
     confirmed_store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
     assert confirmed_store.customers[0].plan_id == "trial"
     assert confirmed_store.customers[0].pending_plan_id == "growth"
+    assert confirmed_store.customers[0].pending_plan_payment_state == "checkout_missing"
+    assert confirmed_store.customers[0].pending_plan_amount_cents == 6999
+
+
+def test_semantic_sixty_flyers_plan_phrase_uses_registry_flow(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 25, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    customer = store.new_customer(
+        business_name="Lakshmi's Kitchen",
+        business_address="90 Brybar Dr, St Johns, FL",
+        public_phone="+17329837841",
+        business_whatsapp_number="+17329837841",
+        authorized_request_number="+17329837841",
+        business_category="restaurant",
+        preferred_language="en",
+        plan_id="trial",
+        now=now,
+        primary_chat_id="17329837841@s.whatsapp.net",
+        onboarded_by_phone="+17329837841",
+    ).model_copy(update={"status": "trial"})
+    store.customers.append(customer)
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    result = handle_account_command(
+        state_path=state_path,
+        sender_phone="+17329837841",
+        sender_role="customer",
+        chat_id="17329837841@s.whatsapp.net",
+        text="I want the 60 flyers per month plan",
+        now=now,
+    )
+
+    assert result.ok is True
+    assert "Please reply CONFIRM UPDATE" in result.reply_text
+    updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8")).customers[0]
+    assert updated.pending_account_command == "change_plan"
+    assert updated.pending_account_value == "Growth"
+
+
+def test_semantic_business_whatsapp_update_is_confirmation_gated(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 25, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    customer = store.new_customer(
+        business_name="Lakshmi's Kitchen",
+        business_address="90 Brybar Dr, St Johns, FL",
+        public_phone="+17329837841",
+        business_whatsapp_number="+17329837841",
+        authorized_request_number="+17329837841",
+        business_category="restaurant",
+        preferred_language="en",
+        plan_id="trial",
+        now=now,
+        primary_chat_id="17329837841@s.whatsapp.net",
+        onboarded_by_phone="+17329837841",
+    ).model_copy(update={"status": "trial"})
+    store.customers.append(customer)
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    result = handle_account_command(
+        state_path=state_path,
+        sender_phone="+17329837841",
+        sender_role="customer",
+        chat_id="17329837841@s.whatsapp.net",
+        text="Please change the flyer request number to +1 904 555 0199",
+        now=now,
+    )
+
+    assert result.ok is True
+    assert "Please reply CONFIRM UPDATE" in result.reply_text
+    updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8")).customers[0]
+    assert updated.business_whatsapp_number == "+17329837841"
+    assert updated.pending_account_command == "update_whatsapp"
 
 
 def test_primary_lid_chat_can_change_plan_when_sender_phone_missing(tmp_path):

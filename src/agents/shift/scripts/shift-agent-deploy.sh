@@ -289,6 +289,16 @@ install_artifacts() {
     else
         rm -f /opt/shift-agent/flyer_intent_training.py
     fi
+    if [ -f src/agents/flyer/action_registry.py ]; then
+        install -m 644 src/agents/flyer/action_registry.py /opt/shift-agent/flyer_action_registry.py
+    else
+        rm -f /opt/shift-agent/flyer_action_registry.py
+    fi
+    if [ -f src/agents/flyer/payment_state.py ]; then
+        install -m 644 src/agents/flyer/payment_state.py /opt/shift-agent/flyer_payment_state.py
+    else
+        rm -f /opt/shift-agent/flyer_payment_state.py
+    fi
     if [ -f src/agents/flyer/account.py ]; then
         install -m 644 src/agents/flyer/account.py /opt/shift-agent/flyer_account.py
     else

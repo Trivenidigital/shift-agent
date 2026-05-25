@@ -24,6 +24,21 @@ from schemas import (
 )
 
 try:
+    from agents.flyer.action_registry import (
+        action_requires_confirmation,
+        get_account_action_definition,
+        normalize_account_command_text,
+    )
+    from agents.flyer.payment_state import activation_event_state, build_plan_payment_request
+except ModuleNotFoundError:
+    from flyer_action_registry import (  # type: ignore
+        action_requires_confirmation,
+        get_account_action_definition,
+        normalize_account_command_text,
+    )
+    from flyer_payment_state import activation_event_state, build_plan_payment_request  # type: ignore
+
+try:
     from safe_io import atomic_write_text  # type: ignore
 except ModuleNotFoundError:
     def atomic_write_text(path: Path, text: str) -> None:  # type: ignore[no-redef]
@@ -108,7 +123,11 @@ def write_customer_store(path: Path, store: FlyerCustomerStore) -> None:
 
 def is_account_command(text: str) -> bool:
     body = _visible_message_text(text)
-    return bool(ACCOUNT_COMMAND_RE.search(body) or _parse_natural_plan_change(body))
+    return bool(
+        ACCOUNT_COMMAND_RE.search(body)
+        or _parse_natural_plan_change(body)
+        or normalize_account_command_text(body)
+    )
 
 
 def handle_account_command(
@@ -131,6 +150,10 @@ def handle_account_command(
     if customer is None:
         return AccountResult(False, False, "", detail="customer_not_found")
     body = " ".join(_visible_message_text(text).split())
+    semantic_match = normalize_account_command_text(body, tiers)
+    direct_plan_command = body.lower().startswith(("change plan", "upgrade plan"))
+    if semantic_match and not direct_plan_command:
+        body = semantic_match.command_text
     lower = body.lower()
     preference_mode: Optional[str] = None
     if STARTER_PROMPT_OFF_RE.search(lower):
@@ -205,6 +228,9 @@ def handle_account_command(
     command, value = _parse_mutating_command(body)
     if not command:
         return AccountResult(False, False, "", customer.customer_id, customer.status, detail="not_account_command")
+    action = get_account_action_definition(command)
+    if action is None or action.effect == "read":
+        return AccountResult(False, False, "", customer.customer_id, customer.status, detail="unsupported_account_action")
     if not customer.is_account_admin(sender_phone, chat_id, sender_role):
         _audit_account_update(
             audit_log_path,
@@ -231,7 +257,7 @@ def handle_account_command(
             customer.status,
         )
 
-    if command in {"remove_authorized", "update_whatsapp", "change_plan"}:
+    if action_requires_confirmation(command):
         requested_by = _phone_or_none(sender_phone)
         customer = customer.model_copy(update={
             "pending_account_command": command,
@@ -394,6 +420,16 @@ def activate_customer(
     expected_cents = tier.price_cents()
     if provider != "manual" and amount_cents != expected_cents:
         return AccountResult(False, True, "", customer.customer_id, customer.status, detail="amount_mismatch")
+    event_state = activation_event_state(
+        provider=provider,
+        payment_reference=payment_reference,
+        amount_cents=amount_cents,
+        currency=currency,
+        expected_amount_cents=expected_cents,
+        expected_currency=tier.currency,
+    )
+    if event_state != "payment_confirmed":
+        return AccountResult(False, True, "", customer.customer_id, customer.status, detail="payment_not_confirmed")
     period_start = now
     period_end = _add_one_month(period_start)
     update = {
@@ -427,6 +463,9 @@ def activate_customer(
             "pending_plan_id": "",
             "pending_plan_checkout_url": "",
             "pending_plan_requested_at": None,
+            "pending_plan_payment_state": "",
+            "pending_plan_amount_cents": None,
+            "pending_plan_currency": currency,
         })
     customer = customer.model_copy(update=update)
     _replace_customer(store, customer)
@@ -592,6 +631,9 @@ def _confirm_pending_update(**kwargs: object) -> AccountResult:
     chat_id: str = kwargs["chat_id"]  # type: ignore[assignment]
     if not customer.pending_account_command:
         return AccountResult(True, True, "Flyer Studio\n------------\nNo pending account update.", customer.customer_id, customer.status)
+    action = get_account_action_definition(customer.pending_account_command)
+    if action is None or not action.requires_confirmation:
+        return AccountResult(True, True, "Flyer Studio\n------------\nThat pending account update is no longer supported. Please send the request again.", customer.customer_id, customer.status)
     if not customer.is_account_admin(sender_phone, chat_id, sender_role):
         return AccountResult(True, True, "Flyer Studio\n------------\nOnly the business WhatsApp number or account owner can confirm this update.", customer.customer_id, customer.status)
     if customer.pending_account_requested_by and _phone_or_none(sender_phone) != customer.pending_account_requested_by:
@@ -696,10 +738,19 @@ def _apply_account_update(
     if command == "change_plan":
         plan_id = _parse_plan_choice(value, tiers)
         url = _checkout_url(payment_checkout_url_template, customer.customer_id, plan_id, chat_id)
+        payment = build_plan_payment_request(
+            plan_id=plan_id,
+            checkout_url=url,
+            provider=payment_provider,
+            tiers=tiers,
+        )
         return customer.model_copy(update={
             "pending_plan_id": plan_id,
             "pending_plan_checkout_url": url,
             "pending_plan_requested_at": now,
+            "pending_plan_payment_state": payment.state,
+            "pending_plan_amount_cents": payment.amount_cents,
+            "pending_plan_currency": payment.currency,
             "updated_at": now,
         }), _pending_plan_reply(plan_id, url, payment_provider), "plan_change_requested"
     raise ValueError(f"unsupported account command: {command}")

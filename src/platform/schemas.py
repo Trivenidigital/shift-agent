@@ -1076,6 +1076,7 @@ class FlyerGuestOrder(BaseModel):
     unit_price_cents: int = Field(default=400, ge=1)
     currency: str = Field(default="USD", min_length=3, max_length=3)
     payment_provider: Literal["manual", "stripe", "razorpay", "other"] = "manual"
+    payment_state: Literal["none", "checkout_missing", "checkout_ready", "payment_pending", "payment_confirmed", "activated"] = "payment_pending"
     payment_checkout_url: str = Field(default="", max_length=1000)
     payment_reference: str = Field(default="", max_length=200)
     payment_amount_cents: Optional[int] = Field(default=None, ge=0)
@@ -1137,6 +1138,9 @@ class FlyerCustomerProfile(BaseModel):
     pending_plan_id: str = Field(default="", max_length=40)
     pending_plan_checkout_url: str = Field(default="", max_length=1000)
     pending_plan_requested_at: Optional[datetime] = None
+    pending_plan_payment_state: Literal["", "checkout_missing", "checkout_ready", "payment_pending", "payment_confirmed"] = ""
+    pending_plan_amount_cents: Optional[int] = Field(default=None, ge=0)
+    pending_plan_currency: str = Field(default="USD", min_length=3, max_length=3)
     pending_account_command: str = Field(default="", max_length=80)
     pending_account_value: str = Field(default="", max_length=300)
     pending_account_requested_by: Optional[E164Phone] = None
@@ -1528,6 +1532,7 @@ class FlyerGuestOrderStore(BaseModel):
             unit_price_cents=unit_price_cents,
             currency=currency,
             payment_provider=provider,  # type: ignore[arg-type]
+            payment_state="payment_pending" if checkout_url else "checkout_missing",
             payment_checkout_url=checkout_url,
             original_message_id=message_id,
             created_at=now,
