@@ -281,7 +281,11 @@ def summarize_flyer_evaluation_report(path: Path | None) -> list[str]:
             return f"; active={active}; historical_or_audit={old}"
         return ""
 
-    stale = [item for item in incidents if item.get("type") == "manual_source_edit_stale"]
+    stale = [
+        item
+        for item in incidents
+        if item.get("type") in {"manual_source_edit_stale", "manual_review_stale"}
+    ]
     if stale:
         ages = [
             float(details.get("queued_age_minutes"))

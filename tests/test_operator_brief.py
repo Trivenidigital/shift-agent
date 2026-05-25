@@ -431,7 +431,7 @@ def test_operator_brief_groups_flyer_self_evaluation_and_redacts_sensitive_lines
         json.dumps(
             {
                 "status": "red",
-                "summary": {"incident_count": 5, "high_or_critical_count": 4},
+                "summary": {"incident_count": 6, "high_or_critical_count": 5},
                 "incidents": [
                     {
                         "type": "manual_source_edit_stale",
@@ -439,6 +439,13 @@ def test_operator_brief_groups_flyer_self_evaluation_and_redacts_sensitive_lines
                         "project_id": "F9101",
                         "suggested_action": "Burn down queue. OPENAI_API_KEY=sk-leaky +17329837841",
                         "evidence_details": {"queued_age_minutes": 91.5, "active_customer_risk": True},
+                    },
+                    {
+                        "type": "manual_review_stale",
+                        "severity": "high",
+                        "project_id": "F9106",
+                        "suggested_action": "Resolve stale visual QA queue row.",
+                        "evidence_details": {"queued_age_minutes": 55.0, "active_customer_risk": True},
                     },
                     {
                         "type": "source_contract_missing",
@@ -487,8 +494,8 @@ def test_operator_brief_groups_flyer_self_evaluation_and_redacts_sensitive_lines
     )
     markdown = module.render_markdown(brief)
 
-    assert "Manual queue: stale_source_edits=1; oldest=91.5min" in markdown
-    assert "Customer risk: active=2; historical_or_audit=1" in markdown
+    assert "Manual queue: stale_source_edits=2; oldest=91.5min" in markdown
+    assert "Customer risk: active=3; historical_or_audit=1" in markdown
     assert "Source contracts: missing=1; locked_fact_gaps=1" in markdown
     assert "QA gaps: missing=0; fact_gaps=1; forbidden_text_hits=0" in markdown
     assert "Customer waiting: repeated_checkins=1" in markdown

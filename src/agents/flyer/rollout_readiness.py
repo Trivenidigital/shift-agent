@@ -237,15 +237,19 @@ def compute_rollout_verdict(
             _bump_red("active customer-copy internal leak in outbound text")
         elif kind == "duplicate_initial_ack" and active:
             _bump_red("active duplicate initial acknowledgement to same customer")
-        elif kind == "manual_source_edit_stale":
+        elif kind in {"manual_source_edit_stale", "manual_review_stale"}:
             age = details.get("queued_age_minutes")
             if isinstance(age, (int, float)) and age >= manual_stale_red_minutes:
+                queue_name = "manual source-edit queue" if kind == "manual_source_edit_stale" else "manual review queue"
                 _bump_red(
-                    f"manual source-edit queue stale >={manual_stale_red_minutes}min "
+                    f"{queue_name} stale >={manual_stale_red_minutes}min "
                     f"(age={float(age):.1f}min)"
                 )
             else:
-                _bump_yellow("manual source-edit queue rows present")
+                if kind == "manual_source_edit_stale":
+                    _bump_yellow("manual source-edit queue rows present")
+                else:
+                    _bump_yellow("manual review queue rows present")
         elif active:
             _bump_yellow(f"active customer-risk incident: {kind}")
 
@@ -351,7 +355,9 @@ def build_rollout_section(
         "cockpit_status": fixture.cockpit_status if fixture else "unknown",
         "source_edit_posture": posture,
         "source_edit_posture_reason": posture_reason,
-        "stale_manual_queue_incidents": _count("manual_source_edit_stale"),
+        "stale_manual_queue_incidents": (
+            _count("manual_source_edit_stale") + _count("manual_review_stale")
+        ),
         "active_customer_risk_incidents": sum(
             1
             for it in incidents
