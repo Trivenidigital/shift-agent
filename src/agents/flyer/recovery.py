@@ -108,8 +108,10 @@ def _canonical_detail(detail: str) -> str:
     body = detail or ""
     for marker in [
         "concept_generation_failed",
+        "edit_generation_failed",
         "revision_regeneration_failed",
         "regeneration_failed",
+        "visual_qa_failed",
         "ack_error",
         "source edit provider is not configured",
         "source edit reference",
@@ -169,7 +171,16 @@ def classify_decision(row: dict, projects: dict[str, dict]) -> RecoverySignal | 
         return None
     lower = detail.lower()
     failure_class = ""
-    if any(marker in lower for marker in ["concept_generation_failed", "revision_regeneration_failed", "regeneration_failed"]):
+    if any(
+        marker in lower
+        for marker in [
+            "concept_generation_failed",
+            "edit_generation_failed",
+            "revision_regeneration_failed",
+            "regeneration_failed",
+            "visual_qa_failed",
+        ]
+    ):
         failure_class = "concept_generation_failed"
     elif "source edit provider" in lower or "source edit reference" in lower:
         failure_class = "provider_unavailable"

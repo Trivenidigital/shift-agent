@@ -89,6 +89,23 @@ def test_empty_ack_error_does_not_create_bridge_incident():
     assert recovery.classify_decision(row, {}) is None
 
 
+def test_edit_generation_failure_takes_precedence_over_trailing_ack_connect_failure():
+    row = _row(
+        "project_id=F0097; sender_role=unknown; ack_message_id=3EB0B09A33D1BF7008E7CC; "
+        "ack_error=edit_generation_failed: exit=-15 ; access_held_for_manual_review=true; "
+        "ack_error=connect_failed: URLError: [Errno 111] Connection refused",
+        reason="flyer_reference_exact_edit_queued",
+        chat_id="74290284261595@lid",
+    )
+    row["subprocess_rc"] = 3
+
+    signal = recovery.classify_decision(row, {})
+
+    assert signal is not None
+    assert signal.failure_class == "concept_generation_failed"
+    assert signal.project_id == "F0097"
+
+
 def test_customer_copy_lint_blocks_internal_terms_and_project_ids():
     bad = recovery.lint_recovery_copy("Project F0065 is in the manual queue", "manual_queue_stale", False)
 
