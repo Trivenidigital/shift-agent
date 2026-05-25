@@ -213,6 +213,9 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
             account_result = _try_flyer_account_intercept(text, chat_id, event)
             if account_result is not None:
                 return account_result
+            regulated_account_result = _try_flyer_regulated_account_guard(text, chat_id, event)
+            if regulated_account_result is not None:
+                return regulated_account_result
             sample_prompt_result = _try_flyer_sample_prompt_request_intercept(text, chat_id, event, media_path)
             if sample_prompt_result is not None:
                 return sample_prompt_result
@@ -1736,6 +1739,44 @@ def _try_flyer_account_intercept(text: str, chat_id: str, event: Any) -> Optiona
         ),
     )
     return {"action": "skip", "reason": "cf-router flyer account command"}
+
+
+def _try_flyer_regulated_account_guard(text: str, chat_id: str, event: Any) -> Optional[dict]:
+    """Fail closed for account/billing language before generic Hermes fallback."""
+    if not actions.is_flyer_regulated_account_intent(text):
+        return None
+    message_id = _extract_message_id(event, chat_id, text)
+    phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
+    customer = actions.find_flyer_customer_by_sender(phone, chat_id)
+    if customer is None:
+        reply = (
+            "Flyer Studio\n"
+            "------------\n"
+            "I can help with Flyer Studio account or billing requests after this number is set up.\n\n"
+            "No account or payment change has been made."
+        )
+    else:
+        business_name = str(customer.get("business_name") or "this business").strip() or "this business"
+        reply = (
+            "Flyer Studio\n"
+            "------------\n"
+            f"I understand this may be an account or billing request for {business_name}.\n\n"
+            "No plan, payment, or account change has been made.\n\n"
+            "To see plans, reply UPGRADE PLAN.\n"
+            "To request a plan change, reply CHANGE PLAN STARTER, CHANGE PLAN GROWTH, or CHANGE PLAN UNLIMITED. "
+            "I will ask for confirmation and payment before any plan changes."
+        )
+    ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+    actions.audit_intercepted(
+        reason="flyer_regulated_account_guard",
+        chat_id=chat_id,
+        subprocess_rc=0 if ack_ok else 3,
+        detail=(
+            f"message_id={message_id}; customer_id={customer.get('customer_id') if customer else ''}; "
+            f"sender_role={role}; ack_message_id={mid}; ack_error={err[:300]}"
+        ),
+    )
+    return {"action": "skip", "reason": "cf-router flyer regulated account guard"}
 
 
 def _try_flyer_campaign_cta_intercept(text: str, chat_id: str, event: Any) -> Optional[dict]:

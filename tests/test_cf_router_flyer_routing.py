@@ -1190,6 +1190,8 @@ def test_sample_prompt_preference_text_is_account_command():
 
     assert actions.is_flyer_account_command("update business name to Lakshmi's Kitchen")
     assert actions.is_flyer_account_command("UPGRADE PLAN - show Flyer Studio plans")
+    assert actions.is_flyer_account_command("Upgrade to Growth")
+    assert actions.is_flyer_account_command("I want the 60 flyers/month plan")
     assert actions.is_flyer_account_command("don't show sample prompts")
     assert actions.is_flyer_account_command("show sample prompts again")
     assert actions.is_flyer_account_command("please don't show sample prompts")
@@ -1201,6 +1203,9 @@ def test_sample_prompt_preference_text_is_account_command():
     assert actions.is_flyer_starter_prompt_preference_command("please don't show sample prompts")
     assert actions.is_flyer_starter_prompt_preference_command("hello, show me sample prompts again")
     assert not actions.is_flyer_starter_prompt_preference_command("status")
+    assert actions.is_flyer_regulated_account_intent("Did my payment go through?")
+    assert actions.is_flyer_regulated_account_intent("I need to update business WhatsApp number")
+    assert not actions.is_flyer_regulated_account_intent("Create a thali flyer with delivery/payment badges")
 
 
 def test_upgrade_plan_cta_for_registered_customer_shows_plans_not_intake(monkeypatch):
@@ -1248,6 +1253,74 @@ def test_upgrade_plan_cta_for_registered_customer_shows_plans_not_intake(monkeyp
     assert "$69.99" in sent["text"]
     assert "$199" in sent["text"]
     assert "What should this flyer promote" not in sent["text"]
+
+
+def test_natural_upgrade_to_growth_routes_to_account_handler(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    sent = {}
+    account_calls = []
+    customer = {
+        "customer_id": "CUST0001",
+        "business_name": "Lakshmi's Kitchen",
+        "status": "trial",
+        "plan_id": "trial",
+    }
+
+    monkeypatch.setattr(actions, "is_flyer_enabled", lambda: True)
+    monkeypatch.setattr(actions, "flyer_campaign_cta_text", lambda _text: "")
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
+    monkeypatch.setattr(actions, "trigger_flyer_account_command", lambda **kwargs: account_calls.append(kwargs) or (True, "ok", {
+        "handled": True,
+        "reply_text": "Flyer Studio\n------------\nPlease reply CONFIRM UPDATE to apply this account change.",
+        "customer_id": "CUST0001",
+        "status": "trial",
+    }))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "account-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+    monkeypatch.setattr(actions, "trigger_create_flyer_project", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("billing command must not create flyer")))
+
+    result = hooks.pre_gateway_dispatch(SimpleNamespace(
+        text="Upgrade to Growth",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="natural-upgrade-growth",
+    ))
+
+    assert result == {"action": "skip", "reason": "cf-router flyer account command"}
+    assert account_calls and account_calls[0]["text"] == "Upgrade to Growth"
+    assert "CONFIRM UPDATE" in sent["text"]
+    assert "processed your request" not in sent["text"].lower()
+
+
+def test_regulated_billing_language_is_guarded_before_generic_passthrough(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    sent = {}
+    audits = []
+    customer = {
+        "customer_id": "CUST0001",
+        "business_name": "Lakshmi's Kitchen",
+        "status": "trial",
+        "plan_id": "trial",
+    }
+
+    monkeypatch.setattr(actions, "is_flyer_enabled", lambda: True)
+    monkeypatch.setattr(actions, "flyer_campaign_cta_text", lambda _text: "")
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "guard-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
+    monkeypatch.setattr(actions, "trigger_create_flyer_project", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("billing guard must not create flyer")))
+
+    result = hooks.pre_gateway_dispatch(SimpleNamespace(
+        text="Did my payment go through?",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="payment-question",
+    ))
+
+    assert result == {"action": "skip", "reason": "cf-router flyer regulated account guard"}
+    assert "No plan, payment, or account change has been made." in sent["text"]
+    assert "processed your request" not in sent["text"].lower()
+    assert audits and audits[-1]["reason"] == "flyer_regulated_account_guard"
 
 
 def test_explicit_sample_prompt_request_sends_starter_ideas(monkeypatch):
