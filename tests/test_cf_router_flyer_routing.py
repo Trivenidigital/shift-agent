@@ -1189,6 +1189,7 @@ def test_sample_prompt_preference_text_is_account_command():
     actions = _load_actions()
 
     assert actions.is_flyer_account_command("update business name to Lakshmi's Kitchen")
+    assert actions.is_flyer_account_command("UPGRADE PLAN - show Flyer Studio plans")
     assert actions.is_flyer_account_command("don't show sample prompts")
     assert actions.is_flyer_account_command("show sample prompts again")
     assert actions.is_flyer_account_command("please don't show sample prompts")
@@ -1200,6 +1201,53 @@ def test_sample_prompt_preference_text_is_account_command():
     assert actions.is_flyer_starter_prompt_preference_command("please don't show sample prompts")
     assert actions.is_flyer_starter_prompt_preference_command("hello, show me sample prompts again")
     assert not actions.is_flyer_starter_prompt_preference_command("status")
+
+
+def test_upgrade_plan_cta_for_registered_customer_shows_plans_not_intake(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    sent = {}
+    customer = {
+        "customer_id": "CUST0001",
+        "business_name": "Lakshmi's Kitchen",
+        "business_category": "restaurant",
+        "status": "trial",
+        "plan_id": "trial",
+    }
+
+    monkeypatch.setattr(actions, "is_flyer_enabled", lambda: True)
+    monkeypatch.setattr(actions, "flyer_campaign_cta_text", lambda _text: "")
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
+    monkeypatch.setattr(actions, "trigger_flyer_account_command", lambda **_kwargs: (True, "ok", {
+        "handled": True,
+        "reply_text": (
+            "Flyer Studio\n------------\n"
+            "Plans for Lakshmi's Kitchen:\n"
+            "Starter - $49.99/month - 30 flyers/month\n"
+            "Growth - $69.99/month - 60 flyers/month\n"
+            "Unlimited - $199/month - unlimited flyers/month\n\n"
+            "Reply CHANGE PLAN STARTER, CHANGE PLAN GROWTH, or CHANGE PLAN UNLIMITED."
+        ),
+        "customer_id": "CUST0001",
+        "status": "trial",
+    }))
+    monkeypatch.setattr(actions, "trigger_flyer_intake", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("upgrade plan CTA must not start flyer intake")))
+    monkeypatch.setattr(actions, "trigger_create_flyer_project", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("upgrade plan CTA must not create a project")))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "plans-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+
+    result = hooks.pre_gateway_dispatch(SimpleNamespace(
+        text="UPGRADE PLAN - show Flyer Studio plans",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="upgrade-plan-click",
+    ))
+
+    assert result == {"action": "skip", "reason": "cf-router flyer account command"}
+    assert sent["chat_id"] == "17329837841@s.whatsapp.net"
+    assert "$49.99" in sent["text"]
+    assert "$69.99" in sent["text"]
+    assert "$199" in sent["text"]
+    assert "What should this flyer promote" not in sent["text"]
 
 
 def test_explicit_sample_prompt_request_sends_starter_ideas(monkeypatch):

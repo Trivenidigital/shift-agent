@@ -56,7 +56,7 @@ ACCOUNT_COMMAND_RE = re.compile(
     r"update business name|change business name|set business name|"
     r"update phone|update business phone|"
     r"update whatsapp|update business whatsapp|"
-    r"change plan|confirm update"
+    r"change plan|upgrade plan|show flyer studio plans|confirm update"
     r")\b",
     re.IGNORECASE,
 )
@@ -156,6 +156,8 @@ def handle_account_command(
         return AccountResult(True, True, _status_reply(customer, tiers), customer.customer_id, customer.status)
     if lower == "help":
         return AccountResult(True, True, _help_reply(customer), customer.customer_id, customer.status)
+    if _is_plan_menu_request(lower):
+        return AccountResult(True, True, _plan_menu_reply(customer, tiers), customer.customer_id, customer.status)
     if lower == "confirm update":
         return _confirm_pending_update(
             store=store,
@@ -523,6 +525,16 @@ def _parse_mutating_command(text: str) -> tuple[str, str]:
     return "", ""
 
 
+def _is_plan_menu_request(lower: str) -> bool:
+    cleaned = lower.strip(" .!,:;")
+    return (
+        cleaned == "upgrade plan"
+        or cleaned.startswith("upgrade plan ")
+        or cleaned.startswith("upgrade plan -")
+        or cleaned == "show flyer studio plans"
+    )
+
+
 def _strip_account_value_prefix(value: str) -> str:
     return re.sub(r"^(?:to|as|is|:|-)\s+", "", value.strip(), flags=re.IGNORECASE).strip()
 
@@ -678,6 +690,23 @@ def _help_reply(customer: FlyerCustomerProfile) -> str:
         "Send a flyer request, STATUS, or HELP. "
         f"Account admins can keep up to {FLYER_AUTHORIZED_REQUESTER_LIMIT} authorized requester numbers, "
         "update phone details, or request a plan change."
+    )
+
+
+def _plan_menu_reply(customer: FlyerCustomerProfile, tiers: list[FlyerPlanTier]) -> str:
+    paid_tiers = [tier for tier in tiers if tier.plan_id != "trial"]
+    lines = []
+    for tier in paid_tiers:
+        price = f"{tier.monthly_price_usd:.2f}".rstrip("0").rstrip(".")
+        quota = "unlimited flyers/month" if tier.included_flyers is None else f"{tier.included_flyers} flyers/month"
+        lines.append(f"{tier.label} - ${price}/month - {quota}")
+    commands = ", ".join(f"CHANGE PLAN {tier.plan_id.upper()}" for tier in paid_tiers)
+    return (
+        "Flyer Studio\n------------\n"
+        f"Plans for {customer.business_name}:\n"
+        + "\n".join(lines)
+        + f"\n\nCurrent plan: {customer.plan_id}.\n"
+        + f"Reply {commands}."
     )
 
 
