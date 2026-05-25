@@ -371,6 +371,56 @@ def test_generate_source_edit_quality_failure_queues_visual_qa_failed(monkeypatc
     assert persisted["manual_review"]["reason_code"] == "visual_qa_failed"
 
 
+
+def test_generate_source_edit_fact_fit_failure_queues_visual_qa_failed(monkeypatch, tmp_path, capsys):
+    """A deterministic source-edit layout failure is not a provider timeout.
+
+    The source-preserving renderer raises this when the requested critical
+    text cannot be fitted without losing required facts. Retrying the provider
+    will not help, so autonomous repair and operator triage should see it as
+    visual/layout QA work.
+    """
+    module = _load_script(monkeypatch)
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    state_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    reference = asset_dir / "F0001-reference.png"
+    reference.write_bytes(b"fake image bytes")
+    project = _project_with_pending_reference(reference)
+    project["raw_request"] = "edit uploaded flyer/source artwork: add many required prices"
+    project["reference_extractions"][0]["provider"] = "openai"
+    project["reference_extractions"][0]["status"] = "ok"
+    project["reference_extractions"][0]["detail"] = "extracted"
+    state_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_sequence": 2,
+        "projects": [project],
+    }), encoding="utf-8")
+
+    def fake_render_source_edit(*_args, **_kwargs):
+        raise module.FlyerRenderError("critical text facts do not fit")
+
+    monkeypatch.setattr(module, "render_source_edit_preview", fake_render_source_edit)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts",
+        "--project-id", "F0001",
+        "--state-path", str(state_path),
+        "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+    ])
+
+    rc = module.main()
+    assert rc == 2
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["manual_review_reason_code"] == "visual_qa_failed"
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "manual_edit_required"
+    assert persisted["manual_review"]["reason_code"] == "visual_qa_failed"
+
 def test_generate_missing_required_facts_project_does_not_enter_source_edit_renderer(
     monkeypatch, tmp_path, capsys,
 ):

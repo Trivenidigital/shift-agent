@@ -87,8 +87,15 @@ _DRAFT_EARLY_STATUSES = {
 }
 
 
+_VISUAL_QA_ERROR_TOKENS = (
+    "quality check",
+    "failed quality",
+    "critical text facts do not fit",
+)
+
+
 def _draft_error_is_visual_qa(detail_lower: str) -> bool:
-    return "quality check" in detail_lower or "failed quality" in detail_lower
+    return any(tok in detail_lower for tok in _VISUAL_QA_ERROR_TOKENS)
 
 
 def _draft_error_retryable(detail_lower: str) -> bool:
@@ -294,7 +301,7 @@ def main() -> int:
                 # provider retries. Provider key / endpoint failures map to
                 # `source_edit_provider_unavailable`. Everything else falls to
                 # `provider_timeout` for transient network/5xx issues.
-                if "quality check" in lower or "failed quality" in lower:
+                if _draft_error_is_visual_qa(lower):
                     reason_code = "visual_qa_failed"
                 elif "openai" in lower or "openrouter" in lower or "api_key" in lower or "provider" in lower or "manual review" in lower:
                     reason_code = "source_edit_provider_unavailable"
