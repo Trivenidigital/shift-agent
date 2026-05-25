@@ -1331,3 +1331,17 @@ Review results:
   - [x] Add red regressions for `all you can eat @ $25.99`, `Update Prices of any biryani to $22.99`, `Where is the update flyer?`, and final visual-QA failure after `APPROVE`.
   - [x] Implement minimal code fixes and verify focused Flyer facts/workflow/visual-QA/router suite.
   - Review: focused regression tests first failed, then passed; broader focused suite `198 passed`.
+
+## Flyer Runtime Recovery/Delivery Fix - 2026-05-25T02:35:37Z
+
+- [x] Merged PR #213 source-edit preflight parity before follow-up work.
+- [x] Added regression coverage for successful source-edit queue rows not becoming recovery incidents.
+- [x] Persisted concept-preview media delivery metadata after WhatsApp bridge success.
+- [x] Verified focused recovery/delivery tests.
+- [ ] Run broader Flyer regression slice.
+- [ ] Triage stale manual queue without sending aged customer messages blindly.
+- [ ] Create/review/merge/deploy PR.
+
+### Review Notes
+
+Root cause from F0095: source-edit config was unset at runtime and recovery classified a successful manual-queue row as provider failure because it keyed on detail text without checking `subprocess_rc`. Follow-up code fix prevents new false incidents and records concept-preview delivery ids after media send.

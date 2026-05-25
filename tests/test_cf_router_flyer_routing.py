@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -1348,6 +1349,98 @@ def test_send_flyer_text_dedupes_identical_recent_reply(monkeypatch, tmp_path):
         ("15550001111@s.whatsapp.net", payment_prompt),
         ("15550001111@s.whatsapp.net", details_prompt),
     ]
+
+
+def test_send_flyer_concept_previews_persists_delivery_metadata(monkeypatch, tmp_path):
+    actions = _load_actions()
+    asset_path = tmp_path / "F0095-C1-preview.png"
+    asset_path.write_bytes(b"png")
+    state_path = tmp_path / "projects.json"
+    state_path.write_text(
+        """{
+  "schema_version": 1,
+  "next_sequence": 96,
+  "projects": [
+    {
+      "project_id": "F0095",
+      "status": "awaiting_final_approval",
+      "customer_phone": "+19045550104",
+      "version": 1,
+      "assets": [
+        {
+          "asset_id": "A0002",
+          "kind": "concept_preview",
+          "path": "%s",
+          "delivery_status": "pending",
+          "outbound_message_id": "",
+          "delivery_attempt_count": 0,
+          "delivery_error": ""
+        }
+      ],
+      "concepts": [
+        {
+          "concept_id": "C1",
+          "title": "Designer Approved",
+          "style_summary": "Operator-approved manual review asset",
+          "preview_asset_id": "A0002"
+        }
+      ]
+    }
+  ]
+}""" % str(asset_path).replace('\\', '/'),
+        encoding="utf-8",
+    )
+    sent_media = []
+    sent_text = []
+
+    class DummyLock:
+        def __init__(self, _path):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    def atomic_write_text(path, body):
+        Path(path).write_text(body, encoding="utf-8")
+
+    def bridge_send_media(chat_id, media_path, caption=""):
+        sent_media.append((chat_id, media_path, caption))
+        return True, "media-mid-1", "", "sent"
+
+    def bridge_post(chat_id, message):
+        sent_text.append((chat_id, message))
+        return True, "text-mid-1", "", "sent"
+
+    monkeypatch.setitem(sys.modules, "safe_io", SimpleNamespace(
+        FileLock=DummyLock,
+        atomic_write_text=atomic_write_text,
+        bridge_send_media=bridge_send_media,
+        bridge_post=bridge_post,
+    ))
+    monkeypatch.setitem(sys.modules, "flyer_render", SimpleNamespace(
+        validate_text_manifest_file=lambda *_a, **_kw: SimpleNamespace(ok=True, blockers=[]),
+    ))
+    monkeypatch.setitem(sys.modules, "flyer_visual_qa", SimpleNamespace(
+        validate_visual_qa_report=lambda *_a, **_kw: SimpleNamespace(ok=True, blockers=[]),
+    ))
+    monkeypatch.setattr(actions, "FLYER_PROJECTS_PATH", state_path)
+
+    ok, mids, err = actions.send_flyer_concept_previews("201975216009469@lid", "F0095")
+
+    assert (ok, mids, err) == (True, "media-mid-1,text-mid-1", "")
+    assert len(sent_media) == 1
+    assert len(sent_text) == 1
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    asset = persisted["projects"][0]["assets"][0]
+    assert asset["delivery_status"] == "sent"
+    assert asset["outbound_message_id"] == "media-mid-1"
+    assert asset["delivery_attempt_count"] == 1
+    assert asset["delivery_error"] == ""
+    assert asset["delivered_at"]
+    assert persisted["projects"][0]["updated_at"]
 
 
 def test_pre_gateway_dispatch_dedupes_replayed_inbound_before_sending(monkeypatch, tmp_path):
