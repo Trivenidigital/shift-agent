@@ -1075,8 +1075,10 @@ class FlyerGuestOrder(BaseModel):
     flyer_count_used: int = Field(default=0, ge=0, le=10)
     unit_price_cents: int = Field(default=400, ge=1)
     currency: str = Field(default="USD", min_length=3, max_length=3)
+    payment_provider: Literal["manual", "stripe", "razorpay", "other"] = "manual"
     payment_checkout_url: str = Field(default="", max_length=1000)
     payment_reference: str = Field(default="", max_length=200)
+    payment_amount_cents: Optional[int] = Field(default=None, ge=0)
     original_message_id: str = Field(min_length=1, max_length=200)
     reserved_project_id: str = Field(default="", max_length=40)
     created_at: datetime
@@ -1515,14 +1517,17 @@ class FlyerGuestOrderStore(BaseModel):
         now: datetime,
         unit_price_cents: int = 400,
         currency: str = "USD",
+        payment_provider: str = "manual",
         checkout_url: str = "",
     ) -> FlyerGuestOrder:
+        provider = payment_provider if payment_provider in {"manual", "stripe", "razorpay", "other"} else "manual"
         order = FlyerGuestOrder(
             order_id=self.next_order_id(),
             chat_id=chat_id,
             sender_phone=E164Phone.from_any(sender_phone, country_code="US"),
             unit_price_cents=unit_price_cents,
             currency=currency,
+            payment_provider=provider,  # type: ignore[arg-type]
             payment_checkout_url=checkout_url,
             original_message_id=message_id,
             created_at=now,
