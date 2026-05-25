@@ -1,14 +1,23 @@
 # Flyer24 Hackathon Latest Report
 
-Updated: 2026-05-25T01:36:11Z
+Updated: 2026-05-25T03:46:00Z
 
 ## Batch
-- Branch: `codex/flyer24-batch-preflight-parity-202605250210`
-- Scope: source-edit preflight fail-closed behavior + cf-router Flyer reason schema parity.
-- Risk: low-medium (Flyer routing policy + schema literal parity; no payment/account/quota mutation).
-- Hermes/MCP-first: Hermes continues to own ingress/routing/state/audit/delivery; this batch only hardens Flyer-local preflight policy and schema contract.
+- Branch: `codex/flyer24-batch-payment-activation-safety-202605250340`
+- Scope: guest-order payment activation contract hardening (provider-scoped idempotency/dedupe, amount+currency fail-closed checks, provider metadata persistence, CLI evidence wiring).
+- Risk: money-adjacent runtime behavior change.
+- Hermes/MCP-first: Hermes owns ingress/routing/state substrate; this batch is deterministic Flyer contract hardening only, with no direct Stripe/Razorpay API clients and no live payment mutations.
+
+## Open PR queue status (drain classification)
+- #216 - fix(flyer): harden guest-order payment activation contracts - **operator-review-required** (money-adjacent)
+- #212 - fix(flyer): expose billing checkout readiness in health panel - **blocked/dirty** (conflict with current main)
+- #211 - fix(flyer): harden guest payment activation safety - **superseded candidate** by #216 (same surface, clean-base reimplementation)
+- #187 - feat: add Flyer Studio concierge intake - **blocked/dirty**, broad feature, needs dedicated rebase review
+- #185 - test-repair-tarball-gate-harness-drift - **draft**
+- #181 - test(flyer): pin no-spend source-edit ownership bypass - **blocked/dirty**
 
 ## Running PR list
+- #216 - fix(flyer): harden guest-order payment activation contracts
 - #213 - fix(flyer): harden source-edit preflight fail-closed and reason parity
 - #212 - fix(flyer): expose billing checkout readiness in health panel
 - #211 - fix(flyer): harden guest payment activation safety
