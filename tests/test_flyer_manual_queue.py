@@ -139,6 +139,40 @@ def test_make_manual_review_rejects_invalid_reason_code():
         make_manual_review(reason_code="not_a_real_code")  # type: ignore[arg-type]
 
 
+def test_list_manual_queue_excludes_nonqueued_projects_with_old_failed_qa():
+    from agents.flyer.manual_queue import list_manual_queue
+
+    now = datetime(2026, 5, 20, tzinfo=timezone.utc)
+    delivered = _manual_project().model_copy(update={
+        "project_id": "F9200",
+        "status": "delivered",
+        "manual_review": FlyerManualReview(status="none"),
+        "qa_reports": [
+            FlyerVisualQAReport(
+                project_id="F9200",
+                asset_id="A0001",
+                artifact_path="/tmp/f9200.png",
+                artifact_sha256="0" * 64,
+                project_version=1,
+                output_format="concept_preview",
+                provider="sidecar",
+                qa_source="ocr_vision",
+                status="failed",
+                blockers=["old blocker"],
+                checked_at=now,
+            )
+        ],
+    })
+    awaiting = delivered.model_copy(update={
+        "project_id": "F9201",
+        "status": "awaiting_final_approval",
+    })
+
+    rows = list_manual_queue(FlyerProjectStore(projects=[delivered, awaiting]), now=now)
+
+    assert rows == []
+
+
 def test_list_manual_queue_includes_reason_code():
     from agents.flyer.manual_queue import list_manual_queue
 
