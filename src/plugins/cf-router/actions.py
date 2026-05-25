@@ -1311,6 +1311,25 @@ def is_flyer_campaign_cta(text: str) -> bool:
     return bool(flyer_campaign_cta_text(text))
 
 
+def is_flyer_legacy_trial_link_followup(text: str) -> bool:
+    """Return True for registered-customer replies caused by the old trial CTA.
+
+    Older final-package messages used a WhatsApp deep link with START FREE
+    TRIAL text even after the customer was already registered. When customers
+    quote or complain about that link, the message is no longer an exact CTA
+    reply, so route it to account-aware recovery instead of starter prompts.
+    """
+    body = " ".join(flyer_visible_message_text(text).split()).lower()
+    if "start free trial" not in body and "start free trail" not in body:
+        return False
+    if "flyer" not in body:
+        return False
+    return bool(re.search(
+        r"\b(?:already|free\s+tier|free\s+plan|clicked?|clicking|link|final\s+flyer|final\s+response)\b",
+        body,
+    ))
+
+
 def flyer_campaign_source(text: str) -> str:
     """Map a campaign CTA reply to the intake source."""
     body = flyer_campaign_cta_text(text).lower()
