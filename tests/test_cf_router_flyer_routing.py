@@ -833,6 +833,36 @@ def test_vague_flyer_start_enters_adaptive_intake_but_complete_request_does_not(
     assert not actions.is_vague_flyer_start("Create flyer using this attached sample", has_media=True)
 
 
+def test_business_scope_block_message_catches_different_business_request():
+    actions = _load_actions()
+    customer = {
+        "customer_id": "CUST0004",
+        "status": "trial",
+        "business_name": "Chloe hair studio",
+    }
+
+    reply = actions.flyer_business_scope_block_message(
+        customer,
+        "Create a flyer for india bazar. Include all indian groceries available and biryani available",
+    )
+    assert "set up for Chloe hair studio" in reply
+    assert "india bazar" in reply.lower()
+    assert "Create One Flyer - $4" in reply
+
+    assert actions.flyer_business_scope_block_message(
+        customer,
+        "Create a flyer for Chloe Studio. Include haircut offers and hair styling services",
+    ) == ""
+    assert actions.flyer_business_scope_block_message(
+        customer,
+        "Create a flyer for evening snacks. Include samosa, mirchi bajji, and tea",
+    ) == ""
+    assert actions.flyer_business_scope_block_message(
+        customer,
+        "Create a flyer for my salon. Include haircut and styling offers",
+    ) == ""
+
+
 def test_routing_decision_preview_reports_evening_snacks_bypass_read_only():
     actions = _load_actions()
     text = (
@@ -3006,6 +3036,47 @@ def test_evening_snacks_fresh_request_bypasses_old_active_project(monkeypatch):
         and "message_id=m-evening-snacks-2" in row.get("detail", "")
         for row in audits
     )
+
+
+def test_cross_business_request_does_not_become_active_project_revision(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    active_project = {
+        "project_id": "F0048",
+        "customer_phone": "+19803826497",
+        "status": "awaiting_final_approval",
+        "raw_request": "Create flyer for Chloe Hair Studio promoting men haircut $20 and perms $80.",
+        "fields": {
+            "event_or_business_name": "Chloe Hair Studio",
+            "venue_or_location": "11111 Gainsborough Ct, Fairfax, VA",
+            "contact_info": "+19803826497",
+        },
+        "concepts": [{"concept_id": "C1"}],
+        "revisions": [],
+    }
+    replies: list[str] = []
+    audits: list[dict] = []
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+19803826497", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {
+        "customer_id": "CUST0004",
+        "status": "trial",
+        "business_name": "Chloe hair studio",
+    })
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, reply: (replies.append(reply) or (True, "m-scope", "")))
+    monkeypatch.setattr(actions, "invoke_update_flyer_project", lambda *_args, **_kwargs: pytest.fail("cross-business request must not revise active project"))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
+
+    result = hooks._try_flyer_active_project_intercept(
+        "Create a flyer for india bazar. Include all indian groceries available and biryani available",
+        "74290284261595@lid",
+        {"message_id": "india-bazar-wrong-account"},
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer business scope blocked"}
+    assert replies and "set up for Chloe hair studio" in replies[0]
+    assert "Create One Flyer - $4" in replies[0]
+    assert any(row.get("reason") == "flyer_business_scope_blocked" for row in audits)
 
 
 @pytest.mark.parametrize(

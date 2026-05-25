@@ -576,6 +576,20 @@ def _try_flyer_primary_intercept(
         )
         return {"action": "skip", "reason": "cf-router flyer customer not active"}
 
+    scope_block = actions.flyer_business_scope_block_message(customer or {}, text)
+    if scope_block:
+        ack_ok, mid, err = actions.send_flyer_text(chat_id, scope_block)
+        actions.audit_intercepted(
+            reason="flyer_business_scope_blocked",
+            chat_id=chat_id,
+            subprocess_rc=0 if ack_ok else 3,
+            detail=(
+                f"customer_id={(customer or {}).get('customer_id') or ''}; sender_role={role}; "
+                f"ack_message_id={mid}; ack_error={err[:300]}"
+            ),
+        )
+        return {"action": "skip", "reason": "cf-router flyer business scope blocked"}
+
     active_project = None if force_new else actions.find_active_flyer_project_by_sender(phone, chat_id)
     if active_project is not None:
         project_id = str(active_project.get("project_id") or "")
@@ -2251,6 +2265,19 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
     status = str(active_project.get("status") or "")
     body = " ".join(actions.flyer_visible_message_text(text).split())
     lower = body.lower()
+    scope_block = actions.flyer_business_scope_block_message(customer or {}, body)
+    if scope_block:
+        ack_ok, mid, err = actions.send_flyer_text(chat_id, scope_block)
+        actions.audit_intercepted(
+            reason="flyer_business_scope_blocked",
+            chat_id=chat_id,
+            subprocess_rc=0 if ack_ok else 3,
+            detail=(
+                f"project_id={project_id}; status={status}; sender_role={role}; "
+                f"ack_message_id={mid}; ack_error={err[:300]}"
+            ),
+        )
+        return {"action": "skip", "reason": "cf-router flyer business scope blocked"}
     if actions.should_bypass_active_flyer_project_for_fresh_request(
         body,
         active_project,

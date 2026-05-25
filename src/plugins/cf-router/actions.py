@@ -2218,6 +2218,84 @@ _US_STATE_WORDS = {
 }
 
 
+_BUSINESS_SCOPE_TERMS = {
+    "academy", "bakery", "barber", "bazaar", "bazar", "cafe", "clinic",
+    "company", "dental", "grocery", "groceries", "hotel", "inc", "kitchen",
+    "llc", "market", "mart", "realty", "restaurant", "salon", "school",
+    "spa", "store", "studio", "supermarket", "temple",
+}
+
+
+def _normalize_business_scope(value: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", (value or "").lower())
+
+
+def _extract_requested_business_scope(raw_request: str) -> str:
+    text = " ".join(flyer_visible_message_text(raw_request).split())
+    if not text:
+        return ""
+    patterns = [
+        r"\b(?:create|make|generate|design|build|need)\s+(?:a\s+|an\s+)?(?:new\s+)?(?:flyer|flier|poster|banner|creative|graphic)\s+for\s+(.+?)(?=\s*(?:[.!?]|,?\s+\b(?:include|with|promoting|offering|featuring|advertising|announcing|about)\b|$))",
+        r"\b(?:flyer|flier|poster|banner|creative|graphic)\s+for\s+(.+?)(?=\s*(?:[.!?]|,?\s+\b(?:include|with|promoting|offering|featuring|advertising|announcing|about)\b|$))",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            label = re.sub(r"[*_`]+", "", match.group(1) or "")
+            label = re.sub(r"^(?:customer|business|client)\s+", "", label, flags=re.IGNORECASE)
+            return label.strip(" .,:;-'\"")
+    return ""
+
+
+def _looks_like_business_scope(label: str) -> bool:
+    tokens = _normalize_business_scope(label)
+    if len(tokens) < 2:
+        return False
+    generic_prefixes = {"my", "our", "the", "this", "that", "your"}
+    generic_nouns = {"business", "company", "restaurant", "store", "salon", "studio", "shop"}
+    if tokens[0] in generic_prefixes and set(tokens[1:]).issubset(generic_nouns):
+        return False
+    return any(token in _BUSINESS_SCOPE_TERMS for token in tokens)
+
+
+def _business_scope_matches(requested: str, account_name: str) -> bool:
+    requested_tokens = set(_normalize_business_scope(requested))
+    account_tokens = set(_normalize_business_scope(account_name))
+    if not requested_tokens or not account_tokens:
+        return False
+    requested_joined = " ".join(_normalize_business_scope(requested))
+    account_joined = " ".join(_normalize_business_scope(account_name))
+    if requested_joined in account_joined or account_joined in requested_joined:
+        return True
+    return requested_tokens.issubset(account_tokens) or account_tokens.issubset(requested_tokens)
+
+
+def flyer_business_scope_block_message(customer: dict, raw_request: str) -> str:
+    """Return customer-safe copy when a brief names a different business.
+
+    A registered account may ask for offers/products under its own brand, but
+    explicit "flyer for <other business>" requests must not attach to an old
+    active project or create work under the wrong customer account.
+    """
+    if not customer or str(customer.get("status") or "") not in {"trial", "active"}:
+        return ""
+    account_name = str(customer.get("business_name") or "").strip()
+    if not account_name:
+        return ""
+    requested = _extract_requested_business_scope(raw_request)
+    if not requested or not _looks_like_business_scope(requested):
+        return ""
+    if _business_scope_matches(requested, account_name):
+        return ""
+    return (
+        "Flyer Studio\n"
+        "------------\n"
+        f"This account is set up for {account_name}. I can't create a flyer for {requested} under this account.\n\n"
+        "To create it for that business, start a separate Flyer Studio setup for that business, "
+        "or use Create One Flyer - $4."
+    )
+
+
 def flyer_location_block_message(customer: dict, raw_request: str) -> str:
     """Return denial copy when a request appears outside account location."""
     if not customer or str(customer.get("plan_id") or "") != "unlimited":
