@@ -984,6 +984,8 @@ def _brand_asset_prompt(project: FlyerProject) -> str:
 
 
 def _active_brand_assets(project: FlyerProject):
+    if os.environ.get("FLYER_DISABLE_BRAND_ASSETS") == "1":
+        return []
     if "FLYER_CUSTOMERS_PATH" in os.environ:
         customers_path = Path(os.environ["FLYER_CUSTOMERS_PATH"])
     elif "FLYER_STATE_ROOT" in os.environ:
