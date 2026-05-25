@@ -3375,6 +3375,42 @@ def trigger_generate_flyer_concepts(project_id: str) -> tuple[bool, str]:
     return True, detail[:500]
 
 
+def _record_flyer_concept_preview_delivery(project_id: str, asset_id: str, outbound_message_id: str) -> None:
+    """Persist concept-preview media delivery metadata after bridge success."""
+    _ensure_platform_path()
+    try:
+        from safe_io import FileLock, atomic_write_text  # type: ignore
+    except Exception as e:
+        raise RuntimeError(f"safe_io_import_failed: {type(e).__name__}: {e}") from e
+
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    with FileLock(Path(str(FLYER_PROJECTS_PATH) + ".lock")):
+        store = json.loads(FLYER_PROJECTS_PATH.read_text(encoding="utf-8"))
+        projects = store.get("projects") if isinstance(store, dict) else None
+        if not isinstance(projects, list):
+            raise RuntimeError("project_store_shape_invalid")
+        for project in projects:
+            if not isinstance(project, dict) or project.get("project_id") != project_id:
+                continue
+            for asset in project.get("assets", []):
+                if not isinstance(asset, dict) or asset.get("asset_id") != asset_id:
+                    continue
+                try:
+                    attempt_count = int(asset.get("delivery_attempt_count") or 0)
+                except (TypeError, ValueError):
+                    attempt_count = 0
+                asset["delivery_status"] = "sent"
+                asset["outbound_message_id"] = outbound_message_id
+                asset["delivered_at"] = now
+                asset["delivery_attempt_count"] = attempt_count + 1
+                asset["delivery_error"] = ""
+                project["updated_at"] = now
+                atomic_write_text(FLYER_PROJECTS_PATH, json.dumps(store, indent=2, ensure_ascii=False))
+                return
+            raise RuntimeError(f"asset_not_found: {asset_id}")
+        raise RuntimeError(f"project_not_found: {project_id}")
+
+
 def send_flyer_concept_previews(chat_id: str, project_id: str) -> tuple[bool, str, str]:
     """Send the generated concept preview and approval instructions."""
     _ensure_platform_path()
@@ -3434,6 +3470,10 @@ def send_flyer_concept_previews(chat_id: str, project_id: str) -> tuple[bool, st
             if status == "send_uncertain":
                 return False, ",".join(outbound_ids), f"partial_delivery_uncertain: {status}: {err}"
             return False, "", f"{status}: {err}"
+        try:
+            _record_flyer_concept_preview_delivery(project_id, str(asset.get("asset_id") or ""), mid)
+        except Exception as e:
+            return False, ",".join(outbound_ids + [mid]), f"delivery_persist_failed: {type(e).__name__}: {e}"
         outbound_ids.append(mid)
     if not outbound_ids:
         return False, "", "no concept previews to send"

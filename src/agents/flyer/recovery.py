@@ -124,16 +124,24 @@ def classify_decision(row: dict, projects: dict[str, dict]) -> RecoverySignal | 
     detail = str(row.get("detail") or "")
     project_id = _parse_project_id(detail)
     chat_id = str(row.get("chat_id") or "")
+    raw_subprocess_rc = row.get("subprocess_rc")
+    try:
+        subprocess_rc = int(raw_subprocess_rc) if raw_subprocess_rc is not None else None
+    except (TypeError, ValueError):
+        subprocess_rc = None
+    if subprocess_rc == 0:
+        return None
     lower = detail.lower()
     failure_class = ""
     if any(marker in lower for marker in ["concept_generation_failed", "revision_regeneration_failed", "regeneration_failed"]):
         failure_class = "concept_generation_failed"
     elif "source edit provider" in lower or "source edit reference" in lower:
         failure_class = "provider_unavailable"
-    elif _has_nonblank_ack_error(detail) or "bridge" in lower:
+    elif _has_nonblank_ack_error(detail) or any(marker in lower for marker in ["bridge_send_failed", "connect_failed", "http_error"]):
         failure_class = "bridge_send_failed"
     elif any(marker in lower for marker in ["json_parse_failed", "select_failed", "status_failed", "exit="]):
-        failure_class = "state_transition_failed"
+        if project_id:
+            failure_class = "state_transition_failed"
     if not failure_class:
         return None
     provider_message_id = _parse_inbound_message_id(row, detail)

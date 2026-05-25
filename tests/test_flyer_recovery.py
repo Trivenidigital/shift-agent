@@ -56,6 +56,39 @@ def test_classifies_concept_generation_failure_with_stable_fingerprint():
     assert recovery.fingerprint_signal(signal_a) == recovery.fingerprint_signal(signal_b)
 
 
+def test_successful_router_rows_with_failure_words_are_not_incidents():
+    row = _row(
+        "project_id=F0095; source_edit_preflight_failed=source edit provider configured for manual review; reason_code=source_edit_provider_unavailable",
+        reason="flyer_reference_exact_edit_queued",
+    )
+    row["subprocess_rc"] = 0
+
+    assert recovery.classify_decision(row, {}) is None
+
+
+def test_failing_source_edit_rows_still_classify_provider_unavailable():
+    row = _row(
+        "project_id=F0095; source_edit_preflight_failed=source edit provider configured for manual review; reason_code=source_edit_provider_unavailable",
+        reason="flyer_reference_exact_edit_failed",
+    )
+    row["subprocess_rc"] = 2
+
+    signal = recovery.classify_decision(row, {})
+
+    assert signal is not None
+    assert signal.failure_class == "provider_unavailable"
+    assert signal.project_id == "F0095"
+
+
+def test_empty_ack_error_does_not_create_bridge_incident():
+    row = _row(
+        "project_id=F0095; ack_message_id=3EB0F47BDBEB38EBCEC587; ack_error=",
+        reason="flyer_reference_exact_edit_queued",
+    )
+
+    assert recovery.classify_decision(row, {}) is None
+
+
 def test_customer_copy_lint_blocks_internal_terms_and_project_ids():
     bad = recovery.lint_recovery_copy("Project F0065 is in the manual queue", "manual_queue_stale", False)
 
