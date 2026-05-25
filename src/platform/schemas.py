@@ -3498,6 +3498,18 @@ class FlyerRecoveryRepairBundleWritten(_BaseEntry):
     bundle_path: str = Field(min_length=1, max_length=500)
 
 
+class FlyerRecoveryOutcomeRepaired(_BaseEntry):
+    type: Literal["flyer_recovery_outcome_repaired"]
+    repair_type: Literal["reference_scope_false_positive"]
+    status: Literal["sent", "failed"]
+    chat_id_hash: str = Field(min_length=1, max_length=120)
+    customer_id: str = Field(default="", max_length=40)
+    business_name: str = Field(default="", max_length=160)
+    scope_reason: str = Field(default="", max_length=200)
+    outbound_message_id: str = Field(default="", max_length=200)
+    error: str = Field(default="", max_length=500)
+
+
 class FlyerRecoveryDeployGate(_BaseEntry):
     type: Literal["flyer_recovery_deploy_gate"]
     incident_id: str = Field(min_length=1, max_length=80)
@@ -4615,6 +4627,7 @@ LogEntry = Annotated[
         Annotated[FlyerRecoveryCustomerAckUncertain, Tag("flyer_recovery_customer_ack_uncertain")],
         Annotated[FlyerRecoveryCustomerAckSuppressed, Tag("flyer_recovery_customer_ack_suppressed")],
         Annotated[FlyerRecoveryRepairBundleWritten, Tag("flyer_recovery_repair_bundle_written")],
+        Annotated[FlyerRecoveryOutcomeRepaired, Tag("flyer_recovery_outcome_repaired")],
         Annotated[FlyerRecoveryDeployGate, Tag("flyer_recovery_deploy_gate")],
         Annotated[FlyerRecoveryResolved, Tag("flyer_recovery_resolved")],
         Annotated[FlyerClosureCustomerNotified, Tag("flyer_closure_customer_notified")],
@@ -4721,7 +4734,7 @@ __all__ = [
     "FlyerRecoveryIncidentOpened", "FlyerRecoveryCustomerAckAttempted",
     "FlyerRecoveryCustomerAckSent", "FlyerRecoveryCustomerAckFailed",
     "FlyerRecoveryCustomerAckUncertain", "FlyerRecoveryCustomerAckSuppressed",
-    "FlyerRecoveryRepairBundleWritten", "FlyerRecoveryDeployGate", "FlyerRecoveryResolved",
+    "FlyerRecoveryRepairBundleWritten", "FlyerRecoveryOutcomeRepaired", "FlyerRecoveryDeployGate", "FlyerRecoveryResolved",
     "FlyerUsageRecorded", "FlyerQuotaBlocked", "FlyerClosureCustomerNotified",
     "Proposal", "ProposalId", "ProposalCode",
     "AwaitingProposal", "ApprovedProposal", "ReconcilingProposal", "SentProposal",
