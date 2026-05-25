@@ -534,8 +534,9 @@ def _parse_mutating_command(text: str) -> tuple[str, str]:
     for prefix in ("update business whatsapp", "update whatsapp"):
         if lower.startswith(prefix):
             return "update_whatsapp", text[len(prefix):].strip()
-    if lower.startswith("change plan"):
-        return "change_plan", text[len("change plan"):].strip()
+    for prefix in ("change plan", "upgrade plan"):
+        if lower.startswith(prefix):
+            return "change_plan", _strip_account_value_prefix(text[len(prefix):].strip())
     return "", ""
 
 
@@ -543,8 +544,8 @@ def _is_plan_menu_request(lower: str) -> bool:
     cleaned = lower.strip(" .!,:;")
     return (
         cleaned == "upgrade plan"
-        or cleaned.startswith("upgrade plan ")
         or cleaned.startswith("upgrade plan -")
+        or cleaned == "upgrade plan show flyer studio plans"
         or cleaned == "show flyer studio plans"
     )
 
