@@ -567,7 +567,11 @@ def test_trial_delivery_upsell_message_tracks_remaining_samples(tmp_path, monkey
 
     first = mod._trial_upsell_message(customer)
     assert "2 free sample flyers left" in first
-    assert "https://wa.me/918522041562" in first
+    assert "Create another flyer" in first
+    assert "CREATE%20ANOTHER%20FLYER" in first
+    assert "UPGRADE%20PLAN" in first
+    assert "START%20FREE%20TRIAL" not in first
+    assert "Start Free Trial" not in first
 
     used_events = []
     for index in range(1, 4):
@@ -587,6 +591,8 @@ def test_trial_delivery_upsell_message_tracks_remaining_samples(tmp_path, monkey
     third = mod._trial_upsell_message(customer)
     assert "3 free sample flyers are complete" in third
     assert "$49.99/month" in third
+    assert "UPGRADE%20PLAN" in third
+    assert "START%20FREE%20TRIAL" not in third
 
 
 def test_trial_upsell_does_not_block_delivery_on_bad_customer_state(tmp_path, monkeypatch):

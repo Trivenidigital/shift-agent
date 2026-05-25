@@ -274,6 +274,8 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
                 if role != "owner":
                     customer = actions.find_flyer_customer_by_sender(phone, chat_id)
                     if customer and customer.get("status") in {"trial", "active"}:
+                        if actions.is_flyer_legacy_trial_link_followup(text):
+                            return _send_flyer_active_customer_trial_link_recovery(chat_id, customer, role=role)
                         if (
                             actions.flyer_starter_prompts_enabled(customer)
                             and not actions.flyer_starter_prompt_already_sent(customer)
@@ -1746,6 +1748,8 @@ def _try_flyer_campaign_cta_intercept(text: str, chat_id: str, event: Any) -> Op
         return None
     customer = actions.find_flyer_customer_by_sender(phone, chat_id)
     if customer and customer.get("status") in {"active", "trial"}:
+        if source == "start_trial":
+            return _send_flyer_active_customer_trial_link_recovery(chat_id, customer, role=role)
         return _send_flyer_active_customer_ready(chat_id, customer, role=role)
     if customer:
         reply = actions.flyer_customer_not_active_reply(customer)
@@ -2021,6 +2025,29 @@ def _send_flyer_active_customer_ready(chat_id: str, customer: dict, *, role: str
         ),
     )
     return {"action": "skip", "reason": "cf-router flyer active customer ready"}
+
+
+def _send_flyer_active_customer_trial_link_recovery(chat_id: str, customer: dict, *, role: str = "") -> dict:
+    business_name = str(customer.get("business_name") or "this business")
+    status = str(customer.get("status") or "trial").lower()
+    plan_label = "Free plan" if status == "trial" else "active plan"
+    reply = (
+        "Flyer Studio\n"
+        "------------\n"
+        f"You're already on the {plan_label} for {business_name}.\n\n"
+        "Create another flyer by sending the full request here, or reply UPGRADE PLAN to see paid plans."
+    )
+    ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+    actions.audit_intercepted(
+        reason="flyer_trial_link_recovery",
+        chat_id=chat_id,
+        subprocess_rc=0 if ack_ok else 3,
+        detail=(
+            f"status={customer.get('status') or ''}; customer_id={customer.get('customer_id') or ''}; "
+            f"sender_role={role}; ack_message_id={mid}; ack_error={err[:300]}"
+        ),
+    )
+    return {"action": "skip", "reason": "cf-router flyer active customer trial link recovery"}
 
 
 def _try_flyer_onboarding_intercept(text: str, chat_id: str, event: Any) -> Optional[dict]:
