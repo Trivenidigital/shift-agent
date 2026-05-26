@@ -27,6 +27,19 @@ from typing import Any, Optional
 
 from . import actions
 
+# PR-ζ F8 2026-05-26: pre-import ActionExecutionContext at module top so any
+# sys.path / packaging quirk in the Hermes plugin load environment surfaces
+# LOUD at plugin-load time, not silently at first regulated change_plan send.
+# Both reviewers (§11-compatibility #5 + security/money-flow #3) flagged the
+# previous lazy try/except as a silent-lint-bypass surface — if the import
+# failed, the code fell back to action_ctx=None which is allowlist-matched
+# (actions.py/hooks.py basenames) → lint silently skipped on a regulated
+# reply. Moving the import to module top means an import failure breaks the
+# plugin at load time (operator sees in journalctl), not at first regulated
+# send (customer silently misses the lint protection).
+actions._ensure_platform_path()  # type: ignore[attr-defined]
+from schemas import ActionExecutionContext  # type: ignore  # noqa: E402
+
 # === F7 path config (PR-CF7 → PR-CF1d primary-mode 2026-05-12) ===
 #
 # F7_ENABLED is the rollback hatch. To disable the F7 plugin path without
@@ -1740,36 +1753,49 @@ def _try_flyer_account_intercept(text: str, chat_id: str, event: Any) -> Optiona
     # change_plan is the only `external_irreversible` action in the portfolio
     # (per PR-δ action_registry). Other branches keep action_context=None and
     # fall through the actions.py basename allowlist; PR-ζ.1 migrates the rest.
+    #
+    # ActionExecutionContext is imported at module top (above) so any import
+    # quirk surfaces at plugin load, not at first regulated send.
     detail = result.get("detail") or ""
+    is_change_plan = "plan_change_requested" in detail
     action_ctx = None
-    if "plan_change_requested" in detail:
-        try:
-            actions._ensure_platform_path()
-            from schemas import ActionExecutionContext  # type: ignore
-            action_ctx = ActionExecutionContext(
-                action_id="flyer.billing.request_plan_change",
-                is_regulated_action=True,
-                # plan_change is a payment REQUEST, not a completion. The
-                # checkout URL emits the next step; verification arrives
-                # only after the payment webhook (PR-ζ.1 + §11 wiring).
-                verified_action_result=False,
-                mutation_class="external_irreversible",
-            )
-        except Exception as e:
-            # Defensive: if schemas import fails (Hermes plugin sys.path
-            # quirks), fall back to None. The send still proceeds via the
-            # actions.py allowlist match; the lint just doesn't run.
-            # Audit the import failure so ops can see it.
-            actions.audit_intercepted(
-                reason="flyer_account_action_context_construction_failed",
-                chat_id=chat_id,
-                subprocess_rc=0,
-                detail=f"detail={detail[:200]}; error={type(e).__name__}: {str(e)[:200]}",
-            )
-            action_ctx = None
+    if is_change_plan:
+        action_ctx = ActionExecutionContext(
+            action_id="flyer.billing.request_plan_change",
+            is_regulated_action=True,
+            # plan_change is a payment REQUEST, not a completion. The
+            # checkout URL emits the next step; verification arrives only
+            # after the payment webhook (PR-ζ.1 + §11 wiring).
+            verified_action_result=False,
+            mutation_class="external_irreversible",
+        )
     ack_ok, mid, err = actions.send_flyer_text(
         chat_id, result.get("reply_text") or "", action_context=action_ctx,
     )
+    # PR-ζ BLOCKER #2 fix (security/money-flow reviewer): when the chokepoint
+    # refuses on the change_plan path, the customer must NOT be left with
+    # half-state (pending_plan_* fields persisted at account.py:301 BEFORE
+    # the send, but no checkout URL delivered). Send an informational
+    # fallback so the customer knows something went wrong + the operator
+    # has been alerted. The fallback uses is_regulated_action=False because
+    # it's a system meta-message about request state, not a claim about
+    # the action's outcome.
+    if not ack_ok and is_change_plan and err and "refused" in str(err).lower():
+        fallback_ctx = ActionExecutionContext(
+            action_id="flyer.billing.request_plan_change_fallback",
+            is_regulated_action=False,
+            verified_action_result=False,
+        )
+        actions.send_flyer_text(
+            chat_id,
+            (
+                "Flyer Studio\n------------\n"
+                "Your plan-change request couldn't be processed right now. "
+                "We've logged it for operator follow-up — please reply again "
+                "in a few minutes or wait for an update here."
+            ),
+            action_context=fallback_ctx,
+        )
     actions.audit_intercepted(
         reason="flyer_account_command",
         chat_id=chat_id,
