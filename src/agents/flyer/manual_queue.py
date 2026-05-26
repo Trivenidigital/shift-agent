@@ -184,6 +184,7 @@ def list_manual_queue(
             "manual_reason": manual.reason,
             "manual_reason_code": manual.reason_code,
             "manual_detail": manual.detail,
+            "manual_queued_at": queued_at.isoformat(),
             "age_minutes": age_minutes,
             "age_hours": max(age_hours, 0),
             "is_stale": age_minutes >= max(stale_minutes_threshold, 1),
@@ -205,9 +206,11 @@ def triage_summary(
     rows = list_manual_queue(store, now=now, stale_minutes_threshold=stale_minutes_threshold)
     groups: dict[str, list[dict]] = defaultdict(list)
     reason_counts: dict[str, int] = defaultdict(int)
+    manual_status_counts: dict[str, int] = defaultdict(int)
     for row in rows:
         groups[row["customer_phone"]].append(row)
         reason_counts[row["manual_reason_code"]] += 1
+        manual_status_counts[row["manual_status"]] += 1
     ordered_groups: list[dict] = []
     for phone, items in groups.items():
         items.sort(key=lambda r: r["age_hours"], reverse=True)
@@ -217,6 +220,7 @@ def triage_summary(
             "stale_count": sum(1 for r in items if bool(r.get("is_stale"))),
             "oldest_age_hours": items[0]["age_hours"] if items else 0,
             "oldest_age_minutes": items[0]["age_minutes"] if items else 0,
+            "oldest_queued_at": items[0]["manual_queued_at"] if items else "",
             "projects": items,
         })
     ordered_groups.sort(key=lambda g: g["oldest_age_hours"], reverse=True)
@@ -225,6 +229,7 @@ def triage_summary(
         "stale_total": sum(1 for r in rows if bool(r.get("is_stale"))),
         "stale_minutes_threshold": stale_minutes_threshold,
         "reason_counts": dict(sorted(reason_counts.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "manual_status_counts": dict(sorted(manual_status_counts.items(), key=lambda kv: kv[0])),
         "groups": ordered_groups,
     }
 
