@@ -319,6 +319,11 @@ install_artifacts() {
     else
         rm -f /opt/shift-agent/flyer_reference_extract.py
     fi
+    if [ -f src/agents/flyer/semantic_brief.py ]; then
+        install -m 644 src/agents/flyer/semantic_brief.py /opt/shift-agent/flyer_semantic_brief.py
+    else
+        rm -f /opt/shift-agent/flyer_semantic_brief.py
+    fi
     if [ -f src/agents/flyer/visual_qa.py ]; then
         install -m 644 src/agents/flyer/visual_qa.py /opt/shift-agent/flyer_visual_qa.py
     else

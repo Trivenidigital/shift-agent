@@ -493,6 +493,7 @@ def test_production_readiness_modules_installed_and_smoked():
     for module in [
         "flyer_facts",
         "flyer_reference_extract",
+        "flyer_semantic_brief",
         "flyer_visual_qa",
         "flyer_manual_queue",
         "flyer_intent",

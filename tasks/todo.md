@@ -1388,4 +1388,8 @@ Review: recovery watchdog now observes both audit-level `ack_error` failures and
 - [x] Write design spec: `docs/superpowers/specs/2026-05-26-flyer-semantic-brief-contract-design.md`.
 - [x] Review design spec with two parallel agents and fold in recommendations.
 - [x] Build semantic QA/render slice with TDD.
-- [ ] Create PR and review PR with two parallel agents.
+- [x] Create PR #277 and review PR with two parallel agents.
+- [x] Fold first PR-review blockers: install `flyer_semantic_brief` in production flat layout, preserve saved-logo retry exact-brand behavior, block known source-contract brands even when `forbidden_substrings` is empty, and reject conservative unlabeled wrong-brand mastheads while still allowing campaign-title flyers with stored contact anchors.
+- [ ] Re-run two parallel PR reviewers after blocker fixes.
+
+Review: focused semantic brief gates passed after the first blocker-fix pass: `tests/test_flyer_visual_qa.py tests/test_flyer_facts.py tests/test_flyer_renderer.py` -> `122 passed`; `tests/test_flyer_generate_concepts.py tests/test_flyer_create_project.py` -> `47 passed`; `tests/test_flyer_scripts_static.py` -> `34 passed`; touched-file `py_compile` passed; `git diff --check` clean.

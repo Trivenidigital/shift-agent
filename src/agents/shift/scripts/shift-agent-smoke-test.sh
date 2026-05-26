@@ -100,6 +100,7 @@ import flyer_intent
 import flyer_intent_training
 import flyer_facts
 import flyer_reference_extract
+import flyer_semantic_brief
 import flyer_visual_qa
 import flyer_manual_queue
 print('schema classes:', [c for c in dir(schemas) if not c.startswith('_')][:5])
