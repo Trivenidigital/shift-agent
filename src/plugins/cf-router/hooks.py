@@ -81,15 +81,22 @@ F7_WATCHDOG_TIMEOUT_SEC = 30
 _CODE_PATTERN = re.compile(r"#([A-HJ-NP-Z2-9]{5})")
 _SAMPLE_PROMPT_REQUEST = re.compile(
     r"\b(?:sample|example|starter)\s+(?:prompt|prompts|idea|ideas)\b"
+    r"|\b(?:prompt|prompts)\s+(?:example|examples)\b"
     r"|\b(?:sample|example|starter|prompt|idea|ideas|inspiration)\b.{0,40}\b(?:for|of)\b.{0,20}\b(?:flyer|flier|poster|marketing)\b"
-    r"|\b(?:give|send|show|share|suggest|provide)\b.{0,50}\b(?:flyer|flier|poster|marketing)\b.{0,30}\b(?:idea|ideas|prompt|prompts|examples|inspiration)\b"
-    r"|\b(?:give|send|show|share|suggest|provide)\b.{0,60}"
-    r"\b(?:sample|example|starter|inspiration)?\s*(?:prompt|prompts|idea|ideas|examples|inspiration)\b.{0,60}"
+    r"|\b(?:give|send|show|share|suggest|provide|help)\b.{0,50}\b(?:flyer|flier|poster|marketing)\b.{0,30}\b(?:idea|ideas|prompt|prompts|examples|inspiration|hook|hooks)\b"
+    r"|\b(?:give|send|show|share|suggest|provide|help)\b.{0,60}"
+    r"\b(?:sample|example|starter|inspiration)?\s*(?:prompt|prompts|idea|ideas|examples|inspiration|hook|hooks)\b.{0,60}"
     r"\b(?:flyer|flier|poster|marketing)\b"
-    r"|\b(?:give|send|show|share|suggest|provide|need)\b.{0,70}"
-    r"\b(?:ad|ads|promo|promotional|campaign|marketing|creative)\b.{0,40}"
-    r"\b(?:idea|ideas|suggestion|suggestions|concept|concepts|example|examples|prompt|prompts|inspiration)\b.{0,40}"
-    r"\b(?:business|shop|store|brand|service|offer)\b",
+    r"|\b(?:give|send|show|share|suggest|provide|need|help)\b.{0,70}"
+    r"\b(?:ad|ads|promo|promotion|promotional|campaign|marketing|creative)\b.{0,40}"
+    r"\b(?:idea|ideas|suggestion|suggestions|concept|concepts|example|examples|prompt|prompts|inspiration|hook|hooks)\b.{0,40}"
+    r"\b(?:business|shop|store|brand|service|offer)\b"
+    r"|\b(?:help|need|suggest|share|give|show|send|provide)\b.{0,25}"
+    r"\b(?:promotion|promo|campaign|marketing|weekend|offer)\b.{0,25}"
+    r"\b(?:idea|ideas|prompt|prompts|example|examples|hook|hooks)\b"
+    r"|\b(?:help|need|suggest|share|give|show|send|provide)\b.{0,30}"
+    r"\b(?:\d+\s+)?(?:idea|ideas|prompt|prompts|example|examples|hook|hooks)\b.{0,40}"
+    r"\b(?:for|about|on)\b.{0,30}\b(?:weekend|offer|promotion|promo|campaign|marketing|flyer|business|shop|store)\b",
     re.IGNORECASE,
 )
 
@@ -226,12 +233,12 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
             account_result = _try_flyer_account_intercept(text, chat_id, event)
             if account_result is not None:
                 return account_result
-            regulated_account_result = _try_flyer_regulated_account_guard(text, chat_id, event)
-            if regulated_account_result is not None:
-                return regulated_account_result
             sample_prompt_result = _try_flyer_sample_prompt_request_intercept(text, chat_id, event, media_path)
             if sample_prompt_result is not None:
                 return sample_prompt_result
+            regulated_account_result = _try_flyer_regulated_account_guard(text, chat_id, event)
+            if regulated_account_result is not None:
+                return regulated_account_result
             intake_result = _try_flyer_intake_intercept(text, chat_id, event, media_path=media_path)
             if intake_result is not None:
                 return intake_result

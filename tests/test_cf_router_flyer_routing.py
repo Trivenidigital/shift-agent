@@ -2145,6 +2145,8 @@ def test_explicit_sample_prompt_request_sends_starter_ideas(monkeypatch):
         "send promotional ideas for my shop",
         "show me example prompts for my business",
         "show me example flyer prompts for this week",
+        "send me prompt examples",
+        "example prompts for my offer",
         "can you share marketing ideas for today",
         "need sample ideas for my business offer",
         "suggest some promo ideas for my business",
@@ -2153,6 +2155,9 @@ def test_explicit_sample_prompt_request_sends_starter_ideas(monkeypatch):
         "i need ad concepts for my business",
         "give ad caption ideas for my store",
         "send poster caption ideas for my offer",
+        "can you suggest hooks for my flyer",
+        "help with promotion ideas",
+        "give 3 ideas for weekend offer",
     ],
 )
 def test_sample_prompt_variants_route_to_sample_idea_intake(monkeypatch, message_text):
@@ -2443,6 +2448,7 @@ def test_vague_flyer_start_for_opted_out_customer_asks_short_clarification(monke
     monkeypatch.setattr(hooks, "_try_flyer_reference_scope_choice_intercept", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(hooks, "_try_flyer_reference_scope_authorization_intercept", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(hooks, "_try_flyer_existing_onboarding_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_active_project_intercept", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(hooks, "_try_flyer_primary_intercept", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not create project")))
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
@@ -2480,6 +2486,7 @@ def test_vague_flyer_start_after_first_starter_asks_short_clarification(monkeypa
     monkeypatch.setattr(hooks, "_try_flyer_reference_scope_choice_intercept", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(hooks, "_try_flyer_reference_scope_authorization_intercept", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(hooks, "_try_flyer_existing_onboarding_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_active_project_intercept", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(hooks, "_try_flyer_primary_intercept", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not create project")))
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
