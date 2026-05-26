@@ -209,7 +209,18 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
                 cta_result = _try_flyer_campaign_cta_intercept(campaign_cta_text, chat_id, event)
                 if cta_result is not None:
                     return cta_result
-                return None
+            visible_text = " ".join(actions.flyer_visible_message_text(text).split()).lower()
+            if "flyer studio" in visible_text and "start free trial" in visible_text:
+                intake_result = _start_flyer_intake(
+                    text,
+                    chat_id,
+                    event,
+                    source="start_trial",
+                    original_text=text,
+                    media_path=media_path,
+                )
+                if intake_result is not None:
+                    return intake_result
             account_result = _try_flyer_account_intercept(text, chat_id, event)
             if account_result is not None:
                 return account_result
@@ -243,13 +254,6 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
             onboarding_reply_result = _try_flyer_existing_onboarding_intercept(text, chat_id, event)
             if onboarding_reply_result is not None:
                 return onboarding_reply_result
-            guest_phone, guest_role = actions.lid_to_phone_via_identify_sender(chat_id)
-            if guest_role != "owner" and actions.find_paid_flyer_guest_order(guest_phone, chat_id):
-                flyer_result = _try_flyer_primary_intercept(
-                    text, chat_id, event, force_new=True, media_path=media_path,
-                )
-                if flyer_result is not None:
-                    return flyer_result
             flyer_result = _try_flyer_active_project_intercept(text, chat_id, event, media_path)
             if flyer_result is not None:
                 return flyer_result
@@ -908,10 +912,7 @@ def _try_flyer_primary_intercept(
             outbound_message_id = ",".join(x for x in [proc_mid, outbound_message_id] if x)
             ack_err = f"concept_generation_failed: {gen_detail}; ack_error={ack_err}"
     else:
-        ack_ok, outbound_message_id, ack_err = actions.send_flyer_text(
-            chat_id,
-            actions.flyer_project_missing_info_reply(project or {}),
-        )
+        ack_ok, outbound_message_id, ack_err = actions.send_flyer_intake_ack(chat_id, project_id)
     actions.audit_intercepted(
         reason="flyer_primary_project_created", chat_id=chat_id,
         subprocess_rc=0 if ack_ok else 3,
@@ -1903,11 +1904,20 @@ def _try_flyer_campaign_cta_intercept(text: str, chat_id: str, event: Any) -> Op
     if role == "owner":
         return None
     customer = actions.find_flyer_customer_by_sender(phone, chat_id)
+    normalized = actions.flyer_campaign_cta_text(text).lower()
     if customer and customer.get("status") in {"active", "trial"}:
-        if source == "start_trial":
+        if actions.is_flyer_legacy_trial_link_followup(text):
             return _send_flyer_active_customer_trial_link_recovery(chat_id, customer, role=role)
-        return _send_flyer_active_customer_ready(chat_id, customer, role=role)
+        if source == "act_now":
+            return _send_flyer_active_customer_account_prompt(chat_id, customer, role=role)
+        _send_flyer_active_customer_ready(chat_id, customer, role=role)
+        return {"action": "skip", "reason": "cf-router flyer campaign CTA: ready_prompt"}
     if customer:
+        status = str(customer.get("status") or "").lower()
+        if status == "payment_pending":
+            return _send_flyer_existing_payment_pending_prompt(chat_id, customer, role=role)
+        if status == "suspended":
+            return _send_flyer_existing_suspended_prompt(chat_id, customer, role=role)
         reply = actions.flyer_customer_not_active_reply(customer)
         ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
         actions.audit_intercepted(
@@ -1920,6 +1930,43 @@ def _try_flyer_campaign_cta_intercept(text: str, chat_id: str, event: Any) -> Op
             ),
         )
         return {"action": "skip", "reason": "cf-router flyer customer not active"}
+    if source == "quick_flyer":
+        message_id = _extract_message_id(event, chat_id, text)
+        if not phone:
+            reply = (
+                "Flyer Studio\n"
+                "------------\n"
+                "I could not verify the WhatsApp phone number for this one-time flyer order.\n\n"
+                "Please message from the phone number you want to use for the order, or tap Start Free Trial to set up your business account first."
+            )
+            actions.send_flyer_text(chat_id, reply)
+            return {"action": "skip", "reason": "cf-router flyer intake: quick_flyer_phone_required"}
+        ok_order, detail_order, order_result = actions.trigger_start_flyer_guest_order(
+            sender_phone=phone,
+            chat_id=chat_id,
+            message_id=message_id,
+        )
+        if not ok_order or not order_result:
+            actions.audit_intercepted(
+                reason="flyer_guest_order_failed", chat_id=chat_id,
+                subprocess_rc=2, detail=detail_order[:500],
+            )
+            return None
+        ack_ok, mid, err = actions.send_flyer_text(chat_id, order_result.get("reply_text") or "")
+        actions.audit_intercepted(
+            reason="flyer_guest_order_started",
+            chat_id=chat_id,
+            subprocess_rc=0 if ack_ok else 3,
+            detail=(
+                f"message_id={message_id}; order_id={order_result.get('order_id') or ''}; "
+                f"status={order_result.get('status') or ''}; sender_role={role}; "
+                f"ack_message_id={mid}; ack_error={err[:300]}"
+            ),
+        )
+        return {"action": "skip", "reason": "cf-router flyer campaign CTA: quick_flyer_payment"}
+    visible_text = " ".join(actions.flyer_visible_message_text(text).split()).lower()
+    if visible_text in {"start free trial", "act now! save time and money"}:
+        return _try_flyer_onboarding_intercept(text, chat_id, event)
     return _start_flyer_intake(text, chat_id, event, source=source, original_text=text)
 
 
@@ -2168,7 +2215,8 @@ def _send_flyer_active_customer_ready(chat_id: str, customer: dict, *, role: str
         "Flyer Studio\n"
         "------------\n"
         f"This number is already set up for {business_name}.\n\n"
-        "Send your flyer request in one message, or attach an existing flyer, logo, menu, photos, or reference image."
+        "Tell me what you want to promote, and send your flyer request in one message. "
+        "You can also attach an existing flyer, logo, menu, photos, or reference image."
     )
     ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
     actions.audit_intercepted(
@@ -2204,6 +2252,72 @@ def _send_flyer_active_customer_trial_link_recovery(chat_id: str, customer: dict
         ),
     )
     return {"action": "skip", "reason": "cf-router flyer active customer trial link recovery"}
+
+
+def _send_flyer_active_customer_account_prompt(chat_id: str, customer: dict, *, role: str = "") -> dict:
+    business_name = str(customer.get("business_name") or "this business")
+    status = str(customer.get("status") or "active")
+    reply = (
+        "Flyer Studio\n"
+        "------------\n"
+        f"This number is already set up for {business_name}.\n\n"
+        f"Your account status is {status}. Send your flyer request here, or reply STATUS for your latest project update."
+    )
+    ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+    actions.audit_intercepted(
+        reason="flyer_onboarding",
+        chat_id=chat_id,
+        subprocess_rc=0 if ack_ok else 3,
+        detail=(
+            f"status={customer.get('status') or ''}; customer_id={customer.get('customer_id') or ''}; "
+            f"sender_role={role}; ack_message_id={mid}; ack_error={err[:300]}"
+        ),
+    )
+    return {"action": "skip", "reason": "cf-router flyer campaign CTA: account_prompt"}
+
+
+def _send_flyer_existing_payment_pending_prompt(chat_id: str, customer: dict, *, role: str = "") -> dict:
+    business_name = str(customer.get("business_name") or "this business")
+    payment_url = str(customer.get("payment_checkout_url") or "").strip()
+    reply = (
+        "Flyer Studio\n"
+        "------------\n"
+        f"Your registration is already saved for {business_name}, and payment is still pending.\n\n"
+        + (f"Complete payment here: {payment_url}\n\n" if payment_url else "")
+        + "After payment, send your flyer request here."
+    )
+    ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+    actions.audit_intercepted(
+        reason="flyer_customer_not_active",
+        chat_id=chat_id,
+        subprocess_rc=0 if ack_ok else 3,
+        detail=(
+            f"status={customer.get('status') or ''}; customer_id={customer.get('customer_id') or ''}; "
+            f"sender_role={role}; ack_message_id={mid}; ack_error={err[:300]}"
+        ),
+    )
+    return {"action": "skip", "reason": "cf-router flyer campaign CTA: existing_payment_pending"}
+
+
+def _send_flyer_existing_suspended_prompt(chat_id: str, customer: dict, *, role: str = "") -> dict:
+    business_name = str(customer.get("business_name") or "this business")
+    reply = (
+        "Flyer Studio\n"
+        "------------\n"
+        f"The Flyer Studio account for {business_name} is suspended. This account is suspended.\n\n"
+        "Please contact support to reactivate the account, then send your flyer request."
+    )
+    ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+    actions.audit_intercepted(
+        reason="flyer_customer_not_active",
+        chat_id=chat_id,
+        subprocess_rc=0 if ack_ok else 3,
+        detail=(
+            f"status={customer.get('status') or ''}; customer_id={customer.get('customer_id') or ''}; "
+            f"sender_role={role}; ack_message_id={mid}; ack_error={err[:300]}"
+        ),
+    )
+    return {"action": "skip", "reason": "cf-router flyer campaign CTA: existing_suspended"}
 
 
 def _try_flyer_onboarding_intercept(text: str, chat_id: str, event: Any) -> Optional[dict]:
@@ -2468,6 +2582,26 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
     status = str(active_project.get("status") or "")
     body = " ".join(actions.flyer_visible_message_text(text).split())
     lower = body.lower()
+    if actions.should_start_new_flyer_over_active(body, has_media=bool(media_path)):
+        actions.audit_intercepted(
+            reason="flyer_active_project_bypassed",
+            chat_id=chat_id,
+            subprocess_rc=0,
+            detail=(
+                f"project_id={project_id}; message_id={message_id}; fresh_flyer_intent=true; "
+                f"status={status}; sender_role={role}; has_media={'1' if media_path else '0'}"
+            ),
+        )
+        return None
+    if (
+        status == "revising_design"
+        and not actions.classify_flyer_intent(body)[0]
+        and not actions.is_flyer_project_status_request(body)
+        and not actions.is_flyer_approval_text(body)
+    ):
+        return None
+    if status in {"intake_started", "collecting_required_info", "awaiting_assets"} and actions.classify_flyer_intent(body)[0]:
+        return None
     scope_block = actions.flyer_business_scope_block_message(customer or {}, body)
     if scope_block:
         ack_ok, mid, err = actions.send_flyer_text(chat_id, scope_block)
