@@ -1,14 +1,15 @@
 # Flyer24 Hackathon Latest Report
 
-Updated: 2026-05-26T06:30:00Z
+Updated: 2026-05-26T08:24:00Z
 
 ## Batch
-- Branch: `codex/flyer24-batch-source-edit-watchdog-visibility-202605260625`
-- Scope: harden source-edit/manual-review stale queue observability by surfacing reason/status splits, oldest queue timestamp, customer-update summary counts, and triage status distribution.
-- Risk: low (read-only visibility + watchdog message/result shape; no payment/account/quota/customer-send mutation).
-- Hermes/MCP-first: Hermes still owns ingress/identity/bridge/state/audit substrate; this batch only improves deterministic Flyer operator visibility on top.
+- Branch: `codex/flyer24-batch-status-routing-coverage-202605260826`
+- Scope: widen deterministic Flyer status-check phrase coverage so common customer follow-up phrasings route to status replies instead of clarification loops.
+- Risk: low (routing phrase-classifier coverage only; no payment/account/quota/manual-queue closure/send mutation).
+- Hermes/MCP-first: Hermes owns ingress/identity/state/audit and project lookup; this batch changes only Flyer phrase classification.
 
 ## Running PR list
+- #257 - fix(flyer): widen status-check phrasing to avoid clarification loops (open; low-risk routing copy/intent coverage)
 - #255 - fix(flyer): harden source-edit watchdog and triage visibility (open; low-risk visibility hardening)
 - #254 - fix(flyer): restore CTA/account routing and intake ack fail-closed behavior (operator-review-required; routing-surface change)
 - #216 - fix(flyer): harden guest-order payment activation contracts (operator-review-required; payment-adjacent)
