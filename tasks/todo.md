@@ -1379,3 +1379,13 @@ Review: focused retry/source-edit generator slice passed `5 passed, 71 deselecte
 - [x] Verified focused recovery, self-eval, Flyer generation/QA, SLA/manual queue suites.
 
 Review: recovery watchdog now observes both audit-level `ack_error` failures and durable stale manual-review state. This does not yet grant the worker direct production deploy authority; it queues bounded no-live-send repair work under the existing recovery worker contract.
+
+## Flyer Semantic Brief Contract - 2026-05-26
+
+- [x] Created isolated branch/worktree `codex/flyer-semantic-brief` at `C:\projects\SME-Agents-semantic-brief` from current `origin/main` (`604def2`).
+- [x] Wrote architecture plan: `tasks/flyer-semantic-brief-contract-plan-2026-05-26.md`.
+- [x] Review plan with two parallel agents and fold in recommendations.
+- [x] Write design spec: `docs/superpowers/specs/2026-05-26-flyer-semantic-brief-contract-design.md`.
+- [x] Review design spec with two parallel agents and fold in recommendations.
+- [x] Build semantic QA/render slice with TDD.
+- [ ] Create PR and review PR with two parallel agents.

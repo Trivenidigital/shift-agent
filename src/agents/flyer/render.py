@@ -741,6 +741,7 @@ def _poster_copy_block(project: FlyerProject) -> str:
     plan = _poster_copy_plan(project)
     lines = [
         "Render the following text exactly. Do not summarize, paraphrase, invent, or omit these customer facts.",
+        "Title is the campaign/product/service headline; Business/brand is the account identity or footer brand.",
     ]
     business_name = _display_business_name(project)
     if business_name:

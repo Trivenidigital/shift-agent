@@ -14,6 +14,10 @@ import urllib.error
 import urllib.request
 
 from schemas import FlyerProject, FlyerVisualQAReport
+try:
+    from flyer_semantic_brief import semantic_visibility_policy, visible_wrong_brand_blockers  # type: ignore
+except ImportError:
+    from agents.flyer.semantic_brief import semantic_visibility_policy, visible_wrong_brand_blockers
 
 
 # Bracketed slot leakage ([price], [phone], …) + lorem ipsum + common template-
@@ -150,6 +154,38 @@ def _value_present_in(
         return _address_value_present_in(normalized_text, fact_value)
     normalized_value = _normalize_text_for_match(fact_value)
     return _text_value_present_in(normalized_text, normalized_value)
+
+
+def _locked_fact_present_in_ocr(project: FlyerProject, fact_id: str, normalized_text: str, raw_text: str) -> bool:
+    for fact in project.locked_facts:
+        if fact.fact_id != fact_id or not str(fact.value or "").strip():
+            continue
+        return _value_present_in(
+            raw_text if _locked_fact_uses_phone_match(fact_id=fact.fact_id, label=fact.label, value=fact.value) else normalized_text,
+            fact.value,
+            phone_match=_locked_fact_uses_phone_match(
+                fact_id=fact.fact_id,
+                label=fact.label,
+                value=fact.value,
+            ),
+            address_match=fact.fact_id == "location" or "address" in fact.label.casefold() or "location" in fact.label.casefold(),
+        )
+    return False
+
+
+def _can_skip_exact_business_name(project: FlyerProject, normalized_text: str, raw_text: str) -> bool:
+    policy = semantic_visibility_policy(project)
+    if policy.brand_visibility_required_exact:
+        return False
+    if not policy.effective_business_name or not policy.campaign_title:
+        return False
+    if not _locked_fact_present_in_ocr(project, "campaign_title", normalized_text, raw_text):
+        return False
+    if policy.require_contact_anchor and not _locked_fact_present_in_ocr(project, "contact_phone", normalized_text, raw_text):
+        return False
+    if policy.require_location_anchor and not _locked_fact_present_in_ocr(project, "location", normalized_text, raw_text):
+        return False
+    return True
 
 
 def _requires_english_only(project: FlyerProject) -> bool:
@@ -301,8 +337,12 @@ def run_visual_qa(
     if _requires_english_only(project) and REGIONAL_SCRIPT_RE.search(extracted_text):
         blockers.append("English-only flyer contains regional/non-English script")
     blockers.extend(note for note in provider_notes if "placeholder" in note.lower() or "unreadable" in note.lower() or "garbled" in note.lower())
+    blockers.extend(visible_wrong_brand_blockers(project, extracted_text))
+    skip_business_name_exact = _can_skip_exact_business_name(project, normalized, extracted_text)
     for fact in project.locked_facts:
         if not fact.required:
+            continue
+        if fact.fact_id == "business_name" and skip_business_name_exact:
             continue
         # Phone/contact facts use digit-run matching; other locked facts use
         # text matching even if they contain address/ZIP digits.

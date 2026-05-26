@@ -508,6 +508,7 @@ def test_image_prompt_uses_clean_biryani_copy_without_price_instruction_leak():
     facts = {fact.fact_id: fact.text for fact in collect_text_facts(project)}
 
     assert facts["schedule"] == "Wednesday and Thursday every week"
+    assert "Title is the campaign/product/service headline; Business/brand is the account identity or footer brand." in prompt
     assert "Schedule: Wednesday and Thursday every week" in prompt
     assert "Chicken Biryani - $16.99" in prompt
     assert "Goat Biryani - $18.99" in prompt
