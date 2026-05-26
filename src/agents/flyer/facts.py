@@ -285,6 +285,12 @@ def _item_name_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFact
         if not name:
             return
         normalized = name.lower()
+        # Reject instruction fragments that can appear after "include ...",
+        # e.g. "add price as $16.99 for chicken", to avoid poisoning item names.
+        if "$" in name or "price" in normalized:
+            return
+        if re.search(r"\b(?:add|set|use|change|update)\s+(?:the\s+)?price\b", normalized):
+            return
         if normalized in skip_exact:
             return
         if any(term in normalized for term in ("address", "phone", "logo")):
