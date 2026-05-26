@@ -1,0 +1,1 @@
+sudo: /opt/shift-agent/venv/bin/python: command not found

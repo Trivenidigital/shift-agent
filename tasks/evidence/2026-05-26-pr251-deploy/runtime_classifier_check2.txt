@@ -1,0 +1,14 @@
+OK [bare-payment-claim] expected=True actual=True text='I paid'
+OK [have-paid-variant] expected=True actual=True text='I have paid'
+OK [mark-paid] expected=True actual=True text='mark paid'
+OK [cancel-plan] expected=True actual=True text='cancel my plan'
+OK [change-phone] expected=True actual=True text='change phone'
+OK [change-my-phone-number] expected=True actual=True text='change my phone number'
+OK [change-address] expected=True actual=True text='change address'
+OK [upgrade-to-growth-existing] expected=True actual=True text='Upgrade to Growth'
+OK [flyer-brief-false-positive-guard] expected=False actual=False text='Create a flyer with our phone number 555-1234'
+OK [poster-brief-false-positive-guard] expected=False actual=False text='Make a poster showing our address'
+---
+helper update-this-flyer-change-phone: True
+helper I-paid: False
+OVERALL: GREEN

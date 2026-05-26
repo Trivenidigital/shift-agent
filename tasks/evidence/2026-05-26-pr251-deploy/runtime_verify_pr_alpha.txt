@@ -1,0 +1,18 @@
+===CF-ROUTER-ACTIONS-PR-α-MARKERS===
+2514:    # PR-α 2026-05-26 — verb-anchored account-change patterns. Closes the
+2536:_FLYER_EDIT_INSTRUCTION_PATTERN = re.compile(
+2544:def flyer_text_targets_revision_field(text: str) -> bool:
+2553:    return bool(_FLYER_EDIT_INSTRUCTION_PATTERN.search(body))
+2559:    # PR-α 2026-05-26 — bare "I paid" + "mark paid" variants. Closes the
+
+===CF-ROUTER-HOOKS-PR-α-YIELD===
+1748:    # PR-α follow-up 2026-05-26: yield to _try_flyer_active_project_intercept
+1759:    if not actions.is_flyer_account_command(text) and actions.flyer_text_targets_revision_field(text):
+1760:        # PR-α follow-up 2026-05-26 (LID-only blocker fix): do NOT gate on
+
+===DEPLOYED-COMMIT-HASH===
+cat: /opt/shift-agent/.commit-hash: No such file or directory
+
+===PR-α-REGEX-PATTERNS===
+2522:    r"(?:change|update|set|edit|modify|remove|delete)\s+(?:my\s+|the\s+|our\s+)?(?:flyer\s+|business\s+|account\s+|public\s+|contact\s+)?(?:phone(?:\s+number)?|address|number)"
+2563:    r"i\s+(?:have\s+|just\s+|already\s+)?paid|"

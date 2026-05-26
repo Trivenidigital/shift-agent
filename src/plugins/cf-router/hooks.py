@@ -253,6 +253,13 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
             flyer_result = _try_flyer_active_project_intercept(text, chat_id, event, media_path)
             if flyer_result is not None:
                 return flyer_result
+            # PR-β 2026-05-26 — delivery-state guard for when no active or
+            # recent flyer project resolves. Placed AFTER active-project
+            # intercept so the guard only sees the no-project-resolves case.
+            # Sister to PR-α's regulated_account_guard (different surface).
+            delivery_state_result = _try_flyer_delivery_state_guard(text, chat_id, event)
+            if delivery_state_result is not None:
+                return delivery_state_result
             context_phone, context_role = actions.lid_to_phone_via_identify_sender(chat_id)
             if context_role != "owner":
                 context_customer = actions.find_flyer_customer_by_sender(context_phone, chat_id)
@@ -1802,6 +1809,89 @@ def _try_flyer_regulated_account_guard(text: str, chat_id: str, event: Any) -> O
         ),
     )
     return {"action": "skip", "reason": "cf-router flyer regulated account guard"}
+
+
+def _try_flyer_delivery_state_guard(text: str, chat_id: str, event: Any) -> Optional[dict]:
+    """Fail closed for delivery-state language when no flyer project resolves.
+
+    Runs AFTER `_try_flyer_active_project_intercept` in dispatch order. The
+    active-project intercept already handles delivery-state phrases when an
+    active project exists OR when a status-request surfaces a closed_no_send
+    project. This guard catches the leftover case where no project resolves
+    and the message would otherwise fall through to generic Hermes (which
+    can claim "I sent your flyer" with no evidence).
+
+    PR-β 2026-05-26 — sister to `_try_flyer_regulated_account_guard` (PR-α).
+    No active-project yield needed because placement is AFTER the
+    active-project intercept (which already handled active-project cases).
+    Per the LID-only lesson (lessons.md line 92-95), do NOT add a phone-
+    truthy gate before the customer lookup — the response copy works whether
+    or not identify-sender resolves a phone.
+    """
+    if not actions.is_flyer_delivery_state_intent(text):
+        return None
+    message_id = _extract_message_id(event, chat_id, text)
+    phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
+    customer = actions.find_flyer_customer_by_sender(phone, chat_id)
+    # PR-β follow-up 2026-05-26 (delivered-project false-copy blocker fix):
+    # surface the latest project's status BEFORE emitting the no-project
+    # copy. The active-project intercept's status-surface branch only fires
+    # for `is_flyer_project_status_request` matches; "did you send my flyer"
+    # and "send my flyer" do NOT classify as status requests by that helper,
+    # so a delivered project would otherwise reach this guard and trigger
+    # the inaccurate "no active or recent flyer" reply. Use
+    # `find_latest_flyer_project_for_status_by_sender` (includes delivered,
+    # closed_no_send, and every non-completed status, max(updated_at)).
+    # NO phone-truthy gate added — pass phone=None through (LID-only lesson).
+    status_project = actions.find_latest_flyer_project_for_status_by_sender(phone, chat_id)
+    if status_project is not None:
+        sp_id = str(status_project.get("project_id") or "")
+        sp_status = str(status_project.get("status") or "")
+        manual_block = status_project.get("manual_review") or {}
+        manual_reason_code = str(manual_block.get("reason_code") or "")
+        if sp_status == "manual_edit_required" and manual_reason_code == "source_edit_provider_unavailable":
+            status_reply = actions.flyer_manual_edit_status_reply(status_project)
+        else:
+            status_reply = actions.flyer_project_status_reply(status_project)
+        ack_ok, mid, err = actions.send_flyer_text(chat_id, status_reply)
+        actions.audit_intercepted(
+            reason="flyer_delivery_state_status_surfaced",
+            chat_id=chat_id,
+            subprocess_rc=0 if ack_ok else 3,
+            detail=(
+                f"message_id={message_id}; project_id={sp_id}; status={sp_status}; "
+                f"customer_id={customer.get('customer_id') if customer else ''}; "
+                f"sender_role={role}; ack_message_id={mid}; ack_error={err[:300]}"
+            ),
+        )
+        return {"action": "skip", "reason": "cf-router flyer delivery state status surfaced"}
+    if customer is None:
+        reply = (
+            "Flyer Studio\n"
+            "------------\n"
+            "I can help with flyer status or delivery after this number is set up.\n\n"
+            "No delivery action has been taken."
+        )
+    else:
+        business_name = str(customer.get("business_name") or "this business").strip() or "this business"
+        reply = (
+            "Flyer Studio\n"
+            "------------\n"
+            f"I don't see an active or recent flyer for {business_name} to deliver right now.\n\n"
+            "No delivery action has been taken.\n\n"
+            "To start a new flyer, reply with what it should promote."
+        )
+    ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+    actions.audit_intercepted(
+        reason="flyer_delivery_state_guard",
+        chat_id=chat_id,
+        subprocess_rc=0 if ack_ok else 3,
+        detail=(
+            f"message_id={message_id}; customer_id={customer.get('customer_id') if customer else ''}; "
+            f"sender_role={role}; ack_message_id={mid}; ack_error={err[:300]}"
+        ),
+    )
+    return {"action": "skip", "reason": "cf-router flyer delivery state guard"}
 
 
 def _try_flyer_campaign_cta_intercept(text: str, chat_id: str, event: Any) -> Optional[dict]:
