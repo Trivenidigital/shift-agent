@@ -621,13 +621,28 @@ def bridge_send_blocked_by_test_context() -> Optional[str]:
     return None
 
 
-def bridge_post(jid: str, message: str) -> Tuple[bool, str, str, str]:
+def bridge_post(
+    jid: str,
+    message: str,
+    *,
+    action_context: "Optional[ActionExecutionContext]" = None,
+) -> Tuple[bool, str, str, str]:
     """POST to local Hermes bridge. Returns (success, message_id, error_str, status).
 
-    status ∈ {'sent', 'connect_failed', 'http_error', 'send_uncertain', 'unknown_error'}
+    status ∈ {'sent', 'connect_failed', 'http_error', 'send_uncertain',
+              'unknown_error', 'refused'}
 
     'send_uncertain' = bridge ACCEPTED (2xx) but ack body unparseable; message
     likely was delivered. Caller MUST NOT auto-retry (would duplicate).
+
+    'refused' (PR-ζ 2026-05-26) = chokepoint blocked the send for regulated-
+    intent discipline. Two sub-cases distinguished by err_str:
+      - 'missing_action_context' → action_context was None AND caller's
+        basename ∉ SAFE_IO_NULL_CONTEXT_ALLOWLIST
+      - 'lint_violation' → action_context.is_regulated_action=True with
+        verified_action_result=False AND message tripped a forbidden
+        completion verb (PR-γ lint).
+    Audit row written via _emit_audit_row before the refusal returns.
     """
     bad = validate_bridge_url(BRIDGE_URL)
     if bad:
@@ -705,6 +720,7 @@ def bridge_send_media(
     media_type: str = "",
     caption: str = "",
     file_name: str = "",
+    action_context: "Optional[ActionExecutionContext]" = None,
 ) -> Tuple[bool, str, str, str]:
     """POST a media file to the local Hermes bridge /send-media endpoint.
 
@@ -769,6 +785,7 @@ def bridge_send_cta(
     footer: str = "",
     media_path: Path | str | None = None,
     media_type: str = "",
+    action_context: "Optional[ActionExecutionContext]" = None,
 ) -> Tuple[bool, str, str, str]:
     """POST an interactive reply-button message to the local Hermes bridge /send-cta.
 
