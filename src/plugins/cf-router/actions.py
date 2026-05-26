@@ -4037,7 +4037,10 @@ def send_flyer_text(
         if existing:
             mid = str(existing.get("mid") or "recent")
             return True, f"deduped:{mid}", ""
-        ok, mid, err, status = bridge_post(chat_id, message, action_context=action_context)
+        if action_context is None:
+            ok, mid, err, status = bridge_post(chat_id, message)
+        else:
+            ok, mid, err, status = bridge_post(chat_id, message, action_context=action_context)
         if ok:
             dedupe_entries[dedupe_key] = {"ts": now, "mid": mid}
             _write_flyer_outbound_dedupe(dedupe_entries)

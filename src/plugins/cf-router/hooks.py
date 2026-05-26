@@ -921,10 +921,7 @@ def _try_flyer_primary_intercept(
             outbound_message_id = ",".join(x for x in [proc_mid, outbound_message_id] if x)
             ack_err = f"concept_generation_failed: {gen_detail}; ack_error={ack_err}"
     else:
-        ack_ok, outbound_message_id, ack_err = actions.send_flyer_text(
-            chat_id,
-            actions.flyer_project_missing_info_reply(project or {}),
-        )
+        ack_ok, outbound_message_id, ack_err = actions.send_flyer_intake_ack(chat_id, project_id)
     actions.audit_intercepted(
         reason="flyer_primary_project_created", chat_id=chat_id,
         subprocess_rc=0 if ack_ok else 3,
@@ -1769,9 +1766,13 @@ def _try_flyer_account_intercept(text: str, chat_id: str, event: Any) -> Optiona
             verified_action_result=False,
             mutation_class="external_irreversible",
         )
-    ack_ok, mid, err = actions.send_flyer_text(
-        chat_id, result.get("reply_text") or "", action_context=action_ctx,
-    )
+    reply_text = result.get("reply_text") or ""
+    if action_ctx is None:
+        ack_ok, mid, err = actions.send_flyer_text(chat_id, reply_text)
+    else:
+        ack_ok, mid, err = actions.send_flyer_text(
+            chat_id, reply_text, action_context=action_ctx,
+        )
     # PR-ζ BLOCKER #2 fix (security/money-flow reviewer): when the chokepoint
     # refuses on the change_plan path, the customer must NOT be left with
     # half-state (pending_plan_* fields persisted at account.py:301 BEFORE
@@ -2541,10 +2542,16 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
             ),
         )
         return {"action": "skip", "reason": "cf-router flyer business scope blocked"}
-    if actions.should_bypass_active_flyer_project_for_fresh_request(
-        body,
-        active_project,
-        has_media=bool(media_path),
+    is_media_backed_revision = bool(media_path) and (
+        actions.is_flyer_revision_intent(body) or "existing flyer" in lower or "apply" in lower
+    )
+    if (
+        not is_media_backed_revision
+        and actions.should_bypass_active_flyer_project_for_fresh_request(
+            body,
+            active_project,
+            has_media=bool(media_path),
+        )
     ):
         actions.audit_intercepted(
             reason="flyer_active_project_bypassed",
@@ -2571,7 +2578,8 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
     # downstream handlers (selection_map, approval flow, manual-review
     # forwarding) run normally.
     if (
-        actions.is_stale_for_new_request(active_project)
+        not is_media_backed_revision
+        and actions.is_stale_for_new_request(active_project)
         and actions.should_start_new_flyer_over_active(body, has_media=bool(media_path))
     ):
         actions.audit_intercepted(
@@ -2603,7 +2611,11 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
                 status_project = named
         else:
             latest = actions.find_latest_flyer_project_for_status_by_sender(phone, chat_id)
-            if latest is not None and str(latest.get("updated_at") or "") > str(active_project.get("updated_at") or ""):
+            if (
+                latest is not None
+                and status in {"delivered", "completed", "closed_no_send"}
+                and str(latest.get("updated_at") or "") > str(active_project.get("updated_at") or "")
+            ):
                 status_project = latest
         status_project_id = str(status_project.get("project_id") or "")
         status_project_status = str(status_project.get("status") or "")
@@ -2720,7 +2732,7 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         )
         return None
 
-    if status == "delivered" and not actions.is_flyer_revision_intent(body):
+    if status == "delivered" and not actions.is_flyer_revision_intent(body) and not media_path:
         return None
 
     if status == "manual_edit_required":
@@ -2739,7 +2751,11 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
                     status_project = named
             else:
                 latest = actions.find_latest_flyer_project_for_status_by_sender(phone, chat_id)
-                if latest is not None and str(latest.get("updated_at") or "") > str(active_project.get("updated_at") or ""):
+                if (
+                    latest is not None
+                    and status in {"delivered", "completed", "closed_no_send"}
+                    and str(latest.get("updated_at") or "") > str(active_project.get("updated_at") or "")
+                ):
                     status_project = latest
             status_project_id = str(status_project.get("project_id") or "")
             status_project_status = str(status_project.get("status") or "")
@@ -2780,6 +2796,8 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
             )
             return {"action": "skip",
                     "reason": f"cf-router flyer status for {status_project_id}"}
+        if not (actions.is_flyer_revision_intent(body) or media_path):
+            return None
         ok, detail = actions.invoke_update_flyer_project(
             project_id,
             "--revision-text", body,

@@ -855,7 +855,10 @@ def _pending_plan_reply(plan_id: str, url: str, provider: str) -> str:
     # the prior "until payment is confirmed" phrasing would refuse every
     # legitimate plan-change reply. The new wording carries the same
     # meaning without tripping the lint.
-    return f"Flyer Studio\n------------\nPlan change requested: {plan_id}.\n{pay}\nYour current plan stays active until we receive payment."
+    return (
+        f"Flyer Studio\n------------\nPlan change requested: {plan_id}.\n{pay}\n"
+        "Your current plan remains active until payment is confirmed."
+    )
 
 
 def _roll_period(customer: FlyerCustomerProfile, now: datetime) -> FlyerCustomerProfile:
