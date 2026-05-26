@@ -356,12 +356,16 @@ class TestActionContextEnforcement:
         )
         assert ok is True
 
-    def test_audit_write_failure_propagates_exception(
+    def test_audit_write_failure_returns_refusal_tuple_not_exception(
         self, safe_io_module, monkeypatch
     ):
-        """When _emit_audit_row raises, the exception must propagate.
-        Callers see a Python exception, not a silent send-succeeded
-        (audit-fail-closed contract, design §A1)."""
+        """REV 3 (PR security/money-flow reviewer #4): when _emit_audit_row
+        raises, the chokepoint must convert the exception to a refusal
+        tuple — propagating OSError out of bridge_post crashes the Hermes
+        plugin handler mid-HTTP-request, leaving customers with persisted
+        half-state and no reply. The tuple shape preserves fail-CLOSED
+        (send doesn't proceed) while composing cleanly with HTTP. Stderr
+        carries the operator-visible signal."""
         def raising_emit(etype, fields):
             raise OSError("disk full")
         monkeypatch.setattr(safe_io_module, "_emit_audit_row", raising_emit)
@@ -369,14 +373,29 @@ class TestActionContextEnforcement:
             safe_io_module, "_resolve_caller_script_name",
             lambda: "rogue-test-script.py",
         )
-        with pytest.raises(OSError, match="disk full"):
-            safe_io_module.bridge_post("jid", "msg")
+        ok, mid, err, status = safe_io_module.bridge_post("jid", "msg")
+        assert ok is False
+        assert mid == ""
+        assert status == "refused"
+        assert "audit_write_failed" in err
+        assert "OSError" in err  # exception type surfaced for ops
 
     @patch("urllib.request.urlopen")
     def test_change_plan_pending_reply_passes_lint(self, urlopen, safe_io_module):
-        """The current _pending_plan_reply shape (account.py:741+) contains
-        no forbidden completion verbs — lint should pass."""
+        """The REAL _pending_plan_reply function output (account.py:849)
+        must pass lint. Loads the actual function rather than a fabricated
+        string — the prior fabricated test missed BLOCKER #1 where the
+        deployed reply contained the forbidden verb 'confirmed'."""
+        import sys as _sys
+        from pathlib import Path as _Path
+        agents_flyer = _Path(__file__).resolve().parent.parent / "src" / "agents" / "flyer"
+        _sys.path.insert(0, str(agents_flyer))
+        try:
+            from account import _pending_plan_reply
+        finally:
+            _sys.path.pop(0)
         from schemas import ActionExecutionContext
+
         mock_resp = MagicMock()
         mock_resp.read.return_value = b'{"id": "wamid.OK"}'
         urlopen.return_value.__enter__.return_value = mock_resp
@@ -386,13 +405,47 @@ class TestActionContextEnforcement:
             verified_action_result=False,
             mutation_class="external_irreversible",
         )
-        reply = (
-            "Flyer Studio\n------------\n"
-            "Plan change pending. Please complete payment at:\n"
-            "https://example.com/checkout?plan=growth"
+        # Exercise the real function with the deployed shape of inputs.
+        reply = _pending_plan_reply(
+            plan_id="growth",
+            url="https://example.com/checkout?plan=growth",
+            provider="manual",
         )
-        ok, _, _, _ = safe_io_module.bridge_post("jid", reply, action_context=ctx)
-        assert ok is True
+        ok, _, err, status = safe_io_module.bridge_post("jid", reply, action_context=ctx)
+        assert ok is True, (
+            f"_pending_plan_reply output tripped chokepoint lint: "
+            f"err={err!r} status={status!r} reply={reply!r}"
+        )
+
+    @patch("urllib.request.urlopen")
+    def test_change_plan_no_url_reply_passes_lint(self, urlopen, safe_io_module):
+        """The empty-URL branch of _pending_plan_reply (provider/checkout
+        not yet configured) must also pass lint."""
+        import sys as _sys
+        from pathlib import Path as _Path
+        agents_flyer = _Path(__file__).resolve().parent.parent / "src" / "agents" / "flyer"
+        _sys.path.insert(0, str(agents_flyer))
+        try:
+            from account import _pending_plan_reply
+        finally:
+            _sys.path.pop(0)
+        from schemas import ActionExecutionContext
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"id": "wamid.OK"}'
+        urlopen.return_value.__enter__.return_value = mock_resp
+        ctx = ActionExecutionContext(
+            action_id="flyer.billing.request_plan_change",
+            is_regulated_action=True,
+            verified_action_result=False,
+            mutation_class="external_irreversible",
+        )
+        reply = _pending_plan_reply(plan_id="growth", url="", provider="manual")
+        ok, _, err, status = safe_io_module.bridge_post("jid", reply, action_context=ctx)
+        assert ok is True, (
+            f"_pending_plan_reply (no-url branch) tripped lint: "
+            f"err={err!r} status={status!r} reply={reply!r}"
+        )
 
     def test_more_than_twenty_verb_hits_fails_closed_not_loud(
         self, safe_io_module, monkeypatch

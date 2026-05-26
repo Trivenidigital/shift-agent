@@ -849,7 +849,13 @@ def _quota_blocked_reply(customer: FlyerCustomerProfile, tiers: list[FlyerPlanTi
 def _pending_plan_reply(plan_id: str, url: str, provider: str) -> str:
     del provider
     pay = f"Pay here: {url}" if url else "Payment link is not configured yet. I saved this plan request for checkout setup."
-    return f"Flyer Studio\n------------\nPlan change requested: {plan_id}.\n{pay}\nYour current plan remains active until payment is confirmed."
+    # PR-ζ 2026-05-26: avoid the verb "confirmed" — it's in
+    # FORBIDDEN_COMPLETION_VERBS (customer_copy_policy.py:85). With PR-ζ
+    # lint applied to this reply (via the change_plan callsite migration),
+    # the prior "until payment is confirmed" phrasing would refuse every
+    # legitimate plan-change reply. The new wording carries the same
+    # meaning without tripping the lint.
+    return f"Flyer Studio\n------------\nPlan change requested: {plan_id}.\n{pay}\nYour current plan stays active until we receive payment."
 
 
 def _roll_period(customer: FlyerCustomerProfile, now: datetime) -> FlyerCustomerProfile:
