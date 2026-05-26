@@ -2589,6 +2589,45 @@ _FLYER_DELIVERY_STATE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# PR-β.1 2026-05-26 — "send now" style finalization request. START-ANCHORED
+# (NOT searchable anywhere in body) so flyer briefs like "Create a flyer
+# that says send now" cannot match — the brief's "send now" is inside the
+# message body, not at the start. Customer-intent "send now" is dominant
+# (start of message, optionally with polite prefix).
+#
+# Matches: "send now", "Send now.", "please send now", "kindly send now",
+# "send me now", "send my flyer now", "send the flyer now", "send it now".
+# Does NOT match: "send to customers Friday", "send me ideas",
+# "send this to my team", "Create a flyer that says send now", any phrase
+# where "send now" is embedded mid-message.
+_FLYER_SEND_NOW_PATTERN = re.compile(
+    r"^\s*(?:please\s+|kindly\s+)?send(?:\s+(?:me|us))?\s+"
+    r"(?:(?:my|the|it)\s+)?(?:flyer\s+)?now\b",
+    re.IGNORECASE,
+)
+
+
+def is_flyer_send_now_intent(text: str) -> bool:
+    """Return True for explicit "send now" finalization requests at message start.
+
+    PR-β.1 helper. Start-anchored to prevent matching flyer briefs that
+    embed "send now" as copy text (e.g., "Create a flyer that says send now").
+    Used by:
+      - `_try_flyer_active_project_intercept` finalization gate (hooks.py:2808)
+        as approval-equivalent in `revising_design` / `awaiting_final_approval`.
+      - `_try_flyer_active_project_intercept` pending-revision-confirmation
+        guard (hooks.py:2790) — same intent as "approve" when a revision is
+        pending.
+      - `_try_flyer_active_project_intercept` revision-text fallback
+        (hooks.py:2894) — explicitly EXCLUDED so "send now" with delivered
+        status falls through to PR-β guard for status-surface (instead of
+        being mis-classified as a revision).
+      - `is_flyer_delivery_state_intent` — included so PR-β guard catches
+        "send now" with no active project (surfaces latest or fail-closes).
+    """
+    body = flyer_visible_message_text(text)
+    return bool(_FLYER_SEND_NOW_PATTERN.search(body))
+
 
 def is_flyer_delivery_state_intent(text: str) -> bool:
     """Return True for delivery/approval phrases that must not hit generic LLM.
@@ -2598,12 +2637,16 @@ def is_flyer_delivery_state_intent(text: str) -> bool:
     matters when no active or recently-closed flyer project resolves —
     i.e., the message would otherwise fall through to generic Hermes.
 
-    "send now" intentionally NOT matched — deferred to PR-β.1 pending a
-    deterministic active-project handler.
+    PR-β.1 2026-05-26 — "send now" is now included (was deferred in PR-β).
+    The corresponding hooks.py wiring in `_try_flyer_active_project_intercept`
+    routes "send now" through the existing approval/finalization path when
+    the active project is in a finalizable state.
     """
     body = flyer_visible_message_text(text)
     lowered = body.lower()
     if _FLYER_DELIVERY_STATE_PATTERN.search(lowered):
+        return True
+    if is_flyer_send_now_intent(text):
         return True
     # Bare "approve" / "approve." — match is_flyer_approval_text semantics
     # so the two checks stay consistent.

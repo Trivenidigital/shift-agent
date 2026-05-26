@@ -2787,7 +2787,11 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         return {"action": "skip",
                 "reason": f"cf-router flyer exact edit already queued for {project_id}"}
 
-    if actions.is_flyer_approval_text(body):
+    # PR-β.1 2026-05-26 — "send now" treated as approval-equivalent for the
+    # pending-revision-confirmation reminder: same intent ("commit / send the
+    # current design"), so the same reminder fires when a revision proposal
+    # is pending.
+    if actions.is_flyer_approval_text(body) or actions.is_flyer_send_now_intent(body):
         pending = active_project.get("pending_revision_confirmation") or {}
         pending_revision_id = str(pending.get("revision_id") or "")
         if pending_revision_id:
@@ -2805,7 +2809,12 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
                 detail=f"project_id={project_id}; pending_revision_confirmation=true; sender_role={role}; ack_message_id={mid}; ack_error={err[:300]}",
             )
             return {"action": "skip", "reason": f"cf-router flyer active: pending revision confirmation for {project_id}"}
-    if actions.is_flyer_approval_text(body) and status in {"revising_design", "awaiting_final_approval"}:
+    # PR-β.1 2026-05-26 — "send now" / "please send my flyer now" routed
+    # through the SAME approval/finalization safe path as bare "approve"
+    # when the active project is in a finalizable state. Same status gates,
+    # same concept-regeneration branch, same finalize_and_send_flyer call,
+    # same audit. Customer's intent matches: "go ahead and send."
+    if (actions.is_flyer_approval_text(body) or actions.is_flyer_send_now_intent(body)) and status in {"revising_design", "awaiting_final_approval"}:
         if status == "revising_design" and not active_project.get("concepts"):
             gen_ok, gen_detail = actions.trigger_generate_flyer_concepts(project_id)
             if gen_ok:
@@ -2891,7 +2900,16 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         return {"action": "skip",
                 "reason": f"cf-router flyer active: finalization failed for {project_id}"}
 
-    if status in {"revising_design", "awaiting_final_approval", "delivered"} and body:
+    # PR-β.1 2026-05-26 — exclude "send now" from the revision-text fallback.
+    # Without this exclusion, "send now" + status="delivered" would be
+    # mis-classified as a revision instruction (status="delivered" reaches
+    # this branch because the finalization gate above only matches
+    # revising_design / awaiting_final_approval). With the exclusion,
+    # "send now" + delivered falls through active-project intercept and
+    # is caught by PR-β's _try_flyer_delivery_state_guard which surfaces
+    # the existing flyer_project_status_reply via
+    # find_latest_flyer_project_for_status_by_sender.
+    if status in {"revising_design", "awaiting_final_approval", "delivered"} and body and not actions.is_flyer_send_now_intent(body):
         ok, detail = actions.invoke_update_flyer_project(
             project_id,
             "--revision-text", body,
