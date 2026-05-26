@@ -168,6 +168,31 @@ def test_extract_text_facts_locks_all_you_can_eat_offer_price():
     assert by_id["offer_price"].source == "customer_text"
 
 
+def test_extract_text_facts_handles_price_for_protein_biryani_items():
+    from agents.flyer.facts import extract_text_facts, facts_by_id
+
+    raw_request = (
+        "Create a Special Biryani's Flyer with all famous south indian biryani's included, "
+        "add Price as $16.99 for chicken and $18.99 for goat. "
+        "This promotion runs on Wednesday and Thursday of every week. "
+        "Use address and phone number stored."
+    )
+    fields = FlyerRequestFields(
+        event_or_business_name="Special Biryani's",
+        contact_info="+17329837841",
+        notes=raw_request,
+    )
+
+    facts = extract_text_facts(fields, raw_request, message_id="m-biryani-prices")
+    by_id = facts_by_id(type("P", (), {"locked_facts": facts})())
+
+    assert by_id["item:0:name"].value == "Chicken Biryani"
+    assert by_id["item:0:price"].value == "$16.99"
+    assert by_id["item:1:name"].value == "Goat Biryani"
+    assert by_id["item:1:price"].value == "$18.99"
+    assert all("price as" not in fact.value.lower() for fact in facts)
+
+
 def test_context_isolation_blocks_stale_project_provenance():
     from agents.flyer.facts import context_isolation_blockers
 

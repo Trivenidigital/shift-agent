@@ -335,10 +335,21 @@ def _schedule_hint(project: FlyerProject) -> str:
         text,
         flags=re.IGNORECASE,
     )
+    recurring_days_match = re.search(
+        r"\b(?P<first>monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+and\s+"
+        r"(?P<second>monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+"
+        r"(?:of\s+)?every\s+week\b",
+        text,
+        flags=re.IGNORECASE,
+    )
     if time_match and days_match:
         return f"{days_match.group(1).title()} | {time_match.group(1).upper()}"
     if time_match:
         return time_match.group(1).upper()
+    if recurring_days_match:
+        first = recurring_days_match.group("first").title()
+        second = recurring_days_match.group("second").title()
+        return f"{first} and {second} every week"
     schedule_match = re.search(
         r"((?:starts?|starting)\s+from\s+.+?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend).+?)(?:\.|$)",
         text,
@@ -442,6 +453,12 @@ def _detail_clauses(project: FlyerProject) -> list[str]:
     if not details:
         return []
     menu_items = _menu_item_lines(project)
+    menu_prices = {
+        re.sub(r"\s+", "", price)
+        for item in menu_items
+        for _, price in [_split_item_price(item)]
+        if price
+    }
     compact = re.sub(r"\s+", " ", details)
     clauses = [part.strip(" .") for part in re.split(r";|\n|•|-{2,}|(?<=\.)\s+", compact) if part.strip(" .")]
     selected: list[str] = []
@@ -463,6 +480,17 @@ def _detail_clauses(project: FlyerProject) -> list[str]:
                 flags=re.IGNORECASE,
             )
         )
+        clause_prices = {
+            re.sub(r"\s+", "", match.group(0))
+            for match in re.finditer(r"\$\s*\d+(?:\.\d{1,2})?", clause)
+        }
+        if (
+            menu_items
+            and clause_prices
+            and clause_prices.issubset(menu_prices)
+            and re.search(r"\b(?:add|set|use)\s+price\s+as\b|\bprice\s+as\b", clause, flags=re.IGNORECASE)
+        ):
+            continue
         if phones and current_contact_digits and current_contact_digits in phones and not has_offer_or_price:
             continue
         if phones and current_contact_digits and all(phone != current_contact_digits for phone in phones):

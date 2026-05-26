@@ -659,6 +659,9 @@ def notify_customer_of_closure(
     return entry
 
 
+_VALID_PROACTIVE_WHATSAPP_CHAT_ID = re.compile(r"^\d{6,20}@(lid|s\.whatsapp\.net)$")
+
+
 def find_recent_inbound_chat_id_for_project(
     decisions_log_path: Path, project_id: str,
     *, max_lines: int = 50_000,
@@ -704,7 +707,7 @@ def find_recent_inbound_chat_id_for_project(
         if doc.get("type") not in {"cf_router_intercepted", "raw_inbound"}:
             continue
         chat_id = str(doc.get("chat_id") or "")
-        if chat_id:
+        if chat_id and _VALID_PROACTIVE_WHATSAPP_CHAT_ID.match(chat_id):
             return chat_id
     return ""
 

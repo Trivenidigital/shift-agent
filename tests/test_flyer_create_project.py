@@ -206,6 +206,48 @@ def test_sample_snacks_request_locks_unpriced_menu_items(tmp_path, monkeypatch, 
     assert "item:0:price" not in facts
 
 
+def test_biryani_price_for_request_locks_real_items_not_instruction_fragments(tmp_path, monkeypatch, capsys):
+    module = _load_script(monkeypatch)
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    _write_customer(
+        customers_path,
+        category="Indian Restaurant",
+        phone="+17329837841",
+        business_name="Lakshmi's Kitchen",
+        business_address="90 Brybar Dr St Johns FL",
+        primary_chat_id="201975216009469@lid",
+    )
+
+    raw_request = (
+        "Create a Special Biryani's Flyer with all famous south indian biryani's included, "
+        "add Price as $16.99 for chicken and $18.99 for goat. "
+        "This promotion runs on Wednesday and Thursday of every week. "
+        "Use address and phone number stored."
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+17329837841",
+        "--chat-id", "201975216009469@lid",
+        "--message-id", "m-biryani-prices",
+        "--raw-request", raw_request,
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+    facts = {fact["fact_id"]: fact for fact in project["locked_facts"]}
+
+    assert facts["business_name"]["value"] == "Lakshmi's Kitchen"
+    assert facts["business_name"]["source"] == "customer_profile"
+    assert facts["item:0:name"]["value"] == "Chicken Biryani"
+    assert facts["item:0:price"]["value"] == "$16.99"
+    assert facts["item:1:name"]["value"] == "Goat Biryani"
+    assert facts["item:1:price"]["value"] == "$18.99"
+    assert "add price as" not in " ".join(fact["value"].lower() for fact in project["locked_facts"])
+
+
 def test_profile_hydration_uses_chat_id_when_phone_does_not_match(tmp_path, monkeypatch, capsys):
     module = _load_script(monkeypatch)
     customers_path = tmp_path / "customers.json"
