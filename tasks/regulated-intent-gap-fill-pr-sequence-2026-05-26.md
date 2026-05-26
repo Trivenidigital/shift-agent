@@ -53,7 +53,11 @@ PRs land in order **α → β → γ → δ → ε → ζ → η → θ**. α an
 | Basis from closed PR #250 | **3 of 19 seed fixtures** in `codex/regulated-intent-pr0-foundation` branch are PR-β scope: `regulated_delivery_did_send.json`, `regulated_delivery_send_my_flyer.json`, `regulated_delivery_where.json`. May cherry-pick when PR-η builds the eval harness. DO NOT lift #250's broader cf-router regex changes wholesale. |
 | Discipline inherited from #251 | (a) Tight phrase-anchored regex (no bare-token matching like #250); (b) False-positive negative tests REQUIRED in the test file alongside positive cases; (c) LID-only test for the no-active-project guard path (no second phone gate); (d) Active-project case tested via the dispatch-order integration check (placement-after means guard never sees active-project cases). |
 
-### PR-β.1 — `send now` deterministic finalization handler (IN PROGRESS 2026-05-26)
+### PR-β.1 — `send now` deterministic finalization handler (MERGED + DEPLOYED 2026-05-26)
+
+**Status:** PR [#260](https://github.com/Trivenidigital/shift-agent/pull/260) squash-merged 2026-05-26T12:39Z as `08ac395`. Deployed 2026-05-26T12:46Z as `deploy-20260526-124624-08ac3952`. Runtime-verified 8/8 phrases green (3 positive + 3 false-positive guard + 3 PR-β regression). Evidence at `tasks/evidence/2026-05-26-pr260-deploy/`. PR-α production fingerprint captured for the related plan-change route at `tasks/evidence/2026-05-26-pr-alpha-runtime-fingerprint/`.
+
+### PR-β.1 — original design table
 
 | Aspect | Detail |
 |---|---|
@@ -75,7 +79,13 @@ PRs land in order **α → β → γ → δ → ε → ζ → η → θ**. α an
 | Non-goals | NO chokepoint consolidation (PR-ε). NO ActionExecutionContext / null-context allowlist (PR-ζ). NO forbidden-completion-verb lint (PR-γ). NO modification to `finalize_and_send_flyer` itself. NO new audit reason added (reuses existing `flyer_primary_project_created` / `flyer_primary_failed` for finalization path, and PR-β's `flyer_delivery_state_status_surfaced` for surface path). NO deploy or live VPS changes. |
 | Dependency | PR-β merged (`9bb5c4d` on `origin/main`). |
 
-## PR-γ — Forbidden-completion-verbs lint in customer_copy_policy.py
+## PR-γ — Forbidden-completion-verbs lint in customer_copy_policy.py (IN PROGRESS 2026-05-26)
+
+### Status
+
+Branch `fix/flyer-forbidden-completion-verbs-lint` off `origin/main` (`da6d1e8`). Scope narrowed per operator 2026-05-26: **forbidden completion verbs lint only, not full PR-0b**. Start in MEASURE/TEST mode — no chokepoint hookup, no `ActionExecutionContext` plumbing (deferred to PR-ζ), no send blocking. Pure additive peer to existing `scan_customer_text` (does NOT modify `scan_customer_text` — would break replay-test assertions on legitimate Flyer copy).
+
+### Original design table
 
 **Order: 3rd.** The cheap shim that prevents fake-completion claims across ALL agents' customer copy.
 
@@ -168,12 +178,13 @@ PRs land in order **α → β → γ → δ → ε → ζ → η → θ**. α an
 
 | PR | Title | Branch | Status |
 |---|---|---|---|
-| α | Regulated-intent regex gap-fill | `docs/regulated-intent-control-layer` (merged + deleted) | **MERGED 2026-05-26 — PR [#251](https://github.com/Trivenidigital/shift-agent/pull/251), squash commit `6e0ffeb`** |
+| α | Regulated-intent regex gap-fill | `docs/regulated-intent-control-layer` (merged + deleted) | **MERGED + DEPLOYED 2026-05-26** — PR [#251](https://github.com/Trivenidigital/shift-agent/pull/251), squash `6e0ffeb`, deploy tag `deploy-20260526-014612-6e0ffeb6`. Production-verified via Lakshmi's Kitchen plan-change interaction 13:09Z (`tasks/evidence/2026-05-26-pr-alpha-runtime-fingerprint/`). |
 | α.1 | LID-only `find_active_flyer_project_by_sender` upstream fix | — | pending — out of PR-α scope; tracked in PR-α row "Known deferred follow-up" |
 | α.2 | GitHub PR checks absent | — | pending — see "Follow-ups" section below |
 | (250) | Codex PR-0 scaffold attempt | `codex/regulated-intent-pr0-foundation` | **CLOSED 2026-05-26 (unmerged)** — PR [#250](https://github.com/Trivenidigital/shift-agent/pull/250). Closed as superseded after PR-α merged because #250's account regex used bare tokens (`address`, `whatsapp`, `phone number`) that would have reintroduced false-positives PR-α explicitly tests against. Content decomposed into PR-β / γ / ζ / η below. Branch kept as cherry-pick source. |
-| β | Delivery-state guard | — | pending α (now unblocked — α merged); MUST inherit #251 verb-anchor + active-project-yield discipline |
-| γ | Forbidden-completion-verbs lint | — | pending β |
+| β | Delivery-state guard | — | **MERGED + DEPLOYED 2026-05-26** — PR [#252](https://github.com/Trivenidigital/shift-agent/pull/252), squash `9bb5c4d`, deploy tag `deploy-20260526-024934-9bb5c4d0`. Evidence at `tasks/evidence/2026-05-26-pr252-deploy/`. |
+| β.1 | `send now` deterministic finalization | — | **MERGED + DEPLOYED 2026-05-26** — PR [#260](https://github.com/Trivenidigital/shift-agent/pull/260), squash `08ac395`, deploy tag `deploy-20260526-124624-08ac3952`. Evidence at `tasks/evidence/2026-05-26-pr260-deploy/`. |
+| γ | Forbidden-completion-verbs lint | `fix/flyer-forbidden-completion-verbs-lint` | **IN PROGRESS 2026-05-26** — measure/test mode only per operator scope ("forbidden completion verbs lint only, not full PR-0b"). NO chokepoint hookup, NO ActionExecutionContext, NO send blocking. Peer to existing `scan_customer_text`. |
 | δ | `mutation_class` field | — | pending γ |
 | ε | Send chokepoint consolidation | — | pending δ |
 | ζ | `ActionExecutionContext` + allowlist + lint hookup | — | pending ε |

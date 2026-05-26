@@ -62,6 +62,45 @@ CUSTOMER_COPY_FORBIDDEN_RE = re.compile(
     re.IGNORECASE,
 )
 
+# PR-γ 2026-05-26 — forbidden completion verbs lint (measure/test mode only).
+# These verbs make a completion claim about a regulated action (billing,
+# payment, account, schedule, delivery). They MUST NOT appear in customer-
+# visible copy unless the system has a verified action result (e.g., payment
+# webhook received, deterministic-handler success audit row written).
+#
+# This list is the basis for future PR-ζ chokepoint enforcement at
+# safe_io.bridge_post. PR-γ ships the constants + the peer lint function
+# (`lint_no_unverified_completion`) for static analysis and tests. NO
+# chokepoint hookup, NO ActionExecutionContext, NO send blocking in this PR.
+# Existing `scan_customer_text` is intentionally NOT modified — many replay
+# tests assert `not scan(text).hits` for legitimate Flyer copy that contains
+# words like "sent" / "scheduled" / "applied", and changing the existing scan
+# semantics would break them. The new lint function is a peer, not a wrapper.
+FORBIDDEN_COMPLETION_VERBS: tuple[str, ...] = (
+    "processed",
+    "completed",
+    "upgraded",
+    "downgraded",
+    "changed",
+    "confirmed",
+    "sent",
+    "approved",
+    "paid",
+    "posted",
+    "pushed",
+    "applied",
+    "scheduled",
+    "booked",
+    "cancelled",
+    "canceled",
+    "refunded",
+)
+
+FORBIDDEN_COMPLETION_VERB_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(v) for v in FORBIDDEN_COMPLETION_VERBS) + r")\b",
+    re.IGNORECASE,
+)
+
 
 @dataclass(frozen=True)
 class CustomerCopyHit:
@@ -125,6 +164,45 @@ def scan_outbound_entry(entry: dict[str, Any]) -> CustomerCopyScan:
         outbound_text_from_entry(entry),
         raw_request=str(entry.get("raw_request") or entry.get("request_text") or ""),
     )
+
+
+def lint_no_unverified_completion(
+    text: str,
+    *,
+    has_verified_action_result: bool = False,
+) -> CustomerCopyScan:
+    """Return CustomerCopyScan with `unverified_completion_verb` hits for
+    forbidden completion verbs in customer-visible copy.
+
+    PR-γ 2026-05-26 — measure/test mode only. Returns hits but does NOT block
+    any send. Future PR-ζ will wire this into safe_io.bridge_post chokepoint
+    so unverified completion claims are refused at runtime.
+
+    Semantics:
+    - If `has_verified_action_result=True`, returns an empty scan even if the
+      text contains forbidden verbs — caller has confirmed evidence of a real
+      action result (payment webhook, deterministic-handler success, etc.).
+    - If `has_verified_action_result=False` (the default), returns hits for
+      every distinct forbidden verb found (case-insensitive, word-boundary
+      anchored, deduplicated per verb).
+
+    This is a PEER to `scan_customer_text`, not a wrapper. `scan_customer_text`
+    remains unchanged so existing replay tests (which assert `not hits` for
+    legitimate Flyer copy containing words like "sent" / "scheduled" /
+    "applied") continue to pass.
+    """
+    body = str(text or "")
+    if has_verified_action_result:
+        return CustomerCopyScan(text=body, hits=())
+    hits: list[CustomerCopyHit] = []
+    seen: set[str] = set()
+    for match in FORBIDDEN_COMPLETION_VERB_RE.finditer(body):
+        verb = match.group(0).lower()
+        if verb in seen:
+            continue
+        seen.add(verb)
+        hits.append(CustomerCopyHit(category="unverified_completion_verb", value=verb))
+    return CustomerCopyScan(text=body, hits=tuple(hits))
 
 
 def classify_initial_ack(text: str) -> set[str]:
