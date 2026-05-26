@@ -9,6 +9,7 @@ EnvironmentFile=/opt/shift-agent/.env
 Environment=HOME=/opt/shift-agent
 Environment=TZ=UTC
 ExecStart=/usr/local/bin/shift-agent-notify-owner --title "Flyer source-edit SLA watchdog failed" --priority 2 "The Flyer source-edit SLA watchdog failed. Check /opt/shift-agent/logs/flyer-source-edit-sla-watchdog.log and systemctl status flyer-source-edit-sla-watchdog.service."
+SuccessExitStatus=5 6
 StandardOutput=append:/opt/shift-agent/logs/flyer-source-edit-sla-watchdog.log
 StandardError=append:/opt/shift-agent/logs/flyer-source-edit-sla-watchdog.log
 

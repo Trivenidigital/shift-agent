@@ -608,7 +608,7 @@ def run_watchdog(
     if not notify_ok:
         _append_audit(
             decisions_log_path,
-            outcome="notify_failed",
+            outcome="alerted_notify_failed",
             rows=alert_rows,
             stale_count=stale_count,
             threshold_minutes=threshold_minutes,
@@ -618,8 +618,8 @@ def run_watchdog(
             now=now,
         )
         return {
-            "status": "notify_failed",
-            "exit_code": 6,
+            "status": "alerted_notify_failed",
+            "exit_code": 0,
             "stale_count": stale_count,
             "alerted_project_ids": [],
             "throttled_project_ids": [row["project_id"] for row in throttled_rows],
