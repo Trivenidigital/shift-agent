@@ -1593,7 +1593,11 @@ def _source_edit_manual_queue_impact() -> dict[str, Any]:
       all_oldest_age_hours: int | None,
       all_oldest_age_minutes: int | None,
       reason_counts: dict[str, int],
+      stale_reason_counts: dict[str, int],
+      oldest_age_minutes_by_reason: dict[str, int],
       stale_count: int,
+      source_edit_stale_count: int,
+      source_edit_oldest_stale_minutes: int | None,
       stale_minutes_threshold: int,
     }. Best-effort: any
     exception loading the project store returns zero impact (the health
@@ -1614,18 +1618,29 @@ def _source_edit_manual_queue_impact() -> dict[str, Any]:
             "all_oldest_age_hours": None,
             "all_oldest_age_minutes": None,
             "reason_counts": {},
+            "stale_reason_counts": {},
+            "oldest_age_minutes_by_reason": {},
             "stale_count": 0,
+            "source_edit_stale_count": 0,
+            "source_edit_oldest_stale_minutes": None,
             "stale_minutes_threshold": threshold,
         }
     active_rows = [r for r in rows if r.get("manual_status") in {"queued", "in_progress"}]
     reason_counts: dict[str, int] = {}
+    stale_reason_counts: dict[str, int] = {}
+    oldest_age_minutes_by_reason: dict[str, int] = {}
     for row in active_rows:
         reason = str(row.get("manual_reason_code") or "unclassified")
+        age_minutes = int(row.get("age_minutes", 0) or 0)
         reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        oldest_age_minutes_by_reason[reason] = max(oldest_age_minutes_by_reason.get(reason, 0), age_minutes)
+        if bool(row.get("is_stale")):
+            stale_reason_counts[reason] = stale_reason_counts.get(reason, 0) + 1
     matched = [
         r for r in active_rows
         if r.get("manual_reason_code") == "source_edit_provider_unavailable"
     ]
+    source_stale = [r for r in matched if bool(r.get("is_stale"))]
     all_oldest_minutes = (
         max(int(r.get("age_minutes", 0) or 0) for r in active_rows)
         if active_rows else None
@@ -1642,7 +1657,15 @@ def _source_edit_manual_queue_impact() -> dict[str, Any]:
         "all_oldest_age_hours": (all_oldest_minutes // 60) if all_oldest_minutes is not None else None,
         "all_oldest_age_minutes": all_oldest_minutes,
         "reason_counts": dict(sorted(reason_counts.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "stale_reason_counts": dict(sorted(stale_reason_counts.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "oldest_age_minutes_by_reason": dict(
+            sorted(oldest_age_minutes_by_reason.items(), key=lambda kv: (-kv[1], kv[0]))
+        ),
         "stale_count": sum(1 for r in active_rows if bool(r.get("is_stale"))),
+        "source_edit_stale_count": len(source_stale),
+        "source_edit_oldest_stale_minutes": (
+            max(int(r.get("age_minutes", 0) or 0) for r in source_stale) if source_stale else None
+        ),
         "stale_minutes_threshold": threshold,
     }
 
@@ -1805,12 +1828,23 @@ def _flyer_provider_components() -> list[dict[str, Any]]:
     else:
         source_severity = "yellow"
         queued = queue_impact["queued_count"]
+        all_queued = queue_impact["all_queued_count"]
         oldest = queue_impact["oldest_age_hours"]
+        threshold = queue_impact["stale_minutes_threshold"]
+        reason_counts = queue_impact.get("reason_counts") or {}
+        top_reasons = ", ".join(f"{k}={v}" for k, v in list(reason_counts.items())[:3])
         if queued > 0:
             source_detail = (
                 "Exact flyer edits are falling back to manual review because source-edit "
                 f"provider is unavailable ({queued} queued; oldest "
-                f"{oldest if oldest is not None else 0}h)"
+                f"{oldest if oldest is not None else 0}h; stale threshold {threshold}m). "
+                f"All manual queue blockers: {top_reasons if top_reasons else 'none'}."
+            )
+        elif all_queued > 0:
+            source_detail = (
+                "Source-edit provider key is unavailable; source edits will fail closed to manual review. "
+                f"Current manual queue has {all_queued} active blockers (stale threshold {threshold}m). "
+                f"Top reasons: {top_reasons if top_reasons else 'none'}."
             )
         elif source_placeholder:
             source_detail = f"{key_name} is a placeholder - exact edits will route to manual review"
