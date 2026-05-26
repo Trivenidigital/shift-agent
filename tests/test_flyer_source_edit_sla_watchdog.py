@@ -154,7 +154,7 @@ def test_recently_alerted_project_is_throttled(tmp_path):
     assert result["alerted_project_ids"] == []
 
 
-def test_notification_failure_returns_error_and_does_not_advance_state(tmp_path):
+def test_notification_failure_returns_degraded_and_keeps_alert_state_unchanged(tmp_path):
     module = load_module()
     projects = tmp_path / "projects.json"
     state = tmp_path / "sla-alerts.json"
@@ -172,12 +172,12 @@ def test_notification_failure_returns_error_and_does_not_advance_state(tmp_path)
         notify_func=lambda **_: False,
     )
 
-    assert result["status"] == "notify_failed"
-    assert result["exit_code"] == 6
+    assert result["status"] == "alerted_notify_failed"
+    assert result["exit_code"] == 0
     assert not state.exists()
     audit = json.loads(decisions.read_text(encoding="utf-8").strip())
     assert audit["notify_ok"] is False
-    assert audit["outcome"] == "notify_failed"
+    assert audit["outcome"] == "alerted_notify_failed"
     assert audit["project_ids"] == ["F9004"]
 
 
@@ -371,10 +371,15 @@ def test_watchdog_returns_customer_update_summary_counts(tmp_path):
 def test_deploy_installs_and_enables_sla_watchdog_timer():
     deploy = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh").read_text(encoding="utf-8")
     smoke = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-smoke-test.sh").read_text(encoding="utf-8")
+    watchdog_service = (REPO / "src" / "agents" / "flyer" / "systemd" / "flyer-source-edit-sla-watchdog.service").read_text(encoding="utf-8")
+    failure_service = (REPO / "src" / "agents" / "flyer" / "systemd" / "flyer-source-edit-sla-watchdog-failure.service").read_text(encoding="utf-8")
 
     assert "flyer-source-edit-sla-watchdog" in deploy
     assert "flyer-source-edit-sla-watchdog.timer" in deploy
     assert "flyer-source-edit-sla-watchdog.timer" in smoke
+    assert "ExecStartPre=/usr/bin/test -x /usr/local/bin/flyer-source-edit-sla-watchdog" in watchdog_service
+    assert "ExecStartPre=/usr/bin/test -x /usr/local/bin/shift-agent-notify-owner" not in watchdog_service
+    assert "SuccessExitStatus=5 6" in failure_service
 
 
 def test_stale_manual_queue_sends_customer_update_after_customer_threshold(tmp_path):
