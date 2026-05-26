@@ -34,6 +34,7 @@ go in audit_helpers.py).
 
 from __future__ import annotations
 import fcntl
+import inspect  # PR-ζ 2026-05-26 — caller introspection in _resolve_caller_script_name
 import json
 import os
 import re
@@ -607,6 +608,159 @@ def validate_bridge_url(url: str) -> Optional[str]:
     return None
 
 
+# ─────────────────────────────────────────────────────────────────
+# PR-ζ 2026-05-26 — Regulated-intent chokepoint discipline
+# ─────────────────────────────────────────────────────────────────
+
+# Eager imports of schemas + Pydantic TypeAdapter (per design REV 2,
+# structural reviewer #3). Verified no circular dep: schemas.py:2316 only
+# mentions safe_io in comments; ActionExecutionContext doesn't depend on
+# safe_io. Importing eagerly avoids sys.path edge cases under Hermes plugin
+# load paths where lazy `from schemas import` could fail at refusal time.
+from schemas import LogEntry, ActionExecutionContext  # type: ignore  # noqa: E402
+from pydantic import TypeAdapter  # noqa: E402
+
+_LOG_ENTRY_ADAPTER = TypeAdapter(LogEntry)
+_DECISIONS_LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+_DECISIONS_LOG_LOCK = Path(str(_DECISIONS_LOG_PATH) + ".lock")
+
+
+# Scripts in this set may call bridge_post / bridge_send_media / bridge_send_cta
+# with action_context=None. Every other caller must pass a non-None
+# ActionExecutionContext OR the chokepoint refuses the send and emits a
+# regulated_send_missing_action_context audit row.
+#
+# Adding a new entry requires updating
+# tests/test_send_chokepoint_null_context_allowlist.py (PR-ζ static gate)
+# and surfacing the rationale in the PR description.
+SAFE_IO_NULL_CONTEXT_ALLOWLIST: frozenset[str] = frozenset({
+    # System health / observability (not regulated business actions).
+    "shift-agent-health-check.sh",
+    "shift-agent-notify-owner",
+    "shift-agent-tail-logger.py",
+    "shift-agent-fsck.py",
+    # Daily / EOD owner-only digests.
+    "send-daily-brief",
+    "eod-reconcile",
+    "check-compliance-deadlines.py",
+    # Flyer recovery watchdogs (system alerts).
+    "flyer-recovery-watchdog",
+    "flyer-source-edit-sla-watchdog",
+    # Flyer media-delivery paths. Threading context is PR-ζ.1 work — the
+    # upstream callers in cf-router/actions.py will pass real context, and
+    # the migration of these two scripts comes after the cf-router callsites.
+    "send-flyer-package",
+    "send-flyer-campaign",
+    # Flyer closure customer-notify path. Uses `from safe_io import bridge_post
+    # as _default_bridge` then `bridge_send(chat_id, text)` at line 634 — the
+    # injected callable is invisible to the static gate; runtime resolver
+    # lands here. NOT a regulated surface (post-closure notify is informational).
+    "manual_queue.py",
+    # Catering / expense — adapter callers via bridge_post_2tuple.
+    # Migrating to real ActionExecutionContext is a follow-up PR per the
+    # PR-ζ spec ("NO mass call-site updates").
+    "send-catering-ack",
+    "apply-catering-owner-decision",
+    "create-catering-lead",
+    "create-catering-proposal-options",
+    "finalize-catering-menu",
+    "select-catering-proposal",
+    "apply-expense-decision",
+    # STATIC-GATE-ONLY ENTRY. send-coverage-message:96 defines a LOCAL
+    # `def bridge_post(jid, text, timeout=15)` that bypasses
+    # safe_io.bridge_post entirely. The chokepoint NEVER fires for this
+    # script; the allowlist entry ONLY satisfies the static gate. Migrating
+    # to the chokepoint is PR-ε.1 work (requires safe_io.bridge_post to
+    # gain a `timeout` kwarg).
+    "send-coverage-message",
+    # cf-router non-change_plan callsites — DEFERRED to PR-ζ.1. actions.py
+    # also houses send_flyer_text which forwards action_context when given;
+    # the allowlist matches when context is None (un-migrated callers).
+    "actions.py",
+    "hooks.py",
+})
+
+
+def _resolve_caller_script_name() -> str:
+    """Walk inspect.stack() to find the first user-code frame and return its
+    basename. Skips safe_io.py self-frames and frozen importlib frames.
+
+    Returns "" if no user frame is identifiable (e.g. import-time eval).
+    """
+    for frame_info in inspect.stack()[1:]:
+        path = frame_info.filename
+        if not path:
+            continue
+        if os.path.basename(path) == "safe_io.py":
+            continue
+        if "<frozen" in path or "importlib" in path:
+            continue
+        return os.path.basename(path)
+    return ""
+
+
+def _emit_audit_row(entry_type: str, fields: dict) -> None:
+    """Build a LogEntry of the given discriminated-union type and append to
+    the canonical audit chokepoint under the conventional flock.
+
+    Wraps `ndjson_append` in `FileLock(_DECISIONS_LOG_LOCK)` per the
+    documented contract of ndjson_append. Does NOT fall back lockless —
+    the chokepoint's audit-fail-closed contract requires failure to
+    propagate so the send isn't allowed to succeed silently.
+
+    Raises:
+        pydantic.ValidationError — if `fields` don't satisfy the variant schema.
+        OSError / RuntimeError — if FileLock acquisition or ndjson_append
+          fails (disk full, permission, lock-unavailable).
+    """
+    ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    payload = {"type": entry_type, "ts": ts, **fields}
+    entry = _LOG_ENTRY_ADAPTER.validate_python(payload)
+    with FileLock(_DECISIONS_LOG_LOCK):
+        ndjson_append(_DECISIONS_LOG_PATH, entry.model_dump_json())
+
+
+def _join_parts_for_preview(parts: list[str]) -> str:
+    """Aggregate the parts that are subject to lint into a single string for
+    both lint scanning and audit-row preview."""
+    return "\n".join(str(p or "") for p in parts if p)
+
+
+def _enforce_action_context_policy(
+    *,
+    message_parts: list[str],
+    jid: str,
+    action_context: Optional[ActionExecutionContext],
+) -> Optional[Tuple[bool, str, str, str]]:
+    """Apply PR-ζ chokepoint discipline. Returns a refusal tuple, or None
+    if the send is allowed.
+
+    Allowlist match exempts from BOTH the missing-context refusal AND the
+    lint (because lint requires a verified_action_result signal bound to
+    the context shape — an allowlisted None-context send is by definition
+    not a regulated-action-completion claim).
+
+    PR-ζ commit 3 wires the null-context branch only. Commit 4 adds the
+    lint dispatch for the regulated branch.
+    """
+    if action_context is None:
+        caller = _resolve_caller_script_name()
+        if caller not in SAFE_IO_NULL_CONTEXT_ALLOWLIST:
+            _emit_audit_row(
+                "regulated_send_missing_action_context",
+                {
+                    "caller_script": caller,
+                    "jid": jid,
+                    "message_preview": _join_parts_for_preview(message_parts)[:120],
+                },
+            )
+            return False, "", "missing_action_context", "refused"
+        return None  # allowlisted; pass through
+
+    # Regulated context path — commit 4 fills in the lint dispatch.
+    return None
+
+
 def bridge_send_blocked_by_test_context() -> Optional[str]:
     """Refuse live bridge sends from pytest unless explicitly overridden."""
     if os.environ.get("FLYER_RECOVERY_NO_LIVE_SEND") == "1":
@@ -650,6 +804,13 @@ def bridge_post(
     blocked = bridge_send_blocked_by_test_context()
     if blocked:
         return False, "", blocked, "connect_failed"
+    # PR-ζ chokepoint discipline. Refuses + emits audit row when None-context
+    # caller is not allowlisted; commit 4 adds the lint dispatch.
+    refusal = _enforce_action_context_policy(
+        message_parts=[message], jid=jid, action_context=action_context,
+    )
+    if refusal is not None:
+        return refusal
     payload = json.dumps({"chatId": jid, "message": message}).encode("utf-8")
     req = urllib.request.Request(
         BRIDGE_URL, data=payload,
@@ -738,6 +899,12 @@ def bridge_send_media(
     blocked = bridge_send_blocked_by_test_context()
     if blocked:
         return False, "", blocked, "connect_failed"
+    # PR-ζ chokepoint discipline. Aggregates caption + file_name for lint.
+    refusal = _enforce_action_context_policy(
+        message_parts=[caption, file_name], jid=jid, action_context=action_context,
+    )
+    if refusal is not None:
+        return refusal
 
     payload_doc = {
         "chatId": jid,
@@ -815,6 +982,13 @@ def bridge_send_cta(
     blocked = bridge_send_blocked_by_test_context()
     if blocked:
         return False, "", blocked, "connect_failed"
+    # PR-ζ chokepoint discipline. Aggregates body + button labels for lint.
+    lint_parts = [body] + [b.get("label", "") for b in cleaned_buttons] + [footer]
+    refusal = _enforce_action_context_policy(
+        message_parts=lint_parts, jid=jid, action_context=action_context,
+    )
+    if refusal is not None:
+        return refusal
 
     payload_doc: dict[str, Any] = {
         "chatId": jid,
