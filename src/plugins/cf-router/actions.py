@@ -2510,15 +2510,58 @@ _FLYER_REGULATED_ACCOUNT_PATTERN = re.compile(
     r"billing|checkout|invoice|card|stripe|razorpay|refund|"
     r"plan|starter|growth|unlimited|upgrade|downgrade|"
     r"account\s+owner|account\s+settings|business\s+name|business\s+address|"
-    r"business\s+phone|business\s+whatsapp|whatsapp\s+number|authorized\s+(?:number|requester)"
+    r"business\s+phone|business\s+whatsapp|whatsapp\s+number|authorized\s+(?:number|requester)|"
+    # PR-α 2026-05-26 — verb-anchored account-change patterns. Closes the
+    # operator's 24-pattern active-block list gaps: "change phone",
+    # "change my phone number", "change address", and equivalents.
+    # Verb anchor avoids false-positives on flyer briefs that mention
+    # these fields without a mutation verb (e.g. "create a flyer with
+    # our phone number"). NOTE: `email` deliberately excluded from this
+    # slice per 2026-05-26 review — not in the operator's approved
+    # 6-phrase-class PR-α scope. Add via a follow-up PR if/when scoped.
+    r"(?:change|update|set|edit|modify|remove|delete)\s+(?:my\s+|the\s+|our\s+)?(?:flyer\s+|business\s+|account\s+|public\s+|contact\s+)?(?:phone(?:\s+number)?|address|number)"
     r")\b",
     re.IGNORECASE,
 )
+
+# PR-α follow-up 2026-05-26 — used by _try_flyer_regulated_account_guard to
+# yield to active-project routing when both conditions hold:
+#   (a) sender has an active flyer project, AND
+#   (b) text matches an edit-instruction targeting a flyer attribute/field.
+# Without this yield, PR-α's extended regulated-account regex would hijack
+# legitimate flyer edits like "update this flyer, change the phone number"
+# into a fail-closed account warning. Pattern intentionally mirrors the
+# inline `edit_starter` regex in `is_flyer_project_status_request` (line ~2007)
+# so the two stay consistent; consider de-duping in a future cleanup PR.
+_FLYER_EDIT_INSTRUCTION_PATTERN = re.compile(
+    r"\b(update|change|edit|modify|replace|remove|add|swap|fix|correct)\s+"
+    r"(this|the|my|that|current|attached)?\s*"
+    r"(flyer|design|poster|text|logo|item|price|date|time|name|phone|address)\b",
+    re.IGNORECASE,
+)
+
+
+def flyer_text_targets_revision_field(text: str) -> bool:
+    """Return True when text reads as an edit instruction against a flyer artifact/field.
+
+    Matches phrases like "update this flyer", "change the phone number",
+    "edit the price", "swap the logo". Used by the regulated-account guard
+    in cf-router/hooks.py to yield to active-project routing when the
+    sender has an active flyer project AND this returns True.
+    """
+    body = " ".join(flyer_visible_message_text(text).lower().split())
+    return bool(_FLYER_EDIT_INSTRUCTION_PATTERN.search(body))
 
 _FLYER_REGULATED_PAYMENT_PATTERN = re.compile(
     r"\b(?:"
     r"payment\s+(?:go\s+through|went\s+through|status|link|method|details?|failed|complete|completed|done)|"
     r"(?:paid|pay|paying)\s+(?:for|the|my|this|now|already)|"
+    # PR-α 2026-05-26 — bare "I paid" + "mark paid" variants. Closes the
+    # operator's 24-pattern active-block list payment-claim gaps. False
+    # positive on phrases like "I paid attention" is acceptable per the
+    # invariant (system may clarify, may not claim completion).
+    r"i\s+(?:have\s+|just\s+|already\s+)?paid|"
+    r"mark(?:ed|ing)?\s+(?:as\s+)?paid|"
     r"how\s+(?:do|can)\s+i\s+pay|"
     r"send\s+(?:me\s+)?(?:a\s+)?payment\s+link"
     r")\b",
