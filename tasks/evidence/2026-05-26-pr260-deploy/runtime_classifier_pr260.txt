@@ -1,0 +1,21 @@
+=== PR-beta.1 positive cases (delivery_state_intent expect True) ===
+  OK 'send now'                                              -> True
+  OK 'please send my flyer now'                              -> True
+  OK 'send the flyer now'                                    -> True
+
+=== PR-beta.1 send_now intent direct check (expect True) ===
+  OK 'send now'                                              -> True
+  OK 'please send my flyer now'                              -> True
+  OK 'send the flyer now'                                    -> True
+
+=== PR-beta.1 negative cases (expect False both ways) ===
+  OK 'Create a flyer that says send now'                     intent=False send_now=False
+  OK 'send to customers Friday'                              intent=False send_now=False
+  OK 'send me ideas'                                         intent=False send_now=False
+
+=== PR-beta regression (delivery_state_intent must still be True) ===
+  OK 'where is my flyer'                                     -> True
+  OK 'did you send my flyer'                                 -> True
+  OK 'send my flyer'                                         -> True
+
+OVERALL: GREEN
