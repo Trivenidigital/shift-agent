@@ -39,8 +39,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -48,12 +46,11 @@ sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
 
 from safe_io import ndjson_append  # noqa: E402
+from safe_io import bridge_post_2tuple as _bridge_post  # noqa: E402  # PR-ε: chokepoint consolidation
 from schemas import CateringCustomerAckSent, CateringCustomerAckFailed  # noqa: E402
 from exit_codes import EXIT_OK, EXIT_INVALID_INPUT, EXIT_DEPENDENCY_DOWN  # noqa: E402
 
 LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
-BRIDGE_URL = "http://127.0.0.1:3000/send"
-BRIDGE_TIMEOUT = 10
 
 # F5b: server-side bridge `template_bypass` prefix. Mirrors apply-script F1
 # (PR #43). See bridge.js:133 for the exact regex:
@@ -71,25 +68,6 @@ _VALID_JID_SUFFIXES = ("@s.whatsapp.net", "@lid")
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def _bridge_post(jid: str, message: str) -> tuple[bool, str]:
-    payload = json.dumps({"chatId": jid, "message": message}).encode("utf-8")
-    req = urllib.request.Request(
-        BRIDGE_URL, data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=BRIDGE_TIMEOUT) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-            doc = json.loads(body)
-            mid = doc.get("id") or doc.get("messageId") or ""
-            if not mid:
-                return False, f"empty messageId: {body[:200]}"
-            return True, mid
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError) as e:
-        return False, f"{type(e).__name__}: {e}"
 
 
 def _emit_ack_failed(jid: str, reason: str, detail: str) -> None:
