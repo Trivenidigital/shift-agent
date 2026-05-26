@@ -16,6 +16,19 @@ from schemas import FlyerPlanTier
 FlyerActionDomain = Literal["account", "billing", "quota", "guest_order", "project", "preference"]
 FlyerActionEffect = Literal["read", "write", "payment_request", "payment_activation"]
 
+# PR-δ 2026-05-26 — mutation_class declares whether the action's side effects
+# can be rolled back via local state restoration. Future audit-fail-closed
+# wiring (deferred to PR-ζ + audit-write-fail-closed) reads this field to
+# choose the right customer copy after an audit-write failure:
+#
+#   local_reversible:      mandatory rollback path, customer copy says
+#                          "no change has been made"
+#   external_irreversible: rollback impossible (external API committed),
+#                          customer copy says "under operator review"
+#
+# PR-δ ships the FIELD only. Rollback handler wiring is later.
+FlyerActionMutationClass = Literal["local_reversible", "external_irreversible"]
+
 
 @dataclass(frozen=True)
 class FlyerActionDefinition:
@@ -23,6 +36,7 @@ class FlyerActionDefinition:
     command: str
     domain: FlyerActionDomain
     effect: FlyerActionEffect
+    mutation_class: FlyerActionMutationClass
     requires_admin: bool = False
     requires_confirmation: bool = False
     requires_payment: bool = False
@@ -44,24 +58,28 @@ ACCOUNT_ACTIONS: dict[str, FlyerActionDefinition] = {
         command="status",
         domain="account",
         effect="read",
+        mutation_class="local_reversible",  # read-only — trivially reversible
     ),
     "help": FlyerActionDefinition(
         action_id="flyer.account.help",
         command="help",
         domain="account",
         effect="read",
+        mutation_class="local_reversible",  # read-only
     ),
     "plan_menu": FlyerActionDefinition(
         action_id="flyer.billing.plan_menu",
         command="plan_menu",
         domain="billing",
         effect="read",
+        mutation_class="local_reversible",  # read-only
     ),
     "starter_prompt_mode": FlyerActionDefinition(
         action_id="flyer.preference.starter_prompt_mode",
         command="starter_prompt_mode",
         domain="preference",
         effect="write",
+        mutation_class="local_reversible",  # JSON state preference; reversible by re-set
         requires_admin=True,
         success_detail="starter_prompt_mode_updated",
     ),
@@ -70,6 +88,7 @@ ACCOUNT_ACTIONS: dict[str, FlyerActionDefinition] = {
         command="update_business_name",
         domain="account",
         effect="write",
+        mutation_class="local_reversible",  # JSON state field; reversible by re-update
         requires_admin=True,
         success_detail="business_name_updated",
     ),
@@ -78,6 +97,7 @@ ACCOUNT_ACTIONS: dict[str, FlyerActionDefinition] = {
         command="add_authorized",
         domain="account",
         effect="write",
+        mutation_class="local_reversible",  # adds entry to list; removable
         requires_admin=True,
         success_detail="authorized_added",
     ),
@@ -86,6 +106,7 @@ ACCOUNT_ACTIONS: dict[str, FlyerActionDefinition] = {
         command="remove_authorized",
         domain="account",
         effect="write",
+        mutation_class="local_reversible",  # removes entry from list; re-addable
         requires_admin=True,
         requires_confirmation=True,
         success_detail="authorized_removed",
@@ -95,6 +116,7 @@ ACCOUNT_ACTIONS: dict[str, FlyerActionDefinition] = {
         command="update_phone",
         domain="account",
         effect="write",
+        mutation_class="local_reversible",  # JSON state field; reversible
         requires_admin=True,
         success_detail="public_phone_updated",
     ),
@@ -103,6 +125,7 @@ ACCOUNT_ACTIONS: dict[str, FlyerActionDefinition] = {
         command="update_whatsapp",
         domain="account",
         effect="write",
+        mutation_class="local_reversible",  # JSON state field; reversible
         requires_admin=True,
         requires_confirmation=True,
         success_detail="business_whatsapp_updated",
@@ -112,6 +135,12 @@ ACCOUNT_ACTIONS: dict[str, FlyerActionDefinition] = {
         command="change_plan",
         domain="billing",
         effect="payment_request",
+        # external_irreversible — once a Stripe/Razorpay/manual charge is
+        # committed by the provider, local state rollback alone cannot undo
+        # the customer's payment. PR-ζ + audit-fail-closed wiring routes
+        # customer copy to "under operator review" instead of "no change has
+        # been made" for this action when the audit write fails.
+        mutation_class="external_irreversible",
         requires_admin=True,
         requires_confirmation=True,
         requires_payment=True,
