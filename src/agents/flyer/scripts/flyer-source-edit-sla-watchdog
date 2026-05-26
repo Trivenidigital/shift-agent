@@ -208,6 +208,51 @@ def _customer_update_is_throttled(row: dict[str, Any], state: dict[str, Any], *,
     return (now - last).total_seconds() < repeat_minutes * 60
 
 
+def _customer_update_already_sent_from_audit(row: dict[str, Any], decisions_log_path: Path) -> bool:
+    """Return True when audit history proves this queue row already got a customer update.
+
+    This is a recovery guard for deploy/smoke paths that may recreate the
+    throttle JSON. The audit log is the durable source of customer-visible
+    sends, so do not re-send stale apologies when the sidecar throttle file is
+    empty or has been reset.
+    """
+    if not decisions_log_path.exists():
+        return False
+    project_id = str(row.get("project_id") or "")
+    reason_code = str(row.get("reason_code") or "")
+    queued_raw = str(row.get("queued_at") or "")
+    try:
+        queued_at = parse_utc(queued_raw) if queued_raw else None
+    except ValueError:
+        queued_at = None
+    try:
+        lines = decisions_log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return False
+    for line in reversed(lines):
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("type") != "flyer_manual_queue_customer_update":
+            continue
+        if str(entry.get("project_id") or "") != project_id:
+            continue
+        if str(entry.get("reason_code") or "") != reason_code:
+            continue
+        if str(entry.get("outcome") or "") not in {"sent", "suppressed_same_chat_update"}:
+            continue
+        if queued_at is not None:
+            try:
+                ts = parse_utc(str(entry.get("ts") or ""))
+            except ValueError:
+                continue
+            if ts < queued_at:
+                continue
+        return True
+    return False
+
+
 def _default_customer_notify(chat_id: str, message: str) -> tuple[bool, str, str]:
     try:
         from safe_io import bridge_post  # type: ignore
@@ -288,6 +333,19 @@ def _send_customer_updates(
             continue
         if _customer_update_is_throttled(row, state, now=now, repeat_minutes=repeat_minutes):
             throttled.append(project_id)
+            continue
+        if _customer_update_already_sent_from_audit(row, decisions_log_path):
+            throttled.append(project_id)
+            entry = alerts.setdefault(row["row_key"], {})
+            entry.update({
+                "project_id": project_id,
+                "reason_code": row.get("reason_code") or "",
+                "queued_at": row.get("queued_at") or "",
+                "last_customer_updated_at": now.isoformat(),
+                "last_customer_update_outcome": "throttled_prior_audit_update",
+                "last_customer_update_age_minutes": row.get("age_minutes") or 0,
+            })
+            state_changed = True
             continue
         project = projects_by_id.get(project_id)
         if project is None:
