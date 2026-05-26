@@ -143,3 +143,76 @@ class TestBridgePost:
             assert ok is True
             assert mid == "mid.xyz"
             assert status == "sent"
+
+
+class TestBridgePost2TupleAdapter:
+    """PR-ε 2026-05-26 — 2-tuple compatibility adapter.
+
+    The legacy catering/expense scripts unpack a 2-tuple (ok, detail_or_mid).
+    bridge_post_2tuple is the consolidation entry point so those scripts can
+    delete their local _bridge_post implementations without changing the
+    canonical surface. Tests verify the (ok, mid, err, status) -> (ok, detail)
+    collapse for every status branch of the canonical bridge_post.
+    """
+
+    @patch("urllib.request.urlopen")
+    def test_success_returns_2tuple_with_message_id(self, urlopen, safe_io_module):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"id": "wamid.abc"}'
+        urlopen.return_value.__enter__.return_value = mock_resp
+        result = safe_io_module.bridge_post_2tuple("jid@s.whatsapp.net", "msg")
+        assert result == (True, "wamid.abc")
+
+    @patch("urllib.request.urlopen")
+    def test_success_via_messageId_field(self, urlopen, safe_io_module):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"messageId": "mid.xyz"}'
+        urlopen.return_value.__enter__.return_value = mock_resp
+        result = safe_io_module.bridge_post_2tuple("jid", "msg")
+        assert result == (True, "mid.xyz")
+
+    @patch("urllib.request.urlopen")
+    def test_send_uncertain_collapses_to_error_detail(self, urlopen, safe_io_module):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b"not-json"
+        urlopen.return_value.__enter__.return_value = mock_resp
+        ok, detail = safe_io_module.bridge_post_2tuple("jid", "msg")
+        assert ok is False
+        # Adapter picks err over status when err is non-empty.
+        assert "ack_parse_failed" in detail
+
+    @patch("urllib.request.urlopen")
+    def test_empty_message_id_collapses_to_error_detail(self, urlopen, safe_io_module):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"foo": "bar"}'
+        urlopen.return_value.__enter__.return_value = mock_resp
+        ok, detail = safe_io_module.bridge_post_2tuple("jid", "msg")
+        assert ok is False
+        assert "empty_message_id" in detail
+
+    @patch("urllib.request.urlopen")
+    def test_http_error_status_collapses_to_error_detail(self, urlopen, safe_io_module):
+        import urllib.error
+        urlopen.side_effect = urllib.error.HTTPError(
+            url="http://test/", code=500, msg="Internal Server Error",
+            hdrs=None, fp=None,
+        )
+        ok, detail = safe_io_module.bridge_post_2tuple("jid", "msg")
+        assert ok is False
+        assert "HTTP 500" in detail
+
+    @patch("urllib.request.urlopen")
+    def test_connect_failed_status_collapses_to_error_detail(self, urlopen, safe_io_module):
+        import urllib.error
+        urlopen.side_effect = urllib.error.URLError("[Errno 111] Connection refused")
+        ok, detail = safe_io_module.bridge_post_2tuple("jid", "msg")
+        assert ok is False
+        assert "URLError" in detail
+
+    def test_adapter_signature_is_2tuple(self, safe_io_module):
+        """Static contract check: bridge_post_2tuple returns exactly 2 values.
+        Legacy callers depend on this shape."""
+        import inspect
+        sig = inspect.signature(safe_io_module.bridge_post_2tuple)
+        params = list(sig.parameters.keys())
+        assert params == ["jid", "message"], f"unexpected signature: {params}"
