@@ -308,7 +308,11 @@ def handle_account_command(
         allowed=True,
         reason=reason,
     )
-    return AccountResult(True, True, reply, updated.customer_id, updated.status)
+    # PR-ζ F8 2026-05-26: propagate `reason` to AccountResult.detail so the
+    # downstream manage-flyer-account JSON output carries the
+    # "plan_change_requested" signal; cf-router/hooks.py:1738 reads this to
+    # decide whether to construct an ActionExecutionContext for the send.
+    return AccountResult(True, True, reply, updated.customer_id, updated.status, detail=reason)
 
 
 def claim_starter_prompt_send(*, state_path: Path, customer_id: str) -> AccountResult:

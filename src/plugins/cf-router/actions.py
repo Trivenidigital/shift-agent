@@ -4010,7 +4010,20 @@ def mark_cf_router_inbound_seen(chat_id: str, message_id: str, text: str, *, now
     return False
 
 
-def send_flyer_text(chat_id: str, message: str) -> tuple[bool, str, str]:
+def send_flyer_text(
+    chat_id: str,
+    message: str,
+    *,
+    action_context: Optional[ActionExecutionContext] = None,
+) -> tuple[bool, str, str]:
+    """Send a customer-facing Flyer Studio text reply via the bridge chokepoint.
+
+    PR-ζ F8 2026-05-26: `action_context` is keyword-only; default None falls
+    back to the safe_io basename allowlist match. Callers that handle
+    regulated actions (e.g. hooks.py:1738 for change_plan) construct a real
+    ActionExecutionContext so the chokepoint runs PR-γ's
+    lint_no_unverified_completion on the message.
+    """
     _ensure_platform_path()
     try:
         from safe_io import bridge_post  # type: ignore
@@ -4024,7 +4037,7 @@ def send_flyer_text(chat_id: str, message: str) -> tuple[bool, str, str]:
         if existing:
             mid = str(existing.get("mid") or "recent")
             return True, f"deduped:{mid}", ""
-        ok, mid, err, status = bridge_post(chat_id, message)
+        ok, mid, err, status = bridge_post(chat_id, message, action_context=action_context)
         if ok:
             dedupe_entries[dedupe_key] = {"ts": now, "mid": mid}
             _write_flyer_outbound_dedupe(dedupe_entries)

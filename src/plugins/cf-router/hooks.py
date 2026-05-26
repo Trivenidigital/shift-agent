@@ -1735,7 +1735,41 @@ def _try_flyer_account_intercept(text: str, chat_id: str, event: Any) -> Optiona
             "Flyer Studio\n------------\nI could not update that setting right now. Please try again.",
         )
         return {"action": "skip", "reason": "cf-router flyer account command failed"}
-    ack_ok, mid, err = actions.send_flyer_text(chat_id, result.get("reply_text") or "")
+    # PR-ζ F8 2026-05-26: construct ActionExecutionContext for the change_plan
+    # path so safe_io.bridge_post runs PR-γ lint on the customer-facing reply.
+    # change_plan is the only `external_irreversible` action in the portfolio
+    # (per PR-δ action_registry). Other branches keep action_context=None and
+    # fall through the actions.py basename allowlist; PR-ζ.1 migrates the rest.
+    detail = result.get("detail") or ""
+    action_ctx = None
+    if "plan_change_requested" in detail:
+        try:
+            actions._ensure_platform_path()
+            from schemas import ActionExecutionContext  # type: ignore
+            action_ctx = ActionExecutionContext(
+                action_id="flyer.billing.request_plan_change",
+                is_regulated_action=True,
+                # plan_change is a payment REQUEST, not a completion. The
+                # checkout URL emits the next step; verification arrives
+                # only after the payment webhook (PR-ζ.1 + §11 wiring).
+                verified_action_result=False,
+                mutation_class="external_irreversible",
+            )
+        except Exception as e:
+            # Defensive: if schemas import fails (Hermes plugin sys.path
+            # quirks), fall back to None. The send still proceeds via the
+            # actions.py allowlist match; the lint just doesn't run.
+            # Audit the import failure so ops can see it.
+            actions.audit_intercepted(
+                reason="flyer_account_action_context_construction_failed",
+                chat_id=chat_id,
+                subprocess_rc=0,
+                detail=f"detail={detail[:200]}; error={type(e).__name__}: {str(e)[:200]}",
+            )
+            action_ctx = None
+    ack_ok, mid, err = actions.send_flyer_text(
+        chat_id, result.get("reply_text") or "", action_context=action_ctx,
+    )
     actions.audit_intercepted(
         reason="flyer_account_command",
         chat_id=chat_id,
