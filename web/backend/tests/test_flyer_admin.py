@@ -134,6 +134,63 @@ def test_flyer_summary_segments_customers_and_guest_orders(tmp_path, monkeypatch
     assert summary["manual_edit_count"] == 1
     assert summary["stuck_edit_count"] == 1
     assert summary["stuck_projects"] == 1
+    assert summary["billing"]["payment_pending_total"] == 1
+    assert summary["billing"]["payment_pending_checkout_missing"] == 1
+    assert summary["billing"]["payment_pending_checkout_ready"] == 0
+
+
+def test_flyer_summary_includes_payment_pending_checkout_breakdown(tmp_path):
+    from app.routers import flyer
+
+    settings = flyer.get_settings()
+    settings.state_dir = tmp_path / "state"
+    settings.cockpit_audit_log = tmp_path / "logs" / "audit.log"
+    pending_missing = _customer("CUST0001", status="payment_pending")
+    pending_ready = _customer("CUST0002", phone="+18479155253", status="payment_pending")
+    pending_ready["payment_checkout_url"] = "https://pay.example/sub/CUST0002"
+    active_pending_upgrade = _customer("CUST0003", phone="+18479610344", status="active", plan_id="starter")
+    active_pending_upgrade["pending_plan_id"] = "growth"
+    active_pending_upgrade["pending_plan_checkout_url"] = "https://pay.example/sub/CUST0003"
+    _write_json(
+        settings.state_dir / "flyer" / "customers.json",
+        {
+            "schema_version": 1,
+            "next_customer_sequence": 4,
+            "customers": [pending_missing, pending_ready, active_pending_upgrade],
+        },
+    )
+    _write_json(settings.state_dir / "flyer" / "guest_orders.json", {"schema_version": 1, "orders": []})
+    _write_json(settings.state_dir / "flyer" / "projects.json", {"schema_version": 1, "next_sequence": 1, "projects": []})
+
+    summary = flyer.build_summary()
+    assert summary["billing"]["payment_pending_total"] == 2
+    assert summary["billing"]["payment_pending_checkout_missing"] == 1
+    assert summary["billing"]["payment_pending_checkout_ready"] == 1
+    assert summary["billing"]["active_pending_plan_change"] == 1
+
+
+def test_customer_row_includes_billing_visibility_fields(tmp_path):
+    from app.routers import flyer
+
+    settings = flyer.get_settings()
+    settings.state_dir = tmp_path / "state"
+    settings.cockpit_audit_log = tmp_path / "logs" / "audit.log"
+    customer = _customer("CUST0001", status="payment_pending")
+    customer["payment_checkout_url"] = "https://pay.example/sub/CUST0001"
+    customer["billing_provider"] = "stripe"
+    customer["payment_reference"] = "pi_123"
+    _write_json(
+        settings.state_dir / "flyer" / "customers.json",
+        {"schema_version": 1, "next_customer_sequence": 2, "customers": [customer]},
+    )
+    _write_json(settings.state_dir / "flyer" / "projects.json", {"schema_version": 1, "next_sequence": 1, "projects": []})
+
+    result = asyncio.run(flyer.customers())
+    row = result["customers"][0]
+    assert row["billing_provider"] == "stripe"
+    assert row["payment_state"] == "payment_pending_checkout_ready"
+    assert row["payment_reference_present"] is True
+    assert row["payment_checkout_configured"] is True
 
 
 def test_project_rows_mark_stale_manual_edits(tmp_path):

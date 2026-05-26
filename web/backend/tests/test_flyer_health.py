@@ -625,8 +625,81 @@ def test_billing_checkout_provider_full_templates_is_green(tmp_path, monkeypatch
     from app.routers import flyer
 
     billing_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "billing_checkout_provider")
+    assert billing_p["severity"] == "yellow"
+    assert "missing" in billing_p["detail"].lower()
+    assert "stripe_secret_key" in billing_p["detail"].lower()
+    assert billing_p["key_present"] is False
+    assert billing_p["key_source"] is None
+    assert billing_p["model_config"]["provider_config_valid"] == "true"
+    assert billing_p["model_config"]["provider_credentials_ready"] == "false"
+    assert billing_p["model_config"]["provider_credentials_required"] == "true"
+
+
+def test_billing_checkout_provider_full_templates_stripe_with_key_is_green(tmp_path, monkeypatch):
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_live_ready")
+    _clear_provider_env(monkeypatch)
+    _isolate_env_files(monkeypatch, tmp_path)
+    _isolate_deploy_markers(monkeypatch, tmp_path)
+    _mock_flyer_config(monkeypatch, {
+        "enabled": True,
+        "payment_provider": "stripe",
+        "payment_checkout_url_template": "https://pay.example/sub/{customer_id}",
+        "quick_flyer_checkout_url_template": "https://pay.example/quick/{order_id}",
+        "quick_flyer_price_cents": 19900,
+    })
+
+    from app.routers import flyer
+
+    billing_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "billing_checkout_provider")
     assert billing_p["severity"] == "green"
     assert "configured" in billing_p["detail"].lower()
     assert billing_p["model_config"]["payment_provider"] == "stripe"
     assert billing_p["model_config"]["payment_checkout_url_template_configured"] == "true"
     assert billing_p["model_config"]["quick_flyer_checkout_url_template_configured"] == "true"
+    assert billing_p["model_config"]["provider_credentials_required"] == "true"
+    assert billing_p["model_config"]["provider_credentials_ready"] == "true"
+    assert billing_p["key_present"] is True
+    assert billing_p["key_source"] == "process_env"
+
+
+def test_billing_checkout_provider_razorpay_missing_secret_is_yellow(tmp_path, monkeypatch):
+    monkeypatch.setenv("RAZORPAY_KEY_ID", "rzp_key_123")
+    monkeypatch.delenv("RAZORPAY_KEY_SECRET", raising=False)
+    _clear_provider_env(monkeypatch)
+    _isolate_env_files(monkeypatch, tmp_path)
+    _isolate_deploy_markers(monkeypatch, tmp_path)
+    _mock_flyer_config(monkeypatch, {
+        "enabled": True,
+        "payment_provider": "razorpay",
+        "payment_checkout_url_template": "https://pay.example/sub/{customer_id}",
+        "quick_flyer_checkout_url_template": "https://pay.example/quick/{order_id}",
+        "quick_flyer_price_cents": 19900,
+    })
+
+    from app.routers import flyer
+
+    billing_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "billing_checkout_provider")
+    assert billing_p["severity"] == "yellow"
+    assert "razorpay_key_secret" in billing_p["detail"].lower()
+    assert billing_p["model_config"]["provider_credentials_required"] == "true"
+    assert billing_p["model_config"]["provider_credentials_ready"] == "false"
+    assert billing_p["key_present"] is False
+
+
+def test_billing_checkout_provider_invalid_provider_is_red(tmp_path, monkeypatch):
+    _clear_provider_env(monkeypatch)
+    _isolate_env_files(monkeypatch, tmp_path)
+    _isolate_deploy_markers(monkeypatch, tmp_path)
+    _mock_flyer_config(monkeypatch, {
+        "enabled": True,
+        "payment_provider": " Stripe ",
+        "payment_checkout_url_template": "https://pay.example/sub/{customer_id}",
+        "quick_flyer_checkout_url_template": "https://pay.example/quick/{order_id}",
+        "quick_flyer_price_cents": 19900,
+    })
+
+    from app.routers import flyer
+
+    billing_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "billing_checkout_provider")
+    assert billing_p["severity"] == "yellow"
+    assert billing_p["model_config"]["payment_provider"] == "stripe"

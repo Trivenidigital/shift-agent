@@ -203,6 +203,18 @@ def _customer_row(customer: FlyerCustomerProfile, project_count: int = 0) -> dic
     cfg = FlyerConfig()
     used = customer.usage_count_for_current_period()
     remaining = customer.quota_remaining(cfg.plan_tiers)
+    payment_pending = customer.status == "payment_pending"
+    payment_state = "none"
+    if payment_pending:
+        payment_state = "payment_pending_checkout_ready" if customer.payment_checkout_url else "payment_pending_checkout_missing"
+    elif customer.status in {"trial", "active"} and customer.pending_plan_id:
+        payment_state = (
+            "active_pending_plan_checkout_ready"
+            if customer.pending_plan_checkout_url
+            else "active_pending_plan_checkout_missing"
+        )
+    elif customer.status in {"trial", "active"}:
+        payment_state = "activated"
     return {
         "customer_id": customer.customer_id,
         "business_name": customer.business_name,
@@ -219,6 +231,13 @@ def _customer_row(customer: FlyerCustomerProfile, project_count: int = 0) -> dic
         "usage_remaining": remaining,
         "trial_bonus_flyers": customer.trial_bonus_flyers,
         "project_count": project_count,
+        "billing_provider": customer.billing_provider,
+        "payment_state": payment_state,
+        "payment_reference_present": bool(str(customer.payment_reference or "").strip()),
+        "payment_checkout_configured": bool(str(customer.payment_checkout_url or "").strip()),
+        "pending_plan_id": customer.pending_plan_id,
+        "pending_plan_payment_state": customer.pending_plan_payment_state,
+        "pending_plan_checkout_configured": bool(str(customer.pending_plan_checkout_url or "").strip()),
         "updated_at": customer.updated_at.isoformat(),
     }
 
@@ -236,6 +255,13 @@ def build_summary() -> dict[str, Any]:
     }
     for customer in customers.customers:
         segments[_customer_category(customer)] += 1
+    payment_pending_rows = [row for row in customers.customers if row.status == "payment_pending"]
+    payment_pending_checkout_ready = sum(1 for row in payment_pending_rows if str(row.payment_checkout_url or "").strip())
+    active_pending_plan_change = sum(
+        1
+        for row in customers.customers
+        if row.status in {"active", "trial"} and str(row.pending_plan_id or "").strip()
+    )
     now = _now()
     active_statuses = {
         "intake_started",
@@ -277,6 +303,12 @@ def build_summary() -> dict[str, Any]:
         "campaign_asset": {
             "path": str(_marketing_flyer_path()),
             "exists": _marketing_flyer_path().exists(),
+        },
+        "billing": {
+            "payment_pending_total": len(payment_pending_rows),
+            "payment_pending_checkout_ready": payment_pending_checkout_ready,
+            "payment_pending_checkout_missing": len(payment_pending_rows) - payment_pending_checkout_ready,
+            "active_pending_plan_change": active_pending_plan_change,
         },
     }
 
@@ -1842,11 +1874,49 @@ def _flyer_provider_components() -> list[dict[str, Any]]:
         candidate = str(value or "").strip()
         return bool(candidate) and not _is_placeholder(candidate)
 
+    normalized_provider = str(payment_provider or "").strip().lower()
+    if normalized_provider not in {"manual", "stripe", "razorpay", "other"}:
+        normalized_provider = "manual"
+        provider_config_valid = False
+    else:
+        provider_config_valid = True
     plan_configured = _configured_template(plan_checkout_template)
     quick_configured = _configured_template(quick_checkout_template)
+    required_keys_by_provider = {
+        "stripe": ("STRIPE_SECRET_KEY",),
+        "razorpay": ("RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET"),
+    }
+    required_keys = required_keys_by_provider.get(normalized_provider, ())
+    missing_keys: list[str] = []
+    credential_sources: dict[str, str] = {}
+    for env_name in required_keys:
+        value, source = _read_env_layered(env_name)
+        if not value or _is_placeholder(value):
+            missing_keys.append(env_name)
+            continue
+        if source:
+            credential_sources[env_name] = source
+    provider_credentials_required = bool(required_keys)
+    provider_credentials_ready = provider_credentials_required and not missing_keys
+    key_present = provider_credentials_ready if provider_credentials_required else (plan_configured or quick_configured)
+    key_source = None
+    if provider_credentials_ready and credential_sources:
+        unique_sources = sorted(set(credential_sources.values()))
+        key_source = unique_sources[0] if len(unique_sources) == 1 else ",".join(unique_sources)
+
     if plan_configured and quick_configured:
-        billing_severity = "green"
-        billing_detail = "Plan and quick-flyer checkout templates are configured."
+        if not provider_config_valid:
+            billing_severity = "red"
+            billing_detail = "Configured payment provider is invalid. Use manual, stripe, razorpay, or other."
+        elif provider_credentials_required and missing_keys:
+            billing_severity = "yellow"
+            billing_detail = (
+                "Checkout templates are configured but provider credentials are missing: "
+                + ", ".join(missing_keys)
+            )
+        else:
+            billing_severity = "green"
+            billing_detail = "Plan and quick-flyer checkout templates are configured."
     elif plan_configured or quick_configured:
         billing_severity = "yellow"
         billing_detail = (
@@ -1888,12 +1958,16 @@ def _flyer_provider_components() -> list[dict[str, Any]]:
             "purpose": "Plan + one-time checkout link readiness (provider-neutral)",
             "severity": billing_severity,
             "detail": billing_detail,
-            "key_present": plan_configured or quick_configured,
-            "key_source": None,
+            "key_present": key_present,
+            "key_source": key_source,
             "model_config": {
-                "payment_provider": str(payment_provider),
+                "payment_provider": normalized_provider,
                 "payment_checkout_url_template_configured": "true" if plan_configured else "false",
                 "quick_flyer_checkout_url_template_configured": "true" if quick_configured else "false",
+                "provider_config_valid": "true" if provider_config_valid else "false",
+                "provider_credentials_required": "true" if provider_credentials_required else "false",
+                "provider_credentials_ready": "true" if provider_credentials_ready else "false",
+                "provider_missing_keys": ",".join(missing_keys),
                 "quick_flyer_price_cents": str(quick_price_cents),
             },
             "checked_at": now_iso,
