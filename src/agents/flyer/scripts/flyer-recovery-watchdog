@@ -178,6 +178,37 @@ def _row_ts(row: dict) -> datetime | None:
     return ts
 
 
+def _project_delivery_repair_rows(projects_by_id: dict[str, dict]) -> list[dict]:
+    rows: list[dict] = []
+    for project_id, project in projects_by_id.items():
+        assets = project.get("assets") if isinstance(project, dict) else []
+        if not isinstance(assets, list):
+            continue
+        for asset in assets:
+            if not isinstance(asset, dict):
+                continue
+            delivery_status = str(asset.get("delivery_status") or "").strip().lower()
+            if delivery_status not in {"sent", "delivered"}:
+                continue
+            outbound_message_id = str(asset.get("outbound_message_id") or "").strip()
+            if not outbound_message_id or outbound_message_id.startswith("dry-run:"):
+                continue
+            delivered_at = str(asset.get("delivered_at") or "").strip()
+            if not delivered_at:
+                continue
+            row = {
+                "type": "flyer_assets_delivered",
+                "ts": delivered_at,
+                "project_id": project_id,
+                "asset_ids": [str(asset.get("asset_id") or "").strip()],
+                "outbound_message_ids": [outbound_message_id],
+                "source": "project_state",
+            }
+            if _row_ts(row) is not None:
+                rows.append(row)
+    return rows
+
+
 def _load_cf_router_actions(actions_path: str = ""):
     candidates = []
     if actions_path:
@@ -828,10 +859,11 @@ def main() -> int:
         row for row in _read_rows(Path(args.log_path))
         if (ts := _row_ts(row)) is not None and since <= ts <= now + timedelta(minutes=5)
     ]
+    repair_rows = rows_after_outcome_repairs + _project_delivery_repair_rows(projects_by_id)
     resolved = _resolve_recovered_incidents(
         state_path,
         Path(args.log_path),
-        rows_after_outcome_repairs,
+        repair_rows,
         now,
         dry_run=args.dry_run,
     )
