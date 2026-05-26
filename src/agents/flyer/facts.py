@@ -161,6 +161,15 @@ def profile_locked_facts(
 
 def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFact]:
     facts: list[FlyerLockedFact] = []
+    category_suffix = ""
+    if re.search(r"\bbiryani(?:'?s|s)?\b", text or "", flags=re.IGNORECASE):
+        category_suffix = "Biryani"
+    price_for_name = re.compile(
+        r"\$\s*(?P<price>\d+(?:\.\d{2})?)\s*(?:for|of)\s+"
+        r"(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,40}?)"
+        r"(?=\s+(?:and|or)\s+\$|[.!?,;]|$)",
+        flags=re.IGNORECASE,
+    )
     name_before_price = re.compile(
         r"(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,60}?)\s*(?:-|:)?\s*\$\s*(?P<price>\d+(?:\.\d{2})?)",
         flags=re.IGNORECASE,
@@ -175,6 +184,7 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
 
     def add_item(name: str, price: str) -> None:
         name = _clean(name)
+        original_name = name
         name = re.sub(
             r"^(?:create|make|generate|design)\s+(?:a\s+)?(?:menu\s+)?(?:flyer|flier|poster|banner)\s+(?:with|for)?\s*",
             "",
@@ -184,6 +194,17 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
         name = re.sub(r"^(?:and|with|include|includes|feature|features|featuring)\s+", "", name, flags=re.IGNORECASE)
         if not name or name.lower() in seen:
             return
+        lowered_original = original_name.lower()
+        lowered = name.lower()
+        if (
+            lowered_original.startswith("for ")
+            or lowered.endswith(" and")
+            or lowered in {"add price as", "price as", "price is", "price for"}
+            or re.search(r"\b(?:add|set|use)\s+price\b|\bprice\s+(?:as|is|for)\b", lowered)
+        ):
+            return
+        if category_suffix and category_suffix.lower() not in lowered:
+            name = f"{name.title()} {category_suffix}"
         if name.lower() in {"and", "with", "include", "includes", "for", "on", "at"}:
             return
         if promo_name.search(name) or bad_context.search(name):
@@ -199,6 +220,8 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
             facts.append(price_fact)
 
     for segment in re.split(r"[\n\r,;]+", text or ""):
+        for match in price_for_name.finditer(segment):
+            add_item(match.group("name"), f"${match.group('price')}")
         for match in name_before_price.finditer(segment):
             add_item(match.group("name"), f"${match.group('price')}")
         for match in price_before_name.finditer(segment):
