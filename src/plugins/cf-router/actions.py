@@ -2568,6 +2568,47 @@ _FLYER_REGULATED_PAYMENT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# PR-β 2026-05-26 — delivery-state guard patterns. Tight phrase-anchored
+# (NOT bare-token per the PR #250 false-positive lesson). Fires only when
+# the active-project intercept has already yielded — i.e., no active or
+# recently-closed flyer project resolved for the sender. The guard's job
+# is to fail-closed with deterministic clarification copy instead of
+# letting generic Hermes claim "I sent your flyer" with no evidence.
+#
+# Bare "approve" / "approve." is NOT in this pattern — handled separately
+# via the existing is_flyer_approval_text semantics (entire-body equality
+# after stripping punctuation) for consistency with the active-project
+# intercept's approval check.
+_FLYER_DELIVERY_STATE_PATTERN = re.compile(
+    r"\b(?:"
+    r"where(?:'s|\s+is)\s+(?:my\s+|the\s+)?flyer|"
+    r"did\s+you\s+send\s+(?:me\s+|us\s+)?(?:my\s+|the\s+)?flyer|"
+    r"send\s+(?:me\s+|us\s+)?(?:my\s+|the\s+)?flyer|"
+    r"i\s+approve"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def is_flyer_delivery_state_intent(text: str) -> bool:
+    """Return True for delivery/approval phrases that must not hit generic LLM.
+
+    Used by `_try_flyer_delivery_state_guard` in cf-router/hooks.py. The
+    guard runs AFTER `_try_flyer_active_project_intercept`, so this only
+    matters when no active or recently-closed flyer project resolves —
+    i.e., the message would otherwise fall through to generic Hermes.
+
+    "send now" intentionally NOT matched — deferred to PR-β.1 pending a
+    deterministic active-project handler.
+    """
+    body = flyer_visible_message_text(text)
+    lowered = body.lower()
+    if _FLYER_DELIVERY_STATE_PATTERN.search(lowered):
+        return True
+    # Bare "approve" / "approve." — match is_flyer_approval_text semantics
+    # so the two checks stay consistent.
+    return lowered.strip(" .!,:;") == "approve"
+
 
 def is_flyer_account_command(text: str) -> bool:
     body = flyer_visible_message_text(text)

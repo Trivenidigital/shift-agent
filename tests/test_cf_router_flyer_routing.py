@@ -1542,6 +1542,341 @@ def test_pr_alpha_lid_only_active_project_revision_phrase_yields_from_regulated_
     assert project_lookup_calls[0]["chat_id"] == "201975216009469@lid"
 
 
+# ---- PR-β 2026-05-26: delivery-state guard ---------------------------------
+# Closes the second customer-visible generic-fallback risk class identified in
+# the regulated-intent vision: delivery-state phrases that have no active or
+# recent flyer project to surface. The active-project intercept already
+# handles delivery phrases when a project resolves; PR-β catches the leftover
+# case where no project exists and the message would otherwise reach generic
+# Hermes (which could claim "I sent your flyer" without evidence).
+#
+# Design discipline inherited from PR-α (per the PR #250 close lesson):
+# - Tight phrase-anchored regex, NOT bare-token matching
+# - False-positive negative tests REQUIRED alongside positive cases
+# - LID-only test for the no-active-project guard path (no second phone gate)
+# - Dispatch-order integration test verifies guard never fires when active-
+#   project intercept handled the message
+#
+# Scope: where is my flyer / did you send my flyer / send my flyer / approve
+# / I approve. "send now" deferred to PR-β.1 (no deterministic active-project
+# handler exists for it).
+
+
+def test_pr_beta_is_flyer_delivery_state_intent_positive_cases():
+    _, actions = _load_plugin_modules()
+    assert actions.is_flyer_delivery_state_intent("where is my flyer")
+    assert actions.is_flyer_delivery_state_intent("where's my flyer")
+    assert actions.is_flyer_delivery_state_intent("where is the flyer")
+    assert actions.is_flyer_delivery_state_intent("did you send my flyer")
+    assert actions.is_flyer_delivery_state_intent("did you send the flyer")
+    assert actions.is_flyer_delivery_state_intent("did you send me my flyer")
+    assert actions.is_flyer_delivery_state_intent("send my flyer")
+    assert actions.is_flyer_delivery_state_intent("send me my flyer")
+    assert actions.is_flyer_delivery_state_intent("send us the flyer")
+    assert actions.is_flyer_delivery_state_intent("I approve")
+    assert actions.is_flyer_delivery_state_intent("approve")
+    assert actions.is_flyer_delivery_state_intent("approve.")
+
+
+def test_pr_beta_is_flyer_delivery_state_intent_false_positive_guards():
+    # Critical: flyer briefs / revisions / other non-delivery contexts must
+    # NOT be caught — they have their own dispatch paths and must not be
+    # hijacked by PR-β's guard.
+    _, actions = _load_plugin_modules()
+    assert not actions.is_flyer_delivery_state_intent("Where can I show my flyer to customers?")
+    assert not actions.is_flyer_delivery_state_intent("approve this concept")
+    assert not actions.is_flyer_delivery_state_intent("approve the changes I requested")
+    assert not actions.is_flyer_delivery_state_intent("send to customers Friday")
+    assert not actions.is_flyer_delivery_state_intent("Did you receive my flyer?")
+    assert not actions.is_flyer_delivery_state_intent("Create a flyer with our address")
+    assert not actions.is_flyer_delivery_state_intent("Make a poster showing our address")
+    # "send now" deferred to PR-β.1 — must NOT match in PR-β
+    assert not actions.is_flyer_delivery_state_intent("send now")
+
+
+def test_pr_beta_no_project_fires_delivery_state_guard(monkeypatch):
+    """No active project AND no latest/closed/delivered project + delivery-
+    state phrase → guard fail-closes with deterministic "no delivery action
+    taken" copy. Never claims completion."""
+    hooks, actions = _load_plugin_modules()
+    sent = {}
+    audits = []
+    customer = {
+        "customer_id": "CUST0001",
+        "business_name": "Lakshmi's Kitchen",
+        "status": "trial",
+    }
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
+    monkeypatch.setattr(actions, "find_latest_flyer_project_for_status_by_sender", lambda _phone, _chat_id: None)
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "delivery-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
+
+    for delivery_text in ["where is my flyer", "did you send my flyer", "send my flyer", "I approve", "approve"]:
+        sent.clear()
+        audits.clear()
+        result = hooks._try_flyer_delivery_state_guard(
+            delivery_text,
+            "17329837841@s.whatsapp.net",
+            SimpleNamespace(text=delivery_text, chat_id="17329837841@s.whatsapp.net", message_id=f"delivery-{hash(delivery_text)}"),
+        )
+        assert result == {"action": "skip", "reason": "cf-router flyer delivery state guard"}, f"guard should fire for {delivery_text!r}"
+        assert "No delivery action has been taken" in sent["text"]
+        assert "Lakshmi's Kitchen" in sent["text"]
+        # Forbidden claims: must not say it sent / delivered / completed.
+        text_lower = sent["text"].lower()
+        for forbidden in ("i sent", "your flyer is done", "delivered to", "completed your"):
+            assert forbidden not in text_lower, f"copy must not claim {forbidden!r} for {delivery_text!r}"
+        assert audits and audits[-1]["reason"] == "flyer_delivery_state_guard"
+
+
+def test_pr_beta_unknown_customer_no_project_fires_guard(monkeypatch):
+    """No customer profile + delivery-state phrase → guard fail-closes with
+    generic "after this number is set up" copy."""
+    hooks, actions = _load_plugin_modules()
+    sent = {}
+    audits = []
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: None)
+    monkeypatch.setattr(actions, "find_latest_flyer_project_for_status_by_sender", lambda _phone, _chat_id: None)
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "delivery-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
+
+    result = hooks._try_flyer_delivery_state_guard(
+        "where is my flyer",
+        "17329837841@s.whatsapp.net",
+        SimpleNamespace(text="where is my flyer", chat_id="17329837841@s.whatsapp.net", message_id="unknown-customer"),
+    )
+    assert result == {"action": "skip", "reason": "cf-router flyer delivery state guard"}
+    assert "after this number is set up" in sent["text"]
+    assert "No delivery action has been taken" in sent["text"]
+    assert audits and audits[-1]["reason"] == "flyer_delivery_state_guard"
+
+
+def test_pr_beta_non_delivery_text_does_not_fire_guard(monkeypatch):
+    """Text that doesn't match is_flyer_delivery_state_intent → guard returns
+    None (no send, no audit). Prevents PR-β from hijacking flyer briefs."""
+    hooks, actions = _load_plugin_modules()
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda *_args: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda *_args: None)
+    monkeypatch.setattr(actions, "send_flyer_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("guard must not send for non-delivery text")))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("guard must not audit for non-delivery text")))
+
+    for non_delivery in [
+        "Create a flyer with our address",
+        "Make a poster showing our phone number",
+        "Where can I show my flyer to customers?",
+        "approve this concept",
+        "send to customers Friday",
+        "Did you receive my flyer?",
+        "send now",  # PR-β.1 deferred — must not fire PR-β guard
+    ]:
+        result = hooks._try_flyer_delivery_state_guard(
+            non_delivery,
+            "17329837841@s.whatsapp.net",
+            SimpleNamespace(text=non_delivery, chat_id="17329837841@s.whatsapp.net", message_id=f"non-{hash(non_delivery)}"),
+        )
+        assert result is None, f"guard must yield for {non_delivery!r}, got {result!r}"
+
+
+def test_pr_beta_lid_only_no_active_project_fires_guard(monkeypatch):
+    """LID-only: phone resolution returns None but a customer profile still
+    resolves via chat_id / primary_chat_id. Guard must still fire with the
+    customer-known copy — NOT add a second phone-truthy gate."""
+    hooks, actions = _load_plugin_modules()
+    sent = {}
+    audits = []
+    customer = {
+        "customer_id": "CUST0001",
+        "business_name": "Lakshmi's Kitchen",
+        "status": "trial",
+    }
+    # LID-only: phone is None
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: (None, "customer"))
+    # Customer lookup still resolves (simulates LID-only chat_id-keyed customer match)
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda phone, _chat_id: customer if phone is None else None)
+    # No latest project — exercises the no-project fail-closed branch
+    project_lookup_calls = []
+    def _record_project_lookup(phone, chat_id):
+        project_lookup_calls.append({"phone": phone, "chat_id": chat_id})
+        return None
+    monkeypatch.setattr(actions, "find_latest_flyer_project_for_status_by_sender", _record_project_lookup)
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "delivery-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
+
+    result = hooks._try_flyer_delivery_state_guard(
+        "where is my flyer",
+        "201975216009469@lid",
+        SimpleNamespace(text="where is my flyer", chat_id="201975216009469@lid", message_id="lid-only-delivery"),
+    )
+    assert result == {"action": "skip", "reason": "cf-router flyer delivery state guard"}, f"LID-only guard should fire, got {result!r}"
+    assert "Lakshmi's Kitchen" in sent["text"], "LID-only customer-known copy expected"
+    assert "No delivery action has been taken" in sent["text"]
+    assert audits and audits[-1]["reason"] == "flyer_delivery_state_guard"
+    # Verify find_latest_flyer_project_for_status_by_sender was called with phone=None
+    # (proves no second-phone-gate added on top of the upstream function's own gate).
+    assert project_lookup_calls and project_lookup_calls[0]["phone"] is None
+    assert project_lookup_calls[0]["chat_id"] == "201975216009469@lid"
+
+
+# ---- PR-β follow-up 2026-05-26: delivered-project surface regression tests ----
+# Closes the blocker caught in PR-β review: `did you send my flyer` and `send
+# my flyer` are NOT classified as status requests by `is_flyer_project_status_request`,
+# so the active-project intercept's status-surface branch doesn't fire for them.
+# When a delivered project exists, the original PR-β fail-closed copy would
+# have falsely claimed "no active or recent flyer to deliver" — inaccurate
+# because the flyer WAS delivered.
+#
+# Fix: PR-β's guard now calls `find_latest_flyer_project_for_status_by_sender`
+# before emitting the no-project copy. If a project resolves (delivered /
+# closed_no_send / manual_edit_required / anything non-completed), surface
+# the existing `flyer_project_status_reply` (or `flyer_manual_edit_status_reply`
+# for the manual_edit_required + source_edit_provider_unavailable case).
+
+
+def _expected_status_reply():
+    return "Flyer Studio status: your most recent flyer is delivered."
+
+
+def _expected_manual_edit_reply():
+    return "Flyer Studio manual edit pending."
+
+
+def test_pr_beta_delivered_project_surfaces_status_for_did_you_send(monkeypatch):
+    """Delivered project + 'did you send my flyer' → surface real status,
+    NOT the no-project fail-closed copy."""
+    hooks, actions = _load_plugin_modules()
+    sent = {}
+    audits = []
+    delivered_project = {
+        "project_id": "F0080",
+        "status": "delivered",
+        "updated_at": "2026-05-26T00:00:00Z",
+    }
+    customer = {"customer_id": "CUST0001", "business_name": "Lakshmi's Kitchen", "status": "active"}
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
+    monkeypatch.setattr(actions, "find_latest_flyer_project_for_status_by_sender", lambda _phone, _chat_id: delivered_project)
+    monkeypatch.setattr(actions, "flyer_project_status_reply", lambda _project: _expected_status_reply())
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "surface-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
+
+    result = hooks._try_flyer_delivery_state_guard(
+        "did you send my flyer",
+        "17329837841@s.whatsapp.net",
+        SimpleNamespace(text="did you send my flyer", chat_id="17329837841@s.whatsapp.net", message_id="delivered-did-send"),
+    )
+    assert result == {"action": "skip", "reason": "cf-router flyer delivery state status surfaced"}
+    assert sent["text"] == _expected_status_reply()
+    # MUST NOT emit the inaccurate no-project copy
+    assert "No delivery action has been taken" not in sent["text"]
+    assert "I don't see an active or recent flyer" not in sent["text"]
+    assert audits and audits[-1]["reason"] == "flyer_delivery_state_status_surfaced"
+    assert "project_id=F0080" in audits[-1]["detail"]
+    assert "status=delivered" in audits[-1]["detail"]
+
+
+def test_pr_beta_delivered_project_surfaces_status_for_send_my_flyer(monkeypatch):
+    """Delivered project + 'send my flyer' → surface real status, NOT
+    no-project copy. Same blocker class as `did you send my flyer`."""
+    hooks, actions = _load_plugin_modules()
+    sent = {}
+    audits = []
+    delivered_project = {"project_id": "F0081", "status": "delivered", "updated_at": "2026-05-26T00:01:00Z"}
+    customer = {"customer_id": "CUST0001", "business_name": "Lakshmi's Kitchen", "status": "active"}
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
+    monkeypatch.setattr(actions, "find_latest_flyer_project_for_status_by_sender", lambda _phone, _chat_id: delivered_project)
+    monkeypatch.setattr(actions, "flyer_project_status_reply", lambda _project: _expected_status_reply())
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "surface-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
+
+    result = hooks._try_flyer_delivery_state_guard(
+        "send my flyer",
+        "17329837841@s.whatsapp.net",
+        SimpleNamespace(text="send my flyer", chat_id="17329837841@s.whatsapp.net", message_id="delivered-send-my"),
+    )
+    assert result == {"action": "skip", "reason": "cf-router flyer delivery state status surfaced"}
+    assert sent["text"] == _expected_status_reply()
+    assert "No delivery action has been taken" not in sent["text"]
+    assert audits and audits[-1]["reason"] == "flyer_delivery_state_status_surfaced"
+    assert "project_id=F0081" in audits[-1]["detail"]
+
+
+def test_pr_beta_closed_no_send_project_surfaces_status(monkeypatch):
+    """closed_no_send project + delivery-state phrase → surface status reply.
+    `find_latest_flyer_project_for_status_by_sender` includes closed_no_send."""
+    hooks, actions = _load_plugin_modules()
+    sent = {}
+    audits = []
+    closed_project = {"project_id": "F0082", "status": "closed_no_send", "updated_at": "2026-05-26T00:02:00Z"}
+    customer = {"customer_id": "CUST0001", "business_name": "Lakshmi's Kitchen", "status": "active"}
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
+    monkeypatch.setattr(actions, "find_latest_flyer_project_for_status_by_sender", lambda _phone, _chat_id: closed_project)
+    monkeypatch.setattr(actions, "flyer_project_status_reply", lambda _project: _expected_status_reply())
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "surface-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
+
+    result = hooks._try_flyer_delivery_state_guard(
+        "where is my flyer",
+        "17329837841@s.whatsapp.net",
+        SimpleNamespace(text="where is my flyer", chat_id="17329837841@s.whatsapp.net", message_id="closed-where"),
+    )
+    assert result == {"action": "skip", "reason": "cf-router flyer delivery state status surfaced"}
+    assert audits and audits[-1]["reason"] == "flyer_delivery_state_status_surfaced"
+    assert "project_id=F0082" in audits[-1]["detail"]
+    assert "status=closed_no_send" in audits[-1]["detail"]
+
+
+def test_pr_beta_manual_edit_required_surfaces_manual_edit_reply(monkeypatch):
+    """manual_edit_required + source_edit_provider_unavailable + delivery-
+    state phrase → surface flyer_manual_edit_status_reply, NOT generic
+    project_status_reply (parallel to active-project intercept's branch)."""
+    hooks, actions = _load_plugin_modules()
+    sent = {}
+    audits = []
+    manual_project = {
+        "project_id": "F0083",
+        "status": "manual_edit_required",
+        "manual_review": {"reason_code": "source_edit_provider_unavailable"},
+        "updated_at": "2026-05-26T00:03:00Z",
+    }
+    customer = {"customer_id": "CUST0001", "business_name": "Lakshmi's Kitchen", "status": "active"}
+    reply_calls = {"manual": 0, "generic": 0}
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
+    monkeypatch.setattr(actions, "find_latest_flyer_project_for_status_by_sender", lambda _phone, _chat_id: manual_project)
+
+    def _manual_reply(_project):
+        reply_calls["manual"] += 1
+        return _expected_manual_edit_reply()
+
+    def _generic_reply(_project):
+        reply_calls["generic"] += 1
+        return _expected_status_reply()
+
+    monkeypatch.setattr(actions, "flyer_manual_edit_status_reply", _manual_reply)
+    monkeypatch.setattr(actions, "flyer_project_status_reply", _generic_reply)
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "surface-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
+
+    result = hooks._try_flyer_delivery_state_guard(
+        "send my flyer",
+        "17329837841@s.whatsapp.net",
+        SimpleNamespace(text="send my flyer", chat_id="17329837841@s.whatsapp.net", message_id="manual-edit-send"),
+    )
+    assert result == {"action": "skip", "reason": "cf-router flyer delivery state status surfaced"}
+    assert sent["text"] == _expected_manual_edit_reply()
+    assert reply_calls["manual"] == 1 and reply_calls["generic"] == 0, "must dispatch to manual_edit_status_reply, not generic"
+    assert audits and audits[-1]["reason"] == "flyer_delivery_state_status_surfaced"
+
+
 def test_explicit_sample_prompt_request_sends_starter_ideas(monkeypatch):
     hooks, actions = _load_plugin_modules()
     sent = {}

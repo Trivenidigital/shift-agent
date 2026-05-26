@@ -37,17 +37,25 @@ PRs land in order **α → β → γ → δ → ε → ζ → η → θ**. α an
 
 | Aspect | Detail |
 |---|---|
+| Status | **IN PROGRESS 2026-05-26** — scope verified, implementation underway on branch `docs/regulated-intent-control-layer` |
 | Files | `src/plugins/cf-router/actions.py`, `src/plugins/cf-router/hooks.py`, `src/platform/schemas.py` (+1 line for new `flyer_delivery_state_guard` reason in `CfRouterIntercepted`), `tests/test_cf_router_flyer_routing.py` |
-| Patterns | `_FLYER_DELIVERY_STATE_PATTERN`: `(where\|status of)\s+(?:is\s+)?(?:my\s+)?flyer`, `did\s+you\s+send`, `send\s+(?:me\s+)?(?:my\s+)?flyer`, `send\s+now`, `\bi\s+approve\b`, `^approve\.?$` |
+| Confirmed in-scope phrases | `where is my flyer`, `did you send my flyer`, `send my flyer`, `approve` (bare), `I approve` |
+| Confirmed deterministic ownership (verified) | `is_flyer_approval_text` (`actions.py:1358`) + active-project intercept (`hooks.py:2700, 2718`) own bare `approve` + `I approve`. `is_flyer_project_status_request` + active-project intercept own `where is my flyer` / `did you send` style queries. |
+| Deferred to PR-β.1 | `send now` — no specific deterministic handler found in active-project path. Defer rather than add a new handler mid-PR-β. |
+| Pattern shape (NOT bare-token per #250 lesson) | `_FLYER_DELIVERY_STATE_PATTERN` uses tight phrase patterns: `where(?:'s\|\s+is)\s+(?:my\s+\|the\s+)?flyer`, `did\s+you\s+send\s+(?:me\s+\|us\s+)?(?:my\s+\|the\s+)?flyer`, `send\s+(?:me\s+\|us\s+)?(?:my\s+\|the\s+)?flyer`, `\bi\s+approve\b`. Bare `approve` handled via the existing `is_flyer_approval_text` semantics (entire-body equality after stripping). |
 | New function | `is_flyer_delivery_state_intent(text)` |
-| Wired into | `_try_flyer_delivery_state_guard()` in `cf-router/hooks.py`, runs AFTER `_try_flyer_regulated_account_guard`, BEFORE generic Hermes fallback |
-| Behavior | Deterministic status-check copy. Looks up the customer's most-recent flyer project + delivery state, replies with factual current state. NEVER claims "I sent it" or "your flyer is done" unless `final_assets_delivered` audit row exists for that project. |
-| Phrases that must fail closed | `where is my flyer`, `did you send my flyer`, `send my flyer`, `send now`, `approve`, `I approve` |
-| Phrases that must NOT match | flyer briefs that mention delivery/approval in non-status contexts (e.g. "I approve the use of festival imagery") — add explicit false-positive tests |
-| Non-goals | NO chokepoint, NO lint, NO action-registry changes, NO modifications to the existing flyer-active-project routing (only adds a NEW pre-gateway guard branch) |
-| Dependency | None structurally; sequenced after α for review-load reasons |
-| Basis from closed PR #250 | **3 of 19 seed fixtures** in `tests/conversation_evals/seed/flyer/` of the `codex/regulated-intent-pr0-foundation` branch are PR-β scope: `regulated_delivery_did_send.json`, `regulated_delivery_send_my_flyer.json`, `regulated_delivery_where.json`. Lift these (cherry-pick or copy) when PR-β opens. DO NOT lift #250's broader cf-router regex changes wholesale — they encode bare-token matching that conflicts with #251's verb-anchored discipline; rebuild PR-β regex on current main per the patterns row above. |
-| Discipline inherited from #251 | (a) Verb-anchored regex (mutation verb before target field); (b) Active-project yield via `flyer_text_targets_revision_field` + `find_active_flyer_project_by_sender` — same shape, applied to delivery-state regex; (c) LID-only yield does NOT add a second phone gate (pass `phone=None` through to lookup function); (d) Negative-test false-positive fixtures REQUIRED in the test file alongside positive cases. |
+| Wired into | `_try_flyer_delivery_state_guard()` in `cf-router/hooks.py`, runs **AFTER** `_try_flyer_active_project_intercept` (not BEFORE per the original draft). Reasoning: active-project intercept already handles all delivery-state phrases when a project (active or closed_no_send) resolves; PR-β fires only when no project resolves and the message would otherwise reach generic Hermes. **No yield logic needed** in PR-β — placement-after means no hijack risk. |
+| Behavior | When no active or recent flyer project resolves for the sender, fail-closed clarification copy explicitly says "No delivery action has been taken" and "I don't see an active or recent flyer for [business] to deliver right now." NEVER claims "I sent it" / "your flyer is done." |
+| Phrases that must fail closed (with no active project) | All 5 in-scope phrases above |
+| Phrases that must NOT match | `Where can I show my flyer to customers?` (where + can ≠ where + is), `approve this concept` (not bare approve), `send to customers Friday` (send + to ≠ send + flyer), `Did you receive my flyer?` (receive ≠ send), `I approve of the colors` (allowed broader match by design — fail-closes harmlessly per the four-part invariant) |
+| Non-goals | NO chokepoint, NO lint, NO action-registry changes, NO active-project yield helper needed (placement-after handles it). The existing `_try_flyer_active_project_intercept` is NOT modified. |
+| Dependency | None structurally; sequenced after α as agreed |
+| Basis from closed PR #250 | **3 of 19 seed fixtures** in `codex/regulated-intent-pr0-foundation` branch are PR-β scope: `regulated_delivery_did_send.json`, `regulated_delivery_send_my_flyer.json`, `regulated_delivery_where.json`. May cherry-pick when PR-η builds the eval harness. DO NOT lift #250's broader cf-router regex changes wholesale. |
+| Discipline inherited from #251 | (a) Tight phrase-anchored regex (no bare-token matching like #250); (b) False-positive negative tests REQUIRED in the test file alongside positive cases; (c) LID-only test for the no-active-project guard path (no second phone gate); (d) Active-project case tested via the dispatch-order integration check (placement-after means guard never sees active-project cases). |
+
+### PR-β.1 — `send now` delivery-state intent (deferred)
+
+`send now` (and possibly `send it now`, `please send`, etc.) has no specific deterministic handler in the active-project intercept today. Adding one mid-PR-β would expand scope. Deferring to a follow-up PR-β.1 once the deterministic ownership question is resolved (either: existing active-project intercept's approval path is extended to cover `send now`, OR a dedicated send-now route is added).
 
 ## PR-γ — Forbidden-completion-verbs lint in customer_copy_policy.py
 

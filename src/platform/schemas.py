@@ -4264,6 +4264,8 @@ class CfRouterIntercepted(_BaseEntry):
         "flyer_account_customer_not_found",
         "flyer_account_unhandled",
         "flyer_regulated_account_guard",
+        "flyer_delivery_state_guard",
+        "flyer_delivery_state_status_surfaced",
         "flyer_active_project_bypassed",
         "flyer_brief_approved",
         "flyer_brief_project_create_failed",
