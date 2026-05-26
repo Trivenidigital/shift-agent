@@ -257,7 +257,10 @@ def test_connected_candidates_are_candidate_only_not_false_unset(tmp_path: Path)
 
 def test_connector_status_distinguishes_partial_and_complete_env_sets(tmp_path: Path):
     partial_env = tmp_path / ".partial.env"
-    partial_env.write_text("QUICKBOOKS_CLIENT_ID=id-only\nPAYPAL_ACCESS_TOKEN=token-only\n", encoding="utf-8")
+    partial_env.write_text(
+        "QUICKBOOKS_CLIENT_ID=id-only\nPAYPAL_ACCESS_TOKEN=token-only\nRAZORPAY_KEY_ID=rzp_test\n",
+        encoding="utf-8",
+    )
     partial_report = cr.build_report(
         cr.ReadinessOptions(
             hermes_home=tmp_path / ".hermes",
@@ -269,6 +272,7 @@ def test_connector_status_distinguishes_partial_and_complete_env_sets(tmp_path: 
     partial = {row["name"]: row["configured_status"] for row in partial_report["connectors"]}
     assert partial["Intuit QuickBooks Online MCP"] == "partial_env"
     assert partial["PayPal MCP Server"] == "partial_env"
+    assert partial["Razorpay MCP"] == "partial_env"
 
     complete_env = tmp_path / ".complete.env"
     complete_env.write_text(
@@ -281,6 +285,8 @@ def test_connector_status_distinguishes_partial_and_complete_env_sets(tmp_path: 
                 "QUICKBOOKS_ENVIRONMENT=sandbox",
                 "PAYPAL_ACCESS_TOKEN=token",
                 "PAYPAL_CLIENT_ID=client",
+                "RAZORPAY_KEY_ID=rzp_id",
+                "RAZORPAY_KEY_SECRET=rzp_secret",
             ]
         ),
         encoding="utf-8",
@@ -296,6 +302,19 @@ def test_connector_status_distinguishes_partial_and_complete_env_sets(tmp_path: 
     complete = {row["name"]: row["configured_status"] for row in complete_report["connectors"]}
     assert complete["Intuit QuickBooks Online MCP"] == "env_present"
     assert complete["PayPal MCP Server"] == "env_present"
+    assert complete["Razorpay MCP"] == "env_present"
+
+
+def test_payment_connector_catalog_includes_stripe_and_razorpay_mcp():
+    connectors = {row.name: row for row in cr.CONNECTOR_CANDIDATES}
+    assert "Stripe MCP" in connectors
+    assert "Razorpay MCP" in connectors
+    stripe = connectors["Stripe MCP"]
+    razorpay = connectors["Razorpay MCP"]
+    assert stripe.domain == "payments"
+    assert razorpay.domain == "payments"
+    assert "restricted_api_key" in stripe.auth_modes
+    assert "restricted_api_key" in razorpay.auth_modes
 
 
 def test_json_output_shape_is_stable(tmp_path: Path):
