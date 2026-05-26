@@ -1,0 +1,20 @@
+{
+  "topic": "pr-zeta-design-2026-05-26",
+  "task_text": "PR-ζ ActionExecutionContext + null-context allowlist + lint hookup + audit-fail-closed foundation — design doc covering concrete code shapes for F1-F8 from plan REV 2",
+  "completed_at": "2026-05-26T17:25:00Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 3,
+  "hermes_step_count": 9,
+  "files_to_read_first": [
+    "src/platform/schemas.py",
+    "src/platform/safe_io.py",
+    "src/agents/flyer/customer_copy_policy.py",
+    "src/agents/flyer/action_registry.py",
+    "src/agents/flyer/account.py",
+    "src/agents/flyer/scripts/manage-flyer-account",
+    "src/plugins/cf-router/actions.py",
+    "src/plugins/cf-router/hooks.py",
+    "src/agents/flyer/manual_queue.py",
+    "src/agents/shift/scripts/send-coverage-message"
+  ]
+}

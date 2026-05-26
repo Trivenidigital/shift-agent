@@ -1,0 +1,19 @@
+{
+  "topic": "pr-zeta-plan-2026-05-26",
+  "task_text": "PR-ζ ActionExecutionContext + null-context allowlist + lint hookup + audit-fail-closed foundation",
+  "completed_at": "2026-05-26T17:05:00Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 3,
+  "hermes_step_count": 9,
+  "files_to_read_first": [
+    "src/platform/schemas.py",
+    "src/platform/safe_io.py",
+    "src/agents/flyer/customer_copy_policy.py",
+    "src/agents/flyer/action_registry.py",
+    "tests/test_safe_io_bridge_post.py",
+    "tests/test_send_chokepoint_singularity.py",
+    "src/plugins/cf-router/actions.py",
+    "tasks/regulated-intent-gap-fill-pr-sequence-2026-05-26.md",
+    "tasks/regulated-intent-control-layer-architecture-2026-05-25.md"
+  ]
+}
