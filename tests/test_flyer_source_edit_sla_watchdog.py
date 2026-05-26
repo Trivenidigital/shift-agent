@@ -379,6 +379,8 @@ def test_deploy_installs_and_enables_sla_watchdog_timer():
     assert "flyer-source-edit-sla-watchdog.timer" in smoke
     assert "ExecStartPre=/usr/bin/test -x /usr/local/bin/flyer-source-edit-sla-watchdog" in watchdog_service
     assert "ExecStartPre=/usr/bin/test -x /usr/local/bin/shift-agent-notify-owner" not in watchdog_service
+    assert "EnvironmentFile=-/opt/shift-agent/.env" in failure_service
+    assert "ExecStartPre=/usr/bin/test -x /usr/local/bin/shift-agent-notify-owner" in failure_service
     assert "SuccessExitStatus=5 6" in failure_service
 
 
