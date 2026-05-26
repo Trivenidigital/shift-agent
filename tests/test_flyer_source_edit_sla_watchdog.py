@@ -412,6 +412,51 @@ def test_stale_manual_queue_sends_customer_update_after_customer_threshold(tmp_p
     assert any(row.get("type") == "flyer_manual_queue_customer_update" and row.get("outcome") == "sent" for row in audit_rows)
 
 
+def test_customer_update_sends_once_per_chat_for_multiple_stale_projects(tmp_path):
+    module = load_module()
+    projects = tmp_path / "projects.json"
+    state = tmp_path / "sla-alerts.json"
+    decisions = tmp_path / "decisions.log"
+    projects.write_text(
+        json.dumps({
+            "projects": [
+                _project("F9017", reason_code="visual_qa_failed"),
+                _project("F9018", reason_code="visual_qa_failed", queued_at="2026-05-21T00:05:00Z"),
+            ]
+        }),
+        encoding="utf-8",
+    )
+    customer_calls: list[dict] = []
+
+    result = module.run_watchdog(
+        projects_path=projects,
+        alert_state_path=state,
+        decisions_log_path=decisions,
+        customers_path=tmp_path / "customers.json",
+        now=module.parse_utc("2026-05-21T03:45:00Z"),
+        threshold_minutes=10,
+        repeat_minutes=60,
+        customer_update_minutes=30,
+        customer_repeat_minutes=120,
+        notify_func=lambda **_: True,
+        customer_chat_resolver=lambda _project: ("17329837841@lid", "audit"),
+        customer_notify_func=lambda chat_id, message: (customer_calls.append({"chat_id": chat_id, "message": message}) or (True, "m-customer", "")),
+    )
+
+    assert result["customer_updates"]["sent_project_ids"] == ["F9017"]
+    assert result["customer_updates"]["throttled_project_ids"] == ["F9018"]
+    assert len(customer_calls) == 1
+    saved = json.loads(state.read_text(encoding="utf-8"))
+    first_key = "F9017|visual_qa_failed|2026-05-21T00:00:00+00:00"
+    second_key = "F9018|visual_qa_failed|2026-05-21T00:05:00+00:00"
+    assert saved["project_alerts"][first_key]["last_customer_update_outcome"] == "sent"
+    assert saved["project_alerts"][second_key]["last_customer_update_outcome"] == "suppressed_same_chat_update"
+    assert saved["project_alerts"][second_key]["last_customer_updated_at"] == "2026-05-21T03:45:00+00:00"
+    audit_rows = [json.loads(line) for line in decisions.read_text(encoding="utf-8").splitlines()]
+    assert any(row.get("outcome") == "sent" and row.get("project_id") == "F9017" for row in audit_rows)
+    assert any(row.get("outcome") == "suppressed_same_chat_update" and row.get("project_id") == "F9018" for row in audit_rows)
+
+
 def test_recent_customer_update_is_throttled_independently_of_operator_alert(tmp_path):
     module = load_module()
     projects = tmp_path / "projects.json"
