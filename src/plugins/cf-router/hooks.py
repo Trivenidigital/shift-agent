@@ -1123,7 +1123,7 @@ def _try_flyer_source_vs_new_choice_intercept(text: str, chat_id: str, event: An
     # Branch 2: status check-in re-send.
     if not choice_token:
         existing = actions.peek_flyer_source_vs_new_pending(chat_id=chat_id, sender_phone=phone)
-        if existing and actions.is_flyer_project_status_request(text):
+        if existing and actions.flyer_is_status_checkin(text):
             clarification = (
                 "Flyer Studio\n"
                 "------------\n"

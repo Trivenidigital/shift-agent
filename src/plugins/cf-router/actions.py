@@ -2029,7 +2029,10 @@ def is_flyer_project_status_request(text: str) -> bool:
     )
     if edit_starter:
         return False
-    if re.fullmatch(r"(status|any update|any updates|update|updates|eta|ready(?:\s+yet)?|done|finished)\??", body):
+    if re.fullmatch(
+        r"(status|any update|any updates|update|updates|eta(?:\s+(?:please|pls))?|ready(?:\s+yet)?|done|finished)\??",
+        body,
+    ):
         return True
     if re.fullmatch(r"where\s+(?:is|are|s)\s+(?:the\s+)?updates?\??", body):
         return True
@@ -3501,15 +3504,10 @@ def parse_source_vs_new_followup(text: str) -> tuple[str, str]:
     return "", ""
 
 
-_STATUS_CHECKIN_RE = re.compile(
-    r"^(?:any\s+updates?|is\s+it\s+ready|what'?s?\s+(?:the\s+)?status|where\s+(?:is|are|s)\s+(?:the\s+)?updates?|update\??|status\??|ready\??)\??$",
-    flags=re.IGNORECASE,
-)
-
-
 def flyer_is_status_checkin(text: str) -> bool:
-    body = " ".join(flyer_visible_message_text(text).split()).strip(" .!,:;-—")
-    return bool(_STATUS_CHECKIN_RE.match(body))
+    # Keep SOURCE/NEW pending-status detection aligned with the main status
+    # router so one path does not miss natural status wording variants.
+    return is_flyer_project_status_request(text)
 
 
 def find_recent_flyer_manual_edit_project(
