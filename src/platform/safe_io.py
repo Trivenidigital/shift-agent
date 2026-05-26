@@ -685,7 +685,12 @@ def _resolve_caller_script_name() -> str:
     """Walk inspect.stack() to find the first user-code frame and return its
     basename. Skips safe_io.py self-frames and frozen importlib frames.
 
-    Returns "" if no user frame is identifiable (e.g. import-time eval).
+    Returns "<unidentifiable>" if no user frame surfaces (e.g. import-time
+    eval). Per PR-ζ security/money-flow reviewer NIT #8: empty-string
+    caller_script values would land in audit rows as anonymous entries
+    that downstream grouping reports (PR-η) can't aggregate cleanly. The
+    sentinel makes the unidentifiable case visible while still failing
+    the allowlist check (the sentinel is not in the allowlist).
     """
     for frame_info in inspect.stack()[1:]:
         path = frame_info.filename
@@ -696,7 +701,7 @@ def _resolve_caller_script_name() -> str:
         if "<frozen" in path or "importlib" in path:
             continue
         return os.path.basename(path)
-    return ""
+    return "<unidentifiable>"
 
 
 def _emit_audit_row(entry_type: str, fields: dict) -> None:
@@ -704,9 +709,9 @@ def _emit_audit_row(entry_type: str, fields: dict) -> None:
     the canonical audit chokepoint under the conventional flock.
 
     Wraps `ndjson_append` in `FileLock(_DECISIONS_LOG_LOCK)` per the
-    documented contract of ndjson_append. Does NOT fall back lockless —
-    the chokepoint's audit-fail-closed contract requires failure to
-    propagate so the send isn't allowed to succeed silently.
+    documented contract of ndjson_append. PROPAGATES exceptions — used by
+    `_try_emit_audit_row` which converts them to a return value for the
+    chokepoint's HTTP-safe error path.
 
     Raises:
         pydantic.ValidationError — if `fields` don't satisfy the variant schema.
@@ -718,6 +723,39 @@ def _emit_audit_row(entry_type: str, fields: dict) -> None:
     entry = _LOG_ENTRY_ADAPTER.validate_python(payload)
     with FileLock(_DECISIONS_LOG_LOCK):
         ndjson_append(_DECISIONS_LOG_PATH, entry.model_dump_json())
+
+
+def _try_emit_audit_row(entry_type: str, fields: dict) -> Optional[str]:
+    """Same as `_emit_audit_row` but converts any exception to a return
+    string so the chokepoint can yield a refusal tuple instead of
+    propagating up through the HTTP-handler stack.
+
+    Returns None on success, or an error-summary string on failure. The
+    summary is logged to stderr (journalctl-visible) so operators see the
+    audit-write failure even though the caller doesn't crash.
+
+    PR-ζ security/money-flow reviewer #4: propagating OSError out of
+    bridge_post crashes the Hermes plugin handler mid-HTTP-request,
+    leaving the customer with persisted half-state (e.g. pending_plan_*
+    set) and no reply. This helper converts the exception into a tuple
+    return + stderr signal — still fail-CLOSED (the send doesn't proceed)
+    but composes cleanly with the HTTP layer.
+
+    Full §11 contract (operator alert via notify-owner-with-fallback +
+    fallback log at state/.audit-fallback.ndjson) deferred to PR-ζ.1.
+    """
+    try:
+        _emit_audit_row(entry_type, fields)
+        return None
+    except Exception as e:
+        err_summary = f"{type(e).__name__}: {str(e)[:200]}"
+        try:
+            sys.stderr.write(
+                f"PR-ζ AUDIT WRITE FAILED for {entry_type}: {err_summary}\n"
+            )
+        except Exception:
+            pass  # double-fault: cannot even write stderr; give up
+        return err_summary
 
 
 def _join_parts_for_preview(parts: list[str]) -> str:
@@ -746,7 +784,7 @@ def _enforce_action_context_policy(
     if action_context is None:
         caller = _resolve_caller_script_name()
         if caller not in SAFE_IO_NULL_CONTEXT_ALLOWLIST:
-            _emit_audit_row(
+            audit_err = _try_emit_audit_row(
                 "regulated_send_missing_action_context",
                 {
                     "caller_script": caller,
@@ -754,6 +792,8 @@ def _enforce_action_context_policy(
                     "message_preview": _join_parts_for_preview(message_parts)[:120],
                 },
             )
+            if audit_err is not None:
+                return False, "", f"audit_write_failed: {audit_err}", "refused"
             return False, "", "missing_action_context", "refused"
         return None  # allowlisted; pass through
 
@@ -779,7 +819,7 @@ def _enforce_action_context_policy(
         # mid-refusal (fail-LOUD: caller crashes instead of getting a
         # clean refusal tuple).
         verb_values = [hit.value for hit in scan.hits][:20]
-        _emit_audit_row(
+        audit_err = _try_emit_audit_row(
             "regulated_send_lint_violation",
             {
                 "action_id": action_context.action_id,
@@ -789,6 +829,8 @@ def _enforce_action_context_policy(
                 "message_preview": aggregated[:120],
             },
         )
+        if audit_err is not None:
+            return False, "", f"audit_write_failed: {audit_err}", "refused"
         return False, "", "lint_violation", "refused"
 
     return None  # passed lint, send proceeds
