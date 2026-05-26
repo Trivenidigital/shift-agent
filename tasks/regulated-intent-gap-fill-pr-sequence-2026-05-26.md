@@ -46,6 +46,8 @@ PRs land in order **α → β → γ → δ → ε → ζ → η → θ**. α an
 | Phrases that must NOT match | flyer briefs that mention delivery/approval in non-status contexts (e.g. "I approve the use of festival imagery") — add explicit false-positive tests |
 | Non-goals | NO chokepoint, NO lint, NO action-registry changes, NO modifications to the existing flyer-active-project routing (only adds a NEW pre-gateway guard branch) |
 | Dependency | None structurally; sequenced after α for review-load reasons |
+| Basis from closed PR #250 | **3 of 19 seed fixtures** in `tests/conversation_evals/seed/flyer/` of the `codex/regulated-intent-pr0-foundation` branch are PR-β scope: `regulated_delivery_did_send.json`, `regulated_delivery_send_my_flyer.json`, `regulated_delivery_where.json`. Lift these (cherry-pick or copy) when PR-β opens. DO NOT lift #250's broader cf-router regex changes wholesale — they encode bare-token matching that conflicts with #251's verb-anchored discipline; rebuild PR-β regex on current main per the patterns row above. |
+| Discipline inherited from #251 | (a) Verb-anchored regex (mutation verb before target field); (b) Active-project yield via `flyer_text_targets_revision_field` + `find_active_flyer_project_by_sender` — same shape, applied to delivery-state regex; (c) LID-only yield does NOT add a second phone gate (pass `phone=None` through to lookup function); (d) Negative-test false-positive fixtures REQUIRED in the test file alongside positive cases. |
 
 ## PR-γ — Forbidden-completion-verbs lint in customer_copy_policy.py
 
@@ -60,6 +62,7 @@ PRs land in order **α → β → γ → δ → ε → ζ → η → θ**. α an
 | Tests | Positive: each verb triggers a violation when `has_verified_action_result=False`. Negative: same verbs pass when `has_verified_action_result=True`. Round-trip: `scan_outbound_entry` on a synthetic entry with "I have processed your upgrade" returns the violation. |
 | Non-goals | NO chokepoint consolidation (that's PR-ε); NO `ActionExecutionContext` plumbing (that's PR-ζ); the lint runs but is not yet wired to refuse sends — that wiring lands in PR-ζ. PR-γ ships the LINT FUNCTION; PR-ζ uses it. |
 | Dependency | None |
+| Basis from closed PR #250 | `src/platform/customer_copy_policy.py` (+95 new file on `codex/regulated-intent-pr0-foundation`) is ~80% of what PR-γ needs. Already includes `FORBIDDEN_COMPLETION_VERBS` tuple (17 verbs), `lint_customer_copy(text, action_context) -> CopyLintResult` API, `_find_forbidden_verbs` + `_normalise_action_context` helpers. Plus `tests/test_customer_copy_policy.py` (+72) and the minor `src/agents/flyer/account.py` "confirmed → verified" copy adjustment. **Note:** #250 also defines `ActionExecutionContext` Pydantic model in this file — split decision deferred to PR-ζ (keep colocated or lift to a dedicated module). PR-γ's scope ends at the lint module + tests. Lift content via cherry-pick from the closed branch. |
 
 ## PR-δ — `mutation_class` field on `FlyerActionDefinition`
 
@@ -102,6 +105,7 @@ PRs land in order **α → β → γ → δ → ε → ζ → η → θ**. α an
 | Tests | Action-context flow (regulated action passes context, gets through lint when `verified_action_result=True`, blocked when `False` + has forbidden verb); allowlist enforcement (non-allowlisted caller with `None` is refused); lint refusal (forbidden verb without verified action result is refused). |
 | Non-goals | NO mass call-site updates — existing callers can pass `None` initially as long as they're on the allowlist; per-script call-site migration happens in follow-up PRs once the schema is stable. |
 | Dependency | PR-ε (chokepoint consolidation must be done first so the signature change reaches all callers), PR-γ (lint function must exist). |
+| Basis from closed PR #250 | `src/platform/safe_io.py` (+33 on `codex/regulated-intent-pr0-foundation`) already ships the `bridge_post` signature extension to accept keyword `action_context: object \| None` + the `_lint_bridge_customer_copy` helper that calls `lint_customer_copy` from `customer_copy_policy.py`. Also `src/platform/schemas.py` (+10) and `tests/test_safe_io_bridge_post.py` (+55). **NOT in #250:** the `SAFE_IO_NULL_CONTEXT_ALLOWLIST` frozenset + runtime caller check via `inspect.stack()` + the static-gate test `test_send_chokepoint_null_context_allowlist.py`. PR-ζ adds those on top of the #250-derived signature plumbing. The `ActionExecutionContext` model lift/colocate decision is also made in PR-ζ. |
 
 ## PR-η — Conversation eval harness scaffold
 
@@ -116,6 +120,7 @@ PRs land in order **α → β → γ → δ → ε → ζ → η → θ**. α an
 | Tests | Harness self-test (runs against an empty corpus, exits clean); harness against a known-failing fixture (exits non-zero); harness against a known-passing fixture (exits zero). |
 | Non-goals | NO self-evolution loop (clustering, automatic fixture proposal — that's a much later PR after PR-θ); NO promote-to-block automatic (operator-triggered). |
 | Dependency | None structurally. |
+| Basis from closed PR #250 | **PR #250's harness work is ~90% of PR-η.** Already shipped on `codex/regulated-intent-pr0-foundation`: `tools/run-conversation-evals.py` (+123, Python harness with `--agent flyer` flag, exit-non-zero on failure), `tools/run-conversation-evals.sh` (+4, shell wrapper), `tests/test_conversation_evals.py` (+53, harness self-tests), and **19 seed fixtures** under `tests/conversation_evals/seed/flyer/`. The 19 break down as: 12 account (`regulated_account_*`), 4 payment (`regulated_payment_*`), 3 delivery (`regulated_delivery_*` — those 3 belong to PR-β per the Basis row above). Lift via cherry-pick from the closed branch. Operator's verification at #250 head `700ab88` showed harness `19 failed=0` — code works. |
 
 ## PR-θ — Audit-log freshness watchdog
 
@@ -137,14 +142,31 @@ PRs land in order **α → β → γ → δ → ε → ζ → η → θ**. α an
 
 | PR | Title | Branch | Status |
 |---|---|---|---|
-| α | Regulated-intent regex gap-fill | `docs/regulated-intent-control-layer` (staged in worktree, not committed) | **in progress** |
-| β | Delivery-state guard | — | pending α |
+| α | Regulated-intent regex gap-fill | `docs/regulated-intent-control-layer` (merged + deleted) | **MERGED 2026-05-26 — PR [#251](https://github.com/Trivenidigital/shift-agent/pull/251), squash commit `6e0ffeb`** |
+| α.1 | LID-only `find_active_flyer_project_by_sender` upstream fix | — | pending — out of PR-α scope; tracked in PR-α row "Known deferred follow-up" |
+| α.2 | GitHub PR checks absent | — | pending — see "Follow-ups" section below |
+| (250) | Codex PR-0 scaffold attempt | `codex/regulated-intent-pr0-foundation` | **CLOSED 2026-05-26 (unmerged)** — PR [#250](https://github.com/Trivenidigital/shift-agent/pull/250). Closed as superseded after PR-α merged because #250's account regex used bare tokens (`address`, `whatsapp`, `phone number`) that would have reintroduced false-positives PR-α explicitly tests against. Content decomposed into PR-β / γ / ζ / η below. Branch kept as cherry-pick source. |
+| β | Delivery-state guard | — | pending α (now unblocked — α merged); MUST inherit #251 verb-anchor + active-project-yield discipline |
 | γ | Forbidden-completion-verbs lint | — | pending β |
 | δ | `mutation_class` field | — | pending γ |
 | ε | Send chokepoint consolidation | — | pending δ |
 | ζ | `ActionExecutionContext` + allowlist + lint hookup | — | pending ε |
 | η | Eval harness scaffold | — | pending ζ |
 | θ | Audit-log freshness watchdog | — | pending η |
+
+## Follow-ups (not in the main sequence)
+
+### PR-α.2 — GitHub PR checks absent
+
+PR #251 merged on `mergeStateStatus: CLEAN` + local verification only. GitHub `statusCheckRollup` was empty — no Actions workflow ran on the PR. Repo has been relying on local verification successfully but the CI gap is real.
+
+Investigate:
+- Whether the repo has any Actions workflows configured at all
+- If yes, whether they trigger on `docs/*` / `fix/*` branches or only on `main` pushes
+- If yes, whether path filters exclude the touched files
+- Minimum useful coverage: run `pytest tests/test_cf_router_flyer_routing.py` (and the broader flyer test files) on every PR open + push
+
+Out of scope for the regulated-intent gap-fill program; tracking here so future PR reviews against this sequence don't have to re-derive the gap. Not blocking PR-β / γ / ...
 
 ---
 
