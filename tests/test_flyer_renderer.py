@@ -475,6 +475,47 @@ def test_image_prompt_extracts_through_day_range_schedule_for_recurring_offer():
     assert "Date: " not in prompt
 
 
+def test_image_prompt_uses_clean_biryani_copy_without_price_instruction_leak():
+    raw_request = (
+        "Create a Special Biryani's Flyer with all famous south indian biryani's included, "
+        "add Price as $16.99 for chicken and $18.99 for goat. "
+        "This promotion runs on Wednesday and Thursday of every week. "
+        "Use address and phone number stored."
+    )
+    project = _complete_project().model_copy(update={
+        "raw_request": raw_request,
+        "fields": FlyerRequestFields(
+            event_or_business_name="Special Biryani's",
+            event_date=None,
+            event_time=None,
+            venue_or_location="90 Brybar Dr St Johns FL",
+            contact_info="+17329837841",
+            notes=raw_request,
+        ),
+        "locked_facts": [
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile"),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Special Biryani's", source="customer_text"),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile"),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile"),
+            FlyerLockedFact(fact_id="item:0:name", label="Item", value="Chicken Biryani", source="customer_text"),
+            FlyerLockedFact(fact_id="item:0:price", label="Price", value="$16.99", source="customer_text"),
+            FlyerLockedFact(fact_id="item:1:name", label="Item", value="Goat Biryani", source="customer_text"),
+            FlyerLockedFact(fact_id="item:1:price", label="Price", value="$18.99", source="customer_text"),
+        ],
+    })
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="whatsapp_image", size=(1080, 1350))
+    facts = {fact.fact_id: fact.text for fact in collect_text_facts(project)}
+
+    assert facts["schedule"] == "Wednesday and Thursday every week"
+    assert "Schedule: Wednesday and Thursday every week" in prompt
+    assert "Chicken Biryani - $16.99" in prompt
+    assert "Goat Biryani - $18.99" in prompt
+    assert "add Price as" not in prompt
+    assert "all famous south indian" not in prompt
+    assert not any("add price" in text.lower() for text in facts.values())
+
+
 def test_image_prompt_skips_blank_optional_fields_for_price_list():
     project = _complete_project()
     fields = FlyerRequestFields(

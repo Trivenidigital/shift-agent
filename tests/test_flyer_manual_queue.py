@@ -811,6 +811,31 @@ def test_resolve_customer_chat_id_by_phone_handles_missing_store(tmp_path):
     assert resolve_customer_chat_id_by_phone(tmp_path / "nope.json", "+19045550104") is None
 
 
+def test_recent_inbound_chat_id_ignores_synthetic_status_jids(tmp_path):
+    from agents.flyer.manual_queue import find_recent_inbound_chat_id_for_project
+
+    decisions = tmp_path / "decisions.log"
+    decisions.write_text(
+        "\n".join([
+            json.dumps({
+                "type": "cf_router_intercepted",
+                "reason": "flyer_primary_project_created",
+                "chat_id": "201975216009469@lid",
+                "detail": "project_id=F0102; sender_role=employee",
+            }),
+            json.dumps({
+                "type": "cf_router_intercepted",
+                "reason": "flyer_customer_not_active",
+                "chat_id": "cancelled@s.whatsapp.net",
+                "detail": "project_id=F0102; customer_id=CUST0001; status=cancelled",
+            }),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    assert find_recent_inbound_chat_id_for_project(decisions, "F0102") == "201975216009469@lid"
+
+
 def _closed_store(*, phone="+19045550104", reason_code="source_edit_provider_unavailable"):
     """Single-project store shaped as if close_manual_project just ran."""
     queued = datetime(2026, 5, 19, 21, 4, 4, tzinfo=timezone.utc)
