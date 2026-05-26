@@ -308,7 +308,11 @@ def handle_account_command(
         allowed=True,
         reason=reason,
     )
-    return AccountResult(True, True, reply, updated.customer_id, updated.status)
+    # PR-ζ F8 2026-05-26: propagate `reason` to AccountResult.detail so the
+    # downstream manage-flyer-account JSON output carries the
+    # "plan_change_requested" signal; cf-router/hooks.py:1738 reads this to
+    # decide whether to construct an ActionExecutionContext for the send.
+    return AccountResult(True, True, reply, updated.customer_id, updated.status, detail=reason)
 
 
 def claim_starter_prompt_send(*, state_path: Path, customer_id: str) -> AccountResult:
@@ -845,7 +849,13 @@ def _quota_blocked_reply(customer: FlyerCustomerProfile, tiers: list[FlyerPlanTi
 def _pending_plan_reply(plan_id: str, url: str, provider: str) -> str:
     del provider
     pay = f"Pay here: {url}" if url else "Payment link is not configured yet. I saved this plan request for checkout setup."
-    return f"Flyer Studio\n------------\nPlan change requested: {plan_id}.\n{pay}\nYour current plan remains active until payment is confirmed."
+    # PR-ζ 2026-05-26: avoid the verb "confirmed" — it's in
+    # FORBIDDEN_COMPLETION_VERBS (customer_copy_policy.py:85). With PR-ζ
+    # lint applied to this reply (via the change_plan callsite migration),
+    # the prior "until payment is confirmed" phrasing would refuse every
+    # legitimate plan-change reply. The new wording carries the same
+    # meaning without tripping the lint.
+    return f"Flyer Studio\n------------\nPlan change requested: {plan_id}.\n{pay}\nYour current plan stays active until we receive payment."
 
 
 def _roll_period(customer: FlyerCustomerProfile, now: datetime) -> FlyerCustomerProfile:

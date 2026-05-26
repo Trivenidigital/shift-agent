@@ -2847,6 +2847,35 @@ class SeenIds(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────────
+# PR-ζ 2026-05-26 — ActionExecutionContext
+# ─────────────────────────────────────────────────────────────────
+#
+# Per-action runtime context propagated through safe_io.bridge_post family.
+# Carries action identity + verification state so the chokepoint applies
+# forbidden-completion-verb lint (PR-γ) only when an action's result is
+# unverified. frozen=True + extra=forbid defends against accidental mutation
+# or unexpected field drift.
+#
+# NOTE on `is_regulated_action=False` defensive use:
+# Setting `is_regulated_action=False` skips the lint entirely, regardless of
+# message content. This is correct for system messages (healthchecks, daily
+# digests). It is INCORRECT to use for a regulated business action that the
+# caller wishes to bypass lint on — the right escape is to set
+# `verified_action_result=True` with explicit evidence (audit-row id of the
+# completion event). Mis-tagging a regulated action as non-regulated bypasses
+# the entire protection.
+
+class ActionExecutionContext(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    action_id: str = Field(..., min_length=1, max_length=200)
+    is_regulated_action: bool
+    verified_action_result: bool
+    audit_row_id: Optional[str] = Field(default=None, max_length=200)
+    mutation_class: Optional[Literal["local_reversible", "external_irreversible"]] = None
+
+
+# ─────────────────────────────────────────────────────────────────
 # decisions.log entries (discriminated union on type)
 # ─────────────────────────────────────────────────────────────────
 
@@ -4534,6 +4563,41 @@ class EodSkipped(_BaseEntry):
     ]
 
 
+# ─────────────────────────────────────────────────────────────────
+# PR-ζ 2026-05-26 — Chokepoint refusal audit variants
+# ─────────────────────────────────────────────────────────────────
+#
+# Both rows are written by `safe_io._emit_audit_row` when the chokepoint
+# refuses a send. The audit-row write must succeed for the refusal to land
+# durably; the helper uses `FileLock(<path>.lock)` per ndjson_append's
+# documented contract, and propagates any write failure (no swallow).
+
+
+class _RegulatedSendMissingActionContext(_BaseEntry):
+    """The chokepoint refused a send because action_context was None AND the
+    calling script's basename is not in `SAFE_IO_NULL_CONTEXT_ALLOWLIST`."""
+    type: Literal["regulated_send_missing_action_context"]
+    caller_script: str = Field(..., max_length=200)
+    jid: str = Field(..., max_length=200)
+    message_preview: str = Field(..., max_length=120)
+
+
+class _RegulatedSendLintViolation(_BaseEntry):
+    """The chokepoint refused a send because the caller passed a regulated
+    ActionExecutionContext with `verified_action_result=False` AND the
+    message tripped one or more forbidden completion verbs from
+    `customer_copy_policy.lint_no_unverified_completion`."""
+    type: Literal["regulated_send_lint_violation"]
+    action_id: str = Field(..., max_length=200)
+    audit_row_id: Optional[str] = Field(default=None, max_length=200)
+    jid: str = Field(..., max_length=200)
+    # PR-ζ caps verb_hits at 20 — the chokepoint truncates before construction
+    # so a pathological >20-verb message still refuses cleanly (no
+    # ValidationError mid-refusal).
+    verb_hits: list[str] = Field(..., max_length=20)
+    message_preview: str = Field(..., max_length=120)
+
+
 # PR-D1: callable Discriminator + Tag-wrapped union members + _UnknownLogEntry
 # forward-compat shim. Replaces `Field(discriminator="type")` which raised
 # `union_tag_invalid` on unknown tags BEFORE any validator could run.
@@ -4695,6 +4759,9 @@ LogEntry = Annotated[
         Annotated[FlyerSourceVsNewChosen, Tag("flyer_source_vs_new_chosen")],
         Annotated[FlyerSourceEditSlaAlert, Tag("flyer_source_edit_sla_alert")],
         Annotated[FlyerHermesIntentDecision, Tag("flyer_hermes_intent_decision")],
+        # PR-ζ 2026-05-26 — chokepoint refusal audit variants
+        Annotated[_RegulatedSendMissingActionContext, Tag("regulated_send_missing_action_context")],
+        Annotated[_RegulatedSendLintViolation, Tag("regulated_send_lint_violation")],
         # PR-D1 forward-compat shim — UNKNOWN tags route here
         Annotated[_UnknownLogEntry, Tag("_unknown_")],
     ],
@@ -4761,6 +4828,8 @@ __all__ = [
     "FlyerRequestFields", "FlyerLockedFact", "FlyerReferenceExtraction",
     "FlyerSourceContractSection", "FlyerSourceContract",
     "FlyerSourceContractExtracted", "FlyerSourceVsNewChosen", "FlyerHermesIntentDecision",
+    # PR-ζ 2026-05-26 — regulated-intent runtime context + chokepoint audit variants
+    "ActionExecutionContext",
     "FlyerVisualQAReport", "FlyerManualReview", "FlyerAsset", "FlyerConcept", "FlyerRevision",
     "FlyerBrandKit", "FlyerProject", "FlyerProjectStore",
     # v0.3 status-machine + helpers

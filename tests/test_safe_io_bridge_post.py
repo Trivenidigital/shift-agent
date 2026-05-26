@@ -216,3 +216,290 @@ class TestBridgePost2TupleAdapter:
         sig = inspect.signature(safe_io_module.bridge_post_2tuple)
         params = list(sig.parameters.keys())
         assert params == ["jid", "message"], f"unexpected signature: {params}"
+
+
+class TestActionContextEnforcement:
+    """PR-ζ 2026-05-26 — chokepoint enforces action_context policy.
+
+    Tests pair each branch in _enforce_action_context_policy with a
+    representative caller (resolver mocked via monkeypatch) and assert the
+    refusal vs pass-through behavior + the audit row written.
+    """
+
+    def _force_caller(self, safe_io_module, monkeypatch, name: str) -> None:
+        """Override _resolve_caller_script_name to return `name`."""
+        monkeypatch.setattr(safe_io_module, "_resolve_caller_script_name", lambda: name)
+
+    @patch("urllib.request.urlopen")
+    def test_allowlisted_caller_with_none_context_proceeds(
+        self, urlopen, safe_io_module, monkeypatch
+    ):
+        self._force_caller(safe_io_module, monkeypatch, "send-daily-brief")
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"id": "wamid.OK"}'
+        urlopen.return_value.__enter__.return_value = mock_resp
+
+        ok, mid, err, status = safe_io_module.bridge_post("jid", "Daily brief: ...")
+        assert ok is True
+        assert mid == "wamid.OK"
+        assert status == "sent"
+
+    @patch("urllib.request.urlopen")
+    def test_non_allowlisted_caller_with_none_context_refused(
+        self, urlopen, safe_io_module, monkeypatch
+    ):
+        self._force_caller(safe_io_module, monkeypatch, "rogue-test-script.py")
+        emit_calls = []
+        monkeypatch.setattr(
+            safe_io_module, "_emit_audit_row",
+            lambda etype, fields: emit_calls.append((etype, fields)),
+        )
+
+        ok, mid, err, status = safe_io_module.bridge_post("jid", "msg")
+        assert ok is False
+        assert mid == ""
+        assert err == "missing_action_context"
+        assert status == "refused"
+        urlopen.assert_not_called()
+        assert len(emit_calls) == 1
+        etype, fields = emit_calls[0]
+        assert etype == "regulated_send_missing_action_context"
+        assert fields["caller_script"] == "rogue-test-script.py"
+        assert fields["jid"] == "jid"
+
+    @patch("urllib.request.urlopen")
+    def test_regulated_context_verified_with_forbidden_verb_proceeds(
+        self, urlopen, safe_io_module
+    ):
+        from schemas import ActionExecutionContext
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"id": "wamid.OK"}'
+        urlopen.return_value.__enter__.return_value = mock_resp
+        ctx = ActionExecutionContext(
+            action_id="flyer.billing.request_plan_change",
+            is_regulated_action=True,
+            verified_action_result=True,
+            mutation_class="external_irreversible",
+        )
+        ok, mid, err, status = safe_io_module.bridge_post(
+            "jid", "Your plan has been upgraded.", action_context=ctx,
+        )
+        assert ok is True
+        assert status == "sent"
+
+    @patch("urllib.request.urlopen")
+    def test_regulated_context_unverified_with_forbidden_verb_refused(
+        self, urlopen, safe_io_module, monkeypatch
+    ):
+        from schemas import ActionExecutionContext
+        emit_calls = []
+        monkeypatch.setattr(
+            safe_io_module, "_emit_audit_row",
+            lambda etype, fields: emit_calls.append((etype, fields)),
+        )
+
+        ctx = ActionExecutionContext(
+            action_id="flyer.billing.request_plan_change",
+            is_regulated_action=True,
+            verified_action_result=False,
+            mutation_class="external_irreversible",
+        )
+        ok, mid, err, status = safe_io_module.bridge_post(
+            "jid", "Your plan has been upgraded.", action_context=ctx,
+        )
+        assert ok is False
+        assert err == "lint_violation"
+        assert status == "refused"
+        urlopen.assert_not_called()
+        assert len(emit_calls) == 1
+        etype, fields = emit_calls[0]
+        assert etype == "regulated_send_lint_violation"
+        assert "upgraded" in fields["verb_hits"]
+
+    @patch("urllib.request.urlopen")
+    def test_regulated_context_unverified_with_clean_message_proceeds(
+        self, urlopen, safe_io_module
+    ):
+        from schemas import ActionExecutionContext
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"id": "wamid.OK"}'
+        urlopen.return_value.__enter__.return_value = mock_resp
+        ctx = ActionExecutionContext(
+            action_id="flyer.billing.request_plan_change",
+            is_regulated_action=True,
+            verified_action_result=False,
+            mutation_class="external_irreversible",
+        )
+        ok, mid, err, status = safe_io_module.bridge_post(
+            "jid",
+            "Please complete payment at https://example.com/checkout",
+            action_context=ctx,
+        )
+        assert ok is True
+        assert status == "sent"
+
+    @patch("urllib.request.urlopen")
+    def test_non_regulated_context_with_forbidden_verb_proceeds(
+        self, urlopen, safe_io_module
+    ):
+        from schemas import ActionExecutionContext
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"id": "wamid.OK"}'
+        urlopen.return_value.__enter__.return_value = mock_resp
+        ctx = ActionExecutionContext(
+            action_id="system.healthcheck",
+            is_regulated_action=False,
+            verified_action_result=False,
+        )
+        ok, mid, err, status = safe_io_module.bridge_post(
+            "jid", "System upgraded to v2.", action_context=ctx,
+        )
+        assert ok is True
+
+    def test_audit_write_failure_returns_refusal_tuple_not_exception(
+        self, safe_io_module, monkeypatch
+    ):
+        """REV 3 (PR security/money-flow reviewer #4): when _emit_audit_row
+        raises, the chokepoint must convert the exception to a refusal
+        tuple — propagating OSError out of bridge_post crashes the Hermes
+        plugin handler mid-HTTP-request, leaving customers with persisted
+        half-state and no reply. The tuple shape preserves fail-CLOSED
+        (send doesn't proceed) while composing cleanly with HTTP. Stderr
+        carries the operator-visible signal."""
+        def raising_emit(etype, fields):
+            raise OSError("disk full")
+        monkeypatch.setattr(safe_io_module, "_emit_audit_row", raising_emit)
+        monkeypatch.setattr(
+            safe_io_module, "_resolve_caller_script_name",
+            lambda: "rogue-test-script.py",
+        )
+        ok, mid, err, status = safe_io_module.bridge_post("jid", "msg")
+        assert ok is False
+        assert mid == ""
+        assert status == "refused"
+        assert "audit_write_failed" in err
+        assert "OSError" in err  # exception type surfaced for ops
+
+    @patch("urllib.request.urlopen")
+    def test_change_plan_pending_reply_passes_lint(self, urlopen, safe_io_module):
+        """The REAL _pending_plan_reply function output (account.py:849)
+        must pass lint. Loads the actual function rather than a fabricated
+        string — the prior fabricated test missed BLOCKER #1 where the
+        deployed reply contained the forbidden verb 'confirmed'."""
+        import sys as _sys
+        from pathlib import Path as _Path
+        agents_flyer = _Path(__file__).resolve().parent.parent / "src" / "agents" / "flyer"
+        _sys.path.insert(0, str(agents_flyer))
+        try:
+            from account import _pending_plan_reply
+        finally:
+            _sys.path.pop(0)
+        from schemas import ActionExecutionContext
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"id": "wamid.OK"}'
+        urlopen.return_value.__enter__.return_value = mock_resp
+        ctx = ActionExecutionContext(
+            action_id="flyer.billing.request_plan_change",
+            is_regulated_action=True,
+            verified_action_result=False,
+            mutation_class="external_irreversible",
+        )
+        # Exercise the real function with the deployed shape of inputs.
+        reply = _pending_plan_reply(
+            plan_id="growth",
+            url="https://example.com/checkout?plan=growth",
+            provider="manual",
+        )
+        ok, _, err, status = safe_io_module.bridge_post("jid", reply, action_context=ctx)
+        assert ok is True, (
+            f"_pending_plan_reply output tripped chokepoint lint: "
+            f"err={err!r} status={status!r} reply={reply!r}"
+        )
+
+    @patch("urllib.request.urlopen")
+    def test_change_plan_no_url_reply_passes_lint(self, urlopen, safe_io_module):
+        """The empty-URL branch of _pending_plan_reply (provider/checkout
+        not yet configured) must also pass lint."""
+        import sys as _sys
+        from pathlib import Path as _Path
+        agents_flyer = _Path(__file__).resolve().parent.parent / "src" / "agents" / "flyer"
+        _sys.path.insert(0, str(agents_flyer))
+        try:
+            from account import _pending_plan_reply
+        finally:
+            _sys.path.pop(0)
+        from schemas import ActionExecutionContext
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"id": "wamid.OK"}'
+        urlopen.return_value.__enter__.return_value = mock_resp
+        ctx = ActionExecutionContext(
+            action_id="flyer.billing.request_plan_change",
+            is_regulated_action=True,
+            verified_action_result=False,
+            mutation_class="external_irreversible",
+        )
+        reply = _pending_plan_reply(plan_id="growth", url="", provider="manual")
+        ok, _, err, status = safe_io_module.bridge_post("jid", reply, action_context=ctx)
+        assert ok is True, (
+            f"_pending_plan_reply (no-url branch) tripped lint: "
+            f"err={err!r} status={status!r} reply={reply!r}"
+        )
+
+    def test_more_than_twenty_verb_hits_fails_closed_not_loud(
+        self, safe_io_module, monkeypatch
+    ):
+        """A message tripping many forbidden verbs must refuse cleanly. The
+        chokepoint caps verb_hits[:20] before audit-row construction so the
+        Pydantic max_length=20 constraint doesn't raise ValidationError
+        mid-refusal (which would convert fail-CLOSED into fail-LOUD)."""
+        from schemas import ActionExecutionContext
+        emit_calls = []
+        monkeypatch.setattr(
+            safe_io_module, "_emit_audit_row",
+            lambda etype, fields: emit_calls.append((etype, fields)),
+        )
+        ctx = ActionExecutionContext(
+            action_id="x", is_regulated_action=True, verified_action_result=False,
+        )
+        # All 16 distinct forbidden verbs from FORBIDDEN_COMPLETION_VERBS:
+        msg = (
+            "processed completed upgraded downgraded changed confirmed sent "
+            "approved paid posted pushed applied scheduled booked cancelled refunded"
+        )
+        ok, mid, err, status = safe_io_module.bridge_post("jid", msg, action_context=ctx)
+        assert ok is False
+        assert err == "lint_violation"
+        assert status == "refused"
+        assert len(emit_calls) == 1
+        _etype, fields = emit_calls[0]
+        assert len(fields["verb_hits"]) <= 20
+
+    def test_dict_passed_as_context_propagates_attribute_error(
+        self, safe_io_module
+    ):
+        """Passing a dict instead of an ActionExecutionContext raises
+        AttributeError → propagates → caller crashes. This is the intended
+        fail-LOUD semantic for type misuse."""
+        bad_ctx = {"is_regulated_action": True, "verified_action_result": False}
+        with pytest.raises(AttributeError):
+            safe_io_module.bridge_post("jid", "msg", action_context=bad_ctx)
+
+    def test_message_preview_truncated_at_120_chars(
+        self, safe_io_module, monkeypatch
+    ):
+        """Long messages must truncate cleanly at 120 chars for the
+        message_preview field (max_length=120 on the audit-row schema)."""
+        self._force_caller(safe_io_module, monkeypatch, "rogue-test-script.py")
+        emit_calls = []
+        monkeypatch.setattr(
+            safe_io_module, "_emit_audit_row",
+            lambda etype, fields: emit_calls.append((etype, fields)),
+        )
+        long_msg = "x" * 500
+        ok, _, _, _ = safe_io_module.bridge_post("jid", long_msg)
+        assert ok is False
+        assert len(emit_calls) == 1
+        _etype, fields = emit_calls[0]
+        assert len(fields["message_preview"]) <= 120
