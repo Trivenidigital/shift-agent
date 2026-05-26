@@ -1192,6 +1192,11 @@ def test_sample_prompt_preference_text_is_account_command():
     assert actions.is_flyer_account_command("UPGRADE PLAN - show Flyer Studio plans")
     assert actions.is_flyer_account_command("Upgrade to Growth")
     assert actions.is_flyer_account_command("I want the 60 flyers/month plan")
+    assert actions.is_flyer_regulated_account_intent("change my phone number")
+    assert actions.is_flyer_regulated_account_intent("I paid")
+    assert actions.is_flyer_regulated_account_intent("payment sent")
+    assert actions.is_flyer_regulated_account_intent("mark paid")
+    assert actions.is_flyer_regulated_account_intent("refund")
     assert actions.is_flyer_account_command("don't show sample prompts")
     assert actions.is_flyer_account_command("show sample prompts again")
     assert actions.is_flyer_account_command("please don't show sample prompts")
@@ -1238,7 +1243,7 @@ def test_upgrade_plan_cta_for_registered_customer_shows_plans_not_intake(monkeyp
     }))
     monkeypatch.setattr(actions, "trigger_flyer_intake", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("upgrade plan CTA must not start flyer intake")))
     monkeypatch.setattr(actions, "trigger_create_flyer_project", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("upgrade plan CTA must not create a project")))
-    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "plans-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text, **_kwargs: sent.update({"chat_id": chat_id, "text": text}) or (True, "plans-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
     result = hooks.pre_gateway_dispatch(SimpleNamespace(
@@ -1276,7 +1281,7 @@ def test_natural_upgrade_to_growth_routes_to_account_handler(monkeypatch):
         "customer_id": "CUST0001",
         "status": "trial",
     }))
-    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "account-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text, **kwargs: sent.update({"chat_id": chat_id, "text": text, "action_context": kwargs.get("action_context")}) or (True, "account-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
     monkeypatch.setattr(actions, "trigger_create_flyer_project", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("billing command must not create flyer")))
 
@@ -1289,6 +1294,11 @@ def test_natural_upgrade_to_growth_routes_to_account_handler(monkeypatch):
     assert result == {"action": "skip", "reason": "cf-router flyer account command"}
     assert account_calls and account_calls[0]["text"] == "Upgrade to Growth"
     assert "CONFIRM UPDATE" in sent["text"]
+    assert sent["action_context"] == {
+        "is_regulated_action": True,
+        "verified_action_result": True,
+        "action_id": "flyer.account_command",
+    }
     assert "processed your request" not in sent["text"].lower()
 
 
@@ -1321,6 +1331,79 @@ def test_regulated_billing_language_is_guarded_before_generic_passthrough(monkey
     assert "No plan, payment, or account change has been made." in sent["text"]
     assert "processed your request" not in sent["text"].lower()
     assert audits and audits[-1]["reason"] == "flyer_regulated_account_guard"
+
+
+def test_remaining_regulated_account_phrases_are_guarded_before_generic_passthrough(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    guarded: list[str] = []
+    customer = {
+        "customer_id": "CUST0001",
+        "business_name": "Lakshmi's Kitchen",
+        "status": "trial",
+        "plan_id": "trial",
+    }
+
+    monkeypatch.setattr(actions, "is_flyer_enabled", lambda: True)
+    monkeypatch.setattr(actions, "flyer_campaign_cta_text", lambda _text: "")
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: guarded.append(text) or (True, "guard-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+    monkeypatch.setattr(actions, "trigger_create_flyer_project", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("regulated account guard must not create flyer")))
+    monkeypatch.setattr(actions, "trigger_flyer_onboarding", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("regulated account guard must not start onboarding")))
+
+    for idx, phrase in enumerate([
+        "change my phone number",
+        "I paid",
+        "payment sent",
+        "mark paid",
+        "refund",
+    ], start=1):
+        guarded.clear()
+        result = hooks.pre_gateway_dispatch(SimpleNamespace(
+            text=phrase,
+            chat_id="17329837841@s.whatsapp.net",
+            message_id=f"regulated-gap-{idx}",
+        ))
+
+        assert result == {"action": "skip", "reason": "cf-router flyer regulated account guard"}
+        assert guarded
+        assert "No plan, payment, or account change has been made." in guarded[0]
+        assert "processed" not in guarded[0].lower()
+        assert "upgraded" not in guarded[0].lower()
+
+
+def test_delivery_status_phrases_without_active_project_are_guarded_before_generic_passthrough(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    sent: list[str] = []
+    customer = {
+        "customer_id": "CUST0001",
+        "business_name": "Lakshmi's Kitchen",
+        "status": "trial",
+        "plan_id": "trial",
+    }
+
+    monkeypatch.setattr(actions, "is_flyer_enabled", lambda: True)
+    monkeypatch.setattr(actions, "flyer_campaign_cta_text", lambda _text: "")
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: None)
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "status-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+    monkeypatch.setattr(actions, "trigger_create_flyer_project", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("delivery status guard must not create flyer")))
+
+    for idx, phrase in enumerate(["where is my flyer", "did you send my flyer", "send my flyer"], start=1):
+        sent.clear()
+        result = hooks.pre_gateway_dispatch(SimpleNamespace(
+            text=phrase,
+            chat_id="17329837841@s.whatsapp.net",
+            message_id=f"delivery-status-{idx}",
+        ))
+
+        assert result == {"action": "skip", "reason": "cf-router flyer delivery status guard"}
+        assert sent
+        assert "I do not see an active flyer ready for delivery" in sent[0]
+        assert "sent" not in sent[0].lower()
 
 
 def test_explicit_sample_prompt_request_sends_starter_ideas(monkeypatch):
@@ -1650,7 +1733,7 @@ def test_explicit_flyer_request_for_ineligible_customer_status_does_not_create_p
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
     monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
     monkeypatch.setattr(actions, "trigger_create_flyer_project", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("ineligible customer must not create project")))
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
     result = hooks._try_flyer_primary_intercept(
@@ -1688,7 +1771,7 @@ def test_vague_flyer_start_for_opted_out_customer_asks_short_clarification(monke
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
     monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
     result = hooks.pre_gateway_dispatch(SimpleNamespace(
@@ -1725,7 +1808,7 @@ def test_vague_flyer_start_after_first_starter_asks_short_clarification(monkeypa
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
     monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
     result = hooks.pre_gateway_dispatch(SimpleNamespace(
@@ -2036,7 +2119,7 @@ def test_business_name_update_command_runs_before_active_project_revision(monkey
         "customer_id": "CUST0001",
         "status": "trial",
     }))
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
     result = hooks.pre_gateway_dispatch(SimpleNamespace(

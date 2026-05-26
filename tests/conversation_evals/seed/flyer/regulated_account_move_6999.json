@@ -1,0 +1,1 @@
+{"id":"regulated_account_move_6999","agent":"flyer","inbound_text":"Move me to the 69.99 plan","expected_reason":"cf-router flyer account command","reply_must_contain":"CONFIRM UPDATE"}

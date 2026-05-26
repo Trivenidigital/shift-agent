@@ -1,0 +1,1 @@
+{"id":"regulated_delivery_did_send","agent":"flyer","inbound_text":"did you send my flyer","expected_reason":"cf-router flyer delivery status guard","reply_must_contain":"I do not see an active flyer ready for delivery"}

@@ -134,6 +134,61 @@ class TestBridgePost:
         assert status == "sent"
 
     @patch("urllib.request.urlopen")
+    def test_operational_copy_with_completion_words_is_not_blocked_without_action_context(self, urlopen, safe_io_module):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"id": "wamid.dailybrief"}'
+        urlopen.return_value.__enter__.return_value = mock_resp
+
+        ok, mid, err, status = safe_io_module.bridge_post(
+            "jid",
+            "2 scheduled shifts. Quotes sent to customers: 3",
+        )
+
+        assert ok is True
+        assert mid == "wamid.dailybrief"
+        assert err == ""
+        assert status == "sent"
+
+    @patch("urllib.request.urlopen")
+    def test_unverified_regulated_action_copy_is_blocked(self, urlopen, safe_io_module):
+        ok, mid, err, status = safe_io_module.bridge_post(
+            "jid",
+            "I processed your upgrade to Growth.",
+            action_context={
+                "is_regulated_action": True,
+                "verified_action_result": False,
+                "action_id": "flyer.plan_change",
+            },
+        )
+
+        assert ok is False
+        assert mid == ""
+        assert status == "copy_lint_rejected"
+        assert "processed" in err
+        urlopen.assert_not_called()
+
+    @patch("urllib.request.urlopen")
+    def test_verified_regulated_action_copy_is_allowed(self, urlopen, safe_io_module):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"id": "wamid.verified"}'
+        urlopen.return_value.__enter__.return_value = mock_resp
+
+        ok, mid, err, status = safe_io_module.bridge_post(
+            "jid",
+            "Plan change completed.",
+            action_context={
+                "is_regulated_action": True,
+                "verified_action_result": True,
+                "action_id": "flyer.plan_change.confirmed",
+            },
+        )
+
+        assert ok is True
+        assert mid == "wamid.verified"
+        assert err == ""
+        assert status == "sent"
+
+    @patch("urllib.request.urlopen")
     def test_alternative_messageId_field(self, safe_io_module):
         with patch("urllib.request.urlopen") as urlopen:
             mock_resp = MagicMock()

@@ -434,7 +434,7 @@ def test_natural_upgrade_to_growth_uses_guarded_plan_change_flow(tmp_path):
 
     assert confirmed.ok is True
     assert "Plan change requested: growth." in confirmed.reply_text
-    assert "current plan remains active until payment is confirmed" in confirmed.reply_text.lower()
+    assert "current plan remains active until payment is verified" in confirmed.reply_text.lower()
     confirmed_store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
     assert confirmed_store.customers[0].plan_id == "trial"
     assert confirmed_store.customers[0].pending_plan_id == "growth"

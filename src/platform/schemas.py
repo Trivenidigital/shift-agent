@@ -24,6 +24,16 @@ import re
 import sys
 from pathlib import Path
 
+
+class ActionExecutionContext(BaseModel):
+    """Evidence context required for customer-visible regulated-action copy."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    is_regulated_action: bool = False
+    verified_action_result: bool = False
+    action_id: str = ""
+
 # v0.3 catering hardening — single source of truth for code-generation alphabet.
 # Excludes I, O, 0, 1, L (visually confusing chars). Used by ProposalCode,
 # MenuPendingUpdate.confirmation_code, and runtime code generators.

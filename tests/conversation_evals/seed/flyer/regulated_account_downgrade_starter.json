@@ -1,0 +1,1 @@
+{"id":"regulated_account_downgrade_starter","agent":"flyer","inbound_text":"downgrade to Starter","expected_reason":"cf-router flyer account command","reply_must_contain":"CONFIRM UPDATE"}

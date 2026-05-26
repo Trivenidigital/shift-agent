@@ -2509,8 +2509,10 @@ _FLYER_REGULATED_ACCOUNT_PATTERN = re.compile(
     r"\b(?:"
     r"billing|checkout|invoice|card|stripe|razorpay|refund|"
     r"plan|starter|growth|unlimited|upgrade|downgrade|"
-    r"account\s+owner|account\s+settings|business\s+name|business\s+address|"
-    r"business\s+phone|business\s+whatsapp|whatsapp\s+number|authorized\s+(?:number|requester)"
+    r"account\s+owner|account\s+settings|business\s+name|business\s+address|address|"
+    r"business\s+phone|business\s+whatsapp|whatsapp\s+number|"
+    r"whatsapp|"
+    r"(?:my|our|the)?\s*phone\s+number|authorized\s+(?:number|requester)|mark\s+paid"
     r")\b",
     re.IGNORECASE,
 )
@@ -2518,10 +2520,16 @@ _FLYER_REGULATED_ACCOUNT_PATTERN = re.compile(
 _FLYER_REGULATED_PAYMENT_PATTERN = re.compile(
     r"\b(?:"
     r"payment\s+(?:go\s+through|went\s+through|status|link|method|details?|failed|complete|completed|done)|"
+    r"(?:i\s+)?paid\b|payment\s+sent|mark\s+paid|"
     r"(?:paid|pay|paying)\s+(?:for|the|my|this|now|already)|"
     r"how\s+(?:do|can)\s+i\s+pay|"
     r"send\s+(?:me\s+)?(?:a\s+)?payment\s+link"
     r")\b",
+    re.IGNORECASE,
+)
+
+_FLYER_DELIVERY_STATUS_PATTERN = re.compile(
+    r"\b(?:where\s+is\s+my\s+flyer|did\s+you\s+send\s+my\s+flyer|send\s+my\s+flyer)\b",
     re.IGNORECASE,
 )
 
@@ -2560,6 +2568,11 @@ def is_flyer_regulated_account_intent(text: str) -> bool:
     if not body:
         return False
     return bool(_FLYER_REGULATED_ACCOUNT_PATTERN.search(body) or _FLYER_REGULATED_PAYMENT_PATTERN.search(body))
+
+
+def is_flyer_delivery_status_intent(text: str) -> bool:
+    body = flyer_visible_message_text(text)
+    return bool(_FLYER_DELIVERY_STATUS_PATTERN.search(body or ""))
 
 
 def is_flyer_starter_prompt_preference_command(text: str) -> bool:
@@ -3864,7 +3877,12 @@ def mark_cf_router_inbound_seen(chat_id: str, message_id: str, text: str, *, now
     return False
 
 
-def send_flyer_text(chat_id: str, message: str) -> tuple[bool, str, str]:
+def send_flyer_text(
+    chat_id: str,
+    message: str,
+    *,
+    action_context: object | None = None,
+) -> tuple[bool, str, str]:
     _ensure_platform_path()
     try:
         from safe_io import bridge_post  # type: ignore
@@ -3878,7 +3896,10 @@ def send_flyer_text(chat_id: str, message: str) -> tuple[bool, str, str]:
         if existing:
             mid = str(existing.get("mid") or "recent")
             return True, f"deduped:{mid}", ""
-        ok, mid, err, status = bridge_post(chat_id, message)
+        if action_context is None:
+            ok, mid, err, status = bridge_post(chat_id, message)
+        else:
+            ok, mid, err, status = bridge_post(chat_id, message, action_context=action_context)
         if ok:
             dedupe_entries[dedupe_key] = {"ts": now, "mid": mid}
             _write_flyer_outbound_dedupe(dedupe_entries)

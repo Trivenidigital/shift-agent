@@ -1,0 +1,1 @@
+{"id":"regulated_account_switch_growth","agent":"flyer","inbound_text":"switch to Growth","expected_reason":"cf-router flyer account command","reply_must_contain":"CONFIRM UPDATE"}

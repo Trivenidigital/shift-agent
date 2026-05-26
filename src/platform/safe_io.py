@@ -47,6 +47,11 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 try:
+    from customer_copy_policy import lint_customer_copy
+except Exception:
+    lint_customer_copy = None  # type: ignore
+
+try:
     from pydantic import BaseModel
 except ImportError:
     BaseModel = None  # type: ignore
@@ -621,7 +626,22 @@ def bridge_send_blocked_by_test_context() -> Optional[str]:
     return None
 
 
-def bridge_post(jid: str, message: str) -> Tuple[bool, str, str, str]:
+def _lint_bridge_customer_copy(parts: list[str], action_context: object | None = None) -> Optional[str]:
+    if lint_customer_copy is None:
+        return None
+    result = lint_customer_copy(parts, action_context=action_context)
+    if result.allowed:
+        return None
+    verbs = ", ".join(result.verbs_found)
+    return f"customer_copy_lint_rejected: {result.reason}; verbs={verbs}"
+
+
+def bridge_post(
+    jid: str,
+    message: str,
+    *,
+    action_context: object | None = None,
+) -> Tuple[bool, str, str, str]:
     """POST to local Hermes bridge. Returns (success, message_id, error_str, status).
 
     status ∈ {'sent', 'connect_failed', 'http_error', 'send_uncertain', 'unknown_error'}
@@ -635,6 +655,9 @@ def bridge_post(jid: str, message: str) -> Tuple[bool, str, str, str]:
     blocked = bridge_send_blocked_by_test_context()
     if blocked:
         return False, "", blocked, "connect_failed"
+    lint_error = _lint_bridge_customer_copy([message], action_context=action_context)
+    if lint_error:
+        return False, "", lint_error, "copy_lint_rejected"
     payload = json.dumps({"chatId": jid, "message": message}).encode("utf-8")
     req = urllib.request.Request(
         BRIDGE_URL, data=payload,
@@ -680,6 +703,7 @@ def bridge_send_media(
     media_type: str = "",
     caption: str = "",
     file_name: str = "",
+    action_context: object | None = None,
 ) -> Tuple[bool, str, str, str]:
     """POST a media file to the local Hermes bridge /send-media endpoint.
 
@@ -697,6 +721,9 @@ def bridge_send_media(
     blocked = bridge_send_blocked_by_test_context()
     if blocked:
         return False, "", blocked, "connect_failed"
+    lint_error = _lint_bridge_customer_copy([caption, file_name], action_context=action_context)
+    if lint_error:
+        return False, "", lint_error, "copy_lint_rejected"
 
     payload_doc = {
         "chatId": jid,
@@ -744,6 +771,7 @@ def bridge_send_cta(
     footer: str = "",
     media_path: Path | str | None = None,
     media_type: str = "",
+    action_context: object | None = None,
 ) -> Tuple[bool, str, str, str]:
     """POST an interactive reply-button message to the local Hermes bridge /send-cta.
 
@@ -773,6 +801,10 @@ def bridge_send_cta(
     blocked = bridge_send_blocked_by_test_context()
     if blocked:
         return False, "", blocked, "connect_failed"
+    lint_parts = [body, footer, *[button["label"] for button in cleaned_buttons]]
+    lint_error = _lint_bridge_customer_copy(lint_parts, action_context=action_context)
+    if lint_error:
+        return False, "", lint_error, "copy_lint_rejected"
 
     payload_doc: dict[str, Any] = {
         "chatId": jid,

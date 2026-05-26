@@ -216,6 +216,9 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
             regulated_account_result = _try_flyer_regulated_account_guard(text, chat_id, event)
             if regulated_account_result is not None:
                 return regulated_account_result
+            delivery_status_result = _try_flyer_delivery_status_guard(text, chat_id, event)
+            if delivery_status_result is not None:
+                return delivery_status_result
             sample_prompt_result = _try_flyer_sample_prompt_request_intercept(text, chat_id, event, media_path)
             if sample_prompt_result is not None:
                 return sample_prompt_result
@@ -1728,7 +1731,15 @@ def _try_flyer_account_intercept(text: str, chat_id: str, event: Any) -> Optiona
             "Flyer Studio\n------------\nI could not update that setting right now. Please try again.",
         )
         return {"action": "skip", "reason": "cf-router flyer account command failed"}
-    ack_ok, mid, err = actions.send_flyer_text(chat_id, result.get("reply_text") or "")
+    ack_ok, mid, err = actions.send_flyer_text(
+        chat_id,
+        result.get("reply_text") or "",
+        action_context={
+            "is_regulated_action": True,
+            "verified_action_result": True,
+            "action_id": "flyer.account_command",
+        },
+    )
     actions.audit_intercepted(
         reason="flyer_account_command",
         chat_id=chat_id,
@@ -1777,6 +1788,38 @@ def _try_flyer_regulated_account_guard(text: str, chat_id: str, event: Any) -> O
         ),
     )
     return {"action": "skip", "reason": "cf-router flyer regulated account guard"}
+
+
+def _try_flyer_delivery_status_guard(text: str, chat_id: str, event: Any) -> Optional[dict]:
+    """Fail closed for delivery-state questions when no active project owns them."""
+    if not actions.is_flyer_delivery_status_intent(text):
+        return None
+    message_id = _extract_message_id(event, chat_id, text)
+    phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
+    customer = actions.find_flyer_customer_by_sender(phone, chat_id)
+    if customer is None:
+        return None
+    if actions.find_active_flyer_project_by_sender(phone, chat_id):
+        return None
+    business_name = str(customer.get("business_name") or "this business").strip() or "this business"
+    reply = (
+        "Flyer Studio\n"
+        "------------\n"
+        f"I do not see an active flyer ready for delivery for {business_name}.\n\n"
+        "No flyer delivery action has been taken from this message. "
+        "Please send the flyer request again, or reply STATUS if you want account details."
+    )
+    ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+    actions.audit_intercepted(
+        reason="flyer_delivery_status_guard",
+        chat_id=chat_id,
+        subprocess_rc=0 if ack_ok else 3,
+        detail=(
+            f"message_id={message_id}; customer_id={customer.get('customer_id') or ''}; "
+            f"sender_role={role}; ack_message_id={mid}; ack_error={err[:300]}"
+        ),
+    )
+    return {"action": "skip", "reason": "cf-router flyer delivery status guard"}
 
 
 def _try_flyer_campaign_cta_intercept(text: str, chat_id: str, event: Any) -> Optional[dict]:
