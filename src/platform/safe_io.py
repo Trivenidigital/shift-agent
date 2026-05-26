@@ -659,6 +659,31 @@ def bridge_post(jid: str, message: str) -> Tuple[bool, str, str, str]:
         return False, "", f"{type(e).__name__}: {e}", "unknown_error"
 
 
+def bridge_post_2tuple(jid: str, message: str) -> Tuple[bool, str]:
+    """2-tuple compatibility adapter over ``bridge_post(jid, message)``.
+
+    PR-ε 2026-05-26 — legacy callers under ``src/agents/catering/scripts/`` and
+    ``src/agents/expense_bookkeeper/scripts/`` unpack a 2-tuple
+    ``(ok, detail_or_mid)``. Canonical :func:`bridge_post` returns a 4-tuple
+    ``(ok, message_id, error_str, status)``. This adapter collapses the
+    canonical result for those legacy callers WITHOUT changing the canonical
+    surface (no new kwargs, no API decisions in the consolidation PR).
+
+    Mapping:
+      success: ``(True, message_id)``
+      failure: ``(False, error_str or status)``  — picks the non-empty descriptor
+
+    Callers get the BENEFIT of the canonical's stricter pre-checks
+    (``validate_bridge_url`` + ``bridge_send_blocked_by_test_context``) and
+    richer error categorization without having to consume the rich status
+    string they don't use today.
+    """
+    ok, mid, err, status = bridge_post(jid, message)
+    if ok:
+        return True, mid
+    return False, err or status
+
+
 def bridge_media_url() -> str:
     """Return the companion /send-media URL for the configured text bridge."""
     if BRIDGE_URL.endswith("/send"):
