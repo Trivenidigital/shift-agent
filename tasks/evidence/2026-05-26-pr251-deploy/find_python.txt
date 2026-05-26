@@ -1,0 +1,6 @@
+/usr/bin/python3
+lrwxrwxrwx 1 root root 73 May 13 03:50 /usr/local/lib/hermes-agent/venv/bin/python -> /root/.local/share/uv/python/cpython-3.11-linux-x86_64-gnu/bin/python3.11
+ls: cannot access '/root/.hermes/venv/bin/python': No such file or directory
+/usr/local/lib/hermes-agent/venv/bin/python
+/root/decommissioned-2026-05-13/.hermes/hermes-agent/venv/bin/python
+/tmp/hermes-agent-patch-trial/venv/bin/python
