@@ -156,6 +156,8 @@ def stale_source_edit_rows(
 
 
 def _is_throttled(row: dict[str, Any], state: dict[str, Any], *, now: datetime, repeat_minutes: int) -> bool:
+    if repeat_minutes <= 0:
+        return False
     entry = state.get("project_alerts", {}).get(row["row_key"])
     if not isinstance(entry, dict):
         return False
@@ -185,6 +187,8 @@ def _build_customer_update_message(row: dict[str, Any]) -> str:
 
 
 def _customer_update_is_throttled(row: dict[str, Any], state: dict[str, Any], *, now: datetime, repeat_minutes: int) -> bool:
+    if repeat_minutes <= 0:
+        return False
     entry = state.get("project_alerts", {}).get(row["row_key"])
     if not isinstance(entry, dict):
         return False
@@ -355,6 +359,51 @@ def _send_customer_updates(
         "skipped_project_ids": skipped,
     }
 
+
+def _parse_row_key(key: str) -> tuple[str, str, str] | None:
+    parts = key.split("|", 2)
+    if len(parts) != 3:
+        return None
+    project_id, reason_code, queued_at = parts
+    if not project_id or not reason_code or not queued_at:
+        return None
+    return project_id, reason_code, queued_at
+
+
+def _prune_alert_state_for_current_rows(state: dict[str, Any], rows: list[dict[str, Any]]) -> int:
+    alerts = state.get("project_alerts")
+    if not isinstance(alerts, dict) or not alerts:
+        return 0
+
+    valid_keys = {str(row.get("row_key") or "") for row in rows}
+    latest_queued_by_pair: dict[tuple[str, str], str] = {}
+    for row in rows:
+        row_key = str(row.get("row_key") or "")
+        parsed = _parse_row_key(row_key)
+        if parsed is None:
+            continue
+        project_id, reason_code, queued_at = parsed
+        pair = (project_id, reason_code)
+        if queued_at > latest_queued_by_pair.get(pair, ""):
+            latest_queued_by_pair[pair] = queued_at
+
+    to_drop: list[str] = []
+    for key in list(alerts.keys()):
+        key_str = str(key)
+        parsed = _parse_row_key(key_str)
+        if parsed is None:
+            to_drop.append(key_str)
+            continue
+        project_id, reason_code, queued_at = parsed
+        pair = (project_id, reason_code)
+        latest_queued = latest_queued_by_pair.get(pair, "")
+        if key_str not in valid_keys or (latest_queued and queued_at < latest_queued):
+            to_drop.append(key_str)
+
+    for key in to_drop:
+        alerts.pop(key, None)
+    return len(to_drop)
+
 def _build_message(
     rows: list[dict[str, Any]],
     *,
@@ -393,6 +442,8 @@ def _append_audit(
     reason_codes: tuple[str, ...],
     now: datetime,
 ) -> None:
+    threshold_minutes = max(int(threshold_minutes), 1)
+    repeat_minutes = max(int(repeat_minutes), 1)
     entry = FlyerSourceEditSlaAlert(
         type="flyer_source_edit_sla_alert",
         ts=now,
@@ -443,6 +494,12 @@ def run_watchdog(
         reason_codes=reason_codes,
     )
     state = _load_alert_state(alert_state_path)
+    pruned_alert_rows = _prune_alert_state_for_current_rows(state, rows)
+    if pruned_alert_rows:
+        with FileLock(Path(str(alert_state_path) + ".lock")):
+            fresh_state = _load_alert_state(alert_state_path)
+            _prune_alert_state_for_current_rows(fresh_state, rows)
+            atomic_write_json(alert_state_path, fresh_state)
     stale_count = len(rows)
     projects_by_id = {project.project_id: project for project in store.projects}
     customer_updates = _send_customer_updates(
@@ -466,6 +523,7 @@ def run_watchdog(
             "stale_count": 0,
             "alerted_project_ids": [],
             "throttled_project_ids": [],
+            "pruned_alert_rows": pruned_alert_rows,
             "customer_updates": customer_updates,
         }
 
@@ -491,6 +549,7 @@ def run_watchdog(
             "alerted_project_ids": [],
             "throttled_project_ids": [row["project_id"] for row in throttled_rows],
             "oldest_age_minutes": max(row["age_minutes"] for row in rows),
+            "pruned_alert_rows": pruned_alert_rows,
             "customer_updates": customer_updates,
         }
 
@@ -523,6 +582,7 @@ def run_watchdog(
             "throttled_project_ids": [row["project_id"] for row in throttled_rows],
             "failed_project_ids": [row["project_id"] for row in alert_rows],
             "oldest_age_minutes": max(row["age_minutes"] for row in rows),
+            "pruned_alert_rows": pruned_alert_rows,
             "customer_updates": customer_updates,
         }
 
@@ -560,6 +620,7 @@ def run_watchdog(
         "alerted_project_ids": [row["project_id"] for row in alert_rows],
         "throttled_project_ids": [row["project_id"] for row in throttled_rows],
         "oldest_age_minutes": max(row["age_minutes"] for row in rows),
+        "pruned_alert_rows": pruned_alert_rows,
         "customer_updates": customer_updates,
     }
 

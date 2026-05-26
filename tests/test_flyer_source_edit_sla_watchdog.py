@@ -383,3 +383,103 @@ def test_recent_customer_update_is_throttled_independently_of_operator_alert(tmp
     )
 
     assert result["customer_updates"]["throttled_project_ids"] == ["F9013"]
+
+
+def test_watchdog_prunes_alert_state_for_rows_no_longer_in_manual_queue(tmp_path):
+    module = load_module()
+    projects = tmp_path / "projects.json"
+    state = tmp_path / "sla-alerts.json"
+    projects.write_text(json.dumps({"projects": [_project("F9014", status="completed", manual_status="closed_no_send")]}), encoding="utf-8")
+    state.write_text(json.dumps({
+        "version": 1,
+        "project_alerts": {
+            "F9014|source_edit_provider_unavailable|2026-05-21T00:00:00+00:00": {
+                "last_alerted_at": "2026-05-21T00:20:00Z",
+                "project_id": "F9014",
+            }
+        },
+    }), encoding="utf-8")
+
+    result = module.run_watchdog(
+        projects_path=projects,
+        alert_state_path=state,
+        decisions_log_path=tmp_path / "decisions.log",
+        now=module.parse_utc("2026-05-21T01:00:00Z"),
+        threshold_minutes=10,
+        repeat_minutes=60,
+        notify_func=lambda **_: (_ for _ in ()).throw(AssertionError("unexpected notify")),
+    )
+
+    assert result["status"] == "ok"
+    assert result["pruned_alert_rows"] == 1
+    saved = json.loads(state.read_text(encoding="utf-8"))
+    assert saved["project_alerts"] == {}
+
+
+def test_watchdog_prunes_superseded_row_key_when_project_requeued(tmp_path):
+    module = load_module()
+    projects = tmp_path / "projects.json"
+    state = tmp_path / "sla-alerts.json"
+    projects.write_text(json.dumps({"projects": [_project("F9015", queued_at="2026-05-21T00:30:00Z")]}), encoding="utf-8")
+    state.write_text(json.dumps({
+        "version": 1,
+        "project_alerts": {
+            "F9015|source_edit_provider_unavailable|2026-05-21T00:00:00+00:00": {
+                "last_alerted_at": "2026-05-21T00:20:00Z",
+                "project_id": "F9015",
+            }
+        },
+    }), encoding="utf-8")
+
+    result = module.run_watchdog(
+        projects_path=projects,
+        alert_state_path=state,
+        decisions_log_path=tmp_path / "decisions.log",
+        now=module.parse_utc("2026-05-21T00:45:00Z"),
+        threshold_minutes=10,
+        repeat_minutes=60,
+        notify_func=lambda **_: True,
+    )
+
+    assert result["status"] == "alerted"
+    assert result["pruned_alert_rows"] == 1
+    saved = json.loads(state.read_text(encoding="utf-8"))
+    assert "F9015|source_edit_provider_unavailable|2026-05-21T00:00:00+00:00" not in saved["project_alerts"]
+    assert "F9015|source_edit_provider_unavailable|2026-05-21T00:30:00+00:00" in saved["project_alerts"]
+
+
+def test_non_positive_repeat_minutes_disable_throttle(tmp_path):
+    module = load_module()
+    projects = tmp_path / "projects.json"
+    state = tmp_path / "sla-alerts.json"
+    projects.write_text(json.dumps({"projects": [_project("F9016", reason_code="visual_qa_failed")]}), encoding="utf-8")
+    state.write_text(json.dumps({
+        "version": 1,
+        "project_alerts": {
+            "F9016|visual_qa_failed|2026-05-21T00:00:00+00:00": {
+                "last_alerted_at": "2026-05-21T00:58:00Z",
+                "last_customer_updated_at": "2026-05-21T00:58:00Z",
+                "project_id": "F9016",
+            }
+        },
+    }), encoding="utf-8")
+    customer_calls: list[str] = []
+
+    result = module.run_watchdog(
+        projects_path=projects,
+        alert_state_path=state,
+        decisions_log_path=tmp_path / "decisions.log",
+        now=module.parse_utc("2026-05-21T01:00:00Z"),
+        threshold_minutes=10,
+        repeat_minutes=0,
+        customer_update_minutes=10,
+        customer_repeat_minutes=-1,
+        notify_func=lambda **_: True,
+        customer_chat_resolver=lambda _project: ("17329837841@lid", "audit"),
+        customer_notify_func=lambda _chat_id, _message: (customer_calls.append("sent") or (True, "mid-1", "")),
+    )
+
+    assert result["status"] == "alerted"
+    assert result["throttled_project_ids"] == []
+    assert result["customer_updates"]["throttled_project_ids"] == []
+    assert customer_calls == ["sent"]
