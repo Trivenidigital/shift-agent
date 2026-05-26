@@ -1745,6 +1745,31 @@ def _try_flyer_regulated_account_guard(text: str, chat_id: str, event: Any) -> O
     """Fail closed for account/billing language before generic Hermes fallback."""
     if not actions.is_flyer_regulated_account_intent(text):
         return None
+    # PR-α follow-up 2026-05-26: yield to _try_flyer_active_project_intercept
+    # when (a) text is NOT a deterministic account command, (b) text targets a
+    # flyer attribute/field via an edit verb, AND (c) sender has an active
+    # flyer project. Without this yield, PR-α's extended regulated-account
+    # regex would hijack legitimate flyer edits like "update this flyer,
+    # change the phone number" into a fail-closed account warning. The
+    # existing flyer_routing_decision_preview already routes such phrases to
+    # revision when an active project exists; preserve that behavior here.
+    # Pure account commands ("Upgrade to Growth", "UPDATE BUSINESS WHATSAPP")
+    # never yield because is_flyer_account_command catches them earlier in
+    # _try_flyer_account_intercept anyway; the early-return below is defensive.
+    if not actions.is_flyer_account_command(text) and actions.flyer_text_targets_revision_field(text):
+        # PR-α follow-up 2026-05-26 (LID-only blocker fix): do NOT gate on
+        # phone_check truthiness before the lookup. LID-only customers
+        # legitimately resolve to phone=None via identify-sender, and the
+        # active-project store may still surface their project by chat_id /
+        # primary_chat_id (see lessons.md line 92-95 on LID-only routing).
+        # Today find_active_flyer_project_by_sender has its own phone-required
+        # gate; passing phone=None through trusts that function to evolve
+        # toward LID-only project lookup. Either way, this code never
+        # ADDS a second phone gate.
+        phone_check, _role_check = actions.lid_to_phone_via_identify_sender(chat_id)
+        active_project = actions.find_active_flyer_project_by_sender(phone_check, chat_id)
+        if active_project:
+            return None
     message_id = _extract_message_id(event, chat_id, text)
     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
     customer = actions.find_flyer_customer_by_sender(phone, chat_id)

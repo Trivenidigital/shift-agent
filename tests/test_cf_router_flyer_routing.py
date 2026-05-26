@@ -1323,6 +1323,225 @@ def test_regulated_billing_language_is_guarded_before_generic_passthrough(monkey
     assert audits and audits[-1]["reason"] == "flyer_regulated_account_guard"
 
 
+# ---- PR-α 2026-05-26: regulated-intent regex gap-fill ----------------------
+# Closes the billing/payment/account gaps from the operator's 24-pattern
+# active-block list. Behavior contract: each phrase must be caught by
+# is_flyer_regulated_account_intent so cf-router's _try_flyer_regulated_account_guard
+# fires fail-closed clarification copy instead of generic Hermes fallback.
+#
+# False-positive guard: flyer briefs that mention these terms in non-mutation
+# contexts (no change/update verb, no "I paid" construction) must NOT be caught,
+# to avoid hijacking legitimate flyer-creation traffic.
+
+
+def test_pr_alpha_bare_i_paid_is_regulated_payment_intent():
+    _, actions = _load_plugin_modules()
+    assert actions.is_flyer_regulated_account_intent("I paid")
+    assert actions.is_flyer_regulated_account_intent("I paid.")
+    assert actions.is_flyer_regulated_account_intent("I have paid")
+    assert actions.is_flyer_regulated_account_intent("I just paid")
+    assert actions.is_flyer_regulated_account_intent("I already paid")
+
+
+def test_pr_alpha_mark_paid_variants_are_regulated_payment_intent():
+    _, actions = _load_plugin_modules()
+    assert actions.is_flyer_regulated_account_intent("mark paid")
+    assert actions.is_flyer_regulated_account_intent("marked paid")
+    assert actions.is_flyer_regulated_account_intent("marking paid")
+    assert actions.is_flyer_regulated_account_intent("marked as paid")
+    assert actions.is_flyer_regulated_account_intent("Please mark as paid")
+
+
+def test_pr_alpha_cancel_my_plan_is_regulated_account_intent():
+    # Already caught via the bare "plan" keyword in the existing pattern;
+    # add explicit coverage to lock the behavior.
+    _, actions = _load_plugin_modules()
+    assert actions.is_flyer_regulated_account_intent("cancel my plan")
+    assert actions.is_flyer_regulated_account_intent("I want to cancel my plan")
+    assert actions.is_flyer_regulated_account_intent("cancel plan")
+
+
+def test_pr_alpha_phone_change_variants_are_regulated_account_intent():
+    _, actions = _load_plugin_modules()
+    assert actions.is_flyer_regulated_account_intent("change phone")
+    assert actions.is_flyer_regulated_account_intent("change my phone number")
+    assert actions.is_flyer_regulated_account_intent("update phone number")
+    assert actions.is_flyer_regulated_account_intent("update my phone")
+    assert actions.is_flyer_regulated_account_intent("set my phone")
+    assert actions.is_flyer_regulated_account_intent("modify our contact phone")
+
+
+def test_pr_alpha_address_change_variants_are_regulated_account_intent():
+    _, actions = _load_plugin_modules()
+    assert actions.is_flyer_regulated_account_intent("change address")
+    assert actions.is_flyer_regulated_account_intent("change my address")
+    assert actions.is_flyer_regulated_account_intent("update address")
+    assert actions.is_flyer_regulated_account_intent("update our business address")
+    assert actions.is_flyer_regulated_account_intent("edit the address")
+
+
+def test_pr_alpha_does_not_false_positive_on_flyer_briefs():
+    # Critical: flyer briefs that mention regulated-intent vocabulary in
+    # non-mutation contexts must continue to route as flyer briefs, NOT as
+    # regulated-account intents.
+    _, actions = _load_plugin_modules()
+    assert not actions.is_flyer_regulated_account_intent(
+        "Create a flyer with our phone number 555-1234"
+    )
+    assert not actions.is_flyer_regulated_account_intent(
+        "Make a poster showing our address"
+    )
+    # Existing negative case from the 0e431b8 test (preserved):
+    assert not actions.is_flyer_regulated_account_intent(
+        "Create a thali flyer with delivery/payment badges"
+    )
+
+
+# ---- PR-α follow-up 2026-05-26: active-project yield regression tests ----
+# The PR-α regex extension catches "change phone number" / "change address" as
+# regulated-account intent. But existing Flyer routing (flyer_routing_decision_preview
+# line 1181) treats those phrases as active-project revisions when the sender
+# has an active flyer project. Without the yield logic in
+# _try_flyer_regulated_account_guard, the new regex would HIJACK legitimate
+# flyer edits like "update this flyer, change the phone number" into a
+# fail-closed account warning. These tests lock the yield behavior.
+
+
+def test_pr_alpha_active_project_revision_phrase_yields_from_regulated_guard(monkeypatch):
+    """When sender has an active flyer project AND text targets a flyer field,
+    the regulated-account guard must yield (return None) so the active-project
+    intercept later in dispatch can route as revision."""
+    hooks, actions = _load_plugin_modules()
+    active_project = {"project_id": "F0062", "status": "awaiting_final_approval"}
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "business_name": "Lakshmi's Kitchen", "status": "trial"})
+    # If the guard didn't yield, it would call send_flyer_text + audit_intercepted.
+    # Asserting these are NEVER called proves the yield happened.
+    monkeypatch.setattr(actions, "send_flyer_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("regulated guard must not send when yielding")))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("regulated guard must not audit when yielding")))
+
+    for revision_text in [
+        "update this flyer, change the phone number",
+        "change phone number",
+        "change my phone number",
+        "change the address",
+        "edit the price",
+        "swap the logo",
+        "update the date",
+    ]:
+        result = hooks._try_flyer_regulated_account_guard(
+            revision_text,
+            "17329837841@s.whatsapp.net",
+            SimpleNamespace(text=revision_text, chat_id="17329837841@s.whatsapp.net", message_id=f"rev-{hash(revision_text)}"),
+        )
+        assert result is None, f"regulated guard should have yielded for {revision_text!r}, got {result!r}"
+
+
+def test_pr_alpha_no_active_project_change_phone_still_fires_guard(monkeypatch):
+    """Without an active flyer project, "change phone number" must still hit
+    the regulated-account guard — the yield is conditional on active project."""
+    hooks, actions = _load_plugin_modules()
+
+    sent = {}
+    audits = []
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: None)
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "business_name": "Lakshmi's Kitchen", "status": "trial"})
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
+
+    result = hooks._try_flyer_regulated_account_guard(
+        "change my phone number",
+        "17329837841@s.whatsapp.net",
+        SimpleNamespace(text="change my phone number", chat_id="17329837841@s.whatsapp.net", message_id="no-active"),
+    )
+    assert result == {"action": "skip", "reason": "cf-router flyer regulated account guard"}
+    assert "No plan, payment, or account change has been made." in sent["text"]
+    assert audits and audits[-1]["reason"] == "flyer_regulated_account_guard"
+
+
+def test_pr_alpha_active_project_payment_claim_still_fires_guard(monkeypatch):
+    """Even with an active project, payment-claim text ("I paid") must hit
+    the regulated guard — payment claims are NOT revision-target text."""
+    hooks, actions = _load_plugin_modules()
+    active_project = {"project_id": "F0062", "status": "awaiting_final_approval"}
+
+    sent = {}
+    audits = []
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "business_name": "Lakshmi's Kitchen", "status": "trial"})
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
+
+    result = hooks._try_flyer_regulated_account_guard(
+        "I paid",
+        "17329837841@s.whatsapp.net",
+        SimpleNamespace(text="I paid", chat_id="17329837841@s.whatsapp.net", message_id="paid-with-active"),
+    )
+    assert result == {"action": "skip", "reason": "cf-router flyer regulated account guard"}
+    assert "No plan, payment, or account change has been made." in sent["text"]
+    assert audits and audits[-1]["reason"] == "flyer_regulated_account_guard"
+
+
+def test_pr_alpha_flyer_text_targets_revision_field_helper():
+    """Unit test for the new helper that drives the yield decision."""
+    _, actions = _load_plugin_modules()
+    assert actions.flyer_text_targets_revision_field("update this flyer, change the phone number")
+    assert actions.flyer_text_targets_revision_field("change phone")
+    assert actions.flyer_text_targets_revision_field("change the address")
+    assert actions.flyer_text_targets_revision_field("edit the price")
+    assert actions.flyer_text_targets_revision_field("swap the logo")
+    assert actions.flyer_text_targets_revision_field("update the date")
+    # Negative: payment claims, pure account commands, non-edit text
+    assert not actions.flyer_text_targets_revision_field("I paid")
+    assert not actions.flyer_text_targets_revision_field("Upgrade to Growth")
+    assert not actions.flyer_text_targets_revision_field("Did my payment go through?")
+    assert not actions.flyer_text_targets_revision_field("show plans")
+
+
+def test_pr_alpha_lid_only_active_project_revision_phrase_yields_from_regulated_guard(monkeypatch):
+    """LID-only blocker fix: when identify-sender resolves phone=None but the
+    active-project store still finds a project (e.g. via primary_chat_id), the
+    yield must fire — the guard MUST NOT add a phone-truthy gate on top of
+    find_active_flyer_project_by_sender.
+
+    Per lessons.md line 92-95 (Flyer Studio LID-only routing lessons), pre-
+    onboarding state and active projects can be chat_id-bound with
+    sender_phone=None. Forcing phone resolution before yielding hijacks
+    legitimate LID-only customers' flyer edits."""
+    hooks, actions = _load_plugin_modules()
+    active_project = {"project_id": "F0070", "status": "awaiting_final_approval"}
+
+    # LID-only: phone resolution returns None
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: (None, "customer"))
+    # Active project lookup MUST be called even when phone is None — and here
+    # we mock it to simulate the function evolving to support chat_id-keyed
+    # LID-only lookup (already on the repo's known-follow-up list).
+    project_lookup_calls = []
+    def _record_project_lookup(phone, chat_id):
+        project_lookup_calls.append({"phone": phone, "chat_id": chat_id})
+        return active_project
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", _record_project_lookup)
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: None)
+    # If the guard didn't yield, it would call send_flyer_text + audit_intercepted.
+    monkeypatch.setattr(actions, "send_flyer_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("regulated guard must not send for LID-only with active project")))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("regulated guard must not audit for LID-only with active project")))
+
+    result = hooks._try_flyer_regulated_account_guard(
+        "change phone number",
+        "201975216009469@lid",
+        SimpleNamespace(text="change phone number", chat_id="201975216009469@lid", message_id="lid-only-rev"),
+    )
+    assert result is None, f"regulated guard should have yielded for LID-only active-project revision, got {result!r}"
+    # Verify find_active_flyer_project_by_sender was actually called with phone=None
+    # (proves the gate-on-phone_check bug is gone).
+    assert project_lookup_calls and project_lookup_calls[0]["phone"] is None
+    assert project_lookup_calls[0]["chat_id"] == "201975216009469@lid"
+
+
 def test_explicit_sample_prompt_request_sends_starter_ideas(monkeypatch):
     hooks, actions = _load_plugin_modules()
     sent = {}
