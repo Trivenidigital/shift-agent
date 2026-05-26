@@ -1379,3 +1379,25 @@ Review: focused retry/source-edit generator slice passed `5 passed, 71 deselecte
 - [x] Verified focused recovery, self-eval, Flyer generation/QA, SLA/manual queue suites.
 
 Review: recovery watchdog now observes both audit-level `ack_error` failures and durable stale manual-review state. This does not yet grant the worker direct production deploy authority; it queues bounded no-live-send repair work under the existing recovery worker contract.
+
+## Flyer Semantic Brief Contract - 2026-05-26
+
+- [x] Created isolated branch/worktree `codex/flyer-semantic-brief` at `C:\projects\SME-Agents-semantic-brief` from current `origin/main` (`604def2`).
+- [x] Wrote architecture plan: `tasks/flyer-semantic-brief-contract-plan-2026-05-26.md`.
+- [x] Review plan with two parallel agents and fold in recommendations.
+- [x] Write design spec: `docs/superpowers/specs/2026-05-26-flyer-semantic-brief-contract-design.md`.
+- [x] Review design spec with two parallel agents and fold in recommendations.
+- [x] Build semantic QA/render slice with TDD.
+- [x] Create PR #277 and review PR with two parallel agents.
+- [x] Fold first PR-review blockers: install `flyer_semantic_brief` in production flat layout, preserve saved-logo retry exact-brand behavior, block known source-contract brands even when `forbidden_substrings` is empty, and reject conservative unlabeled wrong-brand mastheads while still allowing campaign-title flyers with stored contact anchors.
+- [x] Re-run two parallel PR reviewers after blocker fixes.
+- [x] Fold second PR-review blockers: exact-brand omission now requires profile-owned contact/address anchors, title-case org mastheads are blocked, stored phone/address phrasing no longer forces exact brand unless logo/brand is requested, and apostrophe-normalized account names are not misclassified as wrong brands.
+- [x] Re-run final PR review after second blocker fixes.
+
+Review: focused semantic brief gates passed after the first blocker-fix pass: `tests/test_flyer_visual_qa.py tests/test_flyer_facts.py tests/test_flyer_renderer.py` -> `122 passed`; `tests/test_flyer_generate_concepts.py tests/test_flyer_create_project.py` -> `47 passed`; `tests/test_flyer_scripts_static.py` -> `34 passed`; touched-file `py_compile` passed; `git diff --check` clean.
+
+Second blocker-fix verification: `tests/test_flyer_visual_qa.py tests/test_flyer_facts.py tests/test_flyer_renderer.py` -> `125 passed`; `tests/test_flyer_generate_concepts.py tests/test_flyer_create_project.py` -> `47 passed`; `tests/test_flyer_scripts_static.py` -> `34 passed`; touched-script `py_compile` passed; `git diff --check` clean.
+
+Final PR review: two parallel reviewers approved. Product/trust semantics confirmed account-owned anchors, title-case wrong-brand blocking, and saved-contact vs saved-brand separation. Runtime/deploy reviewer confirmed flat production import, smoke/static coverage, saved-logo retry compatibility, and regression coverage. No merge or deploy performed.
+
+Post-review fix: added campaign-title exemption for the unlabeled org-suffix masthead heuristic so valid titles such as Restaurant Week Specials, Kitchen Essentials Sale, Cafe Style Biryani, and Biryani Bazaar pass when profile anchors are visible. Explicit identity labels and source-contract wrong-brand checks remain strict. Verification after fix: targeted 4-test semantic gate passed; `tests/test_flyer_facts.py tests/test_flyer_renderer.py tests/test_flyer_visual_qa.py tests/test_flyer_scripts_static.py` -> `160 passed`; `tests/test_flyer_generate_concepts.py tests/test_flyer_create_project.py` -> `47 passed`; touched-file `py_compile` passed; `git diff --check origin/main...HEAD` clean.

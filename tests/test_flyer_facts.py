@@ -193,6 +193,50 @@ def test_extract_text_facts_handles_price_for_protein_biryani_items():
     assert all("price as" not in fact.value.lower() for fact in facts)
 
 
+def test_profile_facts_keep_account_business_when_request_names_campaign_flyer():
+    from agents.flyer.facts import extract_text_facts, facts_by_id, merge_locked_facts, profile_locked_facts
+    from schemas import FlyerCustomerProfile
+
+    raw_request = (
+        "Create a Special Biryani's Flyer using golden background. "
+        "Use address and phone number stored."
+    )
+    customer = FlyerCustomerProfile(
+        customer_id="CUST0001",
+        business_name="Lakshmi's Kitchen",
+        business_address="90 Brybar Dr St Johns FL",
+        public_phone="+17329837841",
+        business_whatsapp_number="+17329837841",
+        primary_chat_id="17329837841@s.whatsapp.net",
+        business_category="Indian restaurant",
+        plan_id="trial",
+        status="trial",
+        created_at=datetime(2026, 5, 26, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 5, 26, tzinfo=timezone.utc),
+    )
+    fields = FlyerRequestFields(
+        event_or_business_name="Special Biryani's",
+        contact_info="+17329837841",
+        notes=raw_request,
+    )
+
+    facts = merge_locked_facts(
+        profile_locked_facts(customer, raw_request=raw_request, message_id="m-biryani"),
+        extract_text_facts(
+            fields,
+            raw_request,
+            message_id="m-biryani",
+            profile_business_name=customer.business_name,
+            allow_text_identity=False,
+        ),
+    )
+    by_id = facts_by_id(type("P", (), {"locked_facts": facts})())
+
+    assert by_id["business_name"].value == "Lakshmi's Kitchen"
+    assert by_id["business_name"].source == "customer_profile"
+    assert by_id["campaign_title"].value == "Special Biryani's"
+
+
 def test_context_isolation_blocks_stale_project_provenance():
     from agents.flyer.facts import context_isolation_blockers
 
