@@ -264,6 +264,23 @@ def test_triage_summary_groups_by_customer_and_aggregates_reasons():
     assert chloe["oldest_age_hours"] == 19
     assert chloe["oldest_age_minutes"] == 19 * 60
     assert [p["project_id"] for p in chloe["projects"]] == ["F0036", "F0043", "F0045"]
+    assert summary["manual_status_counts"] == {"queued": 5}
+    assert chloe["oldest_queued_at"] == "2026-05-18T17:00:00+00:00"
+
+
+def test_triage_summary_surfaces_manual_status_split():
+    from agents.flyer.manual_queue import triage_summary
+
+    queued = _project("F0060", "+19045550104", age_hours=3, reason_code="visual_qa_failed")
+    in_progress = queued.model_copy(update={
+        "project_id": "F0061",
+        "manual_review": queued.manual_review.model_copy(update={"status": "in_progress"}),
+    })
+    summary = triage_summary(
+        FlyerProjectStore(projects=[queued, in_progress]),
+        now=datetime(2026, 5, 19, 12, 0, tzinfo=timezone.utc),
+    )
+    assert summary["manual_status_counts"] == {"in_progress": 1, "queued": 1}
 
 
 def test_classify_legacy_reason_picks_visual_qa_when_qa_failed():

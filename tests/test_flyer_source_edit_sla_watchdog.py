@@ -309,6 +309,65 @@ def test_reason_code_override_scopes_alert_rows(tmp_path):
     assert "Monitored reason codes: source_edit_provider_unavailable." in calls[0]["message"]
 
 
+def test_watchdog_message_includes_reason_counts_status_split_and_oldest_queue_time(tmp_path):
+    module = load_module()
+    projects = tmp_path / "projects.json"
+    calls: list[dict] = []
+    projects.write_text(
+        json.dumps(
+            {
+                "projects": [
+                    _project("F9020", queued_at="2026-05-21T00:00:00Z", reason_code="source_edit_provider_unavailable", manual_status="queued"),
+                    _project("F9021", queued_at="2026-05-21T00:05:00Z", reason_code="visual_qa_failed", manual_status="in_progress"),
+                    _project("F9022", queued_at="2026-05-21T00:06:00Z", reason_code="visual_qa_failed", manual_status="queued"),
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = module.run_watchdog(
+        projects_path=projects,
+        alert_state_path=tmp_path / "sla-alerts.json",
+        decisions_log_path=tmp_path / "decisions.log",
+        now=module.parse_utc("2026-05-21T01:00:00Z"),
+        threshold_minutes=10,
+        repeat_minutes=60,
+        notify_func=lambda title, message, priority, source: calls.append(
+            {"title": title, "message": message, "priority": priority, "source": source}
+        ) is None or True,
+    )
+    assert result["status"] == "alerted"
+    message = calls[0]["message"]
+    assert ("Status split: queued=2, in_progress=1." in message) or (
+        "Status split: in_progress=1, queued=2." in message
+    )
+    assert "Reason split: source_edit_provider_unavailable=1, visual_qa_failed=2." in message
+    assert "Oldest queued at: 2026-05-21T00:00:00+00:00." in message
+
+
+def test_watchdog_returns_customer_update_summary_counts(tmp_path):
+    module = load_module()
+    projects = tmp_path / "projects.json"
+    projects.write_text(json.dumps({"projects": [_project("F9030")]}), encoding="utf-8")
+    result = module.run_watchdog(
+        projects_path=projects,
+        alert_state_path=tmp_path / "sla-alerts.json",
+        decisions_log_path=tmp_path / "decisions.log",
+        now=module.parse_utc("2026-05-21T01:00:00Z"),
+        threshold_minutes=10,
+        repeat_minutes=60,
+        notify_func=lambda **_: True,
+        customer_chat_resolver=lambda _project: ("", "missing"),
+    )
+    assert result["customer_updates"]["skipped_project_ids"] == ["F9030"]
+    assert result["customer_updates_summary"] == {
+        "sent": 0,
+        "failed": 0,
+        "throttled": 0,
+        "skipped": 1,
+    }
+
+
 def test_deploy_installs_and_enables_sla_watchdog_timer():
     deploy = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh").read_text(encoding="utf-8")
     smoke = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-smoke-test.sh").read_text(encoding="utf-8")
