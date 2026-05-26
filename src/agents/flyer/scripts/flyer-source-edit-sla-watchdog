@@ -275,6 +275,7 @@ def _send_customer_updates(
     skipped: list[str] = []
     state_changed = False
     alerts = state.setdefault("project_alerts", {})
+    updated_chats: set[str] = set()
     for row in rows:
         project_id = str(row.get("project_id") or "")
         if float(row.get("age_minutes") or 0) < threshold_minutes:
@@ -315,9 +316,24 @@ def _send_customer_updates(
             )
             state_changed = True
             continue
+        if chat_id in updated_chats:
+            throttled.append(project_id)
+            entry["last_customer_updated_at"] = now.isoformat()
+            entry["last_customer_update_outcome"] = "suppressed_same_chat_update"
+            _append_customer_update_audit(
+                decisions_log_path,
+                row=row,
+                outcome="suppressed_same_chat_update",
+                chat_id_source=chat_source,
+                error="another_stale_project_update_sent_to_same_chat",
+                now=now,
+            )
+            state_changed = True
+            continue
         ok, mid, err = notify(chat_id, _build_customer_update_message(row))
         if ok:
             sent.append(project_id)
+            updated_chats.add(chat_id)
             entry["last_customer_updated_at"] = now.isoformat()
             entry["last_customer_update_outcome"] = "sent"
             _append_customer_update_audit(
