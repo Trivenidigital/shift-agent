@@ -192,6 +192,12 @@ def _customer_update_is_throttled(row: dict[str, Any], state: dict[str, Any], *,
     entry = state.get("project_alerts", {}).get(row["row_key"])
     if not isinstance(entry, dict):
         return False
+    # Customer-visible stale-edit updates are one-shot per queue row. Repeating
+    # the same apology every SLA window makes the product feel abandoned rather
+    # than proactive; operator alerts can keep repeating until the row is closed.
+    last_outcome = str(entry.get("last_customer_update_outcome") or "")
+    if last_outcome in {"sent", "suppressed_same_chat_update"} and entry.get("last_customer_updated_at"):
+        return True
     last_raw = str(entry.get("last_customer_updated_at") or entry.get("last_customer_update_attempt_at") or "")
     if not last_raw:
         return False
