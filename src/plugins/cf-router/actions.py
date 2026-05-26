@@ -1736,6 +1736,18 @@ def flyer_starter_brief_marker() -> str:
 
 
 def flyer_customer_not_active_reply(customer: dict) -> str:
+    """Customer-facing reply when account is not in {trial, active}.
+
+    PR-ζ.1a 2026-05-26 — customer-copy hotfix:
+    - cancelled branch: "is cancelled" → "is no longer active" (avoids the
+      forbidden completion verb `cancelled` which the PR-ζ chokepoint lint
+      refuses; the actions.py allowlist masks this today but PR-ζ.1b will
+      remove that mask).
+    - generic fallback: drop the dynamic `{status}` interpolation entirely
+      (forward-compat against future schema additions where the status name
+      might itself be a forbidden completion verb).
+    - payment_pending + suspended branches preserved verbatim.
+    """
     status = str(customer.get("status") or "").strip() or "not_active"
     if status == "payment_pending":
         return (
@@ -1753,12 +1765,17 @@ def flyer_customer_not_active_reply(customer: dict) -> str:
         return (
             "Flyer Studio\n"
             "------------\n"
-            "This Flyer Studio account is cancelled. Contact Support or restart setup before creating a new flyer."
+            "This Flyer Studio account is no longer active. Contact Support or restart setup before creating a new flyer."
         )
+    # Generic fallback for unexpected status values (legacy customer dicts,
+    # future schema additions). Intentionally omits the status name to defend
+    # against future forbidden-verb statuses (e.g. a future "refunded" enum
+    # value would otherwise leak `refunded` into customer copy via the
+    # f-string interpolation).
     return (
         "Flyer Studio\n"
         "------------\n"
-        f"This Flyer Studio account is {status}. Contact Support before creating a new flyer."
+        "This Flyer Studio account is not currently active. Contact Support before creating a new flyer."
     )
 
 
