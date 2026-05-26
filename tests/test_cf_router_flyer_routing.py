@@ -5228,7 +5228,19 @@ def test_source_vs_new_source_choice_creates_manual_edit_project(monkeypatch):
     )
 
 
-@pytest.mark.parametrize("status_text", ["any update?", "any updates?", "status please", "what is the status?"])
+@pytest.mark.parametrize(
+    "status_text",
+    [
+        "any update?",
+        "any updates?",
+        "status please",
+        "what is the status?",
+        "any progress on my flyer?",
+        "how long for the update?",
+        "when will it be ready?",
+        "eta please",
+    ],
+)
 def test_queued_source_edit_status_checkin_resends_source_new_clarification(monkeypatch, status_text):
     """After SOURCE-chosen project is queued, follow-up `any update?` MUST
     NOT re-enter the SOURCE/NEW clarification (lessons.md 2026-05-19)."""
@@ -5541,8 +5553,13 @@ def test_flyer_is_status_checkin_matches_expected_phrases():
     actions = _load_actions()
     assert actions.flyer_is_status_checkin("any update?")
     assert actions.flyer_is_status_checkin("any updates?")
+    assert actions.flyer_is_status_checkin("any update please")
+    assert actions.flyer_is_status_checkin("any progress on my flyer?")
     assert actions.flyer_is_status_checkin("is it ready?")
+    assert actions.flyer_is_status_checkin("when will my flyer be ready?")
+    assert actions.flyer_is_status_checkin("eta please")
     assert actions.flyer_is_status_checkin("where are the updates?")
+    assert actions.flyer_is_status_checkin("how long")
     assert actions.flyer_is_status_checkin("status")
     assert not actions.flyer_is_status_checkin("source please")
     assert not actions.flyer_is_status_checkin("change the date")
