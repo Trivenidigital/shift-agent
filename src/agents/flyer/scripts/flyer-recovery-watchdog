@@ -777,6 +777,11 @@ def main() -> int:
         if (signal := recovery.classify_decision(row, {})) is not None
     ]
     projects_by_id = _load_projects_by_id(Path(args.project_state_path))
+    signals.extend(recovery.classify_stale_manual_projects(
+        projects_by_id.values(),
+        now=now,
+        stale_after=timedelta(minutes=cfg.flyer.recovery.manual_queue_stale_minutes),
+    ))
     state_path = Path(args.recovery_state_path)
     with recovery.recovery_state_lock(state_path):
         state = recovery.load_recovery_state(state_path)

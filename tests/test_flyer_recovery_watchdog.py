@@ -135,6 +135,98 @@ flyer:
     assert "ack_sent" not in text
 
 
+def test_watchdog_bundle_queues_stale_manual_review_from_project_state(tmp_path):
+    config = tmp_path / "config.yaml"
+    log = tmp_path / "decisions.log"
+    projects = tmp_path / "projects.json"
+    customers = tmp_path / "customers.json"
+    recovery_state = tmp_path / "recovery.json"
+    bundle_dir = tmp_path / "bundles"
+    worker_queue_dir = tmp_path / "queue"
+    config.write_text(
+        """
+schema_version: 1
+customer: {name: Triveni, location_id: loc_pineville_01, timezone: America/New_York}
+owner: {name: Owner, phone: '+19045550000'}
+limits: {}
+alerting: {pushover_user_key: k, pushover_app_token: t}
+backup: {gpg_recipient_email: owner@example.com}
+flyer:
+  enabled: true
+  recovery:
+    mode: bundle
+    enable_timer: true
+    scan_window_minutes: 240
+    manual_queue_stale_minutes: 30
+""".strip(),
+        encoding="utf-8",
+    )
+    queued_at = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat().replace("+00:00", "Z")
+    log.write_text("", encoding="utf-8")
+    projects.write_text(
+        json.dumps(
+            {
+                "projects": [
+                    {
+                        "project_id": "F0102",
+                        "status": "manual_edit_required",
+                        "customer_phone": "+17329837841",
+                        "raw_request": "Create Special Biryani flyer",
+                        "manual_review": {
+                            "status": "queued",
+                            "reason_code": "visual_qa_failed",
+                            "reason": "visual_qa_failed",
+                            "detail": "missing required visible fact: item:0:name",
+                            "queued_at": queued_at,
+                        },
+                        "qa_reports": [
+                            {
+                                "status": "failed",
+                                "blockers": ["missing required visible fact: item:0:name"],
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    customers.write_text('{"customers":[],"onboarding_sessions":[],"intake_sessions":[]}', encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--config-path", str(config),
+            "--log-path", str(log),
+            "--project-state-path", str(projects),
+            "--customer-state-path", str(customers),
+            "--recovery-state-path", str(recovery_state),
+            "--bundle-dir", str(bundle_dir),
+            "--worker-queue-dir", str(worker_queue_dir),
+            "--text",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "opened=1" in result.stdout
+    assert "queued=1" in result.stdout
+    state = json.loads(recovery_state.read_text(encoding="utf-8"))
+    incident = state["incidents"][0]
+    assert incident["project_id"] == "F0102"
+    assert incident["failure_class"] == "concept_generation_failed"
+    assert incident["evidence_quality"] == "weak"
+    assert incident["codex"]["status"] == "queued"
+    assert (bundle_dir / f"{incident['incident_id']}.json").exists()
+    assert (worker_queue_dir / f"{incident['incident_id']}.json").exists()
+    bundle = json.loads((bundle_dir / f"{incident['incident_id']}.json").read_text(encoding="utf-8"))
+    assert bundle["project_excerpt"]["project_id"] == "F0102"
+    assert bundle["project_excerpt"]["manual_review"]["reason_code"] == "visual_qa_failed"
+
+
 def test_watchdog_write_repair_bundle_is_explicit_operator_action(tmp_path):
     recovery_state = tmp_path / "recovery.json"
     bundle_dir = tmp_path / "bundles"

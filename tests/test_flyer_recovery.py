@@ -66,6 +66,23 @@ def test_successful_router_rows_with_failure_words_are_not_incidents():
     assert recovery.classify_decision(row, {}) is None
 
 
+def test_router_success_with_nonblank_ack_error_is_recovery_incident():
+    row = _row(
+        "project_id=F0102; sender_role=employee; ack_message_id=mid; "
+        "ack_error=concept_generation_failed: exit=2 {\"visual_qa_failed\": []}",
+        reason="flyer_primary_project_created",
+        chat_id="201975216009469@lid",
+    )
+    row["subprocess_rc"] = 0
+
+    signal = recovery.classify_decision(row, {})
+
+    assert signal is not None
+    assert signal.failure_class == "concept_generation_failed"
+    assert signal.project_id == "F0102"
+    assert signal.evidence_quality == "strong"
+
+
 def test_failing_source_edit_rows_still_classify_provider_unavailable():
     row = _row(
         "project_id=F0095; source_edit_preflight_failed=source edit provider configured for manual review; reason_code=source_edit_provider_unavailable",
