@@ -803,9 +803,19 @@ def _enforce_action_context_policy(
     if not action_context.is_regulated_action:
         return None
 
-    # Lazy import — keeps module load order flexible across deployment shapes
-    # (cf-router plugin load env vs. systemd direct scripts vs. test fixtures).
-    from customer_copy_policy import lint_no_unverified_completion  # type: ignore
+    # Lazy import with deployed-flat-module fallback (mirrors intent.py:18-21).
+    # On the deployed VPS at /opt/shift-agent/, modules are flat-named with a
+    # `flyer_` prefix (flyer_customer_copy_policy.py); in the dev tree they
+    # live under src/agents/flyer/customer_copy_policy.py. Try the structured
+    # import first; fall back to the flat module name on the deployed VPS.
+    # Discovered during PR-ζ pre-deploy verification — the original bare
+    # `from customer_copy_policy import ...` would have ImportError'd on the
+    # deployed VPS for every regulated send, crashing the Hermes plugin
+    # handler mid-HTTP.
+    try:
+        from agents.flyer.customer_copy_policy import lint_no_unverified_completion  # type: ignore
+    except Exception:  # pragma: no cover - deployed flat-module fallback
+        from flyer_customer_copy_policy import lint_no_unverified_completion  # type: ignore
 
     aggregated = _join_parts_for_preview(message_parts)
     scan = lint_no_unverified_completion(
