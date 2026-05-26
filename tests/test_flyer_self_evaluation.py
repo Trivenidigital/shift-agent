@@ -461,6 +461,8 @@ def test_manual_source_edit_stale_becomes_incident():
     assert incident["project_id"] == "F9001"
     assert incident["severity"] == "high"
     assert "OpenRouter" in incident["suggested_action"] or "manual queue" in incident["suggested_action"]
+    assert incident["evidence_details"]["reason_family"] == "provider_readiness"
+    assert incident["evidence_details"]["provider_config_gap"] is True
     assert report["eval_candidates"][0]["category"] == "source_edit_provider_posture"
 
 
@@ -492,6 +494,8 @@ def test_manual_visual_qa_stale_becomes_general_manual_incident():
     assert incident["eval_category"] == "manual_queue_sla"
     assert incident["evidence"].endswith("reason_code=visual_qa_failed")
     assert incident["evidence_details"]["manual_reason_code"] == "visual_qa_failed"
+    assert incident["evidence_details"]["reason_family"] == "visual_quality"
+    assert incident["evidence_details"]["provider_config_gap"] is False
     assert "OpenRouter" not in incident["suggested_action"]
 
 

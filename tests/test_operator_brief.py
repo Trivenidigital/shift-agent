@@ -438,14 +438,26 @@ def test_operator_brief_groups_flyer_self_evaluation_and_redacts_sensitive_lines
                         "severity": "high",
                         "project_id": "F9101",
                         "suggested_action": "Burn down queue. OPENAI_API_KEY=sk-leaky +17329837841",
-                        "evidence_details": {"queued_age_minutes": 91.5, "active_customer_risk": True},
+                        "evidence_details": {
+                            "queued_age_minutes": 91.5,
+                            "active_customer_risk": True,
+                            "manual_reason_code": "source_edit_provider_unavailable",
+                            "manual_status": "queued",
+                            "provider_config_gap": True,
+                        },
                     },
                     {
                         "type": "manual_review_stale",
                         "severity": "high",
                         "project_id": "F9106",
                         "suggested_action": "Resolve stale visual QA queue row.",
-                        "evidence_details": {"queued_age_minutes": 55.0, "active_customer_risk": True},
+                        "evidence_details": {
+                            "queued_age_minutes": 55.0,
+                            "active_customer_risk": True,
+                            "manual_reason_code": "visual_qa_failed",
+                            "manual_status": "queued",
+                            "provider_config_gap": False,
+                        },
                     },
                     {
                         "type": "source_contract_missing",
@@ -494,7 +506,10 @@ def test_operator_brief_groups_flyer_self_evaluation_and_redacts_sensitive_lines
     )
     markdown = module.render_markdown(brief)
 
-    assert "Manual queue: stale_source_edits=2; oldest=91.5min" in markdown
+    assert (
+        "Manual queue: stale_total=2; oldest=91.5min; by_reason=source_edit_provider_unavailable:1, visual_qa_failed:1; "
+        "status_mix=in_progress:0, queued:2; provider_config_gaps=1" in markdown
+    )
     assert "Customer risk: active=3; historical_or_audit=1" in markdown
     assert "Source contracts: missing=1; locked_fact_gaps=1" in markdown
     assert "QA gaps: missing=0; fact_gaps=1; forbidden_text_hits=0" in markdown
