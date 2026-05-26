@@ -757,8 +757,41 @@ def _enforce_action_context_policy(
             return False, "", "missing_action_context", "refused"
         return None  # allowlisted; pass through
 
-    # Regulated context path — commit 4 fills in the lint dispatch.
-    return None
+    # Regulated context — apply PR-γ lint when is_regulated_action=True.
+    # Non-regulated contexts (system health alerts, internal smoke) pass
+    # through regardless of message content.
+    if not action_context.is_regulated_action:
+        return None
+
+    # Lazy import — keeps module load order flexible across deployment shapes
+    # (cf-router plugin load env vs. systemd direct scripts vs. test fixtures).
+    from customer_copy_policy import lint_no_unverified_completion  # type: ignore
+
+    aggregated = _join_parts_for_preview(message_parts)
+    scan = lint_no_unverified_completion(
+        aggregated,
+        has_verified_action_result=action_context.verified_action_result,
+    )
+    if scan.hits:
+        # Cap verb_hits[:20] before audit-row construction to preserve
+        # fail-CLOSED semantics. _RegulatedSendLintViolation.verb_hits has
+        # max_length=20; an uncapped >20 list would raise ValidationError
+        # mid-refusal (fail-LOUD: caller crashes instead of getting a
+        # clean refusal tuple).
+        verb_values = [hit.value for hit in scan.hits][:20]
+        _emit_audit_row(
+            "regulated_send_lint_violation",
+            {
+                "action_id": action_context.action_id,
+                "audit_row_id": action_context.audit_row_id,
+                "jid": jid,
+                "verb_hits": verb_values,
+                "message_preview": aggregated[:120],
+            },
+        )
+        return False, "", "lint_violation", "refused"
+
+    return None  # passed lint, send proceeds
 
 
 def bridge_send_blocked_by_test_context() -> Optional[str]:
