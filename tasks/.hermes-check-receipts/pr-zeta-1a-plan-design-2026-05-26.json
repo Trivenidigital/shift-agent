@@ -1,0 +1,16 @@
+{
+  "topic": "pr-zeta-1a-plan-design-2026-05-26",
+  "task_text": "PR-ζ.1a customer-copy hotfix — STATUS_DISPLAY schema-driven + payment_pending preservation + change_plan fallback rewrite",
+  "completed_at": "2026-05-26T19:35:00Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 3,
+  "hermes_step_count": 7,
+  "files_to_read_first": [
+    "src/plugins/cf-router/actions.py",
+    "src/plugins/cf-router/hooks.py",
+    "src/platform/schemas.py",
+    "src/agents/flyer/customer_copy_policy.py",
+    "tests/test_safe_io_bridge_post.py",
+    "tests/test_action_execution_context_schema.py"
+  ]
+}

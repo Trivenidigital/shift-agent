@@ -1790,7 +1790,7 @@ def _try_flyer_account_intercept(text: str, chat_id: str, event: Any) -> Optiona
             chat_id,
             (
                 "Flyer Studio\n------------\n"
-                "Your plan-change request couldn't be processed right now. "
+                "We weren't able to set up your plan change right now. "
                 "We've logged it for operator follow-up — please reply again "
                 "in a few minutes or wait for an update here."
             ),
