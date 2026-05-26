@@ -214,6 +214,28 @@ def test_flyer_manual_edit_status_reply_uses_reason_specific_copy(mods):
     assert "quality checks" in reply.lower()
 
 
+def test_flyer_manual_edit_status_reply_normalizes_reason_code(mods):
+    _, actions_mod = mods
+
+    reply = actions_mod.flyer_manual_edit_status_reply({
+        "status": "manual_edit_required",
+        "manual_review": {"reason_code": " Visual_QA_Failed "},
+    })
+
+    assert "quality checks" in reply.lower()
+
+
+def test_flyer_manual_edit_status_reply_unknown_reason_falls_back_to_unclassified(mods):
+    _, actions_mod = mods
+
+    reply = actions_mod.flyer_manual_edit_status_reply({
+        "status": "manual_edit_required",
+        "manual_review": {"reason_code": "legacy_custom_reason"},
+    })
+
+    assert "queued for designer review" in reply.lower()
+
+
 # ============================================================================
 # F8 — owner approval interception
 # ============================================================================

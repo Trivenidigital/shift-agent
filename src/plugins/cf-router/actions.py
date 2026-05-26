@@ -2056,7 +2056,7 @@ def flyer_manual_edit_status_reply(project: dict) -> str:
     if generic_fallback not in reply:
         return reply
     manual = project.get("manual_review") if isinstance(project.get("manual_review"), dict) else {}
-    reason_code = str(manual.get("reason_code") or "source_edit_provider_unavailable")
+    reason_code = str(manual.get("reason_code") or "unclassified").strip().lower() or "unclassified"
     try:
         _ensure_platform_path()
         from flyer_workflow import MANUAL_REVIEW_REASON_LINES  # type: ignore
@@ -2086,7 +2086,7 @@ def flyer_manual_edit_status_reply(project: dict) -> str:
             }
     line = MANUAL_REVIEW_REASON_LINES.get(
         reason_code,
-        MANUAL_REVIEW_REASON_LINES["source_edit_provider_unavailable"],
+        MANUAL_REVIEW_REASON_LINES["unclassified"],
     )
     return f"Flyer Studio\n------------\n{line}"
 

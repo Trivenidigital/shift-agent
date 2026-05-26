@@ -139,6 +139,18 @@ def test_make_manual_review_rejects_invalid_reason_code():
         make_manual_review(reason_code="not_a_real_code")  # type: ignore[arg-type]
 
 
+def test_triage_reason_family_normalizes_reason_code_case():
+    from agents.flyer.manual_queue import _reason_family
+    assert _reason_family("Visual_QA_Failed") == "visual_quality"
+    assert _reason_family(" source_edit_provider_unavailable ") == "provider_readiness"
+
+
+def test_triage_operator_hint_normalizes_reason_code_case():
+    from agents.flyer.manual_queue import _operator_action_hint
+    hint = _operator_action_hint(" Source_Edit_Provider_Unavailable ")
+    assert "provider credentials" in hint.lower()
+
+
 def test_list_manual_queue_excludes_nonqueued_projects_with_old_failed_qa():
     from agents.flyer.manual_queue import list_manual_queue
 
