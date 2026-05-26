@@ -157,6 +157,42 @@ def _verification_modes(project: FlyerProject) -> list[str]:
     return sorted(modes)
 
 
+def _reason_family(reason_code: str) -> str:
+    if reason_code == "source_edit_provider_unavailable":
+        return "provider_readiness"
+    if reason_code in {"visual_qa_failed", "provider_timeout"}:
+        return "visual_quality"
+    if reason_code.startswith("reference_"):
+        return "reference_intake"
+    if reason_code == "missing_required_facts":
+        return "missing_facts"
+    if reason_code in {"operator_request", "policy_block"}:
+        return "operator_policy"
+    return "other"
+
+
+def _operator_action_hint(reason_code: str) -> str:
+    mapping = {
+        "source_edit_provider_unavailable": "Configure provider credentials or keep designer-assisted path.",
+        "visual_qa_failed": "Review QA blockers and correct layout/text in manual edit.",
+        "provider_timeout": "Retry provider run or complete manual edit if retries keep failing.",
+        "reference_unsupported": "Ask customer to re-upload source flyer as JPG/PNG.",
+        "reference_provider_unavailable": "Ask customer to re-upload source flyer image; asset missing on server.",
+        "reference_low_confidence": "Request a clearer source image or typed details before retry.",
+        "reference_not_run": "Run reference extraction or route to manual edit with captured details.",
+        "missing_required_facts": "Collect missing required facts from customer before regeneration.",
+    }
+    return mapping.get(reason_code, "Review request details and choose complete vs close disposition.")
+
+
+def _age_priority(age_minutes: int) -> str:
+    if age_minutes >= 180:
+        return "critical"
+    if age_minutes >= 60:
+        return "stale"
+    return "fresh"
+
+
 def list_manual_queue(
     store: FlyerProjectStore,
     *,
@@ -188,7 +224,11 @@ def list_manual_queue(
             "age_minutes": age_minutes,
             "age_hours": max(age_hours, 0),
             "is_stale": age_minutes >= max(stale_minutes_threshold, 1),
+            "age_priority": _age_priority(age_minutes),
+            "customer_update_due": age_minutes >= 180,
             "asset_ids": [asset.asset_id for asset in project.assets],
+            "reason_family": _reason_family(manual.reason_code),
+            "operator_action_hint": _operator_action_hint(manual.reason_code),
             "verification_modes": _verification_modes(project),
             "locked_facts": [fact.model_dump(mode="json") for fact in project.locked_facts],
             "qa_blockers": [blocker for report in project.qa_reports for blocker in report.blockers],

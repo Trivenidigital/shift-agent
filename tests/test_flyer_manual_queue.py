@@ -180,6 +180,48 @@ def test_list_manual_queue_includes_reason_code():
     assert rows[0]["manual_reason_code"] == "source_edit_provider_unavailable"
 
 
+def test_list_manual_queue_adds_reason_family_action_and_priority_fields():
+    from agents.flyer.manual_queue import list_manual_queue
+
+    rows = list_manual_queue(
+        FlyerProjectStore(projects=[_manual_project()]),
+        now=datetime(2026, 5, 19, 0, 30, tzinfo=timezone.utc),
+    )
+
+    assert rows[0]["reason_family"] == "provider_readiness"
+    assert rows[0]["operator_action_hint"] == "Configure provider credentials or keep designer-assisted path."
+    assert rows[0]["age_priority"] == "fresh"
+    assert rows[0]["customer_update_due"] is False
+
+
+def test_list_manual_queue_marks_customer_update_due_for_stale_visual_qa_rows():
+    from agents.flyer.manual_queue import list_manual_queue
+
+    now = datetime(2026, 5, 20, tzinfo=timezone.utc)
+    stale_visual = _manual_project().model_copy(
+        update={
+            "manual_review": FlyerManualReview(
+                status="queued",
+                reason="visual_qa_failed",
+                reason_code="visual_qa_failed",
+                detail="text overlap",
+                queued_at=now - timedelta(minutes=200),
+            )
+        }
+    )
+
+    rows = list_manual_queue(
+        FlyerProjectStore(projects=[stale_visual]),
+        now=now,
+        stale_minutes_threshold=30,
+    )
+
+    assert rows[0]["reason_family"] == "visual_quality"
+    assert rows[0]["operator_action_hint"] == "Review QA blockers and correct layout/text in manual edit."
+    assert rows[0]["age_priority"] == "critical"
+    assert rows[0]["customer_update_due"] is True
+
+
 def test_list_manual_queue_surfaces_source_edit_integrity_mode(tmp_path, monkeypatch):
     """Cockpit triage needs to distinguish source-edit previews that passed
     text-manifest integrity only from fully OCR/visual-QA'd generated flyers.
