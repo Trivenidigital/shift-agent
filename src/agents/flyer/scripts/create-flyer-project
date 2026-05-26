@@ -13,12 +13,9 @@ from pathlib import Path
 import sys
 
 SRC_ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(SRC_ROOT))
+sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(SRC_ROOT / "platform"))
-if "/opt/shift-agent" not in sys.path:
-    # Runtime fallback for deployed plugin copies; keep after local source paths
-    # so tests and local development always resolve repo code first.
-    sys.path.append("/opt/shift-agent")
+sys.path.insert(0, str(SRC_ROOT))
 
 from schemas import FlyerAsset, FlyerCustomerStore, FlyerManualReview, FlyerProject, FlyerProjectStore, FlyerProjectCreated, FlyerReferenceExtraction, FlyerRequestFields, FlyerSourceContractExtracted  # noqa: E402
 from safe_io import FileLock, atomic_write_text  # noqa: E402
