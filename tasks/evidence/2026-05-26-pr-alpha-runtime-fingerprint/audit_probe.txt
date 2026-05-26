@@ -1,0 +1,8 @@
+===AUDIT-ROWS-2026-05-26-13:00-13:15-LAKSHMI===
+{"ts":"2026-05-26T13:09:35.005633Z","type":"cf_router_intercepted","reason":"flyer_account_command","chat_id":"201975216009469@lid","code":null,"subprocess_rc":0,"detail":"customer_id=CUST0001; status=trial; sender_role=employee; ack_message_id=3EB089AE5006BBE8AD5CEB; ack_error="}
+{"ts":"2026-05-26T13:09:52.203772Z","type":"flyer_account_updated","customer_id":"CUST0001","command":"change_plan","actor_phone":"+19045550104","actor_role":"employee","allowed":false,"reason":"admin_required"}
+{"ts":"2026-05-26T13:09:52.278895Z","type":"cf_router_intercepted","reason":"flyer_account_command","chat_id":"201975216009469@lid","code":null,"subprocess_rc":0,"detail":"customer_id=CUST0001; status=trial; sender_role=employee; ack_message_id=3EB0A8EEA033064F70D729; ack_error="}
+
+===UPGRADE-PHRASE-CLASSIFIER-RECHECK===
+  'UPGRADE PLAN - show Flyer Studio plans'            account_command=True  regulated_intent=True
+  'Upgrade to Growth Plan'                            account_command=True  regulated_intent=True
