@@ -95,11 +95,13 @@ def _build_test_client():
     from fastapi.testclient import TestClient
     from app import auth as auth_mod
     from app.main import app
+    from app.routers import flyer as flyer_router
 
     async def _bypass_auth():
         return {"sub": "test-operator", "iat": 9_999_999_999}
 
     app.dependency_overrides[auth_mod.require_auth] = _bypass_auth
+    app.dependency_overrides[flyer_router._require_auth_dep] = _bypass_auth
 
     class _Ctx:
         def __enter__(self):
@@ -692,7 +694,7 @@ def test_billing_checkout_provider_invalid_provider_is_red(tmp_path, monkeypatch
     _isolate_deploy_markers(monkeypatch, tmp_path)
     _mock_flyer_config(monkeypatch, {
         "enabled": True,
-        "payment_provider": " Stripe ",
+        "payment_provider": "other",
         "payment_checkout_url_template": "https://pay.example/sub/{customer_id}",
         "quick_flyer_checkout_url_template": "https://pay.example/quick/{order_id}",
         "quick_flyer_price_cents": 19900,
@@ -701,5 +703,6 @@ def test_billing_checkout_provider_invalid_provider_is_red(tmp_path, monkeypatch
     from app.routers import flyer
 
     billing_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "billing_checkout_provider")
-    assert billing_p["severity"] == "yellow"
-    assert billing_p["model_config"]["payment_provider"] == "stripe"
+    assert billing_p["severity"] == "red"
+    assert billing_p["model_config"]["payment_provider"] == "other"
+    assert "unsupported" in billing_p["detail"].lower()

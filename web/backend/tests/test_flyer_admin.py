@@ -399,11 +399,13 @@ def _build_test_client_with_fresh_otp():
     from fastapi.testclient import TestClient
     from app import auth as auth_mod
     from app.main import app
+    from app.routers import flyer as flyer_router
 
     async def _bypass_fresh():
         return {"sub": "test-operator", "iat": 9_999_999_999}
 
     app.dependency_overrides[auth_mod.require_fresh_otp] = _bypass_fresh
+    app.dependency_overrides[flyer_router._require_fresh_otp_dep] = _bypass_fresh
 
     class _Ctx:
         def __enter__(self):

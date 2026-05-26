@@ -102,6 +102,7 @@ def _build_test_client():
     from fastapi.testclient import TestClient
     from app import auth as auth_mod
     from app.main import app
+    from app.routers import flyer as flyer_router
 
     async def _bypass_auth():
         return {"sub": "test-operator", "iat": 9_999_999_999}
@@ -111,6 +112,8 @@ def _build_test_client():
 
     app.dependency_overrides[auth_mod.require_auth] = _bypass_auth
     app.dependency_overrides[auth_mod.require_fresh_otp] = _bypass_fresh
+    app.dependency_overrides[flyer_router._require_auth_dep] = _bypass_auth
+    app.dependency_overrides[flyer_router._require_fresh_otp_dep] = _bypass_fresh
 
     class _Ctx:
         def __enter__(self):
