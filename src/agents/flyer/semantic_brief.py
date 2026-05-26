@@ -107,6 +107,7 @@ def visible_wrong_brand_blockers(project: FlyerProject, extracted_text: str) -> 
     """
     policy = semantic_visibility_policy(project)
     allowed = {_norm(policy.effective_business_name)}
+    campaign_title = _norm(policy.campaign_title)
     for extraction in project.reference_extractions or []:
         contract = getattr(extraction, "source_contract", None)
         if contract:
@@ -116,6 +117,9 @@ def visible_wrong_brand_blockers(project: FlyerProject, extracted_text: str) -> 
 
     def allowed_identity_visible(value: str) -> bool:
         return any(_norm_contains(value, allowed_name) for allowed_name in allowed)
+
+    def is_campaign_title(value: str) -> bool:
+        return bool(campaign_title and _norm(value) == campaign_title)
 
     def append_once(blocker: str) -> None:
         if blocker not in blockers:
@@ -158,6 +162,8 @@ def visible_wrong_brand_blockers(project: FlyerProject, extracted_text: str) -> 
         if uppercase_ratio < 0.8 and not candidate.istitle():
             continue
         if not _ORG_SUFFIX_RE.search(candidate):
+            continue
+        if is_campaign_title(candidate):
             continue
         if allowed_identity_visible(candidate):
             continue

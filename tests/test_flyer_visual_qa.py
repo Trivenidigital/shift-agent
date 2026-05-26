@@ -191,6 +191,43 @@ def test_visual_qa_allows_campaign_title_with_profile_anchors_without_exact_bran
     assert "missing required visible fact: business_name" not in report.blockers
 
 
+def test_visual_qa_allows_campaign_titles_that_contain_org_suffix_words(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    now = datetime(2026, 5, 26, tzinfo=timezone.utc)
+    campaign_titles = [
+        "Restaurant Week Specials",
+        "Kitchen Essentials Sale",
+        "Cafe Style Biryani",
+        "Biryani Bazaar",
+    ]
+    for index, title in enumerate(campaign_titles, start=1):
+        project = FlyerProject(
+            project_id=f"F02{index:02d}",
+            status="awaiting_final_approval",
+            customer_phone="+17329837841",
+            created_at=now,
+            updated_at=now,
+            original_message_id=f"m-campaign-org-word-{index}",
+            raw_request=f"Create a {title} flyer. Use saved address and phone.",
+            locked_facts=[
+                FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+                FlyerLockedFact(fact_id="campaign_title", label="Campaign", value=title, source="customer_text", required=True),
+                FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+                FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+            ],
+        )
+        artifact = _write_sidecar(
+            tmp_path,
+            f"{title}\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
+            filename=f"campaign-{index}.png",
+        )
+
+        report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+
+        assert report.status == "passed", (title, report.blockers)
+
+
 def test_visual_qa_still_requires_campaign_and_profile_anchors_when_brand_absent(tmp_path):
     from agents.flyer.visual_qa import run_visual_qa
 
