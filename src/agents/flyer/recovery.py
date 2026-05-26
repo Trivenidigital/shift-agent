@@ -168,7 +168,8 @@ def classify_decision(row: dict, projects: dict[str, dict]) -> RecoverySignal | 
         subprocess_rc = int(raw_subprocess_rc) if raw_subprocess_rc is not None else None
     except (TypeError, ValueError):
         subprocess_rc = None
-    if subprocess_rc == 0:
+    ack_error_present = _has_nonblank_ack_error(detail)
+    if subprocess_rc == 0 and not ack_error_present:
         return None
     lower = detail.lower()
     failure_class = ""
@@ -185,7 +186,7 @@ def classify_decision(row: dict, projects: dict[str, dict]) -> RecoverySignal | 
         failure_class = "concept_generation_failed"
     elif "source edit provider" in lower or "source edit reference" in lower:
         failure_class = "provider_unavailable"
-    elif _has_nonblank_ack_error(detail) or any(marker in lower for marker in ["bridge_send_failed", "connect_failed", "http_error"]):
+    elif ack_error_present or any(marker in lower for marker in ["bridge_send_failed", "connect_failed", "http_error"]):
         failure_class = "bridge_send_failed"
     elif any(marker in lower for marker in ["json_parse_failed", "select_failed", "status_failed", "exit="]):
         if project_id:
@@ -205,6 +206,77 @@ def classify_decision(row: dict, projects: dict[str, dict]) -> RecoverySignal | 
         provider_message_id=provider_message_id,
         observed_at=_parse_recovery_ts(str(row.get("ts") or "")),
     )
+
+
+def _manual_reason_failure_class(reason_code: str, detail: str) -> str:
+    lowered = f"{reason_code} {detail}".lower()
+    if any(token in lowered for token in ("visual_qa_failed", "provider_timeout", "missing_required_facts")):
+        return "concept_generation_failed"
+    if any(token in lowered for token in ("provider_unavailable", "reference_provider", "source_edit_provider")):
+        return "provider_unavailable"
+    return "state_transition_failed"
+
+
+def classify_stale_manual_project(project: dict, *, now: datetime, stale_after: timedelta) -> RecoverySignal | None:
+    """Classify stale manual-review state even when no failing router row exists.
+
+    This widens recovery from audit-only observation to durable project state:
+    if a customer-visible flyer project is parked in manual review beyond the
+    SLA, the repair engine should queue a bounded worker bundle.
+    """
+    if str(project.get("status") or "") != "manual_edit_required":
+        return None
+    manual = project.get("manual_review") if isinstance(project.get("manual_review"), dict) else {}
+    if str(manual.get("status") or "") != "queued":
+        return None
+    queued_at = _parse_recovery_ts(str(manual.get("queued_at") or ""))
+    if queued_at is None or now - queued_at < stale_after:
+        return None
+    project_id = str(project.get("project_id") or "").strip()
+    if not project_id:
+        return None
+    reason_code = str(manual.get("reason_code") or manual.get("reason") or "manual_review").strip()
+    detail = str(manual.get("detail") or "").strip()
+    qa_blockers: list[str] = []
+    for report in project.get("qa_reports") or []:
+        if not isinstance(report, dict):
+            continue
+        for blocker in report.get("blockers") or []:
+            blocker_text = str(blocker or "").strip()
+            if blocker_text:
+                qa_blockers.append(blocker_text)
+    detail_parts = [
+        f"project_id={project_id}",
+        "manual_review_stale=true",
+        f"reason_code={reason_code}",
+    ]
+    if detail:
+        detail_parts.append(f"detail={detail}")
+    if qa_blockers:
+        detail_parts.append("qa_blockers=" + " | ".join(qa_blockers[:5]))
+    signal_detail = "; ".join(detail_parts)
+    return RecoverySignal(
+        failure_class=_manual_reason_failure_class(reason_code, detail),
+        severity="warning",
+        project_id=project_id,
+        chat_id="",
+        detail=signal_detail,
+        canonical_source=_canonical_detail(signal_detail),
+        evidence_quality="weak",
+        provider_message_id=str(project.get("original_message_id") or ""),
+        observed_at=queued_at,
+    )
+
+
+def classify_stale_manual_projects(projects: Iterable[dict], *, now: datetime, stale_after: timedelta) -> list[RecoverySignal]:
+    signals: list[RecoverySignal] = []
+    for project in projects:
+        if not isinstance(project, dict):
+            continue
+        signal = classify_stale_manual_project(project, now=now, stale_after=stale_after)
+        if signal is not None:
+            signals.append(signal)
+    return signals
 
 
 def fingerprint_signal(signal: RecoverySignal) -> str:

@@ -1366,3 +1366,16 @@ Review: red tests first failed with provider_timeout and critical text facts do 
 - [ ] Merge/deploy and regenerate F0098 so the customer gets a clean preview.
 
 Review: focused retry/source-edit generator slice passed `5 passed, 71 deselected`; touched-script `py_compile` and `git diff --check` passed.
+
+## Flyer Recovery Observation Boundary - 2026-05-26T20:15Z
+
+- Drift-check tag: extends-Hermes
+- Hermes-first analysis: Hermes already provides audit logging, recovery worker bundles, no-live-send worker drafts, and customer-visible success resolution. This slice extends only the deterministic observation boundary so existing Hermes recovery machinery receives the right incidents.
+- [x] Reproduced F0102 attribution failure: `cf_router_intercepted` had `subprocess_rc=0` but nonblank `ack_error=concept_generation_failed ... visual_qa_failed`, so recovery opened no incident.
+- [x] Added regression for router success rows with nonblank `ack_error` becoming recovery incidents.
+- [x] Added regression for stale `manual_review.status=queued` project state opening and queueing a repair bundle even with no failing audit row.
+- [x] Implemented classifier and watchdog state-scan changes.
+- [x] Merged the live PR #272 branch into this worktree before deploy testing so live SLA/parser/render fixes are preserved.
+- [x] Verified focused recovery, self-eval, Flyer generation/QA, SLA/manual queue suites.
+
+Review: recovery watchdog now observes both audit-level `ack_error` failures and durable stale manual-review state. This does not yet grant the worker direct production deploy authority; it queues bounded no-live-send repair work under the existing recovery worker contract.
