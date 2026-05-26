@@ -158,6 +158,7 @@ def _verification_modes(project: FlyerProject) -> list[str]:
 
 
 def _reason_family(reason_code: str) -> str:
+    reason_code = (reason_code or "").strip().lower()
     if reason_code == "source_edit_provider_unavailable":
         return "provider_readiness"
     if reason_code in {"visual_qa_failed", "provider_timeout"}:
@@ -172,6 +173,7 @@ def _reason_family(reason_code: str) -> str:
 
 
 def _operator_action_hint(reason_code: str) -> str:
+    reason_code = (reason_code or "").strip().lower()
     mapping = {
         "source_edit_provider_unavailable": "Configure provider credentials or keep designer-assisted path.",
         "visual_qa_failed": "Review QA blockers and correct layout/text in manual edit.",
@@ -183,6 +185,11 @@ def _operator_action_hint(reason_code: str) -> str:
         "missing_required_facts": "Collect missing required facts from customer before regeneration.",
     }
     return mapping.get(reason_code, "Review request details and choose complete vs close disposition.")
+
+
+def _normalized_reason_code(reason_code: str) -> str:
+    code = (reason_code or "").strip().lower()
+    return code or "unclassified"
 
 
 def _age_priority(age_minutes: int) -> str:
@@ -218,7 +225,7 @@ def list_manual_queue(
             "status": project.status,
             "manual_status": manual.status,
             "manual_reason": manual.reason,
-            "manual_reason_code": manual.reason_code,
+            "manual_reason_code": _normalized_reason_code(str(manual.reason_code)),
             "manual_detail": manual.detail,
             "manual_queued_at": queued_at.isoformat(),
             "age_minutes": age_minutes,
@@ -227,8 +234,8 @@ def list_manual_queue(
             "age_priority": _age_priority(age_minutes),
             "customer_update_due": age_minutes >= 180,
             "asset_ids": [asset.asset_id for asset in project.assets],
-            "reason_family": _reason_family(manual.reason_code),
-            "operator_action_hint": _operator_action_hint(manual.reason_code),
+            "reason_family": _reason_family(str(manual.reason_code)),
+            "operator_action_hint": _operator_action_hint(str(manual.reason_code)),
             "verification_modes": _verification_modes(project),
             "locked_facts": [fact.model_dump(mode="json") for fact in project.locked_facts],
             "qa_blockers": [blocker for report in project.qa_reports for blocker in report.blockers],

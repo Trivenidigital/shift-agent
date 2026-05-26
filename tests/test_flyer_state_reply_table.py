@@ -240,6 +240,38 @@ def test_manual_edit_required_with_completed_review_uses_generic_status_line():
     assert STATUS_LINES["manual_edit_required"] in reply
 
 
+def test_manual_edit_required_reason_code_is_normalized_before_lookup():
+    project = _project(
+        status="manual_edit_required",
+        manual_status="queued",
+        reason_code="visual_qa_failed",
+    ).model_copy(update={
+        "manual_review": _project(
+            status="manual_edit_required",
+            manual_status="queued",
+            reason_code="visual_qa_failed",
+        ).manual_review.model_copy(update={"reason_code": " Visual_QA_Failed "})
+    })
+    reply = build_project_status_reply(project)
+    assert MANUAL_REVIEW_REASON_LINES["visual_qa_failed"] in reply
+
+
+def test_closed_no_send_reason_code_is_normalized_before_lookup():
+    project = _project(
+        status="closed_no_send",
+        manual_status="closed_no_send",
+        reason_code="source_edit_provider_unavailable",
+    ).model_copy(update={
+        "manual_review": _project(
+            status="closed_no_send",
+            manual_status="closed_no_send",
+            reason_code="source_edit_provider_unavailable",
+        ).manual_review.model_copy(update={"reason_code": " Source_Edit_Provider_Unavailable "})
+    })
+    reply = build_project_status_reply(project)
+    assert CLOSED_NO_SEND_REASON_LINES["source_edit_provider_unavailable"] in reply
+
+
 # ---------- reason-code routing into cf-router helpers ----------
 
 def test_cf_router_status_reply_dispatch_uses_source_edit_helper_only_for_source_edit_reason():

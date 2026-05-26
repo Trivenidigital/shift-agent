@@ -375,14 +375,14 @@ def build_project_status_reply(project: FlyerProject) -> str:
         and manual is not None
         and manual_status in {"queued", "in_progress"}
     ):
-        reason_code = (getattr(manual, "reason_code", "") or "unclassified").strip() or "unclassified"
+        reason_code = ((getattr(manual, "reason_code", "") or "unclassified").strip().lower() or "unclassified")
         line = MANUAL_REVIEW_REASON_LINES.get(reason_code, STATUS_LINES["manual_edit_required"])
     elif (
         project.status == "closed_no_send"
         and manual is not None
         and manual_status == "closed_no_send"
     ):
-        reason_code = (getattr(manual, "reason_code", "") or "unclassified").strip() or "unclassified"
+        reason_code = ((getattr(manual, "reason_code", "") or "unclassified").strip().lower() or "unclassified")
         line = CLOSED_NO_SEND_REASON_LINES.get(reason_code, STATUS_LINES["closed_no_send"])
     return (
         "Flyer Studio\n"
