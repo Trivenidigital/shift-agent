@@ -1,0 +1,2 @@
+-rw-r--r-- 1 root root 3880764 May 26 02:49 /tmp/shift-agent-deploy.tgz
+3880764 bytes

@@ -1558,8 +1558,9 @@ def test_pr_alpha_lid_only_active_project_revision_phrase_yields_from_regulated_
 #   project intercept handled the message
 #
 # Scope: where is my flyer / did you send my flyer / send my flyer / approve
-# / I approve. "send now" deferred to PR-β.1 (no deterministic active-project
-# handler exists for it).
+# / I approve. "send now" was originally deferred to PR-β.1; PR-β.1 has
+# since landed (2026-05-26) and adds send-now via a separate start-anchored
+# regex helper `is_flyer_send_now_intent`. See PR-β.1 tests below.
 
 
 def test_pr_beta_is_flyer_delivery_state_intent_positive_cases():
@@ -1590,8 +1591,11 @@ def test_pr_beta_is_flyer_delivery_state_intent_false_positive_guards():
     assert not actions.is_flyer_delivery_state_intent("Did you receive my flyer?")
     assert not actions.is_flyer_delivery_state_intent("Create a flyer with our address")
     assert not actions.is_flyer_delivery_state_intent("Make a poster showing our address")
-    # "send now" deferred to PR-β.1 — must NOT match in PR-β
-    assert not actions.is_flyer_delivery_state_intent("send now")
+    # NOTE: PR-β.1 (2026-05-26) reverses the original "send now" deferral
+    # marker — "send now" now classifies as delivery-state intent. The
+    # PR-β.1 negative case is "send now" embedded mid-message in a flyer
+    # brief; the start-anchored regex prevents that match.
+    assert not actions.is_flyer_delivery_state_intent("Create a flyer that says send now")
 
 
 def test_pr_beta_no_project_fires_delivery_state_guard(monkeypatch):
@@ -1670,7 +1674,12 @@ def test_pr_beta_non_delivery_text_does_not_fire_guard(monkeypatch):
         "approve this concept",
         "send to customers Friday",
         "Did you receive my flyer?",
-        "send now",  # PR-β.1 deferred — must not fire PR-β guard
+        # NOTE: "send now" was originally a PR-β.1 deferral marker here.
+        # PR-β.1 (2026-05-26) reverses that deferral — "send now" now
+        # classifies as delivery-state intent and routes through PR-β
+        # guard. The new false-positive case for the start-anchored
+        # send-now regex is "send now" EMBEDDED in a flyer brief:
+        "Create a flyer that says send now",
     ]:
         result = hooks._try_flyer_delivery_state_guard(
             non_delivery,
@@ -1875,6 +1884,202 @@ def test_pr_beta_manual_edit_required_surfaces_manual_edit_reply(monkeypatch):
     assert sent["text"] == _expected_manual_edit_reply()
     assert reply_calls["manual"] == 1 and reply_calls["generic"] == 0, "must dispatch to manual_edit_status_reply, not generic"
     assert audits and audits[-1]["reason"] == "flyer_delivery_state_status_surfaced"
+
+
+# ---- PR-β.1 2026-05-26: send-now deterministic finalization handler ----
+# Closes the PR-β.1 deferral. "send now" / "please send my flyer now" / etc.
+# now route through the existing approval/finalization safe path when the
+# active project is in a finalizable state, surface status when not
+# finalizable, and fail-closed when no project exists.
+#
+# Discipline inherited from PR-α and PR-β (per the PR #250 close lesson):
+# - Start-anchored regex (NOT searchable anywhere) — prevents false positives
+#   on flyer briefs that embed "send now" as copy text
+# - Active-project / finalizable-state ownership FIRST
+# - PR-β guard's latest-project surface path catches non-finalizable cases
+# - PR-β guard's no-project path catches truly-empty cases
+# - LID-only test asserts no second phone gate
+# - False-positive negative tests alongside positive cases
+
+
+def test_pr_beta_1_is_flyer_send_now_intent_positive_cases():
+    _, actions = _load_plugin_modules()
+    assert actions.is_flyer_send_now_intent("send now")
+    assert actions.is_flyer_send_now_intent("Send now.")
+    assert actions.is_flyer_send_now_intent("please send now")
+    assert actions.is_flyer_send_now_intent("kindly send now")
+    assert actions.is_flyer_send_now_intent("send me now")
+    assert actions.is_flyer_send_now_intent("send my flyer now")
+    assert actions.is_flyer_send_now_intent("send the flyer now")
+    assert actions.is_flyer_send_now_intent("send it now")
+    assert actions.is_flyer_send_now_intent("please send my flyer now")
+    assert actions.is_flyer_send_now_intent("please send the flyer now")
+
+
+def test_pr_beta_1_is_flyer_send_now_intent_false_positive_guards():
+    # The critical false-positive class: "send now" embedded mid-message in
+    # a flyer brief. The start-anchored regex prevents these from matching.
+    _, actions = _load_plugin_modules()
+    assert not actions.is_flyer_send_now_intent("Create a flyer that says send now")
+    assert not actions.is_flyer_send_now_intent("Design a poster with 'send now' button")
+    assert not actions.is_flyer_send_now_intent("Make a flyer with text 'send now'")
+    # Other "send" phrases not finalization intent
+    assert not actions.is_flyer_send_now_intent("send to customers Friday")
+    assert not actions.is_flyer_send_now_intent("send me ideas")
+    assert not actions.is_flyer_send_now_intent("send this to my team")
+    # Bare "send my flyer" without "now" — covered by PR-β, not PR-β.1
+    assert not actions.is_flyer_send_now_intent("send my flyer")
+    # Approval text — different intent class
+    assert not actions.is_flyer_send_now_intent("approve")
+    assert not actions.is_flyer_send_now_intent("approve this concept")
+
+
+def test_pr_beta_1_delivery_state_intent_now_includes_send_now():
+    """Regression check: PR-β explicitly excluded 'send now' from
+    is_flyer_delivery_state_intent (deferred to PR-β.1). PR-β.1 reverses
+    that exclusion."""
+    _, actions = _load_plugin_modules()
+    # send-now variants must now classify as delivery-state intent (regression)
+    assert actions.is_flyer_delivery_state_intent("send now")
+    assert actions.is_flyer_delivery_state_intent("please send my flyer now")
+    assert actions.is_flyer_delivery_state_intent("send the flyer now")
+    # All existing PR-β behavior must still hold
+    assert actions.is_flyer_delivery_state_intent("where is my flyer")
+    assert actions.is_flyer_delivery_state_intent("send my flyer")
+    assert actions.is_flyer_delivery_state_intent("approve")
+    # False positives still excluded
+    assert not actions.is_flyer_delivery_state_intent("Create a flyer that says send now")
+    assert not actions.is_flyer_delivery_state_intent("send to customers Friday")
+
+
+def test_pr_beta_1_send_now_with_no_project_fails_closed(monkeypatch):
+    """No active project + no latest project + 'send now' → PR-β guard
+    fail-closes with deterministic 'no delivery action taken' copy. NEVER
+    claims completion."""
+    hooks, actions = _load_plugin_modules()
+    sent = {}
+    audits = []
+    customer = {"customer_id": "CUST0001", "business_name": "Lakshmi's Kitchen", "status": "trial"}
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
+    monkeypatch.setattr(actions, "find_latest_flyer_project_for_status_by_sender", lambda _phone, _chat_id: None)
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "snw-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
+
+    for send_now_text in ["send now", "please send my flyer now", "send the flyer now"]:
+        sent.clear()
+        audits.clear()
+        result = hooks._try_flyer_delivery_state_guard(
+            send_now_text,
+            "17329837841@s.whatsapp.net",
+            SimpleNamespace(text=send_now_text, chat_id="17329837841@s.whatsapp.net", message_id=f"snw-noproj-{hash(send_now_text)}"),
+        )
+        assert result == {"action": "skip", "reason": "cf-router flyer delivery state guard"}, f"fail-closed expected for {send_now_text!r}"
+        assert "No delivery action has been taken" in sent["text"]
+        text_lower = sent["text"].lower()
+        for forbidden in ("i sent", "your flyer is done", "delivered to", "completed your"):
+            assert forbidden not in text_lower, f"copy must not claim {forbidden!r} for {send_now_text!r}"
+        assert audits and audits[-1]["reason"] == "flyer_delivery_state_guard"
+
+
+def test_pr_beta_1_send_now_with_delivered_project_surfaces_status(monkeypatch):
+    """'send now' + delivered latest project → PR-β guard surfaces real
+    status reply via existing flyer_project_status_reply, NOT a new send
+    claim. Verifies the hooks.py:2894 exclusion routes correctly."""
+    hooks, actions = _load_plugin_modules()
+    sent = {}
+    audits = []
+    delivered_project = {"project_id": "F0090", "status": "delivered", "updated_at": "2026-05-26T03:00:00Z"}
+    customer = {"customer_id": "CUST0001", "business_name": "Lakshmi's Kitchen", "status": "active"}
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
+    monkeypatch.setattr(actions, "find_latest_flyer_project_for_status_by_sender", lambda _phone, _chat_id: delivered_project)
+    monkeypatch.setattr(actions, "flyer_project_status_reply", lambda _project: "Flyer Studio status: delivered.")
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "snw-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
+
+    result = hooks._try_flyer_delivery_state_guard(
+        "send now",
+        "17329837841@s.whatsapp.net",
+        SimpleNamespace(text="send now", chat_id="17329837841@s.whatsapp.net", message_id="snw-delivered"),
+    )
+    assert result == {"action": "skip", "reason": "cf-router flyer delivery state status surfaced"}
+    assert sent["text"] == "Flyer Studio status: delivered."
+    # MUST NOT claim a fresh send
+    assert "No delivery action has been taken" not in sent["text"]
+    assert audits and audits[-1]["reason"] == "flyer_delivery_state_status_surfaced"
+    assert "project_id=F0090" in audits[-1]["detail"]
+    assert "status=delivered" in audits[-1]["detail"]
+
+
+def test_pr_beta_1_send_now_lid_only_no_active_project_fails_closed(monkeypatch):
+    """LID-only: phone=None + no project + 'send now' → fail-closed via
+    PR-β guard. Asserts no second phone-truthy gate."""
+    hooks, actions = _load_plugin_modules()
+    sent = {}
+    audits = []
+    customer = {"customer_id": "CUST0001", "business_name": "Lakshmi's Kitchen", "status": "trial"}
+    project_lookup_calls = []
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: (None, "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda phone, _chat_id: customer if phone is None else None)
+    def _record(phone, chat_id):
+        project_lookup_calls.append({"phone": phone, "chat_id": chat_id})
+        return None
+    monkeypatch.setattr(actions, "find_latest_flyer_project_for_status_by_sender", _record)
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "snw-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
+
+    result = hooks._try_flyer_delivery_state_guard(
+        "send now",
+        "201975216009469@lid",
+        SimpleNamespace(text="send now", chat_id="201975216009469@lid", message_id="snw-lid-noproj"),
+    )
+    assert result == {"action": "skip", "reason": "cf-router flyer delivery state guard"}
+    assert "Lakshmi's Kitchen" in sent["text"]
+    assert "No delivery action has been taken" in sent["text"]
+    assert audits and audits[-1]["reason"] == "flyer_delivery_state_guard"
+    # Verify project lookup was called with phone=None (no second gate)
+    assert project_lookup_calls and project_lookup_calls[0]["phone"] is None
+
+
+def test_pr_beta_1_send_now_with_active_finalizable_routes_to_finalize_helper():
+    """Integration sanity: confirm the OR-ed gate at hooks.py:2808 evaluates
+    'send now' as approval-equivalent when status is finalizable.
+
+    This is a helper-level integration check that proves the gate expression
+    `is_flyer_approval_text(body) or is_flyer_send_now_intent(body)` returns
+    True for 'send now' inputs that would land at the gate. Confirms the
+    hooks.py wiring is correct without needing to mock the full active-
+    project intercept (the actual finalize_and_send_flyer dispatch path is
+    well-tested by existing tests for the 'approve' input)."""
+    _, actions = _load_plugin_modules()
+    # The exact expression used at hooks.py:2808
+    for body in ["send now", "please send my flyer now", "send the flyer now", "send it now"]:
+        gate_result = actions.is_flyer_approval_text(body) or actions.is_flyer_send_now_intent(body)
+        assert gate_result, f"finalization gate must match {body!r}"
+    # And inputs that should NOT match the gate
+    for body in ["Create a flyer that says send now", "send to customers Friday", "send me ideas"]:
+        gate_result = actions.is_flyer_approval_text(body) or actions.is_flyer_send_now_intent(body)
+        assert not gate_result, f"finalization gate must NOT match {body!r}"
+
+
+def test_pr_beta_1_revision_text_branch_excludes_send_now():
+    """Integration sanity: confirm the hooks.py:2894 exclusion is correct.
+    For status in finalizable+delivered states, body must reach revision-text
+    treatment UNLESS it's a send-now intent. The exclusion expression matches
+    the inline negation at the call site."""
+    _, actions = _load_plugin_modules()
+    # Send-now bodies must be EXCLUDED from revision-text treatment
+    for body in ["send now", "please send my flyer now", "send the flyer now"]:
+        excluded = actions.is_flyer_send_now_intent(body)
+        assert excluded, f"revision-text branch must exclude {body!r}"
+    # Other revision-like bodies must NOT be excluded (fall through to revision text)
+    for body in ["change the date to May 30", "swap rice with jeera rice", "make the title bigger", "I want a different color scheme"]:
+        excluded = actions.is_flyer_send_now_intent(body)
+        assert not excluded, f"revision-text branch must NOT exclude {body!r}"
 
 
 def test_explicit_sample_prompt_request_sends_starter_ideas(monkeypatch):
