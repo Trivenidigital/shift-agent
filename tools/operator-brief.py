@@ -293,8 +293,32 @@ def summarize_flyer_evaluation_report(path: Path | None) -> list[str]:
             for details in [item.get("evidence_details") if isinstance(item.get("evidence_details"), dict) else {}]
             if isinstance(details.get("queued_age_minutes"), (int, float))
         ]
+        reason_counts: dict[str, int] = {}
+        status_counts = {"queued": 0, "in_progress": 0}
+        provider_config_gaps = 0
+        for item in stale:
+            details = item.get("evidence_details") if isinstance(item.get("evidence_details"), dict) else {}
+            reason = str(details.get("manual_reason_code") or "unknown")
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+            status = str(details.get("manual_status") or "").strip().lower()
+            if status in status_counts:
+                status_counts[status] += 1
+            if details.get("provider_config_gap") is True:
+                provider_config_gaps += 1
+        by_reason = ", ".join(
+            f"{key}:{reason_counts[key]}"
+            for key in sorted(reason_counts)
+        )
         oldest = max(ages) if ages else 0
-        lines.append(f"Manual queue: stale_source_edits={len(stale)}; oldest={oldest:g}min{active_suffix(stale)}")
+        lines.append(
+            "Manual queue: "
+            f"stale_total={len(stale)}; "
+            f"oldest={oldest:g}min; "
+            f"by_reason={by_reason}; "
+            f"status_mix=in_progress:{status_counts['in_progress']}, queued:{status_counts['queued']}; "
+            f"provider_config_gaps={provider_config_gaps}"
+            f"{active_suffix(stale)}"
+        )
     source_items = [
         item for item in incidents
         if item.get("type") in {"source_contract_missing", "source_contract_locked_fact_gap"}

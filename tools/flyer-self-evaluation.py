@@ -644,6 +644,33 @@ def project_incidents(
     generation_stale_minutes: int,
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+
+    def _manual_reason_family(reason_code: str) -> str:
+        if reason_code == "source_edit_provider_unavailable":
+            return "provider_readiness"
+        if reason_code in {"visual_qa_failed", "provider_timeout"}:
+            return "visual_quality"
+        if reason_code == "missing_required_facts":
+            return "missing_facts"
+        if reason_code.startswith("reference_"):
+            return "reference_intake"
+        return "other"
+
+    def _looks_like_provider_config_gap(reason_code: str, manual_detail: str) -> bool:
+        if reason_code != "source_edit_provider_unavailable":
+            return False
+        detail = manual_detail.lower()
+        cues = (
+            "missing",
+            "not configured",
+            "not set",
+            "unset",
+            "key",
+            "credential",
+            "env",
+        )
+        return any(cue in detail for cue in cues)
+
     for project in projects:
         if not isinstance(project, dict):
             continue
@@ -677,6 +704,7 @@ def project_incidents(
         queued_age = age_minutes(manual.get("queued_at") or project.get("updated_at"), now)
         manual_reason_code = str(manual.get("reason_code") or "")
         manual_status = str(manual.get("status") or "")
+        manual_detail = str(manual.get("detail") or "")
         if (
             project.get("status") == "manual_edit_required"
             and manual_reason_code in STALE_MANUAL_REVIEW_REASONS
@@ -691,6 +719,8 @@ def project_incidents(
             )
             details["manual_reason_code"] = manual_reason_code
             details["manual_status"] = manual_status or "queued"
+            details["reason_family"] = _manual_reason_family(manual_reason_code)
+            details["provider_config_gap"] = _looks_like_provider_config_gap(manual_reason_code, manual_detail)
             if manual_reason_code == "source_edit_provider_unavailable":
                 incident_type = "manual_source_edit_stale"
                 suggested_action = (
