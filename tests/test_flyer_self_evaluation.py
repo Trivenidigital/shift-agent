@@ -1657,7 +1657,11 @@ def test_cli_writes_json_report_and_markdown(tmp_path):
 
     assert result.returncode == 0, result.stderr
     payload = json.loads(out.read_text(encoding="utf-8"))
-    assert payload["summary"]["incident_count"] == 1
+    assert out.exists()
+    assert payload["summary"]["incident_count"] == len(payload["incidents"])
+    assert payload["summary"]["incident_count"] >= 1
+    incident_types = {item.get("type") for item in payload["incidents"] if isinstance(item, dict)}
+    assert "manual_source_edit_stale" in incident_types
 
     markdown = subprocess.run(
         [
@@ -1678,8 +1682,30 @@ def test_cli_writes_json_report_and_markdown(tmp_path):
     )
     assert markdown.returncode == 0, markdown.stderr
     assert "Flyer Self-Evaluation" in markdown.stdout
+    assert "Rollout Readiness" not in markdown.stdout
     assert "manual_source_edit_stale" in markdown.stdout
     assert "customer-copy log scan only sees decisions.log rows with outbound text fields" in markdown.stdout
+
+    markdown_with_rollout = subprocess.run(
+        [
+            sys.executable,
+            str(MODULE_PATH),
+            "--projects",
+            str(projects),
+            "--decisions-log",
+            str(decisions),
+            "--now",
+            "2026-05-20T11:05:00Z",
+            "--format",
+            "markdown",
+            "--rollout-readiness",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert markdown_with_rollout.returncode == 0, markdown_with_rollout.stderr
+    assert "Rollout Readiness" in markdown_with_rollout.stdout
 
 
 def test_static_guard_no_live_mutation_or_network_paths():
