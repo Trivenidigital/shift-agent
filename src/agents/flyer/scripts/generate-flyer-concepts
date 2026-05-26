@@ -107,8 +107,6 @@ def _mentions_saved_brand_assets(project) -> bool:
     return any(token in text for token in (
         "saved logo",
         "saved business name",
-        "saved address",
-        "saved phone",
         "brand asset",
         "use logo",
         "use the logo",

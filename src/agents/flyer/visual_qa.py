@@ -156,9 +156,18 @@ def _value_present_in(
     return _text_value_present_in(normalized_text, normalized_value)
 
 
-def _locked_fact_present_in_ocr(project: FlyerProject, fact_id: str, normalized_text: str, raw_text: str) -> bool:
+def _locked_fact_present_in_ocr(
+    project: FlyerProject,
+    fact_id: str,
+    normalized_text: str,
+    raw_text: str,
+    *,
+    source: str | None = None,
+) -> bool:
     for fact in project.locked_facts:
         if fact.fact_id != fact_id or not str(fact.value or "").strip():
+            continue
+        if source is not None and getattr(fact, "source", "") != source:
             continue
         return _value_present_in(
             raw_text if _locked_fact_uses_phone_match(fact_id=fact.fact_id, label=fact.label, value=fact.value) else normalized_text,
@@ -181,9 +190,21 @@ def _can_skip_exact_business_name(project: FlyerProject, normalized_text: str, r
         return False
     if not _locked_fact_present_in_ocr(project, "campaign_title", normalized_text, raw_text):
         return False
-    if policy.require_contact_anchor and not _locked_fact_present_in_ocr(project, "contact_phone", normalized_text, raw_text):
+    if policy.require_contact_anchor and not _locked_fact_present_in_ocr(
+        project,
+        "contact_phone",
+        normalized_text,
+        raw_text,
+        source="customer_profile",
+    ):
         return False
-    if policy.require_location_anchor and not _locked_fact_present_in_ocr(project, "location", normalized_text, raw_text):
+    if policy.require_location_anchor and not _locked_fact_present_in_ocr(
+        project,
+        "location",
+        normalized_text,
+        raw_text,
+        source="customer_profile",
+    ):
         return False
     return True
 

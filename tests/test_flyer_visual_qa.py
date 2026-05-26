@@ -230,6 +230,36 @@ def test_visual_qa_still_requires_campaign_and_profile_anchors_when_brand_absent
     assert "missing required visible fact: location" in report.blockers
 
 
+def test_visual_qa_does_not_skip_business_name_with_customer_text_anchors(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    now = datetime(2026, 5, 26, tzinfo=timezone.utc)
+    project = FlyerProject(
+        project_id="F0115",
+        status="awaiting_final_approval",
+        customer_phone="+17329837841",
+        created_at=now,
+        updated_at=now,
+        original_message_id="m-customer-text-anchors",
+        raw_request="Create a Special Biryani's Flyer for my event at 1 Event Rd. Phone +19045550104.",
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Special Biryani's", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+19045550104", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="location", label="Location", value="1 Event Rd", source="customer_text", required=True),
+        ],
+    )
+    artifact = _write_sidecar(
+        tmp_path,
+        "SPECIAL BIRYANI'S\n1 Event Rd\n+1 904 555 0104",
+    )
+
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert report.status == "failed"
+    assert "missing required visible fact: business_name" in report.blockers
+
+
 def test_visual_qa_requires_exact_business_name_for_saved_brand_requests(tmp_path):
     from agents.flyer.visual_qa import run_visual_qa
 
@@ -258,6 +288,35 @@ def test_visual_qa_requires_exact_business_name_for_saved_brand_requests(tmp_pat
 
     assert report.status == "failed"
     assert "missing required visible fact: business_name" in report.blockers
+
+
+def test_visual_qa_allows_saved_contact_policy_without_exact_brand(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    now = datetime(2026, 5, 26, tzinfo=timezone.utc)
+    project = FlyerProject(
+        project_id="F0116",
+        status="awaiting_final_approval",
+        customer_phone="+17329837841",
+        created_at=now,
+        updated_at=now,
+        original_message_id="m-saved-contact",
+        raw_request="Create a Special Biryani's flyer. Use saved address and phone.",
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Special Biryani's", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+        ],
+    )
+    artifact = _write_sidecar(
+        tmp_path,
+        "SPECIAL BIRYANI'S\nChicken Biryani $16.99\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
+    )
+
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert report.status == "passed", report.blockers
 
 
 def test_visual_qa_requires_exact_business_name_for_use_logo_requests(tmp_path):
@@ -342,6 +401,36 @@ def test_visual_qa_blocks_unlabeled_wrong_business_masthead_even_with_profile_an
     artifact = _write_sidecar(
         tmp_path,
         "OTHER RESTAURANT\nSPECIAL BIRYANI'S\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
+    )
+
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert report.status == "failed"
+    assert "visible wrong business/brand: Other Restaurant" in report.blockers
+
+
+def test_visual_qa_blocks_titlecase_wrong_business_masthead_even_with_profile_anchors(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    now = datetime(2026, 5, 26, tzinfo=timezone.utc)
+    project = FlyerProject(
+        project_id="F0117",
+        status="awaiting_final_approval",
+        customer_phone="+17329837841",
+        created_at=now,
+        updated_at=now,
+        original_message_id="m-wrong-titlecase",
+        raw_request="Create a Special Biryani's Flyer. Use address and phone number stored.",
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Special Biryani's", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+        ],
+    )
+    artifact = _write_sidecar(
+        tmp_path,
+        "Other Restaurant\nSPECIAL BIRYANI'S\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
     )
 
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)

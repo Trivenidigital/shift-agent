@@ -18,7 +18,7 @@ _SAVED_BRAND_RE = re.compile(
     re.IGNORECASE,
 )
 _SAVED_BRAND_TOKEN_RE = re.compile(
-    r"\b(?:saved\s+(?:logo|business\s+name|address|phone)|brand\s+asset|use\s+(?:the\s+)?logo)\b",
+    r"\b(?:saved\s+(?:logo|business\s+name)|brand\s+asset|use\s+(?:the\s+)?logo)\b",
     re.IGNORECASE,
 )
 _ORG_SUFFIX_RE = re.compile(
@@ -42,7 +42,10 @@ def _clean(value: str) -> str:
 
 
 def _norm(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", (value or "").casefold()).strip()
+    text = (value or "").casefold()
+    for ch in ("'", "`", "’", "‘", "ʼ"):
+        text = text.replace(ch, "")
+    return re.sub(r"[^a-z0-9]+", " ", text).strip()
 
 
 def _norm_contains(haystack: str, needle: str) -> bool:
@@ -144,11 +147,17 @@ def visible_wrong_brand_blockers(project: FlyerProject, extracted_text: str) -> 
         candidate = _clean(line).strip(" .,:;")
         if not candidate or len(candidate) > 80:
             continue
+        if any(ch.isdigit() for ch in candidate) or "$" in candidate:
+            continue
+        if len(re.findall(r"[A-Za-z][A-Za-z'&.-]*", candidate)) > 6:
+            continue
         letters = [ch for ch in candidate if ch.isalpha()]
         if len(letters) < 4:
             continue
         uppercase_ratio = sum(1 for ch in letters if ch.isupper()) / len(letters)
-        if uppercase_ratio < 0.8 or not _ORG_SUFFIX_RE.search(candidate):
+        if uppercase_ratio < 0.8 and not candidate.istitle():
+            continue
+        if not _ORG_SUFFIX_RE.search(candidate):
             continue
         if allowed_identity_visible(candidate):
             continue

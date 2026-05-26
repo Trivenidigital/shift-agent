@@ -1390,6 +1390,10 @@ Review: recovery watchdog now observes both audit-level `ack_error` failures and
 - [x] Build semantic QA/render slice with TDD.
 - [x] Create PR #277 and review PR with two parallel agents.
 - [x] Fold first PR-review blockers: install `flyer_semantic_brief` in production flat layout, preserve saved-logo retry exact-brand behavior, block known source-contract brands even when `forbidden_substrings` is empty, and reject conservative unlabeled wrong-brand mastheads while still allowing campaign-title flyers with stored contact anchors.
-- [ ] Re-run two parallel PR reviewers after blocker fixes.
+- [x] Re-run two parallel PR reviewers after blocker fixes.
+- [x] Fold second PR-review blockers: exact-brand omission now requires profile-owned contact/address anchors, title-case org mastheads are blocked, stored phone/address phrasing no longer forces exact brand unless logo/brand is requested, and apostrophe-normalized account names are not misclassified as wrong brands.
+- [ ] Re-run final PR review after second blocker fixes.
 
 Review: focused semantic brief gates passed after the first blocker-fix pass: `tests/test_flyer_visual_qa.py tests/test_flyer_facts.py tests/test_flyer_renderer.py` -> `122 passed`; `tests/test_flyer_generate_concepts.py tests/test_flyer_create_project.py` -> `47 passed`; `tests/test_flyer_scripts_static.py` -> `34 passed`; touched-file `py_compile` passed; `git diff --check` clean.
+
+Second blocker-fix verification: `tests/test_flyer_visual_qa.py tests/test_flyer_facts.py tests/test_flyer_renderer.py` -> `125 passed`; `tests/test_flyer_generate_concepts.py tests/test_flyer_create_project.py` -> `47 passed`; `tests/test_flyer_scripts_static.py` -> `34 passed`; touched-script `py_compile` passed; `git diff --check` clean.
