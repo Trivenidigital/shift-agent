@@ -203,6 +203,17 @@ def _make_event(text, chat_id, message_id=None):
     return event
 
 
+def test_flyer_manual_edit_status_reply_uses_reason_specific_copy(mods):
+    _, actions_mod = mods
+
+    reply = actions_mod.flyer_manual_edit_status_reply({
+        "status": "manual_edit_required",
+        "manual_review": {"reason_code": "visual_qa_failed"},
+    })
+
+    assert "quality checks" in reply.lower()
+
+
 # ============================================================================
 # F8 — owner approval interception
 # ============================================================================

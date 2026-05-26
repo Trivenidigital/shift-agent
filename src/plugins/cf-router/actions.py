@@ -2066,11 +2066,23 @@ def flyer_manual_edit_status_reply(project: dict) -> str:
             from agents.flyer.workflow import MANUAL_REVIEW_REASON_LINES  # type: ignore
         except Exception:
             MANUAL_REVIEW_REASON_LINES = {
+                "unclassified": (
+                    "This project is queued for designer review. "
+                    "I'll follow up here when it's ready."
+                ),
                 "source_edit_provider_unavailable": (
                     "Your edit is queued for a designer to apply by hand. "
                     "I have the requested changes and the saved account details "
                     "\u2014 no extra information needed from you."
-                )
+                ),
+                "visual_qa_failed": (
+                    "The generated flyer didn't pass our quality checks. "
+                    "It's queued for designer review and I'll send the corrected version here when it's ready."
+                ),
+                "reference_unsupported": (
+                    "The uploaded file format is not supported for exact edit. "
+                    "Please re-upload as JPG or PNG and we'll continue."
+                ),
             }
     line = MANUAL_REVIEW_REASON_LINES.get(
         reason_code,
