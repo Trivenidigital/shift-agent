@@ -9,7 +9,7 @@
 - [x] Design review by 2 parallel agents.
 - [x] Apply design review fixes.
 - [x] Build with TDD.
-- [ ] Create PR.
+- [x] Create PR.
 - [ ] PR review by 3 parallel agents.
 - [ ] Apply PR review fixes.
 - [ ] Merge and deploy.
