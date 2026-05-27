@@ -255,6 +255,12 @@ def test_connected_candidates_are_candidate_only_not_false_unset(tmp_path: Path)
     assert qbo["configured_status"] == "candidate_only"
 
 
+def test_payment_mcp_candidates_include_stripe_and_razorpay():
+    names = {row.name for row in cr.CONNECTOR_CANDIDATES}
+    assert "Stripe MCP" in names
+    assert "Razorpay MCP" in names
+
+
 def test_connector_status_distinguishes_partial_and_complete_env_sets(tmp_path: Path):
     partial_env = tmp_path / ".partial.env"
     partial_env.write_text("QUICKBOOKS_CLIENT_ID=id-only\nPAYPAL_ACCESS_TOKEN=token-only\n", encoding="utf-8")

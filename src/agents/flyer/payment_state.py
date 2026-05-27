@@ -85,11 +85,21 @@ def activation_event_state(
     expected_amount_cents: int,
     expected_currency: str,
 ) -> FlyerPaymentState:
+    normalized_provider = provider.strip().lower()
+    normalized_currency = currency.strip().upper()
+    normalized_expected_currency = expected_currency.strip().upper()
     if not payment_reference.strip():
         return "none"
-    if provider != "manual" and amount_cents is None:
+    if normalized_provider not in {"manual", "stripe", "razorpay", "other"}:
         return "payment_pending"
-    if (currency or expected_currency).upper() != expected_currency.upper():
+    if normalized_provider != "manual" and amount_cents is None:
+        return "payment_pending"
+    if not normalized_expected_currency:
+        return "payment_pending"
+    if normalized_provider != "manual" and not normalized_currency:
+        return "payment_pending"
+    effective_currency = normalized_currency or normalized_expected_currency
+    if effective_currency != normalized_expected_currency:
         return "payment_pending"
     if amount_cents is not None and amount_cents != expected_amount_cents:
         return "payment_pending"

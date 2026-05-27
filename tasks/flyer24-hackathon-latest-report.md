@@ -1,13 +1,13 @@
 # Flyer24 Hackathon Latest Report
 
-Updated: 2026-05-27T04:26:00Z
+Updated: 2026-05-27T06:33:00Z
 
 ## Current batch
-- Branch: `codex/flyer24-batch-cockpit-health-consolidation-202605270319`
-- Scope: resolve PR #291 CI regression and harden manual-queue health detail so mixed/single reason backlogs are explicit in `/flyer/health`.
-- Root-cause evidence: CI failure on #291 (`test_source_edit_detail_mentions_mixed_reason_backlog`) showed `source_edit_provider` detail dropped per-reason counts and emitted a generic blocker phrase only.
-- Risk: low (read-only health detail text + test coverage; no payment/account/quota mutation).
-- Hermes/MCP-first: Hermes owns ingress, identity, audit, and state substrate. This batch is net-new cockpit visibility formatting/tests only; no connector/payment runtime behavior change.
+- Branch: `codex/flyer24-batch-payment-contract-reland-202605270625`
+- Scope: re-land payment activation contract hardening and MCP readiness metadata from fresh `main`, with focused tests only.
+- Root-cause evidence: activation helper accepted unknown providers and readiness catalog missed Razorpay MCP candidate entry.
+- Risk: medium (money-adjacent fail-closed validation/readiness metadata; no live checkout/webhook/provider mutation).
+- Hermes/MCP-first: Hermes/MCP remain the connector substrate; this batch only hardens local provider-neutral contract checks and read-only readiness catalog metadata.
 
 ## PR queue classification (before this batch)
 - #280 `fix(flyer): restore cockpit auth override compatibility and source-edit health detail` - mergeable + green; low-risk visibility/auth compatibility.
@@ -19,14 +19,15 @@ Updated: 2026-05-27T04:26:00Z
 - #254 `fix(flyer): restore CTA/account routing and intake ack fail-closed behavior` - conflicting.
 
 ## Running PR list (hackathon)
-- #254 `fix(flyer): restore CTA/account routing and intake ack fail-closed behavior` - open.
-- #256 `fix(flyer): tighten payment activation contract and MCP readiness catalog` - open.
-- #268 `fix(flyer): harden billing provider readiness and cockpit visibility` - open.
-- #271 `fix(flyer): restore account/manual-edit routing compatibility` - open.
+- #254 `fix(flyer): restore CTA/account routing and intake ack fail-closed behavior` - closed as superseded.
+- #256 `fix(flyer): tighten payment activation contract and MCP readiness catalog` - closed (to re-land cleanly on latest main).
+- #268 `fix(flyer): harden billing provider readiness and cockpit visibility` - closed as superseded by #291 and follow-ons.
+- #271 `fix(flyer): restore account/manual-edit routing compatibility` - closed as superseded.
 - #279 `fix(flyer): expand source-edit/manual-queue health visibility` - closed as superseded by #291.
 - #280 `fix(flyer): restore cockpit auth override compatibility and source-edit health detail` - closed as superseded by #291.
-- #284 `fix(flyer): resolve cf-router routing and dedupe regressions` - open.
-- #291 `fix(flyer): consolidate cockpit auth compatibility and manual-queue health visibility` - open (replacement for #279/#280).
+- #284 `fix(flyer): resolve cf-router routing and dedupe regressions` - closed as superseded.
+- #291 `fix(flyer): consolidate cockpit auth compatibility and manual-queue health visibility` - merged.
+- Pending new PR (this batch): payment contract re-land branch above.
 
 ## PR queue classification refresh (post-main@91274c4)
 - #280: superseded by this consolidated branch (same target files, cleanly rebased on latest main).
@@ -38,8 +39,8 @@ Updated: 2026-05-27T04:26:00Z
 - #284: blocked/dirty due main drift; likely superseded by landed routing guardrail commits + additional replay updates, needs rebase verdict.
 
 ## Verification for this batch
-- `/opt/codex-flyer-autodev-venv/bin/python -m pip install -e web/backend`
-- `/opt/codex-flyer-autodev-venv/bin/python -m pytest -q web/backend/tests/test_flyer_health.py -k "mixed_reason_backlog or single_reason_backlog_without_placeholder_phrase or manual_queue_impact_reports_stale_reason_counts or source_edit_detail_surfaces_queue_impact_when_present"` (pass: 4)
-- `/opt/codex-flyer-autodev-venv/bin/python -m pytest -q web/backend/tests` (pass: 137, skipped: 1)
-- `python3 -m py_compile web/backend/app/routers/flyer.py web/backend/tests/test_flyer_health.py`
+- `python3 -m py_compile src/agents/flyer/payment_state.py src/platform/credential_readiness.py tests/test_flyer_payment_state.py tests/test_credential_readiness.py`
+- `pytest -q tests/test_flyer_payment_state.py tests/test_credential_readiness.py -k "activation_event or payment_mcp_candidates_include_stripe_and_razorpay"` (pass: 6)
+- `pytest -q tests/test_flyer_guest_order.py -k "amount or currency or provider or payment_reference"` (pass: 8)
+- `pytest -q tests/test_flyer_onboarding.py -k "payment_reference or pending_plan_payment_state or upgrade"` (pass: 4)
 - `git diff --check`
