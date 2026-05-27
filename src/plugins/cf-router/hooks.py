@@ -119,7 +119,9 @@ _SAMPLE_PROMPT_REQUEST = re.compile(
     r"|\b(?:help|need|suggest|share|give|show|send|provide)\b.{0,30}"
     r"\b(?:\d+\s+)?(?:idea|ideas|prompt|prompts|example|examples|hook|hooks|caption|captions|copy|copies|line|lines|text|template|templates|tagline|taglines|slogan|slogans|punchline|punchlines|option|options)\b.{0,40}"
     r"\b(?:for|about|on)\b.{0,30}\b(?:weekend|offer|promotion|promo|campaign|marketing|flyer|business|shop|store|poster|ad|ads)\b"
-    r"|\b(?:what(?:'s| is| are)|any)\b.{0,40}\b(?:promo|promotion|marketing|campaign|flyer|flier|poster|ad|ads|business|shop|store|offer)\b.{0,40}\b(?:idea|ideas|caption|captions|copy|copies|prompt|prompts|tagline|taglines|slogan|slogans|punchline|punchlines|option|options)\b",
+    r"|\b(?:what(?:'s| is| are)|any)\b.{0,40}\b(?:promo|promotion|marketing|campaign|flyer|flier|poster|ad|ads|business|shop|store|offer)\b.{0,40}\b(?:idea|ideas|caption|captions|copy|copies|prompt|prompts|tagline|taglines|slogan|slogans|punchline|punchlines|option|options)\b"
+    r"|\bwhat\s+can\s+you\s+suggest\b.{0,60}\b(?:for|about|on)\b.{0,40}\b(?:flyer|flier|poster|ad|ads|promo|promotion|campaign|offer|business|shop|store)\b"
+    r"|\bwhat\s+should\s+i\s+write\b.{0,60}\b(?:for|about|on)\b.{0,40}\b(?:flyer|flier|poster|ad|ads|promo|promotion|campaign|offer)\b",
     re.IGNORECASE,
 )
 
