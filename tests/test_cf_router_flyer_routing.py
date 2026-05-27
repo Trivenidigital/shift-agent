@@ -137,6 +137,12 @@ def test_delivered_existing_flyer_media_revision_stays_on_active_project(monkeyp
     monkeypatch.setattr(actions, "trigger_generate_flyer_concepts", lambda project_id: (True, f"generated {project_id}"))
     monkeypatch.setattr(actions, "send_flyer_concept_previews", lambda _chat_id, project_id: preview_calls.append(project_id) or (True, "preview-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
+    # Test fixture's updated_at is fixed at 2026-05-25T18:09:56Z, which becomes
+    # >24h stale relative to wall-clock once the P0-1 stale-project guard's
+    # `delivered` threshold elapses. The guard's behavior is exercised by
+    # dedicated tests; for this revision-capture path we pin staleness=False
+    # so the test stays deterministic regardless of when it runs.
+    monkeypatch.setattr(actions, "is_stale_for_new_request", lambda _project: False)
 
     result = hooks._try_flyer_active_project_intercept(
         text,
