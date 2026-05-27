@@ -626,9 +626,18 @@ _DECISIONS_LOG_LOCK = Path(str(_DECISIONS_LOG_PATH) + ".lock")
 
 
 # Scripts in this set may call bridge_post / bridge_send_media / bridge_send_cta
-# with action_context=None. Every other caller must pass a non-None
+# WITHOUT an explicit action_context kwarg (i.e. the caller relies on the
+# parameter's default). Every other caller MUST pass a non-None
 # ActionExecutionContext OR the chokepoint refuses the send and emits a
 # regulated_send_missing_action_context audit row.
+#
+# PR-ζ.1b 2026-05-26 update: cf-router actions.py + hooks.py callsites have
+# been migrated to pass action_context explicitly at every site and are no
+# longer in the allowlist; the chokepoint now enforces ActionExecutionContext
+# attribution across the entire customer-facing send surface. The remaining
+# entries are scripts that legitimately have no business-action context
+# (system health checks, owner-only digests, post-closure customer notify,
+# flat-deploy adapter callers awaiting their own follow-up PRs).
 #
 # Adding a new entry requires updating
 # tests/test_send_chokepoint_null_context_allowlist.py (PR-ζ static gate)
@@ -655,7 +664,11 @@ SAFE_IO_NULL_CONTEXT_ALLOWLIST: frozenset[str] = frozenset({
     # as _default_bridge` then `bridge_send(chat_id, text)` at line 634 — the
     # injected callable is invisible to the static gate; runtime resolver
     # lands here. NOT a regulated surface (post-closure notify is informational).
-    "manual_queue.py",
+    # PR-ζ.1b 2026-05-26 — deployed as flyer_manual_queue.py per
+    # shift-agent-deploy.sh flat-rename (NOT manual_queue.py — the source-tree
+    # basename never matches at runtime). Refusal-row evidence at
+    # tasks/audits/pr-zeta-1b-blockers-2026-05-26.md.
+    "flyer_manual_queue.py",
     # Catering / expense — adapter callers via bridge_post_2tuple.
     # Migrating to real ActionExecutionContext is a follow-up PR per the
     # PR-ζ spec ("NO mass call-site updates").
