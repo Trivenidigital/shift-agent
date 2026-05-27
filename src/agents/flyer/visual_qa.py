@@ -44,6 +44,11 @@ _PHONE_DIGITS_RE = re.compile(r"\D+")
 # stray "17" elsewhere in the OCR doesn't glue onto the locked phone's digits.
 _PHONE_RUN_RE = re.compile(r"[\d\s\-().+/]{8,}")
 REGIONAL_SCRIPT_RE = re.compile(r"[\u0900-\u097F\u0A00-\u0A7F\u0A80-\u0AFF\u0B80-\u0BFF\u0C00-\u0C7F\u0C80-\u0CFF\u0D00-\u0D7F]")
+OPERATIONAL_CLAIM_PATTERNS = (
+    ("delivery", re.compile(r"\b(?:whats\s*app|whatsapp)?\s*delivery\b|\bwe\s+deliver\b", re.IGNORECASE)),
+    ("catering", re.compile(r"\bcatering\s+(?:available|orders?|service)\b|\bwe\s+cater\b", re.IGNORECASE)),
+    ("payment", re.compile(r"\b(?:cash\s*app|zelle|venmo|paypal|online\s+payment|payment\s+accepted)\b", re.IGNORECASE)),
+)
 
 
 def _normalize_text_for_match(text: str) -> str:
@@ -246,6 +251,26 @@ def _requires_english_only(project: FlyerProject) -> bool:
         or "no regional indian language" in text
         or "no regional languages" in text
     )
+
+
+def _unrequested_operational_claim_blockers(project: FlyerProject, extracted_text: str) -> list[str]:
+    source_text = " ".join(
+        str(value or "")
+        for value in (
+            project.raw_request,
+            getattr(project.fields, "notes", ""),
+            *(fact.value for fact in project.locked_facts),
+        )
+    ).casefold()
+    blockers: list[str] = []
+    for claim, pattern in OPERATIONAL_CLAIM_PATTERNS:
+        if claim in source_text:
+            continue
+        if pattern.search(extracted_text or ""):
+            blockers.append(f"unrequested operational claim visible: {claim}")
+    return blockers
+
+
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_TIMEOUT_SEC = 60
 VISION_QA_MODEL = os.environ.get("FLYER_VISUAL_QA_MODEL") or os.environ.get("VISION_MODEL") or "openai/gpt-4o-mini"
@@ -385,6 +410,7 @@ def run_visual_qa(
         blockers.append("placeholder text is visible in generated flyer")
     if _requires_english_only(project) and REGIONAL_SCRIPT_RE.search(extracted_text):
         blockers.append("English-only flyer contains regional/non-English script")
+    blockers.extend(_unrequested_operational_claim_blockers(project, extracted_text))
     blockers.extend(note for note in provider_notes if "placeholder" in note.lower() or "unreadable" in note.lower() or "garbled" in note.lower())
     blockers.extend(visible_wrong_brand_blockers(project, extracted_text))
     skip_business_name_exact = _can_skip_exact_business_name(project, normalized, extracted_text)

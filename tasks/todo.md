@@ -1415,3 +1415,12 @@ Post-review fix: added campaign-title exemption for the unlabeled org-suffix mas
 Review: `tests/test_flyer_renderer.py` -> `67 passed`; `tests/test_flyer_visual_qa.py tests/test_flyer_generate_concepts.py` -> `50 passed`; full focused gate `tests/test_flyer_facts.py tests/test_flyer_renderer.py tests/test_flyer_visual_qa.py tests/test_flyer_scripts_static.py` -> `160 passed`; `tests/test_flyer_generate_concepts.py tests/test_flyer_create_project.py` -> `47 passed`; `py_compile src/agents/flyer/render.py` passed; `git diff --check` clean.
 
 Follow-up verification after reviewer fixes: `tests/test_flyer_facts.py tests/test_flyer_renderer.py tests/test_flyer_visual_qa.py tests/test_flyer_scripts_static.py` -> `167 passed`; `tests/test_flyer_generate_concepts.py tests/test_flyer_create_project.py` -> `47 passed`; touched-file `py_compile` passed; `git diff --check` clean.
+
+## Flyer Invented Operational Claims Guard - 2026-05-27
+
+- [x] Visually inspected regenerated F0104 and found an unrequested `WhatsApp Delivery` claim despite passing locked-fact QA.
+- [x] Added prompt instruction forbidding delivery/catering/payment/order-channel claims unless present in the render facts.
+- [x] Added visual QA blocker for unrequested delivery/catering/payment operational claims.
+- [x] Added focused regression coverage for requested vs unrequested delivery wording.
+
+Review: `tests/test_flyer_facts.py tests/test_flyer_renderer.py tests/test_flyer_visual_qa.py tests/test_flyer_scripts_static.py` -> `169 passed`; `tests/test_flyer_generate_concepts.py tests/test_flyer_create_project.py` -> `47 passed`; touched-file `py_compile` passed; `git diff --check` clean.
