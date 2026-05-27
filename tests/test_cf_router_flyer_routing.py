@@ -919,6 +919,10 @@ def test_business_scope_block_message_catches_different_business_request():
     ) == ""
     assert actions.flyer_business_scope_block_message(
         customer,
+        "Create a flyer for Diwali store wide sales. All items 5-10% off",
+    ) == ""
+    assert actions.flyer_business_scope_block_message(
+        customer,
         "Create a flyer for my salon. Include haircut and styling offers",
     ) == ""
 
@@ -948,6 +952,23 @@ def test_business_scope_block_message_catches_nested_for_business_request():
         customer,
         "Can we create a flyer with sales for Memorial Day on groceries",
     ) == ""
+
+
+def test_business_scope_block_preserves_wrong_business_after_campaign_suffix_strip():
+    actions = _load_actions()
+    customer = {
+        "customer_id": "CUST0006",
+        "status": "trial",
+        "business_name": "Lakshmi's Kitchen",
+    }
+
+    reply = actions.flyer_business_scope_block_message(
+        customer,
+        "Create a flyer for Patel Grocery store wide sale. All items 5-10% off",
+    )
+
+    assert "set up for Lakshmi's Kitchen" in reply
+    assert "Patel Grocery" in reply
 
 
 def test_cross_business_primary_request_blocks_before_incomplete_intake_loop(monkeypatch):

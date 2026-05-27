@@ -84,3 +84,64 @@ def test_planner_rejects_instructions_that_mutate_trust_facts():
     assert recovery_module.repair_instruction_is_safe("Show each item once. Remove the extra footer title.")
     assert not recovery_module.repair_instruction_is_safe("Change the phone number to 555-1212.")
     assert not recovery_module.repair_instruction_is_safe("Replace Lakshmi's Kitchen with Desi Chowrastha.")
+    assert not recovery_module.repair_instruction_is_safe("Change the schedule to Friday.")
+    assert not recovery_module.repair_instruction_is_safe("Update the promotion end to July 1.")
+
+
+def test_autorepair_classifier_accepts_campaign_pricing_and_offer_visibility_blockers():
+    project = _project().model_copy(update={
+        "locked_facts": [
+            *_project().locked_facts,
+            FlyerLockedFact(
+                fact_id="campaign_title",
+                label="Campaign",
+                value="Evening Snacks Sale",
+                source="customer_text",
+                required=True,
+            ),
+            FlyerLockedFact(
+                fact_id="pricing_structure",
+                label="Pricing",
+                value="Any item $7.99",
+                source="customer_text",
+                required=True,
+            ),
+            FlyerLockedFact(
+                fact_id="offer:0",
+                label="Offer",
+                value="Free Masala Chai with any purchase above $12",
+                source="customer_text",
+                required=True,
+            ),
+        ]
+    })
+
+    decision = classify_flyer_qa_for_autorepair(
+        [
+            "missing required visible fact: campaign_title",
+            "missing required visible fact: pricing_structure",
+            "missing required visible fact: offer:0",
+        ],
+        project,
+    )
+
+    assert decision.decision == "hermes_plan_eligible"
+    assert decision.reason == "qa_visible_copy_repairable"
+
+
+def test_autorepair_classifier_does_not_repair_unstructured_stray_item_blockers():
+    project = FlyerProject(
+        project_id="F0999",
+        status="generating_concepts",
+        customer_phone="+17329837841",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        original_message_id="wamid.generic",
+        raw_request="Create a flyer.",
+        locked_facts=[],
+    )
+
+    decision = classify_flyer_qa_for_autorepair(["missing required visible fact: item:0:name"], project)
+
+    assert decision.decision == "manual_required"
+    assert decision.reason == "unknown_blocker_pattern"

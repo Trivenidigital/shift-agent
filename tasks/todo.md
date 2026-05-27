@@ -8,7 +8,7 @@
 - [x] Write design.
 - [x] Design review by 2 parallel agents.
 - [x] Apply design review fixes.
-- [ ] Build with TDD.
+- [x] Build with TDD.
 - [ ] Create PR.
 - [ ] PR review by 3 parallel agents.
 - [ ] Apply PR review fixes.

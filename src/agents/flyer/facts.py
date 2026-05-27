@@ -12,6 +12,10 @@ from schemas import (
     FlyerRequestFields,
     FlyerSourceContract,
 )
+try:
+    from flyer_semantic_brief import build_semantic_flyer_brief  # type: ignore
+except ImportError:
+    from agents.flyer.semantic_brief import build_semantic_flyer_brief
 
 
 ALLOWED_NEW_PROJECT_FACT_SOURCES = {
@@ -206,6 +210,8 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
         if category_suffix and category_suffix.lower() not in lowered:
             name = f"{name.title()} {category_suffix}"
         if name.lower() in {"and", "with", "include", "includes", "for", "on", "at"}:
+            return
+        if name.lower() in {"any item", "all item", "all items", "every item", "each item"}:
             return
         if promo_name.search(name) or bad_context.search(name):
             return
@@ -402,9 +408,15 @@ def extract_text_facts(
     allow_text_identity: bool = True,
 ) -> list[FlyerLockedFact]:
     text = f"{raw_request or ''} {fields.notes or ''}"
+    semantic_brief = build_semantic_flyer_brief(
+        fields,
+        raw_request,
+        profile_business_name=profile_business_name,
+        allow_text_identity=allow_text_identity,
+    )
     facts: list[FlyerLockedFact] = []
     event_or_campaign = fields.event_or_business_name or ""
-    campaign_title = event_or_campaign
+    campaign_title = semantic_brief.campaign_title or event_or_campaign
     if _norm(campaign_title) == _norm(profile_business_name):
         campaign_title = ""
     if _looks_like_instruction_fragment(campaign_title):
@@ -417,9 +429,22 @@ def extract_text_facts(
         _fact("campaign_title", "Campaign", campaign_title, "customer_text", message_id=message_id),
         _fact("headline", "Headline", _headline(text), "customer_text", message_id=message_id),
         _fact("tagline", "Tagline", _tagline(text), "customer_text", message_id=message_id),
+        _fact("pricing_structure", "Pricing", semantic_brief.pricing_structure, "customer_text", message_id=message_id),
         _fact("location", "Location", fields.venue_or_location or "", "customer_text", required=False) if allow_text_identity else None,
         _fact("contact_phone", "Contact", fields.contact_info or "", "customer_text") if allow_text_identity else None,
     ]:
+        if item:
+            facts.append(item)
+    for index, offer in enumerate(semantic_brief.offers):
+        item = _fact(f"offer:{index}", "Offer", offer.text, "customer_text", message_id=message_id)
+        if item:
+            facts.append(item)
+    if semantic_brief.schedule:
+        item = _fact("schedule", "Schedule", semantic_brief.schedule, "customer_text", message_id=message_id)
+        if item:
+            facts.append(item)
+    if semantic_brief.promotion_end:
+        item = _fact("promotion_end", "Promotion end", semantic_brief.promotion_end, "customer_text", message_id=message_id)
         if item:
             facts.append(item)
     offer_price = _offer_price_fact(text, message_id=message_id)

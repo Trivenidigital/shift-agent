@@ -461,6 +461,102 @@ def test_generate_source_edit_fact_fit_failure_queues_visual_qa_failed(monkeypat
     assert persisted["status"] == "manual_edit_required"
     assert persisted["manual_review"]["reason_code"] == "visual_qa_failed"
 
+
+@pytest.mark.parametrize(
+    ("project_id", "raw_request", "locked_facts", "rendered_text"),
+    [
+        (
+            "F0106",
+            "Create a flyer for Diwali sale, All items 5-10% off. Lucky draw eligible with purchase above $100.",
+            [
+                {"fact_id": "business_name", "label": "Business", "value": "Lakshmi's Kitchen", "source": "customer_profile"},
+                {"fact_id": "campaign_title", "label": "Campaign", "value": "Diwali Sale", "source": "customer_text"},
+                {"fact_id": "pricing_structure", "label": "Pricing", "value": "All items 5-10% off", "source": "customer_text"},
+                {"fact_id": "offer:0", "label": "Offer", "value": "Lucky draw eligible with purchase above $100", "source": "customer_text"},
+                {"fact_id": "location", "label": "Location", "value": "90 Brybar Dr St Johns FL", "source": "customer_profile"},
+                {"fact_id": "contact_phone", "label": "Contact", "value": "+17329837841", "source": "customer_profile"},
+            ],
+            "Lakshmis Kitchen\nDIWALI SALE\nALL ITEMS 5-10% OFF\nLucky Draw Eligible\nAbove $100 purchase\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
+        ),
+        (
+            "F0107",
+            "Create a flyer for evening snacks sale, Wednesday and Thursday, any item $7.99. Free Masala Chai with any purchase above $12. This promotion runs until June 25.",
+            [
+                {"fact_id": "business_name", "label": "Business", "value": "Lakshmi's Kitchen", "source": "customer_profile"},
+                {"fact_id": "campaign_title", "label": "Campaign", "value": "Evening Snacks Sale", "source": "customer_text"},
+                {"fact_id": "pricing_structure", "label": "Pricing", "value": "Any item $7.99", "source": "customer_text"},
+                {"fact_id": "offer:0", "label": "Offer", "value": "Free Masala Chai with any purchase above $12", "source": "customer_text"},
+                {"fact_id": "schedule", "label": "Schedule", "value": "Wednesday and Thursday", "source": "customer_text"},
+                {"fact_id": "promotion_end", "label": "Promotion end", "value": "June 25", "source": "customer_text"},
+                {"fact_id": "location", "label": "Location", "value": "90 Brybar Dr St Johns FL", "source": "customer_profile"},
+                {"fact_id": "contact_phone", "label": "Contact", "value": "+17329837841", "source": "customer_profile"},
+            ],
+            "Lakshmis Kitchen\nEVENING SNACKS SALE\nWednesday and Thursday\nAny item $7.99\nFree Masala Chai with purchase above $12\nOffer valid until June 25\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
+        ),
+    ],
+)
+def test_generate_replay_incident_semantic_briefs_pass_visual_qa(
+    monkeypatch,
+    tmp_path,
+    capsys,
+    project_id,
+    raw_request,
+    locked_facts,
+    rendered_text,
+):
+    module = _load_script(monkeypatch)
+
+    state_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    now = datetime(2026, 5, 27, tzinfo=timezone.utc).isoformat()
+    state_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_sequence": 108,
+        "projects": [{
+            "project_id": project_id,
+            "status": "intake_started",
+            "customer_phone": "+17329837841",
+            "created_at": now,
+            "updated_at": now,
+            "original_message_id": f"m-{project_id}",
+            "raw_request": raw_request,
+            "locked_facts": locked_facts,
+        }],
+    }), encoding="utf-8")
+
+    def fake_render(project, _asset_dir, **_kwargs):
+        rendered = asset_dir / f"{project.project_id}-C1.png"
+        rendered.write_bytes(b"rendered")
+        (asset_dir / f"{project.project_id}-C1.png.ocr.txt").write_text(rendered_text, encoding="utf-8")
+        return [types.SimpleNamespace(
+            path=rendered,
+            kind="concept_preview",
+            output_format="concept_preview",
+            width=1080,
+            height=1350,
+            concept_id="C1",
+        )]
+
+    monkeypatch.setenv("FLYER_QA_ALLOW_SIDECAR", "1")
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "build_asset_manifest", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts",
+        "--project-id", project_id,
+        "--state-path", str(state_path),
+        "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+    ])
+
+    assert module.main() == 0
+    out = json.loads(capsys.readouterr().out)
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+
+    assert out["project_id"] == project_id
+    assert persisted["status"] == "awaiting_concept_selection"
+
 def test_generate_missing_required_facts_project_does_not_enter_source_edit_renderer(
     monkeypatch, tmp_path, capsys,
 ):

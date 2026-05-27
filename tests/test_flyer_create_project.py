@@ -1423,3 +1423,79 @@ def test_create_project_emits_audit_even_on_provider_unavailable(monkeypatch, tm
     assert captured[0]["role"] == "source_edit_template"
     assert captured[0]["status"] == "provider_unavailable"
     assert captured[0]["source_contract"] is None
+
+
+def test_diwali_sale_request_locks_semantic_campaign_pricing_and_offer(tmp_path, monkeypatch, capsys):
+    module = _load_script(monkeypatch)
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    _write_customer(
+        customers_path,
+        category="Indian Restaurant",
+        phone="+17329837841",
+        business_name="Lakshmi's Kitchen",
+        business_address="90 Brybar Dr St Johns FL",
+        primary_chat_id="17329837841@s.whatsapp.net",
+    )
+    raw_request = (
+        "Create a flyer for Diwali sale, All items 5-10% off. "
+        "Lucky draw eligible with purchase above $100."
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+17329837841",
+        "--chat-id", "17329837841@s.whatsapp.net",
+        "--message-id", "m-diwali",
+        "--raw-request", raw_request,
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+    facts = {fact["fact_id"]: fact for fact in project["locked_facts"]}
+
+    assert facts["business_name"]["value"] == "Lakshmi's Kitchen"
+    assert facts["business_name"]["source"] == "customer_profile"
+    assert facts["campaign_title"]["value"] == "Diwali Sale"
+    assert facts["pricing_structure"]["value"] == "All items 5-10% off"
+    assert facts["offer:0"]["value"] == "Lucky draw eligible with purchase above $100"
+    assert facts["campaign_title"]["value"] != "Diwali sale, All items 5-10% off"
+
+
+def test_evening_snacks_sale_request_locks_price_offer_schedule_and_end(tmp_path, monkeypatch, capsys):
+    module = _load_script(monkeypatch)
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    _write_customer(
+        customers_path,
+        category="Indian Restaurant",
+        phone="+17329837841",
+        business_name="Lakshmi's Kitchen",
+        business_address="90 Brybar Dr St Johns FL",
+        primary_chat_id="17329837841@s.whatsapp.net",
+    )
+    raw_request = (
+        "Create a flyer for evening snacks sale, Wednesday and Thursday, any item $7.99. "
+        "Free Masala Chai with any purchase above $12. This promotion runs until June 25."
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+17329837841",
+        "--chat-id", "17329837841@s.whatsapp.net",
+        "--message-id", "m-snacks",
+        "--raw-request", raw_request,
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+    facts = {fact["fact_id"]: fact for fact in project["locked_facts"]}
+
+    assert facts["campaign_title"]["value"] == "Evening Snacks Sale"
+    assert facts["pricing_structure"]["value"] == "Any item $7.99"
+    assert facts["offer:0"]["value"] == "Free Masala Chai with any purchase above $12"
+    assert facts["schedule"]["value"] == "Wednesday and Thursday"
+    assert facts["promotion_end"]["value"] == "June 25"
+    assert all(fact["value"].lower() != "any item" for fact in project["locked_facts"])

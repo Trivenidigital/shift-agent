@@ -146,6 +146,36 @@ def test_collect_text_facts_keeps_revised_price_phone_location_and_schedule():
     assert "$12.99" in facts["detail_002"]
 
 
+def test_semantic_offer_facts_feed_text_manifest_and_generation_prompt():
+    project = _complete_project().model_copy(update={
+        "raw_request": (
+            "Create a flyer for evening snacks sale, Wednesday and Thursday, any item $7.99. "
+            "Free Masala Chai with any purchase above $12. This promotion runs until June 25."
+        ),
+        "locked_facts": [
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile"),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile"),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile"),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Evening Snacks Sale", source="customer_text"),
+            FlyerLockedFact(fact_id="pricing_structure", label="Pricing", value="Any item $7.99", source="customer_text"),
+            FlyerLockedFact(fact_id="offer:0", label="Offer", value="Free Masala Chai with any purchase above $12", source="customer_text"),
+            FlyerLockedFact(fact_id="schedule", label="Schedule", value="Wednesday and Thursday", source="customer_text"),
+            FlyerLockedFact(fact_id="promotion_end", label="Promotion end", value="June 25", source="customer_text"),
+        ],
+    })
+
+    facts = {fact.fact_id: fact.text for fact in collect_text_facts(project)}
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+
+    assert facts["title"] == "Evening Snacks Sale"
+    assert "Any item $7.99" in facts.values()
+    assert "Free Masala Chai with any purchase above $12" in facts.values()
+    assert "June 25" in facts.values()
+    assert "Any item $7.99" in prompt
+    assert "Free Masala Chai with any purchase above $12" in prompt
+    assert "Promotion end: June 25" in prompt
+
+
 def test_collect_text_facts_avoids_duplicate_time_when_schedule_has_time_range():
     project = _complete_project()
     fields = FlyerRequestFields(

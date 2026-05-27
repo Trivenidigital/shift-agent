@@ -2380,6 +2380,17 @@ def _normalize_business_scope(value: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", (value or "").lower())
 
 
+def _strip_campaign_scope_suffix(label: str) -> str:
+    stripped = re.sub(
+        r"\b(?:store[-\s]*wide|site[-\s]*wide|all\s+items?|everything|weekly|weekend|holiday|diwali|festival)?\s*"
+        r"(?:sale|sales|specials?|promotion|promo|offer|offers|deal|deals)\b.*$",
+        "",
+        label or "",
+        flags=re.IGNORECASE,
+    ).strip(" .,:;-'\"")
+    return stripped or label
+
+
 def _extract_requested_business_scope(raw_request: str) -> str:
     text = " ".join(flyer_visible_message_text(raw_request).split())
     if not text:
@@ -2409,6 +2420,7 @@ def _extract_requested_business_scope(raw_request: str) -> str:
         label = re.sub(r"[*_`]+", "", candidate or "")
         label = re.sub(r"^(?:customer|business|client)\s+", "", label, flags=re.IGNORECASE)
         label = label.strip(" .,:;-'\"")
+        label = _strip_campaign_scope_suffix(label)
         if _looks_like_business_scope(label):
             return label
     return ""
