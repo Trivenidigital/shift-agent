@@ -233,7 +233,7 @@ def _semantic_visible_fact_present(fact_id: str, label: str, value: str, normali
         if not _tokens_present(normalized_text, value):
             return False
         value_tokens = r"\s+".join(re.escape(token) for token in normalized_value.split())
-        return bool(re.search(r"\b(?:until|through|thru|expires?|valid|runs)\b.{0,40}" + value_tokens, normalized_text))
+        return bool(re.search(r"\b(?:until|through|thru|expires?|valid|runs|promotion\s+end)\b.{0,40}" + value_tokens, normalized_text))
     return False
 
 
