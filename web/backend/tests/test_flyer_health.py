@@ -496,8 +496,12 @@ def test_manual_queue_impact_zero_by_default(tmp_path, monkeypatch):
     assert impact["all_oldest_age_hours"] is None
     assert impact["all_oldest_age_minutes"] is None
     assert impact["reason_counts"] == {}
+    assert impact["stale_reason_counts"] == {}
+    assert impact["oldest_age_minutes_by_reason"] == {}
     assert impact["stale_count"] == 0
     assert impact["stale_minutes_threshold"] >= 5
+    assert impact["source_edit_stale_count"] == 0
+    assert impact["source_edit_oldest_stale_minutes"] is None
 
 
 def test_manual_queue_impact_counts_source_edit_unavailable_rows(tmp_path, monkeypatch):
@@ -537,6 +541,43 @@ def test_manual_queue_impact_counts_source_edit_unavailable_rows(tmp_path, monke
         "source_edit_provider_unavailable": 2,
         "visual_qa_failed": 1,
     }
+    assert impact["oldest_age_minutes_by_reason"]["source_edit_provider_unavailable"] >= 300
+    assert impact["oldest_age_minutes_by_reason"]["visual_qa_failed"] >= 60
+    assert impact["source_edit_oldest_stale_minutes"] is not None
+    assert impact["source_edit_oldest_stale_minutes"] >= 300
+    assert impact["source_edit_stale_count"] >= 1
+
+
+def test_manual_queue_impact_reports_stale_reason_counts(tmp_path, monkeypatch):
+    _clear_provider_env(monkeypatch)
+    _isolate_env_files(monkeypatch, tmp_path)
+    _isolate_deploy_markers(monkeypatch, tmp_path)
+
+    from app.routers import flyer
+
+    settings = flyer.get_settings()
+    settings.state_dir = tmp_path / "state"
+    stale_old = (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat()
+    stale_mid = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    fresh = (datetime.now(timezone.utc) - timedelta(minutes=8)).isoformat()
+    _write_json(
+        settings.state_dir / "flyer" / "projects.json",
+        {
+            "schema_version": 1,
+            "next_sequence": 5,
+            "projects": [
+                _manual_edit_project("F0060", reason_code="source_edit_provider_unavailable", queued_at=stale_old),
+                _manual_edit_project("F0061", reason_code="visual_qa_failed", queued_at=stale_mid),
+                _manual_edit_project("F0062", reason_code="visual_qa_failed", queued_at=fresh),
+            ],
+        },
+    )
+
+    impact = flyer._source_edit_manual_queue_impact()
+    assert impact["stale_reason_counts"] == {
+        "source_edit_provider_unavailable": 1,
+        "visual_qa_failed": 1,
+    }
 
 
 def test_source_edit_detail_surfaces_queue_impact_when_present(tmp_path, monkeypatch):
@@ -562,7 +603,67 @@ def test_source_edit_detail_surfaces_queue_impact_when_present(tmp_path, monkeyp
     source_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "source_edit_provider")
     assert source_p["manual_queue_impact"]["queued_count"] == 1
     assert "manual review" in source_p["detail"]
+    assert "stale threshold" in source_p["detail"].lower()
     assert source_p["severity"] == "yellow"
+
+
+def test_source_edit_detail_mentions_mixed_reason_backlog(tmp_path, monkeypatch):
+    _clear_provider_env(monkeypatch)
+    _isolate_env_files(monkeypatch, tmp_path)
+    _isolate_deploy_markers(monkeypatch, tmp_path)
+
+    from app.routers import flyer
+
+    settings = flyer.get_settings()
+    settings.state_dir = tmp_path / "state"
+    queued_at = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    _write_json(
+        settings.state_dir / "flyer" / "projects.json",
+        {
+            "schema_version": 1,
+            "next_sequence": 3,
+            "projects": [
+                _manual_edit_project("F0060", reason_code="visual_qa_failed", queued_at=queued_at),
+                _manual_edit_project("F0061", reason_code="source_edit_provider_unavailable", queued_at=queued_at),
+            ],
+        },
+    )
+
+    source_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "source_edit_provider")
+    detail = source_p["detail"].lower()
+    assert "manual queue reasons" in detail
+    assert "source_edit_provider_unavailable=1" in detail
+    assert "visual_qa_failed=1" in detail
+    assert "stale reasons source_edit_provider_unavailable=1, visual_qa_failed=1" in detail
+    assert "oldest by reason source_edit_provider_unavailable=" in detail
+    assert "visual_qa_failed=" in detail
+
+
+def test_source_edit_detail_lists_single_reason_backlog_without_placeholder_phrase(tmp_path, monkeypatch):
+    _clear_provider_env(monkeypatch)
+    _isolate_env_files(monkeypatch, tmp_path)
+    _isolate_deploy_markers(monkeypatch, tmp_path)
+
+    from app.routers import flyer
+
+    settings = flyer.get_settings()
+    settings.state_dir = tmp_path / "state"
+    queued_at = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    _write_json(
+        settings.state_dir / "flyer" / "projects.json",
+        {
+            "schema_version": 1,
+            "next_sequence": 2,
+            "projects": [
+                _manual_edit_project("F0060", reason_code="source_edit_provider_unavailable", queued_at=queued_at),
+            ],
+        },
+    )
+
+    source_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "source_edit_provider")
+    detail = source_p["detail"].lower()
+    assert "manual queue reasons source_edit_provider_unavailable=1" in detail
+    assert "all manual queue blockers are present" not in detail
 
 
 def test_billing_checkout_provider_missing_templates_is_red(tmp_path, monkeypatch):
