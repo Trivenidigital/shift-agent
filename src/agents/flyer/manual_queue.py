@@ -194,6 +194,38 @@ def _normalized_reason_code(reason_code: str) -> str:
     return code or "unclassified"
 
 
+def canonical_manual_reason_code(
+    reason_code: str,
+    *,
+    reason: str = "",
+    detail: str = "",
+) -> str:
+    """Resolve noisy/legacy reason fields to canonical manual reason codes."""
+    normalized = _normalized_reason_code(reason_code)
+    if normalized != "unclassified":
+        return normalized
+    haystack = " ".join(
+        part.strip().lower()
+        for part in (reason, detail)
+        if part and part.strip()
+    )
+    if not haystack:
+        return "unclassified"
+    if "source_edit_provider_unavailable" in haystack:
+        return "source_edit_provider_unavailable"
+    if "visual_qa_failed" in haystack:
+        return "visual_qa_failed"
+    if "reference_unsupported" in haystack:
+        return "reference_unsupported"
+    if "reference_provider_unavailable" in haystack:
+        return "reference_provider_unavailable"
+    if "reference_low_confidence" in haystack:
+        return "reference_low_confidence"
+    if "missing_required_facts" in haystack:
+        return "missing_required_facts"
+    return "unclassified"
+
+
 def _age_priority(age_minutes: int) -> str:
     if age_minutes >= 180:
         return "critical"
@@ -222,13 +254,18 @@ def list_manual_queue(
         queued_at = manual.queued_at or project.updated_at or project.created_at or now
         age_minutes = max(int((now - queued_at).total_seconds() // 60), 0)
         age_hours = age_minutes // 60
+        canonical_reason = canonical_manual_reason_code(
+            str(manual.reason_code),
+            reason=str(manual.reason or ""),
+            detail=str(manual.detail or ""),
+        )
         rows.append({
             "project_id": project.project_id,
             "customer_phone": str(project.customer_phone),
             "status": project.status,
             "manual_status": manual_status,
             "manual_reason": manual.reason,
-            "manual_reason_code": _normalized_reason_code(str(manual.reason_code)),
+            "manual_reason_code": canonical_reason,
             "manual_detail": manual.detail,
             "manual_queued_at": queued_at.isoformat(),
             "age_minutes": age_minutes,
@@ -237,8 +274,8 @@ def list_manual_queue(
             "age_priority": _age_priority(age_minutes),
             "customer_update_due": age_minutes >= 180,
             "asset_ids": [asset.asset_id for asset in project.assets],
-            "reason_family": _reason_family(str(manual.reason_code)),
-            "operator_action_hint": _operator_action_hint(str(manual.reason_code)),
+            "reason_family": _reason_family(canonical_reason),
+            "operator_action_hint": _operator_action_hint(canonical_reason),
             "verification_modes": _verification_modes(project),
             "locked_facts": [fact.model_dump(mode="json") for fact in project.locked_facts],
             "qa_blockers": [blocker for report in project.qa_reports for blocker in report.blockers],
