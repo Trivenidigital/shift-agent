@@ -1,6 +1,6 @@
 # Flyer24 Hackathon Latest Report
 
-Updated: 2026-05-27T02:35:00Z
+Updated: 2026-05-27T03:28:00Z
 
 ## Current batch
 - Branch: `codex/flyer24-batch-active-intercept-guardrails-202605270225`
@@ -30,7 +30,16 @@ Updated: 2026-05-27T02:35:00Z
 - #279 `fix(flyer): expand source-edit/manual-queue health visibility` - open.
 - #280 `fix(flyer): restore cockpit auth override compatibility and source-edit health detail` - open.
 - #284 `fix(flyer): resolve cf-router routing and dedupe regressions` - open.
-- #TBD `fix(flyer): guard active-project intercept for vague/account-recovery and delivered revisions` - this batch.
+- #TBD `fix(flyer): consolidate cockpit health visibility + auth override compatibility` - this batch.
+
+## PR queue classification refresh (post-main@91274c4)
+- #280: superseded by this consolidated branch (same target files, cleanly rebased on latest main).
+- #279: superseded by this consolidated branch (same health impact/detail expansion, plus auth-override compatibility retained).
+- #268: blocked for this lane (money-adjacent and mixed with broad non-Flyer `safe_io` bridge refactor); keep open for operator decision or split.
+- #256: operator-review-required (money-adjacent activation contract/readiness hardening).
+- #254: blocked/dirty due main drift and overlap with later routing fixes now partly landed in #287/#288; requires rebase/split before merge.
+- #271: blocked/dirty due overlap with later routing fixes in #284 and landed commits on `main`; requires rebase or closure.
+- #284: blocked/dirty due main drift; likely superseded by landed routing guardrail commits + additional replay updates, needs rebase verdict.
 
 ## Verification for this batch
 - `python3 -m py_compile src/plugins/cf-router/hooks.py tests/test_cf_router_flyer_routing.py`
