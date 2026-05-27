@@ -474,6 +474,28 @@ def visible_wrong_brand_blockers(project: FlyerProject, extracted_text: str) -> 
     def is_campaign_title(value: str) -> bool:
         return bool(campaign_title and _norm(value) == campaign_title)
 
+    def is_requested_non_identity_label(value: str) -> bool:
+        normalized = _norm(value)
+        if normalized != "catering":
+            return False
+        source = " ".join(
+            str(item or "")
+            for item in (
+                project.raw_request,
+                getattr(project.fields, "notes", ""),
+                *(fact.value for fact in project.locked_facts),
+            )
+        )
+        return bool(
+            re.search(
+                r"\bcatering\s+(?:note|available|service|services|orders?|option|options|badge|badges)\b"
+                r"|\binclude\s+(?:a\s+)?catering\b"
+                r"|\bwe\s+cater\b",
+                source,
+                flags=re.IGNORECASE,
+            )
+        )
+
     def append_once(blocker: str) -> None:
         if blocker not in blockers:
             blockers.append(blocker)
@@ -517,6 +539,8 @@ def visible_wrong_brand_blockers(project: FlyerProject, extracted_text: str) -> 
         if not _ORG_SUFFIX_RE.search(candidate):
             continue
         if is_campaign_title(candidate):
+            continue
+        if is_requested_non_identity_label(candidate):
             continue
         if allowed_identity_visible(candidate):
             continue

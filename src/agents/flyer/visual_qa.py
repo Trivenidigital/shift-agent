@@ -199,6 +199,35 @@ def _tokens_present(normalized_text: str, value: str) -> bool:
     return bool(tokens) and all(_text_value_present_in(normalized_text, token) for token in tokens)
 
 
+def _item_name_present(raw_text: str, value: str) -> bool:
+    item_descriptor_tokens = {"item", "items", "special", "specials", "daily"}
+    tokens = [
+        token
+        for token in re.findall(r"[a-z0-9]+", _normalize_text_for_match(value))
+        if token and token not in item_descriptor_tokens
+    ]
+    if not tokens:
+        return False
+    negative_re = re.compile(r"\b(?:no|not|without|unavailable|sold\s+out)\b", re.IGNORECASE)
+    menu_context_re = re.compile(
+        r"\b(?:thali|specials?|menu|combo|plate|meal|dish|item|items|sides?|desserts?)\b",
+        re.IGNORECASE,
+    )
+    for line in (raw_text or "").splitlines():
+        normalized_line = _normalize_text_for_match(line)
+        if not all(_text_value_present_in(normalized_line, token) for token in tokens):
+            continue
+        if negative_re.search(line):
+            continue
+        if menu_context_re.search(line):
+            return True
+        # Accept short masthead/card labels such as "GOAT" but not prose
+        # notes like "ask about goat catering options".
+        if len(re.findall(r"[A-Za-z][A-Za-z'&.-]*", line)) <= 3:
+            return True
+    return False
+
+
 def _campaign_title_present(normalized_text: str, value: str) -> bool:
     normalized_value = _normalize_text_for_match(value)
     if _text_value_present_in(normalized_text, normalized_value):
@@ -214,9 +243,11 @@ def _campaign_title_present(normalized_text: str, value: str) -> bool:
     return re.search(pattern, normalized_text) is not None
 
 
-def _semantic_visible_fact_present(fact_id: str, label: str, value: str, normalized_text: str) -> bool:
+def _semantic_visible_fact_present(fact_id: str, label: str, value: str, normalized_text: str, raw_text: str) -> bool:
     context = f"{fact_id} {label}".casefold()
     normalized_value = _normalize_text_for_match(value)
+    if fact_id.startswith("item:") and fact_id.endswith(":name"):
+        return _item_name_present(raw_text, value)
     if fact_id in {"campaign_title", "headline"}:
         return _campaign_title_present(normalized_text, value)
     if fact_id == "pricing_structure" or "pricing" in context:
@@ -469,7 +500,7 @@ def run_visual_qa(
             continue
         # Phone/contact facts use digit-run matching; other locked facts use
         # text matching even if they contain address/ZIP digits.
-        semantic_present = _semantic_visible_fact_present(fact.fact_id, fact.label, fact.value, normalized)
+        semantic_present = _semantic_visible_fact_present(fact.fact_id, fact.label, fact.value, normalized, extracted_text)
         if semantic_present:
             continue
         if fact.fact_id == "promotion_end" or "promotion end" in fact.label.casefold():
