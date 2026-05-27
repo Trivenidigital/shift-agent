@@ -1,5 +1,19 @@
 # Backlog — pending items
 
+## Flyer Hermes Semantic Brief Reliability - 2026-05-27
+
+- [x] Write reliability plan with drift-check + Hermes-first analysis.
+- [x] Plan review by 2 parallel agents.
+- [x] Apply plan review fixes.
+- [x] Write design.
+- [x] Design review by 2 parallel agents.
+- [x] Apply design review fixes.
+- [ ] Build with TDD.
+- [ ] Create PR.
+- [ ] PR review by 3 parallel agents.
+- [ ] Apply PR review fixes.
+- [ ] Merge and deploy.
+
 Living checklist. Items grouped by priority; each completed item gets `✅` and a date.
 For history of *completed* multi-phase initiatives (platform extract, sender-id, agent #2/4/5, etc.), see git log + `tasks/all-phases-*.md`.
 
