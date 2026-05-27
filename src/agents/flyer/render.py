@@ -460,9 +460,30 @@ def _instruction_leak_blockers(facts: list[FlyerTextFact]) -> list[str]:
 
 
 def _detail_clauses(project: FlyerProject) -> list[str]:
+    selected: list[str] = []
+    seen: set[str] = set()
+
+    def add_detail(value: str) -> None:
+        value = _clean_fact_text(value)
+        if not value:
+            return
+        normalized = _normalize_fact_text(value)
+        if normalized in seen:
+            return
+        seen.add(normalized)
+        selected.append(value)
+
+    for fact in project.locked_facts:
+        if fact.fact_id == "pricing_structure" and str(fact.value or "").strip():
+            add_detail(str(fact.value))
+        elif fact.fact_id.startswith("offer:") and str(fact.value or "").strip():
+            add_detail(str(fact.value))
+        elif fact.fact_id == "promotion_end" and str(fact.value or "").strip():
+            add_detail(f"Promotion end: {fact.value}")
+
     details = (project.fields.notes or project.raw_request or "").strip()
     if not details:
-        return []
+        return selected
     menu_items = _menu_item_lines(project)
     menu_prices = {
         re.sub(r"\s+", "", price)
@@ -472,8 +493,6 @@ def _detail_clauses(project: FlyerProject) -> list[str]:
     }
     compact = re.sub(r"\s+", " ", details)
     clauses = [part.strip(" .") for part in re.split(r";|\n|•|-{2,}|(?<=\.)\s+", compact) if part.strip(" .")]
-    selected: list[str] = []
-    seen: set[str] = set()
     current_contact_digits = _digits(project.fields.contact_info or "")
     for clause in clauses:
         clause = _strip_request_instruction_prefix(clause)
@@ -506,17 +525,9 @@ def _detail_clauses(project: FlyerProject) -> list[str]:
             continue
         if phones and current_contact_digits and all(phone != current_contact_digits for phone in phones):
             continue
-        normalized = _normalize_fact_text(clause)
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        selected.append(_clean_fact_text(clause))
+        add_detail(clause)
     for item in menu_items:
-        normalized = _normalize_fact_text(item)
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        selected.append(_clean_fact_text(item))
+        add_detail(item)
     if len(selected) > MAX_DETAIL_FACTS:
         raise FlyerRenderError("critical text facts do not fit")
     return selected
@@ -563,6 +574,11 @@ def _menu_item_lines(project: FlyerProject) -> list[str]:
     locked_items = _locked_menu_item_lines(project)
     if locked_items:
         return locked_items
+    if any(
+        fact.fact_id == "pricing_structure" or fact.fact_id.startswith("offer:")
+        for fact in project.locked_facts
+    ):
+        return []
     text = (project.fields.notes or project.raw_request or "").strip()
     if not text:
         return []
@@ -689,6 +705,9 @@ def collect_text_facts(project: FlyerProject) -> list[FlyerTextFact]:
     contact_text = fact_value(project, "contact_phone", fallback=project.fields.contact_info)
     if contact_text:
         add("contact", "Contact", contact_text)
+    promotion_end_text = fact_value(project, "promotion_end", fallback="")
+    if promotion_end_text:
+        add("promotion_end", "Promotion end", promotion_end_text)
     for idx, clause in enumerate(_detail_clauses(project), start=1):
         add(f"detail_{idx:03d}", "Detail", clause)
     if len(facts) > MAX_TEXT_FACTS:

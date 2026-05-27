@@ -90,6 +90,12 @@ _AUTOREPAIR_TRUST_RISK_TOKENS = (
     "address",
     "price mismatch",
     "wrong price",
+    "promotion_end",
+    "promotion end",
+    "schedule",
+    "event_date",
+    "date",
+    "time",
 )
 
 _AUTOREPAIR_DEPENDENCY_TOKENS = (
@@ -123,6 +129,23 @@ _UNSAFE_REPAIR_INSTRUCTION_TOKENS = (
     "replace the price",
     "change price",
     "replace price",
+    "change the schedule",
+    "replace the schedule",
+    "change schedule",
+    "replace schedule",
+    "change the date",
+    "replace the date",
+    "change date",
+    "replace date",
+    "change the time",
+    "replace the time",
+    "change time",
+    "replace time",
+    "change the promotion end",
+    "replace the promotion end",
+    "update the promotion end",
+    "change promotion end",
+    "replace promotion end",
     "replace ",
     "use a different business",
     "use another business",
@@ -131,13 +154,19 @@ _UNSAFE_REPAIR_INSTRUCTION_TOKENS = (
 
 def _project_has_offer_context(project: object) -> bool:
     raw = f"{getattr(project, 'raw_request', '')} {getattr(getattr(project, 'fields', None), 'notes', '')}".strip()
-    if raw:
+    if re.search(r"\b(?:price|prices|offer|offers|sale|discount|free|items?|menu|combo|biryani|snacks?)\b", raw, flags=re.IGNORECASE):
         return True
     for fact in getattr(project, "locked_facts", []) or []:
         fact_id = str(getattr(fact, "fact_id", ""))
         label = str(getattr(fact, "label", ""))
         value = str(getattr(fact, "value", ""))
-        if value and (fact_id.startswith("detail_") or "item" in label.casefold() or "offer" in label.casefold()):
+        if value and (
+            fact_id.startswith("detail_")
+            or fact_id.startswith("offer:")
+            or fact_id == "pricing_structure"
+            or "item" in label.casefold()
+            or "offer" in label.casefold()
+        ):
             return True
     return False
 
@@ -161,6 +190,8 @@ def classify_flyer_qa_for_autorepair(blockers: Iterable[str], project: object) -
         elif "manifest reports missing facts:" in item and "detail_" in item:
             eligible = True
         elif re.search(r"missing required visible fact:\s*item:\d+:name", item):
+            eligible = _project_has_offer_context(project)
+        elif re.search(r"missing required visible fact:\s*(campaign_title|headline|pricing_structure|offer:\d+)", item):
             eligible = _project_has_offer_context(project)
         elif "duplicate rendered fact" in item and "detail_" in item:
             eligible = True
