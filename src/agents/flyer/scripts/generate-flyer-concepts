@@ -201,17 +201,24 @@ def _write_autorepair_store(path: Path, store: FlyerAutoRepairAttemptStore) -> N
     atomic_write_text(path, store.model_dump_json(indent=2))
 
 
-def _cleanup_render_artifacts(specs) -> None:
+def _render_artifact_candidates(spec) -> list[Path]:
+    path = Path(spec.path)
+    return [
+        path,
+        Path(str(path) + ".text.json"),
+        Path(str(path) + ".qa.json"),
+        Path(str(path) + ".ocr.txt"),
+        path.with_name(f"{path.stem}.raw.png"),
+        path.with_suffix(path.suffix + ".raw.png"),
+    ]
+
+
+def _cleanup_render_artifacts(specs, *, preserve_paths: set[Path] | None = None) -> None:
+    preserve = {path.resolve() for path in (preserve_paths or set())}
     for spec in specs:
-        path = Path(spec.path)
-        for candidate in [
-            path,
-            Path(str(path) + ".text.json"),
-            Path(str(path) + ".qa.json"),
-            Path(str(path) + ".ocr.txt"),
-            path.with_name(f"{path.stem}.raw.png"),
-            path.with_suffix(path.suffix + ".raw.png"),
-        ]:
+        for candidate in _render_artifact_candidates(spec):
+            if candidate.resolve() in preserve:
+                continue
             candidate.unlink(missing_ok=True)
 
 
@@ -741,7 +748,12 @@ def main() -> int:
                         repair_error = f"{exc.__class__.__name__}: {str(exc)[:400]}"
                     completed = datetime.now(timezone.utc)
                     if repair_error or repair_failed_qa:
-                        _cleanup_render_artifacts(repair_specs)
+                        preserve_paths = {
+                            candidate
+                            for spec in specs
+                            for candidate in _render_artifact_candidates(spec)
+                        }
+                        _cleanup_render_artifacts(repair_specs, preserve_paths=preserve_paths)
                         detail = repair_error or "; ".join(blocker for report in repair_failed_qa for blocker in report.blockers)[:1000]
                         exhausted = attempt.model_copy(update={
                             "status": "exhausted",
@@ -775,7 +787,12 @@ def main() -> int:
                             detail="repair_qa_passed",
                             generated_asset_ids=pending_success_attempt.generated_asset_ids,
                         )
-                        _cleanup_render_artifacts(specs)
+                        preserve_paths = {
+                            candidate
+                            for repair_spec in repair_specs
+                            for candidate in _render_artifact_candidates(repair_spec)
+                        }
+                        _cleanup_render_artifacts(specs, preserve_paths=preserve_paths)
                         specs = repair_specs
                         assets = repair_assets
                         qa_reports = repair_qa_reports

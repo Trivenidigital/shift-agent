@@ -980,6 +980,134 @@ def test_generate_autorepairs_f0105_style_visual_qa_failure_before_manual_review
     assert audit_types == ["flyer_autorepair_attempted", "flyer_autorepair_succeeded"]
 
 
+def test_generate_autorepair_preserves_repaired_asset_when_renderer_reuses_path(monkeypatch, tmp_path, capsys):
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec, validate_text_manifest_file, write_text_manifest
+    from agents.flyer.visual_qa import validate_visual_qa_report, write_visual_qa_report
+    from schemas import Config, FlyerVisualQAReport
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    cfg = Config.model_validate({
+        "schema_version": 1,
+        "customer": {"name": "Triveni", "location_id": "loc_pineville_01", "timezone": "America/New_York"},
+        "owner": {"name": "Owner", "phone": "+19045550000"},
+        "limits": {},
+        "alerting": {"pushover_user_key": "k", "pushover_app_token": "t"},
+        "backup": {"gpg_recipient_email": "owner@example.com"},
+        "flyer": {
+            "enabled": True,
+            "draft_image_model": "deterministic-renderer",
+            "concept_count": 1,
+            "recovery": {"auto_repair_enabled": True, "max_auto_repair_attempts": 1},
+        },
+    })
+    monkeypatch.setattr(module, "load_yaml_model", lambda *_args, **_kwargs: cfg)
+
+    state_path = tmp_path / "projects.json"
+    attempt_path = tmp_path / "autorepair_attempts.json"
+    audit_path = tmp_path / "decisions.log"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    now = datetime(2026, 5, 27, tzinfo=timezone.utc).isoformat()
+    state_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_sequence": 2,
+        "projects": [{
+            "project_id": "F0105",
+            "status": "generating_concepts",
+            "customer_phone": "+17329837841",
+            "created_at": now,
+            "updated_at": now,
+            "original_message_id": "wamid.F0105",
+            "raw_request": "Create daily thali specials flyer.",
+            "locked_facts": [
+                {"fact_id": "item:0:name", "label": "Item", "value": "veg", "source": "customer_text", "required": True},
+                {"fact_id": "item:1:name", "label": "Item", "value": "chicken", "source": "customer_text", "required": True},
+                {"fact_id": "item:2:name", "label": "Item", "value": "goat specials", "source": "customer_text", "required": True},
+            ],
+        }],
+    }), encoding="utf-8")
+
+    render_count = {"n": 0}
+    shared_path = asset_dir / "F0105-C1-preview.png"
+
+    def fake_render(_project, output_dir, **kwargs):
+        render_count["n"] += 1
+        content = b"repaired-image" if kwargs.get("repair_instruction") else b"failed-image"
+        shared_path.write_bytes(content)
+        write_text_manifest(
+            _project,
+            shared_path,
+            output_format="concept_preview",
+            selected_concept_id="C1",
+        )
+        return [RenderedAssetSpec(
+            path=shared_path,
+            kind="concept_preview",
+            output_format="concept_preview",
+            width=1080,
+            height=1350,
+            concept_id="C1",
+        )]
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        repaired = render_count["n"] >= 2
+        return FlyerVisualQAReport(
+            project_id=project_obj.project_id,
+            asset_id=asset_id,
+            artifact_path=str(artifact_path),
+            artifact_sha256="1" * 64 if repaired else "0" * 64,
+            project_version=project_obj.version,
+            output_format=output_format,
+            provider="test",
+            qa_source="ocr_vision",
+            status="passed" if repaired else "failed",
+            blockers=[] if repaired else ["missing required visible fact: item:2:name"],
+            extracted_text="veg chicken goat specials" if repaired else "veg chicken",
+            checked_at=datetime.now(timezone.utc),
+        )
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", write_visual_qa_report)
+    monkeypatch.setattr(
+        module,
+        "plan_flyer_autorepair",
+        lambda **_kwargs: {"action": "regenerate_with_instruction", "repair_instruction": "Show goat specials.", "confidence": "high"},
+        raising=False,
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts",
+        "--project-id", "F0105",
+        "--state-path", str(state_path),
+        "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--audit-log-path", str(audit_path),
+        "--autorepair-state-path", str(attempt_path),
+    ])
+
+    assert module.main() == 0
+    capsys.readouterr()
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["assets"][0]["path"] == str(shared_path)
+    assert shared_path.read_bytes() == b"repaired-image"
+    text_result = validate_text_manifest_file(
+        shared_path,
+        project_id="F0105",
+        project_version=persisted["version"],
+        output_format="concept_preview",
+    )
+    visual_result = validate_visual_qa_report(
+        shared_path,
+        project_id="F0105",
+        project_version=persisted["version"],
+        output_format="concept_preview",
+        allow_sidecar=True,
+    )
+    assert text_result.ok, text_result.blockers
+    assert visual_result.ok, visual_result.blockers
+
+
 def test_generate_autorepair_failure_preserves_failed_preview_for_manual_review(monkeypatch, tmp_path, capsys):
     module = _load_script(monkeypatch)
     from agents.flyer.render import RenderedAssetSpec
@@ -1082,6 +1210,137 @@ def test_generate_autorepair_failure_preserves_failed_preview_for_manual_review(
     assert json.loads(attempt_path.read_text(encoding="utf-8"))["attempts"][0]["status"] == "exhausted"
     audit_types = [json.loads(line)["type"] for line in audit_path.read_text(encoding="utf-8").splitlines()]
     assert audit_types == ["flyer_autorepair_attempted", "flyer_autorepair_exhausted"]
+
+
+def test_generate_autorepair_failure_preserves_original_asset_when_renderer_reuses_path(monkeypatch, tmp_path, capsys):
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec, validate_text_manifest_file, write_text_manifest
+    from agents.flyer.visual_qa import validate_visual_qa_report, write_visual_qa_report
+    from schemas import Config, FlyerVisualQAReport
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    cfg = Config.model_validate({
+        "schema_version": 1,
+        "customer": {"name": "Triveni", "location_id": "loc_pineville_01", "timezone": "America/New_York"},
+        "owner": {"name": "Owner", "phone": "+19045550000"},
+        "limits": {},
+        "alerting": {"pushover_user_key": "k", "pushover_app_token": "t"},
+        "backup": {"gpg_recipient_email": "owner@example.com"},
+        "flyer": {
+            "enabled": True,
+            "draft_image_model": "deterministic-renderer",
+            "concept_count": 1,
+            "recovery": {"auto_repair_enabled": True, "max_auto_repair_attempts": 1},
+        },
+    })
+    monkeypatch.setattr(module, "load_yaml_model", lambda *_args, **_kwargs: cfg)
+
+    state_path = tmp_path / "projects.json"
+    attempt_path = tmp_path / "autorepair_attempts.json"
+    audit_path = tmp_path / "decisions.log"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    now = datetime(2026, 5, 27, tzinfo=timezone.utc).isoformat()
+    state_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_sequence": 2,
+        "projects": [{
+            "project_id": "F0105",
+            "status": "generating_concepts",
+            "customer_phone": "+17329837841",
+            "created_at": now,
+            "updated_at": now,
+            "original_message_id": "wamid.F0105",
+            "raw_request": "Create daily thali specials flyer.",
+            "locked_facts": [
+                {"fact_id": "item:0:name", "label": "Item", "value": "veg", "source": "customer_text", "required": True},
+                {"fact_id": "item:1:name", "label": "Item", "value": "chicken", "source": "customer_text", "required": True},
+            ],
+        }],
+    }), encoding="utf-8")
+
+    render_count = {"n": 0}
+    shared_path = asset_dir / "F0105-C1-preview.png"
+
+    def fake_render(_project, output_dir, **kwargs):
+        render_count["n"] += 1
+        if kwargs.get("repair_instruction"):
+            # Production renderers reuse stable preview paths. Simulate a
+            # failed repair write, then restore the original failed artifact
+            # so cleanup must not delete the manual-review evidence.
+            shared_path.write_bytes(b"repair-failed-image")
+            write_text_manifest(_project, shared_path, output_format="concept_preview", selected_concept_id="C1")
+            shared_path.write_bytes(b"original-failed-image")
+            write_text_manifest(_project, shared_path, output_format="concept_preview", selected_concept_id="C1")
+        else:
+            shared_path.write_bytes(b"original-failed-image")
+            write_text_manifest(_project, shared_path, output_format="concept_preview", selected_concept_id="C1")
+        return [RenderedAssetSpec(
+            path=shared_path,
+            kind="concept_preview",
+            output_format="concept_preview",
+            width=1080,
+            height=1350,
+            concept_id="C1",
+        )]
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        return FlyerVisualQAReport(
+            project_id=project_obj.project_id,
+            asset_id=asset_id,
+            artifact_path=str(artifact_path),
+            artifact_sha256="0" * 64,
+            project_version=project_obj.version,
+            output_format=output_format,
+            provider="test",
+            qa_source="ocr_vision",
+            status="failed",
+            blockers=["missing required visible fact: item:1:name"],
+            extracted_text="veg",
+            checked_at=datetime.now(timezone.utc),
+        )
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", write_visual_qa_report)
+    monkeypatch.setattr(
+        module,
+        "plan_flyer_autorepair",
+        lambda **_kwargs: {"action": "regenerate_with_instruction", "repair_instruction": "Show chicken.", "confidence": "high"},
+        raising=False,
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts",
+        "--project-id", "F0105",
+        "--state-path", str(state_path),
+        "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--audit-log-path", str(audit_path),
+        "--autorepair-state-path", str(attempt_path),
+    ])
+
+    assert module.main() == 2
+    capsys.readouterr()
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "manual_edit_required"
+    assert persisted["assets"][0]["path"] == str(shared_path)
+    assert shared_path.read_bytes() == b"original-failed-image"
+    text_result = validate_text_manifest_file(
+        shared_path,
+        project_id="F0105",
+        project_version=persisted["version"],
+        output_format="concept_preview",
+    )
+    visual_result = validate_visual_qa_report(
+        shared_path,
+        project_id="F0105",
+        project_version=persisted["version"],
+        output_format="concept_preview",
+        allow_sidecar=True,
+    )
+    assert text_result.ok, text_result.blockers
+    assert not visual_result.ok
+    assert visual_result.blockers == ["visual QA did not pass", "missing required visible fact: item:1:name"]
 
 
 def test_generate_autorepair_render_exception_exhausts_and_queues_manual_review(monkeypatch, tmp_path, capsys):
