@@ -1401,3 +1401,14 @@ Second blocker-fix verification: `tests/test_flyer_visual_qa.py tests/test_flyer
 Final PR review: two parallel reviewers approved. Product/trust semantics confirmed account-owned anchors, title-case wrong-brand blocking, and saved-contact vs saved-brand separation. Runtime/deploy reviewer confirmed flat production import, smoke/static coverage, saved-logo retry compatibility, and regression coverage. No merge or deploy performed.
 
 Post-review fix: added campaign-title exemption for the unlabeled org-suffix masthead heuristic so valid titles such as Restaurant Week Specials, Kitchen Essentials Sale, Cafe Style Biryani, and Biryani Bazaar pass when profile anchors are visible. Explicit identity labels and source-contract wrong-brand checks remain strict. Verification after fix: targeted 4-test semantic gate passed; `tests/test_flyer_facts.py tests/test_flyer_renderer.py tests/test_flyer_visual_qa.py tests/test_flyer_scripts_static.py` -> `160 passed`; `tests/test_flyer_generate_concepts.py tests/test_flyer_create_project.py` -> `47 passed`; touched-file `py_compile` passed; `git diff --check origin/main...HEAD` clean.
+
+## Flyer Exact Identity Overlay - 2026-05-27
+
+- [x] Investigated live F0104 failure after PR #277 deploy.
+- [x] Verified QA correctly blocked visible generated typos: business rendered as `Lakshni's Kitchen` and phone as `+173298378841`.
+- [x] Verified ARE opened incident `FRI20260527-6D61EBF9DC25`, queued a worker draft, but the draft proposed unsafe OCR-tolerance rather than checking the actual artifact.
+- [x] Added deterministic exact identity/contact overlay for non-deterministic image-model previews, retaining the raw model image as background source.
+- [x] Added regression proving real image-model previews are not the raw bitmap and have top/bottom exact-text overlay pixels.
+- [x] Verified focused Flyer renderer/QA/generation suites.
+
+Review: `tests/test_flyer_renderer.py` -> `67 passed`; `tests/test_flyer_visual_qa.py tests/test_flyer_generate_concepts.py` -> `50 passed`; full focused gate `tests/test_flyer_facts.py tests/test_flyer_renderer.py tests/test_flyer_visual_qa.py tests/test_flyer_scripts_static.py` -> `160 passed`; `tests/test_flyer_generate_concepts.py tests/test_flyer_create_project.py` -> `47 passed`; `py_compile src/agents/flyer/render.py` passed; `git diff --check` clean.

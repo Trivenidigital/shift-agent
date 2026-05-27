@@ -1661,7 +1661,7 @@ def test_explicit_business_override_reaches_direct_and_source_edit_prompts(tmp_p
     assert "Business/brand to preserve: Old Brand" not in source_prompt
 
 
-def test_real_image_model_concept_uses_direct_poster_output_without_overlay(tmp_path, monkeypatch):
+def test_real_image_model_concept_applies_exact_identity_overlay(tmp_path, monkeypatch):
     raw_png = _png_bytes(color=(19, 83, 43))
 
     class _Resp:
@@ -1688,7 +1688,14 @@ def test_real_image_model_concept_uses_direct_poster_output_without_overlay(tmp_
     )
 
     assert inspect_rendered_asset(specs[0].path, expected_width=1080, expected_height=1350, mime_type="image/png").ok is True
-    assert not specs[0].path.with_name(f"{specs[0].path.stem}.raw.png").exists()
+    raw_path = specs[0].path.with_name(f"{specs[0].path.stem}.raw.png")
+    assert raw_path.exists()
+    assert specs[0].path.read_bytes() != raw_path.read_bytes()
+
+    from PIL import Image
+    with Image.open(specs[0].path) as preview, Image.open(raw_path) as raw:
+        assert preview.getpixel((540, 55)) != raw.getpixel((540, 55))
+        assert preview.getpixel((540, 1290)) != raw.getpixel((540, 1290))
 
 
 def test_real_image_model_direct_poster_is_resized_to_requested_format(tmp_path, monkeypatch):
