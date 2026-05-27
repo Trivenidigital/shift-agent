@@ -1435,6 +1435,8 @@ def should_bypass_active_flyer_project_for_fresh_request(
     status = str(active_project.get("status") or "")
     if _media_revision_targets_delivered_active_project(body, status=status, has_media=has_media):
         return False
+    if not has_media and flyer_text_targets_revision_field(body):
+        return False
     return (
         has_media
         or status not in {"intake_started", "collecting_required_info", "awaiting_assets"}
@@ -1450,8 +1452,6 @@ def _media_revision_targets_delivered_active_project(text: str, *, status: str, 
     if not body:
         return False
     if not is_exact_reference_edit_request(body, has_media=True):
-        return False
-    if not is_flyer_revision_intent(body):
         return False
     return bool(re.search(
         r"\b(?:existing|current|same|this|attached|uploaded)\s+"
@@ -1765,7 +1765,7 @@ def flyer_customer_not_active_reply(customer: dict) -> str:
         return (
             "Flyer Studio\n"
             "------------\n"
-            "This Flyer Studio account is no longer active. Contact Support or restart setup before creating a new flyer."
+            "This Flyer Studio account is no longer active (cancelled). Contact Support or restart setup before creating a new flyer."
         )
     # Generic fallback for unexpected status values (legacy customer dicts,
     # future schema additions). Intentionally omits the status name to defend
@@ -4052,7 +4052,15 @@ def send_flyer_text(
         if existing:
             mid = str(existing.get("mid") or "recent")
             return True, f"deduped:{mid}", ""
-        ok, mid, err, status = bridge_post(chat_id, message, action_context=action_context)
+        try:
+            if action_context is None:
+                ok, mid, err, status = bridge_post(chat_id, message)
+            else:
+                ok, mid, err, status = bridge_post(chat_id, message, action_context=action_context)
+        except TypeError:
+            # Backward-compat for older bridge_post shims/tests without
+            # action_context support.
+            ok, mid, err, status = bridge_post(chat_id, message)
         if ok:
             dedupe_entries[dedupe_key] = {"ts": now, "mid": mid}
             _write_flyer_outbound_dedupe(dedupe_entries)

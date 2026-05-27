@@ -1776,9 +1776,12 @@ def _try_flyer_account_intercept(text: str, chat_id: str, event: Any) -> Optiona
             verified_action_result=False,
             mutation_class="external_irreversible",
         )
-    ack_ok, mid, err = actions.send_flyer_text(
-        chat_id, result.get("reply_text") or "", action_context=action_ctx,
-    )
+    if action_ctx is None:
+        ack_ok, mid, err = actions.send_flyer_text(chat_id, result.get("reply_text") or "")
+    else:
+        ack_ok, mid, err = actions.send_flyer_text(
+            chat_id, result.get("reply_text") or "", action_context=action_ctx,
+        )
     # PR-ζ BLOCKER #2 fix (security/money-flow reviewer): when the chokepoint
     # refuses on the change_plan path, the customer must NOT be left with
     # half-state (pending_plan_* fields persisted at account.py:301 BEFORE
@@ -2548,6 +2551,15 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
             ),
         )
         return {"action": "skip", "reason": "cf-router flyer business scope blocked"}
+    if (
+        not media_path
+        and actions.is_stale_for_new_request(active_project)
+        and (
+            actions.is_vague_flyer_start(body, has_media=False)
+            or actions.is_flyer_legacy_trial_link_followup(body)
+        )
+    ):
+        return None
     if actions.should_bypass_active_flyer_project_for_fresh_request(
         body,
         active_project,
@@ -2579,7 +2591,11 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
     # forwarding) run normally.
     if (
         actions.is_stale_for_new_request(active_project)
-        and actions.should_start_new_flyer_over_active(body, has_media=bool(media_path))
+        and actions.should_bypass_active_flyer_project_for_fresh_request(
+            body,
+            active_project,
+            has_media=bool(media_path),
+        )
     ):
         actions.audit_intercepted(
             reason="flyer_active_project_bypassed",
@@ -2727,7 +2743,8 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         )
         return None
 
-    if status == "delivered" and not actions.is_flyer_revision_intent(body):
+    # Delivered rows should still accept exact/media-backed revision requests.
+    if status == "delivered" and not media_path and not actions.is_flyer_revision_intent(body):
         return None
 
     if status == "manual_edit_required":
