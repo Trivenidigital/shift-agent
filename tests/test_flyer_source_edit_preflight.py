@@ -395,10 +395,48 @@ def test_generation_detail_with_reason_code_only_counts_as_manual_review():
     )
 
 
+def test_generation_detail_with_spaced_reason_code_counts_as_manual_review():
+    actions = _load_actions_module()
+    assert actions.flyer_generation_queued_manual_review(
+        "project_id=F0064; reason_code = visual_qa_failed; retry=false"
+    )
+
+
+def test_generation_detail_with_reference_unsupported_reason_code_counts_as_manual_review():
+    actions = _load_actions_module()
+    assert actions.flyer_generation_queued_manual_review(
+        "project_id=F0064; reason_code=reference_unsupported; retry=false"
+    )
+
+
 def test_generation_detail_with_in_progress_manual_state_counts_as_manual_review():
     actions = _load_actions_module()
     assert actions.flyer_generation_queued_manual_review(
         "project_id=F0064; manual_review.status=in_progress; detail=queued_for_operator"
+    )
+
+
+def test_generation_detail_with_spaced_manual_review_status_counts_as_manual_review():
+    actions = _load_actions_module()
+    assert actions.flyer_generation_queued_manual_review(
+        'project_id=F0064; manual_review.status = queued; detail="awaiting operator"'
+    )
+
+
+def test_generation_detail_with_json_manual_review_status_counts_as_manual_review():
+    actions = _load_actions_module()
+    assert actions.flyer_generation_queued_manual_review(
+        '{"project_id":"F0064","manual_review":{"status":"queued","reason_code":"visual_qa_failed"}}'
+    )
+
+
+def test_project_has_manual_review_queued_normalizes_status_and_accepts_in_progress():
+    actions = _load_actions_module()
+    assert actions.flyer_project_has_manual_review_queued(
+        {"status": "manual_edit_required", "manual_review": {"status": " Queued "}}
+    )
+    assert actions.flyer_project_has_manual_review_queued(
+        {"status": "manual_edit_required", "manual_review": {"status": "IN_PROGRESS"}}
     )
 
 

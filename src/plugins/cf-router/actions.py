@@ -3726,7 +3726,11 @@ def flyer_project_has_manual_review_queued(project: Optional[dict]) -> bool:
     if not project:
         return False
     manual = project.get("manual_review") or {}
-    return project.get("status") == "manual_edit_required" and manual.get("status") == "queued"
+    manual_status = str(manual.get("status") or "").strip().lower()
+    return (
+        project.get("status") == "manual_edit_required"
+        and manual_status in {"queued", "in_progress"}
+    )
 
 
 def flyer_generation_queued_manual_review(detail: str) -> bool:
@@ -3737,11 +3741,14 @@ def flyer_generation_queued_manual_review(detail: str) -> bool:
         return True
     if "visual_qa_failed" in detail_lower:
         return True
-    if "reason_code=source_edit_provider_unavailable" in detail_lower:
+    if re.search(
+        r"reason_code\s*=\s*(source_edit_provider_unavailable|visual_qa_failed|reference_unsupported|reference_provider_unavailable|source_edit_generation_failed)",
+        detail_lower,
+    ):
         return True
-    if "manual_review.status=queued" in detail_lower:
+    if re.search(r"manual_review\.status\s*=\s*(queued|in_progress)", detail_lower):
         return True
-    if "manual_review.status=in_progress" in detail_lower:
+    if re.search(r'"manual_review"\s*:\s*\{[^{}]*"status"\s*:\s*"(queued|in_progress)"', detail_lower):
         return True
     return False
 
