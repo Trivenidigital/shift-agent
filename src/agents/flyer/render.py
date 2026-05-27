@@ -1790,6 +1790,61 @@ def _raw_background_path(path: Path) -> Path:
     return path.with_name(f"{path.stem}.raw-background.png")
 
 
+def apply_exact_identity_overlay(project: FlyerProject, source: Path | str, target: Path | str, *, size: tuple[int, int]) -> None:
+    pil = _load_pillow()
+    if pil is None:
+        raise FlyerRenderError("Pillow is required for exact identity overlay")
+    Image, ImageDraw, ImageFont = pil
+    source = Path(source)
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    business = _display_business_name(project).strip()
+    location = fact_value(project, "location", fallback=project.fields.venue_or_location).strip()
+    contact = fact_value(project, "contact_phone", fallback=project.fields.contact_info).strip()
+    if not any((business, location, contact)):
+        _export_from_source_image(source, target, size=size)
+        return
+    with Image.open(source) as img:
+        img = img.convert("RGB")
+        if img.size != size:
+            img = img.resize(size)
+        draw = ImageDraw.Draw(img, "RGBA")
+        width, height = size
+        top_h = max(96, int(height * 0.105))
+        bottom_h = max(100, int(height * 0.105))
+        burgundy = (102, 18, 28, 248)
+        green = (18, 54, 34, 248)
+        gold = (242, 198, 84, 255)
+        white = (255, 255, 245, 255)
+        draw.rectangle((0, 0, width, top_h), fill=burgundy)
+        draw.rectangle((0, top_h - 4, width, top_h), fill=gold)
+        draw.rectangle((0, height - bottom_h, width, height), fill=green)
+        draw.rectangle((0, height - bottom_h, width, height - bottom_h + 4), fill=gold)
+        if business:
+            font = _font(ImageFont, max(34, int(width * 0.048)), bold=True, text=business)
+            lines = _wrap(draw, business, font, int(width * 0.88))[:2]
+            total_h = len(lines) * int(font.size * 1.05)
+            y = max(10, (top_h - total_h) // 2)
+            for line in lines:
+                bbox = draw.textbbox((0, 0), line, font=font)
+                draw.text(((width - (bbox[2] - bbox[0])) // 2, y), line, font=font, fill=white)
+                y += int(font.size * 1.05)
+        footer_parts = [part for part in (location, f"Contact: {contact}" if contact else "") if part]
+        if footer_parts:
+            font = _font(ImageFont, max(22, int(width * 0.03)), bold=True, text=" ".join(footer_parts))
+            lines: list[str] = []
+            for part in footer_parts:
+                lines.extend(_wrap(draw, part.upper(), font, int(width * 0.9))[:2])
+            lines = lines[:3]
+            total_h = len(lines) * int(font.size * 1.06)
+            y = height - bottom_h + max(10, (bottom_h - total_h) // 2)
+            for line in lines:
+                bbox = draw.textbbox((0, 0), line, font=font)
+                draw.text(((width - (bbox[2] - bbox[0])) // 2, y), line, font=font, fill=white)
+                y += int(font.size * 1.06)
+        img.save(target, format="PNG", optimize=True)
+
+
 EXPORT_FROM_SOURCE_RENDERER = r'''
 import sys
 from pathlib import Path
@@ -2073,8 +2128,13 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
         _render(project, path, concept_id=concept_id, size=size)
         return
     raw = _openrouter_image_bytes(project, concept_id=concept_id, output_format=output_format, size=size, model=model, quality=quality)
-    _raw_background_path(path).unlink(missing_ok=True)
-    _write_generated_image(raw, path, size=size)
+    raw_path = _raw_background_path(path)
+    raw_path.unlink(missing_ok=True)
+    if size is None:
+        _write_generated_image(raw, path, size=size)
+        return
+    _write_generated_image(raw, raw_path, size=size)
+    apply_exact_identity_overlay(project, raw_path, path, size=size)
 
 
 def render_concept_previews(project: FlyerProject, output_dir: Path | str, *, model: str = "deterministic-renderer", quality: str = "low", concept_count: int = 1) -> list[RenderedAssetSpec]:
