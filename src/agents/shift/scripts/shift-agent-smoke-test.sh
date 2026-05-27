@@ -154,6 +154,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 import sys
 
+# Deploy-shape: /opt/shift-agent is not on sys.path by default for the
+# shift-agent user's venv invocation. Other probes in this script (e.g. the
+# Python modules importable block above) inject it explicitly; the overlay
+# probe added in PR #298 missed this step and the new smoke gate
+# correctly rolled back deploy 87db7154 at 2026-05-27T13:22Z. Pattern
+# mirrors the PR-ζ #270 deployed-flat-module lesson: SSH pre-deploy
+# runtime check beats review for deploy-shape correctness.
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, "/opt/shift-agent/platform")
+
 from flyer_render import apply_exact_identity_overlay
 from schemas import FlyerLockedFact, FlyerProject, FlyerRequestFields
 
