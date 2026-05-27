@@ -3421,10 +3421,18 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
             )
         elif ok and needs_regen:
             ack_message = "Revision applied to the flyer details. I am regenerating the design now."
+            # PR-ζ.1b PR #282 review fix — sub-branch (b) of §13.C 3-way split:
+            # the "Revision applied" claim is verified by `ok` being True from
+            # actions.invoke_update_flyer_project (subprocess that performed the
+            # local-state mutation). verified_action_result=True is the
+            # purpose-built chokepoint escape for completion verbs backed by a
+            # verified action result. Regression test:
+            # tests/test_revision_ack_chokepoint_lint.py.
             ack_ok, mid, err = actions.send_flyer_text(
                 chat_id, ack_message,
                 action_context=build_action_context_for_command(
                     PROJECT_ACTIONS, "edit.processing",
+                    verified_action_result=True,
                 ),
             )
         else:
