@@ -686,11 +686,15 @@ SAFE_IO_NULL_CONTEXT_ALLOWLIST: frozenset[str] = frozenset({
     # to the chokepoint is PR-ε.1 work (requires safe_io.bridge_post to
     # gain a `timeout` kwarg).
     "send-coverage-message",
-    # cf-router non-change_plan callsites — DEFERRED to PR-ζ.1. actions.py
-    # also houses send_flyer_text which forwards action_context when given;
-    # the allowlist matches when context is None (un-migrated callers).
-    "actions.py",
-    "hooks.py",
+    # PR-ζ.1b 2026-05-26 (commit 10) — cf-router actions.py + hooks.py
+    # REMOVED from the allowlist. Every send-path callsite in those two
+    # modules now passes an explicit action_context (verified by the
+    # AST-scan static gate at test_send_chokepoint_null_context_allowlist.py
+    # + the manual static-gate port executed pre-commit). This is the
+    # load-bearing commit that turns PR-ζ's diagnostic discipline into
+    # enforcement: any new direct bridge_post* callsite in cf-router that
+    # forgets action_context now refuses at runtime + emits a
+    # regulated_send_missing_action_context audit row.
 })
 
 
