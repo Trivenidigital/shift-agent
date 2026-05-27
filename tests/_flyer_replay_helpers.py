@@ -169,7 +169,7 @@ def install_common_replay_mocks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
     identity_calls: list[str] = []
     fake_safe_io = types.ModuleType("safe_io")
 
-    def bridge_post(_chat_id: str, message: str):
+    def bridge_post(_chat_id: str, message: str, **_kwargs):
         calls.append("bridge_post")
         sent.append(message)
         return True, f"mid-{len(sent)}", "", 200
@@ -223,7 +223,7 @@ def install_common_replay_mocks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
         resolved = fixture["resolved_identity"]
         return resolved.get("phone"), resolved.get("role", "customer")
 
-    def send_text(_chat_id: str, text: str):
+    def send_text(_chat_id: str, text: str, **_kwargs):
         calls.append("send_flyer_text")
         sent.append(text)
         return True, f"mid-{len(sent)}", ""

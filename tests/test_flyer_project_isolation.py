@@ -217,7 +217,7 @@ def test_scenario3_status_check_on_stale_manual_edit_still_returns_manual_status
     }
     _patch_basic_lookups(hooks, actions, monkeypatch, stale)
     sent: list[str] = []
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "mid", ""))
     monkeypatch.setattr(actions, "flyer_manual_edit_status_reply", lambda _project: "Manual review queued; designer is working on it.")
     monkeypatch.setattr(actions, "flyer_project_status_reply", lambda _project: "Status: ...")
 
@@ -363,7 +363,7 @@ def test_scenario6_fresh_active_project_still_attaches_revision_correction(monke
     )
     _patch_basic_lookups(hooks, actions, monkeypatch, fresh)
     sent: list[str] = []
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "mid", ""))
     monkeypatch.setattr(actions, "flyer_manual_edit_status_reply", lambda _project: "manual reply")
     monkeypatch.setattr(actions, "flyer_project_status_reply", lambda _project: "status reply")
 
@@ -394,7 +394,7 @@ def test_stale_guard_does_not_drop_concept_selection_after_threshold(monkeypatch
     _patch_basic_lookups(hooks, actions, monkeypatch, stale_awaiting_selection)
     # Downstream selection handler invokes update-flyer-project + sends a confirmation.
     monkeypatch.setattr(actions, "invoke_update_flyer_project", lambda *_a, **_kw: (True, ""))
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, _text: (True, "mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, _text, **_kwargs: (True, "mid", ""))
 
     result = hooks._try_flyer_active_project_intercept(
         "1",
@@ -420,7 +420,7 @@ def test_stale_guard_does_not_drop_approval_text_after_threshold(monkeypatch):
     _patch_basic_lookups(hooks, actions, monkeypatch, stale_awaiting_approval)
     monkeypatch.setattr(actions, "invoke_update_flyer_project", lambda *_a, **_kw: (True, ""))
     monkeypatch.setattr(actions, "finalize_and_send_flyer", lambda *_a, **_kw: (True, "finalized"))
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, _text: (True, "mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, _text, **_kwargs: (True, "mid", ""))
 
     result = hooks._try_flyer_active_project_intercept(
         "approve",
@@ -446,7 +446,7 @@ def test_stale_guard_does_not_drop_non_english_reply(monkeypatch):
     )
     _patch_basic_lookups(hooks, actions, monkeypatch, stale)
     sent: list[str] = []
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "mid", ""))
     monkeypatch.setattr(actions, "flyer_manual_edit_status_reply", lambda _project: "manual reply")
     monkeypatch.setattr(actions, "flyer_project_status_reply", lambda _project: "status reply")
 
@@ -473,7 +473,7 @@ def test_stale_guard_lets_status_check_through_on_stale_project(monkeypatch):
     )
     _patch_basic_lookups(hooks, actions, monkeypatch, stale)
     sent: list[str] = []
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "mid", ""))
     monkeypatch.setattr(actions, "flyer_manual_edit_status_reply", lambda _project: "manual")
     monkeypatch.setattr(actions, "flyer_project_status_reply", lambda _project: "Project F0904 status: awaiting approval")
 

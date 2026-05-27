@@ -23,6 +23,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ACTIONS_PATH = REPO_ROOT / "src" / "plugins" / "cf-router" / "actions.py"
+PLATFORM = REPO_ROOT / "src" / "platform"
 
 EXPECTED_BODY = (
     "Flyer Studio\n"
@@ -66,6 +67,17 @@ def _load_actions_module():
     return module
 
 
+def _action_context():
+    sys.path.insert(0, str(PLATFORM))
+    from schemas import ActionExecutionContext
+
+    return ActionExecutionContext(
+        action_id="test.flyer.manual_edit_ack",
+        is_regulated_action=False,
+        verified_action_result=False,
+    )
+
+
 @pytest.fixture
 def captured_message(monkeypatch):
     """Intercept the safe_io.bridge_post call and capture its message arg.
@@ -82,7 +94,7 @@ def captured_message(monkeypatch):
 
     captured: dict[str, object] = {}
 
-    def fake_bridge_post(chat_id, message):
+    def fake_bridge_post(chat_id, message, **_kwargs):
         captured["chat_id"] = chat_id
         captured["message"] = message
         return True, "test-message-id", "", "sent"
@@ -106,6 +118,7 @@ def test_manual_edit_ack_body_is_exactly_the_operator_approved_copy(captured_mes
         project_id="F0099",
         request_text="Replace Triveni Express with Lakshmi's Kitchen branding.",
         reason="source_edit_provider_unavailable",
+        action_context=_action_context(),
     )
 
     assert ok is True
@@ -131,6 +144,7 @@ def test_manual_edit_ack_body_does_not_leak_internal_terms(captured_message):
             "with project F0099. Please add this to the operator edit queue."
         ),
         reason="source_edit_provider_unavailable",
+        action_context=_action_context(),
     )
 
     body = captured["message"]
@@ -155,6 +169,7 @@ def test_manual_edit_ack_body_is_independent_of_caller_arguments(captured_messag
         project_id="F0001",
         request_text="",
         reason="",
+        action_context=_action_context(),
     )
     body_minimal = captured["message"]
 
@@ -163,6 +178,7 @@ def test_manual_edit_ack_body_is_independent_of_caller_arguments(captured_messag
         project_id="F0999",
         request_text="A very different request with lots of words. " * 10,
         reason="some_other_reason_string_with_underscores",
+        action_context=_action_context(),
     )
     body_maximal = captured["message"]
 
