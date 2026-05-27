@@ -236,6 +236,21 @@ def test_flyer_manual_edit_status_reply_unknown_reason_falls_back_to_unclassifie
     assert "queued for designer review" in reply.lower()
 
 
+def test_flyer_manual_edit_status_reply_uses_legacy_reason_markers(mods):
+    _, actions_mod = mods
+
+    reply = actions_mod.flyer_manual_edit_status_reply({
+        "status": "manual_edit_required",
+        "manual_review": {
+            "reason_code": "unclassified",
+            "reason": "operator_burndown_source_edit_provider_unavailable_no_customer_asset_sent",
+            "detail": "legacy row",
+        },
+    })
+
+    assert "queued for a designer to apply by hand" in reply.lower()
+
+
 @pytest.mark.parametrize(
     "text",
     [

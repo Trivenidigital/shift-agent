@@ -2097,14 +2097,37 @@ def flyer_manual_edit_status_reply(project: dict) -> str:
         return reply
     manual = project.get("manual_review") if isinstance(project.get("manual_review"), dict) else {}
     reason_code = str(manual.get("reason_code") or "unclassified").strip().lower() or "unclassified"
+    reason_text = str(manual.get("reason") or "")
+    detail_text = str(manual.get("detail") or "")
     try:
         _ensure_platform_path()
         from flyer_workflow import MANUAL_REVIEW_REASON_LINES  # type: ignore
+        from flyer_manual_queue import canonical_manual_reason_code  # type: ignore
     except Exception:
         try:
             _ensure_local_src_path()
             from agents.flyer.workflow import MANUAL_REVIEW_REASON_LINES  # type: ignore
+            from agents.flyer.manual_queue import canonical_manual_reason_code  # type: ignore
         except Exception:
+            def canonical_manual_reason_code(  # type: ignore[no-redef]
+                raw_reason_code: str,
+                *,
+                reason: str = "",
+                detail: str = "",
+            ) -> str:
+                code = (raw_reason_code or "").strip().lower() or "unclassified"
+                if code != "unclassified":
+                    return code
+                lowered = f"{reason} {detail}".lower()
+                if "source_edit_provider_unavailable" in lowered:
+                    return "source_edit_provider_unavailable"
+                if "visual_qa_failed" in lowered:
+                    return "visual_qa_failed"
+                if "reference_unsupported" in lowered:
+                    return "reference_unsupported"
+                if "reference_provider_unavailable" in lowered:
+                    return "reference_provider_unavailable"
+                return "unclassified"
             MANUAL_REVIEW_REASON_LINES = {
                 "unclassified": (
                     "This project is queued for designer review. "
@@ -2124,8 +2147,13 @@ def flyer_manual_edit_status_reply(project: dict) -> str:
                     "Please re-upload as JPG or PNG and we'll continue."
                 ),
             }
-    line = MANUAL_REVIEW_REASON_LINES.get(
+    canonical_reason = canonical_manual_reason_code(
         reason_code,
+        reason=reason_text,
+        detail=detail_text,
+    )
+    line = MANUAL_REVIEW_REASON_LINES.get(
+        canonical_reason,
         MANUAL_REVIEW_REASON_LINES["unclassified"],
     )
     return f"Flyer Studio\n------------\n{line}"

@@ -222,6 +222,42 @@ def test_list_manual_queue_includes_reason_code():
     assert rows[0]["manual_reason_code"] == "source_edit_provider_unavailable"
 
 
+def test_list_manual_queue_canonicalizes_reason_from_legacy_reason_text():
+    from agents.flyer.manual_queue import list_manual_queue
+
+    project = _manual_project().model_copy(update={
+        "manual_review": _manual_project().manual_review.model_copy(update={
+            "reason_code": "unclassified",
+            "reason": "operator_burndown_source_edit_provider_unavailable_retry_needed",
+            "detail": "legacy row",
+        }),
+    })
+    rows = list_manual_queue(
+        FlyerProjectStore(projects=[project]),
+        now=datetime(2026, 5, 20, tzinfo=timezone.utc),
+    )
+    assert rows[0]["manual_reason_code"] == "source_edit_provider_unavailable"
+    assert rows[0]["reason_family"] == "provider_readiness"
+
+
+def test_list_manual_queue_canonicalizes_reason_from_detail_markers():
+    from agents.flyer.manual_queue import list_manual_queue
+
+    project = _manual_project().model_copy(update={
+        "manual_review": _manual_project().manual_review.model_copy(update={
+            "reason_code": "unclassified",
+            "reason": "legacy_unknown",
+            "detail": "visual_qa_failed: logo text mismatch",
+        }),
+    })
+    rows = list_manual_queue(
+        FlyerProjectStore(projects=[project]),
+        now=datetime(2026, 5, 20, tzinfo=timezone.utc),
+    )
+    assert rows[0]["manual_reason_code"] == "visual_qa_failed"
+    assert rows[0]["reason_family"] == "visual_quality"
+
+
 def test_list_manual_queue_adds_reason_family_action_and_priority_fields():
     from agents.flyer.manual_queue import list_manual_queue
 
