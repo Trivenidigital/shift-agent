@@ -2170,6 +2170,12 @@ def test_explicit_sample_prompt_request_sends_starter_ideas(monkeypatch):
         "can you suggest hooks for my flyer",
         "help with promotion ideas",
         "give 3 ideas for weekend offer",
+        "give me some taglines for my poster",
+        "need catchy slogans for my store offer",
+        "share a few ad copies for my weekend sale",
+        "what are good promo captions for my business",
+        "can you suggest punchlines for my business poster",
+        "give marketing slogan options for my shop ad",
     ],
 )
 def test_sample_prompt_variants_route_to_sample_idea_intake(monkeypatch, message_text):
