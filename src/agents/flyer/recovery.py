@@ -210,7 +210,14 @@ def classify_decision(row: dict, projects: dict[str, dict]) -> RecoverySignal | 
 
 def _manual_reason_failure_class(reason_code: str, detail: str) -> str:
     lowered = f"{reason_code} {detail}".lower()
-    if any(token in lowered for token in ("visual_qa_failed", "provider_timeout", "missing_required_facts")):
+    if any(token in lowered for token in (
+        "visual_qa_failed",
+        "provider_timeout",
+        "missing_required_facts",
+        "dependency_missing",
+        "pillow is required",
+        "pillow is unavailable",
+    )):
         return "concept_generation_failed"
     if any(token in lowered for token in ("provider_unavailable", "reference_provider", "source_edit_provider")):
         return "provider_unavailable"

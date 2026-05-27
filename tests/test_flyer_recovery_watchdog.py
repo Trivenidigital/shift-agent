@@ -1152,6 +1152,7 @@ def test_stale_manual_project_signal_uses_persisted_project_origin():
     )
 
     assert signal is not None
+    assert signal.failure_class == "concept_generation_failed"
     assert signal.chat_id == "201975216009469@lid"
     assert signal.evidence_quality == "strong"
     assert signal.provider_message_id == "wamid.f0105"
