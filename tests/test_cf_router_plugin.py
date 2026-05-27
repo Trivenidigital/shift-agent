@@ -245,6 +245,12 @@ def test_flyer_manual_edit_status_reply_unknown_reason_falls_back_to_unclassifie
         "queue status for F0063",
         "please share progress on F0063",
         "where is update for F0063",
+        "status for project: F0063",
+        "status on project F0063",
+        "where is the update for project F0063",
+        "need status of F0063",
+        "status about F0063",
+        "status update for project F0063",
     ],
 )
 def test_flyer_project_status_request_accepts_project_id_variants(mods, text):

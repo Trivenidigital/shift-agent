@@ -1,33 +1,34 @@
-# Flyer24 Batch - Manual Queue Status Phrase Coverage (2026-05-27)
+# Flyer24 Batch Plan - Manual Status Phrase Coverage (2026-05-27)
 
 **Drift-check tag:** extends-Hermes
 
 ## Hermes-first checklist
-1. Receive WhatsApp inbound text -> [Hermes]
-2. Resolve sender + active project context -> [Hermes + existing Flyer state helpers]
-3. Detect whether message is a status check vs revision edit -> [net-new: Flyer deterministic phrase policy]
-4. Send customer-safe queue/status reply -> [Hermes transport, Flyer copy policy]
-5. Emit audit intercept reason/details -> [Hermes/Flyer existing audit path]
+1. Receive inbound WhatsApp status text -> [Hermes]
+2. Resolve sender identity/account phones -> [Hermes + existing Flyer helpers]
+3. Detect flyer status intent phrase -> [net-new: Flyer regex phrase coverage]
+4. Route to deterministic status reply/manual queue status surface -> [existing Flyer]
+5. Emit audit rows + reply transport -> [Hermes/existing Flyer]
 
-Net-new scope in this batch: step 3 phrase coverage only, plus tests.
+Net-new scope in this batch: step 3 only (phrase coverage hardening), plus tests.
 
-## Batch issue list (target 6)
-1. `status for project F####` phrasing not explicitly recognized as status check.
-2. `status of project F####` phrasing not explicitly recognized as status check.
-3. `update on project F####` phrasing not explicitly recognized as status check.
-4. `queue status for F####` phrasing not explicitly recognized as status check.
-5. `progress on F####` phrasing not explicitly recognized as status check.
-6. `where is update for F####` style phrasing not explicitly recognized as status check.
+## Batch issues (6)
+1. `status for project: F####` not recognized as status intent.
+2. `status on project F####` not recognized.
+3. `where is the update for project F####` not recognized.
+4. `need status of F####` not recognized.
+5. `status about F####` not recognized.
+6. `status update for project F####` not recognized.
 
-## Implementation
-- Add RED unit tests in `tests/test_cf_router_plugin.py` for the above phrase families.
-- Expand only `is_flyer_project_status_request()` regex coverage in `src/plugins/cf-router/actions.py`.
-- Keep existing edit-intent guard intact to avoid misrouting true edit commands.
+## Root-cause hypothesis
+`is_flyer_project_status_request()` accepts only narrow `for/of` patterns for project-id forms and misses punctuation/preposition variants common in WhatsApp typing.
 
-## Verification
-- `pytest -q tests/test_cf_router_plugin.py -k flyer_project_status_request`
-- `python3 -m py_compile src/plugins/cf-router/actions.py tests/test_cf_router_plugin.py`
-- `git diff --check`
+## Verification plan
+- Add RED parser tests for the 6 phrases.
+- Keep edit-intent guard tests green.
+- Run focused pytest on cf-router plugin status tests.
+- Run `python3 -m py_compile` for touched files.
+- Run `git diff --check`.
 
-## Risk
-- Low: deterministic phrase parsing only, no payment/account/quota mutations, no provider behavior changes.
+## Risk / merge policy
+Low risk: deterministic phrase parsing only, no payment/account/quota/provider/manual-close mutations.
+If CI and focused checks are green, this batch is merge/deploy eligible under low-risk policy.

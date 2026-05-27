@@ -2036,7 +2036,7 @@ def is_flyer_project_status_request(text: str) -> bool:
         return True
     if re.fullmatch(r"f\d{4,}\s+status(?:\s+(?:please|pls))?\??", body):
         return True
-    if re.fullmatch(r"status\s+(?:for|of)\s+project\s+f\d{4,}(?:\s+(?:please|pls))?\??", body):
+    if re.fullmatch(r"status\s+(?:for|of|on)\s+project\s*:?\s*f\d{4,}(?:\s+(?:please|pls))?\??", body):
         return True
     if re.fullmatch(r"where\s+(?:my|the)\s+(?:flyer|flier|design|preview)\s+at\??", body):
         return True
@@ -2051,9 +2051,13 @@ def is_flyer_project_status_request(text: str) -> bool:
         r"(?:give|share)\s+(?:me|us)\s+an?\s+update\s+on\s+(?:the\s+)?(?:flyer|flier|design|preview)|"
         r"update\s+on\s+f\d{4,}|"
         r"update\s+on\s+project\s+f\d{4,}|"
+        r"where(?:'s|\s+is)\s+(?:the\s+)?update\s+for\s+project\s+f\d{4,}|"
         r"update\s+on\s+(?:this|the|my)\s+(?:flyer|flier|design|preview)(?:\s+(?:please|pls))?|"
+        r"status\s+update\s+for\s+project\s+f\d{4,}|"
         r"status\s+update\s+on\s+(?:this|the|my)\s+(?:flyer|flier|design|preview)|"
         r"status\s+for\s+f\d{4,}|"
+        r"(?:need\s+)?status\s+of\s+f\d{4,}|"
+        r"status\s+about\s+f\d{4,}|"
         r"status\s+(?:for|of)\s+project\s+f\d{4,}(?:\s+(?:please|pls))?|"
         r"(?:share|send|give)\s+status\s+of\s+(?:(?:this|the|my)\s+)?(?:flyer|flier|design|preview)|"
         r"status\s+of\s+(?:(?:this|the|my)\s+)?(?:flyer|flier|design|preview)|"
