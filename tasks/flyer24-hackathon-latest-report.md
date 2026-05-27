@@ -1,34 +1,32 @@
 # Flyer24 Hackathon Latest Report
 
-Updated: 2026-05-27T08:30:00Z
+Updated: 2026-05-27T10:40:00Z
 
 ## Current batch
-- Branch: `codex/flyer24-batch-manual-queue-signal-normalization-202605270824`
-- Scope: harden manual-queue signal parsing so fail-closed/manual-review acknowledgements trigger consistently across status/reason formatting variants.
+- Branch: `codex/flyer24-batch-status-phrase-gaps-202605271030`
+- Scope: harden Flyer status-check intent detection to prevent clarification loops for natural check-in wording.
 - Root-cause evidence:
-  - `test_generation_detail_with_reference_unsupported_reason_code_counts_as_manual_review` failed because `flyer_generation_queued_manual_review` only recognized `source_edit_provider_unavailable` reason-code text.
-  - `test_generation_detail_with_spaced_manual_review_status_counts_as_manual_review` failed because parser required exact `manual_review.status=queued` without spaces.
-  - `test_project_has_manual_review_queued_normalizes_status_and_accepts_in_progress` failed because helper required exact lowercase `queued` and ignored `in_progress`.
-- Risk: low (no payment/account/quota mutation; only manual-queue detection and acknowledgement routing predicates).
-- Hermes/MCP-first: Hermes continues to own ingress/routing/audit substrate. Net-new is Flyer policy normalization for deterministic fail-closed customer/operator paths.
+  - New RED test `test_status_request_phrase_gaps_route_as_status_checkins` failed on 6 phrases that were falling through status detection.
+  - Failures reproduced for: `f0058 status?`, `eta on my flyer`, `where my flyer at`, `did you complete it`, `whats happening with my flyer`, `what about my flyer`.
+- Risk: low (routing heuristic only; no payment/account/quota/provider mutations).
+- Hermes/MCP-first: Hermes remains owner for ingress, identity, dispatch substrate, and audit transport. Net-new is Flyer text-intent policy only.
 
 ## Batch issue list
-1. Normalize `manual_review.status` casing/whitespace in `flyer_project_has_manual_review_queued`.
-2. Treat `manual_review.status=in_progress` as queued-manual signal where helper is used.
-3. Accept spaced `reason_code = ...` variants in generation failure detail parsing.
-4. Accept non-source-edit manual reason codes (`visual_qa_failed`, `reference_unsupported`, `reference_provider_unavailable`, `source_edit_generation_failed`) in manual-queue detection.
-5. Accept spaced `manual_review.status = queued|in_progress` variants in generation detail.
-6. Accept JSON-like `"manual_review": {"status": "queued|in_progress"}` detail payloads.
+1. `f0058 status?` was not classified as a status request.
+2. `eta on my flyer` was not classified as a status request.
+3. `where my flyer at` was not classified as a status request.
+4. `did you complete it` was not classified as a status request.
+5. `whats happening with my flyer` was not classified as a status request.
+6. `what about my flyer` was not classified as a status request.
 
 ## PR queue classification refresh
-- #292 `fix(flyer): re-land payment contract fail-closed checks and MCP readiness` - operator-review-required (money-adjacent).
+- #292 `fix(flyer): re-land payment contract fail-closed checks and MCP readiness` - operator-review-required (money-adjacent, merge conflict pending rebase).
 
 ## Running PR list (hackathon)
 - #292 `fix(flyer): re-land payment contract fail-closed checks and MCP readiness` - open; operator-review-required.
+- (pending) status-phrase-gap hardening PR from `codex/flyer24-batch-status-phrase-gaps-202605271030`.
 
 ## Verification for this batch
-- `/opt/codex-flyer-autodev-venv/bin/python -m pytest -q tests/test_flyer_source_edit_preflight.py -k "generation_detail_with_spaced_reason_code or generation_detail_with_reference_unsupported or generation_detail_with_spaced_manual_review_status or generation_detail_with_json_manual_review_status or project_has_manual_review_queued_normalizes_status"` (pass: 5)
-- `/opt/codex-flyer-autodev-venv/bin/python -m pytest -q tests/test_flyer_source_edit_preflight.py` (pass: 21)
-- `/opt/codex-flyer-autodev-venv/bin/python -m pytest -q tests/test_cf_router_flyer_routing.py -k "manual_review_status_normalizes_source_edit_reason_code or source_edit_status_check_uses_general_status_for_non_source_edit_reason"` (pass: 2)
-- `python3 -m py_compile src/plugins/cf-router/actions.py tests/test_flyer_source_edit_preflight.py`
+- `python3 -m py_compile src/plugins/cf-router/actions.py tests/test_cf_router_flyer_routing.py`
+- `pytest -q tests/test_cf_router_flyer_routing.py -k "status_request_phrase_gaps or flyer_is_status_checkin_matches_expected_phrases"` (pass: 7)
 - `git diff --check`
