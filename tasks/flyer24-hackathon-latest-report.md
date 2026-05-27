@@ -1,6 +1,6 @@
 # Flyer24 Hackathon Latest Report
 
-Updated: 2026-05-27T03:28:00Z
+Updated: 2026-05-27T03:37:00Z
 
 ## Current batch
 - Branch: `codex/flyer24-batch-active-intercept-guardrails-202605270225`
@@ -27,10 +27,10 @@ Updated: 2026-05-27T03:28:00Z
 - #256 `fix(flyer): tighten payment activation contract and MCP readiness catalog` - open.
 - #268 `fix(flyer): harden billing provider readiness and cockpit visibility` - open.
 - #271 `fix(flyer): restore account/manual-edit routing compatibility` - open.
-- #279 `fix(flyer): expand source-edit/manual-queue health visibility` - open.
-- #280 `fix(flyer): restore cockpit auth override compatibility and source-edit health detail` - open.
+- #279 `fix(flyer): expand source-edit/manual-queue health visibility` - closed as superseded by #291.
+- #280 `fix(flyer): restore cockpit auth override compatibility and source-edit health detail` - closed as superseded by #291.
 - #284 `fix(flyer): resolve cf-router routing and dedupe regressions` - open.
-- #TBD `fix(flyer): consolidate cockpit health visibility + auth override compatibility` - this batch.
+- #291 `fix(flyer): consolidate cockpit auth compatibility and manual-queue health visibility` - open (replacement for #279/#280).
 
 ## PR queue classification refresh (post-main@91274c4)
 - #280: superseded by this consolidated branch (same target files, cleanly rebased on latest main).
