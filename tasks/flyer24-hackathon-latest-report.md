@@ -1,50 +1,49 @@
 # Flyer24 Hackathon Latest Report
 
-Updated: 2026-05-27T17:21:58Z
+Updated: 2026-05-27T18:32:00Z
 
 ## Current batch
-- Branch: `codex/flyer24-batch-manual-queue-health-signals-202605271725`
+- Branch: `codex/flyer24-batch-payment-contract-consolidation-202605271825`
 - PR: pending create
 - Deploy: not run (PR stage)
-- Scope: expand Flyer `/flyer/health` manual-queue impact signals so source-edit and visual-QA backlog urgency is directly visible to operators.
+- Scope: payment contract fail-closed hardening + MCP readiness parity without live credential/payment mutations.
 - Root-cause evidence:
-  - RED tests showed `_source_edit_manual_queue_impact()` lacked explicit `visual_qa_failed` queue/stale counters.
-  - RED tests showed `_source_edit_manual_queue_impact()` lacked aggregate `customer_update_due` overdue counters.
-  - RED tests showed health payload lacked reason-family and stale-family aggregate counts, forcing raw-code-only triage.
-- Risk: low (read-only health payload + tests/docs only; no payment/account/quota/provider/manual-close mutations).
-- Hermes/MCP-first: Hermes owns ingress, state, and audit substrate; net-new is Flyer-local read-only operator health shaping only.
+  - `activation_event_state` previously accepted unknown providers and currency fallback edge cases.
+  - account/guest-order activation paths treated casing/whitespace provider drift as invalid and persisted untrimmed references.
+  - readiness connector candidates lacked explicit Razorpay MCP row despite MCP-first payment policy.
+- Risk: medium (money-adjacent payment/account lifecycle validation paths).
+- Hermes/MCP-first: Hermes owns ingress/state/audit/connector substrate; net-new is Flyer-local contract validation + readiness metadata only.
 
 ## Batch issue list fixed
-1. `_source_edit_manual_queue_impact()` now reports `visual_qa_queued_count`.
-2. `_source_edit_manual_queue_impact()` now reports `visual_qa_stale_count`.
-3. `_source_edit_manual_queue_impact()` now reports `visual_qa_oldest_stale_minutes`.
-4. `_source_edit_manual_queue_impact()` now reports `customer_update_due_count` and `customer_update_due_oldest_minutes`.
-5. `_source_edit_manual_queue_impact()` now reports `reason_family_counts` and `stale_reason_family_counts`.
-6. Source-edit provider health detail now includes reason-family and customer-update-due summaries for stale backlog triage.
+1. `activation_event_state` now fails closed for unknown provider.
+2. `activation_event_state` now fails closed when expected currency is blank.
+3. `activation_event_state` now requires explicit non-manual event currency and rejects blank fallback.
+4. Account activation now normalizes provider casing/whitespace before validation.
+5. Account/guest-order activation now normalize payment-reference whitespace before dedupe/idempotency persistence.
+6. Credential readiness connector catalog now includes official Razorpay MCP candidate alongside Stripe MCP.
 
 ## PR queue classification refresh
-- #292 `fix(flyer): re-land payment contract fail-closed checks and MCP readiness` - operator-review-required (money-adjacent), open, merge conflict with main.
-- #299 `fix(flyer): harden billing health MCP readiness visibility` - operator-review-required (money-adjacent), open, merge conflict with main.
-- #<pending> `fix(flyer): expand manual queue health signals for source-edit and visual-QA backlog` - pending open.
+- #292 `fix(flyer): re-land payment contract fail-closed checks and MCP readiness` - superseded by this batch (conflicting duplicate scope).
+- #299 `fix(flyer): harden billing health MCP readiness visibility` - operator-review-required (money-adjacent), conflicting with main; keep open for rebase or follow-up.
+- #<pending> `fix(flyer): consolidate payment fail-closed contract and MCP readiness parity` - pending open; operator-review-required.
 
 ## Running PR list (hackathon)
-- #292 `fix(flyer): re-land payment contract fail-closed checks and MCP readiness` - open; operator-review-required.
-- #295 `fix(flyer): close status-check phrasing gaps in active project routing` - merged to `main`; deployed `deploy-20260527-102236-c858caa1`.
-- #296 `fix(flyer): route sample-prompt lexical variants to starter ideas` - merged to `main`; deployed `deploy-20260527-112213-f019b345`.
-- #297 `fix(flyer): route sample-request tagline/slogan variants to idea intake` - merged to `main`; deployed `deploy-20260527-121058-87db7152`.
-- #298 `fix(flyer): close render dependency and recovery alert gaps` - merged to `main`; deployed in later train (see git history).
+- #292 `fix(flyer): re-land payment contract fail-closed checks and MCP readiness` - superseded/close after new PR opens.
+- #295 `fix(flyer): close status-check phrasing gaps in active project routing` - merged; deployed `deploy-20260527-102236-c858caa1`.
+- #296 `fix(flyer): route sample-prompt lexical variants to starter ideas` - merged; deployed `deploy-20260527-112213-f019b345`.
+- #297 `fix(flyer): route sample-request tagline/slogan variants to idea intake` - merged; deployed `deploy-20260527-121058-87db7152`.
+- #298 `fix(flyer): close render dependency and recovery alert gaps` - merged.
 - #299 `fix(flyer): harden billing health MCP readiness visibility` - open; operator-review-required.
-- #303 `fix(flyer): route sample ask-shape variants to starter ideas` - merged to `main`.
-- #304 `fix(flyer): route missed sample request phrase variants to starter ideas` - merged to `main`.
-- #305 `fix(flyer): normalize manual queue triage status and reason signals` - merged to `main`.
-- #<pending> `fix(flyer): expand manual queue health signals for source-edit and visual-QA backlog` - pending open.
+- #303 `fix(flyer): route sample ask-shape variants to starter ideas` - merged.
+- #304 `fix(flyer): route missed sample request phrase variants to starter ideas` - merged.
+- #305 `fix(flyer): normalize manual queue triage status and reason signals` - merged.
+- #306 `fix(flyer): expand manual queue health backlog signals` - merged.
+- #<pending> `fix(flyer): consolidate payment fail-closed contract and MCP readiness parity` - pending open.
 
 ## Verification for this batch
-- `pytest -q web/backend/tests/test_flyer_health.py` ✅ (27 passed)
-- `pytest -q web/backend/tests/test_flyer_health.py -k 'manual_queue_impact_zero_by_default or manual_queue_impact_counts_source_edit_unavailable_rows or manual_queue_impact_reports_stale_reason_counts or source_edit_detail_mentions_mixed_reason_backlog'` ✅ (4 passed)
-- `python3 -m py_compile web/backend/app/routers/flyer.py web/backend/tests/test_flyer_health.py` ✅
+- `python3 -m py_compile src/agents/flyer/payment_state.py src/agents/flyer/account.py src/agents/flyer/guest_order.py src/platform/credential_readiness.py tests/test_flyer_payment_state.py tests/test_flyer_onboarding.py tests/test_flyer_guest_order.py tests/test_credential_readiness.py` ✅
+- `pytest -q tests/test_flyer_payment_state.py` ✅ (4 passed)
+- `pytest -q tests/test_flyer_guest_order.py -k 'activation or replay or mismatch or amount or currency or invalid_provider or normalizes_provider_and_payment_reference'` ✅ (13 passed)
+- `pytest -q tests/test_flyer_onboarding.py -k 'payment_reference_already_used or replay_mismatch or replay_not_active or normalizes_provider_and_payment_reference'` ✅ (2 passed)
+- `pytest -q tests/test_credential_readiness.py -k 'payment_mcp_candidates_include_stripe_and_razorpay'` ✅ (1 passed)
 - `git diff --check` ✅
-
-## Runtime checks snapshot
-- `systemctl --failed`: unrelated pre-existing failed unit remains (`logrotate.service`).
-- Flyer/shift timers active: `flyer-source-edit-sla-watchdog`, `flyer-recovery-watchdog`, `shift-agent-health`, `send-daily-brief`, `shift-agent-tail-logger`.

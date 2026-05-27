@@ -2301,6 +2301,40 @@ def test_account_activation_replay_requires_active_or_trial_customer(tmp_path):
     assert replay.ok is False
     assert replay.detail == "payment_reference_replay_not_active"
 
+
+def test_account_activation_normalizes_provider_and_payment_reference(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 5, 24, tzinfo=timezone.utc)
+    store = FlyerCustomerStore()
+    customer = store.new_customer(
+        business_name="A",
+        business_address="1 Main",
+        public_phone="+17043243322",
+        business_whatsapp_number="+17043243322",
+        authorized_request_number="+19045550104",
+        business_category="restaurant",
+        preferred_language="en",
+        plan_id="starter",
+        now=now,
+    )
+    store.customers.append(customer)
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    active = activate_customer(
+        state_path=state_path,
+        customer_id="CUST0001",
+        provider="  STRIPE  ",
+        payment_reference="  pi_norm_1  ",
+        expected_plan="starter",
+        amount_cents=4999,
+        currency="usd",
+        now=now,
+    )
+    assert active.ok is True
+    updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8")).customers[0]
+    assert updated.billing_provider == "stripe"
+    assert updated.payment_reference == "pi_norm_1"
+
 def test_non_admin_cannot_mutate_account_but_can_status(tmp_path):
     state_path = tmp_path / "customers.json"
     now = datetime(2026, 5, 15, tzinfo=timezone.utc)

@@ -741,6 +741,36 @@ def test_guest_order_activation_rejects_invalid_provider(tmp_path):
     assert active.detail == "invalid_provider"
 
 
+def test_guest_order_activation_normalizes_provider_and_payment_reference(tmp_path):
+    state = tmp_path / "guest_orders.json"
+    now = datetime(2026, 5, 24, tzinfo=timezone.utc)
+
+    start_guest_order(
+        state_path=state,
+        sender_phone="+17329837841",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="cta-1",
+        unit_price_cents=4999,
+        currency="USD",
+        now=now,
+    )
+
+    active = activate_guest_order(
+        state_path=state,
+        order_id="GUEST0001",
+        provider="  STRIPE ",
+        payment_reference="  pi_norm_1 ",
+        amount_cents=4999,
+        currency="USD",
+        now=now,
+    )
+
+    assert active.ok is True
+    store = load_guest_order_store(state)
+    assert store.orders[0].payment_provider == "stripe"
+    assert store.orders[0].payment_reference == "pi_norm_1"
+
+
 def test_guest_order_cli_rejects_activation_amount_mismatch(tmp_path):
     state = tmp_path / "guest_orders.json"
     script = Path(__file__).resolve().parent.parent / "src" / "agents" / "flyer" / "scripts" / "manage-flyer-guest-order"
