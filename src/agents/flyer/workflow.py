@@ -112,6 +112,10 @@ MANUAL_REVIEW_REASON_LINES: dict[str, str] = {
     "provider_timeout": (
         "I hit a temporary issue generating this. It's queued for retry/designer review and I'll follow up here when it's ready."
     ),
+    "dependency_missing": (
+        "I hit a setup issue while generating this flyer. "
+        "It's queued for review and I'll follow up here when it's ready."
+    ),
 }
 
 
@@ -170,6 +174,10 @@ CLOSED_NO_SEND_REASON_LINES: dict[str, str] = {
     "provider_timeout": (
         "This flyer project was closed without delivering due to a temporary issue. "
         "Please re-send your request and I'll try again."
+    ),
+    "dependency_missing": (
+        "This flyer project was closed without delivering because a required setup component was unavailable. "
+        "Please re-send your request and I'll start a fresh one."
     ),
 }
 
