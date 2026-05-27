@@ -1,30 +1,31 @@
 # Flyer24 Hackathon Latest Report
 
-Updated: 2026-05-27T16:25:00Z
+Updated: 2026-05-27T17:21:58Z
 
 ## Current batch
-- Branch: `codex/flyer24-batch-manual-queue-normalization-202605271620`
+- Branch: `codex/flyer24-batch-manual-queue-health-signals-202605271725`
 - PR: pending create
 - Deploy: not run (PR stage)
-- Scope: normalize Flyer manual-queue status/family/hints so stale source-edit and QA backlog rows stay visible and actionable in Cockpit/triage.
+- Scope: expand Flyer `/flyer/health` manual-queue impact signals so source-edit and visual-QA backlog urgency is directly visible to operators.
 - Root-cause evidence:
-  - RED tests showed `list_manual_queue` treated `manual_review.status` as case/spacing-sensitive and leaked raw values to triage counts.
-  - RED tests showed `list_manual_queue` crashed when `manual_review.queued_at` and `updated_at` were missing even though `created_at` existed.
-  - RED tests showed `_reason_family("dependency_missing")` and `_reason_family("legacy_unknown")` fell into `other`, reducing operator triage signal quality.
-- Risk: low (routing regex + tests/docs only; no payment/account/quota/provider/manual-close mutations).
-- Hermes/MCP-first: Hermes owns ingress, state persistence, and audit transport; net-new is Flyer-local manual queue normalization only (no connector/payment work).
+  - RED tests showed `_source_edit_manual_queue_impact()` lacked explicit `visual_qa_failed` queue/stale counters.
+  - RED tests showed `_source_edit_manual_queue_impact()` lacked aggregate `customer_update_due` overdue counters.
+  - RED tests showed health payload lacked reason-family and stale-family aggregate counts, forcing raw-code-only triage.
+- Risk: low (read-only health payload + tests/docs only; no payment/account/quota/provider/manual-close mutations).
+- Hermes/MCP-first: Hermes owns ingress, state, and audit substrate; net-new is Flyer-local read-only operator health shaping only.
 
 ## Batch issue list fixed
-1. `list_manual_queue` now normalizes `manual_review.status` (`queued`/`in_progress`) across case/spacing variants.
-2. `list_manual_queue` now falls back age timestamps to `created_at` when `queued_at` and `updated_at` are absent.
-3. `list_manual_queue` now emits normalized `manual_status` values in queue rows.
-4. `_reason_family` now classifies `dependency_missing` as `provider_readiness`.
-5. `_reason_family` now classifies `legacy_unknown` as `operator_policy`.
-6. `_operator_action_hint` now provides deterministic hints for `dependency_missing` and `legacy_unknown`.
+1. `_source_edit_manual_queue_impact()` now reports `visual_qa_queued_count`.
+2. `_source_edit_manual_queue_impact()` now reports `visual_qa_stale_count`.
+3. `_source_edit_manual_queue_impact()` now reports `visual_qa_oldest_stale_minutes`.
+4. `_source_edit_manual_queue_impact()` now reports `customer_update_due_count` and `customer_update_due_oldest_minutes`.
+5. `_source_edit_manual_queue_impact()` now reports `reason_family_counts` and `stale_reason_family_counts`.
+6. Source-edit provider health detail now includes reason-family and customer-update-due summaries for stale backlog triage.
 
 ## PR queue classification refresh
 - #292 `fix(flyer): re-land payment contract fail-closed checks and MCP readiness` - operator-review-required (money-adjacent), open, merge conflict with main.
 - #299 `fix(flyer): harden billing health MCP readiness visibility` - operator-review-required (money-adjacent), open, merge conflict with main.
+- #<pending> `fix(flyer): expand manual queue health signals for source-edit and visual-QA backlog` - pending open.
 
 ## Running PR list (hackathon)
 - #292 `fix(flyer): re-land payment contract fail-closed checks and MCP readiness` - open; operator-review-required.
@@ -35,12 +36,13 @@ Updated: 2026-05-27T16:25:00Z
 - #299 `fix(flyer): harden billing health MCP readiness visibility` - open; operator-review-required.
 - #303 `fix(flyer): route sample ask-shape variants to starter ideas` - merged to `main`.
 - #304 `fix(flyer): route missed sample request phrase variants to starter ideas` - merged to `main`.
-- #<pending> `fix(flyer): normalize manual queue status/family triage signals` - pending open.
+- #305 `fix(flyer): normalize manual queue triage status and reason signals` - merged to `main`.
+- #<pending> `fix(flyer): expand manual queue health signals for source-edit and visual-QA backlog` - pending open.
 
 ## Verification for this batch
-- `pytest -q tests/test_flyer_manual_queue.py` ✅ (56 passed)
-- `pytest -q tests/test_flyer_manual_queue.py -k 'manual_status_case_and_spacing_variants or uses_created_at_when_manual_queued_and_updated_missing or normalizes_manual_status_casing or groups_field_is_list or dependency_missing_and_legacy_unknown'` ✅ (5 passed)
-- `python3 -m py_compile src/agents/flyer/manual_queue.py tests/test_flyer_manual_queue.py` ✅
+- `pytest -q web/backend/tests/test_flyer_health.py` ✅ (27 passed)
+- `pytest -q web/backend/tests/test_flyer_health.py -k 'manual_queue_impact_zero_by_default or manual_queue_impact_counts_source_edit_unavailable_rows or manual_queue_impact_reports_stale_reason_counts or source_edit_detail_mentions_mixed_reason_backlog'` ✅ (4 passed)
+- `python3 -m py_compile web/backend/app/routers/flyer.py web/backend/tests/test_flyer_health.py` ✅
 - `git diff --check` ✅
 
 ## Runtime checks snapshot
