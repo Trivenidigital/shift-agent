@@ -273,7 +273,7 @@ def test_flyer_complete_requests_send_processing_ack_before_generation():
     assert "I'm creating your flyer now" in actions
     assert "5-6 minutes" in actions
     assert "send a preview here shortly" in actions
-    assert hooks.index("send_flyer_processing_ack(chat_id, project_id)") < hooks.index("trigger_generate_flyer_concepts(project_id)")
+    assert hooks.index("send_flyer_processing_ack(") < hooks.index("trigger_generate_flyer_concepts(project_id)")
 
 
 def test_reference_manual_fallback_copy_reaches_resume_paths_and_releases_source_edit_quota():

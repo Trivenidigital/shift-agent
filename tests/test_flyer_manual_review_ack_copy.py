@@ -16,6 +16,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ACTIONS_PATH = REPO_ROOT / "src" / "plugins" / "cf-router" / "actions.py"
+PLATFORM = REPO_ROOT / "src" / "platform"
 
 MANUAL_REVIEW_EXPECTED_BODY = (
     "Flyer Studio\n"
@@ -82,12 +83,23 @@ def _load_actions_module():
     return module
 
 
+def _action_context():
+    sys.path.insert(0, str(PLATFORM))
+    from schemas import ActionExecutionContext
+
+    return ActionExecutionContext(
+        action_id="test.flyer.manual_review_ack",
+        is_regulated_action=False,
+        verified_action_result=False,
+    )
+
+
 @pytest.fixture
 def captured_message(monkeypatch):
     actions = _load_actions_module()
     captured: dict[str, object] = {}
 
-    def fake_bridge_post(chat_id, message):
+    def fake_bridge_post(chat_id, message, **_kwargs):
         captured["chat_id"] = chat_id
         captured["message"] = message
         return True, "test-message-id", "", "sent"
@@ -113,6 +125,7 @@ def test_manual_review_ack_is_short_outcome_only_copy_for_f0063_style_input(capt
         project_id="F0063",
         request_text=F0063_STYLE_REQUEST,
         reason=F0063_STYLE_REASON,
+        action_context=_action_context(),
     )
 
     assert ok is True
@@ -128,6 +141,7 @@ def test_source_edit_processing_ack_is_short_active_edit_copy(captured_message):
     ok, mid, err = actions.send_flyer_edit_processing_ack(
         chat_id="555555555555@s.whatsapp.net",
         project_id="F0063",
+        action_context=_action_context(),
     )
 
     assert ok is True

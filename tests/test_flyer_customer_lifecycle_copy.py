@@ -61,11 +61,22 @@ def _load_plugin_modules():
     return hooks_mod, actions_mod
 
 
+def _action_context():
+    sys.path.insert(0, str(PLATFORM))
+    from schemas import ActionExecutionContext
+
+    return ActionExecutionContext(
+        action_id="test.flyer.copy_ack",
+        is_regulated_action=False,
+        verified_action_result=False,
+    )
+
+
 def _install_bridge_capture(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     sent: list[str] = []
     fake_safe_io = types.ModuleType("safe_io")
 
-    def bridge_post(_chat_id: str, message: str):
+    def bridge_post(_chat_id: str, message: str, **_kwargs):
         sent.append(message)
         return True, f"mid-{len(sent)}", "", 200
 
@@ -88,7 +99,11 @@ def test_initial_ack_helpers_are_outcome_only(monkeypatch):
         actions.send_flyer_manual_review_ack,
         actions.send_flyer_manual_edit_ack,
     ):
-        ok, _mid, err = helper("17329837841@s.whatsapp.net", "F0065")
+        ok, _mid, err = helper(
+            "17329837841@s.whatsapp.net",
+            "F0065",
+            action_context=_action_context(),
+        )
         assert ok, err
         _assert_customer_safe(sent[-1])
 
@@ -139,9 +154,13 @@ def test_regeneration_failure_copy_hides_project_id(monkeypatch):
     hooks, actions = _load_plugin_modules()
 
     sent: list[str] = []
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: (sent.append(text) is None, "mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: (sent.append(text) is None, "mid", ""))
 
-    ok, _mid, err = hooks._send_flyer_regeneration_failed_ack("17329837841@s.whatsapp.net", "F0065")
+    ok, _mid, err = hooks._send_flyer_regeneration_failed_ack(
+        "17329837841@s.whatsapp.net",
+        "F0065",
+        action_context=_action_context(),
+    )
 
     assert ok, err
     _assert_customer_safe(sent[-1])
