@@ -2855,12 +2855,7 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
             return None
         sp_id = str(status_project.get("project_id") or "")
         sp_status = str(status_project.get("status") or "")
-        manual_block = status_project.get("manual_review") or {}
-        manual_reason_code = str(manual_block.get("reason_code") or "")
-        if sp_status == "manual_edit_required" and manual_reason_code == "source_edit_provider_unavailable":
-            reply = actions.flyer_manual_edit_status_reply(status_project)
-        else:
-            reply = actions.flyer_project_status_reply(status_project)
+        reply, _is_source_edit_manual_status = _select_flyer_status_reply(status_project)
         ack_ok, mid, err = actions.send_flyer_text(
             chat_id, reply,
             action_context=build_action_context(
