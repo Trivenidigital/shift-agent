@@ -2888,13 +2888,6 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
     status = str(active_project.get("status") or "")
     body = " ".join(actions.flyer_visible_message_text(text).split())
     lower = body.lower()
-    # Dedicated starter-idea and legacy trial-link flows live later in
-    # pre_gateway_dispatch ordering. Active-project intercept must not swallow
-    # those vague/account intents just because a stale active row exists.
-    if actions.is_vague_flyer_start(body, has_media=bool(media_path)):
-        return None
-    if customer and customer.get("status") in {"trial", "active"} and actions.is_flyer_legacy_trial_link_followup(body):
-        return None
     scope_block = actions.flyer_business_scope_block_message(customer or {}, body)
     if scope_block:
         ack_ok, mid, err = actions.send_flyer_text(
@@ -2914,6 +2907,17 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
             ),
         )
         return {"action": "skip", "reason": "cf-router flyer business scope blocked"}
+    requested_business_scope = actions.flyer_requested_business_scope(body)
+    # Dedicated starter-idea and legacy trial-link flows live later in
+    # pre_gateway_dispatch ordering. Active-project intercept must not swallow
+    # generic vague/account intents just because a stale active row exists.
+    # Keep named-business requests here: cross-business names need the scope
+    # guard above, and same-business wording such as "create a new flyer for
+    # <current business> with the address smaller" is an active-project edit.
+    if actions.is_vague_flyer_start(body, has_media=bool(media_path)) and not requested_business_scope:
+        return None
+    if customer and customer.get("status") in {"trial", "active"} and actions.is_flyer_legacy_trial_link_followup(body):
+        return None
     revision_on_delivered = status == "delivered" and actions.is_flyer_revision_intent(body)
     if (
         not revision_on_delivered
