@@ -120,6 +120,70 @@ def test_visual_qa_fails_when_required_price_missing(tmp_path):
     assert any("item:0:price" in b for b in report.blockers)
 
 
+def test_visual_qa_fails_when_required_schedule_missing(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    project = _project().model_copy(update={
+        "locked_facts": [
+            *_project().locked_facts,
+            FlyerLockedFact(fact_id="schedule", label="Schedule", value="Thursday every week", source="customer_text", required=True),
+        ]
+    })
+    artifact = _write_sidecar(
+        tmp_path,
+        "Fresh Meats. Premium Clean Chicken. Clean bird. Strong life. Kheema Dosa $13.99",
+    )
+
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert report.status == "failed"
+    assert "missing required visible fact: schedule" in report.blockers
+
+
+def test_visual_qa_accepts_every_day_for_weekly_schedule(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    project = _project().model_copy(update={
+        "locked_facts": [
+            *_project().locked_facts,
+            FlyerLockedFact(fact_id="schedule", label="Schedule", value="Thursday every week", source="customer_text", required=True),
+        ]
+    })
+    artifact = _write_sidecar(
+        tmp_path,
+        "Fresh Meats. Premium Clean Chicken. Every Thursday. Clean bird. Strong life. Kheema Dosa $13.99",
+    )
+
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert report.status == "passed", report.blockers
+
+
+def test_visual_qa_accepts_every_two_days_for_weekly_schedule(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    project = _project().model_copy(update={
+        "locked_facts": [
+            *_project().locked_facts,
+            FlyerLockedFact(
+                fact_id="schedule",
+                label="Schedule",
+                value="Wednesday and Thursday every week",
+                source="customer_text",
+                required=True,
+            ),
+        ]
+    })
+    artifact = _write_sidecar(
+        tmp_path,
+        "Fresh Meats. Premium Clean Chicken. Every Wednesday and Thursday. Clean bird. Strong life. Kheema Dosa $13.99",
+    )
+
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert report.status == "passed", report.blockers
+
+
 def test_visual_qa_requires_business_campaign_contact_and_profile_location(tmp_path):
     from agents.flyer.visual_qa import run_visual_qa
 

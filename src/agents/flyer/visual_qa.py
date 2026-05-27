@@ -129,12 +129,38 @@ def _address_value_present_in(normalized_text: str, fact_value: str) -> bool:
     return _text_value_present_in(normalized_address_text, normalized_address_value)
 
 
+def _schedule_value_present_in(normalized_text: str, fact_value: str) -> bool:
+    normalized_schedule_text = _normalize_text_for_match(normalized_text)
+    normalized_schedule_value = _normalize_text_for_match(fact_value)
+    if _text_value_present_in(normalized_schedule_text, normalized_schedule_value):
+        return True
+    match = re.fullmatch(
+        r"(?P<day>monday|tuesday|wednesday|thursday|friday|saturday|sunday) every week",
+        normalized_schedule_value,
+    )
+    if match:
+        every_day = f"every {match.group('day')}"
+        if _text_value_present_in(normalized_schedule_text, every_day):
+            return True
+    two_day_match = re.fullmatch(
+        r"(?P<first>monday|tuesday|wednesday|thursday|friday|saturday|sunday) and "
+        r"(?P<second>monday|tuesday|wednesday|thursday|friday|saturday|sunday) every week",
+        normalized_schedule_value,
+    )
+    if two_day_match:
+        every_days = f"every {two_day_match.group('first')} and {two_day_match.group('second')}"
+        if _text_value_present_in(normalized_schedule_text, every_days):
+            return True
+    return False
+
+
 def _value_present_in(
     normalized_text: str,
     fact_value: str,
     *,
     phone_match: bool = False,
     address_match: bool = False,
+    schedule_match: bool = False,
 ) -> bool:
     """Smart presence check for a locked-fact value in the OCR'd text.
 
@@ -152,6 +178,8 @@ def _value_present_in(
         return _phone_value_present_in(normalized_text, fact_value)
     if address_match:
         return _address_value_present_in(normalized_text, fact_value)
+    if schedule_match:
+        return _schedule_value_present_in(normalized_text, fact_value)
     normalized_value = _normalize_text_for_match(fact_value)
     return _text_value_present_in(normalized_text, normalized_value)
 
@@ -376,6 +404,7 @@ def run_visual_qa(
                 value=fact.value,
             ),
             address_match=fact.fact_id == "location" or "address" in fact.label.casefold() or "location" in fact.label.casefold(),
+            schedule_match=fact.fact_id == "schedule" or "schedule" in fact.label.casefold(),
         ):
             blockers.append(f"missing required visible fact: {fact.fact_id}")
     # Source-contract negative-assertion gate: any value in

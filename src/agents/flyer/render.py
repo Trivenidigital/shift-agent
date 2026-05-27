@@ -350,6 +350,13 @@ def _schedule_hint(project: FlyerProject) -> str:
         first = recurring_days_match.group("first").title()
         second = recurring_days_match.group("second").title()
         return f"{first} and {second} every week"
+    single_recurring_day_match = re.search(
+        r"\b(?P<day>monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+(?:of\s+)?every\s+week\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if single_recurring_day_match:
+        return f"{single_recurring_day_match.group('day').title()} every week"
     schedule_match = re.search(
         r"((?:starts?|starting)\s+from\s+.+?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend).+?)(?:\.|$)",
         text,
@@ -365,6 +372,10 @@ def _schedule_hint(project: FlyerProject) -> str:
     if recurring_match:
         return recurring_match.group(1).strip(" .")
     return ""
+
+
+def _display_schedule(project: FlyerProject) -> str:
+    return fact_value(project, "schedule", fallback=_schedule_hint(project)).strip()
 
 
 def _schedule_includes_time_range(schedule: str) -> bool:
@@ -665,7 +676,7 @@ def collect_text_facts(project: FlyerProject) -> list[FlyerTextFact]:
         add("brand", "Business", business_text)
     title_text = _display_title(project)
     add("title", "Title", title_text)
-    schedule = _schedule_hint(project)
+    schedule = _display_schedule(project)
     if project.fields.event_date:
         add("date", "Date", _display_date_text(project))
     elif schedule:
@@ -703,7 +714,7 @@ def _menu_overlay_payload(project: FlyerProject) -> dict[str, object]:
     # text manifest S5 will OCR-validate against. Same locked-fact preference
     # for title/location/contact.
     items = _menu_item_lines(project)
-    schedule = _schedule_hint(project)
+    schedule = _display_schedule(project)
     return {
         "title": _display_title(project),
         "schedule": schedule,
@@ -729,7 +740,7 @@ def _poster_copy_plan(project: FlyerProject) -> PosterCopyPlan:
         detail_lines.append(detail)
     return PosterCopyPlan(
         title=_display_title(project),
-        schedule=_schedule_hint(project),
+        schedule=_display_schedule(project),
         location=fact_value(project, "location", fallback=project.fields.venue_or_location) or "",
         contact=fact_value(project, "contact_phone", fallback=project.fields.contact_info) or "",
         items=items,
@@ -1801,7 +1812,8 @@ def apply_exact_identity_overlay(project: FlyerProject, source: Path | str, targ
     business = _display_business_name(project).strip()
     location = fact_value(project, "location", fallback=project.fields.venue_or_location).strip()
     contact = fact_value(project, "contact_phone", fallback=project.fields.contact_info).strip()
-    if not any((business, location, contact)):
+    schedule = _display_schedule(project)
+    if not any((business, location, contact, schedule)):
         _export_from_source_image(source, target, size=size)
         return
     with Image.open(source) as img:
@@ -1829,13 +1841,15 @@ def apply_exact_identity_overlay(project: FlyerProject, source: Path | str, targ
                 bbox = draw.textbbox((0, 0), line, font=font)
                 draw.text(((width - (bbox[2] - bbox[0])) // 2, y), line, font=font, fill=white)
                 y += int(font.size * 1.05)
-        footer_parts = [part for part in (location, f"Contact: {contact}" if contact else "") if part]
-        if footer_parts:
-            font = _font(ImageFont, max(22, int(width * 0.03)), bold=True, text=" ".join(footer_parts))
+        if any((schedule, location, contact)):
+            font = _font(ImageFont, max(22, int(width * 0.03)), bold=True, text=" ".join([schedule, location, contact]))
             lines: list[str] = []
-            for part in footer_parts:
-                lines.extend(_wrap(draw, part.upper(), font, int(width * 0.9))[:2])
-            lines = lines[:3]
+            if schedule:
+                lines.extend(_wrap(draw, schedule.upper(), font, int(width * 0.9))[:1])
+            if location:
+                lines.extend(_wrap(draw, location.upper(), font, int(width * 0.9))[:1])
+            if contact:
+                lines.extend(_wrap(draw, f"CONTACT: {contact}".upper(), font, int(width * 0.9))[:1])
             total_h = len(lines) * int(font.size * 1.06)
             y = height - bottom_h + max(10, (bottom_h - total_h) // 2)
             for line in lines:
