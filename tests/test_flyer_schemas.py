@@ -13,11 +13,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src" / "platfor
 from schemas import (  # noqa: E402
     Config,
     FlyerAsset,
+    FlyerAutoRepairAttemptStore,
     FlyerBrandKit,
     FlyerCustomerActivated,
     FlyerCustomerProfile,
     FlyerConcept,
     FlyerConfig,
+    FlyerRepairAttempt,
     FlyerRecoveryCustomerAckAttempted,
     FlyerRecoveryIncidentOpened,
     FlyerRecoveryOperatorActionRequired,
@@ -89,12 +91,70 @@ def test_flyer_config_defaults_are_safe_and_cost_bounded():
     assert cfg.payment_provider == "manual"
     assert cfg.quick_flyer_price_cents == 400
     assert cfg.quick_flyer_checkout_url_template == ""
+    assert cfg.recovery.auto_repair_enabled is True
+    assert cfg.recovery.max_auto_repair_attempts == 1
+    assert cfg.recovery.auto_repair_attempt_stale_minutes == 30
     assert cfg.final_formats == [
         "whatsapp_image",
         "instagram_post",
         "instagram_story",
         "printable_pdf",
     ]
+
+
+def test_flyer_autorepair_attempt_store_is_separate_from_project_schema():
+    now = datetime.now(timezone.utc)
+    attempt = FlyerRepairAttempt(
+        attempt_id="F0001-v2-a1",
+        project_id="F0001",
+        project_version=2,
+        mode="hermes_regenerate",
+        status="attempted",
+        qa_blocker_hash="a" * 64,
+        repair_instruction_hash="b" * 64,
+        repair_instruction="Show each offer item exactly once.",
+        started_at=now,
+    )
+    store = FlyerAutoRepairAttemptStore(attempts=[attempt])
+    assert store.attempts[0].project_id == "F0001"
+
+    project_payload = _base_project_dict()
+    project_payload["repair_attempts"] = [attempt.model_dump(mode="json")]
+    with pytest.raises(ValidationError):
+        FlyerProject.model_validate(project_payload)
+
+
+def test_flyer_autorepair_audit_rows_round_trip_through_log_entry():
+    from schemas import (  # noqa: E402
+        FlyerAutoRepairAttempted,
+        FlyerAutoRepairExhausted,
+        FlyerAutoRepairSkipped,
+        FlyerAutoRepairSucceeded,
+    )
+
+    now = datetime.now(timezone.utc)
+    common = {
+        "ts": now,
+        "attempt_id": "F0001-v1-a1",
+        "project_id": "F0001",
+        "project_version": 1,
+        "mode": "hermes_regenerate",
+        "qa_blocker_hash": "a" * 64,
+        "repair_instruction_hash": "b" * 64,
+        "detail": "missing required visible fact: item:2:name",
+        "generated_asset_ids": ["A0001"],
+    }
+
+    for cls, expected_type in [
+        (FlyerAutoRepairAttempted, "flyer_autorepair_attempted"),
+        (FlyerAutoRepairSucceeded, "flyer_autorepair_succeeded"),
+        (FlyerAutoRepairExhausted, "flyer_autorepair_exhausted"),
+        (FlyerAutoRepairSkipped, "flyer_autorepair_skipped"),
+    ]:
+        entry = cls(**common)
+        parsed = TypeAdapter(LogEntry).validate_python(entry.model_dump())
+        assert parsed.type == expected_type
+        assert parsed.project_id == "F0001"
 
 
 def test_flyer_config_legacy_model_fields_still_resolve_when_policy_absent():

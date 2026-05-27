@@ -7,6 +7,21 @@ Last updated: 2026-05-21 (Flyer customer-readiness stabilization gate work added
 
 ---
 
+## Active - Flyer Hermes autonomous repair loop (2026-05-27)
+
+**Drift-check tag:** extends-Hermes
+
+Plan: `tasks/flyer-hermes-autonomous-repair-loop-plan-2026-05-27.md`
+Design: `tasks/flyer-hermes-autonomous-repair-loop-design-2026-05-27.md`
+
+- [x] Write plan and fold two independent reviews.
+- [x] Write design and fold two independent reviews.
+- [x] Build first bounded Hermes-planned regeneration slice with tests.
+- [ ] Open PR and run three-vector review.
+- [ ] Merge and deploy with VPS smoke gate.
+
+---
+
 ## Active - Flyer Studio reliability outcomes (2026-05-27)
 
 **Drift-check tag:** extends-Hermes
