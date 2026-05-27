@@ -102,21 +102,23 @@ _CODE_PATTERN = re.compile(r"#([A-HJ-NP-Z2-9]{5})")
 _SAMPLE_PROMPT_REQUEST = re.compile(
     r"\b(?:sample|example|starter)\s+(?:prompt|prompts|idea|ideas)\b"
     r"|\b(?:prompt|prompts)\s+(?:example|examples)\b"
+    r"|\b(?:template|templates)\s+(?:idea|ideas|example|examples)\b"
+    r"|\b(?:example|sample)\s+(?:flyer|flier|poster|marketing|ad)\s+(?:text|copy|caption|captions|line|lines|template|templates)\b"
     r"|\b(?:sample|example|starter|prompt|idea|ideas|inspiration)\b.{0,40}\b(?:for|of)\b.{0,20}\b(?:flyer|flier|poster|marketing)\b"
-    r"|\b(?:give|send|show|share|suggest|provide|help)\b.{0,50}\b(?:flyer|flier|poster|marketing)\b.{0,30}\b(?:idea|ideas|prompt|prompts|examples|inspiration|hook|hooks)\b"
+    r"|\b(?:give|send|show|share|suggest|provide|help|need)\b.{0,50}\b(?:flyer|flier|poster|marketing|ad|ads)\b.{0,30}\b(?:idea|ideas|prompt|prompts|examples|inspiration|hook|hooks|caption|captions|copy|line|lines|text|template|templates)\b"
     r"|\b(?:give|send|show|share|suggest|provide|help)\b.{0,60}"
-    r"\b(?:sample|example|starter|inspiration)?\s*(?:prompt|prompts|idea|ideas|examples|inspiration|hook|hooks)\b.{0,60}"
-    r"\b(?:flyer|flier|poster|marketing)\b"
+    r"\b(?:sample|example|starter|inspiration)?\s*(?:prompt|prompts|idea|ideas|examples|inspiration|hook|hooks|caption|captions|copy|line|lines|text|template|templates)\b.{0,60}"
+    r"\b(?:flyer|flier|poster|marketing|ad|ads)\b"
     r"|\b(?:give|send|show|share|suggest|provide|need|help)\b.{0,70}"
     r"\b(?:ad|ads|promo|promotion|promotional|campaign|marketing|creative)\b.{0,40}"
-    r"\b(?:idea|ideas|suggestion|suggestions|concept|concepts|example|examples|prompt|prompts|inspiration|hook|hooks)\b.{0,40}"
+    r"\b(?:idea|ideas|suggestion|suggestions|concept|concepts|example|examples|prompt|prompts|inspiration|hook|hooks|caption|captions|copy|line|lines|text|template|templates)\b.{0,40}"
     r"\b(?:business|shop|store|brand|service|offer)\b"
     r"|\b(?:help|need|suggest|share|give|show|send|provide)\b.{0,25}"
     r"\b(?:promotion|promo|campaign|marketing|weekend|offer)\b.{0,25}"
-    r"\b(?:idea|ideas|prompt|prompts|example|examples|hook|hooks)\b"
+    r"\b(?:idea|ideas|prompt|prompts|example|examples|hook|hooks|caption|captions|copy|line|lines|text|template|templates)\b"
     r"|\b(?:help|need|suggest|share|give|show|send|provide)\b.{0,30}"
-    r"\b(?:\d+\s+)?(?:idea|ideas|prompt|prompts|example|examples|hook|hooks)\b.{0,40}"
-    r"\b(?:for|about|on)\b.{0,30}\b(?:weekend|offer|promotion|promo|campaign|marketing|flyer|business|shop|store)\b",
+    r"\b(?:\d+\s+)?(?:idea|ideas|prompt|prompts|example|examples|hook|hooks|caption|captions|copy|line|lines|text|template|templates)\b.{0,40}"
+    r"\b(?:for|about|on)\b.{0,30}\b(?:weekend|offer|promotion|promo|campaign|marketing|flyer|business|shop|store|poster|ad|ads)\b",
     re.IGNORECASE,
 )
 
