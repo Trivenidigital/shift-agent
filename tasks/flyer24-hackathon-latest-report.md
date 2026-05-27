@@ -1,48 +1,51 @@
 # Flyer24 Hackathon Latest Report
 
-Updated: 2026-05-27T17:21:58Z
+Updated: 2026-05-27T19:21:19Z
 
 ## Current batch
-- Branch: `codex/flyer24-batch-manual-queue-health-signals-202605271725`
+- Branch: `codex/flyer24-batch-manual-status-phrases-202605271922`
 - PR: pending create
 - Deploy: not run (PR stage)
-- Scope: expand Flyer `/flyer/health` manual-queue impact signals so source-edit and visual-QA backlog urgency is directly visible to operators.
+- Scope: close manual-queue/status phrase gaps so project-id status check-ins route to deterministic status replies instead of revision/LLM ambiguity.
 - Root-cause evidence:
-  - RED tests showed `_source_edit_manual_queue_impact()` lacked explicit `visual_qa_failed` queue/stale counters.
-  - RED tests showed `_source_edit_manual_queue_impact()` lacked aggregate `customer_update_due` overdue counters.
-  - RED tests showed health payload lacked reason-family and stale-family aggregate counts, forcing raw-code-only triage.
-- Risk: low (read-only health payload + tests/docs only; no payment/account/quota/provider/manual-close mutations).
-- Hermes/MCP-first: Hermes owns ingress, state, and audit substrate; net-new is Flyer-local read-only operator health shaping only.
+  - RED tests failed for `status for project F0063`.
+  - RED tests failed for `status of project F0063 please`.
+  - RED tests failed for `where is update for F0063`.
+- Risk: low (deterministic status phrase parsing + tests only; no payment/account/quota/provider/manual-close mutations).
+- Hermes/MCP-first: Hermes continues to own ingress/identity/audit transport; net-new is Flyer-local status intent phrase coverage only.
 
 ## Batch issue list fixed
-1. `_source_edit_manual_queue_impact()` now reports `visual_qa_queued_count`.
-2. `_source_edit_manual_queue_impact()` now reports `visual_qa_stale_count`.
-3. `_source_edit_manual_queue_impact()` now reports `visual_qa_oldest_stale_minutes`.
-4. `_source_edit_manual_queue_impact()` now reports `customer_update_due_count` and `customer_update_due_oldest_minutes`.
-5. `_source_edit_manual_queue_impact()` now reports `reason_family_counts` and `stale_reason_family_counts`.
-6. Source-edit provider health detail now includes reason-family and customer-update-due summaries for stale backlog triage.
+1. Added support for `status for project F####` status checks.
+2. Added support for `status of project F####` status checks.
+3. Added support for `update on project F####` status checks.
+4. Added support for `queue status for F####` status checks.
+5. Added support for `progress on F####` status checks.
+6. Added support for `where is update for F####` status checks.
 
 ## PR queue classification refresh
-- #292 `fix(flyer): re-land payment contract fail-closed checks and MCP readiness` - operator-review-required (money-adjacent), open, merge conflict with main.
-- #299 `fix(flyer): harden billing health MCP readiness visibility` - operator-review-required (money-adjacent), open, merge conflict with main.
-- #<pending> `fix(flyer): expand manual queue health signals for source-edit and visual-QA backlog` - pending open.
+- #299 `fix(flyer): harden billing health MCP readiness visibility` - operator-review-required (money-adjacent), open, merge-conflicting.
+- #307 `fix(flyer): consolidate payment fail-closed contract and MCP parity` - operator-review-required (money-adjacent), open.
+- #308 `feat(flyer): add Hermes-planned autorepair retry` - blocked/deferred for this batch (broader behavior change; separate review track).
+- #<pending> `fix(flyer): close project-id status phrase gaps for manual queue/status replies` - pending open.
 
 ## Running PR list (hackathon)
-- #292 `fix(flyer): re-land payment contract fail-closed checks and MCP readiness` - open; operator-review-required.
 - #295 `fix(flyer): close status-check phrasing gaps in active project routing` - merged to `main`; deployed `deploy-20260527-102236-c858caa1`.
 - #296 `fix(flyer): route sample-prompt lexical variants to starter ideas` - merged to `main`; deployed `deploy-20260527-112213-f019b345`.
 - #297 `fix(flyer): route sample-request tagline/slogan variants to idea intake` - merged to `main`; deployed `deploy-20260527-121058-87db7152`.
-- #298 `fix(flyer): close render dependency and recovery alert gaps` - merged to `main`; deployed in later train (see git history).
+- #298 `fix(flyer): close render dependency and recovery alert gaps` - merged to `main`; deployed in later train.
 - #299 `fix(flyer): harden billing health MCP readiness visibility` - open; operator-review-required.
 - #303 `fix(flyer): route sample ask-shape variants to starter ideas` - merged to `main`.
 - #304 `fix(flyer): route missed sample request phrase variants to starter ideas` - merged to `main`.
 - #305 `fix(flyer): normalize manual queue triage status and reason signals` - merged to `main`.
-- #<pending> `fix(flyer): expand manual queue health signals for source-edit and visual-QA backlog` - pending open.
+- #306 `fix(flyer): expand manual queue health backlog signals` - merged to `main`.
+- #307 `fix(flyer): consolidate payment fail-closed contract and MCP parity` - open; operator-review-required.
+- #308 `feat(flyer): add Hermes-planned autorepair retry` - open; deferred review track.
+- #<pending> `fix(flyer): close project-id status phrase gaps for manual queue/status replies` - pending open.
 
 ## Verification for this batch
-- `pytest -q web/backend/tests/test_flyer_health.py` ✅ (27 passed)
-- `pytest -q web/backend/tests/test_flyer_health.py -k 'manual_queue_impact_zero_by_default or manual_queue_impact_counts_source_edit_unavailable_rows or manual_queue_impact_reports_stale_reason_counts or source_edit_detail_mentions_mixed_reason_backlog'` ✅ (4 passed)
-- `python3 -m py_compile web/backend/app/routers/flyer.py web/backend/tests/test_flyer_health.py` ✅
+- `pytest -q tests/test_cf_router_plugin.py -k 'flyer_project_status_request_accepts_project_id_variants or flyer_project_status_request_keeps_edit_intent_guard'` ✅ (8 passed)
+- `pytest -q tests/test_cf_router_plugin.py -k 'flyer_project_status_request or manual_edit_status_reply'` ✅ (11 passed)
+- `python3 -m py_compile src/plugins/cf-router/actions.py tests/test_cf_router_plugin.py` ✅
 - `git diff --check` ✅
 
 ## Runtime checks snapshot
