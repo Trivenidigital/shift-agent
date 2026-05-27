@@ -1308,3 +1308,32 @@ def test_visual_qa_requires_expiry_context_for_promotion_end(tmp_path):
     assert good.status == "passed", good.blockers
     assert bad.status == "failed"
     assert "missing required visible fact: promotion_end" in bad.blockers
+
+
+def test_visual_qa_accepts_explicit_promotion_end_label(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    project = FlyerProject(
+        project_id="F0107",
+        status="generating_concepts",
+        customer_phone="+17329837841",
+        created_at=datetime(2026, 5, 27, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 5, 27, tzinfo=timezone.utc),
+        original_message_id="m-snacks",
+        raw_request="Create a flyer for evening snacks sale. This promotion runs until June 25.",
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Evening Snacks Sale", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="promotion_end", label="Promotion end", value="June 25", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+        ],
+    )
+    artifact = _write_sidecar(
+        tmp_path,
+        "Lakshmis Kitchen\nEVENING SNACKS SALE\nPROMOTION END: JUNE 25\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
+    )
+
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert report.status == "passed", report.blockers
