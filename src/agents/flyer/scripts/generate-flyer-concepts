@@ -93,9 +93,21 @@ _VISUAL_QA_ERROR_TOKENS = (
     "critical text facts do not fit",
 )
 
+_DEPENDENCY_MISSING_ERROR_TOKENS = (
+    "pillow is required",
+    "pillow is unavailable",
+    "modulenotfounderror",
+    "no module named",
+    "importerror",
+)
+
 
 def _draft_error_is_visual_qa(detail_lower: str) -> bool:
     return any(tok in detail_lower for tok in _VISUAL_QA_ERROR_TOKENS)
+
+
+def _draft_error_is_dependency_missing(detail_lower: str) -> bool:
+    return any(tok in detail_lower for tok in _DEPENDENCY_MISSING_ERROR_TOKENS)
 
 
 def _draft_error_retryable(detail_lower: str) -> bool:
@@ -334,6 +346,8 @@ def main() -> int:
                 # `provider_timeout` for transient network/5xx issues.
                 if _draft_error_is_visual_qa(lower):
                     reason_code = "visual_qa_failed"
+                elif _draft_error_is_dependency_missing(lower):
+                    reason_code = "dependency_missing"
                 elif "openai" in lower or "openrouter" in lower or "api_key" in lower or "provider" in lower or "manual review" in lower:
                     reason_code = "source_edit_provider_unavailable"
                 else:
@@ -381,7 +395,12 @@ def main() -> int:
                         time.sleep(0.35)
                         continue
                     now = datetime.now(timezone.utc)
-                    reason_code = "visual_qa_failed" if _draft_error_is_visual_qa(detail_lower) else "provider_timeout"
+                    if _draft_error_is_visual_qa(detail_lower):
+                        reason_code = "visual_qa_failed"
+                    elif _draft_error_is_dependency_missing(detail_lower):
+                        reason_code = "dependency_missing"
+                    else:
+                        reason_code = "provider_timeout"
                     manual = make_manual_review(
                         reason_code=reason_code,
                         detail=_draft_manual_review_detail(exc, attempts=attempt + 1, retryable_match=retryable_match),

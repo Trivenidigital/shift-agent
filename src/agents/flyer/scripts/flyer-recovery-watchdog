@@ -32,6 +32,7 @@ from schemas import (  # noqa: E402
     FlyerRecoveryCustomerAckUncertain,
     FlyerRecoveryIncidentOpened,
     FlyerRecoveryOperatorActionRequired,
+    FlyerRecoveryOwnerAlert,
     FlyerRecoveryRepairBundleWritten,
     FlyerRecoveryResolved,
 )
@@ -237,6 +238,72 @@ def _append_audit(log_path: Path, entry) -> None:
             fh.write(entry.model_dump_json() + "\n")
         return
     ndjson_append(log_path, entry.model_dump_json())
+
+
+def _notify_owner(title: str, message: str, *, source: str = "flyer-recovery-watchdog") -> bool:
+    try:
+        from safe_io import notify_owner_with_fallback  # type: ignore
+    except Exception:
+        return False
+    return bool(notify_owner_with_fallback(title, message, priority=2, source=source))
+
+
+def _owner_alert_due(current: dict, trigger: str, now: datetime, *, retry_after: timedelta) -> bool:
+    owner_alert = current.get("owner_alert") if isinstance(current.get("owner_alert"), dict) else {}
+    if str(owner_alert.get("trigger") or "") != trigger:
+        return True
+    if str(owner_alert.get("status") or "") == "sent":
+        return False
+    last_raw = str(owner_alert.get("last_attempted_at") or "").strip()
+    if not last_raw:
+        return True
+    last = recovery._parse_recovery_ts(last_raw)  # type: ignore[attr-defined]
+    return last is None or now - last >= retry_after
+
+
+def _record_owner_alert_attempt(current: dict, *, trigger: str, outcome: str, now: datetime) -> None:
+    previous = current.get("owner_alert") if isinstance(current.get("owner_alert"), dict) else {}
+    current["owner_alert"] = {
+        "trigger": trigger,
+        "status": outcome,
+        "last_attempted_at": now.isoformat(),
+        "attempt_count": int(previous.get("attempt_count") or 0) + 1,
+    }
+
+
+def _append_owner_alert_audit(
+    log_path: Path,
+    incident: dict,
+    *,
+    trigger: str,
+    outcome: str,
+    reason: str,
+    now: datetime,
+) -> None:
+    _append_audit(log_path, FlyerRecoveryOwnerAlert(
+        type="flyer_recovery_owner_alert",
+        ts=now,
+        incident_id=str(incident.get("incident_id") or ""),
+        project_id=str(incident.get("project_id") or ""),
+        trigger=trigger,
+        outcome=outcome,
+        reason=reason[:500],
+        notify_source="flyer-recovery-watchdog",
+    ))
+
+
+def _alert_owner_for_recovery(current: dict, *, trigger: str, reason: str, now: datetime) -> bool:
+    project_id = str(current.get("project_id") or "")
+    incident_id = str(current.get("incident_id") or "")
+    title = "Flyer recovery needs attention"
+    message = (
+        f"Flyer recovery needs operator attention.\n"
+        f"project_id={project_id or 'unknown'}\n"
+        f"incident_id={incident_id or 'unknown'}\n"
+        f"trigger={trigger}\n"
+        f"reason={reason or 'unknown'}"
+    )
+    return _notify_owner(title, message)
 
 
 def _incident_common(incident: dict) -> dict:
@@ -609,6 +676,28 @@ def _process_customer_acks(state_path: Path, log_path: Path, cfg: Config, mode: 
                             mode=mode,
                             reason=decision.reason,
                         ))
+                        if decision.reason == "missing_strong_customer_origin_evidence":
+                            outcome = "sent" if _alert_owner_for_recovery(
+                                current,
+                                trigger="customer_ack_suppressed",
+                                reason=decision.reason,
+                                now=now,
+                            ) else "failed"
+                            _record_owner_alert_attempt(
+                                current,
+                                trigger="customer_ack_suppressed",
+                                outcome=outcome,
+                                now=now,
+                            )
+                            recovery.write_recovery_state(state_path, state)
+                            _append_owner_alert_audit(
+                                log_path,
+                                current,
+                                trigger="customer_ack_suppressed",
+                                outcome=outcome,
+                                reason=decision.reason,
+                                now=now,
+                            )
                     continue
                 considered += 1
                 if considered > cfg.flyer.recovery.max_incidents_per_run:
@@ -625,6 +714,28 @@ def _process_customer_acks(state_path: Path, log_path: Path, cfg: Config, mode: 
                         mode=mode,
                         reason=decision.reason,
                     ))
+                    if decision.reason == "missing_strong_customer_origin_evidence":
+                        outcome = "sent" if _alert_owner_for_recovery(
+                            current,
+                            trigger="customer_ack_suppressed",
+                            reason=decision.reason,
+                            now=now,
+                        ) else "failed"
+                        _record_owner_alert_attempt(
+                            current,
+                            trigger="customer_ack_suppressed",
+                            outcome=outcome,
+                            now=now,
+                        )
+                        recovery.write_recovery_state(state_path, state)
+                        _append_owner_alert_audit(
+                            log_path,
+                            current,
+                            trigger="customer_ack_suppressed",
+                            outcome=outcome,
+                            reason=decision.reason,
+                            now=now,
+                        )
                 continue
             considered += 1
             if considered > cfg.flyer.recovery.max_incidents_per_run:
@@ -744,16 +855,90 @@ def _escalate_unrepaired_incidents(
         recovery.write_recovery_state(state_path, state)
     for incident in escalated:
         operator_action = incident.get("operator_action") if isinstance(incident.get("operator_action"), dict) else {}
+        reason = str(operator_action.get("reason") or "worker_completed_no_customer_visible_success")
         _append_audit(log_path, FlyerRecoveryOperatorActionRequired(
             type="flyer_recovery_operator_action_required",
             ts=now,
             incident_id=str(incident.get("incident_id") or ""),
             failure_class=str(incident.get("failure_class") or ""),
             project_id=str(incident.get("project_id") or ""),
-            reason=str(operator_action.get("reason") or "worker_completed_no_customer_visible_success"),
+            reason=reason,
             required_action=str(operator_action.get("required_action") or "verify_customer_outcome_or_repair_manually"),
         ))
+        outcome = "sent" if _alert_owner_for_recovery(
+            incident,
+            trigger="operator_action_required",
+            reason=reason,
+            now=now,
+        ) else "failed"
+        with recovery.recovery_state_lock(state_path):
+            state = recovery.load_recovery_state(state_path)
+            current = next((item for item in state.get("incidents", []) if item.get("incident_id") == incident.get("incident_id")), None)
+            if current is not None:
+                _record_owner_alert_attempt(
+                    current,
+                    trigger="operator_action_required",
+                    outcome=outcome,
+                    now=now,
+                )
+                recovery.write_recovery_state(state_path, state)
+                _append_owner_alert_audit(
+                    log_path,
+                    current,
+                    trigger="operator_action_required",
+                    outcome=outcome,
+                    reason=reason,
+                    now=now,
+                )
     return len(escalated), escalated_ids
+
+
+def _retry_failed_owner_alerts(
+    state_path: Path,
+    log_path: Path,
+    now: datetime,
+    *,
+    retry_after: timedelta,
+    dry_run: bool = False,
+) -> int:
+    if dry_run or not state_path.exists():
+        return 0
+    attempts = 0
+    with recovery.recovery_state_lock(state_path):
+        state = recovery.load_recovery_state(state_path)
+        candidates: list[tuple[dict, str, str]] = []
+        for current in state.get("incidents", []):
+            if not isinstance(current, dict):
+                continue
+            owner_alert = current.get("owner_alert") if isinstance(current.get("owner_alert"), dict) else {}
+            if str(owner_alert.get("status") or "") != "failed":
+                continue
+            trigger = str(owner_alert.get("trigger") or "")
+            reason = ""
+            if trigger == "operator_action_required" and str(current.get("status") or "") == "operator_action_required":
+                operator_action = current.get("operator_action") if isinstance(current.get("operator_action"), dict) else {}
+                reason = str(operator_action.get("reason") or "worker_completed_no_customer_visible_success")
+            elif trigger == "customer_ack_suppressed":
+                ack = current.get("ack") if isinstance(current.get("ack"), dict) else {}
+                if ack.get("status") == "suppressed" and ack.get("status_detail") == "missing_strong_customer_origin_evidence":
+                    reason = "missing_strong_customer_origin_evidence"
+            if not reason or not _owner_alert_due(current, trigger, now, retry_after=retry_after):
+                continue
+            candidates.append((current, trigger, reason))
+        if not candidates:
+            return 0
+    for candidate, trigger, reason in candidates:
+        outcome = "sent" if _alert_owner_for_recovery(candidate, trigger=trigger, reason=reason, now=now) else "failed"
+        with recovery.recovery_state_lock(state_path):
+            state = recovery.load_recovery_state(state_path)
+            current = next((item for item in state.get("incidents", []) if item.get("incident_id") == candidate.get("incident_id")), None)
+            if current is None or not _owner_alert_due(current, trigger, now, retry_after=retry_after):
+                continue
+            _record_owner_alert_attempt(current, trigger=trigger, outcome=outcome, now=now)
+            recovery.write_recovery_state(state_path, state)
+            _append_owner_alert_audit(log_path, current, trigger=trigger, outcome=outcome, reason=reason, now=now)
+            attempts += 1
+    return attempts
 
 
 def main() -> int:
@@ -888,6 +1073,13 @@ def main() -> int:
     )
     if mode == "customer_ack":
         ack_sent = _process_customer_acks(state_path, Path(args.log_path), cfg, mode, now, dry_run=args.dry_run)
+    owner_alert_retries = _retry_failed_owner_alerts(
+        state_path,
+        Path(args.log_path),
+        now,
+        retry_after=timedelta(minutes=cfg.flyer.recovery.operator_escalation_stale_minutes),
+        dry_run=args.dry_run,
+    )
     state = recovery.load_recovery_state(state_path) if state_path.exists() else {"incidents": []}
     summary = {
         "mode": mode,
@@ -896,6 +1088,7 @@ def main() -> int:
         "outcome_repairs": outcome_repairs,
         "resolved": resolved,
         "operator_action_required": operator_action_required,
+        "owner_alert_retries": owner_alert_retries,
         "queued": repair["queued"],
         "worker_runs": repair["worker_runs"],
         "incidents": len(state.get("incidents", [])),
@@ -908,6 +1101,7 @@ def main() -> int:
             f"outcome_repairs={outcome_repairs} "
             f"resolved={resolved} "
             f"operator_action_required={operator_action_required} "
+            f"owner_alert_retries={owner_alert_retries} "
             f"queued={repair['queued']} worker_runs={repair['worker_runs']} incidents={summary['incidents']}"
         )
     return 0

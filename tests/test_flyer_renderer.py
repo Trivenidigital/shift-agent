@@ -7,6 +7,7 @@ import base64
 import http.client
 import io
 import json
+import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -28,6 +29,7 @@ from agents.flyer.render import (  # noqa: E402
     validate_text_manifest_file,
     write_text_manifest,
 )
+import agents.flyer.render as render_module  # noqa: E402
 from schemas import FlyerAsset, FlyerConcept, FlyerLockedFact, FlyerProject, FlyerRequestFields, FlyerRevision  # noqa: E402
 
 
@@ -1786,6 +1788,57 @@ def test_exact_identity_overlay_reserves_contact_with_long_schedule_and_address(
     assert "Wednesday and Thursday every week" in text
     assert "+17329837841" in text
     assert target.exists()
+
+
+def test_exact_identity_overlay_falls_back_to_system_pillow(tmp_path, monkeypatch):
+    source = tmp_path / "raw.png"
+    target = tmp_path / "preview.png"
+    source.write_bytes(_png_bytes(size=(1080, 1350), color=(19, 83, 43)))
+    project = _complete_project()
+
+    real_exists = render_module.Path.exists
+
+    def fake_exists(path):
+        if path.as_posix().endswith("/usr/bin/python3"):
+            return True
+        return real_exists(path)
+
+    def fake_run(args, **_kwargs):
+        payload = json.loads(Path(args[-1]).read_text(encoding="utf-8"))
+        Path(payload["target"]).write_bytes(b"system-pillow-rendered")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(render_module, "_load_pillow", lambda: None)
+    monkeypatch.setattr(render_module.Path, "exists", fake_exists)
+    monkeypatch.setattr(render_module.subprocess, "run", fake_run)
+
+    apply_exact_identity_overlay(project, source, target, size=(1080, 1350))
+
+    assert target.read_bytes() == b"system-pillow-rendered"
+
+
+def test_exact_identity_overlay_fails_closed_when_no_pillow_path(tmp_path, monkeypatch):
+    source = tmp_path / "raw.png"
+    target = tmp_path / "preview.png"
+    source.write_bytes(_png_bytes(size=(1080, 1350), color=(19, 83, 43)))
+    project = _complete_project()
+
+    real_exists = render_module.Path.exists
+
+    def fake_exists(path):
+        if path.as_posix().endswith("/usr/bin/python3"):
+            return False
+        return real_exists(path)
+
+    monkeypatch.setattr(render_module, "_load_pillow", lambda: None)
+    monkeypatch.setattr(render_module.Path, "exists", fake_exists)
+
+    try:
+        apply_exact_identity_overlay(project, source, target, size=(1080, 1350))
+    except FlyerRenderError as exc:
+        assert "Pillow is unavailable for exact identity overlay" in str(exc)
+    else:
+        raise AssertionError("expected FlyerRenderError")
 
 
 def test_real_image_model_direct_poster_is_resized_to_requested_format(tmp_path, monkeypatch):

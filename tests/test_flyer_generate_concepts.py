@@ -325,6 +325,45 @@ def test_generate_source_edit_provider_unavailable_queues_manual_review(monkeypa
     assert "OPENAI_API_KEY" in persisted["manual_review"]["detail"]
 
 
+def test_generate_source_edit_dependency_missing_queues_manual_review(monkeypatch, tmp_path, capsys):
+    module = _load_script(monkeypatch)
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    state_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    reference = asset_dir / "F0001-reference.png"
+    reference.write_bytes(b"fake image bytes")
+    project = _project_with_pending_reference(reference)
+    project["raw_request"] = "edit uploaded flyer/source artwork: change phone to +17329837841"
+    project["reference_extractions"][0]["provider"] = "openai"
+    project["reference_extractions"][0]["status"] = "ok"
+    project["reference_extractions"][0]["detail"] = "extracted"
+    state_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_sequence": 2,
+        "projects": [project],
+    }), encoding="utf-8")
+
+    def fake_render_source_edit(*_args, **_kwargs):
+        raise module.FlyerRenderError("Pillow is unavailable for exact identity overlay: /usr/bin/python3 missing")
+
+    monkeypatch.setattr(module, "render_source_edit_preview", fake_render_source_edit)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts",
+        "--project-id", "F0001",
+        "--state-path", str(state_path),
+        "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+    ])
+
+    assert module.main() == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["manual_review_reason_code"] == "dependency_missing"
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["manual_review"]["reason_code"] == "dependency_missing"
+
+
 def test_generate_source_edit_quality_failure_queues_visual_qa_failed(monkeypatch, tmp_path, capsys):
     """Quality-check FlyerRenderError ("edited concept failed quality check: …")
     is a structural failure (wrong dimensions / mime / corrupt bytes), NOT a
@@ -552,6 +591,46 @@ def test_generate_draft_provider_timeout_queues_manual_review(monkeypatch, tmp_p
     assert persisted["manual_review"]["reason_code"] == "provider_timeout"
 
 
+
+
+def test_generate_draft_dependency_missing_queues_manual_review(monkeypatch, tmp_path, capsys):
+    module = _load_script(monkeypatch)
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    state_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    reference = asset_dir / "F0001-reference.png"
+    reference.write_bytes(b"fake image bytes")
+    project = _project_with_pending_reference(reference)
+    project["reference_extractions"][0]["provider"] = "openai"
+    project["reference_extractions"][0]["status"] = "ok"
+    project["reference_extractions"][0]["detail"] = "extracted"
+    project["status"] = "generating_concepts"
+    state_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_sequence": 2,
+        "projects": [project],
+    }), encoding="utf-8")
+
+    def fake_render(*_args, **_kwargs):
+        raise module.FlyerRenderError("Pillow is unavailable for exact identity overlay: /usr/bin/python3 missing")
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts",
+        "--project-id", "F0001",
+        "--state-path", str(state_path),
+        "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+    ])
+
+    assert module.main() == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["manual_review_reason_code"] == "dependency_missing"
+    assert out["attempts"] == 1
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["manual_review"]["reason_code"] == "dependency_missing"
 
 
 def test_generate_retries_without_saved_brand_assets_when_business_name_missing(monkeypatch, tmp_path, capsys):

@@ -1802,21 +1802,142 @@ def _raw_background_path(path: Path) -> Path:
     return path.with_name(f"{path.stem}.raw-background.png")
 
 
+EXACT_IDENTITY_OVERLAY_RENDERER = r'''
+import json
+import sys
+from pathlib import Path
+from PIL import Image, ImageDraw, ImageFont
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+source = Path(payload["source"])
+target = Path(payload["target"])
+width = int(payload["width"])
+height = int(payload["height"])
+business = str(payload.get("business") or "").strip()
+location = str(payload.get("location") or "").strip()
+contact = str(payload.get("contact") or "").strip()
+schedule = str(payload.get("schedule") or "").strip()
+
+def _font(size):
+    try:
+        return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", size=size)
+    except Exception:
+        return ImageFont.load_default()
+
+def _wrap(draw, text, font, max_width):
+    words = str(text or "").split()
+    if not words:
+        return []
+    lines = []
+    current = ""
+    for word in words:
+        candidate = (current + " " + word).strip()
+        bbox = draw.textbbox((0, 0), candidate, font=font)
+        if bbox[2] - bbox[0] <= max_width or not current:
+            current = candidate
+        else:
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines
+
+target.parent.mkdir(parents=True, exist_ok=True)
+with Image.open(source) as img:
+    img = img.convert("RGB")
+    if img.size != (width, height):
+        img = img.resize((width, height))
+    draw = ImageDraw.Draw(img, "RGBA")
+    top_h = max(96, int(height * 0.105))
+    bottom_h = max(100, int(height * 0.105))
+    burgundy = (102, 18, 28, 248)
+    green = (18, 54, 34, 248)
+    gold = (242, 198, 84, 255)
+    white = (255, 255, 245, 255)
+    draw.rectangle((0, 0, width, top_h), fill=burgundy)
+    draw.rectangle((0, top_h - 4, width, top_h), fill=gold)
+    draw.rectangle((0, height - bottom_h, width, height), fill=green)
+    draw.rectangle((0, height - bottom_h, width, height - bottom_h + 4), fill=gold)
+    if business:
+        font = _font(max(34, int(width * 0.048)))
+        lines = _wrap(draw, business, font, int(width * 0.88))[:2]
+        total_h = len(lines) * int(getattr(font, "size", 34) * 1.05)
+        y = max(10, (top_h - total_h) // 2)
+        for line in lines:
+            bbox = draw.textbbox((0, 0), line, font=font)
+            draw.text(((width - (bbox[2] - bbox[0])) // 2, y), line, font=font, fill=white)
+            y += int(getattr(font, "size", 34) * 1.05)
+    if any((schedule, location, contact)):
+        font = _font(max(22, int(width * 0.03)))
+        lines = []
+        if schedule:
+            lines.extend(_wrap(draw, schedule.upper(), font, int(width * 0.9))[:1])
+        if location:
+            lines.extend(_wrap(draw, location.upper(), font, int(width * 0.9))[:1])
+        if contact:
+            lines.extend(_wrap(draw, f"CONTACT: {contact}".upper(), font, int(width * 0.9))[:1])
+        total_h = len(lines) * int(getattr(font, "size", 22) * 1.06)
+        y = height - bottom_h + max(10, (bottom_h - total_h) // 2)
+        for line in lines:
+            bbox = draw.textbbox((0, 0), line, font=font)
+            draw.text(((width - (bbox[2] - bbox[0])) // 2, y), line, font=font, fill=white)
+            y += int(getattr(font, "size", 22) * 1.06)
+    img.save(target, format="PNG", optimize=True)
+'''
+
+
+def _exact_identity_overlay_payload(project: FlyerProject, source: Path, target: Path, *, size: tuple[int, int]) -> dict:
+    return {
+        "source": str(source),
+        "target": str(target),
+        "width": int(size[0]),
+        "height": int(size[1]),
+        "business": _display_business_name(project).strip(),
+        "location": fact_value(project, "location", fallback=project.fields.venue_or_location).strip(),
+        "contact": fact_value(project, "contact_phone", fallback=project.fields.contact_info).strip(),
+        "schedule": _display_schedule(project),
+    }
+
+
+def _apply_exact_identity_overlay_with_system_pillow(payload: dict) -> None:
+    if not Path("/usr/bin/python3").exists():
+        raise FlyerRenderError("Pillow is unavailable for exact identity overlay: /usr/bin/python3 missing")
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False) as fh:
+        json.dump(payload, fh)
+        payload_path = fh.name
+    try:
+        proc = subprocess.run(
+            ["/usr/bin/python3", "-c", EXACT_IDENTITY_OVERLAY_RENDERER, payload_path],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if proc.returncode != 0:
+            raise FlyerRenderError(
+                "Pillow is unavailable for exact identity overlay: "
+                f"system Pillow renderer failed: {proc.stderr.strip()[:300]}"
+            )
+    finally:
+        Path(payload_path).unlink(missing_ok=True)
+
+
 def apply_exact_identity_overlay(project: FlyerProject, source: Path | str, target: Path | str, *, size: tuple[int, int]) -> None:
     pil = _load_pillow()
-    if pil is None:
-        raise FlyerRenderError("Pillow is required for exact identity overlay")
-    Image, ImageDraw, ImageFont = pil
     source = Path(source)
     target = Path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
-    business = _display_business_name(project).strip()
-    location = fact_value(project, "location", fallback=project.fields.venue_or_location).strip()
-    contact = fact_value(project, "contact_phone", fallback=project.fields.contact_info).strip()
-    schedule = _display_schedule(project)
+    payload = _exact_identity_overlay_payload(project, source, target, size=size)
+    business = str(payload["business"])
+    location = str(payload["location"])
+    contact = str(payload["contact"])
+    schedule = str(payload["schedule"])
     if not any((business, location, contact, schedule)):
         _export_from_source_image(source, target, size=size)
         return
+    if pil is None:
+        _apply_exact_identity_overlay_with_system_pillow(payload)
+        return
+    Image, ImageDraw, ImageFont = pil
     with Image.open(source) as img:
         img = img.convert("RGB")
         if img.size != size:

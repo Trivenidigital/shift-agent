@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
+import os
 import subprocess
 import sys
 
@@ -1126,3 +1127,235 @@ flyer:
     assert "queued=0" in result.stdout
     assert recovery_state.read_text(encoding="utf-8") == before
     assert log.read_text(encoding="utf-8") == ""
+
+
+def test_stale_manual_project_signal_uses_persisted_project_origin():
+    now = datetime(2026, 5, 27, 4, 0, tzinfo=timezone.utc)
+    queued_at = (now - timedelta(hours=2)).isoformat()
+    signal = recovery.classify_stale_manual_project(
+        {
+            "project_id": "F0105",
+            "status": "manual_edit_required",
+            "customer_phone": "+17329837841",
+            "customer_id": "CUST0001",
+            "chat_id": "201975216009469@lid",
+            "original_message_id": "wamid.f0105",
+            "manual_review": {
+                "status": "queued",
+                "reason_code": "dependency_missing",
+                "detail": "Pillow is unavailable for exact identity overlay",
+                "queued_at": queued_at,
+            },
+        },
+        now=now,
+        stale_after=timedelta(minutes=30),
+    )
+
+    assert signal is not None
+    assert signal.chat_id == "201975216009469@lid"
+    assert signal.evidence_quality == "strong"
+    assert signal.provider_message_id == "wamid.f0105"
+
+
+def _watchdog_env(tmp_path):
+    env = os.environ.copy()
+    env["SHIFT_AGENT_NOTIFY_OWNER_BIN"] = str(tmp_path / "missing-notify-owner")
+    env["SHIFT_AGENT_NOTIFY_FAILED_LOG"] = str(tmp_path / "notify-failed.log")
+    return env
+
+
+def _recovery_config(mode: str) -> str:
+    return f"""
+schema_version: 1
+customer: {{name: Triveni, location_id: loc_pineville_01, timezone: America/New_York}}
+owner: {{name: Owner, phone: '+19045550000'}}
+limits: {{}}
+alerting: {{pushover_user_key: k, pushover_app_token: t}}
+backup: {{gpg_recipient_email: owner@example.com}}
+flyer:
+  enabled: true
+  recovery:
+    mode: {mode}
+    enable_timer: true
+    scan_window_minutes: 240
+    operator_escalation_stale_minutes: 30
+""".strip()
+
+
+def test_worker_draft_operator_action_alert_is_audited_once(tmp_path):
+    config = tmp_path / "config.yaml"
+    log = tmp_path / "decisions.log"
+    projects = tmp_path / "projects.json"
+    customers = tmp_path / "customers.json"
+    recovery_state = tmp_path / "recovery.json"
+    config.write_text(_recovery_config("worker_draft"), encoding="utf-8")
+    now = datetime.now(timezone.utc)
+    old_seen = (now - timedelta(hours=2)).isoformat()
+    completed_at = (now - timedelta(hours=1)).isoformat()
+    recovery_state.write_text(json.dumps({
+        "schema_version": 1,
+        "incidents": [{
+            "incident_id": "FRI20260527-F0105",
+            "status": "open",
+            "failure_class": "concept_generation_failed",
+            "severity": "warning",
+            "source_fingerprint": "fp-f0105",
+            "ack_dedupe_key": "ack-f0105",
+            "project_id": "F0105",
+            "chat_id": "201975216009469@lid",
+            "chat_id_hash": recovery.sha256_text("201975216009469@lid"),
+            "sender_phone_hash": "",
+            "root_message_id": "wamid.f0105",
+            "provider_message_id_hash": "sha256:msg",
+            "evidence_quality": "strong",
+            "first_seen": old_seen,
+            "last_seen": old_seen,
+            "ack": {"status": "none"},
+            "codex": {"status": "completed", "completed_at": completed_at, "bundle_path": "/tmp/bundle.json"},
+        }],
+    }), encoding="utf-8")
+    log.write_text("", encoding="utf-8")
+    projects.write_text('{"projects":[]}', encoding="utf-8")
+    customers.write_text('{"customers":[],"onboarding_sessions":[],"intake_sessions":[]}', encoding="utf-8")
+
+    cmd = [
+        sys.executable, str(SCRIPT),
+        "--config-path", str(config),
+        "--log-path", str(log),
+        "--project-state-path", str(projects),
+        "--customer-state-path", str(customers),
+        "--recovery-state-path", str(recovery_state),
+        "--text",
+    ]
+    first = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=_watchdog_env(tmp_path))
+    second = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=_watchdog_env(tmp_path))
+
+    assert first.returncode == 0, first.stderr
+    assert "operator_action_required=1" in first.stdout
+    assert second.returncode == 0, second.stderr
+    rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
+    alert_rows = [row for row in rows if row["type"] == "flyer_recovery_owner_alert"]
+    assert len(alert_rows) == 1
+    assert alert_rows[0]["trigger"] == "operator_action_required"
+    assert alert_rows[0]["outcome"] == "failed"
+    incident = json.loads(recovery_state.read_text(encoding="utf-8"))["incidents"][0]
+    assert incident["owner_alert"]["status"] == "failed"
+    assert incident["owner_alert"]["attempt_count"] == 1
+
+
+def test_failed_owner_alert_retries_after_cooldown(tmp_path):
+    config = tmp_path / "config.yaml"
+    log = tmp_path / "decisions.log"
+    projects = tmp_path / "projects.json"
+    customers = tmp_path / "customers.json"
+    recovery_state = tmp_path / "recovery.json"
+    config.write_text(_recovery_config("worker_draft"), encoding="utf-8")
+    now = datetime.now(timezone.utc)
+    old_attempt = (now - timedelta(hours=2)).isoformat()
+    recovery_state.write_text(json.dumps({
+        "schema_version": 1,
+        "incidents": [{
+            "incident_id": "FRI20260527-RETRY",
+            "status": "operator_action_required",
+            "failure_class": "concept_generation_failed",
+            "severity": "warning",
+            "source_fingerprint": "fp-retry",
+            "ack_dedupe_key": "ack-retry",
+            "project_id": "F0105",
+            "chat_id": "201975216009469@lid",
+            "chat_id_hash": recovery.sha256_text("201975216009469@lid"),
+            "sender_phone_hash": "",
+            "root_message_id": "wamid.f0105",
+            "provider_message_id_hash": "sha256:msg",
+            "evidence_quality": "strong",
+            "first_seen": old_attempt,
+            "last_seen": old_attempt,
+            "ack": {"status": "none"},
+            "codex": {"status": "completed", "completed_at": old_attempt, "bundle_path": "/tmp/bundle.json"},
+            "operator_action": {
+                "reason": "worker_completed_no_customer_visible_success",
+                "required_action": "verify_customer_outcome_or_repair_manually",
+                "marked_at": old_attempt,
+            },
+            "owner_alert": {
+                "trigger": "operator_action_required",
+                "status": "failed",
+                "last_attempted_at": old_attempt,
+                "attempt_count": 1,
+            },
+        }],
+    }), encoding="utf-8")
+    log.write_text("", encoding="utf-8")
+    projects.write_text('{"projects":[]}', encoding="utf-8")
+    customers.write_text('{"customers":[],"onboarding_sessions":[],"intake_sessions":[]}', encoding="utf-8")
+
+    result = subprocess.run([
+        sys.executable, str(SCRIPT),
+        "--config-path", str(config),
+        "--log-path", str(log),
+        "--project-state-path", str(projects),
+        "--customer-state-path", str(customers),
+        "--recovery-state-path", str(recovery_state),
+        "--text",
+    ], capture_output=True, text=True, timeout=30, env=_watchdog_env(tmp_path))
+
+    assert result.returncode == 0, result.stderr
+    assert "owner_alert_retries=1" in result.stdout
+    incident = json.loads(recovery_state.read_text(encoding="utf-8"))["incidents"][0]
+    assert incident["owner_alert"]["attempt_count"] == 2
+    assert '"type":"flyer_recovery_owner_alert"' in log.read_text(encoding="utf-8")
+
+
+def test_customer_ack_missing_origin_suppression_alerts_in_customer_ack_mode(tmp_path):
+    config = tmp_path / "config.yaml"
+    log = tmp_path / "decisions.log"
+    projects = tmp_path / "projects.json"
+    customers = tmp_path / "customers.json"
+    recovery_state = tmp_path / "recovery.json"
+    config.write_text(_recovery_config("customer_ack"), encoding="utf-8")
+    now = datetime.now(timezone.utc)
+    seen = (now - timedelta(minutes=5)).isoformat()
+    recovery_state.write_text(json.dumps({
+        "schema_version": 1,
+        "incidents": [{
+            "incident_id": "FRI20260527-WEAK",
+            "status": "open",
+            "failure_class": "concept_generation_failed",
+            "severity": "warning",
+            "source_fingerprint": "fp-weak",
+            "ack_dedupe_key": "ack-weak",
+            "project_id": "F0105",
+            "chat_id": "201975216009469@lid",
+            "chat_id_hash": recovery.sha256_text("201975216009469@lid"),
+            "sender_phone_hash": "",
+            "root_message_id": "",
+            "provider_message_id_hash": "",
+            "evidence_quality": "weak",
+            "first_seen": seen,
+            "last_seen": seen,
+            "ack": {"status": "none"},
+            "codex": {"status": "none", "bundle_path": ""},
+        }],
+    }), encoding="utf-8")
+    log.write_text("", encoding="utf-8")
+    projects.write_text('{"projects":[]}', encoding="utf-8")
+    customers.write_text('{"customers":[],"onboarding_sessions":[],"intake_sessions":[]}', encoding="utf-8")
+
+    result = subprocess.run([
+        sys.executable, str(SCRIPT),
+        "--config-path", str(config),
+        "--log-path", str(log),
+        "--project-state-path", str(projects),
+        "--customer-state-path", str(customers),
+        "--recovery-state-path", str(recovery_state),
+        "--text",
+    ], capture_output=True, text=True, timeout=30, env=_watchdog_env(tmp_path))
+
+    assert result.returncode == 0, result.stderr
+    state = json.loads(recovery_state.read_text(encoding="utf-8"))
+    incident = state["incidents"][0]
+    assert incident["ack"]["status"] == "suppressed"
+    assert incident["owner_alert"]["trigger"] == "customer_ack_suppressed"
+    text = log.read_text(encoding="utf-8")
+    assert '"type":"flyer_recovery_customer_ack_suppressed"' in text
+    assert '"type":"flyer_recovery_owner_alert"' in text

@@ -255,15 +255,17 @@ def classify_stale_manual_project(project: dict, *, now: datetime, stale_after: 
     if qa_blockers:
         detail_parts.append("qa_blockers=" + " | ".join(qa_blockers[:5]))
     signal_detail = "; ".join(detail_parts)
+    chat_id = str(project.get("chat_id") or "").strip()
+    provider_message_id = str(project.get("original_message_id") or "").strip()
     return RecoverySignal(
         failure_class=_manual_reason_failure_class(reason_code, detail),
         severity="warning",
         project_id=project_id,
-        chat_id="",
+        chat_id=chat_id,
         detail=signal_detail,
         canonical_source=_canonical_detail(signal_detail),
-        evidence_quality="weak",
-        provider_message_id=str(project.get("original_message_id") or ""),
+        evidence_quality="strong" if chat_id and provider_message_id else "weak",
+        provider_message_id=provider_message_id,
         observed_at=queued_at,
     )
 
