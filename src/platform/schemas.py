@@ -743,6 +743,7 @@ FlyerManualReviewReason = Literal[
     "operator_request",
     "policy_block",
     "provider_timeout",
+    "dependency_missing",
     "missing_required_facts",
 ]
 
@@ -1825,6 +1826,8 @@ class FlyerProject(BaseModel):
     project_id: str = Field(pattern=r"^F\d{4,}$")
     status: FlyerWorkflowStatus
     customer_phone: E164Phone
+    customer_id: str = Field(default="", max_length=40)
+    chat_id: str = Field(default="", max_length=200)
     created_at: datetime
     updated_at: datetime
     original_message_id: str = Field(min_length=1, max_length=200)
@@ -3606,6 +3609,16 @@ class FlyerRecoveryOperatorActionRequired(_BaseEntry):
     required_action: Literal["verify_customer_outcome_or_repair_manually"]
 
 
+class FlyerRecoveryOwnerAlert(_BaseEntry):
+    type: Literal["flyer_recovery_owner_alert"]
+    incident_id: str = Field(min_length=1, max_length=80)
+    project_id: str = Field(default="", max_length=40)
+    trigger: Literal["customer_ack_suppressed", "operator_action_required"]
+    outcome: Literal["sent", "failed"]
+    reason: str = Field(default="", max_length=500)
+    notify_source: str = Field(default="flyer-recovery-watchdog", max_length=120)
+
+
 class FlyerClosureCustomerNotified(_BaseEntry):
     """Operator-driven `flyer-manual-queue --close` proactive customer push.
 
@@ -4753,6 +4766,7 @@ LogEntry = Annotated[
         Annotated[FlyerRecoveryDeployGate, Tag("flyer_recovery_deploy_gate")],
         Annotated[FlyerRecoveryResolved, Tag("flyer_recovery_resolved")],
         Annotated[FlyerRecoveryOperatorActionRequired, Tag("flyer_recovery_operator_action_required")],
+        Annotated[FlyerRecoveryOwnerAlert, Tag("flyer_recovery_owner_alert")],
         Annotated[FlyerClosureCustomerNotified, Tag("flyer_closure_customer_notified")],
         # NEW — source-contract observability (2026-05-20 flyer source-contract-first)
         Annotated[FlyerSourceContractExtracted, Tag("flyer_source_contract_extracted")],
@@ -4863,7 +4877,7 @@ __all__ = [
     "FlyerRecoveryCustomerAckSent", "FlyerRecoveryCustomerAckFailed",
     "FlyerRecoveryCustomerAckUncertain", "FlyerRecoveryCustomerAckSuppressed",
     "FlyerRecoveryRepairBundleWritten", "FlyerRecoveryOutcomeRepaired", "FlyerRecoveryDeployGate", "FlyerRecoveryResolved",
-    "FlyerRecoveryOperatorActionRequired",
+    "FlyerRecoveryOperatorActionRequired", "FlyerRecoveryOwnerAlert",
     "FlyerUsageRecorded", "FlyerQuotaBlocked", "FlyerClosureCustomerNotified",
     "Proposal", "ProposalId", "ProposalCode",
     "AwaitingProposal", "ApprovedProposal", "ReconcilingProposal", "SentProposal",

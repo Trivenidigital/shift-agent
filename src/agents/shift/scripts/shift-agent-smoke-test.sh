@@ -144,6 +144,51 @@ if ! sudo -u shift-agent "$PY" /usr/local/bin/smoke-flyer-quality --final-packag
 fi
 echo "Flyer quality deterministic smoke passed"
 
+OVERLAY_SMOKE_DIR="$(mktemp -d /tmp/flyer-overlay-smoke.XXXXXX)"
+cleanup_overlay_smoke() { rm -rf "$OVERLAY_SMOKE_DIR"; }
+trap cleanup_overlay_smoke EXIT
+chown shift-agent:shift-agent "$OVERLAY_SMOKE_DIR"
+if ! sudo -u shift-agent "$PY" - "$OVERLAY_SMOKE_DIR" <<'PY' > /dev/null
+import base64
+from datetime import datetime, timezone
+from pathlib import Path
+import sys
+
+from flyer_render import apply_exact_identity_overlay
+from schemas import FlyerLockedFact, FlyerProject, FlyerRequestFields
+
+root = Path(sys.argv[1])
+source = root / "source.png"
+target = root / "target.png"
+source.write_bytes(base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGM0YgUAAE4AI7Vf2cYAAAAASUVORK5CYII="
+))
+now = datetime.now(timezone.utc)
+project = FlyerProject(
+    project_id="F0001",
+    status="generating_concepts",
+    customer_phone="+19045550123",
+    created_at=now,
+    updated_at=now,
+    original_message_id="smoke-overlay",
+    raw_request="Create a smoke flyer",
+    fields=FlyerRequestFields(event_or_business_name="Smoke Overlay", contact_info="+19045550123"),
+    locked_facts=[
+        FlyerLockedFact(fact_id="business_name", label="Business", value="Smoke Kitchen", source="customer_profile"),
+        FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+19045550123", source="customer_profile"),
+    ],
+)
+apply_exact_identity_overlay(project, source, target, size=(1080, 1350))
+if not target.exists() or target.stat().st_size <= 0:
+    raise SystemExit("exact identity overlay did not produce output")
+PY
+then
+    echo "FAIL: Flyer exact identity overlay smoke failed"
+    exit 1
+fi
+echo "Flyer exact identity overlay smoke passed"
+rm -rf "$OVERLAY_SMOKE_DIR"
+
 REF_SMOKE_DIR="$(mktemp -d /tmp/flyer-reference-smoke.XXXXXX)"
 cleanup_ref_smoke() { rm -rf "$REF_SMOKE_DIR"; }
 trap cleanup_ref_smoke EXIT

@@ -146,6 +146,8 @@ def test_evening_snacks_request_uses_profile_business_and_campaign_title(tmp_pat
     facts = {fact["fact_id"]: fact for fact in project["locked_facts"]}
 
     assert project["status"] == "intake_started"
+    assert project["customer_id"] == "CUST0001"
+    assert project["chat_id"] == "17329837841@s.whatsapp.net"
     assert project["fields"]["event_or_business_name"] == "Evening Snacks"
     assert facts["business_name"]["value"] == "Lakshmis Kitchn"
     assert facts["business_name"]["source"] == "customer_profile"
@@ -160,6 +162,28 @@ def test_evening_snacks_request_uses_profile_business_and_campaign_title(tmp_pat
     poisoned = " ".join(fact["value"].lower() for fact in project["locked_facts"])
     assert "help me with evening snacks flier" not in poisoned
     assert "flier from" not in poisoned
+
+
+def test_flyer_project_store_accepts_legacy_rows_without_origin_fields():
+    from schemas import FlyerProjectStore  # noqa: E402
+
+    now = datetime(2026, 5, 27, tzinfo=timezone.utc).isoformat()
+    store = FlyerProjectStore.model_validate({
+        "schema_version": 1,
+        "next_sequence": 2,
+        "projects": [{
+            "project_id": "F0001",
+            "status": "intake_started",
+            "customer_phone": "+17329837841",
+            "created_at": now,
+            "updated_at": now,
+            "original_message_id": "wamid.legacy",
+            "raw_request": "Create a flyer for biryani",
+        }],
+    })
+
+    assert store.projects[0].customer_id == ""
+    assert store.projects[0].chat_id == ""
 
 
 def test_sample_snacks_request_locks_unpriced_menu_items(tmp_path, monkeypatch, capsys):

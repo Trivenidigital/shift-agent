@@ -7,6 +7,20 @@ Last updated: 2026-05-21 (Flyer customer-readiness stabilization gate work added
 
 ---
 
+## Active - Flyer Studio reliability outcomes (2026-05-27)
+
+**Drift-check tag:** extends-Hermes
+
+Plan: `tasks/flyer-studio-reliability-outcomes-plan-2026-05-27.md`
+
+- [x] Write plan grounded in F0105 production incident and current `origin/main`.
+- [x] Run two parallel plan reviews and fold findings.
+- [x] Write design and run two parallel design reviews.
+- [x] Build scoped fixes with tests.
+- [ ] Open PR and run two parallel PR reviews.
+
+---
+
 ## Active - Flyer Hermes intent layer (2026-05-22)
 
 **Drift-check tag:** extends-Hermes
