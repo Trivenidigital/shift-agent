@@ -263,10 +263,59 @@ def _offer_price_fact(text: str, *, message_id: str = "") -> FlyerLockedFact | N
     return None
 
 
+def _schedule_fact(text: str, *, message_id: str = "") -> FlyerLockedFact | None:
+    day = r"monday|tuesday|wednesday|thursday|friday|saturday|sunday"
+    two_days = re.search(
+        rf"\b(?P<first>{day})\s+and\s+(?P<second>{day})\s+(?:of\s+)?every\s+week\b",
+        text or "",
+        flags=re.IGNORECASE,
+    )
+    if two_days:
+        return _fact(
+            "schedule",
+            "Schedule",
+            f"{two_days.group('first').title()} and {two_days.group('second').title()} every week",
+            "customer_text",
+            message_id=message_id,
+        )
+    single_day = re.search(
+        rf"\b(?P<day>{day})\s+(?:of\s+)?every\s+week\b",
+        text or "",
+        flags=re.IGNORECASE,
+    )
+    if single_day:
+        return _fact(
+            "schedule",
+            "Schedule",
+            f"{single_day.group('day').title()} every week",
+            "customer_text",
+            message_id=message_id,
+        )
+    every_day = re.search(
+        rf"\bevery\s+(?P<day>{day})\b",
+        text or "",
+        flags=re.IGNORECASE,
+    )
+    if every_day:
+        return _fact(
+            "schedule",
+            "Schedule",
+            f"Every {every_day.group('day').title()}",
+            "customer_text",
+            message_id=message_id,
+        )
+    return None
+
+
 def _item_name_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFact]:
     facts: list[FlyerLockedFact] = []
     seen: set[str] = set()
     skip_exact = {
+        "all famous",
+        "all famous biryanis",
+        "all famous biryani's",
+        "all famous south indian biryanis",
+        "all famous south indian biryani's",
         "address",
         "phone",
         "logo",
@@ -293,6 +342,8 @@ def _item_name_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFact
             return
         if normalized in skip_exact:
             return
+        if normalized.startswith("all famous ") and "biryani" in normalized:
+            return
         if any(term in normalized for term in ("address", "phone", "logo")):
             return
         if len(name.split()) > 5:
@@ -317,6 +368,29 @@ def _item_name_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFact
         for part in re.split(r"[,;/]+", clause):
             add_item(part)
     return facts
+
+
+def _offset_standalone_item_names(
+    name_facts: list[FlyerLockedFact],
+    paired_item_facts: list[FlyerLockedFact],
+) -> list[FlyerLockedFact]:
+    paired_names: set[str] = set()
+    max_index = -1
+    for fact in paired_item_facts:
+        match = re.match(r"^item:(?P<index>\d+):(?P<kind>name|price)$", fact.fact_id)
+        if not match:
+            continue
+        max_index = max(max_index, int(match.group("index")))
+        if match.group("kind") == "name":
+            paired_names.add(_norm(fact.value))
+    next_index = max_index + 1
+    offset: list[FlyerLockedFact] = []
+    for fact in name_facts:
+        if _norm(fact.value) in paired_names:
+            continue
+        offset.append(fact.model_copy(update={"fact_id": f"item:{next_index}:name"}))
+        next_index += 1
+    return offset
 
 
 def extract_text_facts(
@@ -351,9 +425,13 @@ def extract_text_facts(
     offer_price = _offer_price_fact(text, message_id=message_id)
     if offer_price:
         facts.append(offer_price)
+    schedule = _schedule_fact(text, message_id=message_id)
+    if schedule:
+        facts.append(schedule)
     item_name_facts = _item_name_facts(text, message_id=message_id)
     generic_price = _generic_item_price(text)
-    item_price_facts = _item_price_facts(text, message_id=message_id)
+    paired_item_price_facts = _item_price_facts(text, message_id=message_id)
+    item_price_facts = paired_item_price_facts
     if generic_price and item_name_facts:
         item_price_facts = []
         for name_fact in item_name_facts:
@@ -369,6 +447,8 @@ def extract_text_facts(
             )
             if price_fact:
                 item_price_facts.append(price_fact)
+    elif paired_item_price_facts and item_name_facts:
+        item_name_facts = _offset_standalone_item_names(item_name_facts, paired_item_price_facts)
     facts.extend(item_price_facts)
     facts.extend(item_name_facts)
     return merge_locked_facts(facts)

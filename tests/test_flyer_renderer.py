@@ -17,6 +17,7 @@ from agents.flyer.render import (  # noqa: E402
     _image_message_content,
     _image_prompt,
     _menu_overlay_payload,
+    apply_exact_identity_overlay,
     apply_critical_text_overlay,
     build_asset_manifest,
     collect_text_facts,
@@ -473,6 +474,56 @@ def test_image_prompt_extracts_through_day_range_schedule_for_recurring_offer():
 
     assert "Schedule: Wednesday Through Saturday | 4 PM TO 7 PM" in prompt
     assert "Date: " not in prompt
+
+
+def test_image_prompt_extracts_single_day_every_week_schedule():
+    raw_request = (
+        "Create a Special Biryani's Flyer using golden background. "
+        "This promotion runs on Thursday of every week. Use address and phone number stored."
+    )
+    project = _complete_project().model_copy(update={
+        "raw_request": raw_request,
+        "fields": FlyerRequestFields(
+            event_or_business_name="Special Biryani's",
+            event_date=None,
+            event_time=None,
+            venue_or_location="90 Brybar Dr St Johns FL",
+            contact_info="+17329837841",
+            notes=raw_request,
+        ),
+    })
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="whatsapp_image", size=(1080, 1350))
+    facts = {fact.fact_id: fact.text for fact in collect_text_facts(project)}
+
+    assert facts["schedule"] == "Thursday every week"
+    assert "Schedule: Thursday every week" in prompt
+    assert "Date: " not in prompt
+
+
+def test_image_prompt_uses_locked_schedule_as_source_of_truth():
+    project = _complete_project().model_copy(update={
+        "raw_request": "Create a flyer with stored details.",
+        "fields": FlyerRequestFields(
+            event_or_business_name="Special Biryani's",
+            event_date=None,
+            event_time=None,
+            venue_or_location="90 Brybar Dr St Johns FL",
+            contact_info="+17329837841",
+            notes="Create a flyer with stored details.",
+        ),
+        "locked_facts": [
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile"),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Special Biryani's", source="customer_text"),
+            FlyerLockedFact(fact_id="schedule", label="Schedule", value="Thursday every week", source="customer_text"),
+        ],
+    })
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="whatsapp_image", size=(1080, 1350))
+    facts = {fact.fact_id: fact.text for fact in collect_text_facts(project)}
+
+    assert facts["schedule"] == "Thursday every week"
+    assert "Schedule: Thursday every week" in prompt
 
 
 def test_image_prompt_uses_clean_biryani_copy_without_price_instruction_leak():
@@ -1696,6 +1747,44 @@ def test_real_image_model_concept_applies_exact_identity_overlay(tmp_path, monke
     with Image.open(specs[0].path) as preview, Image.open(raw_path) as raw:
         assert preview.getpixel((540, 55)) != raw.getpixel((540, 55))
         assert preview.getpixel((540, 1290)) != raw.getpixel((540, 1290))
+
+
+def test_exact_identity_overlay_reserves_contact_with_long_schedule_and_address(tmp_path):
+    source = tmp_path / "raw.png"
+    target = tmp_path / "preview.png"
+    source.write_bytes(_png_bytes(size=(1080, 1350), color=(19, 83, 43)))
+    project = _complete_project().model_copy(update={
+        "fields": FlyerRequestFields(
+            event_or_business_name="Special Biryani's",
+            venue_or_location="12345 Very Long Commercial Plaza Suite 200 Near Market District Saint Johns Florida 32259",
+            contact_info="+17329837841",
+            notes="Create a flyer.",
+        ),
+        "locked_facts": [
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile"),
+            FlyerLockedFact(
+                fact_id="schedule",
+                label="Schedule",
+                value="Wednesday and Thursday every week",
+                source="customer_text",
+            ),
+            FlyerLockedFact(
+                fact_id="location",
+                label="Location",
+                value="12345 Very Long Commercial Plaza Suite 200 Near Market District Saint Johns Florida 32259",
+                source="customer_profile",
+            ),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile"),
+        ],
+    })
+
+    apply_exact_identity_overlay(project, source, target, size=(1080, 1350))
+    manifest = write_text_manifest(project, target, output_format="concept_preview")
+    text = manifest.read_text(encoding="utf-8")
+
+    assert "Wednesday and Thursday every week" in text
+    assert "+17329837841" in text
+    assert target.exists()
 
 
 def test_real_image_model_direct_poster_is_resized_to_requested_format(tmp_path, monkeypatch):
