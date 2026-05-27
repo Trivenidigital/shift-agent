@@ -2396,6 +2396,8 @@ def test_vague_flyer_start_for_ineligible_customer_status_does_not_send_starter(
         assert sent
         if status == "payment_pending":
             assert "waiting for payment" in sent[0].lower()
+        elif status == "cancelled":
+            assert "no longer active" in sent[0].lower()
         else:
             assert status in sent[0].lower()
 

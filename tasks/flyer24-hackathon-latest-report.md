@@ -1,33 +1,39 @@
 # Flyer24 Hackathon Latest Report
 
-Updated: 2026-05-26T22:35:00Z
+Updated: 2026-05-27T02:35:00Z
 
 ## Current batch
-- Branch: `codex/flyer24-batch-sample-idea-coverage-202605262219`
-- Scope: harden explicit sample/example/idea phrase routing so customer requests route to starter ideas instead of stale-project or account/clarification loops.
-- Root-cause evidence: RED tests showed misses for explicit asks (`send me prompt examples`, `can you suggest hooks for my flyer`, `help with promotion ideas`, `give 3 ideas for weekend offer`) and revealed two stale-active-project test leaks.
-- Risk: low (routing phrase matcher + intercept ordering + tests only; no payment/account/quota mutation).
-- Hermes/MCP-first: Hermes continues to own ingress, sender identity, intake execution, and audit transport; this batch changes only Flyer phrase policy and deterministic interception order.
+- Branch: `codex/flyer24-batch-active-intercept-guardrails-202605270225`
+- Scope: fix active-project intercept overreach so dedicated starter-ideas/account-recovery branches execute, while delivered-flyer explicit revisions still attach to the active project.
+- Root-cause evidence: RED routing tests on `main` showed four regressions from intercept ordering/guard drift:
+  - `test_delivered_existing_flyer_media_revision_stays_on_active_project`
+  - `test_vague_flyer_start_for_active_customer_sends_starter_ideas`
+  - `test_registered_customer_legacy_trial_link_complaint_gets_account_aware_reply`
+  - `test_vague_flyer_start_for_ineligible_customer_status_does_not_send_starter`
+- Risk: low (cf-router guardrails + tests only; no payment/account/quota mutation).
+- Hermes/MCP-first: Hermes continues to own ingress/identity/audit/send substrate; batch is deterministic policy glue in cf-router only. No connector/payment surface change.
 
-## PR queue classification (drained before new batch)
-- #276 `fix(flyer): harden source-vs-new status check-in routing`: merged to `main` (already drained).
-- #271 `fix(flyer): restore account/manual-edit routing compatibility`: open, clean, routing behavior change; requires operator review.
-- #268 `fix(flyer): harden billing provider readiness and cockpit visibility`: open, money-adjacent; operator-review-required.
-- #256 `fix(flyer): tighten payment activation contract and MCP readiness catalog`: open, dirty/conflicting; money-adjacent, operator-review-required.
-- #254 `fix(flyer): restore CTA/account routing and intake ack fail-closed behavior`: open, dirty/conflicting; broad routing work, operator-review-required.
-- #277 `feat(flyer): add semantic brief visibility policy`: open; feature scope, operator review pending.
+## PR queue classification (before this batch)
+- #280 `fix(flyer): restore cockpit auth override compatibility and source-edit health detail` - mergeable + green; low-risk visibility/auth compatibility.
+- #279 `fix(flyer): expand source-edit/manual-queue health visibility` - open with failing CI; not merge-qualified.
+- #284 `fix(flyer): resolve cf-router routing and dedupe regressions` - open, mergeable, no CI reported.
+- #271 `fix(flyer): restore account/manual-edit routing compatibility` - conflicting.
+- #268 `fix(flyer): harden billing provider readiness and cockpit visibility` - conflicting + failed CI; money-adjacent.
+- #256 `fix(flyer): tighten payment activation contract and MCP readiness catalog` - conflicting; money-adjacent.
+- #254 `fix(flyer): restore CTA/account routing and intake ack fail-closed behavior` - conflicting.
 
 ## Running PR list (hackathon)
-- #276 `fix(flyer): harden source-vs-new status check-in routing` - merged.
-- #271 `fix(flyer): restore account/manual-edit routing compatibility` - open.
-- #268 `fix(flyer): harden billing provider readiness and cockpit visibility` - open.
-- #256 `fix(flyer): tighten payment activation contract and MCP readiness catalog` - open.
 - #254 `fix(flyer): restore CTA/account routing and intake ack fail-closed behavior` - open.
-- #277 `feat(flyer): add semantic brief visibility policy` - open.
-- #TBD `fix(flyer): widen sample-idea request phrase coverage` - opening from this batch.
+- #256 `fix(flyer): tighten payment activation contract and MCP readiness catalog` - open.
+- #268 `fix(flyer): harden billing provider readiness and cockpit visibility` - open.
+- #271 `fix(flyer): restore account/manual-edit routing compatibility` - open.
+- #279 `fix(flyer): expand source-edit/manual-queue health visibility` - open.
+- #280 `fix(flyer): restore cockpit auth override compatibility and source-edit health detail` - open.
+- #284 `fix(flyer): resolve cf-router routing and dedupe regressions` - open.
+- #TBD `fix(flyer): guard active-project intercept for vague/account-recovery and delivered revisions` - this batch.
 
 ## Verification for this batch
 - `python3 -m py_compile src/plugins/cf-router/hooks.py tests/test_cf_router_flyer_routing.py`
-- `pytest -q tests/test_cf_router_flyer_routing.py -k "sample_prompt_variants_route_to_sample_idea_intake or explicit_sample_prompt_request or vague_flyer_start_for_opted_out_customer or vague_flyer_start_after_first_starter"` (pass: 30)
-- `pytest -q tests/test_cf_router_flyer_routing.py -k "sample or preference or clarification"` (pass: 49)
+- `pytest -q tests/test_cf_router_flyer_routing.py -k "delivered_existing_flyer_media_revision or vague_flyer_start_for_active_customer_sends_starter_ideas or legacy_trial_link_complaint or ineligible_customer_status"` (pass: 5)
+- `pytest -q tests/test_cf_router_flyer_routing.py -k "sample or starter or trial_link or customer_not_active or delivered_existing_flyer_media_revision"` (pass: 47)
 - `git diff --check`
