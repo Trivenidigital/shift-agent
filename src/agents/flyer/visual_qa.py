@@ -199,11 +199,26 @@ def _tokens_present(normalized_text: str, value: str) -> bool:
     return bool(tokens) and all(_text_value_present_in(normalized_text, token) for token in tokens)
 
 
+def _campaign_title_present(normalized_text: str, value: str) -> bool:
+    normalized_value = _normalize_text_for_match(value)
+    if _text_value_present_in(normalized_text, normalized_value):
+        return True
+    tokens = [token for token in re.findall(r"[a-z0-9]+", normalized_value) if token]
+    if not tokens:
+        return False
+    if len(tokens) == 1:
+        return _text_value_present_in(normalized_text, tokens[0])
+    pattern = r"\b" + re.escape(tokens[0]) + r"\b"
+    for token in tokens[1:]:
+        pattern += r"(?:\s+[a-z0-9]+){0,1}\s+\b" + re.escape(token) + r"\b"
+    return re.search(pattern, normalized_text) is not None
+
+
 def _semantic_visible_fact_present(fact_id: str, label: str, value: str, normalized_text: str) -> bool:
     context = f"{fact_id} {label}".casefold()
     normalized_value = _normalize_text_for_match(value)
     if fact_id in {"campaign_title", "headline"}:
-        return _value_present_in(normalized_text, value) or _tokens_present(normalized_text, value)
+        return _campaign_title_present(normalized_text, value)
     if fact_id == "pricing_structure" or "pricing" in context:
         digits = _PHONE_DIGITS_RE.sub("", value)
         if digits and digits not in _PHONE_DIGITS_RE.sub("", normalized_text):

@@ -13,9 +13,9 @@ from schemas import (
     FlyerSourceContract,
 )
 try:
-    from flyer_semantic_brief import build_semantic_flyer_brief  # type: ignore
+    from flyer_semantic_brief import build_hermes_semantic_brief_provider, build_semantic_flyer_brief  # type: ignore
 except ImportError:
-    from agents.flyer.semantic_brief import build_semantic_flyer_brief
+    from agents.flyer.semantic_brief import build_hermes_semantic_brief_provider, build_semantic_flyer_brief
 
 
 ALLOWED_NEW_PROJECT_FACT_SOURCES = {
@@ -413,6 +413,7 @@ def extract_text_facts(
         raw_request,
         profile_business_name=profile_business_name,
         allow_text_identity=allow_text_identity,
+        provider=build_hermes_semantic_brief_provider(),
     )
     facts: list[FlyerLockedFact] = []
     event_or_campaign = fields.event_or_business_name or ""
@@ -439,7 +440,8 @@ def extract_text_facts(
         item = _fact(f"offer:{index}", "Offer", offer.text, "customer_text", message_id=message_id)
         if item:
             facts.append(item)
-    if semantic_brief.schedule:
+    parsed_schedule = _schedule_fact(text, message_id=message_id)
+    if semantic_brief.schedule and not parsed_schedule:
         item = _fact("schedule", "Schedule", semantic_brief.schedule, "customer_text", message_id=message_id)
         if item:
             facts.append(item)
@@ -450,9 +452,8 @@ def extract_text_facts(
     offer_price = _offer_price_fact(text, message_id=message_id)
     if offer_price:
         facts.append(offer_price)
-    schedule = _schedule_fact(text, message_id=message_id)
-    if schedule:
-        facts.append(schedule)
+    if parsed_schedule:
+        facts.append(parsed_schedule)
     item_name_facts = _item_name_facts(text, message_id=message_id)
     generic_price = _generic_item_price(text)
     paired_item_price_facts = _item_price_facts(text, message_id=message_id)

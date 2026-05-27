@@ -970,6 +970,30 @@ def test_business_scope_block_preserves_wrong_business_after_campaign_suffix_str
     assert "set up for Lakshmi's Kitchen" in reply
     assert "Patel Grocery" in reply
 
+    single_token = actions.flyer_business_scope_block_message(
+        customer,
+        "Create a flyer for Walmart store wide sale. All items 5-10% off",
+    )
+    assert "set up for Lakshmi's Kitchen" in single_token
+    assert "Walmart" in single_token
+
+
+def test_business_scope_block_ignores_campaign_titles_with_org_words():
+    actions = _load_actions()
+    customer = {
+        "customer_id": "CUST0007",
+        "status": "trial",
+        "business_name": "Lakshmi's Kitchen",
+    }
+
+    for text in [
+        "Create a flyer for Restaurant Week Specials",
+        "Create a flyer for Cafe Style Biryani",
+        "Create a flyer for Biryani Bazaar",
+        "Create a flyer for Kitchen Essentials Sale",
+    ]:
+        assert actions.flyer_business_scope_block_message(customer, text) == ""
+
 
 def test_cross_business_primary_request_blocks_before_incomplete_intake_loop(monkeypatch):
     hooks, actions = _load_plugin_modules()

@@ -7,8 +7,13 @@ identity facts are hard requirements for the current brief.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
+import os
+from pathlib import Path
 import re
 from typing import Callable, Mapping
+import urllib.error
+import urllib.request
 
 from schemas import FlyerProject, FlyerRequestFields
 
@@ -57,6 +62,9 @@ class FlyerSemanticBrief:
 
 
 SemanticBriefProvider = Callable[[FlyerRequestFields, str], FlyerSemanticBrief | Mapping[str, object] | None]
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+SEMANTIC_BRIEF_MODEL = os.environ.get("FLYER_SEMANTIC_BRIEF_MODEL") or os.environ.get("HERMES_DEFAULT_MODEL") or "openai/gpt-4o-mini"
+SEMANTIC_BRIEF_TIMEOUT_SEC = 30
 
 
 def _clean(value: str) -> str:
@@ -84,6 +92,10 @@ def _source_text(fields: FlyerRequestFields, raw_request: str) -> str:
             fields.style_preference,
         )
     )
+
+
+def _provider_grounding_text(fields: FlyerRequestFields, raw_request: str) -> str:
+    return " ".join(str(value or "") for value in (raw_request, fields.notes))
 
 
 def _title_case(value: str) -> str:
@@ -159,9 +171,52 @@ def _digits(value: str) -> str:
     return re.sub(r"\D+", "", value or "")
 
 
+def _read_key_from_env_file(path: str) -> str:
+    p = Path(path)
+    if not p.exists():
+        return ""
+    try:
+        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, raw = line.split("=", 1)
+            if key.strip() == "OPENROUTER_API_KEY":
+                return raw.strip().strip('"').strip("'")
+    except OSError:
+        return ""
+    return ""
+
+
+def _openrouter_key() -> str:
+    return (
+        os.environ.get("OPENROUTER_API_KEY", "").strip()
+        or _read_key_from_env_file("/root/.hermes/.env")
+        or _read_key_from_env_file("/opt/shift-agent/.env")
+    )
+
+
+def _numeric_tokens(value: str) -> list[str]:
+    return [match.group(0).replace(",", "") for match in re.finditer(r"(?<![A-Za-z0-9])\d+(?:\.\d+)?(?![A-Za-z0-9])", value or "")]
+
+
+def _numeric_token_present(source: str, token: str) -> bool:
+    escaped = re.escape(token)
+    return bool(re.search(rf"(?<![\d.]){escaped}(?![\d.])", source or ""))
+
+
+def _numeric_anchors_grounded(source: str, value: str) -> bool:
+    for token in _numeric_tokens(value):
+        if not _numeric_token_present(source, token):
+            return False
+    return True
+
+
 def _grounded(source: str, value: str, *, require_expiry_context: bool = False) -> bool:
     value = _clean(value)
     if not value:
+        return False
+    if not _numeric_anchors_grounded(source, value):
         return False
     normalized_source = _norm(source)
     normalized_value = _norm(value)
@@ -169,10 +224,6 @@ def _grounded(source: str, value: str, *, require_expiry_context: bool = False) 
         if not require_expiry_context:
             return True
         return bool(re.search(r"\b(?:until|through|thru|expires?|valid|runs)\b.{0,30}" + re.escape(normalized_value), normalized_source))
-    source_digits = _digits(source)
-    value_digits = _digits(value)
-    if value_digits and value_digits not in source_digits:
-        return False
     tokens = [token for token in normalized_value.split() if not token.isdigit()]
     return bool(tokens) and all(token in normalized_source for token in tokens)
 
@@ -251,6 +302,66 @@ def _merge_briefs(primary: FlyerSemanticBrief, fallback: FlyerSemanticBrief) -> 
     )
 
 
+def build_hermes_semantic_brief_provider() -> SemanticBriefProvider | None:
+    key = _openrouter_key()
+    if not key or "PLACEHOLDER" in key:
+        return None
+
+    def provider(fields: FlyerRequestFields, raw_request: str) -> FlyerSemanticBrief | Mapping[str, object] | None:
+        prompt = {
+            "task": "Extract a source-grounded flyer marketing brief from the customer message.",
+            "customer_message": raw_request,
+            "existing_fields": {
+                "event_or_business_name": fields.event_or_business_name,
+                "event_date": fields.event_date,
+                "event_time": fields.event_time,
+                "venue_or_location": fields.venue_or_location,
+                "contact_info": fields.contact_info,
+                "notes": fields.notes,
+                "style_preference": fields.style_preference,
+            },
+            "schema": {
+                "campaign_title": "short campaign/headline/title, not account identity",
+                "account_business": "only if customer explicitly names a business identity",
+                "display_brand": "only if customer explicitly asks to display a brand",
+                "pricing_structure": "sale pricing rule such as Any item $7.99 or All items 5-10% off",
+                "offers": [{"text": "secondary offers exactly grounded in the message"}],
+                "schedule": "days/times exactly grounded in the message",
+                "promotion_end": "expiration/end date exactly grounded in the message",
+                "style": "style direction exactly grounded in the message",
+                "stored_contact_policy": "saved/stored contact/address/logo policy if requested",
+            },
+            "rules": [
+                "Return JSON only.",
+                "Do not invent prices, dates, items, phone, address, or business identity.",
+                "If ambiguous, leave the field blank instead of guessing.",
+                "Keep account business separate from campaign title.",
+            ],
+        }
+        payload = {
+            "model": SEMANTIC_BRIEF_MODEL,
+            "messages": [{"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}],
+            "response_format": {"type": "json_object"},
+            "temperature": 0.0,
+        }
+        req = urllib.request.Request(
+            OPENROUTER_URL,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=SEMANTIC_BRIEF_TIMEOUT_SEC) as resp:
+                body = resp.read().decode("utf-8")
+            doc = json.loads(body)
+            content = doc["choices"][0]["message"]["content"]
+            return json.loads(content)
+        except (OSError, KeyError, IndexError, TypeError, json.JSONDecodeError, urllib.error.URLError, urllib.error.HTTPError):
+            return None
+
+    return provider
+
+
 def build_semantic_flyer_brief(
     fields: FlyerRequestFields,
     raw_request: str,
@@ -265,12 +376,13 @@ def build_semantic_flyer_brief(
     only a conservative fallback for currently observed incident shapes.
     """
     source = _source_text(fields, raw_request)
+    provider_source = _provider_grounding_text(fields, raw_request)
     fallback = _fallback_brief(fields, raw_request, allow_text_identity=allow_text_identity)
     provider_brief = FlyerSemanticBrief()
     if provider is not None:
         provider_brief = _source_ground_brief(
             _coerce_brief(provider(fields, raw_request)),
-            source,
+            provider_source,
             allow_text_identity=allow_text_identity,
         )
     merged = _merge_briefs(provider_brief, fallback)

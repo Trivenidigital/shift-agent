@@ -74,6 +74,28 @@ def test_extract_text_facts_splits_visible_copy_from_style_instructions():
     assert all("rustic textures" not in fact.value for fact in facts)
 
 
+def test_extract_text_facts_uses_hermes_semantic_provider_when_available(monkeypatch):
+    from agents.flyer import facts as facts_module
+    from agents.flyer.semantic_brief import FlyerSemanticBrief, FlyerSemanticOffer
+
+    def provider(_fields, _raw_request):
+        return FlyerSemanticBrief(
+            campaign_title="Weekend Snack Box",
+            pricing_structure="Any item $7.99",
+            offers=[FlyerSemanticOffer("Free Masala Chai with any purchase above $12")],
+        )
+
+    monkeypatch.setattr(facts_module, "build_hermes_semantic_brief_provider", lambda: provider)
+
+    raw = "Create a flyer for Weekend Snack Box, any item $7.99. Free Masala Chai with any purchase above $12."
+    facts = facts_module.extract_text_facts(FlyerRequestFields(), raw, profile_business_name="Lakshmi's Kitchen")
+    by_id = facts_module.facts_by_id(type("P", (), {"locked_facts": facts})())
+
+    assert by_id["campaign_title"].value == "Weekend Snack Box"
+    assert by_id["pricing_structure"].value == "Any item $7.99"
+    assert by_id["offer:0"].value == "Free Masala Chai with any purchase above $12"
+
+
 def test_merge_locked_facts_overrides_reference_items_by_name_not_position():
     from agents.flyer.facts import merge_locked_facts
 

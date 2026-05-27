@@ -1247,6 +1247,28 @@ def test_visual_qa_does_not_accept_bare_event_word_for_campaign_title(tmp_path):
     assert "missing required visible fact: campaign_title" in report.blockers
 
 
+def test_visual_qa_requires_campaign_title_phrase_proximity(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    project = _project().model_copy(update={
+        "locked_facts": [
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Diwali Sale", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+        ],
+    })
+    artifact = _write_sidecar(
+        tmp_path,
+        "Lakshmis Kitchen\nDiwali decorations and sweets\nWeekly sale starts soon\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
+    )
+
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert report.status == "failed"
+    assert "missing required visible fact: campaign_title" in report.blockers
+
+
 def test_visual_qa_requires_expiry_context_for_promotion_end(tmp_path):
     from agents.flyer.visual_qa import run_visual_qa
 

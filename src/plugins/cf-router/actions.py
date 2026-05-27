@@ -2391,6 +2391,26 @@ def _strip_campaign_scope_suffix(label: str) -> str:
     return stripped or label
 
 
+def _looks_like_campaign_title_scope(label: str) -> bool:
+    tokens = _normalize_business_scope(label)
+    joined = " ".join(tokens)
+    if not tokens:
+        return False
+    campaign_patterns = (
+        r"\brestaurant week\b",
+        r"\bcafe style\b",
+        r"\bbiryani bazaar\b",
+        r"\bkitchen essentials\b",
+        r"\bdiwali\b",
+        r"\bholiday\b",
+        r"\bfestival\b",
+        r"\bweekend\b",
+    )
+    if any(re.search(pattern, joined) for pattern in campaign_patterns):
+        return True
+    return False
+
+
 def _extract_requested_business_scope(raw_request: str) -> str:
     text = " ".join(flyer_visible_message_text(raw_request).split())
     if not text:
@@ -2420,7 +2440,16 @@ def _extract_requested_business_scope(raw_request: str) -> str:
         label = re.sub(r"[*_`]+", "", candidate or "")
         label = re.sub(r"^(?:customer|business|client)\s+", "", label, flags=re.IGNORECASE)
         label = label.strip(" .,:;-'\"")
-        label = _strip_campaign_scope_suffix(label)
+        stripped = _strip_campaign_scope_suffix(label)
+        if stripped != label:
+            if _looks_like_campaign_title_scope(label):
+                continue
+            stripped_tokens = _normalize_business_scope(stripped)
+            if len(stripped_tokens) == 1 and stripped_tokens[0] not in {"diwali", "holiday", "festival", "weekend"}:
+                return stripped
+            label = stripped
+        elif _looks_like_campaign_title_scope(label):
+            continue
         if _looks_like_business_scope(label):
             return label
     return ""
@@ -2467,7 +2496,7 @@ def flyer_business_scope_block_message(customer: dict, raw_request: str) -> str:
     if not account_name:
         return ""
     requested = _extract_requested_business_scope(raw_request)
-    if not requested or not _looks_like_business_scope(requested):
+    if not requested or not (_looks_like_business_scope(requested) or len(_normalize_business_scope(requested)) == 1):
         return ""
     if _business_scope_matches(requested, account_name):
         return ""
