@@ -2176,6 +2176,12 @@ def test_explicit_sample_prompt_request_sends_starter_ideas(monkeypatch):
         "what are good promo captions for my business",
         "can you suggest punchlines for my business poster",
         "give marketing slogan options for my shop ad",
+        "what can you suggest for my weekend offer flyer",
+        "any ideas for my summer sale poster",
+        "what should i write for a grand opening flyer",
+        "help me with caption ideas for my store promotion",
+        "give me few prompt ideas for my business ad",
+        "can you share a couple of flyer prompt ideas for my salon",
     ],
 )
 def test_sample_prompt_variants_route_to_sample_idea_intake(monkeypatch, message_text):
