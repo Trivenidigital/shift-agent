@@ -133,7 +133,7 @@ def test_delivered_existing_flyer_media_revision_stays_on_active_project(monkeyp
         "revision_patch": {"changed": True, "visual_only": False, "ambiguous": False},
         "revision_requires_clarification": False,
     })))
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, _message: (True, "ack-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, _message, **_kwargs: (True, "ack-mid", ""))
     monkeypatch.setattr(actions, "trigger_generate_flyer_concepts", lambda project_id: (True, f"generated {project_id}"))
     monkeypatch.setattr(actions, "send_flyer_concept_previews", lambda _chat_id, project_id: preview_calls.append(project_id) or (True, "preview-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
@@ -956,7 +956,7 @@ def test_cross_business_primary_request_blocks_before_incomplete_intake_loop(mon
 
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+15550001111", "customer"))
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, reply: sent.append(reply) or (True, "m-scope", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, reply, **_kwargs: sent.append(reply) or (True, "m-scope", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
     monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
     monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: None)
@@ -1001,7 +1001,7 @@ def test_cross_business_active_project_request_blocks_nested_for_phrase(monkeypa
         "business_name": "MK Kitchen",
     })
     monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, reply: sent.append(reply) or (True, "m-scope", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, reply, **_kwargs: sent.append(reply) or (True, "m-scope", ""))
     monkeypatch.setattr(actions, "invoke_update_flyer_project", lambda *_args, **_kwargs: pytest.fail("cross-business request must not revise active project"))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
@@ -1087,7 +1087,7 @@ def test_registered_customer_get_flyer_ready_with_banner_is_not_vague_loop(monke
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+15550001111", "customer"))
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
     monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, reply: sent.append(reply) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, reply, **_kwargs: sent.append(reply) or (True, "mid", ""))
 
     def fake_primary(raw_text, *_args, **kwargs):
         routed["text"] = raw_text
@@ -1238,7 +1238,7 @@ def test_upgrade_plan_cta_for_registered_customer_shows_plans_not_intake(monkeyp
     }))
     monkeypatch.setattr(actions, "trigger_flyer_intake", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("upgrade plan CTA must not start flyer intake")))
     monkeypatch.setattr(actions, "trigger_create_flyer_project", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("upgrade plan CTA must not create a project")))
-    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "plans-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text, **_kwargs: sent.update({"chat_id": chat_id, "text": text}) or (True, "plans-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
     result = hooks.pre_gateway_dispatch(SimpleNamespace(
@@ -1276,7 +1276,7 @@ def test_natural_upgrade_to_growth_routes_to_account_handler(monkeypatch):
         "customer_id": "CUST0001",
         "status": "trial",
     }))
-    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "account-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text, **_kwargs: sent.update({"chat_id": chat_id, "text": text}) or (True, "account-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
     monkeypatch.setattr(actions, "trigger_create_flyer_project", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("billing command must not create flyer")))
 
@@ -1307,7 +1307,7 @@ def test_regulated_billing_language_is_guarded_before_generic_passthrough(monkey
     monkeypatch.setattr(actions, "flyer_campaign_cta_text", lambda _text: "")
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
-    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "guard-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text, **_kwargs: sent.update({"chat_id": chat_id, "text": text}) or (True, "guard-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
     monkeypatch.setattr(actions, "trigger_create_flyer_project", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("billing guard must not create flyer")))
 
@@ -1449,7 +1449,7 @@ def test_pr_alpha_no_active_project_change_phone_still_fires_guard(monkeypatch):
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
     monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: None)
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "business_name": "Lakshmi's Kitchen", "status": "trial"})
-    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text, **_kwargs: sent.update({"chat_id": chat_id, "text": text}) or (True, "mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
 
     result = hooks._try_flyer_regulated_account_guard(
@@ -1473,7 +1473,7 @@ def test_pr_alpha_active_project_payment_claim_still_fires_guard(monkeypatch):
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
     monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "business_name": "Lakshmi's Kitchen", "status": "trial"})
-    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text, **_kwargs: sent.update({"chat_id": chat_id, "text": text}) or (True, "mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
 
     result = hooks._try_flyer_regulated_account_guard(
@@ -1614,7 +1614,7 @@ def test_pr_beta_no_project_fires_delivery_state_guard(monkeypatch):
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
     monkeypatch.setattr(actions, "find_latest_flyer_project_for_status_by_sender", lambda _phone, _chat_id: None)
-    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "delivery-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text, **_kwargs: sent.update({"chat_id": chat_id, "text": text}) or (True, "delivery-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
 
     for delivery_text in ["where is my flyer", "did you send my flyer", "send my flyer", "I approve", "approve"]:
@@ -1644,7 +1644,7 @@ def test_pr_beta_unknown_customer_no_project_fires_guard(monkeypatch):
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: None)
     monkeypatch.setattr(actions, "find_latest_flyer_project_for_status_by_sender", lambda _phone, _chat_id: None)
-    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "delivery-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text, **_kwargs: sent.update({"chat_id": chat_id, "text": text}) or (True, "delivery-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
 
     result = hooks._try_flyer_delivery_state_guard(
@@ -1711,7 +1711,7 @@ def test_pr_beta_lid_only_no_active_project_fires_guard(monkeypatch):
         project_lookup_calls.append({"phone": phone, "chat_id": chat_id})
         return None
     monkeypatch.setattr(actions, "find_latest_flyer_project_for_status_by_sender", _record_project_lookup)
-    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "delivery-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text, **_kwargs: sent.update({"chat_id": chat_id, "text": text}) or (True, "delivery-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
 
     result = hooks._try_flyer_delivery_state_guard(
@@ -1769,7 +1769,7 @@ def test_pr_beta_delivered_project_surfaces_status_for_did_you_send(monkeypatch)
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
     monkeypatch.setattr(actions, "find_latest_flyer_project_for_status_by_sender", lambda _phone, _chat_id: delivered_project)
     monkeypatch.setattr(actions, "flyer_project_status_reply", lambda _project: _expected_status_reply())
-    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "surface-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text, **_kwargs: sent.update({"chat_id": chat_id, "text": text}) or (True, "surface-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
 
     result = hooks._try_flyer_delivery_state_guard(
@@ -1800,7 +1800,7 @@ def test_pr_beta_delivered_project_surfaces_status_for_send_my_flyer(monkeypatch
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
     monkeypatch.setattr(actions, "find_latest_flyer_project_for_status_by_sender", lambda _phone, _chat_id: delivered_project)
     monkeypatch.setattr(actions, "flyer_project_status_reply", lambda _project: _expected_status_reply())
-    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "surface-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text, **_kwargs: sent.update({"chat_id": chat_id, "text": text}) or (True, "surface-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
 
     result = hooks._try_flyer_delivery_state_guard(
@@ -1828,7 +1828,7 @@ def test_pr_beta_closed_no_send_project_surfaces_status(monkeypatch):
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
     monkeypatch.setattr(actions, "find_latest_flyer_project_for_status_by_sender", lambda _phone, _chat_id: closed_project)
     monkeypatch.setattr(actions, "flyer_project_status_reply", lambda _project: _expected_status_reply())
-    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "surface-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text, **_kwargs: sent.update({"chat_id": chat_id, "text": text}) or (True, "surface-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
 
     result = hooks._try_flyer_delivery_state_guard(
@@ -1872,7 +1872,7 @@ def test_pr_beta_manual_edit_required_surfaces_manual_edit_reply(monkeypatch):
 
     monkeypatch.setattr(actions, "flyer_manual_edit_status_reply", _manual_reply)
     monkeypatch.setattr(actions, "flyer_project_status_reply", _generic_reply)
-    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "surface-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text, **_kwargs: sent.update({"chat_id": chat_id, "text": text}) or (True, "surface-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
 
     result = hooks._try_flyer_delivery_state_guard(
@@ -1964,7 +1964,7 @@ def test_pr_beta_1_send_now_with_no_project_fails_closed(monkeypatch):
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
     monkeypatch.setattr(actions, "find_latest_flyer_project_for_status_by_sender", lambda _phone, _chat_id: None)
-    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "snw-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text, **_kwargs: sent.update({"chat_id": chat_id, "text": text}) or (True, "snw-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
 
     for send_now_text in ["send now", "please send my flyer now", "send the flyer now"]:
@@ -1997,7 +1997,7 @@ def test_pr_beta_1_send_now_with_delivered_project_surfaces_status(monkeypatch):
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
     monkeypatch.setattr(actions, "find_latest_flyer_project_for_status_by_sender", lambda _phone, _chat_id: delivered_project)
     monkeypatch.setattr(actions, "flyer_project_status_reply", lambda _project: "Flyer Studio status: delivered.")
-    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "snw-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text, **_kwargs: sent.update({"chat_id": chat_id, "text": text}) or (True, "snw-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
 
     result = hooks._try_flyer_delivery_state_guard(
@@ -2029,7 +2029,7 @@ def test_pr_beta_1_send_now_lid_only_no_active_project_fails_closed(monkeypatch)
         project_lookup_calls.append({"phone": phone, "chat_id": chat_id})
         return None
     monkeypatch.setattr(actions, "find_latest_flyer_project_for_status_by_sender", _record)
-    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "snw-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text, **_kwargs: sent.update({"chat_id": chat_id, "text": text}) or (True, "snw-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
 
     result = hooks._try_flyer_delivery_state_guard(
@@ -2112,7 +2112,7 @@ def test_explicit_sample_prompt_request_sends_starter_ideas(monkeypatch):
         "action": "choose_sample_idea",
     }))
     monkeypatch.setattr(actions, "trigger_create_flyer_project", lambda **_kwargs: created.update(called=True) or (True, "", {}))
-    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "sample-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text, **_kwargs: sent.update({"chat_id": chat_id, "text": text}) or (True, "sample-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
     result = hooks.pre_gateway_dispatch(SimpleNamespace(
@@ -2180,7 +2180,7 @@ def test_sample_prompt_variants_route_to_sample_idea_intake(monkeypatch, message
         lambda **kwargs: intake_calls.append(kwargs) or (True, "", {"reply_text": "Pick a sample idea to start:", "action": "choose_sample_idea"}),
     )
     monkeypatch.setattr(actions, "trigger_create_flyer_project", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("sample prompt path must not create project")))
-    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "sample-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text, **_kwargs: sent.update({"chat_id": chat_id, "text": text}) or (True, "sample-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
     result = hooks.pre_gateway_dispatch(SimpleNamespace(
@@ -2247,7 +2247,7 @@ def test_sample_prompt_request_from_new_sender_starts_sample_intake(monkeypatch)
         lambda **kwargs: intake_calls.append(kwargs) or (True, "", {"reply_text": "Choose your language first.", "action": "choose_language"}),
     )
     monkeypatch.setattr(actions, "trigger_create_flyer_project", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("new sender sample prompt must not create project")))
-    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "sample-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text, **_kwargs: sent.update({"chat_id": chat_id, "text": text}) or (True, "sample-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
     result = hooks.pre_gateway_dispatch(SimpleNamespace(
@@ -2298,7 +2298,7 @@ def test_vague_flyer_start_for_active_customer_sends_starter_ideas(monkeypatch):
         "action": "choose_sample_idea",
     }))
     monkeypatch.setattr(actions, "trigger_create_flyer_project", lambda **_kwargs: created.update(called=True) or (True, "", {}))
-    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "starter-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text, **_kwargs: sent.update({"chat_id": chat_id, "text": text}) or (True, "starter-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
     result = hooks.pre_gateway_dispatch(SimpleNamespace(
@@ -2338,7 +2338,7 @@ def test_registered_customer_legacy_trial_link_complaint_gets_account_aware_repl
     monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
     monkeypatch.setattr(actions, "trigger_flyer_intake", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("legacy trial-link complaint must not send sample ideas")))
     monkeypatch.setattr(actions, "claim_flyer_starter_prompt_send", lambda _customer_id: (_ for _ in ()).throw(AssertionError("must not burn starter prompt claim")))
-    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}) or (True, "ready-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text, **_kwargs: sent.update({"chat_id": chat_id, "text": text}) or (True, "ready-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
     result = hooks.pre_gateway_dispatch(SimpleNamespace(
@@ -2378,7 +2378,7 @@ def test_vague_flyer_start_for_ineligible_customer_status_does_not_send_starter(
         monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
         monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
         monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
-        monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
+        monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "mid", ""))
 
         result = hooks.pre_gateway_dispatch(SimpleNamespace(
             text="Create flyer",
@@ -2409,7 +2409,7 @@ def test_explicit_flyer_request_for_ineligible_customer_status_does_not_create_p
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
     monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
     monkeypatch.setattr(actions, "trigger_create_flyer_project", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("ineligible customer must not create project")))
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
     result = hooks._try_flyer_primary_intercept(
@@ -2447,7 +2447,7 @@ def test_vague_flyer_start_for_opted_out_customer_asks_short_clarification(monke
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
     monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
     result = hooks.pre_gateway_dispatch(SimpleNamespace(
@@ -2484,7 +2484,7 @@ def test_vague_flyer_start_after_first_starter_asks_short_clarification(monkeypa
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
     monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
     result = hooks.pre_gateway_dispatch(SimpleNamespace(
@@ -2574,7 +2574,7 @@ def test_send_flyer_text_dedupes_identical_recent_reply(monkeypatch, tmp_path):
     actions = _load_actions()
     sends = []
 
-    def fake_bridge_post(chat_id, message):
+    def fake_bridge_post(chat_id, message, **_kwargs):
         sends.append((chat_id, message))
         return True, f"mid-{len(sends)}", "", "sent"
 
@@ -2592,9 +2592,16 @@ def test_send_flyer_text_dedupes_identical_recent_reply(monkeypatch, tmp_path):
         "I need a few more details before creating the design."
     )
 
-    first = actions.send_flyer_text("15550001111@s.whatsapp.net", payment_prompt)
-    replay = actions.send_flyer_text("15550001111@s.whatsapp.net", payment_prompt)
-    different = actions.send_flyer_text("15550001111@s.whatsapp.net", details_prompt)
+    # PR-ζ.1b 2026-05-26 — action_context is REQUIRED on send_flyer_text.
+    # Pass a benign non-regulated context for this dedup-behavior test.
+    from schemas import ActionExecutionContext  # type: ignore
+    _ctx = ActionExecutionContext(
+        action_id="flyer.test.dedupe", is_regulated_action=False,
+        verified_action_result=False,
+    )
+    first = actions.send_flyer_text("15550001111@s.whatsapp.net", payment_prompt, action_context=_ctx)
+    replay = actions.send_flyer_text("15550001111@s.whatsapp.net", payment_prompt, action_context=_ctx)
+    different = actions.send_flyer_text("15550001111@s.whatsapp.net", details_prompt, action_context=_ctx)
 
     assert first == (True, "mid-1", "")
     assert replay == (True, "deduped:mid-1", "")
@@ -2660,11 +2667,11 @@ def test_send_flyer_concept_previews_persists_delivery_metadata(monkeypatch, tmp
     def atomic_write_text(path, body):
         Path(path).write_text(body, encoding="utf-8")
 
-    def bridge_send_media(chat_id, media_path, caption=""):
+    def bridge_send_media(chat_id, media_path, caption="", **_kwargs):
         sent_media.append((chat_id, media_path, caption))
         return True, "media-mid-1", "", "sent"
 
-    def bridge_post(chat_id, message):
+    def bridge_post(chat_id, message, **_kwargs):
         sent_text.append((chat_id, message))
         return True, "text-mid-1", "", "sent"
 
@@ -2795,7 +2802,7 @@ def test_business_name_update_command_runs_before_active_project_revision(monkey
         "customer_id": "CUST0001",
         "status": "trial",
     }))
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
     result = hooks.pre_gateway_dispatch(SimpleNamespace(
@@ -2845,9 +2852,9 @@ def test_repeated_full_request_during_open_intake_generates_existing_project(mon
     monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
     monkeypatch.setattr(actions, "flyer_project_has_required_fields", lambda _project: True)
     monkeypatch.setattr(actions, "trigger_flyer_reserve_quota", lambda **_kwargs: (True, "reserved", {"quota_allowed": True}))
-    monkeypatch.setattr(actions, "send_flyer_processing_ack", lambda _chat_id, _project_id: (True, "processing-mid", ""))
-    monkeypatch.setattr(actions, "trigger_generate_flyer_concepts", lambda _project_id: (True, "generated"))
-    monkeypatch.setattr(actions, "send_flyer_concept_previews", lambda _chat_id, _project_id: (True, "preview-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_processing_ack", lambda _chat_id, _project_id, **_kwargs: (True, "processing-mid", ""))
+    monkeypatch.setattr(actions, "trigger_generate_flyer_concepts", lambda _project_id, **_kwargs: (True, "generated"))
+    monkeypatch.setattr(actions, "send_flyer_concept_previews", lambda _chat_id, _project_id, **_kwargs: (True, "preview-mid", ""))
     monkeypatch.setattr(actions, "trigger_flyer_finalize_usage", lambda **_kwargs: (True, "finalized", {}))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
     monkeypatch.setattr(
@@ -2907,7 +2914,7 @@ def test_ineligible_customer_cannot_finalize_existing_active_project(monkeypatch
     monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
     monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
     monkeypatch.setattr(actions, "find_reserved_flyer_guest_order", lambda _phone, _chat_id, _project_id: None)
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "mid", ""))
     monkeypatch.setattr(actions, "finalize_and_send_flyer", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("inactive customer must not finalize")))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
@@ -3034,7 +3041,7 @@ def test_compound_confirm_routes_trailing_request_without_starter_brief(monkeypa
             "Here is a starter flyer request.\nEdit anything below and send it back."
         ),
     }))
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
     monkeypatch.setattr(actions, "should_start_new_flyer_over_active", lambda _text, has_media=False: True)
     monkeypatch.setattr(hooks, "_try_flyer_primary_intercept", lambda text, *_args, **_kwargs: created.update({"raw_request": text}) or {"action": "skip", "reason": "created"})
@@ -3093,7 +3100,7 @@ def test_sample_prompt_preference_command_failure_does_not_fall_through(monkeypa
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: (None, "customer"))
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
     monkeypatch.setattr(actions, "trigger_flyer_account_command", lambda **_kwargs: (False, "boom", {}))
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
     result = hooks._try_flyer_account_intercept(
@@ -3113,7 +3120,7 @@ def test_sample_prompt_preference_command_without_customer_does_not_fall_through
     monkeypatch.setattr(actions, "is_flyer_account_command", lambda _text: True)
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: (None, "customer"))
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: None)
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
     result = hooks._try_flyer_account_intercept(
@@ -3152,7 +3159,7 @@ def test_onboarding_starter_claim_released_on_hard_send_failure(monkeypatch):
         "customer_id": "CUST0001",
         "reply_text": "Flyer Studio\n------------\nHere is a starter flyer request.\nEdit anything below.",
     }))
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, _text: (False, "", "bridge down"))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, _text, **_kwargs: (False, "", "bridge down"))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
     monkeypatch.setattr(actions, "release_flyer_starter_prompt_claim", lambda customer_id: released.append(customer_id))
 
@@ -3181,7 +3188,7 @@ def test_intake_starter_claim_released_on_hard_send_failure(monkeypatch):
         "customer_id": "CUST0001",
         "reply_text": "Flyer Studio\n------------\nHere is a starter flyer request.\nEdit anything below.",
     }))
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, _text: (False, "", "bridge down"))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, _text, **_kwargs: (False, "", "bridge down"))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
     monkeypatch.setattr(actions, "release_flyer_starter_prompt_claim", lambda customer_id: released.append(customer_id))
 
@@ -3206,7 +3213,7 @@ def test_payment_pending_customer_campaign_cta_gets_payment_guidance(monkeypatch
         "business_name": "Demo Salon",
         "status": "payment_pending",
     })
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
     monkeypatch.setattr(hooks, "_start_flyer_intake", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not start intake")))
 
@@ -3510,8 +3517,8 @@ def test_lid_only_active_service_project_resumes_generation(monkeypatch):
     monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", fake_find_active)
     monkeypatch.setattr(actions, "flyer_project_has_required_fields", lambda _project: True)
     monkeypatch.setattr(hooks, "_reserve_flyer_access_or_reply", lambda *_args, **_kwargs: ({"reservation_id": "R1"}, None))
-    monkeypatch.setattr(actions, "send_flyer_processing_ack", lambda _chat_id, _project_id: (True, "processing-mid", ""))
-    monkeypatch.setattr(actions, "trigger_generate_flyer_concepts", lambda _project_id: (True, "generated"))
+    monkeypatch.setattr(actions, "send_flyer_processing_ack", lambda _chat_id, _project_id, **_kwargs: (True, "processing-mid", ""))
+    monkeypatch.setattr(actions, "trigger_generate_flyer_concepts", lambda _project_id, **_kwargs: (True, "generated"))
 
     def fake_send_preview(access, chat_id, phone, project_id, message_id, **kwargs):
         calls["preview"] = {
@@ -3525,7 +3532,7 @@ def test_lid_only_active_service_project_resumes_generation(monkeypatch):
         return True, "preview-mid", ""
 
     monkeypatch.setattr(hooks, "_send_preview_then_finalize_access", fake_send_preview)
-    monkeypatch.setattr(actions, "send_flyer_text", lambda *_args: (_ for _ in ()).throw(AssertionError("ready service project must not repeat missing-info prompt")))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("ready service project must not repeat missing-info prompt")))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
     result = hooks._try_flyer_active_project_intercept(
@@ -3580,7 +3587,7 @@ def test_manual_source_edit_status_check_gets_queue_update_not_clarification(mon
         "invoke_update_flyer_project",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("status check must not be parsed as an edit")),
     )
-    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: sent.append((chat_id, text)) or (True, "status-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text, **_kwargs: sent.append((chat_id, text)) or (True, "status-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
     result = hooks.pre_gateway_dispatch(SimpleNamespace(
@@ -3630,7 +3637,7 @@ def test_manual_review_where_is_update_flyer_routes_as_status(monkeypatch):
         "invoke_update_flyer_project",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("status check must not become a queued edit")),
     )
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "status-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "status-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audit_reasons.append(kwargs.get("reason", "")))
 
     result = hooks._try_flyer_active_project_intercept(
@@ -3678,7 +3685,7 @@ def test_manual_review_where_is_my_updated_flyer_routes_as_status(monkeypatch):
         "invoke_update_flyer_project",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("status check must not become a queued edit")),
     )
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "status-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "status-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audit_reasons.append(kwargs.get("reason", "")))
 
     result = hooks._try_flyer_active_project_intercept(
@@ -3820,7 +3827,7 @@ def test_registered_lid_only_text_mode_brief_creates_project_not_intake(monkeypa
     monkeypatch.setattr(actions, "trigger_create_flyer_project", fake_create_project)
     monkeypatch.setattr(actions, "flyer_project_has_required_fields", lambda _project: False)
     monkeypatch.setattr(actions, "flyer_project_missing_info_reply", lambda _project: "What else should go on this flyer?")
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, _text: (True, "mid-1", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, _text, **_kwargs: (True, "mid-1", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
     result = hooks._try_flyer_primary_intercept(
@@ -3878,7 +3885,7 @@ def test_active_customer_start_trial_cta_returns_ready_not_new_intake(monkeypatc
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: (None, "unknown"))
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
     monkeypatch.setattr(actions, "trigger_flyer_intake", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("active customer CTA must not restart intake")))
-    def fake_send_ready(_chat_id, text):
+    def fake_send_ready(_chat_id, text, **_kwargs):
         sent["message"] = text
         return True, "mid-1", ""
 
@@ -3911,7 +3918,7 @@ def test_active_customer_stale_onboarding_non_flyer_gets_ready_reply(monkeypatch
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: (None, "unknown"))
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
     monkeypatch.setattr(actions, "find_flyer_onboarding_session_by_sender", lambda _phone, _chat_id: {"status": "collecting_business_name"})
-    def fake_send_ready(_chat_id, text):
+    def fake_send_ready(_chat_id, text, **_kwargs):
         sent["message"] = text
         return True, "mid-1", ""
 
@@ -3941,7 +3948,7 @@ def test_active_customer_stale_onboarding_flyer_brief_continues_to_project(monke
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: (None, "unknown"))
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
     monkeypatch.setattr(actions, "find_flyer_onboarding_session_by_sender", lambda _phone, _chat_id: {"status": "collecting_business_name"})
-    monkeypatch.setattr(actions, "send_flyer_text", lambda *_args: (_ for _ in ()).throw(AssertionError("flyer brief must not get ready-only reply")))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("flyer brief must not get ready-only reply")))
 
     result = hooks._try_flyer_existing_onboarding_intercept(
         "Create flyer for Chloe hair studio grand opening sale",
@@ -3963,7 +3970,7 @@ def test_campaign_cta_starts_intake_for_lid_only_sender(monkeypatch):
         return True, "ok", {"reply_text": "Choose language", "action": "choose_language"}
 
     monkeypatch.setattr(actions, "trigger_flyer_intake", fake_trigger_flyer_intake)
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, _text: (True, "mid-1", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, _text, **_kwargs: (True, "mid-1", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
     result = hooks._try_flyer_campaign_cta_intercept(
@@ -3996,7 +4003,7 @@ def test_lid_only_sender_can_continue_intake_and_onboarding(monkeypatch):
 
     monkeypatch.setattr(actions, "trigger_flyer_intake", fake_continue_intake)
     monkeypatch.setattr(actions, "trigger_flyer_onboarding", fake_continue_onboarding)
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, _text: (True, "mid-1", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, _text, **_kwargs: (True, "mid-1", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
     intake_result = hooks._try_flyer_intake_intercept("1", "999999999999@lid", {"message_id": "msg-2"})
@@ -4076,7 +4083,7 @@ def test_approved_brief_project_creation_failure_keeps_pending_brief(monkeypatch
     }))
     monkeypatch.setattr(hooks, "_try_flyer_primary_intercept", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(actions, "discard_flyer_intake_session_by_sender", lambda *_args: (_ for _ in ()).throw(AssertionError("pending brief must survive failure")))
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "retry-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "retry-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
 
     result = hooks._try_flyer_intake_intercept(
@@ -4237,7 +4244,7 @@ def test_cross_business_request_does_not_become_active_project_revision(monkeypa
         "business_name": "Chloe hair studio",
     })
     monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, reply: (replies.append(reply) or (True, "m-scope", "")))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, reply, **_kwargs: (replies.append(reply) or (True, "m-scope", "")))
     monkeypatch.setattr(actions, "invoke_update_flyer_project", lambda *_args, **_kwargs: pytest.fail("cross-business request must not revise active project"))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
 
@@ -4453,7 +4460,7 @@ def test_status_reply_prefers_recent_closed_no_send_over_older_active(tmp_path, 
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+19045550104", "employee"))
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _p, _c: {"customer_id": "CUST0001", "status": "trial"})
     sent = {}
-    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: (sent.update({"chat_id": chat_id, "text": text}), (True, "out-mid", ""))[1])
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text, **_kwargs: (sent.update({"chat_id": chat_id, "text": text}), (True, "out-mid", ""))[1])
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kw: None)
 
     result = hooks._try_flyer_active_project_intercept(
@@ -4515,7 +4522,7 @@ def test_status_reply_with_explicit_id_mention_wins_over_latest(tmp_path, monkey
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+19045550104", "employee"))
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _p, _c: {"customer_id": "CUST0001", "status": "trial"})
     sent = {}
-    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: (sent.update({"text": text}), (True, "out-mid", ""))[1])
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text, **_kwargs: (sent.update({"text": text}), (True, "out-mid", ""))[1])
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kw: None)
 
     result = hooks._try_flyer_active_project_intercept(
@@ -4584,7 +4591,7 @@ def test_status_reply_when_only_closed_no_send_exists(tmp_path, monkeypatch):
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+19045550104", "employee"))
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _p, _c: {"customer_id": "CUST0001", "status": "trial"})
     sent = {}
-    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: (sent.update({"text": text}), (True, "out-mid", ""))[1])
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text, **_kwargs: (sent.update({"text": text}), (True, "out-mid", ""))[1])
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kw: None)
 
     result = hooks._try_flyer_active_project_intercept(
@@ -4624,7 +4631,7 @@ def test_status_reply_with_explicit_id_when_no_active_project(tmp_path, monkeypa
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+19045550104", "employee"))
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _p, _c: {"customer_id": "CUST0001", "status": "trial"})
     sent = {}
-    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text: (sent.update({"text": text}), (True, "out-mid", ""))[1])
+    monkeypatch.setattr(actions, "send_flyer_text", lambda chat_id, text, **_kwargs: (sent.update({"text": text}), (True, "out-mid", ""))[1])
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kw: None)
 
     result = hooks._try_flyer_active_project_intercept(
@@ -4718,7 +4725,7 @@ def test_exact_edit_request_use_as_reference_does_not_downgrade(monkeypatch):
         actions, "trigger_create_flyer_project",
         lambda **_kw: pytest.fail("must NOT create project on bare `use as reference` for exact-edit"),
     )
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _c, text: (sent.append(text), (True, "mid", ""))[1])
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _c, text, **_kwargs: (sent.append(text), (True, "mid", ""))[1])
     monkeypatch.setattr(actions, "audit_intercepted", lambda **kw: audited.append(kw) or None)
     if hasattr(actions, "audit_source_vs_new"):
         monkeypatch.setattr(actions, "audit_source_vs_new", lambda **kw: audited.append(kw) or None)
@@ -4811,7 +4818,7 @@ def test_active_intake_generation_failure_does_not_send_duplicate_initial_ack(mo
     monkeypatch.setattr(actions, "send_flyer_processing_ack", lambda *_a, **_kw: (calls.__setitem__("processing", calls["processing"] + 1) or True, "processing-mid", ""))
     monkeypatch.setattr(actions, "send_flyer_intake_ack", lambda *_a, **_kw: (calls.__setitem__("intake", calls["intake"] + 1) or True, "intake-mid", ""))
     monkeypatch.setattr(actions, "trigger_generate_flyer_concepts", lambda *_a, **_kw: (False, "exit=1 transient provider error"))
-    monkeypatch.setattr(actions, "flyer_generation_queued_manual_review", lambda _detail: False)
+    monkeypatch.setattr(actions, "flyer_generation_queued_manual_review", lambda _detail, **_kwargs: False)
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kw: None)
     monkeypatch.setattr(hooks, "_reserve_flyer_access_or_reply", lambda *_a, **_kw: ("quota:CUST0001", None))
     monkeypatch.setattr(hooks, "_release_flyer_access", lambda *_a, **_kw: (True, "released"))
@@ -4892,7 +4899,7 @@ def test_visible_time_text_revision_does_not_send_clarification(monkeypatch):
         )
 
     monkeypatch.setattr(actions, "invoke_update_flyer_project", fake_update)
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "mid", ""))
     monkeypatch.setattr(actions, "trigger_generate_flyer_concepts", lambda project_id: generated.append(project_id) or (True, "generated"))
     monkeypatch.setattr(actions, "send_flyer_concept_previews", lambda *_args, **_kwargs: (True, "preview-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audit_reasons.append(kwargs.get("reason", "")))
@@ -4937,7 +4944,7 @@ def test_category_price_revision_does_not_send_clarification(monkeypatch):
         )
 
     monkeypatch.setattr(actions, "invoke_update_flyer_project", fake_update)
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "mid", ""))
     monkeypatch.setattr(actions, "trigger_generate_flyer_concepts", lambda project_id: generated.append(project_id) or (True, "generated"))
     monkeypatch.setattr(actions, "send_flyer_concept_previews", lambda *_args, **_kwargs: (True, "preview-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
@@ -4969,7 +4976,7 @@ def test_pending_revision_confirmation_blocks_approve_and_reminds_apply(monkeypa
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+17329837841", "customer"))
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
     monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
     def boom_finalize(*_a, **_kw):
@@ -5003,7 +5010,7 @@ def test_final_visual_qa_failure_after_approve_gets_review_ack(monkeypatch):
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
     monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
     monkeypatch.setattr(actions, "finalize_and_send_flyer", lambda *_args: (False, "visual_qa_failed: missing required visible facts"))
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "final-failed-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "final-failed-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audit_reasons.append(kwargs.get("reason", "")))
 
     result = hooks._try_flyer_active_project_intercept(
@@ -5062,7 +5069,7 @@ def test_pending_confirmation_message_is_sent_verbatim(monkeypatch):
 
     import json as _json
     monkeypatch.setattr(actions, "invoke_update_flyer_project", fake_update)
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "mid", ""))
     monkeypatch.setattr(actions, "trigger_generate_flyer_concepts", lambda project_id: generated.append(project_id) or (True, "generated"))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
@@ -5104,7 +5111,7 @@ def test_revision_clarification_reply_includes_request_excerpt_to_avoid_dedupe(m
             },
         })),
     )
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
     result = hooks._try_flyer_active_project_intercept(
@@ -5149,7 +5156,7 @@ def test_preview_layout_change_with_create_new_wording_stays_on_active_project(m
         "revision_requires_clarification": False,
         "revision_patch": {"changed": True, "visual_only": False, "ambiguous": False},
     })))
-    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text: sent.append(text) or (True, "ack-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "ack-mid", ""))
     monkeypatch.setattr(actions, "trigger_generate_flyer_concepts", lambda project_id: (True, f"generated {project_id}"))
     monkeypatch.setattr(actions, "send_flyer_concept_previews", lambda _chat_id, project_id: previews.append(project_id) or (True, "preview-mid", ""))
     monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
@@ -5285,7 +5292,7 @@ def test_source_vs_new_status_checkin_clarification_has_no_trial_or_quota_copy(m
     monkeypatch.setattr(
         actions,
         "send_flyer_text",
-        lambda _chat_id, text: sent.update({"text": text}) or (True, "mid", ""),
+        lambda _chat_id, text, **_kwargs: sent.update({"text": text}) or (True, "mid", ""),
     )
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kw: None)
 

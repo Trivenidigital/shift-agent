@@ -40,6 +40,26 @@ from . import actions
 actions._ensure_platform_path()  # type: ignore[attr-defined]
 from schemas import ActionExecutionContext  # type: ignore  # noqa: E402
 
+# PR-ζ.1b 2026-05-26 — registry + helpers for the migrated send-path
+# callsites. Deployed-flat-module fallback mirrors safe_io.py:815-818 +
+# intent.py:18-21 — on the VPS the module lives at
+# /opt/shift-agent/flyer_action_registry.py (flat-renamed by
+# shift-agent-deploy.sh), NOT under an agents/flyer/ package.
+try:
+    from agents.flyer.action_registry import (  # type: ignore  # noqa: E402
+        ACCOUNT_ACTIONS,
+        PROJECT_ACTIONS,
+        build_action_context,
+        build_action_context_for_command,
+    )
+except ImportError:  # pragma: no cover - deployed flat-module fallback
+    from flyer_action_registry import (  # type: ignore  # noqa: E402
+        ACCOUNT_ACTIONS,
+        PROJECT_ACTIONS,
+        build_action_context,
+        build_action_context_for_command,
+    )
+
 # === F7 path config (PR-CF7 → PR-CF1d primary-mode 2026-05-12) ===
 #
 # F7_ENABLED is the rollback hatch. To disable the F7 plugin path without
@@ -323,7 +343,12 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
                                 )
                                 return None
                             reply = str(intake.get("reply_text") or "")
-                            ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+                            ack_ok, mid, err = actions.send_flyer_text(
+                                chat_id, reply,
+                                action_context=build_action_context_for_command(
+                                    PROJECT_ACTIONS, "intake.acknowledged",
+                                ),
+                            )
                             if not ack_ok and not mid:
                                 actions.release_flyer_starter_prompt_claim(str(customer.get("customer_id") or ""))
                             actions.audit_intercepted(
@@ -338,7 +363,13 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
                             )
                             return {"action": "skip", "reason": "cf-router flyer starter ideas sent"}
                         reply = actions.flyer_vague_request_clarification_reply(customer)
-                        ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+                        ack_ok, mid, err = actions.send_flyer_text(
+                            chat_id, reply,
+                            action_context=build_action_context(
+                                action_id="flyer.project.vague_request_clarification",
+                                is_regulated_action=False,
+                            ),
+                        )
                         reason = (
                             "flyer_starter_preference_off"
                             if not actions.flyer_starter_prompts_enabled(customer)
@@ -358,7 +389,13 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
                         return {"action": "skip", "reason": "cf-router flyer starter already sent clarification sent"}
                     elif customer:
                         reply = actions.flyer_customer_not_active_reply(customer)
-                        ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+                        ack_ok, mid, err = actions.send_flyer_text(
+                            chat_id, reply,
+                            action_context=build_action_context(
+                                action_id="flyer.account.customer_not_active",
+                                is_regulated_action=False,
+                            ),
+                        )
                         actions.audit_intercepted(
                             reason="flyer_customer_not_active",
                             chat_id=chat_id,
@@ -523,7 +560,12 @@ def _try_flyer_sample_prompt_request_intercept(text: str, chat_id: str, event: A
             )
             return None
         reply = str(intake.get("reply_text") or "")
-        ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+        ack_ok, mid, err = actions.send_flyer_text(
+            chat_id, reply,
+            action_context=build_action_context_for_command(
+                PROJECT_ACTIONS, "intake.acknowledged",
+            ),
+        )
         actions.audit_intercepted(
             reason="flyer_sample_prompt_requested",
             chat_id=chat_id,
@@ -536,7 +578,13 @@ def _try_flyer_sample_prompt_request_intercept(text: str, chat_id: str, event: A
         return {"action": "skip", "reason": "cf-router flyer sample prompts sent"}
     if customer.get("status") not in {"trial", "active"}:
         reply = actions.flyer_customer_not_active_reply(customer)
-        ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+        ack_ok, mid, err = actions.send_flyer_text(
+            chat_id, reply,
+            action_context=build_action_context(
+                action_id="flyer.account.customer_not_active",
+                is_regulated_action=False,
+            ),
+        )
         actions.audit_intercepted(
             reason="flyer_customer_not_active",
             chat_id=chat_id,
@@ -566,7 +614,12 @@ def _try_flyer_sample_prompt_request_intercept(text: str, chat_id: str, event: A
         )
         return None
     reply = str(intake.get("reply_text") or "")
-    ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+    ack_ok, mid, err = actions.send_flyer_text(
+        chat_id, reply,
+        action_context=build_action_context_for_command(
+            PROJECT_ACTIONS, "intake.acknowledged",
+        ),
+    )
     actions.audit_intercepted(
         reason="flyer_sample_prompt_requested",
         chat_id=chat_id,
@@ -609,7 +662,13 @@ def _try_flyer_primary_intercept(
         )
     if customer and customer.get("status") not in {"trial", "active"} and not actions.find_paid_flyer_guest_order(phone, chat_id):
         reply = actions.flyer_customer_not_active_reply(customer)
-        ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+        ack_ok, mid, err = actions.send_flyer_text(
+            chat_id, reply,
+            action_context=build_action_context(
+                action_id="flyer.account.customer_not_active",
+                is_regulated_action=False,
+            ),
+        )
         actions.audit_intercepted(
             reason="flyer_customer_not_active",
             chat_id=chat_id,
@@ -623,7 +682,13 @@ def _try_flyer_primary_intercept(
 
     scope_block = actions.flyer_business_scope_block_message(customer or {}, text)
     if scope_block:
-        ack_ok, mid, err = actions.send_flyer_text(chat_id, scope_block)
+        ack_ok, mid, err = actions.send_flyer_text(
+            chat_id, scope_block,
+            action_context=build_action_context(
+                action_id="flyer.scope.business_scope_blocked",
+                is_regulated_action=False,
+            ),
+        )
         actions.audit_intercepted(
             reason="flyer_business_scope_blocked",
             chat_id=chat_id,
@@ -646,7 +711,13 @@ def _try_flyer_primary_intercept(
             )
             if quota_result is not None:
                 return quota_result
-            proc_ok, proc_mid, proc_err = actions.send_flyer_processing_ack(chat_id, project_id)
+            proc_ok, proc_mid, proc_err = actions.send_flyer_processing_ack(
+                chat_id, project_id,
+                action_context=build_action_context_for_command(
+                    PROJECT_ACTIONS, "intake.processing",
+                    is_regulated_action=False,
+                ),
+            )
             gen_ok, gen_detail = actions.trigger_generate_flyer_concepts(project_id)
             if gen_ok:
                 if not active_project.get("revisions"):
@@ -668,6 +739,10 @@ def _try_flyer_primary_intercept(
                     text,
                     gen_detail,
                     proc_ok=proc_ok,
+                    action_context=build_action_context_for_command(
+                        PROJECT_ACTIONS, "generation.failed_ack",
+                        is_regulated_action=False,
+                    ),
                 )
                 outbound_message_id = ",".join(x for x in [proc_mid, outbound_message_id] if x)
                 ack_err = f"concept_generation_failed: {gen_detail}; ack_error={ack_err}"
@@ -675,6 +750,9 @@ def _try_flyer_primary_intercept(
             ack_ok, outbound_message_id, ack_err = actions.send_flyer_text(
                 chat_id,
                 actions.flyer_project_missing_info_reply(active_project),
+                action_context=build_action_context_for_command(
+                    PROJECT_ACTIONS, "clarification.request",
+                ),
             )
         actions.audit_intercepted(
             reason="flyer_primary_project_created", chat_id=chat_id,
@@ -691,7 +769,13 @@ def _try_flyer_primary_intercept(
     customer = customer or actions.find_flyer_customer_by_sender(phone, chat_id)
     block_message = actions.flyer_location_block_message(customer or {}, raw_request)
     if block_message:
-        ack_ok, mid, err = actions.send_flyer_text(chat_id, block_message)
+        ack_ok, mid, err = actions.send_flyer_text(
+            chat_id, block_message,
+            action_context=build_action_context(
+                action_id="flyer.scope.location_blocked",
+                is_regulated_action=False,
+            ),
+        )
         actions.audit_intercepted(
             reason="flyer_location_blocked",
             chat_id=chat_id,
@@ -752,7 +836,13 @@ def _try_flyer_primary_intercept(
                 scope=scope or {},
                 original_intent=original_intent,
             )
-            ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+            ack_ok, mid, err = actions.send_flyer_text(
+                chat_id, reply,
+                action_context=build_action_context(
+                    action_id="flyer.scope.reference_scope_blocked",
+                    is_regulated_action=False,
+                ),
+            )
             actions.audit_intercepted(
                 reason="flyer_reference_scope_blocked",
                 chat_id=chat_id,
@@ -790,6 +880,10 @@ def _try_flyer_primary_intercept(
             project_id,
             text,
             reason=str(manual.get("detail") or manual.get("reason") or ""),
+            action_context=build_action_context_for_command(
+                PROJECT_ACTIONS, "manual_review.queued",
+                is_regulated_action=False,
+            ),
         )
         actions.audit_intercepted(
             reason="flyer_reference_manual_review_queued",
@@ -832,6 +926,10 @@ def _try_flyer_primary_intercept(
                     project_id,
                     text,
                     reason=ready_detail,
+                    action_context=build_action_context_for_command(
+                        PROJECT_ACTIONS, "manual_edit.queued",
+                        is_regulated_action=False,
+                    ),
                 )
             else:
                 ack_ok = False
@@ -854,7 +952,13 @@ def _try_flyer_primary_intercept(
                 "action": "skip",
                 "reason": f"cf-router flyer exact edit queued: project {project_id}",
             }
-        proc_ok, proc_mid, proc_err = actions.send_flyer_edit_processing_ack(chat_id, project_id)
+        proc_ok, proc_mid, proc_err = actions.send_flyer_edit_processing_ack(
+            chat_id, project_id,
+            action_context=build_action_context_for_command(
+                PROJECT_ACTIONS, "edit.processing",
+                is_regulated_action=False,
+            ),
+        )
         gen_ok, gen_detail = actions.trigger_generate_flyer_concepts(project_id)
         if gen_ok:
             ack_ok, outbound_message_id, ack_err = _send_preview_then_finalize_access(
@@ -878,6 +982,10 @@ def _try_flyer_primary_intercept(
                 project_id,
                 text,
                 reason=f"automatic edit generation failed: {gen_detail}",
+                action_context=build_action_context_for_command(
+                    PROJECT_ACTIONS, "manual_edit.queued",
+                    is_regulated_action=False,
+                ),
             )
             outbound_message_id = ",".join(x for x in [proc_mid, manual_mid] if x)
             ack_err = (
@@ -902,7 +1010,13 @@ def _try_flyer_primary_intercept(
         access, quota_result = _reserve_flyer_access_or_reply(chat_id, phone, project_id, message_id, consume_quota=True)
         if quota_result is not None:
             return quota_result
-        proc_ok, proc_mid, proc_err = actions.send_flyer_processing_ack(chat_id, project_id)
+        proc_ok, proc_mid, proc_err = actions.send_flyer_processing_ack(
+            chat_id, project_id,
+            action_context=build_action_context_for_command(
+                PROJECT_ACTIONS, "intake.processing",
+                is_regulated_action=False,
+            ),
+        )
         gen_ok, gen_detail = actions.trigger_generate_flyer_concepts(project_id)
         if gen_ok:
             ack_ok, outbound_message_id, ack_err = _send_preview_then_finalize_access(
@@ -917,6 +1031,10 @@ def _try_flyer_primary_intercept(
                 text,
                 gen_detail,
                 proc_ok=proc_ok,
+                action_context=build_action_context_for_command(
+                    PROJECT_ACTIONS, "generation.failed_ack",
+                    is_regulated_action=False,
+                ),
             )
             outbound_message_id = ",".join(x for x in [proc_mid, outbound_message_id] if x)
             ack_err = f"concept_generation_failed: {gen_detail}; ack_error={ack_err}"
@@ -924,6 +1042,9 @@ def _try_flyer_primary_intercept(
         ack_ok, outbound_message_id, ack_err = actions.send_flyer_text(
             chat_id,
             actions.flyer_project_missing_info_reply(project or {}),
+            action_context=build_action_context_for_command(
+                PROJECT_ACTIONS, "clarification.request",
+            ),
         )
     actions.audit_intercepted(
         reason="flyer_primary_project_created", chat_id=chat_id,
@@ -973,7 +1094,12 @@ def _try_flyer_reference_scope_choice_intercept(text: str, chat_id: str, event: 
             "Reply SOURCE to keep this same flyer and apply only the changes you asked for.\n"
             "Reply NEW to create a brand-new flyer inspired by this one (different layout)."
         )
-        ack_ok, mid, err = actions.send_flyer_text(chat_id, clarification)
+        ack_ok, mid, err = actions.send_flyer_text(
+            chat_id, clarification,
+            action_context=build_action_context_for_command(
+                PROJECT_ACTIONS, "clarification.request",
+            ),
+        )
         pending_created_at = float(pending.get("created_at") or 0)
         pending_age_sec = int(time.time() - pending_created_at) if pending_created_at else 0
         try:
@@ -1006,7 +1132,12 @@ def _try_flyer_reference_scope_choice_intercept(text: str, chat_id: str, event: 
             f"and include any {business_name} logo/details that are different from the saved account details.\n\n"
             "If the saved account details are correct, a short answer like \"co-owner\" is enough."
         )
-        ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+        ack_ok, mid, err = actions.send_flyer_text(
+            chat_id, reply,
+            action_context=build_action_context_for_command(
+                PROJECT_ACTIONS, "clarification.request",
+            ),
+        )
         actions.audit_intercepted(
             reason="flyer_reference_scope_blocked",
             chat_id=chat_id,
@@ -1045,6 +1176,10 @@ def _try_flyer_reference_scope_choice_intercept(text: str, chat_id: str, event: 
             project_id,
             raw_request,
             reason=str(manual.get("detail") or manual.get("reason") or ""),
+            action_context=build_action_context_for_command(
+                PROJECT_ACTIONS, "manual_review.queued",
+                is_regulated_action=False,
+            ),
         )
         actions.audit_intercepted(
             reason="flyer_reference_manual_review_queued",
@@ -1063,7 +1198,13 @@ def _try_flyer_reference_scope_choice_intercept(text: str, chat_id: str, event: 
         access, quota_result = _reserve_flyer_access_or_reply(chat_id, phone, project_id, message_id, consume_quota=True)
         if quota_result is not None:
             return quota_result
-        proc_ok, proc_mid, proc_err = actions.send_flyer_processing_ack(chat_id, project_id)
+        proc_ok, proc_mid, proc_err = actions.send_flyer_processing_ack(
+            chat_id, project_id,
+            action_context=build_action_context_for_command(
+                PROJECT_ACTIONS, "intake.processing",
+                is_regulated_action=False,
+            ),
+        )
         gen_ok, gen_detail = actions.trigger_generate_flyer_concepts(project_id)
         if gen_ok:
             ack_ok, outbound_message_id, ack_err = _send_preview_then_finalize_access(
@@ -1078,6 +1219,10 @@ def _try_flyer_reference_scope_choice_intercept(text: str, chat_id: str, event: 
                 raw_request,
                 gen_detail,
                 proc_ok=proc_ok,
+                action_context=build_action_context_for_command(
+                    PROJECT_ACTIONS, "generation.failed_ack",
+                    is_regulated_action=False,
+                ),
             )
             outbound_message_id = ",".join(x for x in [proc_mid, outbound_message_id] if x)
             ack_err = f"concept_generation_failed: {gen_detail}; ack_error={ack_err}"
@@ -1085,6 +1230,9 @@ def _try_flyer_reference_scope_choice_intercept(text: str, chat_id: str, event: 
         ack_ok, outbound_message_id, ack_err = actions.send_flyer_text(
             chat_id,
             actions.flyer_project_missing_info_reply(project or {}),
+            action_context=build_action_context_for_command(
+                PROJECT_ACTIONS, "clarification.request",
+            ),
         )
     actions.audit_intercepted(
         reason="flyer_primary_project_created",
@@ -1131,7 +1279,12 @@ def _try_flyer_source_vs_new_choice_intercept(text: str, chat_id: str, event: An
                 "Reply SOURCE to keep this same flyer and apply only the changes you asked for.\n"
                 "Reply NEW to create a brand-new flyer inspired by this one (different layout)."
             )
-            ack_ok, mid, err = actions.send_flyer_text(chat_id, clarification)
+            ack_ok, mid, err = actions.send_flyer_text(
+                chat_id, clarification,
+                action_context=build_action_context_for_command(
+                    PROJECT_ACTIONS, "clarification.request",
+                ),
+            )
             try:
                 actions.audit_source_vs_new(
                     sender_phone=phone,
@@ -1173,6 +1326,10 @@ def _try_flyer_source_vs_new_choice_intercept(text: str, chat_id: str, event: An
                 project_id,
                 str(recent.get("raw_request") or ""),
                 reason="source_edit_provider_unavailable",
+                action_context=build_action_context_for_command(
+                    PROJECT_ACTIONS, "manual_edit.queued",
+                    is_regulated_action=False,
+                ),
             )
             actions.audit_intercepted(
                 reason="flyer_reference_exact_edit_queued",
@@ -1250,6 +1407,10 @@ def _try_flyer_source_vs_new_choice_intercept(text: str, chat_id: str, event: An
                     project_id,
                     new_raw_request,
                     reason=ready_detail,
+                    action_context=build_action_context_for_command(
+                        PROJECT_ACTIONS, "manual_edit.queued",
+                        is_regulated_action=False,
+                    ),
                 )
             else:
                 ack_ok = False
@@ -1272,7 +1433,13 @@ def _try_flyer_source_vs_new_choice_intercept(text: str, chat_id: str, event: An
                 "action": "skip",
                 "reason": f"cf-router flyer source-edit queued: project {project_id}",
             }
-        proc_ok, proc_mid, proc_err = actions.send_flyer_edit_processing_ack(chat_id, project_id)
+        proc_ok, proc_mid, proc_err = actions.send_flyer_edit_processing_ack(
+            chat_id, project_id,
+            action_context=build_action_context_for_command(
+                PROJECT_ACTIONS, "edit.processing",
+                is_regulated_action=False,
+            ),
+        )
         gen_ok, gen_detail = actions.trigger_generate_flyer_concepts(project_id)
         if gen_ok:
             ack_ok, outbound_message_id, ack_err = _send_preview_then_finalize_access(
@@ -1297,6 +1464,10 @@ def _try_flyer_source_vs_new_choice_intercept(text: str, chat_id: str, event: An
                 project_id,
                 new_raw_request,
                 reason=f"automatic edit generation failed: {gen_detail}",
+                action_context=build_action_context_for_command(
+                    PROJECT_ACTIONS, "manual_edit.queued",
+                    is_regulated_action=False,
+                ),
             )
             release_ok, release_detail = _release_flyer_access(
                 access, chat_id, phone, project_id, message_id,
@@ -1361,9 +1532,19 @@ def _try_flyer_source_vs_new_choice_intercept(text: str, chat_id: str, event: An
                 project_id,
                 new_raw_request,
                 reason=str(manual.get("detail") or manual.get("reason") or ""),
+                action_context=build_action_context_for_command(
+                    PROJECT_ACTIONS, "manual_review.queued",
+                    is_regulated_action=False,
+                ),
             )
         else:
-            ack_ok, outbound_message_id, ack_err = actions.send_flyer_intake_ack(chat_id, project_id)
+            ack_ok, outbound_message_id, ack_err = actions.send_flyer_intake_ack(
+                chat_id, project_id,
+                action_context=build_action_context_for_command(
+                    PROJECT_ACTIONS, "intake.acknowledged",
+                    is_regulated_action=False,
+                ),
+            )
         actions.audit_intercepted(
             reason="flyer_primary_project_created",
             chat_id=chat_id,
@@ -1437,6 +1618,10 @@ def _try_flyer_reference_scope_authorization_intercept(text: str, chat_id: str, 
                     project_id,
                     raw_request,
                     reason=ready_detail,
+                    action_context=build_action_context_for_command(
+                        PROJECT_ACTIONS, "manual_edit.queued",
+                        is_regulated_action=False,
+                    ),
                 )
             else:
                 ack_ok = False
@@ -1459,7 +1644,13 @@ def _try_flyer_reference_scope_authorization_intercept(text: str, chat_id: str, 
                 "action": "skip",
                 "reason": f"cf-router flyer reference scope authorized queued: project {project_id}",
             }
-        proc_ok, proc_mid, proc_err = actions.send_flyer_edit_processing_ack(chat_id, project_id)
+        proc_ok, proc_mid, proc_err = actions.send_flyer_edit_processing_ack(
+            chat_id, project_id,
+            action_context=build_action_context_for_command(
+                PROJECT_ACTIONS, "edit.processing",
+                is_regulated_action=False,
+            ),
+        )
         gen_ok, gen_detail = actions.trigger_generate_flyer_concepts(project_id)
         if gen_ok:
             ack_ok, outbound_message_id, ack_err = _send_preview_then_finalize_access(
@@ -1474,6 +1665,10 @@ def _try_flyer_reference_scope_authorization_intercept(text: str, chat_id: str, 
                 project_id,
                 raw_request,
                 reason=f"automatic edit generation failed: {gen_detail}",
+                action_context=build_action_context_for_command(
+                    PROJECT_ACTIONS, "manual_edit.queued",
+                    is_regulated_action=False,
+                ),
             )
             release_ok, release_detail = _release_flyer_access(access, chat_id, phone, project_id, message_id)
             outbound_message_id = ",".join(x for x in [proc_mid, manual_mid] if x)
@@ -1503,7 +1698,12 @@ def _try_flyer_reference_scope_authorization_intercept(text: str, chat_id: str, 
             "if the saved Flyer Studio account details should be used."
         )
 
-    ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+    ack_ok, mid, err = actions.send_flyer_text(
+        chat_id, reply,
+        action_context=build_action_context_for_command(
+            PROJECT_ACTIONS, "clarification.request",
+        ),
+    )
     actions.audit_intercepted(
         reason="flyer_reference_scope_blocked",
         chat_id=chat_id,
@@ -1544,6 +1744,10 @@ def _reserve_flyer_access_or_reply(
                 "I could not reserve your paid quick-flyer order for this request. "
                 "Please reply STATUS or contact support before retrying."
             ),
+            action_context=build_action_context(
+                action_id="flyer.guest_order.reserve_failed",
+                is_regulated_action=False,
+            ),
         )
         actions.audit_intercepted(
             reason="flyer_primary_failed",
@@ -1568,6 +1772,10 @@ def _reserve_flyer_access_or_reply(
         reply or (
             "Flyer Studio\n------------\n"
             "Please complete payment first. Tap Create One Flyer - $4, pay, then send your flyer details here."
+        ),
+        action_context=build_action_context(
+            action_id="flyer.quota.blocked",
+            is_regulated_action=False,
         ),
     )
     actions.audit_intercepted(
@@ -1648,17 +1856,26 @@ def _send_generation_failure_customer_update(
     gen_detail: str,
     *,
     proc_ok: bool,
+    action_context: ActionExecutionContext,
 ) -> tuple[bool, str, str]:
+    # PR-ζ.1b §13.E — caller threads the context (caller knows the flow:
+    # intake-generation / revision-generation / manual-review-fallback).
+    # The helper passes the SAME context to both internal acks so audit-row
+    # attribution reflects the calling flow rather than the helper's
+    # branch divergence.
     if actions.flyer_generation_queued_manual_review(gen_detail):
         return actions.send_flyer_manual_review_ack(
             chat_id,
             project_id,
             request_text,
             reason=gen_detail,
+            action_context=action_context,
         )
     if proc_ok:
         return True, "", ""
-    return actions.send_flyer_intake_ack(chat_id, project_id)
+    return actions.send_flyer_intake_ack(
+        chat_id, project_id, action_context=action_context,
+    )
 
 
 def _preview_may_have_delivered(outbound_message_id: str, ack_err: str) -> bool:
@@ -1666,7 +1883,15 @@ def _preview_may_have_delivered(outbound_message_id: str, ack_err: str) -> bool:
     return bool(outbound_message_id) or "partial_delivery" in err or "send_uncertain" in err
 
 
-def _send_flyer_regeneration_failed_ack(chat_id: str, project_id: str) -> tuple[bool, str, str]:
+def _send_flyer_regeneration_failed_ack(
+    chat_id: str,
+    project_id: str,
+    *,
+    action_context: ActionExecutionContext,
+) -> tuple[bool, str, str]:
+    # PR-ζ.1b §13.F — kwarg flip. Callers (2 invocation sites at 2921+3050)
+    # pass for_command(PROJECT_ACTIONS, "generation.failed_ack",
+    # is_regulated_action=False). Wrapper passes through to send_flyer_text.
     return actions.send_flyer_text(
         chat_id,
         (
@@ -1676,10 +1901,19 @@ def _send_flyer_regeneration_failed_ack(chat_id: str, project_id: str) -> tuple[
             "I kept the edit request open instead of sending a mismatched flyer. "
             "Please check back here shortly, or send one exact correction if anything else must change."
         ),
+        action_context=action_context,
     )
 
 
-def _send_flyer_finalization_failed_ack(chat_id: str, project_id: str) -> tuple[bool, str, str]:
+def _send_flyer_finalization_failed_ack(
+    chat_id: str,
+    project_id: str,
+    *,
+    action_context: ActionExecutionContext,
+) -> tuple[bool, str, str]:
+    # PR-ζ.1b §13.F — kwarg flip. Single caller (2969) passes
+    # for_command(PROJECT_ACTIONS, "finalization.failed_ack",
+    # is_regulated_action=False). Wrapper passes through.
     return actions.send_flyer_text(
         chat_id,
         (
@@ -1687,6 +1921,7 @@ def _send_flyer_finalization_failed_ack(chat_id: str, project_id: str) -> tuple[
             "------------\n"
             "I hit an issue preparing the final files. I'll review it and send an update here."
         ),
+        action_context=action_context,
     )
 
 
@@ -1703,6 +1938,10 @@ def _try_flyer_account_intercept(text: str, chat_id: str, event: Any) -> Optiona
         ack_ok, mid, err = actions.send_flyer_text(
             chat_id,
             "Flyer Studio\n------------\nI can change sample prompt settings after your Flyer Studio account is set up.",
+            action_context=build_action_context(
+                action_id="flyer.account.command_failed_fallback",
+                is_regulated_action=False,
+            ),
         )
         actions.audit_intercepted(
             reason="flyer_account_customer_not_found",
@@ -1732,6 +1971,10 @@ def _try_flyer_account_intercept(text: str, chat_id: str, event: Any) -> Optiona
         actions.send_flyer_text(
             chat_id,
             "Flyer Studio\n------------\nI could not update that setting right now. Please try again.",
+            action_context=build_action_context(
+                action_id="flyer.account.command_failed_fallback",
+                is_regulated_action=False,
+            ),
         )
         return {"action": "skip", "reason": "cf-router flyer account command failed"}
     if not result.get("handled"):
@@ -1746,28 +1989,34 @@ def _try_flyer_account_intercept(text: str, chat_id: str, event: Any) -> Optiona
         actions.send_flyer_text(
             chat_id,
             "Flyer Studio\n------------\nI could not update that setting right now. Please try again.",
+            action_context=build_action_context(
+                action_id="flyer.account.command_failed_fallback",
+                is_regulated_action=False,
+            ),
         )
         return {"action": "skip", "reason": "cf-router flyer account command failed"}
-    # PR-ζ F8 2026-05-26: construct ActionExecutionContext for the change_plan
-    # path so safe_io.bridge_post runs PR-γ lint on the customer-facing reply.
-    # change_plan is the only `external_irreversible` action in the portfolio
-    # (per PR-δ action_registry). Other branches keep action_context=None and
-    # fall through the actions.py basename allowlist; PR-ζ.1 migrates the rest.
-    #
-    # ActionExecutionContext is imported at module top (above) so any import
-    # quirk surfaces at plugin load, not at first regulated send.
+    # PR-ζ F8 2026-05-26 + PR-ζ.1b §6 2026-05-26: build the action_context for
+    # whichever account-command branch fires. change_plan path → ACCOUNT_ACTIONS
+    # ["change_plan"] (the only external_irreversible action in the portfolio).
+    # Non-change_plan command_reply path → ACCOUNT_ACTIONS["command_reply"]
+    # with is_regulated_action=False (dispatcher matrix already enforced the
+    # regulated check; this is the reply-emission step). ζ.1b commit 10
+    # removes "hooks.py" from SAFE_IO_NULL_CONTEXT_ALLOWLIST, so every send
+    # path MUST carry an explicit context — no implicit fall-through allowed.
     detail = result.get("detail") or ""
     is_change_plan = "plan_change_requested" in detail
-    action_ctx = None
+    # PR-ζ.1b 2026-05-26 §6 — replaces inline ActionExecutionContext with
+    # registry helpers. change_plan path → ACCOUNT_ACTIONS["change_plan"]
+    # (external_irreversible mutation_class carried via the registry entry).
+    # Non-change_plan account commands → ACCOUNT_ACTIONS["command_reply"]
+    # with is_regulated_action=False (dispatcher matrix already enforced the
+    # regulated check; this is the reply-emission step). Required because
+    # commit 10 removes "hooks.py" from SAFE_IO_NULL_CONTEXT_ALLOWLIST.
     if is_change_plan:
-        action_ctx = ActionExecutionContext(
-            action_id="flyer.billing.request_plan_change",
-            is_regulated_action=True,
-            # plan_change is a payment REQUEST, not a completion. The
-            # checkout URL emits the next step; verification arrives only
-            # after the payment webhook (PR-ζ.1 + §11 wiring).
-            verified_action_result=False,
-            mutation_class="external_irreversible",
+        action_ctx = build_action_context_for_command(ACCOUNT_ACTIONS, "change_plan")
+    else:
+        action_ctx = build_action_context_for_command(
+            ACCOUNT_ACTIONS, "command_reply", is_regulated_action=False,
         )
     ack_ok, mid, err = actions.send_flyer_text(
         chat_id, result.get("reply_text") or "", action_context=action_ctx,
@@ -1781,10 +2030,9 @@ def _try_flyer_account_intercept(text: str, chat_id: str, event: Any) -> Optiona
     # it's a system meta-message about request state, not a claim about
     # the action's outcome.
     if not ack_ok and is_change_plan and err and "refused" in str(err).lower():
-        fallback_ctx = ActionExecutionContext(
-            action_id="flyer.billing.request_plan_change_fallback",
-            is_regulated_action=False,
-            verified_action_result=False,
+        # PR-ζ.1b §6 — registry helper replaces inline ctor.
+        fallback_ctx = build_action_context_for_command(
+            ACCOUNT_ACTIONS, "change_plan_fallback", is_regulated_action=False,
         )
         actions.send_flyer_text(
             chat_id,
@@ -1858,7 +2106,13 @@ def _try_flyer_regulated_account_guard(text: str, chat_id: str, event: Any) -> O
             "To request a plan change, reply CHANGE PLAN STARTER, CHANGE PLAN GROWTH, or CHANGE PLAN UNLIMITED. "
             "I will ask for confirmation and payment before any plan changes."
         )
-    ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+    ack_ok, mid, err = actions.send_flyer_text(
+        chat_id, reply,
+        action_context=build_action_context(
+            action_id="flyer.account.regulated_account_guard",
+            is_regulated_action=False,
+        ),
+    )
     actions.audit_intercepted(
         reason="flyer_regulated_account_guard",
         chat_id=chat_id,
@@ -1913,7 +2167,13 @@ def _try_flyer_delivery_state_guard(text: str, chat_id: str, event: Any) -> Opti
             status_reply = actions.flyer_manual_edit_status_reply(status_project)
         else:
             status_reply = actions.flyer_project_status_reply(status_project)
-        ack_ok, mid, err = actions.send_flyer_text(chat_id, status_reply)
+        ack_ok, mid, err = actions.send_flyer_text(
+            chat_id, status_reply,
+            action_context=build_action_context(
+                action_id="flyer.project.status_surfaced",
+                is_regulated_action=False,
+            ),
+        )
         actions.audit_intercepted(
             reason="flyer_delivery_state_status_surfaced",
             chat_id=chat_id,
@@ -1941,7 +2201,13 @@ def _try_flyer_delivery_state_guard(text: str, chat_id: str, event: Any) -> Opti
             "No delivery action has been taken.\n\n"
             "To start a new flyer, reply with what it should promote."
         )
-    ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+    ack_ok, mid, err = actions.send_flyer_text(
+        chat_id, reply,
+        action_context=build_action_context(
+            action_id="flyer.delivery.delivery_state_guard",
+            is_regulated_action=False,
+        ),
+    )
     actions.audit_intercepted(
         reason="flyer_delivery_state_guard",
         chat_id=chat_id,
@@ -1969,7 +2235,13 @@ def _try_flyer_campaign_cta_intercept(text: str, chat_id: str, event: Any) -> Op
         return _send_flyer_active_customer_ready(chat_id, customer, role=role)
     if customer:
         reply = actions.flyer_customer_not_active_reply(customer)
-        ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+        ack_ok, mid, err = actions.send_flyer_text(
+            chat_id, reply,
+            action_context=build_action_context(
+                action_id="flyer.account.customer_not_active",
+                is_regulated_action=False,
+            ),
+        )
         actions.audit_intercepted(
             reason="flyer_customer_not_active",
             chat_id=chat_id,
@@ -2014,9 +2286,18 @@ def _start_flyer_intake(
         actions.send_flyer_text(
             chat_id,
             "Flyer Studio\n------------\nI could not start the flyer setup cleanly. Please reply START FREE TRIAL again, or send your flyer request here.",
+            action_context=build_action_context(
+                action_id="flyer.project.intake_failed_fallback",
+                is_regulated_action=False,
+            ),
         )
         return {"action": "skip", "reason": "cf-router flyer intake failed"}
-    ack_ok, mid, err = actions.send_flyer_text(chat_id, result.get("reply_text") or "")
+    ack_ok, mid, err = actions.send_flyer_text(
+        chat_id, result.get("reply_text") or "",
+        action_context=build_action_context_for_command(
+            PROJECT_ACTIONS, "intake.acknowledged",
+        ),
+    )
     actions.audit_intercepted(
         reason="flyer_intake_started",
         chat_id=chat_id,
@@ -2075,6 +2356,10 @@ def _try_flyer_intake_intercept(
         actions.send_flyer_text(
             chat_id,
             "Flyer Studio\n------------\nI could not continue the flyer setup cleanly. Please reply START FREE TRIAL again, or send your flyer request here.",
+            action_context=build_action_context(
+                action_id="flyer.project.intake_failed_fallback",
+                is_regulated_action=False,
+            ),
         )
         return {"action": "skip", "reason": "cf-router flyer intake failed"}
     action = str(result.get("action") or "")
@@ -2122,7 +2407,13 @@ def _try_flyer_intake_intercept(
                 "I could not start generation cleanly, but your flyer brief is still saved. "
                 "Reply APPROVE to try again, or send changes to update it."
             )
-            ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+            ack_ok, mid, err = actions.send_flyer_text(
+                chat_id, reply,
+                action_context=build_action_context(
+                    action_id="flyer.project.brief_saved_generation_failed_fallback",
+                    is_regulated_action=False,
+                ),
+            )
             actions.audit_intercepted(
                 reason="flyer_brief_project_create_failed",
                 chat_id=chat_id,
@@ -2142,7 +2433,13 @@ def _try_flyer_intake_intercept(
                 "I could not verify the WhatsApp phone number for this one-time flyer order.\n\n"
                 "Please message from the phone number you want to use for the order, or tap Start Free Trial to set up your business account first."
             )
-            ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+            ack_ok, mid, err = actions.send_flyer_text(
+                chat_id, reply,
+                action_context=build_action_context(
+                    action_id="flyer.guest_order.phone_required_fallback",
+                    is_regulated_action=False,
+                ),
+            )
             actions.audit_intercepted(
                 reason="flyer_guest_order_failed",
                 chat_id=chat_id,
@@ -2164,7 +2461,12 @@ def _try_flyer_intake_intercept(
                 subprocess_rc=2, detail=detail_order[:500],
             )
             return None
-        ack_ok, mid, err = actions.send_flyer_text(chat_id, order_result.get("reply_text") or "")
+        ack_ok, mid, err = actions.send_flyer_text(
+            chat_id, order_result.get("reply_text") or "",
+            action_context=build_action_context_for_command(
+                PROJECT_ACTIONS, "guest_order.intake_acknowledged",
+            ),
+        )
         actions.audit_intercepted(
             reason="flyer_guest_order_started",
             chat_id=chat_id,
@@ -2180,7 +2482,12 @@ def _try_flyer_intake_intercept(
     reply = str(result.get("reply_text") or "")
     if not reply:
         return {"action": "skip", "reason": f"cf-router flyer intake: {action}"}
-    ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+    ack_ok, mid, err = actions.send_flyer_text(
+        chat_id, reply,
+        action_context=build_action_context_for_command(
+            PROJECT_ACTIONS, "intake.processing",
+        ),
+    )
     _release_starter_claim_on_hard_send_failure(
         reply,
         str(result.get("customer_id") or ""),
@@ -2230,7 +2537,13 @@ def _send_flyer_active_customer_ready(chat_id: str, customer: dict, *, role: str
         f"This number is already set up for {business_name}.\n\n"
         "Send your flyer request in one message, or attach an existing flyer, logo, menu, photos, or reference image."
     )
-    ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+    ack_ok, mid, err = actions.send_flyer_text(
+        chat_id, reply,
+        action_context=build_action_context(
+            action_id="flyer.account.active_customer_ready",
+            is_regulated_action=False,
+        ),
+    )
     actions.audit_intercepted(
         reason="flyer_onboarding",
         chat_id=chat_id,
@@ -2253,7 +2566,13 @@ def _send_flyer_active_customer_trial_link_recovery(chat_id: str, customer: dict
         f"You're already on the {plan_label} for {business_name}.\n\n"
         "Create another flyer by sending the full request here, or reply UPGRADE PLAN to see paid plans."
     )
-    ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+    ack_ok, mid, err = actions.send_flyer_text(
+        chat_id, reply,
+        action_context=build_action_context(
+            action_id="flyer.account.trial_link_recovery",
+            is_regulated_action=False,
+        ),
+    )
     actions.audit_intercepted(
         reason="flyer_trial_link_recovery",
         chat_id=chat_id,
@@ -2290,6 +2609,10 @@ def _try_flyer_onboarding_intercept(text: str, chat_id: str, event: Any) -> Opti
         actions.send_flyer_text(
             chat_id,
             "Flyer Studio\n------------\nI could not continue account setup cleanly. Please reply START FREE TRIAL again, or send your flyer request here.",
+            action_context=build_action_context(
+                action_id="flyer.account.onboarding_failed_fallback",
+                is_regulated_action=False,
+            ),
         )
         return {"action": "skip", "reason": "cf-router flyer onboarding failed"}
     if not result.get("handled"):
@@ -2303,7 +2626,14 @@ def _try_flyer_onboarding_intercept(text: str, chat_id: str, event: Any) -> Opti
     reply_text = result.get("reply_text") or ""
     if will_route_trailing:
         reply_text = _suppress_flyer_starter_brief(reply_text)
-    ack_ok, mid, err = actions.send_flyer_text(chat_id, reply_text)
+    # PR-ζ.1b §13.A — onboarding-progress reply via ACCOUNT_ACTIONS entry.
+    # Account setup state lives in ACCOUNT_ACTIONS not a flat ad-hoc context.
+    ack_ok, mid, err = actions.send_flyer_text(
+        chat_id, reply_text,
+        action_context=build_action_context_for_command(
+            ACCOUNT_ACTIONS, "onboarding_progress",
+        ),
+    )
     _release_starter_claim_on_hard_send_failure(
         reply_text,
         str(result.get("customer_id") or ""),
@@ -2435,6 +2765,10 @@ def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_
                     project_id,
                     text,
                     reason=gen_detail,
+                    action_context=build_action_context_for_command(
+                        PROJECT_ACTIONS, "manual_review.queued",
+                        is_regulated_action=False,
+                    ),
                 )
                 actions.audit_intercepted(
                     reason="flyer_reference_manual_review_queued",
@@ -2448,7 +2782,14 @@ def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_
                 return {"action": "skip", "reason": f"cf-router flyer brand asset manual review queued {project_id}"}
             reply = f"{reply}\n\nSaved. I couldn't finish the flyer update automatically yet. I'll send an update here shortly."
 
-    ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+    # PR-ζ.1b §13.B — brand-asset save via ACCOUNT_ACTIONS entry.
+    # Durable local account asset write; same shape as update_phone etc.
+    ack_ok, mid, err = actions.send_flyer_text(
+        chat_id, reply,
+        action_context=build_action_context_for_command(
+            ACCOUNT_ACTIONS, "update_brand_asset",
+        ),
+    )
     actions.audit_intercepted(
         reason="flyer_brand_asset_saved", chat_id=chat_id,
         subprocess_rc=0 if ack_ok else 3,
@@ -2495,7 +2836,13 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
             reply = actions.flyer_manual_edit_status_reply(status_project)
         else:
             reply = actions.flyer_project_status_reply(status_project)
-        ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+        ack_ok, mid, err = actions.send_flyer_text(
+            chat_id, reply,
+            action_context=build_action_context(
+                action_id="flyer.project.status_surfaced",
+                is_regulated_action=False,
+            ),
+        )
         actions.audit_intercepted(
             reason=("flyer_project_status" if ack_ok else "flyer_primary_failed"),
             chat_id=chat_id,
@@ -2513,7 +2860,13 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
     if customer and customer.get("status") not in {"trial", "active"}:
         if not actions.find_paid_flyer_guest_order(phone, chat_id) and not actions.find_reserved_flyer_guest_order(phone, chat_id, project_id):
             reply = actions.flyer_customer_not_active_reply(customer)
-            ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+            ack_ok, mid, err = actions.send_flyer_text(
+                chat_id, reply,
+                action_context=build_action_context(
+                    action_id="flyer.account.customer_not_active",
+                    is_regulated_action=False,
+                ),
+            )
             actions.audit_intercepted(
                 reason="flyer_customer_not_active",
                 chat_id=chat_id,
@@ -2530,7 +2883,13 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
     lower = body.lower()
     scope_block = actions.flyer_business_scope_block_message(customer or {}, body)
     if scope_block:
-        ack_ok, mid, err = actions.send_flyer_text(chat_id, scope_block)
+        ack_ok, mid, err = actions.send_flyer_text(
+            chat_id, scope_block,
+            action_context=build_action_context(
+                action_id="flyer.scope.business_scope_blocked",
+                is_regulated_action=False,
+            ),
+        )
         actions.audit_intercepted(
             reason="flyer_business_scope_blocked",
             chat_id=chat_id,
@@ -2619,7 +2978,13 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
             reply = actions.flyer_manual_edit_status_reply(status_project)
         else:
             reply = actions.flyer_project_status_reply(status_project)
-        ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+        ack_ok, mid, err = actions.send_flyer_text(
+            chat_id, reply,
+            action_context=build_action_context(
+                action_id="flyer.project.status_surfaced",
+                is_regulated_action=False,
+            ),
+        )
         is_source_edit_manual_status = (
             status_project_status == "manual_edit_required"
             and manual_reason_code == "source_edit_provider_unavailable"
@@ -2659,7 +3024,13 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         )
         if quota_result is not None:
             return quota_result
-        proc_ok, proc_mid, proc_err = actions.send_flyer_processing_ack(chat_id, project_id)
+        proc_ok, proc_mid, proc_err = actions.send_flyer_processing_ack(
+            chat_id, project_id,
+            action_context=build_action_context_for_command(
+                PROJECT_ACTIONS, "intake.processing",
+                is_regulated_action=False,
+            ),
+        )
         gen_ok, gen_detail = actions.trigger_generate_flyer_concepts(project_id)
         if gen_ok:
             if not active_project.get("revisions"):
@@ -2681,6 +3052,10 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
                 body,
                 gen_detail,
                 proc_ok=proc_ok,
+                action_context=build_action_context_for_command(
+                    PROJECT_ACTIONS, "generation.failed_ack",
+                    is_regulated_action=False,
+                ),
             )
             outbound_message_id = ",".join(x for x in [proc_mid, outbound_message_id] if x)
             ack_err = f"concept_generation_failed: {gen_detail}; ack_error={ack_err}"
@@ -2706,6 +3081,9 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
             ack_ok, mid, err = actions.send_flyer_text(
                 chat_id,
                 f"Selected {concept_id}. Reply with revision notes, or reply APPROVE to receive final files.",
+                action_context=build_action_context_for_command(
+                    PROJECT_ACTIONS, "concept_preview.cta_text",
+                ),
             )
             actions.audit_intercepted(
                 reason="flyer_primary_project_created", chat_id=chat_id,
@@ -2753,7 +3131,13 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
                 reply = actions.flyer_manual_edit_status_reply(status_project)
             else:
                 reply = actions.flyer_project_status_reply(status_project)
-            ack_ok, mid, err = actions.send_flyer_text(chat_id, reply)
+            ack_ok, mid, err = actions.send_flyer_text(
+                chat_id, reply,
+                action_context=build_action_context_for_command(
+                    PROJECT_ACTIONS, "manual_review.status_replied",
+                    is_regulated_action=False,
+                ),
+            )
             # P0-6: audit reason must match the routing branch. Pre-S7 this
             # was hardcoded to flyer_reference_exact_edit_status regardless
             # of reason_code — operator dashboards filtering by audit reason
@@ -2833,6 +3217,9 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         ack_ok, mid, err = actions.send_flyer_text(
             chat_id,
             reply,
+            action_context=build_action_context_for_command(
+                PROJECT_ACTIONS, "manual_edit.acknowledged",
+            ),
         )
         actions.audit_intercepted(
             reason="flyer_reference_exact_edit_queued" if ok and ack_ok else "flyer_primary_failed",
@@ -2861,7 +3248,13 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
                 "You have a pending change proposal.\n\n"
                 f"Reply APPLY {pending_revision_id} to regenerate a new preview, then reply APPROVE for final files."
             )
-            ack_ok, mid, err = actions.send_flyer_text(chat_id, reminder)
+            ack_ok, mid, err = actions.send_flyer_text(
+                chat_id, reminder,
+                action_context=build_action_context(
+                    action_id="flyer.project.pending_revision_confirmation_reminder",
+                    is_regulated_action=False,
+                ),
+            )
             actions.audit_intercepted(
                 reason="flyer_pending_revision_confirmation_reminder" if ack_ok else "flyer_primary_failed",
                 chat_id=chat_id,
@@ -2896,9 +3289,19 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
                     project_id,
                     body,
                     reason=gen_detail,
+                    action_context=build_action_context_for_command(
+                        PROJECT_ACTIONS, "manual_review.queued",
+                        is_regulated_action=False,
+                    ),
                 )
             else:
-                fail_ack_ok, fail_mid, fail_err = _send_flyer_regeneration_failed_ack(chat_id, project_id)
+                fail_ack_ok, fail_mid, fail_err = _send_flyer_regeneration_failed_ack(
+                    chat_id, project_id,
+                    action_context=build_action_context_for_command(
+                        PROJECT_ACTIONS, "generation.failed_ack",
+                        is_regulated_action=False,
+                    ),
+                )
             actions.audit_intercepted(
                 reason="flyer_reference_exact_edit_queued" if fail_ack_ok else "flyer_primary_failed",
                 chat_id=chat_id,
@@ -2946,7 +3349,13 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         if ok:
             return {"action": "skip",
                     "reason": f"cf-router flyer active: finalized {project_id}"}
-        fail_ack_ok, fail_mid, fail_err = _send_flyer_finalization_failed_ack(chat_id, project_id)
+        fail_ack_ok, fail_mid, fail_err = _send_flyer_finalization_failed_ack(
+            chat_id, project_id,
+            action_context=build_action_context_for_command(
+                PROJECT_ACTIONS, "finalization.failed_ack",
+                is_regulated_action=False,
+            ),
+        )
         actions.audit_intercepted(
             reason="flyer_primary_failed",
             chat_id=chat_id,
@@ -2990,6 +3399,10 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
             clarification_reason = detail[:180] or "I could not apply that revision."
         active_after = actions.find_active_flyer_project_by_sender(phone, chat_id) or {}
         needs_regen = not active_after.get("concepts")
+        # PR-ζ.1b §13.C — split into 3 distinct sends, each with its own
+        # action_context. Operator decision: clarification, regeneration-
+        # started, and revision-noted are different customer intents and
+        # should not share one generic revision action_id.
         if revision_requires_clarification:
             if pending_confirmation_message.strip():
                 ack_message = pending_confirmation_message.strip()
@@ -3000,14 +3413,28 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
                     f"I need one clarification before regenerating: {clarification_reason}. "
                     f"Please send the exact item or text to change.{seen_line}"
                 )
+            ack_ok, mid, err = actions.send_flyer_text(
+                chat_id, ack_message,
+                action_context=build_action_context_for_command(
+                    PROJECT_ACTIONS, "clarification.request",
+                ),
+            )
         elif ok and needs_regen:
             ack_message = "Revision applied to the flyer details. I am regenerating the design now."
+            ack_ok, mid, err = actions.send_flyer_text(
+                chat_id, ack_message,
+                action_context=build_action_context_for_command(
+                    PROJECT_ACTIONS, "edit.processing",
+                ),
+            )
         else:
             ack_message = "Revision noted. I will keep it with this flyer project. Reply APPROVE when ready for final files."
-        ack_ok, mid, err = actions.send_flyer_text(
-            chat_id,
-            ack_message,
-        )
+            ack_ok, mid, err = actions.send_flyer_text(
+                chat_id, ack_message,
+                action_context=build_action_context_for_command(
+                    PROJECT_ACTIONS, "project.reply",
+                ),
+            )
         regeneration_failed = False
         if ok and needs_regen and not revision_requires_clarification:
             gen_ok, gen_detail = actions.trigger_generate_flyer_concepts(project_id)
@@ -3025,9 +3452,19 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
                         project_id,
                         body,
                         reason=gen_detail,
+                        action_context=build_action_context_for_command(
+                            PROJECT_ACTIONS, "manual_review.queued",
+                            is_regulated_action=False,
+                        ),
                     )
                 else:
-                    fail_ack_ok, fail_mid, fail_err = _send_flyer_regeneration_failed_ack(chat_id, project_id)
+                    fail_ack_ok, fail_mid, fail_err = _send_flyer_regeneration_failed_ack(
+                        chat_id, project_id,
+                        action_context=build_action_context_for_command(
+                            PROJECT_ACTIONS, "generation.failed_ack",
+                            is_regulated_action=False,
+                        ),
+                    )
                 mid = ",".join(x for x in [mid, fail_mid] if x)
                 ack_ok = False
                 err = f"{err}; regeneration_failed={gen_detail[:300]}"
@@ -3055,6 +3492,9 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
                 "I have your flyer request open. Please send the full flyer request in one message "
                 "or send any logo/photos you want included. If this is a new flyer, start with "
                 "\"Create flyer\" and the offer or event details."
+            ),
+            action_context=build_action_context_for_command(
+                PROJECT_ACTIONS, "intake.processing",
             ),
         )
         actions.audit_intercepted(

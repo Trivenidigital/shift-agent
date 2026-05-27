@@ -3642,6 +3642,8 @@ def send_flyer_manual_edit_ack(
     project_id: str,
     request_text: str = "",
     reason: str = "",
+    *,
+    action_context: Optional[ActionExecutionContext],
 ) -> tuple[bool, str, str]:
     """Acknowledge a queued source-preserving flyer edit on WhatsApp.
 
@@ -3653,6 +3655,10 @@ def send_flyer_manual_edit_ack(
     the queue is workflow leakage. `request_text`, `project_id`, and `reason`
     remain on the signature for caller compatibility (7 sites in cf-router/
     hooks.py) but no longer reach the WhatsApp message body.
+
+    PR-ζ.1b 2026-05-26 — `action_context` is keyword-only. Default None for
+    callsite-migration ordering (commit 7 introduces optional kwarg, commit 8
+    migrates callsites, commit 9 drops the default).
     """
     _ensure_platform_path()
     try:
@@ -3665,7 +3671,9 @@ def send_flyer_manual_edit_ack(
         "Got it. This needs a careful flyer edit. "
         "I'll send the updated flyer here once it's ready."
     )
-    ok, message_id, err, status = bridge_post(chat_id, message)
+    ok, message_id, err, status = bridge_post(
+        chat_id, message, action_context=action_context,
+    )
     if ok:
         return True, message_id, ""
     return False, message_id, f"{status}: {err}"
@@ -3676,8 +3684,14 @@ def send_flyer_manual_review_ack(
     project_id: str,
     request_text: str = "",
     reason: str = "",
+    *,
+    action_context: Optional[ActionExecutionContext],
 ) -> tuple[bool, str, str]:
-    """Acknowledge fail-closed manual review without exposing workflow internals."""
+    """Acknowledge fail-closed manual review without exposing workflow internals.
+
+    PR-ζ.1b 2026-05-26 — `action_context` is keyword-only; see
+    `send_flyer_manual_edit_ack` for default-None rationale.
+    """
     _ensure_platform_path()
     try:
         from safe_io import bridge_post  # type: ignore
@@ -3689,7 +3703,9 @@ def send_flyer_manual_review_ack(
         "------------\n"
         "I couldn't finish this automatically. I'll review it and send an update here."
     )
-    ok, message_id, err, status = bridge_post(chat_id, message)
+    ok, message_id, err, status = bridge_post(
+        chat_id, message, action_context=action_context,
+    )
     if ok:
         return True, message_id, ""
     return False, message_id, f"{status}: {err}"
@@ -3712,8 +3728,17 @@ def flyer_generation_queued_manual_review(detail: str) -> bool:
     return False
 
 
-def send_flyer_edit_processing_ack(chat_id: str, project_id: str) -> tuple[bool, str, str]:
-    """Acknowledge source-edit generation before the model call."""
+def send_flyer_edit_processing_ack(
+    chat_id: str,
+    project_id: str,
+    *,
+    action_context: Optional[ActionExecutionContext],
+) -> tuple[bool, str, str]:
+    """Acknowledge source-edit generation before the model call.
+
+    PR-ζ.1b 2026-05-26 — `action_context` is keyword-only; default-None
+    rationale matches the other ack wrappers above.
+    """
     _ensure_platform_path()
     try:
         from safe_io import bridge_post  # type: ignore
@@ -3725,14 +3750,25 @@ def send_flyer_edit_processing_ack(chat_id: str, project_id: str) -> tuple[bool,
         "------------\n"
         "Got it. I'm updating your flyer now and will send the revised version here when it's ready."
     )
-    ok, message_id, err, status = bridge_post(chat_id, message)
+    ok, message_id, err, status = bridge_post(
+        chat_id, message, action_context=action_context,
+    )
     if ok:
         return True, message_id, ""
     return False, message_id, f"{status}: {err}"
 
 
-def send_flyer_intake_ack(chat_id: str, project_id: str) -> tuple[bool, str, str]:
-    """Send the deterministic Flyer Studio intake acknowledgement."""
+def send_flyer_intake_ack(
+    chat_id: str,
+    project_id: str,
+    *,
+    action_context: Optional[ActionExecutionContext],
+) -> tuple[bool, str, str]:
+    """Send the deterministic Flyer Studio intake acknowledgement.
+
+    PR-ζ.1b 2026-05-26 — `action_context` keyword-only; same default-None
+    rationale as the other ack wrappers.
+    """
     _ensure_platform_path()
     try:
         from safe_io import bridge_post  # type: ignore
@@ -3743,14 +3779,24 @@ def send_flyer_intake_ack(chat_id: str, project_id: str) -> tuple[bool, str, str
         "------------\n"
         "Got it. I have your flyer request and will send an update here shortly."
     )
-    ok, message_id, err, status = bridge_post(chat_id, message)
+    ok, message_id, err, status = bridge_post(
+        chat_id, message, action_context=action_context,
+    )
     if ok:
         return True, message_id, ""
     return False, message_id, f"{status}: {err}"
 
 
-def send_flyer_processing_ack(chat_id: str, project_id: str) -> tuple[bool, str, str]:
-    """Immediately acknowledge a complete flyer request before image generation."""
+def send_flyer_processing_ack(
+    chat_id: str,
+    project_id: str,
+    *,
+    action_context: Optional[ActionExecutionContext],
+) -> tuple[bool, str, str]:
+    """Immediately acknowledge a complete flyer request before image generation.
+
+    PR-ζ.1b 2026-05-26 — `action_context` keyword-only.
+    """
     _ensure_platform_path()
     try:
         from safe_io import bridge_post  # type: ignore
@@ -3762,7 +3808,9 @@ def send_flyer_processing_ack(chat_id: str, project_id: str) -> tuple[bool, str,
         "Got it. I'm creating your flyer now and will send a preview here shortly. "
         "Flyer generation usually takes 5-6 minutes."
     )
-    ok, message_id, err, status = bridge_post(chat_id, message)
+    ok, message_id, err, status = bridge_post(
+        chat_id, message, action_context=action_context,
+    )
     if ok:
         return True, message_id, ""
     return False, message_id, f"{status}: {err}"
@@ -3872,7 +3920,23 @@ def send_flyer_concept_previews(chat_id: str, project_id: str) -> tuple[bool, st
             f"{concept.get('style_summary')}\n\n"
             "Reply APPROVE or reply with changes."
         )
-        ok, mid, err, status = bridge_send_media(chat_id, asset.get("path", ""), caption=caption)
+        # PR-ζ.1b §2.3 — concept-preview media + CTA contexts. Lazy import
+        # mirrors actions.py's existing pattern; deployed-flat fallback for
+        # the VPS where modules install as flyer_action_registry.py.
+        try:
+            from agents.flyer.action_registry import (  # type: ignore
+                PROJECT_ACTIONS, build_action_context_for_command,
+            )
+        except ImportError:  # pragma: no cover - deployed flat-module fallback
+            from flyer_action_registry import (  # type: ignore
+                PROJECT_ACTIONS, build_action_context_for_command,
+            )
+        ok, mid, err, status = bridge_send_media(
+            chat_id, asset.get("path", ""), caption=caption,
+            action_context=build_action_context_for_command(
+                PROJECT_ACTIONS, "concept_preview.media_send",
+            ),
+        )
         if not ok:
             if status == "send_uncertain":
                 return False, ",".join(outbound_ids), f"partial_delivery_uncertain: {status}: {err}"
@@ -3884,9 +3948,18 @@ def send_flyer_concept_previews(chat_id: str, project_id: str) -> tuple[bool, st
         outbound_ids.append(mid)
     if not outbound_ids:
         return False, "", "no concept previews to send"
+    try:
+        from agents.flyer.action_registry import (  # type: ignore
+            PROJECT_ACTIONS as _PA_CTA, build_action_context_for_command as _bac_cta,
+        )
+    except ImportError:  # pragma: no cover - deployed flat-module fallback
+        from flyer_action_registry import (  # type: ignore
+            PROJECT_ACTIONS as _PA_CTA, build_action_context_for_command as _bac_cta,
+        )
     ok, mid, err, status = bridge_post(
         chat_id,
         "Reply APPROVE to receive final files, or reply with changes.",
+        action_context=_bac_cta(_PA_CTA, "concept_preview.cta_text"),
     )
     if ok:
         outbound_ids.append(mid)
@@ -4031,15 +4104,15 @@ def send_flyer_text(
     chat_id: str,
     message: str,
     *,
-    action_context: Optional[ActionExecutionContext] = None,
+    action_context: ActionExecutionContext,
 ) -> tuple[bool, str, str]:
     """Send a customer-facing Flyer Studio text reply via the bridge chokepoint.
 
-    PR-ζ F8 2026-05-26: `action_context` is keyword-only; default None falls
-    back to the safe_io basename allowlist match. Callers that handle
-    regulated actions (e.g. hooks.py:1738 for change_plan) construct a real
-    ActionExecutionContext so the chokepoint runs PR-γ's
-    lint_no_unverified_completion on the message.
+    PR-ζ.1b 2026-05-26 (commit 9): `action_context` is REQUIRED keyword-only —
+    the `= None` default landed in PR-ζ F8 has been removed now that every
+    cf-router callsite passes an explicit ActionExecutionContext. The
+    chokepoint runs PR-γ's lint_no_unverified_completion on regulated
+    messages.
     """
     _ensure_platform_path()
     try:
