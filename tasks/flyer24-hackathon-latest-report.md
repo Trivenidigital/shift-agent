@@ -1,10 +1,10 @@
 # Flyer24 Hackathon Latest Report
 
-Updated: 2026-05-27T13:31:00Z
+Updated: 2026-05-27T13:36:00Z
 
 ## Current batch
 - Branch: `codex/flyer24-batch-billing-health-mcp-202605271325`
-- PR: pending create
+- PR: #299 `fix(flyer): harden billing health MCP readiness visibility` (open)
 - Deploy: not run (money-adjacent visibility/config posture work)
 - Scope: close six billing health visibility gaps in Cockpit `/flyer/health` without payment mutation.
 - Root-cause evidence:
@@ -32,7 +32,7 @@ Updated: 2026-05-27T13:31:00Z
 - #296 `fix(flyer): route sample-prompt lexical variants to starter ideas` - merged to `main`; deployed `deploy-20260527-112213-f019b345`.
 - #297 `fix(flyer): route sample-request tagline/slogan variants to idea intake` - merged to `main`.
 - #298 `fix(flyer): close render dependency and recovery alert gaps` - open.
-- (pending) `codex/flyer24-batch-billing-health-mcp-202605271325` - local, PR not opened yet.
+- #299 `fix(flyer): harden billing health MCP readiness visibility` - open; operator-review-required (money-adjacent visibility).
 
 ## Verification for this batch
 - `pytest -q web/backend/tests/test_flyer_health.py -k billing_checkout_provider` ✅ (6 passed)
