@@ -121,7 +121,12 @@ _SAMPLE_PROMPT_REQUEST = re.compile(
     r"\b(?:for|about|on)\b.{0,30}\b(?:weekend|offer|promotion|promo|campaign|marketing|flyer|business|shop|store|poster|ad|ads)\b"
     r"|\b(?:what(?:'s| is| are)|any)\b.{0,40}\b(?:promo|promotion|marketing|campaign|flyer|flier|poster|ad|ads|business|shop|store|offer)\b.{0,40}\b(?:idea|ideas|caption|captions|copy|copies|prompt|prompts|tagline|taglines|slogan|slogans|punchline|punchlines|option|options)\b"
     r"|\bwhat\s+can\s+you\s+suggest\b.{0,60}\b(?:for|about|on)\b.{0,40}\b(?:flyer|flier|poster|ad|ads|promo|promotion|campaign|offer|business|shop|store)\b"
-    r"|\bwhat\s+should\s+i\s+write\b.{0,60}\b(?:for|about|on)\b.{0,40}\b(?:flyer|flier|poster|ad|ads|promo|promotion|campaign|offer)\b",
+    r"|\bwhat\s+should\s+i\s+write\b.{0,60}\b(?:for|about|on)\b.{0,40}\b(?:flyer|flier|poster|ad|ads|promo|promotion|campaign|offer)\b"
+    r"|\bsample\s+(?:flyer|flier|poster|ad|marketing)\s+request\b"
+    r"|\bwhat\s+should\s+(?:be|i\s+put)\s+on\s+(?:my|the|this)\s+(?:flyer|flier|poster|ad)\b"
+    r"|\bsuggest\b.{0,30}\b(?:flyer|flier|poster|ad)\b.{0,20}\b(?:wording|wordings|copy|caption|captions|text|line|lines)\b"
+    r"|\bneed\b.{0,20}\bideas?\b.{0,15}\bfor\b.{0,10}\bcaptions?\b"
+    r"|\bcan\s+i\s+get\b.{0,20}\b(?:flyer|flier|poster|ad)\b.{0,20}\bideas?\b",
     re.IGNORECASE,
 )
 
