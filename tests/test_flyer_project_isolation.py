@@ -230,6 +230,37 @@ def test_scenario3_status_check_on_stale_manual_edit_still_returns_manual_status
     assert sent and "Manual review" in sent[0]
 
 
+def test_scenario3_status_check_keeps_active_manual_row_when_newer_status_row_exists(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    stale = _stale_project(
+        project_id="F0903",
+        status="manual_edit_required",
+        hours_old=30,
+    )
+    stale["manual_review"] = {
+        "status": "queued",
+        "reason": "source_edit_provider_unavailable",
+        "reason_code": "source_edit_provider_unavailable",
+        "detail": "active manual edit row",
+        "queued_at": stale["updated_at"],
+    }
+    _patch_basic_lookups(hooks, actions, monkeypatch, stale)
+    newer = _stale_project(project_id="F9999", status="delivered", hours_old=1)
+    monkeypatch.setattr(actions, "find_latest_flyer_project_for_status_by_sender", lambda _phone, _chat_id: newer)
+    sent: list[str] = []
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "flyer_manual_edit_status_reply", lambda _project: "Manual review queued; designer is working on it.")
+    monkeypatch.setattr(actions, "flyer_project_status_reply", lambda _project: "Status: ...")
+
+    result = hooks._try_flyer_active_project_intercept(
+        "any update?",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "status-check-newer"},
+    )
+    assert result == {"action": "skip", "reason": "cf-router flyer exact edit status for F0903"}
+    assert sent and "Manual review" in sent[0]
+
+
 def test_scenario4_correction_after_delivery_targets_latest_active_project(monkeypatch):
     """`find_active_flyer_project_by_sender` returns max-updated_at non-completed project.
     A correction on a customer with multiple non-terminal projects routes to the LATEST one.

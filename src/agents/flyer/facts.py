@@ -118,6 +118,14 @@ def _business_title_from_text(value: str) -> str:
     return clean
 
 
+def _normalize_campaign_title(value: str) -> str:
+    clean = _clean(value)
+    if not clean:
+        return ""
+    clean = re.sub(r"\s+\b(?:flyer|flier|poster|banner)\b\s*$", "", clean, flags=re.IGNORECASE).strip(" .")
+    return clean
+
+
 def _explicit_business_override(raw_request: str, profile_business_name: str) -> str:
     text = " ".join((raw_request or "").split())
     patterns = [
@@ -417,7 +425,7 @@ def extract_text_facts(
     )
     facts: list[FlyerLockedFact] = []
     event_or_campaign = fields.event_or_business_name or ""
-    campaign_title = semantic_brief.campaign_title or event_or_campaign
+    campaign_title = _normalize_campaign_title(semantic_brief.campaign_title or event_or_campaign)
     if _norm(campaign_title) == _norm(profile_business_name):
         campaign_title = ""
     if _looks_like_instruction_fragment(campaign_title):

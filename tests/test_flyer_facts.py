@@ -286,6 +286,21 @@ def test_profile_facts_keep_account_business_when_request_names_campaign_flyer()
     assert by_id["campaign_title"].value == "Special Biryani's"
 
 
+def test_campaign_title_strips_trailing_medium_word():
+    from agents.flyer.facts import extract_text_facts, facts_by_id
+
+    raw_request = "Create Weekend Combo Poster with warm colors."
+    fields = FlyerRequestFields(
+        event_or_business_name="Weekend Combo Poster",
+        notes=raw_request,
+    )
+
+    facts = extract_text_facts(fields, raw_request, message_id="m-campaign-title")
+    by_id = facts_by_id(type("P", (), {"locked_facts": facts})())
+
+    assert by_id["campaign_title"].value == "Weekend Combo"
+
+
 def test_context_isolation_blocks_stale_project_provenance():
     from agents.flyer.facts import context_isolation_blockers
 
