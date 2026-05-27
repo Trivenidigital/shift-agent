@@ -1811,13 +1811,34 @@ def _flyer_provider_components() -> list[dict[str, Any]]:
     all_queued = int(queue_impact.get("all_queued_count") or 0)
     stale_count = int(queue_impact.get("stale_count") or 0)
     stale_threshold = int(queue_impact.get("stale_minutes_threshold") or 0)
+    reason_counts = queue_impact.get("reason_counts") or {}
+    stale_reason_counts = queue_impact.get("stale_reason_counts") or {}
+    oldest_by_reason = queue_impact.get("oldest_age_minutes_by_reason") or {}
+
+    def _format_reason_counts(counts: dict[str, Any], *, limit: int = 3) -> str:
+        parts: list[str] = []
+        for key, value in list(counts.items())[:limit]:
+            parts.append(f"{key}={value}")
+        return ", ".join(parts)
+
     if all_queued > 0:
         queue_detail_parts.append(
             f"manual queue backlog {all_queued} (stale threshold {stale_threshold}m, stale {stale_count})"
         )
-        reason_counts = queue_impact.get("reason_counts") or {}
-        if len(reason_counts) > 1:
-            queue_detail_parts.append("all manual queue blockers are present")
+        top_reasons = _format_reason_counts(reason_counts)
+        if top_reasons:
+            queue_detail_parts.append(f"manual queue reasons {top_reasons}")
+        top_stale = _format_reason_counts(stale_reason_counts)
+        if top_stale:
+            queue_detail_parts.append(f"stale reasons {top_stale}")
+        if reason_counts:
+            oldest_parts: list[str] = []
+            for key, _value in list(reason_counts.items())[:3]:
+                age_minutes = oldest_by_reason.get(key)
+                if isinstance(age_minutes, int):
+                    oldest_parts.append(f"{key}={age_minutes}m")
+            if oldest_parts:
+                queue_detail_parts.append(f"oldest by reason {', '.join(oldest_parts)}")
 
     if source_provider == "manual_review":
         source_severity = "yellow"
@@ -1831,8 +1852,7 @@ def _flyer_provider_components() -> list[dict[str, Any]]:
         all_queued = queue_impact["all_queued_count"]
         oldest = queue_impact["oldest_age_hours"]
         threshold = queue_impact["stale_minutes_threshold"]
-        reason_counts = queue_impact.get("reason_counts") or {}
-        top_reasons = ", ".join(f"{k}={v}" for k, v in list(reason_counts.items())[:3])
+        top_reasons = _format_reason_counts(reason_counts)
         if queued > 0:
             source_detail = (
                 "Exact flyer edits are falling back to manual review because source-edit "
