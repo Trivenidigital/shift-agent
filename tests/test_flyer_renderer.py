@@ -84,6 +84,22 @@ def test_render_concept_previews_creates_one_png_by_default(tmp_path):
         ).ok is True
 
 
+def test_image_prompt_adds_repair_instruction_only_when_supplied():
+    project = _complete_project()
+    base = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+    repaired = _image_prompt(
+        project,
+        concept_id="C1",
+        output_format="concept_preview",
+        size=(1080, 1350),
+        repair_instruction="Remove duplicate item lines and do not add a generic footer title.",
+    )
+
+    assert "Autonomous repair instruction:" not in base
+    assert "Autonomous repair instruction:" in repaired
+    assert "Remove duplicate item lines" in repaired
+
+
 def test_text_manifest_rejects_stale_project_version_and_hash(tmp_path):
     project = _complete_project()
     spec = render_concept_previews(project, tmp_path)[0]

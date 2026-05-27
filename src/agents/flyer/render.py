@@ -1158,8 +1158,8 @@ def _project_reference_assets(project: FlyerProject):
     ]
 
 
-def _image_message_content(project: FlyerProject, *, concept_id: str, output_format: str, size: tuple[int, int] | None):
-    prompt = _image_prompt(project, concept_id=concept_id, output_format=output_format, size=size)
+def _image_message_content(project: FlyerProject, *, concept_id: str, output_format: str, size: tuple[int, int] | None, repair_instruction: str = ""):
+    prompt = _image_prompt(project, concept_id=concept_id, output_format=output_format, size=size, repair_instruction=repair_instruction)
     parts: list[dict] = [{"type": "text", "text": prompt}]
     brand_assets = _active_brand_assets(project)
     refs = _project_reference_assets(project)
@@ -1181,10 +1181,16 @@ def _revision_notes_for_prompt(project: FlyerProject) -> str:
     return "\n".join(f"- {r}" for r in revisions) if revisions else "- none"
 
 
-def _image_prompt(project: FlyerProject, *, concept_id: str, output_format: str, size: tuple[int, int] | None) -> str:
+def _image_prompt(project: FlyerProject, *, concept_id: str, output_format: str, size: tuple[int, int] | None, repair_instruction: str = "") -> str:
     revision_block = _revision_notes_for_prompt(project)
     reference_instruction = _reference_preservation_instruction(project)
     sanitized_style = _sanitize_visual_context(project.fields.style_preference or "festive, clean, professional")
+    repair_block = ""
+    if repair_instruction.strip():
+        repair_block = f"""
+Autonomous repair instruction:
+- {_sanitize_visual_context(repair_instruction.strip())}
+"""
     return f"""Create a complete, finished customer-ready poster flyer for WhatsApp delivery.
 
 Design direction: {_design_direction(project, concept_id)}.
@@ -1212,6 +1218,7 @@ Revision notes to honor:
 
 Reference/template policy:
 {reference_instruction}
+{repair_block}
 
 Quality bar:
 - Looks like a paid local marketing designer made it, not a generic template.
@@ -1449,13 +1456,13 @@ def _decode_data_url(data_url: str) -> bytes:
         raise FlyerRenderError(f"image response base64 decode failed: {e}") from e
 
 
-def _openrouter_image_bytes(project: FlyerProject, *, concept_id: str, output_format: str, size: tuple[int, int] | None, model: str, quality: str) -> bytes:
+def _openrouter_image_bytes(project: FlyerProject, *, concept_id: str, output_format: str, size: tuple[int, int] | None, model: str, quality: str, repair_instruction: str = "") -> bytes:
     api_key = _read_env_value("OPENROUTER_API_KEY")
     if not api_key:
         raise FlyerRenderError("OPENROUTER_API_KEY is missing")
     payload = {
         "model": model,
-        "messages": [{"role": "user", "content": _image_message_content(project, concept_id=concept_id, output_format=output_format, size=size)}],
+        "messages": [{"role": "user", "content": _image_message_content(project, concept_id=concept_id, output_format=output_format, size=size, repair_instruction=repair_instruction)}],
         "modalities": ["image", "text"],
         "stream": False,
         "image_config": {
@@ -2259,11 +2266,11 @@ def _render(project: FlyerProject, path: Path, *, concept_id: str, size: tuple[i
         _render_with_system_pillow(project, path, concept_id=concept_id, size=size)
 
 
-def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_format: str, size: tuple[int, int] | None, model: str, quality: str) -> None:
+def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_format: str, size: tuple[int, int] | None, model: str, quality: str, repair_instruction: str = "") -> None:
     if model.strip().lower() in DETERMINISTIC_MODEL_NAMES:
         _render(project, path, concept_id=concept_id, size=size)
         return
-    raw = _openrouter_image_bytes(project, concept_id=concept_id, output_format=output_format, size=size, model=model, quality=quality)
+    raw = _openrouter_image_bytes(project, concept_id=concept_id, output_format=output_format, size=size, model=model, quality=quality, repair_instruction=repair_instruction)
     raw_path = _raw_background_path(path)
     raw_path.unlink(missing_ok=True)
     if size is None:
@@ -2273,12 +2280,12 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
     apply_exact_identity_overlay(project, raw_path, path, size=size)
 
 
-def render_concept_previews(project: FlyerProject, output_dir: Path | str, *, model: str = "deterministic-renderer", quality: str = "low", concept_count: int = 1) -> list[RenderedAssetSpec]:
+def render_concept_previews(project: FlyerProject, output_dir: Path | str, *, model: str = "deterministic-renderer", quality: str = "low", concept_count: int = 1, repair_instruction: str = "") -> list[RenderedAssetSpec]:
     output_dir = Path(output_dir)
     specs: list[RenderedAssetSpec] = []
     for concept_id in ("C1", "C2", "C3")[:concept_count]:
         path = output_dir / f"{project.project_id}-{concept_id}-preview.png"
-        _render_model(project, path, concept_id=concept_id, output_format="concept_preview", size=(1080, 1350), model=model, quality=quality)
+        _render_model(project, path, concept_id=concept_id, output_format="concept_preview", size=(1080, 1350), model=model, quality=quality, repair_instruction=repair_instruction)
         quality_report = inspect_rendered_asset(path, expected_width=1080, expected_height=1350, mime_type="image/png")
         if not quality_report.ok:
             raise FlyerRenderError(f"rendered concept failed quality check: {quality_report.blockers}")

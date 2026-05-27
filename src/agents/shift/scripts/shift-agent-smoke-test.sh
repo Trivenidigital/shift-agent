@@ -95,6 +95,12 @@ import flyer_onboarding
 import flyer_account
 import flyer_starter_briefs
 import flyer_recovery
+assert callable(flyer_recovery.classify_flyer_qa_for_autorepair), \
+    'flyer autorepair classifier missing'
+assert callable(flyer_recovery.plan_flyer_autorepair), \
+    'flyer autorepair planner missing'
+assert flyer_recovery.repair_instruction_is_safe('Show each offer item once.'), \
+    'flyer autorepair safe-instruction guard missing'
 import flyer_customer_copy_policy
 import flyer_intent
 import flyer_intent_training
@@ -232,6 +238,9 @@ flyer:
   draft_image_model: deterministic-renderer
   draft_image_quality: low
   concept_count: 1
+  recovery:
+    auto_repair_enabled: true
+    max_auto_repair_attempts: 1
 YAML
 chown -R shift-agent:shift-agent "$REF_SMOKE_DIR"
 if ! sudo -u shift-agent env FLYER_STATE_ROOT="$REF_SMOKE_DIR" "$PY" /usr/local/bin/create-flyer-project \
@@ -252,7 +261,9 @@ if ! sudo -u shift-agent env FLYER_STATE_ROOT="$REF_SMOKE_DIR" FLYER_REFERENCE_A
     --project-id F0001 \
     --state-path "$REF_SMOKE_DIR/projects.json" \
     --asset-dir "$REF_SMOKE_DIR/assets" \
-    --config-path "$REF_SMOKE_DIR/config.yaml" > "$REF_SMOKE_DIR/generate.json"; then
+    --config-path "$REF_SMOKE_DIR/config.yaml" \
+    --audit-log-path "$REF_SMOKE_DIR/decisions.log" \
+    --autorepair-state-path "$REF_SMOKE_DIR/autorepair_attempts.json" > "$REF_SMOKE_DIR/generate.json"; then
     echo "FAIL: Flyer deferred reference generate smoke failed"
     exit 1
 fi
