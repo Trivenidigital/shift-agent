@@ -314,6 +314,40 @@ def test_customer_visible_asset_delivery_resolves_older_project_incident_only():
     assert unknown_ts["status"] == "open"
 
 
+def test_customer_visible_asset_delivery_resolves_operator_action_no_success_incident():
+    incident = _incident()
+    incident["incident_id"] = "FRI20260527-FIXED"
+    incident["project_id"] = "F0104"
+    incident["status"] = "operator_action_required"
+    incident["operator_action"] = {
+        "marked_at": (NOW - timedelta(minutes=5)).isoformat(),
+        "reason": "worker_completed_no_customer_visible_success",
+        "required_action": "verify_customer_outcome_or_repair_manually",
+    }
+    incident["first_seen"] = (NOW - timedelta(minutes=30)).isoformat()
+    incident["last_seen"] = (NOW - timedelta(minutes=20)).isoformat()
+    state = {"schema_version": 1, "incidents": [incident]}
+
+    resolved = recovery.resolve_incidents_from_customer_visible_repairs(
+        state,
+        [
+            {
+                "type": "flyer_assets_delivered",
+                "ts": NOW.isoformat(),
+                "project_id": "F0104",
+                "asset_ids": ["A0004"],
+                "outbound_message_ids": ["mid-preview"],
+            }
+        ],
+        NOW,
+    )
+
+    assert [item["incident_id"] for item in resolved] == ["FRI20260527-FIXED"]
+    assert incident["status"] == "resolved"
+    assert incident["resolution"] == "customer_visible_success"
+    assert incident["resolution_detail"] == "flyer_assets_delivered"
+
+
 def test_outcome_repair_resolves_only_matching_chat_level_bridge_incident():
     chat_hash = recovery.sha256_text("74290284261595@lid")
     old_chat = _incident()

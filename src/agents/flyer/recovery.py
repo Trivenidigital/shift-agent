@@ -511,10 +511,23 @@ def resolve_incidents_from_customer_visible_repairs(
     if not repair_events:
         return resolved
 
+    def resolvable_status(incident: dict) -> bool:
+        status = str(incident.get("status") or "open").lower()
+        if status == "open":
+            return True
+        if status != "operator_action_required":
+            return False
+        operator_action = incident.get("operator_action") if isinstance(incident.get("operator_action"), dict) else {}
+        reason = str(operator_action.get("reason") or "").strip()
+        return reason in {
+            "worker_completed_no_customer_visible_success",
+            "worker_failed_no_customer_visible_success",
+        }
+
     for incident in state.get("incidents", []):
         if not isinstance(incident, dict):
             continue
-        if str(incident.get("status") or "open").lower() != "open":
+        if not resolvable_status(incident):
             continue
         first_seen = _parse_recovery_ts(str(incident.get("first_seen") or ""))
         last_seen = _parse_recovery_ts(str(incident.get("last_seen") or ""))

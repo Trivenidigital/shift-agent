@@ -1424,3 +1424,11 @@ Follow-up verification after reviewer fixes: `tests/test_flyer_facts.py tests/te
 - [x] Added focused regression coverage for requested vs unrequested delivery wording.
 
 Review: `tests/test_flyer_facts.py tests/test_flyer_renderer.py tests/test_flyer_visual_qa.py tests/test_flyer_scripts_static.py` -> `169 passed`; `tests/test_flyer_generate_concepts.py tests/test_flyer_create_project.py` -> `47 passed`; touched-file `py_compile` passed; `git diff --check` clean.
+
+## Flyer Recovery Operator-Action Resolution - 2026-05-27
+
+- [x] Verified F0104 repaired preview was delivered, but old recovery incidents stayed `operator_action_required`.
+- [x] Updated customer-visible repair resolution to close operator-action incidents whose only reason was worker completion/failure without visible success.
+- [x] Added regression for asset delivery resolving a prior `worker_completed_no_customer_visible_success` incident.
+
+Review: `tests/test_flyer_recovery.py tests/test_flyer_recovery_watchdog.py` -> `37 passed`; touched-file `py_compile` passed; `git diff --check` clean.
