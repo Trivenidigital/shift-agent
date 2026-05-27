@@ -2132,6 +2132,19 @@ def _try_flyer_regulated_account_guard(text: str, chat_id: str, event: Any) -> O
     return {"action": "skip", "reason": "cf-router flyer regulated account guard"}
 
 
+def _select_flyer_status_reply(project: dict) -> tuple[str, bool]:
+    status = str(project.get("status") or "")
+    manual_block = project.get("manual_review") or {}
+    reason_code = manual_block.get("reason_code")
+    is_exact_source_edit_status = (
+        status == "manual_edit_required"
+        and actions.is_source_edit_provider_unavailable_reason(reason_code)
+    )
+    if is_exact_source_edit_status:
+        return actions.flyer_manual_edit_status_reply(project), True
+    return actions.flyer_project_status_reply(project), False
+
+
 def _try_flyer_delivery_state_guard(text: str, chat_id: str, event: Any) -> Optional[dict]:
     """Fail closed for delivery-state language when no flyer project resolves.
 
@@ -2168,12 +2181,7 @@ def _try_flyer_delivery_state_guard(text: str, chat_id: str, event: Any) -> Opti
     if status_project is not None:
         sp_id = str(status_project.get("project_id") or "")
         sp_status = str(status_project.get("status") or "")
-        manual_block = status_project.get("manual_review") or {}
-        manual_reason_code = str(manual_block.get("reason_code") or "")
-        if sp_status == "manual_edit_required" and manual_reason_code == "source_edit_provider_unavailable":
-            status_reply = actions.flyer_manual_edit_status_reply(status_project)
-        else:
-            status_reply = actions.flyer_project_status_reply(status_project)
+        status_reply, _is_exact_source_edit_status = _select_flyer_status_reply(status_project)
         ack_ok, mid, err = actions.send_flyer_text(
             chat_id, status_reply,
             action_context=build_action_context(
@@ -2995,22 +3003,13 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         # visual_qa_failed, etc.) flow through the general status reply, which
         # now consults MANUAL_REVIEW_REASON_LINES to deliver reason-specific
         # copy instead of the generic "source-preserving edit queue" text.
-        manual_block = status_project.get("manual_review") or {}
-        manual_reason_code = str(manual_block.get("reason_code") or "")
-        if status_project_status == "manual_edit_required" and manual_reason_code == "source_edit_provider_unavailable":
-            reply = actions.flyer_manual_edit_status_reply(status_project)
-        else:
-            reply = actions.flyer_project_status_reply(status_project)
+        reply, is_source_edit_manual_status = _select_flyer_status_reply(status_project)
         ack_ok, mid, err = actions.send_flyer_text(
             chat_id, reply,
             action_context=build_action_context(
                 action_id="flyer.project.status_surfaced",
                 is_regulated_action=False,
             ),
-        )
-        is_source_edit_manual_status = (
-            status_project_status == "manual_edit_required"
-            and manual_reason_code == "source_edit_provider_unavailable"
         )
         actions.audit_intercepted(
             reason=("flyer_reference_exact_edit_status" if is_source_edit_manual_status and ack_ok else ("flyer_project_status" if ack_ok else "flyer_primary_failed")),
@@ -3149,11 +3148,8 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
             # only; everything else flows through the reason-code-aware general
             # reply.
             manual_block = status_project.get("manual_review") or {}
-            manual_reason_code = str(manual_block.get("reason_code") or "")
-            if status_project_status == "manual_edit_required" and manual_reason_code == "source_edit_provider_unavailable":
-                reply = actions.flyer_manual_edit_status_reply(status_project)
-            else:
-                reply = actions.flyer_project_status_reply(status_project)
+            manual_reason_code = actions.normalize_manual_reason_code(manual_block.get("reason_code"))
+            reply, is_source_edit_manual_status = _select_flyer_status_reply(status_project)
             ack_ok, mid, err = actions.send_flyer_text(
                 chat_id, reply,
                 action_context=build_action_context_for_command(
@@ -3169,7 +3165,7 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
             if ack_ok:
                 audit_reason = (
                     "flyer_reference_exact_edit_status"
-                    if status_project_status == "manual_edit_required" and manual_reason_code == "source_edit_provider_unavailable"
+                    if is_source_edit_manual_status
                     else "flyer_project_status"
                 )
             else:
@@ -3186,7 +3182,11 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
                 ),
             )
             return {"action": "skip",
-                    "reason": f"cf-router flyer status for {status_project_id}"}
+                    "reason": (
+                        f"cf-router flyer exact edit status for {status_project_id}"
+                        if is_source_edit_manual_status else
+                        f"cf-router flyer status for {status_project_id}"
+                    )}
         ok, detail = actions.invoke_update_flyer_project(
             project_id,
             "--revision-text", body,

@@ -388,6 +388,20 @@ def test_generation_detail_with_source_edit_failed_counts_as_manual_review():
     )
 
 
+def test_generation_detail_with_reason_code_only_counts_as_manual_review():
+    actions = _load_actions_module()
+    assert actions.flyer_generation_queued_manual_review(
+        "project_id=F0064; reason_code=source_edit_provider_unavailable; retry=false"
+    )
+
+
+def test_generation_detail_with_in_progress_manual_state_counts_as_manual_review():
+    actions = _load_actions_module()
+    assert actions.flyer_generation_queued_manual_review(
+        "project_id=F0064; manual_review.status=in_progress; detail=queued_for_operator"
+    )
+
+
 def test_site_2_release_runs_before_ack_for_consistent_quota_ordering():
     """Fix E: in `_try_flyer_reference_scope_authorization_intercept`, the
     quota release MUST happen before the customer ack (matching site 1). If
