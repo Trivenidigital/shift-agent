@@ -2155,6 +2155,22 @@ def _select_flyer_status_reply(project: dict) -> tuple[str, bool]:
     return actions.flyer_project_status_reply(project), False
 
 
+def _resolve_status_project_for_reply(*, active_project: dict, body: str, phone: Optional[str], chat_id: str) -> tuple[dict, Optional[str]]:
+    """Select status target row for customer status check replies."""
+    mentioned_id = actions.extract_flyer_project_id_mention(body)
+    if mentioned_id:
+        named = actions.find_flyer_project_by_id_for_sender(phone, chat_id, mentioned_id)
+        if named is not None:
+            return named, mentioned_id
+        return active_project, mentioned_id
+    if str(active_project.get("status") or "") == "manual_edit_required":
+        return active_project, None
+    latest = actions.find_latest_flyer_project_for_status_by_sender(phone, chat_id)
+    if latest is not None and str(latest.get("updated_at") or "") > str(active_project.get("updated_at") or ""):
+        return latest, None
+    return active_project, None
+
+
 def _try_flyer_delivery_state_guard(text: str, chat_id: str, event: Any) -> Optional[dict]:
     """Fail closed for delivery-state language when no flyer project resolves.
 
@@ -2990,16 +3006,12 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         #      and delivered) wins when it's strictly newer than the active
         #      picker's result. We refuse to downgrade the customer to a
         #      staler row.
-        status_project = active_project
-        mentioned_id = actions.extract_flyer_project_id_mention(body)
-        if mentioned_id:
-            named = actions.find_flyer_project_by_id_for_sender(phone, chat_id, mentioned_id)
-            if named is not None:
-                status_project = named
-        else:
-            latest = actions.find_latest_flyer_project_for_status_by_sender(phone, chat_id)
-            if latest is not None and str(latest.get("updated_at") or "") > str(active_project.get("updated_at") or ""):
-                status_project = latest
+        status_project, mentioned_id = _resolve_status_project_for_reply(
+            active_project=active_project,
+            body=body,
+            phone=phone,
+            chat_id=chat_id,
+        )
         status_project_id = str(status_project.get("project_id") or "")
         status_project_status = str(status_project.get("status") or "")
         # P0-6: manual_edit_required projects pick the source-edit-specific
@@ -3136,16 +3148,12 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
             # the active-project status branch — keep the two sites
             # consistent so customers get the same answer regardless of
             # which intercept path runs first.
-            status_project = active_project
-            mentioned_id = actions.extract_flyer_project_id_mention(body)
-            if mentioned_id:
-                named = actions.find_flyer_project_by_id_for_sender(phone, chat_id, mentioned_id)
-                if named is not None:
-                    status_project = named
-            else:
-                latest = actions.find_latest_flyer_project_for_status_by_sender(phone, chat_id)
-                if latest is not None and str(latest.get("updated_at") or "") > str(active_project.get("updated_at") or ""):
-                    status_project = latest
+            status_project, mentioned_id = _resolve_status_project_for_reply(
+                active_project=active_project,
+                body=body,
+                phone=phone,
+                chat_id=chat_id,
+            )
             status_project_id = str(status_project.get("project_id") or "")
             status_project_status = str(status_project.get("status") or "")
             # P0-6: same reason_code routing as the first status-check handler
