@@ -2386,6 +2386,11 @@ def _extract_requested_business_scope(raw_request: str) -> str:
     return ""
 
 
+def flyer_requested_business_scope(raw_request: str) -> str:
+    """Return the explicit business name requested by a flyer brief, if any."""
+    return _extract_requested_business_scope(raw_request)
+
+
 def _looks_like_business_scope(label: str) -> bool:
     tokens = _normalize_business_scope(label)
     if len(tokens) < 2:
