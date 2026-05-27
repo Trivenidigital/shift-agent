@@ -2111,6 +2111,14 @@ def flyer_manual_edit_status_reply(project: dict) -> str:
     return f"Flyer Studio\n------------\n{line}"
 
 
+def normalize_manual_reason_code(reason_code: Any) -> str:
+    return str(reason_code or "").strip().lower()
+
+
+def is_source_edit_provider_unavailable_reason(reason_code: Any) -> bool:
+    return normalize_manual_reason_code(reason_code) == "source_edit_provider_unavailable"
+
+
 def flyer_project_status_reply(project: dict) -> str:
     try:
         _ensure_platform_path()
@@ -3722,11 +3730,18 @@ def flyer_project_has_manual_review_queued(project: Optional[dict]) -> bool:
 
 
 def flyer_generation_queued_manual_review(detail: str) -> bool:
-    if "reference_extraction_failed" in (detail or ""):
+    detail_lower = str(detail or "").lower()
+    if "reference_extraction_failed" in detail_lower:
         return True
-    if "source_edit_failed" in (detail or ""):
+    if "source_edit_failed" in detail_lower:
         return True
-    if "visual_qa_failed" in (detail or ""):
+    if "visual_qa_failed" in detail_lower:
+        return True
+    if "reason_code=source_edit_provider_unavailable" in detail_lower:
+        return True
+    if "manual_review.status=queued" in detail_lower:
+        return True
+    if "manual_review.status=in_progress" in detail_lower:
         return True
     return False
 

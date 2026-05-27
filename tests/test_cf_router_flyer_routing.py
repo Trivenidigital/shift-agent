@@ -3716,6 +3716,78 @@ def test_manual_review_where_is_my_updated_flyer_routes_as_status(monkeypatch):
     assert "flyer_reference_exact_edit_status" in audit_reasons
 
 
+def test_manual_review_status_normalizes_source_edit_reason_code_in_active_intercept(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    active_project = {
+        "project_id": "F0087",
+        "customer_phone": "+17329837841",
+        "status": "manual_edit_required",
+        "updated_at": "2026-05-23T00:18:00Z",
+        "manual_review": {
+            "status": "queued",
+            "reason_code": " Source_Edit_Provider_Unavailable ",
+        },
+    }
+    audit_reasons: list[str] = []
+    sent: list[str] = []
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
+    monkeypatch.setattr(actions, "find_latest_flyer_project_for_status_by_sender", lambda _phone, _chat_id: active_project)
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "status-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audit_reasons.append(kwargs.get("reason", "")))
+
+    result = hooks._try_flyer_active_project_intercept(
+        "where is my updated flyer?",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "where-updated-normalized"},
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer exact edit status for F0087"}
+    assert sent
+    assert "flyer_reference_exact_edit_status" in audit_reasons
+
+
+def test_manual_review_status_normalizes_source_edit_reason_code_in_pre_gateway(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    active_project = {
+        "project_id": "F0088",
+        "customer_phone": "+17329837841",
+        "status": "manual_edit_required",
+        "updated_at": "2026-05-23T00:18:00Z",
+        "manual_review": {
+            "status": "queued",
+            "reason_code": "SOURCE_EDIT_PROVIDER_UNAVAILABLE",
+        },
+    }
+    audit_reasons: list[str] = []
+    sent: list[str] = []
+
+    monkeypatch.setattr(actions, "is_flyer_enabled", lambda: True)
+    monkeypatch.setattr(actions, "flyer_campaign_cta_text", lambda _text: "")
+    monkeypatch.setattr(hooks, "_try_flyer_intake_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_account_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_reference_scope_choice_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_reference_scope_authorization_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_existing_onboarding_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
+    monkeypatch.setattr(actions, "find_latest_flyer_project_for_status_by_sender", lambda _phone, _chat_id: active_project)
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "status-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audit_reasons.append(kwargs.get("reason", "")))
+
+    result = hooks.pre_gateway_dispatch(SimpleNamespace(
+        text="any update?",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="status-upper-reason",
+    ))
+
+    assert result == {"action": "skip", "reason": "cf-router flyer exact edit status for F0088"}
+    assert sent
+    assert "flyer_reference_exact_edit_status" in audit_reasons
+
+
 def test_flyer_project_status_request_classifier_keeps_edits_separate():
     actions = _load_actions()
 
