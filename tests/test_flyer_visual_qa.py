@@ -184,6 +184,37 @@ def test_visual_qa_accepts_every_two_days_for_weekly_schedule(tmp_path):
     assert report.status == "passed", report.blockers
 
 
+def test_visual_qa_blocks_unrequested_delivery_claim(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    artifact = _write_sidecar(
+        tmp_path,
+        "Fresh Meats. Premium Clean Chicken. WhatsApp Delivery. Clean bird. Strong life. Kheema Dosa $13.99",
+    )
+
+    report = run_visual_qa(_project(), artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert report.status == "failed"
+    assert "unrequested operational claim visible: delivery" in report.blockers
+
+
+def test_visual_qa_allows_requested_delivery_claim(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    artifact = _write_sidecar(
+        tmp_path,
+        "Fresh Meats. Premium Clean Chicken. WhatsApp Delivery. Clean bird. Strong life. Kheema Dosa $13.99",
+    )
+    project = _project().model_copy(update={
+        "raw_request": "Create flyer. Mention delivery available.",
+        "fields": _project().fields.model_copy(update={"notes": "Mention delivery available."}),
+    })
+
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert report.status == "passed", report.blockers
+
+
 def test_visual_qa_requires_business_campaign_contact_and_profile_location(tmp_path):
     from agents.flyer.visual_qa import run_visual_qa
 

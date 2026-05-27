@@ -498,6 +498,7 @@ def test_image_prompt_extracts_single_day_every_week_schedule():
 
     assert facts["schedule"] == "Thursday every week"
     assert "Schedule: Thursday every week" in prompt
+    assert "Do not add delivery, catering, payment, ordering-channel, or service-availability claims" in prompt
     assert "Date: " not in prompt
 
 
