@@ -5659,6 +5659,22 @@ def test_flyer_is_status_checkin_matches_expected_phrases():
     assert not actions.flyer_is_status_checkin("change the date")
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "f0058 status?",
+        "eta on my flyer",
+        "where my flyer at",
+        "did you complete it",
+        "whats happening with my flyer",
+        "what about my flyer",
+    ],
+)
+def test_status_request_phrase_gaps_route_as_status_checkins(text):
+    actions = _load_actions()
+    assert actions.is_flyer_project_status_request(text), text
+
+
 def test_generic_reference_use_as_reference_still_works(tmp_path):
     """Regression: generic-reference customers must NOT see the SOURCE/NEW
     detour. They get the existing use-reference path."""
