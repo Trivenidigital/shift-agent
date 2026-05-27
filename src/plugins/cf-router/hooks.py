@@ -2888,6 +2888,13 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
     status = str(active_project.get("status") or "")
     body = " ".join(actions.flyer_visible_message_text(text).split())
     lower = body.lower()
+    # Dedicated starter-idea and legacy trial-link flows live later in
+    # pre_gateway_dispatch ordering. Active-project intercept must not swallow
+    # those vague/account intents just because a stale active row exists.
+    if actions.is_vague_flyer_start(body, has_media=bool(media_path)):
+        return None
+    if customer and customer.get("status") in {"trial", "active"} and actions.is_flyer_legacy_trial_link_followup(body):
+        return None
     scope_block = actions.flyer_business_scope_block_message(customer or {}, body)
     if scope_block:
         ack_ok, mid, err = actions.send_flyer_text(
@@ -2907,10 +2914,14 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
             ),
         )
         return {"action": "skip", "reason": "cf-router flyer business scope blocked"}
-    if actions.should_bypass_active_flyer_project_for_fresh_request(
-        body,
-        active_project,
-        has_media=bool(media_path),
+    revision_on_delivered = status == "delivered" and actions.is_flyer_revision_intent(body)
+    if (
+        not revision_on_delivered
+        and actions.should_bypass_active_flyer_project_for_fresh_request(
+            body,
+            active_project,
+            has_media=bool(media_path),
+        )
     ):
         actions.audit_intercepted(
             reason="flyer_active_project_bypassed",
@@ -2937,7 +2948,8 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
     # downstream handlers (selection_map, approval flow, manual-review
     # forwarding) run normally.
     if (
-        actions.is_stale_for_new_request(active_project)
+        not revision_on_delivered
+        and actions.is_stale_for_new_request(active_project)
         and actions.should_start_new_flyer_over_active(body, has_media=bool(media_path))
     ):
         actions.audit_intercepted(
