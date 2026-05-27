@@ -29,6 +29,21 @@ TARGET_FUNCS = {"bridge_post", "bridge_post_2tuple", "bridge_send_media", "bridg
 # would otherwise trip the gate. Special-case here.
 SCAN_SKIP_FILES = {"safe_io.py"}
 
+# PR-ζ.1b 2026-05-26 — allowlist entries that exist ONLY at deploy-time on
+# the VPS (under /opt/shift-agent/) as flat-renamed flyer_X.py modules.
+# The source-tree counterpart lives at src/agents/flyer/X.py with the un-
+# prefixed basename. The static gate's existence check skips these because
+# the source basename and the runtime basename DIFFER by design — the
+# allowlist must use the runtime basename (what inspect.stack() returns at
+# runtime), so source-tree existence is the wrong check.
+#
+# The SSH pre-deploy smoke check at tools/check-shift-agent-patch.sh
+# (PR-ζ.1b §10) verifies these basenames resolve correctly at runtime on
+# the deployed VPS.
+DEPLOYED_FLAT_RENAMES: frozenset[str] = frozenset({
+    "flyer_manual_queue.py",
+})
+
 pytestmark = pytest.mark.skipif(
     platform.system() == "Windows",
     reason="safe_io uses fcntl (Linux only)",
@@ -141,7 +156,10 @@ def test_allowlist_files_exist_and_are_unique():
     for f in all_files:
         by_basename.setdefault(f.name, []).append(f)
 
-    missing = [name for name in allowlist if name not in by_basename]
+    missing = [
+        name for name in allowlist
+        if name not in by_basename and name not in DEPLOYED_FLAT_RENAMES
+    ]
     assert not missing, (
         f"SAFE_IO_NULL_CONTEXT_ALLOWLIST references nonexistent files "
         f"(remove from allowlist or restore the file): {missing}"

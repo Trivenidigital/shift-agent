@@ -27,18 +27,26 @@ except Exception:
 VALID_MUTATION_CLASSES = {"local_reversible", "external_irreversible"}
 
 
-def test_pr_delta_flyer_action_definition_requires_mutation_class():
-    """FlyerActionDefinition is a frozen dataclass; constructing one WITHOUT
-    `mutation_class` must raise TypeError. This locks that mutation_class is
-    a non-default required field."""
-    with pytest.raises(TypeError):
-        registry.FlyerActionDefinition(
-            action_id="flyer.test.noop",
-            command="noop",
-            domain="account",
-            effect="read",
-            # mutation_class deliberately omitted
-        )
+def test_pr_zeta_1b_flyer_action_definition_mutation_class_optional():
+    """PR-ζ.1b 2026-05-26 — mutation_class is now Optional (default None) so
+    registry entries without a concrete rollback consumer (project actions,
+    informational fallback replies) can omit it without making a downstream-
+    consumed semantic claim. Constructing without mutation_class no longer
+    raises; the field defaults to None.
+
+    Supersedes the original PR-δ "mutation_class is required" invariant.
+    Existing ACCOUNT_ACTIONS entries that explicitly declare mutation_class
+    continue to do so — see test_pr_delta_mutating_account_actions_classified
+    below for the entries-must-classify invariant on actions that DO mutate.
+    """
+    definition = registry.FlyerActionDefinition(
+        action_id="flyer.test.noop",
+        command="noop",
+        domain="account",
+        effect="read",
+        # mutation_class deliberately omitted — must default to None.
+    )
+    assert definition.mutation_class is None
 
 
 def test_pr_delta_flyer_action_definition_accepts_both_mutation_classes():
@@ -54,15 +62,33 @@ def test_pr_delta_flyer_action_definition_accepts_both_mutation_classes():
         assert definition.mutation_class == value
 
 
-def test_pr_delta_every_account_action_declares_mutation_class():
-    """Every entry in ACCOUNT_ACTIONS must declare mutation_class, and the
-    value must be one of the valid Literal options."""
+def test_pr_delta_mutating_account_actions_classified():
+    """PR-ζ.1b 2026-05-26 — refines PR-δ invariant: mutation_class is now
+    Optional (None default), but ACCOUNT_ACTIONS entries with effect="write"
+    or effect="payment_request" MUST still declare a valid Literal value.
+    Read-only entries (informational fallback replies, status displays) MAY
+    omit mutation_class because they don't mutate state.
+
+    This preserves the original PR-δ classification discipline for the
+    actions that actually matter for rollback semantics, without forcing
+    informational entries to make hollow claims.
+    """
     assert registry.ACCOUNT_ACTIONS, "ACCOUNT_ACTIONS must not be empty"
     for command, definition in registry.ACCOUNT_ACTIONS.items():
         assert hasattr(definition, "mutation_class"), f"{command} missing mutation_class attribute"
-        assert definition.mutation_class in VALID_MUTATION_CLASSES, (
-            f"{command} has invalid mutation_class={definition.mutation_class!r}"
-        )
+        if definition.effect in ("write", "payment_request"):
+            assert definition.mutation_class in VALID_MUTATION_CLASSES, (
+                f"{command} (effect={definition.effect!r}) MUST declare a "
+                f"mutation_class; got {definition.mutation_class!r}"
+            )
+        else:
+            # effect="read" — informational; mutation_class optional.
+            assert (
+                definition.mutation_class is None
+                or definition.mutation_class in VALID_MUTATION_CLASSES
+            ), (
+                f"{command} has invalid mutation_class={definition.mutation_class!r}"
+            )
 
 
 def test_pr_delta_read_only_actions_are_local_reversible():

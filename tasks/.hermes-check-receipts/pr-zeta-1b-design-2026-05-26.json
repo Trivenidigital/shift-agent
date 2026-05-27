@@ -1,0 +1,17 @@
+{
+  "topic": "pr-zeta-1b-design-2026-05-26",
+  "task_text": "PR-ζ.1b design REV 3 doc-fix — arithmetic correction + ζ.1b non-goal section (semantic flyer brief follow-up)",
+  "completed_at": "2026-05-26T22:33:00Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 10,
+  "hermes_step_count": 5,
+  "files_to_read_first": [
+    "src/plugins/cf-router/hooks.py",
+    "src/plugins/cf-router/actions.py",
+    "src/platform/safe_io.py",
+    "src/agents/flyer/action_registry.py",
+    "src/platform/schemas.py",
+    "tests/test_flyer_action_registry.py",
+    "tests/test_flyer_project_actions.py"
+  ]
+}

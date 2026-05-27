@@ -626,9 +626,18 @@ _DECISIONS_LOG_LOCK = Path(str(_DECISIONS_LOG_PATH) + ".lock")
 
 
 # Scripts in this set may call bridge_post / bridge_send_media / bridge_send_cta
-# with action_context=None. Every other caller must pass a non-None
+# WITHOUT an explicit action_context kwarg (i.e. the caller relies on the
+# parameter's default). Every other caller MUST pass a non-None
 # ActionExecutionContext OR the chokepoint refuses the send and emits a
 # regulated_send_missing_action_context audit row.
+#
+# PR-ζ.1b 2026-05-26 update: cf-router actions.py + hooks.py callsites have
+# been migrated to pass action_context explicitly at every site and are no
+# longer in the allowlist; the chokepoint now enforces ActionExecutionContext
+# attribution across the entire customer-facing send surface. The remaining
+# entries are scripts that legitimately have no business-action context
+# (system health checks, owner-only digests, post-closure customer notify,
+# flat-deploy adapter callers awaiting their own follow-up PRs).
 #
 # Adding a new entry requires updating
 # tests/test_send_chokepoint_null_context_allowlist.py (PR-ζ static gate)
@@ -655,7 +664,11 @@ SAFE_IO_NULL_CONTEXT_ALLOWLIST: frozenset[str] = frozenset({
     # as _default_bridge` then `bridge_send(chat_id, text)` at line 634 — the
     # injected callable is invisible to the static gate; runtime resolver
     # lands here. NOT a regulated surface (post-closure notify is informational).
-    "manual_queue.py",
+    # PR-ζ.1b 2026-05-26 — deployed as flyer_manual_queue.py per
+    # shift-agent-deploy.sh flat-rename (NOT manual_queue.py — the source-tree
+    # basename never matches at runtime). Refusal-row evidence at
+    # tasks/audits/pr-zeta-1b-blockers-2026-05-26.md.
+    "flyer_manual_queue.py",
     # Catering / expense — adapter callers via bridge_post_2tuple.
     # Migrating to real ActionExecutionContext is a follow-up PR per the
     # PR-ζ spec ("NO mass call-site updates").
@@ -673,11 +686,15 @@ SAFE_IO_NULL_CONTEXT_ALLOWLIST: frozenset[str] = frozenset({
     # to the chokepoint is PR-ε.1 work (requires safe_io.bridge_post to
     # gain a `timeout` kwarg).
     "send-coverage-message",
-    # cf-router non-change_plan callsites — DEFERRED to PR-ζ.1. actions.py
-    # also houses send_flyer_text which forwards action_context when given;
-    # the allowlist matches when context is None (un-migrated callers).
-    "actions.py",
-    "hooks.py",
+    # PR-ζ.1b 2026-05-26 (commit 10) — cf-router actions.py + hooks.py
+    # REMOVED from the allowlist. Every send-path callsite in those two
+    # modules now passes an explicit action_context (verified by the
+    # AST-scan static gate at test_send_chokepoint_null_context_allowlist.py
+    # + the manual static-gate port executed pre-commit). This is the
+    # load-bearing commit that turns PR-ζ's diagnostic discipline into
+    # enforcement: any new direct bridge_post* callsite in cf-router that
+    # forgets action_context now refuses at runtime + emits a
+    # regulated_send_missing_action_context audit row.
 })
 
 

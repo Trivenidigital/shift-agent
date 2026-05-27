@@ -103,6 +103,22 @@ import flyer_reference_extract
 import flyer_semantic_brief
 import flyer_visual_qa
 import flyer_manual_queue
+# PR-ζ.1b 2026-05-26 — verify flat-renamed allowlist entry matches the
+# deployed basename, verify stale entry removed, verify cf-router entries
+# removed (commit 8), verify PROJECT_ACTIONS + helpers import.
+assert 'flyer_manual_queue.py' in safe_io.SAFE_IO_NULL_CONTEXT_ALLOWLIST, \
+    'PR-ζ.1b: flyer_manual_queue.py missing from allowlist'
+assert 'manual_queue.py' not in safe_io.SAFE_IO_NULL_CONTEXT_ALLOWLIST, \
+    'PR-ζ.1b: stale manual_queue.py still in allowlist'
+import flyer_action_registry
+assert 'change_plan_fallback' in flyer_action_registry.ACCOUNT_ACTIONS, \
+    'PR-ζ.1b: change_plan_fallback missing from ACCOUNT_ACTIONS'
+assert 'command_reply' in flyer_action_registry.ACCOUNT_ACTIONS, \
+    'PR-ζ.1b: command_reply missing from ACCOUNT_ACTIONS'
+assert flyer_action_registry.PROJECT_ACTIONS, 'PR-ζ.1b: PROJECT_ACTIONS empty'
+_ = flyer_action_registry.build_action_context_for_command(
+    flyer_action_registry.PROJECT_ACTIONS, 'intake.acknowledged',
+)
 print('schema classes:', [c for c in dir(schemas) if not c.startswith('_')][:5])
 " > /dev/null; then
     echo "FAIL: Python modules don't import"
