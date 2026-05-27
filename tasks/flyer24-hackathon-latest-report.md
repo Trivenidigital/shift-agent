@@ -4,7 +4,7 @@ Updated: 2026-05-27T22:33:00Z
 
 ## Current batch
 - Branch: `codex/flyer24-batch-status-title-hardening-202605272245`
-- PR: pending (local branch not opened yet)
+- PR: #314 `fix(flyer): harden campaign title and manual status targeting`
 - Deploy: not run (PR stage)
 - Scope: harden campaign-title extraction and status-target project selection so stale/manual queue status checks stay deterministic.
 - Root-cause evidence:
@@ -26,6 +26,7 @@ Updated: 2026-05-27T22:33:00Z
 - #299 `fix(flyer): harden billing health MCP readiness visibility` - operator-review-required (money-adjacent), open.
 - #307 `fix(flyer): consolidate payment fail-closed contract and MCP parity` - operator-review-required (money-adjacent), open.
 - #312 `fix(flyer): canonicalize legacy manual-review reasons` - merged to `main`.
+- #314 `fix(flyer): harden campaign title and manual status targeting` - open, low-risk, no CI checks reported yet (not merge-qualified yet).
 
 ## Running PR list (hackathon)
 - #295 `fix(flyer): close status-check phrasing gaps in active project routing` - merged to `main`; deployed `deploy-20260527-102236-c858caa1`.
@@ -39,6 +40,7 @@ Updated: 2026-05-27T22:33:00Z
 - #306 `fix(flyer): expand manual queue health backlog signals` - merged to `main`.
 - #307 `fix(flyer): consolidate payment fail-closed contract and MCP parity` - open; operator-review-required.
 - #312 `fix(flyer): canonicalize legacy manual-review reasons` - merged to `main`.
+- #314 `fix(flyer): harden campaign title and manual status targeting` - open; low-risk, awaiting review/check signal.
 
 ## Verification for this batch
 - `pytest -q tests/test_flyer_facts.py -k 'campaign_title or profile_facts_keep_account_business_when_request_names_campaign_flyer'` ✅ (2 passed)
