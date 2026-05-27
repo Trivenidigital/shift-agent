@@ -10,8 +10,8 @@
 - [x] Apply design review fixes.
 - [x] Build with TDD.
 - [x] Create PR.
-- [ ] PR review by 3 parallel agents.
-- [ ] Apply PR review fixes.
+- [x] PR review by 3 parallel agents.
+- [x] Apply PR review fixes.
 - [ ] Merge and deploy.
 
 Living checklist. Items grouped by priority; each completed item gets `✅` and a date.
