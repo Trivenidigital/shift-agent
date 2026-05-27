@@ -731,3 +731,71 @@ def test_billing_checkout_provider_full_templates_is_green(tmp_path, monkeypatch
     assert billing_p["model_config"]["payment_provider"] == "stripe"
     assert billing_p["model_config"]["payment_checkout_url_template_configured"] == "true"
     assert billing_p["model_config"]["quick_flyer_checkout_url_template_configured"] == "true"
+
+
+def test_billing_checkout_provider_includes_mcp_first_provider_metadata(tmp_path, monkeypatch):
+    _clear_provider_env(monkeypatch)
+    _isolate_env_files(monkeypatch, tmp_path)
+    _isolate_deploy_markers(monkeypatch, tmp_path)
+    _mock_flyer_config(monkeypatch, {
+        "enabled": True,
+        "payment_provider": "razorpay",
+        "payment_checkout_url_template": "https://pay.example/sub/{customer_id}",
+        "quick_flyer_checkout_url_template": "https://pay.example/quick/{order_id}",
+        "quick_flyer_price_cents": 19900,
+    })
+
+    from app.routers import flyer
+
+    billing_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "billing_checkout_provider")
+    model_cfg = billing_p["model_config"]
+    assert model_cfg["supported_payment_providers"] == "manual,stripe,razorpay,other"
+    assert model_cfg["configured_provider_env_key"] == "RAZORPAY_KEY_ID|RAZORPAY_KEY_SECRET"
+    assert model_cfg["provider_mcp_surface"] == "official_mcp_available"
+
+
+def test_billing_checkout_provider_reports_operator_checklist_when_missing(tmp_path, monkeypatch):
+    _clear_provider_env(monkeypatch)
+    _isolate_env_files(monkeypatch, tmp_path)
+    _isolate_deploy_markers(monkeypatch, tmp_path)
+    _mock_flyer_config(monkeypatch, {
+        "enabled": True,
+        "payment_provider": "stripe",
+        "payment_checkout_url_template": "",
+        "quick_flyer_checkout_url_template": "",
+        "quick_flyer_price_cents": 4999,
+    })
+
+    from app.routers import flyer
+
+    billing_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "billing_checkout_provider")
+    detail = billing_p["detail"].lower()
+    assert "payment link not configured" in detail
+    assert "operator checklist" in detail
+    assert "configure payment_checkout_url_template" in detail
+    assert "configure quick_flyer_checkout_url_template" in detail
+
+
+def test_billing_checkout_provider_flags_currency_posture_for_razorpay(tmp_path, monkeypatch):
+    _clear_provider_env(monkeypatch)
+    _isolate_env_files(monkeypatch, tmp_path)
+    _isolate_deploy_markers(monkeypatch, tmp_path)
+    _mock_flyer_config(monkeypatch, {
+        "enabled": True,
+        "payment_provider": "razorpay",
+        "payment_checkout_url_template": "https://pay.example/sub/{customer_id}",
+        "quick_flyer_checkout_url_template": "https://pay.example/quick/{order_id}",
+        "quick_flyer_price_cents": 6999,
+        "plan_tiers": [
+            {"plan_id": "starter", "label": "Starter", "monthly_price_usd": 49.99, "included_flyers": 30, "currency": "USD"},
+            {"plan_id": "growth", "label": "Growth", "monthly_price_usd": 69.99, "included_flyers": 60, "currency": "USD"},
+            {"plan_id": "unlimited", "label": "Unlimited", "monthly_price_usd": 199.00, "included_flyers": None, "currency": "USD"},
+        ],
+    })
+
+    from app.routers import flyer
+
+    billing_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "billing_checkout_provider")
+    assert billing_p["severity"] == "yellow"
+    assert "configured provider is razorpay but no inr plan tier is configured" in billing_p["detail"].lower()
+    assert billing_p["model_config"]["plan_currencies"] == "USD"
