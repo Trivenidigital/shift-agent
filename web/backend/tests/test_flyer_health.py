@@ -502,6 +502,13 @@ def test_manual_queue_impact_zero_by_default(tmp_path, monkeypatch):
     assert impact["stale_minutes_threshold"] >= 5
     assert impact["source_edit_stale_count"] == 0
     assert impact["source_edit_oldest_stale_minutes"] is None
+    assert impact["visual_qa_queued_count"] == 0
+    assert impact["visual_qa_stale_count"] == 0
+    assert impact["visual_qa_oldest_stale_minutes"] is None
+    assert impact["customer_update_due_count"] == 0
+    assert impact["customer_update_due_oldest_minutes"] is None
+    assert impact["reason_family_counts"] == {}
+    assert impact["stale_reason_family_counts"] == {}
 
 
 def test_manual_queue_impact_counts_source_edit_unavailable_rows(tmp_path, monkeypatch):
@@ -546,6 +553,9 @@ def test_manual_queue_impact_counts_source_edit_unavailable_rows(tmp_path, monke
     assert impact["source_edit_oldest_stale_minutes"] is not None
     assert impact["source_edit_oldest_stale_minutes"] >= 300
     assert impact["source_edit_stale_count"] >= 1
+    assert impact["visual_qa_queued_count"] == 1
+    assert impact["reason_family_counts"]["provider_readiness"] == 2
+    assert impact["reason_family_counts"]["visual_quality"] == 1
 
 
 def test_manual_queue_impact_reports_stale_reason_counts(tmp_path, monkeypatch):
@@ -578,6 +588,16 @@ def test_manual_queue_impact_reports_stale_reason_counts(tmp_path, monkeypatch):
         "source_edit_provider_unavailable": 1,
         "visual_qa_failed": 1,
     }
+    assert impact["stale_reason_family_counts"] == {
+        "provider_readiness": 1,
+        "visual_quality": 1,
+    }
+    assert impact["customer_update_due_count"] >= 1
+    assert impact["customer_update_due_oldest_minutes"] is not None
+    assert impact["customer_update_due_oldest_minutes"] >= 180
+    assert impact["visual_qa_stale_count"] == 1
+    assert impact["visual_qa_oldest_stale_minutes"] is not None
+    assert impact["visual_qa_oldest_stale_minutes"] >= 120
 
 
 def test_source_edit_detail_surfaces_queue_impact_when_present(tmp_path, monkeypatch):
@@ -616,7 +636,7 @@ def test_source_edit_detail_mentions_mixed_reason_backlog(tmp_path, monkeypatch)
 
     settings = flyer.get_settings()
     settings.state_dir = tmp_path / "state"
-    queued_at = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    queued_at = (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat()
     _write_json(
         settings.state_dir / "flyer" / "projects.json",
         {
@@ -637,6 +657,8 @@ def test_source_edit_detail_mentions_mixed_reason_backlog(tmp_path, monkeypatch)
     assert "stale reasons source_edit_provider_unavailable=1, visual_qa_failed=1" in detail
     assert "oldest by reason source_edit_provider_unavailable=" in detail
     assert "visual_qa_failed=" in detail
+    assert "customer updates due" in detail
+    assert "reason families" in detail
 
 
 def test_source_edit_detail_lists_single_reason_backlog_without_placeholder_phrase(tmp_path, monkeypatch):

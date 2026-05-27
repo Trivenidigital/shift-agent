@@ -41,6 +41,7 @@ from schemas import (  # noqa: E402
 )
 try:
     from flyer_manual_queue import (  # type: ignore  # noqa: E402
+        _reason_family as flyer_reason_family,
         _verification_modes as flyer_verification_modes,
         build_closure_customer_text,
         close_manual_project,
@@ -53,6 +54,7 @@ try:
     )
 except ImportError:
     from agents.flyer.manual_queue import (  # noqa: E402
+        _reason_family as flyer_reason_family,
         _verification_modes as flyer_verification_modes,
         build_closure_customer_text,
         close_manual_project,
@@ -1623,24 +1625,42 @@ def _source_edit_manual_queue_impact() -> dict[str, Any]:
             "stale_count": 0,
             "source_edit_stale_count": 0,
             "source_edit_oldest_stale_minutes": None,
+            "visual_qa_queued_count": 0,
+            "visual_qa_stale_count": 0,
+            "visual_qa_oldest_stale_minutes": None,
+            "customer_update_due_count": 0,
+            "customer_update_due_oldest_minutes": None,
+            "reason_family_counts": {},
+            "stale_reason_family_counts": {},
             "stale_minutes_threshold": threshold,
         }
     active_rows = [r for r in rows if r.get("manual_status") in {"queued", "in_progress"}]
     reason_counts: dict[str, int] = {}
     stale_reason_counts: dict[str, int] = {}
     oldest_age_minutes_by_reason: dict[str, int] = {}
+    reason_family_counts: dict[str, int] = {}
+    stale_reason_family_counts: dict[str, int] = {}
     for row in active_rows:
         reason = str(row.get("manual_reason_code") or "unclassified")
+        reason_family = flyer_reason_family(reason)
         age_minutes = int(row.get("age_minutes", 0) or 0)
         reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        reason_family_counts[reason_family] = reason_family_counts.get(reason_family, 0) + 1
         oldest_age_minutes_by_reason[reason] = max(oldest_age_minutes_by_reason.get(reason, 0), age_minutes)
         if bool(row.get("is_stale")):
             stale_reason_counts[reason] = stale_reason_counts.get(reason, 0) + 1
+            stale_reason_family_counts[reason_family] = stale_reason_family_counts.get(reason_family, 0) + 1
+    customer_update_due_rows = [r for r in active_rows if bool(r.get("customer_update_due"))]
     matched = [
         r for r in active_rows
         if r.get("manual_reason_code") == "source_edit_provider_unavailable"
     ]
+    visual_qa_rows = [
+        r for r in active_rows
+        if r.get("manual_reason_code") == "visual_qa_failed"
+    ]
     source_stale = [r for r in matched if bool(r.get("is_stale"))]
+    visual_qa_stale = [r for r in visual_qa_rows if bool(r.get("is_stale"))]
     all_oldest_minutes = (
         max(int(r.get("age_minutes", 0) or 0) for r in active_rows)
         if active_rows else None
@@ -1649,6 +1669,17 @@ def _source_edit_manual_queue_impact() -> dict[str, Any]:
         max(int(r.get("age_minutes", 0) or 0) for r in matched)
         if matched else None
     )
+    def _rank_reasons(data: dict[str, int]) -> list[tuple[str, int]]:
+        return sorted(
+            data.items(),
+            key=lambda kv: (
+                -stale_reason_counts.get(kv[0], 0),
+                -kv[1],
+                -oldest_age_minutes_by_reason.get(kv[0], 0),
+                kv[0],
+            ),
+        )
+
     return {
         "queued_count": len(matched),
         "oldest_age_hours": (oldest_minutes // 60) if oldest_minutes is not None else None,
@@ -1656,7 +1687,7 @@ def _source_edit_manual_queue_impact() -> dict[str, Any]:
         "all_queued_count": len(active_rows),
         "all_oldest_age_hours": (all_oldest_minutes // 60) if all_oldest_minutes is not None else None,
         "all_oldest_age_minutes": all_oldest_minutes,
-        "reason_counts": dict(sorted(reason_counts.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "reason_counts": dict(_rank_reasons(reason_counts)),
         "stale_reason_counts": dict(sorted(stale_reason_counts.items(), key=lambda kv: (-kv[1], kv[0]))),
         "oldest_age_minutes_by_reason": dict(
             sorted(oldest_age_minutes_by_reason.items(), key=lambda kv: (-kv[1], kv[0]))
@@ -1665,6 +1696,20 @@ def _source_edit_manual_queue_impact() -> dict[str, Any]:
         "source_edit_stale_count": len(source_stale),
         "source_edit_oldest_stale_minutes": (
             max(int(r.get("age_minutes", 0) or 0) for r in source_stale) if source_stale else None
+        ),
+        "visual_qa_queued_count": len(visual_qa_rows),
+        "visual_qa_stale_count": len(visual_qa_stale),
+        "visual_qa_oldest_stale_minutes": (
+            max(int(r.get("age_minutes", 0) or 0) for r in visual_qa_stale) if visual_qa_stale else None
+        ),
+        "customer_update_due_count": len(customer_update_due_rows),
+        "customer_update_due_oldest_minutes": (
+            max(int(r.get("age_minutes", 0) or 0) for r in customer_update_due_rows)
+            if customer_update_due_rows else None
+        ),
+        "reason_family_counts": dict(sorted(reason_family_counts.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "stale_reason_family_counts": dict(
+            sorted(stale_reason_family_counts.items(), key=lambda kv: (-kv[1], kv[0]))
         ),
         "stale_minutes_threshold": threshold,
     }
@@ -1813,7 +1858,11 @@ def _flyer_provider_components() -> list[dict[str, Any]]:
     stale_threshold = int(queue_impact.get("stale_minutes_threshold") or 0)
     reason_counts = queue_impact.get("reason_counts") or {}
     stale_reason_counts = queue_impact.get("stale_reason_counts") or {}
+    reason_family_counts = queue_impact.get("reason_family_counts") or {}
+    stale_reason_family_counts = queue_impact.get("stale_reason_family_counts") or {}
     oldest_by_reason = queue_impact.get("oldest_age_minutes_by_reason") or {}
+    updates_due = int(queue_impact.get("customer_update_due_count") or 0)
+    updates_due_oldest = queue_impact.get("customer_update_due_oldest_minutes")
 
     def _format_reason_counts(counts: dict[str, Any], *, limit: int = 3) -> str:
         parts: list[str] = []
@@ -1828,9 +1877,20 @@ def _flyer_provider_components() -> list[dict[str, Any]]:
         top_reasons = _format_reason_counts(reason_counts)
         if top_reasons:
             queue_detail_parts.append(f"manual queue reasons {top_reasons}")
+        top_families = _format_reason_counts(reason_family_counts)
+        if top_families:
+            queue_detail_parts.append(f"reason families {top_families}")
         top_stale = _format_reason_counts(stale_reason_counts)
         if top_stale:
             queue_detail_parts.append(f"stale reasons {top_stale}")
+        top_stale_families = _format_reason_counts(stale_reason_family_counts)
+        if top_stale_families:
+            queue_detail_parts.append(f"stale families {top_stale_families}")
+        if updates_due > 0:
+            oldest_due = int(updates_due_oldest or 0)
+            queue_detail_parts.append(
+                f"customer updates due {updates_due} (oldest {oldest_due}m)"
+            )
         if reason_counts:
             oldest_parts: list[str] = []
             for key, _value in list(reason_counts.items())[:3]:
