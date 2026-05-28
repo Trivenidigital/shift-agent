@@ -31,7 +31,7 @@ Both cases hit the same binary `failed` path. F0108 is fail-closed for a custome
 | WhatsApp customer-direction send | yes — existing `send-flyer-package` operator-script + Hermes WhatsApp bridge | reuse; warn-tier copy goes through same send path |
 | Vision OCR + blocker extraction | yes — existing `run_visual_qa` via OpenRouter `gpt-4o-mini` | reuse; severity is a pure classifier over existing `blockers: list[str]` |
 | Customer-copy lint surface | yes — existing `customer_copy_policy.py` (`BANNED_CUSTOMER_COPY_TERMS`, `FORBIDDEN_COMPLETION_VERBS`, `scan_customer_text`) | reuse; warn-tier template must pass both lints |
-| Audit chain | yes — `log-decision-direct` + `LogEntry` discriminated union in `schemas.py` | reuse; add `_FlyerQASeverityClassified` + `_FlyerWarnTierDelivered` variants |
+| Audit chain | yes — `log-decision-direct` + `LogEntry` discriminated union in `schemas.py` | reuse; add `FlyerQASeverityClassified` + `FlyerWarnTierDelivered` variants |
 | Atomic state writes | yes — `safe_io.atomic_write_json` + `bridge_post` chokepoint | reuse; severity-branch state writes go through these helpers |
 | Customer revision reply routing | yes — existing `revising_design` status + active-project lookup in `cf-router/actions.py` | reuse; revision from `delivered_with_warning` reuses same path |
 | Autorepair classification + retry | yes — `classify_flyer_qa_for_autorepair` + autorepair loop in `recovery.py` (PR #308) | reuse; severity branch slots AFTER autorepair-failed |
@@ -55,11 +55,11 @@ Both cases hit the same binary `failed` path. F0108 is fail-closed for a custome
 7. `[Hermes]` On `failed` + block-tier OR warn-tier: existing autorepair loop (`recovery.py:classify_flyer_qa_for_autorepair` + retry) runs. Re-runs QA → classify again.
 8. **`[net-new]`** Severity branch INSIDE `generate-flyer-concepts` writes state only — no send:
    - `pass`: today's path — writes `awaiting_concept_selection` / `awaiting_final_approval`.
-   - `warn`: NEW path — writes `delivered_with_warning` + populates `project.warning` payload + writes `_FlyerWarnTierDelivered` audit row.
+   - `warn`: NEW path — writes `delivered_with_warning` + populates `project.warning` payload + writes `FlyerWarnTierDelivered` audit row.
    - `block`: today's path — writes `manual_edit_required` with `reason_code="visual_qa_failed"`.
 9. `[Hermes]` cf-router's post-subprocess branch (around `actions.py:3948-3995` today) reads the new status. **`[net-new]`** New conditional: if status == `delivered_with_warning`, build warn-tier customer text from `project.warning.blockers` via `build_warn_tier_customer_text()`, then call `send_flyer_concept_previews(chat_id, project_id, customer_text=warn_text)`. Otherwise today's pass-path body runs as-is.
 10. `[Hermes]` `send_flyer_concept_previews()` ships preview images + customer text through `bridge_send_media`. **`[net-new]`** Function gains an optional `customer_text: Optional[str] = None` parameter (defaults to existing pass-path text).
-11. **`[net-new]`** New `_FlyerQASeverityClassified` audit row at step 6 (from the script); `_FlyerWarnTierDelivered` audit row at step 8 (also from the script, BEFORE the send fires — it records the decision to deliver-with-warning, not the bridge result). Existing bridge-send audit rows cover step 10 unchanged.
+11. **`[net-new]`** New `FlyerQASeverityClassified` audit row at step 6 (from the script); `FlyerWarnTierDelivered` audit row at step 8 (also from the script, BEFORE the send fires — it records the decision to deliver-with-warning, not the bridge result). Existing bridge-send audit rows cover step 10 unchanged.
 12. `[Hermes]` Customer reply with corrections → `cf-router/actions.py` active-project lookup → routes to existing `revising_design` flow via `FLYER_TRANSITIONS`.
 13. **`[net-new]`** `FLYER_TRANSITIONS` matrix extended: `delivered_with_warning → revising_design` allowed.
 
@@ -196,7 +196,7 @@ class FlyerWarningSummary(BaseModel):
 
 Added to `FlyerProject` model as `warning: Optional[FlyerWarningSummary] = None`. Independent of `manual_review` (which stays bound to `manual_edit_required`). On `delivered_with_warning` transition, `warning` is populated. On `revising_design` re-entry from `delivered_with_warning`, `warning` is preserved for that revision pass (see §9 Q3 for clearance-timing decision) — cockpit reads it for the "what blockers prompted this revision" panel.
 
-Rationale: manual_review is a queue-state primitive (operator action pending). Warning-summary is an outcome record (autonomous delivery completed with caveats). Different lifecycles, different consumers — separate fields keep the cockpit query trivial (`SELECT * WHERE status='delivered_with_warning'`) and the audit chain clean (`_FlyerWarnTierDelivered` row stores the same blockers/sha for replay).
+Rationale: manual_review is a queue-state primitive (operator action pending). Warning-summary is an outcome record (autonomous delivery completed with caveats). Different lifecycles, different consumers — separate fields keep the cockpit query trivial (`SELECT * WHERE status='delivered_with_warning'`) and the audit chain clean (`FlyerWarnTierDelivered` row stores the same blockers/sha for replay).
 
 **Stale-project recovery posture (reviewer 3 #8):** `recovery.py:451-502` `classify_stale_manual_project` only scans `status == "manual_edit_required"` + `manual_review.status == "queued"` — `delivered_with_warning` projects will NOT be picked up by the watchdog. A project stuck in this status forever (customer never replies) is OUT OF SCOPE for this PR. An SLA timeout watchdog for `delivered_with_warning` is a follow-up; this PR explicitly accepts the gap with the note in §10. (Rationale: warn-tier delivery still produces an audit row + cockpit row, so operators have visibility even without an alarm; SLA tuning needs real fire-rate data.)
 
@@ -296,59 +296,109 @@ Each commit is small enough to review on its own and ships green tests. Architec
 **Source (~50 LOC):**
 - At the post-autorepair decision point (lines ~823 today), branch on `report.severity`:
   - `pass`: today's path (unchanged — writes `awaiting_concept_selection` / `awaiting_final_approval`).
-  - `warn`: NEW path — `_is_flyer_transition_allowed("generating_concepts", "delivered_with_warning")` (defensive), then `current.model_copy(update={"status": "delivered_with_warning", "warning": FlyerWarningSummary(...), "assets": ..., "qa_reports": ..., "updated_at": now})`, `atomic_write_text(state_path, ...)`, then writes `_FlyerWarnTierDelivered` audit row via `_audit_append`.
+  - `warn`: NEW path — `_is_flyer_transition_allowed("generating_concepts", "delivered_with_warning")` (defensive), then `current.model_copy(update={"status": "delivered_with_warning", "warning": FlyerWarningSummary(...), "assets": ..., "qa_reports": ..., "updated_at": now})`, `atomic_write_text(state_path, ...)`, then writes `FlyerWarnTierDelivered` audit row via `_audit_append`.
   - `block`: today's `manual_edit_required` + `visual_qa_failed` path (unchanged).
 - **No outbound send call inside generate-flyer-concepts.** The script returns 0 with a stdout JSON marker (`{"project_id": ..., "delivered_with_warning": true, "warning_blockers": [...]}`) so cf-router knows to take the warn-tier send branch.
 
 **Tests (~50 LOC) — subprocess + sidecar QA fixture:**
-- F0108-shape (single brand-typo warn): asserts state `delivered_with_warning` + `warning` payload populated + `_FlyerWarnTierDelivered` audit row + stdout JSON marker present + NO outbound bridge call from the script.
+- F0108-shape (single brand-typo warn): asserts state `delivered_with_warning` + `warning` payload populated + `FlyerWarnTierDelivered` audit row + stdout JSON marker present + NO outbound bridge call from the script.
 - F0109-shape (core-promise escalation): asserts state `manual_edit_required` (block path unchanged).
 - Pass-shape: unchanged behavior.
 - **`FLYER_TRANSITIONS` enforcement:** mutate state to invalid source-status, assert transition rejection raises clean error (no partial write).
 
-### Commit 4 — `feat(cf-router): warn-tier send branch + customer_text override on send_flyer_concept_previews`
-**Files:** `src/plugins/cf-router/actions.py`, `tests/test_cf_router_flyer_routing.py` (or closest existing routing test).
-**Source (~60 LOC):**
-- Modify `send_flyer_concept_previews(chat_id, project_id, customer_text: Optional[str] = None)` (`actions.py:3995`): if `customer_text` is provided, use it as the caption / accompanying text on the first bridge_send_media call; otherwise existing default copy.
-- In the post-subprocess branch (around `actions.py:3948`): after the subprocess returns and state is re-read, branch on `project.status`:
-  - `awaiting_concept_selection` / `awaiting_final_approval`: today's path — call `send_flyer_concept_previews(chat_id, project_id)` (no override).
-  - `delivered_with_warning`: NEW — read `project.warning.blockers`, call `build_warn_tier_customer_text(...)`, then `send_flyer_concept_previews(chat_id, project_id, customer_text=warn_text)`.
-  - `manual_edit_required`: today's path (unchanged).
-- Customer revision reply on `delivered_with_warning`: the existing active-project lookup + revision-intent classifier path takes over (no new code here; the `FLYER_TRANSITIONS` edge from Commit 1 is what unlocks it).
+### Commit 4 — `feat(cf-router): _dispatch_concept_preview_send helper + customer_text override on send_flyer_concept_previews`
+**Files:** `src/plugins/cf-router/actions.py`, `src/plugins/cf-router/hooks.py`, `tests/test_cf_router_flyer_routing.py` (or closest existing routing test).
+**Source (~70 LOC):**
 
-**Tests (~60 LOC) — cf-router replay:**
-- Replay subprocess returning `delivered_with_warning` state: asserts `send_flyer_concept_previews` called WITH `customer_text=<warn body>`.
-- Replay subprocess returning `awaiting_concept_selection`: asserts called WITHOUT `customer_text` (default path).
+**Pin A — helper (not enumerated callers).** Reviewer 1 (rerun) found 7 existing call sites to `send_flyer_concept_previews` (`hooks.py:746, 1848, 2795, 3081, 3310, 3486` + `actions.py:~3995`). Rather than touch all 7 with the warn-tier branch (brittle if a new caller appears), introduce a single helper that owns the read-state-then-pick-body decision:
+
+```python
+def _dispatch_concept_preview_send(chat_id: str, project_id: str) -> tuple[bool, str, str]:
+    """Read project state. If status == 'delivered_with_warning', build warn-tier
+    customer text from project.warning and call send_flyer_concept_previews with
+    the override. Otherwise call with default body. Single point of change for the
+    warn-tier branch — replaces direct send_flyer_concept_previews calls at the
+    7 caller sites."""
+    project = _read_flyer_project(project_id)
+    if project and project.status == "delivered_with_warning" and project.warning:
+        warn_text = build_warn_tier_customer_text(project.warning.blockers, project)
+        return send_flyer_concept_previews(chat_id, project_id, customer_text=warn_text)
+    return send_flyer_concept_previews(chat_id, project_id)
+```
+
+Replace each of the 7 direct `send_flyer_concept_previews(chat_id, project_id)` call sites with `_dispatch_concept_preview_send(chat_id, project_id)`. This is mechanical — same signature, same return contract.
+
+**Pin C — `customer_text` insertion site.** The override replaces the **trailing CTA at `actions.py:4087`** (`"Reply APPROVE to receive final files, or reply with changes."`), NOT the per-concept caption at line 4044 (`"C1: Title\n..."`). Per-concept captions remain stable semantic descriptors. Warn-tier body becomes the trailing post-preview message: header + correction summary + "Reply OK if you've checked…" conscious-confirmation line.
+
+```python
+def send_flyer_concept_previews(
+    chat_id: str,
+    project_id: str,
+    customer_text: Optional[str] = None,
+) -> tuple[bool, str, str]:
+    ...
+    # existing per-concept loop at lines 4044-4060 unchanged (captions stay as "C1: Title")
+    ...
+    cta_text = customer_text if customer_text is not None else "Reply APPROVE to receive final files, or reply with changes."
+    bridge_post(chat_id, cta_text)  # was: hardcoded text at line 4087
+    return ok, mid, err
+```
+
+Default-None preserves all 7 existing callers' behavior bit-for-bit.
+
+Customer revision reply on `delivered_with_warning`: existing active-project lookup + revision-intent classifier path takes over (no new code here; the `FLYER_TRANSITIONS` edge from Commit 1 is what unlocks it).
+
+**Tests (~70 LOC) — cf-router replay:**
+- `_dispatch_concept_preview_send` with `status=delivered_with_warning` + populated `warning`: asserts `send_flyer_concept_previews` called WITH `customer_text=<warn body matching build_warn_tier_customer_text output>`.
+- `_dispatch_concept_preview_send` with `status=awaiting_concept_selection`: asserts called WITHOUT `customer_text` (None default → existing pass-path text).
+- Trailing CTA text-substitution test: assert `bridge_post(..., warn_text)` fires on warn path; per-concept captions remain unchanged.
+- Per-caller-site regression: spot-check 2 of the 7 caller sites that the helper substitution preserves behavior on pass-path state.
 - Customer reply with revision intent on `delivered_with_warning` project: asserts active-project lookup finds project + routes to `revising_design` (uses new `FLYER_TRANSITIONS` edge from Commit 1).
 
-### Commit 5 — `feat(flyer-cockpit): build Projects-tab status filter row + delivered_with_warning panel + audit-only operator flag`
-**Files:** `web/frontend/src/sections/FlyerAdmin.tsx`, `web/frontend/src/sections/__tests__/FlyerAdmin.test.tsx` (or closest existing test file), `src/platform/scripts/flyer-operator-flag-warn-tier` (new minimal CLI), `src/platform/schemas.py` (one more LogEntry variant).
-**Source (~80 LOC TSX + ~30 LOC backend):**
+### Commit 5 — `feat(flyer-cockpit): build Projects-tab status filter row + delivered_with_warning panel + audit-only flag endpoint`
+**Files:** `web/frontend/src/sections/FlyerAdmin.tsx`, `web/frontend/src/sections/__tests__/FlyerAdmin.test.tsx`, `web/backend/app/routers/flyer.py` (new POST route), `tests/test_flyer_backend_routes.py` (or closest existing route test).
+**Source (~80 LOC TSX + ~40 LOC backend Python):**
 - **Build new Projects-tab filter row** mirroring the Manual Queue filter pattern at `FlyerAdmin.tsx:594-711`. The Projects tab has NO existing status-filter UI (reviewer 3 #7 — earlier draft incorrectly assumed "extend"). New filter state: `projectsFilterStatus` (multi-select), `projectsFilterPhone`, `projectsFilterProjectId`.
 - New rendering branch in the project-list row: when `project.status === "delivered_with_warning"`, show a small amber badge with blocker count + expand-on-click panel showing the warning payload (`blockers`, `customer_text` exact copy delivered, `delivered_at`).
-- **Audit-only operator flag (reviewer 2 #6):** add a "Flag this warning for follow-up" button on the panel. Button click does NOT mutate project state. It POSTs to an existing audit-write endpoint (or invokes a thin CLI) that writes a `_FlyerOperatorFlaggedWarnTier` audit row with `project_id`, `flagged_by_operator_id`, `flagged_at`, `note: Optional[str]`. No state transition, no manual_edit_required reroute. The full mutation path (warn → manual queue) remains deferred.
-- Add `_FlyerOperatorFlaggedWarnTier` to the `LogEntry` union in `schemas.py` (small addition to Commit 5 rather than Commit 4 because it lives with the cockpit feature).
+- **Pin D — backend POST route, not CLI.** Audit-only operator flag (reviewer 2 #6) ships as a new backend route at `web/backend/app/routers/flyer.py`:
+  ```python
+  @router.post("/flyer/projects/{project_id}/flag")
+  def flag_warn_tier_project(project_id: str, body: FlagWarnTierBody) -> dict:
+      """Audit-only operator flag. Writes FlyerOperatorFlaggedWarnTier
+      via log-decision-direct. NO project-state mutation."""
+      # body: {note: Optional[str]}
+      # calls log-decision-direct chokepoint with FlyerOperatorFlaggedWarnTier payload
+      ...
+  ```
+  Cockpit's "Flag this warning for follow-up" button POSTs here. This keeps audit-write path consistent with the rest of the cockpit (web-native, no CLI dependency).
+- Add `FlyerOperatorFlaggedWarnTier` to the `LogEntry` union in `schemas.py` (lives with the cockpit feature, not bundled into Commit 6 where the QA-classified/warn-tier-delivered variants live).
 
-**Tests (~40 LOC):**
+**Tests (~50 LOC):**
 - Filter row renders + filters by `delivered_with_warning`.
 - Warning details panel renders blocker list + customer copy when expanded.
-- "Flag for follow-up" button click writes `_FlyerOperatorFlaggedWarnTier` audit row (mocked endpoint).
-- Read-only assertion: clicking the flag button does NOT change `project.status` or `project.warning`.
-- `_FlyerOperatorFlaggedWarnTier` round-trip + `extra="forbid"`.
+- POST `/flyer/projects/{id}/flag` writes `FlyerOperatorFlaggedWarnTier` audit row (route-level test with the audit chokepoint mocked).
+- Route returns 200 + does NOT call any state-mutation helper (assert no `model_copy` / no `atomic_write` on projects.json).
+- Cockpit button click → POSTs to the new route + receives 200 + does NOT update `project.status` or `project.warning`.
+- `FlyerOperatorFlaggedWarnTier` round-trip + `extra="forbid"`.
 
-### Commit 6 (formerly part of Commit 4) — `feat(flyer): _FlyerQASeverityClassified + _FlyerWarnTierDelivered audit variants`
+### Commit 6 (lands BEFORE Commit 3 in implementation order) — `feat(flyer): FlyerQASeverityClassified + FlyerWarnTierDelivered audit variants`
 **Files:** `src/platform/schemas.py`, `tests/test_flyer_schemas.py`.
 **Source (~30 LOC):**
-- Add two `LogEntry` discriminated-union members (subclass `_BaseEntry`, `type: Literal["..."]`).
-- `_FlyerQASeverityClassified`: project_id, asset_id, severity, blocker_count, classifier_version, classified_at.
-- `_FlyerWarnTierDelivered`: project_id, asset_id, severity, blockers, customer_text_sha256, delivered_at.
+
+**Pin B — public variant names (no leading underscore).** Reviewer 1 (rerun) flagged that the earlier draft's `FlyerQASeverityClassified` / `FlyerWarnTierDelivered` / `FlyerOperatorFlaggedWarnTier` names diverge from the LogEntry-union convention (existing public variants: `RawInbound`, `FlyerProjectCreated`, etc.). Renamed throughout the plan:
+
+- `FlyerQASeverityClassified`: project_id, asset_id, severity, blocker_count, classifier_version, classified_at.
+- `FlyerWarnTierDelivered`: project_id, asset_id, severity, blockers, customer_text_sha256, delivered_at.
+- `FlyerOperatorFlaggedWarnTier` (added in Commit 5): project_id, flagged_by_operator_id, flagged_at, note.
+
+All three subclass `_BaseEntry` and declare `type: Literal[...]`; the discriminated-union extension is automatic via `Annotated[..., Tag(...)]`.
 
 **Tests (~20 LOC):**
 - Round-trip: model_validate → model_dump.
 - `extra="forbid"` enforced.
 - Discriminator routing: `type` field deserializes to right subclass.
 
-> Note: Commit 6 should land BEFORE Commit 3 in implementation order — Commit 3 writes these audit rows, so the schema variants must exist first. Numbering preserved to align with build narrative; actual sequencing is 1 → 6 → 2 → 3 → 4 → 5.
+> Note: Commit 6 lands BEFORE Commit 3 in implementation order — Commit 3 writes `FlyerWarnTierDelivered` audit rows, so the schema variants must exist first. Numbering preserved to align with build narrative; actual sequencing is 1 → 6 → 2 → 3 → 4 → 5.
 
 ---
 
@@ -368,7 +418,7 @@ Each commit is small enough to review on its own and ships green tests. Architec
 | Cockpit | new Projects-tab filter row renders + filters by `delivered_with_warning` | `web/frontend/src/sections/__tests__/FlyerAdmin.test.tsx` |
 | Cockpit | warning details panel renders blocker list + customer copy | same |
 | Cockpit | "Flag for follow-up" button writes audit row without state mutation | same |
-| Schema | Three new LogEntry variants (`_FlyerQASeverityClassified`, `_FlyerWarnTierDelivered`, `_FlyerOperatorFlaggedWarnTier`) round-trip cleanly | `tests/test_flyer_schemas.py` |
+| Schema | Three new LogEntry variants (`FlyerQASeverityClassified`, `FlyerWarnTierDelivered`, `FlyerOperatorFlaggedWarnTier`) round-trip cleanly | `tests/test_flyer_schemas.py` |
 | Smoke (deploy gate) | `shift-agent-smoke-test.sh` imports `classify_qa_severity` + `_is_brand_typo` + `build_warn_tier_customer_text` to verify symbols are loadable on VPS post-deploy | `src/agents/shift/scripts/shift-agent-smoke-test.sh` |
 
 **Regression discipline:** every existing `tests/test_flyer_visual_qa.py`, `tests/test_flyer_generate_concepts.py`, and `tests/test_cf_router_flyer_routing.py` test must remain green. Severity defaults to `pass` (no `warn`/`block` mappings hit) for existing test fixtures; the binary `failed` → manual_edit_required path is preserved for everything classified `block`, which is everything failing today's tests. cf-router default-body path is preserved for all non-`delivered_with_warning` states.
