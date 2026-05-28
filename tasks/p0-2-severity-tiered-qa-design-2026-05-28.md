@@ -16,14 +16,17 @@ This design pins the implementation details for the 6-commit build sequence — 
 
 To verify locally: `cd C:/projects/sme-agents-pr-zeta-1b && git log --oneline HEAD -1` should show this branch's HEAD; `ls src/agents/flyer/*.py | wc -l` should report 21.
 
-**Module-path conventions.** Two different paths to the same modules:
+**Module-path conventions.** Two contexts; the schemas import is identical between them (only the sys.path source differs), but the flyer modules use different forms because of the flat-deploy rename.
 
-| Context | Import path |
-|---|---|
-| Local repo / tests | `from agents.flyer.visual_qa import ...`, `from platform.schemas import ...` |
-| Deployed flat layout on `/opt/shift-agent/` (smoke tests, runtime cf-router) | `from flyer_visual_qa import ...`, `from schemas import ...` (after `sys.path.insert(0, '/opt/shift-agent')` and `sys.path.insert(0, '/opt/shift-agent/platform')`) |
+| Module type | Local (pytest) | Deployed (smoke test, runtime cf-router) |
+|---|---|---|
+| `schemas` | `from schemas import ...` — `tests/conftest.py:21` inserts `<repo>/src/platform/` into `sys.path` | `from schemas import ...` — smoke test inserts `/opt/shift-agent/platform/` into `sys.path` |
+| `safe_io` | `from safe_io import ...` — same conftest path setup | `from safe_io import ...` — same smoke setup |
+| flyer modules | `from agents.flyer.<name> import ...` — conftest inserts `<repo>/src/`, so `agents/` is a package | `from flyer_<name> import ...` — `shift-agent-deploy.sh` renames `src/agents/flyer/<name>.py` → `/opt/shift-agent/flyer_<name>.py` flat |
 
-`shift-agent-deploy.sh` renames `src/agents/flyer/<name>.py` to `/opt/shift-agent/flyer_<name>.py` in the tarball-staging step. Anything that runs on the VPS uses the flat names. Existing precedent at `actions.py:4003-4011` shows the pattern: try the deployed flat name first, fall back to the `agents.flyer.<name>` path when running locally (tests). Same convention applies to any new modules in this PR.
+`shift-agent-deploy.sh` is the source of the rename. Anything that runs on the VPS — smoke tests and runtime cf-router code — uses the flat `flyer_<name>` names. The dual-mode `try flyer_X / except: try agents.flyer.X` pattern at `actions.py:4003-4011` exists for runtime code that may execute in either context.
+
+Neither context uses `from platform.schemas import ...` — that would only work if `src/` were on `sys.path` AND `platform/` were a package (it isn't — `platform.py` is a stdlib module). The pattern is always "insert the schemas directory directly, then flat-import."
 
 ---
 
