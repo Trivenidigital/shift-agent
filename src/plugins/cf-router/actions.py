@@ -2036,6 +2036,8 @@ def is_flyer_project_status_request(text: str) -> bool:
         return True
     if re.fullmatch(r"f\d{4,}\s+status(?:\s+(?:please|pls))?\??", body):
         return True
+    if re.fullmatch(r"status\s+(?:for|of|on)\s+project\s*:?\s*f\d{4,}(?:\s+(?:please|pls))?\??", body):
+        return True
     if re.fullmatch(r"where\s+(?:my|the)\s+(?:flyer|flier|design|preview)\s+at\??", body):
         return True
     if re.fullmatch(r"eta\s+on\s+(?:my|the)\s+(?:flyer|flier|design|preview)(?:\s+(?:please|pls))?\??", body):
@@ -2048,11 +2050,20 @@ def is_flyer_project_status_request(text: str) -> bool:
         r"(?:can|could)\s+(?:i|we)\s+get\s+an?\s+update|"
         r"(?:give|share)\s+(?:me|us)\s+an?\s+update\s+on\s+(?:the\s+)?(?:flyer|flier|design|preview)|"
         r"update\s+on\s+f\d{4,}|"
+        r"update\s+on\s+project\s+f\d{4,}|"
+        r"where(?:'s|\s+is)\s+(?:the\s+)?update\s+for\s+project\s+f\d{4,}|"
         r"update\s+on\s+(?:this|the|my)\s+(?:flyer|flier|design|preview)(?:\s+(?:please|pls))?|"
+        r"status\s+update\s+for\s+project\s+f\d{4,}|"
         r"status\s+update\s+on\s+(?:this|the|my)\s+(?:flyer|flier|design|preview)|"
         r"status\s+for\s+f\d{4,}|"
+        r"(?:need\s+)?status\s+of\s+f\d{4,}|"
+        r"status\s+about\s+f\d{4,}|"
+        r"status\s+(?:for|of)\s+project\s+f\d{4,}(?:\s+(?:please|pls))?|"
         r"(?:share|send|give)\s+status\s+of\s+(?:(?:this|the|my)\s+)?(?:flyer|flier|design|preview)|"
         r"status\s+of\s+(?:(?:this|the|my)\s+)?(?:flyer|flier|design|preview)|"
+        r"queue\s+status\s+for\s+f\d{4,}|"
+        r"(?:share|send|give)\s+progress\s+on\s+f\d{4,}|"
+        r"where(?:'s|\s+is)\s+update\s+for\s+f\d{4,}|"
         r"status\s+on\s+(?:this|the)\s+(?:flyer|flier|design|preview)|"
         r"status\s+on\s+my\s+(?:flyer|flier|design|preview)(?:\s+(?:please|pls))?|"
         r"any\s+news(?:\s+on\s+(?:the\s+)?(?:flyer|flier|design|preview))?|"
@@ -2086,14 +2097,37 @@ def flyer_manual_edit_status_reply(project: dict) -> str:
         return reply
     manual = project.get("manual_review") if isinstance(project.get("manual_review"), dict) else {}
     reason_code = str(manual.get("reason_code") or "unclassified").strip().lower() or "unclassified"
+    reason_text = str(manual.get("reason") or "")
+    detail_text = str(manual.get("detail") or "")
     try:
         _ensure_platform_path()
         from flyer_workflow import MANUAL_REVIEW_REASON_LINES  # type: ignore
+        from flyer_manual_queue import canonical_manual_reason_code  # type: ignore
     except Exception:
         try:
             _ensure_local_src_path()
             from agents.flyer.workflow import MANUAL_REVIEW_REASON_LINES  # type: ignore
+            from agents.flyer.manual_queue import canonical_manual_reason_code  # type: ignore
         except Exception:
+            def canonical_manual_reason_code(  # type: ignore[no-redef]
+                raw_reason_code: str,
+                *,
+                reason: str = "",
+                detail: str = "",
+            ) -> str:
+                code = (raw_reason_code or "").strip().lower() or "unclassified"
+                if code != "unclassified":
+                    return code
+                lowered = f"{reason} {detail}".lower()
+                if "source_edit_provider_unavailable" in lowered:
+                    return "source_edit_provider_unavailable"
+                if "visual_qa_failed" in lowered:
+                    return "visual_qa_failed"
+                if "reference_unsupported" in lowered:
+                    return "reference_unsupported"
+                if "reference_provider_unavailable" in lowered:
+                    return "reference_provider_unavailable"
+                return "unclassified"
             MANUAL_REVIEW_REASON_LINES = {
                 "unclassified": (
                     "This project is queued for designer review. "
@@ -2113,8 +2147,13 @@ def flyer_manual_edit_status_reply(project: dict) -> str:
                     "Please re-upload as JPG or PNG and we'll continue."
                 ),
             }
-    line = MANUAL_REVIEW_REASON_LINES.get(
+    canonical_reason = canonical_manual_reason_code(
         reason_code,
+        reason=reason_text,
+        detail=detail_text,
+    )
+    line = MANUAL_REVIEW_REASON_LINES.get(
+        canonical_reason,
         MANUAL_REVIEW_REASON_LINES["unclassified"],
     )
     return f"Flyer Studio\n------------\n{line}"
@@ -2369,6 +2408,37 @@ def _normalize_business_scope(value: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", (value or "").lower())
 
 
+def _strip_campaign_scope_suffix(label: str) -> str:
+    stripped = re.sub(
+        r"\b(?:store[-\s]*wide|site[-\s]*wide|all\s+items?|everything|weekly|weekend|holiday|diwali|festival)?\s*"
+        r"(?:sale|sales|specials?|promotion|promo|offer|offers|deal|deals)\b.*$",
+        "",
+        label or "",
+        flags=re.IGNORECASE,
+    ).strip(" .,:;-'\"")
+    return stripped or label
+
+
+def _looks_like_campaign_title_scope(label: str) -> bool:
+    tokens = _normalize_business_scope(label)
+    joined = " ".join(tokens)
+    if not tokens:
+        return False
+    campaign_patterns = (
+        r"\brestaurant week\b",
+        r"\bcafe style\b",
+        r"\bbiryani bazaar\b",
+        r"\bkitchen essentials\b",
+        r"\bdiwali\b",
+        r"\bholiday\b",
+        r"\bfestival\b",
+        r"\bweekend\b",
+    )
+    if any(re.search(pattern, joined) for pattern in campaign_patterns):
+        return True
+    return False
+
+
 def _extract_requested_business_scope(raw_request: str) -> str:
     text = " ".join(flyer_visible_message_text(raw_request).split())
     if not text:
@@ -2398,6 +2468,16 @@ def _extract_requested_business_scope(raw_request: str) -> str:
         label = re.sub(r"[*_`]+", "", candidate or "")
         label = re.sub(r"^(?:customer|business|client)\s+", "", label, flags=re.IGNORECASE)
         label = label.strip(" .,:;-'\"")
+        stripped = _strip_campaign_scope_suffix(label)
+        if stripped != label:
+            if _looks_like_campaign_title_scope(label):
+                continue
+            stripped_tokens = _normalize_business_scope(stripped)
+            if len(stripped_tokens) == 1 and stripped_tokens[0] not in {"diwali", "holiday", "festival", "weekend"}:
+                return stripped
+            label = stripped
+        elif _looks_like_campaign_title_scope(label):
+            continue
         if _looks_like_business_scope(label):
             return label
     return ""
@@ -2444,7 +2524,7 @@ def flyer_business_scope_block_message(customer: dict, raw_request: str) -> str:
     if not account_name:
         return ""
     requested = _extract_requested_business_scope(raw_request)
-    if not requested or not _looks_like_business_scope(requested):
+    if not requested or not (_looks_like_business_scope(requested) or len(_normalize_business_scope(requested)) == 1):
         return ""
     if _business_scope_matches(requested, account_name):
         return ""

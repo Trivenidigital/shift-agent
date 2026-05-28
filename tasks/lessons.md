@@ -1,5 +1,10 @@
 # Lessons
 
+## 2026-05-27 - Flyer autonomous repair must keep Hermes as the brain
+
+- Do not ship "autonomous repair" as deterministic Python text/image patching. Python may classify hard stops, persist retry ledgers, and enforce no-send safety, but the repair instruction itself must come from Hermes/LLM planning or the path must write a skipped audit row and fall back to manual review.
+- Store autorepair attempts outside `FlyerProject`; project rows are rollback-sensitive and use `extra="forbid"`, so adding ad hoc fields can break rollback to older deployed code.
+
 ## 2026-05-22 - Flyer Hermes intent layer
 
 - When working in isolated worktrees, verify the plan/design file landed in the intended worktree before dispatching reviewers. A plan written to the dirty root checkout can make reviewers correctly report "file missing" even though the main session sees it.

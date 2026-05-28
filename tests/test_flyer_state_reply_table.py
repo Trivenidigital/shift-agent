@@ -315,16 +315,15 @@ def test_cf_router_status_reply_dispatch_uses_source_edit_helper_only_for_source
 
     # Static-text inspection of hooks.py — verify the routing pattern.
     hooks_text = Path(hooks_loader.path).read_text(encoding="utf-8")
-    assert 'manual_reason_code == "source_edit_provider_unavailable"' in hooks_text, (
-        "cf-router routing must branch on reason_code, not just status"
+    assert "is_source_edit_provider_unavailable_reason" in hooks_text, (
+        "cf-router routing must branch on normalized reason_code, not just status"
     )
-    # Verify both status-check sites have the routing pattern. The string can
-    # appear additional times for audit-reason classification (S7 fix to
-    # avoid mis-tagging non-source-edit status checks as source-edit traffic).
-    source_edit_route_count = hooks_text.count('manual_reason_code == "source_edit_provider_unavailable"')
-    assert source_edit_route_count >= 2, (
-        f"expected at least 2 reason_code routing sites in hooks.py "
-        f"(one per status-check branch), got {source_edit_route_count}"
+    # Verify both status-check sites route through the shared selector instead
+    # of re-implementing direct reason-code comparisons in separate branches.
+    selector_route_count = hooks_text.count("_select_flyer_status_reply(") - 1  # subtract function definition
+    assert selector_route_count >= 2, (
+        f"expected at least 2 status-check branches to call _select_flyer_status_reply, "
+        f"got {selector_route_count}"
     )
 
 

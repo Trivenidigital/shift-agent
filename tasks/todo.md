@@ -1,9 +1,38 @@
 # Backlog — pending items
 
+## Flyer Hermes Semantic Brief Reliability - 2026-05-27
+
+- [x] Write reliability plan with drift-check + Hermes-first analysis.
+- [x] Plan review by 2 parallel agents.
+- [x] Apply plan review fixes.
+- [x] Write design.
+- [x] Design review by 2 parallel agents.
+- [x] Apply design review fixes.
+- [x] Build with TDD.
+- [x] Create PR.
+- [x] PR review by 3 parallel agents.
+- [x] Apply PR review fixes.
+- [ ] Merge and deploy.
+
 Living checklist. Items grouped by priority; each completed item gets `✅` and a date.
 For history of *completed* multi-phase initiatives (platform extract, sender-id, agent #2/4/5, etc.), see git log + `tasks/all-phases-*.md`.
 
 Last updated: 2026-05-21 (Flyer customer-readiness stabilization gate work added; prior note: Flyer brief builder low-typing intake)
+
+---
+
+## Active - Flyer Hermes autonomous repair loop (2026-05-27)
+
+**Drift-check tag:** extends-Hermes
+
+Plan: `tasks/flyer-hermes-autonomous-repair-loop-plan-2026-05-27.md`
+Design: `tasks/flyer-hermes-autonomous-repair-loop-design-2026-05-27.md`
+
+- [x] Write plan and fold two independent reviews.
+- [x] Write design and fold two independent reviews.
+- [x] Build first bounded Hermes-planned regeneration slice with tests.
+- [ ] Open PR and run three-vector review.
+- [ ] Merge and deploy with VPS smoke gate.
 
 ---
 
@@ -1446,3 +1475,20 @@ Review: `tests/test_flyer_facts.py tests/test_flyer_renderer.py tests/test_flyer
 - [x] Added regression for asset delivery resolving a prior `worker_completed_no_customer_visible_success` incident.
 
 Review: `tests/test_flyer_recovery.py tests/test_flyer_recovery_watchdog.py` -> `37 passed`; touched-file `py_compile` passed; `git diff --check` clean.
+
+## Pre-PR #298 stuck-project customer_id / chat_id backfill - 2026-05-27
+
+Filed during F0105 incident response (deploy `deploy-20260527-134933-affe3c0a` + recovery runbook). Not yet started.
+
+- [ ] Survey: count projects with `customer_id=None` AND `customer_phone` populated in `/opt/shift-agent/state/flyer/projects.json`. Upper bound via `grep -c '"customer_id": null' /opt/shift-agent/state/flyer/projects.json`. Per-status breakdown for `manual_edit_required` / `awaiting_final_approval` / `revising_design`.
+- [ ] Write deterministic backfill script: for each pre-PR-#298 project where `customer_id is None` AND `customer_phone` matches exactly one row in `customers.json`, write `customer_id` + (where deterministic) `primary_chat_id` back onto the project row. Idempotent. Safe-IO atomic write + flock.
+- [ ] Dry-run mode that prints would-write rows without mutating.
+- [ ] Regression test that asserts the backfill leaves a multi-match phone alone (refuses to guess).
+- [ ] Run dry-run on prod state, review, then apply.
+- [ ] Drift-tag: extends-Hermes. Plan/design before build per the standard cycle.
+
+**Why this matters:** PR #298 (commit 87db715) added `customer_id` + `chat_id` persistence at CREATE time. Pre-PR-#298 projects still in `manual_edit_required` etc. carry `customer_id=None` / `chat_id=None`. The recovery engine's customer-origin heuristic suppresses follow-up customer acks for those projects (`missing_strong_customer_origin_evidence`), because it can't prove the chat binding from the project row alone. Surfaced concretely on F0105 during the 2026-05-27 incident: `customer_phone=+17329837841` matched CUST0001 unambiguously, but no `customer_id` was on the project row, so the recovery engine couldn't auto-ack the customer.
+
+**Out of scope:** changing the recovery heuristic itself. The heuristic stays as a defense against future projects that genuinely lack origin evidence. This entry is the targeted backfill for pre-cutover stuck rows.
+
+**Source incident:** F0105 (Lakshmi's Kitchen). Cutover commit: PR #298 (`87db715`). Affected project count: TBD (survey first).

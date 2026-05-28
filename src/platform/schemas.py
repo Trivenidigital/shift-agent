@@ -886,6 +886,9 @@ class FlyerRecoveryConfig(BaseModel):
     max_worker_runs_per_run: int = Field(default=1, ge=0, le=10)
     worker_model: str = Field(default="gpt-5.3-codex", min_length=1, max_length=120)
     worker_max_budget_usd: float = Field(default=2.0, ge=0.01, le=25.0)
+    auto_repair_enabled: bool = True
+    max_auto_repair_attempts: int = Field(default=1, ge=0, le=3)
+    auto_repair_attempt_stale_minutes: int = Field(default=30, ge=1, le=1440)
 
     @field_validator("mode", mode="before")
     @classmethod
@@ -1861,6 +1864,32 @@ class FlyerProjectStore(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     next_sequence: int = Field(default=1, ge=1)
     projects: list[FlyerProject] = Field(default_factory=list)
+
+
+FlyerRepairMode = Literal["hermes_regenerate"]
+FlyerRepairStatus = Literal["attempted", "succeeded", "exhausted", "skipped", "stale"]
+
+
+class FlyerRepairAttempt(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    attempt_id: str = Field(min_length=1, max_length=120)
+    project_id: str = Field(pattern=r"^F\d{4,}$")
+    project_version: int = Field(ge=1)
+    mode: FlyerRepairMode = "hermes_regenerate"
+    status: FlyerRepairStatus
+    qa_blocker_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    repair_instruction_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    repair_instruction: str = Field(default="", max_length=1000)
+    started_at: datetime
+    completed_at: Optional[datetime] = None
+    generated_asset_ids: list[str] = Field(default_factory=list, max_length=10)
+    detail: str = Field(default="", max_length=1000)
+
+
+class FlyerAutoRepairAttemptStore(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    schema_version: int = Field(default=1, ge=1)
+    attempts: list[FlyerRepairAttempt] = Field(default_factory=list, max_length=20000)
 
 
 class CateringLeadExtractedFields(BaseModel):
@@ -3487,6 +3516,33 @@ class FlyerQuotaBlocked(_BaseEntry):
     limit: int = Field(ge=1)
 
 
+class _FlyerAutoRepairEntry(_BaseEntry):
+    attempt_id: str = Field(min_length=1, max_length=120)
+    project_id: str = Field(pattern=r"^F\d{4,}$")
+    project_version: int = Field(ge=1)
+    mode: FlyerRepairMode = "hermes_regenerate"
+    qa_blocker_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    repair_instruction_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    detail: str = Field(default="", max_length=1000)
+    generated_asset_ids: list[str] = Field(default_factory=list, max_length=10)
+
+
+class FlyerAutoRepairAttempted(_FlyerAutoRepairEntry):
+    type: Literal["flyer_autorepair_attempted"] = "flyer_autorepair_attempted"
+
+
+class FlyerAutoRepairSucceeded(_FlyerAutoRepairEntry):
+    type: Literal["flyer_autorepair_succeeded"] = "flyer_autorepair_succeeded"
+
+
+class FlyerAutoRepairExhausted(_FlyerAutoRepairEntry):
+    type: Literal["flyer_autorepair_exhausted"] = "flyer_autorepair_exhausted"
+
+
+class FlyerAutoRepairSkipped(_FlyerAutoRepairEntry):
+    type: Literal["flyer_autorepair_skipped"] = "flyer_autorepair_skipped"
+
+
 FlyerRecoverySeverity = Literal["info", "warning", "critical"]
 FlyerRecoveryEvidenceQuality = Literal["strong", "weak", "missing"]
 
@@ -4755,6 +4811,10 @@ LogEntry = Annotated[
         Annotated[FlyerAccountUpdated, Tag("flyer_account_updated")],
         Annotated[FlyerUsageRecorded, Tag("flyer_usage_recorded")],
         Annotated[FlyerQuotaBlocked, Tag("flyer_quota_blocked")],
+        Annotated[FlyerAutoRepairAttempted, Tag("flyer_autorepair_attempted")],
+        Annotated[FlyerAutoRepairSucceeded, Tag("flyer_autorepair_succeeded")],
+        Annotated[FlyerAutoRepairExhausted, Tag("flyer_autorepair_exhausted")],
+        Annotated[FlyerAutoRepairSkipped, Tag("flyer_autorepair_skipped")],
         Annotated[FlyerRecoveryIncidentOpened, Tag("flyer_recovery_incident_opened")],
         Annotated[FlyerRecoveryCustomerAckAttempted, Tag("flyer_recovery_customer_ack_attempted")],
         Annotated[FlyerRecoveryCustomerAckSent, Tag("flyer_recovery_customer_ack_sent")],
@@ -4873,6 +4933,8 @@ __all__ = [
     "FlyerAssetsDelivered", "FlyerDeliveryFailed",
     "FlyerCustomerCreated", "FlyerCustomerActivated", "FlyerAccountUpdated",
     "FlyerUsageRecorded", "FlyerQuotaBlocked",
+    "FlyerRepairMode", "FlyerRepairStatus", "FlyerRepairAttempt", "FlyerAutoRepairAttemptStore",
+    "FlyerAutoRepairAttempted", "FlyerAutoRepairSucceeded", "FlyerAutoRepairExhausted", "FlyerAutoRepairSkipped",
     "FlyerRecoveryIncidentOpened", "FlyerRecoveryCustomerAckAttempted",
     "FlyerRecoveryCustomerAckSent", "FlyerRecoveryCustomerAckFailed",
     "FlyerRecoveryCustomerAckUncertain", "FlyerRecoveryCustomerAckSuppressed",

@@ -71,6 +71,25 @@ def _mark_revision_applied(revisions: list[FlyerRevision], revision_id: str) -> 
     return updated
 
 
+def _mark_superseded_revisions_applied(
+    revisions: list[FlyerRevision],
+    current_version: int,
+) -> tuple[list[FlyerRevision], bool]:
+    updated: list[FlyerRevision] = []
+    changed = False
+    for rev in revisions:
+        if (
+            not rev.applied
+            and rev.resulting_version is not None
+            and rev.resulting_version <= current_version
+        ):
+            updated.append(rev.model_copy(update={"applied": True}))
+            changed = True
+        else:
+            updated.append(rev)
+    return updated, changed
+
+
 def _append_source_edit_correction(raw_request: str, correction: str) -> str:
     correction = " ".join((correction or "").split())
     base = (raw_request or "").rstrip()
@@ -409,6 +428,15 @@ def main() -> int:
                     })
                     should_write = True
             if args.approve_message_id:
+                revisions, revisions_changed = _mark_superseded_revisions_applied(updated.revisions, updated.version)
+                if revisions_changed:
+                    updated = updated.model_copy(update={
+                        "revisions": revisions,
+                        "updated_at": datetime.now(timezone.utc),
+                    })
+                    store.projects[idx] = updated
+                    store = FlyerProjectStore.model_validate(store.model_dump())
+                    atomic_write_text(state_path, store.model_dump_json(indent=2))
                 unapplied = [r.revision_id for r in updated.revisions if not r.applied]
                 if unapplied:
                     raise SystemExit(f"cannot approve with unapplied revisions: {','.join(unapplied)}")

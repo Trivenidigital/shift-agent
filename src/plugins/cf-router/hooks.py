@@ -119,7 +119,14 @@ _SAMPLE_PROMPT_REQUEST = re.compile(
     r"|\b(?:help|need|suggest|share|give|show|send|provide)\b.{0,30}"
     r"\b(?:\d+\s+)?(?:idea|ideas|prompt|prompts|example|examples|hook|hooks|caption|captions|copy|copies|line|lines|text|template|templates|tagline|taglines|slogan|slogans|punchline|punchlines|option|options)\b.{0,40}"
     r"\b(?:for|about|on)\b.{0,30}\b(?:weekend|offer|promotion|promo|campaign|marketing|flyer|business|shop|store|poster|ad|ads)\b"
-    r"|\b(?:what(?:'s| is| are)|any)\b.{0,40}\b(?:promo|promotion|marketing|campaign|flyer|flier|poster|ad|ads|business|shop|store|offer)\b.{0,40}\b(?:idea|ideas|caption|captions|copy|copies|prompt|prompts|tagline|taglines|slogan|slogans|punchline|punchlines|option|options)\b",
+    r"|\b(?:what(?:'s| is| are)|any)\b.{0,40}\b(?:promo|promotion|marketing|campaign|flyer|flier|poster|ad|ads|business|shop|store|offer)\b.{0,40}\b(?:idea|ideas|caption|captions|copy|copies|prompt|prompts|tagline|taglines|slogan|slogans|punchline|punchlines|option|options)\b"
+    r"|\bwhat\s+can\s+you\s+suggest\b.{0,60}\b(?:for|about|on)\b.{0,40}\b(?:flyer|flier|poster|ad|ads|promo|promotion|campaign|offer|business|shop|store)\b"
+    r"|\bwhat\s+should\s+i\s+write\b.{0,60}\b(?:for|about|on)\b.{0,40}\b(?:flyer|flier|poster|ad|ads|promo|promotion|campaign|offer)\b"
+    r"|\bsample\s+(?:flyer|flier|poster|ad|marketing)\s+request\b"
+    r"|\bwhat\s+should\s+(?:be|i\s+put)\s+on\s+(?:my|the|this)\s+(?:flyer|flier|poster|ad)\b"
+    r"|\bsuggest\b.{0,30}\b(?:flyer|flier|poster|ad)\b.{0,20}\b(?:wording|wordings|copy|caption|captions|text|line|lines)\b"
+    r"|\bneed\b.{0,20}\bideas?\b.{0,15}\bfor\b.{0,10}\bcaptions?\b"
+    r"|\bcan\s+i\s+get\b.{0,20}\b(?:flyer|flier|poster|ad)\b.{0,20}\bideas?\b",
     re.IGNORECASE,
 )
 
@@ -2148,6 +2155,22 @@ def _select_flyer_status_reply(project: dict) -> tuple[str, bool]:
     return actions.flyer_project_status_reply(project), False
 
 
+def _resolve_status_project_for_reply(*, active_project: dict, body: str, phone: Optional[str], chat_id: str) -> tuple[dict, Optional[str]]:
+    """Select status target row for customer status check replies."""
+    mentioned_id = actions.extract_flyer_project_id_mention(body)
+    if mentioned_id:
+        named = actions.find_flyer_project_by_id_for_sender(phone, chat_id, mentioned_id)
+        if named is not None:
+            return named, mentioned_id
+        return active_project, mentioned_id
+    if str(active_project.get("status") or "") == "manual_edit_required":
+        return active_project, None
+    latest = actions.find_latest_flyer_project_for_status_by_sender(phone, chat_id)
+    if latest is not None and str(latest.get("updated_at") or "") > str(active_project.get("updated_at") or ""):
+        return latest, None
+    return active_project, None
+
+
 def _try_flyer_delivery_state_guard(text: str, chat_id: str, event: Any) -> Optional[dict]:
     """Fail closed for delivery-state language when no flyer project resolves.
 
@@ -2848,12 +2871,7 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
             return None
         sp_id = str(status_project.get("project_id") or "")
         sp_status = str(status_project.get("status") or "")
-        manual_block = status_project.get("manual_review") or {}
-        manual_reason_code = str(manual_block.get("reason_code") or "")
-        if sp_status == "manual_edit_required" and manual_reason_code == "source_edit_provider_unavailable":
-            reply = actions.flyer_manual_edit_status_reply(status_project)
-        else:
-            reply = actions.flyer_project_status_reply(status_project)
+        reply, _is_source_edit_manual_status = _select_flyer_status_reply(status_project)
         ack_ok, mid, err = actions.send_flyer_text(
             chat_id, reply,
             action_context=build_action_context(
@@ -2988,16 +3006,12 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         #      and delivered) wins when it's strictly newer than the active
         #      picker's result. We refuse to downgrade the customer to a
         #      staler row.
-        status_project = active_project
-        mentioned_id = actions.extract_flyer_project_id_mention(body)
-        if mentioned_id:
-            named = actions.find_flyer_project_by_id_for_sender(phone, chat_id, mentioned_id)
-            if named is not None:
-                status_project = named
-        else:
-            latest = actions.find_latest_flyer_project_for_status_by_sender(phone, chat_id)
-            if latest is not None and str(latest.get("updated_at") or "") > str(active_project.get("updated_at") or ""):
-                status_project = latest
+        status_project, mentioned_id = _resolve_status_project_for_reply(
+            active_project=active_project,
+            body=body,
+            phone=phone,
+            chat_id=chat_id,
+        )
         status_project_id = str(status_project.get("project_id") or "")
         status_project_status = str(status_project.get("status") or "")
         # P0-6: manual_edit_required projects pick the source-edit-specific
@@ -3134,16 +3148,12 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
             # the active-project status branch — keep the two sites
             # consistent so customers get the same answer regardless of
             # which intercept path runs first.
-            status_project = active_project
-            mentioned_id = actions.extract_flyer_project_id_mention(body)
-            if mentioned_id:
-                named = actions.find_flyer_project_by_id_for_sender(phone, chat_id, mentioned_id)
-                if named is not None:
-                    status_project = named
-            else:
-                latest = actions.find_latest_flyer_project_for_status_by_sender(phone, chat_id)
-                if latest is not None and str(latest.get("updated_at") or "") > str(active_project.get("updated_at") or ""):
-                    status_project = latest
+            status_project, mentioned_id = _resolve_status_project_for_reply(
+                active_project=active_project,
+                body=body,
+                phone=phone,
+                chat_id=chat_id,
+            )
             status_project_id = str(status_project.get("project_id") or "")
             status_project_status = str(status_project.get("status") or "")
             # P0-6: same reason_code routing as the first status-check handler

@@ -13,6 +13,8 @@ import re
 from pathlib import Path
 from contextlib import contextmanager
 from typing import Iterable, Iterator, Literal
+import os
+import urllib.request
 
 
 EvidenceQuality = Literal["strong", "weak", "missing"]
@@ -43,6 +45,13 @@ class AckDecision:
     reason: str
 
 
+@dataclass(frozen=True)
+class AutoRepairDecision:
+    decision: Literal["hermes_plan_eligible", "hard_stop", "manual_required"]
+    reason: str
+    blockers: list[str]
+
+
 FORBIDDEN_CUSTOMER_TERMS = [
     "provider",
     "manual queue",
@@ -69,6 +78,221 @@ BUNDLE_SENSITIVE_KEYS = {
 
 def sha256_text(text: str) -> str:
     return "sha256:" + hashlib.sha256((text or "").encode("utf-8", errors="replace")).hexdigest()
+
+
+_AUTOREPAIR_TRUST_RISK_TOKENS = (
+    "wrong business",
+    "wrong brand",
+    "visible wrong business",
+    "visible wrong brand",
+    "contact",
+    "phone",
+    "address",
+    "price mismatch",
+    "wrong price",
+    "promotion_end",
+    "promotion end",
+    "schedule",
+    "event_date",
+    "date",
+    "time",
+)
+
+_AUTOREPAIR_DEPENDENCY_TOKENS = (
+    "pillow is required",
+    "pillow is unavailable",
+    "modulenotfounderror",
+    "no module named",
+    "provider_timeout",
+    "bad gateway",
+    "gateway timeout",
+)
+
+_UNSAFE_REPAIR_INSTRUCTION_TOKENS = (
+    "change the business",
+    "replace the business",
+    "change business",
+    "replace business",
+    "change the brand",
+    "replace the brand",
+    "change brand",
+    "replace brand",
+    "change the phone",
+    "replace the phone",
+    "change phone",
+    "replace phone",
+    "change the address",
+    "replace the address",
+    "change address",
+    "replace address",
+    "change the price",
+    "replace the price",
+    "change price",
+    "replace price",
+    "change the schedule",
+    "replace the schedule",
+    "change schedule",
+    "replace schedule",
+    "change the date",
+    "replace the date",
+    "change date",
+    "replace date",
+    "change the time",
+    "replace the time",
+    "change time",
+    "replace time",
+    "change the promotion end",
+    "replace the promotion end",
+    "update the promotion end",
+    "change promotion end",
+    "replace promotion end",
+    "replace ",
+    "use a different business",
+    "use another business",
+)
+
+
+def _project_has_offer_context(project: object) -> bool:
+    raw = f"{getattr(project, 'raw_request', '')} {getattr(getattr(project, 'fields', None), 'notes', '')}".strip()
+    if re.search(r"\b(?:price|prices|offer|offers|sale|discount|free|items?|menu|combo|biryani|snacks?)\b", raw, flags=re.IGNORECASE):
+        return True
+    for fact in getattr(project, "locked_facts", []) or []:
+        fact_id = str(getattr(fact, "fact_id", ""))
+        label = str(getattr(fact, "label", ""))
+        value = str(getattr(fact, "value", ""))
+        if value and (
+            fact_id.startswith("detail_")
+            or fact_id.startswith("offer:")
+            or fact_id == "pricing_structure"
+            or "item" in label.casefold()
+            or "offer" in label.casefold()
+        ):
+            return True
+    return False
+
+
+def classify_flyer_qa_for_autorepair(blockers: Iterable[str], project: object) -> AutoRepairDecision:
+    """Classify QA blockers into Hermes-plannable repair vs fail-closed cases."""
+    normalized = [str(blocker).strip() for blocker in blockers if str(blocker).strip()]
+    if not normalized:
+        return AutoRepairDecision("manual_required", "no_blockers", [])
+
+    lowered = [item.casefold() for item in normalized]
+    if any(any(token in item for token in _AUTOREPAIR_TRUST_RISK_TOKENS) for item in lowered):
+        return AutoRepairDecision("hard_stop", "customer_trust_risk", normalized)
+    if any(any(token in item for token in _AUTOREPAIR_DEPENDENCY_TOKENS) for item in lowered):
+        return AutoRepairDecision("manual_required", "provider_or_dependency_failure", normalized)
+
+    eligible = False
+    for item in lowered:
+        if "missing rendered fact: detail_" in item:
+            eligible = True
+        elif "manifest reports missing facts:" in item and "detail_" in item:
+            eligible = True
+        elif re.search(r"missing required visible fact:\s*item:\d+:name", item):
+            eligible = _project_has_offer_context(project)
+        elif re.search(r"missing required visible fact:\s*(campaign_title|headline|pricing_structure|offer:\d+)", item):
+            eligible = _project_has_offer_context(project)
+        elif "duplicate rendered fact" in item and "detail_" in item:
+            eligible = True
+        elif "instruction text leaked into flyer copy" in item:
+            eligible = True
+
+    if eligible:
+        return AutoRepairDecision("hermes_plan_eligible", "qa_visible_copy_repairable", normalized)
+    return AutoRepairDecision("manual_required", "unknown_blocker_pattern", normalized)
+
+
+def resolve_hermes_model(model: str, *, hermes_config_path: Path = Path("/root/.hermes/config.yaml")) -> str:
+    requested = (model or "").strip()
+    if requested and requested != "default_hermes_gateway":
+        return requested
+    if hermes_config_path.exists():
+        text = hermes_config_path.read_text(encoding="utf-8", errors="ignore")
+        match = re.search(r"(?m)^\s*default\s*:\s*['\"]?([^'\"\n#]+)", text)
+        if match:
+            return match.group(1).strip()
+    env_model = os.environ.get("HERMES_DEFAULT_MODEL", "").strip()
+    if env_model:
+        return env_model
+    return ""
+
+
+def repair_instruction_is_safe(instruction: str) -> bool:
+    lowered = (instruction or "").casefold()
+    return bool(lowered.strip()) and not any(token in lowered for token in _UNSAFE_REPAIR_INSTRUCTION_TOKENS)
+
+
+def plan_flyer_autorepair(*, project: object, blockers: Iterable[str], rendered_text: str = "", model: str = "default_hermes_gateway") -> dict:
+    """Ask Hermes' configured LLM substrate for a bounded poster-repair plan.
+
+    The caller treats unavailable or malformed planner output as fail-closed
+    manual review. Tests monkeypatch this function; production uses the same
+    OpenRouter/Hermes env convention as the renderer.
+    """
+    api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    if not api_key:
+        for env_path in (Path("/root/.hermes/.env"), Path("/opt/shift-agent/.env")):
+            if not env_path.exists():
+                continue
+            for line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                if line.startswith("OPENROUTER_API_KEY="):
+                    api_key = line.split("=", 1)[1].strip().strip("'\"")
+                    break
+            if api_key:
+                break
+    if not api_key:
+        return {"action": "manual_required", "reason": "planner_unavailable"}
+
+    planner_model = resolve_hermes_model(model)
+    if not planner_model:
+        return {"action": "manual_required", "reason": "hermes_model_unconfigured"}
+    prompt = {
+        "project_id": getattr(project, "project_id", ""),
+        "raw_request": getattr(project, "raw_request", ""),
+        "locked_facts": [
+            {"fact_id": getattr(f, "fact_id", ""), "label": getattr(f, "label", ""), "value": getattr(f, "value", "")}
+            for f in (getattr(project, "locked_facts", []) or [])
+        ],
+        "qa_blockers": list(blockers),
+        "rendered_text": rendered_text[:2000],
+        "instruction": (
+            "Return compact JSON only. If safe, use action regenerate_with_instruction "
+            "and a repair_instruction under 500 chars. Never change business identity, "
+            "contact, address, prices, schedule, or unauthorized brand. Otherwise use "
+            "manual_required."
+        ),
+    }
+    payload = {
+        "model": planner_model,
+        "messages": [{"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.1,
+    }
+    req = urllib.request.Request(
+        "https://openrouter.ai/api/v1/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://triveni.local/flyer-autorepair",
+            "X-Title": "Flyer Studio Autorepair",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=45) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        content = data["choices"][0]["message"]["content"]
+        parsed = json.loads(content)
+    except Exception as exc:
+        return {"action": "manual_required", "reason": f"planner_error:{exc.__class__.__name__}"}
+    if parsed.get("action") != "regenerate_with_instruction":
+        return {"action": parsed.get("action", "manual_required"), "reason": parsed.get("reason", "planner_declined")}
+    instruction = str(parsed.get("repair_instruction") or "").strip()
+    if not repair_instruction_is_safe(instruction):
+        return {"action": "manual_required", "reason": "planner_unsafe_or_empty_instruction"}
+    return {"action": "regenerate_with_instruction", "repair_instruction": instruction[:1000], "confidence": str(parsed.get("confidence", ""))}
 
 
 def _redact_identifier(value: str) -> str:

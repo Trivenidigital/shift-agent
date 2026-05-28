@@ -151,6 +151,36 @@ def test_triage_operator_hint_normalizes_reason_code_case():
     assert "provider credentials" in hint.lower()
 
 
+def test_list_manual_queue_accepts_manual_status_case_and_spacing_variants():
+    from agents.flyer.manual_queue import list_manual_queue
+
+    project = _manual_project().model_copy(update={
+        "manual_review": _manual_project().manual_review.model_copy(update={"status": " Queued "}),
+    })
+    rows = list_manual_queue(
+        FlyerProjectStore(projects=[project]),
+        now=datetime(2026, 5, 19, 1, 0, tzinfo=timezone.utc),
+    )
+    assert len(rows) == 1
+    assert rows[0]["manual_status"] == "queued"
+
+
+def test_list_manual_queue_uses_created_at_when_manual_queued_and_updated_missing():
+    from agents.flyer.manual_queue import list_manual_queue
+
+    created = datetime(2026, 5, 19, 0, 0, tzinfo=timezone.utc)
+    project = _manual_project().model_copy(update={
+        "created_at": created,
+        "updated_at": None,
+        "manual_review": _manual_project().manual_review.model_copy(update={"queued_at": None}),
+    })
+    rows = list_manual_queue(
+        FlyerProjectStore(projects=[project]),
+        now=datetime(2026, 5, 19, 2, 0, tzinfo=timezone.utc),
+    )
+    assert rows[0]["age_minutes"] == 120
+
+
 def test_list_manual_queue_excludes_nonqueued_projects_with_old_failed_qa():
     from agents.flyer.manual_queue import list_manual_queue
 
@@ -190,6 +220,42 @@ def test_list_manual_queue_includes_reason_code():
 
     rows = list_manual_queue(FlyerProjectStore(projects=[_manual_project()]), now=datetime(2026, 5, 20, tzinfo=timezone.utc))
     assert rows[0]["manual_reason_code"] == "source_edit_provider_unavailable"
+
+
+def test_list_manual_queue_canonicalizes_reason_from_legacy_reason_text():
+    from agents.flyer.manual_queue import list_manual_queue
+
+    project = _manual_project().model_copy(update={
+        "manual_review": _manual_project().manual_review.model_copy(update={
+            "reason_code": "unclassified",
+            "reason": "operator_burndown_source_edit_provider_unavailable_retry_needed",
+            "detail": "legacy row",
+        }),
+    })
+    rows = list_manual_queue(
+        FlyerProjectStore(projects=[project]),
+        now=datetime(2026, 5, 20, tzinfo=timezone.utc),
+    )
+    assert rows[0]["manual_reason_code"] == "source_edit_provider_unavailable"
+    assert rows[0]["reason_family"] == "provider_readiness"
+
+
+def test_list_manual_queue_canonicalizes_reason_from_detail_markers():
+    from agents.flyer.manual_queue import list_manual_queue
+
+    project = _manual_project().model_copy(update={
+        "manual_review": _manual_project().manual_review.model_copy(update={
+            "reason_code": "unclassified",
+            "reason": "legacy_unknown",
+            "detail": "visual_qa_failed: logo text mismatch",
+        }),
+    })
+    rows = list_manual_queue(
+        FlyerProjectStore(projects=[project]),
+        now=datetime(2026, 5, 20, tzinfo=timezone.utc),
+    )
+    assert rows[0]["manual_reason_code"] == "visual_qa_failed"
+    assert rows[0]["reason_family"] == "visual_quality"
 
 
 def test_list_manual_queue_adds_reason_family_action_and_priority_fields():
@@ -335,6 +401,35 @@ def test_triage_summary_surfaces_manual_status_split():
         now=datetime(2026, 5, 19, 12, 0, tzinfo=timezone.utc),
     )
     assert summary["manual_status_counts"] == {"in_progress": 1, "queued": 1}
+
+
+def test_triage_summary_normalizes_manual_status_casing():
+    from agents.flyer.manual_queue import triage_summary
+
+    queued = _project("F0062", "+19045550104", age_hours=3, reason_code="visual_qa_failed").model_copy(update={
+        "manual_review": _project("F0062", "+19045550104", age_hours=3).manual_review.model_copy(update={"status": " In_Progress "}),
+    })
+    summary = triage_summary(
+        FlyerProjectStore(projects=[queued]),
+        now=datetime(2026, 5, 19, 12, 0, tzinfo=timezone.utc),
+    )
+    assert summary["manual_status_counts"] == {"in_progress": 1}
+
+
+def test_triage_summary_groups_field_is_list():
+    from agents.flyer.manual_queue import triage_summary
+
+    summary = triage_summary(FlyerProjectStore(projects=[_manual_project()]), now=datetime(2026, 5, 20, tzinfo=timezone.utc))
+    assert isinstance(summary["groups"], list)
+
+
+def test_triage_reason_family_and_hint_cover_dependency_missing_and_legacy_unknown():
+    from agents.flyer.manual_queue import _operator_action_hint, _reason_family
+
+    assert _reason_family("dependency_missing") == "provider_readiness"
+    assert _reason_family("legacy_unknown") == "operator_policy"
+    assert "dependency" in _operator_action_hint("dependency_missing").lower()
+    assert "legacy" in _operator_action_hint("legacy_unknown").lower()
 
 
 def test_classify_legacy_reason_picks_visual_qa_when_qa_failed():

@@ -1196,3 +1196,273 @@ def test_visual_qa_brown_rice_passes_when_only_jeera_rice_is_a_replacement(tmp_p
     )
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
     assert all("Brown Rice" not in b and "Rice" not in b for b in report.blockers)
+
+
+def test_visual_qa_semantically_accepts_diwali_campaign_and_offer_facts(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    project = FlyerProject(
+        project_id="F0106",
+        status="generating_concepts",
+        customer_phone="+17329837841",
+        created_at=datetime(2026, 5, 27, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 5, 27, tzinfo=timezone.utc),
+        original_message_id="m-diwali",
+        raw_request="Create a flyer for Diwali sale, All items 5-10% off. Lucky draw eligible with purchase above $100.",
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Diwali Sale", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="pricing_structure", label="Pricing", value="All items 5-10% off", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="offer:0", label="Offer", value="Lucky draw eligible with purchase above $100", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+        ],
+    )
+    artifact = _write_sidecar(
+        tmp_path,
+        "Lakshmis Kitchen\nDIWALI SALE\nALL ITEMS 5-10% OFF\nLucky Draw Eligible\nAbove $100 purchase\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
+    )
+
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert report.status == "passed", report.blockers
+
+
+def test_visual_qa_accepts_requested_catering_label_as_non_identity(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    project = FlyerProject(
+        project_id="F0105",
+        status="generating_concepts",
+        customer_phone="+17329837841",
+        created_at=datetime(2026, 5, 27, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 5, 27, tzinfo=timezone.utc),
+        original_message_id="m-f0105",
+        raw_request="Create a daily thali specials flyer. Include veg, chicken, and goat specials, sides, catering note, address, phone.",
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="item:0:name", label="Item", value="veg", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:1:name", label="Item", value="chicken", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:2:name", label="Item", value="goat specials", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:3:name", label="Item", value="sides", source="customer_text", required=True),
+        ],
+    )
+    artifact = _write_sidecar(
+        tmp_path,
+        "Lakshmi's Kitchen\nCATERING\nDAILY THALI SPECIALS\nVEG THALI\nCHICKEN THALI\nGOAT THALI\nSIDES & DESSERTS\n90 BRYBAR DR ST JOHNS FL\nCONTACT: +17329837841",
+    )
+
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert report.status == "passed", report.blockers
+
+
+def test_visual_qa_still_blocks_unrequested_catering_identity(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    project = _project().model_copy(update={
+        "locked_facts": [
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+        ],
+        "raw_request": "Create a daily thali specials flyer.",
+    })
+    artifact = _write_sidecar(
+        tmp_path,
+        "Lakshmi's Kitchen\nCATERING\nDAILY THALI SPECIALS\n90 Brybar Dr St Johns FL\nCONTACT: +17329837841",
+    )
+
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert "visible wrong business/brand: Catering" in report.blockers
+
+
+def test_visual_qa_blocks_source_contract_catering_suffix_masthead(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    now = datetime(2026, 5, 27, tzinfo=timezone.utc)
+    project = FlyerProject(
+        project_id="F0118",
+        status="awaiting_final_approval",
+        customer_phone="+17329837841",
+        created_at=now,
+        updated_at=now,
+        original_message_id="m-source-catering",
+        raw_request="Use Acme Catering reference only as inspiration for Lakshmi's Kitchen.",
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+        ],
+        reference_extractions=[
+            FlyerReferenceExtraction(
+                asset_id="A0001",
+                role="source_edit_template",
+                provider="test",
+                status="ok",
+                source_contract=FlyerSourceContract(
+                    source_business_names=["Acme Catering"],
+                    target_business_name="Lakshmi's Kitchen",
+                    forbidden_substrings=[],
+                ),
+            )
+        ],
+    )
+    artifact = _write_sidecar(
+        tmp_path,
+        "Lakshmi's Kitchen\nCATERING\nDAILY THALI SPECIALS\n90 Brybar Dr St Johns FL\nCONTACT: +17329837841",
+    )
+
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert "visible wrong business/brand: Catering" in report.blockers
+
+
+def test_visual_qa_item_name_semantics_reject_negative_or_note_only_mentions(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    project = FlyerProject(
+        project_id="F0105",
+        status="generating_concepts",
+        customer_phone="+17329837841",
+        created_at=datetime(2026, 5, 27, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 5, 27, tzinfo=timezone.utc),
+        original_message_id="m-f0105",
+        raw_request="Create a daily thali specials flyer. Include veg, chicken, and goat specials, sides, catering note, address, phone.",
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="item:2:name", label="Item", value="goat specials", source="customer_text", required=True),
+        ],
+    )
+    negative = _write_sidecar(
+        tmp_path,
+        "Lakshmi's Kitchen\nDAILY THALI SPECIALS\nNO GOAT AVAILABLE TODAY\n90 Brybar Dr St Johns FL\nCONTACT: +17329837841",
+        filename="negative.png",
+    )
+    note_only = _write_sidecar(
+        tmp_path,
+        "Lakshmi's Kitchen\nDAILY THALI SPECIALS\nCATERING NOTE: ASK ABOUT GOAT OPTIONS\n90 Brybar Dr St Johns FL\nCONTACT: +17329837841",
+        filename="note.png",
+    )
+
+    negative_report = run_visual_qa(project, negative, output_format="concept_preview", allow_sidecar=True)
+    note_report = run_visual_qa(project, note_only, output_format="concept_preview", allow_sidecar=True)
+
+    assert "missing required visible fact: item:2:name" in negative_report.blockers
+    assert "missing required visible fact: item:2:name" in note_report.blockers
+
+
+def test_visual_qa_does_not_accept_bare_event_word_for_campaign_title(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    project = _project().model_copy(update={
+        "locked_facts": [
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Diwali Sale", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+        ],
+    })
+    artifact = _write_sidecar(tmp_path, "Lakshmis Kitchen\nDIWALI\n90 Brybar Dr St Johns FL\n+1 732 983 7841")
+
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert report.status == "failed"
+    assert "missing required visible fact: campaign_title" in report.blockers
+
+
+def test_visual_qa_requires_campaign_title_phrase_proximity(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    project = _project().model_copy(update={
+        "locked_facts": [
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Diwali Sale", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+        ],
+    })
+    artifact = _write_sidecar(
+        tmp_path,
+        "Lakshmis Kitchen\nDiwali decorations and sweets\nWeekly sale starts soon\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
+    )
+
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert report.status == "failed"
+    assert "missing required visible fact: campaign_title" in report.blockers
+
+
+def test_visual_qa_requires_expiry_context_for_promotion_end(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    project = FlyerProject(
+        project_id="F0107",
+        status="generating_concepts",
+        customer_phone="+17329837841",
+        created_at=datetime(2026, 5, 27, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 5, 27, tzinfo=timezone.utc),
+        original_message_id="m-snacks",
+        raw_request="Create a flyer for evening snacks sale, Wednesday and Thursday, any item $7.99. Free Masala Chai with any purchase above $12. This promotion runs until June 25.",
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Evening Snacks Sale", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="pricing_structure", label="Pricing", value="Any item $7.99", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="offer:0", label="Offer", value="Free Masala Chai with any purchase above $12", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="schedule", label="Schedule", value="Wednesday and Thursday", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="promotion_end", label="Promotion end", value="June 25", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+        ],
+    )
+    good_artifact = _write_sidecar(
+        tmp_path,
+        "Lakshmis Kitchen\nEVENING SNACKS SALE\nWednesday and Thursday\nAny item $7.99\nFree Masala Chai with purchase above $12\nOffer valid until June 25\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
+        filename="good.png",
+    )
+    bad_artifact = _write_sidecar(
+        tmp_path,
+        "Lakshmis Kitchen\nEVENING SNACKS SALE\nWednesday and Thursday\nAny item $7.99\nFree Masala Chai with purchase above $12\nJune 25\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
+        filename="bad.png",
+    )
+
+    good = run_visual_qa(project, good_artifact, output_format="concept_preview", allow_sidecar=True)
+    bad = run_visual_qa(project, bad_artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert good.status == "passed", good.blockers
+    assert bad.status == "failed"
+    assert "missing required visible fact: promotion_end" in bad.blockers
+
+
+def test_visual_qa_accepts_explicit_promotion_end_label(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    project = FlyerProject(
+        project_id="F0107",
+        status="generating_concepts",
+        customer_phone="+17329837841",
+        created_at=datetime(2026, 5, 27, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 5, 27, tzinfo=timezone.utc),
+        original_message_id="m-snacks",
+        raw_request="Create a flyer for evening snacks sale. This promotion runs until June 25.",
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Evening Snacks Sale", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="promotion_end", label="Promotion end", value="June 25", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+        ],
+    )
+    artifact = _write_sidecar(
+        tmp_path,
+        "Lakshmis Kitchen\nEVENING SNACKS SALE\nPROMOTION END: JUNE 25\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
+    )
+
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert report.status == "passed", report.blockers

@@ -919,6 +919,10 @@ def test_business_scope_block_message_catches_different_business_request():
     ) == ""
     assert actions.flyer_business_scope_block_message(
         customer,
+        "Create a flyer for Diwali store wide sales. All items 5-10% off",
+    ) == ""
+    assert actions.flyer_business_scope_block_message(
+        customer,
         "Create a flyer for my salon. Include haircut and styling offers",
     ) == ""
 
@@ -948,6 +952,47 @@ def test_business_scope_block_message_catches_nested_for_business_request():
         customer,
         "Can we create a flyer with sales for Memorial Day on groceries",
     ) == ""
+
+
+def test_business_scope_block_preserves_wrong_business_after_campaign_suffix_strip():
+    actions = _load_actions()
+    customer = {
+        "customer_id": "CUST0006",
+        "status": "trial",
+        "business_name": "Lakshmi's Kitchen",
+    }
+
+    reply = actions.flyer_business_scope_block_message(
+        customer,
+        "Create a flyer for Patel Grocery store wide sale. All items 5-10% off",
+    )
+
+    assert "set up for Lakshmi's Kitchen" in reply
+    assert "Patel Grocery" in reply
+
+    single_token = actions.flyer_business_scope_block_message(
+        customer,
+        "Create a flyer for Walmart store wide sale. All items 5-10% off",
+    )
+    assert "set up for Lakshmi's Kitchen" in single_token
+    assert "Walmart" in single_token
+
+
+def test_business_scope_block_ignores_campaign_titles_with_org_words():
+    actions = _load_actions()
+    customer = {
+        "customer_id": "CUST0007",
+        "status": "trial",
+        "business_name": "Lakshmi's Kitchen",
+    }
+
+    for text in [
+        "Create a flyer for Restaurant Week Specials",
+        "Create a flyer for Cafe Style Biryani",
+        "Create a flyer for Biryani Bazaar",
+        "Create a flyer for Kitchen Essentials Sale",
+    ]:
+        assert actions.flyer_business_scope_block_message(customer, text) == ""
 
 
 def test_cross_business_primary_request_blocks_before_incomplete_intake_loop(monkeypatch):
@@ -2176,6 +2221,18 @@ def test_explicit_sample_prompt_request_sends_starter_ideas(monkeypatch):
         "what are good promo captions for my business",
         "can you suggest punchlines for my business poster",
         "give marketing slogan options for my shop ad",
+        "what can you suggest for my weekend offer flyer",
+        "any ideas for my summer sale poster",
+        "what should i write for a grand opening flyer",
+        "sample flyer request please",
+        "what should be on my flyer",
+        "what should i put on my flyer",
+        "suggest flyer wording for summer sale",
+        "need ideas for caption",
+        "can i get some flyer ideas?",
+        "help me with caption ideas for my store promotion",
+        "give me few prompt ideas for my business ad",
+        "can you share a couple of flyer prompt ideas for my salon",
     ],
 )
 def test_sample_prompt_variants_route_to_sample_idea_intake(monkeypatch, message_text):

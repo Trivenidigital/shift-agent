@@ -236,6 +236,55 @@ def test_flyer_manual_edit_status_reply_unknown_reason_falls_back_to_unclassifie
     assert "queued for designer review" in reply.lower()
 
 
+def test_flyer_manual_edit_status_reply_uses_legacy_reason_markers(mods):
+    _, actions_mod = mods
+
+    reply = actions_mod.flyer_manual_edit_status_reply({
+        "status": "manual_edit_required",
+        "manual_review": {
+            "reason_code": "unclassified",
+            "reason": "operator_burndown_source_edit_provider_unavailable_no_customer_asset_sent",
+            "detail": "legacy row",
+        },
+    })
+
+    assert "queued for a designer to apply by hand" in reply.lower()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "status for project F0063",
+        "status of project F0063 please",
+        "any update on project F0063?",
+        "queue status for F0063",
+        "please share progress on F0063",
+        "where is update for F0063",
+        "status for project: F0063",
+        "status on project F0063",
+        "where is the update for project F0063",
+        "need status of F0063",
+        "status about F0063",
+        "status update for project F0063",
+    ],
+)
+def test_flyer_project_status_request_accepts_project_id_variants(mods, text):
+    _, actions_mod = mods
+    assert actions_mod.is_flyer_project_status_request(text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "update project F0063 price to 19.99",
+        "change project F0063 flyer phone number",
+    ],
+)
+def test_flyer_project_status_request_keeps_edit_intent_guard(mods, text):
+    _, actions_mod = mods
+    assert actions_mod.is_flyer_project_status_request(text) is False
+
+
 # ============================================================================
 # F8 — owner approval interception
 # ============================================================================

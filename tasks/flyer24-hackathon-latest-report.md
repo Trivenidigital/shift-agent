@@ -1,46 +1,54 @@
 # Flyer24 Hackathon Latest Report
 
-Updated: 2026-05-27T13:36:00Z
+Updated: 2026-05-27T22:33:00Z
 
 ## Current batch
-- Branch: `codex/flyer24-batch-billing-health-mcp-202605271325`
-- PR: #299 `fix(flyer): harden billing health MCP readiness visibility` (open)
-- Deploy: not run (money-adjacent visibility/config posture work)
-- Scope: close six billing health visibility gaps in Cockpit `/flyer/health` without payment mutation.
+- Branch: `codex/flyer24-batch-status-title-hardening-202605272245`
+- PR: #314 `fix(flyer): harden campaign title and manual status targeting`
+- Deploy: not run (PR stage)
+- Scope: harden campaign-title extraction and status-target project selection so stale/manual queue status checks stay deterministic.
 - Root-cause evidence:
-  - RED tests failed on missing `supported_payment_providers` / provider env metadata in billing model config.
-  - RED tests failed because missing-template detail did not include explicit fail-closed operator checklist.
-  - Billing health had no signal when configured provider was Razorpay but plan catalog stayed USD-only.
-- Risk: medium (billing/cockpit visibility and severity policy only; no checkout creation/activation/refund/subscription mutation).
-- Hermes/MCP-first: Hermes owns ingress/state/audit/payment workflow substrate; this batch adds read-only operator visibility for MCP-first Stripe/Razorpay posture.
+  - `tests/test_flyer_facts.py::test_profile_facts_keep_account_business_when_request_names_campaign_flyer` failed on `main`: campaign title was `Special Biryani's Flyer` not `Special Biryani's`.
+  - `tests/test_flyer_project_isolation.py::test_scenario3_status_check_on_stale_manual_edit_still_returns_manual_status` failed on `main`: status response targeted unrelated project id.
+  - Active/manual status branch duplicated status-project resolution logic, increasing drift risk.
+- Risk: low (deterministic normalization + routing target selection, no payment/quota mutation).
+- Hermes/MCP-first: Hermes owns ingress/sender/audit substrate; net-new is Flyer-local status/copy/fact normalization only.
 
 ## Batch issue list fixed
-1. Added explicit supported payment-provider list in billing health model config.
-2. Added configured-provider env-key hint (`STRIPE_SECRET_KEY` or `RAZORPAY_KEY_ID|RAZORPAY_KEY_SECRET`).
-3. Added provider MCP posture marker (`official_mcp_available`) for Stripe/Razorpay.
-4. Added plan-currency visibility in billing health model config.
-5. Added yellow posture when provider is Razorpay but plan tiers contain no INR currency.
-6. Added fail-closed operator checklist text when one or both checkout templates are missing/placeholder.
+1. Strip trailing medium words (`flyer`/`poster`/`banner`) from campaign title normalization.
+2. Add regression coverage for campaign-title suffix stripping.
+3. Centralize status-target project resolution for status checks.
+4. Keep active `manual_edit_required` project as status target unless customer explicitly mentions another project id.
+5. Reuse central resolver in both status-check branches to avoid drift.
+6. Add regression coverage for generic `any update?` with a newer unrelated status row.
 
 ## PR queue classification refresh
-- #292 `fix(flyer): re-land payment contract fail-closed checks and MCP readiness` - operator-review-required (money-adjacent), currently conflicting with main, remains open.
-- #298 `fix(flyer): close render dependency and recovery alert gaps` - open; broad runtime behavior change, needs review and check pass evidence before autonomous merge/deploy.
+- #299 `fix(flyer): harden billing health MCP readiness visibility` - operator-review-required (money-adjacent), open.
+- #307 `fix(flyer): consolidate payment fail-closed contract and MCP parity` - operator-review-required (money-adjacent), open.
+- #312 `fix(flyer): canonicalize legacy manual-review reasons` - merged to `main`.
+- #314 `fix(flyer): harden campaign title and manual status targeting` - open, low-risk, no CI checks reported yet (not merge-qualified yet).
 
 ## Running PR list (hackathon)
-- #292 `fix(flyer): re-land payment contract fail-closed checks and MCP readiness` - open; operator-review-required.
 - #295 `fix(flyer): close status-check phrasing gaps in active project routing` - merged to `main`; deployed `deploy-20260527-102236-c858caa1`.
 - #296 `fix(flyer): route sample-prompt lexical variants to starter ideas` - merged to `main`; deployed `deploy-20260527-112213-f019b345`.
-- #297 `fix(flyer): route sample-request tagline/slogan variants to idea intake` - merged to `main`.
-- #298 `fix(flyer): close render dependency and recovery alert gaps` - open.
-- #299 `fix(flyer): harden billing health MCP readiness visibility` - open; operator-review-required (money-adjacent visibility).
+- #297 `fix(flyer): route sample-request tagline/slogan variants to idea intake` - merged to `main`; deployed `deploy-20260527-121058-87db7152`.
+- #298 `fix(flyer): close render dependency and recovery alert gaps` - merged to `main`; deployed in later train.
+- #299 `fix(flyer): harden billing health MCP readiness visibility` - open; operator-review-required.
+- #303 `fix(flyer): route sample ask-shape variants to starter ideas` - merged to `main`.
+- #304 `fix(flyer): route missed sample request phrase variants to starter ideas` - merged to `main`.
+- #305 `fix(flyer): normalize manual queue triage status and reason signals` - merged to `main`.
+- #306 `fix(flyer): expand manual queue health backlog signals` - merged to `main`.
+- #307 `fix(flyer): consolidate payment fail-closed contract and MCP parity` - open; operator-review-required.
+- #312 `fix(flyer): canonicalize legacy manual-review reasons` - merged to `main`.
+- #314 `fix(flyer): harden campaign title and manual status targeting` - open; low-risk, awaiting review/check signal.
 
 ## Verification for this batch
-- `pytest -q web/backend/tests/test_flyer_health.py -k billing_checkout_provider` ✅ (6 passed)
-- `pytest -q web/backend/tests/test_flyer_health.py` ✅ (30 passed)
-- `python3 -m py_compile web/backend/app/routers/flyer.py web/backend/tests/test_flyer_health.py` ✅
+- `pytest -q tests/test_flyer_facts.py -k 'campaign_title or profile_facts_keep_account_business_when_request_names_campaign_flyer'` ✅ (2 passed)
+- `pytest -q tests/test_flyer_project_isolation.py -k 'scenario3_status_check'` ✅ (2 passed)
+- `pytest -q tests/test_flyer_* --maxfail=20` ✅ (945 passed, 1 skipped)
+- `python3 -m py_compile src/agents/flyer/facts.py src/plugins/cf-router/hooks.py tests/test_flyer_facts.py tests/test_flyer_project_isolation.py` ✅
 - `git diff --check` ✅
 
-## Post-deploy runtime checks
-- No deploy in this batch.
-- `pilot-readiness-check --text`: READY (16 pass, 0 fail).
-- `systemctl --failed`: unrelated pre-existing `logrotate.service` only.
+## Runtime checks snapshot
+- `systemctl --failed`: unrelated pre-existing failed unit remains (`logrotate.service`).
+- Flyer/shift timers active: `flyer-source-edit-sla-watchdog`, `flyer-recovery-watchdog`, `shift-agent-health`, `shift-agent-tail-logger`.
