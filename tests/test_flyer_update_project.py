@@ -313,6 +313,115 @@ def test_source_artwork_followup_after_preview_requires_regeneration(tmp_path, m
     assert persisted["revisions"][0]["applied"] is False
 
 
+def test_approval_applies_superseded_revisions_but_preserves_pending_boundaries(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    module = _load_script(monkeypatch)
+    state_path = tmp_path / "projects.json"
+    store = json.loads(_project_store_json(tmp_path, status="awaiting_final_approval"))
+    project = store["projects"][0]
+    project["version"] = 3
+    project["revisions"] = [
+        {
+            "revision_id": "R001",
+            "message_id": "m-edit-1",
+            "requested_at": "2026-05-27T11:20:30.674256Z",
+            "request_text": "show me some template ideas",
+            "applied": False,
+            "resulting_version": 2,
+        },
+        {
+            "revision_id": "R002",
+            "message_id": "m-edit-2",
+            "requested_at": "2026-05-27T11:21:14.928670Z",
+            "request_text": "show me some template ideas",
+            "applied": False,
+            "resulting_version": 3,
+        },
+        {
+            "revision_id": "R003",
+            "message_id": "m-edit-3",
+            "requested_at": "2026-05-27T11:22:14.928670Z",
+            "request_text": "change footer before regenerating",
+            "applied": False,
+            "resulting_version": None,
+        },
+        {
+            "revision_id": "R004",
+            "message_id": "m-edit-4",
+            "requested_at": "2026-05-27T11:23:14.928670Z",
+            "request_text": "future concurrent revision",
+            "applied": False,
+            "resulting_version": 4,
+        },
+    ]
+    state_path.write_text(json.dumps(store), encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", [
+        "update-flyer-project",
+        "--project-id", "F9001",
+        "--approve-message-id", "m-approve-retry",
+        "--state-path", str(state_path),
+    ])
+
+    with pytest.raises(SystemExit, match="cannot approve with unapplied revisions: R003,R004"):
+        module.main()
+    capsys.readouterr()
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    revisions = {revision["revision_id"]: revision for revision in persisted["revisions"]}
+    assert persisted["status"] == "awaiting_final_approval"
+    assert revisions["R001"]["applied"] is True
+    assert revisions["R002"]["applied"] is True
+    assert revisions["R003"]["applied"] is False
+    assert revisions["R004"]["applied"] is False
+
+
+def test_approval_succeeds_after_only_superseded_revisions_remain(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    module = _load_script(monkeypatch)
+    state_path = tmp_path / "projects.json"
+    store = json.loads(_project_store_json(tmp_path, status="awaiting_final_approval"))
+    project = store["projects"][0]
+    project["version"] = 3
+    project["revisions"] = [
+        {
+            "revision_id": "R001",
+            "message_id": "m-edit-1",
+            "requested_at": "2026-05-27T11:20:30.674256Z",
+            "request_text": "show me some template ideas",
+            "applied": False,
+            "resulting_version": 2,
+        },
+        {
+            "revision_id": "R002",
+            "message_id": "m-edit-2",
+            "requested_at": "2026-05-27T11:21:14.928670Z",
+            "request_text": "show me some template ideas",
+            "applied": False,
+            "resulting_version": 3,
+        },
+    ]
+    state_path.write_text(json.dumps(store), encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", [
+        "update-flyer-project",
+        "--project-id", "F9001",
+        "--approve-message-id", "m-approve-retry",
+        "--state-path", str(state_path),
+    ])
+
+    assert module.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    revisions = {revision["revision_id"]: revision for revision in persisted["revisions"]}
+
+    assert payload["project_id"] == "F9001"
+    assert persisted["status"] == "finalizing_assets"
+    assert persisted["approved_message_id"] == "m-approve-retry"
+    assert revisions["R001"]["applied"] is True
+    assert revisions["R002"]["applied"] is True
+
+
 def test_source_artwork_followup_keeps_raw_request_within_schema_limit(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     module = _load_script(monkeypatch)

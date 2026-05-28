@@ -845,8 +845,24 @@ def test_generate_marks_superseded_revision_applied_before_approval(monkeypatch,
                 "message_id": "m-edit-2",
                 "requested_at": "2026-05-27T11:21:14.928670Z",
                 "request_text": "show me some template ideas",
-                "applied": True,
+                "applied": False,
                 "resulting_version": 3,
+            },
+            {
+                "revision_id": "R003",
+                "message_id": "m-edit-3",
+                "requested_at": "2026-05-27T11:22:14.928670Z",
+                "request_text": "change the footer before regenerating",
+                "applied": False,
+                "resulting_version": None,
+            },
+            {
+                "revision_id": "R004",
+                "message_id": "m-edit-4",
+                "requested_at": "2026-05-27T11:23:14.928670Z",
+                "request_text": "future revision from a concurrent writer",
+                "applied": False,
+                "resulting_version": 4,
             },
         ],
     })
@@ -902,6 +918,8 @@ def test_generate_marks_superseded_revision_applied_before_approval(monkeypatch,
     assert persisted["status"] == "awaiting_final_approval"
     assert revisions["R001"]["applied"] is True
     assert revisions["R002"]["applied"] is True
+    assert revisions["R003"]["applied"] is False
+    assert revisions["R004"]["applied"] is False
 
 
 def test_generate_draft_quality_failure_does_not_retry(monkeypatch, tmp_path, capsys):
