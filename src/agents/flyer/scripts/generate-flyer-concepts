@@ -27,8 +27,15 @@ from schemas import (  # noqa: E402
     FlyerProjectStore,
     FlyerReferenceExtraction,
     FlyerRepairAttempt,
+    FlyerWarningSummary,
+    FlyerWarnTierDelivered,
+    is_flyer_transition_allowed,
 )
 from safe_io import FileLock, atomic_write_text, load_yaml_model, ndjson_append  # noqa: E402
+try:
+    from flyer_customer_copy_policy import build_warn_tier_customer_text  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.customer_copy_policy import build_warn_tier_customer_text  # noqa: E402
 try:
     from flyer_manual_queue import make_manual_review  # type: ignore  # noqa: E402
 except ImportError:
@@ -821,6 +828,68 @@ def main() -> int:
                 _cleanup_render_artifacts(specs)
                 raise SystemExit("project changed while rendering; refusing to overwrite newer flyer state")
             if failed_qa:
+                # P0 #2 — severity branch. Strict state-machine: severity label
+                # → exactly one state-write + audit row. No conditional logic
+                # beyond this map (Hermes-as-brain invariant).
+                #   - Any report with severity == "block" → manual_edit_required
+                #     (existing path; preserved bit-for-bit).
+                #   - All failed reports severity == "warn" → delivered_with_warning
+                #     (new path; cf-router drives the send via the post-subprocess
+                #     branch in Commit 4).
+                has_block_severity = any(
+                    getattr(r, "severity", "block") == "block" for r in failed_qa
+                )
+                if not has_block_severity:
+                    if not is_flyer_transition_allowed(current.status, "delivered_with_warning"):
+                        raise SystemExit(
+                            f"warn-tier transition not allowed from {current.status} "
+                            "to delivered_with_warning; refusing partial write"
+                        )
+                    all_blockers = [b for r in failed_qa for b in r.blockers]
+                    # asset_id for the audit row must be non-empty (schema
+                    # min_length=1). Use the first failed report's asset_id;
+                    # fall back to a deterministic sentinel if absent.
+                    warn_asset_id = ""
+                    for r in failed_qa:
+                        if r.asset_id:
+                            warn_asset_id = r.asset_id
+                            break
+                    if not warn_asset_id:
+                        warn_asset_id = "concept_preview_warn"
+                    customer_text = build_warn_tier_customer_text(all_blockers, current)
+                    customer_text_sha = hashlib.sha256(
+                        customer_text.encode("utf-8")
+                    ).hexdigest()
+                    warning_payload = FlyerWarningSummary(
+                        severity="warn",
+                        blockers=all_blockers,
+                        customer_text=customer_text,
+                        customer_text_sha256=customer_text_sha,
+                        delivered_at=now,
+                        asset_id=warn_asset_id,
+                    )
+                    store.projects[snapshot_idx] = current.model_copy(update={
+                        "status": "delivered_with_warning",
+                        "assets": [*current.assets, *assets],
+                        "qa_reports": [*current.qa_reports, *qa_reports],
+                        "warning": warning_payload,
+                        "updated_at": now,
+                    })
+                    atomic_write_text(state_path, store.model_dump_json(indent=2))
+                    _audit_append(audit_log_path, FlyerWarnTierDelivered(
+                        ts=now,
+                        project_id=args.project_id,
+                        asset_id=warn_asset_id,
+                        severity="warn",
+                        blockers=all_blockers,
+                        customer_text_sha256=customer_text_sha,
+                    ))
+                    print(json.dumps({
+                        "project_id": args.project_id,
+                        "delivered_with_warning": True,
+                        "warning_blockers": all_blockers,
+                    }))
+                    return 0
                 manual = make_manual_review(
                     reason_code="visual_qa_failed",
                     detail="; ".join(blocker for report in failed_qa for blocker in report.blockers)[:500],

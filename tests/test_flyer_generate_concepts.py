@@ -1284,6 +1284,7 @@ def test_generate_autorepair_failure_preserves_failed_preview_for_manual_review(
             qa_source="ocr_vision",
             status="failed",
             blockers=["missing required visible fact: item:2:name"],
+            severity="block",  # P0 #2 — pin block to exercise manual-review path
             extracted_text="Lakshmi's Kitchen\nChicken biryani",
             checked_at=datetime.now(timezone.utc),
         )
@@ -1405,6 +1406,7 @@ def test_generate_autorepair_failure_preserves_original_asset_when_renderer_reus
             qa_source="ocr_vision",
             status="failed",
             blockers=["missing required visible fact: item:1:name"],
+            severity="block",  # P0 #2 — pin block to exercise manual-review path
             extracted_text="veg",
             checked_at=datetime.now(timezone.utc),
         )
@@ -1507,6 +1509,7 @@ def test_generate_autorepair_render_exception_exhausts_and_queues_manual_review(
             qa_source="ocr_vision",
             status="failed",
             blockers=["missing required visible fact: item:2:name"],
+            severity="block",  # P0 #2 — pin block to exercise manual-review path
             extracted_text="Lakshmi's Kitchen",
             checked_at=datetime.now(timezone.utc),
         )
@@ -1584,6 +1587,7 @@ def test_generate_autorepair_audit_failure_does_not_block_manual_review(monkeypa
             qa_source="ocr_vision",
             status="failed",
             blockers=["visible wrong business: Desi Chowrastha"],
+            severity="block",  # P0 #2 — pin block to exercise manual-review path
             extracted_text="Desi Chowrastha",
             checked_at=datetime.now(timezone.utc),
         )
@@ -1629,3 +1633,301 @@ def test_autorepair_attempted_rows_are_marked_stale_before_budget_count(monkeypa
 
     assert updated.attempts[0].status == "stale"
     assert updated.attempts[0].completed_at == now
+
+
+# ─────────────────────────────────────────────────────────────────
+# P0 #2 — warn-tier severity branch tests (Commit 3)
+# Verifies the script writes delivered_with_warning + warning payload +
+# FlyerWarnTierDelivered audit row WITHOUT sending. cf-router drives the
+# actual customer send via its post-subprocess branch (Commit 4).
+# Hermes-as-brain invariant check: script is a state-writer, not a sender.
+# ─────────────────────────────────────────────────────────────────
+
+
+def _setup_warn_tier_project_state(state_path: Path, project_id: str = "F0108") -> None:
+    """Project in generating_concepts state with Lakshmi's Kitchen brand —
+    matches F0108 production reproduction shape."""
+    now = datetime(2026, 5, 28, tzinfo=timezone.utc).isoformat()
+    state_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_sequence": 2,
+        "projects": [{
+            "project_id": project_id,
+            "status": "generating_concepts",
+            "customer_phone": "+17329837841",
+            "created_at": now,
+            "updated_at": now,
+            "original_message_id": f"wamid.{project_id}",
+            "raw_request": "Create a flyer for Dosa Special Night at Lakshmi's Kitchen.",
+            "locked_facts": [
+                {"fact_id": "business_name", "label": "Business",
+                 "value": "Lakshmi's Kitchen", "source": "customer_text", "required": True},
+            ],
+        }],
+    }), encoding="utf-8")
+
+
+def _warn_tier_test_config() -> "Config":  # noqa: F821
+    from schemas import Config
+    return Config.model_validate({
+        "schema_version": 1,
+        "customer": {"name": "Triveni", "location_id": "loc_pineville_01", "timezone": "America/New_York"},
+        "owner": {"name": "Owner", "phone": "+19045550000"},
+        "limits": {},
+        "alerting": {"pushover_user_key": "k", "pushover_app_token": "t"},
+        "backup": {"gpg_recipient_email": "owner@example.com"},
+        "flyer": {"enabled": True, "draft_image_model": "deterministic-renderer", "concept_count": 1},
+    })
+
+
+def test_generate_concepts_warn_tier_writes_delivered_with_warning_state(monkeypatch, tmp_path, capsys):
+    """F0108-shape: single brand-typo warn blocker → state writes
+    delivered_with_warning + warning payload + FlyerWarnTierDelivered audit row.
+    Script returns 0 with a stdout JSON marker so cf-router knows to take
+    the warn-tier send branch. NO outbound bridge call from the script."""
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+    from schemas import FlyerVisualQAReport
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setattr(module, "load_yaml_model", lambda *_a, **_k: _warn_tier_test_config())
+
+    state_path = tmp_path / "projects.json"
+    attempt_path = tmp_path / "autorepair_attempts.json"
+    audit_path = tmp_path / "decisions.log"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    _setup_warn_tier_project_state(state_path)
+
+    def fake_render(_project, output_dir, **kwargs):
+        suffix = "repair" if kwargs.get("repair_instruction", "") else "first"
+        path = Path(output_dir) / f"F0108-C1-{suffix}.png"
+        path.write_bytes(f"img-{suffix}".encode("ascii"))
+        return [RenderedAssetSpec(
+            path=path, kind="concept_preview",
+            output_format="concept_preview",
+            width=1080, height=1350, concept_id="C1",
+        )]
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        return FlyerVisualQAReport(
+            project_id=project_obj.project_id,
+            asset_id=asset_id,
+            artifact_path=str(artifact_path),
+            artifact_sha256="0" * 64,
+            project_version=project_obj.version,
+            output_format=output_format,
+            provider="test",
+            qa_source="ocr_vision",
+            status="failed",
+            blockers=["visible wrong business/brand: Laksmi'S Kitchen"],
+            severity="warn",  # F0108 — brand typo classifier output
+            extracted_text="Lakshmi's Kitchen ... LAKSMI'S KITCHEN",
+            checked_at=datetime.now(timezone.utc),
+        )
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(
+        module, "plan_flyer_autorepair",
+        lambda **_k: {"action": "regenerate_with_instruction",
+                      "repair_instruction": "Fix the brand spelling.",
+                      "confidence": "high"},
+        raising=False,
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0108",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--audit-log-path", str(audit_path),
+        "--autorepair-state-path", str(attempt_path),
+    ])
+
+    # State machine result + return code
+    assert module.main() == 0
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "delivered_with_warning"
+
+    # Warning payload populated with the warn-tier blockers + customer text + sha
+    warning = persisted["warning"]
+    assert warning is not None
+    assert warning["severity"] == "warn"
+    assert warning["blockers"] == ["visible wrong business/brand: Laksmi'S Kitchen"]
+    assert warning["customer_text"]  # non-empty
+    assert "Lakshmi's Kitchen" in warning["customer_text"]
+    assert "spelling" in warning["customer_text"]
+    assert len(warning["customer_text_sha256"]) == 64  # sha256 hex
+    assert warning["asset_id"]  # non-empty
+
+    # FlyerWarnTierDelivered audit row written, NOT visual_qa_failed
+    audit_lines = audit_path.read_text(encoding="utf-8").splitlines()
+    audit_types = [json.loads(line)["type"] for line in audit_lines]
+    assert "flyer_warn_tier_delivered" in audit_types
+    warn_row = next(json.loads(line) for line in audit_lines
+                    if json.loads(line)["type"] == "flyer_warn_tier_delivered")
+    assert warn_row["project_id"] == "F0108"
+    assert warn_row["severity"] == "warn"
+    assert warn_row["blockers"] == ["visible wrong business/brand: Laksmi'S Kitchen"]
+    assert warn_row["customer_text_sha256"] == warning["customer_text_sha256"]
+
+    # Stdout JSON marker — cf-router uses this to know warn-tier branch fired
+    captured = capsys.readouterr()
+    marker = json.loads(captured.out.strip().splitlines()[-1])
+    assert marker["project_id"] == "F0108"
+    assert marker["delivered_with_warning"] is True
+    assert marker["warning_blockers"] == ["visible wrong business/brand: Laksmi'S Kitchen"]
+
+
+def test_generate_concepts_block_tier_preserves_manual_edit_required_path(monkeypatch, tmp_path, capsys):
+    """Block-tier path is preserved bit-for-bit. Placeholder blocker is
+    always block-tier; severity branch routes to manual_edit_required."""
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+    from schemas import FlyerVisualQAReport
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setattr(module, "load_yaml_model", lambda *_a, **_k: _warn_tier_test_config())
+
+    state_path = tmp_path / "projects.json"
+    attempt_path = tmp_path / "autorepair_attempts.json"
+    audit_path = tmp_path / "decisions.log"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    _setup_warn_tier_project_state(state_path, project_id="F0109")
+
+    def fake_render(_project, output_dir, **kwargs):
+        suffix = "repair" if kwargs.get("repair_instruction", "") else "first"
+        path = Path(output_dir) / f"F0109-C1-{suffix}.png"
+        path.write_bytes(f"img-{suffix}".encode("ascii"))
+        return [RenderedAssetSpec(
+            path=path, kind="concept_preview",
+            output_format="concept_preview",
+            width=1080, height=1350, concept_id="C1",
+        )]
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        return FlyerVisualQAReport(
+            project_id=project_obj.project_id,
+            asset_id=asset_id,
+            artifact_path=str(artifact_path),
+            artifact_sha256="0" * 64,
+            project_version=project_obj.version,
+            output_format=output_format,
+            provider="test",
+            qa_source="ocr_vision",
+            status="failed",
+            blockers=["placeholder text is visible in generated flyer"],
+            severity="block",  # placeholder is block-tier per classifier
+            extracted_text="[your business name here]",
+            checked_at=datetime.now(timezone.utc),
+        )
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(
+        module, "plan_flyer_autorepair",
+        lambda **_k: {"action": "regenerate_with_instruction",
+                      "repair_instruction": "Remove placeholder.",
+                      "confidence": "high"},
+        raising=False,
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0109",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--audit-log-path", str(audit_path),
+        "--autorepair-state-path", str(attempt_path),
+    ])
+
+    # Block-tier hits the manual_edit_required path (return 2)
+    assert module.main() == 2
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "manual_edit_required"
+    assert persisted["warning"] is None  # warn payload NOT populated on block path
+    assert persisted["manual_review"]["reason_code"] == "visual_qa_failed"
+
+    # No flyer_warn_tier_delivered audit row written on block path
+    audit_types = [json.loads(line)["type"] for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert "flyer_warn_tier_delivered" not in audit_types
+
+
+def test_generate_concepts_warn_tier_state_write_does_not_send(monkeypatch, tmp_path, capsys):
+    """Hermes-as-brain invariant check: generate-flyer-concepts must NOT
+    invoke any send mechanism. The warn-tier path writes state + audit
+    row + stdout marker; cf-router (Commit 4) drives the actual customer
+    send. This test asserts no bridge_post / bridge_send_media calls fire
+    from the script."""
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+    from schemas import FlyerVisualQAReport
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setattr(module, "load_yaml_model", lambda *_a, **_k: _warn_tier_test_config())
+
+    # Sentinel for any bridge call fired from the script
+    bridge_calls: list[tuple] = []
+    monkeypatch.setattr(
+        "safe_io.bridge_post" if False else "builtins.print",
+        lambda *a, **k: None,
+        raising=False,
+    )
+    # Stub-import bridge functions in case the script tries to import them
+    import safe_io  # noqa: E402
+    if hasattr(safe_io, "bridge_post"):
+        monkeypatch.setattr(safe_io, "bridge_post",
+                            lambda *a, **k: bridge_calls.append(("bridge_post", a, k)),
+                            raising=False)
+    if hasattr(safe_io, "bridge_send_media"):
+        monkeypatch.setattr(safe_io, "bridge_send_media",
+                            lambda *a, **k: bridge_calls.append(("bridge_send_media", a, k)),
+                            raising=False)
+
+    state_path = tmp_path / "projects.json"
+    attempt_path = tmp_path / "autorepair_attempts.json"
+    audit_path = tmp_path / "decisions.log"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    _setup_warn_tier_project_state(state_path)
+
+    def fake_render(_project, output_dir, **kwargs):
+        suffix = "repair" if kwargs.get("repair_instruction", "") else "first"
+        path = Path(output_dir) / f"F0108-C1-{suffix}.png"
+        path.write_bytes(b"img")
+        return [RenderedAssetSpec(
+            path=path, kind="concept_preview",
+            output_format="concept_preview",
+            width=1080, height=1350, concept_id="C1",
+        )]
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        return FlyerVisualQAReport(
+            project_id=project_obj.project_id, asset_id=asset_id,
+            artifact_path=str(artifact_path), artifact_sha256="0" * 64,
+            project_version=project_obj.version, output_format=output_format,
+            provider="test", qa_source="ocr_vision", status="failed",
+            blockers=["visible wrong business/brand: Laksmi'S Kitchen"],
+            severity="warn",
+            extracted_text="x", checked_at=datetime.now(timezone.utc),
+        )
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(
+        module, "plan_flyer_autorepair",
+        lambda **_k: {"action": "regenerate_with_instruction",
+                      "repair_instruction": "x", "confidence": "high"},
+        raising=False,
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0108",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--audit-log-path", str(audit_path),
+        "--autorepair-state-path", str(attempt_path),
+    ])
+
+    assert module.main() == 0
+    # The whole point: zero outbound bridge calls from the script
+    assert bridge_calls == []
