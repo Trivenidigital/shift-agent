@@ -10,6 +10,23 @@ This design pins the implementation details for the 6-commit build sequence — 
 
 ---
 
+## 0. Workspace + module-path conventions (note for future reviewers)
+
+**Workspace.** This design + plan live at `C:\projects\sme-agents-pr-zeta-1b\` on branch `plan/p0-2-severity-tiered-qa-2026-05-28` (off `origin/main` HEAD `f7ad477`). The sibling workspace `C:\projects\sme-agents\` is on the stale branch `codex/flyer-full-autonomous-recovery` (HEAD `ca41a84`, 396 commits behind main). **Read code from the plan-branch worktree.** On the stale branch, recently-added flyer modules including `visual_qa.py`, `customer_copy_policy.py`, `semantic_brief.py`, `action_registry.py`, and `manual_queue.py` are not present — reading from there reproduces the false-alarm pattern that affected reviewer 1 round 1 and Finding 3 of the design review.
+
+To verify locally: `cd C:/projects/sme-agents-pr-zeta-1b && git log --oneline HEAD -1` should show this branch's HEAD; `ls src/agents/flyer/*.py | wc -l` should report 21.
+
+**Module-path conventions.** Two different paths to the same modules:
+
+| Context | Import path |
+|---|---|
+| Local repo / tests | `from agents.flyer.visual_qa import ...`, `from platform.schemas import ...` |
+| Deployed flat layout on `/opt/shift-agent/` (smoke tests, runtime cf-router) | `from flyer_visual_qa import ...`, `from schemas import ...` (after `sys.path.insert(0, '/opt/shift-agent')` and `sys.path.insert(0, '/opt/shift-agent/platform')`) |
+
+`shift-agent-deploy.sh` renames `src/agents/flyer/<name>.py` to `/opt/shift-agent/flyer_<name>.py` in the tarball-staging step. Anything that runs on the VPS uses the flat names. Existing precedent at `actions.py:4003-4011` shows the pattern: try the deployed flat name first, fall back to the `agents.flyer.<name>` path when running locally (tests). Same convention applies to any new modules in this PR.
+
+---
+
 ## 1. Hermes-first delta from plan
 
 No new domains. The §2 plan analysis (7 reuse rows, 0 new primitives) holds. This design adds one concrete reuse: the cf-router reply-classifier surface (`is_flyer_send_now_intent`, `is_flyer_revision_intent`, `is_flyer_delivery_state_intent`, bare-`approve` match at `actions.py:2806`) is re-used for `delivered_with_warning` source status. No new classifier; only source-status allowlist extension at the intercept site.
@@ -234,20 +251,155 @@ def _is_brand_typo(extracted: str, project_brand: str) -> bool:
     return prefix_len >= 4 or overlap >= 0.75
 ```
 
-### Commit 4 — cf-router helper signature (plan §7 Commit 4 Pin A)
+### Commit 4 — cf-router helper extraction (X2 architecture; Finding 1 fix)
+
+**Why X2:** Reviewer Finding 1 (operator 2026-05-28) confirmed `send_flyer_concept_previews` has TWO hard-fail QA gates inside the per-concept loop — `validate_text_manifest_file:4027-4034` AND `validate_visual_qa_report:4035-4043`. The second gate trips on every warn-tier project (`report.status="failed"` by construction). The fix extracts a private helper with a `qa_policy` parameter; text-manifest QA stays strict in both policies (substrate-correctness), visual-QA-report gate flips warn-tolerant on the warn path.
 
 ```python
-# src/plugins/cf-router/actions.py — new helper
+# src/plugins/cf-router/actions.py
+
+def _send_concept_preview_media(
+    chat_id: str,
+    project: dict,
+    concepts: list[dict],
+    assets: dict[str, dict],
+    qa_policy: Literal["strict", "warn_tolerant"],
+    customer_text: Optional[str] = None,
+) -> tuple[bool, str, str]:
+    """Canonical concept-preview send. Extracted from the existing
+    send_flyer_concept_previews body. Text-manifest QA always strict
+    (substrate-correctness; template-parse failures aren't warn-tier-
+    recoverable). Visual-QA-report status check is strict-only; warn-tolerant
+    accepts report.status=='failed' because the upstream classifier
+    (classify_qa_severity) already determined warn-tier is acceptable and
+    project.warning captures the visible blockers for audit."""
+    _ensure_platform_path()
+    try:
+        from safe_io import bridge_post, bridge_send_media  # type: ignore
+    except Exception as e:
+        return False, "", f"safe_io_import_failed: {type(e).__name__}: {e}"
+    try:
+        from flyer_render import validate_text_manifest_file  # type: ignore
+    except Exception as e:
+        return False, "", f"flyer_render_import_failed: {type(e).__name__}: {e}"
+    try:
+        from flyer_visual_qa import validate_visual_qa_report  # type: ignore
+    except Exception:
+        try:
+            _ensure_local_src_path()
+            from agents.flyer.visual_qa import validate_visual_qa_report  # type: ignore
+        except Exception as e:
+            return False, "", f"flyer_visual_qa_import_failed: {type(e).__name__}: {e}"
+
+    outbound_ids: list[str] = []
+    for concept in concepts:
+        asset = assets.get(concept.get("preview_asset_id"))
+        if not asset:
+            continue
+
+        # Text-manifest QA — ALWAYS strict in both policies
+        qa = validate_text_manifest_file(
+            asset.get("path", ""),
+            project_id=project["project_id"],
+            project_version=project.get("version"),
+            output_format="concept_preview",
+        )
+        if not qa.ok:
+            return False, "", "text_qa_failed: " + "; ".join(qa.blockers)
+
+        # Visual-QA-report gate — strict in pass-tier, warn-tolerant in warn-tier
+        visual = validate_visual_qa_report(
+            asset.get("path", ""),
+            project_id=project["project_id"],
+            project_version=int(project.get("version") or 1),
+            output_format="concept_preview",
+            allow_sidecar=False,
+        )
+        if not visual.ok and qa_policy == "strict":
+            return False, "", "visual_qa_failed: " + "; ".join(visual.blockers)
+        # warn_tolerant: proceed; blockers are already captured in project.warning
+
+        caption = (
+            f"{concept.get('concept_id')}: {concept.get('title')}\n"
+            f"{concept.get('style_summary')}\n\n"
+            "Reply APPROVE or reply with changes."
+        )
+        try:
+            from agents.flyer.action_registry import PROJECT_ACTIONS, build_action_context_for_command  # type: ignore
+        except ImportError:
+            from flyer_action_registry import PROJECT_ACTIONS, build_action_context_for_command  # type: ignore
+        ok, mid, err, status = bridge_send_media(
+            chat_id, asset.get("path", ""), caption=caption,
+            action_context=build_action_context_for_command(PROJECT_ACTIONS, "concept_preview.media_send"),
+        )
+        if not ok:
+            if status == "send_uncertain":
+                return False, ",".join(outbound_ids), f"partial_delivery_uncertain: {status}: {err}"
+            return False, "", f"{status}: {err}"
+        try:
+            _record_flyer_concept_preview_delivery(project["project_id"], str(asset.get("asset_id") or ""), mid)
+        except Exception as e:
+            return False, ",".join(outbound_ids + [mid]), f"delivery_persist_failed: {type(e).__name__}: {e}"
+        outbound_ids.append(mid)
+
+    if not outbound_ids:
+        return False, "", "no concept previews to send"
+
+    # Trailing CTA — Pin C: customer_text override site
+    try:
+        from agents.flyer.action_registry import PROJECT_ACTIONS as _PA_CTA, build_action_context_for_command as _bac_cta  # type: ignore
+    except ImportError:
+        from flyer_action_registry import PROJECT_ACTIONS as _PA_CTA, build_action_context_for_command as _bac_cta  # type: ignore
+    cta_text = customer_text if customer_text is not None else "Reply APPROVE to receive final files, or reply with changes."
+    ok, mid, err, status = bridge_post(
+        chat_id, cta_text,
+        action_context=_bac_cta(_PA_CTA, "concept_preview.cta_text"),
+    )
+    if not ok:
+        return False, ",".join(outbound_ids), f"cta_send_failed: {status}: {err}"
+    return True, ",".join(outbound_ids + [mid]), ""
+
+
+def send_flyer_concept_previews(chat_id: str, project_id: str) -> tuple[bool, str, str]:
+    """Pass-tier concept-preview send. Signature unchanged from pre-PR
+    (7 existing callers in hooks.py + 1 in actions.py preserved bit-for-bit).
+    Now a thin wrapper over _send_concept_preview_media with strict QA policy."""
+    project = _load_flyer_project_dict(project_id)
+    if not project:
+        return False, "", f"project_not_found: {project_id}"
+    assets = {a.get("asset_id"): a for a in project.get("assets", [])}
+    return _send_concept_preview_media(
+        chat_id, project, project.get("concepts", []), assets,
+        qa_policy="strict",
+    )
+
+
+def send_warn_tier_concept_previews(
+    chat_id: str,
+    project_id: str,
+    customer_text: str,
+) -> tuple[bool, str, str]:
+    """Warn-tier concept-preview send. Reachable only via _dispatch_concept_preview_send.
+    Relaxes visual-QA-report status check; keeps text-manifest QA strict.
+    customer_text is REQUIRED (no default) — warn-tier delivery always needs
+    correction-prompt copy, never the pass-tier APPROVE CTA."""
+    project = _load_flyer_project_dict(project_id)
+    if not project:
+        return False, "", f"project_not_found: {project_id}"
+    assets = {a.get("asset_id"): a for a in project.get("assets", [])}
+    return _send_concept_preview_media(
+        chat_id, project, project.get("concepts", []), assets,
+        qa_policy="warn_tolerant",
+        customer_text=customer_text,
+    )
+
 
 def _dispatch_concept_preview_send(chat_id: str, project_id: str) -> tuple[bool, str, str]:
-    """Single point of change for the warn-tier branch. Reads current project
-    state, builds warn-tier customer text if status == 'delivered_with_warning',
-    then calls send_flyer_concept_previews with the appropriate body.
-
-    Replaces 7 direct callers of send_flyer_concept_previews:
-    hooks.py:746, 1848, 2795, 3081, 3310, 3486, plus actions.py one local call.
-    """
-    project = _read_flyer_project(project_id)
+    """Single point of change for the warn-tier branch. Reads project state,
+    picks the right send wrapper. Replaces the 7 direct callers of
+    send_flyer_concept_previews at hooks.py:746, 1848, 2795, 3081, 3310, 3486
+    plus the one in actions.py."""
+    project = _load_flyer_project_dict(project_id)
     if (
         project is not None
         and project.get("status") == "delivered_with_warning"
@@ -255,23 +407,14 @@ def _dispatch_concept_preview_send(chat_id: str, project_id: str) -> tuple[bool,
     ):
         warning = project["warning"]
         warn_text = build_warn_tier_customer_text(warning["blockers"], project)
-        return send_flyer_concept_previews(chat_id, project_id, customer_text=warn_text)
+        return send_warn_tier_concept_previews(chat_id, project_id, warn_text)
     return send_flyer_concept_previews(chat_id, project_id)
-
-# Modify existing function (plan Pin C)
-def send_flyer_concept_previews(
-    chat_id: str,
-    project_id: str,
-    customer_text: Optional[str] = None,
-) -> tuple[bool, str, str]:
-    ...
-    # Per-concept caption loop at lines 4044-4060 UNCHANGED.
-    ...
-    # Final post-preview message at lines 4087-4089 — Pin C target:
-    cta_text = customer_text if customer_text is not None else "Reply APPROVE to receive final files, or reply with changes."
-    bridge_post(chat_id, cta_text)
-    return ok, mid, err
 ```
+
+**Notes:**
+- `_load_flyer_project_dict` is the existing pattern at `actions.py:4015-4020` extracted into a helper for reuse across the three new wrappers + dispatcher. Open item §11: confirm if the helper already exists or needs adding (lean: add it once at build time; existing inline duplications in actions.py can be left untouched).
+- The helper preserves the existing per-concept loop ordering: text-manifest QA → visual QA → send. Order matters because text-manifest gate is the cheapest (no network call); visual-QA-report is cheapest network-free; send is the expensive operation.
+- Customer-text type signature: `Optional[str]` in helper, REQUIRED `str` in `send_warn_tier_concept_previews`. Asymmetric on purpose — warn-tier callers can't accidentally ship default APPROVE copy.
 
 ### Commit 5 — Cockpit backend route (plan §7 Commit 5 Pin D)
 
@@ -407,18 +550,23 @@ Classifier expectations:
 
 ## 7. Deploy gates — `shift-agent-smoke-test.sh` additions
 
-Adds three symbol-import probes (per plan §8 smoke row):
+Adds one symbol-import probe (per plan §8 smoke row). **Finding 2 (operator 2026-05-28)**: the deployed module-path convention is `sys.path.insert + from <flat_module> import`, NOT `from agents.flyer.<module>` or `from platform.schemas`. Modules deploy flat under `/opt/shift-agent/` as `flyer_<name>.py` (matching the existing pattern at `actions.py:4003` for `flyer_render` and `actions.py:4007` for `flyer_visual_qa`). Schemas deploy at `/opt/shift-agent/platform/schemas.py` and are imported as `from schemas import ...` after path insertion.
 
 ```bash
-# In src/agents/shift/scripts/shift-agent-smoke-test.sh
+# In src/agents/shift/scripts/shift-agent-smoke-test.sh (mirrors deployed pattern at lines 170-174)
 
 python3 -c "
-from agents.flyer.visual_qa import classify_qa_severity, _is_brand_typo
-from agents.flyer.customer_copy_policy import build_warn_tier_customer_text, format_warn_recovery_revision_ack
-from platform.schemas import FlyerWarningSummary, FlyerQASeverityClassified, FlyerWarnTierDelivered, FlyerOperatorFlaggedWarnTier
+import sys
+sys.path.insert(0, '/opt/shift-agent')
+sys.path.insert(0, '/opt/shift-agent/platform')
+from schemas import FlyerWarningSummary, FlyerQASeverityClassified, FlyerWarnTierDelivered, FlyerOperatorFlaggedWarnTier
+from flyer_visual_qa import classify_qa_severity, _is_brand_typo
+from flyer_customer_copy_policy import build_warn_tier_customer_text, format_warn_recovery_revision_ack
 print('warn-tier symbols loadable')
-" || { echo "FAIL: warn-tier symbol import"; exit 1; }
+" || { echo 'FAIL: warn-tier symbol import'; exit 1; }
 ```
+
+**Cross-check before merge:** `shift-agent-deploy.sh` already handles the `src/agents/flyer/<name>.py → /opt/shift-agent/flyer_<name>.py` rename in its tarball-staging step. Confirm at build time that `visual_qa.py` and `customer_copy_policy.py` are included in the deploy manifest (existing pattern; deploy script should pick them up via wildcards, but worth a build-time grep).
 
 **Rollout posture:** ship green tests + smoke-gate locally + deploy to main-vps. No env flag / feature gate — the severity branch is on by default because:
 1. New code path only fires when QA `status="failed"`. Pre-PR behavior on `failed` was 100% manual queue; post-PR it's `warn` (auto-deliver) or `block` (manual queue). Block branch preserves prior behavior bit-for-bit.
@@ -489,9 +637,10 @@ Each commit ships green tests. Deploy after Commit 5 lands; smoke-gate verifies 
 ## 11. Open items deferred to build phase
 
 - Exact regex for `_FLYER_SEND_NOW_PATTERN` / `_FLYER_DELIVERY_STATE_PATTERN` interactions with `delivered_with_warning` source status (plan §3 step 11 + §9 Q1 resolution; details land at coding time).
-- `_read_flyer_project` helper in `actions.py` — does it exist today, or does the helper in Commit 4 need to inline the read? (build-time confirm).
+- `_load_flyer_project_dict` helper — design assumes it can be extracted at build time from the existing inline pattern at `actions.py:4015-4020`. Confirm at build start that the extraction is clean (no other call sites depend on the inline form); land it as a precursor commit if needed, OR inline the read in the three wrappers if extraction is messy.
 - Customer-text byte length cap: `FlyerWarningSummary.customer_text` is capped at 2000 chars in schema; warn-tier template (~140 chars + correction summary ~50 chars) sits comfortably under. Verify in Commit 2 test fixture.
 - Operator identity propagation through `FlagWarnTierBody` route: which `OperatorPrincipal` field is the audit-log identity (`id` vs `email` vs `username`)? Match the convention used by the existing cockpit mutation routes (e.g., manual-queue completion). Build-time grep + reuse.
+- `shift-agent-deploy.sh` deploy-manifest inclusion: confirm at build time that `visual_qa.py` and `customer_copy_policy.py` are picked up by the tarball-staging step (existing wildcards should cover them, but worth a grep before merge to avoid post-deploy ImportError).
 
 ---
 

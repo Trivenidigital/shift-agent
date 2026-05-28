@@ -57,8 +57,8 @@ Both cases hit the same binary `failed` path. F0108 is fail-closed for a custome
    - `pass`: today's path — writes `awaiting_concept_selection` / `awaiting_final_approval`.
    - `warn`: NEW path — writes `delivered_with_warning` + populates `project.warning` payload + writes `FlyerWarnTierDelivered` audit row.
    - `block`: today's path — writes `manual_edit_required` with `reason_code="visual_qa_failed"`.
-9. `[Hermes]` cf-router's post-subprocess branch (around `actions.py:3948-3995` today) reads the new status. **`[net-new]`** New conditional: if status == `delivered_with_warning`, build warn-tier customer text from `project.warning.blockers` via `build_warn_tier_customer_text()`, then call `send_flyer_concept_previews(chat_id, project_id, customer_text=warn_text)`. Otherwise today's pass-path body runs as-is.
-10. `[Hermes]` `send_flyer_concept_previews()` ships preview images + customer text through `bridge_send_media`. **`[net-new]`** Function gains an optional `customer_text: Optional[str] = None` parameter (defaults to existing pass-path text).
+9. `[Hermes]` cf-router's post-subprocess branch (around `actions.py:3948-3995` today) reads the new status. **`[net-new]`** New conditional via `_dispatch_concept_preview_send(chat_id, project_id)` helper: if status == `delivered_with_warning`, build warn-tier customer text from `project.warning.blockers` via `build_warn_tier_customer_text()`, then call `send_warn_tier_concept_previews(chat_id, project_id, customer_text=warn_text)`. Otherwise call the existing `send_flyer_concept_previews(chat_id, project_id)`.
+10. `[Hermes]` Send fires via the canonical `_send_concept_preview_media` helper (extracted from existing `send_flyer_concept_previews` body — Finding 1 fix). **`[net-new]`** Helper takes `qa_policy: Literal["strict", "warn_tolerant"]`. Text-manifest QA (`validate_text_manifest_file`) always strict in both policies — substrate/template-parse failures are NOT warn-tier-recoverable. Visual-QA-report gate (`validate_visual_qa_report` status check) is strict in pass-tier (existing behavior preserved bit-for-bit) and warn-tolerant in warn-tier (accepts the `report.status != "passed"` blocker because `project.warning` already captures the visual blockers).
 11. **`[net-new]`** New `FlyerQASeverityClassified` audit row at step 6 (from the script); `FlyerWarnTierDelivered` audit row at step 8 (also from the script, BEFORE the send fires — it records the decision to deliver-with-warning, not the bridge result). Existing bridge-send audit rows cover step 10 unchanged.
 12. `[Hermes]` Customer reply with corrections → `cf-router/actions.py` active-project lookup → routes to existing `revising_design` flow via `FLYER_TRANSITIONS`.
 13. **`[net-new]`** `FLYER_TRANSITIONS` matrix extended: `delivered_with_warning → revising_design` allowed.
@@ -306,53 +306,30 @@ Each commit is small enough to review on its own and ships green tests. Architec
 - Pass-shape: unchanged behavior.
 - **`FLYER_TRANSITIONS` enforcement:** mutate state to invalid source-status, assert transition rejection raises clean error (no partial write).
 
-### Commit 4 — `feat(cf-router): _dispatch_concept_preview_send helper + customer_text override on send_flyer_concept_previews`
-**Files:** `src/plugins/cf-router/actions.py`, `src/plugins/cf-router/hooks.py`, `tests/test_cf_router_flyer_routing.py` (or closest existing routing test).
-**Source (~70 LOC):**
+### Commit 4 — `feat(cf-router): extract _send_concept_preview_media helper + warn-tolerant variant + dispatcher`
+**Files:** `src/plugins/cf-router/actions.py`, `src/plugins/cf-router/hooks.py`, `tests/test_cf_router_flyer_routing.py`.
+**Source (~110 LOC):**
 
-**Pin A — helper (not enumerated callers).** Reviewer 1 (rerun) found 7 existing call sites to `send_flyer_concept_previews` (`hooks.py:746, 1848, 2795, 3081, 3310, 3486` + `actions.py:~3995`). Rather than touch all 7 with the warn-tier branch (brittle if a new caller appears), introduce a single helper that owns the read-state-then-pick-body decision:
+**Finding 1 fix — strict vs warn-tolerant QA policy via helper extraction (X2 architecture).** The existing `send_flyer_concept_previews` (`actions.py:3995-4089`) has TWO hard-fail gates inside the per-concept loop: `validate_text_manifest_file` at 4027-4034 AND `validate_visual_qa_report` at 4035-4043. The second gate trips on every warn-tier project (`report.status="failed"` by construction). Direct reuse of `send_flyer_concept_previews` for warn-tier delivery is dead-on-arrival.
 
-```python
-def _dispatch_concept_preview_send(chat_id: str, project_id: str) -> tuple[bool, str, str]:
-    """Read project state. If status == 'delivered_with_warning', build warn-tier
-    customer text from project.warning and call send_flyer_concept_previews with
-    the override. Otherwise call with default body. Single point of change for the
-    warn-tier branch — replaces direct send_flyer_concept_previews calls at the
-    7 caller sites."""
-    project = _read_flyer_project(project_id)
-    if project and project.status == "delivered_with_warning" and project.warning:
-        warn_text = build_warn_tier_customer_text(project.warning.blockers, project)
-        return send_flyer_concept_previews(chat_id, project_id, customer_text=warn_text)
-    return send_flyer_concept_previews(chat_id, project_id)
-```
+Restructure (operator 2026-05-28):
+1. Extract the per-concept media+caption+record loop into private helper `_send_concept_preview_media(chat_id, project, concepts, assets, qa_policy, customer_text=None)`.
+2. Helper takes `qa_policy: Literal["strict", "warn_tolerant"]`. Text-manifest QA always strict (substrate-correctness; template-parse failures aren't warn-tier-recoverable). Visual-QA-report `status != "passed"` assertion is strict-only.
+3. Existing `send_flyer_concept_previews(chat_id, project_id)` becomes a thin wrapper calling the helper with `qa_policy="strict"`. Backward-compatible for all 7 existing callers — behavior bit-for-bit identical.
+4. New `send_warn_tier_concept_previews(chat_id, project_id, customer_text)` wraps the helper with `qa_policy="warn_tolerant"` + required `customer_text`. Reachable only via the dispatcher.
+5. New `_dispatch_concept_preview_send(chat_id, project_id)` reads project state and picks the wrapper. Replaces the 7 direct `send_flyer_concept_previews(chat_id, project_id)` call sites (Pin A — `hooks.py:746, 1848, 2795, 3081, 3310, 3486` + `actions.py:~3995`).
 
-Replace each of the 7 direct `send_flyer_concept_previews(chat_id, project_id)` call sites with `_dispatch_concept_preview_send(chat_id, project_id)`. This is mechanical — same signature, same return contract.
+**Pin C — `customer_text` insertion site.** The override replaces the **trailing CTA at `actions.py:4087`** (`"Reply APPROVE to receive final files, or reply with changes."`), NOT the per-concept captions at line 4044. Per-concept captions remain stable semantic descriptors. Warn-tier body becomes the trailing post-preview message.
 
-**Pin C — `customer_text` insertion site.** The override replaces the **trailing CTA at `actions.py:4087`** (`"Reply APPROVE to receive final files, or reply with changes."`), NOT the per-concept caption at line 4044 (`"C1: Title\n..."`). Per-concept captions remain stable semantic descriptors. Warn-tier body becomes the trailing post-preview message: header + correction summary + "Reply OK if you've checked…" conscious-confirmation line.
-
-```python
-def send_flyer_concept_previews(
-    chat_id: str,
-    project_id: str,
-    customer_text: Optional[str] = None,
-) -> tuple[bool, str, str]:
-    ...
-    # existing per-concept loop at lines 4044-4060 unchanged (captions stay as "C1: Title")
-    ...
-    cta_text = customer_text if customer_text is not None else "Reply APPROVE to receive final files, or reply with changes."
-    bridge_post(chat_id, cta_text)  # was: hardcoded text at line 4087
-    return ok, mid, err
-```
-
-Default-None preserves all 7 existing callers' behavior bit-for-bit.
-
-Customer revision reply on `delivered_with_warning`: existing active-project lookup + revision-intent classifier path takes over (no new code here; the `FLYER_TRANSITIONS` edge from Commit 1 is what unlocks it).
-
-**Tests (~70 LOC) — cf-router replay:**
-- `_dispatch_concept_preview_send` with `status=delivered_with_warning` + populated `warning`: asserts `send_flyer_concept_previews` called WITH `customer_text=<warn body matching build_warn_tier_customer_text output>`.
-- `_dispatch_concept_preview_send` with `status=awaiting_concept_selection`: asserts called WITHOUT `customer_text` (None default → existing pass-path text).
+**Tests (~80 LOC) — cf-router replay:**
+- `_send_concept_preview_media` with `qa_policy="strict"` + text-manifest QA failing: asserts hard-fail with `"text_qa_failed: ..."`.
+- `_send_concept_preview_media` with `qa_policy="warn_tolerant"` + text-manifest QA failing: asserts hard-fail (substrate gate still strict — covers reviewer-2-style "warn-tier doesn't silently swallow template-parse failures").
+- `_send_concept_preview_media` with `qa_policy="strict"` + visual QA report `status="failed"`: asserts hard-fail with `"visual_qa_failed: ..."`.
+- `_send_concept_preview_media` with `qa_policy="warn_tolerant"` + visual QA report `status="failed"` (with brand-typo warn blockers): asserts SUCCESS — proceeds to send.
+- `_dispatch_concept_preview_send` with `status=delivered_with_warning` + populated `warning`: asserts routes to `send_warn_tier_concept_previews` (mocked) with correctly-built customer_text from `project.warning.blockers`.
+- `_dispatch_concept_preview_send` with `status=awaiting_concept_selection`: asserts routes to `send_flyer_concept_previews` (strict path).
 - Trailing CTA text-substitution test: assert `bridge_post(..., warn_text)` fires on warn path; per-concept captions remain unchanged.
-- Per-caller-site regression: spot-check 2 of the 7 caller sites that the helper substitution preserves behavior on pass-path state.
+- Per-caller-site regression: spot-check 2 of the 7 caller sites — the helper substitution preserves behavior on pass-path state.
 - Customer reply with revision intent on `delivered_with_warning` project: asserts active-project lookup finds project + routes to `revising_design` (uses new `FLYER_TRANSITIONS` edge from Commit 1).
 
 ### Commit 5 — `feat(flyer-cockpit): build Projects-tab status filter row + delivered_with_warning panel + audit-only flag endpoint`
