@@ -2254,6 +2254,171 @@ class LocationEntry(BaseModel):
         return v
 
 
+# ─────────────────────────────────────────────────────────────────
+# Commerce primitives — slice 1 (tasks/hermes-commerce-prd-v2.md)
+# Shared deterministic substrate; NOT a new agent. Callable by Catering,
+# Flyer, future order/upsell/loyalty agents. Opt-in via cfg.commerce.enabled.
+# ─────────────────────────────────────────────────────────────────
+
+class CommerceConfig(BaseModel):
+    """Hermes Commerce primitive settings. Default off; opt-in per customer."""
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    # Compliance / category gates (PRD v2 §6 enforcement mechanism)
+    allow_restricted_categories: bool = False
+    permanently_blocked_categories: tuple[str, ...] = (
+        "alcohol", "tobacco", "age_gated", "live_animals",
+    )
+    per_vps_excluded_categories: tuple[str, ...] = ()
+    # Approval threshold — fail-closed (Reviewer B HIGH-3): None means UNCONFIGURED.
+    # Callers that invoke the approval-gated path without operator config raise.
+    owner_approval_amount_cents_threshold: Optional[int] = Field(default=None, ge=0)
+    # Payment-link template (slice 1: placeholder substitution only).
+    # Empty -> assert_payment_url_renderable raises; callers MUST emit
+    # "Payment link is not configured yet" copy.
+    payment_checkout_url_template: str = Field(default="", max_length=1000)
+
+
+class CommerceCartItem(BaseModel):
+    """A single line in a CommerceCart. Slice 1: integer quantities only."""
+    model_config = ConfigDict(extra="forbid")
+    sku: str = Field(min_length=1, max_length=80)
+    display_name: str = Field(min_length=1, max_length=200)
+    quantity: int = Field(ge=1, le=10_000)
+    unit: Literal["each", "lb", "kg", "tray", "platter", "gal", "qt"]
+    unit_price_cents: int = Field(ge=1, le=10_000_000)
+    line_total_cents: int = Field(ge=1, le=10_000_000_000)
+    added_at: datetime
+
+
+class CommerceCart(BaseModel):
+    """Per-(sender, chat) cart state. 4h idle TTL refreshed on every mutation."""
+    model_config = ConfigDict(extra="forbid")
+    cart_id: str = Field(pattern=r"^CC\d{5,}$")
+    sender_phone: Optional[E164Phone] = None
+    sender_lid: Optional[str] = Field(default=None, max_length=120)
+    chat_id: str = Field(min_length=1, max_length=200)
+    items: list[CommerceCartItem] = Field(default_factory=list, max_length=50)
+    subtotal_cents: int = Field(ge=0, le=10_000_000_000)
+    currency: Literal["USD", "INR", "CAD", "GBP", "EUR"]
+    status: Literal["open", "checked_out", "expired", "cleared"]
+    created_at: datetime
+    updated_at: datetime
+    expires_at: datetime
+
+    @model_validator(mode="after")
+    def _require_sender_identity(self) -> "CommerceCart":
+        if self.sender_phone is None and self.sender_lid is None:
+            raise ValueError(
+                "CommerceCart requires at least one of sender_phone or sender_lid"
+            )
+        return self
+
+
+class CommerceCartStore(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    carts: list[CommerceCart] = Field(default_factory=list, max_length=10_000)
+
+
+CommerceOrderStatus = Literal[
+    "pending_payment",
+    "awaiting_approval",
+    "paid",
+    "preparing",
+    "ready",
+    "out_for_delivery",
+    "completed",
+    "cancelled",
+    "voided",
+    "refunded",
+]
+
+
+class CommerceOrderStatusEvent(BaseModel):
+    """Append-only status-history entry; typed for slice 1 schema discipline."""
+    model_config = ConfigDict(extra="forbid")
+    from_status: Optional[CommerceOrderStatus] = None
+    to_status: CommerceOrderStatus
+    ts: datetime
+    cause: str = Field(min_length=1, max_length=200)
+    actor: Literal["customer", "caller", "operator", "cron", "webhook"]
+    event_ref: str = Field(default="", max_length=120)
+
+
+class CommerceOrder(BaseModel):
+    """Order state machine instance. status_history is append-only."""
+    model_config = ConfigDict(extra="forbid")
+    order_id: str = Field(pattern=r"^CO\d{5,}$")
+    sender_phone: Optional[E164Phone] = None
+    sender_lid: Optional[str] = Field(default=None, max_length=120)
+    chat_id: str = Field(min_length=1, max_length=200)
+    cart_id: str = Field(pattern=r"^CC\d{5,}$")
+    line_items: list[CommerceCartItem] = Field(default_factory=list, max_length=50)
+    subtotal_cents: int = Field(ge=0, le=10_000_000_000)
+    tax_cents: int = Field(default=0, ge=0, le=10_000_000_000)
+    fee_cents: int = Field(default=0, ge=0, le=10_000_000_000)
+    total_cents: int = Field(ge=0, le=10_000_000_000)
+    currency: Literal["USD", "INR", "CAD", "GBP", "EUR"]
+    status: CommerceOrderStatus
+    payment_intent_id: str = Field(default="", max_length=40)
+    payment_reference: str = Field(default="", max_length=200)
+    status_history: list[CommerceOrderStatusEvent] = Field(default_factory=list, max_length=200)
+    created_at: datetime
+    updated_at: datetime
+
+    @model_validator(mode="after")
+    def _require_sender_identity(self) -> "CommerceOrder":
+        if self.sender_phone is None and self.sender_lid is None:
+            raise ValueError(
+                "CommerceOrder requires at least one of sender_phone or sender_lid"
+            )
+        return self
+
+
+class CommerceOrderStore(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    orders: list[CommerceOrder] = Field(default_factory=list, max_length=100_000)
+
+
+class CommercePaymentIntent(BaseModel):
+    """One payment intent per order_id (idempotency key). Mirrors Flyer guest_order shape."""
+    model_config = ConfigDict(extra="forbid")
+    intent_id: str = Field(pattern=r"^CPI\d{5,}$")
+    order_id: str = Field(pattern=r"^CO\d{5,}$")
+    originating_message_id: str = Field(default="", max_length=200)
+    amount_cents: int = Field(ge=1, le=10_000_000_000)
+    currency: Literal["USD", "INR", "CAD", "GBP", "EUR"]
+    provider: Literal["placeholder", "stripe", "razorpay", "upi", "zelle", "cashapp", "manual"]
+    checkout_url: str = Field(default="", max_length=1000)
+    status: Literal["minted", "sent", "confirmed", "voided", "refunded", "chargeback"]
+    payment_reference: str = Field(default="", max_length=200)
+    created_at: datetime
+    updated_at: datetime
+    voided_at: Optional[datetime] = None
+    refunded_at: Optional[datetime] = None
+    refunded_amount_cents: int = Field(default=0, ge=0, le=10_000_000_000)
+    chargeback_received_at: Optional[datetime] = None
+
+
+class CommercePaymentIntentStore(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    intents: list[CommercePaymentIntent] = Field(default_factory=list, max_length=100_000)
+
+
+class CommercePaymentReferenceLedger(BaseModel):
+    """Immutable cross-order dedup ledger. Reuse permanently blocked.
+
+    Mirrors flyer/guest_order.py:108-113 + 2026-05-25 lesson.
+    """
+    model_config = ConfigDict(extra="forbid")
+    references: dict[str, str] = Field(default_factory=dict)
+
+
+# ─────────────────────────────────────────────────────────────────
+# End commerce primitives
+# ─────────────────────────────────────────────────────────────────
+
+
 class MultiLocationConfig(BaseModel):
     """Multi-location coordinator settings (Agent #3).
 
@@ -2683,6 +2848,7 @@ class Config(BaseModel):
     multi_location: MultiLocationConfig = Field(default_factory=MultiLocationConfig)
     catering: CateringConfig = Field(default_factory=CateringConfig)
     flyer: FlyerConfig = Field(default_factory=FlyerConfig)
+    commerce: CommerceConfig = Field(default_factory=CommerceConfig)
     # Tier 2 agents (all default enabled=False; opt-in per customer)
     inventory: InventoryConfig = Field(default_factory=InventoryConfig)
     supplier: SupplierConfig = Field(default_factory=SupplierConfig)
@@ -4667,6 +4833,192 @@ class _RegulatedSendLintViolation(_BaseEntry):
     message_preview: str = Field(..., max_length=120)
 
 
+# ─────────────────────────────────────────────────────────────────
+# Commerce primitive LogEntry variants — slice 1 (PRD v2 §8)
+# Slice 1 emits: cart_started/updated/cleared/expired/checked_out,
+# order_created/status_change/cancelled/create_refused_category,
+# payment_intent_minted, payment_link_attempted/sent, payment_intent_voided,
+# payment_dedup_blocked.
+# Reserved (declared now, emitted slice 2+): confirmed, webhook_received,
+# webhook_verify_failed, refunded, chargeback_received,
+# owner_approval_required, owner_approval_threshold_unconfigured,
+# blocked_category_override, payment_link_failed.
+# ─────────────────────────────────────────────────────────────────
+
+class CommerceCartStarted(_BaseEntry):
+    type: Literal["commerce_cart_started"]
+    cart_id: str = Field(pattern=r"^CC\d{5,}$")
+    sender_phone: Optional[E164Phone] = None
+    sender_lid: Optional[str] = Field(default=None, max_length=120)
+    chat_id: str = Field(max_length=200)
+
+
+class CommerceCartUpdated(_BaseEntry):
+    type: Literal["commerce_cart_updated"]
+    cart_id: str = Field(pattern=r"^CC\d{5,}$")
+    op: Literal["add", "remove", "update_qty"]
+    sku: str = Field(min_length=1, max_length=80)
+    qty_before: int = Field(ge=0)
+    qty_after: int = Field(ge=0)
+    subtotal_cents: int = Field(ge=0)
+
+
+class CommerceCartCleared(_BaseEntry):
+    type: Literal["commerce_cart_cleared"]
+    cart_id: str = Field(pattern=r"^CC\d{5,}$")
+    reason: str = Field(max_length=200)
+
+
+class CommerceCartExpired(_BaseEntry):
+    type: Literal["commerce_cart_expired"]
+    cart_id: str = Field(pattern=r"^CC\d{5,}$")
+    expired_at: datetime
+
+
+class CommerceCartCheckedOut(_BaseEntry):
+    type: Literal["commerce_cart_checked_out"]
+    cart_id: str = Field(pattern=r"^CC\d{5,}$")
+    order_id: str = Field(pattern=r"^CO\d{5,}$")
+    subtotal_cents: int = Field(ge=0)
+
+
+class CommerceOrderCreated(_BaseEntry):
+    type: Literal["commerce_order_created"]
+    order_id: str = Field(pattern=r"^CO\d{5,}$")
+    cart_id: str = Field(pattern=r"^CC\d{5,}$")
+    sender_phone: Optional[E164Phone] = None
+    sender_lid: Optional[str] = Field(default=None, max_length=120)
+    total_cents: int = Field(ge=0)
+    currency: str = Field(max_length=3)
+
+
+class CommerceOrderStatusChange(_BaseEntry):
+    type: Literal["commerce_order_status_change"]
+    order_id: str = Field(pattern=r"^CO\d{5,}$")
+    prev_status: CommerceOrderStatus
+    next_status: CommerceOrderStatus
+    actor: Literal["customer", "caller", "operator", "cron", "webhook"]
+    cause: str = Field(max_length=200)
+
+
+class CommerceOrderCancelled(_BaseEntry):
+    type: Literal["commerce_order_cancelled"]
+    order_id: str = Field(pattern=r"^CO\d{5,}$")
+    reason: str = Field(max_length=200)
+    actor: Literal["customer", "operator", "cron"]
+
+
+class CommerceOrderCreateRefusedCategory(_BaseEntry):
+    type: Literal["commerce_order_create_refused_category"]
+    sender_phone: Optional[E164Phone] = None
+    sender_lid: Optional[str] = Field(default=None, max_length=120)
+    refused_skus: list[str] = Field(default_factory=list, max_length=50)
+    reason: str = Field(max_length=80)
+
+
+class CommercePaymentIntentMinted(_BaseEntry):
+    type: Literal["commerce_payment_intent_minted"]
+    intent_id: str = Field(pattern=r"^CPI\d{5,}$")
+    order_id: str = Field(pattern=r"^CO\d{5,}$")
+    originating_message_id: str = Field(default="", max_length=200)
+    amount_cents: int = Field(ge=1)
+    currency: str = Field(max_length=3)
+    provider: Literal["placeholder", "stripe", "razorpay", "upi", "zelle", "cashapp", "manual"]
+
+
+class CommercePaymentLinkAttempted(_BaseEntry):
+    type: Literal["commerce_payment_link_attempted"]
+    intent_id: str = Field(pattern=r"^CPI\d{5,}$")
+    order_id: str = Field(pattern=r"^CO\d{5,}$")
+
+
+class CommercePaymentLinkSent(_BaseEntry):
+    type: Literal["commerce_payment_link_sent"]
+    intent_id: str = Field(pattern=r"^CPI\d{5,}$")
+    order_id: str = Field(pattern=r"^CO\d{5,}$")
+
+
+class CommercePaymentLinkFailed(_BaseEntry):
+    type: Literal["commerce_payment_link_failed"]
+    intent_id: str = Field(pattern=r"^CPI\d{5,}$")
+    order_id: str = Field(pattern=r"^CO\d{5,}$")
+    reason: str = Field(max_length=200)
+
+
+class CommercePaymentIntentVoided(_BaseEntry):
+    type: Literal["commerce_payment_intent_voided"]
+    intent_id: str = Field(pattern=r"^CPI\d{5,}$")
+    order_id: str = Field(pattern=r"^CO\d{5,}$")
+    reason: str = Field(max_length=200)
+    actor: str = Field(max_length=40)
+
+
+class CommercePaymentConfirmed(_BaseEntry):
+    type: Literal["commerce_payment_confirmed"]
+    intent_id: str = Field(pattern=r"^CPI\d{5,}$")
+    order_id: str = Field(pattern=r"^CO\d{5,}$")
+    payment_reference: str = Field(min_length=1, max_length=200)
+
+
+class CommercePaymentDedupBlocked(_BaseEntry):
+    type: Literal["commerce_payment_dedup_blocked"]
+    reference: str = Field(min_length=1, max_length=200)
+    attempted_order_id: str = Field(pattern=r"^CO\d{5,}$")
+    original_order_id: str = Field(pattern=r"^CO\d{5,}$")
+
+
+class CommercePaymentWebhookReceived(_BaseEntry):
+    type: Literal["commerce_payment_webhook_received"]
+    provider: Literal["stripe", "razorpay", "upi", "zelle", "cashapp", "manual"]
+    intent_id_claimed: str = Field(default="", max_length=40)
+    verified: bool
+
+
+class CommercePaymentWebhookVerifyFailed(_BaseEntry):
+    type: Literal["commerce_payment_webhook_verify_failed"]
+    provider: Literal["stripe", "razorpay", "upi", "zelle", "cashapp", "manual"]
+    raw_signature: str = Field(default="", max_length=500)
+    computed_digest: str = Field(default="", max_length=500)
+
+
+class CommercePaymentRefunded(_BaseEntry):
+    type: Literal["commerce_payment_refunded"]
+    intent_id: str = Field(pattern=r"^CPI\d{5,}$")
+    order_id: str = Field(pattern=r"^CO\d{5,}$")
+    refund_reference: str = Field(min_length=1, max_length=200)
+    amount_cents: int = Field(ge=1)
+    is_partial: bool = False
+
+
+class CommercePaymentChargebackReceived(_BaseEntry):
+    type: Literal["commerce_payment_chargeback_received"]
+    intent_id: str = Field(pattern=r"^CPI\d{5,}$")
+    order_id: str = Field(pattern=r"^CO\d{5,}$")
+    provider_reference: str = Field(min_length=1, max_length=200)
+    amount_cents: int = Field(ge=1)
+    arrived_after_refund: bool = False
+
+
+class CommerceOrderOwnerApprovalRequired(_BaseEntry):
+    type: Literal["commerce_order_owner_approval_required"]
+    order_id: str = Field(pattern=r"^CO\d{5,}$")
+    amount_cents: int = Field(ge=1)
+
+
+class CommerceOrderOwnerApprovalThresholdUnconfigured(_BaseEntry):
+    type: Literal["commerce_order_owner_approval_threshold_unconfigured"]
+    order_id: str = Field(pattern=r"^CO\d{5,}$")
+    amount_cents: int = Field(ge=1)
+
+
+class CommerceBlockedCategoryOverride(_BaseEntry):
+    type: Literal["commerce_blocked_category_override"]
+    category: str = Field(min_length=1, max_length=80)
+    reason: str = Field(min_length=1, max_length=400)
+    approver: str = Field(min_length=1, max_length=80)
+    expires_at: datetime
+
+
 # PR-D1: callable Discriminator + Tag-wrapped union members + _UnknownLogEntry
 # forward-compat shim. Replaces `Field(discriminator="type")` which raised
 # `union_tag_invalid` on unknown tags BEFORE any validator could run.
@@ -4836,6 +5188,30 @@ LogEntry = Annotated[
         # PR-ζ 2026-05-26 — chokepoint refusal audit variants
         Annotated[_RegulatedSendMissingActionContext, Tag("regulated_send_missing_action_context")],
         Annotated[_RegulatedSendLintViolation, Tag("regulated_send_lint_violation")],
+        # Commerce primitives slice 1 — PRD v2 §8
+        Annotated[CommerceCartStarted, Tag("commerce_cart_started")],
+        Annotated[CommerceCartUpdated, Tag("commerce_cart_updated")],
+        Annotated[CommerceCartCleared, Tag("commerce_cart_cleared")],
+        Annotated[CommerceCartExpired, Tag("commerce_cart_expired")],
+        Annotated[CommerceCartCheckedOut, Tag("commerce_cart_checked_out")],
+        Annotated[CommerceOrderCreated, Tag("commerce_order_created")],
+        Annotated[CommerceOrderStatusChange, Tag("commerce_order_status_change")],
+        Annotated[CommerceOrderCancelled, Tag("commerce_order_cancelled")],
+        Annotated[CommerceOrderCreateRefusedCategory, Tag("commerce_order_create_refused_category")],
+        Annotated[CommercePaymentIntentMinted, Tag("commerce_payment_intent_minted")],
+        Annotated[CommercePaymentLinkAttempted, Tag("commerce_payment_link_attempted")],
+        Annotated[CommercePaymentLinkSent, Tag("commerce_payment_link_sent")],
+        Annotated[CommercePaymentLinkFailed, Tag("commerce_payment_link_failed")],
+        Annotated[CommercePaymentIntentVoided, Tag("commerce_payment_intent_voided")],
+        Annotated[CommercePaymentConfirmed, Tag("commerce_payment_confirmed")],
+        Annotated[CommercePaymentDedupBlocked, Tag("commerce_payment_dedup_blocked")],
+        Annotated[CommercePaymentWebhookReceived, Tag("commerce_payment_webhook_received")],
+        Annotated[CommercePaymentWebhookVerifyFailed, Tag("commerce_payment_webhook_verify_failed")],
+        Annotated[CommercePaymentRefunded, Tag("commerce_payment_refunded")],
+        Annotated[CommercePaymentChargebackReceived, Tag("commerce_payment_chargeback_received")],
+        Annotated[CommerceOrderOwnerApprovalRequired, Tag("commerce_order_owner_approval_required")],
+        Annotated[CommerceOrderOwnerApprovalThresholdUnconfigured, Tag("commerce_order_owner_approval_threshold_unconfigured")],
+        Annotated[CommerceBlockedCategoryOverride, Tag("commerce_blocked_category_override")],
         # PR-D1 forward-compat shim — UNKNOWN tags route here
         Annotated[_UnknownLogEntry, Tag("_unknown_")],
     ],
