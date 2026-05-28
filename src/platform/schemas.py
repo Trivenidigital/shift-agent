@@ -3819,6 +3819,63 @@ class FlyerHermesIntentDecision(_BaseEntry):
     ] = "none"
 
 
+# 2026-05-28 — intake-bypass audit pair. See plan + design at
+# tasks/flyer-intake-bypass-{plan,design}-2026-05-28.md.
+# `ts` (inherited from `_BaseEntry`) is the event timestamp — no separate
+# `bypassed_at` / `finalized_at` field (matches deployed convention).
+class FlyerIntakeBypassed(_BaseEntry):
+    """Decision-time audit: intake bypass fired.
+
+    Emitted by `_try_flyer_intake_intercept` (cf-router/hooks.py) immediately
+    on bypass — the customer's intent was structurally clear, so the wizard
+    was skipped + the message was allowed to flow to the rest of the
+    intercept ladder.
+
+    Pairs with `FlyerIntakeBypassOutcome` (emitted by the dispatch finally
+    block via `finalize_flyer_intake_bypass_shadow`) to give operators a
+    two-row decision-then-outcome trail per `chat_id_hash` without relying
+    on timestamp-window correlation across logrotate boundaries."""
+    type: Literal["flyer_intake_bypassed"] = "flyer_intake_bypassed"
+    chat_id_hash: str = Field(min_length=1, max_length=120)
+    bypass_reason: Literal[
+        "edit_with_media",
+        "new_flyer_text_only",
+        "new_flyer_with_media",
+        "existing_active_customer_intent",
+        "existing_trial_customer_intent",
+    ]
+    has_media: bool
+    customer_state: str = Field(default="", max_length=40)
+    intake_session_status: str = Field(default="", max_length=80)
+    # Regional-SMB telemetry — detection-and-act deferred but the script
+    # signal accumulates here for the follow-up PR. Operator decision
+    # 2026-05-28 #3 — prevents silent anglo-defaulting of Hindi/Telugu/Tamil
+    # customers.
+    inbound_script: Literal["latin", "devanagari", "tamil", "other"] = "latin"
+
+
+class FlyerIntakeBypassOutcome(_BaseEntry):
+    """Outcome-time audit: what happened after intake bypass fired.
+
+    Emitted by `_pre_gateway_dispatch`'s finally block via
+    `finalize_flyer_intake_bypass_shadow` — mirrors the deployed
+    `finalize_flyer_intent_shadow` pattern at cf-router/actions.py.
+
+    Outcome derivation pinned per plan §9 (post-revision): F-pattern regex
+    extraction from `hook_result["reason"]`. Build-phase replay gate
+    verifies derivation reliability against captured audit-log sample."""
+    type: Literal["flyer_intake_bypass_outcome"] = "flyer_intake_bypass_outcome"
+    chat_id_hash: str = Field(min_length=1, max_length=120)
+    outcome: Literal[
+        "routed_to_project",
+        "unrouted",
+        "intermediate_intercept_handled",
+    ]
+    project_id: str = Field(default="", max_length=40)
+    handler_intercept: str = Field(default="", max_length=80)
+    elapsed_ms: int = Field(default=0, ge=0)
+
+
 class CateringLeadCreated(_BaseEntry):
     type: Literal["catering_lead_created"]
     lead_id: str = Field(min_length=1)
@@ -4833,6 +4890,9 @@ LogEntry = Annotated[
         Annotated[FlyerSourceVsNewChosen, Tag("flyer_source_vs_new_chosen")],
         Annotated[FlyerSourceEditSlaAlert, Tag("flyer_source_edit_sla_alert")],
         Annotated[FlyerHermesIntentDecision, Tag("flyer_hermes_intent_decision")],
+        # 2026-05-28 — intake-bypass audit pair (decision + outcome)
+        Annotated[FlyerIntakeBypassed, Tag("flyer_intake_bypassed")],
+        Annotated[FlyerIntakeBypassOutcome, Tag("flyer_intake_bypass_outcome")],
         # PR-ζ 2026-05-26 — chokepoint refusal audit variants
         Annotated[_RegulatedSendMissingActionContext, Tag("regulated_send_missing_action_context")],
         Annotated[_RegulatedSendLintViolation, Tag("regulated_send_lint_violation")],
@@ -4902,6 +4962,7 @@ __all__ = [
     "FlyerRequestFields", "FlyerLockedFact", "FlyerReferenceExtraction",
     "FlyerSourceContractSection", "FlyerSourceContract",
     "FlyerSourceContractExtracted", "FlyerSourceVsNewChosen", "FlyerHermesIntentDecision",
+    "FlyerIntakeBypassed", "FlyerIntakeBypassOutcome",
     # PR-ζ 2026-05-26 — regulated-intent runtime context + chokepoint audit variants
     "ActionExecutionContext",
     "FlyerVisualQAReport", "FlyerManualReview", "FlyerAsset", "FlyerConcept", "FlyerRevision",
