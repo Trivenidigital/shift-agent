@@ -29,7 +29,7 @@ from schemas import (
     CommercePaymentIntentStore,
     CommercePaymentReferenceLedger,
 )
-from .cart import atomic_write_json  # reuse Windows-safe shim
+from ._io_shim import atomic_write_json
 from .audit import emit
 from .exceptions import (
     CommerceCheckoutUrlUnrenderable,
@@ -279,6 +279,9 @@ def void(
     return PaymentLinkResult(True, updated)
 
 
+_ORDER_ID_PATTERN = __import__("re").compile(r"^CO\d{5,}$")
+
+
 def register_reference(
     *,
     reference_ledger_path: Path,
@@ -293,10 +296,23 @@ def register_reference(
     (False, "dedup_blocked") AND emits commerce_payment_dedup_blocked.
     Raises CommercePaymentReferenceReuse only if caller uses the
     strict variant (register_reference_strict).
+
+    Write-side guard (Reviewer B HIGH-1): refuses to write if order_id
+    doesn't match the canonical CO\\d{5,} pattern. Without this, a
+    misformatted caller-supplied id would persist in the ledger and the
+    later commerce_payment_dedup_blocked audit row would silently fail
+    union read on the LogEntry pattern constraint — the most safety-
+    critical audit variant would disappear from operator analysis.
+
+    Single-writer-per-VPS slice 1 assumption: load → check → write is
+    non-atomic; a concurrent webhook daemon writer will need flock in
+    slice 2. State explicitly so the assumption is auditable.
     """
     payment_reference = " ".join((payment_reference or "").split())
     if not payment_reference:
         return False, "payment_reference_required"
+    if not _ORDER_ID_PATTERN.match(order_id):
+        return False, f"invalid_order_id_format:{order_id!r}"
     now = now or datetime.now(timezone.utc)
     ledger = load_reference_ledger(reference_ledger_path)
     prior = ledger.references.get(payment_reference)

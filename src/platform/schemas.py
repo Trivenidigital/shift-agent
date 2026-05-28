@@ -2260,6 +2260,11 @@ class LocationEntry(BaseModel):
 # Flyer, future order/upsell/loyalty agents. Opt-in via cfg.commerce.enabled.
 # ─────────────────────────────────────────────────────────────────
 
+_COMMERCE_LOCKED_BLOCKED_CATEGORIES = frozenset({
+    "alcohol", "tobacco", "age_gated", "live_animals",
+})
+
+
 class CommerceConfig(BaseModel):
     """Hermes Commerce primitive settings. Default off; opt-in per customer."""
     model_config = ConfigDict(extra="forbid")
@@ -2277,6 +2282,23 @@ class CommerceConfig(BaseModel):
     # Empty -> assert_payment_url_renderable raises; callers MUST emit
     # "Payment link is not configured yet" copy.
     payment_checkout_url_template: str = Field(default="", max_length=1000)
+
+    @model_validator(mode="after")
+    def _enforce_locked_blocked_categories(self) -> "CommerceConfig":
+        """Reviewer B LOW-2: locked Meta-policy categories cannot be removed.
+
+        An operator cannot enable alcohol/tobacco/age_gated/live_animals via
+        config alone — they would have to also add an explicit
+        BlockedCategoryOverride model with audit row. PRD v2 §6.
+        """
+        missing = _COMMERCE_LOCKED_BLOCKED_CATEGORIES - set(self.permanently_blocked_categories)
+        if missing:
+            raise ValueError(
+                f"permanently_blocked_categories must include all locked "
+                f"categories; missing: {sorted(missing)}. Use a "
+                f"BlockedCategoryOverride model + audit row to remove."
+            )
+        return self
 
 
 class CommerceCartItem(BaseModel):
@@ -4908,11 +4930,20 @@ class CommerceOrderCancelled(_BaseEntry):
     actor: Literal["customer", "operator", "cron"]
 
 
+class CommerceRefusedItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    sku: str = Field(min_length=1, max_length=80)
+    display_name: str = Field(min_length=1, max_length=200)
+
+
 class CommerceOrderCreateRefusedCategory(_BaseEntry):
     type: Literal["commerce_order_create_refused_category"]
     sender_phone: Optional[E164Phone] = None
     sender_lid: Optional[str] = Field(default=None, max_length=120)
     refused_skus: list[str] = Field(default_factory=list, max_length=50)
+    # Reviewer B MEDIUM-2: carry display_name so callers can render
+    # category-agnostic customer copy without re-loading the cart.
+    refused_items: list[CommerceRefusedItem] = Field(default_factory=list, max_length=50)
     reason: str = Field(max_length=80)
 
 

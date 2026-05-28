@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, Optional, get_args
+from typing import Literal, Optional
 
 from schemas import (
     CommerceCart,
@@ -21,7 +21,7 @@ from schemas import (
     CommerceOrderStatusEvent,
     CommerceOrderStore,
 )
-from .cart import atomic_write_json  # reuse cart.py's Windows-safe shim
+from ._io_shim import atomic_write_json
 from .audit import emit
 from .exceptions import IllegalCommerceTransition
 
@@ -33,6 +33,11 @@ LEGAL_TRANSITIONS: frozenset[tuple[str, str]] = frozenset({
     ("pending_payment", "cancelled"),
     ("pending_payment", "voided"),
     # awaiting_approval → ...
+    # PR reviewer A BLOCKER fix: a webhook may confirm payment directly on an
+    # order parked in awaiting_approval (owner approved → customer paid before
+    # the caller demoted back to pending_payment). Without this edge, slice 2
+    # callers raise IllegalCommerceTransition silently.
+    ("awaiting_approval", "paid"),
     ("awaiting_approval", "pending_payment"),
     ("awaiting_approval", "cancelled"),
     # paid → ...
@@ -95,6 +100,7 @@ def create(
     cart: CommerceCart,
     restricted_skus: list[str] = (),
     refusal_reason: str = "restricted_category",
+    cart_state_path: Optional[Path] = None,
     now: Optional[datetime] = None,
 ) -> OrderOpResult:
     """Create an order from a cart.
@@ -102,9 +108,41 @@ def create(
     If `restricted_skus` is non-empty, refuses the order and emits
     `commerce_order_create_refused_category`. Caller (catalog filter)
     determines which SKUs are restricted under current cfg.
+
+    If `cart_state_path` is provided, also calls cart.checkout() to mark
+    the cart `checked_out` (PR reviewer A HIGH-2: prevents cart/order
+    state drift). Slice 1 callers SHOULD always pass it; left optional
+    for in-memory test scenarios that don't persist cart state.
+
+    Idempotency: the existing-order lookup runs BEFORE the refused-category
+    check (PR reviewer B MEDIUM-1) so re-attempts on an already-refused
+    cart don't multiply audit rows.
     """
     now = now or datetime.now(timezone.utc)
+
+    if not cart.items:
+        return OrderOpResult(False, None, "cart_empty")
+
+    # Idempotency check FIRST so re-attempts on an already-created or
+    # already-refused cart don't multiply audit rows.
+    store = load_order_store(state_path)
+    existing = next(
+        (o for o in store.orders if o.cart_id == cart.cart_id), None
+    )
+    if existing is not None:
+        return OrderOpResult(True, existing, "already_created_idempotent")
+
     if restricted_skus:
+        # Reviewer B MEDIUM-2: carry display_name alongside SKU so callers
+        # can render category-agnostic customer copy without re-loading cart.
+        refused_set = set(restricted_skus)
+        refused_items = [
+            {"sku": item.sku, "display_name": item.display_name}
+            for item in cart.line_items if item.sku in refused_set
+        ] if hasattr(cart, "line_items") else [
+            {"sku": item.sku, "display_name": item.display_name}
+            for item in cart.items if item.sku in refused_set
+        ]
         emit(
             decisions_log_path,
             {
@@ -113,21 +151,11 @@ def create(
                 "sender_phone": str(cart.sender_phone) if cart.sender_phone else None,
                 "sender_lid": cart.sender_lid,
                 "refused_skus": list(restricted_skus),
+                "refused_items": refused_items,
                 "reason": refusal_reason,
             },
         )
         return OrderOpResult(False, None, f"refused_category:{refusal_reason}")
-
-    if not cart.items:
-        return OrderOpResult(False, None, "cart_empty")
-
-    store = load_order_store(state_path)
-    existing = next(
-        (o for o in store.orders if o.cart_id == cart.cart_id), None
-    )
-    if existing is not None:
-        # Idempotent: same cart -> same order (do not double-create).
-        return OrderOpResult(True, existing, "already_created_idempotent")
 
     order_id = _next_order_id(store)
     subtotal = sum(item.line_total_cents for item in cart.items)
@@ -173,6 +201,17 @@ def create(
             "currency": cart.currency,
         },
     )
+    # Reviewer A HIGH-2: mark the cart checked_out so a follow-up add_item
+    # on the same (sender, chat) doesn't append to an already-ordered cart.
+    if cart_state_path is not None:
+        from . import cart as commerce_cart
+        commerce_cart.checkout(
+            state_path=cart_state_path,
+            decisions_log_path=decisions_log_path,
+            cart_id=cart.cart_id,
+            order_id=order_id,
+            now=now,
+        )
     return OrderOpResult(True, order)
 
 

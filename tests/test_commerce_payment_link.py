@@ -249,3 +249,68 @@ def test_register_reference_empty_refused(ledger_state, decisions_log_path):
     )
     assert not ok
     assert detail == "payment_reference_required"
+
+
+def test_register_reference_malformed_order_id_refused(ledger_state, decisions_log_path):
+    """Reviewer B HIGH-1: write-side guard rejects non-canonical order_id so the
+    later commerce_payment_dedup_blocked audit row never gets a malformed
+    original_order_id that would fail union-read validation."""
+    ok, detail = payment_link.register_reference(
+        reference_ledger_path=ledger_state,
+        decisions_log_path=decisions_log_path,
+        payment_reference="stripe_pi_abc",
+        order_id="not-an-order-id",
+    )
+    assert not ok
+    assert detail.startswith("invalid_order_id_format:")
+
+
+def test_register_reference_immutable_after_cancellation(ledger_state, decisions_log_path):
+    """Reviewer A MEDIUM-2: immutability claim — even after the original order
+    is cancelled / voided / refunded, the reference cannot be reused."""
+    payment_link.register_reference(
+        reference_ledger_path=ledger_state,
+        decisions_log_path=decisions_log_path,
+        payment_reference="stripe_pi_abc",
+        order_id="CO00001",
+    )
+    # Original order is "cancelled" in some other state — irrelevant; the
+    # ledger entry stays. Try to reuse on a new order.
+    ok, detail = payment_link.register_reference(
+        reference_ledger_path=ledger_state,
+        decisions_log_path=decisions_log_path,
+        payment_reference="stripe_pi_abc",
+        order_id="CO00002",
+    )
+    assert not ok
+    assert "dedup_blocked" in detail
+
+
+def test_void_then_remint_same_order_id_returns_NEW_intent(intent_state, decisions_log_path):
+    """Reviewer A MEDIUM-1: PRD §7 invariant 3 — amount change requires void
+    + new intent. After voiding an intent, a re-mint on the same order_id
+    must create a NEW intent (not return the voided one)."""
+    a = payment_link.mint(
+        intent_state_path=intent_state,
+        decisions_log_path=decisions_log_path,
+        order_id="CO00001", originating_message_id="m1",
+        amount_cents=1000, currency="USD", chat_id="c",
+        checkout_url_template="https://pay/?o={order_id}",
+    )
+    payment_link.void(
+        intent_state_path=intent_state,
+        decisions_log_path=decisions_log_path,
+        intent_id=a.intent.intent_id, reason="price_typo",
+    )
+    b = payment_link.mint(
+        intent_state_path=intent_state,
+        decisions_log_path=decisions_log_path,
+        order_id="CO00001",  # SAME order_id
+        originating_message_id="m2",
+        amount_cents=1500,  # new price
+        currency="USD", chat_id="c",
+        checkout_url_template="https://pay/?o={order_id}",
+    )
+    assert b.intent.intent_id != a.intent.intent_id
+    assert b.intent.amount_cents == 1500
+    assert b.intent.status == "minted"

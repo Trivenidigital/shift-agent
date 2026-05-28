@@ -15,21 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-import os
-try:
-    if os.name == "nt":
-        raise ModuleNotFoundError("use simple append fallback on Windows (Flyer guest_order.py precedent)")
-    from safe_io import ndjson_append as _safe_ndjson_append  # type: ignore
-except ModuleNotFoundError:
-    def _safe_ndjson_append(path, entry_json):  # type: ignore[no-redef]
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if any(c in entry_json for c in ("\n", "\r")):
-            raise ValueError("ndjson_append: entry_json must not contain line-break characters")
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(entry_json + "\n")
-
-def ndjson_append(path, entry_json):
-    _safe_ndjson_append(path, entry_json)
+from ._io_shim import ndjson_append
 
 
 def emit(decisions_log_path: Path, entry: Mapping[str, Any]) -> None:

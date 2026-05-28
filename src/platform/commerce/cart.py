@@ -24,24 +24,7 @@ from schemas import (
     CommerceCartStore,
     E164Phone,
 )
-import os
-try:
-    if os.name == "nt":
-        raise ModuleNotFoundError("use simple atomic write fallback on Windows (Flyer guest_order.py precedent)")
-    from safe_io import atomic_write_json as _safe_atomic_write_json  # type: ignore
-except ModuleNotFoundError:
-    import json as _json
-    def _safe_atomic_write_json(path, obj, mode=0o640):  # type: ignore[no-redef]
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if hasattr(obj, "model_dump_json"):
-            content = obj.model_dump_json(indent=2)
-        else:
-            content = _json.dumps(obj, indent=2, default=str)
-        path.write_text(content, encoding="utf-8")
-
-def atomic_write_json(path, obj, mode=0o640):
-    _safe_atomic_write_json(path, obj, mode=mode)
-
+from ._io_shim import atomic_write_json
 from .audit import emit
 from .exceptions import CommerceError
 
