@@ -1559,6 +1559,18 @@ def is_vague_flyer_start(text: str, *, has_media: bool = False) -> bool:
         return False
     if not classify_flyer_intent(lower)[0] and not is_flyer_onboarding_intent(lower):
         return False
+    # Explicit "flyer for ..." asks with concrete brief cues are new-work
+    # intents, not vague starters. Keep this narrow so generic onboarding
+    # lines like "create a marketing flyer for my business" still route to
+    # guided intake.
+    if re.search(r"\b(?:flyer|flier|poster|banner)\s+for\s+\S+", lower) and re.search(
+        r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|"
+        r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+        r"today|tomorrow|weekend|special|sale|offer|discount|menu|"
+        r"contact|call|whatsapp)\b|\$\d|\b\d{1,2}\b",
+        lower,
+    ):
+        return False
     has_detail = (
         "$" in lower
         or ":" in body

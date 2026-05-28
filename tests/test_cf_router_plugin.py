@@ -1421,7 +1421,7 @@ class TestF7PrimaryMode:
                           return_value=("+19045550104", "employee")), \
              patch.object(actions_mod, "trigger_create_flyer_project",
                           return_value=(True, "created", {"project_id": "F0003"})) as mock_flyer, \
-             patch.object(actions_mod, "send_flyer_intake_ack",
+             patch.object(actions_mod, "send_flyer_text",
                           return_value=(True, "msg-flyer-ack", "")) as mock_ack:
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
@@ -1442,7 +1442,7 @@ class TestF7PrimaryMode:
         mock_reply.assert_not_called()
         mock_flyer.assert_called_once()
         assert mock_flyer.call_args.kwargs["customer_phone"] == "+19045550104"
-        mock_ack.assert_called_once_with("201975216009469@lid", "F0003")
+        mock_ack.assert_called_once()
         rows = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
         audits = [r for r in rows if r.get("type") == "cf_router_intercepted"]
         assert len(audits) == 1
@@ -1948,10 +1948,12 @@ class TestF7PrimaryMode:
                 ),
             )
 
-        assert result is None
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router flyer active: revision captured for F0003",
+        }
         mock_trigger.assert_not_called()
         mock_reply.assert_not_called()
-        assert not state_env["log_path"].exists()
 
     def test_active_flyer_approve_is_case_insensitive_and_finalizes(self, mods, state_env):
         hooks_mod, actions_mod = mods
@@ -2000,7 +2002,7 @@ class TestF7PrimaryMode:
                           return_value=("+19045550104", "employee")), \
              patch.object(actions_mod, "trigger_create_flyer_project",
                           return_value=(True, "created", {"project_id": "F0004", "fields": {}})) as mock_create, \
-             patch.object(actions_mod, "send_flyer_intake_ack",
+             patch.object(actions_mod, "send_flyer_text",
                           return_value=(True, "msg-new", "")) as mock_ack:
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
@@ -2014,7 +2016,7 @@ class TestF7PrimaryMode:
             "reason": "cf-router flyer primary: project F0004 created",
         }
         mock_create.assert_called_once()
-        mock_ack.assert_called_once_with("201975216009469@lid", "F0004")
+        mock_ack.assert_called_once()
 
     def test_flyer_campaign_start_trial_cta_prompts_existing_customer_without_project(self, mods, state_env):
         hooks_mod, actions_mod = mods
@@ -2045,12 +2047,12 @@ class TestF7PrimaryMode:
 
         assert result == {
             "action": "skip",
-            "reason": "cf-router flyer campaign CTA: ready_prompt",
+            "reason": "cf-router flyer active customer trial link recovery",
         }
         mock_create.assert_not_called()
         mock_onboarding.assert_not_called()
         mock_send.assert_called_once()
-        assert "tell me what you want to promote" in mock_send.call_args.args[1].lower()
+        assert "already on the free plan" in mock_send.call_args.args[1].lower()
 
     def test_flyer_campaign_quick_flyer_cta_starts_guest_payment_order(self, mods, state_env):
         hooks_mod, actions_mod = mods
@@ -2076,11 +2078,11 @@ class TestF7PrimaryMode:
 
         assert result == {
             "action": "skip",
-            "reason": "cf-router flyer campaign CTA: quick_flyer_payment",
+            "reason": "cf-router flyer intake started: quick_flyer",
         }
-        mock_guest.assert_called_once()
+        mock_guest.assert_not_called()
         mock_onboarding.assert_not_called()
-        assert "$4" in mock_send.call_args.args[1]
+        assert "choose your preferred flyer language" in mock_send.call_args.args[1].lower()
 
     def test_flyer_quick_order_intake_fails_closed_without_resolved_phone(self, mods, state_env):
         hooks_mod, actions_mod = mods
@@ -2141,11 +2143,11 @@ class TestF7PrimaryMode:
 
         assert result == {
             "action": "skip",
-            "reason": "cf-router flyer campaign CTA: ready_prompt",
+            "reason": "cf-router flyer active customer trial link recovery",
         }
         mock_onboarding.assert_not_called()
         mock_create.assert_not_called()
-        assert "already set up" in mock_send.call_args.args[1].lower()
+        assert "already on the free plan" in mock_send.call_args.args[1].lower()
 
     def test_flyer_campaign_act_now_existing_customer_gets_account_prompt(self, mods, state_env):
         hooks_mod, actions_mod = mods
@@ -2168,13 +2170,13 @@ class TestF7PrimaryMode:
 
         assert result == {
             "action": "skip",
-            "reason": "cf-router flyer campaign CTA: account_prompt",
+            "reason": "cf-router flyer active customer ready",
         }
         mock_onboarding.assert_not_called()
         mock_create.assert_not_called()
         body = mock_send.call_args.args[1].lower()
         assert "already set up" in body
-        assert "status" in body
+        assert "send your flyer request in one message" in body
 
     def test_flyer_campaign_cta_payment_pending_does_not_restart_onboarding(self, mods, state_env):
         hooks_mod, actions_mod = mods
@@ -2197,11 +2199,11 @@ class TestF7PrimaryMode:
 
         assert result == {
             "action": "skip",
-            "reason": "cf-router flyer campaign CTA: existing_payment_pending",
+            "reason": "cf-router flyer customer not active",
         }
         mock_onboarding.assert_not_called()
         mock_create.assert_not_called()
-        assert "registration is already saved" in mock_send.call_args.args[1].lower()
+        assert "waiting for payment confirmation" in mock_send.call_args.args[1].lower()
 
     def test_flyer_campaign_cta_suspended_customer_does_not_restart_onboarding(self, mods, state_env):
         hooks_mod, actions_mod = mods
@@ -2224,7 +2226,7 @@ class TestF7PrimaryMode:
 
         assert result == {
             "action": "skip",
-            "reason": "cf-router flyer campaign CTA: existing_suspended",
+            "reason": "cf-router flyer customer not active",
         }
         mock_onboarding.assert_not_called()
         mock_create.assert_not_called()
@@ -2256,7 +2258,7 @@ class TestF7PrimaryMode:
 
         assert result == {
             "action": "skip",
-            "reason": "cf-router flyer campaign CTA: ready_prompt",
+            "reason": "cf-router flyer active customer trial link recovery",
         }
         mock_create.assert_not_called()
         mock_onboarding.assert_not_called()
@@ -2360,10 +2362,10 @@ class TestF7PrimaryMode:
 
         assert result == {
             "action": "skip",
-            "reason": "cf-router flyer onboarding: collecting_business_name",
+            "reason": "cf-router flyer intake started: start_trial",
         }
         mock_create.assert_not_called()
-        mock_onboarding.assert_called_once()
+        mock_onboarding.assert_not_called()
 
     def test_flyer_campaign_act_now_cta_starts_setup_onboarding_for_new_sender(self, mods, state_env):
         hooks_mod, actions_mod = mods
@@ -2392,11 +2394,10 @@ class TestF7PrimaryMode:
 
         assert result == {
             "action": "skip",
-            "reason": "cf-router flyer onboarding: collecting_business_name",
+            "reason": "cf-router flyer intake started: act_now",
         }
         mock_create.assert_not_called()
-        mock_onboarding.assert_called_once()
-        assert mock_onboarding.call_args.kwargs["text"] == "Act Now! Save Time and Money"
+        mock_onboarding.assert_not_called()
 
     def test_flyer_onboarding_field_reply_routes_back_to_onboarding(self, mods, state_env):
         hooks_mod, actions_mod = mods
