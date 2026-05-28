@@ -1952,6 +1952,7 @@ def _flyer_provider_components() -> list[dict[str, Any]]:
         plan_checkout_template = defaults.payment_checkout_url_template
         quick_checkout_template = defaults.quick_flyer_checkout_url_template
         quick_price_cents = defaults.quick_flyer_price_cents
+        flyer_cfg = defaults
 
     def _configured_template(value: str) -> bool:
         candidate = str(value or "").strip()
@@ -1959,6 +1960,20 @@ def _flyer_provider_components() -> list[dict[str, Any]]:
 
     plan_configured = _configured_template(plan_checkout_template)
     quick_configured = _configured_template(quick_checkout_template)
+    supported_payment_providers = ("manual", "stripe", "razorpay", "other")
+    configured_provider = str(payment_provider or "manual").strip().lower()
+    if configured_provider not in supported_payment_providers:
+        configured_provider = "manual"
+    provider_env_key = {
+        "stripe": "STRIPE_SECRET_KEY",
+        "razorpay": "RAZORPAY_KEY_ID|RAZORPAY_KEY_SECRET",
+    }.get(configured_provider, "not_required")
+    provider_mcp_surface = "official_mcp_available" if configured_provider in {"stripe", "razorpay"} else "n/a"
+    plan_currencies = sorted({str(tier.currency).upper() for tier in flyer_cfg.plan_tiers}) or ["USD"]
+    currency_note = ""
+    if configured_provider == "razorpay" and "INR" not in plan_currencies:
+        currency_note = "Configured provider is Razorpay but no INR plan tier is configured."
+
     if plan_configured and quick_configured:
         billing_severity = "green"
         billing_detail = "Plan and quick-flyer checkout templates are configured."
@@ -1973,6 +1988,15 @@ def _flyer_provider_components() -> list[dict[str, Any]]:
         billing_detail = (
             "Plan and quick-flyer checkout templates are missing or placeholders. "
             "Payment link creation is not configured."
+        )
+    if currency_note:
+        billing_severity = "yellow"
+        billing_detail = f"{billing_detail} {currency_note}"
+    if not plan_configured or not quick_configured:
+        billing_detail = (
+            f"{billing_detail} Operator checklist: configure payment_checkout_url_template, "
+            "configure quick_flyer_checkout_url_template, and verify customer copy says "
+            "'payment link not configured' until both are set."
         )
 
     return [
@@ -2010,6 +2034,10 @@ def _flyer_provider_components() -> list[dict[str, Any]]:
                 "payment_checkout_url_template_configured": "true" if plan_configured else "false",
                 "quick_flyer_checkout_url_template_configured": "true" if quick_configured else "false",
                 "quick_flyer_price_cents": str(quick_price_cents),
+                "supported_payment_providers": ",".join(supported_payment_providers),
+                "configured_provider_env_key": provider_env_key,
+                "provider_mcp_surface": provider_mcp_surface,
+                "plan_currencies": ",".join(plan_currencies),
             },
             "checked_at": now_iso,
         },
