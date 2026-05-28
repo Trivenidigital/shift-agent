@@ -181,3 +181,218 @@ def test_pr_gamma_lint_returns_customer_copy_scan_dataclass():
     assert all(isinstance(hit, policy.CustomerCopyHit) for hit in scan.hits)
     # matched_values property works on the returned scan
     assert "sent" in scan.matched_values
+
+
+# ─────────────────────────────────────────────────────────────────
+# P0 #2 — warn-tier customer copy tests (Commit 2)
+# Pure-function formatters: blockers + project -> string.
+# All output must pass BOTH scan_customer_text AND lint_no_unverified_completion.
+# ─────────────────────────────────────────────────────────────────
+
+
+def _project_with_brand(brand: str = "Lakshmi's Kitchen") -> dict:
+    """Dict-shaped project (matches cf-router's runtime call shape from
+    _dispatch_concept_preview_send loading projects.json)."""
+    return {
+        "project_id": "F0108",
+        "locked_facts": [{"fact_id": "business_name", "value": brand}],
+    }
+
+
+def _assert_lint_clean(text: str) -> None:
+    scan = policy.scan_customer_text(text)
+    assert scan.hits == (), f"scan_customer_text hits: {scan.hits}"
+    lint = policy.lint_no_unverified_completion(text)
+    assert lint.hits == (), f"lint_no_unverified_completion hits: {lint.hits}"
+
+
+def test_warn_tier_draft_header_constant_lint_clean():
+    _assert_lint_clean(policy.WARN_TIER_DRAFT_HEADER)
+
+
+def test_format_warn_tier_correction_summary_brand_typo_only():
+    """F0108 reproduction: single brand-typo blocker."""
+    full, short = policy.format_warn_tier_correction_summary(
+        ["visible wrong business/brand: Laksmi'S Kitchen"],
+        _project_with_brand(),
+    )
+    assert "Lakshmi's Kitchen" in full
+    assert "near the bottom" in full
+    assert "near the bottom" in short
+
+
+def test_format_warn_tier_correction_summary_missing_location_only():
+    full, short = policy.format_warn_tier_correction_summary(
+        ["missing required visible fact: location"],
+        _project_with_brand(),
+    )
+    assert "location" in full
+    assert "missing location" in short
+
+
+def test_format_warn_tier_correction_summary_brand_plus_contact_info_severity_ordered():
+    """Brand-identity outputs first regardless of input order."""
+    full, _ = policy.format_warn_tier_correction_summary(
+        [
+            "missing required visible fact: contact_info",
+            "visible wrong business/brand: Laksmi'S Kitchen",
+        ],
+        _project_with_brand(),
+    )
+    spelling_idx = full.find("spelling")
+    contact_idx = full.find("contact")
+    assert 0 <= spelling_idx < contact_idx, full
+
+
+def test_format_warn_tier_correction_summary_clamps_to_top_2():
+    blockers = [
+        "missing required visible fact: contact_info",
+        "missing required visible fact: location",
+        "visible wrong business/brand: Laksmi'S Kitchen",
+    ]
+    full, _ = policy.format_warn_tier_correction_summary(blockers, _project_with_brand())
+    assert "spelling" in full
+    assert "location" in full
+    assert "contact" not in full
+
+
+def test_build_warn_tier_customer_text_f0108_lint_clean():
+    text = policy.build_warn_tier_customer_text(
+        ["visible wrong business/brand: Laksmi'S Kitchen"],
+        _project_with_brand(),
+    )
+    _assert_lint_clean(text)
+
+
+def test_build_warn_tier_customer_text_contains_short_summary_verbatim_in_ok_clause():
+    """Reviewer 2 #3 refinement: the OK-confirm clause echoes the short
+    summary verbatim so the customer can't dismiss without acknowledging
+    what's wrong."""
+    text = policy.build_warn_tier_customer_text(
+        ["visible wrong business/brand: Laksmi'S Kitchen"],
+        _project_with_brand(),
+    )
+    _, short = policy.format_warn_tier_correction_summary(
+        ["visible wrong business/brand: Laksmi'S Kitchen"],
+        _project_with_brand(),
+    )
+    assert short in text
+    assert "Reply OK if you've checked" in text
+    ok_line = next(line for line in text.splitlines() if line.startswith("Reply OK"))
+    assert short in ok_line
+
+
+def test_build_warn_tier_customer_text_contains_full_summary_in_body():
+    text = policy.build_warn_tier_customer_text(
+        ["missing required visible fact: location"],
+        _project_with_brand(),
+    )
+    assert "location address" in text
+
+
+def test_build_warn_tier_customer_text_degenerate_empty_blockers_lint_clean():
+    text = policy.build_warn_tier_customer_text([], _project_with_brand())
+    _assert_lint_clean(text)
+    assert policy.WARN_TIER_DRAFT_HEADER in text
+
+
+def test_build_warn_tier_customer_text_brand_missing_uses_placeholder():
+    no_brand_project = {"project_id": "F0001", "locked_facts": []}
+    text = policy.build_warn_tier_customer_text(
+        ["visible wrong business/brand: Some Name"],
+        no_brand_project,
+    )
+    _assert_lint_clean(text)
+    assert "the business name" in text
+
+
+def test_warn_tier_text_lint_clean_for_all_translation_table_entries():
+    """Every blocker pattern in _WARN_BLOCKER_TRANSLATIONS must produce
+    lint-clean output when rendered alone. Catches a regression where a
+    new translation entry introduces a banned word."""
+    sample_blockers = [
+        "visible wrong business/brand: Laksmi'S Kitchen",
+        "missing required visible fact: location",
+        "missing required visible fact: schedule",
+        "missing required visible fact: promotion_end",
+        "missing required visible fact: item:3:name",
+        "missing required visible fact: contact_info",
+    ]
+    for blocker in sample_blockers:
+        text = policy.build_warn_tier_customer_text([blocker], _project_with_brand())
+        scan = policy.scan_customer_text(text)
+        lint = policy.lint_no_unverified_completion(text)
+        assert scan.hits == (), f"blocker {blocker!r}: scan hits {scan.hits}"
+        assert lint.hits == (), f"blocker {blocker!r}: lint hits {lint.hits}"
+
+
+def test_format_warn_recovery_revision_ack_lint_clean():
+    """Reviewer 2 #7 — warn-recovery revision ack must lint-clean against both."""
+    ack = policy.format_warn_recovery_revision_ack(
+        ["visible wrong business/brand: Laksmi'S Kitchen"],
+        _project_with_brand(),
+    )
+    _assert_lint_clean(ack)
+
+
+def test_format_warn_recovery_revision_ack_does_not_use_prior_draft_clean_phrasing():
+    """The warn-recovery ack must NOT echo the existing revising_design copy
+    ('Your requested changes are saved and the revised design is being
+    prepared') — that phrasing presupposes the prior draft was clean."""
+    ack = policy.format_warn_recovery_revision_ack([], _project_with_brand())
+    lowered = ack.lower()
+    assert "update" in lowered or "fix" in lowered
+    assert "requested changes are saved" not in lowered
+
+
+def test_warn_tier_formatters_do_not_mutate_inputs():
+    """Pure-function invariant: formatters must not modify blockers or
+    project. Defensive — if any formatter leaks state-write side effects,
+    Hermes-as-brain invariant regression."""
+    blockers = ["visible wrong business/brand: Laksmi'S Kitchen"]
+    blockers_before = list(blockers)
+    project = _project_with_brand()
+    project_before = {
+        "project_id": project["project_id"],
+        "locked_facts": [dict(f) for f in project["locked_facts"]],
+    }
+    _ = policy.build_warn_tier_customer_text(blockers, project)
+    _ = policy.format_warn_tier_correction_summary(blockers, project)
+    _ = policy.format_warn_recovery_revision_ack(blockers, project)
+    assert blockers == blockers_before
+    assert project["project_id"] == project_before["project_id"]
+    assert [dict(f) for f in project["locked_facts"]] == project_before["locked_facts"]
+
+
+def test_format_warn_tier_correction_summary_accepts_pydantic_project_shape():
+    """The formatter accepts BOTH dict-shape (cf-router runtime via
+    projects.json) AND Pydantic FlyerProject-shape (generate-flyer-concepts
+    call site). Smoke test for the Pydantic path."""
+    from datetime import datetime, timezone
+    from schemas import FlyerLockedFact, FlyerProject
+
+    now = datetime(2026, 5, 28, tzinfo=timezone.utc)
+    # Use generating_concepts here — Commit 2 branches off origin/main
+    # which doesn't yet have Commit 1's delivered_with_warning Literal.
+    # Formatter doesn't read project.status; any valid status works.
+    project = FlyerProject(
+        project_id="F0108",
+        status="generating_concepts",
+        customer_phone="+17329837841",
+        created_at=now,
+        updated_at=now,
+        original_message_id="m-1",
+        raw_request="Create flyer",
+        locked_facts=[
+            FlyerLockedFact(
+                fact_id="business_name", label="Business",
+                value="Lakshmi's Kitchen", source="customer_text", required=True,
+            ),
+        ],
+    )
+    full, short = policy.format_warn_tier_correction_summary(
+        ["visible wrong business/brand: Laksmi'S Kitchen"],
+        project,
+    )
+    assert "Lakshmi's Kitchen" in full
+    assert "spelling" in short
