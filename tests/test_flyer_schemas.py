@@ -666,6 +666,8 @@ def test_workflow_status_literal_contains_requested_states():
         "delivered",
         "completed",
         "closed_no_send",
+        # P0 #2 2026-05-28 — severity-tiered QA warn-tier delivery state.
+        "delivered_with_warning",
     }
 
 
@@ -1245,3 +1247,219 @@ def test_new_variants_export_via_schemas_all():
 
     assert "FlyerQASeverityClassified" in schemas.__all__
     assert "FlyerWarnTierDelivered" in schemas.__all__
+
+
+# ─────────────────────────────────────────────────────────────────
+# P0 #2 — FlyerWorkflowStatus extension, FLYER_TRANSITIONS edges,
+# FlyerWarningSummary, FlyerVisualQAReport.severity (Commit 1)
+# ─────────────────────────────────────────────────────────────────
+
+
+def test_flyer_workflow_status_includes_delivered_with_warning():
+    """`delivered_with_warning` is now a valid FlyerProjectStatus value."""
+    from schemas import FlyerProject  # noqa: E402
+    now = datetime.now(timezone.utc)
+    project = FlyerProject(
+        project_id="F0108",
+        status="delivered_with_warning",
+        customer_phone="+17329837841",
+        created_at=now,
+        updated_at=now,
+        original_message_id="m-1",
+        raw_request="Create flyer",
+    )
+    assert project.status == "delivered_with_warning"
+
+
+def test_flyer_transitions_allows_generating_concepts_to_delivered_with_warning():
+    """Inbound edge from generating_concepts (the QA decision point)."""
+    assert is_flyer_transition_allowed("generating_concepts", "delivered_with_warning")
+
+
+def test_flyer_transitions_allows_delivered_with_warning_outbound_edges():
+    """Three outbound edges: revising_design, awaiting_final_approval, closed_no_send."""
+    assert is_flyer_transition_allowed("delivered_with_warning", "revising_design")
+    assert is_flyer_transition_allowed("delivered_with_warning", "awaiting_final_approval")
+    assert is_flyer_transition_allowed("delivered_with_warning", "closed_no_send")
+
+
+def test_flyer_transitions_rejects_unsupported_inbound_to_delivered_with_warning():
+    """awaiting_final_approval and revising_design CANNOT write
+    delivered_with_warning — those re-run QA via generating_concepts
+    which is the single warn-tier entry point (plan §5b out-of-scope rule)."""
+    assert not is_flyer_transition_allowed("awaiting_final_approval", "delivered_with_warning")
+    assert not is_flyer_transition_allowed("revising_design", "delivered_with_warning")
+
+
+def test_flyer_transitions_delivered_with_warning_does_not_reach_manual_edit_required():
+    """Warn-tier delivery does NOT route back to manual_edit_required
+    directly. The "operator escalates a warn-tier delivery to manual queue"
+    path is deferred to a follow-up PR (plan §10 out-of-scope)."""
+    assert not is_flyer_transition_allowed("delivered_with_warning", "manual_edit_required")
+
+
+def test_flyer_visual_qa_report_severity_defaults_to_pass():
+    """Backward-compat: existing on-disk reports without severity
+    deserialize cleanly with severity defaulting to 'pass'."""
+    from schemas import FlyerVisualQAReport  # noqa: E402
+    now = datetime.now(timezone.utc)
+    report = FlyerVisualQAReport(
+        project_id="F0108",
+        asset_id="A0001",
+        artifact_path="/tmp/preview.png",
+        artifact_sha256="a" * 64,
+        project_version=1,
+        output_format="concept_preview",
+        provider="openrouter",
+        qa_source="ocr_vision",
+        status="passed",
+        blockers=[],
+        warnings=[],
+        extracted_text="",
+        checked_at=now,
+    )
+    assert report.severity == "pass"
+
+
+def test_flyer_visual_qa_report_severity_accepts_warn_and_block():
+    from schemas import FlyerVisualQAReport  # noqa: E402
+    now = datetime.now(timezone.utc)
+    common = dict(
+        project_id="F0108",
+        asset_id="A0001",
+        artifact_path="/tmp/preview.png",
+        artifact_sha256="a" * 64,
+        project_version=1,
+        output_format="concept_preview",
+        provider="openrouter",
+        qa_source="ocr_vision",
+        status="failed",
+        blockers=["visible wrong business/brand: Laksmi'S Kitchen"],
+        warnings=[],
+        extracted_text="",
+        checked_at=now,
+    )
+    warn_report = FlyerVisualQAReport(**common, severity="warn")
+    block_report = FlyerVisualQAReport(**common, severity="block")
+    assert warn_report.severity == "warn"
+    assert block_report.severity == "block"
+
+
+def test_flyer_visual_qa_report_severity_rejects_unknown_value():
+    from schemas import FlyerVisualQAReport  # noqa: E402
+    now = datetime.now(timezone.utc)
+    with pytest.raises(ValidationError):
+        FlyerVisualQAReport(
+            project_id="F0108",
+            asset_id="A0001",
+            artifact_path="/tmp/preview.png",
+            artifact_sha256="a" * 64,
+            project_version=1,
+            output_format="concept_preview",
+            provider="openrouter",
+            qa_source="ocr_vision",
+            status="passed",
+            blockers=[],
+            warnings=[],
+            extracted_text="",
+            checked_at=now,
+            severity="critical",  # not in pass/warn/block
+        )
+
+
+def test_flyer_warning_summary_round_trip():
+    from schemas import FlyerWarningSummary  # noqa: E402
+    now = datetime.now(timezone.utc)
+    summary = FlyerWarningSummary(
+        severity="warn",
+        blockers=["visible wrong business/brand: Laksmi'S Kitchen"],
+        customer_text="Here's your flyer draft. We noticed a small detail...",
+        customer_text_sha256="a" * 64,
+        delivered_at=now,
+        asset_id="A0001",
+    )
+    dumped = summary.model_dump(mode="json")
+    assert dumped["severity"] == "warn"
+    assert dumped["classifier_version"] == "v1"  # default
+    restored = FlyerWarningSummary.model_validate(dumped)
+    assert restored == summary
+
+
+def test_flyer_warning_summary_severity_locked_to_warn():
+    """severity is Literal['warn'] — block/pass rejected at the schema layer.
+    Warn-tier delivery is by definition warn-severity; the outcome payload
+    only exists for that path."""
+    from schemas import FlyerWarningSummary  # noqa: E402
+    now = datetime.now(timezone.utc)
+    for bad in ("pass", "block"):
+        with pytest.raises(ValidationError):
+            FlyerWarningSummary(
+                severity=bad,
+                blockers=[],
+                customer_text="",
+                customer_text_sha256="",
+                delivered_at=now,
+                asset_id="",
+            )
+
+
+def test_flyer_warning_summary_extra_forbid():
+    from schemas import FlyerWarningSummary  # noqa: E402
+    now = datetime.now(timezone.utc)
+    with pytest.raises(ValidationError):
+        FlyerWarningSummary.model_validate({
+            "severity": "warn",
+            "blockers": [],
+            "customer_text": "",
+            "customer_text_sha256": "",
+            "delivered_at": now.isoformat(),
+            "asset_id": "",
+            "rogue_field": "no",
+        })
+
+
+def test_flyer_project_warning_defaults_to_none():
+    """Backward-compat: existing on-disk projects without `warning` field
+    deserialize cleanly with warning=None."""
+    from schemas import FlyerProject  # noqa: E402
+    now = datetime.now(timezone.utc)
+    project = FlyerProject(
+        project_id="F0001",
+        status="intake_started",
+        customer_phone="+17329837841",
+        created_at=now,
+        updated_at=now,
+        original_message_id="m-1",
+        raw_request="Create flyer",
+    )
+    assert project.warning is None
+
+
+def test_flyer_project_accepts_populated_warning_payload():
+    from schemas import FlyerProject, FlyerWarningSummary  # noqa: E402
+    now = datetime.now(timezone.utc)
+    summary = FlyerWarningSummary(
+        severity="warn",
+        blockers=["visible wrong business/brand: Laksmi'S Kitchen"],
+        customer_text="...",
+        customer_text_sha256="a" * 64,
+        delivered_at=now,
+        asset_id="A0001",
+    )
+    project = FlyerProject(
+        project_id="F0108",
+        status="delivered_with_warning",
+        customer_phone="+17329837841",
+        created_at=now,
+        updated_at=now,
+        original_message_id="m-1",
+        raw_request="Create flyer",
+        warning=summary,
+    )
+    assert project.warning is summary or project.warning == summary
+
+
+def test_flyer_warning_summary_in_schemas_all():
+    """Backward-compat for `from schemas import *` consumers."""
+    import schemas  # noqa: E402
+    assert "FlyerWarningSummary" in schemas.__all__

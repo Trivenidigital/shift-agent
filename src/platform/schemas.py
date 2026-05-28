@@ -647,6 +647,11 @@ FlyerWorkflowStatus = Literal[
     "delivered",
     "completed",
     "closed_no_send",
+    # P0 #2 2026-05-28 — severity-tiered QA: warn-tier delivery state. Reachable
+    # only from generating_concepts (the QA decision point); exits to
+    # revising_design (customer revision), awaiting_final_approval (customer OK),
+    # or closed_no_send (operator override). See FLYER_TRANSITIONS below.
+    "delivered_with_warning",
 ]
 
 FlyerOnboardingStatus = Literal[
@@ -852,7 +857,7 @@ FLYER_TRANSITIONS: dict[FlyerWorkflowStatus, set[FlyerWorkflowStatus]] = {
     "collecting_required_info": {"awaiting_assets", "generating_concepts"},
     "awaiting_assets": {"generating_concepts"},
     "manual_edit_required": {"generating_concepts", "revising_design", "awaiting_final_approval", "closed_no_send"},
-    "generating_concepts": {"awaiting_concept_selection", "awaiting_final_approval", "manual_edit_required"},
+    "generating_concepts": {"awaiting_concept_selection", "awaiting_final_approval", "manual_edit_required", "delivered_with_warning"},
     "awaiting_concept_selection": {"revising_design"},
     "revising_design": {"generating_concepts", "awaiting_final_approval"},
     "awaiting_final_approval": {"finalizing_assets", "revising_design"},
@@ -860,6 +865,10 @@ FLYER_TRANSITIONS: dict[FlyerWorkflowStatus, set[FlyerWorkflowStatus]] = {
     "delivered": {"completed", "revising_design"},
     "completed": set(),
     "closed_no_send": set(),
+    # P0 #2 2026-05-28 — warn-tier delivery exits. NOT reachable from
+    # awaiting_final_approval or revising_design (those re-run QA via
+    # generating_concepts which is the single warn-tier entry point).
+    "delivered_with_warning": {"revising_design", "awaiting_final_approval", "closed_no_send"},
 }
 
 
@@ -1721,6 +1730,32 @@ class FlyerVisualQAReport(BaseModel):
     warnings: list[str] = Field(default_factory=list, max_length=50)
     extracted_text: str = Field(default="", max_length=5000)
     checked_at: datetime
+    # P0 #2 2026-05-28 — severity-tiered QA. Defaults to "pass" for
+    # backward-compat on existing on-disk reports written before this PR.
+    # Populated by classify_qa_severity() in visual_qa.run_visual_qa().
+    severity: Literal["pass", "warn", "block"] = "pass"
+
+
+class FlyerWarningSummary(BaseModel):
+    """P0 #2 2026-05-28 — warn-tier delivery outcome record.
+
+    Lifecycle: populated by generate-flyer-concepts when severity == 'warn'.
+    Reflects the MOST RECENT QA outcome only; replaced (not merged) on
+    re-QA per design §9 Q3. Audit log preserves history via the
+    FlyerWarnTierDelivered audit row variant.
+
+    Independent of FlyerManualReview (which stays bound to
+    manual_edit_required state — operator-action-pending queue primitive).
+    Warning-summary is autonomous-delivery-with-caveats — different
+    consumers, different lifecycles."""
+    model_config = ConfigDict(extra="forbid")
+    severity: Literal["warn"]
+    blockers: list[str] = Field(default_factory=list, max_length=50)
+    customer_text: str = Field(default="", max_length=2000)
+    customer_text_sha256: str = Field(default="", max_length=64)
+    delivered_at: datetime
+    asset_id: str = Field(default="", max_length=80)
+    classifier_version: str = Field(default="v1", max_length=20)
 
 
 class FlyerManualReview(BaseModel):
@@ -1849,6 +1884,11 @@ class FlyerProject(BaseModel):
     version: int = Field(default=1, ge=1)
     final_asset_ids: list[str] = Field(default_factory=list, max_length=4)
     approved_message_id: str = Field(default="", max_length=200)
+    # P0 #2 2026-05-28 — warn-tier outcome payload. None for projects in
+    # any state other than `delivered_with_warning`. Replaced (not merged)
+    # on re-QA per design §9 Q3; cleared to None when severity returns to
+    # 'pass' on the next QA pass.
+    warning: Optional[FlyerWarningSummary] = None
 
     @model_validator(mode="after")
     def _selected_concept_must_exist(self) -> "FlyerProject":
@@ -5495,7 +5535,7 @@ __all__ = [
     "FlyerQASeverityClassified", "FlyerWarnTierDelivered",
     # PR-ζ 2026-05-26 — regulated-intent runtime context + chokepoint audit variants
     "ActionExecutionContext",
-    "FlyerVisualQAReport", "FlyerManualReview", "FlyerAsset", "FlyerConcept", "FlyerRevision",
+    "FlyerVisualQAReport", "FlyerWarningSummary", "FlyerManualReview", "FlyerAsset", "FlyerConcept", "FlyerRevision",
     "FlyerBrandKit", "FlyerProject", "FlyerProjectStore",
     # v0.3 status-machine + helpers
     "CATERING_TRANSITIONS", "is_catering_transition_allowed",
