@@ -735,6 +735,7 @@ def test_billing_checkout_provider_partial_template_is_yellow(tmp_path, monkeypa
 
 def test_billing_checkout_provider_full_templates_is_green(tmp_path, monkeypatch):
     _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_live_test")
     _isolate_env_files(monkeypatch, tmp_path)
     _isolate_deploy_markers(monkeypatch, tmp_path)
     _mock_flyer_config(monkeypatch, {
@@ -774,6 +775,8 @@ def test_billing_checkout_provider_includes_mcp_first_provider_metadata(tmp_path
     assert model_cfg["supported_payment_providers"] == "manual,stripe,razorpay,other"
     assert model_cfg["configured_provider_env_key"] == "RAZORPAY_KEY_ID|RAZORPAY_KEY_SECRET"
     assert model_cfg["provider_mcp_surface"] == "official_mcp_available"
+    assert model_cfg["effective_payment_provider"] == "razorpay"
+    assert model_cfg["provider_credentials_ready"] == "false"
 
 
 def test_billing_checkout_provider_reports_operator_checklist_when_missing(tmp_path, monkeypatch):
@@ -796,6 +799,7 @@ def test_billing_checkout_provider_reports_operator_checklist_when_missing(tmp_p
     assert "operator checklist" in detail
     assert "configure payment_checkout_url_template" in detail
     assert "configure quick_flyer_checkout_url_template" in detail
+    assert "stripe mcp" in detail
 
 
 def test_billing_checkout_provider_flags_currency_posture_for_razorpay(tmp_path, monkeypatch):
@@ -821,3 +825,77 @@ def test_billing_checkout_provider_flags_currency_posture_for_razorpay(tmp_path,
     assert billing_p["severity"] == "yellow"
     assert "configured provider is razorpay but no inr plan tier is configured" in billing_p["detail"].lower()
     assert billing_p["model_config"]["plan_currencies"] == "USD"
+
+
+def test_billing_checkout_provider_normalizes_unknown_provider_to_manual(tmp_path, monkeypatch):
+    _clear_provider_env(monkeypatch)
+    _isolate_env_files(monkeypatch, tmp_path)
+    _isolate_deploy_markers(monkeypatch, tmp_path)
+    from app import state as state_mod
+    from app.routers import flyer
+    from schemas import FlyerConfig
+
+    defaults = FlyerConfig()
+    monkeypatch.setattr(
+        state_mod,
+        "load_config",
+        lambda: SimpleNamespace(
+            flyer=SimpleNamespace(
+                payment_provider="bogus_provider",
+                payment_checkout_url_template="https://pay.example/sub/{customer_id}",
+                quick_flyer_checkout_url_template="https://pay.example/quick/{order_id}",
+                quick_flyer_price_cents=defaults.quick_flyer_price_cents,
+                plan_tiers=defaults.plan_tiers,
+            )
+        ),
+    )
+
+    billing_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "billing_checkout_provider")
+    model_cfg = billing_p["model_config"]
+    assert model_cfg["payment_provider"] == "bogus_provider"
+    assert model_cfg["effective_payment_provider"] == "manual"
+    assert model_cfg["provider_credentials_ready"] == "true"
+    assert "unsupported payment_provider" in billing_p["detail"].lower()
+
+
+def test_billing_checkout_provider_stripe_missing_secret_is_yellow(tmp_path, monkeypatch):
+    _clear_provider_env(monkeypatch)
+    _isolate_env_files(monkeypatch, tmp_path)
+    _isolate_deploy_markers(monkeypatch, tmp_path)
+    _mock_flyer_config(monkeypatch, {
+        "enabled": True,
+        "payment_provider": "stripe",
+        "payment_checkout_url_template": "https://pay.example/sub/{customer_id}",
+        "quick_flyer_checkout_url_template": "https://pay.example/quick/{order_id}",
+    })
+
+    from app.routers import flyer
+
+    billing_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "billing_checkout_provider")
+    model_cfg = billing_p["model_config"]
+    assert billing_p["severity"] == "yellow"
+    assert model_cfg["provider_credentials_ready"] == "false"
+    assert model_cfg["provider_credential_detail"] == "missing_or_placeholder:STRIPE_SECRET_KEY"
+    assert "payment link not configured" in billing_p["detail"].lower()
+
+
+def test_billing_checkout_provider_razorpay_partial_secret_is_yellow(tmp_path, monkeypatch):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("RAZORPAY_KEY_ID", "rzp_test_123")
+    _isolate_env_files(monkeypatch, tmp_path)
+    _isolate_deploy_markers(monkeypatch, tmp_path)
+    _mock_flyer_config(monkeypatch, {
+        "enabled": True,
+        "payment_provider": "razorpay",
+        "payment_checkout_url_template": "https://pay.example/sub/{customer_id}",
+        "quick_flyer_checkout_url_template": "https://pay.example/quick/{order_id}",
+    })
+
+    from app.routers import flyer
+
+    billing_p = next(p for p in flyer._flyer_provider_components() if p["name"] == "billing_checkout_provider")
+    model_cfg = billing_p["model_config"]
+    assert billing_p["severity"] == "yellow"
+    assert model_cfg["provider_credentials_ready"] == "false"
+    assert model_cfg["provider_credential_detail"] == "missing_or_placeholder:RAZORPAY_KEY_SECRET"
+    assert "payment link not configured" in billing_p["detail"].lower()
