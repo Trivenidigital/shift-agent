@@ -755,7 +755,7 @@ def _try_flyer_primary_intercept(
                         proc_ok=proc_ok, proc_mid=proc_mid, proc_err=proc_err,
                     )
                 else:
-                    ack_ok, outbound_message_id, ack_err = actions.send_flyer_concept_previews(chat_id, project_id)
+                    ack_ok, outbound_message_id, ack_err = actions._dispatch_concept_preview_send(chat_id, project_id)
                     outbound_message_id = ",".join(x for x in [proc_mid, outbound_message_id] if x)
                     if not proc_ok:
                         ack_err = f"processing_ack_failed: {proc_err}; ack_error={ack_err}"
@@ -1857,7 +1857,7 @@ def _send_preview_then_finalize_access(
     proc_mid: str,
     proc_err: str,
 ) -> tuple[bool, str, str]:
-    preview_ok, preview_mid, preview_err = actions.send_flyer_concept_previews(chat_id, project_id)
+    preview_ok, preview_mid, preview_err = actions._dispatch_concept_preview_send(chat_id, project_id)
     outbound_message_id = ",".join(x for x in [proc_mid, preview_mid] if x)
     ack_err = preview_err
     if not proc_ok:
@@ -2850,7 +2850,7 @@ def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_
             )
             gen_ok, gen_detail = actions.trigger_generate_flyer_concepts(project_id)
             if gen_ok:
-                preview_ok, preview_mid, preview_err = actions.send_flyer_concept_previews(chat_id, project_id)
+                preview_ok, preview_mid, preview_err = actions._dispatch_concept_preview_send(chat_id, project_id)
                 actions.audit_intercepted(
                     reason="flyer_brand_asset_saved", chat_id=chat_id,
                     subprocess_rc=0 if preview_ok else 3,
@@ -3136,7 +3136,7 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
                     proc_ok=proc_ok, proc_mid=proc_mid, proc_err=proc_err,
                 )
             else:
-                ack_ok, outbound_message_id, ack_err = actions.send_flyer_concept_previews(chat_id, project_id)
+                ack_ok, outbound_message_id, ack_err = actions._dispatch_concept_preview_send(chat_id, project_id)
                 outbound_message_id = ",".join(x for x in [proc_mid, outbound_message_id] if x)
                 if not proc_ok:
                     ack_err = f"processing_ack_failed: {proc_err}; ack_error={ack_err}"
@@ -3361,11 +3361,17 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
     # when the active project is in a finalizable state. Same status gates,
     # same concept-regeneration branch, same finalize_and_send_flyer call,
     # same audit. Customer's intent matches: "go ahead and send."
-    if (actions.is_flyer_approval_text(body) or actions.is_flyer_send_now_intent(body)) and status in {"revising_design", "awaiting_final_approval"}:
+    # P0 #2 — `delivered_with_warning` added to the approval-route allowlist.
+    # Design §2 Q1 resolution: warn-tier "OK"/"approve"/"send now" routes via
+    # awaiting_final_approval (NOT directly to delivered) — preserves the
+    # finalize-flyer-assets contract. The FLYER_TRANSITIONS edge
+    # delivered_with_warning → awaiting_final_approval (Commit 1) is what
+    # makes the transition at line ~3354 below succeed.
+    if (actions.is_flyer_approval_text(body) or actions.is_flyer_send_now_intent(body)) and status in {"revising_design", "awaiting_final_approval", "delivered_with_warning"}:
         if status == "revising_design" and not active_project.get("concepts"):
             gen_ok, gen_detail = actions.trigger_generate_flyer_concepts(project_id)
             if gen_ok:
-                ack_ok, outbound_message_id, ack_err = actions.send_flyer_concept_previews(chat_id, project_id)
+                ack_ok, outbound_message_id, ack_err = actions._dispatch_concept_preview_send(chat_id, project_id)
                 actions.audit_intercepted(
                     reason="flyer_primary_project_created", chat_id=chat_id,
                     subprocess_rc=0 if ack_ok else 3,
@@ -3408,7 +3414,12 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
             )
             return {"action": "skip",
                     "reason": f"cf-router flyer active: regeneration failed for {project_id}"}
-        if status == "revising_design":
+        # P0 #2 — `delivered_with_warning` joins the source-state transition
+        # path for "OK"/"approve": same invoke_update_flyer_project call to
+        # transition to awaiting_final_approval, then the shared finalize
+        # path below picks up. FLYER_TRANSITIONS edge from Commit 1 makes
+        # this allowed; without that edge the update-state call would fail.
+        if status in {"revising_design", "delivered_with_warning"}:
             ok_status, status_detail = actions.invoke_update_flyer_project(project_id, "--status", "awaiting_final_approval")
             if not ok_status:
                 actions.audit_intercepted(
@@ -3472,7 +3483,12 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
     # is caught by PR-β's _try_flyer_delivery_state_guard which surfaces
     # the existing flyer_project_status_reply via
     # find_latest_flyer_project_for_status_by_sender.
-    if status in {"revising_design", "awaiting_final_approval", "delivered"} and body and not actions.is_flyer_send_now_intent(body):
+    # P0 #2 — `delivered_with_warning` joins the revision-text fallback.
+    # Customer replies that aren't approval/send-now on a warn-tier project
+    # are revision instructions; route via invoke_update_flyer_project to
+    # capture them. FLYER_TRANSITIONS edge delivered_with_warning →
+    # revising_design (Commit 1) takes effect downstream of this capture.
+    if status in {"revising_design", "awaiting_final_approval", "delivered", "delivered_with_warning"} and body and not actions.is_flyer_send_now_intent(body):
         ok, detail = actions.invoke_update_flyer_project(
             project_id,
             "--revision-text", body,
@@ -3541,7 +3557,7 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         if ok and needs_regen and not revision_requires_clarification:
             gen_ok, gen_detail = actions.trigger_generate_flyer_concepts(project_id)
             if gen_ok:
-                preview_ok, preview_mid, preview_err = actions.send_flyer_concept_previews(chat_id, project_id)
+                preview_ok, preview_mid, preview_err = actions._dispatch_concept_preview_send(chat_id, project_id)
                 mid = ",".join(x for x in [mid, preview_mid] if x)
                 ack_ok = ack_ok and preview_ok
                 if preview_err:

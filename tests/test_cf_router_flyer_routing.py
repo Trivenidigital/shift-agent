@@ -6257,3 +6257,301 @@ def test_outcome_derivation_against_recent_audit_sample():
         f"in detail — derivation regex would mis-classify these as "
         f"intermediate_intercept_handled: {bad[:3]}"
     )
+
+
+# ─────────────────────────────────────────────────────────────────
+# P0 #2 — cf-router helper extraction + dispatcher tests (Commit 4)
+# ─────────────────────────────────────────────────────────────────
+
+
+class _FakeValidation:
+    """Mimics text-manifest QA / visual QA validation return shape."""
+    def __init__(self, ok: bool, blockers: list[str] | None = None) -> None:
+        self.ok = ok
+        self.blockers = blockers or []
+
+
+def _install_send_media_fakes(
+    monkeypatch,
+    actions,
+    *,
+    text_qa_ok: bool = True,
+    visual_qa_ok: bool = True,
+    text_qa_blockers: list[str] | None = None,
+    visual_qa_blockers: list[str] | None = None,
+    bridge_send_media_ok: bool = True,
+    bridge_post_ok: bool = True,
+):
+    """Stub the network/IO surface of _send_concept_preview_media. Returns
+    a list of (call_name, args, kwargs) tuples that tests assert on.
+
+    Uses monkeypatch.setitem(sys.modules, ...) so fake modules auto-restore
+    at test teardown — otherwise sys.modules pollution would corrupt
+    later tests (e.g., test_flyer_delivery_retry which imports the real
+    safe_io)."""
+    bridge_calls: list[tuple] = []
+    import types as _types
+
+    def fake_bridge_send_media(chat_id, path, **kwargs):
+        bridge_calls.append(("bridge_send_media", (chat_id, path), kwargs))
+        if bridge_send_media_ok:
+            return True, f"mid-media-{len(bridge_calls)}", "", "sent"
+        return False, "", "send_failed", "failed"
+
+    def fake_bridge_post(chat_id, text, **kwargs):
+        bridge_calls.append(("bridge_post", (chat_id, text), kwargs))
+        if bridge_post_ok:
+            return True, f"mid-post-{len(bridge_calls)}", "", "sent"
+        return False, "", "post_failed", "failed"
+
+    fake_safe_io = _types.ModuleType("safe_io")
+    fake_safe_io.bridge_send_media = fake_bridge_send_media
+    fake_safe_io.bridge_post = fake_bridge_post
+    monkeypatch.setitem(sys.modules, "safe_io", fake_safe_io)
+
+    fake_flyer_render = _types.ModuleType("flyer_render")
+    fake_flyer_render.validate_text_manifest_file = lambda *a, **k: _FakeValidation(
+        ok=text_qa_ok, blockers=text_qa_blockers or [],
+    )
+    monkeypatch.setitem(sys.modules, "flyer_render", fake_flyer_render)
+
+    fake_flyer_visual_qa = _types.ModuleType("flyer_visual_qa")
+    fake_flyer_visual_qa.validate_visual_qa_report = lambda *a, **k: _FakeValidation(
+        ok=visual_qa_ok, blockers=visual_qa_blockers or [],
+    )
+    monkeypatch.setitem(sys.modules, "flyer_visual_qa", fake_flyer_visual_qa)
+
+    fake_action_registry = _types.ModuleType("flyer_action_registry")
+    fake_action_registry.PROJECT_ACTIONS = {}
+    fake_action_registry.build_action_context_for_command = lambda *a, **k: {}
+    monkeypatch.setitem(sys.modules, "flyer_action_registry", fake_action_registry)
+
+    monkeypatch.setattr(actions, "_record_flyer_concept_preview_delivery",
+                        lambda *a, **k: None, raising=False)
+    return bridge_calls
+
+
+def _sample_project_dict(status: str = "awaiting_concept_selection",
+                         with_warning: bool = False) -> dict:
+    project = {
+        "project_id": "F0108", "status": status, "version": 1,
+        "concepts": [{
+            "concept_id": "C1", "title": "Dosa Night",
+            "style_summary": "warm tones", "preview_asset_id": "A0001",
+        }],
+        "assets": [{"asset_id": "A0001", "path": "/tmp/preview.png"}],
+        "locked_facts": [{"fact_id": "business_name", "value": "Lakshmi's Kitchen"}],
+    }
+    if with_warning:
+        project["warning"] = {
+            "severity": "warn",
+            "blockers": ["visible wrong business/brand: Laksmi'S Kitchen"],
+            "customer_text": "Here's your flyer draft. ...",
+            "customer_text_sha256": "a" * 64,
+            "delivered_at": "2026-05-28T14:30:00+00:00",
+            "asset_id": "A0001", "classifier_version": "v1",
+        }
+    return project
+
+
+def test_send_concept_preview_media_strict_policy_fails_on_visual_qa(monkeypatch):
+    """qa_policy='strict' (pass-tier) hard-fails when visual-QA-report is not
+    ok. Pre-PR behavior preserved bit-for-bit."""
+    actions = _load_actions()
+    _install_send_media_fakes(monkeypatch, actions,
+                              visual_qa_ok=False,
+                              visual_qa_blockers=["visual QA did not pass"])
+    project = _sample_project_dict()
+    ok, _, err = actions._send_concept_preview_media(
+        chat_id="x@s.whatsapp.net", project=project, qa_policy="strict",
+    )
+    assert ok is False
+    assert err.startswith("visual_qa_failed:")
+    assert "visual QA did not pass" in err
+
+
+def test_send_concept_preview_media_warn_tolerant_proceeds_on_failed_visual_qa(monkeypatch):
+    """qa_policy='warn_tolerant' proceeds even when visual-QA-report status
+    != 'passed'. project.warning already captures the blockers."""
+    actions = _load_actions()
+    bridge_calls = _install_send_media_fakes(
+        monkeypatch, actions,
+        visual_qa_ok=False,
+        visual_qa_blockers=["visual QA did not pass"],
+    )
+    project = _sample_project_dict()
+    ok, _, _ = actions._send_concept_preview_media(
+        chat_id="x@s.whatsapp.net", project=project,
+        qa_policy="warn_tolerant",
+        customer_text="Here's your flyer draft. ...",
+    )
+    assert ok is True
+    call_names = [c[0] for c in bridge_calls]
+    assert "bridge_send_media" in call_names
+    assert "bridge_post" in call_names
+
+
+def test_send_concept_preview_media_text_manifest_qa_always_strict(monkeypatch):
+    """Text-manifest QA stays strict regardless of qa_policy. Substrate /
+    template-parse failures are NOT warn-tier-recoverable."""
+    actions = _load_actions()
+    _install_send_media_fakes(
+        monkeypatch, actions,
+        text_qa_ok=False, text_qa_blockers=["template parse failed"],
+    )
+    project = _sample_project_dict()
+    for policy in ("strict", "warn_tolerant"):
+        ok, _, err = actions._send_concept_preview_media(
+            chat_id="x@s.whatsapp.net", project=project, qa_policy=policy,
+            customer_text=("text" if policy == "warn_tolerant" else None),
+        )
+        assert ok is False, f"qa_policy={policy} should still fail on text_qa"
+        assert err.startswith("text_qa_failed:"), policy
+
+
+def test_send_concept_preview_media_pin_c_customer_text_replaces_trailing_cta(monkeypatch):
+    """Pin C — customer_text replaces ONLY the trailing CTA, NOT the per-concept
+    captions. Concept captions stay 'C1: Title' semantic descriptors."""
+    actions = _load_actions()
+    bridge_calls = _install_send_media_fakes(monkeypatch, actions)
+    project = _sample_project_dict()
+    warn_text = "Here's your flyer draft.\n\nWe noticed a small detail..."
+    ok, _, _ = actions._send_concept_preview_media(
+        chat_id="x@s.whatsapp.net", project=project,
+        qa_policy="warn_tolerant", customer_text=warn_text,
+    )
+    assert ok is True
+
+    # Per-concept caption: stable "C1: Title" pattern; NOT replaced
+    media_call = next(c for c in bridge_calls if c[0] == "bridge_send_media")
+    assert "C1: Dosa Night" in media_call[2]["caption"]
+    assert "Reply APPROVE or reply with changes" in media_call[2]["caption"]
+    assert warn_text not in media_call[2]["caption"]
+
+    # Trailing CTA: text IS the warn_text override
+    cta_call = next(c for c in bridge_calls if c[0] == "bridge_post")
+    assert cta_call[1][1] == warn_text
+    assert "Reply APPROVE to receive final files" not in cta_call[1][1]
+
+
+def test_send_concept_preview_media_default_cta_when_customer_text_none(monkeypatch):
+    """qa_policy='strict' with no customer_text uses the pre-PR CTA verbatim."""
+    actions = _load_actions()
+    bridge_calls = _install_send_media_fakes(monkeypatch, actions)
+    project = _sample_project_dict()
+    ok, _, _ = actions._send_concept_preview_media(
+        chat_id="x@s.whatsapp.net", project=project, qa_policy="strict",
+    )
+    assert ok is True
+    cta_call = next(c for c in bridge_calls if c[0] == "bridge_post")
+    assert cta_call[1][1] == "Reply APPROVE to receive final files, or reply with changes."
+
+
+def test_dispatch_concept_preview_send_routes_warn_tier_to_warn_wrapper(monkeypatch, tmp_path):
+    """Dispatcher routes status=delivered_with_warning + warning payload
+    → send_warn_tier_concept_previews with the built customer_text."""
+    actions = _load_actions()
+    fake_store = tmp_path / "projects.json"
+    fake_store.write_text(json.dumps({"projects": [_sample_project_dict(
+        status="delivered_with_warning", with_warning=True,
+    )]}), encoding="utf-8")
+    monkeypatch.setattr(actions, "FLYER_PROJECTS_PATH", fake_store)
+
+    captured: dict = {}
+
+    def fake_warn(chat_id, project_id, customer_text):
+        captured["target"] = "warn"
+        captured["customer_text"] = customer_text
+        return True, "mid", ""
+
+    def fake_pass(chat_id, project_id):
+        captured["target"] = "pass"
+        return True, "mid", ""
+
+    monkeypatch.setattr(actions, "send_warn_tier_concept_previews", fake_warn)
+    monkeypatch.setattr(actions, "send_flyer_concept_previews", fake_pass)
+
+    ok, _, _ = actions._dispatch_concept_preview_send("x@s.whatsapp.net", "F0108")
+    assert ok is True
+    assert captured["target"] == "warn"
+    assert captured["customer_text"]
+    assert "Lakshmi's Kitchen" in captured["customer_text"]
+
+
+def test_dispatch_concept_preview_send_routes_pass_tier_to_pass_wrapper(monkeypatch, tmp_path):
+    """Dispatcher routes any non-warn status → existing pass-tier wrapper.
+    Hermes-as-brain check: only reads status + warning; doesn't re-classify."""
+    actions = _load_actions()
+    fake_store = tmp_path / "projects.json"
+    fake_store.write_text(json.dumps({"projects": [_sample_project_dict(
+        status="awaiting_concept_selection", with_warning=False,
+    )]}), encoding="utf-8")
+    monkeypatch.setattr(actions, "FLYER_PROJECTS_PATH", fake_store)
+
+    captured: dict = {}
+    monkeypatch.setattr(actions, "send_warn_tier_concept_previews",
+                        lambda *a, **k: captured.update(target="warn") or (True, "", ""))
+    monkeypatch.setattr(actions, "send_flyer_concept_previews",
+                        lambda *a, **k: captured.update(target="pass") or (True, "", ""))
+
+    actions._dispatch_concept_preview_send("x@s.whatsapp.net", "F0108")
+    assert captured["target"] == "pass"
+
+
+def test_dispatch_concept_preview_send_falls_back_to_pass_when_project_missing(monkeypatch, tmp_path):
+    """Missing project → falls back to pass-tier wrapper (which then returns
+    'project_not_found'). Defensive: dispatcher doesn't gate on existence."""
+    actions = _load_actions()
+    fake_store = tmp_path / "projects.json"
+    fake_store.write_text(json.dumps({"projects": []}), encoding="utf-8")
+    monkeypatch.setattr(actions, "FLYER_PROJECTS_PATH", fake_store)
+
+    captured: dict = {}
+    monkeypatch.setattr(actions, "send_warn_tier_concept_previews",
+                        lambda *a, **k: captured.update(target="warn") or (True, "", ""))
+    monkeypatch.setattr(actions, "send_flyer_concept_previews",
+                        lambda *a, **k: captured.update(target="pass") or (True, "", ""))
+
+    actions._dispatch_concept_preview_send("x@s.whatsapp.net", "F9999")
+    assert captured["target"] == "pass"
+
+
+def test_dispatch_concept_preview_send_pass_tier_when_warning_none(monkeypatch, tmp_path):
+    """Edge case: status=delivered_with_warning but warning=None → falls
+    back to pass-tier. Defensive against state-machine inconsistencies."""
+    actions = _load_actions()
+    fake_store = tmp_path / "projects.json"
+    bad_project = _sample_project_dict(status="delivered_with_warning", with_warning=False)
+    bad_project["warning"] = None
+    fake_store.write_text(json.dumps({"projects": [bad_project]}), encoding="utf-8")
+    monkeypatch.setattr(actions, "FLYER_PROJECTS_PATH", fake_store)
+
+    captured: dict = {}
+    monkeypatch.setattr(actions, "send_warn_tier_concept_previews",
+                        lambda *a, **k: captured.update(target="warn") or (True, "", ""))
+    monkeypatch.setattr(actions, "send_flyer_concept_previews",
+                        lambda *a, **k: captured.update(target="pass") or (True, "", ""))
+
+    actions._dispatch_concept_preview_send("x@s.whatsapp.net", "F0108")
+    assert captured["target"] == "pass"
+
+
+def test_send_flyer_concept_previews_signature_unchanged(monkeypatch):
+    """Pass-tier wrapper preserves the pre-PR signature.
+    Bit-for-bit compatibility for the 6 existing callers in hooks.py."""
+    actions = _load_actions()
+    import inspect
+    sig = inspect.signature(actions.send_flyer_concept_previews)
+    params = list(sig.parameters.keys())
+    assert params == ["chat_id", "project_id"], params
+
+
+def test_send_warn_tier_concept_previews_requires_customer_text(monkeypatch):
+    """Warn-tier wrapper REQUIRES customer_text — asymmetric signature
+    prevents accidental empty-customer-text on warn-tier."""
+    actions = _load_actions()
+    import inspect
+    sig = inspect.signature(actions.send_warn_tier_concept_previews)
+    params = sig.parameters
+    assert "customer_text" in params
+    assert params["customer_text"].default is inspect.Parameter.empty
