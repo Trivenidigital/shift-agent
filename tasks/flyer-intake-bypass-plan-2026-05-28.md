@@ -351,9 +351,47 @@ The brainstorm's language piece — "complete requests without a language signal
 
 1. **Chat-id hashing function.** Plan picks `chat_id_hash` matching the dominant `FlyerRecovery*` family convention. Design phase: confirm which hash function the family uses (likely `hashlib.sha256(chat_id.encode())[:N]` or similar) and reuse exactly — divergence breaks audit-log replay tooling that decodes by hash prefix.
 2. **`flyer_intake_bypass_shadow` context pattern parity.** Plan §6 Commit 3 mirrors `flyer_intent_shadow` (`hooks.py:178-197`) for the outcome-row emit. Design phase: read the deployed shadow helpers (`begin_flyer_intent_shadow` + `finalize_flyer_intent_shadow` + `reset_flyer_intent_shadow`) end-to-end and confirm the same try/finally + token-passing pattern is appropriate. Specifically: does the existing shadow run inside `_pre_gateway_dispatch_impl`'s try/except/finally or somewhere else? Plan assumes inside; design phase pins.
-3. **`outcome="intermediate_intercept_handled"` detection.** The finalize step needs to identify WHICH intermediate intercept handled the message. Design phase: how does the finalize step learn the handler name? Options: (a) `hook_result` dict already carries `reason` field that names the intercept; (b) the shadow context tracks the running intercept name; (c) the handler intercepts themselves stamp the result. Lean: option (a) — `hook_result["reason"]` typically contains a string like `"cf-router flyer active: ..."` that names the path.
 
-(Decisions 2026-05-28: 5 `bypass_reason` Literal values; 2 audit-row variants — `FlyerIntakeBypassed` + `FlyerIntakeBypassOutcome` — immutable each; `inbound_script` captured; expired/cancelled customers DO NOT bypass; account-lifecycle boundary preserved. All five operator decisions baked in; not open.)
+### Pinned 2026-05-28 (was Q3): `FlyerIntakeBypassOutcome.outcome` derivation mechanism
+
+Operator finding 2026-05-28: derivation must be pinned BEFORE build, not deferred.
+
+**Decision: F-pattern regex extraction from `hook_result["reason"]`** + None-check. Concrete rules:
+
+```python
+_FLYER_PROJECT_ID_RE = re.compile(r"\bF\d{4,}\b")
+
+
+def _derive_bypass_outcome(hook_result: Optional[dict]) -> tuple[str, str, str]:
+    """Returns (outcome, project_id, handler_intercept) for the outcome row.
+
+    Pinned per operator finding 2026-05-28. Build phase must NOT rely on
+    string-pattern-matching beyond the F-pattern extraction below.
+    """
+    if hook_result is None:
+        return ("unrouted", "", "")
+    reason = str(hook_result.get("reason") or "")
+    # Survey of hook_result["reason"] strings on origin/main HEAD f7ad477:
+    # - Primary-intercept-success paths embed an F-pattern project_id
+    #   (e.g., "cf-router flyer active: regenerated revised design for F0097").
+    # - Intermediate-intercept paths return reason strings WITHOUT an
+    #   F-pattern (e.g., "cf-router flyer reference scope auth_blocked",
+    #   "cf-router flyer sample prompts sent",
+    #   "cf-router flyer customer not active").
+    # - This asymmetry is what makes the regex extraction reliable.
+    m = _FLYER_PROJECT_ID_RE.search(reason)
+    if m:
+        return ("routed_to_project", m.group(0), "")
+    # No project_id → intermediate intercept handled. Capture the reason
+    # string (truncated to handler_intercept field limit) for triage.
+    return ("intermediate_intercept_handled", "", reason[:80])
+```
+
+**Build-phase verification step (NEW, added per operator finding):** Before Commit 3 ships, run a replay over the last 100 `cf_router_intercepted` audit rows on main-vps and verify the derivation produces the expected outcomes — specifically, that every `flyer_primary_project_created` audit row has a corresponding `hook_result["reason"]` containing an F-pattern project_id. If any success-path reason string lacks the F-pattern, the regex misses that path → `intermediate_intercept_handled` mis-classification. Surface as a build-time test fixture loaded from the audit-log sample, not a runtime assumption.
+
+**Risk acknowledged:** the derivation is reason-string-coupled. If a future PR changes a success path's reason string to drop the project_id, this derivation breaks silently. The build-phase replay test guards against current breakage; a follow-up could enforce via a `metadata: dict` field on `hook_result` populated explicitly. Out of scope here; logged as a known coupling.
+
+(Decisions 2026-05-28: 5 `bypass_reason` Literal values; 2 audit-row variants — `FlyerIntakeBypassed` + `FlyerIntakeBypassOutcome` — immutable each; `inbound_script` captured; expired/cancelled customers DO NOT bypass; account-lifecycle boundary preserved; **outcome-derivation mechanism pinned to F-pattern extraction from `hook_result["reason"]`**. All operator decisions baked in.)
 
 ---
 
@@ -367,9 +405,23 @@ The brainstorm's language piece — "complete requests without a language signal
 - **Backfill of historical wizard-stuck customers** → operator-driven; not in scope here.
 - **Expired/cancelled/suspended customer bypass** → operator decision 2026-05-28 #1 — account-lifecycle boundary owns re-onboarding; wizard stays in control for these states. Helper precondition 2 enforces.
 
-**Two invariants pinned for build-time preservation (per reviewer 2 #8):**
+**Invariant pinned for build-time preservation (per reviewer 2 #8):**
 - **`intake_session is None` + bypass returns None → existing line 2383-2384 `return None` preserved bit-for-bit.** The helper short-circuits via the customer-state precondition + signal-OR, then falls through; the existing `if not intake_session: return None` at line 2383 is unchanged.
-- **Customer-row lifecycle after bypass.** When `_try_flyer_primary_intercept` runs after bypass and creates a project, the existing primary-intercept code path creates the customer row + advances it via `flyer_customer_created` / `flyer_customer_activated` audit rows (existing substrate). So the customer's NEXT message faces a populated `customer` dict (status `trial` or `active`), which routes via the existing-customer fast path branches 4-5 of the helper — NOT via the brand-new-sender branches 1-3. This means: brand-new sender bypasses ONCE per first-message-with-clear-intent; subsequent messages from the same chat take the (preserved) existing-customer path. Build phase verifies this by reading the post-bypass primary-intercept body confirms customer-row creation; if absent, design-phase Q4 (new).
+
+**Customer-row lifecycle after bypass — VERIFIED IDEMPOTENT-FRIENDLY (per operator finding 2026-05-28):**
+
+Earlier draft of this plan claimed that "brand-new sender bypasses ONCE; subsequent messages take the existing-customer path" — that claim is **false** and has been removed.
+
+Reality (verified against `src/agents/flyer/scripts/create-flyer-project:614-658`):
+- The post-bypass `_try_flyer_primary_intercept → create-flyer-project` path **does NOT create or activate a customer row**. It only reads customer state if present (`customer is not None and customer.status in {"trial","active"}` at line 614 hydrates profile facts) and writes `customer_id=customer.customer_id if customer is not None else ""` on the project record at line 658.
+- No customer-store write occurs in `create-flyer-project`. Customer-row creation is owned by the **separate onboarding flow** (`src/agents/flyer/onboarding.py`) triggered by the trial-link click — that flow is NOT engaged by the bypass.
+- Consequence: a brand-new sender (no customer row) sending repeated clear-intent messages from the same `chat_id` **will bypass every time**, each creating a new project with `customer_id=""`.
+
+**Is this acceptable?** Yes for the F0108 / 22.png class — each message gets routed to a project (the right customer-facing outcome). Customer ends up with multiple drafts from multiple messages, which is what an operator wants when intent is clear. The customer-row creation continues to be owned by the trial-onboarding flow; the bypass doesn't disturb it.
+
+**Operator visibility surface:** the `FlyerIntakeBypassed` row population per `chat_id_hash` over time gives operators a measurable signal — if the same chat_id bypasses N times without onboarding completing, that's the new operator-triage population. NOT a silent-failure regression because every bypass writes an audit row.
+
+**What this means for §10 out-of-scope:** "promote brand-new senders to a customer row at bypass time" → out of scope here; that's a separate onboarding-flow concern. Surface to operator if telemetry shows repeated-bypass-without-onboarding becomes a population worth acting on.
 
 ---
 
