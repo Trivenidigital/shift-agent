@@ -1701,6 +1701,191 @@ def _detect_inbound_script(text: str) -> str:
     return "other"
 
 
+# ─────────────────────────────────────────────────────────────────
+# 2026-05-28 — intake-bypass shadow context + audit emit.
+# Mirrors the flyer_intent_shadow pattern at lines 499-794 — same
+# contextvars.Token lifecycle, same try/except non-fatal finalize
+# discipline. See design §3 for the design-phase resolution.
+# ─────────────────────────────────────────────────────────────────
+
+
+_FLYER_INTAKE_BYPASS_CONTEXT: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "flyer_intake_bypass_context",
+    default=None,
+)
+
+# Pending-token stash — the intake intercept (deep in the dispatch impl)
+# opens the bypass shadow and stashes the token here. The dispatch wrapper's
+# finally block consumes + resets. Avoids plumbing tokens through every
+# intercept return value.
+_PENDING_BYPASS_TOKEN: contextvars.ContextVar[contextvars.Token | None] = contextvars.ContextVar(
+    "pending_flyer_intake_bypass_token",
+    default=None,
+)
+
+
+# F-pattern regex for outcome derivation per design §4 — primary-intercept
+# success paths embed an F-pattern project_id in hook_result["reason"];
+# intermediate-intercept paths don't. Build-phase replay gate verifies the
+# asymmetry against a captured audit-log sample (see Commit 3 test fixture).
+_FLYER_PROJECT_ID_RE = re.compile(r"\bF\d{4,}\b")
+
+
+def begin_flyer_intake_bypass_shadow(
+    *,
+    chat_id: str,
+    message_id: str,
+    bypass_reason: str,
+    has_media: bool,
+    customer_state: str,
+    intake_session_status: str,
+    inbound_script: str,
+) -> contextvars.Token | None:
+    """Open a bypass-tracking context that survives until the dispatch
+    wrapper's finally block calls finalize_flyer_intake_bypass_shadow.
+    Returns a contextvars.Token the caller must hand to reset()."""
+    context = {
+        "chat_id_hash": _short_hash(chat_id),
+        "message_id_hash": _short_hash(message_id),
+        "bypass_reason": str(bypass_reason or ""),
+        "has_media": bool(has_media),
+        "customer_state": str(customer_state or ""),
+        "intake_session_status": str(intake_session_status or ""),
+        "inbound_script": str(inbound_script or "latin"),
+        "begin_ts": datetime.now(timezone.utc),
+    }
+    return _FLYER_INTAKE_BYPASS_CONTEXT.set(context)
+
+
+def reset_flyer_intake_bypass_shadow(token: contextvars.Token | None) -> None:
+    """Reset the bypass-context ContextVar binding. Mirrors
+    reset_flyer_intent_shadow — must be called in the dispatch wrapper's
+    finally block, even when the begin() call returned None."""
+    if token is not None:
+        _FLYER_INTAKE_BYPASS_CONTEXT.reset(token)
+
+
+def _derive_bypass_outcome(hook_result: Optional[dict]) -> tuple[str, str, str]:
+    """Plan §9 pinned mechanism (post-revision): F-pattern regex extraction
+    from hook_result['reason']. Returns (outcome, project_id, handler_intercept).
+
+    - hook_result is None → ("unrouted", "", "")
+    - hook_result["reason"] contains F-pattern → ("routed_to_project", "F...", "")
+    - else → ("intermediate_intercept_handled", "", reason[:80])"""
+    if hook_result is None:
+        return ("unrouted", "", "")
+    reason = str(hook_result.get("reason") or "")
+    m = _FLYER_PROJECT_ID_RE.search(reason)
+    if m:
+        return ("routed_to_project", m.group(0), "")
+    return ("intermediate_intercept_handled", "", reason[:80])
+
+
+def finalize_flyer_intake_bypass_shadow(*, hook_result: Optional[dict] = None) -> None:
+    """Emit FlyerIntakeBypassOutcome via the deployed audit chokepoint
+    (safe_io.ndjson_append → LOG_PATH). No-op when no bypass fired during
+    the dispatch (context is None).
+
+    Mirrors finalize_flyer_intent_shadow exception-suppression discipline:
+    any failure here is written to stderr and never propagated — the
+    dispatch flow must NEVER be blocked by audit emit failures."""
+    context = _FLYER_INTAKE_BYPASS_CONTEXT.get()
+    if not context:
+        return
+    outcome, project_id, handler = _derive_bypass_outcome(hook_result)
+    elapsed = datetime.now(timezone.utc) - context["begin_ts"]
+    elapsed_ms = max(0, int(elapsed.total_seconds() * 1000))
+    try:
+        _ensure_platform_path()
+        _ensure_src_path()
+        from safe_io import ndjson_append  # type: ignore
+        from schemas import FlyerIntakeBypassOutcome  # type: ignore
+
+        entry = FlyerIntakeBypassOutcome(
+            ts=datetime.now(timezone.utc),
+            chat_id_hash=str(context.get("chat_id_hash") or ""),
+            outcome=outcome,  # type: ignore[arg-type]
+            project_id=project_id,
+            handler_intercept=handler,
+            elapsed_ms=elapsed_ms,
+        )
+        ndjson_append(LOG_PATH, entry.model_dump_json())
+    except Exception as e:
+        sys.stderr.write(
+            f"cf-router: flyer_intake_bypass_outcome emit failed (non-fatal): "
+            f"{type(e).__name__}: {e}\n"
+        )
+
+
+def note_flyer_intake_bypass_active(
+    *,
+    chat_id: str,
+    message_id: str,
+    bypass_reason: str,
+    has_media: bool,
+    customer_state: str,
+    intake_session_status: str,
+    inbound_script: str,
+) -> None:
+    """Called from _try_flyer_intake_intercept on bypass. Opens the bypass
+    shadow + stashes the token in _PENDING_BYPASS_TOKEN. The dispatch
+    wrapper's finally consumes the pending token via
+    consume_pending_flyer_intake_bypass_token() for reset."""
+    token = begin_flyer_intake_bypass_shadow(
+        chat_id=chat_id,
+        message_id=message_id,
+        bypass_reason=bypass_reason,
+        has_media=has_media,
+        customer_state=customer_state,
+        intake_session_status=intake_session_status,
+        inbound_script=inbound_script,
+    )
+    _PENDING_BYPASS_TOKEN.set(token)
+
+
+def consume_pending_flyer_intake_bypass_token() -> contextvars.Token | None:
+    """Atomic read-and-clear of the pending bypass token. Called by the
+    dispatch wrapper's finally block to hand the token to reset_*().
+    Always sets None on exit even if the read raises."""
+    token = _PENDING_BYPASS_TOKEN.get()
+    _PENDING_BYPASS_TOKEN.set(None)
+    return token
+
+
+def audit_flyer_intake_bypassed(
+    *,
+    chat_id: str,
+    bypass_reason: str,
+    has_media: bool,
+    customer_state: str,
+    intake_session_status: str,
+    inbound_script: str,
+) -> None:
+    """Emit the decision-time FlyerIntakeBypassed audit row via the deployed
+    ndjson_append chokepoint. Best-effort; failures suppressed to stderr."""
+    try:
+        _ensure_platform_path()
+        _ensure_src_path()
+        from safe_io import ndjson_append  # type: ignore
+        from schemas import FlyerIntakeBypassed  # type: ignore
+
+        entry = FlyerIntakeBypassed(
+            ts=datetime.now(timezone.utc),
+            chat_id_hash=_short_hash(chat_id),
+            bypass_reason=bypass_reason,  # type: ignore[arg-type]
+            has_media=has_media,
+            customer_state=customer_state,
+            intake_session_status=intake_session_status,
+            inbound_script=inbound_script,  # type: ignore[arg-type]
+        )
+        ndjson_append(LOG_PATH, entry.model_dump_json())
+    except Exception as e:
+        sys.stderr.write(
+            f"cf-router: flyer_intake_bypassed emit failed (non-fatal): "
+            f"{type(e).__name__}: {e}\n"
+        )
+
+
 def extract_flyer_request_after_confirm(text: str) -> str:
     """Return a flyer brief trailing a compound onboarding CONFIRM reply."""
     body = flyer_visible_message_text(text)

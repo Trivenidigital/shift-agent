@@ -5967,3 +5967,244 @@ def test_detect_inbound_script_does_not_mutate_input():
     snapshot = text
     _ = actions._detect_inbound_script(text)
     assert text == snapshot
+
+
+# ─────────────────────────────────────────────────────────────────
+# 2026-05-28 — intake-bypass wiring + shadow context (Commit 3)
+# Tests cover the helper-call insertion, the shadow context lifecycle,
+# and _derive_bypass_outcome's F-pattern regex extraction.
+# ─────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("hook_result,expected", [
+    # None → unrouted
+    (None, ("unrouted", "", "")),
+    # F-pattern in reason → routed_to_project with project_id extracted
+    ({"action": "skip", "reason": "cf-router flyer primary project created F0108"},
+     ("routed_to_project", "F0108", "")),
+    ({"action": "skip", "reason": "cf-router flyer active: regenerated revised design for F0097"},
+     ("routed_to_project", "F0097", "")),
+    # No F-pattern → intermediate_intercept_handled with reason captured
+    ({"action": "skip", "reason": "cf-router flyer sample prompts sent"},
+     ("intermediate_intercept_handled", "", "cf-router flyer sample prompts sent")),
+    ({"action": "skip", "reason": "cf-router flyer customer not active"},
+     ("intermediate_intercept_handled", "", "cf-router flyer customer not active")),
+    ({"action": "skip", "reason": "cf-router flyer reference scope auth_blocked"},
+     ("intermediate_intercept_handled", "", "cf-router flyer reference scope auth_blocked")),
+    # Empty reason → intermediate with empty handler
+    ({"action": "skip", "reason": ""},
+     ("intermediate_intercept_handled", "", "")),
+    # Missing reason key → empty string → intermediate
+    ({"action": "skip"},
+     ("intermediate_intercept_handled", "", "")),
+])
+def test_derive_bypass_outcome(hook_result, expected):
+    """Pinned per plan §9 (post-revision) + design §4. F-pattern regex
+    extraction from hook_result['reason']."""
+    actions = _load_actions()
+    assert actions._derive_bypass_outcome(hook_result) == expected
+
+
+def test_derive_bypass_outcome_truncates_long_handler_reason():
+    """Reason field on FlyerIntakeBypassOutcome.handler_intercept is max_length=80.
+    The derivation truncates to fit the schema constraint."""
+    actions = _load_actions()
+    long_reason = "cf-router flyer " + ("a" * 200)
+    outcome, project_id, handler = actions._derive_bypass_outcome(
+        {"action": "skip", "reason": long_reason},
+    )
+    assert outcome == "intermediate_intercept_handled"
+    assert project_id == ""
+    assert len(handler) == 80
+
+
+def _stub_safe_io_for_bypass_audit(monkeypatch, fake_log: Path) -> None:
+    """Stub sys.modules['safe_io'] with a Windows-compatible ndjson_append
+    so the lazy import inside audit_flyer_intake_bypassed /
+    finalize_flyer_intake_bypass_shadow finds a working module.
+
+    Real safe_io imports fcntl which is Unix-only — on Windows the lazy
+    import raises ModuleNotFoundError and the except suppresses, so the
+    audit row is never written. Tests need a working stub to verify the
+    decision/outcome row shape."""
+    import types as _types
+    safe_io_stub = _types.ModuleType("safe_io")
+
+    def _stub_ndjson_append(path, payload):
+        p = Path(str(path))
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(str(p), "a", encoding="utf-8") as fh:
+            fh.write(str(payload) + "\n")
+
+    safe_io_stub.ndjson_append = _stub_ndjson_append
+    monkeypatch.setitem(sys.modules, "safe_io", safe_io_stub)
+
+
+def test_bypass_shadow_lifecycle_begin_finalize_reset(monkeypatch, tmp_path):
+    """End-to-end shadow context: begin() sets ContextVar, finalize() emits
+    FlyerIntakeBypassOutcome via ndjson_append, reset() clears the binding."""
+    actions = _load_actions()
+    fake_log = tmp_path / "decisions.log"
+    monkeypatch.setattr(actions, "LOG_PATH", fake_log)
+    _stub_safe_io_for_bypass_audit(monkeypatch, fake_log)
+
+    token = actions.begin_flyer_intake_bypass_shadow(
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="wamid.intake.1",
+        bypass_reason="edit_with_media",
+        has_media=True,
+        customer_state="",
+        intake_session_status="choosing_mode",
+        inbound_script="latin",
+    )
+    assert token is not None
+
+    # Finalize with a successful hook_result → routed_to_project outcome.
+    actions.finalize_flyer_intake_bypass_shadow(
+        hook_result={"action": "skip", "reason": "cf-router flyer primary project created F0108"},
+    )
+
+    # Audit row written.
+    contents = fake_log.read_text(encoding="utf-8").strip().splitlines()
+    assert len(contents) == 1
+    row = json.loads(contents[0])
+    assert row["type"] == "flyer_intake_bypass_outcome"
+    assert row["outcome"] == "routed_to_project"
+    assert row["project_id"] == "F0108"
+    assert row["elapsed_ms"] >= 0
+    assert row["chat_id_hash"]  # non-empty
+
+    # Reset clears the binding so subsequent finalize() is a no-op.
+    actions.reset_flyer_intake_bypass_shadow(token)
+    fake_log.unlink()
+    actions.finalize_flyer_intake_bypass_shadow(hook_result=None)
+    assert not fake_log.exists()  # no-op when context is None
+
+
+def test_bypass_shadow_finalize_no_op_when_no_bypass(monkeypatch, tmp_path):
+    """Defensive: finalize() with no prior begin() must write nothing.
+    Dispatch wrapper calls finalize unconditionally; no-op is the
+    correctness-critical contract."""
+    actions = _load_actions()
+    fake_log = tmp_path / "decisions.log"
+    monkeypatch.setattr(actions, "LOG_PATH", fake_log)
+    _stub_safe_io_for_bypass_audit(monkeypatch, fake_log)
+    actions.finalize_flyer_intake_bypass_shadow(hook_result={"action": "skip", "reason": "anything"})
+    assert not fake_log.exists()
+
+
+def test_bypass_shadow_finalize_outcome_unrouted_when_hook_result_none(monkeypatch, tmp_path):
+    """When intake bypass fired but no downstream intercept handled →
+    outcome=unrouted. Silent-failure surface lit per operator decision #5
+    (the row exists so operators can grep for it; it's NOT a mutable bool
+    on the decision row)."""
+    actions = _load_actions()
+    fake_log = tmp_path / "decisions.log"
+    monkeypatch.setattr(actions, "LOG_PATH", fake_log)
+    _stub_safe_io_for_bypass_audit(monkeypatch, fake_log)
+    token = actions.begin_flyer_intake_bypass_shadow(
+        chat_id="x", message_id="m", bypass_reason="edit_with_media",
+        has_media=True, customer_state="", intake_session_status="choosing_mode",
+        inbound_script="latin",
+    )
+    actions.finalize_flyer_intake_bypass_shadow(hook_result=None)
+    actions.reset_flyer_intake_bypass_shadow(token)
+    row = json.loads(fake_log.read_text(encoding="utf-8").strip())
+    assert row["outcome"] == "unrouted"
+    assert row["project_id"] == ""
+    assert row["handler_intercept"] == ""
+
+
+def test_bypass_shadow_finalize_outcome_intermediate_when_handler_no_project(monkeypatch, tmp_path):
+    """When an intermediate intercept (e.g., scope_choice) handles the
+    message after bypass-return-None → outcome=intermediate_intercept_handled
+    + handler_intercept captured."""
+    actions = _load_actions()
+    fake_log = tmp_path / "decisions.log"
+    monkeypatch.setattr(actions, "LOG_PATH", fake_log)
+    _stub_safe_io_for_bypass_audit(monkeypatch, fake_log)
+    token = actions.begin_flyer_intake_bypass_shadow(
+        chat_id="x", message_id="m", bypass_reason="edit_with_media",
+        has_media=True, customer_state="", intake_session_status="choosing_mode",
+        inbound_script="latin",
+    )
+    actions.finalize_flyer_intake_bypass_shadow(
+        hook_result={"action": "skip", "reason": "cf-router flyer reference scope auth_blocked"},
+    )
+    actions.reset_flyer_intake_bypass_shadow(token)
+    row = json.loads(fake_log.read_text(encoding="utf-8").strip())
+    assert row["outcome"] == "intermediate_intercept_handled"
+    assert row["project_id"] == ""
+    assert "reference scope" in row["handler_intercept"]
+
+
+def test_pending_bypass_token_consume_and_clear(monkeypatch):
+    """note_flyer_intake_bypass_active stashes; consume_*_token returns +
+    clears in one call. Defensive against token leakage across dispatches."""
+    actions = _load_actions()
+    # Pre-state: nothing pending.
+    assert actions.consume_pending_flyer_intake_bypass_token() is None
+    actions.note_flyer_intake_bypass_active(
+        chat_id="x", message_id="m", bypass_reason="edit_with_media",
+        has_media=True, customer_state="", intake_session_status="choosing_mode",
+        inbound_script="latin",
+    )
+    token = actions.consume_pending_flyer_intake_bypass_token()
+    assert token is not None
+    # Consumed; subsequent consume returns None.
+    assert actions.consume_pending_flyer_intake_bypass_token() is None
+    actions.reset_flyer_intake_bypass_shadow(token)
+
+
+def test_audit_flyer_intake_bypassed_writes_decision_row(monkeypatch, tmp_path):
+    """audit_flyer_intake_bypassed emits the FlyerIntakeBypassed row via
+    ndjson_append with the right field shape — verifies schema fit."""
+    actions = _load_actions()
+    fake_log = tmp_path / "decisions.log"
+    monkeypatch.setattr(actions, "LOG_PATH", fake_log)
+    _stub_safe_io_for_bypass_audit(monkeypatch, fake_log)
+    actions.audit_flyer_intake_bypassed(
+        chat_id="17329837841@s.whatsapp.net",
+        bypass_reason="edit_with_media",
+        has_media=True,
+        customer_state="",
+        intake_session_status="choosing_mode",
+        inbound_script="latin",
+    )
+    row = json.loads(fake_log.read_text(encoding="utf-8").strip())
+    assert row["type"] == "flyer_intake_bypassed"
+    assert row["bypass_reason"] == "edit_with_media"
+    assert row["has_media"] is True
+    assert row["inbound_script"] == "latin"
+    assert row["chat_id_hash"]
+
+
+def test_audit_emit_failures_are_non_fatal(monkeypatch, tmp_path):
+    """Per design §3 — audit-emit failures MUST NOT propagate. Both
+    audit_flyer_intake_bypassed and finalize_flyer_intake_bypass_shadow
+    write to stderr and swallow exceptions."""
+    actions = _load_actions()
+
+    def fake_ndjson_append_raise(*a, **k):
+        raise OSError("simulated disk full")
+
+    monkeypatch.setitem(sys.modules, "safe_io",
+                        type(sys)("safe_io"))  # type: ignore[arg-type]
+    sys.modules["safe_io"].ndjson_append = fake_ndjson_append_raise
+
+    # audit_flyer_intake_bypassed: should NOT raise.
+    actions.audit_flyer_intake_bypassed(
+        chat_id="x", bypass_reason="edit_with_media", has_media=True,
+        customer_state="", intake_session_status="choosing_mode",
+        inbound_script="latin",
+    )
+
+    # finalize_flyer_intake_bypass_shadow: should NOT raise.
+    token = actions.begin_flyer_intake_bypass_shadow(
+        chat_id="x", message_id="m", bypass_reason="edit_with_media",
+        has_media=True, customer_state="", intake_session_status="choosing_mode",
+        inbound_script="latin",
+    )
+    actions.finalize_flyer_intake_bypass_shadow(hook_result=None)
+    actions.reset_flyer_intake_bypass_shadow(token)
+    # If we got here without raising, the non-fatal discipline holds.
