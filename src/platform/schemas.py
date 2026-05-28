@@ -4168,6 +4168,21 @@ class FlyerWarnTierDelivered(_BaseEntry):
     customer_text_sha256: str = Field(pattern=r"^[a-fA-F0-9]{64}$")
 
 
+class FlyerOperatorFlaggedWarnTier(_BaseEntry):
+    """Audit-only operator flag on a delivered_with_warning project.
+
+    Emitted by the cockpit POST /flyer/projects/{id}/flag route (P0 #2 Commit 5
+    Pin D — reviewer 2 #6). NO project-state mutation; the flag exists purely
+    to surface operator concern in the audit log without engaging the manual
+    queue. Operators use this to mark warn-tier deliveries that look wrong
+    (classifier should have escalated to block) — trend data accumulates from
+    day 1 even though the full warn → manual-queue re-route stays deferred."""
+    type: Literal["flyer_operator_flagged_warn_tier"] = "flyer_operator_flagged_warn_tier"
+    project_id: str = Field(pattern=r"^F\d{4,}$")
+    flagged_by_operator_id: str = Field(min_length=1, max_length=80)
+    note: str = Field(default="", max_length=500)
+
+
 class CateringLeadCreated(_BaseEntry):
     type: Literal["catering_lead_created"]
     lead_id: str = Field(min_length=1)
@@ -5435,6 +5450,7 @@ LogEntry = Annotated[
         # P0 #2 2026-05-28 — severity-tiered visual QA audit variants
         Annotated[FlyerQASeverityClassified, Tag("flyer_qa_severity_classified")],
         Annotated[FlyerWarnTierDelivered, Tag("flyer_warn_tier_delivered")],
+        Annotated[FlyerOperatorFlaggedWarnTier, Tag("flyer_operator_flagged_warn_tier")],
         # PR-ζ 2026-05-26 — chokepoint refusal audit variants
         Annotated[_RegulatedSendMissingActionContext, Tag("regulated_send_missing_action_context")],
         Annotated[_RegulatedSendLintViolation, Tag("regulated_send_lint_violation")],
@@ -5532,7 +5548,7 @@ __all__ = [
     "FlyerSourceContractSection", "FlyerSourceContract",
     "FlyerSourceContractExtracted", "FlyerSourceVsNewChosen", "FlyerHermesIntentDecision",
     "FlyerIntakeBypassed", "FlyerIntakeBypassOutcome",
-    "FlyerQASeverityClassified", "FlyerWarnTierDelivered",
+    "FlyerQASeverityClassified", "FlyerWarnTierDelivered", "FlyerOperatorFlaggedWarnTier",
     # PR-ζ 2026-05-26 — regulated-intent runtime context + chokepoint audit variants
     "ActionExecutionContext",
     "FlyerVisualQAReport", "FlyerWarningSummary", "FlyerManualReview", "FlyerAsset", "FlyerConcept", "FlyerRevision",

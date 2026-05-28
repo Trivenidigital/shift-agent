@@ -36,6 +36,7 @@ from schemas import (  # noqa: E402
     FlyerCustomerProfile,
     FlyerCustomerStore,
     FlyerGuestOrderStore,
+    FlyerOperatorFlaggedWarnTier,
     FlyerProjectStore,
     FlyerUsageEvent,
 )
@@ -2111,3 +2112,98 @@ async def flyer_health(_=Depends(require_auth)):
         "components": components,
         "providers": providers,
     }
+
+
+# ─────────────────────────────────────────────────────────────────
+# P0 #2 — warn-tier operator-flag route (Commit 5, Pin D).
+# Audit-only mutation: operator can mark a `delivered_with_warning`
+# project as deserving follow-up without engaging the manual queue or
+# mutating project state. Reviewer 2 #6 — the read-only cockpit panel
+# would otherwise be a silent-failure surface where degraded warn-tier
+# deliveries pile up unactioned; this route surfaces the operator's
+# concern in the audit log so trend data accumulates from day 1.
+# ─────────────────────────────────────────────────────────────────
+
+
+class FlagWarnTierBody(BaseModel):
+    """Operator's optional context note. Empty is acceptable — the flag
+    itself is the signal; ts + flagged_by_operator_id always traceable."""
+    note: str = Field(default="", max_length=500)
+
+
+def flag_warn_tier_project_action(
+    project_id: str,
+    *,
+    note: str,
+    operator_id: str = "cockpit",
+    now_fn=None,
+    audit_append=None,
+    decisions_path: Path | None = None,
+) -> dict[str, Any]:
+    """Audit-only operator flag on a delivered_with_warning project.
+
+    Writes a FlyerOperatorFlaggedWarnTier audit row. NO project-state
+    mutation: project remains in delivered_with_warning, no transition,
+    no manual-queue write.
+
+    Raises:
+        ValueError("project_not_found") — project_id absent
+        ValueError("not_warn_tier") — project status != delivered_with_warning
+
+    Dependencies are injected so the helper is unit-testable without
+    touching the live decisions log."""
+    if now_fn is None:
+        now_fn = _now
+    store = _safe_load(_projects_path(), FlyerProjectStore, FlyerProjectStore())
+    project = next((p for p in store.projects if p.project_id == project_id), None)
+    if project is None:
+        raise ValueError("project_not_found")
+    if project.status != "delivered_with_warning":
+        raise ValueError("not_warn_tier")
+
+    entry = FlyerOperatorFlaggedWarnTier(
+        ts=now_fn(),
+        project_id=project_id,
+        flagged_by_operator_id=operator_id,
+        note=note,
+    )
+    if audit_append is None:
+        audit_append = safe_io.ndjson_append
+    if decisions_path is None:
+        decisions_path = get_settings().decisions_path
+    audit_append(decisions_path, entry.model_dump_json())
+
+    return {
+        "ok": True,
+        "project_id": project_id,
+        "project_status": project.status,
+        "audit_entry": entry.model_dump(mode="json"),
+    }
+
+
+@router.post("/projects/{project_id}/flag")
+async def flag_warn_tier_project(
+    project_id: str,
+    body: FlagWarnTierBody,
+    request: Request,
+    _=Depends(require_fresh_otp),
+):
+    """POST /flyer/projects/{project_id}/flag — operator flags a
+    delivered_with_warning project for follow-up. Audit-only; no state
+    mutation. 404 if missing, 409 if not in delivered_with_warning state."""
+    try:
+        result = flag_warn_tier_project_action(project_id, note=body.note)
+    except ValueError as e:
+        msg = str(e)
+        if msg == "project_not_found":
+            raise HTTPException(404, "project_not_found")
+        if msg == "not_warn_tier":
+            raise HTTPException(409, "project_not_in_delivered_with_warning_state")
+        raise
+    audit_log(
+        "flyer.projects.flag_warn_tier",
+        ip=client_ip(request),
+        ua=client_ua(request),
+        details={"project_id": project_id, "note_present": bool(body.note)},
+    )
+    return result

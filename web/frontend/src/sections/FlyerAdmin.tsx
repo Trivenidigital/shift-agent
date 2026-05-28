@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import type React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, AlertTriangle, FileUp, Gift, Megaphone, RefreshCw, Search, Send, UserX, Users } from "lucide-react";
@@ -209,6 +209,16 @@ interface FlyerCustomer {
   updated_at: string;
 }
 
+interface FlyerWarningPayload {
+  severity: "warn";
+  blockers: string[];
+  customer_text: string;
+  customer_text_sha256: string;
+  delivered_at: string;
+  asset_id: string;
+  classifier_version: string;
+}
+
 interface FlyerProject {
   project_id: string;
   status: string;
@@ -219,6 +229,10 @@ interface FlyerProject {
   final_asset_ids?: string[];
   age_minutes?: number;
   attention?: string[];
+  // P0 #2 — warn-tier outcome payload. Populated when status ===
+  // "delivered_with_warning"; null otherwise. Cleared on the next
+  // successful QA pass (severity returns to "pass").
+  warning?: FlyerWarningPayload | null;
 }
 
 interface GuestOrder {
@@ -591,6 +605,15 @@ export function FlyerAdmin() {
   const [deactivateConfirmOpen, setDeactivateConfirmOpen] = useState(false);
   const [customerOffset, setCustomerOffset] = useState(0);
   const CUSTOMER_PAGE_SIZE = 300;
+  // P0 #2 Projects-tab filter state. Mirrors the Manual Queue filter pattern
+  // (no pre-PR project-status filter row existed; this builds new).
+  const [projectsFilterStatus, setProjectsFilterStatus] = useState("");
+  const [projectsFilterPhone, setProjectsFilterPhone] = useState("");
+  const [projectsFilterProjectId, setProjectsFilterProjectId] = useState("");
+  // Expanded warning panel + Flag-for-follow-up surface state
+  const [expandedWarningProjectId, setExpandedWarningProjectId] = useState<string | null>(null);
+  const [flagNoteByProject, setFlagNoteByProject] = useState<Record<string, string>>({});
+  const [flagStatusByProject, setFlagStatusByProject] = useState<Record<string, "idle" | "sending" | "ok" | "error">>({});
   // P0-1 Manual Queue drawer + filter state
   const [drawerProjectId, setDrawerProjectId] = useState<string | null>(null);
   const [queueFilterReason, setQueueFilterReason] = useState("");
@@ -762,10 +785,46 @@ export function FlyerAdmin() {
     },
   });
 
+  // P0 #2 Commit 5 — audit-only operator flag on a delivered_with_warning project.
+  // Writes a flyer_operator_flagged_warn_tier row; does NOT mutate project state.
+  // qc invalidation keeps the projects list fresh but the project's status stays
+  // delivered_with_warning (audit-only mutation).
+  const flagWarnTierProject = useMutation({
+    mutationFn: ({ projectId, note }: { projectId: string; note: string }) =>
+      api.POST(`/flyer/projects/${projectId}/flag`, { note }),
+    onSuccess: (_data, vars) => {
+      setFlagStatusByProject((prev) => ({ ...prev, [vars.projectId]: "ok" }));
+      qc.invalidateQueries({ queryKey: ["flyer-projects"] });
+    },
+    onError: (_err, vars) => {
+      setFlagStatusByProject((prev) => ({ ...prev, [vars.projectId]: "error" }));
+    },
+  });
+
   const customers = customerData?.customers ?? [];
   const customerTotal = customerData?.total ?? customers.length;
   const customerTruncated = customerData?.truncated ?? false;
   const projects = projectsData?.projects ?? [];
+  // P0 #2 Commit 5 — filtered projects view. Applied AFTER the raw fetch so
+  // the status/phone/project_id filters operate on the live list.
+  const filteredProjects = useMemo(() => {
+    const statusF = projectsFilterStatus.trim();
+    const phoneF = projectsFilterPhone.trim().toLowerCase();
+    const projF = projectsFilterProjectId.trim().toLowerCase();
+    return projects.filter((p) => {
+      if (statusF && p.status !== statusF) return false;
+      if (phoneF && !p.customer_phone.toLowerCase().includes(phoneF)) return false;
+      if (projF && !p.project_id.toLowerCase().includes(projF)) return false;
+      return true;
+    });
+  }, [projects, projectsFilterStatus, projectsFilterPhone, projectsFilterProjectId]);
+  // Distinct status values present in the current data — feeds the filter dropdown.
+  // Pre-PR the Projects tab had no filter row at all; this builds new per reviewer 3 #7.
+  const projectStatusOptions = useMemo(() => {
+    const seen = new Set<string>();
+    for (const p of projects) seen.add(p.status);
+    return Array.from(seen).sort();
+  }, [projects]);
   const guests = guestData?.orders ?? [];
 
   const preview = useMutation({
@@ -1153,19 +1212,136 @@ export function FlyerAdmin() {
         <Card>
           <CardHeader><CardTitle>Projects</CardTitle></CardHeader>
           <CardContent className="p-0">
+            {/* P0 #2 Commit 5 — Projects-tab filter row (new; no pre-PR filter existed). */}
+            <div className="flex flex-wrap items-end gap-3 border-b border-zinc-200 bg-zinc-50 px-3 py-2 text-xs">
+              <label className="flex flex-col gap-1">
+                <span className="text-zinc-500">Status</span>
+                <select
+                  className="rounded border border-zinc-300 bg-white px-2 py-1"
+                  value={projectsFilterStatus}
+                  onChange={(e) => setProjectsFilterStatus(e.target.value)}
+                >
+                  <option value="">All statuses</option>
+                  {projectStatusOptions.map((s) => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-zinc-500">Phone</span>
+                <input
+                  className="rounded border border-zinc-300 bg-white px-2 py-1"
+                  value={projectsFilterPhone}
+                  onChange={(e) => setProjectsFilterPhone(e.target.value)}
+                  placeholder="+1..."
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-zinc-500">Project</span>
+                <input
+                  className="rounded border border-zinc-300 bg-white px-2 py-1"
+                  value={projectsFilterProjectId}
+                  onChange={(e) => setProjectsFilterProjectId(e.target.value)}
+                  placeholder="F0108"
+                />
+              </label>
+              <div className="ml-auto text-zinc-500">
+                {filteredProjects.length} / {projects.length} shown
+              </div>
+            </div>
             <table className="w-full text-sm">
               <thead className="bg-zinc-50 text-xs text-zinc-500"><tr><th className="px-3 py-2 text-left">Project</th><th className="px-3 py-2 text-left">Status</th><th className="px-3 py-2 text-left">Phone</th><th className="px-3 py-2 text-left">Request</th><th className="px-3 py-2 text-left">Age</th><th className="px-3 py-2 text-left">Assets</th></tr></thead>
               <tbody>
-                {projects.map((project) => (
-                  <tr key={project.project_id} className="border-t border-zinc-100">
-                    <td className="px-3 py-2 font-mono text-xs">{project.project_id}</td>
-                    <td className="px-3 py-2"><Badge tone={project.status.includes("awaiting") ? "amber" : project.status === "delivered" ? "green" : "neutral"}>{project.status}</Badge></td>
-                    <td className="px-3 py-2 font-mono text-xs">{project.customer_phone}</td>
-                    <td className="max-w-xl truncate px-3 py-2">{project.raw_request}</td>
-                    <td className={cn("px-3 py-2 text-xs", (project.attention?.length ?? 0) > 0 ? "font-medium text-amber-700" : "text-zinc-500")}>{project.age_minutes ?? 0}m</td>
-                    <td className="px-3 py-2 text-xs text-zinc-500">{project.concepts?.length ?? 0} concepts · {project.final_asset_ids?.length ?? 0} final</td>
-                  </tr>
-                ))}
+                {filteredProjects.map((project) => {
+                  const isWarn = project.status === "delivered_with_warning";
+                  const isExpanded = expandedWarningProjectId === project.project_id;
+                  const flagStatus = flagStatusByProject[project.project_id] ?? "idle";
+                  const flagNote = flagNoteByProject[project.project_id] ?? "";
+                  const blockerCount = project.warning?.blockers?.length ?? 0;
+                  // Pin B + Pin D — warn-tier rows render amber badge + expand panel.
+                  // Panel itself is read-only display; the "Flag for follow-up"
+                  // button writes an audit row but does NOT mutate project state.
+                  return (
+                    <Fragment key={project.project_id}>
+                      <tr className="border-t border-zinc-100">
+                        <td className="px-3 py-2 font-mono text-xs">{project.project_id}</td>
+                        <td className="px-3 py-2">
+                          <Badge tone={isWarn ? "amber" : (project.status.includes("awaiting") ? "amber" : project.status === "delivered" ? "green" : "neutral")}>
+                            {project.status}
+                          </Badge>
+                          {isWarn && project.warning != null && (
+                            <button
+                              type="button"
+                              className="ml-2 inline-flex items-center rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 hover:bg-amber-100"
+                              onClick={() => setExpandedWarningProjectId(isExpanded ? null : project.project_id)}
+                            >
+                              {isExpanded ? "▾" : "▸"} {blockerCount} blocker{blockerCount === 1 ? "" : "s"}
+                            </button>
+                          )}
+                        </td>
+                        <td className="px-3 py-2 font-mono text-xs">{project.customer_phone}</td>
+                        <td className="max-w-xl truncate px-3 py-2">{project.raw_request}</td>
+                        <td className={cn("px-3 py-2 text-xs", (project.attention?.length ?? 0) > 0 ? "font-medium text-amber-700" : "text-zinc-500")}>{project.age_minutes ?? 0}m</td>
+                        <td className="px-3 py-2 text-xs text-zinc-500">{project.concepts?.length ?? 0} concepts · {project.final_asset_ids?.length ?? 0} final</td>
+                      </tr>
+                      {isWarn && isExpanded && project.warning != null && (
+                        <tr className="border-t border-amber-100 bg-amber-50/40">
+                          <td colSpan={6} className="px-3 py-3">
+                            <div className="flex flex-col gap-2 text-xs">
+                              <div>
+                                <span className="font-semibold text-amber-900">Blockers:</span>
+                                <ul className="ml-4 list-disc text-zinc-700">
+                                  {project.warning.blockers.map((b, idx) => (
+                                    <li key={idx} className="font-mono">{b}</li>
+                                  ))}
+                                </ul>
+                              </div>
+                              <div>
+                                <span className="font-semibold text-amber-900">Customer copy delivered:</span>
+                                <pre className="mt-1 whitespace-pre-wrap rounded bg-white p-2 text-[11px] text-zinc-700">{project.warning.customer_text}</pre>
+                              </div>
+                              <div className="text-zinc-500">
+                                Delivered at {project.warning.delivered_at} · asset {project.warning.asset_id} · classifier {project.warning.classifier_version}
+                              </div>
+                              {/* Pin D — Flag for follow-up writes an audit row only.
+                                  NO project state mutation; tone is operator-concern signal,
+                                  not manual-queue escalation. */}
+                              <div className="flex flex-wrap items-end gap-2 border-t border-amber-200 pt-2">
+                                <label className="flex flex-1 flex-col gap-1">
+                                  <span className="text-zinc-500">Optional note for audit log</span>
+                                  <input
+                                    className="rounded border border-zinc-300 bg-white px-2 py-1"
+                                    value={flagNote}
+                                    onChange={(e) => setFlagNoteByProject((prev) => ({ ...prev, [project.project_id]: e.target.value }))}
+                                    placeholder="Why does this need follow-up?"
+                                    maxLength={500}
+                                  />
+                                </label>
+                                <button
+                                  type="button"
+                                  className="rounded border border-amber-400 bg-amber-100 px-3 py-1 text-amber-900 hover:bg-amber-200 disabled:opacity-60"
+                                  disabled={flagStatus === "sending"}
+                                  onClick={() => {
+                                    setFlagStatusByProject((prev) => ({ ...prev, [project.project_id]: "sending" }));
+                                    flagWarnTierProject.mutate({ projectId: project.project_id, note: flagNote });
+                                  }}
+                                >
+                                  {flagStatus === "sending" ? "Flagging..." : "Flag for follow-up"}
+                                </button>
+                                {flagStatus === "ok" && (
+                                  <span className="text-emerald-700">Flagged · audit row written.</span>
+                                )}
+                                {flagStatus === "error" && (
+                                  <span className="text-red-700">Flag failed — see audit log.</span>
+                                )}
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  );
+                })}
               </tbody>
             </table>
           </CardContent>
