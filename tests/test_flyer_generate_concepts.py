@@ -813,6 +813,97 @@ def test_generate_retries_without_saved_brand_assets_when_business_name_missing(
     assert persisted["manual_review"]["status"] == "none"
     assert persisted["assets"][-1]["path"].endswith("F0001-C1-retry.png")
 
+
+def test_generate_marks_superseded_revision_applied_before_approval(monkeypatch, tmp_path, capsys):
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+    from schemas import FlyerVisualQAReport
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    state_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    project = _project_with_failed_reference()
+    project.update({
+        "project_id": "F0105",
+        "status": "generating_concepts",
+        "version": 3,
+        "reference_extractions": [],
+        "assets": [],
+        "raw_request": "Create Daily Thali Specials for Lakshmi's Kitchen.",
+        "revisions": [
+            {
+                "revision_id": "R001",
+                "message_id": "m-edit-1",
+                "requested_at": "2026-05-27T11:20:30.674256Z",
+                "request_text": "show me some template ideas",
+                "applied": False,
+                "resulting_version": 2,
+            },
+            {
+                "revision_id": "R002",
+                "message_id": "m-edit-2",
+                "requested_at": "2026-05-27T11:21:14.928670Z",
+                "request_text": "show me some template ideas",
+                "applied": True,
+                "resulting_version": 3,
+            },
+        ],
+    })
+    state_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_sequence": 106,
+        "projects": [project],
+    }), encoding="utf-8")
+
+    def fake_render(_project, output_dir, **_kwargs):
+        rendered = Path(output_dir) / "F0105-C1-preview.png"
+        rendered.write_bytes(b"rendered")
+        return [RenderedAssetSpec(
+            path=rendered,
+            kind="concept_preview",
+            output_format="concept_preview",
+            width=1080,
+            height=1350,
+            concept_id="C1",
+        )]
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        return FlyerVisualQAReport(
+            project_id=project_obj.project_id,
+            asset_id=asset_id,
+            artifact_path=str(artifact_path),
+            artifact_sha256="c" * 64,
+            project_version=project_obj.version,
+            output_format=output_format,
+            provider="test",
+            qa_source="sidecar_test",
+            status="passed",
+            checked_at=datetime(2026, 5, 27, tzinfo=timezone.utc),
+        )
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts",
+        "--project-id", "F0105",
+        "--state-path", str(state_path),
+        "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+    ])
+
+    assert module.main() == 0
+    out = json.loads(capsys.readouterr().out)
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    revisions = {revision["revision_id"]: revision for revision in persisted["revisions"]}
+
+    assert out["project_id"] == "F0105"
+    assert persisted["status"] == "awaiting_final_approval"
+    assert revisions["R001"]["applied"] is True
+    assert revisions["R002"]["applied"] is True
+
+
 def test_generate_draft_quality_failure_does_not_retry(monkeypatch, tmp_path, capsys):
     module = _load_script(monkeypatch)
 

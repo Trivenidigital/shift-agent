@@ -799,7 +799,11 @@ def main() -> int:
                         failed_qa = []
         revisions = [
             revision.model_copy(update={"applied": True})
-            if (not revision.applied and revision.resulting_version == current.version)
+            if (
+                not revision.applied
+                and revision.resulting_version is not None
+                and revision.resulting_version <= current.version
+            )
             else revision
             for revision in current.revisions
         ]
