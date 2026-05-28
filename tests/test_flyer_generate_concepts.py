@@ -1853,6 +1853,115 @@ def test_generate_concepts_block_tier_preserves_manual_edit_required_path(monkey
     assert "flyer_warn_tier_delivered" not in audit_types
 
 
+def test_generate_concepts_warn_tier_clears_stale_manual_review_payload(monkeypatch, tmp_path, capsys):
+    """Regression check: if a project re-entered generating_concepts from
+    manual_edit_required carrying a queued manual_review payload, the warn-
+    tier transition MUST reset manual_review to its default. Otherwise
+    cf-router's status formatters at actions.py:2103/2182 would leak stale
+    operator-review copy onto the delivered_with_warning surface."""
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+    from schemas import FlyerVisualQAReport
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setattr(module, "load_yaml_model", lambda *_a, **_k: _warn_tier_test_config())
+
+    state_path = tmp_path / "projects.json"
+    attempt_path = tmp_path / "autorepair_attempts.json"
+    audit_path = tmp_path / "decisions.log"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+
+    # Project re-entered generating_concepts from manual_edit_required and
+    # carries the prior manual_review payload from that queued state.
+    now = datetime(2026, 5, 28, tzinfo=timezone.utc).isoformat()
+    state_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_sequence": 2,
+        "projects": [{
+            "project_id": "F0110",
+            "status": "generating_concepts",
+            "customer_phone": "+17329837841",
+            "created_at": now,
+            "updated_at": now,
+            "original_message_id": "wamid.F0110",
+            "raw_request": "Create flyer for Lakshmi's Kitchen Dosa night.",
+            "locked_facts": [
+                {"fact_id": "business_name", "label": "Business",
+                 "value": "Lakshmi's Kitchen", "source": "customer_text", "required": True},
+            ],
+            "manual_review": {
+                "status": "queued",
+                "reason": "Stale designer-review note",
+                "reason_code": "visual_qa_failed",
+                "detail": "Stale detail copy from a prior manual_edit_required cycle",
+                "queued_at": now,
+                "completed_at": None,
+                "operator_asset_ids": [],
+                "break_glass_reason": "",
+            },
+        }],
+    }), encoding="utf-8")
+
+    def fake_render(_project, output_dir, **kwargs):
+        suffix = "repair" if kwargs.get("repair_instruction", "") else "first"
+        path = Path(output_dir) / f"F0110-C1-{suffix}.png"
+        path.write_bytes(b"img")
+        return [RenderedAssetSpec(
+            path=path, kind="concept_preview",
+            output_format="concept_preview",
+            width=1080, height=1350, concept_id="C1",
+        )]
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        return FlyerVisualQAReport(
+            project_id=project_obj.project_id, asset_id=asset_id,
+            artifact_path=str(artifact_path), artifact_sha256="0" * 64,
+            project_version=project_obj.version, output_format=output_format,
+            provider="test", qa_source="ocr_vision", status="failed",
+            blockers=["visible wrong business/brand: Laksmi'S Kitchen"],
+            severity="warn",
+            extracted_text="x", checked_at=datetime.now(timezone.utc),
+        )
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(
+        module, "plan_flyer_autorepair",
+        lambda **_k: {"action": "regenerate_with_instruction",
+                      "repair_instruction": "x", "confidence": "high"},
+        raising=False,
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0110",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--audit-log-path", str(audit_path),
+        "--autorepair-state-path", str(attempt_path),
+    ])
+
+    assert module.main() == 0
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "delivered_with_warning"
+
+    # The defining invariant of this test: manual_review reset to default,
+    # NOT carrying the stale "Stale designer-review note" / queued state.
+    manual_review = persisted["manual_review"]
+    assert manual_review["status"] == "none"
+    assert manual_review["reason"] == ""
+    assert manual_review["reason_code"] == "unclassified"
+    assert manual_review["detail"] == ""
+    assert manual_review["queued_at"] is None
+    assert manual_review["completed_at"] is None
+    assert manual_review["operator_asset_ids"] == []
+    assert manual_review["break_glass_reason"] == ""
+
+    # Warning payload populated as expected (regression-safe — the new branch
+    # behavior is unaffected by adding the manual_review reset).
+    assert persisted["warning"] is not None
+    assert persisted["warning"]["severity"] == "warn"
+
+
 def test_generate_concepts_warn_tier_state_write_does_not_send(monkeypatch, tmp_path, capsys):
     """Hermes-as-brain invariant check: generate-flyer-concepts must NOT
     invoke any send mechanism. The warn-tier path writes state + audit

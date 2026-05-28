@@ -873,6 +873,15 @@ def main() -> int:
                         "assets": [*current.assets, *assets],
                         "qa_reports": [*current.qa_reports, *qa_reports],
                         "warning": warning_payload,
+                        # P0 #2 — clear any stale manual_review payload that
+                        # may have come in from a prior manual_edit_required
+                        # → generating_concepts re-entry. cf-router's status
+                        # formatters (actions.py:2103, 2182) still read
+                        # manual_review on transitions; leaving stale data
+                        # would leak operator-review copy onto the
+                        # delivered_with_warning surface. Mirrors the existing
+                        # pass-path reset below.
+                        "manual_review": FlyerManualReview(),
                         "updated_at": now,
                     })
                     atomic_write_text(state_path, store.model_dump_json(indent=2))
