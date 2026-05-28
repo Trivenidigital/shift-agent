@@ -1961,9 +1961,14 @@ def _flyer_provider_components() -> list[dict[str, Any]]:
     plan_configured = _configured_template(plan_checkout_template)
     quick_configured = _configured_template(quick_checkout_template)
     supported_payment_providers = ("manual", "stripe", "razorpay", "other")
-    configured_provider = str(payment_provider or "manual").strip().lower()
+    raw_configured_provider = str(payment_provider or "manual").strip().lower()
+    configured_provider = raw_configured_provider
+    provider_normalization_note = ""
     if configured_provider not in supported_payment_providers:
         configured_provider = "manual"
+        provider_normalization_note = (
+            f"Unsupported payment_provider '{raw_configured_provider}' normalized to manual."
+        )
     provider_env_key = {
         "stripe": "STRIPE_SECRET_KEY",
         "razorpay": "RAZORPAY_KEY_ID|RAZORPAY_KEY_SECRET",
@@ -1973,6 +1978,24 @@ def _flyer_provider_components() -> list[dict[str, Any]]:
     currency_note = ""
     if configured_provider == "razorpay" and "INR" not in plan_currencies:
         currency_note = "Configured provider is Razorpay but no INR plan tier is configured."
+
+    provider_creds_ready = True
+    provider_cred_detail = "not_required"
+    if configured_provider == "stripe":
+        stripe_value, _stripe_source = _read_env_layered("STRIPE_SECRET_KEY")
+        stripe_ok = bool(stripe_value) and not _is_placeholder(stripe_value)
+        if not stripe_ok:
+            provider_creds_ready = False
+            provider_cred_detail = "missing_or_placeholder:STRIPE_SECRET_KEY"
+    elif configured_provider == "razorpay":
+        rz_key_id, _rz_key_id_source = _read_env_layered("RAZORPAY_KEY_ID")
+        rz_key_secret, _rz_key_secret_source = _read_env_layered("RAZORPAY_KEY_SECRET")
+        rz_key_id_ok = bool(rz_key_id) and not _is_placeholder(rz_key_id)
+        rz_key_secret_ok = bool(rz_key_secret) and not _is_placeholder(rz_key_secret)
+        if not rz_key_id_ok or not rz_key_secret_ok:
+            provider_creds_ready = False
+            missing = "RAZORPAY_KEY_ID" if not rz_key_id_ok else "RAZORPAY_KEY_SECRET"
+            provider_cred_detail = f"missing_or_placeholder:{missing}"
 
     if plan_configured and quick_configured:
         billing_severity = "green"
@@ -1989,14 +2012,33 @@ def _flyer_provider_components() -> list[dict[str, Any]]:
             "Plan and quick-flyer checkout templates are missing or placeholders. "
             "Payment link creation is not configured."
         )
+    if (
+        plan_configured
+        and quick_configured
+        and (configured_provider in {"stripe", "razorpay"})
+        and not provider_creds_ready
+    ):
+        billing_severity = "yellow"
+        billing_detail = (
+            "Checkout templates are present but provider credentials are missing or placeholders. "
+            "Payment link not configured: provider credentials missing."
+        )
     if currency_note:
         billing_severity = "yellow"
         billing_detail = f"{billing_detail} {currency_note}"
+    if provider_normalization_note:
+        billing_detail = f"{billing_detail} {provider_normalization_note}"
     if not plan_configured or not quick_configured:
         billing_detail = (
             f"{billing_detail} Operator checklist: configure payment_checkout_url_template, "
             "configure quick_flyer_checkout_url_template, and verify customer copy says "
-            "'payment link not configured' until both are set."
+            "'payment link not configured' until both are set. "
+            "If using Stripe/Razorpay, verify Stripe MCP / Razorpay MCP connector posture."
+        )
+    elif (configured_provider in {"stripe", "razorpay"}) and not provider_creds_ready:
+        billing_detail = (
+            f"{billing_detail} Operator checklist: configure provider credentials and verify "
+            "Stripe MCP / Razorpay MCP connector posture before enabling live checkout."
         )
 
     return [
@@ -2031,11 +2073,14 @@ def _flyer_provider_components() -> list[dict[str, Any]]:
             "key_source": None,
             "model_config": {
                 "payment_provider": str(payment_provider),
+                "effective_payment_provider": configured_provider,
                 "payment_checkout_url_template_configured": "true" if plan_configured else "false",
                 "quick_flyer_checkout_url_template_configured": "true" if quick_configured else "false",
                 "quick_flyer_price_cents": str(quick_price_cents),
                 "supported_payment_providers": ",".join(supported_payment_providers),
                 "configured_provider_env_key": provider_env_key,
+                "provider_credentials_ready": "true" if provider_creds_ready else "false",
+                "provider_credential_detail": provider_cred_detail,
                 "provider_mcp_surface": provider_mcp_surface,
                 "plan_currencies": ",".join(plan_currencies),
             },
