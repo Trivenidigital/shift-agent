@@ -455,3 +455,38 @@ def test_mark_confirmed_intent_not_found(intent_state, decisions_log_path):
     )
     assert not r.ok
     assert r.detail == "intent_not_found"
+
+
+def test_void_after_mark_confirmed_refused(intent_state, decisions_log_path):
+    """PR-1 reviewer M2: confirmed intent cannot be voided (slice-1 invariant).
+    Pin the composition: mark_confirmed → void must reject with
+    cannot_void_confirmed."""
+    intent = _mint_placeholder_intent(intent_state, decisions_log_path)
+    payment_link.mark_confirmed(
+        intent_state_path=intent_state, decisions_log_path=decisions_log_path,
+        intent_id=intent.intent_id, payment_reference="pi_test_abc",
+    )
+    r = payment_link.void(
+        intent_state_path=intent_state, decisions_log_path=decisions_log_path,
+        intent_id=intent.intent_id, reason="too_late",
+    )
+    assert not r.ok
+    assert r.detail == "cannot_void_confirmed"
+
+
+def test_mint_currency_normalized_to_uppercase(intent_state, decisions_log_path):
+    """PR-1 reviewer L1: lowercase caller currency must be normalized before
+    persisting so CommercePaymentIntent.currency Literal validation passes."""
+    r = payment_link.mint(
+        intent_state_path=intent_state,
+        decisions_log_path=decisions_log_path,
+        order_id="CO00001",
+        originating_message_id="msg_x",
+        amount_cents=1500,
+        currency="usd",  # lowercase caller input
+        chat_id="c",
+        checkout_url_template="https://pay/?o={order_id}",
+        now=TS,
+    )
+    assert r.ok
+    assert r.intent.currency == "USD"

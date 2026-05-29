@@ -152,6 +152,13 @@ def mint(
         # in the schema but not wired in slice-3 PR-1. Reject explicitly so
         # operator typos fail fast.
         return PaymentLinkResult(False, None, f"unsupported_provider:{provider}")
+    # PR-1 reviewer L1: normalize currency to uppercase to match
+    # CommercePaymentIntent.currency Literal ("USD","INR","CAD","GBP","EUR")
+    # before persisting. Stripe call lowercases internally via .lower() in
+    # _mint_via_stripe(); slice-1 placeholder path is unaffected by case but
+    # the intent's persisted record was previously vulnerable to a lowercase
+    # caller value (ValidationError at write).
+    currency = currency.upper()
     now = now or datetime.now(timezone.utc)
     store = load_intent_store(intent_state_path)
 
