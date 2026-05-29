@@ -1987,6 +1987,31 @@ class CateringLead(BaseModel):
                     "finalize message. Same id seen twice => no-op replay.",
     )
 
+    # Slice-2 deposit caller — orthogonal to lead.status (PR feat/commerce-
+    # slice2-catering-deposit-caller). Lead.status stays SENT_TO_CUSTOMER after
+    # quote+deposit are sent; deposit_status tracks the deposit lifecycle
+    # independently. Slice-3 webhook receiver will flip deposit_status to "paid"
+    # and the catering follow-up agent (or operator) decides when to advance
+    # lead.status further (CONFIRMED in a future slice).
+    #
+    # Design choice: NO `catering_lead_status_change` row is emitted when these
+    # fields land. `catering_deposit_link_sent` IS the canonical audit row for
+    # deposit transitions. Documented per A-MEDIUM-2 deferral.
+    deposit_required: bool = False
+    deposit_amount_cents: int = Field(default=0, ge=0, le=10_000_000_000)
+    deposit_commerce_order_id: str = Field(default="", max_length=40)
+    deposit_payment_intent_id: str = Field(default="", max_length=40)
+    deposit_payment_reference: str = Field(default="", max_length=200)
+    deposit_status: Literal[
+        "none",             # default — no deposit required for this lead
+        "unconfigured",     # threshold met but checkout_url_template empty
+        "awaiting_payment",
+        "paid",             # slice-3 webhook will set this
+        "voided",           # operator cancelled deposit
+        "refunded",         # slice-3+
+    ] = "none"
+    deposit_minted_at: Optional[datetime] = None
+
     # v0.3: post-AWAITING statuses require non-empty quote_text. Legacy data
     # (pre-v0.3 leads with empty quote_text) is backfilled with sentinel by
     # mode="before" shim, then strict validator runs. Migration tool fixes
@@ -2282,6 +2307,11 @@ class CommerceConfig(BaseModel):
     # Empty -> assert_payment_url_renderable raises; callers MUST emit
     # "Payment link is not configured yet" copy.
     payment_checkout_url_template: str = Field(default="", max_length=1000)
+    # Slice-2 minimum-deposit floor (Reviewer B MEDIUM-2). Below this amount,
+    # callers (e.g. catering deposit caller) refuse to mint a payment intent
+    # rather than producing an unactionable provider link. Default $5.00 covers
+    # Stripe + Razorpay + UPI minimum-charge thresholds in most regions.
+    minimum_deposit_cents: int = Field(default=500, ge=0, le=10_000_000)
 
     @model_validator(mode="after")
     def _enforce_locked_blocked_categories(self) -> "CommerceConfig":
@@ -5050,6 +5080,55 @@ class CommerceBlockedCategoryOverride(_BaseEntry):
     expires_at: datetime
 
 
+# ─────────────────────────────────────────────────────────────────
+# Slice-2 catering deposit caller (feat/commerce-slice2-catering-deposit-caller)
+# Reconciliation invariant #4: callers MUST carry commerce_order_id +
+# commerce_payment_intent_id cross-ref fields so Cash & AR can join the
+# commerce_* and catering_* audit streams.
+# ─────────────────────────────────────────────────────────────────
+
+class CateringDepositLinkSent(_BaseEntry):
+    """Successful mint+send of a catering deposit link.
+
+    Emitted by catering-mint-deposit after both the slice-1 commerce_payment_link
+    primitive returned OK AND the WhatsApp bridge POST returned ok=True. When
+    url_status=="unconfigured" the customer received the "Payment link is not
+    configured yet" copy (template empty) — the audit row still fires because
+    the bridge POST succeeded; only the link itself was unactionable.
+    """
+    type: Literal["catering_deposit_link_sent"]
+    lead_id: str = Field(min_length=1, max_length=40)
+    commerce_order_id: str = Field(pattern=r"^CO\d{5,}$")
+    commerce_payment_intent_id: str = Field(pattern=r"^CPI\d{5,}$")
+    amount_cents: int = Field(ge=1, le=10_000_000_000)
+    url_status: Literal["configured", "unconfigured"]
+    outbound_message_id: str = Field(min_length=1, max_length=200)
+
+
+class CateringDepositLinkFailed(_BaseEntry):
+    """Failed mint or send of a catering deposit link. NEVER rolls back the
+    quote-send transaction; failure is purely a deposit-side concern.
+
+    commerce_* fields are optional because some failure modes (zero_amount,
+    below_minimum, cart_build_failed) occur before any slice-1 primitive
+    returned an id.
+    """
+    type: Literal["catering_deposit_link_failed"]
+    lead_id: str = Field(min_length=1, max_length=40)
+    reason: Literal[
+        "zero_amount",
+        "below_minimum",
+        "cart_build_failed",
+        "order_create_failed",
+        "intent_mint_failed",
+        "bridge_send_failed",
+        "subprocess_timeout",
+    ]
+    detail: str = Field(default="", max_length=500)
+    commerce_order_id: str = Field(default="", max_length=40)
+    commerce_payment_intent_id: str = Field(default="", max_length=40)
+
+
 # PR-D1: callable Discriminator + Tag-wrapped union members + _UnknownLogEntry
 # forward-compat shim. Replaces `Field(discriminator="type")` which raised
 # `union_tag_invalid` on unknown tags BEFORE any validator could run.
@@ -5243,6 +5322,9 @@ LogEntry = Annotated[
         Annotated[CommerceOrderOwnerApprovalRequired, Tag("commerce_order_owner_approval_required")],
         Annotated[CommerceOrderOwnerApprovalThresholdUnconfigured, Tag("commerce_order_owner_approval_threshold_unconfigured")],
         Annotated[CommerceBlockedCategoryOverride, Tag("commerce_blocked_category_override")],
+        # Slice-2 catering deposit caller
+        Annotated[CateringDepositLinkSent, Tag("catering_deposit_link_sent")],
+        Annotated[CateringDepositLinkFailed, Tag("catering_deposit_link_failed")],
         # PR-D1 forward-compat shim — UNKNOWN tags route here
         Annotated[_UnknownLogEntry, Tag("_unknown_")],
     ],

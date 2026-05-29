@@ -244,6 +244,38 @@ def mark_sent(
     return PaymentLinkResult(True, updated)
 
 
+def emit_payment_link_failed(
+    *,
+    decisions_log_path: Path,
+    intent_id: str,
+    order_id: str,
+    reason: str,
+    now: Optional[datetime] = None,
+) -> None:
+    """Slice-2 helper: emit the commerce_payment_link_failed audit row.
+
+    Callers invoke this BEFORE calling void() on a bridge-send failure so the
+    slice-1 attempted/sent/failed triple invariant holds. Operator looking at
+    the intent's audit trail sees attempted -> failed -> voided (no gap)
+    instead of attempted -> voided (gap that hides why void fired).
+
+    Reviewer A BLOCKER-2 (PR feat/commerce-slice2-catering-deposit-caller
+    design review). The audit variant itself shipped in slice 1; this helper
+    is just the dedicated emitter so callers don't roll their own JSON.
+    """
+    now = now or datetime.now(timezone.utc)
+    emit(
+        decisions_log_path,
+        {
+            "type": "commerce_payment_link_failed",
+            "ts": now.isoformat(),
+            "intent_id": intent_id,
+            "order_id": order_id,
+            "reason": reason[:200],
+        },
+    )
+
+
 def void(
     *,
     intent_state_path: Path,
