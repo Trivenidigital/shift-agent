@@ -126,19 +126,36 @@ def mint(
     currency: str,
     chat_id: str,
     checkout_url_template: str = "",
+    provider: str = "placeholder",
+    stripe_api_key: Optional[str] = None,
     now: Optional[datetime] = None,
 ) -> PaymentLinkResult:
-    """Mint a new intent (slice 1: provider=placeholder only).
+    """Mint a new intent.
+
+    Slice 1: provider="placeholder" — template substitution only (unchanged
+    default behavior; backward-compatible).
+
+    Slice 3 (PR 1): provider="stripe" — call Stripe API to mint a real
+    Payment Link with metadata.commerce_order_id for webhook correlation.
+    Requires stripe-python installed (operator runbook installs before
+    flipping cfg.commerce.provider="stripe").
 
     Idempotent on order_id: re-minting returns the existing live intent
-    (status != voided/refunded/chargeback) unchanged.
+    (status != voided/refunded/chargeback) unchanged. For Stripe path,
+    passes idempotency_key=order_id to Stripe so transient retries don't
+    create duplicate Payment Links (defense-in-depth per Reviewer B-LOW-3).
     """
     if amount_cents <= 0:
         return PaymentLinkResult(False, None, "amount_must_be_positive")
+    if provider not in ("placeholder", "stripe"):
+        # Other providers (razorpay/upi/zelle/cashapp/manual) are reserved
+        # in the schema but not wired in slice-3 PR-1. Reject explicitly so
+        # operator typos fail fast.
+        return PaymentLinkResult(False, None, f"unsupported_provider:{provider}")
     now = now or datetime.now(timezone.utc)
     store = load_intent_store(intent_state_path)
 
-    # Idempotency: one live intent per order_id
+    # Idempotency: one live intent per order_id (provider-agnostic)
     live = [
         i for i in store.intents
         if i.order_id == order_id
@@ -148,21 +165,37 @@ def mint(
         return PaymentLinkResult(True, live[0], "already_minted_idempotent")
 
     intent_id = _next_intent_id(store)
-    checkout_url = _render_checkout_url(
-        checkout_url_template,
-        order_id=order_id,
-        intent_id=intent_id,
-        amount_cents=amount_cents,
-        currency=currency,
-        chat_id=chat_id,
-    )
+    if provider == "stripe":
+        if not stripe_api_key:
+            return PaymentLinkResult(False, None, "stripe_api_key_required")
+        try:
+            checkout_url = _mint_via_stripe(
+                stripe_api_key=stripe_api_key,
+                order_id=order_id,
+                intent_id=intent_id,
+                amount_cents=amount_cents,
+                currency=currency,
+            )
+        except _StripeImportError as e:
+            return PaymentLinkResult(False, None, f"stripe_sdk_not_installed: {e}")
+        except _StripeApiError as e:
+            return PaymentLinkResult(False, None, f"stripe_api_error: {e}")
+    else:
+        checkout_url = _render_checkout_url(
+            checkout_url_template,
+            order_id=order_id,
+            intent_id=intent_id,
+            amount_cents=amount_cents,
+            currency=currency,
+            chat_id=chat_id,
+        )
     intent = CommercePaymentIntent(
         intent_id=intent_id,
         order_id=order_id,
         originating_message_id=originating_message_id,
         amount_cents=amount_cents,
         currency=currency,
-        provider="placeholder",
+        provider=provider,  # "placeholder" or "stripe"
         checkout_url=checkout_url,
         status="minted",
         payment_reference="",
@@ -181,10 +214,124 @@ def mint(
             "originating_message_id": originating_message_id,
             "amount_cents": amount_cents,
             "currency": currency,
-            "provider": "placeholder",
+            "provider": provider,
         },
     )
     return PaymentLinkResult(True, intent)
+
+
+class _StripeImportError(Exception):
+    """Raised when stripe-python is not installed but provider='stripe' was requested."""
+
+
+class _StripeApiError(Exception):
+    """Raised when Stripe API returns an error during Payment Link mint."""
+
+
+def _mint_via_stripe(
+    *,
+    stripe_api_key: str,
+    order_id: str,
+    intent_id: str,
+    amount_cents: int,
+    currency: str,
+) -> str:
+    """Call Stripe API to mint a Payment Link.
+
+    Uses stripe-python SDK directly (the MCP option from the design is
+    deferred to a separate slice-3.1 PR per reviewer A-HIGH-1: gated on
+    Stripe MCP tool-surface verification).
+
+    Defense-in-depth invariants:
+    - idempotency_key=order_id (Reviewer B-LOW-3): Stripe's own
+      idempotency layer means a transient network retry won't create
+      duplicate Payment Links
+    - metadata.commerce_order_id: lets the slice-3 PR-2 webhook reconciler
+      correlate Stripe's webhook payload back to our order
+    - metadata.commerce_intent_id: secondary correlation key for forensics
+
+    Currency must be a lowercase ISO 4217 code per Stripe convention.
+    Caller passes uppercase; we lowercase here.
+    """
+    try:
+        import stripe  # type: ignore
+    except ImportError as e:
+        raise _StripeImportError(
+            "stripe-python not installed; install via "
+            "/opt/shift-agent/venv/bin/pip install stripe; see "
+            "docs/runbooks/commerce-stripe-onboarding.md"
+        ) from e
+
+    stripe.api_key = stripe_api_key
+    try:
+        # Stripe Payment Links require a price object first. For one-off
+        # deposit links we use ad-hoc price_data inline.
+        payment_link = stripe.PaymentLink.create(
+            line_items=[{
+                "price_data": {
+                    "currency": currency.lower(),
+                    "product_data": {"name": f"Deposit {order_id}"},
+                    "unit_amount": amount_cents,
+                },
+                "quantity": 1,
+            }],
+            metadata={
+                "commerce_order_id": order_id,
+                "commerce_intent_id": intent_id,
+            },
+            idempotency_key=order_id,
+        )
+    except Exception as e:  # noqa: BLE001 — Stripe SDK raises various exceptions; treat all as API error
+        raise _StripeApiError(f"{type(e).__name__}: {e}") from e
+
+    return payment_link.url
+
+
+def mark_confirmed(
+    *,
+    intent_state_path: Path,
+    decisions_log_path: Path,
+    intent_id: str,
+    payment_reference: str,
+    now: Optional[datetime] = None,
+) -> PaymentLinkResult:
+    """Flip an intent from sent/minted → confirmed (slice-3 webhook reconciler).
+
+    Slice-3 PR-2 reconciler calls this after Stripe webhook arrives. The
+    payment_reference is the Stripe payment_intent.id (e.g., pi_xxx).
+
+    Idempotent: re-applying on an already-confirmed intent with the SAME
+    payment_reference is a no-op success. Re-applying with a DIFFERENT
+    payment_reference raises (caller should call register_reference first
+    to detect cross-order dedup at the ledger layer).
+    """
+    now = now or datetime.now(timezone.utc)
+    store = load_intent_store(intent_state_path)
+    intent = next((i for i in store.intents if i.intent_id == intent_id), None)
+    if intent is None:
+        return PaymentLinkResult(False, None, "intent_not_found")
+    if intent.status == "confirmed":
+        if intent.payment_reference == payment_reference:
+            return PaymentLinkResult(True, intent, "noop_already_confirmed")
+        return PaymentLinkResult(
+            False, intent,
+            f"confirmed_with_different_reference:existing={intent.payment_reference}",
+        )
+    if intent.status in {"voided", "refunded", "chargeback"}:
+        return PaymentLinkResult(False, intent, f"cannot_confirm_{intent.status}")
+    updated = intent.model_copy(
+        update={
+            "status": "confirmed",
+            "payment_reference": payment_reference,
+            "updated_at": now,
+        }
+    )
+    _replace(store, updated)
+    write_intent_store(intent_state_path, store)
+    # The commerce_payment_confirmed audit row is emitted by the caller
+    # (the reconciler script) so it can include lead + cross-ref context;
+    # the primitive only persists state.
+    return PaymentLinkResult(True, updated)
 
 
 def mark_attempted(
