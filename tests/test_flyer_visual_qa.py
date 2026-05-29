@@ -1466,3 +1466,214 @@ def test_visual_qa_accepts_explicit_promotion_end_label(tmp_path):
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
 
     assert report.status == "passed", report.blockers
+
+
+# ─────────────────────────────────────────────────────────────────
+# P0 #2 — severity classifier tests (Commit 1)
+# Pure-function over (blockers, project) -> 'pass' | 'warn' | 'block'.
+# DICTIONARY is the policy; classifier evaluates it.
+# ─────────────────────────────────────────────────────────────────
+
+
+def _classifier_project(business_name: str = "Lakshmi's Kitchen") -> FlyerProject:
+    """Minimal project for classifier tests — only locked_fact is business_name
+    (the brand-typo gate's reference value)."""
+    now = datetime(2026, 5, 28, tzinfo=timezone.utc)
+    return FlyerProject(
+        project_id="F0108",
+        status="generating_concepts",
+        customer_phone="+17329837841",
+        created_at=now,
+        updated_at=now,
+        original_message_id="m-test",
+        raw_request="Create a flyer for Dosa Special",
+        locked_facts=[
+            FlyerLockedFact(
+                fact_id="business_name", label="Business", value=business_name,
+                source="customer_text", required=True,
+            ),
+        ],
+    )
+
+
+def _project_business_name_for_test(project: FlyerProject) -> str:
+    for fact in project.locked_facts:
+        if fact.fact_id == "business_name":
+            return fact.value
+    return ""
+
+
+def test_classify_qa_severity_empty_blockers_returns_pass():
+    from agents.flyer.visual_qa import classify_qa_severity
+    assert classify_qa_severity([], project=_classifier_project()) == "pass"
+
+
+def test_classify_qa_severity_single_placeholder_blocker_returns_block():
+    from agents.flyer.visual_qa import classify_qa_severity
+    blockers = ["placeholder text is visible in generated flyer"]
+    assert classify_qa_severity(blockers, project=_classifier_project()) == "block"
+
+
+def test_classify_qa_severity_single_missing_location_returns_warn():
+    from agents.flyer.visual_qa import classify_qa_severity
+    blockers = ["missing required visible fact: location"]
+    assert classify_qa_severity(blockers, project=_classifier_project()) == "warn"
+
+
+def test_classify_qa_severity_f0108_brand_typo_returns_warn():
+    """F0108 reproduction: 'Laksmi'S Kitchen' (typo) vs 'Lakshmi's Kitchen'
+    (project brand). Passes all 3 gates -> warn."""
+    from agents.flyer.visual_qa import classify_qa_severity
+    blockers = ["visible wrong business/brand: Laksmi'S Kitchen"]
+    assert classify_qa_severity(blockers, project=_classifier_project()) == "warn"
+
+
+def test_classify_qa_severity_brand_token_overlap_zero_returns_block():
+    """Distinct brand (token overlap = 0) -> block."""
+    from agents.flyer.visual_qa import classify_qa_severity
+    blockers = ["visible wrong business/brand: Laxmi Mart"]
+    assert classify_qa_severity(blockers, project=_classifier_project()) == "block"
+
+
+def test_classify_qa_severity_short_brand_typo_blocked_when_overlap_fails():
+    """Short brands (4 chars): Arla vs Aria -> overlap 0, distance 1.
+    Token gate fails -> block. Short-brand-by-default is correct."""
+    from agents.flyer.visual_qa import classify_qa_severity
+    blockers = ["visible wrong business/brand: Arla"]
+    assert classify_qa_severity(blockers, project=_classifier_project("Aria")) == "block"
+
+
+def test_is_brand_typo_boundary_overlap_05_classifies_warn():
+    """F0108 sits at overlap = 0.5 exactly (shared {kitchen} of 2 project
+    tokens). With >= semantics MUST classify warn. Pinned per plan §5."""
+    from agents.flyer.visual_qa import _is_brand_typo
+    assert _is_brand_typo("Laksmi'S Kitchen", "Lakshmi's Kitchen")
+
+
+def test_classify_qa_severity_two_item_warns_returns_block_via_core_promise():
+    """2 core-promise warn blockers (item:N:name) -> block via escalation,
+    even though count is below the cap."""
+    from agents.flyer.visual_qa import classify_qa_severity
+    blockers = [
+        "missing required visible fact: item:4:name",
+        "missing required visible fact: item:5:name",
+    ]
+    assert classify_qa_severity(blockers, project=_classifier_project()) == "block"
+
+
+def test_classify_qa_severity_brand_typo_plus_missing_schedule_returns_block():
+    """Reviewer 2 #2 combo escalation: 1 brand-identity warn + 1 event-essential
+    warn -> block. Owner getting a draft with misspelled name AND no event
+    time is structurally worse than count=2 suggests."""
+    from agents.flyer.visual_qa import classify_qa_severity
+    blockers = [
+        "visible wrong business/brand: Laksmi'S Kitchen",
+        "missing required visible fact: schedule",
+    ]
+    assert classify_qa_severity(blockers, project=_classifier_project()) == "block"
+
+
+def test_classify_qa_severity_brand_typo_plus_missing_contact_info_returns_warn():
+    """Brand-identity warn + non-event-essential warn -> warn (combo
+    escalation only triggers for event-essential warns; contact_info is
+    recoverable on revision)."""
+    from agents.flyer.visual_qa import classify_qa_severity
+    blockers = [
+        "visible wrong business/brand: Laksmi'S Kitchen",
+        "missing required visible fact: contact_info",
+    ]
+    assert classify_qa_severity(blockers, project=_classifier_project()) == "warn"
+
+
+def test_classify_qa_severity_four_warns_returns_block_via_count_cap():
+    """4 warn blockers -> block via count cap."""
+    from agents.flyer.visual_qa import classify_qa_severity
+    blockers = [
+        "missing required visible fact: location",
+        "missing required visible fact: contact_info",
+        "missing required visible fact: schedule",
+        "missing required visible fact: promotion_end",
+    ]
+    assert classify_qa_severity(blockers, project=_classifier_project()) == "block"
+
+
+def test_classify_qa_severity_warn_plus_block_returns_block():
+    """Any block-tier blocker forces block."""
+    from agents.flyer.visual_qa import classify_qa_severity
+    blockers = [
+        "missing required visible fact: location",
+        "missing required visible fact: contact_info",
+        "placeholder text is visible in generated flyer",
+    ]
+    assert classify_qa_severity(blockers, project=_classifier_project()) == "block"
+
+
+def test_classify_qa_severity_f0109_three_missing_facts_returns_block():
+    """F0109 reproduction: 1 missing location (warn, event-essential)
+    + 2 missing item names (warn, core-promise) -> block via BOTH
+    core-promise escalation AND count cap."""
+    from agents.flyer.visual_qa import classify_qa_severity
+    blockers = [
+        "missing required visible fact: location",
+        "missing required visible fact: item:4:name",
+        "missing required visible fact: item:5:name",
+    ]
+    assert classify_qa_severity(blockers, project=_classifier_project()) == "block"
+
+
+def test_classify_qa_severity_provider_unavailable_returns_block():
+    """Substrate failure (OCR unavailable) -> block."""
+    from agents.flyer.visual_qa import classify_qa_severity
+    blockers = ["ocr/vision text unavailable for generated artifact"]
+    assert classify_qa_severity(blockers, project=_classifier_project()) == "block"
+
+
+def test_classify_qa_severity_missing_business_name_returns_block():
+    """missing business_name is block-tier (identity bleed risk), NOT warn."""
+    from agents.flyer.visual_qa import classify_qa_severity
+    blockers = ["missing required visible fact: business_name"]
+    assert classify_qa_severity(blockers, project=_classifier_project()) == "block"
+
+
+def test_classify_qa_severity_does_not_mutate_inputs():
+    """Pure-function invariant: classifier must not modify blockers or project.
+    Defensive — if the classifier ever leaks workflow side-effects, the
+    Hermes-as-brain invariant has regressed."""
+    from agents.flyer.visual_qa import classify_qa_severity
+    blockers = ["missing required visible fact: schedule"]
+    blockers_before = list(blockers)
+    project = _classifier_project()
+    brand_before = _project_business_name_for_test(project)
+    _ = classify_qa_severity(blockers, project=project)
+    assert blockers == blockers_before
+    assert _project_business_name_for_test(project) == brand_before
+
+
+def test_run_visual_qa_sets_severity_field_on_pass_path(tmp_path):
+    """run_visual_qa now populates report.severity in both early-return and
+    main paths. Pass-path: no blockers -> severity 'pass'."""
+    from agents.flyer.visual_qa import run_visual_qa
+    artifact = tmp_path / "ok.png"
+    artifact.write_bytes(b"img")
+    (tmp_path / "ok.png.ocr.txt").write_text(
+        "Fresh Meats Premium Clean Chicken Clean bird. Strong life. $13.99",
+        encoding="utf-8",
+    )
+    report = run_visual_qa(_project(), artifact, output_format="concept_preview", allow_sidecar=True)
+    assert report.status == "passed"
+    assert report.severity == "pass"
+
+
+def test_run_visual_qa_sets_severity_field_on_block_path(tmp_path):
+    """When blockers fire, severity reflects the classifier output."""
+    from agents.flyer.visual_qa import run_visual_qa
+    artifact = tmp_path / "bad.png"
+    artifact.write_bytes(b"img")
+    (tmp_path / "bad.png.ocr.txt").write_text(
+        "Fresh Meats Premium Clean Chicken Clean bird. Strong life. Kheema Dosa [price]",
+        encoding="utf-8",
+    )
+    report = run_visual_qa(_project(), artifact, output_format="concept_preview", allow_sidecar=True)
+    assert report.status == "failed"
+    # placeholder blocker is block-tier
+    assert report.severity == "block"

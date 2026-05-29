@@ -350,6 +350,199 @@ def _unrequested_operational_claim_blockers(project: FlyerProject, extracted_tex
     return blockers
 
 
+# ─────────────────────────────────────────────────────────────────
+# P0 #2 — severity classifier (pass / warn / block)
+# Pure-function: blocker list + project → severity label.
+# DICTIONARY is the policy; this evaluates it. No workflow side
+# effects (Hermes-as-brain invariant: classifier is a validator,
+# not a workflow owner). The decision to act on `warn` lives in
+# generate-flyer-concepts (state-write) and cf-router (send).
+# ─────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class _WarnTierBlockerSpec:
+    pattern: re.Pattern[str]
+    label: str
+    is_core_promise: bool = False
+    is_brand_identity: bool = False
+    is_event_essential: bool = False
+
+
+_BLOCK_TIER_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"^placeholder text is visible in generated flyer$"), "placeholder"),
+    (re.compile(r"^English-only flyer contains regional/non-English script$"), "regional_script"),
+    (re.compile(r"^unrequested operational claim visible: "), "unrequested_claim"),
+    (re.compile(r"^ocr/vision text unavailable for generated artifact"), "ocr_unavailable"),
+    (re.compile(r"^replaced source text still visible: "), "source_text_visible"),
+    (re.compile(r"^missing required visible fact: business_name$"), "missing_business_name"),
+    (re.compile(r"placeholder|unreadable|garbled", re.IGNORECASE), "quality_note_corruption"),
+)
+
+
+_WARN_TIER_PATTERNS: tuple[_WarnTierBlockerSpec, ...] = (
+    _WarnTierBlockerSpec(
+        pattern=re.compile(r"^visible wrong business/brand: (?P<name>.+)$"),
+        label="brand_variant",
+        is_brand_identity=True,
+    ),
+    _WarnTierBlockerSpec(
+        pattern=re.compile(r"^missing required visible fact: location$"),
+        label="missing_location",
+        is_event_essential=True,
+    ),
+    _WarnTierBlockerSpec(
+        pattern=re.compile(r"^missing required visible fact: contact_info$"),
+        label="missing_contact_info",
+    ),
+    _WarnTierBlockerSpec(
+        pattern=re.compile(r"^missing required visible fact: schedule$"),
+        label="missing_schedule",
+        is_event_essential=True,
+    ),
+    _WarnTierBlockerSpec(
+        pattern=re.compile(r"^missing required visible fact: promotion_end$"),
+        label="missing_promotion_end",
+        is_event_essential=True,
+    ),
+    _WarnTierBlockerSpec(
+        pattern=re.compile(r"^missing required visible fact: item:\d+:name$"),
+        label="missing_item_name",
+        is_core_promise=True,
+    ),
+)
+
+
+_WARN_TIER_COMBINATION_LIMIT: int = 3
+_CORE_PROMISE_ESCALATION_LIMIT: int = 2
+
+
+def _normalize_brand_for_match(value: str) -> str:
+    """Casefold + strip apostrophes/backticks + collapse whitespace."""
+    return re.sub(r"\s+", " ", re.sub(r"[’ʼ'`]", "", value or "")).strip().casefold()
+
+
+def _brand_tokens(normalized: str) -> set[str]:
+    """Tokenize on non-alphanumeric. Returns set of tokens."""
+    return {t for t in re.split(r"[^a-z0-9]+", normalized) if t}
+
+
+def _edit_distance(a: str, b: str) -> int:
+    """Levenshtein. Pure function, no deps. Symmetric."""
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, start=1):
+        curr = [i] + [0] * len(b)
+        for j, cb in enumerate(b, start=1):
+            cost = 0 if ca == cb else 1
+            curr[j] = min(curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost)
+        prev = curr
+    return prev[-1]
+
+
+def _is_brand_typo(extracted: str, project_brand: str) -> bool:
+    """AND-of-3 gate (operator decision 2026-05-28):
+    edit-distance ≤ 2 AND token-overlap ≥ 0.5 AND
+    (common-prefix ≥ 4 OR overlap ≥ 0.75).
+
+    All comparisons use ``>=`` — boundary case at overlap == 0.5 with
+    distance == 2 and prefix == 4 classifies as warn (per plan §5
+    worked example F0108 "Laksmi'S Kitchen" vs "Lakshmi's Kitchen").
+
+    Returns True if extracted is a typo of the project's brand (warn-tier
+    fold). Returns False if extracted is structurally distinct (block-tier
+    fold — wrong customer entirely)."""
+    e = _normalize_brand_for_match(extracted)
+    p = _normalize_brand_for_match(project_brand)
+    if _edit_distance(e, p) > 2:
+        return False
+    et, pt = _brand_tokens(e), _brand_tokens(p)
+    if not pt:
+        return False
+    overlap = len(et & pt) / len(pt)
+    if overlap < 0.5:
+        return False
+    prefix_len = 0
+    for c1, c2 in zip(e, p):
+        if c1 != c2:
+            break
+        prefix_len += 1
+    return prefix_len >= 4 or overlap >= 0.75
+
+
+def _project_business_name(project: FlyerProject) -> str:
+    """Lookup the canonical business_name from the project's locked_facts.
+    Returns empty string if absent — brand-typo gate then rejects all
+    variants (no known brand to compare against → fail safe to block)."""
+    for fact in project.locked_facts:
+        if fact.fact_id == "business_name":
+            return fact.value or ""
+    return ""
+
+
+def classify_qa_severity(
+    blockers: list[str],
+    *,
+    project: FlyerProject,
+) -> str:
+    """Pure-function classifier. Returns 'pass' | 'warn' | 'block'.
+
+    Rule order (first match wins):
+      1. any block-tier blocker → block
+      2. ≥ 2 core-promise warn blockers → block (core-promise escalation)
+      3. brand-identity warn AND event-essential warn → block (combo
+         escalation — owner gets draft with name typo AND no event time
+         is structurally worse than count=2 suggests)
+      4. ≥ 3 total warn blockers → block (count cap)
+      5. any warn-tier → warn
+      6. else → pass
+
+    The DICTIONARY (_BLOCK_TIER_PATTERNS, _WARN_TIER_PATTERNS) is the
+    policy. This function only evaluates it — no workflow side effects."""
+    block_hits: list[str] = []
+    warn_specs: list[_WarnTierBlockerSpec] = []
+    brand_name = _project_business_name(project)
+    for blocker in blockers:
+        # Block-tier first
+        matched_block = False
+        for pattern, _label in _BLOCK_TIER_PATTERNS:
+            if pattern.search(blocker):
+                block_hits.append(blocker)
+                matched_block = True
+                break
+        if matched_block:
+            continue
+        # Then warn-tier
+        for spec in _WARN_TIER_PATTERNS:
+            m = spec.pattern.search(blocker)
+            if not m:
+                continue
+            if spec.label == "brand_variant":
+                # Brand-variant splits into warn (typo) vs block (wrong brand
+                # entirely) via the Levenshtein + token + prefix gate.
+                if not _is_brand_typo(m.group("name"), brand_name):
+                    block_hits.append(blocker)
+                    break
+            warn_specs.append(spec)
+            break
+    if block_hits:
+        return "block"
+    if sum(1 for s in warn_specs if s.is_core_promise) >= _CORE_PROMISE_ESCALATION_LIMIT:
+        return "block"
+    if any(s.is_brand_identity for s in warn_specs) and any(s.is_event_essential for s in warn_specs):
+        return "block"
+    if len(warn_specs) >= _WARN_TIER_COMBINATION_LIMIT:
+        return "block"
+    if warn_specs:
+        return "warn"
+    return "pass"
+
+
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_TIMEOUT_SEC = 60
 VISION_QA_MODEL = os.environ.get("FLYER_VISUAL_QA_MODEL") or os.environ.get("VISION_MODEL") or "openai/gpt-4o-mini"
@@ -470,6 +663,7 @@ def run_visual_qa(
         extracted_text, provider, qa_source, provider_notes = _vision_text(artifact)
     blockers: list[str] = []
     if not extracted_text:
+        _early_blockers = ["ocr/vision text unavailable for generated artifact", *provider_notes]
         return FlyerVisualQAReport(
             project_id=project.project_id,
             asset_id=asset_id,
@@ -480,7 +674,8 @@ def run_visual_qa(
             provider=provider,
             qa_source=qa_source,
             status="provider_unavailable",
-            blockers=["ocr/vision text unavailable for generated artifact", *provider_notes],
+            blockers=_early_blockers,
+            severity=classify_qa_severity(_early_blockers, project=project),
             extracted_text="",
             checked_at=datetime.now(timezone.utc),
         )
@@ -549,6 +744,7 @@ def run_visual_qa(
         qa_source=qa_source,
         status="failed" if blockers else "passed",
         blockers=blockers,
+        severity=classify_qa_severity(blockers, project=project),
         extracted_text=extracted_text,
         checked_at=datetime.now(timezone.utc),
     )

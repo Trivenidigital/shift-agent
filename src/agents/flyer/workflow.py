@@ -59,6 +59,10 @@ STATUS_LINES = {
     "delivered": "The final flyer files have been delivered.",
     "completed": "This flyer project is complete.",
     "closed_no_send": "This flyer request was closed without sending final assets.",
+    # P0 #2 2026-05-28 — warn-tier status query reply. Sits alongside the
+    # rich initial warn-tier customer copy (Commit 2). Verbs verified
+    # against customer_copy_policy.FORBIDDEN_COMPLETION_VERBS.
+    "delivered_with_warning": "Your flyer draft is out with a small note. Reply with corrections or OK if you've checked it.",
 }
 
 
