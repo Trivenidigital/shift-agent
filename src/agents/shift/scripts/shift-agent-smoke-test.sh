@@ -700,6 +700,26 @@ print('catering schema + transition table validated')
 fi
 echo "✓ catering schema + transition table"
 
+# 10b. Agent #5 EOD reconcile — exercise the aggregation path with NO side
+# effects. `--force` bypasses the time self-gate; `--dry-run` aggregates and
+# prints JSON, then returns BEFORE any snapshot write, audit-log append, or
+# Pushover send (eod-reconcile main() returns at the dry-run branch). The
+# pre-restart import gates do not exercise eod-reconcile's aggregation, so a
+# break there would otherwise surface only when the nightly EOD timer fires.
+# Guarded with [ -x ] for rollback to tarballs that predate the script.
+if [ -x /usr/local/bin/eod-reconcile ]; then
+    if ! sudo -u shift-agent "$PY" /usr/local/bin/eod-reconcile --force --dry-run > /tmp/eod-smoke.out 2>&1; then
+        echo "FAIL: eod-reconcile --force --dry-run failed (Agent #5 aggregation regression)" >&2
+        cat /tmp/eod-smoke.out >&2
+        rm -f /tmp/eod-smoke.out
+        exit 1
+    fi
+    rm -f /tmp/eod-smoke.out
+    echo "✓ eod-reconcile --force --dry-run (Agent #5 aggregation path)"
+else
+    echo "⚠  eod-reconcile not installed — skipping Agent #5 smoke check"
+fi
+
 # 11+12. Agent #21 Expense Bookkeeper checks — only run when the agent's
 # venv is present. Agent #21 ships disabled-default and its venv at
 # /opt/shift-agent/venv/ is created by the operator's bootstrap step
