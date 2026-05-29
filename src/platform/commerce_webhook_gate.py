@@ -15,12 +15,21 @@ unaffected. Verified against main-vps runtime: `hermes webhook list` returns
 exit 0 with a "Webhook platform is not enabled" banner while dormant, so the
 gate decides applicability from config (not from the CLI exit code).
 
+Money-safety matching rules (Codex review 2026-05-29):
+- The subscription name is matched as a whole, delimiter-bounded token on some
+  line of `hermes webhook list` — never a raw substring — so a different
+  subscription such as ``<name>-v2`` or the name buried in free text cannot
+  produce a false pass.
+- A non-zero `hermes webhook list` exit is a gate/runtime error (EXIT_CONFIG_ERROR),
+  never silently classified as pass or as "subscription missing".
+
 Stdlib + PyYAML + Pydantic `CommerceConfig` only — no fcntl/safe_io — so it is
 importable in-process for tests and runnable pre-restart via the Hermes venv.
 """
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -35,6 +44,15 @@ EXIT_CONFIG_ERROR = 2
 DEFAULT_CONFIG_PATH = "/opt/shift-agent/config.yaml"
 DEFAULT_HERMES_BIN = "hermes"
 _LIST_TIMEOUT_SECONDS = 30
+
+# Split a list line into candidate tokens on whitespace and the common
+# key/value + record separators Hermes uses ("name=...", "route: ...", commas).
+_TOKEN_SPLIT = re.compile(r"[\s,=:]+")
+# Decorations stripped from the edge of a token before exact comparison
+# (bullets, quotes, brackets). Hyphens are NOT stripped — they are part of the
+# subscription name.
+_EDGE_PUNCT = "\"'`()[]<>"
+_LINE_BULLETS = "-*• \t"
 
 
 @dataclass
@@ -72,12 +90,13 @@ def load_commerce_fields(config_path: str) -> CommerceWebhookFields:
     )
 
 
-def default_list_runner(hermes_bin: str) -> str:
-    """Run ``<hermes_bin> webhook list`` and return combined stdout+stderr.
+def default_list_runner(hermes_bin: str) -> tuple[int, str]:
+    """Run ``<hermes_bin> webhook list`` and return ``(returncode, output)``.
 
-    Combined because Hermes prints the "platform not enabled" banner and the
-    subscription listing to different streams across versions; the gate only
-    needs to substring-match the subscription name regardless of stream.
+    Output is combined stdout+stderr because Hermes prints the "platform not
+    enabled" banner and the subscription listing to different streams across
+    versions; the gate only needs to token-match the subscription name. The
+    return code is surfaced so the caller can fail closed on a CLI failure.
     """
     proc = subprocess.run(
         [hermes_bin, "webhook", "list"],
@@ -85,12 +104,30 @@ def default_list_runner(hermes_bin: str) -> str:
         text=True,
         timeout=_LIST_TIMEOUT_SECONDS,
     )
-    return (proc.stdout or "") + (proc.stderr or "")
+    return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+
+def is_subscription_registered(name: str, list_output: str) -> bool:
+    """True iff ``name`` appears as a whole, delimiter-bounded token on some
+    line of ``list_output``. Never a raw substring — prevents a longer name
+    (``<name>-v2``) or the name embedded in free text from passing.
+    """
+    if not name:
+        return False
+    for line in list_output.splitlines():
+        cleaned = line.strip().strip(_LINE_BULLETS)
+        for token in _TOKEN_SPLIT.split(cleaned):
+            if token.strip(_EDGE_PUNCT) == name:
+                return True
+    return False
 
 
 def evaluate(fields: CommerceWebhookFields, list_output: str) -> tuple[int, str]:
-    """Pure decision for the *active* path. Returns (exit_code, message)."""
-    if fields.subscription_name and fields.subscription_name in list_output:
+    """Pure decision for the *active* path. Returns (exit_code, message).
+
+    Caller has already confirmed applicability and a clean (rc==0) CLI run.
+    """
+    if is_subscription_registered(fields.subscription_name, list_output):
         return EXIT_OK, (
             f"OK: commerce webhook subscription "
             f"'{fields.subscription_name}' is registered."
@@ -137,11 +174,26 @@ def run(
 
     runner = list_runner or default_list_runner
     try:
-        list_output = runner(hermes_bin)
+        returncode, list_output = runner(hermes_bin)
     except FileNotFoundError as exc:
         return EXIT_CONFIG_ERROR, "", f"ERROR: hermes binary not found: {hermes_bin} ({exc})"
     except subprocess.SubprocessError as exc:
         return EXIT_CONFIG_ERROR, "", f"ERROR: `{hermes_bin} webhook list` failed: {exc}"
+
+    if returncode != 0:
+        # Fail closed: a CLI failure means we cannot determine subscription
+        # state. Do NOT classify as pass, and do NOT classify as "missing"
+        # (which would mislead the operator) — report a gate/runtime error.
+        return (
+            EXIT_CONFIG_ERROR,
+            "",
+            (
+                f"ERROR: `{hermes_bin} webhook list` exited {returncode}; cannot "
+                f"determine whether subscription '{fields.subscription_name}' is "
+                f"registered. Refusing to pass the commerce webhook gate "
+                f"(fail-closed).\n--- output ---\n{list_output}"
+            ),
+        )
 
     code, msg = evaluate(fields, list_output)
     if code == EXIT_OK:

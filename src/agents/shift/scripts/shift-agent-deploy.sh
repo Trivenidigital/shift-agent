@@ -966,7 +966,14 @@ PY
         # `from schemas import CommerceConfig` resolves (pydantic lives there).
         COMMERCE_WEBHOOK_GATE="$STAGING/src/platform/scripts/check-commerce-webhook-subscription"
         [ -x "$COMMERCE_WEBHOOK_GATE" ] || COMMERCE_WEBHOOK_GATE=/usr/local/bin/check-commerce-webhook-subscription
-        if [ -x "$COMMERCE_WEBHOOK_GATE" ]; then
+        if [ ! -x "$COMMERCE_WEBHOOK_GATE" ]; then
+            # The gate ships in every current tarball, so absence means a
+            # pre-gate (older) tarball. Skipping is correct for rollback/older-
+            # build compatibility — but make it LOUD (not silent), because if
+            # this VPS runs commerce on Stripe the subscription would go
+            # unverified (Codex review 2026-05-29, Medium-3).
+            echo "WARN: commerce webhook-subscription gate script not found in staging or /usr/local/bin — skipping (pre-gate tarball?). If commerce.provider=stripe on this VPS, verify the Stripe webhook subscription manually: hermes webhook list" >&2
+        else
             if ! "$VENV_PY" "$COMMERCE_WEBHOOK_GATE" --config /opt/shift-agent/config.yaml; then
                 echo "FAIL: pre-restart commerce webhook-subscription gate — refusing to restart hermes-gateway" >&2
                 if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
