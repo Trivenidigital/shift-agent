@@ -52,6 +52,9 @@ install_artifacts() {
     if [ ! -f src/platform/scripts/check-commerce-webhook-subscription ]; then
         rm -f /usr/local/bin/check-commerce-webhook-subscription
     fi
+    if [ ! -f src/platform/scripts/check-commerce-stripe-livemode ]; then
+        rm -f /usr/local/bin/check-commerce-stripe-livemode
+    fi
 
     # Python modules — flat layout at /opt/shift-agent/ matches scripts' sys.path
     install -m 644 src/platform/schemas.py /opt/shift-agent/schemas.py
@@ -85,6 +88,14 @@ install_artifacts() {
         install -m 644 src/platform/commerce_webhook_gate.py /opt/shift-agent/commerce_webhook_gate.py
     else
         rm -f /opt/shift-agent/commerce_webhook_gate.py
+    fi
+    # Commerce Stripe livemode-match deploy-gate module (slice-3.1). Imported by
+    # the check-commerce-stripe-livemode wrapper. Guarded for rollback
+    # compatibility with tarballs that predate this module.
+    if [ -f src/platform/commerce_livemode_gate.py ]; then
+        install -m 644 src/platform/commerce_livemode_gate.py /opt/shift-agent/commerce_livemode_gate.py
+    else
+        rm -f /opt/shift-agent/commerce_livemode_gate.py
     fi
 
     # Commerce primitives package (PR #321, slice 1 library-only).
@@ -952,6 +963,31 @@ PY
             exit 1
         fi
 
+        # Determine ONCE whether commerce is active-for-Stripe on this VPS. Both
+        # the webhook-subscription gate (slice-3.5) and the livemode gate
+        # (slice-3.1) use this to decide whether a MISSING gate script (pre-gate
+        # or rollback tarball) is a hard-fail (commerce live on Stripe — a
+        # money-safety gate must not be silently dropped) or a safe WARN-skip
+        # (dormant/non-commerce). Probe errors (pre-commerce schema, unparseable
+        # config) are treated as not-active.
+        if "$VENV_PY" - <<'PY'
+import sys, yaml
+sys.path.insert(0, "/opt/shift-agent")
+try:
+    from schemas import CommerceConfig
+    raw = (yaml.safe_load(open("/opt/shift-agent/config.yaml")) or {}).get("commerce") or {}
+    cfg = CommerceConfig.model_validate(raw if isinstance(raw, dict) else {})
+    active = bool(cfg.enabled and cfg.provider == "stripe")
+except Exception:
+    active = False
+raise SystemExit(0 if active else 1)
+PY
+        then
+            COMMERCE_ACTIVE_STRIPE=1
+        else
+            COMMERCE_ACTIVE_STRIPE=0
+        fi
+
         # Pre-restart commerce webhook-subscription gate (slice-3.5). Dormant-safe:
         # exits 0 (and prints a one-line "not applicable" note) unless
         # commerce.enabled && commerce.provider == "stripe". When commerce IS
@@ -968,24 +1004,11 @@ PY
         [ -x "$COMMERCE_WEBHOOK_GATE" ] || COMMERCE_WEBHOOK_GATE=/usr/local/bin/check-commerce-webhook-subscription
         if [ ! -x "$COMMERCE_WEBHOOK_GATE" ]; then
             # Gate script absent => pre-gate (older) tarball or malformed deploy.
-            # Skipping is safe ONLY if commerce is not active-for-Stripe on this
-            # VPS. Probe commerce state and HARD-FAIL if active, so a rollback
-            # cannot silently drop the money-safety gate while Stripe is live
-            # (Codex review 2026-05-29, escalated finding #3). If commerce is
-            # dormant/non-commerce, WARN and continue (older-build compatibility).
-            if "$VENV_PY" - <<'PY'
-import sys, yaml
-sys.path.insert(0, "/opt/shift-agent")
-try:
-    from schemas import CommerceConfig
-    raw = (yaml.safe_load(open("/opt/shift-agent/config.yaml")) or {}).get("commerce") or {}
-    cfg = CommerceConfig.model_validate(raw if isinstance(raw, dict) else {})
-    active = bool(cfg.enabled and cfg.provider == "stripe")
-except Exception:
-    active = False  # pre-commerce schema or unparseable config => cannot be active
-raise SystemExit(0 if active else 1)
-PY
-            then
+            # Skipping is safe ONLY if commerce is not active-for-Stripe (probed
+            # once above). HARD-FAIL if active so a rollback cannot silently drop
+            # the money-safety gate while Stripe is live (Codex review 2026-05-29,
+            # escalated finding #3); WARN-skip when dormant (older-build compat).
+            if [ "$COMMERCE_ACTIVE_STRIPE" = 1 ]; then
                 echo "FATAL: commerce is active for Stripe but the webhook-subscription gate script is absent from staging and /usr/local/bin — refusing to deploy/restart (a rollback must not drop the money-safety gate while Stripe is live)." >&2
                 if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
                     "$0" rollback "$PREV_TAG"
@@ -1012,6 +1035,51 @@ PY
                         --title "Deploy FAILED at commerce webhook gate, no prior tarball" \
                         --priority 2 \
                         "Deploy $NEW_TAG failed the commerce webhook-subscription gate (commerce active for Stripe but the subscription is missing). New files installed but service still on OLD code (gateway not yet restarted). No prior tarball to roll back to — SSH immediately." 2>/dev/null || true
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                fi
+                exit 1
+            fi
+        fi
+
+        # Pre-restart commerce Stripe livemode-match gate (slice-3.1). Dormant-safe:
+        # exits 0 unless commerce.enabled && commerce.provider == "stripe". When
+        # active, asserts the Stripe API key's account livemode matches
+        # commerce.stripe_livemode_expected — catches the "live key in test config"
+        # (or vice versa) footgun before a customer pays (§13.5 B-MEDIUM-1).
+        # Fail-closed on mismatch (exit 1) or key/API error (exit 2). Reads
+        # STRIPE_API_KEY from .env itself and calls api.stripe.com via urllib (no
+        # SDK); never logs the key. Same staging-preference + absent-handling as
+        # the webhook gate above.
+        COMMERCE_LIVEMODE_GATE="$STAGING/src/platform/scripts/check-commerce-stripe-livemode"
+        [ -x "$COMMERCE_LIVEMODE_GATE" ] || COMMERCE_LIVEMODE_GATE=/usr/local/bin/check-commerce-stripe-livemode
+        if [ ! -x "$COMMERCE_LIVEMODE_GATE" ]; then
+            if [ "$COMMERCE_ACTIVE_STRIPE" = 1 ]; then
+                echo "FATAL: commerce is active for Stripe but the livemode-match gate script is absent from staging and /usr/local/bin — refusing to deploy/restart (a rollback must not drop the money-safety gate while Stripe is live)." >&2
+                if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                    "$0" rollback "$PREV_TAG"
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                else
+                    /usr/local/bin/shift-agent-notify-owner \
+                        --title "Deploy FAILED: commerce livemode gate missing while Stripe active" \
+                        --priority 2 \
+                        "Deploy $NEW_TAG: commerce active for Stripe but the livemode-match gate script is missing from the tarball. New files installed but service still on OLD code. SSH immediately." 2>/dev/null || true
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                fi
+                exit 1
+            else
+                echo "WARN: commerce Stripe livemode-match gate script not found (pre-gate tarball); commerce is not active-for-Stripe on this VPS so skipping is safe. If you later enable Stripe, redeploy a current tarball so the gate runs." >&2
+            fi
+        else
+            if ! "$VENV_PY" "$COMMERCE_LIVEMODE_GATE" --config /opt/shift-agent/config.yaml; then
+                echo "FAIL: pre-restart commerce Stripe livemode-match gate — refusing to restart hermes-gateway" >&2
+                if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                    "$0" rollback "$PREV_TAG"
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                else
+                    /usr/local/bin/shift-agent-notify-owner \
+                        --title "Deploy FAILED at commerce livemode gate, no prior tarball" \
+                        --priority 2 \
+                        "Deploy $NEW_TAG failed the commerce Stripe livemode-match gate (key mode != stripe_livemode_expected, or Stripe unreachable). New files installed but service still on OLD code. No prior tarball to roll back to — SSH immediately." 2>/dev/null || true
                     rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
                 fi
                 exit 1

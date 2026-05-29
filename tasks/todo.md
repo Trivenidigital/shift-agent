@@ -14,13 +14,15 @@ review on main-vps; merge only after tests/smokes pass + Codex clean. Hard stops
 no secrets, no Stripe activation, no provider flip, no prod mutation beyond read-only
 probes / required deploy-smoke, no customer sends, no speculative agents, no PR-4.
 
-- [ ] **Item 1 — Commerce slice-3.5 webhook-subscription deploy gate** (branch `feat/commerce-slice3-activation-guard`)
-  - Design: `tasks/commerce-slice3.5-webhook-subscription-gate-design.md` ✅ (hermes-check receipt written)
-  - [ ] TDD: `tests/test_commerce_webhook_subscription_gate.py` (6 cases)
-  - [ ] Build `src/platform/commerce_webhook_gate.py` + `src/platform/scripts/check-commerce-webhook-subscription`
-  - [ ] Wire into `shift-agent-deploy.sh` (prefer staging path) + install + rollback-guard
-  - [ ] Local tests green → push → Codex review on main-vps → merge if clean
-- [ ] Item 2+ — next dormant-safe gate/test/observability item (livemode-match smoke slice-3.1 is a candidate)
+- [x] **Item 1 — Commerce slice-3.5 webhook-subscription deploy gate** ✅ MERGED PR #340 (origin/main f3156a3). 20 tests, 3 Codex rounds → CLEAN. Dormant-verified on live VPS. Not yet deployed (dormant-safe).
+- [ ] **Item 2 — Commerce slice-3.1 Stripe livemode-match deploy gate** (branch `feat/commerce-slice3.1-livemode-gate`)
+  - Design: `tasks/commerce-slice3.1-livemode-gate-design.md` ✅ (hermes-check receipt written)
+  - [x] TDD: `tests/test_commerce_livemode_gate.py` (13 cases, green)
+  - [x] Build `src/platform/commerce_livemode_gate.py` (urllib, no SDK) + wrapper `check-commerce-stripe-livemode`
+  - [x] Wire into `shift-agent-deploy.sh` (refactored shared COMMERCE_ACTIVE_STRIPE probe) + install + rollback-guard
+  - [x] Local tests green (33/33 both suites) + dormant-verified on live VPS (exit 0)
+  - [ ] push → Codex review on main-vps → merge if clean
+- [ ] Item 3+ — pivot to Shift/Catering/Daily Brief dormant-safe hardening. Deferred: audit-log §12a freshness watchdog (needs write-rate data + heartbeat design — false-alarm risk on quiet pilot VPS).
 
 
 

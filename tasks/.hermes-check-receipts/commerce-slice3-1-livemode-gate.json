@@ -1,0 +1,15 @@
+{
+  "topic": "commerce-slice3-1-livemode-gate",
+  "task_text": "commerce-slice3-1-livemode-gate — deploy-time dormant-safe gate asserting Stripe account livemode matches cfg.commerce.stripe_livemode_expected when commerce.provider=stripe, via raw HTTPS to api.stripe.com (no SDK), skip otherwise",
+  "completed_at": "2026-05-29T22:49:08Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 4,
+  "hermes_step_count": 5,
+  "files_to_read_first": [
+    "src/agents/catering/scripts/vision-auth-smoke",
+    "src/platform/schemas.py",
+    "src/platform/commerce_webhook_gate.py",
+    "src/agents/shift/scripts/shift-agent-deploy.sh",
+    "docs/runbooks/commerce-stripe-onboarding.md"
+  ]
+}
