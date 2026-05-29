@@ -6208,3 +6208,52 @@ def test_audit_emit_failures_are_non_fatal(monkeypatch, tmp_path):
     actions.finalize_flyer_intake_bypass_shadow(hook_result=None)
     actions.reset_flyer_intake_bypass_shadow(token)
     # If we got here without raising, the non-fatal discipline holds.
+
+
+# ─────────────────────────────────────────────────────────────────
+# 2026-05-29 — design §4 build-phase replay gate against live audit sample
+# ─────────────────────────────────────────────────────────────────
+
+
+def test_outcome_derivation_against_recent_audit_sample():
+    """Build-phase gate (design §4): the F-pattern derivation in
+    _derive_bypass_outcome assumes every flyer_primary_project_created
+    audit row carries an F-pattern project_id in its detail field —
+    i.e., the call-site formatters in hooks.py consistently include
+    `project_id=F....` in their detail strings, mirroring the same
+    shape they use in hook_result['reason'] for the success paths.
+
+    The fixture at tests/fixtures/intake_bypass_audit_sample.jsonl was
+    pulled from /var/log/shift-agent-archive/decisions.log-2026052{6,8,9}
+    on main-vps via the two-step SSH pattern on 2026-05-29 — 32 rows
+    where reason == 'flyer_primary_project_created'.
+
+    If a future PR changes a success path's formatter to drop the
+    project_id reference, this test fails and surfaces the
+    derivation-coupling risk before canary."""
+    actions = _load_actions()
+    fixture_path = (Path(__file__).resolve().parent / "fixtures"
+                    / "intake_bypass_audit_sample.jsonl")
+    assert fixture_path.exists(), (
+        f"audit-sample fixture missing at {fixture_path}; "
+        f"refresh via two-step SSH pull from main-vps decisions archive"
+    )
+    rows = [json.loads(line) for line in
+            fixture_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()]
+    project_created_rows = [
+        r for r in rows if r.get("reason") == "flyer_primary_project_created"
+    ]
+    assert project_created_rows, (
+        "fixture must contain at least one flyer_primary_project_created row"
+    )
+    bad: list[dict] = []
+    for row in project_created_rows:
+        detail = str(row.get("detail") or "")
+        if not actions._FLYER_PROJECT_ID_RE.search(detail):
+            bad.append({"ts": row.get("ts"), "detail": detail[:120]})
+    assert not bad, (
+        f"{len(bad)} flyer_primary_project_created row(s) without F-pattern "
+        f"in detail — derivation regex would mis-classify these as "
+        f"intermediate_intercept_handled: {bad[:3]}"
+    )
