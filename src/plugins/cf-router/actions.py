@@ -4296,8 +4296,49 @@ def _record_flyer_concept_preview_delivery(project_id: str, asset_id: str, outbo
         raise RuntimeError(f"project_not_found: {project_id}")
 
 
-def send_flyer_concept_previews(chat_id: str, project_id: str) -> tuple[bool, str, str]:
-    """Send the generated concept preview and approval instructions."""
+def _load_flyer_project_dict(project_id: str) -> Optional[dict]:
+    """Load a single flyer project from the projects.json store as a dict.
+    Returns None if the store is unreadable or the project_id is absent.
+    Shared by send_flyer_concept_previews / send_warn_tier_concept_previews /
+    _dispatch_concept_preview_send (P0 #2 Commit 4)."""
+    try:
+        store = json.loads(FLYER_PROJECTS_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    for p in store.get("projects", []):
+        if p.get("project_id") == project_id:
+            return p
+    return None
+
+
+def _send_concept_preview_media(
+    chat_id: str,
+    project: dict,
+    qa_policy: str,
+    customer_text: Optional[str] = None,
+) -> tuple[bool, str, str]:
+    """Canonical concept-preview send. Extracted from send_flyer_concept_previews
+    so warn-tier delivery can reuse the same per-concept loop with a relaxed
+    visual-QA-report gate (P0 #2 Commit 4 — X2 helper-extraction architecture).
+
+    qa_policy semantics:
+    - "strict" — text-manifest QA + visual-QA-report both gate the send.
+      Pass-tier wrapper uses this; pre-PR behavior preserved bit-for-bit.
+    - "warn_tolerant" — text-manifest QA still gates (substrate correctness;
+      template-parse failures aren't warn-tier-recoverable), but visual-QA-
+      report `status != "passed"` no longer hard-fails. Warn-tier wrapper
+      uses this. The upstream classifier (classify_qa_severity) already
+      determined warn-tier is acceptable; project.warning captures the
+      visible blockers for audit.
+
+    customer_text override (Pin C — design §5 Commit 4):
+    - Replaces the trailing CTA at end of the previews send.
+    - Does NOT replace per-concept captions — those stay stable semantic
+      descriptors ("C1: Title\\n...").
+    - None → existing pass-tier APPROVE CTA (6 callers preserved bit-for-bit).
+
+    Hermes-as-brain: this is a worker. The strict vs warn_tolerant choice
+    lives one level up in the wrappers; this helper just executes it."""
     _ensure_platform_path()
     try:
         from safe_io import bridge_post, bridge_send_media  # type: ignore
@@ -4315,19 +4356,16 @@ def send_flyer_concept_previews(chat_id: str, project_id: str) -> tuple[bool, st
             from agents.flyer.visual_qa import validate_visual_qa_report  # type: ignore
         except Exception as e:
             return False, "", f"flyer_visual_qa_import_failed: {type(e).__name__}: {e}"
-    try:
-        store = json.loads(FLYER_PROJECTS_PATH.read_text(encoding="utf-8"))
-        project = next((p for p in store.get("projects", []) if p.get("project_id") == project_id), None)
-    except Exception as e:
-        return False, "", f"project_load_failed: {type(e).__name__}: {e}"
-    if not project:
-        return False, "", f"project_not_found: {project_id}"
+
+    project_id = str(project.get("project_id") or "")
     assets = {asset.get("asset_id"): asset for asset in project.get("assets", [])}
     outbound_ids: list[str] = []
     for concept in project.get("concepts", []):
         asset = assets.get(concept.get("preview_asset_id"))
         if not asset:
             continue
+        # Text-manifest QA — ALWAYS strict in both policies (substrate gate;
+        # template-parse failures aren't warn-tier-recoverable)
         qa = validate_text_manifest_file(
             asset.get("path", ""),
             project_id=project_id,
@@ -4336,6 +4374,7 @@ def send_flyer_concept_previews(chat_id: str, project_id: str) -> tuple[bool, st
         )
         if not qa.ok:
             return False, "", "text_qa_failed: " + "; ".join(qa.blockers)
+        # Visual-QA-report gate — strict in pass-tier; warn-tolerant skips it
         visual = validate_visual_qa_report(
             asset.get("path", ""),
             project_id=project_id,
@@ -4343,16 +4382,15 @@ def send_flyer_concept_previews(chat_id: str, project_id: str) -> tuple[bool, st
             output_format="concept_preview",
             allow_sidecar=False,
         )
-        if not visual.ok:
+        if not visual.ok and qa_policy == "strict":
             return False, "", "visual_qa_failed: " + "; ".join(visual.blockers)
+        # warn_tolerant: proceed; project.warning already captures blockers
         caption = (
             f"{concept.get('concept_id')}: {concept.get('title')}\n"
             f"{concept.get('style_summary')}\n\n"
             "Reply APPROVE or reply with changes."
         )
-        # PR-ζ.1b §2.3 — concept-preview media + CTA contexts. Lazy import
-        # mirrors actions.py's existing pattern; deployed-flat fallback for
-        # the VPS where modules install as flyer_action_registry.py.
+        # PR-ζ.1b §2.3 — concept-preview media + CTA contexts.
         try:
             from agents.flyer.action_registry import (  # type: ignore
                 PROJECT_ACTIONS, build_action_context_for_command,
@@ -4361,16 +4399,16 @@ def send_flyer_concept_previews(chat_id: str, project_id: str) -> tuple[bool, st
             from flyer_action_registry import (  # type: ignore
                 PROJECT_ACTIONS, build_action_context_for_command,
             )
-        ok, mid, err, status = bridge_send_media(
+        ok, mid, err, bridge_status = bridge_send_media(
             chat_id, asset.get("path", ""), caption=caption,
             action_context=build_action_context_for_command(
                 PROJECT_ACTIONS, "concept_preview.media_send",
             ),
         )
         if not ok:
-            if status == "send_uncertain":
-                return False, ",".join(outbound_ids), f"partial_delivery_uncertain: {status}: {err}"
-            return False, "", f"{status}: {err}"
+            if bridge_status == "send_uncertain":
+                return False, ",".join(outbound_ids), f"partial_delivery_uncertain: {bridge_status}: {err}"
+            return False, "", f"{bridge_status}: {err}"
         try:
             _record_flyer_concept_preview_delivery(project_id, str(asset.get("asset_id") or ""), mid)
         except Exception as e:
@@ -4386,16 +4424,76 @@ def send_flyer_concept_previews(chat_id: str, project_id: str) -> tuple[bool, st
         from flyer_action_registry import (  # type: ignore
             PROJECT_ACTIONS as _PA_CTA, build_action_context_for_command as _bac_cta,
         )
-    ok, mid, err, status = bridge_post(
-        chat_id,
-        "Reply APPROVE to receive final files, or reply with changes.",
+    # Pin C — customer_text override replaces ONLY the trailing CTA.
+    cta_text = customer_text if customer_text is not None else (
+        "Reply APPROVE to receive final files, or reply with changes."
+    )
+    ok, mid, err, bridge_status = bridge_post(
+        chat_id, cta_text,
         action_context=_bac_cta(_PA_CTA, "concept_preview.cta_text"),
     )
     if ok:
         outbound_ids.append(mid)
     else:
-        return False, ",".join(outbound_ids), f"partial_delivery: {status}: {err}"
+        return False, ",".join(outbound_ids), f"partial_delivery: {bridge_status}: {err}"
     return True, ",".join(outbound_ids), ""
+
+
+def send_flyer_concept_previews(chat_id: str, project_id: str) -> tuple[bool, str, str]:
+    """Pass-tier concept-preview send. Signature unchanged from pre-PR
+    (6 existing callers in hooks.py preserved bit-for-bit). Wraps
+    _send_concept_preview_media with qa_policy='strict'."""
+    project = _load_flyer_project_dict(project_id)
+    if project is None:
+        return False, "", f"project_not_found: {project_id}"
+    return _send_concept_preview_media(chat_id, project, qa_policy="strict")
+
+
+def send_warn_tier_concept_previews(
+    chat_id: str,
+    project_id: str,
+    customer_text: str,
+) -> tuple[bool, str, str]:
+    """Warn-tier concept-preview send. Reachable only via
+    _dispatch_concept_preview_send. Relaxes visual-QA-report status check;
+    keeps text-manifest QA strict.
+
+    customer_text is REQUIRED (no default) — warn-tier delivery always
+    needs correction-prompt copy, never the pass-tier APPROVE CTA. The
+    asymmetric signature (vs send_flyer_concept_previews) prevents
+    accidental empty-customer-text on warn-tier."""
+    project = _load_flyer_project_dict(project_id)
+    if project is None:
+        return False, "", f"project_not_found: {project_id}"
+    return _send_concept_preview_media(
+        chat_id, project, qa_policy="warn_tolerant", customer_text=customer_text,
+    )
+
+
+def _dispatch_concept_preview_send(chat_id: str, project_id: str) -> tuple[bool, str, str]:
+    """Single point of change for the warn-tier branch. Reads project state,
+    picks the right wrapper. Replaces the 6 direct callers of
+    send_flyer_concept_previews at hooks.py:746, 1848, 2795, 3081, 3310, 3486.
+
+    Hermes-as-brain compliance: this dispatcher only reads `project.status`
+    and `project.warning`. No re-classification, no policy decisions beyond
+    `status → wrapper`."""
+    project = _load_flyer_project_dict(project_id)
+    if (
+        project is not None
+        and project.get("status") == "delivered_with_warning"
+        and project.get("warning") is not None
+    ):
+        warning = project["warning"]
+        try:
+            from agents.flyer.customer_copy_policy import build_warn_tier_customer_text  # type: ignore
+        except ImportError:  # pragma: no cover - deployed flat-module fallback
+            from flyer_customer_copy_policy import build_warn_tier_customer_text  # type: ignore
+        warn_text = build_warn_tier_customer_text(
+            list(warning.get("blockers") or []), project,
+        )
+        return send_warn_tier_concept_previews(chat_id, project_id, warn_text)
+    return send_flyer_concept_previews(chat_id, project_id)
 
 
 def _flyer_outbound_dedupe_key(chat_id: str, message: str) -> str:
