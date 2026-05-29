@@ -781,3 +781,227 @@ def test_flyer_reference_extraction_source_contract_defaults_to_none():
         status="not_run",
     )
     assert ext.source_contract is None
+
+
+# ─────────────────────────────────────────────────────────────────
+# 2026-05-28 — intake-bypass audit pair (Commit 1)
+# Pairs with the plan + design at
+# tasks/flyer-intake-bypass-{plan,design}-2026-05-28.md.
+# ─────────────────────────────────────────────────────────────────
+
+
+_BYPASS_NOW = datetime(2026, 5, 28, 22, 30, tzinfo=timezone.utc)
+_BYPASS_CHAT_HASH = "a" * 32  # mirrors _short_hash output shape
+
+
+def test_flyer_intake_bypassed_round_trip_edit_with_media():
+    from schemas import FlyerIntakeBypassed  # noqa: E402
+
+    entry = FlyerIntakeBypassed(
+        ts=_BYPASS_NOW,
+        chat_id_hash=_BYPASS_CHAT_HASH,
+        bypass_reason="edit_with_media",
+        has_media=True,
+        customer_state="",
+        intake_session_status="choosing_mode",
+        inbound_script="latin",
+    )
+    dumped = entry.model_dump(mode="json")
+    assert dumped["type"] == "flyer_intake_bypassed"
+    assert dumped["bypass_reason"] == "edit_with_media"
+    assert dumped["has_media"] is True
+    assert dumped["customer_state"] == ""
+    assert dumped["inbound_script"] == "latin"
+    restored = FlyerIntakeBypassed.model_validate(dumped)
+    assert restored == entry
+
+
+def test_flyer_intake_bypassed_accepts_all_five_bypass_reason_literals():
+    """All 5 bypass_reason Literal values round-trip — operator decision
+    2026-05-28 #2 (5 values, not 3)."""
+    from schemas import FlyerIntakeBypassed  # noqa: E402
+    for reason in (
+        "edit_with_media",
+        "new_flyer_text_only",
+        "new_flyer_with_media",
+        "existing_active_customer_intent",
+        "existing_trial_customer_intent",
+    ):
+        entry = FlyerIntakeBypassed(
+            ts=_BYPASS_NOW, chat_id_hash=_BYPASS_CHAT_HASH,
+            bypass_reason=reason, has_media=False,
+        )
+        assert entry.bypass_reason == reason
+
+
+def test_flyer_intake_bypassed_rejects_unknown_bypass_reason():
+    from schemas import FlyerIntakeBypassed  # noqa: E402
+    with pytest.raises(ValidationError):
+        FlyerIntakeBypassed(
+            ts=_BYPASS_NOW, chat_id_hash=_BYPASS_CHAT_HASH,
+            bypass_reason="not_a_real_reason", has_media=False,
+        )
+
+
+def test_flyer_intake_bypassed_accepts_all_four_inbound_script_literals():
+    """All 4 inbound_script Literal values — operator decision #3 + reviewer 2
+    regional-SMB telemetry."""
+    from schemas import FlyerIntakeBypassed  # noqa: E402
+    for script in ("latin", "devanagari", "tamil", "other"):
+        entry = FlyerIntakeBypassed(
+            ts=_BYPASS_NOW, chat_id_hash=_BYPASS_CHAT_HASH,
+            bypass_reason="edit_with_media", has_media=True,
+            inbound_script=script,
+        )
+        assert entry.inbound_script == script
+
+
+def test_flyer_intake_bypassed_inbound_script_defaults_to_latin():
+    from schemas import FlyerIntakeBypassed  # noqa: E402
+    entry = FlyerIntakeBypassed(
+        ts=_BYPASS_NOW, chat_id_hash=_BYPASS_CHAT_HASH,
+        bypass_reason="edit_with_media", has_media=True,
+    )
+    assert entry.inbound_script == "latin"
+
+
+def test_flyer_intake_bypassed_requires_non_empty_chat_id_hash():
+    from schemas import FlyerIntakeBypassed  # noqa: E402
+    with pytest.raises(ValidationError):
+        FlyerIntakeBypassed(
+            ts=_BYPASS_NOW, chat_id_hash="",  # min_length=1
+            bypass_reason="edit_with_media", has_media=True,
+        )
+
+
+def test_flyer_intake_bypassed_rejects_extra_field():
+    from schemas import FlyerIntakeBypassed  # noqa: E402
+    with pytest.raises(ValidationError):
+        FlyerIntakeBypassed.model_validate({
+            "type": "flyer_intake_bypassed",
+            "ts": _BYPASS_NOW.isoformat(),
+            "chat_id_hash": _BYPASS_CHAT_HASH,
+            "bypass_reason": "edit_with_media",
+            "has_media": True,
+            "rogue_field": "no",
+        })
+
+
+def test_flyer_intake_bypass_outcome_round_trip_routed_to_project():
+    from schemas import FlyerIntakeBypassOutcome  # noqa: E402
+    entry = FlyerIntakeBypassOutcome(
+        ts=_BYPASS_NOW,
+        chat_id_hash=_BYPASS_CHAT_HASH,
+        outcome="routed_to_project",
+        project_id="F0108",
+        handler_intercept="",
+        elapsed_ms=42,
+    )
+    dumped = entry.model_dump(mode="json")
+    assert dumped["type"] == "flyer_intake_bypass_outcome"
+    assert dumped["outcome"] == "routed_to_project"
+    assert dumped["project_id"] == "F0108"
+    assert dumped["elapsed_ms"] == 42
+    restored = FlyerIntakeBypassOutcome.model_validate(dumped)
+    assert restored == entry
+
+
+def test_flyer_intake_bypass_outcome_accepts_all_three_outcome_literals():
+    """All 3 outcome Literal values — operator decision 2026-05-28 #5."""
+    from schemas import FlyerIntakeBypassOutcome  # noqa: E402
+    for outcome in ("routed_to_project", "unrouted", "intermediate_intercept_handled"):
+        entry = FlyerIntakeBypassOutcome(
+            ts=_BYPASS_NOW, chat_id_hash=_BYPASS_CHAT_HASH,
+            outcome=outcome,
+        )
+        assert entry.outcome == outcome
+
+
+def test_flyer_intake_bypass_outcome_rejects_unknown_outcome():
+    from schemas import FlyerIntakeBypassOutcome  # noqa: E402
+    with pytest.raises(ValidationError):
+        FlyerIntakeBypassOutcome(
+            ts=_BYPASS_NOW, chat_id_hash=_BYPASS_CHAT_HASH,
+            outcome="created_a_universe",
+        )
+
+
+def test_flyer_intake_bypass_outcome_project_id_defaults_empty():
+    """When outcome != routed_to_project, project_id is empty by default."""
+    from schemas import FlyerIntakeBypassOutcome  # noqa: E402
+    entry = FlyerIntakeBypassOutcome(
+        ts=_BYPASS_NOW, chat_id_hash=_BYPASS_CHAT_HASH,
+        outcome="unrouted",
+    )
+    assert entry.project_id == ""
+    assert entry.handler_intercept == ""
+    assert entry.elapsed_ms == 0
+
+
+def test_flyer_intake_bypass_outcome_elapsed_ms_non_negative():
+    from schemas import FlyerIntakeBypassOutcome  # noqa: E402
+    with pytest.raises(ValidationError):
+        FlyerIntakeBypassOutcome(
+            ts=_BYPASS_NOW, chat_id_hash=_BYPASS_CHAT_HASH,
+            outcome="routed_to_project", elapsed_ms=-1,
+        )
+
+
+def test_flyer_intake_bypass_outcome_rejects_extra_field():
+    from schemas import FlyerIntakeBypassOutcome  # noqa: E402
+    with pytest.raises(ValidationError):
+        FlyerIntakeBypassOutcome.model_validate({
+            "type": "flyer_intake_bypass_outcome",
+            "ts": _BYPASS_NOW.isoformat(),
+            "chat_id_hash": _BYPASS_CHAT_HASH,
+            "outcome": "routed_to_project",
+            "rogue_field": "no",
+        })
+
+
+def test_intake_bypass_pair_routes_via_log_entry_discriminator():
+    """Both new variants register in _KNOWN_LOG_ENTRY_TYPES via introspection
+    and dispatch via TypeAdapter(LogEntry) by `type` tag."""
+    from schemas import (  # noqa: E402
+        FlyerIntakeBypassed,
+        FlyerIntakeBypassOutcome,
+        LogEntry,
+        _KNOWN_LOG_ENTRY_TYPES,
+    )
+    assert "flyer_intake_bypassed" in _KNOWN_LOG_ENTRY_TYPES
+    assert "flyer_intake_bypass_outcome" in _KNOWN_LOG_ENTRY_TYPES
+
+    adapter = TypeAdapter(LogEntry)
+
+    decision_row = {
+        "type": "flyer_intake_bypassed",
+        "ts": _BYPASS_NOW.isoformat(),
+        "chat_id_hash": _BYPASS_CHAT_HASH,
+        "bypass_reason": "edit_with_media",
+        "has_media": True,
+        "customer_state": "",
+        "intake_session_status": "choosing_mode",
+        "inbound_script": "latin",
+    }
+    parsed = adapter.validate_python(decision_row)
+    assert isinstance(parsed, FlyerIntakeBypassed)
+
+    outcome_row = {
+        "type": "flyer_intake_bypass_outcome",
+        "ts": _BYPASS_NOW.isoformat(),
+        "chat_id_hash": _BYPASS_CHAT_HASH,
+        "outcome": "routed_to_project",
+        "project_id": "F0108",
+        "handler_intercept": "",
+        "elapsed_ms": 42,
+    }
+    parsed = adapter.validate_python(outcome_row)
+    assert isinstance(parsed, FlyerIntakeBypassOutcome)
+
+
+def test_intake_bypass_pair_in_schemas_all():
+    """Both names exported via __all__ — backward-compat for
+    `from schemas import *` consumers."""
+    import schemas  # noqa: E402
+    assert "FlyerIntakeBypassed" in schemas.__all__
+    assert "FlyerIntakeBypassOutcome" in schemas.__all__
