@@ -1,0 +1,431 @@
+#!/usr/bin/env python3
+"""commerce-payment-confirm — Slice-3 PR-2 webhook reconciler.
+
+Invoked by the commerce_payment_confirmed SKILL after a Stripe webhook
+arrives. Validates Stripe's signature scheme directly (does NOT rely on
+the Hermes webhook adapter's generic HMAC), then:
+  1. Look up the intent by metadata.commerce_intent_id (cross-ref)
+  2. Validate currency match + amount match
+  3. Fail closed on empty/null Stripe payment_intent.id (2026-05-25 lesson)
+  4. register_reference (cross-order dedup, slice-1 immutability invariant)
+  5. mark_confirmed the intent
+  6. transition order pending_payment → paid (legal slice-1 transition)
+  7. Flip CateringLead.deposit_status="paid" + record reference
+  8. Release LEADS_LOCK
+  9. Emit commerce_payment_confirmed audit row (slice-1 reserved variant)
+  10. Emit catering_deposit_paid audit row (new variant)
+  11. Optional: send customer-visible event-anchored confirmation reply
+
+Input contract (caller MUST provide):
+  - stdin: raw webhook body bytes (NOT pretty-printed; exact Stripe payload)
+  - env STRIPE_WEBHOOK_SECRET: the signing secret from Stripe dashboard
+  - env STRIPE_SIGNATURE: value of the Stripe-Signature HTTP header
+
+Usage (operator manual smoke):
+  STRIPE_WEBHOOK_SECRET=whsec_xxx \\
+  STRIPE_SIGNATURE='t=...,v1=...' \\
+  cat webhook_body.json | commerce-payment-confirm
+
+Exit codes:
+  0  — confirmation applied OR idempotent replay
+  2  — invalid input (missing env, malformed body, empty payment_intent.id)
+  4  — intent not found / lead not found
+  5  — schema violation (currency/amount mismatch, dedup-block, config load)
+  7  — signature verification failed (Stripe-Signature invalid)
+
+Design: tasks/hermes-commerce-slice3-provider-webhook-design.md §13.5
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+sys.path.insert(0, "/opt/shift-agent")
+_THIS = Path(__file__).resolve()
+_REPO_ROOT = _THIS.parent.parent.parent.parent  # scripts/<file> -> platform -> src -> repo
+sys.path.insert(0, str(_REPO_ROOT / "src" / "platform"))
+sys.path.insert(0, str(_REPO_ROOT / "src" / "agents" / "catering"))
+
+from safe_io import (  # noqa: E402
+    FileLock, atomic_write_json, customer_now,
+    load_model, load_yaml_model,
+)
+from schemas import Config, CateringLeadStore  # noqa: E402
+from exit_codes import (  # noqa: E402
+    EXIT_OK, EXIT_INVALID_INPUT, EXIT_NOT_FOUND,
+    EXIT_SCHEMA_VIOLATION,
+)
+EXIT_SIGNATURE_INVALID = 7  # slice-3 PR-2 specific exit code
+
+from commerce import payment_link as commerce_payment_link  # noqa: E402
+from commerce import order_state as commerce_order  # noqa: E402
+from commerce.audit import emit as audit_emit  # noqa: E402
+
+
+CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
+LEADS_PATH = Path(os.environ.get("SHIFT_AGENT_LEADS_PATH", "/opt/shift-agent/state/catering-leads.json"))
+LEADS_LOCK = Path(os.environ.get("SHIFT_AGENT_LEADS_LOCK", "/opt/shift-agent/state/catering-leads.json.lock"))
+LOG_PATH = Path(os.environ.get("SHIFT_AGENT_LOG_PATH", "/opt/shift-agent/logs/decisions.log"))
+COMMERCE_INTENTS_PATH = Path(os.environ.get("COMMERCE_INTENTS_PATH", "/opt/shift-agent/state/commerce/payment_intents.json"))
+COMMERCE_ORDERS_PATH = Path(os.environ.get("COMMERCE_ORDERS_PATH", "/opt/shift-agent/state/commerce/orders.json"))
+COMMERCE_REFERENCES_PATH = Path(os.environ.get("COMMERCE_REFERENCES_PATH", "/opt/shift-agent/state/commerce/payment_references.json"))
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _emit_confirmation_failed(*, lead_id: str = "", commerce_intent_id: str = "",
+                               commerce_order_id: str = "", reason: str,
+                               detail: str = "") -> None:
+    """Best-effort emit; swallow errors."""
+    try:
+        audit_emit(
+            LOG_PATH,
+            {
+                "type": "commerce_payment_confirmation_failed",
+                "ts": _now().isoformat(),
+                "lead_id": lead_id,
+                "commerce_intent_id": commerce_intent_id,
+                "commerce_order_id": commerce_order_id,
+                "reason": reason,
+                "detail": detail[:500],
+            },
+        )
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write(f"WARN: failed to emit commerce_payment_confirmation_failed: {e}\n")
+
+
+def _emit_deposit_paid(*, lead_id: str, commerce_order_id: str,
+                        commerce_payment_intent_id: str, payment_reference: str,
+                        amount_cents: int) -> None:
+    audit_emit(
+        LOG_PATH,
+        {
+            "type": "catering_deposit_paid",
+            "ts": _now().isoformat(),
+            "lead_id": lead_id,
+            "commerce_order_id": commerce_order_id,
+            "commerce_payment_intent_id": commerce_payment_intent_id,
+            "payment_reference": payment_reference,
+            "amount_cents": amount_cents,
+        },
+    )
+
+
+def _emit_payment_confirmed(*, intent_id: str, order_id: str, payment_reference: str) -> None:
+    audit_emit(
+        LOG_PATH,
+        {
+            "type": "commerce_payment_confirmed",
+            "ts": _now().isoformat(),
+            "intent_id": intent_id,
+            "order_id": order_id,
+            "payment_reference": payment_reference,
+        },
+    )
+
+
+def _verify_stripe_signature(raw_body: bytes, sig_header: str, webhook_secret: str) -> dict:
+    """Use stripe-python's construct_event() as the load-bearing verifier.
+
+    Stripe's scheme: Stripe-Signature header is `t=<unix-ts>,v1=<hex>` where
+    hex = HMAC-SHA256(secret, f"{ts}.{raw_body.decode()}"). construct_event()
+    parses + validates this exactly; also enforces a default 5-minute tolerance
+    against replay attacks via the timestamp.
+
+    Returns the parsed event dict on success.
+    Raises stripe.error.SignatureVerificationError on failure.
+    """
+    try:
+        import stripe  # type: ignore
+    except ImportError as e:
+        # In test mode (PYTEST_CURRENT_TEST set) caller may stub the module
+        raise RuntimeError(
+            "stripe-python not installed; install via "
+            "/opt/shift-agent/venv/bin/pip install stripe"
+        ) from e
+    event = stripe.Webhook.construct_event(raw_body, sig_header, webhook_secret)
+    return dict(event) if not isinstance(event, dict) else event
+
+
+def _maybe_send_confirmation_reply(cfg, lead, deposit_amount_cents: int) -> None:
+    """Reviewer B-MEDIUM-3: event-anchor copy (slice-2 invariant carryover).
+
+    Best-effort; never blocks confirmation. If cfg.commerce.send_payment_
+    confirmation_reply is False, skip. If bridge POST fails, log + continue.
+    """
+    if not cfg.commerce.send_payment_confirmation_reply:
+        return
+    try:
+        from safe_io import bridge_post_2tuple as _bridge_post
+    except ImportError:
+        return  # platform doesn't provide bridge (test env)
+
+    amount_str = f"${deposit_amount_cents / 100:.2f}"
+    event_date = lead.extracted.event_date if lead.extracted else None
+    headcount = lead.extracted.headcount if lead.extracted else None
+    customer_name = (lead.customer_name or "").strip()
+
+    if event_date and headcount:
+        body = (
+            f"Thanks! Your {amount_str} deposit for your {headcount}-guest "
+            f"event on {event_date} is confirmed. We'll be in touch with details."
+        )
+    elif customer_name:
+        body = (
+            f"Thanks, {customer_name}! Your {amount_str} deposit is confirmed. "
+            f"We'll be in touch with details."
+        )
+    else:
+        body = (
+            f"Thanks! Your {amount_str} deposit is confirmed. "
+            f"We'll be in touch with details."
+        )
+
+    target_jid = f"{str(lead.customer_phone).lstrip('+')}@s.whatsapp.net"
+    prefix = "⚕ *Catering Agent*\n────────────\n"
+    try:
+        _bridge_post(target_jid, prefix + body)
+    except Exception as e:  # noqa: BLE001 — best-effort
+        sys.stderr.write(
+            f"WARN: confirmation reply bridge POST failed (non-fatal): "
+            f"{type(e).__name__}: {e}\n"
+        )
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument(
+        "--payload-source", default="stdin",
+        choices=["stdin", "file"],
+        help="Where to read the raw webhook body from (default stdin).",
+    )
+    ap.add_argument("--payload-file", default="", help="Path when --payload-source=file")
+    args = ap.parse_args()
+
+    # 1. Read raw body
+    if args.payload_source == "stdin":
+        raw_body = sys.stdin.buffer.read()
+    else:
+        if not args.payload_file:
+            sys.stderr.write("--payload-file required with --payload-source=file\n")
+            return EXIT_INVALID_INPUT
+        raw_body = Path(args.payload_file).read_bytes()
+    if not raw_body:
+        sys.stderr.write("empty webhook body\n")
+        return EXIT_INVALID_INPUT
+
+    # 2. Read env
+    webhook_secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+    sig_header = os.environ.get("STRIPE_SIGNATURE", "")
+    if not webhook_secret or not sig_header:
+        sys.stderr.write(
+            "STRIPE_WEBHOOK_SECRET + STRIPE_SIGNATURE env vars required\n"
+        )
+        return EXIT_INVALID_INPUT
+
+    # 3. Verify signature (LOAD-BEARING — Reviewer A-HIGH-1 + B-HIGH-1)
+    try:
+        event = _verify_stripe_signature(raw_body, sig_header, webhook_secret)
+    except Exception as e:
+        _emit_confirmation_failed(reason="signature_invalid", detail=str(e)[:300])
+        sys.stderr.write(f"signature verification failed: {type(e).__name__}: {e}\n")
+        return EXIT_SIGNATURE_INVALID
+
+    # 4. Extract Stripe payment_intent (for payment_intent.succeeded events)
+    event_type = event.get("type", "")
+    if event_type != "payment_intent.succeeded":
+        # Slice-3 PR-2 only handles payment_intent.succeeded; other event types
+        # (refund / dispute) ship in PR-4 with their own handlers.
+        sys.stderr.write(f"unsupported event type {event_type!r}; PR-2 handles payment_intent.succeeded only\n")
+        return EXIT_OK  # not an error; another subscription handles other events
+
+    pi = event.get("data", {}).get("object", {})
+    payment_reference = pi.get("id", "")
+    metadata = pi.get("metadata", {}) or {}
+    commerce_order_id = metadata.get("commerce_order_id", "")
+    commerce_intent_id = metadata.get("commerce_intent_id", "")
+    webhook_amount = pi.get("amount", 0)
+    webhook_currency = (pi.get("currency", "") or "").upper()
+
+    # 5. Fail-closed on empty payment_intent.id (Reviewer B-HIGH-3; 2026-05-25 lesson)
+    if not payment_reference or not payment_reference.strip():
+        _emit_confirmation_failed(
+            commerce_order_id=commerce_order_id,
+            commerce_intent_id=commerce_intent_id,
+            reason="empty_payment_reference",
+            detail="Stripe payment_intent.id was empty/null; refusing to confirm",
+        )
+        sys.stderr.write("empty Stripe payment_intent.id — refusing\n")
+        return EXIT_INVALID_INPUT
+
+    if not commerce_intent_id or not commerce_order_id:
+        _emit_confirmation_failed(
+            reason="missing_metadata",
+            detail=f"commerce_order_id={commerce_order_id!r} commerce_intent_id={commerce_intent_id!r}",
+        )
+        sys.stderr.write("missing commerce_order_id or commerce_intent_id in metadata\n")
+        return EXIT_INVALID_INPUT
+
+    # 6. Load config
+    try:
+        cfg = load_yaml_model(CONFIG_PATH, Config)
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write(f"config load failed: {type(e).__name__}: {e}\n")
+        _emit_confirmation_failed(
+            commerce_order_id=commerce_order_id,
+            commerce_intent_id=commerce_intent_id,
+            reason="config_load_failed", detail=str(e)[:300],
+        )
+        return EXIT_SCHEMA_VIOLATION
+
+    # 7. Reconcile under LEADS_LOCK
+    with FileLock(LEADS_LOCK):
+        # 7a. Look up intent + validate currency/amount match
+        intent_store = commerce_payment_link.load_intent_store(COMMERCE_INTENTS_PATH)
+        intent = next(
+            (i for i in intent_store.intents if i.intent_id == commerce_intent_id), None,
+        )
+        if intent is None:
+            _emit_confirmation_failed(
+                commerce_intent_id=commerce_intent_id,
+                commerce_order_id=commerce_order_id,
+                reason="intent_not_found",
+                detail=f"no CommercePaymentIntent with intent_id={commerce_intent_id!r}",
+            )
+            return EXIT_NOT_FOUND
+
+        if intent.currency.upper() != webhook_currency:
+            # Reviewer B-HIGH-2: currency-mismatch validation
+            _emit_confirmation_failed(
+                commerce_intent_id=commerce_intent_id,
+                commerce_order_id=commerce_order_id,
+                reason="currency_mismatch",
+                detail=f"intent.currency={intent.currency!r} webhook.currency={webhook_currency!r}",
+            )
+            return EXIT_SCHEMA_VIOLATION
+
+        if intent.amount_cents != webhook_amount:
+            _emit_confirmation_failed(
+                commerce_intent_id=commerce_intent_id,
+                commerce_order_id=commerce_order_id,
+                reason="amount_mismatch",
+                detail=f"intent.amount_cents={intent.amount_cents} webhook.amount={webhook_amount}",
+            )
+            return EXIT_SCHEMA_VIOLATION
+
+        # 7b. Register payment_reference (cross-order dedup invariant, slice-1)
+        ok, ref_detail = commerce_payment_link.register_reference(
+            reference_ledger_path=COMMERCE_REFERENCES_PATH,
+            decisions_log_path=LOG_PATH,
+            payment_reference=payment_reference,
+            order_id=intent.order_id,
+        )
+        if not ok and not ref_detail.startswith("noop_same_order"):
+            _emit_confirmation_failed(
+                commerce_intent_id=commerce_intent_id,
+                commerce_order_id=commerce_order_id,
+                reason="reference_reused",
+                detail=ref_detail,
+            )
+            return EXIT_SCHEMA_VIOLATION
+
+        # 7c. Mark intent confirmed (idempotent on same payment_reference)
+        confirm_result = commerce_payment_link.mark_confirmed(
+            intent_state_path=COMMERCE_INTENTS_PATH,
+            decisions_log_path=LOG_PATH,
+            intent_id=commerce_intent_id,
+            payment_reference=payment_reference,
+        )
+        if not confirm_result.ok:
+            _emit_confirmation_failed(
+                commerce_intent_id=commerce_intent_id,
+                commerce_order_id=commerce_order_id,
+                reason="mark_confirmed_failed",
+                detail=confirm_result.detail,
+            )
+            return EXIT_SCHEMA_VIOLATION
+
+        # 7d. Transition order pending_payment → paid (legal slice-1 transition)
+        # Idempotent: if order is already paid, transition() returns noop.
+        transition_result = commerce_order.transition(
+            state_path=COMMERCE_ORDERS_PATH,
+            decisions_log_path=LOG_PATH,
+            order_id=intent.order_id,
+            to_status="paid",
+            actor="webhook",
+            cause="stripe_payment_intent_succeeded",
+            event_ref=payment_reference,
+        )
+        # transition() raises IllegalCommerceTransition if order is in some
+        # other terminal state (cancelled, voided, refunded). Caller signals
+        # via exception bubble-up; we catch for graceful exit.
+
+        # 7e. Find catering lead by deposit_payment_intent_id + flip status
+        leads_store, status = load_model(LEADS_PATH, CateringLeadStore, default=CateringLeadStore())
+        lead_matched_idx = next(
+            (i for i, l in enumerate(leads_store.leads) if l.deposit_payment_intent_id == commerce_intent_id),
+            None,
+        )
+        lead_id_for_audit = ""
+        if lead_matched_idx is not None:
+            lead = leads_store.leads[lead_matched_idx]
+            lead_id_for_audit = lead.lead_id
+            now = customer_now(cfg.customer.timezone)
+            updated_lead = lead.model_copy(update={
+                "deposit_status": "paid",
+                "deposit_payment_reference": payment_reference,
+                "updated_at": now,
+            })
+            leads_store.leads[lead_matched_idx] = updated_lead
+            atomic_write_json(LEADS_PATH, leads_store)
+        else:
+            # Intent exists but no catering lead carries this intent_id —
+            # this is a state-divergence signal. Slice-3 still confirms the
+            # intent (truth = customer paid) but emits warning audit.
+            sys.stderr.write(
+                f"WARN: no catering lead with deposit_payment_intent_id="
+                f"{commerce_intent_id!r}; intent confirmed but lead not updated\n"
+            )
+
+    # 8. Outside lock: emit audit rows + maybe-send customer reply
+    # Reviewer A-HIGH-4: bridge POST happens OUTSIDE lock to mirror slice-2.
+    _emit_payment_confirmed(
+        intent_id=commerce_intent_id,
+        order_id=intent.order_id,
+        payment_reference=payment_reference,
+    )
+    if lead_id_for_audit:
+        _emit_deposit_paid(
+            lead_id=lead_id_for_audit,
+            commerce_order_id=intent.order_id,
+            commerce_payment_intent_id=commerce_intent_id,
+            payment_reference=payment_reference,
+            amount_cents=intent.amount_cents,
+        )
+        # Fresh lead load for the customer reply (post-lock)
+        leads_store_post, _ = load_model(LEADS_PATH, CateringLeadStore, default=CateringLeadStore())
+        lead_for_reply = next(
+            (l for l in leads_store_post.leads if l.lead_id == lead_id_for_audit), None,
+        )
+        if lead_for_reply is not None:
+            _maybe_send_confirmation_reply(cfg, lead_for_reply, intent.amount_cents)
+
+    print(json.dumps({
+        "ok": True,
+        "intent_id": commerce_intent_id,
+        "order_id": intent.order_id,
+        "payment_reference": payment_reference,
+        "lead_id": lead_id_for_audit or None,
+    }))
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

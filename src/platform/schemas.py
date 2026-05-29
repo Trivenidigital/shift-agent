@@ -5286,6 +5286,45 @@ class CateringDepositLinkFailed(_BaseEntry):
     commerce_payment_intent_id: str = Field(default="", max_length=40)
 
 
+# ─────────────────────────────────────────────────────────────────
+# Slice-3 PR-2 catering deposit confirmation
+# Emitted by commerce-payment-confirm after Stripe webhook confirms a
+# deposit payment + lead.deposit_status flipped to "paid".
+# ─────────────────────────────────────────────────────────────────
+
+class CateringDepositPaid(_BaseEntry):
+    """Catering deposit payment confirmed via webhook. Carries cross-ref
+    fields per reconciliation invariant #4 for Cash & AR join."""
+    type: Literal["catering_deposit_paid"]
+    lead_id: str = Field(min_length=1, max_length=40)
+    commerce_order_id: str = Field(pattern=r"^CO\d{5,}$")
+    commerce_payment_intent_id: str = Field(pattern=r"^CPI\d{5,}$")
+    payment_reference: str = Field(min_length=1, max_length=200)
+    amount_cents: int = Field(ge=1, le=10_000_000_000)
+
+
+class CommercePaymentConfirmationFailed(_BaseEntry):
+    """Failed webhook-driven payment confirmation. The intent itself is NOT
+    advanced (state stays in minted/sent). The customer's actual payment may
+    have succeeded at Stripe; operator-side reconciliation required."""
+    type: Literal["commerce_payment_confirmation_failed"]
+    commerce_intent_id: str = Field(default="", max_length=40)
+    commerce_order_id: str = Field(default="", max_length=40)
+    lead_id: str = Field(default="", max_length=40)
+    reason: Literal[
+        "signature_invalid",
+        "empty_payment_reference",
+        "missing_metadata",
+        "intent_not_found",
+        "currency_mismatch",
+        "amount_mismatch",
+        "reference_reused",
+        "mark_confirmed_failed",
+        "config_load_failed",
+    ]
+    detail: str = Field(default="", max_length=500)
+
+
 # PR-D1: callable Discriminator + Tag-wrapped union members + _UnknownLogEntry
 # forward-compat shim. Replaces `Field(discriminator="type")` which raised
 # `union_tag_invalid` on unknown tags BEFORE any validator could run.
@@ -5488,6 +5527,9 @@ LogEntry = Annotated[
         # Slice-2 catering deposit caller
         Annotated[CateringDepositLinkSent, Tag("catering_deposit_link_sent")],
         Annotated[CateringDepositLinkFailed, Tag("catering_deposit_link_failed")],
+        # Slice-3 PR-2: catering deposit confirmation + commerce confirmation-failure
+        Annotated[CateringDepositPaid, Tag("catering_deposit_paid")],
+        Annotated[CommercePaymentConfirmationFailed, Tag("commerce_payment_confirmation_failed")],
         # PR-D1 forward-compat shim — UNKNOWN tags route here
         Annotated[_UnknownLogEntry, Tag("_unknown_")],
     ],
