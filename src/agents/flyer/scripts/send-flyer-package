@@ -16,9 +16,9 @@ sys.path.insert(0, str(SRC_ROOT))
 
 from schemas import FlyerAssetsDelivered, FlyerCustomerStore, FlyerDeliveryFailed, FlyerPlanTier, FlyerProjectStore, is_flyer_transition_allowed  # noqa: E402
 try:
-    from flyer_render import validate_text_manifest_file  # type: ignore  # noqa: E402
+    from flyer_render import FINAL_FORMAT_PIXEL_SHAPES, png_pixel_dimensions, validate_text_manifest_file  # type: ignore  # noqa: E402
 except ImportError:
-    from agents.flyer.render import validate_text_manifest_file  # noqa: E402
+    from agents.flyer.render import FINAL_FORMAT_PIXEL_SHAPES, png_pixel_dimensions, validate_text_manifest_file  # noqa: E402
 try:
     from flyer_visual_qa import validate_visual_qa_report  # type: ignore  # noqa: E402
 except ImportError:
@@ -132,7 +132,16 @@ def _trial_upsell_for_project(project, customer_state_path: Path) -> str:
 
 
 def _caption_for_asset(asset, fallback: str = "") -> str:
-    return FINAL_KIND_TO_CAPTION.get(getattr(asset, "kind", ""), fallback or "Your final flyer package is ready.")
+    kind = getattr(asset, "kind", "")
+    caption = FINAL_KIND_TO_CAPTION.get(kind, fallback or "Your final flyer package is ready.")
+    expected_shape = FINAL_FORMAT_PIXEL_SHAPES.get(FINAL_KIND_TO_FORMAT.get(kind, ""))
+    if expected_shape is not None and png_pixel_dimensions(getattr(asset, "path", "")) != expected_shape:
+        # Format-truthfulness gate: never tell the customer a file is an
+        # "Instagram story"/"post" unless it actually matches that channel's
+        # pixel shape. Pillow-free so it holds even when the render-time PIL
+        # dimension check was skipped (Pillow absent in the Hermes venv).
+        return fallback or "Your final flyer package is ready."
+    return caption
 
 
 def _resolve_project_assets(project):

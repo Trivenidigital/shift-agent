@@ -1263,6 +1263,39 @@ def _reference_preservation_instruction(project: FlyerProject) -> str:
     )
 
 
+# Canonical pixel shape per final output format. Single source of truth shared
+# by render_final_package (generation) and the send-time truthfulness gate.
+# None = no fixed pixel shape (PDF).
+FINAL_FORMAT_PIXEL_SHAPES: dict[str, tuple[int, int] | None] = {
+    "whatsapp_image": (1080, 1350),
+    "instagram_post": (1080, 1080),
+    "instagram_story": (1080, 1920),
+    "printable_pdf": None,
+}
+
+
+def png_pixel_dimensions(path: Path | str) -> tuple[int, int] | None:
+    """Read a PNG's (width, height) from its IHDR header without Pillow.
+
+    Returns None when the file is missing or is not a readable PNG. Pillow is
+    not reliably present in the Hermes venv (it is the F0105 root cause), so the
+    send-time format-truthfulness check must not depend on it; the PNG IHDR
+    header is fixed-layout and parseable from the first 24 bytes.
+    """
+    try:
+        with open(path, "rb") as fh:
+            header = fh.read(24)
+    except OSError:
+        return None
+    if len(header) < 24 or header[:8] != b"\x89PNG\r\n\x1a\n" or header[12:16] != b"IHDR":
+        return None
+    width = int.from_bytes(header[16:20], "big")
+    height = int.from_bytes(header[20:24], "big")
+    if width <= 0 or height <= 0:
+        return None
+    return (width, height)
+
+
 def inspect_rendered_asset(path: Path | str, *, expected_width: int, expected_height: int, mime_type: str) -> RenderedAssetQuality:
     path = Path(path)
     blockers: list[str] = []
@@ -2368,10 +2401,10 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
                 if quality_report.ok:
                     selected_preview = candidate
     formats: list[tuple[FlyerOutputFormat, str, tuple[int, int] | None]] = [
-        ("whatsapp_image", "final_whatsapp_image", (1080, 1350)),
-        ("instagram_post", "final_instagram_post", (1080, 1080)),
-        ("instagram_story", "final_instagram_story", (1080, 1920)),
-        ("printable_pdf", "final_printable_pdf", None),
+        ("whatsapp_image", "final_whatsapp_image", FINAL_FORMAT_PIXEL_SHAPES["whatsapp_image"]),
+        ("instagram_post", "final_instagram_post", FINAL_FORMAT_PIXEL_SHAPES["instagram_post"]),
+        ("instagram_story", "final_instagram_story", FINAL_FORMAT_PIXEL_SHAPES["instagram_story"]),
+        ("printable_pdf", "final_printable_pdf", FINAL_FORMAT_PIXEL_SHAPES["printable_pdf"]),
     ]
     specs: list[RenderedAssetSpec] = []
     for output_format, kind, size in formats:
