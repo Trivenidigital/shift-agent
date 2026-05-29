@@ -2353,6 +2353,29 @@ class CommerceConfig(BaseModel):
     # Stripe + Razorpay + UPI minimum-charge thresholds in most regions.
     minimum_deposit_cents: int = Field(default=500, ge=0, le=10_000_000)
 
+    # Slice-3 PR-1 provider integration (PR feat/commerce-slice3-pr1-provider-abstraction).
+    # `provider="placeholder"` (default) preserves slice-2 template substitution.
+    # `provider="stripe"` calls Stripe API to mint real Payment Links.
+    # Other values are reserved in the schema (razorpay/upi/zelle/cashapp/manual)
+    # but reject at runtime in slice-1 primitive's mint() until wired.
+    provider: Literal["placeholder", "stripe", "razorpay", "upi", "zelle", "cashapp", "manual"] = "placeholder"
+    # MCP vs direct SDK — slice-3 PR-1 ships SDK only; MCP path deferred to a
+    # slice-3.1 PR gated on Stripe MCP tool-surface verification (Reviewer A-HIGH-1).
+    provider_mode: Literal["sdk", "mcp"] = "sdk"
+    # Operator-controlled webhook subscription name (for runbook + smoke gate
+    # in slice-3 PR-2 — `hermes webhook list` is checked at deploy time to
+    # assert this subscription is present per Reviewer A-LOW-1).
+    webhook_subscription_name: str = Field(default="stripe-commerce-payments", max_length=80)
+    # Customer-visible confirmation reply opt-in (PR-2 reconciler skips the
+    # reply when False; useful if operator wants to handle confirmation
+    # manually). Default True preserves the design's customer-friendly default.
+    send_payment_confirmation_reply: bool = True
+    # Live vs test mode safety gate (Reviewer B-MEDIUM-1). Operator sets this
+    # explicitly per VPS. Slice-3 PR-3 runbook adds a smoke check that calls
+    # stripe.Account.retrieve().livemode and asserts it matches this flag.
+    # Catches the "live key in test cfg" footgun before any customer pays.
+    stripe_livemode_expected: bool = False
+
     @model_validator(mode="after")
     def _enforce_locked_blocked_categories(self) -> "CommerceConfig":
         """Reviewer B LOW-2: locked Meta-policy categories cannot be removed.
