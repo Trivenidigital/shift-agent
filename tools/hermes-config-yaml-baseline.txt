@@ -16,4 +16,4 @@
 # cli-config.yaml.example (11 keys not on live but legitimately Hermes-managed).
 # 32 keys total.
 
-KNOWN_TOP_LEVEL_KEYS=WHATSAPP_HOME_CHANNEL,agent,auxiliary,browser,code_execution,compression,container_cpu,container_disk,container_memory,container_persistent,delegation,display,fallback_providers,group_sessions_per_user,honcho,memory,model,onboarding,openrouter,platforms,platform_toolsets,plugins,prompt_caching,provider_routing,security,session_reset,skills,streaming,stt,terminal,tool_loop_guardrails,worktree
+KNOWN_TOP_LEVEL_KEYS=WHATSAPP_HOME_CHANNEL,agent,auxiliary,browser,code_execution,compression,container_cpu,container_disk,container_memory,container_persistent,delegation,display,fallback_providers,group_sessions_per_user,honcho,mcp_servers,memory,model,onboarding,openrouter,platforms,platform_toolsets,plugins,prompt_caching,provider_routing,security,session_reset,skills,streaming,stt,terminal,tool_loop_guardrails,worktree
