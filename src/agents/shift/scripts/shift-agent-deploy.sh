@@ -76,6 +76,18 @@ install_artifacts() {
         rm -f /opt/shift-agent/check_hermes_config_yaml.py
     fi
 
+    # Commerce primitives package (PR #321, slice 1 library-only).
+    # Guarded for rollback compatibility with tarballs that predate the package.
+    # Library-only: no scripts here, no dispatcher row, no caller wiring —
+    # modules sit dormant on disk until slice-2 callers wire them. Schema +
+    # LogEntry additions ship via schemas.py install above.
+    if [ -d src/platform/commerce ]; then
+        install -d /opt/shift-agent/commerce
+        install -m 644 src/platform/commerce/*.py /opt/shift-agent/commerce/
+    else
+        rm -rf /opt/shift-agent/commerce
+    fi
+
     # Templates — Shift-Agent message templates (idempotent: shared dir filled by multiple agents below)
     install -d /opt/shift-agent/templates
     install -m 644 src/agents/shift/templates/* /opt/shift-agent/templates/
