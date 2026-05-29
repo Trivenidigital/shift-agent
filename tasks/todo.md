@@ -16,12 +16,13 @@ probes / required deploy-smoke, no customer sends, no speculative agents, no PR-
 
 - [x] **Item 1 — Commerce slice-3.5 webhook-subscription deploy gate** ✅ MERGED PR #340 (origin/main f3156a3). 20 tests, 3 Codex rounds → CLEAN. Dormant-verified on live VPS. Not yet deployed (dormant-safe).
 - [x] **Item 2 — Commerce slice-3.1 Stripe livemode-match deploy gate** ✅ MERGED PR #342 (origin/main 7aa3a10). 13 tests (33/33 both suites), Codex CLEAN round 1. urllib (no SDK). Dormant-verified on live VPS. Not yet deployed.
-- [ ] **Item 3 — EOD reconcile deploy-smoke coverage** (branch `feat/eod-reconcile-smoke-coverage`)
-  - Drift-check: candidates 2 (config gate) redundant (deploy already runs full Config.model_validate) + 4 (eod subprocess test) already done (234-line test exists). EOD #5 ships + has a timer but is NOT smoke-checked at deploy → real gap.
-  - [x] Add `eod-reconcile --force --dry-run` to `shift-agent-smoke-test.sh` (side-effect-free: dry-run returns before write/log/Pushover). Guarded `[ -x ]` for rollback.
-  - [x] bash -n clean + live VPS probe (exit 0, valid aggregation JSON, read-only).
+- [x] **Item 3 — EOD reconcile deploy-smoke coverage** ✅ MERGED PR #343 (origin/main 79f7002). Added `eod-reconcile --force --dry-run` to smoke (snapshot path → temp). Codex 2 rounds → CLEAN. Live-verified.
+- [ ] **Item 4 — Daily Brief deploy-smoke coverage** (branch `feat/daily-brief-smoke-coverage`)
+  - Same gap/pattern as EOD: Agent #4 LIVE, timer-enabled-checked but aggregation/render never smoke-run.
+  - [x] Add `send-daily-brief --force --dry-run` to `shift-agent-smoke-test.sh` (skips bridge POST + log appends + watchdog Pushover; SHIFT_AGENT_BRIEF_SENTINEL_PATH → temp so the FileLock lock lands in temp). Guarded `[ -x ]`.
+  - [x] bash -n clean + live VPS probe: exit 0, brief renders, before/after diff shows NO new files under /opt (lock in temp).
   - [ ] push → Codex review on main-vps → merge if clean
-- [ ] Item 4+ — more Shift/Catering/Daily Brief dormant-safe hardening. Deferred: audit-log §12a freshness watchdog (needs write-rate data + heartbeat design — false-alarm risk on quiet pilot VPS).
+- [ ] Item 5+ — more Shift/Catering dormant-safe hardening. Deferred: audit-log §12a freshness watchdog (needs write-rate data + heartbeat design — false-alarm risk on quiet pilot VPS).
 
 
 

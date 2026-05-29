@@ -727,6 +727,34 @@ else
     echo "⚠  eod-reconcile not installed — skipping Agent #5 smoke check"
 fi
 
+# 10c. Agent #4 Daily Brief — exercise the aggregate + render path. `--force`
+# bypasses the time self-gate; `--dry-run` runs aggregation + render but skips
+# the bridge POST (no WhatsApp send), the log appends, and the routing watchdog
+# Pushover. Like EOD, the pre-restart import gates don't exercise the brief's
+# aggregation/render, so a break would otherwise surface only when the timer
+# fires in the morning.
+#
+# Strictly no-write under /opt/shift-agent: SHIFT_AGENT_BRIEF_SENTINEL_PATH is
+# redirected to a throwaway temp dir so the idempotency FileLock lock-file
+# (O_CREAT) lands in temp, not production state. The brief reads live config /
+# roster / pending / decisions.log read-only for aggregation.
+# Guarded with [ -x ] for rollback to tarballs that predate the script.
+if [ -x /usr/local/bin/send-daily-brief ]; then
+    DB_SMOKE_DIR="$(mktemp -d /tmp/daily-brief-smoke.XXXXXX)"
+    chown shift-agent:shift-agent "$DB_SMOKE_DIR"
+    if ! sudo -u shift-agent env SHIFT_AGENT_BRIEF_SENTINEL_PATH="$DB_SMOKE_DIR/last-brief-sent.json" \
+            "$PY" /usr/local/bin/send-daily-brief --force --dry-run > "$DB_SMOKE_DIR/out.txt" 2>&1; then
+        echo "FAIL: send-daily-brief --force --dry-run failed (Agent #4 aggregate/render regression)" >&2
+        cat "$DB_SMOKE_DIR/out.txt" >&2
+        rm -rf "$DB_SMOKE_DIR"
+        exit 1
+    fi
+    rm -rf "$DB_SMOKE_DIR"
+    echo "✓ send-daily-brief --force --dry-run (Agent #4 aggregate/render path)"
+else
+    echo "⚠  send-daily-brief not installed — skipping Agent #4 smoke check"
+fi
+
 # 11+12. Agent #21 Expense Bookkeeper checks — only run when the agent's
 # venv is present. Agent #21 ships disabled-default and its venv at
 # /opt/shift-agent/venv/ is created by the operator's bootstrap step
