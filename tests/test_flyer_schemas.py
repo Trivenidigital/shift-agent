@@ -1463,3 +1463,95 @@ def test_flyer_warning_summary_in_schemas_all():
     """Backward-compat for `from schemas import *` consumers."""
     import schemas  # noqa: E402
     assert "FlyerWarningSummary" in schemas.__all__
+
+
+# ─────────────────────────────────────────────────────────────────
+# P0 #2 — FlyerOperatorFlaggedWarnTier audit variant (Commit 5)
+# Pairs with the cockpit POST /flyer/projects/{id}/flag route.
+# Audit-only — no project-state mutation. Schema-tested here; route
+# behavior tested in test_flyer_backend_flag_route.py.
+# ─────────────────────────────────────────────────────────────────
+
+
+def test_flyer_operator_flagged_warn_tier_round_trip():
+    from schemas import FlyerOperatorFlaggedWarnTier  # noqa: E402
+    now = datetime.now(timezone.utc)
+    entry = FlyerOperatorFlaggedWarnTier(
+        ts=now,
+        project_id="F0108",
+        flagged_by_operator_id="cockpit",
+        note="Brand typo looks weird here",
+    )
+    dumped = entry.model_dump(mode="json")
+    assert dumped["type"] == "flyer_operator_flagged_warn_tier"
+    assert dumped["project_id"] == "F0108"
+    assert dumped["flagged_by_operator_id"] == "cockpit"
+    assert dumped["note"] == "Brand typo looks weird here"
+    restored = FlyerOperatorFlaggedWarnTier.model_validate(dumped)
+    assert restored == entry
+
+
+def test_flyer_operator_flagged_warn_tier_note_defaults_to_empty():
+    """note is optional — empty acceptable; the flag itself is the signal."""
+    from schemas import FlyerOperatorFlaggedWarnTier  # noqa: E402
+    entry = FlyerOperatorFlaggedWarnTier(
+        ts=datetime.now(timezone.utc),
+        project_id="F0108",
+        flagged_by_operator_id="cockpit",
+    )
+    assert entry.note == ""
+
+
+def test_flyer_operator_flagged_warn_tier_requires_project_id_f_pattern():
+    from schemas import FlyerOperatorFlaggedWarnTier  # noqa: E402
+    with pytest.raises(ValidationError):
+        FlyerOperatorFlaggedWarnTier(
+            ts=datetime.now(timezone.utc),
+            project_id="X0001",  # F-prefix required
+            flagged_by_operator_id="cockpit",
+        )
+
+
+def test_flyer_operator_flagged_warn_tier_requires_operator_id():
+    from schemas import FlyerOperatorFlaggedWarnTier  # noqa: E402
+    with pytest.raises(ValidationError):
+        FlyerOperatorFlaggedWarnTier(
+            ts=datetime.now(timezone.utc),
+            project_id="F0108",
+            flagged_by_operator_id="",  # min_length=1
+        )
+
+
+def test_flyer_operator_flagged_warn_tier_rejects_extra_field():
+    from schemas import FlyerOperatorFlaggedWarnTier  # noqa: E402
+    with pytest.raises(ValidationError):
+        FlyerOperatorFlaggedWarnTier.model_validate({
+            "type": "flyer_operator_flagged_warn_tier",
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "project_id": "F0108",
+            "flagged_by_operator_id": "cockpit",
+            "rogue_field": "no",
+        })
+
+
+def test_flyer_operator_flagged_warn_tier_routes_via_log_entry_discriminator():
+    """LogEntry Union routes flyer_operator_flagged_warn_tier to the new class."""
+    from schemas import (  # noqa: E402
+        FlyerOperatorFlaggedWarnTier, LogEntry, _KNOWN_LOG_ENTRY_TYPES,
+    )
+    assert "flyer_operator_flagged_warn_tier" in _KNOWN_LOG_ENTRY_TYPES
+    adapter = TypeAdapter(LogEntry)
+    row = {
+        "type": "flyer_operator_flagged_warn_tier",
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "project_id": "F0108",
+        "flagged_by_operator_id": "cockpit",
+        "note": "",
+    }
+    parsed = adapter.validate_python(row)
+    assert isinstance(parsed, FlyerOperatorFlaggedWarnTier)
+
+
+def test_flyer_operator_flagged_warn_tier_in_schemas_all():
+    import schemas  # noqa: E402
+    assert "FlyerOperatorFlaggedWarnTier" in schemas.__all__
