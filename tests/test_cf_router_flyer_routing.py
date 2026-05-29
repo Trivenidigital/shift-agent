@@ -5772,3 +5772,198 @@ def test_generic_reference_use_as_reference_still_works(tmp_path):
         chat_id="17329837841@s.whatsapp.net",
         sender_phone="+17329837841",
     ) is None
+
+
+# ─────────────────────────────────────────────────────────────────
+# 2026-05-28 — intake-bypass helper + script detector (Commit 2)
+# ─────────────────────────────────────────────────────────────────
+
+
+def _bypass_customer(status: str = "trial") -> dict:
+    return {"customer_id": "CUST0001", "status": status, "preferred_language": "en"}
+
+
+def _bypass_intake(status: str = "choosing_mode") -> dict:
+    return {"status": status}
+
+
+@pytest.mark.parametrize("text,customer,intake_session,has_media,expected", [
+    # F0108 / 22.png canonical — "fix the time" hits edit_target regex.
+    # The original plan example "add Saturday hours" did NOT match — reviewer 2
+    # was right to flag the phrasing; pin actual-matching phrasing here.
+    ("edit this to fix the time", None, _bypass_intake("choosing_mode"), True,
+     "edit_with_media"),
+    # Different verb + target — also matches.
+    ("change the date on this flyer", None, _bypass_intake("choosing_mode"), True,
+     "edit_with_media"),
+    # New customer + new-flyer + media → "new_flyer_with_media".
+    ("Create flyer for Dosa Night", None, _bypass_intake("choosing_mode"), True,
+     "new_flyer_with_media"),
+    # Existing trial customer + flyer-intent (NOT new-flyer-signal) + no media.
+    # "What is the status of my flyer" matches classify_flyer_intent but
+    # NOT should_start_new_flyer_over_active — exercises the existing-
+    # customer fast path (signal 4/5 of the helper). Text that ALSO matches
+    # the new-flyer signal (e.g., "I want a flyer for next week") hits the
+    # more-specific "new_flyer_text_only" branch first; that's by design
+    # for granular audit labeling per operator decision #2.
+    ("What is the status of my flyer", _bypass_customer("trial"), None, False,
+     "existing_trial_customer_intent"),
+    # Existing active customer + flyer-intent + no media — active label.
+    ("What is the status of my flyer", _bypass_customer("active"), None, False,
+     "existing_active_customer_intent"),
+    # Protected status — wizard owns the message.
+    ("Create flyer for Dosa Night", _bypass_customer("trial"),
+     _bypass_intake("guided_collecting_goal"), True, None),
+    # Brand-new + vague + no media — no signal; wizard.
+    ("hi", None, _bypass_intake("choosing_language"), False, None),
+    # Counter-example pinning reviewer 2 #2 finding: "edit this" alone (no
+    # edit_target word) does NOT bypass — classifier requires both verb AND
+    # target. Pins the asymmetry so a regex relaxation doesn't silently
+    # broaden the bypass.
+    ("edit this", None, _bypass_intake("choosing_mode"), True, None),
+    # Operator decision 2026-05-28 #1: expired/cancelled/suspended customers
+    # NEVER bypass — account-lifecycle boundary owns re-onboarding.
+    ("edit this to fix the time", _bypass_customer("expired"), None, True, None),
+    ("edit this to fix the time", _bypass_customer("cancelled"), None, True, None),
+    ("edit this to fix the time", _bypass_customer("suspended"), None, True, None),
+])
+def test_should_bypass_intake_for_clear_intent(
+    text, customer, intake_session, has_media, expected,
+):
+    actions = _load_actions()
+    assert actions.should_bypass_intake_for_clear_intent(
+        text, customer, intake_session, has_media=has_media,
+    ) == expected
+
+
+def test_should_bypass_intake_returns_optional_str_type():
+    """Signature returns Optional[str] — None when no bypass, else the
+    bypass_reason Literal value. Callers consume directly to populate
+    FlyerIntakeBypassed.bypass_reason (no re-classification)."""
+    actions = _load_actions()
+    result_bypass = actions.should_bypass_intake_for_clear_intent(
+        "edit this to fix the time", None, _bypass_intake("choosing_mode"),
+        has_media=True,
+    )
+    result_no_bypass = actions.should_bypass_intake_for_clear_intent(
+        "hi", None, _bypass_intake("choosing_language"), has_media=False,
+    )
+    assert isinstance(result_bypass, str)
+    assert result_bypass == "edit_with_media"
+    assert result_no_bypass is None
+
+
+def test_should_bypass_intake_priority_order_new_flyer_beats_existing_customer():
+    """When text matches BOTH should_start_new_flyer_over_active AND
+    classify_flyer_intent (e.g., 'I want a flyer for next week'), the helper
+    returns the more-specific new-flyer Literal — NOT the existing-customer
+    Literal. This is operator decision #2 granularity: media-vs-text-only on
+    new-flyer routes is more useful for audit triage than the customer-state
+    breakdown when both signals overlap. Pre-PR semantics still preserved:
+    ANY pre-PR bypass case still bypasses post-PR — just with a finer-grained
+    reason label."""
+    actions = _load_actions()
+    # Text matches both classifiers.
+    assert actions.classify_flyer_intent("I want a flyer for next week")[0]
+    assert actions.should_start_new_flyer_over_active(
+        "I want a flyer for next week", has_media=False,
+    )
+    # Helper returns new_flyer_text_only (more specific), not the
+    # existing-customer Literal, even with active/trial customer present.
+    result = actions.should_bypass_intake_for_clear_intent(
+        "I want a flyer for next week",
+        _bypass_customer("active"),
+        None, has_media=False,
+    )
+    assert result == "new_flyer_text_only"
+
+
+def test_should_bypass_intake_does_not_mutate_inputs():
+    """Pure-function invariant: helper does NOT modify customer or
+    intake_session dicts. Defensive Hermes-as-brain check."""
+    actions = _load_actions()
+    customer = _bypass_customer("trial")
+    intake_session = _bypass_intake("choosing_mode")
+    customer_snapshot = dict(customer)
+    intake_snapshot = dict(intake_session)
+    _ = actions.should_bypass_intake_for_clear_intent(
+        "edit this to fix the time", customer, intake_session, has_media=True,
+    )
+    assert customer == customer_snapshot
+    assert intake_session == intake_snapshot
+
+
+def test_should_bypass_intake_accepts_intake_session_without_status_field():
+    """Defensive: empty intake_session dict → treated as non-protected."""
+    actions = _load_actions()
+    result = actions.should_bypass_intake_for_clear_intent(
+        "edit this to fix the time", None, {}, has_media=True,
+    )
+    assert result == "edit_with_media"
+
+
+def test_should_bypass_intake_accepts_customer_without_status_field():
+    """Defensive: customer dict missing 'status' — fails precondition 2."""
+    actions = _load_actions()
+    result = actions.should_bypass_intake_for_clear_intent(
+        "edit this to fix the time", {"customer_id": "CUST0001"},
+        None, has_media=True,
+    )
+    assert result is None
+
+
+def test_intake_protected_statuses_match_inline_hooks_set():
+    """The helper's _INTAKE_PROTECTED_STATUSES must match the inline set
+    at hooks.py:2367-2376 exactly. Any drift would split bypass behavior;
+    Commit 3 wiring replaces the inline references with imports from here."""
+    actions = _load_actions()
+    from pathlib import Path
+    hooks_src = (Path(__file__).resolve().parent.parent / "src" / "plugins"
+                 / "cf-router" / "hooks.py").read_text(encoding="utf-8")
+    anchor = "protected_statuses = {"
+    start = hooks_src.find(anchor)
+    assert start >= 0, "hooks.py inline protected_statuses set not found"
+    end = hooks_src.find("}", start)
+    assert end > start
+    body = hooks_src[start + len(anchor):end]
+    inline_members = {
+        m.strip().strip('"').strip("'")
+        for m in body.split(",")
+        if m.strip()
+    }
+    assert inline_members == actions._INTAKE_PROTECTED_STATUSES
+
+
+# ─────────────────────────────────────────────────────────────────
+# Script detector — operator decision 2026-05-28 #3 (regional-SMB telemetry)
+# ─────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("Create flyer for Dosa Night", "latin"),
+    ("", "latin"),
+    ("Diwali के लिए flyer बनाओ", "devanagari"),  # Hindi (Devanagari)
+    ("तोसा रात के लिए", "devanagari"),  # Marathi (also Devanagari)
+    ("தோசை இரவுக்கான flyer", "tamil"),  # Tamil
+    ("¡Crea un volante!", "other"),  # Spanish — non-ASCII but not Hindi/Tamil
+    ("Mixed Latin + देवनागरी", "devanagari"),  # mixed prefers Devanagari
+    ("Mixed Latin + தமிழ்", "tamil"),  # mixed prefers Tamil
+])
+def test_detect_inbound_script(text, expected):
+    actions = _load_actions()
+    assert actions._detect_inbound_script(text) == expected
+
+
+def test_detect_inbound_script_handles_none_safely():
+    """Defensive: None text shouldn't crash; default to 'latin'."""
+    actions = _load_actions()
+    assert actions._detect_inbound_script(None) == "latin"  # type: ignore[arg-type]
+
+
+def test_detect_inbound_script_does_not_mutate_input():
+    """Pure-function invariant."""
+    actions = _load_actions()
+    text = "Diwali के लिए flyer"
+    snapshot = text
+    _ = actions._detect_inbound_script(text)
+    assert text == snapshot

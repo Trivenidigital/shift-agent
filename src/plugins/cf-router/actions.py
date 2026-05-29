@@ -1582,6 +1582,125 @@ def is_vague_flyer_start(text: str, *, has_media: bool = False) -> bool:
     return bool(re.search(r"\b(?:create|make|need|help|start|try|get)\b.*\b(?:flyer|flier|poster|marketing|flyer studio)\b", lower))
 
 
+# ─────────────────────────────────────────────────────────────────
+# 2026-05-28 — intake-bypass helper + script detector.
+# See plan + design at tasks/flyer-intake-bypass-{plan,design}-2026-05-28.md.
+# Hermes-as-brain compliance: composes the three deployed classifiers
+# (classify_flyer_intent, is_exact_reference_edit_request,
+# should_start_new_flyer_over_active) — does NOT classify on its own.
+# Pure functions, no I/O, no input mutation.
+# ─────────────────────────────────────────────────────────────────
+
+
+# Mirrors the inline `protected_statuses` set at hooks.py:2367-2376 exactly
+# (8 actively-collecting-brief statuses where the wizard is in flight + must
+# never be interrupted). Drift between this set and the inline definition
+# would split bypass behavior; tests assert exact membership match.
+_INTAKE_PROTECTED_STATUSES = frozenset({
+    "choosing_sample_idea",
+    "text_awaiting_brief",
+    "guided_collecting_goal",
+    "guided_collecting_schedule",
+    "guided_collecting_items",
+    "guided_collecting_location",
+    "guided_collecting_assets",
+    "brief_pending_approval",
+})
+
+
+# Account-lifecycle boundary — operator decision 2026-05-28 #1.
+# Expired/cancelled/suspended customers stay in wizard / re-onboarding path;
+# bypass is reserved for brand-new senders (customer is None) + active/trial.
+_CUSTOMER_BYPASS_ELIGIBLE_STATUSES = frozenset({"active", "trial"})
+
+
+def should_bypass_intake_for_clear_intent(
+    text: str,
+    customer: Optional[dict],
+    intake_session: Optional[dict],
+    *,
+    has_media: bool = False,
+) -> Optional[str]:
+    """Returns the bypass_reason Literal value when intake should be skipped,
+    else None.
+
+    Two preconditions block bypass (evaluated first):
+    1. intake_session.status in _INTAKE_PROTECTED_STATUSES — operator is
+       mid-collection of a guided brief; never interrupt.
+    2. customer is not None AND customer.status not in {"active","trial"} —
+       expired/cancelled/suspended stay in wizard. Brand-new senders
+       (customer is None) ARE bypass-eligible.
+
+    Five signal branches (return the matching bypass_reason):
+    - "edit_with_media": is_exact_reference_edit_request matches.
+      The F0108 / 22.png case.
+    - "new_flyer_with_media": should_start_new_flyer_over_active AND has_media.
+    - "new_flyer_text_only": should_start_new_flyer_over_active AND not has_media.
+    - "existing_active_customer_intent" / "existing_trial_customer_intent":
+      classify_flyer_intent matches AND customer.status active/trial.
+      Preserves pre-PR behavior of the lines 2378-2382 bypass for these states.
+
+    Hermes-as-brain: composes deployed classifiers. Does not classify itself."""
+    # Precondition 1: protected statuses block bypass.
+    status = str((intake_session or {}).get("status") or "")
+    if status in _INTAKE_PROTECTED_STATUSES:
+        return None
+
+    # Precondition 2: account-lifecycle boundary.
+    if customer is not None and customer.get("status") not in _CUSTOMER_BYPASS_ELIGIBLE_STATUSES:
+        return None
+
+    # Signal 1: edit-with-media — most unambiguous.
+    if is_exact_reference_edit_request(text, has_media=has_media):
+        return "edit_with_media"
+
+    # Signals 2 + 3: clear new-flyer request. Split on media for replay.
+    if should_start_new_flyer_over_active(text, has_media=has_media):
+        return "new_flyer_with_media" if has_media else "new_flyer_text_only"
+
+    # Signals 4 + 5: existing-customer fast path. Trial vs active split for triage.
+    intent_match, _reasons = classify_flyer_intent(text)
+    if intent_match and customer:
+        customer_status = customer.get("status")
+        if customer_status == "trial":
+            return "existing_trial_customer_intent"
+        if customer_status == "active":
+            return "existing_active_customer_intent"
+
+    return None
+
+
+# Unicode block ranges for the script detector. Basic Devanagari (U+0900–U+097F)
+# covers Hindi/Marathi/Nepali common case; basic Tamil (U+0B80–U+0BFF) covers
+# Tamil. Non-ASCII fallback ("other") catches Spanish/etc.
+_DEVANAGARI_RE = re.compile(r"[ऀ-ॿ]")
+_TAMIL_RE = re.compile(r"[஀-௿]")
+_NON_ASCII_RE = re.compile(r"[^\x00-\x7F]")
+
+
+def _detect_inbound_script(text: str) -> str:
+    """Returns the dominant non-Latin script name from
+    {"latin","devanagari","tamil","other"}. Default "latin" when the text
+    is pure ASCII or empty.
+
+    Used by the bypass wiring (Commit 3) to populate
+    FlyerIntakeBypassed.inbound_script for regional-SMB telemetry —
+    operator decision 2026-05-28 #3. Detection-and-act on non-Latin
+    scripts is deferred; this field accumulates the data so a follow-up
+    PR can act without backfill.
+
+    Pure function; no I/O. When mixed-script text appears, the order
+    of checks below establishes precedence: Devanagari > Tamil > other."""
+    body = str(text or "")
+    if not body or not _NON_ASCII_RE.search(body):
+        return "latin"
+    if _DEVANAGARI_RE.search(body):
+        return "devanagari"
+    if _TAMIL_RE.search(body):
+        return "tamil"
+    return "other"
+
+
 def extract_flyer_request_after_confirm(text: str) -> str:
     """Return a flyer brief trailing a compound onboarding CONFIRM reply."""
     body = flyer_visible_message_text(text)
