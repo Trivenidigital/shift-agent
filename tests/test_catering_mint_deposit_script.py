@@ -523,6 +523,19 @@ def test_bridge_send_failed_voids_intent_and_audits(isolated_state):
     intents = json.loads((isolated_state["commerce_state"] / "payment_intents.json").read_text(encoding="utf-8"))
     assert intents["intents"][0]["status"] == "voided"
 
+    # Slice-2.5 fix: ORDER must also be cancelled (not left as pending_payment
+    # orphan). Operator-flagged from 2026-05-29 deploy smoke. Parallel to the
+    # intent_mint_failed cleanup path.
+    orders = json.loads((isolated_state["commerce_state"] / "orders.json").read_text(encoding="utf-8"))
+    assert orders["orders"][0]["status"] == "cancelled", (
+        f"orphan order left as {orders['orders'][0]['status']!r}; "
+        "expected 'cancelled' per slice-2.5 ledger-cleanliness fix"
+    )
+    # commerce_order_cancelled audit row emitted with the documented reason
+    cancelled_rows = [r for r in rows if r["type"] == "commerce_order_cancelled"]
+    assert len(cancelled_rows) == 1
+    assert cancelled_rows[0]["reason"] == "bridge_send_failed_orphan_cleanup"
+
     # Lead state — deposit fields NOT populated (bridge fail rolled them back via early return)
     leads = json.loads(isolated_state["leads_path"].read_text(encoding="utf-8"))
     assert leads["leads"][0]["deposit_status"] == "none"

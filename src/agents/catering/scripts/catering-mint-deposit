@@ -321,6 +321,26 @@ def main() -> int:
                 reason="customer_send_failed",
                 actor="caller",  # Reviewer A HIGH-3 + B HIGH-3
             )
+            # Slice-2.5 ledger-cleanliness fix (operator-flagged from
+            # 2026-05-29 deploy smoke). Parallel to the intent_mint_failed
+            # cleanup ~30 lines above: cancel the orphan order so it doesn't
+            # sit in `pending_payment` accumulating drift. Operator re-
+            # invocation will mint a fresh intent against a NEW order_id;
+            # without this, the prior order persists as ledger noise that
+            # only the §12a freshness watchdog (slice 3) would notice.
+            try:
+                commerce_order.cancel(
+                    state_path=COMMERCE_ORDERS_PATH,
+                    decisions_log_path=LOG_PATH,
+                    order_id=order_result.order.order_id,
+                    reason="bridge_send_failed_orphan_cleanup",
+                    actor="cron",  # order_state.cancel actor is Literal[customer|operator|cron]
+                )
+            except Exception as cancel_err:  # noqa: BLE001 — best-effort cleanup
+                sys.stderr.write(
+                    f"WARN: order cancel-on-bridge-fail failed (non-fatal): "
+                    f"{type(cancel_err).__name__}: {cancel_err}\n"
+                )
             _emit_deposit_link_failed(
                 lead_id=lead.lead_id, reason="bridge_send_failed",
                 detail=mid_or_err[:500],
