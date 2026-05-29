@@ -4094,6 +4094,40 @@ class FlyerIntakeBypassOutcome(_BaseEntry):
     elapsed_ms: int = Field(default=0, ge=0)
 
 
+# P0 #2 2026-05-28 — severity-tiered visual QA audit variants.
+# `ts` (inherited from `_BaseEntry`) is the event timestamp; no separate
+# classified_at / delivered_at field — matches deployed convention.
+class FlyerQASeverityClassified(_BaseEntry):
+    """Records the severity classification on a visual QA report.
+
+    Emitted by generate-flyer-concepts after run_visual_qa() returns
+    and classify_qa_severity() has decided pass / warn / block.
+    Always fires regardless of severity — operators can grep for
+    severity distribution over time."""
+    type: Literal["flyer_qa_severity_classified"] = "flyer_qa_severity_classified"
+    project_id: str = Field(pattern=r"^F\d{4,}$")
+    asset_id: str = Field(default="", max_length=80)
+    severity: Literal["pass", "warn", "block"]
+    blocker_count: int = Field(ge=0, le=50)
+    classifier_version: str = Field(default="v1", max_length=20)
+
+
+class FlyerWarnTierDelivered(_BaseEntry):
+    """Records the decision to deliver a concept preview under warn-tier severity.
+
+    Emitted by generate-flyer-concepts immediately BEFORE the cf-router
+    post-subprocess branch dispatches the warn-tier send. Captures the
+    blockers list + sha256 of the customer text so audit replay can
+    reconstruct exactly what was shipped without storing the raw copy
+    twice (FlyerWarningSummary.customer_text is the live copy)."""
+    type: Literal["flyer_warn_tier_delivered"] = "flyer_warn_tier_delivered"
+    project_id: str = Field(pattern=r"^F\d{4,}$")
+    asset_id: str = Field(min_length=1, max_length=80)
+    severity: Literal["warn"]
+    blockers: list[str] = Field(default_factory=list, max_length=50)
+    customer_text_sha256: str = Field(pattern=r"^[a-fA-F0-9]{64}$")
+
+
 class CateringLeadCreated(_BaseEntry):
     type: Literal["catering_lead_created"]
     lead_id: str = Field(min_length=1)
@@ -5358,6 +5392,9 @@ LogEntry = Annotated[
         # 2026-05-28 — intake-bypass audit pair (decision + outcome)
         Annotated[FlyerIntakeBypassed, Tag("flyer_intake_bypassed")],
         Annotated[FlyerIntakeBypassOutcome, Tag("flyer_intake_bypass_outcome")],
+        # P0 #2 2026-05-28 — severity-tiered visual QA audit variants
+        Annotated[FlyerQASeverityClassified, Tag("flyer_qa_severity_classified")],
+        Annotated[FlyerWarnTierDelivered, Tag("flyer_warn_tier_delivered")],
         # PR-ζ 2026-05-26 — chokepoint refusal audit variants
         Annotated[_RegulatedSendMissingActionContext, Tag("regulated_send_missing_action_context")],
         Annotated[_RegulatedSendLintViolation, Tag("regulated_send_lint_violation")],
@@ -5455,6 +5492,7 @@ __all__ = [
     "FlyerSourceContractSection", "FlyerSourceContract",
     "FlyerSourceContractExtracted", "FlyerSourceVsNewChosen", "FlyerHermesIntentDecision",
     "FlyerIntakeBypassed", "FlyerIntakeBypassOutcome",
+    "FlyerQASeverityClassified", "FlyerWarnTierDelivered",
     # PR-ζ 2026-05-26 — regulated-intent runtime context + chokepoint audit variants
     "ActionExecutionContext",
     "FlyerVisualQAReport", "FlyerManualReview", "FlyerAsset", "FlyerConcept", "FlyerRevision",

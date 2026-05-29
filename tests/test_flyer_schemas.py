@@ -1005,3 +1005,243 @@ def test_intake_bypass_pair_in_schemas_all():
     import schemas  # noqa: E402
     assert "FlyerIntakeBypassed" in schemas.__all__
     assert "FlyerIntakeBypassOutcome" in schemas.__all__
+
+
+# ─────────────────────────────────────────────────────────────────
+# P0 #2 — severity-tiered visual QA audit variants (Commit 6)
+# ─────────────────────────────────────────────────────────────────
+
+
+_NOW_UTC = datetime(2026, 5, 28, 14, 30, tzinfo=timezone.utc)
+_SAMPLE_SHA = "a" * 64  # valid 64-hex-char sha256 placeholder
+
+
+def test_flyer_qa_severity_classified_round_trip_pass():
+    from schemas import FlyerQASeverityClassified  # noqa: E402
+
+    entry = FlyerQASeverityClassified(
+        ts=_NOW_UTC,
+        project_id="F0108",
+        asset_id="A0001",
+        severity="pass",
+        blocker_count=0,
+    )
+    dumped = entry.model_dump(mode="json")
+    assert dumped["type"] == "flyer_qa_severity_classified"
+    assert dumped["severity"] == "pass"
+    assert dumped["blocker_count"] == 0
+    assert dumped["classifier_version"] == "v1"  # default
+    restored = FlyerQASeverityClassified.model_validate(dumped)
+    assert restored == entry
+
+
+def test_flyer_qa_severity_classified_warn_with_blockers():
+    from schemas import FlyerQASeverityClassified  # noqa: E402
+
+    entry = FlyerQASeverityClassified(
+        ts=_NOW_UTC,
+        project_id="F0108",
+        asset_id="",
+        severity="warn",
+        blocker_count=1,
+        classifier_version="v1",
+    )
+    assert entry.severity == "warn"
+    assert entry.asset_id == ""  # asset_id is optional
+
+
+def test_flyer_qa_severity_classified_block_severity():
+    from schemas import FlyerQASeverityClassified  # noqa: E402
+
+    entry = FlyerQASeverityClassified(
+        ts=_NOW_UTC,
+        project_id="F0109",
+        asset_id="A0002",
+        severity="block",
+        blocker_count=3,
+    )
+    assert entry.severity == "block"
+
+
+def test_flyer_qa_severity_classified_rejects_unknown_severity():
+    from schemas import FlyerQASeverityClassified  # noqa: E402
+
+    with pytest.raises(ValidationError):
+        FlyerQASeverityClassified(
+            ts=_NOW_UTC,
+            project_id="F0108",
+            severity="critical",  # not in pass/warn/block
+            blocker_count=1,
+        )
+
+
+def test_flyer_qa_severity_classified_rejects_bad_project_id():
+    from schemas import FlyerQASeverityClassified  # noqa: E402
+
+    with pytest.raises(ValidationError):
+        FlyerQASeverityClassified(
+            ts=_NOW_UTC,
+            project_id="X0001",  # F-prefix required
+            severity="warn",
+            blocker_count=1,
+        )
+
+
+def test_flyer_qa_severity_classified_rejects_extra_field():
+    from schemas import FlyerQASeverityClassified  # noqa: E402
+
+    with pytest.raises(ValidationError):
+        FlyerQASeverityClassified.model_validate({
+            "type": "flyer_qa_severity_classified",
+            "ts": _NOW_UTC.isoformat(),
+            "project_id": "F0108",
+            "severity": "warn",
+            "blocker_count": 1,
+            "extra_unexpected_field": "nope",
+        })
+
+
+def test_flyer_qa_severity_classified_blocker_count_bounds():
+    from schemas import FlyerQASeverityClassified  # noqa: E402
+
+    # ge=0 enforced
+    with pytest.raises(ValidationError):
+        FlyerQASeverityClassified(
+            ts=_NOW_UTC, project_id="F0108", severity="pass", blocker_count=-1,
+        )
+    # le=50 enforced
+    with pytest.raises(ValidationError):
+        FlyerQASeverityClassified(
+            ts=_NOW_UTC, project_id="F0108", severity="block", blocker_count=51,
+        )
+
+
+def test_flyer_warn_tier_delivered_round_trip():
+    from schemas import FlyerWarnTierDelivered  # noqa: E402
+
+    entry = FlyerWarnTierDelivered(
+        ts=_NOW_UTC,
+        project_id="F0108",
+        asset_id="A0001",
+        severity="warn",
+        blockers=["visible wrong business/brand: Laksmi'S Kitchen"],
+        customer_text_sha256=_SAMPLE_SHA,
+    )
+    dumped = entry.model_dump(mode="json")
+    assert dumped["type"] == "flyer_warn_tier_delivered"
+    assert dumped["severity"] == "warn"
+    assert dumped["blockers"] == ["visible wrong business/brand: Laksmi'S Kitchen"]
+    assert dumped["customer_text_sha256"] == _SAMPLE_SHA
+    restored = FlyerWarnTierDelivered.model_validate(dumped)
+    assert restored == entry
+
+
+def test_flyer_warn_tier_delivered_requires_warn_severity():
+    from schemas import FlyerWarnTierDelivered  # noqa: E402
+
+    # pass / block not allowed — warn-tier delivery is by definition warn
+    for bad in ("pass", "block"):
+        with pytest.raises(ValidationError):
+            FlyerWarnTierDelivered(
+                ts=_NOW_UTC,
+                project_id="F0108",
+                asset_id="A0001",
+                severity=bad,
+                blockers=[],
+                customer_text_sha256=_SAMPLE_SHA,
+            )
+
+
+def test_flyer_warn_tier_delivered_requires_asset_id():
+    from schemas import FlyerWarnTierDelivered  # noqa: E402
+
+    # asset_id has min_length=1 — delivery must identify which asset
+    with pytest.raises(ValidationError):
+        FlyerWarnTierDelivered(
+            ts=_NOW_UTC,
+            project_id="F0108",
+            asset_id="",
+            severity="warn",
+            blockers=[],
+            customer_text_sha256=_SAMPLE_SHA,
+        )
+
+
+def test_flyer_warn_tier_delivered_rejects_bad_sha256():
+    from schemas import FlyerWarnTierDelivered  # noqa: E402
+
+    with pytest.raises(ValidationError):
+        FlyerWarnTierDelivered(
+            ts=_NOW_UTC,
+            project_id="F0108",
+            asset_id="A0001",
+            severity="warn",
+            blockers=[],
+            customer_text_sha256="not-a-sha",  # fails hex pattern
+        )
+
+
+def test_flyer_warn_tier_delivered_rejects_extra_field():
+    from schemas import FlyerWarnTierDelivered  # noqa: E402
+
+    with pytest.raises(ValidationError):
+        FlyerWarnTierDelivered.model_validate({
+            "type": "flyer_warn_tier_delivered",
+            "ts": _NOW_UTC.isoformat(),
+            "project_id": "F0108",
+            "asset_id": "A0001",
+            "severity": "warn",
+            "blockers": [],
+            "customer_text_sha256": _SAMPLE_SHA,
+            "rogue": "no",
+        })
+
+
+def test_new_variants_route_via_log_entry_discriminator():
+    """Adding the variants to the LogEntry Union must auto-register them
+    in _KNOWN_LOG_ENTRY_TYPES (built by introspection at module import)
+    AND let TypeAdapter(LogEntry) dispatch the right class by `type`."""
+    from schemas import (  # noqa: E402
+        FlyerQASeverityClassified,
+        FlyerWarnTierDelivered,
+        LogEntry,
+        _KNOWN_LOG_ENTRY_TYPES,
+    )
+
+    assert "flyer_qa_severity_classified" in _KNOWN_LOG_ENTRY_TYPES
+    assert "flyer_warn_tier_delivered" in _KNOWN_LOG_ENTRY_TYPES
+
+    adapter = TypeAdapter(LogEntry)
+
+    severity_row = {
+        "type": "flyer_qa_severity_classified",
+        "ts": _NOW_UTC.isoformat(),
+        "project_id": "F0108",
+        "asset_id": "A0001",
+        "severity": "warn",
+        "blocker_count": 1,
+        "classifier_version": "v1",
+    }
+    parsed = adapter.validate_python(severity_row)
+    assert isinstance(parsed, FlyerQASeverityClassified)
+
+    delivered_row = {
+        "type": "flyer_warn_tier_delivered",
+        "ts": _NOW_UTC.isoformat(),
+        "project_id": "F0108",
+        "asset_id": "A0001",
+        "severity": "warn",
+        "blockers": ["visible wrong business/brand: Laksmi'S Kitchen"],
+        "customer_text_sha256": _SAMPLE_SHA,
+    }
+    parsed = adapter.validate_python(delivered_row)
+    assert isinstance(parsed, FlyerWarnTierDelivered)
+
+
+def test_new_variants_export_via_schemas_all():
+    """Both new variants must appear in schemas.__all__ so `from schemas
+    import *` reaches them — protects against silent missing-export drift."""
+    import schemas  # noqa: E402
+
+    assert "FlyerQASeverityClassified" in schemas.__all__
+    assert "FlyerWarnTierDelivered" in schemas.__all__
