@@ -1,0 +1,18 @@
+{
+  "topic": "hermes-commerce-slice2-catering-deposit-caller-design",
+  "task_text": "Hermes Commerce slice 2 design: catering deposit caller — wire post-SENT_TO_CUSTOMER deposit-mint into apply-catering-owner-decision; consumes slice-1 commerce primitives without adding provider/webhook/dispatcher surface.",
+  "completed_at": "2026-05-29T13:14:51Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 4,
+  "hermes_step_count": 9,
+  "files_to_read_first": [
+    "src/platform/schemas.py (CateringConfig l.627, CateringLead l.1944, CateringLeadStatusChange l.4017)",
+    "src/agents/catering/scripts/apply-catering-owner-decision (deployed approval flow)",
+    "src/agents/catering/skills/handle_catering_owner_approval/SKILL.md",
+    "src/platform/commerce/payment_link.py (slice-1)",
+    "src/platform/commerce/order_state.py (slice-1)",
+    "src/platform/commerce/cart.py (slice-1)",
+    "tasks/hermes-commerce-prd-v2.md (caller invariants §7 + §10)",
+    "tasks/hermes-commerce-portfolio-reconciliation.md (money-moving invariants)"
+  ]
+}
