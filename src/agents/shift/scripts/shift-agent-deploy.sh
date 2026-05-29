@@ -49,6 +49,9 @@ install_artifacts() {
     if [ ! -f src/platform/scripts/check-hermes-config-yaml ]; then
         rm -f /usr/local/bin/check-hermes-config-yaml
     fi
+    if [ ! -f src/platform/scripts/check-commerce-webhook-subscription ]; then
+        rm -f /usr/local/bin/check-commerce-webhook-subscription
+    fi
 
     # Python modules — flat layout at /opt/shift-agent/ matches scripts' sys.path
     install -m 644 src/platform/schemas.py /opt/shift-agent/schemas.py
@@ -74,6 +77,14 @@ install_artifacts() {
         install -m 644 src/platform/check_hermes_config_yaml.py /opt/shift-agent/check_hermes_config_yaml.py
     else
         rm -f /opt/shift-agent/check_hermes_config_yaml.py
+    fi
+    # Commerce webhook-subscription deploy-gate module (slice-3.5). Imported by
+    # the check-commerce-webhook-subscription wrapper. Guarded for rollback
+    # compatibility with tarballs that predate this module.
+    if [ -f src/platform/commerce_webhook_gate.py ]; then
+        install -m 644 src/platform/commerce_webhook_gate.py /opt/shift-agent/commerce_webhook_gate.py
+    else
+        rm -f /opt/shift-agent/commerce_webhook_gate.py
     fi
 
     # Commerce primitives package (PR #321, slice 1 library-only).
@@ -939,6 +950,37 @@ PY
                 rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
             fi
             exit 1
+        fi
+
+        # Pre-restart commerce webhook-subscription gate (slice-3.5). Dormant-safe:
+        # exits 0 (and prints a one-line "not applicable" note) unless
+        # commerce.enabled && commerce.provider == "stripe". When commerce IS
+        # actively Stripe, it asserts the Stripe webhook subscription is
+        # registered; if missing it fails closed — without the subscription,
+        # Stripe payment_intent.succeeded events silently 404 and a paying
+        # customer is never confirmed (slice-3 §13.5 A-LOW-1).
+        #
+        # Prefer the staging source copy so the FIRST deploy that introduces the
+        # gate still runs it; fall back to the installed /usr/local/bin copy only
+        # for rollback-tarball compatibility. Run via $VENV_PY so the wrapper's
+        # `from schemas import CommerceConfig` resolves (pydantic lives there).
+        COMMERCE_WEBHOOK_GATE="$STAGING/src/platform/scripts/check-commerce-webhook-subscription"
+        [ -x "$COMMERCE_WEBHOOK_GATE" ] || COMMERCE_WEBHOOK_GATE=/usr/local/bin/check-commerce-webhook-subscription
+        if [ -x "$COMMERCE_WEBHOOK_GATE" ]; then
+            if ! "$VENV_PY" "$COMMERCE_WEBHOOK_GATE" --config /opt/shift-agent/config.yaml; then
+                echo "FAIL: pre-restart commerce webhook-subscription gate — refusing to restart hermes-gateway" >&2
+                if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                    "$0" rollback "$PREV_TAG"
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                else
+                    /usr/local/bin/shift-agent-notify-owner \
+                        --title "Deploy FAILED at commerce webhook gate, no prior tarball" \
+                        --priority 2 \
+                        "Deploy $NEW_TAG failed the commerce webhook-subscription gate (commerce active for Stripe but the subscription is missing). New files installed but service still on OLD code (gateway not yet restarted). No prior tarball to roll back to — SSH immediately." 2>/dev/null || true
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                fi
+                exit 1
+            fi
         fi
 
         # Hermes runtime permission gate: run the same targeted preflight that
