@@ -304,3 +304,157 @@ def extract_send_call_literals(source: str, function_names: tuple[str, ...] | No
                 if keyword.arg in {"caption", "message", "text"}:
                     snippets.append(literal_text(keyword.value))
     return "\n".join(part for part in snippets if part)
+
+
+# ─────────────────────────────────────────────────────────────────
+# P0 #2 — warn-tier customer copy (Commit 2)
+# Pure-function formatters: blockers + project → string.
+# No workflow side effects (Hermes-as-brain compliance — see plan §6).
+# All output verified against scan_customer_text + lint_no_unverified_completion.
+# ─────────────────────────────────────────────────────────────────
+
+
+WARN_TIER_DRAFT_HEADER = "Here's your flyer draft."
+
+# Translation table: blocker-string prefix → (full sentence template, short clause).
+# Templates may interpolate {brand} (resolved from project.business_name).
+# Order = severity within warn-tier — brand-identity first (most user-visible),
+# then event-essential (location/schedule/promotion_end), then core-promise
+# (item names), then contact_info. Mirrors the classifier's escalation rules.
+_WARN_BLOCKER_TRANSLATIONS: tuple[tuple[str, str, str], ...] = (
+    ("visible wrong business/brand:",
+     "the spelling of {brand} near the bottom",
+     "the spelling near the bottom"),
+    ("missing required visible fact: location",
+     "the location address isn't showing",
+     "the missing location"),
+    ("missing required visible fact: schedule",
+     "the event time isn't showing",
+     "the missing event time"),
+    ("missing required visible fact: promotion_end",
+     "the promotion end date isn't showing",
+     "the missing end date"),
+    ("missing required visible fact: item:",
+     "one menu item name didn't come through correctly",
+     "the menu item issue"),
+    ("missing required visible fact: contact_info",
+     "the contact info isn't showing",
+     "the missing contact"),
+)
+
+_WARN_TIER_TOP_N = 2  # Clamp summaries to top-2 most-severe translations.
+
+
+def _resolve_brand(project: Any) -> str:
+    """Read business_name from project.locked_facts.
+
+    Accepts either a Pydantic FlyerProject or a plain dict (matches the
+    runtime call shape from cf-router's _dispatch_concept_preview_send,
+    which loads projects.json into dicts). Returns empty string when the
+    business_name fact is absent — caller's template should degrade
+    gracefully (e.g. brand-typo summary uses 'the business name'
+    placeholder)."""
+    if isinstance(project, dict):
+        facts = project.get("locked_facts") or []
+        for fact in facts:
+            if isinstance(fact, dict) and fact.get("fact_id") == "business_name":
+                return str(fact.get("value") or "")
+        return ""
+    facts = getattr(project, "locked_facts", None) or []
+    for fact in facts:
+        if getattr(fact, "fact_id", None) == "business_name":
+            return str(getattr(fact, "value", "") or "")
+    return ""
+
+
+def _translate_warn_blockers(
+    blockers: list[str],
+    *,
+    brand: str,
+) -> list[tuple[str, str]]:
+    """Match blocker strings against _WARN_BLOCKER_TRANSLATIONS in severity
+    order. Returns list of (full_sentence, short_clause) tuples, deduped by
+    short_clause (a customer doesn't need "the missing location" listed twice
+    even if two blockers happen to map to the same clause)."""
+    brand_display = f'"{brand}"' if brand else "the business name"
+    seen_short: set[str] = set()
+    out: list[tuple[str, str]] = []
+    # Iterate the table in severity order; within each table entry, every
+    # matching blocker counts once. This keeps brand-identity first even if
+    # the input list orders blockers differently.
+    for prefix, full_template, short_clause in _WARN_BLOCKER_TRANSLATIONS:
+        if short_clause in seen_short:
+            continue
+        for blocker in blockers:
+            if blocker.startswith(prefix):
+                full = full_template.format(brand=brand_display)
+                out.append((full, short_clause))
+                seen_short.add(short_clause)
+                break
+    return out
+
+
+def format_warn_tier_correction_summary(
+    blockers: list[str],
+    project: Any,
+) -> tuple[str, str]:
+    """Translate warn-tier blockers into customer-language sentences.
+
+    Returns (full_summary, short_summary):
+    - full_summary: comma-joined full sentences for the body
+      (e.g., "the spelling of 'Lakshmi's Kitchen' near the bottom").
+    - short_summary: comma-joined short clauses for the OK-confirm sentence
+      (e.g., "the spelling near the bottom").
+
+    Both clamped to top-2 most-severe per plan §6 (warn-tier cohort can
+    only have 1-2 warns; 3+ trips the classifier's count cap to block)."""
+    brand = _resolve_brand(project)
+    translations = _translate_warn_blockers(blockers, brand=brand)[:_WARN_TIER_TOP_N]
+    full = ", and ".join(t[0] for t in translations) if translations else ""
+    short = " and ".join(t[1] for t in translations) if translations else ""
+    return full, short
+
+
+def build_warn_tier_customer_text(
+    blockers: list[str],
+    project: Any,
+) -> str:
+    """Compose the full warn-tier customer message: header + correction
+    summary + OK-confirm sentence with short-clause echo (reviewer 2 #3
+    refinement — forces conscious confirmation rather than passive 'OK')."""
+    full, short = format_warn_tier_correction_summary(blockers, project)
+    if not full:
+        # Degenerate path — caller passed blockers that didn't match any
+        # known translation. Should not occur in practice (Commit 3 only
+        # calls this on severity=warn output), but stay safe.
+        return f"{WARN_TIER_DRAFT_HEADER}\n\nReply with any changes you'd like."
+    return (
+        f"{WARN_TIER_DRAFT_HEADER}\n\n"
+        f"We noticed a small detail you may want to fix:\n"
+        f"{full}.\n\n"
+        f"Reply with the correction and we'll redo the design.\n"
+        f"Reply OK if you've checked {short} and it's acceptable as drawn."
+    )
+
+
+def format_warn_recovery_revision_ack(
+    blockers: list[str],
+    project: Any,
+) -> str:
+    """Acknowledgment for the customer reply-with-fix flow on a warn-tier
+    project (reviewer 2 #7 — existing 'revising_design' ack assumes the
+    prior draft was clean; warn-recovery context is different and needs
+    its own tone).
+
+    The blockers parameter is the prior warn payload's blocker list,
+    available for future personalization. Today the ack stays generic to
+    avoid presupposing which fix the customer actually sent — they may
+    have addressed a different blocker than the classifier flagged.
+
+    Verbs verified against FORBIDDEN_COMPLETION_VERBS: 'Got', 'update',
+    'redrawing', 'fix', 'share', 'draft', 'here' — none forbidden."""
+    _ = blockers, project  # reserved for future personalization
+    return (
+        "Got your update — I'm redrawing the flyer with this fix "
+        "and will share the new draft here."
+    )
