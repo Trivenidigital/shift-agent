@@ -4614,6 +4614,9 @@ class CfRouterIntercepted(_BaseEntry):
         "flyer_intake",
         "flyer_intake_failed",
         "flyer_intake_cleanup_failed",
+        # 2026-05-28 — intake-bypass when intent is clear. See plan + design
+        # at tasks/flyer-intake-bypass-{plan,design}-2026-05-28.md.
+        "flyer_intake_bypassed",
         "flyer_onboarding",
         "flyer_onboarding_failed",
         "flyer_starter_brief",

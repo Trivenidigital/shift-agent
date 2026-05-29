@@ -193,8 +193,20 @@ def pre_gateway_dispatch(event: Any, gateway: Any = None, session_store: Any = N
                 actions.finalize_flyer_intent_shadow(hook_result=result, error=error, gateway=gateway)
             except Exception as shadow_exc:
                 actions.sys.stderr.write(f"cf-router: flyer intent shadow finalizer failed (non-fatal): {shadow_exc}\n")
+            # 2026-05-28 — intake-bypass shadow finalize (Commit 3 wiring).
+            # No-op when no bypass fired during the dispatch. Emits
+            # FlyerIntakeBypassOutcome via the deployed audit chokepoint.
+            try:
+                actions.finalize_flyer_intake_bypass_shadow(hook_result=result)
+            except Exception as bypass_exc:
+                actions.sys.stderr.write(
+                    f"cf-router: flyer intake bypass shadow finalizer failed (non-fatal): {bypass_exc}\n"
+                )
         finally:
             actions.reset_flyer_intent_shadow(token)
+            actions.reset_flyer_intake_bypass_shadow(
+                actions.consume_pending_flyer_intake_bypass_token()
+            )
 
 
 def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: Any = None,
@@ -2374,11 +2386,57 @@ def _try_flyer_intake_intercept(
         "guided_collecting_assets",
         "brief_pending_approval",
     }
-    status = str((intake_session or {}).get("status") or "")
-    if customer and customer.get("status") in {"active", "trial"} and status not in protected_statuses and (
-        actions.classify_flyer_intent(text)[0]
-        or actions.should_start_new_flyer_over_active(text, has_media=bool(media_path))
-    ):
+    # 2026-05-28 — intake bypass via the named helper (Commit 3 wiring).
+    # Replaces the inline conditional that was here. Helper composes the
+    # same 3 deployed classifiers (classify_flyer_intent,
+    # is_exact_reference_edit_request, should_start_new_flyer_over_active)
+    # plus the account-lifecycle precondition + protected-status guard.
+    # Returns the bypass_reason Literal value (or None for "no bypass").
+    bypass_reason = actions.should_bypass_intake_for_clear_intent(
+        text=text,
+        customer=customer,
+        intake_session=intake_session,
+        has_media=bool(media_path),
+    )
+    if bypass_reason is not None:
+        inbound_script = actions._detect_inbound_script(text)
+        customer_state = str((customer or {}).get("status") or "")
+        intake_status = str((intake_session or {}).get("status") or "")
+        # Decision-time structured audit row.
+        actions.audit_flyer_intake_bypassed(
+            chat_id=chat_id,
+            bypass_reason=bypass_reason,
+            has_media=bool(media_path),
+            customer_state=customer_state,
+            intake_session_status=intake_status,
+            inbound_script=inbound_script,
+        )
+        # Existing-style cf_router_intercepted audit row for grepability.
+        try:
+            actions.audit_intercepted(
+                reason="flyer_intake_bypassed",
+                chat_id=chat_id,
+                subprocess_rc=0,
+                detail=(
+                    f"bypass_reason={bypass_reason}; has_media={'1' if media_path else '0'}; "
+                    f"customer_state={customer_state}; intake_status={intake_status}; "
+                    f"inbound_script={inbound_script}; sender_role={role}"
+                )[:500],
+            )
+        except Exception:
+            # Audit emit must not block the bypass path.
+            pass
+        # Open the bypass shadow — dispatch wrapper's finally emits the
+        # outcome row + resets the token.
+        actions.note_flyer_intake_bypass_active(
+            chat_id=chat_id,
+            message_id=message_id,
+            bypass_reason=bypass_reason,
+            has_media=bool(media_path),
+            customer_state=customer_state,
+            intake_session_status=intake_status,
+            inbound_script=inbound_script,
+        )
         return None
     if not intake_session:
         return None
