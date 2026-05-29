@@ -161,6 +161,45 @@ def test_nonzero_returncode_without_token_is_config_error_not_missing(tmp_path):
     assert code == 2
 
 
+# ── round-2 regressions: empty name + non-SubprocessError launch failures ────
+
+def test_active_stripe_empty_subscription_name_is_config_error(tmp_path):
+    cfg = _write_config(
+        tmp_path,
+        {"enabled": True, "provider": "stripe", "webhook_subscription_name": ""},
+    )
+    # Must be a config error (exit 2), not "missing" (exit 1), and must not emit
+    # a broken `hermes webhook subscribe  --route` command.
+    code, out, err = gate.run(cfg, "hermes", list_runner=_no_call)
+    assert code == 2
+    assert "webhook_subscription_name" in err
+    assert "subscribe  --route" not in err
+
+
+def test_permission_error_launching_hermes_is_config_error(tmp_path):
+    cfg = _write_config(tmp_path, {"enabled": True, "provider": "stripe"})
+
+    def _perm(_bin):
+        raise PermissionError("hermes is not executable")
+
+    code, out, err = gate.run(cfg, "hermes", list_runner=_perm)
+    assert code == 2
+    assert "ERROR" in err
+
+
+def test_timeout_launching_hermes_is_config_error(tmp_path):
+    import subprocess as _sp
+
+    cfg = _write_config(tmp_path, {"enabled": True, "provider": "stripe"})
+
+    def _timeout(_bin):
+        raise _sp.TimeoutExpired(cmd="hermes webhook list", timeout=30)
+
+    code, out, err = gate.run(cfg, "hermes", list_runner=_timeout)
+    assert code == 2
+    assert "ERROR" in err
+
+
 # ── config / runtime error paths ────────────────────────────────────────────
 
 def test_missing_config_exit_2(tmp_path):

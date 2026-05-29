@@ -967,12 +967,40 @@ PY
         COMMERCE_WEBHOOK_GATE="$STAGING/src/platform/scripts/check-commerce-webhook-subscription"
         [ -x "$COMMERCE_WEBHOOK_GATE" ] || COMMERCE_WEBHOOK_GATE=/usr/local/bin/check-commerce-webhook-subscription
         if [ ! -x "$COMMERCE_WEBHOOK_GATE" ]; then
-            # The gate ships in every current tarball, so absence means a
-            # pre-gate (older) tarball. Skipping is correct for rollback/older-
-            # build compatibility — but make it LOUD (not silent), because if
-            # this VPS runs commerce on Stripe the subscription would go
-            # unverified (Codex review 2026-05-29, Medium-3).
-            echo "WARN: commerce webhook-subscription gate script not found in staging or /usr/local/bin — skipping (pre-gate tarball?). If commerce.provider=stripe on this VPS, verify the Stripe webhook subscription manually: hermes webhook list" >&2
+            # Gate script absent => pre-gate (older) tarball or malformed deploy.
+            # Skipping is safe ONLY if commerce is not active-for-Stripe on this
+            # VPS. Probe commerce state and HARD-FAIL if active, so a rollback
+            # cannot silently drop the money-safety gate while Stripe is live
+            # (Codex review 2026-05-29, escalated finding #3). If commerce is
+            # dormant/non-commerce, WARN and continue (older-build compatibility).
+            if "$VENV_PY" - <<'PY'
+import sys, yaml
+sys.path.insert(0, "/opt/shift-agent")
+try:
+    from schemas import CommerceConfig
+    raw = (yaml.safe_load(open("/opt/shift-agent/config.yaml")) or {}).get("commerce") or {}
+    cfg = CommerceConfig.model_validate(raw if isinstance(raw, dict) else {})
+    active = bool(cfg.enabled and cfg.provider == "stripe")
+except Exception:
+    active = False  # pre-commerce schema or unparseable config => cannot be active
+raise SystemExit(0 if active else 1)
+PY
+            then
+                echo "FATAL: commerce is active for Stripe but the webhook-subscription gate script is absent from staging and /usr/local/bin — refusing to deploy/restart (a rollback must not drop the money-safety gate while Stripe is live)." >&2
+                if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                    "$0" rollback "$PREV_TAG"
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                else
+                    /usr/local/bin/shift-agent-notify-owner \
+                        --title "Deploy FAILED: commerce gate missing while Stripe active" \
+                        --priority 2 \
+                        "Deploy $NEW_TAG: commerce active for Stripe but the webhook-subscription gate script is missing from the tarball. New files installed but service still on OLD code. SSH immediately." 2>/dev/null || true
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                fi
+                exit 1
+            else
+                echo "WARN: commerce webhook-subscription gate script not found (pre-gate tarball); commerce is not active-for-Stripe on this VPS so skipping is safe. If you later enable Stripe, redeploy a current tarball so the gate runs." >&2
+            fi
         else
             if ! "$VENV_PY" "$COMMERCE_WEBHOOK_GATE" --config /opt/shift-agent/config.yaml; then
                 echo "FAIL: pre-restart commerce webhook-subscription gate — refusing to restart hermes-gateway" >&2

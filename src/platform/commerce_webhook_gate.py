@@ -172,13 +172,32 @@ def run(
             "",
         )
 
+    # Active-for-Stripe but the subscription name is blank is a config-shape
+    # error (exit 2), not a "missing subscription" (exit 1) — the latter would
+    # also emit an invalid remediation command (`hermes webhook subscribe ` with
+    # no name). Catch it before touching the CLI.
+    if not fields.subscription_name.strip():
+        return (
+            EXIT_CONFIG_ERROR,
+            "",
+            (
+                "ERROR: commerce.provider=stripe but commerce.webhook_subscription_name "
+                "is empty. Set it (default 'stripe-commerce-payments') so the gate can "
+                "verify the Stripe webhook subscription. See "
+                "docs/runbooks/commerce-stripe-onboarding.md."
+            ),
+        )
+
     runner = list_runner or default_list_runner
     try:
         returncode, list_output = runner(hermes_bin)
     except FileNotFoundError as exc:
         return EXIT_CONFIG_ERROR, "", f"ERROR: hermes binary not found: {hermes_bin} ({exc})"
-    except subprocess.SubprocessError as exc:
-        return EXIT_CONFIG_ERROR, "", f"ERROR: `{hermes_bin} webhook list` failed: {exc}"
+    except (OSError, subprocess.SubprocessError) as exc:
+        # Any other launch/run failure (PermissionError, not-executable,
+        # TimeoutExpired, ...) is a gate/runtime error — fail closed, never a
+        # silent pass or an uncaught traceback.
+        return EXIT_CONFIG_ERROR, "", f"ERROR: `{hermes_bin} webhook list` could not run: {exc}"
 
     if returncode != 0:
         # Fail closed: a CLI failure means we cannot determine subscription
