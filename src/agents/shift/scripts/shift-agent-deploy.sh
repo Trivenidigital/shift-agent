@@ -88,6 +88,17 @@ install_artifacts() {
         rm -rf /opt/shift-agent/commerce
     fi
 
+    # Catering deposit helper module (PR feat/commerce-slice2-catering-deposit-caller).
+    # catering-mint-deposit + apply-catering-owner-decision's deposit hook both
+    # import `deposit._should_mint_deposit` etc. Without this install line the
+    # imports silently fail on the VPS (script paths are /usr/local/bin/, not
+    # the repo layout) — PR reviewer B-BLOCKER-1 fix. Guarded for rollback.
+    if [ -f src/agents/catering/deposit.py ]; then
+        install -m 644 src/agents/catering/deposit.py /opt/shift-agent/deposit.py
+    else
+        rm -f /opt/shift-agent/deposit.py
+    fi
+
     # Templates — Shift-Agent message templates (idempotent: shared dir filled by multiple agents below)
     install -d /opt/shift-agent/templates
     install -m 644 src/agents/shift/templates/* /opt/shift-agent/templates/

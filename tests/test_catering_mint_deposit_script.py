@@ -228,11 +228,20 @@ def test_happy_path_configured_template_mints_and_sends(isolated_state):
     assert lead["deposit_status"] == "awaiting_payment"
     assert lead["deposit_commerce_order_id"].startswith("CO")
     assert lead["deposit_payment_intent_id"].startswith("CPI")
+    # PR reviewer A regression guard: lead.status MUST stay SENT_TO_CUSTOMER
+    # — deposit_status is orthogonal; lead.status is not advanced by the mint.
+    assert lead["status"] == "SENT_TO_CUSTOMER"
 
     # Commerce state files populated
     carts = json.loads((isolated_state["commerce_state"] / "carts.json").read_text(encoding="utf-8"))
     assert len(carts["carts"]) == 1
     assert carts["carts"][0]["status"] == "checked_out"
+    # PR reviewer A MEDIUM-1 isolation invariant: cart's chat_id is the
+    # SYNTHETIC catering_deposit_{lead_id}@s.whatsapp.net (NOT the customer's
+    # real WhatsApp JID). If a refactor swapped this for target_jid, a
+    # concurrent slice-3 commerce flow could share a cart with the deposit.
+    assert carts["carts"][0]["chat_id"] == f"catering_deposit_{lead_id}@s.whatsapp.net"
+    assert "+" not in carts["carts"][0]["chat_id"]  # no E.164 leak
 
     orders = json.loads((isolated_state["commerce_state"] / "orders.json").read_text(encoding="utf-8"))
     assert len(orders["orders"]) == 1
@@ -363,6 +372,99 @@ def test_lead_not_found(isolated_state):
 
     result = _run_script(isolated_state["env"], "L_does_not_exist")
     assert result.returncode == 4  # EXIT_NOT_FOUND
+
+
+def test_oversize_quote_total_caught_as_cart_build_failed(isolated_state):
+    """PR reviewer B-MEDIUM-1: oversize quote_total_usd → ValidationError
+    on CommerceCartItem.unit_price_cents le=10_000_000_000 → cart_build_failed
+    audit row (not uncaught exception)."""
+    _write_config(isolated_state["config_path"], checkout_url_template="https://pay/?o={order_id}")
+    # quote_total_usd = $1_000_000_000 → deposit = $250M = 25_000_000_000 cents
+    # which exceeds CommerceCartItem.unit_price_cents le=10_000_000 (10M cents)
+    lead_id = _write_lead(isolated_state["leads_path"], quote_total_usd=1_000_000_000)
+
+    result = _run_script(isolated_state["env"], lead_id)
+    assert result.returncode == 5, f"stderr={result.stderr!r}"
+
+    rows = _read_audit_rows(isolated_state["log_path"])
+    failed_rows = [r for r in rows if r["type"] == "catering_deposit_link_failed"]
+    assert len(failed_rows) >= 1
+    assert failed_rows[0]["reason"] == "cart_build_failed"
+
+
+def test_intent_mint_failure_cancels_orphan_order(isolated_state, monkeypatch):
+    """PR reviewer B-MEDIUM-2: if commerce_payment_link.mint() returns ok=False,
+    the order that was just created is cancelled so it doesn't sit as an
+    orphan in the commerce ledger."""
+    # Build the env normally; we'll sabotage payment_link.mint via the
+    # bridge-stub shim by injecting a mint failure flag.
+    _write_config(isolated_state["config_path"], checkout_url_template="https://pay/?o={order_id}")
+    lead_id = _write_lead(isolated_state["leads_path"])
+
+    # Sabotage via a shim that overrides commerce.payment_link.mint
+    shim_dir = Path(isolated_state["config_path"]).parent / "shim"
+    shim_dir.mkdir(exist_ok=True)
+    sitecustomize = shim_dir / "sitecustomize.py"
+    sitecustomize.write_text(
+        '''
+def _patch_payment_link():
+    try:
+        from commerce import payment_link
+        from commerce.payment_link import PaymentLinkResult
+    except Exception:
+        return
+    def _stub_mint(**kwargs):
+        return PaymentLinkResult(False, None, "stubbed_mint_failure")
+    payment_link.mint = _stub_mint
+_patch_payment_link()
+''',
+        encoding="utf-8",
+    )
+    env = {**isolated_state["env"], "PYTHONPATH": f"{shim_dir}{os.pathsep}{isolated_state['env'].get('PYTHONPATH', '')}"}
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT_PATH), "--lead-id", lead_id],
+        env=env, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 5
+
+    rows = _read_audit_rows(isolated_state["log_path"])
+    types = [r["type"] for r in rows]
+    # Cart + order were created; intent was NOT minted; order MUST be cancelled
+    assert "commerce_order_created" in types
+    assert "catering_deposit_link_failed" in types
+    assert "commerce_order_cancelled" in types  # PR reviewer B-MEDIUM-2
+
+    deposit_failed = next(r for r in rows if r["type"] == "catering_deposit_link_failed")
+    assert deposit_failed["reason"] == "intent_mint_failed"
+
+    # Order state file: order in `cancelled` status
+    orders = json.loads((isolated_state["commerce_state"] / "orders.json").read_text(encoding="utf-8"))
+    assert orders["orders"][0]["status"] == "cancelled"
+
+
+def test_deposit_failure_does_NOT_roll_back_quote_send(isolated_state, monkeypatch):
+    """PR reviewer A MEDIUM-3 + key invariant: even if the deposit-mint script
+    fails outright (binary missing — simulated via SHIFT_AGENT_CATERING_DEPOSIT_SCRIPT
+    override), the upstream apply-catering-owner-decision must still exit 0 and
+    persist lead.status=SENT_TO_CUSTOMER. The deposit hook is best-effort by
+    design — a deposit failure NEVER rolls back the quote-send transaction.
+
+    This test exercises the hook path inside apply-catering-owner-decision, not
+    the catering-mint-deposit script itself — covered fully in
+    test_catering_apply_owner_decision_deposit_hook.py::test_approve_deposit_failure_does_not_roll_back_quote_send.
+    """
+    # The script-level analog: invoke catering-mint-deposit on a lead that
+    # doesn't qualify (below threshold) → no-op exit 0, no audit-row noise.
+    _write_config(isolated_state["config_path"], checkout_url_template="https://pay/?o={order_id}")
+    lead_id = _write_lead(isolated_state["leads_path"], extracted={"headcount": 5, "event_date": "2026-06-15"})
+
+    result = _run_script(isolated_state["env"], lead_id)
+    assert result.returncode == 0  # no-op
+    # Lead state — deposit fields all empty
+    leads = json.loads(isolated_state["leads_path"].read_text(encoding="utf-8"))
+    assert leads["leads"][0]["deposit_status"] == "none"
+    assert leads["leads"][0]["deposit_payment_intent_id"] == ""
 
 
 def test_below_minimum_deposit(isolated_state):

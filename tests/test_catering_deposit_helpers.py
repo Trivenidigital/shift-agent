@@ -166,6 +166,15 @@ def test_compute_amount_round_down_to_zero():
     assert _compute_deposit_amount_cents(1, 0.001) == 0
 
 
+def test_compute_amount_fractional_pct_125_percent():
+    """PR reviewer A MEDIUM-2: lock _compute + _format both at deposit_pct=0.125.
+
+    $800 × 12.5% = $100.00 = 10000 cents.
+    """
+    assert _compute_deposit_amount_cents(800, 0.125) == 10000
+    assert _format_pct(0.125) == "12.5%"
+
+
 # ─────────────────────────────────────────────────────────────────
 # _format_pct
 # ─────────────────────────────────────────────────────────────────
@@ -195,6 +204,8 @@ def test_render_event_anchor_preferred():
     assert "$150.00" in reply
     assert "(25% of total)" in reply
     assert URL in reply
+    # PR reviewer B-LOW-1 softening: lead-in across all branches
+    assert reply.startswith("Thanks")
 
 
 def test_render_name_anchor_fallback_when_no_event():
@@ -210,10 +221,11 @@ def test_render_generic_last_resort():
     lead = _lead(headcount=None, event_date=None, customer_name=None)
     reply = _render_customer_reply(lead, 15000, 0.25, URL)
     assert "your catering booking" in reply
-    assert "Thanks," not in reply
     assert "100-guest" not in reply
     assert "$150.00" in reply
     assert URL in reply
+    # PR reviewer B-LOW-1 softening: all branches start with "Thanks"
+    assert reply.startswith("Thanks")
 
 
 def test_render_event_anchor_when_only_headcount():

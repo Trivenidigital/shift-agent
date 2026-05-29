@@ -904,15 +904,23 @@ def _maybe_invoke_deposit_hook(cfg, lead, lead_id: str) -> None:
     fallback to the repo path for in-place test runs.
     """
     import subprocess
+    # Try /opt/shift-agent (deployed VPS layout — deploy script installs
+    # deposit.py there) then fall back to the repo path for in-place test
+    # runs. The /opt/shift-agent path is already on sys.path (line 47 above).
     try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
         from deposit import _should_mint_deposit  # type: ignore
-    except ImportError as e:
-        sys.stderr.write(
-            f"WARN: catering deposit helper import failed (non-fatal); "
-            f"skipping deposit hook for {lead_id}: {e}\n"
-        )
-        return
+    except ImportError:
+        # Fallback for in-repo test invocations: walk to src/agents/catering
+        try:
+            _repo_root = Path(__file__).resolve().parent.parent.parent.parent.parent
+            sys.path.insert(0, str(_repo_root / "src" / "agents" / "catering"))
+            from deposit import _should_mint_deposit  # type: ignore
+        except ImportError as e:
+            sys.stderr.write(
+                f"WARN: catering deposit helper import failed (non-fatal); "
+                f"skipping deposit hook for {lead_id}: {e}\n"
+            )
+            return
     if not _should_mint_deposit(cfg, lead):
         return
     script_paths = [

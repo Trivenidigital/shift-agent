@@ -106,22 +106,21 @@ def _render_customer_reply(lead, deposit_amount_cents: int, deposit_pct: float, 
     headcount = lead.extracted.headcount if lead.extracted else None
     customer_name = (lead.customer_name or "").strip()
 
+    # PR reviewer B-LOW-1: softer "Thanks for confirming!" lead-in across all
+    # three branches for consistent first-customer tone.
     if event_date and headcount:
-        # Preferred form
         return (
-            f"To confirm your {headcount}-guest event on {event_date}, "
-            f"please pay {amount_str} ({pct_str} of total): {url}"
+            f"Thanks for confirming! To finalize your {headcount}-guest event on "
+            f"{event_date}, please pay {amount_str} ({pct_str} of total): {url}"
         )
     if customer_name:
-        # Fallback form — name only, no event details
         return (
             f"Thanks, {customer_name}! To confirm your booking, "
             f"please pay {amount_str} ({pct_str} of total): {url}"
         )
-    # Last resort — neither anchor available
     return (
-        f"To confirm your catering booking, please pay "
-        f"{amount_str} ({pct_str} of total): {url}"
+        f"Thanks for confirming! To finalize your catering booking, "
+        f"please pay {amount_str} ({pct_str} of total): {url}"
     )
 
 

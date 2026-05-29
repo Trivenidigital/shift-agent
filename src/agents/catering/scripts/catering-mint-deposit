@@ -33,8 +33,13 @@ from pathlib import Path
 from typing import Optional
 
 sys.path.insert(0, "/opt/shift-agent")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "agents" / "catering"))
+# Repo-relative fallback for in-repo test runs (deployed VPS already has
+# /opt/shift-agent on sys.path above). Walk up from /src/agents/catering/scripts/
+# to repo root then add src/platform + src/agents/catering.
+_THIS = Path(__file__).resolve()
+_REPO_ROOT = _THIS.parent.parent.parent.parent.parent  # scripts/<file> -> catering -> agents -> src -> repo
+sys.path.insert(0, str(_REPO_ROOT / "src" / "platform"))
+sys.path.insert(0, str(_REPO_ROOT / "src" / "agents" / "catering"))
 
 from safe_io import (  # noqa: E402
     FileLock, atomic_write_json, customer_now,
@@ -201,19 +206,30 @@ def main() -> int:
 
         # Build synthetic cart with isolated chat_id (Reviewer B HIGH-1 + A MEDIUM-1)
         synthetic_chat_id = f"catering_deposit_{lead.lead_id}@s.whatsapp.net"
-        cart_result = commerce_cart.add_item(
-            state_path=COMMERCE_CARTS_PATH,
-            decisions_log_path=LOG_PATH,
-            sender_phone=str(lead.customer_phone),
-            sender_lid=None,
-            chat_id=synthetic_chat_id,
-            sku=f"CATERING-DEPOSIT-{lead.lead_id}",
-            display_name=f"Catering deposit for {lead.customer_name or 'event'}"[:200],
-            quantity=1,
-            unit="each",
-            unit_price_cents=deposit_amount_cents,
-            currency="USD",
-        )
+        # PR reviewer B-MEDIUM-1: wrap in try/except so oversize deposit_amount_cents
+        # (which would trip CommerceCartItem.unit_price_cents le=10_000_000_000)
+        # produces a clean cart_build_failed audit row instead of an uncaught
+        # ValidationError that exits the script with traceback.
+        try:
+            cart_result = commerce_cart.add_item(
+                state_path=COMMERCE_CARTS_PATH,
+                decisions_log_path=LOG_PATH,
+                sender_phone=str(lead.customer_phone),
+                sender_lid=None,
+                chat_id=synthetic_chat_id,
+                sku=f"CATERING-DEPOSIT-{lead.lead_id}",
+                display_name=f"Catering deposit for {lead.customer_name or 'event'}"[:200],
+                quantity=1,
+                unit="each",
+                unit_price_cents=deposit_amount_cents,
+                currency="USD",
+            )
+        except ValidationError as e:
+            _emit_deposit_link_failed(
+                lead_id=lead.lead_id, reason="cart_build_failed",
+                detail=f"ValidationError: {str(e)[:400]}",
+            )
+            return EXIT_SCHEMA_VIOLATION
         if not cart_result.ok:
             _emit_deposit_link_failed(
                 lead_id=lead.lead_id, reason="cart_build_failed", detail=cart_result.detail,
@@ -244,6 +260,25 @@ def main() -> int:
             checkout_url_template=cfg.commerce.payment_checkout_url_template,
         )
         if not intent_result.ok:
+            # PR reviewer B-MEDIUM-2: cancel the order so it doesn't sit as an
+            # orphan in the commerce ledger. The cart was built, the order was
+            # created, but no intent exists — without cancellation the order
+            # would accumulate as silent drift until the §12a watchdog catches
+            # it. Best-effort: if cancel itself fails we still audit the original
+            # intent_mint_failed.
+            try:
+                commerce_order.cancel(
+                    state_path=COMMERCE_ORDERS_PATH,
+                    decisions_log_path=LOG_PATH,
+                    order_id=order_result.order.order_id,
+                    reason="intent_mint_failed_orphan_cleanup",
+                    actor="cron",
+                )
+            except Exception as cancel_err:  # noqa: BLE001 — best-effort cleanup
+                sys.stderr.write(
+                    f"WARN: order cancel-on-intent-fail failed (non-fatal): "
+                    f"{type(cancel_err).__name__}: {cancel_err}\n"
+                )
             _emit_deposit_link_failed(
                 lead_id=lead.lead_id, reason="intent_mint_failed",
                 detail=intent_result.detail,
