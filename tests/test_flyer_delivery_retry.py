@@ -71,6 +71,17 @@ def _asset(asset_id: str, kind: str, path: str, *, status: str = "pending", mid:
     )
 
 
+def _png_header_bytes(width: int, height: int) -> bytes:
+    """Minimal valid PNG header (8-byte signature + IHDR chunk) carrying the
+    given width/height. Enough for the Pillow-free dimension reader; no pixel
+    data is needed because the reader only consumes the IHDR header."""
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + (13).to_bytes(4, "big") + b"IHDR"
+        + int(width).to_bytes(4, "big") + int(height).to_bytes(4, "big")
+    )
+
+
 def _project(tmp_path: Path) -> FlyerProject:
     kinds = [
         ("A0001", "final_whatsapp_image", "wa.png"),
@@ -163,9 +174,19 @@ def test_delivery_retry_selects_only_unsent_assets(tmp_path, monkeypatch):
 def test_final_asset_captions_label_each_customer_file(tmp_path, monkeypatch):
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     mod = _load_script()
-    project = _project(tmp_path)
+    specs = [
+        ("A0001", "final_whatsapp_image", "wa.png", (1080, 1350)),
+        ("A0002", "final_instagram_post", "post.png", (1080, 1080)),
+        ("A0003", "final_instagram_story", "story.png", (1080, 1920)),
+        ("A0004", "final_printable_pdf", "print.pdf", None),
+    ]
+    assets = []
+    for asset_id, kind, name, shape in specs:
+        path = tmp_path / name
+        path.write_bytes(b"%PDF-1.4 minimal pdf" if shape is None else _png_header_bytes(*shape))
+        assets.append(_asset(asset_id, kind, str(path)))
 
-    labels = [mod._caption_for_asset(asset) for asset in project.assets]
+    labels = [mod._caption_for_asset(asset) for asset in assets]
 
     assert labels == [
         "WhatsApp flyer - ready to forward in WhatsApp.",
@@ -173,6 +194,61 @@ def test_final_asset_captions_label_each_customer_file(tmp_path, monkeypatch):
         "Instagram story - vertical story/status version.",
         "Printable PDF - best for printing or sharing as a document.",
     ]
+
+
+def test_png_pixel_dimensions_reads_shape_without_pillow(tmp_path):
+    from agents.flyer.render import png_pixel_dimensions
+
+    path = tmp_path / "story.png"
+    path.write_bytes(_png_header_bytes(1080, 1920) + b"\x00" * 16)
+
+    assert png_pixel_dimensions(path) == (1080, 1920)
+
+
+def test_png_pixel_dimensions_returns_none_for_non_png(tmp_path):
+    from agents.flyer.render import png_pixel_dimensions
+
+    path = tmp_path / "not.png"
+    path.write_bytes(b"asset")
+
+    assert png_pixel_dimensions(path) is None
+
+
+def test_caption_keeps_channel_claim_when_asset_matches_format_shape(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    mod = _load_script()
+    story = tmp_path / "story.png"
+    story.write_bytes(_png_header_bytes(1080, 1920))
+    asset = _asset("A0003", "final_instagram_story", str(story))
+
+    assert mod._caption_for_asset(asset) == "Instagram story - vertical story/status version."
+
+
+def test_caption_downgrades_when_asset_shape_mismatches_format(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    mod = _load_script()
+    # A 1080x1080 square mislabeled as an instagram story (which must be 1080x1920):
+    # the truthfulness gate must not let the "story" claim reach the customer.
+    story = tmp_path / "story.png"
+    story.write_bytes(_png_header_bytes(1080, 1080))
+    asset = _asset("A0003", "final_instagram_story", str(story))
+
+    caption = mod._caption_for_asset(asset)
+
+    assert "story" not in caption.lower()
+    assert caption == "Your final flyer package is ready."
+
+
+def test_caption_keeps_pdf_claim_regardless_of_file_bytes(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    mod = _load_script()
+    # PDF has no fixed pixel shape (expected_shape is None), so the truthfulness
+    # gate must never downgrade its caption even when the bytes are not a PNG.
+    pdf = tmp_path / "print.pdf"
+    pdf.write_bytes(b"%PDF-1.4 not a png")
+    asset = _asset("A0004", "final_printable_pdf", str(pdf))
+
+    assert mod._caption_for_asset(asset) == "Printable PDF - best for printing or sharing as a document."
 
 
 def test_record_asset_delivery_persists_success_immediately(tmp_path, monkeypatch):
