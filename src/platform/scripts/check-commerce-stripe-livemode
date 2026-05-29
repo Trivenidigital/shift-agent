@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+"""check-commerce-stripe-livemode — deploy-time Stripe livemode-match gate.
+
+Thin wrapper that prepends staging + /opt/shift-agent to sys.path so the
+commerce_livemode_gate module (and the schemas it imports) resolve whether run
+from the staging tarball (preferred) or the installed /usr/local/bin copy.
+Mirrors src/platform/scripts/check-commerce-webhook-subscription.
+
+Exit codes: 0 pass/skip (dormant-safe), 1 livemode mismatch (fail-closed),
+2 config/runtime error. See tasks/commerce-slice3.1-livemode-gate-design.md.
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+
+def _add_import_roots() -> None:
+    here = Path(__file__).resolve()
+    candidates = [
+        here.parents[1],            # .../src/platform when run from staging or checkout
+        Path("/opt/shift-agent"),   # installed location
+    ]
+    try:
+        candidates.append(here.parents[3] / "src" / "platform")
+    except IndexError:
+        pass
+    roots: list[str] = []
+    for c in candidates:
+        s = str(c)
+        if c.exists() and s not in sys.path and s not in roots:
+            roots.append(s)
+    sys.path[:0] = roots
+
+
+_add_import_roots()
+
+from commerce_livemode_gate import main as _main  # noqa: E402
+
+
+def main(argv: list[str] | None = None) -> int:
+    return _main(argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
