@@ -17,12 +17,13 @@ probes / required deploy-smoke, no customer sends, no speculative agents, no PR-
 - [x] **Item 1 — Commerce slice-3.5 webhook-subscription deploy gate** ✅ MERGED PR #340 (origin/main f3156a3). 20 tests, 3 Codex rounds → CLEAN. Dormant-verified on live VPS. Not yet deployed (dormant-safe).
 - [x] **Item 2 — Commerce slice-3.1 Stripe livemode-match deploy gate** ✅ MERGED PR #342 (origin/main 7aa3a10). 13 tests (33/33 both suites), Codex CLEAN round 1. urllib (no SDK). Dormant-verified on live VPS. Not yet deployed.
 - [x] **Item 3 — EOD reconcile deploy-smoke coverage** ✅ MERGED PR #343 (origin/main 79f7002). Added `eod-reconcile --force --dry-run` to smoke (snapshot path → temp). Codex 2 rounds → CLEAN. Live-verified.
-- [ ] **Item 4 — Daily Brief deploy-smoke coverage** (branch `feat/daily-brief-smoke-coverage`)
-  - Same gap/pattern as EOD: Agent #4 LIVE, timer-enabled-checked but aggregation/render never smoke-run.
-  - [x] Add `send-daily-brief --force --dry-run` to `shift-agent-smoke-test.sh` (skips bridge POST + log appends + watchdog Pushover; SHIFT_AGENT_BRIEF_SENTINEL_PATH → temp so the FileLock lock lands in temp). Guarded `[ -x ]`.
-  - [x] bash -n clean + live VPS probe: exit 0, brief renders, before/after diff shows NO new files under /opt (lock in temp).
-  - [ ] push → Codex review on main-vps → merge if clean
-- [ ] Item 5+ — more Shift/Catering dormant-safe hardening. Deferred: audit-log §12a freshness watchdog (needs write-rate data + heartbeat design — false-alarm risk on quiet pilot VPS).
+- [x] **Item 4 — Daily Brief deploy-smoke coverage** ✅ MERGED PR #344 (origin/main c939f98). `send-daily-brief --force --dry-run` (sentinel → temp). Codex CLEAN (after a re-run with file-specific prompt). Live-verified.
+- [ ] **Item 5 — Catering pattern-report deploy-smoke coverage** (branch `feat/catering-pattern-report-smoke-coverage`)
+  - Survey: catering had schema + classifier + SKILL smoke coverage but core scripts unsmoked. catering-lead-reconcile rejected (operator tool, required args, hardcoded live lock). catering-pattern-report (Agent #2 hallucination-scan, timer-driven, has --dry-run) = the gap, analogous to EOD/Daily Brief.
+  - [x] Add `catering-pattern-report --dry-run` to smoke (writable outputs --lessons/--learning-summary[-lock] → temp; dry-run provably skips all writes). Guarded `[ -x ]`.
+  - [x] bash -n clean + live VPS probe: exit 0, report runs ("0 findings, No-op"), before/after diff shows NO new files under /opt.
+  - [ ] push → Codex review (catering-specific prompt) → merge if clean
+- [ ] Item 6+ — continue agent-by-agent dormant-safe hardening (Multi-Location #3, Compliance #13, Expense #21, P&L #22, WhatsApp-ordering/commerce). Deferred: audit-log §12a freshness watchdog (needs write-rate + heartbeat design).
 
 
 

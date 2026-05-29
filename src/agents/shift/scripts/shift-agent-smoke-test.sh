@@ -755,6 +755,34 @@ else
     echo "⚠  send-daily-brief not installed — skipping Agent #4 smoke check"
 fi
 
+# 10d. Agent #2 Catering pattern-report — exercise the lead-extraction
+# hallucination-scan aggregation. It is timer-driven (catering-pattern-report.
+# timer) but never smoke-run, so a break in the scan/report logic would surface
+# only when the daily timer fires. `--dry-run` reads the live decisions.log /
+# leads / proposals / menu read-only and prints the report, returning BEFORE any
+# lessons.md append or learning-summary write (both guarded by `if not
+# args.dry_run`). The writable outputs (--lessons / --learning-summary[-lock])
+# are additionally redirected to a temp dir as defense-in-depth, so nothing can
+# land under /opt/shift-agent. Guarded with [ -x ] for rollback.
+if [ -x /usr/local/bin/catering-pattern-report ]; then
+    CPR_SMOKE_DIR="$(mktemp -d /tmp/catering-report-smoke.XXXXXX)"
+    chown shift-agent:shift-agent "$CPR_SMOKE_DIR"
+    if ! sudo -u shift-agent "$PY" /usr/local/bin/catering-pattern-report --dry-run \
+            --lessons "$CPR_SMOKE_DIR/catering.md" \
+            --learning-summary "$CPR_SMOKE_DIR/learning-summary.json" \
+            --learning-summary-lock "$CPR_SMOKE_DIR/learning-summary.json.lock" \
+            > "$CPR_SMOKE_DIR/out.txt" 2>&1; then
+        echo "FAIL: catering-pattern-report --dry-run failed (Agent #2 pattern-scan regression)" >&2
+        cat "$CPR_SMOKE_DIR/out.txt" >&2
+        rm -rf "$CPR_SMOKE_DIR"
+        exit 1
+    fi
+    rm -rf "$CPR_SMOKE_DIR"
+    echo "✓ catering-pattern-report --dry-run (Agent #2 pattern-scan path)"
+else
+    echo "⚠  catering-pattern-report not installed — skipping Agent #2 smoke check"
+fi
+
 # 11+12. Agent #21 Expense Bookkeeper checks — only run when the agent's
 # venv is present. Agent #21 ships disabled-default and its venv at
 # /opt/shift-agent/venv/ is created by the operator's bootstrap step
