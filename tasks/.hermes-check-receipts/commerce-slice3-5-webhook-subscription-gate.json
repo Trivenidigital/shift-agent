@@ -1,0 +1,15 @@
+{
+  "topic": "commerce-slice3-5-webhook-subscription-gate",
+  "task_text": "commerce-slice3-5-webhook-subscription-gate — deploy-time fail-closed gate asserting the stripe-commerce-payments hermes webhook subscription is registered when commerce.provider=stripe, dormant-safe skip otherwise",
+  "completed_at": "2026-05-29T21:57:04Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 4,
+  "hermes_step_count": 6,
+  "files_to_read_first": [
+    "src/agents/shift/scripts/shift-agent-deploy.sh",
+    "src/platform/schemas.py",
+    "tasks/hermes-commerce-slice3-provider-webhook-design.md",
+    "src/platform/scripts/check-hermes-config-yaml",
+    "tests/test_catering_v02_scripts.py"
+  ]
+}
