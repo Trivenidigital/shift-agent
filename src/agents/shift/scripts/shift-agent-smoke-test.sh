@@ -700,6 +700,33 @@ print('catering schema + transition table validated')
 fi
 echo "✓ catering schema + transition table"
 
+# 10b. Agent #5 EOD reconcile — exercise the aggregation path. `--force`
+# bypasses the time self-gate; `--dry-run` aggregates + prints JSON then returns
+# BEFORE any snapshot write, audit-log append, or Pushover send. The pre-restart
+# import gates do not exercise eod-reconcile's aggregation, so a break there
+# would otherwise surface only when the nightly EOD timer fires.
+#
+# Strictly no-write under /opt/shift-agent: SHIFT_AGENT_EOD_SNAPSHOT_PATH is
+# redirected to a throwaway temp dir so the FileLock lock-file (O_CREAT) and the
+# snapshot-dir mkdir land in temp, not production state (Codex review
+# 2026-05-29). Aggregation still reads the live decisions.log read-only.
+# Guarded with [ -x ] for rollback to tarballs that predate the script.
+if [ -x /usr/local/bin/eod-reconcile ]; then
+    EOD_SMOKE_DIR="$(mktemp -d /tmp/eod-smoke.XXXXXX)"
+    chown shift-agent:shift-agent "$EOD_SMOKE_DIR"
+    if ! sudo -u shift-agent env SHIFT_AGENT_EOD_SNAPSHOT_PATH="$EOD_SMOKE_DIR/eod-snapshot.json" \
+            "$PY" /usr/local/bin/eod-reconcile --force --dry-run > "$EOD_SMOKE_DIR/out.txt" 2>&1; then
+        echo "FAIL: eod-reconcile --force --dry-run failed (Agent #5 aggregation regression)" >&2
+        cat "$EOD_SMOKE_DIR/out.txt" >&2
+        rm -rf "$EOD_SMOKE_DIR"
+        exit 1
+    fi
+    rm -rf "$EOD_SMOKE_DIR"
+    echo "✓ eod-reconcile --force --dry-run (Agent #5 aggregation path)"
+else
+    echo "⚠  eod-reconcile not installed — skipping Agent #5 smoke check"
+fi
+
 # 11+12. Agent #21 Expense Bookkeeper checks — only run when the agent's
 # venv is present. Agent #21 ships disabled-default and its venv at
 # /opt/shift-agent/venv/ is created by the operator's bootstrap step
