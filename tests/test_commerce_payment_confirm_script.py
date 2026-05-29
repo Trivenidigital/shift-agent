@@ -472,7 +472,8 @@ def test_missing_env_vars_refused(isolated_state):
 def test_reference_reuse_across_orders_blocked(isolated_state):
     """A payment_reference already bound to order A cannot confirm order B.
     Slice-1 register_reference enforces this; the reconciler emits the
-    confirmation_failed audit row."""
+    confirmation_failed audit row with the renamed reason that disambiguates
+    from slice-1's commerce_payment_dedup_blocked (PR-2 review A-MEDIUM-2)."""
     _write_config(isolated_state["config_path"])
     # Pre-populate the reference ledger with pi_test_abc123 bound to CO99999
     isolated_state["references_path"].parent.mkdir(parents=True, exist_ok=True)
@@ -490,8 +491,65 @@ def test_reference_reuse_across_orders_blocked(isolated_state):
 
     rows = _read_audit_rows(isolated_state["log_path"])
     failed = next(r for r in rows if r["type"] == "commerce_payment_confirmation_failed")
-    assert failed["reason"] == "reference_reused"
+    assert failed["reason"] == "reference_reused_other_order"
 
     # Intent NOT confirmed (left in original status)
     intents = json.loads(isolated_state["intents_path"].read_text())
     assert intents["intents"][0]["status"] == "sent"
+
+
+def test_illegal_transition_emits_audit_and_exits_cleanly(isolated_state):
+    """PR-2 review A-HIGH-1 + A-HIGH-2: order in cancelled state (e.g., from
+    slice-2.5 bridge_send_failed orphan cleanup) → IllegalCommerceTransition
+    is caught, confirmation_failed audit emitted, exit 5 (not crash)."""
+    _write_config(isolated_state["config_path"])
+    _write_intent(isolated_state["intents_path"])
+    _write_order(isolated_state["orders_path"], status="cancelled")
+    _write_lead(isolated_state["leads_path"])
+
+    event = _build_stripe_event()
+    result = _run_script(isolated_state, raw_body=json.dumps(event).encode(),
+                          stripe_construct_event_returns=event)
+    assert result.returncode == 5  # EXIT_SCHEMA_VIOLATION
+
+    rows = _read_audit_rows(isolated_state["log_path"])
+    failed = next(r for r in rows if r["type"] == "commerce_payment_confirmation_failed")
+    assert failed["reason"] == "illegal_transition"
+    assert "'cancelled' -> 'paid' refused" in failed["detail"]
+
+
+def test_sdk_not_installed_distinct_from_signature_invalid(isolated_state, monkeypatch):
+    """PR-2 review B-LOW-1: missing stripe-python surfaces as sdk_not_installed
+    (exit 8), NOT signature_invalid (exit 7). Operator gets correct alert."""
+    import sys as _sys
+    monkeypatch.setitem(_sys.modules, "stripe", None)
+    _write_config(isolated_state["config_path"])
+    _write_intent(isolated_state["intents_path"])
+    _write_order(isolated_state["orders_path"])
+    _write_lead(isolated_state["leads_path"])
+
+    # Use a shim that does NOT install the stripe stub (we want the real
+    # import path to fail). Bypass _run_script helper for this single case.
+    env = {
+        **os.environ,
+        "SHIFT_AGENT_CONFIG_PATH": str(isolated_state["config_path"]),
+        "SHIFT_AGENT_LEADS_PATH": str(isolated_state["leads_path"]),
+        "SHIFT_AGENT_LOG_PATH": str(isolated_state["log_path"]),
+        "COMMERCE_INTENTS_PATH": str(isolated_state["intents_path"]),
+        "COMMERCE_ORDERS_PATH": str(isolated_state["orders_path"]),
+        "COMMERCE_REFERENCES_PATH": str(isolated_state["references_path"]),
+        "STRIPE_WEBHOOK_SECRET": "whsec_test",
+        "STRIPE_SIGNATURE": "t=1,v1=ignored",
+        "PYTEST_CURRENT_TEST": "smoke",
+    }
+    event = _build_stripe_event()
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT_PATH)],
+        input=json.dumps(event).encode(), env=env,
+        capture_output=True, timeout=30,
+    )
+    assert result.returncode == 8  # EXIT_DEPENDENCY_MISSING
+
+    rows = _read_audit_rows(isolated_state["log_path"])
+    failed = next(r for r in rows if r["type"] == "commerce_payment_confirmation_failed")
+    assert failed["reason"] == "sdk_not_installed"

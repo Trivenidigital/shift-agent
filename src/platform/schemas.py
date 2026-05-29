@@ -5313,13 +5313,15 @@ class CommercePaymentConfirmationFailed(_BaseEntry):
     lead_id: str = Field(default="", max_length=40)
     reason: Literal[
         "signature_invalid",
+        "sdk_not_installed",                # PR-2 review B-LOW-1: separate from signature_invalid
         "empty_payment_reference",
         "missing_metadata",
         "intent_not_found",
         "currency_mismatch",
         "amount_mismatch",
-        "reference_reused",
+        "reference_reused_other_order",     # PR-2 review A-MEDIUM-2: disambiguates from slice-1 dedup_blocked
         "mark_confirmed_failed",
+        "illegal_transition",               # PR-2 review A-HIGH-1: order in cancelled/voided/refunded
         "config_load_failed",
     ]
     detail: str = Field(default="", max_length=500)

@@ -87,13 +87,15 @@ def test_catering_deposit_paid_extras_forbidden():
 
 @pytest.mark.parametrize("reason", [
     "signature_invalid",
+    "sdk_not_installed",
     "empty_payment_reference",
     "missing_metadata",
     "intent_not_found",
     "currency_mismatch",
     "amount_mismatch",
-    "reference_reused",
+    "reference_reused_other_order",
     "mark_confirmed_failed",
+    "illegal_transition",
     "config_load_failed",
 ])
 def test_confirmation_failed_round_trip_all_reasons(reason):
