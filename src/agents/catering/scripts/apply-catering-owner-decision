@@ -874,9 +874,79 @@ def main() -> int:
             ),
         )
 
+    # Slice-2 catering deposit caller (PR feat/commerce-slice2-catering-deposit-caller).
+    # Hook fires AFTER LEADS_LOCK releases (above `with FileLock(LEADS_LOCK):`
+    # block dedented at line 875) — critical: subprocess MUST NOT run inside
+    # parent flock or it self-deadlocks re-acquiring the same lock
+    # (Reviewer A BLOCKER-1 fix from design review).
+    #
+    # The hook is best-effort: a deposit failure NEVER rolls back the quote
+    # send. Customer has the quote; deposit link is a follow-up.
+    # See tasks/hermes-commerce-slice2-catering-deposit-caller-design.md §2.
+    _maybe_invoke_deposit_hook(
+        cfg=cfg,
+        lead=store.leads[matched_idx],
+        lead_id=lead_id_for_output,
+    )
+
     print(json.dumps({"lead_id": lead_id_for_output, "new_status": "SENT_TO_CUSTOMER",
                       "outbound_sent": True, "outbound_message_id": mid_or_err}))
     return EXIT_OK
+
+
+def _maybe_invoke_deposit_hook(cfg, lead, lead_id: str) -> None:
+    """Slice-2 post-send hook: if the lead crosses the deposit threshold,
+    subprocess-invoke catering-mint-deposit. NEVER raises; failures are
+    journald-logged and best-effort audited.
+
+    Imports the threshold predicate from src/agents/catering/deposit.py.
+    Resolves the deposit script via /usr/local/bin (deployed path) with a
+    fallback to the repo path for in-place test runs.
+    """
+    import subprocess
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from deposit import _should_mint_deposit  # type: ignore
+    except ImportError as e:
+        sys.stderr.write(
+            f"WARN: catering deposit helper import failed (non-fatal); "
+            f"skipping deposit hook for {lead_id}: {e}\n"
+        )
+        return
+    if not _should_mint_deposit(cfg, lead):
+        return
+    script_paths = [
+        Path("/usr/local/bin/catering-mint-deposit"),
+        Path(__file__).resolve().parent / "catering-mint-deposit",
+    ]
+    script_path = next((p for p in script_paths if p.exists()), None)
+    if script_path is None:
+        sys.stderr.write(
+            f"WARN: catering-mint-deposit binary not found in any of "
+            f"{[str(p) for p in script_paths]}; skipping deposit for {lead_id}\n"
+        )
+        return
+    try:
+        result = subprocess.run(
+            [sys.executable, str(script_path), "--lead-id", lead_id],
+            capture_output=True, text=True, timeout=30,
+            check=False,
+        )
+        if result.returncode != 0:
+            sys.stderr.write(
+                f"catering-mint-deposit lead_id={lead_id} exit={result.returncode} "
+                f"stderr={result.stderr[:500]}\n"
+            )
+    except subprocess.TimeoutExpired:
+        sys.stderr.write(
+            f"catering-mint-deposit lead_id={lead_id} TIMED OUT after 30s; "
+            f"deposit will need operator re-invocation\n"
+        )
+    except Exception as e:  # noqa: BLE001 — hook is best-effort
+        sys.stderr.write(
+            f"WARN: catering-mint-deposit hook failed (non-fatal): "
+            f"{type(e).__name__}: {e}\n"
+        )
 
 
 if __name__ == "__main__":
