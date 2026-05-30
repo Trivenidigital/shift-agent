@@ -224,6 +224,39 @@ The next qualifying owner-approve will mint a real Stripe Payment Link instead o
 
 ---
 
+## Deploy gates protecting activation
+
+Once commerce is active for Stripe — `commerce.enabled: true` **and**
+`commerce.provider: stripe` — **every subsequent `shift-agent-deploy` runs two
+fail-closed pre-restart gates** that verify the activation is still sound. When
+commerce is dormant (`provider: placeholder`, or `enabled: false`) both gates
+**skip cleanly (exit 0)** and never affect pre-activation deploys.
+
+1. **`check-commerce-webhook-subscription`** (`commerce_webhook_gate.py`) —
+   asserts `cfg.commerce.webhook_subscription_name` (default
+   `stripe-commerce-payments`) appears in `hermes webhook list`. If the
+   subscription is missing it aborts the deploy (exit 1):
+   `FATAL: commerce.provider=stripe but webhook subscription
+   'stripe-commerce-payments' is not registered ...`. So **Step 5 must be
+   complete** before any deploy runs with commerce active, or
+   `payment_intent.succeeded` events would silently 404.
+
+2. **`check-commerce-stripe-livemode`** (`commerce_livemode_gate.py`) — reads
+   `STRIPE_API_KEY` from `/root/.hermes/.env`, calls
+   `GET https://api.stripe.com/v1/account`, and asserts the account's `livemode`
+   matches `cfg.commerce.stripe_livemode_expected`. A mismatch aborts the deploy
+   (exit 1) — this catches an `sk_live_` key while `stripe_livemode_expected:
+   false` (or vice versa) before a customer can pay against the wrong mode. A
+   missing/invalid key or unreachable Stripe aborts the deploy (exit 2).
+
+A gate failure triggers the deploy's normal **auto-rollback** to the previous
+tarball. Safe activation order: finish Step 5 (webhook subscribe) and set
+`stripe_livemode_expected` to match your key's mode **before** the first deploy
+that runs with commerce active. (Activation via the Step 8 config edit needs no
+deploy — these gates fire on the *next* deploy and keep the active config honest.)
+
+---
+
 ## Live mode rollout (only after multiple test-mode successes)
 
 When you're ready to accept real payments:
@@ -231,11 +264,11 @@ When you're ready to accept real payments:
 1. Generate a Stripe **live** API key (Developers → API keys → live mode toggle)
 2. Update `/root/.hermes/.env`: replace `STRIPE_API_KEY=sk_test_...` with `STRIPE_API_KEY=sk_live_...`
 3. Re-do Step 6 in **live mode** Stripe dashboard (different webhook endpoint configured per environment)
-4. Update `/opt/shift-agent/config.yaml`: set `stripe_livemode_expected: true` (slice-3 PR-3 livemode-match smoke will verify on next config-load)
+4. Update `/opt/shift-agent/config.yaml`: set `stripe_livemode_expected: true` (the deployed `check-commerce-stripe-livemode` gate verifies this matches the key's mode on the next deploy — see "Deploy gates protecting activation")
 5. `systemctl restart hermes-gateway` to pick up new env
 6. Smoke against a personal scratch lead with a $1 deposit (a real $1 charge you'll refund)
 
-The `stripe_livemode_expected` flag is a defense-in-depth check: if it's `false` but the API key returns `livemode=true`, the smoke gate would alarm. (Implementation lands in slice-3.1 — flag the check as a manual operator step until then.)
+The `stripe_livemode_expected` flag is a defense-in-depth check: the deployed `check-commerce-stripe-livemode` deploy gate **fails closed** if the API key's `livemode` doesn't match this flag — so a `sk_live_` key under `stripe_livemode_expected: false` aborts the next deploy rather than letting a customer pay against the wrong mode. (Now an automated deploy gate, not a manual step.)
 
 ---
 
