@@ -738,11 +738,17 @@ def _menu_overlay_payload(project: FlyerProject) -> dict[str, object]:
     # for title/location/contact.
     items = _menu_item_lines(project)
     schedule = _display_schedule(project)
+    # Required visible facts the menu item-cards don't show (offers, promotion
+    # end, pricing structure) — drawn in the title card so visual QA finds every
+    # required fact, not just items. Exclude anything already shown as a menu item.
+    item_norms = {_normalize_fact_text(i) for i in items}
+    extras = [c for c in _detail_clauses(project) if _normalize_fact_text(c) not in item_norms]
     return {
         "business": _display_business_name(project),
         "title": _display_title(project),
         "schedule": schedule,
         "items": items,
+        "extras": extras,
         "location": fact_value(project, "location", fallback=project.fields.venue_or_location) or "",
         "contact": fact_value(project, "contact_phone", fallback=project.fields.contact_info) or "",
     }
@@ -1377,27 +1383,37 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
             item_font = _font(ImageFont, max(18, int(width * 0.023)), bold=True)
             small_font = _font(ImageFont, max(15, int(width * 0.018)))
 
-            # Use the top-left blank label when present, and the lower green band
-            # for conversion details. This keeps the AI food art visible while
-            # avoiding the old debug-looking black transcript box.
-            title_box = (margin, int(height * 0.055), int(width * 0.58), int(height * 0.245))
-            draw.rounded_rectangle(title_box, radius=22, fill=(42, 86, 42, 232), outline=(255, 205, 74, 245), width=3)
-            y = title_box[1] + 20
-            # Brand line: the registered business name, shown above the campaign
-            # title (skipped when it equals the title to avoid a duplicate). This
-            # is the required `business_name` visible fact at the concept stage.
+            # Title card (top-left): brand + full campaign title + schedule +
+            # promo/offer facts. Content-adaptive height so no required visible
+            # fact is truncated — the card grows downward (capped above the menu
+            # panel). `extras` carries the offer/promotion/pricing facts the menu
+            # item cards don't show, so visual QA finds every required fact.
+            biz_font = _font(ImageFont, max(19, int(width * 0.025)), bold=True)
             business = str(menu_payload.get("business") or "").strip()
             title_text = str(menu_payload["title"]).strip()
+            box_x0, box_y0, box_x1 = margin, int(height * 0.055), int(width * 0.58)
+            inner_w = box_x1 - box_x0 - 44
+            card_lines: list[tuple[object, tuple[int, int, int, int], str]] = []
             if business and not _same_text(business, title_text):
-                biz_font = _font(ImageFont, max(19, int(width * 0.025)), bold=True, text=business)
-                for line in _wrap(draw, business, biz_font, title_box[2] - title_box[0] - 44)[:1]:
-                    draw.text((title_box[0] + 22, y), line, font=biz_font, fill=(255, 255, 245, 255))
-                    y += int(biz_font.size * 1.18)
-            for line in _wrap(draw, title_text, title_font, title_box[2] - title_box[0] - 44)[:2]:
-                draw.text((title_box[0] + 22, y), line, font=title_font, fill=(255, 218, 85, 255))
-                y += int(title_font.size * 1.05)
+                for ln in _wrap(draw, business, biz_font, inner_w)[:1]:
+                    card_lines.append((biz_font, (255, 255, 245, 255), ln))
+            for ln in _wrap(draw, title_text, title_font, inner_w)[:3]:
+                card_lines.append((title_font, (255, 218, 85, 255), ln))
             if menu_payload["schedule"]:
-                draw.text((title_box[0] + 24, y + 6), str(menu_payload["schedule"]), font=sub_font, fill=(255, 255, 240, 250))
+                for ln in _wrap(draw, str(menu_payload["schedule"]), sub_font, inner_w)[:1]:
+                    card_lines.append((sub_font, (255, 255, 240, 250), ln))
+            for extra in list(menu_payload.get("extras") or [])[:2]:
+                for ln in _wrap(draw, str(extra), small_font, inner_w)[:1]:
+                    card_lines.append((small_font, (255, 236, 205, 250), ln))
+            content_h = sum(int(getattr(f, "size", 18) * 1.2) for f, _c, _t in card_lines)
+            box_y1 = min(int(height * 0.585), box_y0 + content_h + 34)
+            draw.rounded_rectangle((box_x0, box_y0, box_x1, box_y1), radius=22, fill=(42, 86, 42, 232), outline=(255, 205, 74, 245), width=3)
+            y = box_y0 + 18
+            for f, color, ln in card_lines:
+                if y + getattr(f, "size", 18) > box_y1 - 10:
+                    break
+                draw.text((box_x0 + 22, y), ln, font=f, fill=color)
+                y += int(getattr(f, "size", 18) * 1.2)
 
             panel = (margin, int(height * 0.64), width - margin, height - margin)
             draw.rounded_rectangle(panel, radius=24, fill=(18, 54, 34, 236), outline=(255, 205, 74, 245), width=3)

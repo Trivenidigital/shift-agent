@@ -436,6 +436,35 @@ def test_inspect_rendered_asset_rejects_blank_or_wrong_size_png(tmp_path):
     assert any("dimensions" in item for item in wrong_result.blockers)
 
 
+def test_menu_overlay_payload_surfaces_offer_and_promo_as_extras():
+    """Offers / promotion_end are required visible facts that the menu item cards
+    don't render — they must reach the title card via `extras` so the
+    deterministic overlay (and therefore visual QA) covers them, not just items.
+    Regression for the F0112/F0113 `missing required visible fact: offer:0` class.
+    """
+    locked = [
+        FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen",
+                        source="customer_text", required=True, confidence=1.0, source_message_id="wamid.x"),
+        FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Dosa Special Night",
+                        source="customer_text", required=True, confidence=1.0, source_message_id="wamid.x"),
+        FlyerLockedFact(fact_id="offer:0", label="Offer", value="Pick Any 4 Dosa for $20",
+                        source="customer_text", required=True, confidence=1.0, source_message_id="wamid.x"),
+    ]
+    for i, (n, p) in enumerate([("Ghee Karam Dosa", "$6.99"), ("Benne Dosa", "$7.49")]):
+        locked.append(FlyerLockedFact(fact_id=f"item:{i}:name", label="Item", value=n,
+                                      source="customer_text", required=True, confidence=1.0, source_message_id="wamid.x"))
+        locked.append(FlyerLockedFact(fact_id=f"item:{i}:price", label="Price", value=p,
+                                      source="customer_text", required=True, confidence=1.0, source_message_id="wamid.x"))
+    project = _complete_project().model_copy(update={"locked_facts": locked})
+    payload = _menu_overlay_payload(project)
+
+    assert payload["items"], "menu path should engage with locked item facts"
+    assert payload["business"] == "Lakshmi's Kitchen"
+    assert "Pick Any 4 Dosa for $20" in payload["extras"]
+    # Items are shown as cards, not duplicated into the title-card extras.
+    assert not any("Ghee Karam Dosa" in str(e) for e in payload["extras"])
+
+
 def test_concept_preview_model_branch_applies_critical_text_overlay(tmp_path, monkeypatch):
     """New-flyer concept generation must composite the deterministic critical-text
     overlay (title/items/prices) at the CONCEPT stage so visual QA runs on
