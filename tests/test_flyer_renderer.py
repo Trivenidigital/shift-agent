@@ -1145,9 +1145,15 @@ def test_background_only_contract_is_gated_to_english_no_reference(tmp_path, mon
     # A logo/brand asset alone stays eligible (it's visual identity, not text).
     assert render_module._background_only_eligible(
         english.model_copy(update={"assets": [_asset("logo")]})) is True
-    # A reference IMAGE (items/prices to read out) gates off → model renders text.
+    # A reference IMAGE with NO extracted facts yet → gates off (model reads it).
     assert render_module._background_only_eligible(
         english.model_copy(update={"assets": [_asset("reference_image")]})) is False
+    # Once the reference is extracted (facts merged into locked_facts) the overlay
+    # can draw every fact → eligible again.
+    extracted = FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Dosa Night",
+                                source="customer_text", required=True, confidence=1.0, source_message_id="m1")
+    assert render_module._background_only_eligible(english.model_copy(update={
+        "assets": [_asset("reference_image")], "locked_facts": [extracted]})) is True
 
 
 def test_direct_poster_prompt_does_not_make_request_sentence_flyer_copy(monkeypatch):

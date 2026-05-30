@@ -823,14 +823,25 @@ def _poster_copy_block(project: FlyerProject) -> str:
 
 
 def _needs_reference_extraction(project: FlyerProject) -> bool:
-    """A REFERENCE-IMAGE (not a logo/brand asset) is attached, whose items/prices
-    may need to be read out of the image — only the model can do that. Logos and
-    brand assets do NOT trigger this (they're honored as visual identity, not a
-    text source), so common branded flyers stay background-only eligible."""
-    return any(
+    """A REFERENCE-IMAGE is attached whose facts are NOT yet extracted, so its
+    items/prices still live in the image and only the model can render them.
+
+    Two ways this is NOT true (→ background-only stays eligible):
+      - the asset is a logo/brand asset, not a reference image (visual identity,
+        not a text source); or
+      - the reference has already been extracted — `create-flyer-project` merges
+        the extracted facts into `locked_facts`, so once those exist the overlay
+        can draw every fact and the model no longer needs to read the image.
+    """
+    has_reference_image = any(
         getattr(asset, "kind", "") == "reference_image" and Path(str(getattr(asset, "path", ""))).exists()
         for asset in project.assets
     )
+    if not has_reference_image:
+        return False
+    # Extraction merges reference facts into locked_facts; if none exist yet, the
+    # items are still only in the image and the model must read them.
+    return not project.locked_facts
 
 
 def _background_only_eligible(project: FlyerProject) -> bool:
