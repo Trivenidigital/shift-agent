@@ -139,6 +139,11 @@ DETERMINISTIC_MODEL_NAMES = {"", "deterministic-renderer", "pillow", "local-pill
 TEXT_MANIFEST_SCHEMA_VERSION = 1
 MAX_DETAIL_FACTS = 10
 MAX_TEXT_FACTS = 16
+# A generated background-only composite writes its raw background and overlaid
+# preview together (sub-second). A preview newer than its raw by more than this
+# window was edited/regenerated apart from the raw → final export honors the
+# preview directly rather than rebuilding from a possibly-stale raw.
+_RAW_COMPOSITE_FRESH_SECONDS = 30
 MONTH_NAME_TO_NUMBER = {
     "jan": 1,
     "january": 1,
@@ -780,11 +785,22 @@ def _poster_copy_plan(project: FlyerProject) -> PosterCopyPlan:
 
 def _poster_copy_block(project: FlyerProject) -> str:
     plan = _poster_copy_plan(project)
-    lines = [
-        "Render the following text exactly. Do not summarize, paraphrase, invent, or omit these customer facts.",
-        "Title is the campaign/product/service headline; Business/brand is the account identity or footer brand.",
-        "Do not add delivery, catering, payment, ordering-channel, or service-availability claims unless they appear below.",
-    ]
+    if _background_only_eligible(project):
+        lines = [
+            "Flyer facts (for theme/imagery relevance ONLY — do NOT render them as text, words, "
+            "menu lists, headlines, or price tags in the image; the system composites all exact "
+            "text into overlay panels afterwards). Use them only to pick relevant, accurate imagery and mood.",
+            "Title is the campaign/product/service headline; Business/brand is the account identity.",
+            "Do not invent delivery, catering, payment, ordering-channel, or service-availability claims.",
+        ]
+    else:
+        # Localized / reference-extraction flows: the overlay can't produce this
+        # text, so the model must render it exactly.
+        lines = [
+            "Render the following text exactly. Do not summarize, paraphrase, invent, or omit these customer facts.",
+            "Title is the campaign/product/service headline; Business/brand is the account identity or footer brand.",
+            "Do not add delivery, catering, payment, ordering-channel, or service-availability claims unless they appear below.",
+        ]
     business_name = _display_business_name(project)
     if business_name:
         lines.append(f"Business/brand: {business_name}")
@@ -807,12 +823,95 @@ def _poster_copy_block(project: FlyerProject) -> str:
         lines.append("Offer details:")
         for detail in plan.detail_lines:
             lines.append(f"- {detail}")
-    lines.append("If any required text cannot be rendered legibly, make the typography simpler and larger rather than dropping facts.")
+    if not _background_only_eligible(project):
+        # Only the integrated-text path renders these facts itself; the legibility
+        # guidance is contradictory under the background-only (textless) contract.
+        lines.append("If any required text cannot be rendered legibly, make the typography simpler and larger rather than dropping facts.")
     return "\n".join(lines)
+
+
+def _request_asks_reference_extraction(project: FlyerProject) -> bool:
+    """The request asks to read items/prices OUT of an attached reference image
+    (vs attaching it only as a visual/style template)."""
+    request = f"{project.raw_request or ''} {project.fields.notes or ''}".lower()
+    return any(kw in request for kw in (
+        "take items", "breakfast section", "from breakfast",
+        "extract items", "extract prices", "items and prices",
+        "sample flyer", "sample flier", "use items in this",
+    ))
+
+
+def _needs_reference_extraction(project: FlyerProject) -> bool:
+    """A reference IMAGE is attached AND the request asks to read its items/prices
+    out of the image — so that copy isn't in `collect_text_facts()` and only the
+    model can render it. In that case the deterministic overlay can't own the text.
+
+    NOT true (→ background-only stays eligible):
+      - logo/brand asset only (visual identity, not a text source); or
+      - the reference is a visual/STYLE template and the copy is already in
+        fields/locked facts (no extraction requested) — the overlay draws it.
+    """
+    has_reference_image = any(
+        getattr(asset, "kind", "") == "reference_image"
+        for asset in _project_reference_assets(project)
+    )
+    return has_reference_image and _request_asks_reference_extraction(project)
+
+
+def _background_only_eligible(project: FlyerProject) -> bool:
+    """Whether the model should render a TEXTLESS background (the deterministic
+    overlay owns ALL customer-facing text).
+
+    Principle: the deterministic overlay always owns the text — it renders each
+    fact in its OWN script (`_font` loads Telugu/Indic fonts via `_has_telugu`),
+    so it is at least as good as the image model for any language. The model
+    GARBLES non-English text (the live F0114 Telugu hallucination), so handing
+    localized copy back to the model is strictly worse, not a safe fallback.
+    Localization is therefore an INTAKE concern (capture/translate facts into the
+    target language; the overlay then draws them) — NOT a reason to let the model
+    paint text. So language does NOT gate eligibility.
+
+    The only flow the overlay genuinely cannot cover is reference-extraction:
+    items/prices that live in an attached reference IMAGE and aren't in
+    `collect_text_facts()` yet, which only the model can read. A logo/brand asset
+    alone does NOT disqualify (visual identity, not a text source).
+    """
+    return not _needs_reference_extraction(project)
 
 
 def _poster_layout_requirements(project: FlyerProject) -> str:
     plan = _poster_copy_plan(project)
+    if _background_only_eligible(project):
+        # Reserved-zone background contract (P1 slice 2): exact text is composited
+        # deterministically as overlay panels, so the model produces only the
+        # decorative BACKGROUND and leaves calm reserved zones — it must NOT draw
+        # text/menu-cards/prices, which diffusion models garble.
+        reserve = (
+            "- Produce a decorative BACKGROUND image only. Do NOT draw any text, headlines, "
+            "menu/item cards, price tags, schedule, location, or contact — the exact text is "
+            "composited afterwards into overlay panels.\n"
+            "- Reserve visually calm, low-detail zones in the upper-left and along the bottom for "
+            "those overlay panels; keep the rich hero imagery in the center and right.\n"
+        )
+        if plan.items:
+            if not _is_food_or_grocery_project(project):
+                return reserve + (
+                    "- Use polished, category-appropriate service imagery for the stated service category.\n"
+                    "- Keep the visual language category-safe for the stated business type; avoid "
+                    "restaurant/grocery and cultural-celebration styling unless the customer explicitly asks for it."
+                )
+            return reserve + (
+                "- Use appetizing food photography and a premium restaurant ambiance (warm lighting, "
+                "garnished dishes, tasteful gold/green/red accents, ornamental texture).\n"
+                "- Match the attached reference flyer's premium retail feel (palette, density, motifs) "
+                "when a reference is provided — but as background imagery, not text."
+            )
+        return reserve + (
+            "- Use polished, category-appropriate hero imagery and a professional local-business look.\n"
+            "- Keep the composition clean behind the reserved overlay zones."
+        )
+    # Non-eligible flows (localized / reference-extraction): the overlay cannot
+    # produce the required text, so the model must still render it.
     if plan.items:
         if not _is_food_or_grocery_project(project):
             return (
@@ -841,6 +940,18 @@ def _reference_extraction_instruction(project: FlyerProject) -> str:
     refs = _project_reference_assets(project)
     if not refs:
         return "- none"
+    if _background_only_eligible(project):
+        # Background-only eligible (English + reference already extracted): the
+        # deterministic overlay owns all text, so the model must NOT recreate any
+        # text from the reference — only borrow its visual style. Suppressing the
+        # "recreate item names/prices as cards" instructions avoids contradicting
+        # the textless-background contract and drawing garbled text under the overlay.
+        return (
+            "- Use the attached reference image for visual style only: palette, brand feel, "
+            "cuisine/category, motifs, and layout density.\n"
+            "- Do NOT recreate or render any text, item names, prices, or business names from the "
+            "reference — all exact text is composited separately into overlay panels."
+        )
     request = f"{project.raw_request} {project.fields.notes}".lower()
     instructions = [
         "- Do not render the request wording itself; it is operator instruction, not flyer copy.",
@@ -1228,6 +1339,33 @@ def _image_prompt(project: FlyerProject, *, concept_id: str, output_format: str,
 Autonomous repair instruction:
 - {_sanitize_visual_context(repair_instruction.strip())}
 """
+    if _background_only_eligible(project):
+        text_contract_line = (
+            "- Generate the decorative BACKGROUND image only — do NOT render flyer text, menu item "
+            "cards, prices, schedule, location, or contact as words; the system composites all exact "
+            "text into overlay panels afterwards. Leave the upper-left and lower areas visually "
+            "calm/uncluttered so those panels read cleanly; keep hero imagery in the center and right."
+        )
+        # Overlay owns ALL text → the language hint must NOT instruct text/script
+        # rendering (that would reintroduce model-painted, garbled non-English text).
+        # Reflect language/culture in IMAGERY only.
+        _lang = (project.fields.preferred_language or "").strip().lower()
+        if _lang in {"te", "mixed"}:
+            language_block = (
+                "- Reflect Telugu / South-Indian cultural styling in the imagery, motifs, and palette "
+                "ONLY — do NOT render any text, script, or words; all flyer text is composited separately."
+            )
+        else:
+            language_block = (
+                "- Do not render any text, script, or words in the background; all flyer text is "
+                "composited separately into overlay panels."
+            )
+    else:
+        text_contract_line = (
+            "- The final image must already contain the finished flyer text, menu item cards, prices, "
+            "schedule, location, and contact when those facts are provided."
+        )
+        language_block = _language_constraint_hint(project)
     return f"""Create a complete, finished customer-ready poster flyer for WhatsApp delivery.
 
 Design direction: {_design_direction(project, concept_id)}.
@@ -1263,12 +1401,12 @@ Quality bar:
 - Looks like a paid local marketing designer made it, not a generic template.
 {_quality_bar(project)}
 - High contrast and readable on a phone screen.
-- The final image must already contain the finished flyer text, menu item cards, prices, schedule, location, and contact when those facts are provided.
+{text_contract_line}
 - If customer brand assets are listed, preserve the business identity and use the active logo/template as the visual reference.
 - If an uploaded reference image/template is attached, preserve its visual identity and offer category but replace stale readable facts with the controlled customer copy above.
 - If there is no one-time date, present the recurring schedule clearly instead of inventing a date.
 - Avoid QR codes, fake logos, watermarks, unreadable microtext, and placeholder glyph boxes.
-{_language_constraint_hint(project)}
+{language_block}
 """
 
 
@@ -1435,12 +1573,20 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
             panel = (margin, int(height * 0.64), width - margin, height - margin)
             draw.rounded_rectangle(panel, radius=24, fill=(18, 54, 34, 236), outline=(255, 205, 74, 245), width=3)
             px0, py0, px1, py1 = panel
-            draw.text((px0 + 24, py0 + 22), "MENU", font=sub_font, fill=(255, 218, 85, 255))
+            # No hardcoded English "MENU" label — keeps the overlay language-neutral
+            # (item cards are self-evidently a menu). `_font` already renders the
+            # actual fact text in its own script (Telugu/Indic) via _has_telugu.
+            # Localizing facts captured in the wrong language is an intake concern.
             items = list(menu_payload["items"])
             cols = 2 if width >= 900 and len(items) > 3 else 1
             gap = 14
             card_w = (px1 - px0 - 48 - gap * (cols - 1)) // cols
-            card_h = max(58, min(84, (py1 - py0 - 118) // max(1, (len(items) + cols - 1) // cols)))
+            # Size cards so the full allowed item count (MAX_DETAIL_FACTS = 10, i.e.
+            # up to 5 two-column rows) fits the panel: subtract the start offset
+            # (66), the footer reserve (58), and the 10px inter-row gaps from the
+            # available height before dividing by rows. Min 50 lets 5 rows fit.
+            rows = (len(items) + cols - 1) // cols
+            card_h = max(50, min(84, ((py1 - py0 - 124) - 10 * (rows - 1)) // max(1, rows)))
             start_y = py0 + 66
             for idx, item in enumerate(items):
                 col = idx % cols
@@ -1448,7 +1594,16 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
                 x = px0 + 24 + col * (card_w + gap)
                 cy = start_y + row * (card_h + 10)
                 if cy + card_h > py1 - 58:
-                    break
+                    # Fail closed instead of silently dropping items. Under the
+                    # background-only contract the overlay is the SOLE source of
+                    # item facts (the model draws none), and `write_text_manifest`
+                    # declares every collected item — so a silent break would ship
+                    # a flyer missing required items with no QA blocker. Raising
+                    # routes the project to manual review (same fail-closed contract
+                    # as the title card / non-menu critical panel).
+                    raise FlyerRenderError(
+                        f"menu overlay cannot fit all {len(items)} items (drew {idx})"
+                    )
                 draw.rounded_rectangle((x, cy, x + card_w, cy + card_h), radius=14, fill=(116, 18, 30, 238), outline=(255, 190, 58, 230), width=2)
                 name, price = _split_item_price(item)
                 draw.text((x + 16, cy + 12), name, font=item_font, fill=(255, 255, 245, 255))
@@ -2382,20 +2537,38 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
     raw = _openrouter_image_bytes(project, concept_id=concept_id, output_format=output_format, size=size, model=model, quality=quality, repair_instruction=repair_instruction)
     raw_path = _raw_background_path(path)
     raw_path.unlink(missing_ok=True)
+    # The prompt and the overlay MUST agree (same gate). For non-eligible flows
+    # (localized / reference-extraction) the model renders the text itself, so we
+    # must NOT composite the deterministic critical overlay on top — that would
+    # duplicate text and reintroduce untranslated/incomplete facts. Those flows
+    # keep the identity banner only (pre-overlay behavior). Background-only
+    # eligible flows get the full deterministic overlay (the P1 fix).
+    if not _background_only_eligible(project):
+        if size is None:
+            _write_generated_image(raw, path, size=size)
+            return
+        _write_generated_image(raw, raw_path, size=size)
+        apply_exact_identity_overlay(project, raw_path, path, size=size)
+        return
+    # Background-only eligible: the model emitted a textless background; the
+    # critical overlay (brand + title + schedule + menu items/prices + footer)
+    # is the sole source of every required visible fact. `_apply_critical_text_
+    # overlay` carries the system-python3 Pillow fallback for VPSes whose Hermes
+    # venv lacks Pillow.
     if size is None:
-        _write_generated_image(raw, path, size=size)
+        # PDF: composite the overlay on a PNG, then export to PDF (same pattern as
+        # render_final_package's primary PDF path) — else a textless background PDF.
+        pdf_px = (1275, 1650)
+        _write_generated_image(raw, raw_path, size=pdf_px)
+        overlaid = path.with_suffix(".overlaid.png")
+        overlaid.unlink(missing_ok=True)
+        try:
+            _apply_critical_text_overlay(project, raw_path, overlaid, size=pdf_px, output_format=output_format)
+            _export_from_source_image(overlaid, path, size=None)
+        finally:
+            overlaid.unlink(missing_ok=True)
         return
     _write_generated_image(raw, raw_path, size=size)
-    # Deterministic exact-text composition (Priority-1 fix for the ~100%
-    # `visual_qa_failed` incident): the image model cannot reliably render exact
-    # text, so we composite it ourselves. The critical overlay is self-contained
-    # — brand + campaign title + schedule (title card), menu items/prices (menu
-    # panel), location + contact (footer) — covering every required visible fact
-    # in one coherent pass over the model background. This brings forward to the
-    # CONCEPT stage the same deterministic text layer that already runs at
-    # `render_final_package`, so visual QA reads our crisp text instead of the
-    # model's garbled rendering. `_apply_critical_text_overlay` carries the
-    # system-python3 Pillow fallback for VPSes whose Hermes venv lacks Pillow.
     _apply_critical_text_overlay(project, raw_path, path, size=size, output_format=output_format)
 
 
@@ -2480,11 +2653,31 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
         source_for_manifest: Path | None = None
         if selected_preview is not None:
             source = _raw_background_path(selected_preview)
+            # Provenance, not mtime: eligibility itself is the signal.
+            # - Background-only-eligible projects: the preview is a generated
+            #   composite (raw background + overlay), and the raw is ALWAYS written
+            #   together with the preview (render_concept_previews / repair both
+            #   write a matched raw+preview), so re-applying the overlay from the
+            #   raw at each output size is correct and never drops an edit — there
+            #   are no edits, the overlay IS the text. This avoids cropping the 4:5
+            #   preview (which under the no-text contract would drop required copy).
+            # - Non-eligible (reference-extraction / source-edit / operator-upload):
+            #   the preview is the authoritative artifact (its text is model- or
+            #   operator-produced) and there is no matched raw, so use it directly
+            #   and never composite the overlay on top.
             direct_poster_source = (
                 not source.exists()
+                or not _background_only_eligible(project)
+                # Defensive stale-raw guard: a generated background-only composite
+                # writes its raw and overlaid preview together (within ~1s), so a
+                # preview MEANINGFULLY newer than its raw means the preview was
+                # edited/regenerated apart from this raw — honor that approved
+                # preview directly instead of rebuilding from a possibly-stale raw.
+                # The tight window cleanly separates composites (sub-second) from
+                # any later edit (seconds-to-minutes).
                 or (
                     selected_preview.exists()
-                    and selected_preview.stat().st_mtime > source.stat().st_mtime
+                    and selected_preview.stat().st_mtime - source.stat().st_mtime > _RAW_COMPOSITE_FRESH_SECONDS
                 )
             )
             if direct_poster_source:
