@@ -64,7 +64,7 @@ NO_HANDLER_FOUND = "<no-handler-found>"
 #   2. Update fixtures + mock to reflect any new priority rules
 #   3. Update SKILL_MD_KNOWN_SHA256 below to the new hash
 #   4. Document the change in the commit message
-SKILL_MD_KNOWN_SHA256 = "01e6bc46b767d4b30f5a2b6cf6fd975dbdae2d829461a25f55d46eb07a30d14b"
+SKILL_MD_KNOWN_SHA256 = "337f791eaae5229a0dcb875dafecd83967f2fe6d7700acbdc78ab8d0fcdf71c0"
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
