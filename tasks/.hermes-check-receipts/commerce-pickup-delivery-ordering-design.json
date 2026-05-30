@@ -1,0 +1,19 @@
+{
+  "topic": "commerce-pickup-delivery-ordering-design",
+  "task_text": "Draft the Commerce pickup/delivery ordering design doc (design only, no implementation): drift-check tag extends-Hermes, Hermes-first analysis, new primitives, reconciliation of existing payment/catering-deposit-oriented commerce primitives with the new pickup/delivery order loop, POS-first analysis (Square/Clover/Toast/Shopify), Cockpit-first decision (read-only Order Cockpit first; POS sync later adapter), operator-gated items, explicit non-goals, slices A-F. Codex-reviewed before any build.",
+  "completed_at": "2026-05-30T19:45:44Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 4,
+  "hermes_step_count": 6,
+  "files_to_read_first": [
+    "tasks/hermes-commerce-prd-v2.md",
+    "tasks/hermes-commerce-portfolio-reconciliation.md",
+    "src/platform/commerce/order_state.py",
+    "src/platform/commerce/cart.py",
+    "src/platform/commerce/payment_link.py",
+    "src/platform/schemas.py",
+    "src/agents/shift/skills/dispatch_shift_agent/SKILL.md",
+    "web/frontend/src/sections/FlyerAdmin.tsx",
+    "web/backend/app/routers/flyer.py"
+  ]
+}
