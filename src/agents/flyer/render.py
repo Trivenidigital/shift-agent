@@ -1402,16 +1402,21 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
             if menu_payload["schedule"]:
                 for ln in _wrap(draw, str(menu_payload["schedule"]), sub_font, inner_w)[:1]:
                     card_lines.append((sub_font, (255, 255, 240, 250), ln))
-            for extra in list(menu_payload.get("extras") or [])[:2]:
-                for ln in _wrap(draw, str(extra), small_font, inner_w)[:1]:
+            # ALL offer/promo/detail facts (fully wrapped) — never cap or
+            # silently drop a required visible fact, or visual QA reports it
+            # missing. If the full set can't fit the card, fail closed (raise)
+            # like the non-menu path so the project routes to manual review
+            # instead of shipping an incomplete concept.
+            for extra in list(menu_payload.get("extras") or []):
+                for ln in _wrap(draw, str(extra), small_font, inner_w):
                     card_lines.append((small_font, (255, 236, 205, 250), ln))
             content_h = sum(int(getattr(f, "size", 18) * 1.2) for f, _c, _t in card_lines)
-            box_y1 = min(int(height * 0.585), box_y0 + content_h + 34)
+            box_y1 = box_y0 + content_h + 34
+            if box_y1 > int(height * 0.60):
+                raise FlyerRenderError("critical text overlay does not fit")
             draw.rounded_rectangle((box_x0, box_y0, box_x1, box_y1), radius=22, fill=(42, 86, 42, 232), outline=(255, 205, 74, 245), width=3)
             y = box_y0 + 18
             for f, color, ln in card_lines:
-                if y + getattr(f, "size", 18) > box_y1 - 10:
-                    break
                 draw.text((box_x0 + 22, y), ln, font=f, fill=color)
                 y += int(getattr(f, "size", 18) * 1.2)
 
