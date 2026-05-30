@@ -250,8 +250,10 @@ commerce is dormant (`provider: placeholder`, or `enabled: false`) both gates
    false` (or vice versa) before a customer can pay against the wrong mode. A
    missing/invalid key or unreachable Stripe aborts the deploy (exit 2).
 
-A gate failure triggers the deploy's normal **auto-rollback** to the previous
-tarball. Safe activation order: finish Step 5 (webhook subscribe) and set
+A gate failure aborts the deploy: it **auto-rolls-back to the previous tarball
+if one exists**; otherwise it stops and fires a Pushover P2 (new files installed
+but the gateway stays on the old code) — SSH in and fix the activation config.
+Safe activation order: finish Step 5 (webhook subscribe) and set
 `stripe_livemode_expected` to match your key's mode **before** the first deploy
 that runs with commerce active. (Activation via the Step 8 config edit needs no
 deploy — these gates fire on the *next* deploy and keep the active config honest.)
@@ -339,8 +341,9 @@ Per `tasks/hermes-commerce-slice3-provider-webhook-design.md` §13:
 - **Refund handling** (`charge.refunded` Stripe event) — PR-4
 - **Chargeback handling** (`charge.dispute.created` Stripe event) — PR-4
 - **Chargeback watchdog** (re-fire Pushover every 6h until resolved) — PR-4
-- **Subscription-presence deploy-smoke gate** — slice-3.5
 - **Stripe MCP path** (replace SDK with MCP for richer tool surface) — slice-3.1
-- **livemode-match smoke** (auto-assert `cfg.commerce.stripe_livemode_expected` matches `stripe.Account.retrieve().livemode`) — slice-3.1
+
+(The subscription-presence gate and the livemode-match gate are now **deployed**
+— see "Deploy gates protecting activation" above.)
 - **Multi-currency support** — slice 4
 - **Razorpay / UPI providers** — slice 4 (India market)
