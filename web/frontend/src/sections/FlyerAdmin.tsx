@@ -132,6 +132,19 @@ interface CloseNoSendResult {
   };
 }
 
+interface ResendStatusResult {
+  ok: boolean;
+  project_id: string;
+  status: string;
+  manual_status: string;
+  notification: {
+    send_ok: boolean;
+    chat_id: string;
+    outbound_message_id: string;
+    error: string;
+  };
+}
+
 interface DeactivateCustomerResult {
   ok: boolean;
   customer_id: string;
@@ -796,6 +809,17 @@ export function FlyerAdmin() {
       qc.invalidateQueries({ queryKey: ["flyer-manual-queue"] });
       qc.invalidateQueries({ queryKey: ["flyer-summary"] });
       qc.invalidateQueries({ queryKey: ["flyer-projects"] });
+    },
+  });
+  // P3 safe action: proactively re-send the current status reply to a
+  // waiting customer. Read-only (no state transition), so we only refresh
+  // the queue/summary so the row's updated_at-derived freshness reflects
+  // any audit; the notification result is surfaced inline.
+  const resendStatusQueueItem = useMutation({
+    mutationFn: ({ projectId }: { projectId: string }) =>
+      api.POST<ResendStatusResult>(`/flyer/manual-queue/${projectId}/resend-status`, {}),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["flyer-manual-queue"] });
     },
   });
 
@@ -1666,13 +1690,23 @@ export function FlyerAdmin() {
                       // notification result inline before dismissing the drawer.
                     );
                   }}
+                  onResendStatus={() => {
+                    resendStatusQueueItem.mutate(
+                      { projectId: queueDetail.project_id },
+                      // Keep the drawer open so the operator sees whether the
+                      // proactive status push reached the bridge.
+                    );
+                  }}
                   completePending={completeQueueItem.isPending}
                   breakGlassPending={breakGlassQueueItem.isPending}
                   closeNoSendPending={closeNoSendQueueItem.isPending}
+                  resendStatusPending={resendStatusQueueItem.isPending}
                   completeError={mutationErrorMessage(completeQueueItem.error)}
                   breakGlassError={mutationErrorMessage(breakGlassQueueItem.error)}
                   closeNoSendError={mutationErrorMessage(closeNoSendQueueItem.error)}
+                  resendStatusError={mutationErrorMessage(resendStatusQueueItem.error)}
                   closeNoSendResult={closeNoSendQueueItem.data ?? null}
+                  resendStatusResult={resendStatusQueueItem.data ?? null}
                 />
               )}
             </div>
@@ -1707,32 +1741,44 @@ interface ManualQueueDrawerBodyProps {
   onComplete: () => void;
   onBreakGlass: () => void;
   onCloseNoSend: (opts: { force: boolean }) => void;
+  onResendStatus: () => void;
   completePending: boolean;
   breakGlassPending: boolean;
   closeNoSendPending: boolean;
+  resendStatusPending: boolean;
   completeError: string;
   breakGlassError: string;
   closeNoSendError: string;
+  resendStatusError: string;
   closeNoSendResult: CloseNoSendResult | null;
+  resendStatusResult: ResendStatusResult | null;
 }
 
 function ManualQueueDrawerBody(props: ManualQueueDrawerBodyProps) {
   const {
     detail, playbook, reason, onReasonChange,
     uploadedAsset, uploadError, uploadBusy, onUpload,
-    onComplete, onBreakGlass, onCloseNoSend,
-    completePending, breakGlassPending, closeNoSendPending,
-    completeError, breakGlassError, closeNoSendError, closeNoSendResult,
+    onComplete, onBreakGlass, onCloseNoSend, onResendStatus,
+    completePending, breakGlassPending, closeNoSendPending, resendStatusPending,
+    completeError, breakGlassError, closeNoSendError, resendStatusError,
+    closeNoSendResult, resendStatusResult,
   } = props;
   const reasonOk = reason.trim().length >= 5;
   const completeOk = reasonOk && !!uploadedAsset && !completePending;
+  // resend_status is accepted by the backend only for active manual-queue
+  // rows (queued/in_progress); mirror that gate so the button isn't offered
+  // when the POST would 409.
+  const canResendStatus = (detail.manual_review.status === "queued"
+    || detail.manual_review.status === "in_progress") && !resendStatusPending;
   const pendingActionKind = completePending
     ? ("complete" as const)
     : breakGlassPending
       ? ("break_glass" as const)
       : closeNoSendPending
         ? ("close_no_send" as const)
-        : null;
+        : resendStatusPending
+          ? ("resend_status" as const)
+          : null;
   const integrityOnly = detail.verification_modes.includes("source_edit_integrity_only");
   const uploadedAssetUrl = uploadedAsset ? `/api/flyer/operator-uploads/${uploadedAsset.filename}` : "";
 
@@ -1874,9 +1920,11 @@ function ManualQueueDrawerBody(props: ManualQueueDrawerBodyProps) {
             reasonCode={detail.manual_review.reason_code}
             reason={reason}
             canComplete={completeOk}
+            canResendStatus={canResendStatus}
             onCompleteConfirmed={onComplete}
             onBreakGlassConfirmed={onBreakGlass}
             onCloseNoSendConfirmed={onCloseNoSend}
+            onResendStatusConfirmed={onResendStatus}
             pendingAction={pendingActionKind}
             completeAsset={uploadedAsset ? {
               filename: uploadedAsset.filename,
@@ -1888,8 +1936,32 @@ function ManualQueueDrawerBody(props: ManualQueueDrawerBodyProps) {
               complete: completeError,
               breakGlass: breakGlassError,
               closeNoSend: closeNoSendError,
+              resendStatus: resendStatusError,
             }}
           />
+          {resendStatusResult && (
+            <div
+              className={cn(
+                "rounded border px-2 py-2 text-xs",
+                resendStatusResult.notification.send_ok
+                  ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                  : "border-amber-200 bg-amber-50 text-amber-800",
+              )}
+            >
+              {resendStatusResult.notification.send_ok ? (
+                <span>
+                  Status re-sent to customer (chat_id{" "}
+                  <span className="font-mono">{resendStatusResult.notification.chat_id || "—"}</span>).
+                </span>
+              ) : (
+                <span>
+                  Status push did not reach the bridge
+                  {resendStatusResult.notification.error ? `: ${resendStatusResult.notification.error}` : ""}.
+                  The reactive “any update?” reply remains the safety net.
+                </span>
+              )}
+            </div>
+          )}
           {closeNoSendResult && (
             <div
               className={cn(
