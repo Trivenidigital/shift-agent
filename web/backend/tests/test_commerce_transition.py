@@ -137,6 +137,23 @@ def test_stale_expected_status_refused_409(tmp_path):
     assert refused[-1]["reason"] == "stale_expected_status"
 
 
+def test_illegal_transition_maps_to_409_refused(tmp_path, monkeypatch):
+    """Defense-in-depth branch: if the primitive raises IllegalCommerceTransition
+    for an otherwise-allowlisted, status-matching request, the route returns 409
+    and audits reason='illegal_transition'. Forced by emptying LEGAL_TRANSITIONS
+    (unreachable in normal operation — the Slice-C allowlist is a subset of it)."""
+    commerce, s = _set_paths(tmp_path)
+    oid = _seed(commerce, s, status="paid")
+    from commerce import order_state
+    monkeypatch.setattr(order_state, "LEGAL_TRANSITIONS", frozenset())
+    with pytest.raises(HTTPException) as ei:
+        _post(commerce, oid, to_status="preparing", expected_from_status="paid", cause="")
+    assert ei.value.status_code == 409
+    refused = [json.loads(line) for line in s.decisions_path.read_text().splitlines()
+               if "commerce_order_action_refused" in line]
+    assert refused[-1]["reason"] == "illegal_transition"
+
+
 def test_unknown_order_404_and_audited(tmp_path):
     commerce, s = _set_paths(tmp_path)
     _seed(commerce, s, status="paid")  # some other order exists
