@@ -780,13 +780,22 @@ def _poster_copy_plan(project: FlyerProject) -> PosterCopyPlan:
 
 def _poster_copy_block(project: FlyerProject) -> str:
     plan = _poster_copy_plan(project)
-    lines = [
-        "Flyer facts (for theme/imagery relevance ONLY — do NOT render them as text, words, "
-        "menu lists, headlines, or price tags in the image; the system composites all exact "
-        "text into overlay panels afterwards). Use them only to pick relevant, accurate imagery and mood.",
-        "Title is the campaign/product/service headline; Business/brand is the account identity.",
-        "Do not invent delivery, catering, payment, ordering-channel, or service-availability claims.",
-    ]
+    if _background_only_eligible(project):
+        lines = [
+            "Flyer facts (for theme/imagery relevance ONLY — do NOT render them as text, words, "
+            "menu lists, headlines, or price tags in the image; the system composites all exact "
+            "text into overlay panels afterwards). Use them only to pick relevant, accurate imagery and mood.",
+            "Title is the campaign/product/service headline; Business/brand is the account identity.",
+            "Do not invent delivery, catering, payment, ordering-channel, or service-availability claims.",
+        ]
+    else:
+        # Localized / reference-extraction flows: the overlay can't produce this
+        # text, so the model must render it exactly.
+        lines = [
+            "Render the following text exactly. Do not summarize, paraphrase, invent, or omit these customer facts.",
+            "Title is the campaign/product/service headline; Business/brand is the account identity or footer brand.",
+            "Do not add delivery, catering, payment, ordering-channel, or service-availability claims unless they appear below.",
+        ]
     business_name = _display_business_name(project)
     if business_name:
         lines.append(f"Business/brand: {business_name}")
@@ -813,36 +822,80 @@ def _poster_copy_block(project: FlyerProject) -> str:
     return "\n".join(lines)
 
 
+def _background_only_eligible(project: FlyerProject) -> bool:
+    """Whether the model should render a TEXTLESS background (the deterministic
+    overlay owns all text).
+
+    Only safe when the overlay can produce every required visible fact. That
+    fails for two supported flows the overlay can't cover, so they keep the
+    model rendering text:
+      - non-English requests — the overlay draws facts as captured and cannot
+        translate them; the model is still needed for localized copy.
+      - reference-extraction — items/prices live in an attached reference image,
+        not yet in `collect_text_facts()`; the model must read + render them.
+    """
+    lang = (project.fields.preferred_language or "en").strip().lower()
+    if lang not in {"", "en", "english"}:
+        return False
+    if _project_reference_assets(project):
+        return False
+    return True
+
+
 def _poster_layout_requirements(project: FlyerProject) -> str:
     plan = _poster_copy_plan(project)
-    # Reserved-zone background contract (P1 slice 2): the exact flyer text is
-    # composited deterministically as overlay panels (apply_critical_text_overlay),
-    # so the model must produce only the decorative BACKGROUND and leave calm
-    # reserved zones for the panels — it must NOT draw text/menu-cards/prices,
-    # which diffusion models garble.
-    reserve = (
-        "- Produce a decorative BACKGROUND image only. Do NOT draw any text, headlines, "
-        "menu/item cards, price tags, schedule, location, or contact — the exact text is "
-        "composited afterwards into overlay panels.\n"
-        "- Reserve visually calm, low-detail zones in the upper-left and along the bottom for "
-        "those overlay panels; keep the rich hero imagery in the center and right.\n"
-    )
-    if plan.items:
-        if not _is_food_or_grocery_project(project):
+    if _background_only_eligible(project):
+        # Reserved-zone background contract (P1 slice 2): exact text is composited
+        # deterministically as overlay panels, so the model produces only the
+        # decorative BACKGROUND and leaves calm reserved zones — it must NOT draw
+        # text/menu-cards/prices, which diffusion models garble.
+        reserve = (
+            "- Produce a decorative BACKGROUND image only. Do NOT draw any text, headlines, "
+            "menu/item cards, price tags, schedule, location, or contact — the exact text is "
+            "composited afterwards into overlay panels.\n"
+            "- Reserve visually calm, low-detail zones in the upper-left and along the bottom for "
+            "those overlay panels; keep the rich hero imagery in the center and right.\n"
+        )
+        if plan.items:
+            if not _is_food_or_grocery_project(project):
+                return reserve + (
+                    "- Use polished, category-appropriate service imagery for the stated service category.\n"
+                    "- Keep the visual language category-safe for the stated business type; avoid "
+                    "restaurant/grocery and cultural-celebration styling unless the customer explicitly asks for it."
+                )
             return reserve + (
-                "- Use polished, category-appropriate service imagery for the stated service category.\n"
-                "- Keep the visual language category-safe for the stated business type; avoid "
-                "restaurant/grocery and cultural-celebration styling unless the customer explicitly asks for it."
+                "- Use appetizing food photography and a premium restaurant ambiance (warm lighting, "
+                "garnished dishes, tasteful gold/green/red accents, ornamental texture).\n"
+                "- Match the attached reference flyer's premium retail feel (palette, density, motifs) "
+                "when a reference is provided — but as background imagery, not text."
             )
         return reserve + (
-            "- Use appetizing food photography and a premium restaurant ambiance (warm lighting, "
-            "garnished dishes, tasteful gold/green/red accents, ornamental texture).\n"
-            "- Match the attached reference flyer's premium retail feel (palette, density, motifs) "
-            "when a reference is provided — but as background imagery, not text."
+            "- Use polished, category-appropriate hero imagery and a professional local-business look.\n"
+            "- Keep the composition clean behind the reserved overlay zones."
         )
-    return reserve + (
-        "- Use polished, category-appropriate hero imagery and a professional local-business look.\n"
-        "- Keep the composition clean behind the reserved overlay zones."
+    # Non-eligible flows (localized / reference-extraction): the overlay cannot
+    # produce the required text, so the model must still render it.
+    if plan.items:
+        if not _is_food_or_grocery_project(project):
+            return (
+                "- Build a complete local service-business poster for the stated service category.\n"
+                "- Use a clear brand masthead, large headline, service offer cards with prices, category-appropriate service imagery, and a footer for location/contact.\n"
+                "- Service offer cards must pair each service name and price together.\n"
+                "- If a service line is listed without a price, show it as a service label without a price, dash, or placeholder.\n"
+                "- Keep text large, high-contrast, and centered inside its designed panels; avoid tiny text blocks and generic lower-third captions.\n"
+                "- Keep the visual language category-safe for the stated business type; avoid restaurant/grocery and cultural-celebration styling unless the customer explicitly asks for it."
+            )
+        return (
+            "- Build a full restaurant/menu poster, not a background template.\n"
+            "- Use a brand masthead at the top, a large high-impact promo title, item cards with food imagery and prices, and a footer for location/contact.\n"
+            "- Item cards must look like designed menu tiles, with each item name and price paired together.\n"
+            "- Match the attached reference flyer's dense premium retail hierarchy when a reference is provided: bold headline, food photography, gold/green/red accents, ornamental separators, and phone-readable cards.\n"
+            "- Keep text large, high-contrast, and centered inside its designed panels; avoid tiny text blocks and generic lower-third captions."
+        )
+    return (
+        "- Build a complete finished poster flyer, not a blank background.\n"
+        "- Use a clear brand masthead, large headline, offer/details section, visual proof imagery, and footer contact/action area.\n"
+        "- Keep all required customer text large, high-contrast, and readable on a phone screen."
     )
 
 
@@ -1237,6 +1290,18 @@ def _image_prompt(project: FlyerProject, *, concept_id: str, output_format: str,
 Autonomous repair instruction:
 - {_sanitize_visual_context(repair_instruction.strip())}
 """
+    if _background_only_eligible(project):
+        text_contract_line = (
+            "- Generate the decorative BACKGROUND image only — do NOT render flyer text, menu item "
+            "cards, prices, schedule, location, or contact as words; the system composites all exact "
+            "text into overlay panels afterwards. Leave the upper-left and lower areas visually "
+            "calm/uncluttered so those panels read cleanly; keep hero imagery in the center and right."
+        )
+    else:
+        text_contract_line = (
+            "- The final image must already contain the finished flyer text, menu item cards, prices, "
+            "schedule, location, and contact when those facts are provided."
+        )
     return f"""Create a complete, finished customer-ready poster flyer for WhatsApp delivery.
 
 Design direction: {_design_direction(project, concept_id)}.
@@ -1272,7 +1337,7 @@ Quality bar:
 - Looks like a paid local marketing designer made it, not a generic template.
 {_quality_bar(project)}
 - High contrast and readable on a phone screen.
-- Generate the decorative BACKGROUND image only — do NOT render flyer text, menu item cards, prices, schedule, location, or contact as words; the system composites all exact text into overlay panels afterwards. Leave the upper-left and lower areas visually calm/uncluttered so those panels read cleanly; keep hero imagery in the center and right.
+{text_contract_line}
 - If customer brand assets are listed, preserve the business identity and use the active logo/template as the visual reference.
 - If an uploaded reference image/template is attached, preserve its visual identity and offer category but replace stale readable facts with the controlled customer copy above.
 - If there is no one-time date, present the recurring schedule clearly instead of inventing a date.

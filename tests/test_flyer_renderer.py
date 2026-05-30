@@ -1058,7 +1058,7 @@ def test_openrouter_image_renderer_retries_incomplete_chunk_read(tmp_path, monke
     assert specs[0].path.read_bytes().startswith(b"\x89PNG")
 
 
-def test_direct_poster_prompt_carries_menu_copy_as_imagery_context_not_text():
+def test_localized_telugu_poster_prompt_keeps_integrated_text_contract():
     project = _complete_project().model_copy(update={
         "fields": FlyerRequestFields(
             event_or_business_name="Weekend Breakfast Specials",
@@ -1082,18 +1082,44 @@ def test_direct_poster_prompt_carries_menu_copy_as_imagery_context_not_text():
     prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
 
     assert "Create a complete, finished customer-ready poster flyer" in prompt
-    # Slice-2 contract: facts are carried as imagery CONTEXT, not rendered as
-    # text — the model produces a background; the system composites the text.
-    assert "do NOT render them as text" in prompt
-    assert "decorative BACKGROUND image only" in prompt
-    # The exact facts are still present (so the model picks relevant imagery).
+    # This is a TELUGU project, so it is NOT background-only eligible: the overlay
+    # can't translate, so the model must still render the localized text. The
+    # background-only contract is gated OFF and the integrated-text contract holds.
+    assert "Render the following text exactly" in prompt
+    assert "do NOT render them as text" not in prompt
     assert "Weekend Breakfast Specials" in prompt
     assert "Thursday To Sunday | 8 AM TO 11 AM" in prompt
     assert "Poori with Chicken - $14.99" in prompt
     assert "Kheema Dosa - $12.99" in prompt
     assert "+17329837841" in prompt
+    assert "brand masthead" in prompt
+    assert "item cards" in prompt
     assert "Telugu as the primary flyer language" in prompt
     assert "Do not output an all-English flyer" in prompt
+
+
+def test_background_only_contract_is_gated_to_english_no_reference(monkeypatch):
+    """Background-only (model emits no text) applies ONLY when the deterministic
+    overlay can produce every required fact: English + no reference. Localized
+    and reference-extraction flows keep the model rendering text."""
+    english = _complete_project().model_copy(update={"fields": FlyerRequestFields(
+        event_or_business_name="Lakshmi's Kitchen", contact_info="+1 732 983 7841",
+        preferred_language="en", notes="Dosa $6.99; Idli $5.99")})
+    p_en = _image_prompt(english, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+    assert "decorative BACKGROUND image only" in p_en
+    assert "do NOT render them as text" in p_en
+
+    assert render_module._background_only_eligible(english) is True
+
+    telugu = english.model_copy(update={"fields": english.fields.model_copy(update={"preferred_language": "te"})})
+    p_te = _image_prompt(telugu, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+    assert "Render the following text exactly" in p_te
+    assert "decorative BACKGROUND image only" not in p_te
+    assert render_module._background_only_eligible(telugu) is False
+
+    # English but with a reference image to extract from → gated off (model reads it).
+    monkeypatch.setattr("agents.flyer.render._project_reference_assets", lambda project: ["ref"])
+    assert render_module._background_only_eligible(english) is False
 
 
 def test_direct_poster_prompt_does_not_make_request_sentence_flyer_copy(monkeypatch):
