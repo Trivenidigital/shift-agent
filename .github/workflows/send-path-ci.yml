@@ -73,5 +73,6 @@ jobs:
             tests/test_select_catering_proposal.py \
             tests/test_send_catering_ack.py \
             tests/test_create_catering_proposal_options.py \
+            tests/test_daily_brief_script.py \
             tests/test_prune_and_expire_logic.py \
             tests/test_expense_dedup_primitives.py
