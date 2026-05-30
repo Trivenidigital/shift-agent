@@ -1939,7 +1939,10 @@ function ManualQueueDrawerBody(props: ManualQueueDrawerBodyProps) {
               resendStatus: resendStatusError,
             }}
           />
-          {resendStatusResult && (
+          {/* Gate on project_id: the mutation's `data` persists across drawer
+              switches, so without this an unrelated project's drawer could
+              show a stale "re-sent" banner for a project never nudged here. */}
+          {resendStatusResult && resendStatusResult.project_id === detail.project_id && (
             <div
               className={cn(
                 "rounded border px-2 py-2 text-xs",
