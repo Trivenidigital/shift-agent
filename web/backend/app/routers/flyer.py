@@ -42,6 +42,7 @@ from schemas import (  # noqa: E402
 )
 try:
     from flyer_manual_queue import (  # type: ignore  # noqa: E402
+        _queue_row_age_minutes as flyer_queue_row_age_minutes,
         _reason_family as flyer_reason_family,
         _verification_modes as flyer_verification_modes,
         build_closure_customer_text,
@@ -57,6 +58,7 @@ try:
     )
 except ImportError:
     from agents.flyer.manual_queue import (  # noqa: E402
+        _queue_row_age_minutes as flyer_queue_row_age_minutes,
         _reason_family as flyer_reason_family,
         _verification_modes as flyer_verification_modes,
         build_closure_customer_text,
@@ -115,6 +117,11 @@ class ManualQueueClaimBody(BaseModel):
     authenticated identity — the cockpit shares one owner login)."""
     admin_id: str = Field(min_length=1, max_length=60, pattern=_ADMIN_HANDLE)
     force: bool = False
+
+
+class ManualQueueClaimNextBody(BaseModel):
+    """Self-reported admin handle for the atomic claim-next throughput action."""
+    admin_id: str = Field(min_length=1, max_length=60, pattern=_ADMIN_HANDLE)
 
 
 class ManualQueueAssignBody(BaseModel):
@@ -863,6 +870,51 @@ def manual_queue_assign_action(project_id: str, *, admin_id: str, by: str) -> di
     )
 
 
+def _claim_next_for_admin(admin_id: str) -> dict[str, Any]:
+    """Select the oldest unclaimed claimable row and claim it — atomically.
+
+    Selection + claim run under ONE flock so two admins racing claim-next
+    cannot grab the same case (a flock-per-call approach would re-read
+    between select and claim and TOCTOU-race). Returns {claimed: False}
+    when nothing is available — a normal 'all caught up' state, not an error.
+    """
+    path = _projects_path()
+    now = _now()
+    with safe_io.flock(path):
+        store = load_project_store()
+        candidates = [
+            (i, p) for i, p in enumerate(store.projects)
+            if p.manual_review.status in _CLAIMABLE_MANUAL_STATUSES and not p.manual_review.claimed_by
+        ]
+        if not candidates:
+            return {"claimed": False, "reason": "no_unclaimed_cases", "project_id": ""}
+        # Oldest queue-entry first (FIFO fairness). Reuse the canonical age
+        # resolver (queued_at → updated_at → created_at) so claim-next picks
+        # the same top the operator sees in the rendered queue — they can't drift.
+        idx, project = max(candidates, key=lambda t: flyer_queue_row_age_minutes(t[1], now=now))
+        mr = project.manual_review
+        backup = _backup_path(path, f"claim-next-{admin_id}")
+        store.projects[idx] = project.model_copy(update={
+            "manual_review": mr.model_copy(update={"claimed_by": admin_id, "claimed_at": now}),
+        })
+        safe_io.dump_model(path, store)
+    return {
+        "claimed": True,
+        "project_id": project.project_id,
+        "claimed_by": admin_id,
+        "claimed_at": now.isoformat(),
+        "manual_status": mr.status,
+        "reason_code": str(mr.reason_code or ""),
+        "backup": backup,
+    }
+
+
+def manual_queue_claim_next_action(*, admin_id: str) -> dict[str, Any]:
+    """Claim the OLDEST unclaimed manual-queue case for `admin_id`."""
+    admin_id = _clean_admin_id(admin_id)
+    return _claim_next_for_admin(admin_id)
+
+
 @router.post("/manual-queue/{project_id}/claim")
 async def manual_queue_claim(
     project_id: str, body: ManualQueueClaimBody, request: Request, _=Depends(require_auth),
@@ -895,6 +947,21 @@ async def manual_queue_assign(
     audit_log(
         "flyer.manual_queue.assign", ip=client_ip(request), ua=client_ua(request),
         details=result | {"admin_id": body.admin_id, "by": body.by},
+    )
+    return result
+
+
+# Two-segment literal path — declared so it can't be shadowed by the
+# three-segment `/manual-queue/{project_id}/...` routes. No project_id in
+# the path: claim-next selects the case itself.
+@router.post("/manual-queue/claim-next")
+async def manual_queue_claim_next(
+    body: ManualQueueClaimNextBody, request: Request, _=Depends(require_auth),
+):
+    result = manual_queue_claim_next_action(admin_id=body.admin_id)
+    audit_log(
+        "flyer.manual_queue.claim_next", ip=client_ip(request), ua=client_ua(request),
+        details=result | {"admin_id": body.admin_id},
     )
     return result
 

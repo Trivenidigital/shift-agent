@@ -145,6 +145,16 @@ interface ResendStatusResult {
   };
 }
 
+interface ClaimNextResult {
+  claimed: boolean;
+  project_id: string;
+  claimed_by?: string;
+  claimed_at?: string;
+  manual_status?: string;
+  reason_code?: string;
+  reason?: string;
+}
+
 interface DeactivateCustomerResult {
   ok: boolean;
   customer_id: string;
@@ -855,6 +865,22 @@ export function FlyerAdmin() {
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["flyer-manual-queue"] }); },
     onError: onOwnershipError,
   });
+  // P5 team-ops throughput: claim the oldest unclaimed case in one click and
+  // land the admin on it. A {claimed:false} response is a normal "all caught
+  // up" state, not an error — surface it plainly rather than via onError.
+  const claimNext = useMutation({
+    mutationFn: () =>
+      api.POST<ClaimNextResult>(`/flyer/manual-queue/claim-next`, { admin_id: adminHandle.trim() }),
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ["flyer-manual-queue"] });
+      if (data.claimed && data.project_id) {
+        openDrawer(data.project_id);
+      } else {
+        window.alert("No unclaimed cases in the queue — all caught up.");
+      }
+    },
+    onError: onOwnershipError,
+  });
 
   // P0 #2 Commit 5 — audit-only operator flag on a delivered_with_warning project.
   // Writes a flyer_operator_flagged_warn_tier row; does NOT mutate project state.
@@ -1516,6 +1542,14 @@ export function FlyerAdmin() {
                   placeholder="e.g. priya"
                   className="h-7 w-40 text-xs"
                 />
+                <Button
+                  size="sm"
+                  disabled={!adminHandle.trim() || claimNext.isPending}
+                  onClick={() => claimNext.mutate()}
+                  title="Claim the oldest unclaimed case and open it"
+                >
+                  {claimNext.isPending ? "Claiming…" : "Claim next"}
+                </Button>
                 <span className="text-zinc-400">
                   {adminHandle.trim()
                     ? "Used to claim / assign cases. Browser-local label, not a login."
