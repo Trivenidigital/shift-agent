@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/Input";
 import { cn } from "@/lib/cn";
 import { FlyerProjectEvidenceDrawer } from "./FlyerProjectEvidenceDrawer";
 import { ManualQueueActions } from "./flyer/ManualQueueActions";
+import { FlyerQueueWorkload } from "./flyer/FlyerQueueWorkload";
 
 type Tab = "overview" | "customers" | "campaigns" | "projects" | "guests" | "queue";
 
@@ -1556,6 +1557,12 @@ export function FlyerAdmin() {
                     : "Set a handle to claim cases (browser-local; shared cockpit login)."}
                 </span>
               </div>
+              {/* P5 slice 2: team workload — aggregate the FULL queue (not the
+                  filtered view) so ownership totals reflect true team state. */}
+              <FlyerQueueWorkload
+                rows={(queueData?.groups ?? []).flatMap((g) => g.projects)}
+                adminHandle={adminHandle}
+              />
               {(queueData?.total ?? 0) > 0 && filteredQueueCount === 0 && (
                 <div className="rounded-md border border-zinc-200 bg-zinc-50 px-3 py-3 text-center text-xs text-zinc-500">
                   No rows match the current filters. {(queueData?.total ?? 0)} row{(queueData?.total ?? 0) === 1 ? "" : "s"} hidden.
