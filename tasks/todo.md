@@ -18,12 +18,14 @@ probes / required deploy-smoke, no customer sends, no speculative agents, no PR-
 - [x] **Item 2 — Commerce slice-3.1 Stripe livemode-match deploy gate** ✅ MERGED PR #342 (origin/main 7aa3a10). 13 tests (33/33 both suites), Codex CLEAN round 1. urllib (no SDK). Dormant-verified on live VPS. Not yet deployed.
 - [x] **Item 3 — EOD reconcile deploy-smoke coverage** ✅ MERGED PR #343 (origin/main 79f7002). Added `eod-reconcile --force --dry-run` to smoke (snapshot path → temp). Codex 2 rounds → CLEAN. Live-verified.
 - [x] **Item 4 — Daily Brief deploy-smoke coverage** ✅ MERGED PR #344 (origin/main c939f98). `send-daily-brief --force --dry-run` (sentinel → temp). Codex CLEAN (after a re-run with file-specific prompt). Live-verified.
-- [ ] **Item 5 — Catering pattern-report deploy-smoke coverage** (branch `feat/catering-pattern-report-smoke-coverage`)
-  - Survey: catering had schema + classifier + SKILL smoke coverage but core scripts unsmoked. catering-lead-reconcile rejected (operator tool, required args, hardcoded live lock). catering-pattern-report (Agent #2 hallucination-scan, timer-driven, has --dry-run) = the gap, analogous to EOD/Daily Brief.
-  - [x] Add `catering-pattern-report --dry-run` to smoke (writable outputs --lessons/--learning-summary[-lock] → temp; dry-run provably skips all writes). Guarded `[ -x ]`.
-  - [x] bash -n clean + live VPS probe: exit 0, report runs ("0 findings, No-op"), before/after diff shows NO new files under /opt.
-  - [ ] push → Codex review (catering-specific prompt) → merge if clean
-- [ ] Item 6+ — continue agent-by-agent dormant-safe hardening (Multi-Location #3, Compliance #13, Expense #21, P&L #22, WhatsApp-ordering/commerce). Deferred: audit-log §12a freshness watchdog (needs write-rate + heartbeat design).
+- [x] **Item 5 — Catering pattern-report deploy-smoke coverage** ✅ MERGED PR #345 (origin/main 7cac726). `catering-pattern-report --dry-run` (outputs → temp). Codex CLEAN. Live-verified ("0 findings", no new /opt files).
+- [ ] **Item 6 — Timer-liveness freshness WARN (EOD #5 + Daily Brief #4)** (branch `feat/timer-liveness-freshness-warn`)
+  - The §12a freshness signal done SAFELY: EOD/Daily-Brief write SCHEDULED artifacts daily (eod-snapshot.json / last-brief-sent.json) independent of traffic → reliable timer-liveness signal without the event-log false-alarm problem. Read-only, enabled-gated, WARN-only (never fails deploy), no new writers. Mirrors deployed compliance heartbeat check (§2d). 28h threshold (24h+4h slack).
+  - [x] Add `_freshness_warn` + `_agent_enabled` helpers + 2 checks to smoke (§10e).
+  - [x] bash -n clean + live VPS probe: both enabled; eod-snapshot 22h, sentinel 12h → both "✓ fresh" (no false alarm).
+  - [ ] push → Codex review (freshness-specific prompt) → merge if clean
+  - SURVEY NOTE: dry-run-smoke pattern now exhausted for active agents — #2/#4/#5 done; #3/#13/#21 already had --help/dry-run smoke; shift-agent-reconcile has NO dry-run (can't safely smoke); commerce reconciler scripts dormant/mutating; commerce subsystem comprehensively tested. Remaining 24-agent scope is mostly scaffold/Tier-2 SKILL-only (operator-activation-gated) or commerce (dormant).
+- [ ] Item 7+ — remaining dormant-safe candidates: extend freshness WARN to catering learning-summary if daily-scheduled; runbook fixes; or larger heartbeat-watchdog design. Many remaining agents need operator activation (real blocker to "finishing" them dormant-safe).
 
 
 
