@@ -739,6 +739,7 @@ def _menu_overlay_payload(project: FlyerProject) -> dict[str, object]:
     items = _menu_item_lines(project)
     schedule = _display_schedule(project)
     return {
+        "business": _display_business_name(project),
         "title": _display_title(project),
         "schedule": schedule,
         "items": items,
@@ -1381,8 +1382,18 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
             # avoiding the old debug-looking black transcript box.
             title_box = (margin, int(height * 0.055), int(width * 0.58), int(height * 0.245))
             draw.rounded_rectangle(title_box, radius=22, fill=(42, 86, 42, 232), outline=(255, 205, 74, 245), width=3)
-            y = title_box[1] + 22
-            for line in _wrap(draw, str(menu_payload["title"]), title_font, title_box[2] - title_box[0] - 44)[:3]:
+            y = title_box[1] + 20
+            # Brand line: the registered business name, shown above the campaign
+            # title (skipped when it equals the title to avoid a duplicate). This
+            # is the required `business_name` visible fact at the concept stage.
+            business = str(menu_payload.get("business") or "").strip()
+            title_text = str(menu_payload["title"]).strip()
+            if business and not _same_text(business, title_text):
+                biz_font = _font(ImageFont, max(19, int(width * 0.025)), bold=True, text=business)
+                for line in _wrap(draw, business, biz_font, title_box[2] - title_box[0] - 44)[:1]:
+                    draw.text((title_box[0] + 22, y), line, font=biz_font, fill=(255, 255, 245, 255))
+                    y += int(biz_font.size * 1.18)
+            for line in _wrap(draw, title_text, title_font, title_box[2] - title_box[0] - 44)[:2]:
                 draw.text((title_box[0] + 22, y), line, font=title_font, fill=(255, 218, 85, 255))
                 y += int(title_font.size * 1.05)
             if menu_payload["schedule"]:
@@ -2342,7 +2353,17 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
         _write_generated_image(raw, path, size=size)
         return
     _write_generated_image(raw, raw_path, size=size)
-    apply_exact_identity_overlay(project, raw_path, path, size=size)
+    # Deterministic exact-text composition (Priority-1 fix for the ~100%
+    # `visual_qa_failed` incident): the image model cannot reliably render exact
+    # text, so we composite it ourselves. The critical overlay is self-contained
+    # — brand + campaign title + schedule (title card), menu items/prices (menu
+    # panel), location + contact (footer) — covering every required visible fact
+    # in one coherent pass over the model background. This brings forward to the
+    # CONCEPT stage the same deterministic text layer that already runs at
+    # `render_final_package`, so visual QA reads our crisp text instead of the
+    # model's garbled rendering. `_apply_critical_text_overlay` carries the
+    # system-python3 Pillow fallback for VPSes whose Hermes venv lacks Pillow.
+    _apply_critical_text_overlay(project, raw_path, path, size=size, output_format=output_format)
 
 
 def render_concept_previews(project: FlyerProject, output_dir: Path | str, *, model: str = "deterministic-renderer", quality: str = "low", concept_count: int = 1, repair_instruction: str = "") -> list[RenderedAssetSpec]:

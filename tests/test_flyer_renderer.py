@@ -436,6 +436,31 @@ def test_inspect_rendered_asset_rejects_blank_or_wrong_size_png(tmp_path):
     assert any("dimensions" in item for item in wrong_result.blockers)
 
 
+def test_concept_preview_model_branch_applies_critical_text_overlay(tmp_path, monkeypatch):
+    """New-flyer concept generation must composite the deterministic critical-text
+    overlay (title/items/prices) at the CONCEPT stage so visual QA runs on
+    deterministic text, not the image model's garbled rendering. Regression for the
+    100% `visual_qa_failed` incident (F0113 = missing campaign_title/offer/items).
+    """
+    project = _complete_project()
+    monkeypatch.setattr(render_module, "_openrouter_image_bytes", lambda *a, **k: _png_bytes())
+    overlay_targets: list[str] = []
+    real_overlay = render_module._apply_critical_text_overlay
+
+    def _spy(proj, source, target, *, size, output_format):
+        overlay_targets.append(str(target))
+        return real_overlay(proj, source, target, size=size, output_format=output_format)
+
+    monkeypatch.setattr(render_module, "_apply_critical_text_overlay", _spy)
+    specs = render_concept_previews(project, tmp_path, model="google/gemini-2.5-flash-image")
+    assert overlay_targets, "concept model-branch must apply the deterministic critical-text overlay"
+    assert str(specs[0].path) in overlay_targets
+    assert specs[0].path.exists()
+    assert inspect_rendered_asset(
+        specs[0].path, expected_width=1080, expected_height=1350, mime_type="image/png"
+    ).ok is True
+
+
 def test_apply_critical_text_overlay_changes_model_background_pixels(tmp_path):
     from PIL import Image, ImageChops
 
@@ -1761,7 +1786,7 @@ def test_explicit_business_override_reaches_direct_and_source_edit_prompts(tmp_p
     assert "Business/brand to preserve: Old Brand" not in source_prompt
 
 
-def test_real_image_model_concept_applies_exact_identity_overlay(tmp_path, monkeypatch):
+def test_real_image_model_concept_applies_deterministic_text_overlay(tmp_path, monkeypatch):
     raw_png = _png_bytes(color=(19, 83, 43))
 
     class _Resp:
@@ -1792,10 +1817,13 @@ def test_real_image_model_concept_applies_exact_identity_overlay(tmp_path, monke
     assert raw_path.exists()
     assert specs[0].path.read_bytes() != raw_path.read_bytes()
 
-    from PIL import Image
-    with Image.open(specs[0].path) as preview, Image.open(raw_path) as raw:
-        assert preview.getpixel((540, 55)) != raw.getpixel((540, 55))
-        assert preview.getpixel((540, 1290)) != raw.getpixel((540, 1290))
+    from PIL import Image, ImageChops
+    with Image.open(specs[0].path).convert("RGB") as preview, Image.open(raw_path).convert("RGB") as raw:
+        # The deterministic critical-text overlay composites exact text over the
+        # model background (replacing the old identity-only overlay); the
+        # non-menu project draws its critical panel near the bottom.
+        assert ImageChops.difference(preview, raw).getbbox() is not None
+        assert preview.getpixel((540, 1200)) != raw.getpixel((540, 1200))
 
 
 def test_exact_identity_overlay_reserves_contact_with_long_schedule_and_address(tmp_path):
