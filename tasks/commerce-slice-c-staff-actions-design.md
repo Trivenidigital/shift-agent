@@ -100,7 +100,7 @@ Source of truth stays `order_state.LEGAL_TRANSITIONS`; Slice C exposes a **subse
 ## 9. UI plan (Cockpit, Slice C)
 
 - **Where:** the Slice-B order **detail drawer** gains an "Actions" block.
-- **Actions:** context-sensitive buttons for the *allowed-from-current-status* transitions only (e.g. an order in `preparing` shows "Mark ready" + "Cancel"). Computed from the Slice-C allowlist + current status.
+- **Actions:** context-sensitive buttons for the *allowed-from-current-status* transitions only, computed from the Slice-C allowlist + current status. Concretely: a `preparing` order shows **only "Mark ready"** (no Cancel — `preparing` is post-`paid`, and `preparing→cancelled` is excluded from Slice C); "Cancel" appears **only on pre-payment statuses** (`pending_payment` / `awaiting_approval`). This matches the §3 transition matrix exactly — the UI never offers a transition the allowlist forbids.
 - **Disabled states:** terminal orders → no actions (show "Order is final"); illegal/deferred transitions → not rendered; degraded/missing state → actions hidden + banner.
 - **Destructive confirmation:** `Cancel` requires a confirm dialog + a reason (free-text → `cause`/`reason`). Progress actions may use a lightweight confirm.
 - **Step-up:** a transition triggers the existing fresh-OTP flow if the OTP is stale (reuse flyer's `require_fresh_otp` UX).
