@@ -783,6 +783,45 @@ else
     echo "⚠  catering-pattern-report not installed — skipping Agent #2 smoke check"
 fi
 
+# 10e. Timer-liveness freshness (WARN-only, read-only). EOD (#5) and Daily Brief
+# (#4) write scheduled artifacts once per day INDEPENDENT of traffic volume
+# (eod-snapshot.json on every EOD run; last-brief-sent.json when the morning
+# brief sends), so the artifact mtime is a reliable "did the timer run?" signal
+# — unlike the event-driven decisions.log, whose freshness false-alarms on quiet
+# pilot days. This is the §12a freshness check done safely: read-only, enabled-
+# gated, and WARN-only (NEVER fails the deploy), mirroring the deployed
+# compliance heartbeat check (§2d). A fresh/quiet VPS that hasn't run the timer
+# yet only WARNs; it never rolls back a deploy. No new writers are introduced.
+_freshness_warn() {  # $1 label  $2 artifact path  $3 max-age hours  $4 enabled(0/1)
+    local label="$1" path="$2" max_h="$3" enabled="$4"
+    [ "$enabled" = "1" ] || return 0
+    if [ ! -f "$path" ]; then
+        echo "⚠  $label: $path absent (agent enabled — timer may not have run yet)"
+        return 0
+    fi
+    local age_h
+    age_h=$("$PY" -c "import os,time; print(int((time.time()-os.path.getmtime('$path'))/3600))" 2>/dev/null || echo "999")
+    if [ "$age_h" -gt "$max_h" ]; then
+        echo "⚠  $label: artifact ${age_h}h old (>${max_h}h) — timer may have stopped"
+    else
+        echo "✓ $label timer fresh (${age_h}h old)"
+    fi
+}
+_agent_enabled() {  # $1 = dotted cfg attr (e.g. eod.enabled) -> prints 0/1
+    "$PY" -c "
+import sys, yaml
+sys.path.insert(0, '/opt/shift-agent')
+from schemas import Config
+cfg = Config.model_validate(yaml.safe_load(open('/opt/shift-agent/config.yaml')) or {})
+obj = cfg
+for part in '$1'.split('.'):
+    obj = getattr(obj, part)
+print('1' if obj else '0')
+" 2>/dev/null || echo "0"
+}
+_freshness_warn "EOD snapshot (#5)" /opt/shift-agent/state/eod-snapshot.json 28 "$(_agent_enabled eod.enabled)"
+_freshness_warn "Daily Brief (#4)" /opt/shift-agent/state/last-brief-sent.json 28 "$(_agent_enabled daily_brief.enabled)"
+
 # 11+12. Agent #21 Expense Bookkeeper checks — only run when the agent's
 # venv is present. Agent #21 ships disabled-default and its venv at
 # /opt/shift-agent/venv/ is created by the operator's bootstrap step
