@@ -105,7 +105,6 @@ import importlib.machinery, importlib.util
 loader = importlib.machinery.SourceFileLoader("sca", {str(SCRIPT)!r})
 spec = importlib.util.spec_from_file_location("sca", {str(SCRIPT)!r}, loader=loader)
 mod = importlib.util.module_from_spec(spec)
-mod.__name__ = "sca_test_loaded"
 spec.loader.exec_module(mod)
 mod.LOG_PATH = pathlib.Path({str(log_path)!r})
 mod.BRIDGE_URL = "http://127.0.0.1:{bridge_port}/send"
