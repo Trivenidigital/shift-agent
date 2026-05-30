@@ -36,6 +36,19 @@ def safe_io_module():
     return safe_io
 
 
+def _ctx():
+    """Minimal non-regulated ActionExecutionContext so the action-context
+    chokepoint allows a send whose in-process caller isn't an allowlisted
+    script basename (send-path-test-harness). Mirrors how a real regulated
+    caller threads context; here is_regulated_action=False so no lint runs."""
+    from schemas import ActionExecutionContext
+    return ActionExecutionContext(
+        action_id="bridge-post-unit-test",
+        is_regulated_action=False,
+        verified_action_result=False,
+    )
+
+
 class TestValidateBridgeUrl:
     def test_loopback_accepted(self, safe_io_module, monkeypatch):
         monkeypatch.setattr(safe_io_module, "ALLOW_REMOTE_BRIDGE", False)
@@ -96,7 +109,7 @@ class TestBridgePost:
         mock_resp.read.return_value = b'{"id": "wamid.123abc"}'
         urlopen.return_value.__enter__.return_value = mock_resp
 
-        ok, mid, err, status = safe_io_module.bridge_post("jid@s.whatsapp.net", "msg")
+        ok, mid, err, status = safe_io_module.bridge_post("jid@s.whatsapp.net", "msg", action_context=_ctx())
 
         assert ok is True
         assert mid == "wamid.123abc"
@@ -104,42 +117,51 @@ class TestBridgePost:
         assert status == "sent"
 
     @patch("urllib.request.urlopen")
-    def test_send_uncertain_on_unparseable_body(self, urlopen, safe_io_module):
+    def test_send_uncertain_on_unparseable_body(self, urlopen, safe_io_module, monkeypatch):
+        # send-path-test-harness: per-test opt-in (this class also holds the
+        # guard-refuse tests, which must NOT be opted in). Fake-sink default +
+        # mocked urlopen mean nothing is sent.
+        monkeypatch.setenv("SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS", "1")
         mock_resp = MagicMock()
         mock_resp.read.return_value = b"not-json"
         urlopen.return_value.__enter__.return_value = mock_resp
-        ok, mid, err, status = safe_io_module.bridge_post("jid@s.whatsapp.net", "msg")
+        ok, mid, err, status = safe_io_module.bridge_post("jid@s.whatsapp.net", "msg", action_context=_ctx())
         assert ok is False
         assert status == "send_uncertain"
         assert "ack_parse_failed" in err
 
     @patch("urllib.request.urlopen")
-    def test_empty_message_id_is_uncertain(self, urlopen, safe_io_module):
+    def test_empty_message_id_is_uncertain(self, urlopen, safe_io_module, monkeypatch):
+        monkeypatch.setenv("SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS", "1")
         mock_resp = MagicMock()
         mock_resp.read.return_value = b'{"foo": "bar"}'  # parses but no id field
         urlopen.return_value.__enter__.return_value = mock_resp
-        ok, mid, err, status = safe_io_module.bridge_post("jid", "msg")
+        ok, mid, err, status = safe_io_module.bridge_post("jid", "msg", action_context=_ctx())
         assert ok is False
         assert status == "send_uncertain"
         assert "empty_message_id" in err
 
     @patch("urllib.request.urlopen")
-    def test_success_returns_message_id(self, urlopen, safe_io_module):
+    def test_success_returns_message_id(self, urlopen, safe_io_module, monkeypatch):
+        monkeypatch.setenv("SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS", "1")
         mock_resp = MagicMock()
         mock_resp.read.return_value = b'{"id": "wamid.123abc"}'
         urlopen.return_value.__enter__.return_value = mock_resp
-        ok, mid, err, status = safe_io_module.bridge_post("jid", "msg")
+        ok, mid, err, status = safe_io_module.bridge_post("jid", "msg", action_context=_ctx())
         assert ok is True
         assert mid == "wamid.123abc"
         assert status == "sent"
 
-    @patch("urllib.request.urlopen")
-    def test_alternative_messageId_field(self, safe_io_module):
+    def test_alternative_messageId_field(self, safe_io_module, monkeypatch):
+        # Note: this test patches urlopen via the `with` block below; the prior
+        # redundant @patch decorator injected its mock into safe_io_module
+        # (latent bug, surfaced once the test reached the send path).
+        monkeypatch.setenv("SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS", "1")
         with patch("urllib.request.urlopen") as urlopen:
             mock_resp = MagicMock()
             mock_resp.read.return_value = b'{"messageId": "mid.xyz"}'
             urlopen.return_value.__enter__.return_value = mock_resp
-            ok, mid, err, status = safe_io_module.bridge_post("jid", "msg")
+            ok, mid, err, status = safe_io_module.bridge_post("jid", "msg", action_context=_ctx())
             assert ok is True
             assert mid == "mid.xyz"
             assert status == "sent"
@@ -154,6 +176,23 @@ class TestBridgePost2TupleAdapter:
     canonical surface. Tests verify the (ok, mid, err, status) -> (ok, detail)
     collapse for every status branch of the canonical bridge_post.
     """
+
+    @pytest.fixture(autouse=True)
+    def _opt_in_bridge_sends(self, safe_io_module, monkeypatch):
+        """send-path-test-harness: every test in this class exercises the send
+        path against a mocked urlopen, so (1) opt past the pytest bridge guard
+        and (2) resolve the caller to an allowlisted production script. The
+        2-tuple adapter takes no action_context arg, and in production its
+        callers ARE allowlisted scripts (send-catering-ack, apply-expense-
+        decision, ...), so forcing an allowlisted caller faithfully mirrors
+        prod and is the reviewed-allowlist route. Conftest fake-sink default +
+        mocked urlopen mean nothing is sent; the tripwire is unaffected. No
+        guard-refuse test lives in this class (does not weaken the guard)."""
+        monkeypatch.setenv("SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS", "1")
+        monkeypatch.setattr(
+            safe_io_module, "_resolve_caller_script_name",
+            lambda: "send-catering-ack",
+        )
 
     @patch("urllib.request.urlopen")
     def test_success_returns_2tuple_with_message_id(self, urlopen, safe_io_module):
@@ -225,6 +264,17 @@ class TestActionContextEnforcement:
     representative caller (resolver mocked via monkeypatch) and assert the
     refusal vs pass-through behavior + the audit row written.
     """
+
+    @pytest.fixture(autouse=True)
+    def _opt_in_bridge_sends(self, monkeypatch):
+        """send-path-test-harness: every test here exercises the chokepoint,
+        which runs AFTER the pytest bridge guard — so opt past the guard to
+        reach the code under test. Both the pass-through and the chokepoint-
+        refusal tests need the guard bypassed (the refusals they assert are
+        the CHOKEPOINT's, not the guard's). The conftest fake-sink default +
+        mocked urlopen mean nothing is sent. No guard-refuse test lives in this
+        class, so a class-scoped opt-in is safe (does not weaken the guard)."""
+        monkeypatch.setenv("SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS", "1")
 
     def _force_caller(self, safe_io_module, monkeypatch, name: str) -> None:
         """Override _resolve_caller_script_name to return `name`."""
