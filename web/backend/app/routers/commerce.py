@@ -36,6 +36,19 @@ def _orders_path() -> Path:
     return get_settings().state_dir / "commerce" / "orders.json"
 
 
+def _safe_int(v: Any) -> int:
+    """Coerce a possibly-malformed cents value to int; bad data -> 0 (never raise)."""
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _item_count(v: Any) -> int:
+    """Count line items defensively; a non-list value -> 0 (never raise)."""
+    return len(v) if isinstance(v, list) else 0
+
+
 def _load_orders() -> tuple[list[dict[str, Any]], Optional[str]]:
     """Return (orders, degraded_reason). Missing file -> ([], None): a useful
     empty state (Commerce is dormant). Unreadable/malformed -> ([], reason):
@@ -81,7 +94,7 @@ def _row(o: dict[str, Any]) -> dict[str, Any]:
         "pos_sync_status": o.get("pos_sync_status", "not_synced"),
         "total_cents": o.get("total_cents"),
         "currency": o.get("currency"),
-        "item_count": len(o.get("line_items") or []),
+        "item_count": _item_count(o.get("line_items")),
         "created_at": o.get("created_at"),
         "updated_at": o.get("updated_at"),
     }
@@ -91,7 +104,7 @@ def _totals(orders: list[dict[str, Any]]) -> dict[str, Any]:
     by_currency: dict[str, int] = {}
     for o in orders:
         cur = o.get("currency") or "USD"
-        by_currency[cur] = by_currency.get(cur, 0) + int(o.get("total_cents") or 0)
+        by_currency[cur] = by_currency.get(cur, 0) + _safe_int(o.get("total_cents"))
     open_count = sum(1 for o in orders if (o.get("status") or "") in _OPEN_STATUSES)
     return {
         "order_count": len(orders),
@@ -105,14 +118,20 @@ def _order_audit_trail(order_id: str, limit: int = 200) -> list[dict[str, Any]]:
     order. The authoritative per-order trail is the order's embedded
     `status_history`; this supplements it. Read-only, bounded scan, oldest-first."""
     out: list[dict[str, Any]] = []
-    for e in reverse_json_entries(get_settings().decisions_path, max_lines=20_000):
-        t = e.get("type") or ""
-        if not t.startswith(_COMMERCE_AUDIT_PREFIX):
-            continue
-        if e.get("order_id") == order_id or e.get("event_ref") == order_id:
-            out.append(e)
-            if len(out) >= limit:
-                break
+    try:
+        for e in reverse_json_entries(get_settings().decisions_path, max_lines=20_000):
+            t = e.get("type") or ""
+            if not t.startswith(_COMMERCE_AUDIT_PREFIX):
+                continue
+            if e.get("order_id") == order_id or e.get("event_ref") == order_id:
+                out.append(e)
+                if len(out) >= limit:
+                    break
+    except OSError:
+        # Unreadable decisions.log (permission/IO/IsADirectory). The audit join
+        # is supplementary (the order's status_history is the authoritative
+        # trail) — degrade to an empty trail rather than 500 the detail view.
+        return []
     out.reverse()
     return out
 

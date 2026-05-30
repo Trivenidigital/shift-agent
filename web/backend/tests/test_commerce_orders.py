@@ -185,6 +185,35 @@ def test_json_without_orders_list_is_degraded(tmp_path):
     assert res["degraded"] and "malformed" in res["degraded"]
 
 
+def test_malformed_order_fields_do_not_crash(tmp_path):
+    """An order with a non-numeric total_cents and a non-list line_items must
+    NOT 500 — fields coerce safely (0 / count 0)."""
+    commerce, s = _set_paths(tmp_path)
+    _write_orders(s.state_dir, [
+        _order("CO00001", total_cents="abc", line_items=1, currency="USD"),
+        _order("CO00002", total_cents=500, currency="USD"),
+    ])
+    res = asyncio.run(commerce.list_orders(_=None))
+    assert res["totals"]["order_count"] == 2
+    # malformed total coerces to 0; valid one counts
+    assert res["totals"]["gross_cents_by_currency"] == {"USD": 500}
+    bad = next(r for r in res["orders"] if r["order_id"] == "CO00001")
+    assert bad["item_count"] == 0  # non-list line_items -> 0
+
+
+def test_detail_unreadable_decisions_log_degrades_audit(tmp_path):
+    """If decisions.log is unreadable (here: a directory), the detail view still
+    returns the order with an empty audit trail — never 500."""
+    commerce, s = _set_paths(tmp_path)
+    _write_orders(s.state_dir, [_order("CO00001")])
+    # Point decisions_path at a DIRECTORY so reverse_json_entries' open() raises OSError.
+    s.decisions_path = tmp_path / "logs"
+    s.decisions_path.mkdir(parents=True, exist_ok=True)
+    res = asyncio.run(commerce.get_order("CO00001", _=None))
+    assert res["order"]["order_id"] == "CO00001"
+    assert res["audit"] == []
+
+
 def test_router_does_not_write_files(tmp_path):
     """Read-only invariant: listing/detail must not create or modify state."""
     commerce, s = _set_paths(tmp_path)
