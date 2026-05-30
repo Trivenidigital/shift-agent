@@ -5396,6 +5396,28 @@ def test_schedule_named_business_revision_attaches_not_bypassed():
     ) is False
 
 
+def test_contact_address_digits_in_revision_attach_not_bypassed():
+    """A layout revision that names the actual phone/street number being resized
+    must attach, not bypass — contact/address digits are not a new campaign;
+    only new dates/times/occasions are."""
+    _hooks, actions = _load_plugin_modules()
+    active = {
+        "project_id": "F0097",
+        "status": "awaiting_final_approval",
+        "fields": {"event_or_business_name": "Chloe Hair Studio"},
+    }
+    assert actions.should_bypass_active_flyer_project_for_fresh_request(
+        "Create a new flyer for Chloe Hair Studio, make phone number 555-1234 and address smaller.",
+        active,
+        has_media=False,
+    ) is False
+    assert actions.should_bypass_active_flyer_project_for_fresh_request(
+        "Create a new flyer for chloe hair studio, make 123 Main St address and contact smaller.",
+        active,
+        has_media=False,
+    ) is False
+
+
 def test_source_vs_new_source_choice_creates_manual_edit_project(monkeypatch):
     """SOURCE branch routes through existing exact-edit handler:
     trigger_create_flyer_project called WITH manual_edit_required=True and
