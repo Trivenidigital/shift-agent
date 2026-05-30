@@ -29,6 +29,8 @@ interface ManualQueueRow {
   verification_modes?: string[];
   locked_facts: unknown[];
   qa_blockers: string[];
+  claimed_by: string;
+  claimed_at: string | null;
 }
 
 interface ManualQueueGroup {
@@ -76,6 +78,8 @@ interface ManualQueueDetailManualReview {
   completed_at: string | null;
   break_glass_reason: string;
   operator_asset_ids: string[];
+  claimed_by: string;
+  claimed_at: string | null;
 }
 
 interface ManualQueueDetailTimelineEvent {
@@ -621,6 +625,16 @@ export function FlyerAdmin() {
   const [queueFilterAgeBucket, setQueueFilterAgeBucket] = useState("");
   const [queueFilterManualStatus, setQueueFilterManualStatus] = useState("");
   const [queueFilterProjectId, setQueueFilterProjectId] = useState("");
+  // Multi-admin coordination: self-reported admin handle (browser-local; the
+  // cockpit shares one login, so this is a coordination label, not a login).
+  // Drives claim/unclaim/assign attribution.
+  const [adminHandle, setAdminHandle] = useState<string>(() => {
+    try { return localStorage.getItem("flyer_admin_handle") || ""; } catch { return ""; }
+  });
+  const setHandle = (v: string) => {
+    setAdminHandle(v);
+    try { localStorage.setItem("flyer_admin_handle", v); } catch { /* localStorage may be unavailable */ }
+  };
   // P0-2 in-drawer upload-then-complete state (per drawer instance — drawer
   // is single-row, so flat state is sufficient)
   const [drawerReason, setDrawerReason] = useState("");
@@ -783,6 +797,39 @@ export function FlyerAdmin() {
       qc.invalidateQueries({ queryKey: ["flyer-summary"] });
       qc.invalidateQueries({ queryKey: ["flyer-projects"] });
     },
+  });
+
+  // Multi-admin queue ownership mutations (Priority 1). admin_id is the
+  // browser-local handle; the backend rejects blank handles and 409s on
+  // cross-admin conflict (force = explicit take-over). On failure (a race
+  // 409 where another admin claimed during the poll window, or a 422) we
+  // refetch so the operator sees the true current owner, then surface it —
+  // a silent no-op would leave them acting on stale ownership state.
+  const onOwnershipError = (err: unknown) => {
+    qc.invalidateQueries({ queryKey: ["flyer-manual-queue"] });
+    const detail = err instanceof Error && err.message ? ` (${err.message})` : "";
+    window.alert(
+      `Ownership action could not be applied${detail}. It may already be claimed by another admin, ` +
+      `or your handle was rejected. The queue has been refreshed — check the current owner and retry.`,
+    );
+  };
+  const claimQueueItem = useMutation({
+    mutationFn: ({ projectId, force }: { projectId: string; force?: boolean }) =>
+      api.POST(`/flyer/manual-queue/${projectId}/claim`, { admin_id: adminHandle.trim(), force: !!force }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["flyer-manual-queue"] }); },
+    onError: onOwnershipError,
+  });
+  const unclaimQueueItem = useMutation({
+    mutationFn: ({ projectId, force }: { projectId: string; force?: boolean }) =>
+      api.POST(`/flyer/manual-queue/${projectId}/unclaim`, { admin_id: adminHandle.trim(), force: !!force }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["flyer-manual-queue"] }); },
+    onError: onOwnershipError,
+  });
+  const assignQueueItem = useMutation({
+    mutationFn: ({ projectId, target }: { projectId: string; target: string }) =>
+      api.POST(`/flyer/manual-queue/${projectId}/assign`, { admin_id: target, by: adminHandle.trim() }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["flyer-manual-queue"] }); },
+    onError: onOwnershipError,
   });
 
   // P0 #2 Commit 5 — audit-only operator flag on a delivered_with_warning project.
@@ -1437,6 +1484,20 @@ export function FlyerAdmin() {
                   {mutationErrorMessage(completeQueueItem.error ?? breakGlassQueueItem.error)}
                 </div>
               )}
+              <div className="mb-3 flex flex-wrap items-center gap-2 rounded-md border border-zinc-200 bg-white px-3 py-2 text-xs">
+                <span className="font-medium text-zinc-600">Your admin handle</span>
+                <Input
+                  value={adminHandle}
+                  onChange={(e) => setHandle(e.target.value)}
+                  placeholder="e.g. priya"
+                  className="h-7 w-40 text-xs"
+                />
+                <span className="text-zinc-400">
+                  {adminHandle.trim()
+                    ? "Used to claim / assign cases. Browser-local label, not a login."
+                    : "Set a handle to claim cases (browser-local; shared cockpit login)."}
+                </span>
+              </div>
               {(queueData?.total ?? 0) > 0 && filteredQueueCount === 0 && (
                 <div className="rounded-md border border-zinc-200 bg-zinc-50 px-3 py-3 text-center text-xs text-zinc-500">
                   No rows match the current filters. {(queueData?.total ?? 0)} row{(queueData?.total ?? 0) === 1 ? "" : "s"} hidden.
@@ -1501,7 +1562,54 @@ export function FlyerAdmin() {
                                 <div className="mt-1 text-zinc-500">assets: {row.asset_ids.join(", ")}</div>
                               )}
                             </td>
-                            <td className="px-3 py-2 text-xs text-brand-700">Open →</td>
+                            <td className="px-3 py-2 text-xs" onClick={(e) => e.stopPropagation()}>
+                              {row.claimed_by ? (
+                                <div className="flex flex-col items-start gap-1">
+                                  <span className="font-medium text-zinc-700" title={row.claimed_at ? `claimed ${row.claimed_at}` : ""}>
+                                    👤 {row.claimed_by}{row.claimed_by === adminHandle.trim() ? " (you)" : ""}
+                                  </span>
+                                  {row.claimed_by === adminHandle.trim() ? (
+                                    <button
+                                      type="button"
+                                      className="rounded border border-zinc-300 px-2 py-0.5 hover:bg-zinc-50"
+                                      onClick={() => unclaimQueueItem.mutate({ projectId: row.project_id })}
+                                    >Unclaim</button>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      disabled={!adminHandle.trim()}
+                                      className="rounded border border-amber-400 px-2 py-0.5 text-amber-800 hover:bg-amber-50 disabled:opacity-40"
+                                      onClick={() => { if (window.confirm(`Take over ${row.project_id} from ${row.claimed_by}?`)) claimQueueItem.mutate({ projectId: row.project_id, force: true }); }}
+                                    >Take over</button>
+                                  )}
+                                </div>
+                              ) : (
+                                <button
+                                  type="button"
+                                  disabled={!adminHandle.trim()}
+                                  title={adminHandle.trim() ? "" : "Set your admin handle above first"}
+                                  className="rounded border border-brand-400 px-2 py-0.5 text-brand-700 hover:bg-brand-50 disabled:opacity-40"
+                                  onClick={() => claimQueueItem.mutate({ projectId: row.project_id })}
+                                >Claim</button>
+                              )}
+                              <div className="mt-1 flex items-center gap-2 text-zinc-500">
+                                <button
+                                  type="button"
+                                  disabled={!adminHandle.trim()}
+                                  title={adminHandle.trim() ? "" : "Set your admin handle above first"}
+                                  className="hover:underline disabled:opacity-40 disabled:no-underline"
+                                  onClick={() => {
+                                    const t = window.prompt(`Assign ${row.project_id} to which admin handle?`, "");
+                                    if (t && t.trim()) assignQueueItem.mutate({ projectId: row.project_id, target: t.trim() });
+                                  }}
+                                >Assign</button>
+                                <button
+                                  type="button"
+                                  className="text-brand-700 hover:underline"
+                                  onClick={() => openDrawer(row.project_id)}
+                                >Open →</button>
+                              </div>
+                            </td>
                           </tr>
                         ))}
                       </tbody>
