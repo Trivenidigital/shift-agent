@@ -1427,8 +1427,13 @@ _LAYOUT_SIZE_REVISION = re.compile(
     re.IGNORECASE,
 )
 _LAYOUT_CONTACT_TARGET = re.compile(r"\b(?:contact|phone|number|address|location)\b", re.IGNORECASE)
+# Revision-specific focus phrasing only. Generic "highlight/emphasize" is
+# omitted: "create a new flyer highlighting our specials" is a plausible new
+# brief, and routing it as a revision would corrupt an active project. The
+# authoritative agent-side extractor still handles the broader set once a
+# message is (conservatively) attached.
 _LAYOUT_FOCUS_REVISION = re.compile(
-    r"\b(?:main\s+focus|focus\s+should\s+be|focus\s+on|highlight|emphasize|emphasis)\b", re.IGNORECASE
+    r"\b(?:main\s+focus|focus\s+should\s+be|focus\s+on)\b", re.IGNORECASE
 )
 _LAYOUT_OFFER_TARGET = re.compile(
     r"\b(?:service|services|offer|offers|items|menu|products|specials)\b", re.IGNORECASE

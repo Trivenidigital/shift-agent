@@ -5418,6 +5418,18 @@ def test_contact_address_digits_in_revision_attach_not_bypassed():
     ) is False
 
 
+def test_layout_revision_wording_requires_revision_specific_focus_phrasing():
+    """Only revision-specific focus phrasing ('main focus / focus should be /
+    focus on') counts as a layout revision; generic 'highlight/emphasize' new-
+    brief language does not (it would risk false-attaching a new brief to an
+    active project). Size edits and explicit focus edits still count."""
+    _hooks, actions = _load_plugin_modules()
+    assert actions._is_layout_emphasis_revision_wording("highlighting our specials and products") is False
+    assert actions._is_layout_emphasis_revision_wording("the main focus should be on the services") is True
+    assert actions._is_layout_emphasis_revision_wording("focus on the menu items") is True
+    assert actions._is_layout_emphasis_revision_wording("make the contact number and address smaller") is True
+
+
 def test_source_vs_new_source_choice_creates_manual_edit_project(monkeypatch):
     """SOURCE branch routes through existing exact-edit handler:
     trigger_create_flyer_project called WITH manual_edit_required=True and
