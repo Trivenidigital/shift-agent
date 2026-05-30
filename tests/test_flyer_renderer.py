@@ -1111,17 +1111,20 @@ def test_localized_telugu_poster_prompt_keeps_integrated_text_contract():
     assert "Do not output an all-English flyer" in prompt
 
 
-def test_background_only_contract_is_gated_to_english_no_reference(monkeypatch):
+def test_background_only_contract_is_gated_to_english_no_reference(tmp_path, monkeypatch):
     """Background-only (model emits no text) applies ONLY when the deterministic
-    overlay can produce every required fact: English + no reference. Localized
-    and reference-extraction flows keep the model rendering text."""
+    overlay can produce every required fact: English + no reference-IMAGE.
+    Localized and reference-extraction flows keep the model rendering text; a
+    logo/brand asset alone does NOT disqualify (common branded flyer)."""
+    from PIL import Image as _Image
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+
     english = _complete_project().model_copy(update={"fields": FlyerRequestFields(
         event_or_business_name="Lakshmi's Kitchen", contact_info="+1 732 983 7841",
         preferred_language="en", notes="Dosa $6.99; Idli $5.99")})
     p_en = _image_prompt(english, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
     assert "decorative BACKGROUND image only" in p_en
     assert "do NOT render them as text" in p_en
-
     assert render_module._background_only_eligible(english) is True
 
     telugu = english.model_copy(update={"fields": english.fields.model_copy(update={"preferred_language": "te"})})
@@ -1130,9 +1133,21 @@ def test_background_only_contract_is_gated_to_english_no_reference(monkeypatch):
     assert "decorative BACKGROUND image only" not in p_te
     assert render_module._background_only_eligible(telugu) is False
 
-    # English but with a reference image to extract from → gated off (model reads it).
-    monkeypatch.setattr("agents.flyer.render._project_reference_assets", lambda project: ["ref"])
-    assert render_module._background_only_eligible(english) is False
+    img = tmp_path / "assets" / "ref.png"
+    img.parent.mkdir(parents=True, exist_ok=True)
+    _Image.new("RGB", (10, 10), (1, 2, 3)).save(img)
+
+    def _asset(kind: str) -> FlyerAsset:
+        return FlyerAsset(asset_id="A0001", kind=kind, source="whatsapp", path=str(img),
+                          mime_type="image/png", sha256="b" * 64, original_message_id="m1",
+                          received_at=datetime.now(timezone.utc))
+
+    # A logo/brand asset alone stays eligible (it's visual identity, not text).
+    assert render_module._background_only_eligible(
+        english.model_copy(update={"assets": [_asset("logo")]})) is True
+    # A reference IMAGE (items/prices to read out) gates off → model renders text.
+    assert render_module._background_only_eligible(
+        english.model_copy(update={"assets": [_asset("reference_image")]})) is False
 
 
 def test_direct_poster_prompt_does_not_make_request_sentence_flyer_copy(monkeypatch):

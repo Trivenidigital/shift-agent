@@ -822,6 +822,17 @@ def _poster_copy_block(project: FlyerProject) -> str:
     return "\n".join(lines)
 
 
+def _needs_reference_extraction(project: FlyerProject) -> bool:
+    """A REFERENCE-IMAGE (not a logo/brand asset) is attached, whose items/prices
+    may need to be read out of the image — only the model can do that. Logos and
+    brand assets do NOT trigger this (they're honored as visual identity, not a
+    text source), so common branded flyers stay background-only eligible."""
+    return any(
+        getattr(asset, "kind", "") == "reference_image" and Path(str(getattr(asset, "path", ""))).exists()
+        for asset in project.assets
+    )
+
+
 def _background_only_eligible(project: FlyerProject) -> bool:
     """Whether the model should render a TEXTLESS background (the deterministic
     overlay owns all text).
@@ -831,13 +842,15 @@ def _background_only_eligible(project: FlyerProject) -> bool:
     model rendering text:
       - non-English requests — the overlay draws facts as captured and cannot
         translate them; the model is still needed for localized copy.
-      - reference-extraction — items/prices live in an attached reference image,
+      - reference-extraction — items/prices live in an attached reference IMAGE,
         not yet in `collect_text_facts()`; the model must read + render them.
+        (A logo/brand asset alone does NOT disqualify — it's visual identity,
+        not a text source.)
     """
     lang = (project.fields.preferred_language or "en").strip().lower()
     if lang not in {"", "en", "english"}:
         return False
-    if _project_reference_assets(project):
+    if _needs_reference_extraction(project):
         return False
     return True
 
