@@ -2459,12 +2459,27 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
     raw = _openrouter_image_bytes(project, concept_id=concept_id, output_format=output_format, size=size, model=model, quality=quality, repair_instruction=repair_instruction)
     raw_path = _raw_background_path(path)
     raw_path.unlink(missing_ok=True)
+    # The prompt and the overlay MUST agree (same gate). For non-eligible flows
+    # (localized / reference-extraction) the model renders the text itself, so we
+    # must NOT composite the deterministic critical overlay on top — that would
+    # duplicate text and reintroduce untranslated/incomplete facts. Those flows
+    # keep the identity banner only (pre-overlay behavior). Background-only
+    # eligible flows get the full deterministic overlay (the P1 fix).
+    if not _background_only_eligible(project):
+        if size is None:
+            _write_generated_image(raw, path, size=size)
+            return
+        _write_generated_image(raw, raw_path, size=size)
+        apply_exact_identity_overlay(project, raw_path, path, size=size)
+        return
+    # Background-only eligible: the model emitted a textless background; the
+    # critical overlay (brand + title + schedule + menu items/prices + footer)
+    # is the sole source of every required visible fact. `_apply_critical_text_
+    # overlay` carries the system-python3 Pillow fallback for VPSes whose Hermes
+    # venv lacks Pillow.
     if size is None:
-        # PDF fallback (render_final_package else-branch). The slice-2 prompt tells
-        # the model to emit a textless background, so the deterministic overlay MUST
-        # be composited here too — otherwise this path ships a printable PDF with no
-        # copy/prices/contact. Render the overlay on a PNG, then export to PDF
-        # (same pattern as render_final_package's primary PDF path).
+        # PDF: composite the overlay on a PNG, then export to PDF (same pattern as
+        # render_final_package's primary PDF path) — else a textless background PDF.
         pdf_px = (1275, 1650)
         _write_generated_image(raw, raw_path, size=pdf_px)
         overlaid = path.with_suffix(".overlaid.png")
@@ -2476,16 +2491,6 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
             overlaid.unlink(missing_ok=True)
         return
     _write_generated_image(raw, raw_path, size=size)
-    # Deterministic exact-text composition (Priority-1 fix for the ~100%
-    # `visual_qa_failed` incident): the image model cannot reliably render exact
-    # text, so we composite it ourselves. The critical overlay is self-contained
-    # — brand + campaign title + schedule (title card), menu items/prices (menu
-    # panel), location + contact (footer) — covering every required visible fact
-    # in one coherent pass over the model background. This brings forward to the
-    # CONCEPT stage the same deterministic text layer that already runs at
-    # `render_final_package`, so visual QA reads our crisp text instead of the
-    # model's garbled rendering. `_apply_critical_text_overlay` carries the
-    # system-python3 Pillow fallback for VPSes whose Hermes venv lacks Pillow.
     _apply_critical_text_overlay(project, raw_path, path, size=size, output_format=output_format)
 
 

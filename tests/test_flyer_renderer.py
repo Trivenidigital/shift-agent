@@ -54,6 +54,19 @@ def _complete_project() -> FlyerProject:
     )
 
 
+def _english_project() -> FlyerProject:
+    """English, no reference → background-only eligible, so the model-branch
+    render composites the full deterministic critical overlay (the P1 fix)."""
+    return _complete_project().model_copy(update={"fields": FlyerRequestFields(
+        event_or_business_name="Lakshmi's Kitchen",
+        contact_info="+1 732 983 7841",
+        venue_or_location="90 Brybar Dr St Johns FL",
+        preferred_language="en",
+        notes="Dosa $6.99; Idli $5.99",
+        style_preference="warm festive south-indian, premium readable",
+    )})
+
+
 def _png_bytes(size=(1080, 1350), color=(240, 120, 40)) -> bytes:
     from PIL import Image, ImageDraw
 
@@ -471,7 +484,7 @@ def test_concept_preview_model_branch_applies_critical_text_overlay(tmp_path, mo
     deterministic text, not the image model's garbled rendering. Regression for the
     100% `visual_qa_failed` incident (F0113 = missing campaign_title/offer/items).
     """
-    project = _complete_project()
+    project = _english_project()  # background-only eligible → critical overlay applies
     monkeypatch.setattr(render_module, "_openrouter_image_bytes", lambda *a, **k: _png_bytes())
     overlay_targets: list[str] = []
     real_overlay = render_module._apply_critical_text_overlay
@@ -495,7 +508,7 @@ def test_render_model_pdf_fallback_applies_critical_overlay(tmp_path, monkeypatc
     deterministic overlay too — otherwise the slice-2 background-only prompt
     ships a printable PDF with no copy/prices/contact.
     """
-    project = _complete_project()
+    project = _english_project()  # background-only eligible → overlay composited
     monkeypatch.setattr(render_module, "_openrouter_image_bytes", lambda *a, **k: _png_bytes())
     overlay_targets: list[str] = []
     real_overlay = render_module._apply_critical_text_overlay
@@ -1886,7 +1899,7 @@ def test_real_image_model_concept_applies_deterministic_text_overlay(tmp_path, m
     monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", lambda *_args, **_kwargs: _Resp())
 
     specs = render_concept_previews(
-        _complete_project(),
+        _english_project(),
         tmp_path,
         model="openai/gpt-5.4-image-2",
         quality="high",
