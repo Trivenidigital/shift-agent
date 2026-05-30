@@ -36,6 +36,19 @@ def safe_io_module():
     return safe_io
 
 
+def _ctx():
+    """Minimal non-regulated ActionExecutionContext so the action-context
+    chokepoint allows a send whose in-process caller isn't an allowlisted
+    script basename (send-path-test-harness). Mirrors how a real regulated
+    caller threads context; here is_regulated_action=False so no lint runs."""
+    from schemas import ActionExecutionContext
+    return ActionExecutionContext(
+        action_id="bridge-post-unit-test",
+        is_regulated_action=False,
+        verified_action_result=False,
+    )
+
+
 class TestValidateBridgeUrl:
     def test_loopback_accepted(self, safe_io_module, monkeypatch):
         monkeypatch.setattr(safe_io_module, "ALLOW_REMOTE_BRIDGE", False)
@@ -96,7 +109,7 @@ class TestBridgePost:
         mock_resp.read.return_value = b'{"id": "wamid.123abc"}'
         urlopen.return_value.__enter__.return_value = mock_resp
 
-        ok, mid, err, status = safe_io_module.bridge_post("jid@s.whatsapp.net", "msg")
+        ok, mid, err, status = safe_io_module.bridge_post("jid@s.whatsapp.net", "msg", action_context=_ctx())
 
         assert ok is True
         assert mid == "wamid.123abc"
@@ -112,7 +125,7 @@ class TestBridgePost:
         mock_resp = MagicMock()
         mock_resp.read.return_value = b"not-json"
         urlopen.return_value.__enter__.return_value = mock_resp
-        ok, mid, err, status = safe_io_module.bridge_post("jid@s.whatsapp.net", "msg")
+        ok, mid, err, status = safe_io_module.bridge_post("jid@s.whatsapp.net", "msg", action_context=_ctx())
         assert ok is False
         assert status == "send_uncertain"
         assert "ack_parse_failed" in err
@@ -123,7 +136,7 @@ class TestBridgePost:
         mock_resp = MagicMock()
         mock_resp.read.return_value = b'{"foo": "bar"}'  # parses but no id field
         urlopen.return_value.__enter__.return_value = mock_resp
-        ok, mid, err, status = safe_io_module.bridge_post("jid", "msg")
+        ok, mid, err, status = safe_io_module.bridge_post("jid", "msg", action_context=_ctx())
         assert ok is False
         assert status == "send_uncertain"
         assert "empty_message_id" in err
@@ -134,7 +147,7 @@ class TestBridgePost:
         mock_resp = MagicMock()
         mock_resp.read.return_value = b'{"id": "wamid.123abc"}'
         urlopen.return_value.__enter__.return_value = mock_resp
-        ok, mid, err, status = safe_io_module.bridge_post("jid", "msg")
+        ok, mid, err, status = safe_io_module.bridge_post("jid", "msg", action_context=_ctx())
         assert ok is True
         assert mid == "wamid.123abc"
         assert status == "sent"
@@ -146,7 +159,7 @@ class TestBridgePost:
             mock_resp = MagicMock()
             mock_resp.read.return_value = b'{"messageId": "mid.xyz"}'
             urlopen.return_value.__enter__.return_value = mock_resp
-            ok, mid, err, status = safe_io_module.bridge_post("jid", "msg")
+            ok, mid, err, status = safe_io_module.bridge_post("jid", "msg", action_context=_ctx())
             assert ok is True
             assert mid == "mid.xyz"
             assert status == "sent"
@@ -163,15 +176,21 @@ class TestBridgePost2TupleAdapter:
     """
 
     @pytest.fixture(autouse=True)
-    def _opt_in_bridge_sends(self, monkeypatch):
+    def _opt_in_bridge_sends(self, safe_io_module, monkeypatch):
         """send-path-test-harness: every test in this class exercises the send
-        path against a mocked urlopen, so opt past the pytest bridge guard.
-        The conftest fake-sink default keeps BRIDGE_URL off the live bridge
-        (:3000) and urlopen is mocked, so nothing is actually sent; the
-        LiveBridgeSendInTestError tripwire still fires if BRIDGE_URL were ever
-        the live bridge. No guard-refuse test lives in this class, so a
-        class-scoped opt-in is safe (does not weaken the guard)."""
+        path against a mocked urlopen, so (1) opt past the pytest bridge guard
+        and (2) resolve the caller to an allowlisted production script. The
+        2-tuple adapter takes no action_context arg, and in production its
+        callers ARE allowlisted scripts (send-catering-ack, apply-expense-
+        decision, ...), so forcing an allowlisted caller faithfully mirrors
+        prod and is the reviewed-allowlist route. Conftest fake-sink default +
+        mocked urlopen mean nothing is sent; the tripwire is unaffected. No
+        guard-refuse test lives in this class (does not weaken the guard)."""
         monkeypatch.setenv("SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS", "1")
+        monkeypatch.setattr(
+            safe_io_module, "_resolve_caller_script_name",
+            lambda: "send-catering-ack",
+        )
 
     @patch("urllib.request.urlopen")
     def test_success_returns_2tuple_with_message_id(self, urlopen, safe_io_module):
