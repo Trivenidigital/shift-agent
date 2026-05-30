@@ -27,11 +27,27 @@ def safe_io_module():
     return safe_io
 
 
+# send-path-test-harness 2026-05-30: NON-live loopback bridge URL (never :3000)
+# so the LiveBridgeSendInTestError tripwire stays dormant; urlopen is mocked.
+_TEST_BRIDGE = "http://127.0.0.1:8765/send"
+
+
+def _ctx():
+    """Minimal non-regulated ActionExecutionContext so the chokepoint allows the
+    send (in-process caller isn't an allowlisted script basename)."""
+    from schemas import ActionExecutionContext
+    return ActionExecutionContext(
+        action_id="media-unit-test", is_regulated_action=False,
+        verified_action_result=False,
+    )
+
+
 @patch("urllib.request.urlopen")
 def test_bridge_send_media_posts_to_send_media_endpoint(urlopen, safe_io_module, tmp_path, monkeypatch):
     asset = tmp_path / "flyer.png"
     asset.write_bytes(b"fake-png")
-    monkeypatch.setattr(safe_io_module, "BRIDGE_URL", "http://127.0.0.1:3000/send")
+    monkeypatch.setenv("SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS", "1")
+    monkeypatch.setattr(safe_io_module, "BRIDGE_URL", _TEST_BRIDGE)
 
     mock_resp = MagicMock()
     mock_resp.read.return_value = b'{"success": true, "messageId": "wamid.media.1"}'
@@ -43,13 +59,14 @@ def test_bridge_send_media_posts_to_send_media_endpoint(urlopen, safe_io_module,
         media_type="image",
         caption="Draft concept 1",
         file_name="concept-1.png",
+        action_context=_ctx(),
     )
 
     assert ok is True
     assert mid == "wamid.media.1"
     assert status == "sent"
     request = urlopen.call_args.args[0]
-    assert request.full_url == "http://127.0.0.1:3000/send-media"
+    assert request.full_url == "http://127.0.0.1:8765/send-media"
     payload = json.loads(request.data.decode("utf-8"))
     assert payload == {
         "chatId": "customer@s.whatsapp.net",
@@ -75,13 +92,14 @@ def test_bridge_send_media_rejects_missing_file(safe_io_module, tmp_path):
 def test_bridge_send_media_unparseable_ack_is_uncertain(urlopen, safe_io_module, tmp_path, monkeypatch):
     asset = tmp_path / "flyer.pdf"
     asset.write_bytes(b"%PDF fake")
-    monkeypatch.setattr(safe_io_module, "BRIDGE_URL", "http://127.0.0.1:3000/send")
+    monkeypatch.setenv("SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS", "1")
+    monkeypatch.setattr(safe_io_module, "BRIDGE_URL", _TEST_BRIDGE)
 
     mock_resp = MagicMock()
     mock_resp.read.return_value = b"not json"
     urlopen.return_value.__enter__.return_value = mock_resp
 
-    ok, mid, err, status = safe_io_module.bridge_send_media("jid", asset)
+    ok, mid, err, status = safe_io_module.bridge_send_media("jid", asset, action_context=_ctx())
     assert ok is False
     assert mid == ""
     assert status == "send_uncertain"

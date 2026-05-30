@@ -27,9 +27,26 @@ def safe_io_module():
     return safe_io
 
 
+# send-path-test-harness 2026-05-30: a NON-live loopback bridge URL (never :3000)
+# so the LiveBridgeSendInTestError tripwire stays dormant; urlopen is mocked so
+# nothing is actually sent.
+_TEST_BRIDGE = "http://127.0.0.1:8765/send"
+
+
+def _ctx():
+    """Minimal non-regulated ActionExecutionContext so the chokepoint allows the
+    send (in-process caller isn't an allowlisted script basename)."""
+    from schemas import ActionExecutionContext
+    return ActionExecutionContext(
+        action_id="cta-unit-test", is_regulated_action=False,
+        verified_action_result=False,
+    )
+
+
 @patch("urllib.request.urlopen")
 def test_bridge_send_cta_posts_labels_and_reply_messages_to_send_cta(urlopen, safe_io_module, monkeypatch):
-    monkeypatch.setattr(safe_io_module, "BRIDGE_URL", "http://127.0.0.1:3000/send")
+    monkeypatch.setenv("SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS", "1")
+    monkeypatch.setattr(safe_io_module, "BRIDGE_URL", _TEST_BRIDGE)
 
     mock_resp = MagicMock()
     mock_resp.read.return_value = b'{"success": true, "messageId": "wamid.cta.1"}'
@@ -51,6 +68,7 @@ def test_bridge_send_cta_posts_labels_and_reply_messages_to_send_cta(urlopen, sa
         media_path="/opt/shift-agent/state/flyer/marketing/Flyer.png",
         media_type="image",
         footer="Flyer Studio",
+        action_context=_ctx(),
     )
 
     assert ok is True
@@ -58,7 +76,7 @@ def test_bridge_send_cta_posts_labels_and_reply_messages_to_send_cta(urlopen, sa
     assert err == ""
     assert status == "sent"
     request = urlopen.call_args.args[0]
-    assert request.full_url == "http://127.0.0.1:3000/send-cta"
+    assert request.full_url == "http://127.0.0.1:8765/send-cta"
     payload = json.loads(request.data.decode("utf-8"))
     assert payload == {
         "chatId": "customer@s.whatsapp.net",
@@ -81,7 +99,8 @@ def test_bridge_send_cta_posts_labels_and_reply_messages_to_send_cta(urlopen, sa
 
 @patch("urllib.request.urlopen")
 def test_bridge_send_cta_unparseable_ack_is_uncertain(urlopen, safe_io_module, monkeypatch):
-    monkeypatch.setattr(safe_io_module, "BRIDGE_URL", "http://127.0.0.1:3000/send")
+    monkeypatch.setenv("SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS", "1")
+    monkeypatch.setattr(safe_io_module, "BRIDGE_URL", _TEST_BRIDGE)
 
     mock_resp = MagicMock()
     mock_resp.read.return_value = b"not json"
@@ -91,6 +110,7 @@ def test_bridge_send_cta_unparseable_ack_is_uncertain(urlopen, safe_io_module, m
         "jid",
         body="Start Free Trial",
         buttons=[{"label": "Start Free Trial", "message": "Help me create a beautiful flyer for my business"}],
+        action_context=_ctx(),
     )
     assert ok is False
     assert mid == ""
