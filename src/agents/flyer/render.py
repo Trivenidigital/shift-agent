@@ -1394,13 +1394,17 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
             box_x0, box_y0, box_x1 = margin, int(height * 0.055), int(width * 0.58)
             inner_w = box_x1 - box_x0 - 44
             card_lines: list[tuple[object, tuple[int, int, int, int], str]] = []
+            # Every required visible fact is fully wrapped — NO silent line caps
+            # anywhere (brand/title/schedule/extras). Overflow is handled solely
+            # by the fail-closed fit check below, so a long brand or title can
+            # never be truncated into a QA "missing required visible fact".
             if business and not _same_text(business, title_text):
-                for ln in _wrap(draw, business, biz_font, inner_w)[:1]:
+                for ln in _wrap(draw, business, biz_font, inner_w):
                     card_lines.append((biz_font, (255, 255, 245, 255), ln))
-            for ln in _wrap(draw, title_text, title_font, inner_w)[:3]:
+            for ln in _wrap(draw, title_text, title_font, inner_w):
                 card_lines.append((title_font, (255, 218, 85, 255), ln))
             if menu_payload["schedule"]:
-                for ln in _wrap(draw, str(menu_payload["schedule"]), sub_font, inner_w)[:1]:
+                for ln in _wrap(draw, str(menu_payload["schedule"]), sub_font, inner_w):
                     card_lines.append((sub_font, (255, 255, 240, 250), ln))
             # ALL offer/promo/detail facts (fully wrapped) — never cap or
             # silently drop a required visible fact, or visual QA reports it
