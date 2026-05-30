@@ -562,7 +562,12 @@ def test_in_flight_push_not_flagged_as_orphan(env_dir, bridge_server):
     _seed_lead(env_dir,
                status="APPROVED_PENDING_PUSH",
                owner_approval_received_at=fresh_approved,
-               owner_confirmed_total_cents=23450)
+               owner_confirmed_total_cents=23450,
+               # Seed the model default explicitly so the not-flagged assertion
+               # below is well-defined: a young (in-flight) lead is never touched
+               # by _check_orphans, so the key would otherwise be absent and the
+               # strict `is False` index would KeyError.
+               reconcile_required=False)
     mod = _load_apply(env_dir, port)
 
     sys.argv = [str(APPLY_PATH),
