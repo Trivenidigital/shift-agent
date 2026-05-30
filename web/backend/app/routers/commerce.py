@@ -13,16 +13,47 @@ a missing/malformed state file, never mutates anything.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, ConfigDict, Field
 
-from ..auth import require_auth
+from ..audit import log as audit_log
+from ..auth import require_auth, require_fresh_otp
 from ..config import get_settings
+from ..deps import client_ip, client_ua
 from ..log_tail import reverse_json_entries
 
+# Same path-injection as flyer.py so the agent's commerce primitives + schemas
+# import in production (/opt/shift-agent) and on a fresh clone (conftest /
+# dump-openapi prepend src + src/platform).
+_AGENT_ROOT = Path("/opt/shift-agent")
+if str(_AGENT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_AGENT_ROOT))
+
+from commerce import order_state  # noqa: E402
+from commerce.audit import emit as commerce_emit  # noqa: E402
+from commerce.exceptions import IllegalCommerceTransition  # noqa: E402
+from schemas import CommerceOrderStatus  # noqa: E402
+
 router = APIRouter(prefix="/commerce", tags=["commerce"])
+
+# Slice-C scope gate: a STRICT SUBSET of the primitive's LEGAL_TRANSITIONS.
+# Owner-initiated fulfillment progress + pre-payment cancel only. Money/provider
+# transitions (->paid, ->refunded), post-payment cancel (preparing->cancelled),
+# and POS edits are intentionally withheld — see the Slice-C design doc.
+SLICE_C_ALLOWED_TRANSITIONS: frozenset[tuple[str, str]] = frozenset({
+    ("paid", "preparing"),
+    ("preparing", "ready"),
+    ("ready", "out_for_delivery"),
+    ("out_for_delivery", "completed"),
+    ("ready", "completed"),
+    ("pending_payment", "cancelled"),
+    ("awaiting_approval", "cancelled"),
+})
+_CANCEL_TARGET = "cancelled"
 
 _COMMERCE_AUDIT_PREFIX = "commerce_"
 _OPEN_STATUSES = {
@@ -159,3 +190,125 @@ async def get_order(order_id: str, _=Depends(require_auth)) -> dict[str, Any]:
         "audit": _order_audit_trail(order_id),
         "degraded": degraded,
     }
+
+
+# ── Slice C: owner-initiated status transitions (the first write surface) ────
+
+
+class OrderTransitionBody(BaseModel):
+    """Cockpit staff-action request. `expected_from_status` is the status the
+    operator saw when they clicked (optimistic-concurrency token); `cause` is
+    required for a cancel (the operator's reason) and optional otherwise."""
+    model_config = ConfigDict(extra="forbid")
+    to_status: CommerceOrderStatus
+    expected_from_status: CommerceOrderStatus
+    cause: str = Field(default="", max_length=200)
+
+
+def _emit_action_refused(
+    *, order_id: str, body: "OrderTransitionBody", reason: str, request: Request
+) -> None:
+    """Audit a declined cockpit action through the commerce chokepoint AND the
+    cockpit audit log (owner sub + IP + UA)."""
+    commerce_emit(
+        get_settings().decisions_path,
+        {
+            "type": "commerce_order_action_refused",
+            "order_id": order_id,
+            "attempted_to_status": body.to_status,
+            "from_status": body.expected_from_status,
+            "reason": reason,
+            "actor": "operator",
+            "cause": body.cause[:200],
+        },
+    )
+    audit_log(
+        "commerce.order.transition.refused",
+        ip=client_ip(request),
+        ua=client_ua(request),
+        details={
+            "order_id": order_id,
+            "to_status": body.to_status,
+            "expected_from_status": body.expected_from_status,
+            "reason": reason,
+        },
+    )
+
+
+@router.post("/orders/{order_id}/transition")
+async def transition_order(
+    order_id: str,
+    body: OrderTransitionBody,
+    request: Request,
+    _=Depends(require_fresh_otp),
+) -> dict[str, Any]:
+    """Apply an owner-initiated Slice-C status transition.
+
+    Owner-only (require_fresh_otp step-up). No provider/POS/customer-send calls.
+    Scope-gated to SLICE_C_ALLOWED_TRANSITIONS; the optimistic-concurrency
+    guard (`expected_from_status`) and the shared FileLock live in the
+    `order_state` primitive. Every refusal is audited; on the happy path the
+    updated order is returned."""
+    settings = get_settings()
+    state_path = _orders_path()
+    pair = (body.expected_from_status, body.to_status)
+
+    # 1. Slice-C scope gate (route-level allowlist; narrower than LEGAL_TRANSITIONS).
+    if pair not in SLICE_C_ALLOWED_TRANSITIONS:
+        _emit_action_refused(order_id=order_id, body=body,
+                             reason="not_allowed_in_slice_c", request=request)
+        raise HTTPException(status_code=409, detail="transition not allowed in this slice")
+
+    # 2. Cancel requires an operator reason (O3); progress gets a default cause.
+    cause = body.cause.strip()
+    if body.to_status == _CANCEL_TARGET and not cause:
+        raise HTTPException(status_code=422, detail="cancel requires a reason")
+    if not cause:
+        cause = f"cockpit: {body.expected_from_status}->{body.to_status}"
+
+    # 3. Apply via the primitive (lock + authoritative stale-check are inside it).
+    try:
+        if body.to_status == _CANCEL_TARGET:
+            result = order_state.cancel(
+                state_path=state_path,
+                decisions_log_path=settings.decisions_path,
+                order_id=order_id,
+                reason=cause,
+                actor="operator",
+                expected_from_status=body.expected_from_status,
+            )
+        else:
+            result = order_state.transition(
+                state_path=state_path,
+                decisions_log_path=settings.decisions_path,
+                order_id=order_id,
+                to_status=body.to_status,
+                actor="operator",
+                cause=cause,
+                expected_from_status=body.expected_from_status,
+            )
+    except IllegalCommerceTransition:
+        _emit_action_refused(order_id=order_id, body=body,
+                             reason="illegal_transition", request=request)
+        raise HTTPException(status_code=409, detail="illegal transition")
+
+    if not result.ok:
+        reason = result.detail if result.detail in (
+            "order_not_found", "stale_expected_status") else "illegal_transition"
+        _emit_action_refused(order_id=order_id, body=body, reason=reason, request=request)
+        raise HTTPException(
+            status_code=404 if reason == "order_not_found" else 409, detail=reason)
+
+    audit_log(
+        "commerce.order.transition",
+        ip=client_ip(request),
+        ua=client_ua(request),
+        details={
+            "order_id": order_id,
+            "to_status": body.to_status,
+            "expected_from_status": body.expected_from_status,
+            "cause": cause,
+            "detail": result.detail,
+        },
+    )
+    return {"order": result.order.model_dump(mode="json"), "detail": result.detail}

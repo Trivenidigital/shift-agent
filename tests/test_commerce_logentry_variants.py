@@ -21,6 +21,7 @@ from schemas import (
     CommerceOrderCreated,
     CommerceOrderStatusChange,
     CommerceOrderCancelled,
+    CommerceOrderActionRefused,
     CommerceOrderCreateRefusedCategory,
     CommercePaymentIntentMinted,
     CommercePaymentLinkAttempted,
@@ -135,6 +136,10 @@ def test_all_20_commerce_variants_discriminated_union_round_trips():
          "next_status": "paid", "actor": "webhook", "cause": "paid"},
         {"type": "commerce_order_cancelled", "ts": TS.isoformat(),
          "order_id": "CO00001", "reason": "x", "actor": "operator"},
+        {"type": "commerce_order_action_refused", "ts": TS.isoformat(),
+         "order_id": "CO00001", "attempted_to_status": "ready",
+         "from_status": "preparing", "reason": "stale_expected_status",
+         "actor": "operator", "cause": "cockpit: preparing->ready"},
         {"type": "commerce_order_create_refused_category", "ts": TS.isoformat(),
          "sender_lid": "l@lid", "refused_skus": ["A"],
          "refused_items": [{"sku": "A", "display_name": "Alpha"}],
@@ -177,6 +182,44 @@ def test_all_20_commerce_variants_discriminated_union_round_trips():
     for v in variants:
         parsed = ADAPTER.validate_python(v)
         assert parsed.type == v["type"]
+
+
+def test_commerce_order_action_refused_round_trip_and_reasons():
+    """The Slice-C refusal-audit variant round-trips through the union and
+    constrains `reason` to the four known refusal causes."""
+    for reason in ("illegal_transition", "stale_expected_status",
+                   "order_not_found", "not_allowed_in_slice_c"):
+        out = _round_trip({
+            "type": "commerce_order_action_refused", "ts": TS.isoformat(),
+            "order_id": "CO00001", "attempted_to_status": "paid",
+            "from_status": "preparing", "reason": reason,
+            "actor": "operator", "cause": "x",
+        })
+        assert out["reason"] == reason
+    with pytest.raises(ValidationError):
+        CommerceOrderActionRefused(
+            type="commerce_order_action_refused", ts=TS,
+            order_id="CO00001", reason="not_a_real_reason",
+        )
+
+
+def test_commerce_order_action_refused_allows_unknown_order_id():
+    """order_id is intentionally NOT pattern-bound — a refused action may carry
+    a malformed/unknown id (that can be why it was refused)."""
+    out = _round_trip({
+        "type": "commerce_order_action_refused", "ts": TS.isoformat(),
+        "order_id": "NOT-AN-ORDER", "reason": "order_not_found",
+    })
+    assert out["order_id"] == "NOT-AN-ORDER"
+    assert out["attempted_to_status"] is None and out["from_status"] is None
+
+
+def test_commerce_order_action_refused_extra_forbidden():
+    with pytest.raises(ValidationError):
+        CommerceOrderActionRefused(
+            type="commerce_order_action_refused", ts=TS,
+            order_id="CO00001", reason="illegal_transition", surprise="x",
+        )
 
 
 def test_commerce_cart_requires_sender_identity():

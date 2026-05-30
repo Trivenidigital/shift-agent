@@ -690,6 +690,56 @@
         "title": "MeResponse",
         "type": "object"
       },
+      "OrderTransitionBody": {
+        "additionalProperties": false,
+        "description": "Cockpit staff-action request. `expected_from_status` is the status the\noperator saw when they clicked (optimistic-concurrency token); `cause` is\nrequired for a cancel (the operator's reason) and optional otherwise.",
+        "properties": {
+          "cause": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Cause",
+            "type": "string"
+          },
+          "expected_from_status": {
+            "enum": [
+              "pending_payment",
+              "awaiting_approval",
+              "paid",
+              "preparing",
+              "ready",
+              "out_for_delivery",
+              "completed",
+              "cancelled",
+              "voided",
+              "refunded"
+            ],
+            "title": "Expected From Status",
+            "type": "string"
+          },
+          "to_status": {
+            "enum": [
+              "pending_payment",
+              "awaiting_approval",
+              "paid",
+              "preparing",
+              "ready",
+              "out_for_delivery",
+              "completed",
+              "cancelled",
+              "voided",
+              "refunded"
+            ],
+            "title": "To Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "to_status",
+          "expected_from_status"
+        ],
+        "title": "OrderTransitionBody",
+        "type": "object"
+      },
       "OtpRequestResponse": {
         "properties": {
           "expires_in_seconds": {
@@ -1398,6 +1448,61 @@
           }
         },
         "summary": "Get Order",
+        "tags": [
+          "commerce"
+        ]
+      }
+    },
+    "/commerce/orders/{order_id}/transition": {
+      "post": {
+        "description": "Apply an owner-initiated Slice-C status transition.\n\nOwner-only (require_fresh_otp step-up). No provider/POS/customer-send calls.\nScope-gated to SLICE_C_ALLOWED_TRANSITIONS; the optimistic-concurrency\nguard (`expected_from_status`) and the shared FileLock live in the\n`order_state` primitive. Every refusal is audited; on the happy path the\nupdated order is returned.",
+        "operationId": "transition_order_commerce_orders__order_id__transition_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "order_id",
+            "required": true,
+            "schema": {
+              "title": "Order Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OrderTransitionBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Transition Order Commerce Orders  Order Id  Transition Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Transition Order",
         "tags": [
           "commerce"
         ]
