@@ -19,13 +19,13 @@ probes / required deploy-smoke, no customer sends, no speculative agents, no PR-
 - [x] **Item 3 — EOD reconcile deploy-smoke coverage** ✅ MERGED PR #343 (origin/main 79f7002). Added `eod-reconcile --force --dry-run` to smoke (snapshot path → temp). Codex 2 rounds → CLEAN. Live-verified.
 - [x] **Item 4 — Daily Brief deploy-smoke coverage** ✅ MERGED PR #344 (origin/main c939f98). `send-daily-brief --force --dry-run` (sentinel → temp). Codex CLEAN (after a re-run with file-specific prompt). Live-verified.
 - [x] **Item 5 — Catering pattern-report deploy-smoke coverage** ✅ MERGED PR #345 (origin/main 7cac726). `catering-pattern-report --dry-run` (outputs → temp). Codex CLEAN. Live-verified ("0 findings", no new /opt files).
-- [ ] **Item 6 — Timer-liveness freshness WARN (EOD #5 + Daily Brief #4)** (branch `feat/timer-liveness-freshness-warn`)
-  - The §12a freshness signal done SAFELY: EOD/Daily-Brief write SCHEDULED artifacts daily (eod-snapshot.json / last-brief-sent.json) independent of traffic → reliable timer-liveness signal without the event-log false-alarm problem. Read-only, enabled-gated, WARN-only (never fails deploy), no new writers. Mirrors deployed compliance heartbeat check (§2d). 28h threshold (24h+4h slack).
-  - [x] Add `_freshness_warn` + `_agent_enabled` helpers + 2 checks to smoke (§10e).
-  - [x] bash -n clean + live VPS probe: both enabled; eod-snapshot 22h, sentinel 12h → both "✓ fresh" (no false alarm).
-  - [ ] push → Codex review (freshness-specific prompt) → merge if clean
-  - SURVEY NOTE: dry-run-smoke pattern now exhausted for active agents — #2/#4/#5 done; #3/#13/#21 already had --help/dry-run smoke; shift-agent-reconcile has NO dry-run (can't safely smoke); commerce reconciler scripts dormant/mutating; commerce subsystem comprehensively tested. Remaining 24-agent scope is mostly scaffold/Tier-2 SKILL-only (operator-activation-gated) or commerce (dormant).
-- [ ] Item 7+ — remaining dormant-safe candidates: extend freshness WARN to catering learning-summary if daily-scheduled; runbook fixes; or larger heartbeat-watchdog design. Many remaining agents need operator activation (real blocker to "finishing" them dormant-safe).
+- [x] **Item 6 — Timer-liveness freshness WARN (EOD #5 + Daily Brief #4)** ✅ MERGED PR #346 (origin/main 44b1c18). §12a freshness done safely (read-only, enabled-gated, WARN-only, no new writers). Codex CLEAN. Live-verified.
+- [ ] **Item 7 — Expense Bookkeeper #21 prune/expire core-loop tests** (branch `feat/expense-prune-expire-tests`)
+  - Survey (Explore agent): prune-and-expire-expenses.py core loop (expiration AWAITING→EXPIRED + receipt-JPEG retention pruning) was UNTESTED — existing test covers only --dry-run config-load (explicitly deferred the loop). Money/state + retention/audit, deterministic, no external deps → test-only, strictly dormant-safe.
+  - [x] `tests/test_prune_and_expire_logic.py` — 8 cases (stale-expire+audit, fresh-not-expired, non-AWAITING-not-expired, old-receipt-pruned+metadata audit, fresh-receipt-kept, non-retention-kept, idempotency, disabled-noop). Mirrors dry-run test's importlib+path-override wrapper; Linux-only (fcntl).
+  - [x] Verified on VPS: 8/8 pass via Hermes venv pytest.
+  - [ ] push → Codex review (test-specific prompt) → merge if clean
+- [ ] Item 8+ — remaining dormant-safe: extract-receipt _hamming/dedup-threshold tests; closest-location geocode error-path tests; runbook fixes. NOTE many remaining pipeline agents (P&L #22, Tier-2 stubs, commerce) need operator activation (real blocker to dormant-safe "finishing").
 
 
 
