@@ -5350,6 +5350,13 @@ def test_same_business_layout_revision_does_not_bypass_but_new_campaign_does():
     assert actions.should_bypass_active_flyer_project_for_fresh_request(layout_revision, active, has_media=False) is False
     # Genuine new campaign for the same business is still a fresh work order.
     assert actions.should_bypass_active_flyer_project_for_fresh_request(new_campaign, active, has_media=False) is True
+    # A layout tweak combined with fresh campaign/event detail is a new work
+    # order, not a revision — must still bypass.
+    combined = (
+        "Create a new flyer for chloe hair studio, make the contact number smaller, "
+        "event from 4 pm to 7 pm this Saturday."
+    )
+    assert actions.should_bypass_active_flyer_project_for_fresh_request(combined, active, has_media=False) is True
     # Media-backed requests keep their existing path (carve-out is text-only).
     assert actions.should_bypass_active_flyer_project_for_fresh_request(layout_revision, active, has_media=True) is True
 

@@ -1463,6 +1463,11 @@ def _is_same_business_layout_revision(body: str, active_project: Optional[dict])
     active_business = str(((active_project.get("fields") or {}).get("event_or_business_name")) or "").strip()
     if not active_business or not _business_scope_matches(requested, active_business):
         return False
+    if _FRESH_FLYER_BRIEF_DETAIL.search(body):
+        # A fresh brief/campaign detail (event window, dates, item list) means
+        # this is a new work order that merely also mentions a layout tweak —
+        # keep it on the new-project path rather than attaching it as a revision.
+        return False
     return _is_layout_emphasis_revision_wording(body)
 
 
