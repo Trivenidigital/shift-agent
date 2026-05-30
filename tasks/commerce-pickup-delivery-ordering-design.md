@@ -4,7 +4,7 @@
 
 **Drift-check tag:** extends-Hermes
 
-This extends the already-built (dormant) Commerce order/cart/payment substrate and the existing read-only Cockpit pattern (`web/backend` FastAPI routers + `web/frontend` React sections). It introduces **no** new runtime substrate, no dispatcher change in the first slices, and no provider/POS activation.
+This extends the already-built **and functional** Commerce order/cart/payment substrate — which is **operator-gated and config-inactive in typical deploys** (`provider=placeholder`, `enabled=False`), NOT unbuilt scaffolding (the Stripe `mint` path and webhook/payment-confirm event models are real code) — and the existing read-only Cockpit pattern (`web/backend` FastAPI routers + `web/frontend` React sections). It introduces **no** new runtime substrate, no dispatcher change in the first slices, and no provider/POS activation.
 
 **Live-deploy note (runtime-verified on main-vps 2026-05-30, authoritative over docs):** production runs `deploy-20260530-034606-f1ff0cb9` (SHA `f1ff0cb`) — confirmed as the newest tarball in `/opt/shift-agent/deploys/`, with the deployed `pilot-readiness-check` carrying the `alerting.pushover` check (so **#358 IS deployed**) and the deployed `safe_io.py` carrying **no** `LiveBridgeSendInTestError` (pre-#367, consistent with `f1ff0cb`). Prod is **15 commits behind** origin/main `43fceab`. The only customer-facing undeployed runtime change is **#374** (`send-catering-ack` empty-JID fail-closed) — it rides the next normal deploy; the undeployed `safe_io.py` send-path tripwire is pytest-gated (inert in prod). Commerce is **dormant** (`enabled=False, provider=placeholder`). NOTE: `docs/runbooks/pilot-readiness-report-2026-05-30.md` (which names `deploy-…-7e524c2e` / "#358 not yet deployed") is an **earlier-in-the-day snapshot, now stale** — superseded by the runtime evidence above. None of this design depends on deploying anything; it builds on origin/main.
 
@@ -24,16 +24,16 @@ End-to-end flow: customer WhatsApp order → cart → order record → staff see
 |---|---|---|
 | 1. Receive WhatsApp inbound (text/media) | `[Hermes]` | Hermes ingress (verified for Catering/Shift/Flyer) |
 | 2. Identify sender (phone/LID) + role-gate | `[Hermes]` | `identify-sender` / `validate-sender-block` substrate |
-| 3. Cart + order state (priced line items, status machine) | `[Hermes-built, dormant]` | `src/platform/commerce/{cart,order_state}.py` already exist |
+| 3. Cart + order state (priced line items, status machine) | `[Hermes-built, config-inactive]` | `src/platform/commerce/{cart,order_state}.py` already exist |
 | 4. Append-only audit | `[Hermes]` | `commerce/audit.py` → canonical `decisions.log` chokepoint |
-| 5. Payment link mint (when active) | `[Hermes-built, dormant]` | `commerce/payment_link.py` + livemode/webhook gates |
+| 5. Payment link mint (when active) | `[Hermes-built, config-inactive]` | `commerce/payment_link.py` + livemode/webhook gates |
 | 6. Pickup/delivery fulfillment metadata on the order | `[net-new]` | additive optional fields on `CommerceOrder` (Slice A) |
 | 7. Read-only staff Order Cockpit | `[net-new]` | new FastAPI router + React section mirroring `FlyerAdmin` (Slice B) |
 | 8. Staff status actions (preparing/ready/…) | `[net-new]` | thin operator-script wrappers over `order_state.transition` (Slice C) |
 | 9. WhatsApp ordering dispatcher route + catalog | `[net-new]` | PRD v2 §9 design; behind compliance + catalog + operator gates (Slice D) |
 | 10. POS sync | `[net-new, deferred]` | per-customer adapter after a POS is chosen (Slice F) |
 
-Most of the substrate (steps 1-5) is Hermes or already-built-dormant; the net-new is fulfillment metadata + Cockpit + (gated) ordering flow + (deferred) POS adapter. `mcp/native-mcp` is the likely path for any future POS adapter (Slice F) — investigated only when a specific customer/POS is chosen.
+Most of the substrate (steps 1-5) is Hermes or already-built-and-functional (config-inactive); the net-new is fulfillment metadata + Cockpit + (gated) ordering flow + (deferred) POS adapter. `mcp/native-mcp` is the likely path for any future POS adapter (Slice F) — investigated only when a specific customer/POS is chosen.
 
 ## 3. Drift-rule self-checks (read-deployed-code done)
 
@@ -50,10 +50,10 @@ Deployed-pattern compliance: JSON-on-disk + `safe_io` atomic writes + `flock`; N
 
 **Finding:** the Commerce *state machine* is already general-purpose and pickup/delivery-**capable**, but its existing *callers/primitives* are payment/catering-deposit oriented, and the order record **lacks fulfillment metadata**.
 
-| Concern | Exists today (dormant) | Gap for pickup/delivery |
+| Concern | Exists today (built; config-inactive) | Gap for pickup/delivery |
 |---|---|---|
 | Cart | `CommerceCart`/`CommerceCartItem` (sku, qty, unit, price); `cart.py` add/remove/update_qty | none structural; needs a catalog to source SKUs (PRD v2 §5 catalog = Slice 2/D) |
-| Order lifecycle | `CommerceOrderStatus` already has `preparing/ready/out_for_delivery/completed` | **no `fulfillment_type` (pickup\|delivery)** field |
+| Order lifecycle | `CommerceOrderStatus` already spans the full lifecycle (`pending_payment, awaiting_approval, paid, preparing, ready, out_for_delivery, completed, cancelled, voided, refunded`) | **no `fulfillment_type` (pickup\|delivery)** field |
 | Order contact/logistics | `sender_phone`/`sender_lid`/`chat_id` | **no `customer_name`, `delivery_address`, `requested_time`/`scheduled_for`, `order_notes`** |
 | Payment | `payment_intent_id`, `payment_reference`, `payment_link.mint`, livemode/webhook gates | activation is operator-gated (Stripe) — Slice E |
 | POS | none | **no `pos_sync_status`** placeholder; real sync deferred (Slice F) |
@@ -61,11 +61,11 @@ Deployed-pattern compliance: JSON-on-disk + `safe_io` atomic writes + `flock`; N
 | Dispatcher | **no ordering route** | PRD v2 §9 design; gated (Slice D) |
 | Cockpit | none for Commerce | net-new read-only section (Slice B) |
 
-**Reconciliation decision:** treat the existing `commerce/*` order/cart/payment substrate as the foundation. Pickup/delivery is **additive**: optional fulfillment fields on `CommerceOrder` (Slice A, `extra="forbid"`-compatible, with safe defaults — `None` for the optional metadata fields, `not_synced` for `pos_sync_status` — so existing dormant callers and already-stored orders validate unchanged) + a `pos_sync_status` placeholder, then a read-only Cockpit over the existing `orders.json`/`carts.json`/`decisions.log`. The catering-deposit caller (`commerce_payment_confirmed`, deposit gates) is **not** modified. The Flyer `guest_order.py` migration posture from the reconciliation doc remains as-is (out of scope here).
+**Reconciliation decision:** treat the existing `commerce/*` order/cart/payment substrate as the foundation. Pickup/delivery is **additive**: optional fulfillment fields on `CommerceOrder` (Slice A, `extra="forbid"`-compatible, with safe defaults — `None` for the optional metadata fields, `not_synced` for `pos_sync_status` — so existing (config-inactive) callers and already-stored orders validate unchanged) + a `pos_sync_status` placeholder, then a read-only Cockpit over the existing `orders.json`/`carts.json`/`decisions.log`. The catering-deposit caller (`commerce_payment_confirmed`, deposit gates) is **not** modified. The Flyer `guest_order.py` migration posture from the reconciliation doc remains as-is (out of scope here).
 
 ## 5. New primitives introduced
 
-- **Schema (additive, Slice A):** optional fields on `CommerceOrder` — `fulfillment_type: Optional[Literal["pickup","delivery"]]`, `customer_name`, `delivery_address` (structured, optional), `requested_time`/`scheduled_for`, `order_notes`, `pos_sync_status: Literal["not_synced","pending","synced","failed","n/a"] = "not_synced"`. Defaults are `None` for the optional metadata fields and `"not_synced"` for `pos_sync_status`, so dormant callers and already-stored orders validate unchanged; `extra="forbid"` preserved.
+- **Schema (additive, Slice A):** optional fields on `CommerceOrder` — `fulfillment_type: Optional[Literal["pickup","delivery"]]`, `customer_name`, `delivery_address` (structured, optional), `requested_time`/`scheduled_for`, `order_notes`, `pos_sync_status: Literal["not_synced","pending","synced","failed","n/a"] = "not_synced"`. Defaults are `None` for the optional metadata fields and `"not_synced"` for `pos_sync_status`, so existing (config-inactive) callers and already-stored orders validate unchanged; `extra="forbid"` preserved.
 - **Cockpit backend (Slice B):** new read-only FastAPI router `web/backend/app/routers/commerce.py` (GET orders list + GET order detail, reading `state/commerce/orders.json` + joined `decisions.log` audit), included in `main.py` like `flyer.router`.
 - **Cockpit frontend (Slice B):** new React section `web/frontend/src/sections/CommerceOrders.tsx` mirroring `FlyerAdmin.tsx` (useQuery, Cards, tabs, evidence/transcript drawer).
 - **Staff-action operator scripts (Slice C, gated):** thin deterministic wrappers over `order_state.transition` (e.g., `commerce-order-advance`), audit-logged, operator/role-gated — design-only until reviewed.
@@ -88,7 +88,7 @@ Per CLAUDE.md Hermes-first + the `mcp/native-mcp` escape hatch, the question is 
 
 ## 7. Cockpit-first decision
 
-**First slice that ships customer/operator value = a read-only Commerce Order Cockpit** (Slice B), built on the existing FastAPI-router + React-section pattern, reading the already-built (dormant) `orders.json`/`carts.json` + `decisions.log`. It needs no provider activation, no dispatcher change, no customer messaging — only the Slice-A fulfillment fields to render meaningfully. POS sync is a **status field only**, real sync deferred to a later per-customer adapter. This sequences value (operators can see/track orders) ahead of risk (payment activation, customer-facing ordering, POS).
+**First slice that ships customer/operator value = a read-only Commerce Order Cockpit** (Slice B), built on the existing FastAPI-router + React-section pattern, reading the already-built `orders.json`/`carts.json` + `decisions.log`. It needs no provider activation, no dispatcher change, no customer messaging — only the Slice-A fulfillment fields to render meaningfully. POS sync is a **status field only**, real sync deferred to a later per-customer adapter. This sequences value (operators can see/track orders) ahead of risk (payment activation, customer-facing ordering, POS).
 
 ## 8. Operator-gated items (STOP-and-hand-off)
 
@@ -113,11 +113,11 @@ Per CLAUDE.md Hermes-first + the `mcp/native-mcp` escape hatch, the question is 
 
 Each slice = its own fresh branch → build → test → Codex review → merge (Codex-CLEAN) → operator-approved deploy if runtime-material. Slices gate forward; do not skip ahead.
 
-- **Slice A — schema/state reconciliation (test-only-ish, dormant):** additive optional fulfillment fields + `pos_sync_status` on `CommerceOrder`; deterministic schema + `order_state` round-trip tests; back-compat tests proving existing dormant callers + stored orders still validate. No behavior change (fields unused until B/D). *Smallest, lowest-risk; likely first build if approved.*
+- **Slice A — schema/state reconciliation (additive, no behavior change):** additive optional fulfillment fields + `pos_sync_status` on `CommerceOrder`; deterministic schema + `order_state` round-trip tests; back-compat tests proving existing callers + stored orders still validate. No behavior change (fields unused until B/D). *Smallest, lowest-risk; likely first build if approved.*
 - **Slice B — read-only Order Cockpit:** FastAPI router (GET list/detail over `orders.json` + audit join) + React section (mirror `FlyerAdmin`): customer/items/notes/pickup-delivery/requested-time/address/payment-status/transcript/audit, simple totals, `pos_sync_status` display. **No state transitions** (read-only). CI/tests for the router; frontend follows cockpit conventions.
 - **Slice C — staff actions:** operator-script wrappers over `order_state.transition` (preparing/ready/out_for_delivery/completed/cancel), audit-logged, role-gated; Cockpit buttons wired. **Design-only until the transition matrix + authority model are fully reviewed** (money/operator-gate lens).
 - **Slice D — WhatsApp ordering dispatcher flow:** catalog (`CommerceCatalog`, PRD v2 §5) + dispatcher ordering route (PRD v2 §9) + customer-facing cart/checkout. **Behind:** compliance sign-off (§6), catalog provisioning (operator), and live-number validation. Not started until A–C land + gates clear.
-- **Slice E — payment link:** only after **operator** activates Stripe (provider flip + livemode + webhook + template). Uses existing `payment_link.mint` + deployed gates. No activation in this design's scope.
+- **Slice E — payment link (activation + wiring, NOT net-new capability):** the Stripe `mint` path + livemode/webhook gates already exist and are functional. This slice is **operator Stripe activation** (provider flip + livemode + webhook + template) **plus wiring the existing `mint` into the order flow** — it does not build link capability. No activation in this design's scope.
 - **Slice F — POS adapter:** only after a specific **customer + POS** is chosen; investigate `mcp/native-mcp` first; per-customer OAuth onboarding is operator-gated. Own design+review cycle.
 
 ## 11. Open questions for review / operator
