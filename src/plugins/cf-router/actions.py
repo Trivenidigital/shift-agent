@@ -1443,8 +1443,14 @@ _NEW_CAMPAIGN_SCHEDULE = re.compile(
     r"\d{1,2}\s*(?:am|pm)\s+(?:to|-)\s+\d{1,2}\s*(?:am|pm)|"
     r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
     r"today|tomorrow|weekend|"
-    r"grand\s+opening|festival|sale|"
-    r"top\s+\d+"
+    r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
+    r"aug(?:ust)?|sep(?:tember)?|sept|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?|"
+    r"\d{1,2}\s*/\s*\d{1,2}|"
+    r"event|grand\s+opening|festival|sale|top\s+\d+|"
+    # Occasion/holiday names (this portfolio is ethnic SMBs — festival flyers
+    # are a core campaign type, so these are realistic new-campaign signals).
+    r"diwali|deepavali|holi|navratri|navaratri|ugadi|pongal|onam|eid|ramadan|"
+    r"christmas|thanksgiving|halloween|valentine|easter|new\s+year"
     r")\b",
     re.IGNORECASE,
 )
