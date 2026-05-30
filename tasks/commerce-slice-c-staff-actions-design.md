@@ -2,7 +2,7 @@
 
 **Status:** DESIGN ONLY — not approved for implementation. This is the **first write surface** for Commerce orders. Requires Codex-CLEAN (Hermes/drift · product/scope · runtime-state/operator-gate · money/payment/compliance · **write-safety/concurrency**) **and** operator approval before any build.
 
-**Drift-check tag:** extends-Hermes — adds a mutating cockpit route + UI on top of the existing `commerce.order_state.transition` primitive and the deployed cockpit auth; introduces a `FileLock` (the deployed `safe_io` locking convention) and one additive failure-audit `LogEntry` variant. No new storage/identity/messaging substrate; no dispatcher; no provider/POS activation.
+**Drift-check tag:** extends-Hermes — adds a mutating cockpit route + UI on top of the existing `commerce.order_state.transition` primitive and the deployed cockpit auth; closes a verified concurrency gap by wrapping the read-modify-write in **both `create()` and `transition()`** with one shared `FileLock` (the deployed `safe_io.flock` convention, routed through `_io_shim` for Windows dev/test parity); and adds one additive failure-audit `LogEntry` variant. No new storage/identity/messaging substrate; no dispatcher; no provider/POS activation.
 
 ---
 
@@ -77,10 +77,12 @@ Source of truth stays `order_state.LEGAL_TRANSITIONS`; Slice C exposes a **subse
 
 ## 6. State / write safety (the core risk)
 
-**Problem (verified):** `order_state.transition` does `load_order_store → mutate → write_order_store` with **no lock** — concurrent writers (double-click, owner + future cron/webhook) can lost-update (last-writer-wins, dropping a status_history entry).
+**Problem (verified):** `order_state.transition` does `load_order_store → mutate → write_order_store` with **no lock** — concurrent writers (double-click, owner + future cron/webhook) can lost-update (last-writer-wins, dropping a status_history entry). **Same gap in `create()`** (`order_state.py:128-131` load → `189-190` mutate/write, also unlocked).
 
 **Slice C remedy (smallest safe):**
-1. **FileLock at the PRIMITIVE level (decided).** Add `safe_io.FileLock(orders.json.lock)` (the deployed `.lock`-sibling convention) **inside `order_state.transition`** around the load→validate→write. This protects EVERY caller (cockpit + future webhook/cron/operator), not just the cockpit route — the correct fix for the verified gap. It lightly touches the primitive + its tests (acceptable, and re-reviewed). `cancel()` (which wraps `transition`) is covered automatically.
+1. **One shared FileLock across ALL `orders.json` writers (decided).** A lock that covers only `transition()` does **not** prevent lost updates — a concurrent `create()` (customer checkout) and `transition()` (operator action) would still clobber each other because `create()` does the same unguarded read-modify-write. The fix wraps the `load→…→write` section in **both `create()` and `transition()`** with the **same** lock keyed on the orders-store path (the deployed `flock(path)` → `<path>.lock` sibling convention, so every writer serializes on one lock file regardless of entry point). `cancel()` (which wraps `transition`) is covered automatically.
+   - **Shim parity (drift fix).** Commerce primitives write through `src/platform/commerce/_io_shim.py`, which on Windows (`os.name=="nt"`) deliberately falls back to a lockless atomic write because `fcntl` is Unix-only. So the lock MUST be obtained through the shim, **not** by importing `safe_io.FileLock` directly (that import would break Windows dev/test). Add `_io_shim.file_lock(path)`: returns the real `safe_io.flock(path)` on Linux (production VPS) and a **no-op context manager** on Windows dev/test — mirroring the shim's existing real-on-Linux / fallback-on-Windows pattern. Dev/test is single-process, so the no-op is safe there; production gets the real advisory lock. Both `create()` and `transition()` use `with file_lock(state_path):` around their RMW.
+   - It lightly touches the primitive (`create` + `transition`) + the shim + their tests (acceptable, and re-reviewed at build).
 2. **Optimistic-concurrency guard `expected_from_status`.** The cockpit sends the status it rendered; the handler rejects (HTTP 409 + `commerce_order_action_refused: stale_expected_status`) if `order.status != expected_from_status`. Prevents acting on a stale view; **no silent overwrite.**
 3. **Malformed state:** reuse Slice B's graceful read — if `orders.json` is unreadable/malformed, the mutation is refused (HTTP 409/`degraded`), never a partial write.
 4. **Atomicity:** `write_order_store` already does `atomic_write_json` (temp+rename); the FileLock closes the read-modify-write window around it.
@@ -117,7 +119,7 @@ Source of truth stays `order_state.LEGAL_TRANSITIONS`; Slice C exposes a **subse
 
 ## 11. Open questions (for review / operator)
 
-- **O1 — lock placement: DECIDED → primitive-level.** `FileLock` goes inside `order_state.transition` (protects all callers; correct fix for the verified gap). Lightly touches the primitive + its tests; re-reviewed at build.
+- **O1 — lock placement: DECIDED → shared lock across ALL `orders.json` writers.** One `FileLock` (keyed on the orders-store path via the `flock(path)` → `<path>.lock` convention) wraps the read-modify-write in **both `create()` and `transition()`** (cancel inherits via transition) — locking only `transition` would still allow a concurrent `create` to lost-update. Obtained through a new `_io_shim.file_lock(path)` (real `safe_io.flock` on Linux, no-op CM on Windows dev/test) so the shim's cross-platform contract holds. Touches `create` + `transition` + the shim + their tests; re-reviewed at build. (See §6.)
 - **O2 — cancel scope: DECIDED → pre-payment only.** `preparing→cancelled` is excluded from Slice C (post-payment cancel without a refund path = money/state mismatch); all post-`paid` reversal routes through the deferred refund path.
 - **O3 — `cause` requiredness: DECIDED.** `cause` is REQUIRED for `cancel` (the operator's reason); OPTIONAL for progress transitions, defaulting to `"cockpit: <action>"`.
 
