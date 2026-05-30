@@ -138,3 +138,13 @@ def test_reclaim_by_same_owner_preserves_claimed_at(tmp_path):
     r2 = flyer.manual_queue_claim_action("F0001", admin_id="sam", force=True)
     assert r2["claimed_by"] == "sam"
     assert not r2["claimed_at"].startswith("2026-05-20T01:00:00")
+
+
+def test_queue_summary_exposes_claim_state(tmp_path):
+    """Another admin must see ownership from the queue list, not only detail."""
+    flyer = _seed(tmp_path, [_queued_project("F0001", claimed_by="priya", claimed_at="2026-05-20T01:00:00Z")])
+    summary = flyer.manual_queue_triage_action()
+    rows = [p for g in summary["groups"] for p in g["projects"]]
+    row = next(r for r in rows if r["project_id"] == "F0001")
+    assert row["claimed_by"] == "priya"
+    assert row["claimed_at"].startswith("2026-05-20T01:00:00")

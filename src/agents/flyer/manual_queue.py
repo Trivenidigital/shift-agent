@@ -279,6 +279,10 @@ def list_manual_queue(
             "verification_modes": _verification_modes(project),
             "locked_facts": [fact.model_dump(mode="json") for fact in project.locked_facts],
             "qa_blockers": [blocker for report in project.qa_reports for blocker in report.blockers],
+            # Multi-admin coordination: surface ownership in the queue list so a
+            # second admin sees a row is already claimed before working it.
+            "claimed_by": manual.claimed_by,
+            "claimed_at": manual.claimed_at.isoformat() if manual.claimed_at else None,
         })
     return rows
 
