@@ -927,6 +927,18 @@ def _reference_extraction_instruction(project: FlyerProject) -> str:
     refs = _project_reference_assets(project)
     if not refs:
         return "- none"
+    if _background_only_eligible(project):
+        # Background-only eligible (English + reference already extracted): the
+        # deterministic overlay owns all text, so the model must NOT recreate any
+        # text from the reference — only borrow its visual style. Suppressing the
+        # "recreate item names/prices as cards" instructions avoids contradicting
+        # the textless-background contract and drawing garbled text under the overlay.
+        return (
+            "- Use the attached reference image for visual style only: palette, brand feel, "
+            "cuisine/category, motifs, and layout density.\n"
+            "- Do NOT recreate or render any text, item names, prices, or business names from the "
+            "reference — all exact text is composited separately into overlay panels."
+        )
     request = f"{project.raw_request} {project.fields.notes}".lower()
     instructions = [
         "- Do not render the request wording itself; it is operator instruction, not flyer copy.",
