@@ -104,7 +104,11 @@ class TestBridgePost:
         assert status == "sent"
 
     @patch("urllib.request.urlopen")
-    def test_send_uncertain_on_unparseable_body(self, urlopen, safe_io_module):
+    def test_send_uncertain_on_unparseable_body(self, urlopen, safe_io_module, monkeypatch):
+        # send-path-test-harness: per-test opt-in (this class also holds the
+        # guard-refuse tests, which must NOT be opted in). Fake-sink default +
+        # mocked urlopen mean nothing is sent.
+        monkeypatch.setenv("SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS", "1")
         mock_resp = MagicMock()
         mock_resp.read.return_value = b"not-json"
         urlopen.return_value.__enter__.return_value = mock_resp
@@ -114,7 +118,8 @@ class TestBridgePost:
         assert "ack_parse_failed" in err
 
     @patch("urllib.request.urlopen")
-    def test_empty_message_id_is_uncertain(self, urlopen, safe_io_module):
+    def test_empty_message_id_is_uncertain(self, urlopen, safe_io_module, monkeypatch):
+        monkeypatch.setenv("SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS", "1")
         mock_resp = MagicMock()
         mock_resp.read.return_value = b'{"foo": "bar"}'  # parses but no id field
         urlopen.return_value.__enter__.return_value = mock_resp
@@ -124,7 +129,8 @@ class TestBridgePost:
         assert "empty_message_id" in err
 
     @patch("urllib.request.urlopen")
-    def test_success_returns_message_id(self, urlopen, safe_io_module):
+    def test_success_returns_message_id(self, urlopen, safe_io_module, monkeypatch):
+        monkeypatch.setenv("SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS", "1")
         mock_resp = MagicMock()
         mock_resp.read.return_value = b'{"id": "wamid.123abc"}'
         urlopen.return_value.__enter__.return_value = mock_resp
@@ -134,7 +140,8 @@ class TestBridgePost:
         assert status == "sent"
 
     @patch("urllib.request.urlopen")
-    def test_alternative_messageId_field(self, safe_io_module):
+    def test_alternative_messageId_field(self, safe_io_module, monkeypatch):
+        monkeypatch.setenv("SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS", "1")
         with patch("urllib.request.urlopen") as urlopen:
             mock_resp = MagicMock()
             mock_resp.read.return_value = b'{"messageId": "mid.xyz"}'
@@ -154,6 +161,17 @@ class TestBridgePost2TupleAdapter:
     canonical surface. Tests verify the (ok, mid, err, status) -> (ok, detail)
     collapse for every status branch of the canonical bridge_post.
     """
+
+    @pytest.fixture(autouse=True)
+    def _opt_in_bridge_sends(self, monkeypatch):
+        """send-path-test-harness: every test in this class exercises the send
+        path against a mocked urlopen, so opt past the pytest bridge guard.
+        The conftest fake-sink default keeps BRIDGE_URL off the live bridge
+        (:3000) and urlopen is mocked, so nothing is actually sent; the
+        LiveBridgeSendInTestError tripwire still fires if BRIDGE_URL were ever
+        the live bridge. No guard-refuse test lives in this class, so a
+        class-scoped opt-in is safe (does not weaken the guard)."""
+        monkeypatch.setenv("SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS", "1")
 
     @patch("urllib.request.urlopen")
     def test_success_returns_2tuple_with_message_id(self, urlopen, safe_io_module):
@@ -225,6 +243,17 @@ class TestActionContextEnforcement:
     representative caller (resolver mocked via monkeypatch) and assert the
     refusal vs pass-through behavior + the audit row written.
     """
+
+    @pytest.fixture(autouse=True)
+    def _opt_in_bridge_sends(self, monkeypatch):
+        """send-path-test-harness: every test here exercises the chokepoint,
+        which runs AFTER the pytest bridge guard — so opt past the guard to
+        reach the code under test. Both the pass-through and the chokepoint-
+        refusal tests need the guard bypassed (the refusals they assert are
+        the CHOKEPOINT's, not the guard's). The conftest fake-sink default +
+        mocked urlopen mean nothing is sent. No guard-refuse test lives in this
+        class, so a class-scoped opt-in is safe (does not weaken the guard)."""
+        monkeypatch.setenv("SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS", "1")
 
     def _force_caller(self, safe_io_module, monkeypatch, name: str) -> None:
         """Override _resolve_caller_script_name to return `name`."""

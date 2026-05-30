@@ -53,6 +53,7 @@ jobs:
         run: |
           python -m pytest -q -p no:cacheprovider \
             tests/test_bridge_send_harness.py \
+            tests/test_safe_io_bridge_post.py \
             tests/test_safe_io_bridge_send_cta.py \
             tests/test_safe_io_bridge_send_media.py \
             tests/test_dispatcher_replay.py \
