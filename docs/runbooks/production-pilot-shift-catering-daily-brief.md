@@ -31,6 +31,25 @@ ssh main-vps '/usr/local/lib/hermes-agent/venv/bin/python /usr/local/bin/pilot-r
 ssh main-vps 'systemctl is-active hermes-gateway; curl -fsS http://127.0.0.1:3000/health; systemctl list-timers --all --no-pager | grep -E "shift-agent|send-daily-brief|catering-pattern-report"' > .ssh_pilot_runtime.txt 2>&1
 ```
 
+## Permissions (owner / employee / customer)
+
+Identity is set by `identify-sender` (`sender_role` from roster/config metadata,
+never message text — see Shift dispatcher). Catering actions are gated by role:
+
+| Action | Owner | Employee | Customer / unknown |
+|---|---|---|---|
+| Submit catering inquiry (`parse_catering_inquiry`) | ✅ | ✅ | ✅ |
+| Upload menu source (`update_catering_menu` / `parse-menu-photo`) | ✅ | ✅ | — |
+| **Apply menu** (`apply-menu-update`) | ✅ | ❌ | ❌ |
+| **Approve / edit / reject quote** (`apply-catering-owner-decision`) | ✅ | ❌ | ❌ |
+| Request / select proposals, finalize own selection | via owner flow | — | ✅ (own lead) |
+
+Owner-only operations reject non-owner senders with exit code **12
+(`EXIT_PRIVILEGE_DENIED`) before any state read or lock** — verified at
+`apply-catering-owner-decision:368` and `apply-menu-update:82`, covered by
+`tests/test_catering_privilege_escalation.py` (32 cases). A non-owner who
+forwards an owner's `#XXXXX` code cannot apply it.
+
 ## Smoke Script
 
 ### 1. Owner Or Employee Uploads Menu Source
@@ -271,3 +290,25 @@ Pause the pilot and do not onboard another customer if any of these occur:
 - Menu proposal contains items not present in the current menu.
 - A sick-call state change occurs without a corresponding audit row.
 - Daily Brief does not fire or cannot send to owner self-chat.
+
+## Rollback
+
+Deploys are tarball-based with a smoke gate. **On smoke-test failure the deploy
+auto-rolls-back to the previous tarball** (no operator action needed); the run
+exits non-zero and fires a Pushover P2.
+
+Manual rollback (a regression that passed smoke but misbehaves live):
+
+```bash
+ssh main-vps 'sudo /usr/local/bin/shift-agent-deploy.sh list' > .ssh_deploy_list.txt 2>&1
+# pick the last-known-good deploy-YYYYMMDD-HHMMSS-<hash> tag, then:
+ssh main-vps 'sudo /usr/local/bin/shift-agent-deploy.sh rollback <deploy-tag>' > .ssh_rollback.txt 2>&1
+```
+
+Rollback restores that tarball's `src/`, reinstalls, restarts hermes-gateway +
+cockpit, and re-runs the smoke test against the restored version. It does NOT
+touch customer / menu / roster / lead state files (data, not code) — and the
+catering stores are forward-compatible (`extra="ignore"`), so rolling code back
+does not corrupt existing `catering-leads.json` / `catering-menu.json`. If the
+rollback target itself fails smoke, the deploy stops and fires a Pushover P2 —
+SSH in and triage; do not chain another rollback.
