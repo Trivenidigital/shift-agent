@@ -159,6 +159,31 @@ def _check_config(path: Path, checks: Checks) -> Config | None:
     else:
         checks.pass_("daily_brief.sections", "daily brief includes alerts")
 
+    # Pushover out-of-band alerts must be real for a customer pilot — owner
+    # escalation (sick-call no-coverage, deploy failures) is delivered via
+    # Pushover. The Config schema already rejects EMPTY keys; this catches
+    # placeholder + MUTED_ (dev/rehearsal) keys that pass schema validation but
+    # are not pilot-ready (alerts silently won't reach the owner).
+    user_key = cfg.alerting.pushover_user_key
+    app_token = cfg.alerting.pushover_app_token
+    if _is_placeholder(user_key) or _is_placeholder(app_token):
+        checks.fail(
+            "alerting.pushover",
+            "Pushover user_key/app_token is placeholder — owner out-of-band "
+            "alerts (sick-call escalation, deploy failures) won't be delivered",
+        )
+    elif user_key.startswith("MUTED_") or app_token.startswith("MUTED_"):
+        checks.fail(
+            "alerting.pushover",
+            "Pushover credentials are MUTED_ (dev/rehearsal) — provision real "
+            "keys before a customer pilot so owner alerts are delivered",
+        )
+    else:
+        checks.pass_(
+            "alerting.pushover",
+            "Pushover credentials set (owner out-of-band alerts will be delivered)",
+        )
+
     return cfg
 
 
