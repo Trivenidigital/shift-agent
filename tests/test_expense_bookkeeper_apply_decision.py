@@ -73,6 +73,18 @@ class _BridgeStub(BaseHTTPRequestHandler):
         return
 
 
+@pytest.fixture(autouse=True)
+def _opt_in_bridge_sends(monkeypatch):
+    """send-path-test-harness: these in-process apply tests exercise the send
+    path (owner reply) and must opt past the pytest bridge guard. No
+    guard-refuse test lives in this file, so a file-scoped opt-in is safe (does
+    not weaken the guard). The canonical safe_io.BRIDGE_URL is pointed at the
+    per-test stub inside _load_apply; apply-expense-decision is an allowlisted
+    null-context caller; stub ports (not :3000) keep the live-bridge tripwire
+    dormant."""
+    monkeypatch.setenv("SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS", "1")
+
+
 @pytest.fixture
 def bridge_server():
     _BridgeStub.requests = []
@@ -147,7 +159,34 @@ def _load_apply(env_dir, bridge_port):
     # don't write to the production state path. In-process tests still see
     # cross-process behaviour via this file.
     mod.MOCK_QBO_STATE_PATH = env_dir / "state" / "expense-bookkeeper" / "mock-qbo-pushed.json"
+    # send-path-test-harness: point the CANONICAL safe_io.BRIDGE_URL (the one
+    # bridge_post_2tuple actually reads) at this test's stub. mod.BRIDGE_URL
+    # above is vestigial post-PR-ε. The conftest fake-sink autouse resets
+    # safe_io.BRIDGE_URL each test, so this per-test override does not leak.
+    import safe_io as _safe_io
+    _safe_io.BRIDGE_URL = f"http://127.0.0.1:{bridge_port}/send"
     return mod
+
+
+def _seed_mock_qbo_ledger(env_dir, transaction_id, amount_cents, *, seq=1):
+    """Seed the per-test mock-QBO ledger so void_transaction(transaction_id)
+    finds the txn (matches MockQBOClient state schema v1). Lets the undo
+    happy-path succeed without driving a full approve→push first. Mirrors the
+    JSON shape MockQBOClient._save_state writes."""
+    from datetime import datetime, timezone
+    path = env_dir / "state" / "expense-bookkeeper" / "mock-qbo-pushed.json"
+    payload = {
+        "schema_version": 1,
+        "seq": seq,
+        "transactions": {
+            transaction_id: {
+                "transaction_id": transaction_id,
+                "amount_cents": amount_cents,
+                "pushed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        },
+    }
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def _seed_lead(env_dir, **overrides):
@@ -287,6 +326,11 @@ def test_undo_within_window_succeeds(env_dir, bridge_server):
                qbo_transaction_id="MOCK-E0001-1",
                pushed_at=pushed_at,
                owner_confirmed_total_cents=23450)
+    # Seed the mock-QBO ledger so the txn is voidable. MockQBOClient (state_path
+    # mode) only voids transactions present in its ledger — i.e. ones a prior
+    # push_expense recorded. Seeding the ledger here mirrors that prior push so
+    # the within-window undo actually succeeds (matches the test name).
+    _seed_mock_qbo_ledger(env_dir, "MOCK-E0001-1", 23450)
     mod = _load_apply(env_dir, port)
 
     sys.argv = [str(APPLY_PATH),
@@ -294,11 +338,6 @@ def test_undo_within_window_succeeds(env_dir, bridge_server):
                 "--sender-phone", "+19045550100"]
     rc = mod.main()
     assert rc == mod.EXIT_OK
-
-    # Note: MockQBOClient requires push_expense to have been called for the
-    # transaction to be voidable. Since we seeded a "pushed" lead without
-    # going through push_expense, void will fail. This test exercises the
-    # window-check path; full happy-path is in E2E.
 
 
 def test_undo_outside_window_requires_force(env_dir, bridge_server):
@@ -489,7 +528,7 @@ def test_orphan_flag_persists_across_calls(env_dir, bridge_server):
 
     # Trigger any code path that calls _check_orphans (e.g. unrelated approve)
     sys.argv = [str(APPLY_PATH),
-                "--raw-message", "#NONEXX 99.99",  # won't match any lead
+                "--raw-message", "#A47C3 99.99",  # valid-format code, matches no lead (reaches _check_orphans)
                 "--sender-phone", "+19045550100"]
     mod.main()
 
@@ -505,7 +544,7 @@ def test_orphan_flag_persists_across_calls(env_dir, bridge_server):
     # Second call: should NOT re-detect (already flagged → skipped)
     initial_count = sum(1 for e in _read_audit(env_dir) if e["type"] == "expense_orphan_detected")
     sys.argv = [str(APPLY_PATH),
-                "--raw-message", "#NONEXX 99.99",
+                "--raw-message", "#A47C3 99.99",
                 "--sender-phone", "+19045550100"]
     mod.main()
     second_count = sum(1 for e in _read_audit(env_dir) if e["type"] == "expense_orphan_detected")
@@ -523,11 +562,16 @@ def test_in_flight_push_not_flagged_as_orphan(env_dir, bridge_server):
     _seed_lead(env_dir,
                status="APPROVED_PENDING_PUSH",
                owner_approval_received_at=fresh_approved,
-               owner_confirmed_total_cents=23450)
+               owner_confirmed_total_cents=23450,
+               # Seed the model default explicitly so the not-flagged assertion
+               # below is well-defined: a young (in-flight) lead is never touched
+               # by _check_orphans, so the key would otherwise be absent and the
+               # strict `is False` index would KeyError.
+               reconcile_required=False)
     mod = _load_apply(env_dir, port)
 
     sys.argv = [str(APPLY_PATH),
-                "--raw-message", "#NONEXX 99.99",
+                "--raw-message", "#A47C3 99.99",
                 "--sender-phone", "+19045550100"]
     mod.main()
 
