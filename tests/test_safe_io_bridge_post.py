@@ -152,8 +152,10 @@ class TestBridgePost:
         assert mid == "wamid.123abc"
         assert status == "sent"
 
-    @patch("urllib.request.urlopen")
     def test_alternative_messageId_field(self, safe_io_module, monkeypatch):
+        # Note: this test patches urlopen via the `with` block below; the prior
+        # redundant @patch decorator injected its mock into safe_io_module
+        # (latent bug, surfaced once the test reached the send path).
         monkeypatch.setenv("SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS", "1")
         with patch("urllib.request.urlopen") as urlopen:
             mock_resp = MagicMock()
