@@ -198,7 +198,15 @@ export function ManualQueueActions(props: ManualQueueActionsProps) {
           onConfirm={() => {
             if (previewing === "complete") onCompleteConfirmed();
             else if (previewing === "break_glass") onBreakGlassConfirmed();
-            else if (previewing === "resend_status") onResendStatusConfirmed();
+            else if (previewing === "resend_status") {
+              // resend_status intentionally keeps the drawer open to show the
+              // send result, but the preview modal MUST close on confirm —
+              // otherwise the re-enabled confirm button invites duplicate
+              // WhatsApp nudges before the operator sees the outcome. (The
+              // other actions transition/close the row, so re-confirm 409s.)
+              onResendStatusConfirmed();
+              closePreviewModal();
+            }
             else onCloseNoSendConfirmed({ force: forceClose });
           }}
         />

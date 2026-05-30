@@ -730,6 +730,27 @@ def test_flyer_source_contract_extracted_round_trips_through_log_entry():
     assert parsed.headings_count == 4
 
 
+def test_flyer_status_resent_round_trips_through_log_entry():
+    from schemas import FlyerStatusResent  # noqa: E402
+
+    now = datetime.now(timezone.utc)
+    entry = FlyerStatusResent(
+        ts=now,
+        project_id="F0070",
+        customer_phone="+19045550104",
+        chat_id="17329837841@s.whatsapp.net",
+        chat_id_source="primary_chat_id",
+        send_ok=True,
+        outbound_message_id="MID1",
+    )
+    parsed = TypeAdapter(LogEntry).validate_python(entry.model_dump())
+    # Must route to the typed variant, NOT _UnknownLogEntry.
+    assert parsed.__class__.__name__ == "FlyerStatusResent"
+    assert parsed.type == "flyer_status_resent"
+    assert parsed.send_ok is True
+    assert parsed.chat_id == "17329837841@s.whatsapp.net"
+
+
 def test_flyer_source_vs_new_chosen_round_trips_through_log_entry():
     from schemas import FlyerSourceVsNewChosen  # noqa: E402
 
