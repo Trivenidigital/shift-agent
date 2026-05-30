@@ -738,10 +738,17 @@ def _menu_overlay_payload(project: FlyerProject) -> dict[str, object]:
     # for title/location/contact.
     items = _menu_item_lines(project)
     schedule = _display_schedule(project)
+    # Required visible facts the menu item-cards don't show (offers, promotion
+    # end, pricing structure) — drawn in the title card so visual QA finds every
+    # required fact, not just items. Exclude anything already shown as a menu item.
+    item_norms = {_normalize_fact_text(i) for i in items}
+    extras = [c for c in _detail_clauses(project) if _normalize_fact_text(c) not in item_norms]
     return {
+        "business": _display_business_name(project),
         "title": _display_title(project),
         "schedule": schedule,
         "items": items,
+        "extras": extras,
         "location": fact_value(project, "location", fallback=project.fields.venue_or_location) or "",
         "contact": fact_value(project, "contact_phone", fallback=project.fields.contact_info) or "",
     }
@@ -1376,17 +1383,54 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
             item_font = _font(ImageFont, max(18, int(width * 0.023)), bold=True)
             small_font = _font(ImageFont, max(15, int(width * 0.018)))
 
-            # Use the top-left blank label when present, and the lower green band
-            # for conversion details. This keeps the AI food art visible while
-            # avoiding the old debug-looking black transcript box.
-            title_box = (margin, int(height * 0.055), int(width * 0.58), int(height * 0.245))
-            draw.rounded_rectangle(title_box, radius=22, fill=(42, 86, 42, 232), outline=(255, 205, 74, 245), width=3)
-            y = title_box[1] + 22
-            for line in _wrap(draw, str(menu_payload["title"]), title_font, title_box[2] - title_box[0] - 44)[:3]:
-                draw.text((title_box[0] + 22, y), line, font=title_font, fill=(255, 218, 85, 255))
-                y += int(title_font.size * 1.05)
-            if menu_payload["schedule"]:
-                draw.text((title_box[0] + 24, y + 6), str(menu_payload["schedule"]), font=sub_font, fill=(255, 255, 240, 250))
+            # Title card (top-left): brand + full campaign title + schedule +
+            # promo/offer facts. Content-adaptive height so no required visible
+            # fact is truncated — the card grows downward (capped above the menu
+            # panel). `extras` carries the offer/promotion/pricing facts the menu
+            # item cards don't show, so visual QA finds every required fact.
+            biz_font = _font(ImageFont, max(19, int(width * 0.025)), bold=True)
+            business = str(menu_payload.get("business") or "").strip()
+            title_text = str(menu_payload["title"]).strip()
+            box_x0, box_y0, box_x1 = margin, int(height * 0.055), int(width * 0.58)
+            inner_w = box_x1 - box_x0 - 44
+            card_lines: list[tuple[object, tuple[int, int, int, int], str]] = []
+            # Every required visible fact is fully wrapped — NO silent line caps
+            # anywhere (brand/title/schedule/extras). Overflow is handled solely
+            # by the fail-closed fit check below, so a long brand or title can
+            # never be truncated into a QA "missing required visible fact".
+            if business and not _same_text(business, title_text):
+                for ln in _wrap(draw, business, biz_font, inner_w):
+                    card_lines.append((biz_font, (255, 255, 245, 255), ln))
+            for ln in _wrap(draw, title_text, title_font, inner_w):
+                card_lines.append((title_font, (255, 218, 85, 255), ln))
+            # Secondary required facts (date / schedule / time / promotion_end /
+            # offers / details) are sourced directly from `collect_text_facts()`
+            # — the SAME set visual QA checks — so the title card cannot omit a
+            # required visible fact. The other regions cover the rest: the big
+            # title (above), the brand line, the menu item cards, and the footer
+            # (location + contact). Items are skipped here (drawn as cards). If
+            # the full set can't fit, the fail-closed check below routes the
+            # project to manual review rather than shipping an incomplete concept.
+            item_norms = {_normalize_fact_text(i) for i in menu_payload["items"]}
+            for fact in collect_text_facts(project):
+                if fact.fact_id in ("brand", "title", "location", "contact"):
+                    continue
+                value = str(fact.text).strip()
+                if not value or _normalize_fact_text(value) in item_norms:
+                    continue
+                if _same_text(value, title_text) or (business and _same_text(value, business)):
+                    continue
+                for ln in _wrap(draw, value, small_font, inner_w):
+                    card_lines.append((small_font, (255, 236, 205, 250), ln))
+            content_h = sum(int(getattr(f, "size", 18) * 1.2) for f, _c, _t in card_lines)
+            box_y1 = box_y0 + content_h + 34
+            if box_y1 > int(height * 0.60):
+                raise FlyerRenderError("critical text overlay does not fit")
+            draw.rounded_rectangle((box_x0, box_y0, box_x1, box_y1), radius=22, fill=(42, 86, 42, 232), outline=(255, 205, 74, 245), width=3)
+            y = box_y0 + 18
+            for f, color, ln in card_lines:
+                draw.text((box_x0 + 22, y), ln, font=f, fill=color)
+                y += int(getattr(f, "size", 18) * 1.2)
 
             panel = (margin, int(height * 0.64), width - margin, height - margin)
             draw.rounded_rectangle(panel, radius=24, fill=(18, 54, 34, 236), outline=(255, 205, 74, 245), width=3)
@@ -2342,7 +2386,17 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
         _write_generated_image(raw, path, size=size)
         return
     _write_generated_image(raw, raw_path, size=size)
-    apply_exact_identity_overlay(project, raw_path, path, size=size)
+    # Deterministic exact-text composition (Priority-1 fix for the ~100%
+    # `visual_qa_failed` incident): the image model cannot reliably render exact
+    # text, so we composite it ourselves. The critical overlay is self-contained
+    # — brand + campaign title + schedule (title card), menu items/prices (menu
+    # panel), location + contact (footer) — covering every required visible fact
+    # in one coherent pass over the model background. This brings forward to the
+    # CONCEPT stage the same deterministic text layer that already runs at
+    # `render_final_package`, so visual QA reads our crisp text instead of the
+    # model's garbled rendering. `_apply_critical_text_overlay` carries the
+    # system-python3 Pillow fallback for VPSes whose Hermes venv lacks Pillow.
+    _apply_critical_text_overlay(project, raw_path, path, size=size, output_format=output_format)
 
 
 def render_concept_previews(project: FlyerProject, output_dir: Path | str, *, model: str = "deterministic-renderer", quality: str = "low", concept_count: int = 1, repair_instruction: str = "") -> list[RenderedAssetSpec]:

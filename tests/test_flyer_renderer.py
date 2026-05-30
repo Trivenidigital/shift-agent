@@ -436,6 +436,60 @@ def test_inspect_rendered_asset_rejects_blank_or_wrong_size_png(tmp_path):
     assert any("dimensions" in item for item in wrong_result.blockers)
 
 
+def test_menu_overlay_payload_surfaces_offer_and_promo_as_extras():
+    """Offers / promotion_end are required visible facts that the menu item cards
+    don't render — they must reach the title card via `extras` so the
+    deterministic overlay (and therefore visual QA) covers them, not just items.
+    Regression for the F0112/F0113 `missing required visible fact: offer:0` class.
+    """
+    locked = [
+        FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen",
+                        source="customer_text", required=True, confidence=1.0, source_message_id="wamid.x"),
+        FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Dosa Special Night",
+                        source="customer_text", required=True, confidence=1.0, source_message_id="wamid.x"),
+        FlyerLockedFact(fact_id="offer:0", label="Offer", value="Pick Any 4 Dosa for $20",
+                        source="customer_text", required=True, confidence=1.0, source_message_id="wamid.x"),
+    ]
+    for i, (n, p) in enumerate([("Ghee Karam Dosa", "$6.99"), ("Benne Dosa", "$7.49")]):
+        locked.append(FlyerLockedFact(fact_id=f"item:{i}:name", label="Item", value=n,
+                                      source="customer_text", required=True, confidence=1.0, source_message_id="wamid.x"))
+        locked.append(FlyerLockedFact(fact_id=f"item:{i}:price", label="Price", value=p,
+                                      source="customer_text", required=True, confidence=1.0, source_message_id="wamid.x"))
+    project = _complete_project().model_copy(update={"locked_facts": locked})
+    payload = _menu_overlay_payload(project)
+
+    assert payload["items"], "menu path should engage with locked item facts"
+    assert payload["business"] == "Lakshmi's Kitchen"
+    assert "Pick Any 4 Dosa for $20" in payload["extras"]
+    # Items are shown as cards, not duplicated into the title-card extras.
+    assert not any("Ghee Karam Dosa" in str(e) for e in payload["extras"])
+
+
+def test_concept_preview_model_branch_applies_critical_text_overlay(tmp_path, monkeypatch):
+    """New-flyer concept generation must composite the deterministic critical-text
+    overlay (title/items/prices) at the CONCEPT stage so visual QA runs on
+    deterministic text, not the image model's garbled rendering. Regression for the
+    100% `visual_qa_failed` incident (F0113 = missing campaign_title/offer/items).
+    """
+    project = _complete_project()
+    monkeypatch.setattr(render_module, "_openrouter_image_bytes", lambda *a, **k: _png_bytes())
+    overlay_targets: list[str] = []
+    real_overlay = render_module._apply_critical_text_overlay
+
+    def _spy(proj, source, target, *, size, output_format):
+        overlay_targets.append(str(target))
+        return real_overlay(proj, source, target, size=size, output_format=output_format)
+
+    monkeypatch.setattr(render_module, "_apply_critical_text_overlay", _spy)
+    specs = render_concept_previews(project, tmp_path, model="google/gemini-2.5-flash-image")
+    assert overlay_targets, "concept model-branch must apply the deterministic critical-text overlay"
+    assert str(specs[0].path) in overlay_targets
+    assert specs[0].path.exists()
+    assert inspect_rendered_asset(
+        specs[0].path, expected_width=1080, expected_height=1350, mime_type="image/png"
+    ).ok is True
+
+
 def test_apply_critical_text_overlay_changes_model_background_pixels(tmp_path):
     from PIL import Image, ImageChops
 
@@ -1761,7 +1815,7 @@ def test_explicit_business_override_reaches_direct_and_source_edit_prompts(tmp_p
     assert "Business/brand to preserve: Old Brand" not in source_prompt
 
 
-def test_real_image_model_concept_applies_exact_identity_overlay(tmp_path, monkeypatch):
+def test_real_image_model_concept_applies_deterministic_text_overlay(tmp_path, monkeypatch):
     raw_png = _png_bytes(color=(19, 83, 43))
 
     class _Resp:
@@ -1792,10 +1846,13 @@ def test_real_image_model_concept_applies_exact_identity_overlay(tmp_path, monke
     assert raw_path.exists()
     assert specs[0].path.read_bytes() != raw_path.read_bytes()
 
-    from PIL import Image
-    with Image.open(specs[0].path) as preview, Image.open(raw_path) as raw:
-        assert preview.getpixel((540, 55)) != raw.getpixel((540, 55))
-        assert preview.getpixel((540, 1290)) != raw.getpixel((540, 1290))
+    from PIL import Image, ImageChops
+    with Image.open(specs[0].path).convert("RGB") as preview, Image.open(raw_path).convert("RGB") as raw:
+        # The deterministic critical-text overlay composites exact text over the
+        # model background (replacing the old identity-only overlay); the
+        # non-menu project draws its critical panel near the bottom.
+        assert ImageChops.difference(preview, raw).getbbox() is not None
+        assert preview.getpixel((540, 1200)) != raw.getpixel((540, 1200))
 
 
 def test_exact_identity_overlay_reserves_contact_with_long_schedule_and_address(tmp_path):
