@@ -634,6 +634,38 @@ def test_background_only_final_package_reapplies_overlay_per_format(tmp_path, mo
     assert "printable_pdf" in overlay_formats
 
 
+def test_background_only_final_honors_edited_preview_over_stale_raw(tmp_path, monkeypatch):
+    """Even for a background-only-eligible project, a preview edited/regenerated
+    well after its raw (stale raw) must be honored directly, not rebuilt from the
+    stale raw — the tight freshness window distinguishes this from a sub-second
+    generated composite."""
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    approved = tmp_path / "F0001-C1-preview.png"
+    stale_raw = tmp_path / "F0001-C1-preview.raw.png"
+    approved.write_bytes(_png_bytes(color=(20, 120, 40)))
+    stale_raw.write_bytes(_png_bytes(color=(140, 20, 20)))
+    import os
+    old = datetime(2026, 5, 17, 12, 0, tzinfo=timezone.utc).timestamp()
+    new = datetime(2026, 5, 17, 13, 0, tzinfo=timezone.utc).timestamp()  # 1h newer → edited
+    os.utime(stale_raw, (old, old))
+    os.utime(approved, (new, new))
+    project = _english_project().model_copy(update={
+        "assets": [FlyerAsset(asset_id="A0001", kind="concept_preview", source="rendered",
+                              path=str(approved), mime_type="image/png", sha256="a" * 64,
+                              original_message_id="m1", received_at=datetime.now(timezone.utc))],
+        "concepts": [FlyerConcept(concept_id="C1", title="Best", style_summary="g",
+                                  preview_asset_id="A0001", prompt="", created_at=datetime.now(timezone.utc))],
+        "selected_concept_id": "C1",
+    })
+    assert render_module._background_only_eligible(project) is True
+    specs = render_final_package(project, tmp_path / "finals", model="openai/gpt-5.4-image-2", quality="high")
+    whatsapp = next(s for s in specs if s.output_format == "whatsapp_image")
+    from PIL import Image
+    with Image.open(whatsapp.path) as final_img, Image.open(approved) as appr, Image.open(stale_raw) as raw:
+        assert final_img.getpixel((20, 20)) == appr.getpixel((20, 20))
+        assert final_img.getpixel((20, 20)) != raw.getpixel((20, 20))
+
+
 def test_renderer_blocks_missing_required_fields(tmp_path):
     project = _complete_project().model_copy(
         update={"fields": FlyerRequestFields(event_or_business_name="Bathukamma")}

@@ -139,6 +139,11 @@ DETERMINISTIC_MODEL_NAMES = {"", "deterministic-renderer", "pillow", "local-pill
 TEXT_MANIFEST_SCHEMA_VERSION = 1
 MAX_DETAIL_FACTS = 10
 MAX_TEXT_FACTS = 16
+# A generated background-only composite writes its raw background and overlaid
+# preview together (sub-second). A preview newer than its raw by more than this
+# window was edited/regenerated apart from the raw → final export honors the
+# preview directly rather than rebuilding from a possibly-stale raw.
+_RAW_COMPOSITE_FRESH_SECONDS = 30
 MONTH_NAME_TO_NUMBER = {
     "jan": 1,
     "january": 1,
@@ -2663,6 +2668,17 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
             direct_poster_source = (
                 not source.exists()
                 or not _background_only_eligible(project)
+                # Defensive stale-raw guard: a generated background-only composite
+                # writes its raw and overlaid preview together (within ~1s), so a
+                # preview MEANINGFULLY newer than its raw means the preview was
+                # edited/regenerated apart from this raw — honor that approved
+                # preview directly instead of rebuilding from a possibly-stale raw.
+                # The tight window cleanly separates composites (sub-second) from
+                # any later edit (seconds-to-minutes).
+                or (
+                    selected_preview.exists()
+                    and selected_preview.stat().st_mtime - source.stat().st_mtime > _RAW_COMPOSITE_FRESH_SECONDS
+                )
             )
             if direct_poster_source:
                 source = selected_preview
