@@ -413,6 +413,28 @@ def test_render_concept_previews_accepts_ten_item_menu(tmp_path):
     assert validate_text_manifest_file(specs[0].path, project_id=project.project_id, project_version=project.version).ok
 
 
+def test_menu_overlay_fails_closed_when_items_overflow_the_card_panel(tmp_path, monkeypatch):
+    """Under background-only the overlay is the SOLE source of item facts, so a
+    menu too large to fit the card panel must FAIL CLOSED (→ manual review), not
+    silently drop items. Normal flow already caps items at MAX_DETAIL_FACTS (and
+    `_detail_clauses` raises beyond that); this verifies the overlay's own backstop
+    if that cap is ever bypassed.
+    """
+    from PIL import Image
+    import pytest as _pytest
+
+    project = _english_project()
+    payload = dict(render_module._menu_overlay_payload(project))
+    payload["items"] = [f"Famous Item {i} - $9.99" for i in range(1, 25)]
+    monkeypatch.setattr(render_module, "_menu_overlay_payload", lambda _p: payload)
+    source = tmp_path / "bg.png"
+    Image.new("RGB", (1080, 1350), (30, 90, 120)).save(source)
+    with _pytest.raises(FlyerRenderError, match="menu overlay cannot fit all"):
+        apply_critical_text_overlay(
+            project, source, tmp_path / "out.png", size=(1080, 1350), output_format="concept_preview",
+        )
+
+
 def test_renderer_fails_if_title_cannot_fit_without_truncation(tmp_path):
     fields = _complete_project().fields.model_copy(update={
         "event_or_business_name": " ".join(["VeryLongFestivalName"] * 16),

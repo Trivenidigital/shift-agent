@@ -1584,7 +1584,16 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
                 x = px0 + 24 + col * (card_w + gap)
                 cy = start_y + row * (card_h + 10)
                 if cy + card_h > py1 - 58:
-                    break
+                    # Fail closed instead of silently dropping items. Under the
+                    # background-only contract the overlay is the SOLE source of
+                    # item facts (the model draws none), and `write_text_manifest`
+                    # declares every collected item — so a silent break would ship
+                    # a flyer missing required items with no QA blocker. Raising
+                    # routes the project to manual review (same fail-closed contract
+                    # as the title card / non-menu critical panel).
+                    raise FlyerRenderError(
+                        f"menu overlay cannot fit all {len(items)} items (drew {idx})"
+                    )
                 draw.rounded_rectangle((x, cy, x + card_w, cy + card_h), radius=14, fill=(116, 18, 30, 238), outline=(255, 190, 58, 230), width=2)
                 name, price = _split_item_price(item)
                 draw.text((x + 16, cy + 12), name, font=item_font, fill=(255, 255, 245, 255))
