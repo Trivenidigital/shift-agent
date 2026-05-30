@@ -5329,6 +5329,110 @@ def test_preview_layout_change_with_create_new_wording_stays_on_active_project(m
     assert not any(row.get("reason") == "flyer_active_project_bypassed" for row in audits)
 
 
+def test_same_business_layout_revision_does_not_bypass_but_new_campaign_does():
+    """Boundary guard for the 42bdda5 contract: 'create a new flyer for
+    <current business> with [layout/emphasis edits]' is a revision (no bypass),
+    but a genuine new campaign for the same business is still a fresh work order
+    (bypass). Keeps the same-business carve-out narrow."""
+    _hooks, actions = _load_plugin_modules()
+    active = {
+        "project_id": "F0097",
+        "status": "awaiting_final_approval",
+        "fields": {"event_or_business_name": "Chloe Hair Studio"},
+    }
+    layout_revision = (
+        "Create a new flyer for chloe hair studio with contact number and address "
+        "look smaller and the main focus should be on the services that we provide."
+    )
+    new_campaign = "Create a new flyer for chloe hair studio for our grand opening sale this weekend."
+
+    # Same-business layout/emphasis edit attaches to the active project.
+    assert actions.should_bypass_active_flyer_project_for_fresh_request(layout_revision, active, has_media=False) is False
+    # Genuine new campaign for the same business is still a fresh work order.
+    assert actions.should_bypass_active_flyer_project_for_fresh_request(new_campaign, active, has_media=False) is True
+    # A layout tweak combined with fresh campaign/event detail is a new work
+    # order, not a revision — must still bypass.
+    combined = (
+        "Create a new flyer for chloe hair studio, make the contact number smaller, "
+        "event from 4 pm to 7 pm this Saturday."
+    )
+    assert actions.should_bypass_active_flyer_project_for_fresh_request(combined, active, has_media=False) is True
+    # Emphasis on existing content (menu/items) is a revision, not a new brief —
+    # content nouns must not be treated as fresh-campaign detail.
+    menu_emphasis = "Create a new flyer for chloe hair studio with the main focus on the menu items."
+    assert actions.should_bypass_active_flyer_project_for_fresh_request(menu_emphasis, active, has_media=False) is False
+    # A concrete calendar date is a new dated campaign, even with a layout tweak —
+    # in either month-day or day-month order.
+    dated_campaign = "Create a new flyer for chloe hair studio for June 12, make the contact number smaller."
+    assert actions.should_bypass_active_flyer_project_for_fresh_request(dated_campaign, active, has_media=False) is True
+    dated_campaign_dm = "Create a new flyer for chloe hair studio for 12 June, make the contact number smaller."
+    assert actions.should_bypass_active_flyer_project_for_fresh_request(dated_campaign_dm, active, has_media=False) is True
+    # Media-backed requests keep their existing path (carve-out is text-only).
+    assert actions.should_bypass_active_flyer_project_for_fresh_request(layout_revision, active, has_media=True) is True
+
+
+def test_schedule_named_business_revision_attaches_not_bypassed():
+    """A business whose name contains a schedule/occasion word (e.g. 'Sunday
+    Salon', 'Eid Market') must still get its layout revisions attached. The
+    new-campaign check ignores the stored business-name span, so the word in
+    the name doesn't masquerade as fresh-campaign detail."""
+    _hooks, actions = _load_plugin_modules()
+    sunday = {
+        "project_id": "F0200",
+        "status": "awaiting_final_approval",
+        "fields": {"event_or_business_name": "Sunday Salon"},
+    }
+    eid = {
+        "project_id": "F0201",
+        "status": "awaiting_final_approval",
+        "fields": {"event_or_business_name": "Eid Market"},
+    }
+    assert actions.should_bypass_active_flyer_project_for_fresh_request(
+        "Create a new flyer for Sunday Salon, make the contact number smaller and focus on the services.",
+        sunday,
+        has_media=False,
+    ) is False
+    assert actions.should_bypass_active_flyer_project_for_fresh_request(
+        "Create a new flyer for Eid Market, make the contact and address smaller.",
+        eid,
+        has_media=False,
+    ) is False
+
+
+def test_contact_address_digits_in_revision_attach_not_bypassed():
+    """A layout revision that names the actual phone/street number being resized
+    must attach, not bypass — contact/address digits are not a new campaign;
+    only new dates/times/occasions are."""
+    _hooks, actions = _load_plugin_modules()
+    active = {
+        "project_id": "F0097",
+        "status": "awaiting_final_approval",
+        "fields": {"event_or_business_name": "Chloe Hair Studio"},
+    }
+    assert actions.should_bypass_active_flyer_project_for_fresh_request(
+        "Create a new flyer for Chloe Hair Studio, make phone number 555-1234 and address smaller.",
+        active,
+        has_media=False,
+    ) is False
+    assert actions.should_bypass_active_flyer_project_for_fresh_request(
+        "Create a new flyer for chloe hair studio, make 123 Main St address and contact smaller.",
+        active,
+        has_media=False,
+    ) is False
+
+
+def test_layout_revision_wording_requires_revision_specific_focus_phrasing():
+    """Only revision-specific focus phrasing ('main focus / focus should be /
+    focus on') counts as a layout revision; generic 'highlight/emphasize' new-
+    brief language does not (it would risk false-attaching a new brief to an
+    active project). Size edits and explicit focus edits still count."""
+    _hooks, actions = _load_plugin_modules()
+    assert actions._is_layout_emphasis_revision_wording("highlighting our specials and products") is False
+    assert actions._is_layout_emphasis_revision_wording("the main focus should be on the services") is True
+    assert actions._is_layout_emphasis_revision_wording("focus on the menu items") is True
+    assert actions._is_layout_emphasis_revision_wording("make the contact number and address smaller") is True
+
+
 def test_source_vs_new_source_choice_creates_manual_edit_project(monkeypatch):
     """SOURCE branch routes through existing exact-edit handler:
     trigger_create_flyer_project called WITH manual_edit_required=True and

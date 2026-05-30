@@ -1421,6 +1421,105 @@ def similar_to_active_project_request(body: str, active_project: dict) -> bool:
     return SequenceMatcher(None, incoming, current).ratio() >= 0.82
 
 
+_LAYOUT_SIZE_REVISION = re.compile(
+    r"\b(?:look|make|keep|show)\b.{0,80}\b(?:smaller|less\s+prominent|tiny|smaller\s+font)\b"
+    r"|\b(?:smaller|less\s+prominent|tiny|smaller\s+font)\b.{0,80}\b(?:contact|phone|number|address|location)\b",
+    re.IGNORECASE,
+)
+_LAYOUT_CONTACT_TARGET = re.compile(r"\b(?:contact|phone|number|address|location)\b", re.IGNORECASE)
+# Revision-specific focus phrasing only. Generic "highlight/emphasize" is
+# omitted: "create a new flyer highlighting our specials" is a plausible new
+# brief, and routing it as a revision would corrupt an active project. The
+# authoritative agent-side extractor still handles the broader set once a
+# message is (conservatively) attached.
+_LAYOUT_FOCUS_REVISION = re.compile(
+    r"\b(?:main\s+focus|focus\s+should\s+be|focus\s+on)\b", re.IGNORECASE
+)
+_LAYOUT_OFFER_TARGET = re.compile(
+    r"\b(?:service|services|offer|offers|items|menu|products|specials)\b", re.IGNORECASE
+)
+# New-campaign signal: a new date, time window, or occasion. Run against the
+# business-name-stripped brief so a business named e.g. "Sunday Salon" does not
+# trip its own revisions. Deliberately a date/time/occasion detector rather than
+# a wholesale digit check, so the actual phone/street numbers being resized in a
+# layout revision ("make phone 555-1234 smaller") do NOT read as a new campaign.
+# Content nouns (menu/items/offer/special) are absent — valid emphasis targets.
+_NEW_CAMPAIGN_SCHEDULE = re.compile(
+    r"\b(?:"
+    r"from\s+\d{1,2}\s*(?:am|pm)\s+(?:to|-)\s+\d{1,2}\s*(?:am|pm)|"
+    r"\d{1,2}\s*(?:am|pm)\s+(?:to|-)\s+\d{1,2}\s*(?:am|pm)|"
+    r"\d{1,2}\s*(?:am|pm)|"
+    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+    r"today|tomorrow|weekend|"
+    r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
+    r"aug(?:ust)?|sep(?:tember)?|sept|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?|"
+    r"\d{1,2}(?:st|nd|rd|th)?\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
+    r"aug(?:ust)?|sep(?:tember)?|sept|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)|"
+    r"\d{1,2}\s*/\s*\d{1,2}|"
+    r"event|grand\s+opening|festival|sale|top\s+\d+|"
+    # Occasion/holiday names (this portfolio is ethnic SMBs — festival flyers
+    # are a core campaign type, so these are realistic new-campaign signals).
+    r"diwali|deepavali|holi|navratri|navaratri|ugadi|pongal|onam|eid|ramadan|"
+    r"christmas|thanksgiving|halloween|valentine|easter|new\s+year"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _strip_business_scope_span(body: str, business_name: str) -> str:
+    """Remove the (clean, stored) business-name span so new-campaign detection
+    runs on the brief's remainder. A business literally named "Sunday Salon" /
+    "Eid Market" must not have its own name counted as a new-campaign signal.
+    Uses the stored business name (not the loosely-extracted requested scope,
+    which can over-capture the whole brief tail)."""
+    if not business_name:
+        return body
+    return re.sub(re.escape(business_name), " ", body, flags=re.IGNORECASE)
+
+
+def _is_layout_emphasis_revision_wording(body: str) -> bool:
+    """Router-local lexical mirror of agents/flyer
+    ``workflow._extract_layout_emphasis_revision_instruction``: "make the
+    contact/address smaller" or "focus should be on the services" style edits to
+    an existing flyer. Kept here because cf-router classifies lexically and does
+    not import the flyer agent (authoritative extraction still runs agent-side
+    via ``invoke_update_flyer_project``)."""
+    lower = body.lower()
+    size_edit = bool(_LAYOUT_SIZE_REVISION.search(lower) and _LAYOUT_CONTACT_TARGET.search(lower))
+    focus_edit = bool(_LAYOUT_FOCUS_REVISION.search(lower) and _LAYOUT_OFFER_TARGET.search(lower))
+    return size_edit or focus_edit
+
+
+def _is_same_business_layout_revision(body: str, active_project: Optional[dict]) -> bool:
+    """Same-business layout/emphasis edits worded as "create a new flyer for
+    <current business> with the address smaller / focus on the services" are
+    active-project revisions, not fresh work orders. Without this guard the
+    "create a new flyer" wording trips ``should_start_new_flyer_over_active`` and
+    bypasses the active project — regression of the 42bdda5 contract documented
+    in ``hooks._try_flyer_active_project_intercept``."""
+    if not active_project:
+        return False
+    requested = flyer_requested_business_scope(body)
+    if not requested:
+        return False
+    active_business = str(((active_project.get("fields") or {}).get("event_or_business_name")) or "").strip()
+    if not active_business or not _business_scope_matches(requested, active_business):
+        return False
+    if not _is_layout_emphasis_revision_wording(body):
+        return False
+    # New-campaign detection runs on the brief WITHOUT the business-name span so a
+    # business named e.g. "Sunday Salon" doesn't disqualify its own revisions. A
+    # new date/time/occasion means a new work order; default to the bypass path
+    # when present. False-bypass is the safe, pre-existing behaviour; false-attach
+    # would corrupt an active project. Using a date/time/occasion detector (not a
+    # wholesale digit check) keeps contact/address numbers being resized from
+    # reading as a new campaign.
+    remainder = _strip_business_scope_span(body, active_business)
+    if _NEW_CAMPAIGN_SCHEDULE.search(remainder):
+        return False
+    return True
+
+
 def should_bypass_active_flyer_project_for_fresh_request(
     text: str,
     active_project: Optional[dict],
@@ -1434,6 +1533,8 @@ def should_bypass_active_flyer_project_for_fresh_request(
         return True
     status = str(active_project.get("status") or "")
     if _media_revision_targets_delivered_active_project(body, status=status, has_media=has_media):
+        return False
+    if not has_media and _is_same_business_layout_revision(body, active_project):
         return False
     return (
         has_media
