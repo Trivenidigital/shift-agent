@@ -20,7 +20,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-SCRIPT = Path(__file__).resolve().parent.parent / "src" / "scripts" / "identify-sender"
+SCRIPT = Path(__file__).resolve().parent.parent / "src" / "platform" / "scripts" / "identify-sender"
 
 
 @pytest.fixture
@@ -93,7 +93,7 @@ def _run(arg, fixture_dir):
         **os.environ,
         "SHIFT_AGENT_ROSTER_PATH": str(fixture_dir / "roster.json"),
         "SHIFT_AGENT_CONFIG_PATH": str(fixture_dir / "config.yaml"),
-        "PYTHONPATH": str(Path(__file__).resolve().parent.parent / "src"),
+        "PYTHONPATH": str(Path(__file__).resolve().parent.parent / "src" / "platform"),
     }
     return subprocess.run(
         [sys.executable, str(SCRIPT), arg],
@@ -157,3 +157,42 @@ def test_employee_without_lid_returns_lid_none(fixture_dir):
     assert out["role"] == "employee"
     assert out["employee_id"] == "e006"
     assert out["lid"] is None
+
+
+# ── roster-load failure must FAIL SAFE (role="error", non-zero exit, never a
+# fabricated real role). The dispatcher treats role="error" as fail-closed and
+# can surface the load failure to the owner; identify-sender must never invent
+# an identity from an unreadable/invalid roster. +17329837841 (e004) WOULD
+# resolve to an employee with a valid roster — so role="error" here proves the
+# failure path wins over identity resolution.
+
+def test_corrupt_roster_fails_safe(fixture_dir):
+    (fixture_dir / "roster.json").write_text("{ this is not valid json ")
+    r = _run("+17329837841", fixture_dir)
+    assert r.returncode != 0, r.stdout
+    out = json.loads(r.stdout)
+    assert out["role"] == "error", out
+    assert out["role"] not in ("employee", "owner", "unknown")
+
+
+def test_schema_invalid_roster_fails_safe(fixture_dir):
+    # valid JSON, invalid Roster schema (employee missing required fields)
+    (fixture_dir / "roster.json").write_text(
+        json.dumps({"location": {}, "employees": [{"id": "x"}], "schedule": {}})
+    )
+    r = _run("+17329837841", fixture_dir)
+    assert r.returncode != 0, r.stdout
+    out = json.loads(r.stdout)
+    assert out["role"] == "error", out
+
+
+def test_missing_roster_fails_safe(fixture_dir):
+    (fixture_dir / "roster.json").unlink()
+    r = _run("+17329837841", fixture_dir)
+    assert r.returncode != 0, r.stdout
+    out = json.loads(r.stdout)
+    assert out["role"] == "error", out
+    # even the owner phone must not resolve when the roster cannot be loaded
+    r2 = _run("+918522041562", fixture_dir)  # owner phone in the fixture config
+    assert r2.returncode != 0, r2.stdout
+    assert json.loads(r2.stdout)["role"] == "error"
