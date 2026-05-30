@@ -310,9 +310,11 @@ cockpit, and re-runs the smoke test against the restored version. It does NOT
 touch customer / menu / roster / lead state files (data, not code). Schema
 compatibility differs by store: `catering-leads.json` (`CateringLeadStore`) is
 `extra="ignore"` — explicitly forward-compatible, so rolled-back code tolerates
-newer fields; `catering-menu.json` (`Menu`) is `extra="forbid"` (strict), so a
-rollback spanning a menu-schema change can reject newer menu fields — the menu
-loader falls open to an empty menu (it does not crash), and
-`pilot-readiness-check` flags a non-validating menu. If the rollback target
-itself fails smoke, the deploy stops and fires a Pushover P2 — SSH in and
-triage; do not chain another rollback.
+newer fields. `catering-menu.json` (`Menu`) is `extra="forbid"` (strict): a
+rollback spanning a menu-schema change can make the menu file fail to validate
+against the rolled-back schema — `pilot-readiness-check` (`catering.menu.schema`)
+flags this, and several catering scripts fail closed on an invalid menu rather
+than serving a degraded one. Resolution: re-deploy forward, or correct the menu
+file, before serving customers. If the rollback target itself fails smoke, the
+deploy stops and fires a Pushover P2 — SSH in and triage; do not chain another
+rollback.
