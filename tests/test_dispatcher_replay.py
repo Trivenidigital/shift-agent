@@ -287,6 +287,34 @@ def test_priority_mock_raises_on_missing_required_field(
         mock_llm_priority_order(skill_md, bad_payload)
 
 
+def test_invalid_sender_block_fails_closed(skill_md):
+    """An invalid sender block must FAIL CLOSED — even an employee with a clear
+    sick-call message must NOT route to handle_sick_call, because identity is
+    never trusted from an unvalidated block. Exercises the validate-sender-block
+    gate in mock_llm_priority_order (the `valid=false` path) that no fixture
+    currently covers."""
+    raw, handler = mock_llm_priority_order(skill_md, {
+        "raw_text": "[shift-agent-sender malformed]\nI can't come in today, I'm sick",
+        "identity": {"role": "employee"},
+        "sender_block": {"valid": False},
+    })
+    assert handler == "unknown_sender_declined", handler
+    assert handler != "handle_sick_call", "invalid block must not reach a real handler"
+    assert "fail closed" in raw.lower()
+
+
+def test_wrong_version_sender_block_fails_closed(skill_md):
+    """v != 1 is treated as invalid (forward/backward-incompatible block) and
+    fails closed, regardless of role/message content."""
+    raw, handler = mock_llm_priority_order(skill_md, {
+        "raw_text": "[shift-agent-sender v=2 platform=whatsapp ...]\nI'm sick today",
+        "identity": {"role": "employee"},
+        "sender_block": {"valid": True, "v": 2},
+    })
+    assert handler == "unknown_sender_declined", handler
+    assert handler != "handle_sick_call"
+
+
 def test_priority_order_mock_diverges_on_known_ambiguity(fixtures, skill_md):
     """Sanity-print the divergence cases (if any).
 
