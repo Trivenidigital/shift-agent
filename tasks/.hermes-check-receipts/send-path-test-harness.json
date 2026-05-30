@@ -1,0 +1,14 @@
+{
+  "topic": "send-path-test-harness",
+  "task_text": "Create an isolated CI/test harness for send-path tests. Linux pytest job or isolated VPS/worktree with no live WhatsApp bridge. safe_io.BRIDGE_URL must default to a fake sink during tests. Tests must fail if they attempt 127.0.0.1:3000 or any live bridge URL. In-process tests must provide action_context or use an explicitly reviewed allowlist. Keep the bridge pytest-guard; do not weaken it. Add regression coverage proving send tests cannot hit live bridge. Codex review must include regulated-intent/money-audit lens + Hermes/drift lens.",
+  "completed_at": "2026-05-30T14:00:18Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 5,
+  "hermes_step_count": 1,
+  "files_to_read_first": [
+    "src/platform/safe_io.py",
+    "tests/conftest.py",
+    "src/platform/schemas.py",
+    "tests/test_safe_io_bridge_send_cta.py"
+  ]
+}

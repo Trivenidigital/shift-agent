@@ -863,16 +863,65 @@ def _enforce_action_context_policy(
     return None  # passed lint, send proceeds
 
 
-def bridge_send_blocked_by_test_context() -> Optional[str]:
-    """Refuse live bridge sends from pytest unless explicitly overridden."""
+class LiveBridgeSendInTestError(RuntimeError):
+    """Test-only tripwire: a pytest-context send targeted the live WhatsApp
+    bridge. Raised ONLY under pytest (never in production), so it cannot affect
+    runtime behavior. Strengthens — does not replace — the refuse-by-default
+    guard in :func:`bridge_send_blocked_by_test_context`: tests that opt in via
+    ``SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS=1`` must point the bridge URL at a fake
+    sink or a local stub, never the live bridge (send-path-test-harness
+    2026-05-30 — prevents the live-bridge leak observed that day)."""
+
+
+# Canonical local Hermes WhatsApp bridge port. A pytest-context send to this
+# port is always a misconfigured test (a leak to the live bridge), never a
+# legitimate in-test stub (stubs bind ephemeral ports).
+_LIVE_BRIDGE_PORTS: "frozenset[int]" = frozenset({3000})
+
+
+def _running_under_pytest() -> bool:
+    """True when executing inside a pytest run (env marker or argv)."""
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return True
+    return "pytest" in " ".join(sys.argv[:3]).lower()
+
+
+def _is_live_bridge_url(url: Optional[str]) -> bool:
+    """True if ``url`` targets the live bridge (port 3000). Pure function."""
+    if not url:
+        return False
+    from urllib.parse import urlparse
+    try:
+        return urlparse(url).port in _LIVE_BRIDGE_PORTS
+    except ValueError:
+        # Malformed port in netloc — classify as non-live; scheme/host safety
+        # is validate_bridge_url's job, this helper only flags the live port.
+        return False
+
+
+def bridge_send_blocked_by_test_context(target_url: Optional[str] = None) -> Optional[str]:
+    """Refuse live bridge sends from pytest unless explicitly overridden.
+
+    Refuse-by-default behaviour (no opt-in) is unchanged. Additive tripwire
+    (send-path-test-harness 2026-05-30): even WITH
+    ``SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS=1``, a pytest-context send whose
+    ``target_url`` is the live bridge raises :class:`LiveBridgeSendInTestError`
+    — tests must use a fake sink / local stub, never the live bridge. Gated on
+    pytest context, so production is unaffected. ``target_url`` defaults to
+    ``None`` (no tripwire) for backward compatibility with direct callers."""
     if os.environ.get("FLYER_RECOVERY_NO_LIVE_SEND") == "1":
         return "refusing bridge send under FLYER_RECOVERY_NO_LIVE_SEND"
     if os.environ.get("SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS") == "1":
+        if _running_under_pytest() and _is_live_bridge_url(target_url):
+            raise LiveBridgeSendInTestError(
+                f"test attempted send to the live bridge {target_url!r}; "
+                f"point HERMES_BRIDGE_URL / safe_io.BRIDGE_URL at a fake sink "
+                f"or a local stub (never the live bridge)"
+            )
         return None
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return "refusing bridge send from pytest context"
-    argv = " ".join(sys.argv[:3]).lower()
-    if "pytest" in argv:
+    if "pytest" in " ".join(sys.argv[:3]).lower():
         return "refusing bridge send from pytest context"
     return None
 
@@ -903,7 +952,7 @@ def bridge_post(
     bad = validate_bridge_url(BRIDGE_URL)
     if bad:
         return False, "", bad, "connect_failed"
-    blocked = bridge_send_blocked_by_test_context()
+    blocked = bridge_send_blocked_by_test_context(BRIDGE_URL)
     if blocked:
         return False, "", blocked, "connect_failed"
     # PR-ζ chokepoint discipline. Refuses + emits audit row when None-context
@@ -998,7 +1047,7 @@ def bridge_send_media(
     bad = validate_bridge_url(url)
     if bad:
         return False, "", bad, "connect_failed"
-    blocked = bridge_send_blocked_by_test_context()
+    blocked = bridge_send_blocked_by_test_context(url)
     if blocked:
         return False, "", blocked, "connect_failed"
     # PR-ζ chokepoint discipline. Aggregates caption + file_name for lint.
@@ -1081,7 +1130,7 @@ def bridge_send_cta(
     bad = validate_bridge_url(url)
     if bad:
         return False, "", bad, "connect_failed"
-    blocked = bridge_send_blocked_by_test_context()
+    blocked = bridge_send_blocked_by_test_context(url)
     if blocked:
         return False, "", blocked, "connect_failed"
     # PR-ζ chokepoint discipline. Aggregates body + button labels for lint.

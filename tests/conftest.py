@@ -23,6 +23,27 @@ for _p in (_SRC_DIR, _SRC_DIR / "platform", _SRC_DIR / "agents" / "shift"):
         sys.path.insert(0, str(_p))
 
 
+# ── send-path test safety (send-path-test-harness 2026-05-30) ───────────────
+# Default the bridge URL to a CLOSED loopback sink for EVERY test so no test can
+# reach the live WhatsApp bridge (port 3000). Subprocess tests inherit
+# HERMES_BRIDGE_URL; in-process callers get safe_io.BRIDGE_URL patched. Tests
+# that capture sends override safe_io.BRIDGE_URL to their own stub AFTER this
+# autouse fixture runs (function-scoped monkeypatch in the test body wins).
+# Paired with safe_io's LiveBridgeSendInTestError tripwire (defense in depth):
+# a stray send to :3000 RAISES (loud test failure) rather than leaking.
+FAKE_BRIDGE_SINK = "http://127.0.0.1:1/__fake_test_sink__"
+
+
+@pytest.fixture(autouse=True)
+def _force_fake_bridge_sink(monkeypatch):
+    """Autouse: no test may default to the live bridge. See FAKE_BRIDGE_SINK."""
+    monkeypatch.setenv("HERMES_BRIDGE_URL", FAKE_BRIDGE_SINK)
+    _mod = sys.modules.get("safe_io")
+    if _mod is not None and hasattr(_mod, "BRIDGE_URL"):
+        monkeypatch.setattr(_mod, "BRIDGE_URL", FAKE_BRIDGE_SINK, raising=False)
+    yield
+
+
 @pytest.fixture
 def tmp_state_dir(tmp_path: Path) -> Path:
     """Isolated state directory per test."""
