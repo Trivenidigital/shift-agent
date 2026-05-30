@@ -5368,6 +5368,34 @@ def test_same_business_layout_revision_does_not_bypass_but_new_campaign_does():
     assert actions.should_bypass_active_flyer_project_for_fresh_request(layout_revision, active, has_media=True) is True
 
 
+def test_schedule_named_business_revision_attaches_not_bypassed():
+    """A business whose name contains a schedule/occasion word (e.g. 'Sunday
+    Salon', 'Eid Market') must still get its layout revisions attached. The
+    new-campaign check ignores the stored business-name span, so the word in
+    the name doesn't masquerade as fresh-campaign detail."""
+    _hooks, actions = _load_plugin_modules()
+    sunday = {
+        "project_id": "F0200",
+        "status": "awaiting_final_approval",
+        "fields": {"event_or_business_name": "Sunday Salon"},
+    }
+    eid = {
+        "project_id": "F0201",
+        "status": "awaiting_final_approval",
+        "fields": {"event_or_business_name": "Eid Market"},
+    }
+    assert actions.should_bypass_active_flyer_project_for_fresh_request(
+        "Create a new flyer for Sunday Salon, make the contact number smaller and focus on the services.",
+        sunday,
+        has_media=False,
+    ) is False
+    assert actions.should_bypass_active_flyer_project_for_fresh_request(
+        "Create a new flyer for Eid Market, make the contact and address smaller.",
+        eid,
+        has_media=False,
+    ) is False
+
+
 def test_source_vs_new_source_choice_creates_manual_edit_project(monkeypatch):
     """SOURCE branch routes through existing exact-edit handler:
     trigger_create_flyer_project called WITH manual_edit_required=True and

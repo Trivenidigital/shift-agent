@@ -1433,20 +1433,16 @@ _LAYOUT_FOCUS_REVISION = re.compile(
 _LAYOUT_OFFER_TARGET = re.compile(
     r"\b(?:service|services|offer|offers|items|menu|products|specials)\b", re.IGNORECASE
 )
-# New-campaign signal: a *new event/date/time/occasion*. Deliberately excludes
-# content nouns (menu/items/offer/special) because those are legitimate
-# emphasis targets in a layout revision ("focus on the menu items"); only
-# genuinely new scheduling/occasion content disqualifies the revision carve-out.
-_NEW_CAMPAIGN_SCHEDULE = re.compile(
+# No-digit new-campaign occasion tokens. Digit-bearing signals (dates, times,
+# prices, item counts) are handled separately by a wholesale digit check, so
+# this list only needs the word-form occasion/weekday signals. Content nouns
+# (menu/items/offer/special) are deliberately absent — they are valid emphasis
+# targets in a layout revision ("focus on the menu items").
+_NEW_CAMPAIGN_OCCASION = re.compile(
     r"\b(?:"
-    r"from\s+\d{1,2}\s*(?:am|pm)\s+(?:to|-)\s+\d{1,2}\s*(?:am|pm)|"
-    r"\d{1,2}\s*(?:am|pm)\s+(?:to|-)\s+\d{1,2}\s*(?:am|pm)|"
     r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
     r"today|tomorrow|weekend|"
-    r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
-    r"aug(?:ust)?|sep(?:tember)?|sept|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?|"
-    r"\d{1,2}\s*/\s*\d{1,2}|"
-    r"event|grand\s+opening|festival|sale|top\s+\d+|"
+    r"event|grand\s+opening|festival|sale|"
     # Occasion/holiday names (this portfolio is ethnic SMBs — festival flyers
     # are a core campaign type, so these are realistic new-campaign signals).
     r"diwali|deepavali|holi|navratri|navaratri|ugadi|pongal|onam|eid|ramadan|"
@@ -1454,6 +1450,17 @@ _NEW_CAMPAIGN_SCHEDULE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+
+
+def _strip_business_scope_span(body: str, business_name: str) -> str:
+    """Remove the (clean, stored) business-name span so new-campaign detection
+    runs on the brief's remainder. A business literally named "Sunday Salon" /
+    "Eid Market" must not have its own name counted as a new-campaign signal.
+    Uses the stored business name (not the loosely-extracted requested scope,
+    which can over-capture the whole brief tail)."""
+    if not business_name:
+        return body
+    return re.sub(re.escape(business_name), " ", body, flags=re.IGNORECASE)
 
 
 def _is_layout_emphasis_revision_wording(body: str) -> bool:
@@ -1484,14 +1491,19 @@ def _is_same_business_layout_revision(body: str, active_project: Optional[dict])
     active_business = str(((active_project.get("fields") or {}).get("event_or_business_name")) or "").strip()
     if not active_business or not _business_scope_matches(requested, active_business):
         return False
-    if _NEW_CAMPAIGN_SCHEDULE.search(body):
-        # A new event/date/time/occasion means this is a new work order that
-        # merely also mentions a layout tweak — keep it on the new-project path
-        # rather than attaching it as a revision. (Content nouns like
-        # menu/items/services are NOT disqualifiers; they are valid emphasis
-        # targets in a revision.)
+    if not _is_layout_emphasis_revision_wording(body):
         return False
-    return _is_layout_emphasis_revision_wording(body)
+    # New-campaign detection runs on the brief WITHOUT the business-name span so a
+    # business named e.g. "Sunday Salon" doesn't disqualify its own revisions.
+    # Robust, conservative discriminator: a pure layout/emphasis edit carries no
+    # new scheduling content. Any digit (dates, times, prices, item counts) or an
+    # occasion/weekday token in the remainder means a new campaign — default to
+    # the bypass path. False-bypass is the safe, pre-existing behaviour;
+    # false-attach would corrupt an active project.
+    remainder = _strip_business_scope_span(body, active_business)
+    if re.search(r"\d", remainder) or _NEW_CAMPAIGN_OCCASION.search(remainder):
+        return False
+    return True
 
 
 def should_bypass_active_flyer_project_for_fresh_request(
