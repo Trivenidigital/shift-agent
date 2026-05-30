@@ -1403,16 +1403,24 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
                     card_lines.append((biz_font, (255, 255, 245, 255), ln))
             for ln in _wrap(draw, title_text, title_font, inner_w):
                 card_lines.append((title_font, (255, 218, 85, 255), ln))
-            if menu_payload["schedule"]:
-                for ln in _wrap(draw, str(menu_payload["schedule"]), sub_font, inner_w):
-                    card_lines.append((sub_font, (255, 255, 240, 250), ln))
-            # ALL offer/promo/detail facts (fully wrapped) — never cap or
-            # silently drop a required visible fact, or visual QA reports it
-            # missing. If the full set can't fit the card, fail closed (raise)
-            # like the non-menu path so the project routes to manual review
-            # instead of shipping an incomplete concept.
-            for extra in list(menu_payload.get("extras") or []):
-                for ln in _wrap(draw, str(extra), small_font, inner_w):
+            # Secondary required facts (date / schedule / time / promotion_end /
+            # offers / details) are sourced directly from `collect_text_facts()`
+            # — the SAME set visual QA checks — so the title card cannot omit a
+            # required visible fact. The other regions cover the rest: the big
+            # title (above), the brand line, the menu item cards, and the footer
+            # (location + contact). Items are skipped here (drawn as cards). If
+            # the full set can't fit, the fail-closed check below routes the
+            # project to manual review rather than shipping an incomplete concept.
+            item_norms = {_normalize_fact_text(i) for i in menu_payload["items"]}
+            for fact in collect_text_facts(project):
+                if fact.fact_id in ("brand", "title", "location", "contact"):
+                    continue
+                value = str(fact.text).strip()
+                if not value or _normalize_fact_text(value) in item_norms:
+                    continue
+                if _same_text(value, title_text) or (business and _same_text(value, business)):
+                    continue
+                for ln in _wrap(draw, value, small_font, inner_w):
                     card_lines.append((small_font, (255, 236, 205, 250), ln))
             content_h = sum(int(getattr(f, "size", 18) * 1.2) for f, _c, _t in card_lines)
             box_y1 = box_y0 + content_h + 34
