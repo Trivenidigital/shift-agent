@@ -2392,7 +2392,20 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
     raw_path = _raw_background_path(path)
     raw_path.unlink(missing_ok=True)
     if size is None:
-        _write_generated_image(raw, path, size=size)
+        # PDF fallback (render_final_package else-branch). The slice-2 prompt tells
+        # the model to emit a textless background, so the deterministic overlay MUST
+        # be composited here too — otherwise this path ships a printable PDF with no
+        # copy/prices/contact. Render the overlay on a PNG, then export to PDF
+        # (same pattern as render_final_package's primary PDF path).
+        pdf_px = (1275, 1650)
+        _write_generated_image(raw, raw_path, size=pdf_px)
+        overlaid = path.with_suffix(".overlaid.png")
+        overlaid.unlink(missing_ok=True)
+        try:
+            _apply_critical_text_overlay(project, raw_path, overlaid, size=pdf_px, output_format=output_format)
+            _export_from_source_image(overlaid, path, size=None)
+        finally:
+            overlaid.unlink(missing_ok=True)
         return
     _write_generated_image(raw, raw_path, size=size)
     # Deterministic exact-text composition (Priority-1 fix for the ~100%

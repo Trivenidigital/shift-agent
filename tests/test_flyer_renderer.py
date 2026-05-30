@@ -490,6 +490,31 @@ def test_concept_preview_model_branch_applies_critical_text_overlay(tmp_path, mo
     ).ok is True
 
 
+def test_render_model_pdf_fallback_applies_critical_overlay(tmp_path, monkeypatch):
+    """The PDF branch (size=None) of the model fallback must composite the
+    deterministic overlay too — otherwise the slice-2 background-only prompt
+    ships a printable PDF with no copy/prices/contact.
+    """
+    project = _complete_project()
+    monkeypatch.setattr(render_module, "_openrouter_image_bytes", lambda *a, **k: _png_bytes())
+    overlay_targets: list[str] = []
+    real_overlay = render_module._apply_critical_text_overlay
+
+    def _spy(proj, source, target, *, size, output_format):
+        overlay_targets.append(str(target))
+        return real_overlay(proj, source, target, size=size, output_format=output_format)
+
+    monkeypatch.setattr(render_module, "_apply_critical_text_overlay", _spy)
+    pdf_path = tmp_path / "F0001-printable_pdf.pdf"
+    render_module._render_model(
+        project, pdf_path, concept_id="C1", output_format="printable_pdf",
+        size=None, model="google/gemini-2.5-flash-image", quality="medium",
+    )
+    assert overlay_targets, "PDF model fallback must apply the deterministic critical overlay"
+    assert pdf_path.exists()
+    assert pdf_path.stat().st_size > 1000
+
+
 def test_apply_critical_text_overlay_changes_model_background_pixels(tmp_path):
     from PIL import Image, ImageChops
 
