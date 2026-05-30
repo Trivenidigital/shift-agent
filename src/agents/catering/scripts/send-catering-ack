@@ -108,9 +108,22 @@ def main() -> int:
     jid = args.customer_jid.strip()
     body = args.message_text.strip()
 
-    if not jid or not any(jid.endswith(s) for s in _VALID_JID_SUFFIXES):
+    # Resolve the matched suffix and its local part. Fail closed unless the JID
+    # ends with a valid suffix AND carries a non-empty local part — e.g.
+    # "@s.whatsapp.net" / "@lid" with no digits before the suffix is malformed
+    # (undeliverable) and must NOT be sent.
+    jid_local = ""
+    jid_suffix_ok = False
+    for _suffix in _VALID_JID_SUFFIXES:
+        if jid.endswith(_suffix):
+            jid_suffix_ok = True
+            jid_local = jid[: -len(_suffix)]
+            break
+
+    if not jid or not jid_suffix_ok or not jid_local:
         _emit_ack_failed(jid or "<empty>", "bad_input",
-                         f"jid must end with one of {_VALID_JID_SUFFIXES}")
+                         f"jid must be <local>@suffix with a non-empty local part; "
+                         f"suffix one of {_VALID_JID_SUFFIXES}")
         sys.stderr.write(f"invalid --customer-jid: {jid!r}\n")
         return EXIT_INVALID_INPUT
 

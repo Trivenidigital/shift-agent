@@ -187,18 +187,8 @@ def test_returns_outbound_message_id_on_stdout(bridge_server, env_dir):
 @pytest.mark.parametrize("bad_jid", [
     "17329837841",                           # no @suffix
     "17329837841@c.us",                       # wrong suffix
-    pytest.param(
-        "@s.whatsapp.net",                    # empty digits
-        marks=pytest.mark.xfail(
-            strict=True,
-            reason="send-catering-ack validates only the JID suffix, not a "
-                   "non-empty local part, so '@s.whatsapp.net' is accepted + "
-                   "sent instead of rejected with exit 2. Latent production "
-                   "script-validation gap exposed once the wrapper loader was "
-                   "fixed; out of scope for the send-path test repair "
-                   "(no production runtime change). Tracked separately.",
-        ),
-    ),
+    "@s.whatsapp.net",                        # empty local part (regression: must fail closed)
+    "@lid",                                   # empty local part, lid suffix
     "user@example.com",                       # email-shaped
 ])
 def test_bad_jid_rejected_with_exit_2(bridge_server, env_dir, bad_jid):
