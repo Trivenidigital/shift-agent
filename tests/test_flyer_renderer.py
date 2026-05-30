@@ -2131,18 +2131,20 @@ def test_real_image_model_direct_poster_is_resized_to_requested_format(tmp_path,
     assert (report.width, report.height) == (1080, 1350)
 
 
-def test_final_package_ignores_stale_raw_background_when_preview_is_newer(tmp_path, monkeypatch):
+def test_non_eligible_final_package_uses_preview_directly_not_raw(tmp_path, monkeypatch):
+    """For NON-eligible projects (reference-extraction / source-edit) the preview
+    is the authoritative artifact (its text is model/operator-produced) — finals
+    use it directly and are NOT rebuilt from the raw background + overlay."""
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     approved = tmp_path / "F0001-C1-preview.png"
     stale_raw = tmp_path / "F0001-C1-preview.raw.png"
+    ref = tmp_path / "ref.png"
     approved.write_bytes(_png_bytes(color=(20, 120, 40)))
     stale_raw.write_bytes(_png_bytes(color=(140, 20, 20)))
-    old_time = datetime(2026, 5, 17, 12, 0, tzinfo=timezone.utc).timestamp()
-    new_time = datetime(2026, 5, 17, 13, 0, tzinfo=timezone.utc).timestamp()
-    import os
-    os.utime(stale_raw, (old_time, old_time))
-    os.utime(approved, (new_time, new_time))
+    ref.write_bytes(_png_bytes(color=(10, 10, 10)))
     project = _complete_project().model_copy(update={
+        # Reference-extraction request → NOT background-only eligible → direct.
+        "raw_request": "Create a flyer; extract items and prices from this sample flyer.",
         "assets": [
             FlyerAsset(
                 asset_id="A0001",
@@ -2153,7 +2155,17 @@ def test_final_package_ignores_stale_raw_background_when_preview_is_newer(tmp_pa
                 sha256="a" * 64,
                 original_message_id="wamid.flyer.1",
                 received_at=datetime.now(timezone.utc),
-            )
+            ),
+            FlyerAsset(
+                asset_id="A0002",
+                kind="reference_image",
+                source="whatsapp",
+                path=str(ref),
+                mime_type="image/png",
+                sha256="b" * 64,
+                original_message_id="wamid.flyer.1",
+                received_at=datetime.now(timezone.utc),
+            ),
         ],
         "concepts": [
             FlyerConcept(

@@ -1576,7 +1576,12 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
             cols = 2 if width >= 900 and len(items) > 3 else 1
             gap = 14
             card_w = (px1 - px0 - 48 - gap * (cols - 1)) // cols
-            card_h = max(58, min(84, (py1 - py0 - 118) // max(1, (len(items) + cols - 1) // cols)))
+            # Size cards so the full allowed item count (MAX_DETAIL_FACTS = 10, i.e.
+            # up to 5 two-column rows) fits the panel: subtract the start offset
+            # (66), the footer reserve (58), and the 10px inter-row gaps from the
+            # available height before dividing by rows. Min 50 lets 5 rows fit.
+            rows = (len(items) + cols - 1) // cols
+            card_h = max(50, min(84, ((py1 - py0 - 124) - 10 * (rows - 1)) // max(1, rows)))
             start_y = py0 + 66
             for idx, item in enumerate(items):
                 col = idx % cols
@@ -2643,28 +2648,21 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
         source_for_manifest: Path | None = None
         if selected_preview is not None:
             source = _raw_background_path(selected_preview)
-            # Background-only finals re-apply the deterministic overlay from the
-            # raw background at each output size — under the no-text contract the
-            # overlay is the SOLE text source, so cropping the 4:5 preview for
-            # square/story would drop required facts. We re-apply ONLY for a
-            # freshly-generated composite, distinguished from an edited/approved
-            # preview by how far the preview's mtime is past its raw: a generated
-            # background-only composite writes the raw and the overlaid preview
-            # within seconds, whereas an operator-approved/edited preview is much
-            # later. So a preview meaningfully newer than its raw is honored
-            # directly (protects approved visual edits from a stale raw).
-            #
-            # Non-eligible (reference-extraction / source-edit) previews already
-            # contain the model-rendered text; use them directly so the overlay is
-            # NOT composited on top (which would duplicate that text).
-            _PREVIEW_EDIT_GAP_SECONDS = 120
+            # Provenance, not mtime: eligibility itself is the signal.
+            # - Background-only-eligible projects: the preview is a generated
+            #   composite (raw background + overlay), and the raw is ALWAYS written
+            #   together with the preview (render_concept_previews / repair both
+            #   write a matched raw+preview), so re-applying the overlay from the
+            #   raw at each output size is correct and never drops an edit — there
+            #   are no edits, the overlay IS the text. This avoids cropping the 4:5
+            #   preview (which under the no-text contract would drop required copy).
+            # - Non-eligible (reference-extraction / source-edit / operator-upload):
+            #   the preview is the authoritative artifact (its text is model- or
+            #   operator-produced) and there is no matched raw, so use it directly
+            #   and never composite the overlay on top.
             direct_poster_source = (
                 not source.exists()
                 or not _background_only_eligible(project)
-                or (
-                    selected_preview.exists()
-                    and selected_preview.stat().st_mtime - source.stat().st_mtime > _PREVIEW_EDIT_GAP_SECONDS
-                )
             )
             if direct_poster_source:
                 source = selected_preview
