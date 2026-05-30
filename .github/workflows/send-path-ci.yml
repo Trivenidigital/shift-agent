@@ -1,0 +1,68 @@
+name: send-path-ci
+
+# Isolated Linux pytest gate for the send-path surface (send-path-test-harness
+# 2026-05-30). No live WhatsApp bridge exists on the runner, and the harness
+# itself (conftest fake-sink default + safe_io LiveBridgeSendInTestError
+# tripwire) guarantees no test can reach the live bridge. NO production secrets
+# are used or required.
+
+on:
+  pull_request:
+    paths:
+      - "src/platform/**"
+      - "tests/**"
+      - ".github/workflows/send-path-ci.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "src/platform/**"
+      - "tests/**"
+      - ".github/workflows/send-path-ci.yml"
+
+concurrency:
+  group: send-path-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  send-path:
+    name: send-path pytest (fake sink, no live bridge)
+    runs-on: ubuntu-latest
+    env:
+      # Gate #3: CI defaults the bridge to a CLOSED loopback sink, never the
+      # live bridge (:3000). The conftest autouse fixture also enforces this
+      # per-test; setting it here makes the workflow-level default explicit.
+      HERMES_BRIDGE_URL: "http://127.0.0.1:1/__fake_test_sink__"
+      # Belt-and-suspenders: never opt into live bridge sends at the job level.
+      # Tests that exercise the send path opt in per-test against a local stub.
+      SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test deps (no project secrets)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pydantic pyyaml pytest
+
+      - name: Pytest — send-path green-set
+        run: |
+          python -m pytest -q -p no:cacheprovider \
+            tests/test_bridge_send_harness.py \
+            tests/test_safe_io_bridge_send_cta.py \
+            tests/test_safe_io_bridge_send_media.py \
+            tests/test_dispatcher_replay.py \
+            tests/test_commerce_payment_link.py \
+            tests/test_commerce_cart.py \
+            tests/test_commerce_order_state.py \
+            tests/test_commerce_webhook_subscription_gate.py \
+            tests/test_commerce_livemode_gate.py \
+            tests/test_catering_deposit_copy_invariants.py \
+            tests/test_catering_deposit_helpers.py \
+            tests/test_catering_deposit_schema.py \
+            tests/test_prune_and_expire_logic.py \
+            tests/test_expense_dedup_primitives.py
