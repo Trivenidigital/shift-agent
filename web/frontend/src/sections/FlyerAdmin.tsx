@@ -801,21 +801,35 @@ export function FlyerAdmin() {
 
   // Multi-admin queue ownership mutations (Priority 1). admin_id is the
   // browser-local handle; the backend rejects blank handles and 409s on
-  // cross-admin conflict (force = explicit take-over).
+  // cross-admin conflict (force = explicit take-over). On failure (a race
+  // 409 where another admin claimed during the poll window, or a 422) we
+  // refetch so the operator sees the true current owner, then surface it —
+  // a silent no-op would leave them acting on stale ownership state.
+  const onOwnershipError = (err: unknown) => {
+    qc.invalidateQueries({ queryKey: ["flyer-manual-queue"] });
+    const detail = err instanceof Error && err.message ? ` (${err.message})` : "";
+    window.alert(
+      `Ownership action could not be applied${detail}. It may already be claimed by another admin, ` +
+      `or your handle was rejected. The queue has been refreshed — check the current owner and retry.`,
+    );
+  };
   const claimQueueItem = useMutation({
     mutationFn: ({ projectId, force }: { projectId: string; force?: boolean }) =>
       api.POST(`/flyer/manual-queue/${projectId}/claim`, { admin_id: adminHandle.trim(), force: !!force }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["flyer-manual-queue"] }); },
+    onError: onOwnershipError,
   });
   const unclaimQueueItem = useMutation({
     mutationFn: ({ projectId, force }: { projectId: string; force?: boolean }) =>
       api.POST(`/flyer/manual-queue/${projectId}/unclaim`, { admin_id: adminHandle.trim(), force: !!force }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["flyer-manual-queue"] }); },
+    onError: onOwnershipError,
   });
   const assignQueueItem = useMutation({
     mutationFn: ({ projectId, target }: { projectId: string; target: string }) =>
       api.POST(`/flyer/manual-queue/${projectId}/assign`, { admin_id: target, by: adminHandle.trim() }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["flyer-manual-queue"] }); },
+    onError: onOwnershipError,
   });
 
   // P0 #2 Commit 5 — audit-only operator flag on a delivered_with_warning project.
