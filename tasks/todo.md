@@ -26,12 +26,13 @@ probes / required deploy-smoke, no customer sends, no speculative agents, no PR-
   - [x] Verified on VPS: 8/8 pass via Hermes venv pytest.
   - [ ] push → Codex review (test-specific prompt) → merge if clean
 - [x] **Item 7 — Expense #21 prune/expire core-loop tests** ✅ MERGED PR #347 (origin/main 8d4423b). 12 cases. Codex CLEAN. 12/12 on VPS.
-- [ ] **Item 8 — Expense #21 dedup-primitive tests (_hamming + _dhash_from_bytes)** (branch `feat/expense-dedup-primitive-tests`)
-  - Money-adjacent: these pure functions are the perceptual-hash duplicate-detection primitive (prevents double-pushing the same receipt to QBO). Untested by the existing extract test. No vision/network/state → strictly dormant-safe.
-  - [x] `tests/test_expense_dedup_primitives.py` — 11 cases (_hamming exact values incl. 0/1/4/64/length-mismatch/symmetry; _dhash determinism/format/distinctness; exact-duplicate zero-distance invariant). Module loaded in a fixture (Linux-only fcntl, after Windows skip).
-  - [x] Verified on VPS: 11/11 pass via Hermes venv pytest.
+- [x] **Item 8 — Expense #21 dedup-primitive tests** ✅ MERGED PR #349 (origin/main 113f17b). _hamming + _dhash; valid-PNG fixture (PIL + fallback). Codex CLEAN. Verified both paths on VPS.
+- [ ] **Item 9 — Multi-Location #3 geocode_address error-path tests** (branch `feat/multi-location-geocode-error-tests`)
+  - geocode_address must return None (never raise) on every maps_client.py failure mode → caller degrades instead of crashing the store-locator reply. Error branches (rc≠0/empty/missing-key/malformed-JSON/missing-coords/non-numeric/subprocess-exception) were untested. Test-only, subprocess mocked → strictly dormant-safe.
+  - [x] Added `TestGeocodeAddressErrorPaths` to tests/test_agent_3_multi_location.py — 11 cases (success, first-match, rc≠0, empty, missing-key, malformed-JSON, missing-coords, non-numeric, string-coercion, TimeoutExpired, OSError). Mirrors existing class's SourceFileLoader fixture + patch.object pattern.
+  - [x] Verified on VPS: full file 43/43 (32 existing + 11 new), new class 11/11, no regressions.
   - [ ] push → Codex review (test-specific prompt) → merge if clean
-- [ ] Item 9+ — remaining dormant-safe: closest-location #3 geocode error-path tests; runbook fixes. NOTE many remaining pipeline agents (P&L #22, Tier-2 stubs, commerce) need operator activation (real blocker to dormant-safe "finishing every agent").
+- [ ] Item 10+ — remaining dormant-safe thinning out: runbook fixes; any other shipped-script error-path test gaps. NOTE most remaining pipeline agents (P&L #22, Tier-2 stubs, commerce) need operator activation (real blocker to dormant-safe "finishing every agent") — worth surfacing to operator as the run continues.
 
 
 
