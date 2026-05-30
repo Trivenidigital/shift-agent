@@ -5329,6 +5329,31 @@ def test_preview_layout_change_with_create_new_wording_stays_on_active_project(m
     assert not any(row.get("reason") == "flyer_active_project_bypassed" for row in audits)
 
 
+def test_same_business_layout_revision_does_not_bypass_but_new_campaign_does():
+    """Boundary guard for the 42bdda5 contract: 'create a new flyer for
+    <current business> with [layout/emphasis edits]' is a revision (no bypass),
+    but a genuine new campaign for the same business is still a fresh work order
+    (bypass). Keeps the same-business carve-out narrow."""
+    _hooks, actions = _load_plugin_modules()
+    active = {
+        "project_id": "F0097",
+        "status": "awaiting_final_approval",
+        "fields": {"event_or_business_name": "Chloe Hair Studio"},
+    }
+    layout_revision = (
+        "Create a new flyer for chloe hair studio with contact number and address "
+        "look smaller and the main focus should be on the services that we provide."
+    )
+    new_campaign = "Create a new flyer for chloe hair studio for our grand opening sale this weekend."
+
+    # Same-business layout/emphasis edit attaches to the active project.
+    assert actions.should_bypass_active_flyer_project_for_fresh_request(layout_revision, active, has_media=False) is False
+    # Genuine new campaign for the same business is still a fresh work order.
+    assert actions.should_bypass_active_flyer_project_for_fresh_request(new_campaign, active, has_media=False) is True
+    # Media-backed requests keep their existing path (carve-out is text-only).
+    assert actions.should_bypass_active_flyer_project_for_fresh_request(layout_revision, active, has_media=True) is True
+
+
 def test_source_vs_new_source_choice_creates_manual_edit_project(monkeypatch):
     """SOURCE branch routes through existing exact-edit handler:
     trigger_create_flyer_project called WITH manual_edit_required=True and

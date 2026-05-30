@@ -1421,6 +1421,51 @@ def similar_to_active_project_request(body: str, active_project: dict) -> bool:
     return SequenceMatcher(None, incoming, current).ratio() >= 0.82
 
 
+_LAYOUT_SIZE_REVISION = re.compile(
+    r"\b(?:look|make|keep|show)\b.{0,80}\b(?:smaller|less\s+prominent|tiny|smaller\s+font)\b"
+    r"|\b(?:smaller|less\s+prominent|tiny|smaller\s+font)\b.{0,80}\b(?:contact|phone|number|address|location)\b",
+    re.IGNORECASE,
+)
+_LAYOUT_CONTACT_TARGET = re.compile(r"\b(?:contact|phone|number|address|location)\b", re.IGNORECASE)
+_LAYOUT_FOCUS_REVISION = re.compile(
+    r"\b(?:main\s+focus|focus\s+should\s+be|focus\s+on|highlight|emphasize|emphasis)\b", re.IGNORECASE
+)
+_LAYOUT_OFFER_TARGET = re.compile(
+    r"\b(?:service|services|offer|offers|items|menu|products|specials)\b", re.IGNORECASE
+)
+
+
+def _is_layout_emphasis_revision_wording(body: str) -> bool:
+    """Router-local lexical mirror of agents/flyer
+    ``workflow._extract_layout_emphasis_revision_instruction``: "make the
+    contact/address smaller" or "focus should be on the services" style edits to
+    an existing flyer. Kept here because cf-router classifies lexically and does
+    not import the flyer agent (authoritative extraction still runs agent-side
+    via ``invoke_update_flyer_project``)."""
+    lower = body.lower()
+    size_edit = bool(_LAYOUT_SIZE_REVISION.search(lower) and _LAYOUT_CONTACT_TARGET.search(lower))
+    focus_edit = bool(_LAYOUT_FOCUS_REVISION.search(lower) and _LAYOUT_OFFER_TARGET.search(lower))
+    return size_edit or focus_edit
+
+
+def _is_same_business_layout_revision(body: str, active_project: Optional[dict]) -> bool:
+    """Same-business layout/emphasis edits worded as "create a new flyer for
+    <current business> with the address smaller / focus on the services" are
+    active-project revisions, not fresh work orders. Without this guard the
+    "create a new flyer" wording trips ``should_start_new_flyer_over_active`` and
+    bypasses the active project — regression of the 42bdda5 contract documented
+    in ``hooks._try_flyer_active_project_intercept``."""
+    if not active_project:
+        return False
+    requested = flyer_requested_business_scope(body)
+    if not requested:
+        return False
+    active_business = str(((active_project.get("fields") or {}).get("event_or_business_name")) or "").strip()
+    if not active_business or not _business_scope_matches(requested, active_business):
+        return False
+    return _is_layout_emphasis_revision_wording(body)
+
+
 def should_bypass_active_flyer_project_for_fresh_request(
     text: str,
     active_project: Optional[dict],
@@ -1434,6 +1479,8 @@ def should_bypass_active_flyer_project_for_fresh_request(
         return True
     status = str(active_project.get("status") or "")
     if _media_revision_targets_delivered_active_project(body, status=status, has_media=has_media):
+        return False
+    if not has_media and _is_same_business_layout_revision(body, active_project):
         return False
     return (
         has_media
