@@ -1339,11 +1339,26 @@ Autonomous repair instruction:
             "text into overlay panels afterwards. Leave the upper-left and lower areas visually "
             "calm/uncluttered so those panels read cleanly; keep hero imagery in the center and right."
         )
+        # Overlay owns ALL text → the language hint must NOT instruct text/script
+        # rendering (that would reintroduce model-painted, garbled non-English text).
+        # Reflect language/culture in IMAGERY only.
+        _lang = (project.fields.preferred_language or "").strip().lower()
+        if _lang in {"te", "mixed"}:
+            language_block = (
+                "- Reflect Telugu / South-Indian cultural styling in the imagery, motifs, and palette "
+                "ONLY — do NOT render any text, script, or words; all flyer text is composited separately."
+            )
+        else:
+            language_block = (
+                "- Do not render any text, script, or words in the background; all flyer text is "
+                "composited separately into overlay panels."
+            )
     else:
         text_contract_line = (
             "- The final image must already contain the finished flyer text, menu item cards, prices, "
             "schedule, location, and contact when those facts are provided."
         )
+        language_block = _language_constraint_hint(project)
     return f"""Create a complete, finished customer-ready poster flyer for WhatsApp delivery.
 
 Design direction: {_design_direction(project, concept_id)}.
@@ -1384,7 +1399,7 @@ Quality bar:
 - If an uploaded reference image/template is attached, preserve its visual identity and offer category but replace stale readable facts with the controlled customer copy above.
 - If there is no one-time date, present the recurring schedule clearly instead of inventing a date.
 - Avoid QR codes, fake logos, watermarks, unreadable microtext, and placeholder glyph boxes.
-{_language_constraint_hint(project)}
+{language_block}
 """
 
 

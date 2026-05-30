@@ -744,8 +744,11 @@ def test_image_prompt_enforces_explicit_english_only_language_constraint():
 
     prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
 
-    assert "Use English only" in prompt
-    assert "Do not use Telugu, Hindi, or any regional Indian language" in prompt
+    # English-only + background-only eligible: the overlay draws the English facts
+    # and the model renders NO text/script at all, so non-English text is
+    # structurally impossible (stronger than the old "use English only" hint).
+    assert "Do not render any text, script, or words in the background" in prompt
+    assert "do NOT render flyer text" in prompt
 
 
 def test_image_prompt_does_not_turn_weekend_special_badge_into_schedule():
@@ -1106,8 +1109,10 @@ def test_telugu_poster_prompt_is_background_only_overlay_owns_text():
     assert "Poori with Chicken - $14.99" in prompt
     assert "Kheema Dosa - $12.99" in prompt
     assert "+17329837841" in prompt
-    # The language hint still informs imagery/script choice for the background.
-    assert "Telugu as the primary flyer language" in prompt
+    # The language hint is now IMAGERY-only under background-only — it must NOT
+    # instruct the model to render Telugu text (which it garbles).
+    assert "Reflect Telugu / South-Indian cultural styling in the imagery" in prompt
+    assert "Use Telugu as the primary flyer language" not in prompt
 
 
 def test_background_only_contract_is_gated_only_by_reference_extraction(tmp_path, monkeypatch):
