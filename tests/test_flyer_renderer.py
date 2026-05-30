@@ -1071,7 +1071,7 @@ def test_openrouter_image_renderer_retries_incomplete_chunk_read(tmp_path, monke
     assert specs[0].path.read_bytes().startswith(b"\x89PNG")
 
 
-def test_localized_telugu_poster_prompt_keeps_integrated_text_contract():
+def test_telugu_poster_prompt_is_background_only_overlay_owns_text():
     project = _complete_project().model_copy(update={
         "fields": FlyerRequestFields(
             event_or_business_name="Weekend Breakfast Specials",
@@ -1095,26 +1095,26 @@ def test_localized_telugu_poster_prompt_keeps_integrated_text_contract():
     prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
 
     assert "Create a complete, finished customer-ready poster flyer" in prompt
-    # This is a TELUGU project, so it is NOT background-only eligible: the overlay
-    # can't translate, so the model must still render the localized text. The
-    # background-only contract is gated OFF and the integrated-text contract holds.
-    assert "Render the following text exactly" in prompt
-    assert "do NOT render them as text" not in prompt
+    # Telugu is now background-only eligible: the overlay owns ALL text (it renders
+    # facts in their own script via _font), and the model garbles non-English — so
+    # the model produces a TEXTLESS background and the deterministic overlay draws
+    # the text, instead of the model painting garbled/hallucinated Telugu.
+    assert "decorative BACKGROUND image only" in prompt
+    assert "do NOT render them as text" in prompt
+    # The exact facts are still present as imagery context.
     assert "Weekend Breakfast Specials" in prompt
-    assert "Thursday To Sunday | 8 AM TO 11 AM" in prompt
     assert "Poori with Chicken - $14.99" in prompt
     assert "Kheema Dosa - $12.99" in prompt
     assert "+17329837841" in prompt
-    assert "brand masthead" in prompt
-    assert "item cards" in prompt
+    # The language hint still informs imagery/script choice for the background.
     assert "Telugu as the primary flyer language" in prompt
-    assert "Do not output an all-English flyer" in prompt
 
 
-def test_background_only_contract_is_gated_to_english_no_reference(tmp_path, monkeypatch):
-    """Background-only (model emits no text) applies ONLY when the deterministic
-    overlay can produce every required fact: English + no reference-IMAGE.
-    Localized and reference-extraction flows keep the model rendering text; a
+def test_background_only_contract_is_gated_only_by_reference_extraction(tmp_path, monkeypatch):
+    """Background-only (model emits no text) applies whenever the overlay can
+    produce every required fact — which is everything EXCEPT reference-extraction
+    (items live in an attached reference image, not in facts). Language does NOT
+    gate (the overlay renders any script; the model garbles non-English). A
     logo/brand asset alone does NOT disqualify (common branded flyer)."""
     from PIL import Image as _Image
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
@@ -1127,11 +1127,13 @@ def test_background_only_contract_is_gated_to_english_no_reference(tmp_path, mon
     assert "do NOT render them as text" in p_en
     assert render_module._background_only_eligible(english) is True
 
+    # Language no longer gates: the overlay renders facts in their own script
+    # (Telugu via _font), and the model garbles non-English, so Telugu is ALSO
+    # background-only eligible (the model stops painting garbled/hallucinated text).
     telugu = english.model_copy(update={"fields": english.fields.model_copy(update={"preferred_language": "te"})})
     p_te = _image_prompt(telugu, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
-    assert "Render the following text exactly" in p_te
-    assert "decorative BACKGROUND image only" not in p_te
-    assert render_module._background_only_eligible(telugu) is False
+    assert "decorative BACKGROUND image only" in p_te
+    assert render_module._background_only_eligible(telugu) is True
 
     img = tmp_path / "assets" / "ref.png"
     img.parent.mkdir(parents=True, exist_ok=True)

@@ -818,7 +818,10 @@ def _poster_copy_block(project: FlyerProject) -> str:
         lines.append("Offer details:")
         for detail in plan.detail_lines:
             lines.append(f"- {detail}")
-    lines.append("If any required text cannot be rendered legibly, make the typography simpler and larger rather than dropping facts.")
+    if not _background_only_eligible(project):
+        # Only the integrated-text path renders these facts itself; the legibility
+        # guidance is contradictory under the background-only (textless) contract.
+        lines.append("If any required text cannot be rendered legibly, make the typography simpler and larger rather than dropping facts.")
     return "\n".join(lines)
 
 
@@ -840,32 +843,33 @@ def _needs_reference_extraction(project: FlyerProject) -> bool:
     # reference) — so we do NOT optimize extracted references into background-only
     # here, to avoid ever dropping reference-only items/prices. Tracked as a
     # follow-up (gate on reference-extraction status once it's surfaced in state).
+    # Uses `_project_reference_assets` (same seam the reference-extraction prompt
+    # block uses) so the two stay consistent; logos are excluded here.
     return any(
-        getattr(asset, "kind", "") == "reference_image" and Path(str(getattr(asset, "path", ""))).exists()
-        for asset in project.assets
+        getattr(asset, "kind", "") == "reference_image"
+        for asset in _project_reference_assets(project)
     )
 
 
 def _background_only_eligible(project: FlyerProject) -> bool:
     """Whether the model should render a TEXTLESS background (the deterministic
-    overlay owns all text).
+    overlay owns ALL customer-facing text).
 
-    Only safe when the overlay can produce every required visible fact. That
-    fails for two supported flows the overlay can't cover, so they keep the
-    model rendering text:
-      - non-English requests — the overlay draws facts as captured and cannot
-        translate them; the model is still needed for localized copy.
-      - reference-extraction — items/prices live in an attached reference IMAGE,
-        not yet in `collect_text_facts()`; the model must read + render them.
-        (A logo/brand asset alone does NOT disqualify — it's visual identity,
-        not a text source.)
+    Principle: the deterministic overlay always owns the text — it renders each
+    fact in its OWN script (`_font` loads Telugu/Indic fonts via `_has_telugu`),
+    so it is at least as good as the image model for any language. The model
+    GARBLES non-English text (the live F0114 Telugu hallucination), so handing
+    localized copy back to the model is strictly worse, not a safe fallback.
+    Localization is therefore an INTAKE concern (capture/translate facts into the
+    target language; the overlay then draws them) — NOT a reason to let the model
+    paint text. So language does NOT gate eligibility.
+
+    The only flow the overlay genuinely cannot cover is reference-extraction:
+    items/prices that live in an attached reference IMAGE and aren't in
+    `collect_text_facts()` yet, which only the model can read. A logo/brand asset
+    alone does NOT disqualify (visual identity, not a text source).
     """
-    lang = (project.fields.preferred_language or "en").strip().lower()
-    if lang not in {"", "en", "english"}:
-        return False
-    if _needs_reference_extraction(project):
-        return False
-    return True
+    return not _needs_reference_extraction(project)
 
 
 def _poster_layout_requirements(project: FlyerProject) -> str:
@@ -2615,6 +2619,11 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
             source = _raw_background_path(selected_preview)
             direct_poster_source = (
                 not source.exists()
+                # Non-eligible (reference-extraction) previews already contain the
+                # model-rendered text; use the preview directly so the deterministic
+                # critical overlay is NOT composited on top (which would duplicate /
+                # double-render that text in the finals).
+                or not _background_only_eligible(project)
                 or (
                     selected_preview.exists()
                     and selected_preview.stat().st_mtime > source.stat().st_mtime
