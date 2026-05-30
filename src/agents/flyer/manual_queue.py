@@ -703,6 +703,112 @@ def notify_customer_of_closure(
     return entry
 
 
+def build_status_customer_text(project: FlyerProject) -> str:
+    """Current customer-facing status reply for a LIVE (in-flight) project.
+
+    Reused by the cockpit 'resend status' proactive nudge AND its preview so
+    the two CANNOT drift from the reactive 'any update?' reply — single
+    source of truth is `agents.flyer.workflow.build_project_status_reply`.
+    Same dual-import pattern as `build_closure_customer_text`: the deployed
+    VPS layout has flat `/opt/shift-agent/flyer_*.py` modules (no
+    `agents.flyer` package), so the flat alias MUST be tried first.
+    """
+    try:
+        from flyer_workflow import build_project_status_reply  # type: ignore
+    except ImportError:
+        from agents.flyer.workflow import build_project_status_reply
+    return build_project_status_reply(project)
+
+
+def resend_status_to_customer(
+    store: FlyerProjectStore,
+    project_id: str,
+    *,
+    customers_path: Path,
+    decisions_log_path: Path,
+    bridge_send=None,
+    audit_append=None,
+    now_fn=None,
+) -> dict:
+    """Best-effort proactive WhatsApp re-send of a project's CURRENT status.
+
+    Symmetric with `notify_customer_of_closure`, but for an in-flight
+    manual-queue row: an operator working a stalled case can proactively
+    reassure a waiting customer rather than waiting for their next
+    "any update?" inbound. This helper performs NO project-state mutation —
+    it is a pure read-and-send, so there is nothing to roll back.
+
+    Invariants (mirrors the closure path):
+      - NEVER raises into the caller; unexpected errors become an audited
+        send failure. The reactive "any update?" path is the safety net.
+      - a `flyer_status_resent` row is appended for EVERY attempt (success,
+        missing chat_id, bridge failure) for traceability.
+      - the sent text comes from `build_status_customer_text`, so the nudge
+        cannot drift from the reactive reply.
+
+    Dependencies are injected so the helper is fully testable without the
+    WhatsApp bridge or the live decisions log; defaults wire up
+    `safe_io.bridge_post` + `safe_io.ndjson_append` lazily so the module
+    stays importable on Windows where `fcntl` is absent.
+    """
+    if bridge_send is None or audit_append is None:
+        from safe_io import bridge_post as _default_bridge  # type: ignore
+        from safe_io import ndjson_append as _default_append  # type: ignore
+        if bridge_send is None:
+            bridge_send = _default_bridge
+        if audit_append is None:
+            audit_append = _default_append
+    if now_fn is None:
+        now_fn = lambda: datetime.now(timezone.utc)
+    project = next((p for p in store.projects if p.project_id == project_id), None)
+    if project is None:
+        return {
+            "type": "flyer_status_resent",
+            "project_id": project_id,
+            "skipped": True,
+            "error": "project_not_found",
+        }
+    customer_phone = str(project.customer_phone)
+    chat_id = ""
+    chat_id_source = "none"
+    send_ok = False
+    outbound_mid = ""
+    error = ""
+    try:
+        chat_id, chat_id_source = resolve_proactive_chat_id_for_project(
+            project,
+            customers_path=customers_path,
+            decisions_log_path=decisions_log_path,
+        )
+        if not chat_id:
+            error = "no_chat_id_for_customer"
+        else:
+            text = build_status_customer_text(project)
+            ok, mid, err, status = bridge_send(chat_id, text)
+            send_ok = bool(ok)
+            outbound_mid = mid or ""
+            if not ok:
+                error = f"{status}: {err}"[:500]
+    except Exception as e:
+        error = f"unexpected: {type(e).__name__}: {e}"[:500]
+    entry = {
+        "ts": now_fn().strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "type": "flyer_status_resent",
+        "project_id": project_id,
+        "customer_phone": customer_phone,
+        "chat_id": chat_id,
+        "chat_id_source": chat_id_source,
+        "send_ok": send_ok,
+        "outbound_message_id": outbound_mid,
+        "error": error,
+    }
+    try:
+        audit_append(decisions_log_path, json.dumps(entry, separators=(",", ":")))
+    except Exception as e:
+        entry["audit_append_failed"] = f"{type(e).__name__}: {e}"
+    return entry
+
+
 _VALID_PROACTIVE_WHATSAPP_CHAT_ID = re.compile(r"^\d{6,20}@(lid|s\.whatsapp\.net)$")
 
 

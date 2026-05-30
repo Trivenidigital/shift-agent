@@ -20,7 +20,7 @@ import { cn } from "@/lib/cn";
 // in FlyerAdmin.tsx where the other queries are wired.
 // ─────────────────────────────────────────────────────────────────
 
-export type ManualQueueActionKind = "complete" | "break_glass" | "close_no_send";
+export type ManualQueueActionKind = "complete" | "break_glass" | "close_no_send" | "resend_status";
 
 export interface ActionPreview {
   action: ManualQueueActionKind;
@@ -43,13 +43,22 @@ const ACTION_LABEL: Record<ManualQueueActionKind, string> = {
   complete: "Complete with uploaded asset",
   break_glass: "Break-glass",
   close_no_send: "Close (no send)",
+  resend_status: "Resend status",
 };
 
 const ACTION_HEADING: Record<ManualQueueActionKind, string> = {
   complete: "Complete with uploaded asset",
   break_glass: "Mark Break-glass (no customer push)",
   close_no_send: "Close — no send (proactive customer notification)",
+  resend_status: "Resend current status to customer",
 };
+
+// resend_status is a read-only nudge: no reason text, no uploaded asset.
+// Every other action requires the operator reason; this set lets the
+// preview-confirm gate skip the reason requirement for the nudge only.
+const ACTIONS_REQUIRING_REASON: ReadonlySet<ManualQueueActionKind> = new Set([
+  "complete", "break_glass", "close_no_send",
+]);
 
 // Mirrors agents.flyer.manual_queue.CLOSE_FRESH_OK_REASON_TOKENS so the
 // operator sees the same tokens documented in the CLI freshness guard.
@@ -62,6 +71,10 @@ export interface ManualQueueActionsProps {
   reasonCode: string;
   reason: string;
   canComplete: boolean;
+  // resend_status is gated to active manual-queue rows (queued/in_progress);
+  // the parent computes this so the nudge button is only offered when the
+  // backend would accept it (otherwise the POST 409s).
+  canResendStatus: boolean;
   completeAsset: {
     filename: string;
     mimeType: string;
@@ -71,15 +84,16 @@ export interface ManualQueueActionsProps {
   onCompleteConfirmed: () => void;
   onBreakGlassConfirmed: () => void;
   onCloseNoSendConfirmed: (opts: { force: boolean }) => void;
+  onResendStatusConfirmed: () => void;
   pendingAction: ManualQueueActionKind | null;
-  errors: { complete: string; breakGlass: string; closeNoSend: string };
+  errors: { complete: string; breakGlass: string; closeNoSend: string; resendStatus: string };
 }
 
 export function ManualQueueActions(props: ManualQueueActionsProps) {
   const {
-    projectId, reasonCode, reason, canComplete, completeAsset,
+    projectId, reasonCode, reason, canComplete, canResendStatus, completeAsset,
     onCompleteConfirmed, onBreakGlassConfirmed, onCloseNoSendConfirmed,
-    pendingAction, errors,
+    onResendStatusConfirmed, pendingAction, errors,
   } = props;
 
   const reasonOk = reason.trim().length >= 5;
@@ -123,6 +137,7 @@ export function ManualQueueActions(props: ManualQueueActionsProps) {
     previewing === "complete" ? errors.complete
     : previewing === "break_glass" ? errors.breakGlass
     : previewing === "close_no_send" ? errors.closeNoSend
+    : previewing === "resend_status" ? errors.resendStatus
     : "";
 
   return (
@@ -153,6 +168,15 @@ export function ManualQueueActions(props: ManualQueueActionsProps) {
         >
           {ACTION_LABEL.close_no_send}
         </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={!canResendStatus || confirmActive}
+          onClick={() => openPreview("resend_status")}
+          className="border-sky-300 text-sky-700 hover:bg-sky-50"
+        >
+          {ACTION_LABEL.resend_status}
+        </Button>
       </div>
 
       {previewing && (
@@ -174,6 +198,15 @@ export function ManualQueueActions(props: ManualQueueActionsProps) {
           onConfirm={() => {
             if (previewing === "complete") onCompleteConfirmed();
             else if (previewing === "break_glass") onBreakGlassConfirmed();
+            else if (previewing === "resend_status") {
+              // resend_status intentionally keeps the drawer open to show the
+              // send result, but the preview modal MUST close on confirm —
+              // otherwise the re-enabled confirm button invites duplicate
+              // WhatsApp nudges before the operator sees the outcome. (The
+              // other actions transition/close the row, so re-confirm 409s.)
+              onResendStatusConfirmed();
+              closePreviewModal();
+            }
             else onCloseNoSendConfirmed({ force: forceClose });
           }}
         />
@@ -221,7 +254,7 @@ function ActionPreviewModal(props: ActionPreviewModalProps) {
   // re-trigger the action so they consciously re-attempt the preview.
   const confirmDisabled =
     actionPending
-    || !reasonOk
+    || (ACTIONS_REQUIRING_REASON.has(action) && !reasonOk)
     || (action === "complete" && !canComplete)
     || previewBusy
     || preview === null;
@@ -243,12 +276,14 @@ function ActionPreviewModal(props: ActionPreviewModalProps) {
           {preview && (
             <>
               <PreviewBody preview={preview} />
-              <div className="rounded border border-zinc-200 px-2 py-1 text-xs text-zinc-700">
-                <div className="text-xs uppercase tracking-wide text-zinc-500">Operator reason</div>
-                <div className={cn("mt-1 italic", reasonOk ? "text-zinc-800" : "text-rose-700")}>
-                  {reasonOk ? reasonText : "(reason must be ≥ 5 characters — close this modal and update the reason input first)"}
+              {ACTIONS_REQUIRING_REASON.has(action) && (
+                <div className="rounded border border-zinc-200 px-2 py-1 text-xs text-zinc-700">
+                  <div className="text-xs uppercase tracking-wide text-zinc-500">Operator reason</div>
+                  <div className={cn("mt-1 italic", reasonOk ? "text-zinc-800" : "text-rose-700")}>
+                    {reasonOk ? reasonText : "(reason must be ≥ 5 characters — close this modal and update the reason input first)"}
+                  </div>
                 </div>
-              </div>
+              )}
               {action === "close_no_send" && (
                 <CloseSpecificControls
                   reasonCode={reasonCode}

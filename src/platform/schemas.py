@@ -4004,6 +4004,26 @@ class FlyerClosureCustomerNotified(_BaseEntry):
     error: str = Field(default="", max_length=500)
 
 
+class FlyerStatusResent(_BaseEntry):
+    """Operator-driven proactive 'resend status' nudge from the cockpit.
+
+    Records the outcome of the best-effort WhatsApp push that re-sends a
+    waiting customer the project's CURRENT status reply (P3 safe action).
+    Read-only with respect to project state — unlike
+    `FlyerClosureCustomerNotified` it carries no state transition and no
+    `reason_code`. `send_ok=False` rows mean the customer will learn via
+    the reactive "any update?" safety net instead.
+    """
+    type: Literal["flyer_status_resent"] = "flyer_status_resent"
+    project_id: str = Field(pattern=r"^F\d{4,}$")
+    customer_phone: E164Phone
+    chat_id: str = Field(default="", max_length=200)
+    chat_id_source: Literal["audit_log", "primary_chat_id", "none", ""] = ""
+    send_ok: bool
+    outbound_message_id: str = Field(default="", max_length=200)
+    error: str = Field(default="", max_length=500)
+
+
 class FlyerSourceContractExtracted(_BaseEntry):
     """Audit row emitted once per source-contract extraction attempt.
 
@@ -5532,6 +5552,7 @@ LogEntry = Annotated[
         Annotated[FlyerRecoveryOperatorActionRequired, Tag("flyer_recovery_operator_action_required")],
         Annotated[FlyerRecoveryOwnerAlert, Tag("flyer_recovery_owner_alert")],
         Annotated[FlyerClosureCustomerNotified, Tag("flyer_closure_customer_notified")],
+        Annotated[FlyerStatusResent, Tag("flyer_status_resent")],
         # NEW — source-contract observability (2026-05-20 flyer source-contract-first)
         Annotated[FlyerSourceContractExtracted, Tag("flyer_source_contract_extracted")],
         Annotated[FlyerSourceVsNewChosen, Tag("flyer_source_vs_new_chosen")],
@@ -5684,6 +5705,7 @@ __all__ = [
     "FlyerRecoveryRepairBundleWritten", "FlyerRecoveryOutcomeRepaired", "FlyerRecoveryDeployGate", "FlyerRecoveryResolved",
     "FlyerRecoveryOperatorActionRequired", "FlyerRecoveryOwnerAlert",
     "FlyerUsageRecorded", "FlyerQuotaBlocked", "FlyerClosureCustomerNotified",
+    "FlyerStatusResent",
     "Proposal", "ProposalId", "ProposalCode",
     "AwaitingProposal", "ApprovedProposal", "ReconcilingProposal", "SentProposal",
     "SendFailedProposal", "AcceptedProposal", "DeclinedProposal", "DeniedByOwnerProposal",
