@@ -1581,7 +1581,9 @@ export function FlyerAdmin() {
                               <div className="mt-1 flex items-center gap-2 text-zinc-500">
                                 <button
                                   type="button"
-                                  className="hover:underline"
+                                  disabled={!adminHandle.trim()}
+                                  title={adminHandle.trim() ? "" : "Set your admin handle above first"}
+                                  className="hover:underline disabled:opacity-40 disabled:no-underline"
                                   onClick={() => {
                                     const t = window.prompt(`Assign ${row.project_id} to which admin handle?`, "");
                                     if (t && t.trim()) assignQueueItem.mutate({ projectId: row.project_id, target: t.trim() });
