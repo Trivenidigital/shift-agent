@@ -131,15 +131,24 @@ def _trial_upsell_for_project(project, customer_state_path: Path) -> str:
     return _trial_upsell_message(customer)
 
 
+def _asset_format_shape_mismatch(asset) -> bool:
+    """True when an asset claims a fixed-shape channel format but its actual PNG
+    pixel shape does not match it — i.e. the format-truthfulness caption gate
+    fires. Pillow-free so it holds even when the render-time PIL dimension check
+    was skipped (Pillow absent in the Hermes venv)."""
+    expected_shape = FINAL_FORMAT_PIXEL_SHAPES.get(FINAL_KIND_TO_FORMAT.get(getattr(asset, "kind", ""), ""))
+    if expected_shape is None:
+        return False
+    return png_pixel_dimensions(getattr(asset, "path", "")) != expected_shape
+
+
 def _caption_for_asset(asset, fallback: str = "") -> str:
     kind = getattr(asset, "kind", "")
     caption = FINAL_KIND_TO_CAPTION.get(kind, fallback or "Your final flyer package is ready.")
-    expected_shape = FINAL_FORMAT_PIXEL_SHAPES.get(FINAL_KIND_TO_FORMAT.get(kind, ""))
-    if expected_shape is not None and png_pixel_dimensions(getattr(asset, "path", "")) != expected_shape:
+    if _asset_format_shape_mismatch(asset):
         # Format-truthfulness gate: never tell the customer a file is an
         # "Instagram story"/"post" unless it actually matches that channel's
-        # pixel shape. Pillow-free so it holds even when the render-time PIL
-        # dimension check was skipped (Pillow absent in the Hermes venv).
+        # pixel shape.
         return fallback or "Your final flyer package is ready."
     return caption
 
@@ -439,11 +448,24 @@ def main() -> int:
                     trial_upsell_message_id = mid
                 else:
                     trial_upsell_error = err
+    # Format-truthfulness observability: surface any asset whose channel-specific
+    # caption was downgraded because its file shape didn't match the claimed
+    # format (e.g. an operator-uploaded asset that bypassed render_final_package).
+    # Closes the silent-failure surface of the caption gate (§12b).
+    format_truthfulness_downgrades = [
+        asset.asset_id for asset in pending_project_assets if _asset_format_shape_mismatch(asset)
+    ]
+    for asset_id in format_truthfulness_downgrades:
+        print(
+            f"flyer_format_truthfulness_downgrade project_id={project.project_id} asset_id={asset_id}",
+            file=sys.stderr,
+        )
     print(json.dumps({
         "sent": len(assets),
         "message_ids": outbound_ids,
         "trial_upsell_message_id": trial_upsell_message_id,
         "trial_upsell_error": trial_upsell_error,
+        "format_truthfulness_downgrades": format_truthfulness_downgrades,
     }))
     return 0
 

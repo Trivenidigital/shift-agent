@@ -251,6 +251,62 @@ def test_caption_keeps_pdf_claim_regardless_of_file_bytes(tmp_path, monkeypatch)
     assert mod._caption_for_asset(asset) == "Printable PDF - best for printing or sharing as a document."
 
 
+def test_asset_format_shape_mismatch_predicate(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    mod = _load_script()
+    good = tmp_path / "story_ok.png"
+    good.write_bytes(_png_header_bytes(1080, 1920))
+    bad = tmp_path / "story_bad.png"
+    bad.write_bytes(_png_header_bytes(1080, 1080))  # square mislabeled as a story
+    pdf = tmp_path / "p.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+
+    assert mod._asset_format_shape_mismatch(_asset("A0001", "final_instagram_story", str(good))) is False
+    assert mod._asset_format_shape_mismatch(_asset("A0002", "final_instagram_story", str(bad))) is True
+    # PDF has no fixed pixel shape — never a mismatch.
+    assert mod._asset_format_shape_mismatch(_asset("A0003", "final_printable_pdf", str(pdf))) is False
+
+
+def test_send_result_reports_format_truthfulness_downgrades(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    mod = _load_script()
+    # Distinct filenames so the _project() helper (which writes placeholder bytes
+    # to wa.png/story.png) doesn't clobber these shaped PNGs.
+    wa = tmp_path / "wa_final.png"
+    wa.write_bytes(_png_header_bytes(1080, 1350))  # correct whatsapp shape
+    story = tmp_path / "story_final.png"
+    story.write_bytes(_png_header_bytes(1080, 1080))  # wrong shape for a story
+    assets = [
+        _asset("A0001", "final_whatsapp_image", str(wa)),
+        _asset("A0003", "final_instagram_story", str(story)),
+    ]
+    project = _project(tmp_path).model_copy(update={"assets": assets, "final_asset_ids": ["A0001", "A0003"]})
+    state_path = tmp_path / "projects.json"
+    log_path = tmp_path / "decisions.log"
+    state_path.write_text(FlyerProjectStore(projects=[project]).model_dump_json(indent=2), encoding="utf-8")
+
+    monkeypatch.setattr(mod, "validate_text_manifest_file", lambda *_a, **_k: type("R", (), {"ok": True, "blockers": []})())
+    monkeypatch.setattr(mod, "validate_visual_qa_report", lambda *_a, **_k: type("R", (), {"ok": True, "blockers": []})())
+    monkeypatch.setattr(sys, "argv", [
+        "send-flyer-package",
+        "--jid", "15551234567@c.us",
+        "--project-id", project.project_id,
+        "--state-path", str(state_path),
+        "--log-path", str(log_path),
+        "--dry-run-bridge",
+    ])
+
+    assert mod.main() == 0
+
+    captured = capsys.readouterr()
+    result = json.loads([line for line in captured.out.splitlines() if line.strip().startswith("{")][-1])
+    assert result["sent"] == 2
+    assert result["format_truthfulness_downgrades"] == ["A0003"]
+    # Operator-visible structured log line on stderr for journalctl traceability.
+    assert "flyer_format_truthfulness_downgrade" in captured.err
+    assert "A0003" in captured.err
+
+
 def test_record_asset_delivery_persists_success_immediately(tmp_path, monkeypatch):
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     mod = _load_script()
