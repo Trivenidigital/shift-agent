@@ -209,6 +209,60 @@ def test_non_retention_status_receipt_not_pruned(tmp_path):
     assert _counts(r)["pruned"] == 0
 
 
+# ── threshold boundaries ─────────────────────────────────────────────────────
+# The script uses strict `>` (age_hours > ttl_hours; age_days > retention_days).
+# The exact-equality tick (age == threshold, which alone distinguishes `>` from
+# `>=`) is not reliably reproducible from a subprocess: the script computes
+# `now = datetime.now(timezone.utc)` internally with no injection hook, so any
+# fixture age drifts a few seconds by runtime. Rather than add a production
+# now-override (out of scope for a test-only PR), we bracket the threshold with
+# margins >> execution time, pinning the comparator's units + direction near the
+# boundary (catches hours/days unit bugs, inverted comparisons, factor errors).
+
+def test_expire_just_over_threshold(tmp_path):
+    rec = tmp_path / "receipts"
+    _make_config(tmp_path, ttl_hours=1)
+    # ~1h10m old, ttl 1h -> age > ttl -> expire (10m margin >> runtime drift).
+    _write_leads(tmp_path, [_lead("E0010", "AWAITING_OWNER_APPROVAL", received_ago_hours=1 + 10 / 60, receipts_dir=rec, image_name="e10.jpg")])
+    r = _run(tmp_path)
+    assert r.returncode == 0, (r.stderr, r.stdout)
+    assert _read_leads(tmp_path)["E0010"] == "EXPIRED"
+    assert _counts(r)["expired"] == 1
+
+
+def test_expire_just_under_threshold(tmp_path):
+    rec = tmp_path / "receipts"
+    _make_config(tmp_path, ttl_hours=1)
+    # ~50m old, ttl 1h -> age < ttl -> keep (10m margin under the boundary).
+    _write_leads(tmp_path, [_lead("E0011", "AWAITING_OWNER_APPROVAL", received_ago_hours=50 / 60, receipts_dir=rec, image_name="e11.jpg")])
+    r = _run(tmp_path)
+    assert r.returncode == 0, (r.stderr, r.stdout)
+    assert _read_leads(tmp_path)["E0011"] == "AWAITING_OWNER_APPROVAL"
+    assert _counts(r)["expired"] == 0
+
+
+def test_prune_just_over_retention(tmp_path):
+    rec = tmp_path / "receipts"
+    _make_config(tmp_path, retention_days=7)
+    img = _make_receipt(rec, "e12.jpg", age_days=7 + 3 / 24)  # 7d + 3h
+    _write_leads(tmp_path, [_lead("E0012", "PUSHED", received_ago_hours=0, receipts_dir=rec, image_name="e12.jpg")])
+    r = _run(tmp_path)
+    assert r.returncode == 0, (r.stderr, r.stdout)
+    assert not img.exists()
+    assert _counts(r)["pruned"] == 1
+
+
+def test_prune_just_under_retention(tmp_path):
+    rec = tmp_path / "receipts"
+    _make_config(tmp_path, retention_days=8)
+    img = _make_receipt(rec, "e13.jpg", age_days=7)  # 7d, retention 8d -> keep
+    _write_leads(tmp_path, [_lead("E0013", "PUSHED", received_ago_hours=0, receipts_dir=rec, image_name="e13.jpg")])
+    r = _run(tmp_path)
+    assert r.returncode == 0, (r.stderr, r.stdout)
+    assert img.exists()
+    assert _counts(r)["pruned"] == 0
+
+
 # ── idempotency + contracts ──────────────────────────────────────────────────
 
 def test_idempotent_second_run_is_noop(tmp_path):
