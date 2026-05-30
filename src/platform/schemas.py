@@ -1768,6 +1768,13 @@ class FlyerManualReview(BaseModel):
     completed_at: Optional[datetime] = None
     operator_asset_ids: list[str] = Field(default_factory=list, max_length=20)
     break_glass_reason: str = Field(default="", max_length=500)
+    # Multi-admin coordination (cockpit-set). Self-reported admin handle, not an
+    # authenticated identity — the cockpit shares a single owner login, so this
+    # is a coordination label ("who is working this case") to prevent two admins
+    # silently working the same row. All changes go through audited claim/unclaim
+    # /assign endpoints. Empty = unclaimed.
+    claimed_by: str = Field(default="", max_length=60)
+    claimed_at: Optional[datetime] = None
 
 
 class FlyerAsset(BaseModel):

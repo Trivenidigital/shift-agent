@@ -103,6 +103,21 @@ class ManualQueueCloseNoSendBody(ReasonBody):
     force: bool = False
 
 
+_ADMIN_HANDLE = r"^[A-Za-z0-9 ._@-]{1,60}$"
+
+
+class ManualQueueClaimBody(BaseModel):
+    """Self-reported admin handle for claim/unclaim coordination (not an
+    authenticated identity — the cockpit shares one owner login)."""
+    admin_id: str = Field(min_length=1, max_length=60, pattern=_ADMIN_HANDLE)
+    force: bool = False
+
+
+class ManualQueueAssignBody(BaseModel):
+    admin_id: str = Field(min_length=1, max_length=60, pattern=_ADMIN_HANDLE)  # target
+    by: str = Field(min_length=1, max_length=60, pattern=_ADMIN_HANDLE)  # actor
+
+
 def _flyer_dir() -> Path:
     return get_settings().state_dir / "flyer"
 
@@ -755,6 +770,129 @@ def manual_queue_break_glass_action(project_id: str, *, reason: str) -> dict[str
 @router.get("/manual-queue")
 async def manual_queue(_=Depends(require_auth)):
     return manual_queue_triage_action()
+
+
+# ─────────────────────────────────────────────────────────────────
+# Priority 1: multi-admin queue ownership (claim / unclaim / assign).
+# `claimed_by` on manual_review is a self-reported admin handle (NOT an
+# authenticated identity — the cockpit shares one owner login); it is a
+# coordination label so two admins don't silently work the same case.
+# Mutations mirror the close-no-send safe-write contract (flock + backup +
+# atomic dump_model) and are audited via audit_log. Low-sensitivity (no
+# customer-visible change, no push) → require_auth, not require_fresh_otp.
+# ─────────────────────────────────────────────────────────────────
+
+
+_CLAIMABLE_MANUAL_STATUSES = frozenset({"queued", "in_progress"})
+
+
+def _apply_queue_claim(
+    project_id: str, *, new_owner: str, owner_guard: str, force: bool, backup_reason: str,
+) -> dict[str, Any]:
+    path = _projects_path()
+    with safe_io.flock(path):
+        store = load_project_store()
+        idx = next((i for i, p in enumerate(store.projects) if p.project_id == project_id), None)
+        if idx is None:
+            raise HTTPException(404, f"project {project_id} not found")
+        mr = store.projects[idx].manual_review
+        # Only mutate ownership on rows actually in the manual-review queue; a
+        # stale URL/typo must not rewrite delivered/completed project history.
+        if mr.status not in _CLAIMABLE_MANUAL_STATUSES:
+            raise HTTPException(
+                409, f"project {project_id} is not in the manual-review queue (manual_review.status={mr.status})"
+            )
+        prev_owner = mr.claimed_by
+        if owner_guard and prev_owner and prev_owner != owner_guard and not force:
+            raise HTTPException(409, f"already claimed by {prev_owner}; use force to override")
+        backup = _backup_path(path, backup_reason)
+        if new_owner and prev_owner == new_owner and mr.claimed_at is not None:
+            # Idempotent same-owner re-claim (retry/double-click): preserve the
+            # original claim time so stale-claim coordination stays accurate.
+            new_at = mr.claimed_at
+        else:
+            new_at = _now() if new_owner else None
+        store.projects[idx] = store.projects[idx].model_copy(update={
+            "manual_review": mr.model_copy(update={"claimed_by": new_owner, "claimed_at": new_at}),
+        })
+        safe_io.dump_model(path, store)
+    return {
+        "project_id": project_id,
+        "claimed_by": new_owner,
+        "claimed_at": new_at.isoformat() if new_at else None,
+        "previous_owner": prev_owner,
+        "backup": backup,
+    }
+
+
+def _clean_admin_id(value: str) -> str:
+    """Strip + require a non-space handle so a whitespace-only owner can't
+    truthily lock a row (subsequent real claims would 409 on a blank owner)."""
+    cleaned = (value or "").strip()
+    if not cleaned:
+        raise HTTPException(422, "admin_id must contain a non-space character")
+    return cleaned
+
+
+def manual_queue_claim_action(project_id: str, *, admin_id: str, force: bool = False) -> dict[str, Any]:
+    """Claim a queue case. 409 if already owned by a different admin (unless force)."""
+    admin_id = _clean_admin_id(admin_id)
+    return _apply_queue_claim(
+        project_id, new_owner=admin_id, owner_guard=admin_id, force=force, backup_reason=f"claim-{admin_id}",
+    )
+
+
+def manual_queue_unclaim_action(project_id: str, *, admin_id: str, force: bool = False) -> dict[str, Any]:
+    """Release a claim. 409 if claimed by a different admin (unless force)."""
+    admin_id = _clean_admin_id(admin_id)
+    return _apply_queue_claim(
+        project_id, new_owner="", owner_guard=admin_id, force=force, backup_reason=f"unclaim-{admin_id}",
+    )
+
+
+def manual_queue_assign_action(project_id: str, *, admin_id: str, by: str) -> dict[str, Any]:
+    """Reassign a case to another admin (explicit handoff); records previous owner."""
+    admin_id = _clean_admin_id(admin_id)
+    by = _clean_admin_id(by)
+    return _apply_queue_claim(
+        project_id, new_owner=admin_id, owner_guard="", force=True, backup_reason=f"assign-{admin_id}-by-{by}",
+    )
+
+
+@router.post("/manual-queue/{project_id}/claim")
+async def manual_queue_claim(
+    project_id: str, body: ManualQueueClaimBody, request: Request, _=Depends(require_auth),
+):
+    result = manual_queue_claim_action(project_id, admin_id=body.admin_id, force=body.force)
+    audit_log(
+        "flyer.manual_queue.claim", ip=client_ip(request), ua=client_ua(request),
+        details=result | {"admin_id": body.admin_id, "force": body.force},
+    )
+    return result
+
+
+@router.post("/manual-queue/{project_id}/unclaim")
+async def manual_queue_unclaim(
+    project_id: str, body: ManualQueueClaimBody, request: Request, _=Depends(require_auth),
+):
+    result = manual_queue_unclaim_action(project_id, admin_id=body.admin_id, force=body.force)
+    audit_log(
+        "flyer.manual_queue.unclaim", ip=client_ip(request), ua=client_ua(request),
+        details=result | {"admin_id": body.admin_id, "force": body.force},
+    )
+    return result
+
+
+@router.post("/manual-queue/{project_id}/assign")
+async def manual_queue_assign(
+    project_id: str, body: ManualQueueAssignBody, request: Request, _=Depends(require_auth),
+):
+    result = manual_queue_assign_action(project_id, admin_id=body.admin_id, by=body.by)
+    audit_log(
+        "flyer.manual_queue.assign", ip=client_ip(request), ua=client_ua(request),
+        details=result | {"admin_id": body.admin_id, "by": body.by},
+    )
+    return result
 
 
 @router.post("/manual-queue/{project_id}/complete")
@@ -1413,6 +1551,8 @@ def manual_queue_detail_action(project_id: str) -> dict[str, Any]:
             "completed_at": manual.completed_at.isoformat() if manual.completed_at else None,
             "break_glass_reason": getattr(manual, "break_glass_reason", "") or "",
             "operator_asset_ids": list(manual.operator_asset_ids),
+            "claimed_by": getattr(manual, "claimed_by", "") or "",
+            "claimed_at": manual.claimed_at.isoformat() if getattr(manual, "claimed_at", None) else None,
         },
         "locked_facts": [fact.model_dump(mode="json") for fact in project.locked_facts],
         "qa_blockers": qa_blockers,
