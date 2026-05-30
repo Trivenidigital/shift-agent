@@ -25,7 +25,13 @@ probes / required deploy-smoke, no customer sends, no speculative agents, no PR-
   - [x] `tests/test_prune_and_expire_logic.py` — 8 cases (stale-expire+audit, fresh-not-expired, non-AWAITING-not-expired, old-receipt-pruned+metadata audit, fresh-receipt-kept, non-retention-kept, idempotency, disabled-noop). Mirrors dry-run test's importlib+path-override wrapper; Linux-only (fcntl).
   - [x] Verified on VPS: 8/8 pass via Hermes venv pytest.
   - [ ] push → Codex review (test-specific prompt) → merge if clean
-- [ ] Item 8+ — remaining dormant-safe: extract-receipt _hamming/dedup-threshold tests; closest-location geocode error-path tests; runbook fixes. NOTE many remaining pipeline agents (P&L #22, Tier-2 stubs, commerce) need operator activation (real blocker to dormant-safe "finishing").
+- [x] **Item 7 — Expense #21 prune/expire core-loop tests** ✅ MERGED PR #347 (origin/main 8d4423b). 12 cases. Codex CLEAN. 12/12 on VPS.
+- [ ] **Item 8 — Expense #21 dedup-primitive tests (_hamming + _dhash_from_bytes)** (branch `feat/expense-dedup-primitive-tests`)
+  - Money-adjacent: these pure functions are the perceptual-hash duplicate-detection primitive (prevents double-pushing the same receipt to QBO). Untested by the existing extract test. No vision/network/state → strictly dormant-safe.
+  - [x] `tests/test_expense_dedup_primitives.py` — 11 cases (_hamming exact values incl. 0/1/4/64/length-mismatch/symmetry; _dhash determinism/format/distinctness; exact-duplicate zero-distance invariant). Module loaded in a fixture (Linux-only fcntl, after Windows skip).
+  - [x] Verified on VPS: 11/11 pass via Hermes venv pytest.
+  - [ ] push → Codex review (test-specific prompt) → merge if clean
+- [ ] Item 9+ — remaining dormant-safe: closest-location #3 geocode error-path tests; runbook fixes. NOTE many remaining pipeline agents (P&L #22, Tier-2 stubs, commerce) need operator activation (real blocker to dormant-safe "finishing every agent").
 
 
 
