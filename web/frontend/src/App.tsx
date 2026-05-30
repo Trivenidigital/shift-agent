@@ -13,6 +13,7 @@ import { Config } from "@/sections/Config";
 import { Safety } from "@/sections/Safety";
 import { WhatsApp } from "@/sections/WhatsApp";
 import { FlyerAdmin } from "@/sections/FlyerAdmin";
+import { CommerceOrders } from "@/sections/CommerceOrders";
 import { Disclosures } from "@/sections/Disclosures";
 import { AuditView } from "@/sections/AuditView";
 
@@ -60,6 +61,7 @@ export function App() {
           {section === "safety" && <Safety />}
           {section === "whatsapp" && <WhatsApp />}
           {section === "flyer" && <FlyerAdmin />}
+          {section === "commerce" && <CommerceOrders />}
           {section === "disclosures" && <Disclosures />}
           {section === "audit" && <AuditView />}
         </main>
