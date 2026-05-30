@@ -117,6 +117,13 @@ print(json.dumps({{"rc": rc, "stdout": buf_out.getvalue()}}))
     result = subprocess.run(
         [sys.executable, "-c", wrapper],
         capture_output=True, text=True, timeout=15,
+        # send-path-test-harness: canonical safe_io.BRIDGE_URL -> stub (via env)
+        # + opt past the pytest guard. Caller resolves to the allowlisted
+        # send-catering-ack script. (bridge_port=1 in the dead-port test keeps
+        # its intended connect-refused behavior; never the live bridge :3000.)
+        env={**os.environ,
+             "HERMES_BRIDGE_URL": f"http://127.0.0.1:{bridge_port}/send",
+             "SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS": "1"},
     )
     return result
 
