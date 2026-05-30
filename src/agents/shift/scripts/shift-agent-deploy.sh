@@ -294,6 +294,11 @@ install_artifacts() {
     else
         rm -f /opt/shift-agent/flyer_render.py
     fi
+    if [ -f src/agents/flyer/campaign_scene_prompts.py ]; then
+        install -m 644 src/agents/flyer/campaign_scene_prompts.py /opt/shift-agent/flyer_campaign_scene_prompts.py
+    else
+        rm -f /opt/shift-agent/flyer_campaign_scene_prompts.py
+    fi
     if [ -f src/agents/flyer/workflow.py ]; then
         install -m 644 src/agents/flyer/workflow.py /opt/shift-agent/flyer_workflow.py
     else
