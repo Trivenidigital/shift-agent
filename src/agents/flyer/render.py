@@ -833,15 +833,17 @@ def _needs_reference_extraction(project: FlyerProject) -> bool:
         the extracted facts into `locked_facts`, so once those exist the overlay
         can draw every fact and the model no longer needs to read the image.
     """
-    has_reference_image = any(
+    # Conservative + safe: any attached reference IMAGE keeps the model rendering
+    # text. Reliably detecting "extraction already consumed this reference" needs
+    # a reference-derived-fact signal that doesn't exist cleanly yet (a non-empty
+    # `locked_facts` can come from the customer profile/typed request, not the
+    # reference) — so we do NOT optimize extracted references into background-only
+    # here, to avoid ever dropping reference-only items/prices. Tracked as a
+    # follow-up (gate on reference-extraction status once it's surfaced in state).
+    return any(
         getattr(asset, "kind", "") == "reference_image" and Path(str(getattr(asset, "path", ""))).exists()
         for asset in project.assets
     )
-    if not has_reference_image:
-        return False
-    # Extraction merges reference facts into locked_facts; if none exist yet, the
-    # items are still only in the image and the model must read them.
-    return not project.locked_facts
 
 
 def _background_only_eligible(project: FlyerProject) -> bool:
