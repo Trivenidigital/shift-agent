@@ -60,6 +60,7 @@ jobs:
             tests/test_commerce_payment_link.py \
             tests/test_commerce_cart.py \
             tests/test_commerce_order_state.py \
+            tests/test_commerce_order_fulfillment_fields.py \
             tests/test_commerce_webhook_subscription_gate.py \
             tests/test_commerce_livemode_gate.py \
             tests/test_catering_deposit_copy_invariants.py \

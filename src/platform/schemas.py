@@ -2487,6 +2487,20 @@ class CommerceOrder(BaseModel):
     status_history: list[CommerceOrderStatusEvent] = Field(default_factory=list, max_length=200)
     created_at: datetime
     updated_at: datetime
+    # ── Pickup/delivery fulfillment metadata (Slice A 2026-05-30; additive,
+    # default-safe, dormant). Populated by the ordering loop / Order Cockpit in
+    # later slices; existing stored orders and the (config-inactive) order
+    # substrate validate unchanged because every field has a default.
+    # delivery_address is a free-form string for now — structured address is
+    # deferred until delivery routing/geocoding matters (design §11).
+    fulfillment_type: Optional[Literal["pickup", "delivery"]] = None
+    customer_name: Optional[str] = Field(default=None, max_length=200)
+    delivery_address: Optional[str] = Field(default=None, max_length=500)
+    requested_time: Optional[datetime] = None
+    order_notes: Optional[str] = Field(default=None, max_length=2000)
+    pos_sync_status: Literal[
+        "not_synced", "pending", "synced", "failed", "n/a"
+    ] = "not_synced"
 
     @model_validator(mode="after")
     def _require_sender_identity(self) -> "CommerceOrder":
