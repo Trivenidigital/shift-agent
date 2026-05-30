@@ -113,3 +113,28 @@ def test_claim_404_unknown_project(tmp_path):
     with pytest.raises(HTTPException) as exc:
         flyer.manual_queue_claim_action("F9999", admin_id="priya", force=False)
     assert exc.value.status_code == 404
+
+
+def test_claim_rejects_non_queued_project(tmp_path):
+    """A stale URL/typo must not mutate ownership on a delivered/completed row."""
+    from fastapi import HTTPException
+    proj = _queued_project("F0001")
+    proj["status"] = "delivered"
+    proj["manual_review"]["status"] = "completed"
+    flyer = _seed(tmp_path, [proj])
+    with pytest.raises(HTTPException) as exc:
+        flyer.manual_queue_claim_action("F0001", admin_id="priya", force=False)
+    assert exc.value.status_code == 409
+    assert "not in the manual-review queue" in str(exc.value.detail)
+
+
+def test_reclaim_by_same_owner_preserves_claimed_at(tmp_path):
+    """Idempotent re-claim must not reset the occupancy clock (stale detection)."""
+    flyer = _seed(tmp_path, [_queued_project("F0001", claimed_by="priya", claimed_at="2026-05-20T01:00:00Z")])
+    r = flyer.manual_queue_claim_action("F0001", admin_id="priya", force=False)
+    assert r["claimed_by"] == "priya"
+    assert r["claimed_at"].startswith("2026-05-20T01:00:00")  # original time preserved
+    # an explicit takeover by a different admin DOES reset the clock
+    r2 = flyer.manual_queue_claim_action("F0001", admin_id="sam", force=True)
+    assert r2["claimed_by"] == "sam"
+    assert not r2["claimed_at"].startswith("2026-05-20T01:00:00")

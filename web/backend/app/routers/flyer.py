@@ -783,6 +783,9 @@ async def manual_queue(_=Depends(require_auth)):
 # ─────────────────────────────────────────────────────────────────
 
 
+_CLAIMABLE_MANUAL_STATUSES = frozenset({"queued", "in_progress"})
+
+
 def _apply_queue_claim(
     project_id: str, *, new_owner: str, owner_guard: str, force: bool, backup_reason: str,
 ) -> dict[str, Any]:
@@ -793,11 +796,22 @@ def _apply_queue_claim(
         if idx is None:
             raise HTTPException(404, f"project {project_id} not found")
         mr = store.projects[idx].manual_review
+        # Only mutate ownership on rows actually in the manual-review queue; a
+        # stale URL/typo must not rewrite delivered/completed project history.
+        if mr.status not in _CLAIMABLE_MANUAL_STATUSES:
+            raise HTTPException(
+                409, f"project {project_id} is not in the manual-review queue (manual_review.status={mr.status})"
+            )
         prev_owner = mr.claimed_by
         if owner_guard and prev_owner and prev_owner != owner_guard and not force:
             raise HTTPException(409, f"already claimed by {prev_owner}; use force to override")
         backup = _backup_path(path, backup_reason)
-        new_at = _now() if new_owner else None
+        if new_owner and prev_owner == new_owner and mr.claimed_at is not None:
+            # Idempotent same-owner re-claim (retry/double-click): preserve the
+            # original claim time so stale-claim coordination stays accurate.
+            new_at = mr.claimed_at
+        else:
+            new_at = _now() if new_owner else None
         store.projects[idx] = store.projects[idx].model_copy(update={
             "manual_review": mr.model_copy(update={"claimed_by": new_owner, "claimed_at": new_at}),
         })
