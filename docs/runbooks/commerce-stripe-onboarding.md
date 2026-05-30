@@ -242,7 +242,8 @@ commerce is dormant (`provider: placeholder`, or `enabled: false`) both gates
    `payment_intent.succeeded` events would silently 404.
 
 2. **`check-commerce-stripe-livemode`** (`commerce_livemode_gate.py`) — reads
-   `STRIPE_API_KEY` from `/root/.hermes/.env`, calls
+   `STRIPE_API_KEY` from the environment, else from `/opt/shift-agent/.env` (the
+   symlink to `/root/.hermes/.env` you set in Step 3), calls
    `GET https://api.stripe.com/v1/account`, and asserts the account's `livemode`
    matches `cfg.commerce.stripe_livemode_expected`. A mismatch aborts the deploy
    (exit 1) — this catches an `sk_live_` key while `stripe_livemode_expected:
