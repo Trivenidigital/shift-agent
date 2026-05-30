@@ -1444,7 +1444,10 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
             panel = (margin, int(height * 0.64), width - margin, height - margin)
             draw.rounded_rectangle(panel, radius=24, fill=(18, 54, 34, 236), outline=(255, 205, 74, 245), width=3)
             px0, py0, px1, py1 = panel
-            draw.text((px0 + 24, py0 + 22), "MENU", font=sub_font, fill=(255, 218, 85, 255))
+            # No hardcoded English "MENU" label — keeps the overlay language-neutral
+            # (item cards are self-evidently a menu). `_font` already renders the
+            # actual fact text in its own script (Telugu/Indic) via _has_telugu.
+            # Localizing facts captured in the wrong language is an intake concern.
             items = list(menu_payload["items"])
             cols = 2 if width >= 900 and len(items) > 3 else 1
             gap = 14
