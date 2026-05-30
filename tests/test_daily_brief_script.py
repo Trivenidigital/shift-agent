@@ -136,6 +136,11 @@ def _run(fixture_dir, bridge_port=None, args=("--force",), now_override=None,
     }
     if bridge_port is not None:
         env["HERMES_BRIDGE_URL"] = f"http://127.0.0.1:{bridge_port}/send"
+        # send-path-test-harness: opt past the pytest bridge guard so the send
+        # reaches the local stub (env inherits PYTEST_CURRENT_TEST). send-daily-brief
+        # is an allowlisted null-context caller; stub port (not :3000) keeps the
+        # live-bridge tripwire dormant.
+        env["SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS"] = "1"
     if now_override is not None:
         env["SHIFT_AGENT_NOW_OVERRIDE"] = now_override
     if notify_owner_stub is not None:
