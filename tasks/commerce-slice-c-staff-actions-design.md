@@ -8,7 +8,7 @@
 
 ## 0. Smallest-safe recommendation (the headline)
 
-**Ship only owner-initiated _fulfillment-progress_ transitions + pre-payment cancel.** Concretely the allowed Slice-C actions are: `paid→preparing`, `preparing→ready`, `ready→out_for_delivery`, `out_for_delivery→completed`, `ready→completed` (pickup), and `cancel` (pre-payment only: `pending_payment`/`awaiting_approval`→`cancelled`, plus `preparing→cancelled`). **DEFER** everything money/provider-touching: manual `→paid` (mark-paid), `→refunded`, `pos_sync_status` edits, and any customer notification. Rationale: the kitchen/fulfillment flow is operationally safe and money-neutral; the payment/refund/POS states are the source-of-truth of an external provider and must stay provider/operator-gated (Slices E/F).
+**Ship only owner-initiated _fulfillment-progress_ transitions + pre-payment cancel.** Concretely the allowed Slice-C actions are: `paid→preparing`, `preparing→ready`, `ready→out_for_delivery`, `out_for_delivery→completed`, `ready→completed` (pickup), and `cancel` (**pre-payment only**: `pending_payment`/`awaiting_approval`→`cancelled`). **DEFER** everything money/provider-touching: manual `→paid` (mark-paid), `→refunded`, `pos_sync_status` edits, and any customer notification. Rationale: the kitchen/fulfillment flow is operationally safe and money-neutral; the payment/refund/POS states are the source-of-truth of an external provider and must stay provider/operator-gated (Slices E/F).
 
 This keeps Slice C: owner-only, money-neutral, customer-silent, and dormant-in-practice (it only acts on orders that exist — none until Slice D/activation; testable via seeded orders).
 
@@ -44,7 +44,7 @@ Source of truth stays `order_state.LEGAL_TRANSITIONS`; Slice C exposes a **subse
 | `pending_payment` | `cancelled` | `paid` (manual mark-paid = money claim → DEFER), `awaiting_approval`/`voided` (caller/webhook-driven) |
 | `awaiting_approval` | `cancelled` | `paid` (provider/webhook), `pending_payment` (caller-driven) |
 | `paid` | `preparing` | `refunded` (money → DEFER) |
-| `preparing` | `ready`, `cancelled` | — |
+| `preparing` | `ready` | `cancelled` (post-payment cancel without a refund path = money/state mismatch → route via the deferred refund path, not Slice C) |
 | `ready` | `out_for_delivery`, `completed` | — |
 | `out_for_delivery` | `completed` | — |
 | terminal (`completed`/`cancelled`/`voided`/`refunded`) | none | all (terminal) |
@@ -52,7 +52,7 @@ Source of truth stays `order_state.LEGAL_TRANSITIONS`; Slice C exposes a **subse
 - **Idempotent same-state:** re-applying the current status → success no-op (`noop_already_in_status`), no new audit row, no error (matches `transition`).
 - **Illegal transition:** rejected with a clear error (HTTP 409) + a `commerce_order_action_refused` audit row; never mutates.
 - **Terminal:** no outbound transitions; UI disables all actions.
-- **Rollback/cancel:** `cancel` is **pre-fulfillment only** in Slice C (`pending_payment`/`awaiting_approval`/`preparing` → `cancelled`). Post-payment reversal = `refunded`, which is **DEFERRED** (provider/operator-gated). No "un-complete" / backward transitions (not in `LEGAL_TRANSITIONS`).
+- **Rollback/cancel:** `cancel` is **pre-PAYMENT only** in Slice C (`pending_payment`/`awaiting_approval` → `cancelled`). `preparing→cancelled` is **EXCLUDED** (preparing is post-`paid`; cancelling a paid order without a defined refund leaves an order/money-state mismatch). Any post-payment reversal goes through the **DEFERRED** refund path (`→refunded`, provider/operator-gated). No "un-complete" / backward transitions (not in `LEGAL_TRANSITIONS`).
 
 ## 4. Authority matrix (against the ACTUAL cockpit auth)
 
@@ -80,7 +80,7 @@ Source of truth stays `order_state.LEGAL_TRANSITIONS`; Slice C exposes a **subse
 **Problem (verified):** `order_state.transition` does `load_order_store → mutate → write_order_store` with **no lock** — concurrent writers (double-click, owner + future cron/webhook) can lost-update (last-writer-wins, dropping a status_history entry).
 
 **Slice C remedy (smallest safe):**
-1. **FileLock around the critical section.** The cockpit transition handler acquires `safe_io.FileLock(orders.json.lock)` (the deployed locking convention) for the whole load→validate→write; `transition` runs inside it. Serializes cockpit writes. (Open design question O1: lock inside the route vs. inside `order_state.transition` itself — see §11.)
+1. **FileLock at the PRIMITIVE level (decided).** Add `safe_io.FileLock(orders.json.lock)` (the deployed `.lock`-sibling convention) **inside `order_state.transition`** around the load→validate→write. This protects EVERY caller (cockpit + future webhook/cron/operator), not just the cockpit route — the correct fix for the verified gap. It lightly touches the primitive + its tests (acceptable, and re-reviewed). `cancel()` (which wraps `transition`) is covered automatically.
 2. **Optimistic-concurrency guard `expected_from_status`.** The cockpit sends the status it rendered; the handler rejects (HTTP 409 + `commerce_order_action_refused: stale_expected_status`) if `order.status != expected_from_status`. Prevents acting on a stale view; **no silent overwrite.**
 3. **Malformed state:** reuse Slice B's graceful read — if `orders.json` is unreadable/malformed, the mutation is refused (HTTP 409/`degraded`), never a partial write.
 4. **Atomicity:** `write_order_store` already does `atomic_write_json` (temp+rename); the FileLock closes the read-modify-write window around it.
@@ -117,9 +117,9 @@ Source of truth stays `order_state.LEGAL_TRANSITIONS`; Slice C exposes a **subse
 
 ## 11. Open questions (for review / operator)
 
-- **O1 — lock placement:** add `FileLock` inside `order_state.transition` (protects ALL callers incl. future webhook/cron — broader safety, but a primitive change touching existing tests) **vs.** only in the cockpit route (narrower, no primitive change). Recommendation: **lock inside `transition`** (closes the race for every caller, not just the cockpit) — it's the correct fix for the verified gap; flag that it lightly touches the primitive + its tests.
-- **O2 — cancel scope:** is `preparing→cancelled` (post-payment, pre-fulfillment-complete) acceptable as operator-cancel, or should ALL post-`paid` cancels route through the deferred refund path? (Design currently allows `preparing→cancelled` per `LEGAL_TRANSITIONS` but emits no refund — the money side is untouched; confirm that's acceptable, or restrict cancel to pre-`paid` only.)
-- **O3 — `cause` requiredness** for progress transitions (vs. a sensible default).
+- **O1 — lock placement: DECIDED → primitive-level.** `FileLock` goes inside `order_state.transition` (protects all callers; correct fix for the verified gap). Lightly touches the primitive + its tests; re-reviewed at build.
+- **O2 — cancel scope: DECIDED → pre-payment only.** `preparing→cancelled` is excluded from Slice C (post-payment cancel without a refund path = money/state mismatch); all post-`paid` reversal routes through the deferred refund path.
+- **O3 — `cause` requiredness: DECIDED.** `cause` is REQUIRED for `cancel` (the operator's reason); OPTIONAL for progress transitions, defaulting to `"cockpit: <action>"`.
 
 ## 12. Operator gates
 
