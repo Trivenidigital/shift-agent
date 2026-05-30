@@ -73,6 +73,18 @@ class _BridgeStub(BaseHTTPRequestHandler):
         return
 
 
+@pytest.fixture(autouse=True)
+def _opt_in_bridge_sends(monkeypatch):
+    """send-path-test-harness: these in-process apply tests exercise the send
+    path (owner reply) and must opt past the pytest bridge guard. No
+    guard-refuse test lives in this file, so a file-scoped opt-in is safe
+    (does not weaken the guard). The canonical safe_io.BRIDGE_URL is pointed at
+    the per-test stub inside _load_apply; apply-expense-decision is an
+    allowlisted null-context caller; stub ports (not :3000) keep the
+    live-bridge tripwire dormant."""
+    monkeypatch.setenv("SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS", "1")
+
+
 @pytest.fixture
 def bridge_server():
     _BridgeStub.requests = []
@@ -143,6 +155,13 @@ def _load_apply(env_dir, bridge_port):
     mod.LOG_PATH = env_dir / "logs" / "decisions.log"
     mod.TEMPLATE_DIR = env_dir / "templates"
     mod.BRIDGE_URL = f"http://127.0.0.1:{bridge_port}/send"
+    # send-path-test-harness: the script sends via safe_io.bridge_post_2tuple,
+    # which reads the CANONICAL safe_io.BRIDGE_URL (mod.BRIDGE_URL above is now
+    # vestigial). Point it at this test's stub. The conftest fake-sink autouse
+    # resets safe_io.BRIDGE_URL at the start of every test, so this per-test
+    # override does not leak.
+    import safe_io as _safe_io
+    _safe_io.BRIDGE_URL = f"http://127.0.0.1:{bridge_port}/send"
     # F2 (E2E Layer B fix): isolate the mock-qbo ledger per-test so tests
     # don't write to the production state path. In-process tests still see
     # cross-process behaviour via this file.
