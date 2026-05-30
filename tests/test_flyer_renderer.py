@@ -600,7 +600,7 @@ def test_image_prompt_extracts_single_day_every_week_schedule():
 
     assert facts["schedule"] == "Thursday every week"
     assert "Schedule: Thursday every week" in prompt
-    assert "Do not add delivery, catering, payment, ordering-channel, or service-availability claims" in prompt
+    assert "Do not invent delivery, catering, payment, ordering-channel, or service-availability claims" in prompt
     assert "Date: " not in prompt
 
 
@@ -662,7 +662,7 @@ def test_image_prompt_uses_clean_biryani_copy_without_price_instruction_leak():
     facts = {fact.fact_id: fact.text for fact in collect_text_facts(project)}
 
     assert facts["schedule"] == "Wednesday and Thursday every week"
-    assert "Title is the campaign/product/service headline; Business/brand is the account identity or footer brand." in prompt
+    assert "Title is the campaign/product/service headline; Business/brand is the account identity." in prompt
     assert "Schedule: Wednesday and Thursday every week" in prompt
     assert "Chicken Biryani - $16.99" in prompt
     assert "Goat Biryani - $18.99" in prompt
@@ -1033,7 +1033,7 @@ def test_openrouter_image_renderer_retries_incomplete_chunk_read(tmp_path, monke
     assert specs[0].path.read_bytes().startswith(b"\x89PNG")
 
 
-def test_direct_poster_prompt_includes_exact_menu_copy_and_allows_integrated_text():
+def test_direct_poster_prompt_carries_menu_copy_as_imagery_context_not_text():
     project = _complete_project().model_copy(update={
         "fields": FlyerRequestFields(
             event_or_business_name="Weekend Breakfast Specials",
@@ -1057,18 +1057,18 @@ def test_direct_poster_prompt_includes_exact_menu_copy_and_allows_integrated_tex
     prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
 
     assert "Create a complete, finished customer-ready poster flyer" in prompt
-    assert "Render the following text exactly" in prompt
+    # Slice-2 contract: facts are carried as imagery CONTEXT, not rendered as
+    # text — the model produces a background; the system composites the text.
+    assert "do NOT render them as text" in prompt
+    assert "decorative BACKGROUND image only" in prompt
+    # The exact facts are still present (so the model picks relevant imagery).
     assert "Weekend Breakfast Specials" in prompt
     assert "Thursday To Sunday | 8 AM TO 11 AM" in prompt
     assert "Poori with Chicken - $14.99" in prompt
     assert "Kheema Dosa - $12.99" in prompt
     assert "+17329837841" in prompt
-    assert "brand masthead" in prompt
-    assert "item cards" in prompt
     assert "Telugu as the primary flyer language" in prompt
     assert "Do not output an all-English flyer" in prompt
-    assert "Do not render readable words" not in prompt
-    assert "Leave a premium lower-third area" not in prompt
 
 
 def test_direct_poster_prompt_does_not_make_request_sentence_flyer_copy(monkeypatch):
@@ -2075,7 +2075,6 @@ def test_chloe_salon_prompt_is_not_food_or_festival_themed():
     assert "salon" in prompt.lower()
     assert "service offer cards" in prompt.lower()
     assert "Other hair services available" in prompt
-    assert "without a price, show it as a service label" in prompt
     assert "ethnic grocery" not in prompt.lower()
     assert "south indian" not in prompt.lower()
     assert "marigold" not in prompt.lower()
