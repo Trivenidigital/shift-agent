@@ -32,6 +32,10 @@ try:
     from flyer_facts import fact_value  # type: ignore
 except ImportError:  # pragma: no cover - src layout fallback
     from agents.flyer.facts import fact_value
+try:
+    from flyer_campaign_scene_prompts import campaign_scene_prompt_block  # type: ignore
+except ImportError:  # pragma: no cover - src layout fallback
+    from agents.flyer.campaign_scene_prompts import campaign_scene_prompt_block
 
 
 class FlyerRenderError(RuntimeError):
@@ -1204,6 +1208,13 @@ def _image_prompt(project: FlyerProject, *, concept_id: str, output_format: str,
     revision_block = _revision_notes_for_prompt(project)
     reference_instruction = _reference_preservation_instruction(project)
     sanitized_style = _sanitize_visual_context(project.fields.style_preference or "festive, clean, professional")
+    campaign_scene_block = campaign_scene_prompt_block(
+        context=_category_context(project),
+        business=_sanitize_visual_context(
+            fact_value(project, "business_name", fallback=project.fields.event_or_business_name) or ""
+        ),
+        offer=_sanitize_visual_context(fact_value(project, "campaign_title", fallback="") or ""),
+    )
     repair_block = ""
     if repair_instruction.strip():
         repair_block = f"""
@@ -1215,6 +1226,8 @@ Autonomous repair instruction:
 Design direction: {_design_direction(project, concept_id)}.
 Customer style notes: {sanitized_style}.
 Output format: {output_format}; aspect ratio {_aspect_ratio(size)}.
+
+{campaign_scene_block}
 
 Controlled customer copy:
 {_poster_copy_block(project)}

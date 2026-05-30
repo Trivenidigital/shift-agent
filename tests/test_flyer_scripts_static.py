@@ -130,6 +130,17 @@ def test_recovery_watchdog_installed_but_not_enabled_by_default():
     assert "FLYER_RECOVERY_NO_LIVE_SEND" in preflight
 
 
+def test_campaign_scene_prompts_module_is_deployed():
+    """flyer_render imports flyer_campaign_scene_prompts; the deploy must install
+    it into the flat /opt/shift-agent layout or the deployed renderer import
+    fails (ModuleNotFoundError) and breaks concept generation/finalization."""
+    deploy = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh").read_text(encoding="utf-8")
+    render = (REPO / "src" / "agents" / "flyer" / "render.py").read_text(encoding="utf-8")
+    assert "flyer_campaign_scene_prompts" in render  # render imports the flat module
+    assert "src/agents/flyer/campaign_scene_prompts.py" in deploy
+    assert "/opt/shift-agent/flyer_campaign_scene_prompts.py" in deploy
+
+
 def test_guest_order_script_installed_for_quick_flyer_path():
     deploy = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh").read_text(encoding="utf-8")
     smoke = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-smoke-test.sh").read_text(encoding="utf-8")
