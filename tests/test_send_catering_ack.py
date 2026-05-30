@@ -98,8 +98,12 @@ def _run_script(env_dir, bridge_port, customer_jid, message_text, lead_id=""):
 import sys, pathlib, json, io
 sys.argv = {args!r}
 sys.path.insert(0, {str(PLATFORM_DIR)!r})
-import importlib.util
-spec = importlib.util.spec_from_file_location("sca", {str(SCRIPT)!r})
+import importlib.machinery, importlib.util
+# Explicit SourceFileLoader: send-catering-ack is extensionless, so
+# spec_from_file_location WITHOUT a loader returns None (pre-existing wrapper
+# bug that prevented this send test from running at all).
+loader = importlib.machinery.SourceFileLoader("sca", {str(SCRIPT)!r})
+spec = importlib.util.spec_from_file_location("sca", {str(SCRIPT)!r}, loader=loader)
 mod = importlib.util.module_from_spec(spec)
 mod.__name__ = "sca_test_loaded"
 spec.loader.exec_module(mod)
