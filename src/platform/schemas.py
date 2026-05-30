@@ -5194,6 +5194,28 @@ class CommerceOrderCancelled(_BaseEntry):
     actor: Literal["customer", "operator", "cron"]
 
 
+class CommerceOrderActionRefused(_BaseEntry):
+    """Audited refusal of an operator-initiated cockpit order action (Slice C).
+
+    Emitted whenever a staff status-transition request is declined: outside the
+    Slice-C allowlist, an illegal transition, a stale optimistic-concurrency
+    view, or an unknown order. `order_id` is intentionally NOT pattern-bound —
+    a refused action may carry a malformed/unknown id (that can be the reason
+    it was refused)."""
+    type: Literal["commerce_order_action_refused"]
+    order_id: str = Field(min_length=1, max_length=64)
+    attempted_to_status: Optional[CommerceOrderStatus] = None
+    from_status: Optional[CommerceOrderStatus] = None
+    reason: Literal[
+        "illegal_transition",
+        "stale_expected_status",
+        "order_not_found",
+        "not_allowed_in_slice_c",
+    ]
+    actor: Literal["operator"] = "operator"
+    cause: str = Field(default="", max_length=200)
+
+
 class CommerceRefusedItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
     sku: str = Field(min_length=1, max_length=80)
@@ -5591,6 +5613,7 @@ LogEntry = Annotated[
         Annotated[CommerceOrderCreated, Tag("commerce_order_created")],
         Annotated[CommerceOrderStatusChange, Tag("commerce_order_status_change")],
         Annotated[CommerceOrderCancelled, Tag("commerce_order_cancelled")],
+        Annotated[CommerceOrderActionRefused, Tag("commerce_order_action_refused")],
         Annotated[CommerceOrderCreateRefusedCategory, Tag("commerce_order_create_refused_category")],
         Annotated[CommercePaymentIntentMinted, Tag("commerce_payment_intent_minted")],
         Annotated[CommercePaymentLinkAttempted, Tag("commerce_payment_link_attempted")],

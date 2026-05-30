@@ -1,10 +1,12 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { api } from "@/lib/api";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { api, type ApiError } from "@/lib/api";
+import { Button } from "@/components/ui/Button";
 import { Card, CardContent } from "@/components/ui/Card";
 
-// Read-only Commerce Order Cockpit (Slice B). Operational inbox over the
-// existing commerce order state; no state transitions, no staff actions.
+// Commerce Order Cockpit. Slice B = read-only inbox; Slice C adds owner-only
+// status transitions (fulfillment progress + pre-payment cancel). No provider,
+// POS, or customer-messaging side-effects — pure order-state advancement.
 
 interface OrderRow {
   order_id: string;
@@ -69,6 +71,36 @@ const STATUS_TONE: Record<string, string> = {
   voided: "text-zinc-400",
   refunded: "text-rose-700",
 };
+
+// Slice-C action map — MUST mirror the backend SLICE_C_ALLOWED_TRANSITIONS
+// exactly. The UI never offers a transition the route would refuse:
+//   • `preparing` shows ONLY "Mark ready" (preparing→cancelled is excluded —
+//     post-paid cancel without a refund path).
+//   • "Cancel order" appears ONLY on pre-payment statuses.
+//   • terminal statuses show no actions.
+export interface SliceCAction {
+  to_status: string;
+  label: string;
+  destructive?: boolean;
+}
+const SLICE_C_ACTIONS: Record<string, SliceCAction[]> = {
+  paid: [{ to_status: "preparing", label: "Start preparing" }],
+  preparing: [{ to_status: "ready", label: "Mark ready" }],
+  ready: [
+    { to_status: "out_for_delivery", label: "Out for delivery" },
+    { to_status: "completed", label: "Mark completed" },
+  ],
+  out_for_delivery: [{ to_status: "completed", label: "Mark completed" }],
+  pending_payment: [{ to_status: "cancelled", label: "Cancel order", destructive: true }],
+  awaiting_approval: [{ to_status: "cancelled", label: "Cancel order", destructive: true }],
+};
+const TERMINAL_STATUSES = new Set(["completed", "cancelled", "voided", "refunded"]);
+
+/** Pure: the Slice-C actions available from a given current status. Exported
+ *  for unit testing the allowlist/disabled-state logic. */
+export function sliceCActionsFor(status: string): SliceCAction[] {
+  return SLICE_C_ACTIONS[status] ?? [];
+}
 
 export function CommerceOrders() {
   const [selected, setSelected] = useState<string | null>(null);
@@ -224,11 +256,87 @@ function OrderDetail({ orderId, onClose }: { orderId: string; onClose: () => voi
               </div>
             )}
 
-            <p className="text-xs text-zinc-400 pt-2 border-t">
-              Read-only view. Staff actions (advance status, etc.) are not enabled in this slice.
-            </p>
+            <div className="pt-2 border-t">
+              {data?.degraded ? (
+                <p className="text-xs text-rose-700">
+                  ⚠ Order state degraded — staff actions are hidden until it can be read cleanly.
+                </p>
+              ) : (
+                <OrderActions orderId={orderId} status={o.status} />
+              )}
+            </div>
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+function OrderActions({ orderId, status }: { orderId: string; status: string }) {
+  const qc = useQueryClient();
+  const actions = sliceCActionsFor(status);
+
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ["commerce-orders"] });
+    qc.invalidateQueries({ queryKey: ["commerce-order", orderId] });
+  };
+
+  const mutation = useMutation({
+    mutationFn: (vars: { to_status: string; cause: string }) =>
+      api.POST(`/commerce/orders/${orderId}/transition`, {
+        to_status: vars.to_status,
+        expected_from_status: status,
+        cause: vars.cause,
+      }),
+    onSuccess: refresh,
+    onError: (e) => {
+      const err = e as ApiError;
+      if (err.status === 409) {
+        // Stale view or illegal/blocked transition — re-fetch so the operator
+        // sees the authoritative status; never silently clobber.
+        refresh();
+        alert("Order changed since you loaded it — refreshing. Re-check the status and retry.");
+      } else if (err.status === 403) {
+        alert("Session is stale. Log out and back in (fresh login code) within 5 minutes, then retry.");
+      } else {
+        alert("Action failed: " + err.message);
+      }
+    },
+  });
+
+  if (TERMINAL_STATUSES.has(status)) {
+    return <p className="text-xs text-zinc-400">This order is final — no further actions.</p>;
+  }
+  if (actions.length === 0) {
+    return <p className="text-xs text-zinc-400">No staff actions available for this status.</p>;
+  }
+
+  const run = (a: SliceCAction) => {
+    if (mutation.isPending) return;
+    if (a.destructive) {
+      const reason = window.prompt("Reason for cancelling this order? (required)");
+      if (!reason || !reason.trim()) return;
+      mutation.mutate({ to_status: a.to_status, cause: reason.trim() });
+    } else {
+      if (!window.confirm(`${a.label}?`)) return;
+      mutation.mutate({ to_status: a.to_status, cause: "" });
+    }
+  };
+
+  return (
+    <div className="space-y-2">
+      <h4 className="text-sm font-semibold">Actions</h4>
+      <div className="flex flex-wrap gap-2">
+        {actions.map((a) => (
+          <Button
+            key={a.to_status}
+            variant={a.destructive ? "destructive" : "default"}
+            disabled={mutation.isPending}
+            onClick={() => run(a)}
+          >
+            {a.label}
+          </Button>
+        ))}
       </div>
     </div>
   );

@@ -21,7 +21,7 @@ from schemas import (
     CommerceOrderStatusEvent,
     CommerceOrderStore,
 )
-from ._io_shim import atomic_write_json
+from ._io_shim import atomic_write_json, file_lock
 from .audit import emit
 from .exceptions import IllegalCommerceTransition
 
@@ -123,84 +123,91 @@ def create(
     if not cart.items:
         return OrderOpResult(False, None, "cart_empty")
 
-    # Idempotency check FIRST so re-attempts on an already-created or
-    # already-refused cart don't multiply audit rows.
-    store = load_order_store(state_path)
-    existing = next(
-        (o for o in store.orders if o.cart_id == cart.cart_id), None
-    )
-    if existing is not None:
-        return OrderOpResult(True, existing, "already_created_idempotent")
+    # Shared FileLock around the orders-store read-modify-write so a concurrent
+    # create()/transition() can't lost-update (Slice C write-safety fix). The
+    # idempotency check MUST be inside the lock — otherwise two concurrent
+    # creates for the same cart_id could both pass it. Released before the
+    # cart.checkout() below (which takes the cart-store lock) to avoid holding
+    # two store locks at once.
+    with file_lock(state_path):
+        # Idempotency check FIRST so re-attempts on an already-created or
+        # already-refused cart don't multiply audit rows.
+        store = load_order_store(state_path)
+        existing = next(
+            (o for o in store.orders if o.cart_id == cart.cart_id), None
+        )
+        if existing is not None:
+            return OrderOpResult(True, existing, "already_created_idempotent")
 
-    if restricted_skus:
-        # Reviewer B MEDIUM-2: carry display_name alongside SKU so callers
-        # can render category-agnostic customer copy without re-loading cart.
-        refused_set = set(restricted_skus)
-        refused_items = [
-            {"sku": item.sku, "display_name": item.display_name}
-            for item in cart.line_items if item.sku in refused_set
-        ] if hasattr(cart, "line_items") else [
-            {"sku": item.sku, "display_name": item.display_name}
-            for item in cart.items if item.sku in refused_set
-        ]
+        if restricted_skus:
+            # Reviewer B MEDIUM-2: carry display_name alongside SKU so callers
+            # can render category-agnostic customer copy without re-loading cart.
+            refused_set = set(restricted_skus)
+            refused_items = [
+                {"sku": item.sku, "display_name": item.display_name}
+                for item in cart.line_items if item.sku in refused_set
+            ] if hasattr(cart, "line_items") else [
+                {"sku": item.sku, "display_name": item.display_name}
+                for item in cart.items if item.sku in refused_set
+            ]
+            emit(
+                decisions_log_path,
+                {
+                    "type": "commerce_order_create_refused_category",
+                    "ts": now.isoformat(),
+                    "sender_phone": str(cart.sender_phone) if cart.sender_phone else None,
+                    "sender_lid": cart.sender_lid,
+                    "refused_skus": list(restricted_skus),
+                    "refused_items": refused_items,
+                    "reason": refusal_reason,
+                },
+            )
+            return OrderOpResult(False, None, f"refused_category:{refusal_reason}")
+
+        order_id = _next_order_id(store)
+        subtotal = sum(item.line_total_cents for item in cart.items)
+        initial_event = CommerceOrderStatusEvent(
+            from_status=None,
+            to_status="pending_payment",
+            ts=now,
+            cause="customer_checkout",
+            actor="caller",
+            event_ref=cart.cart_id,
+        )
+        order = CommerceOrder(
+            order_id=order_id,
+            sender_phone=cart.sender_phone,
+            sender_lid=cart.sender_lid,
+            chat_id=cart.chat_id,
+            cart_id=cart.cart_id,
+            line_items=list(cart.items),
+            subtotal_cents=subtotal,
+            tax_cents=0,
+            fee_cents=0,
+            total_cents=subtotal,
+            currency=cart.currency,
+            status="pending_payment",
+            payment_intent_id="",
+            payment_reference="",
+            status_history=[initial_event],
+            created_at=now,
+            updated_at=now,
+        )
+        store.orders.append(order)
+        write_order_store(state_path, store)
         emit(
             decisions_log_path,
             {
-                "type": "commerce_order_create_refused_category",
+                "type": "commerce_order_created",
                 "ts": now.isoformat(),
+                "order_id": order_id,
+                "cart_id": cart.cart_id,
                 "sender_phone": str(cart.sender_phone) if cart.sender_phone else None,
                 "sender_lid": cart.sender_lid,
-                "refused_skus": list(restricted_skus),
-                "refused_items": refused_items,
-                "reason": refusal_reason,
+                "total_cents": subtotal,
+                "currency": cart.currency,
             },
         )
-        return OrderOpResult(False, None, f"refused_category:{refusal_reason}")
-
-    order_id = _next_order_id(store)
-    subtotal = sum(item.line_total_cents for item in cart.items)
-    initial_event = CommerceOrderStatusEvent(
-        from_status=None,
-        to_status="pending_payment",
-        ts=now,
-        cause="customer_checkout",
-        actor="caller",
-        event_ref=cart.cart_id,
-    )
-    order = CommerceOrder(
-        order_id=order_id,
-        sender_phone=cart.sender_phone,
-        sender_lid=cart.sender_lid,
-        chat_id=cart.chat_id,
-        cart_id=cart.cart_id,
-        line_items=list(cart.items),
-        subtotal_cents=subtotal,
-        tax_cents=0,
-        fee_cents=0,
-        total_cents=subtotal,
-        currency=cart.currency,
-        status="pending_payment",
-        payment_intent_id="",
-        payment_reference="",
-        status_history=[initial_event],
-        created_at=now,
-        updated_at=now,
-    )
-    store.orders.append(order)
-    write_order_store(state_path, store)
-    emit(
-        decisions_log_path,
-        {
-            "type": "commerce_order_created",
-            "ts": now.isoformat(),
-            "order_id": order_id,
-            "cart_id": cart.cart_id,
-            "sender_phone": str(cart.sender_phone) if cart.sender_phone else None,
-            "sender_lid": cart.sender_lid,
-            "total_cents": subtotal,
-            "currency": cart.currency,
-        },
-    )
     # Reviewer A HIGH-2: mark the cart checked_out so a follow-up add_item
     # on the same (sender, chat) doesn't append to an already-ordered cart.
     if cart_state_path is not None:
@@ -224,51 +231,68 @@ def transition(
     actor: Literal["customer", "caller", "operator", "cron", "webhook"],
     cause: str,
     event_ref: str = "",
+    expected_from_status: Optional[CommerceOrderStatus] = None,
     now: Optional[datetime] = None,
 ) -> OrderOpResult:
-    """Apply a state transition. Raises IllegalCommerceTransition if not in LEGAL_TRANSITIONS."""
+    """Apply a state transition. Raises IllegalCommerceTransition if not in LEGAL_TRANSITIONS.
+
+    `expected_from_status` (optional) is an optimistic-concurrency guard: if
+    provided and the order's current status differs, the transition is refused
+    with detail "stale_expected_status" and NO write happens — the caller acted
+    on a stale view. Checked INSIDE the lock so the comparison is against the
+    authoritative current state, not a pre-read snapshot.
+
+    The whole load->validate->write runs under a shared FileLock keyed on the
+    orders-store path, so concurrent create()/transition() calls serialize and
+    cannot lost-update (Slice C write-safety fix)."""
     now = now or datetime.now(timezone.utc)
-    store = load_order_store(state_path)
-    order = next((o for o in store.orders if o.order_id == order_id), None)
-    if order is None:
-        return OrderOpResult(False, None, "order_not_found")
+    with file_lock(state_path):
+        store = load_order_store(state_path)
+        order = next((o for o in store.orders if o.order_id == order_id), None)
+        if order is None:
+            return OrderOpResult(False, None, "order_not_found")
 
-    if order.status == to_status:
-        # Idempotent: re-applying the same status is a no-op success.
-        return OrderOpResult(True, order, "noop_already_in_status")
+        if expected_from_status is not None and order.status != expected_from_status:
+            # Optimistic-concurrency miss: the caller's rendered status is stale.
+            # Refuse without writing rather than silently clobbering.
+            return OrderOpResult(False, order, "stale_expected_status")
 
-    if (order.status, to_status) not in LEGAL_TRANSITIONS:
-        raise IllegalCommerceTransition(order.status, to_status)
+        if order.status == to_status:
+            # Idempotent: re-applying the same status is a no-op success.
+            return OrderOpResult(True, order, "noop_already_in_status")
 
-    new_event = CommerceOrderStatusEvent(
-        from_status=order.status,
-        to_status=to_status,
-        ts=now,
-        cause=cause,
-        actor=actor,
-        event_ref=event_ref,
-    )
-    updated = order.model_copy(
-        update={
-            "status": to_status,
-            "status_history": list(order.status_history) + [new_event],
-            "updated_at": now,
-        }
-    )
-    _replace(store, updated)
-    write_order_store(state_path, store)
-    emit(
-        decisions_log_path,
-        {
-            "type": "commerce_order_status_change",
-            "ts": now.isoformat(),
-            "order_id": order_id,
-            "prev_status": order.status,
-            "next_status": to_status,
-            "actor": actor,
-            "cause": cause,
-        },
-    )
+        if (order.status, to_status) not in LEGAL_TRANSITIONS:
+            raise IllegalCommerceTransition(order.status, to_status)
+
+        new_event = CommerceOrderStatusEvent(
+            from_status=order.status,
+            to_status=to_status,
+            ts=now,
+            cause=cause,
+            actor=actor,
+            event_ref=event_ref,
+        )
+        updated = order.model_copy(
+            update={
+                "status": to_status,
+                "status_history": list(order.status_history) + [new_event],
+                "updated_at": now,
+            }
+        )
+        _replace(store, updated)
+        write_order_store(state_path, store)
+        emit(
+            decisions_log_path,
+            {
+                "type": "commerce_order_status_change",
+                "ts": now.isoformat(),
+                "order_id": order_id,
+                "prev_status": order.status,
+                "next_status": to_status,
+                "actor": actor,
+                "cause": cause,
+            },
+        )
     return OrderOpResult(True, updated)
 
 
@@ -279,12 +303,17 @@ def cancel(
     order_id: str,
     reason: str,
     actor: Literal["customer", "operator", "cron"] = "operator",
+    expected_from_status: Optional[CommerceOrderStatus] = None,
     now: Optional[datetime] = None,
 ) -> OrderOpResult:
     """Convenience wrapper. Cancel is only valid pre-payment.
 
     Post-payment refunds go via the (slice 2) refund path which transitions
     to `refunded`, not `cancelled`.
+
+    Delegates the locked read-modify-write to `transition` (so it does NOT take
+    its own FileLock — a nested same-file lock would deadlock). The
+    `expected_from_status` optimistic guard is forwarded to `transition`.
     """
     result = transition(
         state_path=state_path,
@@ -293,6 +322,7 @@ def cancel(
         to_status="cancelled",
         actor=actor,
         cause=reason,
+        expected_from_status=expected_from_status,
         now=now,
     )
     if not result.ok or result.order is None:
