@@ -321,3 +321,80 @@ class TestStoreLocatorRegex:
     ])
     def test_negative_cases(self, text):
         assert not _STORE_LOCATOR_REGEX.search(text), f"should NOT match: {text!r}"
+
+
+# === geocode_address error paths (Linux-only — loads the script) ===
+
+@pytest.mark.skipif(
+    platform.system() == "Windows",
+    reason="closest-location.py uses subprocess + maps_client.py at deployed path",
+)
+class TestGeocodeAddressErrorPaths:
+    """geocode_address must return None (never raise) on EVERY maps_client.py
+    failure mode, so the caller degrades gracefully instead of crashing the
+    store-locator reply. Mocks subprocess.run for the maps_client.py search."""
+
+    @pytest.fixture(scope="class")
+    def script_mod(self):
+        loader = importlib.machinery.SourceFileLoader(
+            "closest_location_geocode_test", str(CLOSEST_LOC_SCRIPT),
+        )
+        spec = importlib.util.spec_from_loader("closest_location_geocode_test", loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        return mod
+
+    @staticmethod
+    def _proc(returncode=0, stdout=""):
+        import types
+        return types.SimpleNamespace(returncode=returncode, stdout=stdout, stderr="")
+
+    def test_success_returns_lat_lon(self, script_mod):
+        proc = self._proc(0, json.dumps({"results": [{"lat": 29.7, "lon": -95.4}]}))
+        with patch.object(script_mod.subprocess, "run", return_value=proc):
+            assert script_mod.geocode_address("Houston", 10) == (29.7, -95.4)
+
+    def test_takes_first_highest_importance_match(self, script_mod):
+        proc = self._proc(0, json.dumps({"results": [
+            {"lat": 1.0, "lon": 2.0}, {"lat": 9.0, "lon": 9.0},
+        ]}))
+        with patch.object(script_mod.subprocess, "run", return_value=proc):
+            assert script_mod.geocode_address("X", 10) == (1.0, 2.0)
+
+    def test_nonzero_returncode_returns_none(self, script_mod):
+        with patch.object(script_mod.subprocess, "run", return_value=self._proc(1, "")):
+            assert script_mod.geocode_address("X", 10) is None
+
+    def test_empty_results_returns_none(self, script_mod):
+        with patch.object(script_mod.subprocess, "run", return_value=self._proc(0, json.dumps({"results": []}))):
+            assert script_mod.geocode_address("X", 10) is None
+
+    def test_missing_results_key_returns_none(self, script_mod):
+        with patch.object(script_mod.subprocess, "run", return_value=self._proc(0, json.dumps({"query": "X"}))):
+            assert script_mod.geocode_address("X", 10) is None
+
+    def test_malformed_json_returns_none(self, script_mod):
+        with patch.object(script_mod.subprocess, "run", return_value=self._proc(0, "this is not json")):
+            assert script_mod.geocode_address("X", 10) is None
+
+    def test_missing_lat_lon_returns_none(self, script_mod):
+        with patch.object(script_mod.subprocess, "run", return_value=self._proc(0, json.dumps({"results": [{"name": "no coords"}]}))):
+            assert script_mod.geocode_address("X", 10) is None
+
+    def test_non_numeric_lat_returns_none(self, script_mod):
+        with patch.object(script_mod.subprocess, "run", return_value=self._proc(0, json.dumps({"results": [{"lat": "abc", "lon": "1.0"}]}))):
+            assert script_mod.geocode_address("X", 10) is None
+
+    def test_string_numeric_lat_lon_coerced(self, script_mod):
+        # maps_client may emit numeric strings; float() coercion should accept.
+        with patch.object(script_mod.subprocess, "run", return_value=self._proc(0, json.dumps({"results": [{"lat": "29.7", "lon": "-95.4"}]}))):
+            assert script_mod.geocode_address("X", 10) == (29.7, -95.4)
+
+    def test_subprocess_timeout_returns_none(self, script_mod):
+        with patch.object(script_mod.subprocess, "run",
+                          side_effect=script_mod.subprocess.TimeoutExpired(cmd="maps", timeout=10)):
+            assert script_mod.geocode_address("X", 10) is None
+
+    def test_subprocess_oserror_returns_none(self, script_mod):
+        with patch.object(script_mod.subprocess, "run", side_effect=OSError("boom")):
+            assert script_mod.geocode_address("X", 10) is None
