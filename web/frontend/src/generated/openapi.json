@@ -515,6 +515,19 @@
         "title": "ExtendTrialBody",
         "type": "object"
       },
+      "FlagWarnTierBody": {
+        "description": "Operator's optional context note. Empty is acceptable \u2014 the flag\nitself is the signal; ts + flagged_by_operator_id always traceable.",
+        "properties": {
+          "note": {
+            "default": "",
+            "maxLength": 500,
+            "title": "Note",
+            "type": "string"
+          }
+        },
+        "title": "FlagWarnTierBody",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -526,6 +539,30 @@
           }
         },
         "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "ManualQueueAssignBody": {
+        "properties": {
+          "admin_id": {
+            "maxLength": 60,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9 ._@-]{1,60}$",
+            "title": "Admin Id",
+            "type": "string"
+          },
+          "by": {
+            "maxLength": 60,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9 ._@-]{1,60}$",
+            "title": "By",
+            "type": "string"
+          }
+        },
+        "required": [
+          "admin_id",
+          "by"
+        ],
+        "title": "ManualQueueAssignBody",
         "type": "object"
       },
       "ManualQueueBreakGlassBody": {
@@ -541,6 +578,45 @@
           "reason"
         ],
         "title": "ManualQueueBreakGlassBody",
+        "type": "object"
+      },
+      "ManualQueueClaimBody": {
+        "description": "Self-reported admin handle for claim/unclaim coordination (not an\nauthenticated identity \u2014 the cockpit shares one owner login).",
+        "properties": {
+          "admin_id": {
+            "maxLength": 60,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9 ._@-]{1,60}$",
+            "title": "Admin Id",
+            "type": "string"
+          },
+          "force": {
+            "default": false,
+            "title": "Force",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "admin_id"
+        ],
+        "title": "ManualQueueClaimBody",
+        "type": "object"
+      },
+      "ManualQueueClaimNextBody": {
+        "description": "Self-reported admin handle for the atomic claim-next throughput action.",
+        "properties": {
+          "admin_id": {
+            "maxLength": 60,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9 ._@-]{1,60}$",
+            "title": "Admin Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "admin_id"
+        ],
+        "title": "ManualQueueClaimNextBody",
         "type": "object"
       },
       "ManualQueueCloseNoSendBody": {
@@ -2103,6 +2179,45 @@
         ]
       }
     },
+    "/flyer/manual-queue/claim-next": {
+      "post": {
+        "operationId": "manual_queue_claim_next_flyer_manual_queue_claim_next_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManualQueueClaimNextBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Manual Queue Claim Next",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
     "/flyer/manual-queue/{project_id}/action-preview": {
       "get": {
         "operationId": "manual_queue_action_preview_endpoint_flyer_manual_queue__project_id__action_preview_get",
@@ -2147,6 +2262,56 @@
           }
         },
         "summary": "Manual Queue Action Preview Endpoint",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
+    "/flyer/manual-queue/{project_id}/assign": {
+      "post": {
+        "operationId": "manual_queue_assign_flyer_manual_queue__project_id__assign_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManualQueueAssignBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Manual Queue Assign",
         "tags": [
           "flyer"
         ]
@@ -2197,6 +2362,56 @@
           }
         },
         "summary": "Manual Queue Break Glass",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
+    "/flyer/manual-queue/{project_id}/claim": {
+      "post": {
+        "operationId": "manual_queue_claim_flyer_manual_queue__project_id__claim_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManualQueueClaimBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Manual Queue Claim",
         "tags": [
           "flyer"
         ]
@@ -2337,6 +2552,96 @@
           }
         },
         "summary": "Manual Queue Detail",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
+    "/flyer/manual-queue/{project_id}/resend-status": {
+      "post": {
+        "operationId": "manual_queue_resend_status_flyer_manual_queue__project_id__resend_status_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Manual Queue Resend Status",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
+    "/flyer/manual-queue/{project_id}/unclaim": {
+      "post": {
+        "operationId": "manual_queue_unclaim_flyer_manual_queue__project_id__unclaim_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManualQueueClaimBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Manual Queue Unclaim",
         "tags": [
           "flyer"
         ]
@@ -2519,6 +2824,57 @@
           }
         },
         "summary": "Project Asset Media",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
+    "/flyer/projects/{project_id}/flag": {
+      "post": {
+        "description": "POST /flyer/projects/{project_id}/flag \u2014 operator flags a\ndelivered_with_warning project for follow-up. Audit-only; no state\nmutation. 404 if missing, 409 if not in delivered_with_warning state.",
+        "operationId": "flag_warn_tier_project_flyer_projects__project_id__flag_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FlagWarnTierBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Flag Warn Tier Project",
         "tags": [
           "flyer"
         ]
