@@ -45,11 +45,13 @@ try:
         _reason_family as flyer_reason_family,
         _verification_modes as flyer_verification_modes,
         build_closure_customer_text,
+        build_status_customer_text,
         close_manual_project,
         complete_manual_project,
         enforce_close_freshness_guard,
         list_manual_queue,
         notify_customer_of_closure,
+        resend_status_to_customer,
         resolve_proactive_chat_id_for_project,
         triage_summary,
     )
@@ -58,11 +60,13 @@ except ImportError:
         _reason_family as flyer_reason_family,
         _verification_modes as flyer_verification_modes,
         build_closure_customer_text,
+        build_status_customer_text,
         close_manual_project,
         complete_manual_project,
         enforce_close_freshness_guard,
         list_manual_queue,
         notify_customer_of_closure,
+        resend_status_to_customer,
         resolve_proactive_chat_id_for_project,
         triage_summary,
     )
@@ -1044,10 +1048,66 @@ async def manual_queue_close_no_send(
     return result
 
 
+# ── P3: proactive 'resend status' nudge ────────────────────────────
+
+
+def manual_queue_resend_status_action(project_id: str) -> dict[str, Any]:
+    """Proactively re-send a waiting customer the project's CURRENT status.
+
+    A safe, read-only cockpit action: NO project-state transition, NO backup,
+    NO write — it resolves the customer's chat_id and re-sends the same
+    status reply the reactive "any update?" path would. Gated to ACTIVE
+    manual-queue rows (`manual_edit_required` + `manual_review` in
+    {queued, in_progress}) so the nudge maps to a case an operator is
+    actually working. The send is best-effort and never rolls anything back
+    (there is nothing to roll back); the reactive path is the safety net.
+    """
+    store = load_project_store()
+    project = next((p for p in store.projects if p.project_id == project_id), None)
+    if project is None:
+        raise HTTPException(404, f"project {project_id} not found")
+    if project.status != "manual_edit_required" or project.manual_review.status not in {"queued", "in_progress"}:
+        raise HTTPException(409, "project_not_in_manual_queue")
+    # No flock: this action does not mutate the store. Best-effort send.
+    notification = resend_status_to_customer(
+        store, project_id,
+        customers_path=_customers_path(),
+        decisions_log_path=_decisions_log_path(),
+    )
+    return {
+        "ok": True,
+        "project_id": project_id,
+        "status": project.status,
+        "manual_status": project.manual_review.status,
+        "notification": {
+            "send_ok": bool(notification.get("send_ok", False)),
+            "chat_id": notification.get("chat_id", ""),
+            "outbound_message_id": notification.get("outbound_message_id", ""),
+            "error": notification.get("error", ""),
+        },
+    }
+
+
+@router.post("/manual-queue/{project_id}/resend-status")
+async def manual_queue_resend_status(
+    project_id: str,
+    request: Request,
+    _=Depends(require_fresh_otp),
+):
+    result = manual_queue_resend_status_action(project_id)
+    audit_log(
+        "flyer.manual_queue.resend_status",
+        ip=client_ip(request),
+        ua=client_ua(request),
+        details=result,
+    )
+    return result
+
+
 # ── P0-5: action preview ──────────────────────────────────────────
 
 
-_ALLOWED_PREVIEW_ACTIONS = frozenset({"close_no_send", "complete", "break_glass"})
+_ALLOWED_PREVIEW_ACTIONS = frozenset({"close_no_send", "complete", "break_glass", "resend_status"})
 
 
 def manual_queue_action_preview(project_id: str, *, action: str) -> dict[str, Any]:
@@ -1144,6 +1204,29 @@ def manual_queue_action_preview(project_id: str, *, action: str) -> dict[str, An
                 "messages on the next send_flyer_concept_previews fire — "
                 "the caption ships on the concept image, the follow-up "
                 "ships as a separate text."
+            ),
+            "reason_code": str(project.manual_review.reason_code or ""),
+        }
+
+    if action == "resend_status":
+        # Proactive nudge: re-send the customer's CURRENT status reply.
+        # `build_status_customer_text` is the same source the reactive
+        # "any update?" answer uses, so the preview equals what the
+        # customer receives. No state change.
+        customer_text = build_status_customer_text(project)
+        return {
+            "action": "resend_status",
+            "project_id": project_id,
+            "will_notify": bool(chat_id),
+            "customer_text": customer_text,
+            "customer_messages": [customer_text],
+            "would_notify_chat_id": chat_id,
+            "chat_id_source": chat_id_source,
+            "note": (
+                "Proactively re-sends the customer's current status reply "
+                "(identical copy to the reactive 'any update?' answer). "
+                "No project-state change. If no chat_id is on file nothing "
+                "is sent and the reactive path remains the safety net."
             ),
             "reason_code": str(project.manual_review.reason_code or ""),
         }
