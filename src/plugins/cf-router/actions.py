@@ -1433,6 +1433,21 @@ _LAYOUT_FOCUS_REVISION = re.compile(
 _LAYOUT_OFFER_TARGET = re.compile(
     r"\b(?:service|services|offer|offers|items|menu|products|specials)\b", re.IGNORECASE
 )
+# New-campaign signal: a *new event/date/time/occasion*. Deliberately excludes
+# content nouns (menu/items/offer/special) because those are legitimate
+# emphasis targets in a layout revision ("focus on the menu items"); only
+# genuinely new scheduling/occasion content disqualifies the revision carve-out.
+_NEW_CAMPAIGN_SCHEDULE = re.compile(
+    r"\b(?:"
+    r"from\s+\d{1,2}\s*(?:am|pm)\s+(?:to|-)\s+\d{1,2}\s*(?:am|pm)|"
+    r"\d{1,2}\s*(?:am|pm)\s+(?:to|-)\s+\d{1,2}\s*(?:am|pm)|"
+    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+    r"today|tomorrow|weekend|"
+    r"grand\s+opening|festival|sale|"
+    r"top\s+\d+"
+    r")\b",
+    re.IGNORECASE,
+)
 
 
 def _is_layout_emphasis_revision_wording(body: str) -> bool:
@@ -1463,10 +1478,12 @@ def _is_same_business_layout_revision(body: str, active_project: Optional[dict])
     active_business = str(((active_project.get("fields") or {}).get("event_or_business_name")) or "").strip()
     if not active_business or not _business_scope_matches(requested, active_business):
         return False
-    if _FRESH_FLYER_BRIEF_DETAIL.search(body):
-        # A fresh brief/campaign detail (event window, dates, item list) means
-        # this is a new work order that merely also mentions a layout tweak —
-        # keep it on the new-project path rather than attaching it as a revision.
+    if _NEW_CAMPAIGN_SCHEDULE.search(body):
+        # A new event/date/time/occasion means this is a new work order that
+        # merely also mentions a layout tweak — keep it on the new-project path
+        # rather than attaching it as a revision. (Content nouns like
+        # menu/items/services are NOT disqualifiers; they are valid emphasis
+        # targets in a revision.)
         return False
     return _is_layout_emphasis_revision_wording(body)
 
