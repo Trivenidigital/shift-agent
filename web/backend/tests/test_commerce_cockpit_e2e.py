@@ -194,6 +194,57 @@ def test_pre_payment_cancel_lifecycle(tmp_path):
     assert _row(_list(commerce), oid)["payment_status"] == "none"
 
 
+# ── dormant-safe boundary: cockpit refuses money/post-payment transitions ──
+
+def test_cockpit_refuses_money_and_postpayment_transitions(tmp_path):
+    """The cockpit must NOT expose ->paid (money claim), ->refunded (money move),
+    or preparing->cancelled (post-payment cancel w/o refund path). Each is legal
+    globally but excluded from the Slice-C allowlist; the route refuses with 409
+    + an audited commerce_order_action_refused(reason=not_allowed_in_slice_c).
+    Asserting this inside the full E2E harness (not just per-route) guards the
+    central money/send-safety boundary."""
+    from commerce import cart as commerce_cart
+    from commerce import order_state
+    commerce, s = _set_paths(tmp_path)
+
+    # pending_payment order (for the manual mark-paid attempt)
+    cart = commerce_cart.add_item(
+        state_path=s.state_dir / "commerce" / "carts.json",
+        decisions_log_path=s.decisions_path,
+        sender_phone="+15556660006", sender_lid=None, chat_id="c",
+        sku="idli", display_name="Idli", quantity=1, unit="each", unit_price_cents=400,
+    ).cart
+    pending_oid = order_state.create(
+        state_path=commerce._orders_path(), decisions_log_path=s.decisions_path, cart=cart,
+    ).order.order_id
+
+    # paid order (for the refund attempt) + preparing order (for post-pay cancel)
+    paid_oid = _seed_paid(commerce, s, phone="+15556660007", fulfillment_type="pickup")
+    prep_oid = _seed_paid(commerce, s, phone="+15556660008", fulfillment_type="pickup")
+    _transition(commerce, prep_oid, "preparing", "paid")  # advance to preparing
+
+    forbidden = [
+        (pending_oid, "paid", "pending_payment"),     # manual mark-paid — money claim
+        (paid_oid, "refunded", "paid"),               # refund — money move
+        (prep_oid, "cancelled", "preparing"),         # post-payment cancel, no refund path
+    ]
+    for oid, to_status, expected_from in forbidden:
+        with pytest.raises(HTTPException) as ei:
+            _transition(commerce, oid, to_status, expected_from, cause="should be refused")
+        assert ei.value.status_code == 409, f"{expected_from}->{to_status} should be 409"
+
+    # every refusal audited as not_allowed_in_slice_c, and NO order changed status
+    refused = [json.loads(line) for line in s.decisions_path.read_text().splitlines()
+               if "commerce_order_action_refused" in line]
+    for oid, to_status, _expected in forbidden:
+        rows = [r for r in refused if r["order_id"] == oid and r["attempted_to_status"] == to_status]
+        assert rows and rows[-1]["reason"] == "not_allowed_in_slice_c", \
+            f"missing refusal audit for {oid} -> {to_status}"
+    assert order_state.get(commerce._orders_path(), pending_oid).status == "pending_payment"
+    assert order_state.get(commerce._orders_path(), paid_oid).status == "paid"
+    assert order_state.get(commerce._orders_path(), prep_oid).status == "preparing"
+
+
 # ── stale-guard across the read/write boundary (no silent clobber) ──────────
 
 def test_stale_action_after_concurrent_advance_is_refused(tmp_path):
