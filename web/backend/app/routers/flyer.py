@@ -825,8 +825,18 @@ def _apply_queue_claim(
     }
 
 
+def _clean_admin_id(value: str) -> str:
+    """Strip + require a non-space handle so a whitespace-only owner can't
+    truthily lock a row (subsequent real claims would 409 on a blank owner)."""
+    cleaned = (value or "").strip()
+    if not cleaned:
+        raise HTTPException(422, "admin_id must contain a non-space character")
+    return cleaned
+
+
 def manual_queue_claim_action(project_id: str, *, admin_id: str, force: bool = False) -> dict[str, Any]:
     """Claim a queue case. 409 if already owned by a different admin (unless force)."""
+    admin_id = _clean_admin_id(admin_id)
     return _apply_queue_claim(
         project_id, new_owner=admin_id, owner_guard=admin_id, force=force, backup_reason=f"claim-{admin_id}",
     )
@@ -834,6 +844,7 @@ def manual_queue_claim_action(project_id: str, *, admin_id: str, force: bool = F
 
 def manual_queue_unclaim_action(project_id: str, *, admin_id: str, force: bool = False) -> dict[str, Any]:
     """Release a claim. 409 if claimed by a different admin (unless force)."""
+    admin_id = _clean_admin_id(admin_id)
     return _apply_queue_claim(
         project_id, new_owner="", owner_guard=admin_id, force=force, backup_reason=f"unclaim-{admin_id}",
     )
@@ -841,6 +852,8 @@ def manual_queue_unclaim_action(project_id: str, *, admin_id: str, force: bool =
 
 def manual_queue_assign_action(project_id: str, *, admin_id: str, by: str) -> dict[str, Any]:
     """Reassign a case to another admin (explicit handoff); records previous owner."""
+    admin_id = _clean_admin_id(admin_id)
+    by = _clean_admin_id(by)
     return _apply_queue_claim(
         project_id, new_owner=admin_id, owner_guard="", force=True, backup_reason=f"assign-{admin_id}-by-{by}",
     )

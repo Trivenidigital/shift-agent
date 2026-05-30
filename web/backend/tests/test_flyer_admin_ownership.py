@@ -140,6 +140,18 @@ def test_reclaim_by_same_owner_preserves_claimed_at(tmp_path):
     assert not r2["claimed_at"].startswith("2026-05-20T01:00:00")
 
 
+def test_claim_rejects_whitespace_only_admin_id(tmp_path):
+    """A blank/whitespace handle must not truthily lock a row."""
+    from fastapi import HTTPException
+    flyer = _seed(tmp_path, [_queued_project("F0001")])
+    with pytest.raises(HTTPException) as exc:
+        flyer.manual_queue_claim_action("F0001", admin_id="   ", force=False)
+    assert exc.value.status_code == 422
+    # whitespace around a real handle is trimmed, not stored verbatim
+    r = flyer.manual_queue_claim_action("F0001", admin_id="  priya  ", force=False)
+    assert r["claimed_by"] == "priya"
+
+
 def test_queue_summary_exposes_claim_state(tmp_path):
     """Another admin must see ownership from the queue list, not only detail."""
     flyer = _seed(tmp_path, [_queued_project("F0001", claimed_by="priya", claimed_at="2026-05-20T01:00:00Z")])
