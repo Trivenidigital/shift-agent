@@ -573,48 +573,6 @@ def test_render_final_package_creates_expected_formats(tmp_path):
         ).ok is True
 
 
-def test_background_only_final_package_reapplies_overlay_per_format(tmp_path, monkeypatch):
-    """A selected background-only preview (raw background + composited overlay) must
-    have the critical overlay RE-APPLIED from the raw background per output format,
-    not be cropped as a direct poster — otherwise square/story/PDF exports cut off
-    the title card or menu panel.
-    """
-    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
-    monkeypatch.setattr(render_module, "_openrouter_image_bytes", lambda *a, **k: _png_bytes())
-    project = _english_project()
-    # Generate a real model-branch concept preview (writes <id>.png + <id>.raw.png).
-    specs = render_concept_previews(project, tmp_path, model="google/gemini-2.5-flash-image")
-    preview_path = specs[0].path
-    asset = FlyerAsset(
-        asset_id="A0001", kind="concept_preview", source="generated", path=str(preview_path),
-        mime_type="image/png", sha256="c" * 64, original_message_id="m1",
-        received_at=datetime.now(timezone.utc),
-    )
-    selected = project.model_copy(update={
-        "selected_concept_id": "C1",
-        "concepts": [FlyerConcept(
-            concept_id="C1", title="Best Design", style_summary="Generated",
-            preview_asset_id="A0001", prompt="", created_at=datetime.now(timezone.utc),
-        )],
-        "assets": [asset],
-    })
-
-    overlay_calls: list[tuple[str, tuple[int, int]]] = []
-    real_overlay = render_module._apply_critical_text_overlay
-
-    def _spy(proj, source, target, *, size, output_format):
-        overlay_calls.append((output_format, size))
-        return real_overlay(proj, source, target, size=size, output_format=output_format)
-
-    monkeypatch.setattr(render_module, "_apply_critical_text_overlay", _spy)
-    render_final_package(selected, tmp_path)
-    # The overlay must be re-applied for the non-square formats (story/pdf) at their
-    # own sizes — proving they are NOT cropped from the 4:5 preview.
-    formats = {fmt for fmt, _ in overlay_calls}
-    assert "instagram_story" in formats
-    assert "printable_pdf" in formats
-
-
 def test_renderer_blocks_missing_required_fields(tmp_path):
     project = _complete_project().model_copy(
         update={"fields": FlyerRequestFields(event_or_business_name="Bathukamma")}

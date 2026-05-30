@@ -2613,17 +2613,12 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
         source_for_manifest: Path | None = None
         if selected_preview is not None:
             source = _raw_background_path(selected_preview)
-            # For background-only-eligible projects the preview is a raw model
-            # background with the deterministic critical overlay composited on top
-            # (so the preview is always newer than the raw). Re-apply the overlay
-            # from the RAW background per output format instead of cropping the
-            # already-overlaid 4:5 preview, which would cut the title card / menu
-            # panel out of square/story/PDF exports. The mtime "preview edited
-            # directly" heuristic stays for source-edit (non-eligible) flows.
-            direct_poster_source = not source.exists() or (
-                not _background_only_eligible(project)
-                and selected_preview.exists()
-                and selected_preview.stat().st_mtime > source.stat().st_mtime
+            direct_poster_source = (
+                not source.exists()
+                or (
+                    selected_preview.exists()
+                    and selected_preview.stat().st_mtime > source.stat().st_mtime
+                )
             )
             if direct_poster_source:
                 source = selected_preview
