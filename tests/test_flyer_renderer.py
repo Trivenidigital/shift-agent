@@ -1191,14 +1191,18 @@ def test_background_only_contract_is_gated_only_by_reference_extraction(tmp_path
     # A logo/brand asset alone stays eligible (it's visual identity, not text).
     assert render_module._background_only_eligible(
         english.model_copy(update={"assets": [_asset("logo")]})) is True
-    # A reference IMAGE keeps the model rendering text (conservative — never drops
-    # reference-only items), regardless of any pre-existing customer locked facts.
+    # A reference IMAGE attached only as a STYLE template (the request does not ask
+    # to read items out of it; copy is in fields) stays eligible — the overlay
+    # owns the known text.
     assert render_module._background_only_eligible(
-        english.model_copy(update={"assets": [_asset("reference_image")]})) is False
-    customer_fact = FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Dosa Night",
-                                    source="customer_text", required=True, confidence=1.0, source_message_id="m1")
-    assert render_module._background_only_eligible(english.model_copy(update={
-        "assets": [_asset("reference_image")], "locked_facts": [customer_fact]})) is False
+        english.model_copy(update={"assets": [_asset("reference_image")]})) is True
+    # A reference IMAGE the request asks to EXTRACT items from → not eligible
+    # (those items live in the image, only the model can read them).
+    extract_req = english.model_copy(update={
+        "assets": [_asset("reference_image")],
+        "raw_request": "Create a flyer and extract items and prices from this sample flyer.",
+    })
+    assert render_module._background_only_eligible(extract_req) is False
 
 
 def test_direct_poster_prompt_does_not_make_request_sentence_flyer_copy(monkeypatch):

@@ -825,30 +825,32 @@ def _poster_copy_block(project: FlyerProject) -> str:
     return "\n".join(lines)
 
 
-def _needs_reference_extraction(project: FlyerProject) -> bool:
-    """A REFERENCE-IMAGE is attached whose facts are NOT yet extracted, so its
-    items/prices still live in the image and only the model can render them.
+def _request_asks_reference_extraction(project: FlyerProject) -> bool:
+    """The request asks to read items/prices OUT of an attached reference image
+    (vs attaching it only as a visual/style template)."""
+    request = f"{project.raw_request or ''} {project.fields.notes or ''}".lower()
+    return any(kw in request for kw in (
+        "take items", "breakfast section", "from breakfast",
+        "extract items", "extract prices", "items and prices",
+        "sample flyer", "sample flier", "use items in this",
+    ))
 
-    Two ways this is NOT true (→ background-only stays eligible):
-      - the asset is a logo/brand asset, not a reference image (visual identity,
-        not a text source); or
-      - the reference has already been extracted — `create-flyer-project` merges
-        the extracted facts into `locked_facts`, so once those exist the overlay
-        can draw every fact and the model no longer needs to read the image.
+
+def _needs_reference_extraction(project: FlyerProject) -> bool:
+    """A reference IMAGE is attached AND the request asks to read its items/prices
+    out of the image — so that copy isn't in `collect_text_facts()` and only the
+    model can render it. In that case the deterministic overlay can't own the text.
+
+    NOT true (→ background-only stays eligible):
+      - logo/brand asset only (visual identity, not a text source); or
+      - the reference is a visual/STYLE template and the copy is already in
+        fields/locked facts (no extraction requested) — the overlay draws it.
     """
-    # Conservative + safe: any attached reference IMAGE keeps the model rendering
-    # text. Reliably detecting "extraction already consumed this reference" needs
-    # a reference-derived-fact signal that doesn't exist cleanly yet (a non-empty
-    # `locked_facts` can come from the customer profile/typed request, not the
-    # reference) — so we do NOT optimize extracted references into background-only
-    # here, to avoid ever dropping reference-only items/prices. Tracked as a
-    # follow-up (gate on reference-extraction status once it's surfaced in state).
-    # Uses `_project_reference_assets` (same seam the reference-extraction prompt
-    # block uses) so the two stay consistent; logos are excluded here.
-    return any(
+    has_reference_image = any(
         getattr(asset, "kind", "") == "reference_image"
         for asset in _project_reference_assets(project)
     )
+    return has_reference_image and _request_asks_reference_extraction(project)
 
 
 def _background_only_eligible(project: FlyerProject) -> bool:
