@@ -195,6 +195,12 @@ print(json.dumps({{"rc": rc, "stdout": buf.getvalue()}}))
     result = subprocess.run(
         [sys.executable, "-c", wrapper],
         capture_output=True, text=True, timeout=15,
+        # send-path-test-harness: canonical safe_io.BRIDGE_URL -> stub (via env)
+        # + opt past the pytest guard. Caller resolves to the allowlisted
+        # finalize-catering-menu script; stub port keeps the tripwire dormant.
+        env={**os.environ,
+             "HERMES_BRIDGE_URL": f"http://127.0.0.1:{bridge_port}/send",
+             "SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS": "1"},
     )
     out_lines = [l for l in result.stdout.strip().splitlines() if l.strip()]
     parsed = json.loads(out_lines[-1]) if out_lines else {"rc": -1, "stdout": ""}

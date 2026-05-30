@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import platform
 import subprocess
 import sys
@@ -263,6 +264,13 @@ print(json.dumps({{"rc": rc, "stdout": buf.getvalue(), "notify_calls": notify_ca
         capture_output=True,
         text=True,
         timeout=15,
+        # send-path-test-harness: canonical safe_io.BRIDGE_URL -> stub (via env)
+        # + opt past the pytest guard. The wrapper loads the real
+        # create-catering-proposal-options script (allowlisted caller); stub
+        # port (not :3000) keeps the live-bridge tripwire dormant.
+        env={**os.environ,
+             "HERMES_BRIDGE_URL": f"http://127.0.0.1:{bridge_port}/send",
+             "SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS": "1"},
     )
     lines = [line for line in result.stdout.splitlines() if line.strip()]
     parsed = json.loads(lines[-1]) if lines else {"rc": -1, "stdout": ""}

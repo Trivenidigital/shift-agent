@@ -183,6 +183,16 @@ def _load_script(
     mod.BRIDGE_URL = f"http://127.0.0.1:{bridge_port}/send"
     mod.NOTIFY_OWNER_BIN = env_dir / "notify-owner"
 
+    # send-path-test-harness: this script runs IN-PROCESS (SourceFileLoader),
+    # so override the CANONICAL safe_io.BRIDGE_URL to the stub + opt past the
+    # pytest bridge guard here. The loaded module's frame basename resolves to
+    # the allowlisted select-catering-proposal script, so the action-context
+    # chokepoint passes for its null-context sends. Stub port (not :3000) keeps
+    # the live-bridge tripwire dormant.
+    import safe_io as _safe_io
+    monkeypatch.setenv("SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS", "1")
+    monkeypatch.setattr(_safe_io, "BRIDGE_URL", f"http://127.0.0.1:{bridge_port}/send")
+
     calls: list[list[str]] = []
     real_run = subprocess.run
 

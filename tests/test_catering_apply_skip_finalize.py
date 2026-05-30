@@ -13,6 +13,7 @@ Linux-only — apply-script transitively imports safe_io which uses fcntl.
 from __future__ import annotations
 
 import json
+import os
 import platform
 import subprocess
 import sys
@@ -179,6 +180,14 @@ sys.exit(mod.main())
         [sys.executable, "-c", wrapper],
         input=quote_text,
         capture_output=True, text=True, timeout=20,
+        # send-path-test-harness: override the CANONICAL safe_io.BRIDGE_URL (via
+        # its env source) to the local stub, and opt past the pytest bridge
+        # guard. The wrapper loads the real apply-catering-owner-decision script,
+        # so the caller resolves to an allowlisted basename (chokepoint passes).
+        # Stub port (not :3000) so the live-bridge tripwire stays dormant.
+        env={**os.environ,
+             "HERMES_BRIDGE_URL": f"http://127.0.0.1:{bridge_port}/send",
+             "SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS": "1"},
     )
 
 
