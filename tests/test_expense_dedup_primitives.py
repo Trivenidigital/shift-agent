@@ -14,6 +14,7 @@ loaded inside a fixture that only executes after the Windows skip.
 """
 from __future__ import annotations
 
+import base64
 import importlib.machinery
 import importlib.util
 import platform
@@ -83,26 +84,33 @@ def test_hamming_length_mismatch_returns_max_len(er):
 
 
 # ── _dhash_from_bytes: determinism + format ──────────────────────────────────
+# Must use VALID image bytes: _dhash_from_bytes only falls back to sha256[:16]
+# on ImportError (PIL absent). With PIL installed, non-image bytes raise
+# UnidentifiedImageError, which would fail these tests for the wrong reason
+# (Codex review 2026-05-30). A known-good 4x4 PNG (the same fixture the deploy
+# overlay smoke uses) decodes under PIL AND hashes under the fallback, so these
+# assertions hold in BOTH environments. (We do NOT assert distinctness of two
+# different images: perceptual hashing can legitimately collide for tiny images
+# under PIL, so it isn't robustly assertable here. Threshold application — the
+# `<=` comparison against dedup_hash_distance_threshold — lives in the caller
+# (extract-receipt main), which needs the vision path and is out of dormant-safe
+# unit scope.)
+_VALID_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAIAAAAmkwkpAAAAFElEQVR42mNcsOUEAwwwMSAB3BwAalQCJGH3RFYAAAAASUVORK5CYII="
+)
+
 
 def test_dhash_is_deterministic(er):
-    data = b"\xff\xd8\xff\xe0 some receipt bytes"
-    assert er._dhash_from_bytes(data) == er._dhash_from_bytes(data)
+    assert er._dhash_from_bytes(_VALID_PNG) == er._dhash_from_bytes(_VALID_PNG)
 
 
 def test_dhash_format_is_16_hex_chars(er):
-    h = er._dhash_from_bytes(b"anything at all")
+    h = er._dhash_from_bytes(_VALID_PNG)
     assert len(h) == 16
     int(h, 16)  # raises if not valid hex
-
-
-def test_dhash_differs_for_different_inputs(er):
-    h1 = er._dhash_from_bytes(b"receipt-A-pixels-aaaaaaaa")
-    h2 = er._dhash_from_bytes(b"receipt-B-pixels-zzzzzzzz")
-    assert h1 != h2
 
 
 def test_exact_duplicate_image_has_zero_distance(er):
     # The core dedup invariant: identical image bytes -> identical dHash ->
     # hamming distance 0 -> within ANY non-negative threshold -> duplicate.
-    data = b"\x89PNG identical receipt"
-    assert er._hamming(er._dhash_from_bytes(data), er._dhash_from_bytes(data)) == 0
+    assert er._hamming(er._dhash_from_bytes(_VALID_PNG), er._dhash_from_bytes(_VALID_PNG)) == 0
