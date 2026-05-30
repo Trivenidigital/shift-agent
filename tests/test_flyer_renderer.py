@@ -573,6 +573,45 @@ def test_render_final_package_creates_expected_formats(tmp_path):
         ).ok is True
 
 
+def test_background_only_final_package_reapplies_overlay_per_format(tmp_path, monkeypatch):
+    """A freshly-generated background-only preview (raw + overlay within seconds)
+    must have the critical overlay RE-APPLIED from the raw at each output size,
+    not be cropped as a direct poster — under the no-text contract the overlay is
+    the sole text source, so cropping square/story would drop required facts.
+    """
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setattr(render_module, "_openrouter_image_bytes", lambda *a, **k: _png_bytes())
+    project = _english_project()
+    specs = render_concept_previews(project, tmp_path, model="google/gemini-2.5-flash-image")
+    preview_path = specs[0].path
+    asset = FlyerAsset(
+        asset_id="A0001", kind="concept_preview", source="rendered", path=str(preview_path),
+        mime_type="image/png", sha256="c" * 64, original_message_id="m1",
+        received_at=datetime.now(timezone.utc),
+    )
+    selected = project.model_copy(update={
+        "selected_concept_id": "C1",
+        "concepts": [FlyerConcept(
+            concept_id="C1", title="Best Design", style_summary="Generated",
+            preview_asset_id="A0001", prompt="", created_at=datetime.now(timezone.utc),
+        )],
+        "assets": [asset],
+    })
+
+    overlay_formats: list[str] = []
+    real_overlay = render_module._apply_critical_text_overlay
+
+    def _spy(proj, source, target, *, size, output_format):
+        overlay_formats.append(output_format)
+        return real_overlay(proj, source, target, size=size, output_format=output_format)
+
+    monkeypatch.setattr(render_module, "_apply_critical_text_overlay", _spy)
+    render_final_package(selected, tmp_path / "finals")
+    # Re-applied for the non-4:5 formats (story/pdf) at their own sizes → not cropped.
+    assert "instagram_story" in overlay_formats
+    assert "printable_pdf" in overlay_formats
+
+
 def test_renderer_blocks_missing_required_fields(tmp_path):
     project = _complete_project().model_copy(
         update={"fields": FlyerRequestFields(event_or_business_name="Bathukamma")}

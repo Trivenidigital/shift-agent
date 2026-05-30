@@ -2632,16 +2632,27 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
         source_for_manifest: Path | None = None
         if selected_preview is not None:
             source = _raw_background_path(selected_preview)
+            # Background-only finals re-apply the deterministic overlay from the
+            # raw background at each output size — under the no-text contract the
+            # overlay is the SOLE text source, so cropping the 4:5 preview for
+            # square/story would drop required facts. We re-apply ONLY for a
+            # freshly-generated composite, distinguished from an edited/approved
+            # preview by how far the preview's mtime is past its raw: a generated
+            # background-only composite writes the raw and the overlaid preview
+            # within seconds, whereas an operator-approved/edited preview is much
+            # later. So a preview meaningfully newer than its raw is honored
+            # directly (protects approved visual edits from a stale raw).
+            #
+            # Non-eligible (reference-extraction / source-edit) previews already
+            # contain the model-rendered text; use them directly so the overlay is
+            # NOT composited on top (which would duplicate that text).
+            _PREVIEW_EDIT_GAP_SECONDS = 120
             direct_poster_source = (
                 not source.exists()
-                # Non-eligible (reference-extraction) previews already contain the
-                # model-rendered text; use the preview directly so the deterministic
-                # critical overlay is NOT composited on top (which would duplicate /
-                # double-render that text in the finals).
                 or not _background_only_eligible(project)
                 or (
                     selected_preview.exists()
-                    and selected_preview.stat().st_mtime > source.stat().st_mtime
+                    and selected_preview.stat().st_mtime - source.stat().st_mtime > _PREVIEW_EDIT_GAP_SECONDS
                 )
             )
             if direct_poster_source:
