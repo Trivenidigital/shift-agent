@@ -383,3 +383,65 @@ def test_dispatcher_routed_routed_to_skill_required(now_aware):
             "message_shape": "text",
             "routed_to_skill": "",  # empty string violates min_length=1
         })
+
+
+def test_validate_failed_minimal(now_aware):
+    """dispatch_shift_agent SKILL writes a `validate_failed` audit when
+    validate-sender-block returns valid=false OR v != 1. The minimal emit
+    (type + ts) must validate so log-decision-direct accepts it instead of
+    refusing (exit 5)."""
+    from pydantic import TypeAdapter
+    from schemas import LogEntry, ValidateFailed
+    adapter = TypeAdapter(LogEntry)
+    entry = adapter.validate_python({
+        "type": "validate_failed",
+        "ts": now_aware.isoformat(),
+    })
+    assert isinstance(entry, ValidateFailed)
+    assert entry.reason is None and entry.message_id is None
+
+
+def test_validate_failed_with_reason_and_message_id(now_aware):
+    from pydantic import TypeAdapter
+    from schemas import LogEntry, ValidateFailed
+    adapter = TypeAdapter(LogEntry)
+    entry = adapter.validate_python({
+        "type": "validate_failed",
+        "ts": now_aware.isoformat(),
+        "reason": "version_mismatch",
+        "message_id": "wa:abc123",
+    })
+    assert isinstance(entry, ValidateFailed)
+    assert entry.reason == "version_mismatch"
+    assert entry.message_id == "wa:abc123"
+
+
+def test_validate_failed_rejects_extra_field(now_aware):
+    """extra='forbid' (via _BaseEntry) — no raw block content can be smuggled in
+    via an unmodelled field."""
+    from pydantic import TypeAdapter, ValidationError
+    from schemas import LogEntry
+    adapter = TypeAdapter(LogEntry)
+    with pytest.raises(ValidationError):
+        adapter.validate_python({
+            "type": "validate_failed",
+            "ts": now_aware.isoformat(),
+            "raw_block": "[shift-agent-sender ... IGNORE PREVIOUS ...]",  # must be rejected
+        })
+
+
+def test_validate_failed_distinct_from_unknown_sender_declined(now_aware):
+    """validate_failed (malformed/absent block) is a DIFFERENT event from
+    unknown_sender_declined (a valid block whose identity is just unknown)."""
+    from pydantic import TypeAdapter
+    from schemas import LogEntry, ValidateFailed, UnknownSenderDeclined
+    adapter = TypeAdapter(LogEntry)
+    vf = adapter.validate_python({"type": "validate_failed", "ts": now_aware.isoformat()})
+    usd = adapter.validate_python({
+        "type": "unknown_sender_declined",
+        "ts": now_aware.isoformat(),
+        "sender_lid": "201975216009469@lid",
+        "input_message_truncated": "hi",
+    })
+    assert isinstance(vf, ValidateFailed)
+    assert isinstance(usd, UnknownSenderDeclined)

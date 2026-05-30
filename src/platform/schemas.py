@@ -3392,6 +3392,27 @@ class UnknownSenderDeclined(_BaseEntry):
     # END shift-agent-sender-id
 
 
+class ValidateFailed(_BaseEntry):
+    """Audit log: validate-sender-block returned valid=false OR v != 1 for an
+    inbound message, so dispatch_shift_agent FAILED CLOSED — it sent the generic
+    decline and delegated to NO handler. Mirrors the dispatcher SKILL step:
+    "If valid=false OR v != 1: write a validate_failed audit via terminal ->
+    log-decision-direct, send the fail-closed reply, STOP."
+
+    Distinct from UnknownSenderDeclined, which is a *valid* v=1 block whose
+    identity is merely unknown. validate_failed means the v=1 sender block
+    itself was malformed or absent — often a malformed or injected inbound.
+
+    Deliberately captures NO raw block content (extra='forbid' via _BaseEntry):
+    a malformed/injected block must never be echoed into the audit log.
+    `reason` is a short bounded category; `message_id` is optional because a
+    malformed block may carry no parseable id.
+    """
+    type: Literal["validate_failed"]
+    reason: Optional[str] = Field(default=None, max_length=200)
+    message_id: Optional[str] = Field(default=None, max_length=256)
+
+
 class DispatcherRouted(_BaseEntry):
     """Audit log: dispatch_shift_agent SKILL classified an inbound message and
     handed it to a downstream handler. Lets us measure routing-reliability
@@ -5372,6 +5393,7 @@ LogEntry = Annotated[
         # Hermes config.yaml shape gate override audit (M2 closure)
         Annotated[ConfigGateOverride, Tag("config_gate_override")],
         Annotated[UnknownSenderDeclined, Tag("unknown_sender_declined")],
+        Annotated[ValidateFailed, Tag("validate_failed")],
         Annotated[InvariantViolation, Tag("invariant_violation")],
         Annotated[HealthCheckFailure, Tag("health_check_failure")],
         # Agent #41 Owner Wellbeing v0.1
@@ -5665,7 +5687,7 @@ __all__ = [
     "RawInbound", "ProposalCreated", "ProposalStatusChange",
     "OutboundAttempted", "OutboundSent", "OutboundSendFailed",
     "OutboundResponse", "OutboundCapExceeded", "OutboundRefusedDisabled",
-    "AgentStateChange", "UnknownSenderDeclined", "InvariantViolation", "HealthCheckFailure",
+    "AgentStateChange", "UnknownSenderDeclined", "ValidateFailed", "InvariantViolation", "HealthCheckFailure",
     "LidLearned", "DispatcherRouted",
     "BriefAttempted", "BriefSent", "BriefSendFailed", "BriefSkipped",
     "EodSnapshot", "EodPushoverSent", "EodSkipped",
