@@ -5361,9 +5361,12 @@ def test_same_business_layout_revision_does_not_bypass_but_new_campaign_does():
     # content nouns must not be treated as fresh-campaign detail.
     menu_emphasis = "Create a new flyer for chloe hair studio with the main focus on the menu items."
     assert actions.should_bypass_active_flyer_project_for_fresh_request(menu_emphasis, active, has_media=False) is False
-    # A concrete calendar date is a new dated campaign, even with a layout tweak.
+    # A concrete calendar date is a new dated campaign, even with a layout tweak —
+    # in either month-day or day-month order.
     dated_campaign = "Create a new flyer for chloe hair studio for June 12, make the contact number smaller."
     assert actions.should_bypass_active_flyer_project_for_fresh_request(dated_campaign, active, has_media=False) is True
+    dated_campaign_dm = "Create a new flyer for chloe hair studio for 12 June, make the contact number smaller."
+    assert actions.should_bypass_active_flyer_project_for_fresh_request(dated_campaign_dm, active, has_media=False) is True
     # Media-backed requests keep their existing path (carve-out is text-only).
     assert actions.should_bypass_active_flyer_project_for_fresh_request(layout_revision, active, has_media=True) is True
 

@@ -1453,6 +1453,8 @@ _NEW_CAMPAIGN_SCHEDULE = re.compile(
     r"today|tomorrow|weekend|"
     r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
     r"aug(?:ust)?|sep(?:tember)?|sept|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?|"
+    r"\d{1,2}(?:st|nd|rd|th)?\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
+    r"aug(?:ust)?|sep(?:tember)?|sept|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)|"
     r"\d{1,2}\s*/\s*\d{1,2}|"
     r"event|grand\s+opening|festival|sale|top\s+\d+|"
     # Occasion/holiday names (this portfolio is ethnic SMBs — festival flyers
