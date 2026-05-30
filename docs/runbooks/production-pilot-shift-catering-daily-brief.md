@@ -47,8 +47,8 @@ never message text — see Shift dispatcher). Catering actions are gated by role
 Owner-only operations reject non-owner senders with exit code **12
 (`EXIT_PRIVILEGE_DENIED`) before any state read or lock** — verified at
 `apply-catering-owner-decision:368` and `apply-menu-update:82`, covered by
-`tests/test_catering_privilege_escalation.py` (32 cases). A non-owner who
-forwards an owner's `#XXXXX` code cannot apply it.
+`tests/test_catering_privilege_escalation.py`. A non-owner who forwards an
+owner's `#XXXXX` code cannot apply it.
 
 ## Smoke Script
 
