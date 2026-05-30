@@ -1683,6 +1683,18 @@ export function FlyerAdmin() {
   );
 }
 
+function relativeAge(iso: string | null): string {
+  if (!iso) return "—";
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "—";
+  const mins = Math.max(0, Math.floor((Date.now() - then) / 60000));
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 48) return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
+}
+
+
 interface ManualQueueDrawerBodyProps {
   detail: ManualQueueDetail;
   playbook: { title: string; next_steps: string[] };
@@ -1734,7 +1746,23 @@ function ManualQueueDrawerBody(props: ManualQueueDrawerBodyProps) {
           {integrityOnly && <Badge tone="amber">Integrity only</Badge>}
           <span className="text-zinc-500">customer {detail.customer_phone}</span>
         </div>
-        <div className="mt-1 text-xs text-zinc-600">Updated {new Date(detail.updated_at).toLocaleString()}</div>
+        {/* Ownership (P1) + age (P2): who owns it + how urgent, without leaving the drawer. */}
+        <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+          {detail.manual_review.claimed_by ? (
+            <span className="font-medium text-zinc-700">
+              👤 Owned by {detail.manual_review.claimed_by}
+              {detail.manual_review.claimed_at ? ` · since ${relativeAge(detail.manual_review.claimed_at)}` : ""}
+            </span>
+          ) : (
+            <span className="text-zinc-500">Unclaimed</span>
+          )}
+          {detail.manual_review.queued_at && (
+            <span className="text-zinc-600">Queued {relativeAge(detail.manual_review.queued_at)}</span>
+          )}
+          <span className="text-zinc-500" title={new Date(detail.updated_at).toLocaleString()}>
+            Updated {relativeAge(detail.updated_at)}
+          </span>
+        </div>
         {detail.manual_review.detail && (
           <div className="mt-2 text-xs text-zinc-700">{detail.manual_review.detail}</div>
         )}
