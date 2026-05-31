@@ -81,6 +81,9 @@ def reverse_json_entries(path: Path, max_lines: int = 1000) -> Iterator[dict]:
     """reverse_lines + json.loads, dropping unparseable lines."""
     for line in reverse_lines(path, max_lines):
         try:
-            yield json.loads(line)
+            entry = json.loads(line)
         except (json.JSONDecodeError, ValueError):
             continue
+        if not isinstance(entry, dict):
+            continue
+        yield entry

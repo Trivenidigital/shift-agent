@@ -28,7 +28,8 @@ from qbo_client import (
 
 
 @pytest.fixture
-def lead():
+def lead(monkeypatch):
+    monkeypatch.setenv("EXPENSE_RECEIPTS_DIR", "/tmp/test/")
     return ExpenseLead.model_validate({
         "expense_id": "E0042", "original_message_id": "wa_xyz",
         "sender_phone": "+19045550000",
@@ -133,7 +134,14 @@ def test_redact_strips_bearer():
 def test_redact_truncates():
     err = QBOPushError("server", "x" * 1000)
     redacted = redact_qbo_error(err, max_chars=50)
-    assert len(redacted) <= 60  # [server] prefix + max_chars + ellipsis
+    assert len(redacted) <= 50
+
+
+def test_redact_truncates_after_prefix():
+    err = QBOPushError("invalid_request", "x" * 1000)
+    redacted = redact_qbo_error(err, max_chars=200)
+    assert len(redacted) <= 200
+    assert redacted.startswith("[invalid_request]")
 
 
 def test_real_client_refuses_v01():
@@ -151,8 +159,9 @@ def test_factory_returns_mock_when_mode_mock():
 def test_factory_real_raises_v01():
     class FakeCfg:
         qbo_client_mode = "real"
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(QBOPushError) as exc:
         make_qbo_client(FakeCfg())
+    assert exc.value.error_class == "invalid_request"
 
 
 # ─────────────────────────────────────────────────────────────────

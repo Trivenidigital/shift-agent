@@ -151,6 +151,18 @@ def test_cockpit_service_does_not_ship_auth_bypass_enabled():
     assert "COCKPIT_COOKIE_SECURE=false" not in service
 
 
+def test_auth_bypass_forbidden_when_prod_layout_present(monkeypatch):
+    import pytest
+    from app import config as cfg_mod
+
+    monkeypatch.setenv("COCKPIT_AUTH_BYPASS", "1")
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setattr(cfg_mod, "_prod_filesystem_present", lambda: True)
+
+    with pytest.raises(RuntimeError, match="COCKPIT_AUTH_BYPASS"):
+        cfg_mod.Settings.from_env()
+
+
 def test_auth_bypass_counts_as_fresh_for_temporary_sensitive_actions(monkeypatch):
     import anyio
     from app import auth

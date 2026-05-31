@@ -102,7 +102,7 @@ def redact_qbo_error(err: QBOPushError, max_chars: int = 200) -> str:
     msg = err.message_redacted
     for pattern in _TOKEN_PATTERNS:
         msg = pattern.sub("<REDACTED>", msg)
-    return f"[{err.error_class}] {msg[:max_chars]}"
+    return f"[{err.error_class}] {msg}"[:max_chars]
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -332,4 +332,7 @@ def make_qbo_client(
     """
     if cfg.qbo_client_mode == "mock":
         return MockQBOClient(timezone=customer_timezone, state_path=state_path)
-    return RealQBOClient()  # raises in v0.1
+    raise QBOPushError(
+        "invalid_request",
+        "RealQBOClient is not enabled in v0.1; configure qbo_client_mode=mock",
+    )

@@ -108,6 +108,8 @@ def test_canary_bulk_deploy_script_exists():
     # Per R5-H1: halt-on-failure (set -e) + per-VPS smoke gate before next launch
     assert "set -euo pipefail" in text
     assert "ABORT" in text
+    assert "last-deploy-status.txt" not in text
+    assert "deploy + smoke OK" in text
     # Per design §6.2: 2-min cooldown AFTER smoke clear
     assert "sleep 120" in text
 

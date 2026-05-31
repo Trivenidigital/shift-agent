@@ -558,11 +558,16 @@ def main():
         # both extract-receipt and apply-expense-decision run this. v1 only
         # had it in apply-expense-decision; ports the audit-cross-check + age
         # gate inline so we don't depend on apply-expense-decision symbols.
-        _check_extract_orphans(store)
+        orphan_count = _check_extract_orphans(store)
+
+        def _persist_orphan_flags_if_needed() -> None:
+            if orphan_count:
+                atomic_write_json(LEADS_PATH, store.model_dump(mode="json"))
 
         # Idempotency check (reviewer-a MED — original_message_id)
         for lead in store.leads:
             if lead.original_message_id == args.source_image_id:
+                _persist_orphan_flags_if_needed()
                 print(json.dumps({
                     "expense_id": lead.expense_id,
                     "approval_code": lead.owner_approval_code or "",
@@ -586,6 +591,7 @@ def main():
             data, sha256, dhash = _atomic_copy_image(src_path, dst_path)
         except (OSError, ValueError) as e:
             sys.stderr.write(f"image copy failed: {e}\n")
+            _persist_orphan_flags_if_needed()
             return EXIT_INVALID_INPUT
 
         # Dedup: hamming distance against existing phashes
@@ -622,9 +628,11 @@ def main():
             extraction = ReceiptExtraction.model_validate(extracted_dict)
         except (urllib.error.URLError, urllib.error.HTTPError, OSError) as e:
             sys.stderr.write(f"vision API error: {e}\n")
+            _persist_orphan_flags_if_needed()
             return EXIT_DEPENDENCY_DOWN
         except (ValidationError, json.JSONDecodeError, KeyError) as e:
             sys.stderr.write(f"vision schema violation: {e}\n")
+            _persist_orphan_flags_if_needed()
             return EXIT_SCHEMA_VIOLATION
 
         try:
@@ -632,9 +640,11 @@ def main():
             classification = ExpenseClassification.model_validate(classify_dict)
         except (urllib.error.URLError, urllib.error.HTTPError, OSError) as e:
             sys.stderr.write(f"classify API error: {e}\n")
+            _persist_orphan_flags_if_needed()
             return EXIT_DEPENDENCY_DOWN
         except (ValidationError, json.JSONDecodeError, KeyError) as e:
             sys.stderr.write(f"classify schema violation: {e}\n")
+            _persist_orphan_flags_if_needed()
             return EXIT_SCHEMA_VIOLATION
 
         # Persist lead

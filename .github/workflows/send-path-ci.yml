@@ -10,6 +10,8 @@ on:
   pull_request:
     paths:
       - "src/platform/**"
+      - "src/agents/**"
+      - "tools/**"
       - "tests/**"
       - ".github/workflows/send-path-ci.yml"
   push:
@@ -17,6 +19,8 @@ on:
       - main
     paths:
       - "src/platform/**"
+      - "src/agents/**"
+      - "tools/**"
       - "tests/**"
       - ".github/workflows/send-path-ci.yml"
 
@@ -49,33 +53,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pydantic pyyaml pytest
 
-      - name: Pytest — send-path green-set
+      - name: Pytest - non-Flyer root suite
         run: |
-          python -m pytest -q -p no:cacheprovider \
-            tests/test_bridge_send_harness.py \
-            tests/test_safe_io_bridge_post.py \
-            tests/test_safe_io_bridge_send_cta.py \
-            tests/test_safe_io_bridge_send_media.py \
-            tests/test_dispatcher_replay.py \
-            tests/test_commerce_payment_link.py \
-            tests/test_commerce_cart.py \
-            tests/test_commerce_order_state.py \
-            tests/test_commerce_order_fulfillment_fields.py \
-            tests/test_commerce_webhook_subscription_gate.py \
-            tests/test_commerce_livemode_gate.py \
-            tests/test_catering_deposit_copy_invariants.py \
-            tests/test_catering_deposit_helpers.py \
-            tests/test_catering_deposit_schema.py \
-            tests/test_catering_apply_skip_finalize.py \
-            tests/test_catering_apply_anchor_outcome.py \
-            tests/test_catering_apply_idempotent_replay.py \
-            tests/test_catering_apply_post_bridge_missing_lead.py \
-            tests/test_catering_finalize_menu.py \
-            tests/test_select_catering_proposal.py \
-            tests/test_send_catering_ack.py \
-            tests/test_create_catering_proposal_options.py \
-            tests/test_daily_brief_script.py \
-            tests/test_expense_bookkeeper_apply_decision.py \
-            tests/test_prune_and_expire_logic.py \
-            tests/test_expense_dedup_primitives.py \
-            tests/test_shift_reconcile.py
+          mapfile -t TESTS < <(find tests -maxdepth 1 -type f -name 'test_*.py' ! -name 'test_flyer*' | sort)
+          python -m pytest -q -p no:cacheprovider "${TESTS[@]}"

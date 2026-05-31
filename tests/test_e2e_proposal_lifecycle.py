@@ -24,12 +24,13 @@ REQUIRED_BINS = [
 REQUIRED_STATE = [
     Path("/opt/shift-agent/config.yaml"),
     Path("/opt/shift-agent/roster.json"),
-    Path("/opt/shift-agent/venv/bin/python3"),
 ]
 
-
 def _tools_deployed() -> bool:
-    return all(os.access(b, os.X_OK) for b in REQUIRED_BINS) and all(p.exists() for p in REQUIRED_STATE)
+    return (
+        all(os.access(b, os.X_OK) for b in REQUIRED_BINS)
+        and all(p.exists() for p in REQUIRED_STATE)
+    )
 
 
 pytestmark = pytest.mark.skipif(

@@ -21,20 +21,32 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 _TEST_MODE = os.environ.get("COCKPIT_TEST_MODE", "").lower() in ("1", "true", "yes")
 _TEST_BASE: Path | None = None
 
+
+def _prod_filesystem_present() -> bool:
+    return Path("/opt/shift-agent").exists()
+
+
+def _active_pytest_run() -> bool:
+    return bool(os.environ.get("PYTEST_CURRENT_TEST"))
+
+
+def _forbid_prod_bypass(flag_name: str, reason: str) -> None:
+    if _prod_filesystem_present() and not _active_pytest_run():
+        raise RuntimeError(
+            f"{flag_name}=1 with /opt/shift-agent present is forbidden outside an "
+            f"active pytest run (PYTEST_CURRENT_TEST must be set). This bypass would "
+            f"{reason} in production."
+        )
+
 # Security guard (Reviewer 2 R2 #1): refuse to run in test-mode if the
 # production filesystem layout exists. Prevents an operator who accidentally
 # exports COCKPIT_TEST_MODE=1 in the prod shell from silently bypassing the
 # JWT-secret hex validator (which would let a base64 secret be accepted).
-if _TEST_MODE and Path("/opt/shift-agent").exists():
+if _TEST_MODE and _prod_filesystem_present():
     # Tighter check (Reviewer Nit): only PYTEST_CURRENT_TEST env var indicates
     # an active pytest run. `"pytest" in sys.modules` is too permissive — any
     # `python -c "import pytest"` from a prod shell would pass it.
-    if not os.environ.get("PYTEST_CURRENT_TEST"):
-        raise RuntimeError(
-            "COCKPIT_TEST_MODE=1 with /opt/shift-agent present is forbidden outside an "
-            "active pytest run (PYTEST_CURRENT_TEST must be set). This bypass would "
-            "weaken JWT-secret validation in production."
-        )
+    _forbid_prod_bypass("COCKPIT_TEST_MODE", "weaken JWT-secret validation")
 
 
 def _test_base() -> Path:
@@ -134,6 +146,8 @@ class Settings(BaseModel):
                     "COCKPIT_JWT_SECRET must be 64+ hex chars (32+ bytes). "
                     "Generate with: python3 -c 'import secrets; print(secrets.token_hex(32))'"
                 )
+        if self.auth_bypass_enabled:
+            _forbid_prod_bypass("COCKPIT_AUTH_BYPASS", "skip cockpit authentication and OTP checks")
         return self
 
     @classmethod

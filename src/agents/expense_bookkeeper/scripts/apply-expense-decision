@@ -414,11 +414,6 @@ def _handle_approve(parsed, owner_phone, owner_jid, sender_phone, raw_message,
 def _push_to_qbo(lead: ExpenseLead, owner_jid: str,
                  cfg: Config, customer_tz: str) -> int:
     """External push step. Lead has owner_confirmed_total_cents set."""
-    client = make_qbo_client(
-        cfg.expense_bookkeeper,
-        customer_timezone=customer_tz,
-        state_path=MOCK_QBO_STATE_PATH,
-    )
     push_total = lead.owner_confirmed_total_cents or 0
 
     _log(ExpensePushAttempted(
@@ -432,6 +427,11 @@ def _push_to_qbo(lead: ExpenseLead, owner_jid: str,
     ))
 
     try:
+        client = make_qbo_client(
+            cfg.expense_bookkeeper,
+            customer_timezone=customer_tz,
+            state_path=MOCK_QBO_STATE_PATH,
+        )
         result = client.push_expense(lead)
     except QBOPushError as e:
         # Sanitize error before audit-write
@@ -668,22 +668,21 @@ def _handle_undo(parsed, owner_phone, owner_lid, owner_jid, sender_phone,
         )
         return EXIT_SCHEMA_VIOLATION
 
-    # Lock released for QBO call
-    client = make_qbo_client(
-        cfg.expense_bookkeeper,
-        customer_timezone=customer_tz,
-        state_path=MOCK_QBO_STATE_PATH,
-    )
     try:
+        client = make_qbo_client(
+            cfg.expense_bookkeeper,
+            customer_timezone=customer_tz,
+            state_path=MOCK_QBO_STATE_PATH,
+        )
         client.void_transaction(tx_id)
     except QBOPushError as e:
-        redacted = redact_qbo_error(e)
+        redacted = f"void: {redact_qbo_error(e)}"[:200]
         _log(ExpensePushFailed(
             ts=datetime.now(timezone.utc),
             type="expense_push_failed",
             expense_id=eid,
             error_class=e.error_class,
-            error_message_redacted=f"void: {redacted}",
+            error_message_redacted=redacted,
         ))
         _bridge_post(
             owner_jid,

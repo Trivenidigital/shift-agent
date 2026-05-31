@@ -57,6 +57,8 @@ def test_reverse_json_entries_drops_corrupt(tmp_path: Path) -> None:
     lines = [
         json.dumps({"i": 0}),
         "not-json",
+        json.dumps(42),
+        json.dumps(["valid", "json", "but", "not", "object"]),
         json.dumps({"i": 2}),
     ]
     p.write_text("\n".join(lines) + "\n")

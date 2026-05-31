@@ -45,7 +45,7 @@ cat "$OUT_FILE"
 
 PREV_SHA=$(grep '^PREV_SHA=' "$OUT_FILE" | cut -d= -f2 | tr -d '[:space:]')
 
-if [ "$PREV_SHA" = "$EXPECTED_SHA" ] || [ "${PREV_SHA#$EXPECTED_SHA}" != "$PREV_SHA" ]; then
+if [ "$PREV_SHA" = "$EXPECTED_SHA" ] || [ "${PREV_SHA%$EXPECTED_SHA}" != "$PREV_SHA" ]; then
     echo "PR-D2_ROLLBACK_TARGET_OK: PREV_SHA=$PREV_SHA matches expected $EXPECTED_SHA"
     exit 0
 fi

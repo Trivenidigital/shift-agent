@@ -250,11 +250,19 @@ install_artifacts() {
         install -m 644 src/agents/compliance/templates/* /opt/shift-agent/templates/
     fi
     if compgen -G "src/agents/compliance/systemd/*.service" > /dev/null; then
-        # TZ templating: read cfg.customer.timezone via PyYAML (yq is not
-        # installed on srilu; PyYAML IS — already used by render-coverage-
-        # template + schemas validation). Default to America/New_York if
-        # config missing or unparseable (matches Triveni's reference customer).
-        customer_tz=$(python3 -c "import yaml; print(yaml.safe_load(open('/opt/shift-agent/config.yaml'))['customer']['timezone'])" 2>/dev/null || echo "America/New_York")
+        # TZ templating: read cfg.customer.timezone through the Hermes venv,
+        # not system python. If extraction fails, warn before using the
+        # reference-customer fallback timezone.
+        customer_tz=$("${VENV_PY:-/usr/local/lib/hermes-agent/venv/bin/python}" - <<'PY' 2>/dev/null || true
+import yaml
+with open('/opt/shift-agent/config.yaml', encoding='utf-8') as f:
+    print(yaml.safe_load(f)['customer']['timezone'])
+PY
+)
+        if [ -z "$customer_tz" ]; then
+            echo "WARN: unable to read customer.timezone from /opt/shift-agent/config.yaml via Hermes venv; defaulting compliance timers to America/New_York" >&2
+            customer_tz="America/New_York"
+        fi
         for svc_src in src/agents/compliance/systemd/*.service; do
             svc_name=$(basename "$svc_src")
             sed "s|@CUSTOMER_TZ@|${customer_tz}|g" "$svc_src" \
@@ -888,7 +896,20 @@ case "$ACTION" in
                 || tar czf "$DEPLOYS_DIR/${NEW_TAG}.tgz" -C "$STAGING" src
         fi
 
-        install_artifacts "$STAGING"
+        if ! install_artifacts "$STAGING"; then
+            echo "FAIL: install_artifacts gate failed - rolling back to $PREV_TAG" >&2
+            if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                "$0" rollback "$PREV_TAG"
+                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+            else
+                /usr/local/bin/shift-agent-notify-owner \
+                    --title "Deploy FAILED during install_artifacts, no prior tarball" \
+                    --priority 2 \
+                    "Deploy $NEW_TAG failed during install_artifacts. Files may be partially installed while services still run old in-memory code. No prior tarball to roll back to - SSH immediately." 2>/dev/null || true
+                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+            fi
+            exit 1
+        fi
 
         # Pre-restart cf-router compile gate: hooks.py is imported by the
         # gateway at startup, so a syntax error can make systemctl restart

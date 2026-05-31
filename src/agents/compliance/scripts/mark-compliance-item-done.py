@@ -117,7 +117,11 @@ def main() -> int:
             next_renewal = None
             deleted = True
         else:
-            match.renewal_date = match.renewal_date + timedelta(days=match.recurrence_days)
+            candidate = match.renewal_date + timedelta(days=match.recurrence_days)
+            today = customer_now(cfg.customer.timezone).date()
+            while candidate <= today:
+                candidate = candidate + timedelta(days=match.recurrence_days)
+            match.renewal_date = candidate
             next_renewal = match.renewal_date
             deleted = False
 

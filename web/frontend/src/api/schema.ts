@@ -196,6 +196,66 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/commerce/orders": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Orders */
+        get: operations["list_orders_commerce_orders_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/commerce/orders/{order_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Order */
+        get: operations["get_order_commerce_orders__order_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/commerce/orders/{order_id}/transition": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Transition Order
+         * @description Apply an owner-initiated Slice-C status transition.
+         *
+         *     Owner-only (require_fresh_otp step-up). No provider/POS/customer-send calls.
+         *     Scope-gated to SLICE_C_ALLOWED_TRANSITIONS; the optimistic-concurrency
+         *     guard (`expected_from_status`) and the shared FileLock live in the
+         *     `order_state` primitive. Every refusal is audited; on the happy path the
+         *     updated order is returned.
+         */
+        post: operations["transition_order_commerce_orders__order_id__transition_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/config": {
         parameters: {
             query?: never;
@@ -540,6 +600,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/flyer/manual-queue/claim-next": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Manual Queue Claim Next */
+        post: operations["manual_queue_claim_next_flyer_manual_queue_claim_next_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/flyer/manual-queue/{project_id}/action-preview": {
         parameters: {
             query?: never;
@@ -557,6 +634,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/flyer/manual-queue/{project_id}/assign": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Manual Queue Assign */
+        post: operations["manual_queue_assign_flyer_manual_queue__project_id__assign_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/flyer/manual-queue/{project_id}/break-glass": {
         parameters: {
             query?: never;
@@ -568,6 +662,23 @@ export interface paths {
         put?: never;
         /** Manual Queue Break Glass */
         post: operations["manual_queue_break_glass_flyer_manual_queue__project_id__break_glass_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/flyer/manual-queue/{project_id}/claim": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Manual Queue Claim */
+        post: operations["manual_queue_claim_flyer_manual_queue__project_id__claim_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -619,6 +730,40 @@ export interface paths {
         get: operations["manual_queue_detail_flyer_manual_queue__project_id__detail_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/flyer/manual-queue/{project_id}/resend-status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Manual Queue Resend Status */
+        post: operations["manual_queue_resend_status_flyer_manual_queue__project_id__resend_status_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/flyer/manual-queue/{project_id}/unclaim": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Manual Queue Unclaim */
+        post: operations["manual_queue_unclaim_flyer_manual_queue__project_id__unclaim_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -709,6 +854,28 @@ export interface paths {
         get: operations["project_asset_media_flyer_projects__project_id__assets__asset_id__get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/flyer/projects/{project_id}/flag": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Flag Warn Tier Project
+         * @description POST /flyer/projects/{project_id}/flag — operator flags a
+         *     delivered_with_warning project for follow-up. Audit-only; no state
+         *     mutation. 404 if missing, 409 if not in delivered_with_warning state.
+         */
+        post: operations["flag_warn_tier_project_flyer_projects__project_id__flag_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1250,15 +1417,56 @@ export interface components {
             /** Reason */
             reason: string;
         };
+        /**
+         * FlagWarnTierBody
+         * @description Operator's optional context note. Empty is acceptable — the flag
+         *     itself is the signal; ts + flagged_by_operator_id always traceable.
+         */
+        FlagWarnTierBody: {
+            /**
+             * Note
+             * @default
+             */
+            note: string;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
         };
+        /** ManualQueueAssignBody */
+        ManualQueueAssignBody: {
+            /** Admin Id */
+            admin_id: string;
+            /** By */
+            by: string;
+        };
         /** ManualQueueBreakGlassBody */
         ManualQueueBreakGlassBody: {
             /** Reason */
             reason: string;
+        };
+        /**
+         * ManualQueueClaimBody
+         * @description Self-reported admin handle for claim/unclaim coordination (not an
+         *     authenticated identity — the cockpit shares one owner login).
+         */
+        ManualQueueClaimBody: {
+            /** Admin Id */
+            admin_id: string;
+            /**
+             * Force
+             * @default false
+             */
+            force: boolean;
+        };
+        /**
+         * ManualQueueClaimNextBody
+         * @description Self-reported admin handle for the atomic claim-next throughput action.
+         */
+        ManualQueueClaimNextBody: {
+            /** Admin Id */
+            admin_id: string;
         };
         /**
          * ManualQueueCloseNoSendBody
@@ -1292,6 +1500,29 @@ export interface components {
             owner_name: string;
             /** Owner Phone */
             owner_phone: string;
+        };
+        /**
+         * OrderTransitionBody
+         * @description Cockpit staff-action request. `expected_from_status` is the status the
+         *     operator saw when they clicked (optimistic-concurrency token); `cause` is
+         *     required for a cancel (the operator's reason) and optional otherwise.
+         */
+        OrderTransitionBody: {
+            /**
+             * Cause
+             * @default
+             */
+            cause: string;
+            /**
+             * Expected From Status
+             * @enum {string}
+             */
+            expected_from_status: "pending_payment" | "awaiting_approval" | "paid" | "preparing" | "ready" | "out_for_delivery" | "completed" | "cancelled" | "voided" | "refunded";
+            /**
+             * To Status
+             * @enum {string}
+             */
+            to_status: "pending_payment" | "awaiting_approval" | "paid" | "preparing" | "ready" | "out_for_delivery" | "completed" | "cancelled" | "voided" | "refunded";
         };
         /** OtpRequestResponse */
         OtpRequestResponse: {
@@ -1652,6 +1883,98 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_orders_commerce_orders_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    get_order_commerce_orders__order_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                order_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    transition_order_commerce_orders__order_id__transition_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                order_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OrderTransitionBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
             /** @description Validation Error */
@@ -2254,6 +2577,39 @@ export interface operations {
             };
         };
     };
+    manual_queue_claim_next_flyer_manual_queue_claim_next_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ManualQueueClaimNextBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     manual_queue_action_preview_endpoint_flyer_manual_queue__project_id__action_preview_get: {
         parameters: {
             query: {
@@ -2287,6 +2643,41 @@ export interface operations {
             };
         };
     };
+    manual_queue_assign_flyer_manual_queue__project_id__assign_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ManualQueueAssignBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     manual_queue_break_glass_flyer_manual_queue__project_id__break_glass_post: {
         parameters: {
             query?: never;
@@ -2299,6 +2690,41 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["ManualQueueBreakGlassBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    manual_queue_claim_flyer_manual_queue__project_id__claim_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ManualQueueClaimBody"];
             };
         };
         responses: {
@@ -2402,6 +2828,72 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    manual_queue_resend_status_flyer_manual_queue__project_id__resend_status_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    manual_queue_unclaim_flyer_manual_queue__project_id__unclaim_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ManualQueueClaimBody"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -2530,6 +3022,41 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    flag_warn_tier_project_flyer_projects__project_id__flag_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FlagWarnTierBody"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

@@ -1,5 +1,31 @@
 # Backlog — pending items
 
+## Active - Full SMB-Agents non-Flyer autonomous code review (2026-05-31)
+
+**Drift-check tag:** extends-Hermes
+
+Scope: full repository review excluding Flyer Studio surfaces (`src/agents/flyer/**`,
+Flyer-specific tests, Flyer cockpit UI, and Flyer marketing/design docs). Include
+platform, Shift, Catering, Daily Brief, Expense Bookkeeper, Commerce, cockpit
+non-Flyer surfaces, deploy/smoke scripts, schemas, tests, and runtime safety gates.
+
+- [x] Create isolated branch `codex/full-smb-review-20260531` from `origin/main`.
+- [x] Run parallel local Claude Code review slices with orthogonal lenses.
+- [x] Run non-Flyer baseline tests/static checks.
+- [x] Fix every confirmed non-Flyer issue autonomously with focused tests.
+- [x] Run end-to-end/broad verification after fixes.
+- [x] Document findings, fixes, and residual operator-only blockers in this section.
+
+Review/fix results:
+- Platform/deploy: fixed rollback-target suffix check, removed dead canary polling of an unwritten deploy-status file, made deploy timezone extraction prefer `VENV_PY`, and restored rollback/notify behavior when `install_artifacts` fails.
+- Cockpit/commerce: forbade `COCKPIT_AUTH_BYPASS` on prod-like `/opt/shift-agent` filesystems, regenerated OpenAPI frontend types, added a CI drift gate for generated schema, and made log-tail skip non-object JSON safely.
+- CI/test coverage: widened send-path CI to run all root non-Flyer tests and trigger on `src/agents/**` + `tools/**`; fixed deployed E2E skip-gate so the live proposal lifecycle test actually runs without a stale `/opt/shift-agent/venv` requirement.
+- Compliance: `check-compliance-deadlines.py` now treats missing/empty compliance item state as an invariant violation instead of silently validating an empty deadline list; recurring mark-done now advances overdue items to the next future renewal.
+- Expense Bookkeeper: real QBO mode now fail-closes through the normal `QBOPushError` path after owner approval; QBO error redaction respects the total 200-char audit bound; extract-receipt now persists orphan reconcile flags before dependency/error early returns.
+- Verification: root non-Flyer pytest `1453 passed, 868 skipped`; web backend `214 passed, 1 skipped`; frontend `typecheck` + `build` passed; Git Bash syntax check passed for changed shell/Python executable scripts; workflow YAML parse + `git diff --check` passed; Linux focused slice on VPS `77 passed`; live deployed proposal lifecycle E2E on VPS `8 passed`.
+- Deploy: cockpit backend/static deployed to `main-vps` via tar/scp fallback because local `rsync` was unavailable. Runtime health verified at `http://127.0.0.1:8081/health` => `{"ok":true}`. Deploy exposed live `COCKPIT_AUTH_BYPASS=1`; backed up `/opt/shift-agent/.env` to `/opt/shift-agent/.env.bak-20260531-cockpit-auth-bypass`, removed `COCKPIT_AUTH_BYPASS`/`COCKPIT_TEST_MODE`, restarted cockpit, and re-verified healthy.
+- Residual operator-only blocker: none for this review slice. Live runtime still depends on the previously-known operator-gated deploy/secret decisions; no customer-send or secret-dependent path was exercised.
+
 ## Active - Flyer source-edit identity QA hardening (2026-05-31)
 
 **Drift-check tag:** extends-Hermes

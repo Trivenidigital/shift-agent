@@ -458,6 +458,32 @@ def test_above_threshold_approve_without_force_audited(env_dir, bridge_server):
     assert "50.00" in msg
 
 
+def test_real_qbo_mode_fails_closed_after_owner_approval(env_dir, bridge_server):
+    port, stub = bridge_server
+    cfg = yaml.safe_load((env_dir / "config.yaml").read_text())
+    cfg["expense_bookkeeper"]["qbo_client_mode"] = "real"
+    cfg["expense_bookkeeper"]["cockpit_threshold_cents"] = 50000
+    (env_dir / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    _seed_lead(env_dir)
+    mod = _load_apply(env_dir, port)
+
+    sys.argv = [str(APPLY_PATH),
+                "--raw-message", "#A47C2 234.50",
+                "--sender-phone", "+19045550100"]
+    rc = mod.main()
+
+    assert rc == mod.EXIT_PUSH_FAILED
+    leads = json.loads((env_dir / "state" / "expense-bookkeeper" / "leads.json").read_text())
+    assert leads["leads"][0]["status"] == "PUSH_FAILED"
+    types = _audit_types(env_dir)
+    assert "expense_push_attempted" in types
+    assert "expense_push_failed" in types
+    failed = [e for e in _read_audit(env_dir) if e["type"] == "expense_push_failed"][-1]
+    assert failed["error_class"] == "invalid_request"
+    assert len(failed["error_message_redacted"]) <= 200
+    assert stub.requests
+
+
 def test_dedup_only_approve_without_force_audited(env_dir, bridge_server):
     """Re-review (c) MED test gap: dedup-only branch (under threshold but
     is a duplicate) must also audit + reply with template."""
