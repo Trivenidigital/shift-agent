@@ -1,5 +1,16 @@
 # Backlog — pending items
 
+## Active - Flyer source-edit identity QA hardening (2026-05-31)
+
+**Drift-check tag:** extends-Hermes
+
+Hermes-first summary: Hermes already owns WhatsApp media ingress, source/reference extraction, OCR/vision QA provider access, and the audit/deploy substrate. Flyer code owns the deterministic visual QA contract. This slice extends the existing `visible_wrong_brand_blockers` QA rule so source-edit recomposition cannot pass when a mixed-case foreign business masthead such as `Triveni EXPRESS` remains visible under the deterministic overlay.
+
+- [x] Verify live failure mode with F0112 reprocess: required Lakshmi facts pass QA while `Triveni EXPRESS` remains visible in OCR.
+- [x] Add red visual-QA regression for mixed-case org-suffix masthead.
+- [x] Implement minimal semantic visibility heuristic and focused tests.
+- [x] Run Claude review + local verification before PR/deploy.
+
 ## Autonomous production-readiness run — 2026-05-29 (Claude builder / Codex reviewer)
 
 **Operating-mode change (reversible):** disabled Codex *builder* timers on main-vps

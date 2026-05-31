@@ -571,6 +571,77 @@ def test_visual_qa_blocks_titlecase_wrong_business_masthead_even_with_profile_an
     assert "visible wrong business/brand: Other Restaurant" in report.blockers
 
 
+def test_visual_qa_blocks_mixed_case_org_suffix_wrong_masthead_even_with_profile_anchors(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    now = datetime(2026, 5, 31, tzinfo=timezone.utc)
+    project = FlyerProject(
+        project_id="F0112",
+        status="awaiting_final_approval",
+        customer_phone="+17329837841",
+        created_at=now,
+        updated_at=now,
+        original_message_id="m-source-edit-recomposed",
+        raw_request="Edit uploaded flyer/source artwork. Pick Any 3 Dosa replace with Pick Any 4 Dosa.",
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Specials", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="offer:0", label="Offer", value="Pick Any 4 Dosa", source="customer_text", required=True),
+        ],
+    )
+    artifact = _write_sidecar(
+        tmp_path,
+        "Triveni EXPRESS\n"
+        "indian Cafe & Bakery\n"
+        "THURSDAY DOSA NIGHT SPECIALS\n"
+        "Business: Lakshmi's Kitchen\n"
+        "Specials\n"
+        "Location: 90 Brybar Dr St Johns FL\n"
+        "Contact: +1 732 983 7841\n"
+        "Detail: Pick Any 4 Dosa",
+    )
+
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert report.status == "failed"
+    assert "visible wrong business/brand: Triveni Express" in report.blockers
+
+
+def test_visual_qa_allows_sentence_case_org_word_tagline_with_profile_anchors(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    now = datetime(2026, 5, 31, tzinfo=timezone.utc)
+    project = FlyerProject(
+        project_id="F0118",
+        status="awaiting_final_approval",
+        customer_phone="+17329837841",
+        created_at=now,
+        updated_at=now,
+        original_message_id="m-tagline",
+        raw_request="Create a daily specials flyer.",
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Daily Specials", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+        ],
+    )
+    artifact = _write_sidecar(
+        tmp_path,
+        "Lakshmi's Kitchen\n"
+        "Daily Specials\n"
+        "Made fresh in our kitchen\n"
+        "90 Brybar Dr St Johns FL\n"
+        "Contact: +1 732 983 7841",
+    )
+
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert report.status == "passed", report.blockers
+
+
 def test_visual_qa_blocks_source_contract_business_name_without_forbidden_substrings(tmp_path):
     from agents.flyer.visual_qa import run_visual_qa
 
