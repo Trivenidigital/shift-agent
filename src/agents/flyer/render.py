@@ -1253,6 +1253,67 @@ def _category_context(project: FlyerProject) -> str:
     ]).lower()
 
 
+def _positive_visual_style_context(text: str) -> str:
+    """Remove negated visual clauses before deterministic scene selection.
+
+    The full style preference is still passed to the model prompt. This helper
+    only keeps negated category words from becoming positive signals in the
+    deterministic campaign-scene/layout selector.
+    """
+    normalized = re.sub(r"\b(?:but|while)\b", ",", text or "", flags=re.IGNORECASE)
+    negated = re.compile(r"\b(?:no|not|without|avoid|exclude|don't|dont|do\s+not)\b", flags=re.IGNORECASE)
+    return " ".join(
+        part.strip()
+        for part in re.split(r"[,.;\n]+", normalized)
+        if part.strip() and not negated.search(part)
+    )
+
+
+def _visual_prompt_context(project: FlyerProject) -> str:
+    """Structured context for scene/layout decisions in image prompts.
+
+    `_category_context` intentionally includes the raw request because older
+    extraction helpers still need the literal customer instruction text. The
+    model prompt's visual routing should prefer the validated facts once they
+    exist, so negative instructions like "no food or festival visuals" do not
+    become positive scene-selection signals.
+    """
+    registered_category = _registered_business_category(project)
+    locked_facts = list(getattr(project, "locked_facts", []))
+    if not registered_category and not locked_facts:
+        return _category_context(project)
+
+    structured_parts = [
+        registered_category,
+        project.fields.event_or_business_name or "",
+        _positive_visual_style_context(project.fields.style_preference or ""),
+    ]
+    for fact in locked_facts:
+        fact_id = getattr(fact, "fact_id", "") or ""
+        value = str(getattr(fact, "value", "") or "").strip()
+        if not value:
+            continue
+        if (
+            fact_id
+            in {
+                "business_name",
+                "campaign_title",
+                "headline",
+                "tagline",
+                "pricing_structure",
+                "offer_price",
+                "promotion_end",
+            }
+            or fact_id.startswith(("offer:", "item:", "detail_"))
+        ):
+            structured_parts.append(value)
+
+    structured = " ".join(part for part in structured_parts if part).strip()
+    if structured:
+        return structured.lower()
+    return _category_context(project)
+
+
 def _context_has(context: str, terms: set[str]) -> bool:
     """Word-boundary-aware presence check for category-routing terms.
 
@@ -1272,12 +1333,12 @@ def _context_has(context: str, terms: set[str]) -> bool:
 
 
 def _is_food_or_grocery_project(project: FlyerProject) -> bool:
-    context = _category_context(project)
+    context = _visual_prompt_context(project)
     return _context_has(context, FOOD_CATEGORY_TERMS)
 
 
 def _design_direction(project: FlyerProject, concept_id: str) -> str:
-    context = _category_context(project)
+    context = _visual_prompt_context(project)
     if _context_has(context, SALON_CATEGORY_TERMS):
         return "modern US salon and beauty studio promotion, upscale but approachable, clean service offer cards, hair-service photography, polished local-business branding"
     if _context_has(context, TAX_CATEGORY_TERMS):
@@ -1336,8 +1397,9 @@ def _image_prompt(project: FlyerProject, *, concept_id: str, output_format: str,
     revision_block = _revision_notes_for_prompt(project)
     reference_instruction = _reference_preservation_instruction(project)
     sanitized_style = _sanitize_visual_context(project.fields.style_preference or "festive, clean, professional")
+    visual_context = _visual_prompt_context(project)
     campaign_scene_block = campaign_scene_prompt_block(
-        context=_category_context(project),
+        context=visual_context,
         business=_sanitize_visual_context(
             fact_value(project, "business_name", fallback=project.fields.event_or_business_name) or ""
         ),
@@ -1388,7 +1450,7 @@ Controlled customer copy:
 {_poster_copy_block(project)}
 
 Visual context for style and imagery:
-- theme/category: {_sanitize_visual_context(fact_value(project, "business_name", fallback=project.fields.event_or_business_name) or project.raw_request or "local SMB promotion")}
+- theme/category: {_sanitize_visual_context(fact_value(project, "business_name", fallback=project.fields.event_or_business_name) or visual_context or "local SMB promotion")}
 - style: {sanitized_style}
 
 Layout requirements:
