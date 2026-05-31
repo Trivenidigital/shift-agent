@@ -103,7 +103,10 @@ def _title_case(value: str) -> str:
     words = []
     for index, word in enumerate(_clean(value).split()):
         lowered = word.lower()
-        words.append(lowered if index and lowered in small else lowered.capitalize())
+        if index and lowered in small:
+            words.append(lowered)
+        else:
+            words.append("-".join(part.capitalize() for part in lowered.split("-")))
     return " ".join(words)
 
 
@@ -118,6 +121,13 @@ def _campaign_from_source(text: str) -> str:
             continue
         candidate = _clean(match.group(1))
         candidate = re.sub(r"\b(?:sale|specials?|promotion|promo|offer)\b.*$", lambda m: m.group(0), candidate, flags=re.IGNORECASE)
+        candidate = re.sub(
+            r"\s+\bon\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b$",
+            "",
+            candidate,
+            flags=re.IGNORECASE,
+        )
+        candidate = re.sub(r"\s+\bon\b$", "", candidate, flags=re.IGNORECASE)
         if candidate and len(candidate.split()) <= 6:
             return _title_case(candidate)
     return ""
@@ -128,7 +138,11 @@ def _pricing_from_source(text: str) -> str:
     if match:
         discount = re.sub(r"\s+", "", match.group("discount")).replace("%off", "% off")
         return f"All items {discount}"
-    match = re.search(r"\bany\s+item\s+\$?\s*(?P<price>\d+(?:\.\d{2})?)\b", text or "", flags=re.IGNORECASE)
+    match = re.search(
+        r"\bany\s+item\s+(?:priced\s+)?(?:at|for|is|=|:)?\s*\$?\s*(?P<price>\d+(?:\.\d{2})?)\b",
+        text or "",
+        flags=re.IGNORECASE,
+    )
     if match:
         return f"Any item ${match.group('price')}"
     return ""

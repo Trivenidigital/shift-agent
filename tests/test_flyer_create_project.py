@@ -272,6 +272,166 @@ def test_biryani_price_for_request_locks_real_items_not_instruction_fragments(tm
     assert "add price as" not in " ".join(fact["value"].lower() for fact in project["locked_facts"])
 
 
+def test_indochinese_famous_items_request_expands_menu_and_uses_profile_location(tmp_path, monkeypatch, capsys):
+    module = _load_script(monkeypatch)
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    _write_customer(
+        customers_path,
+        category="Indian Restaurant",
+        phone="+17329837841",
+        business_name="Lakshmi's Kitchen",
+        business_address="90 Brybar Dr St Johns FL",
+        primary_chat_id="201975216009469@lid",
+    )
+
+    raw_request = (
+        "Create a flyer for Indo-Chinese specials on Wednesday. "
+        "Include 8 famous Indo-Chinese items. Any item priced at $9.99. "
+        "Use Address and phone number stored with this business."
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+17329837841",
+        "--chat-id", "201975216009469@lid",
+        "--message-id", "m-indochinese",
+        "--raw-request", raw_request,
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+    facts = {fact["fact_id"]: fact for fact in project["locked_facts"]}
+
+    assert project["status"] == "intake_started"
+    assert project["fields"]["venue_or_location"] == "90 Brybar Dr St Johns FL"
+    assert facts["campaign_title"]["value"] == "Indo-Chinese Specials"
+    assert [facts[f"item:{idx}:name"]["value"] for idx in range(8)] == [
+        "Veg Manchurian",
+        "Gobi Manchurian",
+        "Chili Paneer",
+        "Hakka Noodles",
+        "Schezwan Fried Rice",
+        "Chili Garlic Noodles",
+        "Manchow Soup",
+        "Spring Rolls",
+    ]
+    assert [facts[f"item:{idx}:price"]["value"] for idx in range(8)] == ["$9.99"] * 8
+    assert "$9" not in project["fields"]["venue_or_location"]
+
+
+def test_discount_offer_does_not_become_menu_item_prices(tmp_path, monkeypatch, capsys):
+    module = _load_script(monkeypatch)
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    _write_customer(
+        customers_path,
+        category="Indian Restaurant",
+        phone="+17329837841",
+        business_name="Lakshmi's Kitchen",
+        business_address="90 Brybar Dr St Johns FL",
+        primary_chat_id="201975216009469@lid",
+    )
+
+    raw_request = (
+        "Create a flyer for evening snacks sale. "
+        "Include samosa and idli. All items 5-10% off. Use saved address and phone."
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+17329837841",
+        "--chat-id", "201975216009469@lid",
+        "--message-id", "m-discount-not-price",
+        "--raw-request", raw_request,
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+    facts = {fact["fact_id"]: fact for fact in project["locked_facts"]}
+
+    assert facts["item:0:name"]["value"] == "samosa"
+    assert facts["item:1:name"]["value"] == "idli"
+    assert "item:0:price" not in facts
+    assert facts["pricing_structure"]["value"] == "All items 5-10% off"
+
+
+def test_explicit_item_prices_outrank_famous_item_expansion(tmp_path, monkeypatch, capsys):
+    module = _load_script(monkeypatch)
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    _write_customer(
+        customers_path,
+        category="Indian Restaurant",
+        phone="+17329837841",
+        business_name="Lakshmi's Kitchen",
+        business_address="90 Brybar Dr St Johns FL",
+        primary_chat_id="201975216009469@lid",
+    )
+
+    raw_request = (
+        "Create a flyer for Indo-Chinese specials. Include 8 famous Indo-Chinese items. "
+        "Chili Chicken $12.99, Hakka Noodles $10.99. Use saved address and phone."
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+17329837841",
+        "--chat-id", "201975216009469@lid",
+        "--message-id", "m-explicit-indochinese",
+        "--raw-request", raw_request,
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+    facts = {fact["fact_id"]: fact for fact in project["locked_facts"]}
+
+    assert facts["item:0:name"]["value"] == "Chili Chicken"
+    assert facts["item:0:price"]["value"] == "$12.99"
+    assert facts["item:1:name"]["value"] == "Hakka Noodles"
+    assert facts["item:1:price"]["value"] == "$10.99"
+    assert "Veg Manchurian" not in {fact["value"] for fact in project["locked_facts"]}
+
+
+def test_indochinese_famous_item_expansion_supports_ten_items(tmp_path, monkeypatch, capsys):
+    module = _load_script(monkeypatch)
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    _write_customer(
+        customers_path,
+        category="Indian Restaurant",
+        phone="+17329837841",
+        business_name="Lakshmi's Kitchen",
+        business_address="90 Brybar Dr St Johns FL",
+        primary_chat_id="201975216009469@lid",
+    )
+
+    raw_request = (
+        "Create a flyer for Indo-Chinese specials. Include 10 famous Indo-Chinese items. "
+        "Any item priced at $9.99. Use saved address and phone."
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+17329837841",
+        "--chat-id", "201975216009469@lid",
+        "--message-id", "m-indochinese-ten",
+        "--raw-request", raw_request,
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+    facts = {fact["fact_id"]: fact for fact in project["locked_facts"]}
+
+    assert facts["item:8:name"]["value"] == "American Chopsuey"
+    assert facts["item:9:name"]["value"] == "Chili Chicken"
+    assert facts["item:9:price"]["value"] == "$9.99"
+
+
 def test_profile_hydration_uses_chat_id_when_phone_does_not_match(tmp_path, monkeypatch, capsys):
     module = _load_script(monkeypatch)
     customers_path = tmp_path / "customers.json"

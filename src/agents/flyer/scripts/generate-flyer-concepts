@@ -51,9 +51,9 @@ try:
 except ImportError:
     from agents.flyer.reference_extract import build_reference_extraction_provider, extract_reference  # noqa: E402
 try:
-    from flyer_render import FlyerRenderError, build_asset_manifest, next_asset_number, render_concept_previews, render_source_edit_preview  # type: ignore  # noqa: E402
+    from flyer_render import FlyerRenderError, build_asset_manifest, build_image_generation_prompt, build_source_edit_generation_prompt, next_asset_number, render_concept_previews, render_source_edit_preview  # type: ignore  # noqa: E402
 except ImportError:
-    from agents.flyer.render import FlyerRenderError, build_asset_manifest, next_asset_number, render_concept_previews, render_source_edit_preview  # noqa: E402
+    from agents.flyer.render import FlyerRenderError, build_asset_manifest, build_image_generation_prompt, build_source_edit_generation_prompt, next_asset_number, render_concept_previews, render_source_edit_preview  # noqa: E402
 try:
     from flyer_visual_qa import run_visual_qa, write_visual_qa_report  # type: ignore  # noqa: E402
 except ImportError:
@@ -216,6 +216,22 @@ def _draft_manual_review_detail(exc: Exception, *, attempts: int, retryable_matc
 
 def _sha256_hex(text: str) -> str:
     return hashlib.sha256((text or "").encode("utf-8", errors="replace")).hexdigest()
+
+
+def _concept_prompt_metadata(project, *, concept_id: str, source_edit_requested: bool = False) -> str:
+    if source_edit_requested:
+        prompt = build_source_edit_generation_prompt(project)
+    else:
+        prompt = build_image_generation_prompt(
+            project,
+            concept_id=concept_id,
+            output_format="concept_preview",
+            size=(1080, 1350),
+        )
+    if len(prompt) <= 4000:
+        return prompt
+    suffix = "\n[truncated metadata; renderer used the full structured prompt]"
+    return prompt[: 4000 - len(suffix)] + suffix
 
 
 def _audit_append(path: Path, entry) -> None:
@@ -677,7 +693,11 @@ def main() -> int:
                 title=title,
                 style_summary=summary,
                 preview_asset_id=asset.asset_id,
-                prompt=current.raw_request,
+                prompt=_concept_prompt_metadata(
+                    current,
+                    concept_id=concept_id,
+                    source_edit_requested=source_edit_requested,
+                ),
                 created_at=now,
             )
             for asset, (concept_id, title, summary) in zip(assets, concept_meta)

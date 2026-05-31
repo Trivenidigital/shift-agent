@@ -85,3 +85,15 @@ def test_provider_grounding_requires_exact_money_amount_tokens():
     brief = build_semantic_flyer_brief(FlyerRequestFields(), raw, provider=provider)
 
     assert brief.pricing_structure == "Any item $17.99"
+
+
+def test_semantic_brief_strips_weekday_from_campaign_title_and_preserves_hyphen_case():
+    raw = (
+        "Create a flyer for Indo-Chinese specials on Wednesday. "
+        "Include 8 famous Indo-Chinese items. Any item priced at $9.99."
+    )
+
+    brief = build_semantic_flyer_brief(FlyerRequestFields(), raw)
+
+    assert brief.campaign_title == "Indo-Chinese Specials"
+    assert brief.pricing_structure == "Any item $9.99"

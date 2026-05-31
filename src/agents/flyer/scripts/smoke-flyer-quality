@@ -19,13 +19,26 @@ sys.path.insert(0, str(SRC_ROOT))
 
 from schemas import Config, FlyerConcept, FlyerProject, FlyerProjectStore, FlyerRequestFields  # noqa: E402
 try:
-    from flyer_render import build_asset_manifest, inspect_rendered_asset, render_concept_previews, render_final_package, validate_text_manifest_file  # type: ignore  # noqa: E402
+    from flyer_render import build_asset_manifest, build_image_generation_prompt, inspect_rendered_asset, render_concept_previews, render_final_package, validate_text_manifest_file  # type: ignore  # noqa: E402
 except ImportError:
-    from agents.flyer.render import build_asset_manifest, inspect_rendered_asset, render_concept_previews, render_final_package, validate_text_manifest_file  # noqa: E402
+    from agents.flyer.render import build_asset_manifest, build_image_generation_prompt, inspect_rendered_asset, render_concept_previews, render_final_package, validate_text_manifest_file  # noqa: E402
 try:
     from flyer_visual_qa import run_visual_qa, write_visual_qa_report  # type: ignore  # noqa: E402
 except ImportError:
     from agents.flyer.visual_qa import run_visual_qa, write_visual_qa_report  # noqa: E402
+
+
+def _concept_prompt_metadata(project: FlyerProject, *, concept_id: str) -> str:
+    prompt = build_image_generation_prompt(
+        project,
+        concept_id=concept_id,
+        output_format="concept_preview",
+        size=(1080, 1350),
+    )
+    if len(prompt) <= 4000:
+        return prompt
+    suffix = "\n[truncated metadata; renderer used the full structured prompt]"
+    return prompt[: 4000 - len(suffix)] + suffix
 
 
 def _project() -> FlyerProject:
@@ -206,7 +219,7 @@ def main() -> int:
                     title="Best Design",
                     style_summary="Smoke concept",
                     preview_asset_id=preview_assets[0].asset_id,
-                    prompt=project.raw_request,
+                    prompt=_concept_prompt_metadata(project, concept_id="C1"),
                     created_at=datetime.now(timezone.utc),
                     selected_at=datetime.now(timezone.utc),
                 )

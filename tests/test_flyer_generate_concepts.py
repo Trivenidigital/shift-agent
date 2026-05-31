@@ -204,6 +204,96 @@ def test_generate_extracts_pending_reference_facts_before_render(monkeypatch, tm
     assert persisted["status"] == "awaiting_final_approval"
 
 
+def test_generate_persists_structured_generation_prompt_not_raw_request(monkeypatch, tmp_path, capsys):
+    module = _load_script(monkeypatch)
+    from schemas import FlyerVisualQAReport  # noqa: E402
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    state_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    rendered = asset_dir / "F0120-C1-preview.png"
+    now = datetime(2026, 5, 31, tzinfo=timezone.utc).isoformat()
+    raw = (
+        "Create a flyer for Indo-Chinese specials on Wednesday. Include 8 famous "
+        "Indo-Chinese items. Any item priced at $9.99. Use Address and phone number stored."
+    )
+    state_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_sequence": 122,
+        "projects": [{
+            "project_id": "F0120",
+            "status": "intake_started",
+            "customer_phone": "+17329837841",
+            "created_at": now,
+            "updated_at": now,
+            "original_message_id": "m-indochinese",
+            "raw_request": raw,
+            "fields": {
+                "event_or_business_name": "Indo-Chinese Specials",
+                "venue_or_location": "90 Brybar Dr St Johns FL",
+                "contact_info": "+17329837841",
+                "notes": raw,
+                "style_preference": "professional local food menu flyer",
+            },
+            "locked_facts": [
+                {"fact_id": "business_name", "label": "Business", "value": "Lakshmi's Kitchen", "source": "customer_profile", "required": True},
+                {"fact_id": "campaign_title", "label": "Campaign", "value": "Indo-Chinese Specials", "source": "customer_text", "required": True},
+                {"fact_id": "location", "label": "Location", "value": "90 Brybar Dr St Johns FL", "source": "customer_profile", "required": True},
+                {"fact_id": "contact_phone", "label": "Contact", "value": "+17329837841", "source": "customer_profile", "required": True},
+                {"fact_id": "item:0:name", "label": "Item", "value": "Veg Manchurian", "source": "customer_text", "required": True},
+                {"fact_id": "item:0:price", "label": "Price", "value": "$9.99", "source": "customer_text", "required": True},
+            ],
+        }],
+    }), encoding="utf-8")
+
+    def fake_render(*_args, **_kwargs):
+        rendered.write_bytes(b"rendered image")
+        return [types.SimpleNamespace(
+            path=rendered,
+            kind="concept_preview",
+            output_format="concept_preview",
+            width=1080,
+            height=1350,
+            concept_id="C1",
+        )]
+
+    def fake_qa(project, path, *, output_format, asset_id):
+        return FlyerVisualQAReport(
+            project_id=project.project_id,
+            asset_id=asset_id,
+            artifact_path=str(path),
+            artifact_sha256="b" * 64,
+            project_version=project.version,
+            output_format=output_format,
+            provider="test",
+            qa_source="sidecar_test",
+            status="passed",
+            checked_at=datetime(2026, 5, 31, tzinfo=timezone.utc),
+        )
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts",
+        "--project-id", "F0120",
+        "--state-path", str(state_path),
+        "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+    ])
+
+    assert module.main() == 0
+    capsys.readouterr()
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    prompt = persisted["concepts"][0]["prompt"]
+
+    assert prompt != raw
+    assert "Controlled customer copy:" in prompt
+    assert "Business/brand: Lakshmi's Kitchen" in prompt
+    assert "Veg Manchurian - $9.99" in prompt
+
+
 def test_generate_deferred_source_edit_template_extracts_source_contract_before_render(monkeypatch, tmp_path, capsys):
     module = _load_script(monkeypatch)
     from schemas import (  # noqa: E402
@@ -314,6 +404,8 @@ def test_generate_deferred_source_edit_template_extracts_source_contract_before_
     assert "Lunch Menu" in values
     assert "Dinner Combo" in values
     assert persisted["status"] == "awaiting_final_approval"
+    assert "Edit the attached flyer image" in persisted["concepts"][0]["prompt"]
+    assert "Create a complete, finished customer-ready poster flyer" not in persisted["concepts"][0]["prompt"]
     audit_rows = [json.loads(line) for line in audit_log_path.read_text(encoding="utf-8").splitlines()]
     assert audit_rows[0]["type"] == "flyer_source_contract_extracted"
     assert audit_rows[0]["role"] == "source_edit_template"

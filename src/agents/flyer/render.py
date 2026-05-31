@@ -903,6 +903,8 @@ def _poster_layout_requirements(project: FlyerProject) -> str:
             return reserve + (
                 "- Use appetizing food photography and a premium restaurant ambiance (warm lighting, "
                 "garnished dishes, tasteful gold/green/red accents, ornamental texture).\n"
+                "- Use product-specific close-up food imagery based on the listed menu items. "
+                "Avoid generic buffet, dining-family, or unrelated stock-food scenes.\n"
                 "- Match the attached reference flyer's premium retail feel (palette, density, motifs) "
                 "when a reference is provided — but as background imagery, not text."
             )
@@ -1482,6 +1484,23 @@ Quality bar:
 """
 
 
+def build_image_generation_prompt(
+    project: FlyerProject,
+    *,
+    concept_id: str,
+    output_format: str,
+    size: tuple[int, int] | None,
+    repair_instruction: str = "",
+) -> str:
+    return _image_prompt(
+        project,
+        concept_id=concept_id,
+        output_format=output_format,
+        size=size,
+        repair_instruction=repair_instruction,
+    )
+
+
 def _reference_preservation_instruction(project: FlyerProject) -> str:
     if not [*_active_brand_assets(project), *_project_reference_assets(project)]:
         return "- none"
@@ -1975,6 +1994,10 @@ Rules:
 - Remove stale text only when requested; keep all other readable text as close as possible to the source.
 - Return one finished customer-ready flyer image with the edited text integrated into the source artwork.
 """
+
+
+def build_source_edit_generation_prompt(project: FlyerProject) -> str:
+    return _source_edit_prompt(project)
 
 
 def _openai_edit_size(size: tuple[int, int] | None) -> str:

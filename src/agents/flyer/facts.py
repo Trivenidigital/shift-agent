@@ -221,13 +221,14 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
             or lowered.endswith(" and")
             or lowered in {"add price as", "price as", "price is", "price for"}
             or re.search(r"\b(?:add|set|use)\s+price\b|\bprice\s+(?:as|is|for)\b", lowered)
+            or re.search(r"\bprice\s+(?:any|every|each|all)\s+items?\b", lowered)
         ):
             return
         if category_suffix and category_suffix.lower() not in lowered:
             name = f"{name.title()} {category_suffix}"
         if name.lower() in {"a", "an", "the", "and", "with", "include", "includes", "for", "on", "at", "each", "plate", "pc", "pcs", "piece", "pieces"}:
             return
-        if name.lower() in {"any item", "all item", "all items", "every item", "each item"}:
+        if name.lower() in {"any item", "all item", "all items", "every item", "each item", "priced at"}:
             return
         if promo_name.search(name) or bad_context.search(name):
             return
@@ -264,14 +265,61 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
 
 
 def _generic_item_price(text: str) -> str:
+    patterns = (
+        r"\bprice\s+(?:any|every|each|all)\s+(?:item|items?)\s*\$?\s*(?P<price>\d+(?:\.\d{2})?)(?!\s*[%\-])\b",
+        r"\b(?:any|every|each|all)\s+(?:item|items?)\s+(?:priced\s+)?(?:at|for|is|=|:)\s*\$\s*(?P<price>\d+(?:\.\d{2})?)(?!\s*[%\-])\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text or "", flags=re.IGNORECASE)
+        if match:
+            return f"${match.group('price')}"
+    return ""
+
+
+FAMOUS_ITEM_SETS: tuple[tuple[re.Pattern[str], list[str]], ...] = (
+    (
+        re.compile(r"\bindo[-\s]?chinese\b", re.IGNORECASE),
+        [
+            "Veg Manchurian",
+            "Gobi Manchurian",
+            "Chili Paneer",
+            "Hakka Noodles",
+            "Schezwan Fried Rice",
+            "Chili Garlic Noodles",
+            "Manchow Soup",
+            "Spring Rolls",
+            "American Chopsuey",
+            "Chili Chicken",
+        ],
+    ),
+)
+
+
+def _requested_famous_item_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFact]:
     match = re.search(
-        r"\bprice\s+(?:any|every|each|all)\s+(?:item|items?)\s*\$?\s*(?P<price>\d+(?:\.\d{2})?)\b",
+        r"\binclude\s+(?P<count>\d{1,2})\s+(?:famous|popular|top)\s+(?P<category>[A-Za-z][A-Za-z\s-]{2,50}?)\s+items?\b",
         text or "",
         flags=re.IGNORECASE,
     )
     if not match:
-        return ""
-    return f"${match.group('price')}"
+        return []
+    count = max(1, min(10, int(match.group("count"))))
+    category = match.group("category")
+    generic_price = _generic_item_price(text)
+    for pattern, names in FAMOUS_ITEM_SETS:
+        if not pattern.search(category):
+            continue
+        facts: list[FlyerLockedFact] = []
+        for index, name in enumerate(names[:count]):
+            name_fact = _fact(f"item:{index}:name", "Item", name, "customer_text", message_id=message_id)
+            if name_fact:
+                facts.append(name_fact)
+            if generic_price:
+                price_fact = _fact(f"item:{index}:price", "Price", generic_price, "customer_text", message_id=message_id)
+                if price_fact:
+                    facts.append(price_fact)
+        return facts
+    return []
 
 
 def _offer_price_fact(text: str, *, message_id: str = "") -> FlyerLockedFact | None:
@@ -479,10 +527,17 @@ def extract_text_facts(
     if parsed_schedule:
         facts.append(parsed_schedule)
     item_name_facts = _item_name_facts(text, message_id=message_id)
+    famous_item_facts = _requested_famous_item_facts(text, message_id=message_id)
     generic_price = _generic_item_price(text)
     paired_item_price_facts = _item_price_facts(text, message_id=message_id)
     item_price_facts = paired_item_price_facts
-    if generic_price and item_name_facts:
+    if paired_item_price_facts:
+        if item_name_facts:
+            item_name_facts = _offset_standalone_item_names(item_name_facts, paired_item_price_facts)
+    elif famous_item_facts:
+        item_name_facts = []
+        item_price_facts = famous_item_facts
+    elif generic_price and item_name_facts:
         item_price_facts = []
         for name_fact in item_name_facts:
             match = re.match(r"^item:(?P<index>\d+):name$", name_fact.fact_id)
@@ -497,8 +552,6 @@ def extract_text_facts(
             )
             if price_fact:
                 item_price_facts.append(price_fact)
-    elif paired_item_price_facts and item_name_facts:
-        item_name_facts = _offset_standalone_item_names(item_name_facts, paired_item_price_facts)
     facts.extend(item_price_facts)
     facts.extend(item_name_facts)
     return merge_locked_facts(facts)
