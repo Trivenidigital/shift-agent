@@ -87,9 +87,6 @@ _FAMILY_DISCOVERY_SIGNALS: frozenset[str] = frozenset({
     "pongal", "onam", "eid", "ramadan", "christmas", "easter", "new year",
     # target audience
     "family", "families", "kids", "children", "community", "together",
-    # food / hospitality business type
-    "restaurant", "grocery", "catering", "bakery", "cafe", "sweets", "thali",
-    "dosa", "biryani", "buffet", "menu", "dinner", "lunch", "brunch",
 })
 _HUMAN_BILLBOARD_SIGNALS: frozenset[str] = frozenset({
     # promotion type / conversion goal

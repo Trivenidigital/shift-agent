@@ -33,9 +33,9 @@ try:
 except ImportError:  # pragma: no cover - src layout fallback
     from agents.flyer.facts import fact_value
 try:
-    from flyer_campaign_scene_prompts import campaign_scene_prompt_block  # type: ignore
+    from flyer_campaign_scene_prompts import campaign_scene_prompt_block, select_campaign_scene  # type: ignore
 except ImportError:  # pragma: no cover - src layout fallback
-    from agents.flyer.campaign_scene_prompts import campaign_scene_prompt_block
+    from agents.flyer.campaign_scene_prompts import campaign_scene_prompt_block, select_campaign_scene
 
 
 class FlyerRenderError(RuntimeError):
@@ -1336,6 +1336,13 @@ def _context_has(context: str, terms: set[str]) -> bool:
 
 def _is_food_or_grocery_project(project: FlyerProject) -> bool:
     context = _visual_prompt_context(project)
+    if any(_context_has(context, terms) for terms in (
+        SALON_CATEGORY_TERMS,
+        TAX_CATEGORY_TERMS,
+        CLEANING_CATEGORY_TERMS,
+        MARKETING_CATEGORY_TERMS,
+    )):
+        return False
     return _context_has(context, FOOD_CATEGORY_TERMS)
 
 
@@ -1363,6 +1370,27 @@ def _quality_bar(project: FlyerProject) -> str:
     if _is_food_or_grocery_project(project):
         return "- Strong hierarchy, appetizing food visuals when food is relevant, tasteful cultural warmth only when it fits the customer, no empty beige space."
     return "- Strong hierarchy, category-appropriate service visuals, modern local-business polish, and category-safe styling unless a different theme is explicitly requested."
+
+
+def _campaign_scene_block_for_project(project: FlyerProject, *, context: str, business: str, offer: str) -> str:
+    plan = _poster_copy_plan(project)
+    selected_scene = select_campaign_scene(context)
+    explicit_family_scene = selected_scene.key == "family_discovery"
+    if _background_only_eligible(project) and plan.items and _is_food_or_grocery_project(project) and not explicit_family_scene:
+        return (
+            "Campaign scene direction (menu product close-up):\n"
+            f"- Show appetizing close-up product photography for {business or 'the business'}'s listed menu items, "
+            "with the food/snacks as the hero background.\n"
+            "- Do not show a generic family, community dining table, buffet spread, or unrelated restaurant scene; "
+            "the listed items must drive the visual.\n"
+            f"- The scene supports the offer ({offer or 'the featured menu offer'}) while preserving calm reserved zones "
+            "for the system-composited copy."
+        )
+    return campaign_scene_prompt_block(
+        context=context,
+        business=business,
+        offer=offer,
+    )
 
 
 def _project_reference_assets(project: FlyerProject):
@@ -1400,7 +1428,8 @@ def _image_prompt(project: FlyerProject, *, concept_id: str, output_format: str,
     reference_instruction = _reference_preservation_instruction(project)
     sanitized_style = _sanitize_visual_context(project.fields.style_preference or "festive, clean, professional")
     visual_context = _visual_prompt_context(project)
-    campaign_scene_block = campaign_scene_prompt_block(
+    campaign_scene_block = _campaign_scene_block_for_project(
+        project,
         context=visual_context,
         business=_sanitize_visual_context(
             fact_value(project, "business_name", fallback=project.fields.event_or_business_name) or ""
