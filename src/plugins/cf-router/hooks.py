@@ -783,9 +783,11 @@ def _try_flyer_primary_intercept(
                     PROJECT_ACTIONS, "clarification.request",
                 ),
             )
+        generation_failed = str(ack_err or "").startswith("concept_generation_failed:")
         actions.audit_intercepted(
-            reason="flyer_primary_project_created", chat_id=chat_id,
-            subprocess_rc=0 if ack_ok else 3,
+            reason="flyer_primary_failed" if generation_failed or not ack_ok else "flyer_primary_project_created",
+            chat_id=chat_id,
+            subprocess_rc=0 if ack_ok and not generation_failed else (2 if generation_failed else 3),
             detail=(
                 f"project_id={project_id}; sender_role={role}; existing=true; "
                 f"ack_message_id={outbound_message_id}; ack_error={ack_err[:300]}"
@@ -1076,9 +1078,11 @@ def _try_flyer_primary_intercept(
                 PROJECT_ACTIONS, "clarification.request",
             ),
         )
+    generation_failed = str(ack_err or "").startswith("concept_generation_failed:")
     actions.audit_intercepted(
-        reason="flyer_primary_project_created", chat_id=chat_id,
-        subprocess_rc=0 if ack_ok else 3,
+        reason="flyer_primary_failed" if generation_failed or not ack_ok else "flyer_primary_project_created",
+        chat_id=chat_id,
+        subprocess_rc=0 if ack_ok and not generation_failed else (2 if generation_failed else 3),
         detail=(
             f"project_id={project_id}; sender_role={role}; "
             f"ack_message_id={outbound_message_id}; ack_error={ack_err[:300]}{brief_detail}"
@@ -1264,10 +1268,11 @@ def _try_flyer_reference_scope_choice_intercept(text: str, chat_id: str, event: 
                 PROJECT_ACTIONS, "clarification.request",
             ),
         )
+    generation_failed = str(ack_err or "").startswith("concept_generation_failed:")
     actions.audit_intercepted(
-        reason="flyer_primary_project_created",
+        reason="flyer_primary_failed" if generation_failed or not ack_ok else "flyer_primary_project_created",
         chat_id=chat_id,
-        subprocess_rc=0 if ack_ok else 3,
+        subprocess_rc=0 if ack_ok and not generation_failed else (2 if generation_failed else 3),
         detail=(
             f"project_id={project_id}; sender_role={role}; source={source}; "
             f"ack_message_id={outbound_message_id}; ack_error={ack_err[:300]}"
@@ -3203,7 +3208,7 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         actions.audit_intercepted(
             reason="flyer_primary_project_created" if gen_ok and ack_ok else "flyer_primary_failed",
             chat_id=chat_id,
-            subprocess_rc=0 if gen_ok and ack_ok else 2,
+            subprocess_rc=0 if gen_ok and ack_ok else (2 if not gen_ok else 3),
             detail=(
                 f"project_id={project_id}; intake_ready=true; sender_role={role}; "
                 f"ack_message_id={outbound_message_id}; ack_error={ack_err[:300]}"
