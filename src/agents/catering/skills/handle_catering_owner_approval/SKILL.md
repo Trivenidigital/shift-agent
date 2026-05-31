@@ -17,10 +17,10 @@ to LLM substrate).
 
 ## Step 1 — Parse the owner's reply
 
-Extract the code with format `#[A-HJ-NP-Z2-9]{5}`:
+Extract the code with format `#[A-HJKMNPQR-Z2-9]{5}`:
 
 ```bash
-CODE=$(echo "<message_text>" | grep -oE "#[A-HJ-NP-Z2-9]{5}" | head -1)
+CODE=$(echo "<message_text>" | grep -oE "#[A-HJKMNPQR-Z2-9]{5}" | head -1)
 ```
 
 If no code matched: ask the owner to include the code from the approval

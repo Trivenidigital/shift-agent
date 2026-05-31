@@ -69,8 +69,10 @@ re.compile(r'\bcode_verifier=[A-Za-z0-9_\-\.]{16,}', re.IGNORECASE),
 
 ### V02-7 — Pre-existing dispatcher regex inconsistency
 
+**Status:** done. Dispatcher, cf-router, catering apply/finalize, audit schema, replay-helper approval-code regex surfaces, and generator `_CODE_ALPHA` literals now use canonical `#[A-HJKMNPQR-Z2-9]{5}` / `ABCDEFGHJKMNPQRSTUVWXYZ23456789` with a static parity test in `tests/test_schemas.py`.
+
 **From:** reviewer-a (multiple stages)
-**Current:** `dispatch_shift_agent/SKILL.md:79` uses `#[A-HJ-NP-Z2-9]{5}` while canonical alphabet in `schemas.py:843` is `#[A-HJKMNPQR-Z2-9]{5}`. Both are functionally restrictive enough; the dispatcher's regex is stricter near the seam (excludes `K`/`M`).
+**Current:** closed. Historical `dispatch_shift_agent/SKILL.md` and adjacent code/doc surfaces used `#[A-HJ-NP-Z2-9]{5}` while canonical `ProposalCode` uses `#[A-HJKMNPQR-Z2-9]{5}`.
 
 **Why deferred:** needs a scoped pass across all dispatcher mentions + handler skills + tests, not piggybacking on a 1-line jq fix.
 
