@@ -21,8 +21,11 @@ import sys
 from pathlib import Path
 
 # BEGIN shift-agent-sender-id
+SRC_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, "/opt/shift-agent")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # for tests against src/
+sys.path.insert(0, str(SRC_ROOT / "platform"))
+sys.path.insert(0, str(SRC_ROOT))
+sys.path.insert(0, str(SRC_ROOT / "agents" / "shift"))  # for tests against src/
 
 from safe_io import flock, atomic_write_text, atomic_write_json, ndjson_append, customer_now  # noqa: E402
 from schemas import Roster, Config, LidLearned, LogEntry  # noqa: E402

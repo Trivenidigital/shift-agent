@@ -109,6 +109,9 @@ def mods(state_env):
     actions_mod.ROSTER_PATH = state_env["roster_path"]
     actions_mod.LOG_PATH = state_env["log_path"]
     actions_mod.THROTTLE_PATH = state_env["throttle_path"]
+    actions_mod.PYTHON_BIN = Path(sys.executable)
+    actions_mod.HANDLE_FLYER_INTAKE_BIN = REPO / "src" / "agents" / "flyer" / "scripts" / "handle-flyer-intake"
+    actions_mod.HANDLE_FLYER_ONBOARDING_BIN = REPO / "src" / "agents" / "flyer" / "scripts" / "handle-flyer-onboarding"
     # Override PLATFORM_DIR so audit_intercepted picks up the in-repo
     # schemas.py (which has CfRouterIntercepted), not the deployed one.
     actions_mod.PLATFORM_DIR = PLATFORM_DIR
