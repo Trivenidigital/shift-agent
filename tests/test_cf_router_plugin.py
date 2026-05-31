@@ -1995,6 +1995,45 @@ class TestF7PrimaryMode:
         mock_finalize.assert_called_once_with("17329837841@s.whatsapp.net", "F0018", "approve-msg-1")
         mock_update.assert_not_called()
 
+    def test_active_flyer_approve_outranks_stale_intake_session(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+17329837841", "customer")), \
+             patch.object(actions_mod, "find_flyer_customer_by_sender",
+                          return_value={"customer_id": "CUST0001", "status": "trial"}), \
+             patch.object(actions_mod, "find_flyer_intake_session_by_sender",
+                          return_value={"status": "choosing_language", "source": "quick_flyer"}), \
+             patch.object(actions_mod, "find_active_flyer_project_by_sender",
+                          return_value={
+                              "project_id": "F0117",
+                              "status": "awaiting_final_approval",
+                              "concepts": [{"concept_id": "C1"}],
+                          }), \
+             patch.object(actions_mod, "trigger_flyer_intake",
+                          return_value=(True, "intake", {
+                              "handled": True,
+                              "reply_text": "Please choose one of these languages",
+                              "action": "choose_language",
+                          })) as mock_intake, \
+             patch.object(actions_mod, "finalize_and_send_flyer",
+                          return_value=(True, "finalized")) as mock_finalize:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    text="APPROVE",
+                    chat_id="201975216009469@lid",
+                    message_id="approve-msg-2",
+                ),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router flyer active: finalized F0117",
+        }
+        mock_intake.assert_not_called()
+        mock_finalize.assert_called_once_with("201975216009469@lid", "F0117", "approve-msg-2")
+
     def test_explicit_flyer_intent_starts_new_work_over_active_project(self, mods, state_env):
         hooks_mod, actions_mod = mods
         _seed_config(state_env, flyer_enabled=True)

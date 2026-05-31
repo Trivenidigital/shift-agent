@@ -281,6 +281,10 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
             regulated_account_result = _try_flyer_regulated_account_guard(text, chat_id, event)
             if regulated_account_result is not None:
                 return regulated_account_result
+            if actions.is_flyer_approval_text(text) or actions.is_flyer_send_now_intent(text):
+                flyer_result = _try_flyer_active_project_intercept(text, chat_id, event, media_path)
+                if flyer_result is not None:
+                    return flyer_result
             intake_result = _try_flyer_intake_intercept(text, chat_id, event, media_path=media_path)
             if intake_result is not None:
                 return intake_result
