@@ -477,11 +477,12 @@ echo "✓ creative_catering_proposals SKILL present"
 
 # 3. Config loads and validates (shift-agent app config at /opt/shift-agent/config.yaml)
 if ! "$PY" -c "
-import sys, yaml
+import sys
+from pathlib import Path
 sys.path.insert(0, '/opt/shift-agent')
 from schemas import Config
-with open('/opt/shift-agent/config.yaml') as f:
-    cfg = Config.model_validate(yaml.safe_load(f))
+from safe_io import load_yaml_model
+cfg = load_yaml_model(Path('/opt/shift-agent/config.yaml'), Config)
 print(f'config ok: customer={cfg.customer.name}, tz={cfg.customer.timezone}')
 " ; then
     echo "FAIL: config.yaml does not validate against Config schema"
@@ -546,11 +547,14 @@ fi
 # 5. identify-sender works on the owner's own phone
 # Use Python to parse YAML; bash+awk+tr quoting here is fragile.
 OWNER_PHONE=$("$PY" -c "
-import yaml, sys
+import sys
+from pathlib import Path
+sys.path.insert(0, '/opt/shift-agent')
+from schemas import Config
+from safe_io import load_yaml_model
 try:
-    with open('/opt/shift-agent/config.yaml') as f:
-        cfg = yaml.safe_load(f)
-    print(cfg.get('owner', {}).get('phone', ''))
+    cfg = load_yaml_model(Path('/opt/shift-agent/config.yaml'), Config)
+    print(cfg.owner.phone)
 except Exception as e:
     sys.stderr.write(f'(owner phone extraction failed: {e})')
 " 2>/dev/null)
@@ -585,10 +589,13 @@ echo "✓ render-coverage-template works"
 # alerts are silenced. Real-credential VPS still get a real-channel probe
 # and fail-close on credential breakage.
 PUSHOVER_KEY=$("$PY" -c "
-import sys, yaml; sys.path.insert(0, '/opt/shift-agent')
-with open('/opt/shift-agent/config.yaml') as f:
-    cfg = yaml.safe_load(f) or {}
-print((cfg.get('alerting') or {}).get('pushover_user_key', ''))
+import sys
+from pathlib import Path
+sys.path.insert(0, '/opt/shift-agent')
+from schemas import Config
+from safe_io import load_yaml_model
+cfg = load_yaml_model(Path('/opt/shift-agent/config.yaml'), Config)
+print(cfg.alerting.pushover_user_key)
 " 2>/dev/null)
 if [[ "$PUSHOVER_KEY" == MUTED_* ]]; then
     echo "⚠  Pushover credentials muted (key=$PUSHOVER_KEY) — skipping channel probe (dev VPS)"
@@ -809,10 +816,12 @@ _freshness_warn() {  # $1 label  $2 artifact path  $3 max-age hours  $4 enabled(
 }
 _agent_enabled() {  # $1 = dotted cfg attr (e.g. eod.enabled) -> prints 0/1
     "$PY" -c "
-import sys, yaml
+import sys
+from pathlib import Path
 sys.path.insert(0, '/opt/shift-agent')
 from schemas import Config
-cfg = Config.model_validate(yaml.safe_load(open('/opt/shift-agent/config.yaml')) or {})
+from safe_io import load_yaml_model
+cfg = load_yaml_model(Path('/opt/shift-agent/config.yaml'), Config)
 obj = cfg
 for part in '$1'.split('.'):
     obj = getattr(obj, part)
@@ -840,10 +849,11 @@ if [ -x /opt/shift-agent/venv/bin/python ]; then
 
     # 11b. Schema + config validation (needs Agent-21 venv)
     if ! sudo -u shift-agent /opt/shift-agent/venv/bin/python -c "
-import json, sys, pathlib, yaml
+import json, sys, pathlib
 sys.path.insert(0, '/opt/shift-agent')
+from safe_io import load_yaml_model
 from schemas import Config, ExpenseLeadStore, EXPENSE_TRANSITIONS, is_expense_transition_allowed
-cfg = Config.model_validate(yaml.safe_load(open('/opt/shift-agent/config.yaml').read()))
+cfg = load_yaml_model(pathlib.Path('/opt/shift-agent/config.yaml'), Config)
 assert cfg.expense_bookkeeper.enabled is False, 'expense_bookkeeper MUST ship disabled (got True)'
 assert cfg.expense_bookkeeper.qbo_client_mode == 'mock', 'qbo_client_mode MUST be mock in v0.1'
 leads_p = pathlib.Path('/opt/shift-agent/state/expense-bookkeeper/leads.json')

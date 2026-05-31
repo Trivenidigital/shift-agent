@@ -724,7 +724,7 @@ These items were dropped from PR-A (catering omnibus) when 5-agent reviews surfa
 - [x] **`hermes-alignment.md` Part 1 Storage one-line policy note** - closed by existing Storage section note: JSON `load_model` rename-quarantines parse failures; YAML `load_yaml_model` is YAML-aware, raises explicitly, and does not auto-rename operator-edited files.
 - [x] **`config_load_failed` LogEntry variant** - closed by existing `ConfigLoadFailed` schema variant, `LogEntry` union wiring, and `audit_helpers.log_config_load_failed_best_effort` coverage.
 - [x] **Script-level integration test for expense config-load** - added `tests/test_expense_config_load_integration.py` covering `extract-receipt` and `apply-expense-decision` with valid YAML config reaching the next deterministic boundary, not `EXIT_SCHEMA_VIOLATION`.
-- [ ] **Migrate existing inline yaml.safe_load callsites to `load_yaml_model`** — DRY centralization across `create-catering-lead` (line 343-347), `apply-catering-owner-decision` (~232), `lookup-prior-leads-by-phone` (~252), `shift-agent-smoke-test.sh` step 3. Plan called this out as out-of-scope follow-up. ~1 hour. **R2 acknowledgment.**
+- [x] **Migrate existing inline yaml.safe_load callsites to `load_yaml_model`** — catering scripts were already migrated; remaining `shift-agent-smoke-test.sh` config.yaml readers now use `safe_io.load_yaml_model` for config validation, owner phone extraction, Pushover key extraction, freshness enabled-gates, and Expense #21 schema/config validation. Added `tests/test_shift_smoke_config_load.py` static guard. Claude Code read-only review: CLEAN; no blocking findings.
 
 ### From PR review (round 3, 2026-04-29 PR #33)
 
