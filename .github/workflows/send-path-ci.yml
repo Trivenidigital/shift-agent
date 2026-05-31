@@ -77,4 +77,5 @@ jobs:
             tests/test_daily_brief_script.py \
             tests/test_expense_bookkeeper_apply_decision.py \
             tests/test_prune_and_expire_logic.py \
-            tests/test_expense_dedup_primitives.py
+            tests/test_expense_dedup_primitives.py \
+            tests/test_shift_reconcile.py
