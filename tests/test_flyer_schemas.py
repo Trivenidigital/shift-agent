@@ -751,6 +751,41 @@ def test_flyer_status_resent_round_trips_through_log_entry():
     assert parsed.chat_id == "17329837841@s.whatsapp.net"
 
 
+def test_flyer_manual_queue_customer_update_round_trips_through_log_entry():
+    from schemas import FlyerManualQueueCustomerUpdate  # noqa: E402
+
+    now = datetime.now(timezone.utc)
+    entry = FlyerManualQueueCustomerUpdate(
+        ts=now,
+        project_id="F0105",
+        reason_code="visual_qa_failed",
+        manual_status="queued",
+        age_minutes=92.5,
+        outcome="sent",
+        chat_id_source="audit_log",
+        outbound_message_id="wamid.manual.status",
+    )
+    parsed = TypeAdapter(LogEntry).validate_python(entry.model_dump())
+    assert parsed.__class__.__name__ == "FlyerManualQueueCustomerUpdate"
+    assert parsed.type == "flyer_manual_queue_customer_update"
+    assert parsed.outcome == "sent"
+    assert parsed.age_minutes == 92.5
+
+
+def test_flyer_manual_queue_customer_update_rejects_unknown_outcome():
+    from schemas import FlyerManualQueueCustomerUpdate  # noqa: E402
+
+    with pytest.raises(ValidationError):
+        FlyerManualQueueCustomerUpdate(
+            ts=datetime.now(timezone.utc),
+            project_id="F0105",
+            reason_code="visual_qa_failed",
+            manual_status="queued",
+            age_minutes=92.5,
+            outcome="maybe_sent",  # type: ignore[arg-type]
+        )
+
+
 def test_flyer_source_vs_new_chosen_round_trips_through_log_entry():
     from schemas import FlyerSourceVsNewChosen  # noqa: E402
 

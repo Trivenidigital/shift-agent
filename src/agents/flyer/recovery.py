@@ -458,10 +458,15 @@ def classify_stale_manual_project(project: dict, *, now: datetime, stale_after: 
     if str(project.get("status") or "") != "manual_edit_required":
         return None
     manual = project.get("manual_review") if isinstance(project.get("manual_review"), dict) else {}
-    if str(manual.get("status") or "") != "queued":
+    manual_status = str(manual.get("status") or "")
+    if manual_status not in {"queued", "in_progress"}:
         return None
-    queued_at = _parse_recovery_ts(str(manual.get("queued_at") or ""))
-    if queued_at is None or now - queued_at < stale_after:
+    stale_basis = _parse_recovery_ts(str(
+        manual.get("claimed_at") if manual_status == "in_progress" else manual.get("queued_at")
+    or ""))
+    if stale_basis is None:
+        stale_basis = _parse_recovery_ts(str(manual.get("queued_at") or ""))
+    if stale_basis is None or now - stale_basis < stale_after:
         return None
     project_id = str(project.get("project_id") or "").strip()
     if not project_id:
@@ -479,8 +484,15 @@ def classify_stale_manual_project(project: dict, *, now: datetime, stale_after: 
     detail_parts = [
         f"project_id={project_id}",
         "manual_review_stale=true",
+        f"manual_status={manual_status}",
         f"reason_code={reason_code}",
     ]
+    claimed_by = str(manual.get("claimed_by") or "").strip()
+    claimed_at = str(manual.get("claimed_at") or "").strip()
+    if claimed_by:
+        detail_parts.append(f"claimed_by={claimed_by}")
+    if claimed_at:
+        detail_parts.append(f"claimed_at={claimed_at}")
     if detail:
         detail_parts.append(f"detail={detail}")
     if qa_blockers:
@@ -497,7 +509,7 @@ def classify_stale_manual_project(project: dict, *, now: datetime, stale_after: 
         canonical_source=_canonical_detail(signal_detail),
         evidence_quality="strong" if chat_id and provider_message_id else "weak",
         provider_message_id=provider_message_id,
-        observed_at=queued_at,
+        observed_at=stale_basis,
     )
 
 

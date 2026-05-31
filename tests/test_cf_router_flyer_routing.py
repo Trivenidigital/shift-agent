@@ -1553,6 +1553,25 @@ def test_pr_alpha_flyer_text_targets_revision_field_helper():
     assert not actions.flyer_text_targets_revision_field("show plans")
 
 
+def test_media_edit_to_delivered_project_stays_on_active_project():
+    _, actions = _load_plugin_modules()
+    active_project = {
+        "project_id": "F0120",
+        "status": "delivered",
+        "fields": {
+            "event_or_business_name": "Lakshmi's Kitchen",
+            "contact_info": "+1 732 983 7841",
+        },
+        "concepts": [{"concept_id": "C1", "preview_asset_id": "A0001"}],
+    }
+
+    assert actions.should_bypass_active_flyer_project_for_fresh_request(
+        "change this attached flyer price to $9.99",
+        active_project,
+        has_media=True,
+    ) is False
+
+
 def test_pr_alpha_lid_only_active_project_revision_phrase_yields_from_regulated_guard(monkeypatch):
     """LID-only blocker fix: when identify-sender resolves phone=None but the
     active-project store still finds a project (e.g. via primary_chat_id), the

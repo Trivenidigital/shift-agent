@@ -1781,6 +1781,25 @@ def test_openrouter_source_edit_fails_closed_on_placeholder_key(tmp_path, monkey
         )
 
 
+def test_openrouter_image_bytes_fails_closed_on_placeholder_key(monkeypatch):
+    def tripwire(*_args, **_kwargs):
+        raise AssertionError("network request issued with placeholder OpenRouter key")
+
+    monkeypatch.setattr(render_module, "_read_env_value", lambda _name: "PLACEHOLDER-key")
+    monkeypatch.setattr(render_module.urllib.request, "urlopen", tripwire)
+
+    import pytest as _pytest
+    with _pytest.raises(FlyerRenderError, match="placeholder"):
+        render_module._openrouter_image_bytes(
+            _english_project(),
+            concept_id="C1",
+            output_format="concept_preview",
+            size=(1080, 1350),
+            model="openrouter/test",
+            quality="medium",
+        )
+
+
 def test_openai_source_edit_bytes_fails_closed_on_lowercase_placeholder_key(tmp_path, monkeypatch):
     import agents.flyer.render as render_mod
 
