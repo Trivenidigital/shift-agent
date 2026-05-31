@@ -26,6 +26,11 @@ _RESTAURANT_IDEAS = (
     "Create an evening snacks flyer from 4 PM to 7 PM, Wednesday to Saturday. Include samosa, mirchi bajji, punugulu, masala vada, and tea. Use saved address, phone, and logo.",
 )
 
+_GROCERY_IDEAS = (
+    "Create a weekly grocery deals flyer. Include produce, pantry staples, sweets/snacks, rice/flour, sale dates, address, phone, and delivery/payment badges. Use saved address, phone, and logo.",
+    "Create a festive supermarket sale flyer. Include 6 to 8 product deals with prices, department labels, sale end date, address, phone, and logo. Use saved address, phone, and logo.",
+)
+
 _LOCAL_BUSINESS_IDEAS = (
     "Create a WhatsApp-ready marketing material flyer. Highlight what my business offers, how customers can text requests, available formats, pricing or offer details, and a clear call to action. Use saved address, phone, and logo.",
     "Create a clean menu-board or schedule-style flyer. Show 2 to 4 active offers, times, locations or screens, and a simple call to action. Use saved address, phone, and logo.",
@@ -52,7 +57,10 @@ def _briefs() -> tuple[StarterBrief, ...]:
         StarterBrief(
             category_id="restaurant",
             label="Restaurant / food special",
-            keywords=("restaurant", "food", "kitchen", "cafe", "bakery", "dosa", "biryani", "menu"),
+            keywords=(
+                "restaurant", "food court", "fast food", "food truck", "food special", "food specials",
+                "street food", "kitchen", "cafe", "bakery", "dosa", "biryani", "menu",
+            ),
             body=(
                 "Create a professional flyer for my restaurant.\n\n"
                 "Main heading:\nWeekend Specials\n\n"
@@ -207,6 +215,10 @@ def _contains_keyword(normalized_text: str, normalized_keyword: str) -> bool:
     ))
 
 
+def _looks_like_grocery_category(normalized: str) -> bool:
+    return any(_contains_keyword(normalized, key) for key in ("grocery", "supermarket"))
+
+
 def all_starter_briefs() -> list[StarterBrief]:
     return list(_briefs())
 
@@ -216,6 +228,10 @@ def starter_brief_for_category(category: str) -> StarterBrief:
     fallback = _briefs()[-1]
     if not normalized:
         return fallback
+    if _looks_like_grocery_category(normalized):
+        for brief in _briefs():
+            if brief.category_id == "grocery":
+                return brief
     best: tuple[int, StarterBrief] = (0, fallback)
     for brief in _briefs()[:-1]:
         score = 0
@@ -259,7 +275,12 @@ def starter_idea_choices(
     language: str = "en",
 ) -> list[str]:
     brief = starter_brief_for_category(category)
-    ideas = _RESTAURANT_IDEAS if brief.category_id in {"restaurant", "grocery"} else _LOCAL_BUSINESS_IDEAS
+    if brief.category_id == "restaurant":
+        ideas = _RESTAURANT_IDEAS
+    elif brief.category_id == "grocery":
+        ideas = _GROCERY_IDEAS
+    else:
+        ideas = _LOCAL_BUSINESS_IDEAS
     if not business_name.strip():
         return list(ideas)
     return [idea.replace("Use saved address, phone, and logo.", "Use saved address, phone, and logo.") for idea in ideas]

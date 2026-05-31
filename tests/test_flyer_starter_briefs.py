@@ -71,6 +71,35 @@ def test_restaurant_starter_idea_choices_are_compact_and_safe():
     assert all(len(idea) <= 280 for idea in ideas)
 
 
+def test_grocery_starter_idea_choices_are_grocery_specific():
+    ideas = starter_briefs.starter_idea_choices(
+        "Indian grocery and food court",
+        business_name="Triveni Supermarket",
+        language="en",
+    )
+
+    assert len(ideas) == 2
+    joined = "\n".join(ideas).lower()
+    assert "grocery" in joined or "produce" in joined
+    assert "weekly" in joined or "sale" in joined
+    assert "product" in joined or "deals" in joined
+    assert "thali" not in joined
+    assert "evening snacks" not in joined
+    assert "samosa" not in joined
+    assert all(len(idea) <= 280 for idea in ideas)
+
+
+def test_food_court_and_food_business_starter_ideas_stay_restaurant_specific():
+    for category in ("food court", "fast food", "food truck", "food special"):
+        brief = starter_briefs.starter_brief_for_category(category)
+        ideas = starter_briefs.starter_idea_choices(category, business_name="Demo Food Business")
+        joined = "\n".join(ideas).lower()
+
+        assert brief.category_id == "restaurant"
+        assert "thali" in joined
+        assert "evening snacks" in joined
+
+
 def test_starter_idea_message_uses_selected_language_shell_with_numeric_replies():
     message = starter_briefs.starter_idea_choices_message(
         "restaurant",
