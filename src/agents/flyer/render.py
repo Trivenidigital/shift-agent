@@ -1102,6 +1102,10 @@ def validate_text_manifest_file(
         warnings.append(
             "source edit manifest verifies artifact integrity only; customer approval remains the visual/text QA gate"
         )
+    elif manifest.get("verification_mode") == "source_edit_overlay_recomposed":
+        warnings.append(
+            "source edit output re-composed the deterministic text overlay over the customer artwork; declared facts are visual-QA-checked; customer approval remains the gate"
+        )
     expected = manifest.get("expected_facts") or []
     rendered = manifest.get("rendered_facts") or []
     if not isinstance(expected, list) or not isinstance(rendered, list):
@@ -2599,8 +2603,26 @@ def render_source_edit_preview(project: FlyerProject, output_dir: Path | str, *,
         raise FlyerRenderError("source edit provider configured for manual review")
     else:
         raise FlyerRenderError(f"unsupported source edit provider: {provider_name or 'unknown'}")
-    _raw_background_path(path).unlink(missing_ok=True)
-    _write_generated_image_contained(raw, path, size=(1080, 1350))
+    # Render-side robustness: give the source-edit output the SAME deterministic
+    # critical-text overlay new flyers get. The generative-edit model has no
+    # structural text guarantee (it drops/garbles required facts → visual_qa_failed),
+    # so we write its edit as the raw background, then composite the deterministic
+    # overlay (brand + title + schedule + items/prices + footer) on top. The raw
+    # background is preserved separately so render_final_package can re-apply the
+    # overlay per output format. `_apply_critical_text_overlay` carries the
+    # system-python3 Pillow fallback for VPSes whose Hermes runtime lacks Pillow.
+    raw_path = _raw_background_path(path)
+    raw_path.unlink(missing_ok=True)
+    _write_generated_image_contained(raw, raw_path, size=(1080, 1350))
+    try:
+        _apply_critical_text_overlay(project, raw_path, path, size=(1080, 1350), output_format="concept_preview")
+    except FlyerRenderError:
+        # Fail-closed: if the overlay cannot fit every required fact, do NOT ship a
+        # silently-incomplete edit — clean up and propagate (downstream queues
+        # manual review). Same contract as new-flyer generation.
+        path.unlink(missing_ok=True)
+        raw_path.unlink(missing_ok=True)
+        raise
     quality_report = inspect_rendered_asset(path, expected_width=1080, expected_height=1350, mime_type="image/png")
     if not quality_report.ok:
         # P0-5 follow-up: clean up the orphan preview + raw-background files
@@ -2610,7 +2632,7 @@ def render_source_edit_preview(project: FlyerProject, output_dir: Path | str, *,
         # FlyerRenderError handler downstream rewrites manual_review state
         # but doesn't touch disk artifacts; this is the right place.
         path.unlink(missing_ok=True)
-        _raw_background_path(path).unlink(missing_ok=True)
+        raw_path.unlink(missing_ok=True)
         raise FlyerRenderError(f"edited concept failed quality check: {quality_report.blockers}")
     reference = _source_edit_reference_asset(project)
     write_text_manifest(
@@ -2619,9 +2641,13 @@ def render_source_edit_preview(project: FlyerProject, output_dir: Path | str, *,
         output_format="concept_preview",
         selected_concept_id=concept_id,
         source_path=reference.path,
-        verification_mode="source_edit_integrity_only",
+        # The output is the customer's uploaded artwork with the deterministic text
+        # overlay RE-COMPOSED on top — not a pixel-preserving integrity edit — so the
+        # manifest declares the overlaid facts (corroborating visual QA) rather than
+        # claiming integrity-only.
+        verification_mode="source_edit_overlay_recomposed",
         warnings=[
-            "Source-preserving edit output is model-edited artwork; inspect the preview visually before approval."
+            "Source edit: customer artwork with the deterministic text overlay re-composed on top; required facts are declared and visual-QA-checked. Inspect the preview before approval."
         ],
     )
     return RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview", width=1080, height=1350, concept_id=concept_id)
@@ -2667,7 +2693,10 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
             #   and never composite the overlay on top.
             direct_poster_source = (
                 not source.exists()
-                or not _background_only_eligible(project)
+                # Source-edits with a preserved raw model edit re-apply the
+                # deterministic overlay per format (below) — new-flyer parity — so
+                # they are NOT forced down the direct/no-re-overlay path here.
+                or (not _background_only_eligible(project) and not _is_source_edit_project(project))
                 # Defensive stale-raw guard: a generated background-only composite
                 # writes its raw and overlaid preview together (within ~1s), so a
                 # preview MEANINGFULLY newer than its raw means the preview was
@@ -2689,7 +2718,12 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
                 else:
                     temp_png = path.with_suffix(".overlay-source.png")
                     overlaid_png = path.with_suffix(".overlaid.png")
-                    _export_from_source_image(source, temp_png, size=(1275, 1650))
+                    if _is_source_edit_project(project):
+                        # Preserve the uploaded flyer's aspect (letterbox); fill/crop
+                        # would cut off the customer's own artwork.
+                        _export_from_source_image_contained(source, temp_png, size=(1275, 1650))
+                    else:
+                        _export_from_source_image(source, temp_png, size=(1275, 1650))
                     _apply_critical_text_overlay(project, temp_png, overlaid_png, size=(1275, 1650), output_format=output_format)
                     _export_from_source_image(overlaid_png, path, size=None)
                     temp_png.unlink(missing_ok=True)
@@ -2702,7 +2736,12 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
                         _export_from_source_image(source, path, size=size)
                 else:
                     temp_png = path.with_suffix(".overlay-source.png")
-                    _export_from_source_image(source, temp_png, size=size)
+                    if _is_source_edit_project(project):
+                        # Preserve the uploaded flyer's aspect (letterbox); fill/crop
+                        # would cut off the customer's own artwork.
+                        _export_from_source_image_contained(source, temp_png, size=size)
+                    else:
+                        _export_from_source_image(source, temp_png, size=size)
                     _apply_critical_text_overlay(project, temp_png, path, size=size, output_format=output_format)
                     temp_png.unlink(missing_ok=True)
         else:
@@ -2718,9 +2757,9 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
                 output_format=output_format,
                 selected_concept_id=concept_id,
                 source_path=source_for_manifest,
-                verification_mode="source_edit_integrity_only",
+                verification_mode="source_edit_overlay_recomposed",
                 warnings=[
-                    "Source-preserving edit output is model-edited artwork; final files derive from the approved preview."
+                    "Source edit: customer artwork with the deterministic text overlay re-composed on top; final files derive from the approved preview. Required facts are declared and visual-QA-checked."
                 ],
             )
         else:
