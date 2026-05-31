@@ -1400,6 +1400,13 @@ def flyer_routing_decision_preview(
     elif fresh_bypasses_active:
         route = "new_project"
         reason = "fresh_new_request"
+    elif active_status == "finalizing_assets" and (
+        is_flyer_approval_text(body)
+        or is_flyer_send_now_intent(body)
+        or is_flyer_delivery_state_intent(body)
+    ):
+        route = "approval"
+        reason = "finalizing_assets_retry"
     elif fresh and active_project:
         route = "active_intake"
         reason = "active_intake_similar_request"
@@ -4885,6 +4892,48 @@ def finalize_and_send_flyer(chat_id: str, project_id: str, message_id: str) -> t
         if result.returncode != 0:
             return False, f"{cmd[0]} exit={result.returncode}: {detail[:500]}"
     return True, " | ".join(details)
+
+
+def retry_send_flyer_package(chat_id: str, project_id: str, message_id: str) -> tuple[bool, str]:
+    try:
+        result = subprocess.run(
+            [str(PYTHON_BIN), "/usr/local/bin/send-flyer-package", "--jid", chat_id, "--project-id", project_id],
+            capture_output=True, text=True, timeout=FLYER_RENDER_TIMEOUT_SEC,
+        )
+    except (subprocess.SubprocessError, OSError) as e:
+        return False, f"send-flyer-package: {type(e).__name__}: {e}"
+    detail = (result.stdout or result.stderr or "").strip()
+    if result.returncode != 0:
+        if "project must be finalizing_assets before delivery, got delivered" in detail and _flyer_project_delivery_complete(project_id):
+            return True, f"already_delivered=true; project_id={project_id}; message_id={message_id}"
+        return False, f"send-flyer-package exit={result.returncode}: {detail[:500]}"
+    return True, detail[:500] or f"delivery retried for {project_id}; message_id={message_id}"
+
+
+def _flyer_project_delivery_complete(project_id: str) -> bool:
+    for row in _load_flyer_projects():
+        if not isinstance(row, dict) or row.get("project_id") != project_id:
+            continue
+        if row.get("status") != "delivered":
+            return False
+        final_ids = [str(asset_id) for asset_id in (row.get("final_asset_ids") or []) if str(asset_id)]
+        if not final_ids:
+            return False
+        assets_by_id = {
+            str(asset.get("asset_id") or ""): asset
+            for asset in (row.get("assets") or [])
+            if isinstance(asset, dict)
+        }
+        for asset_id in final_ids:
+            asset = assets_by_id.get(asset_id)
+            if not asset:
+                return False
+            if asset.get("delivery_status") != "sent":
+                return False
+            if not str(asset.get("outbound_message_id") or ""):
+                return False
+        return True
+    return False
 
 
 def find_dispatcher_routed_for(chat_id: str, since_ts: float) -> bool:

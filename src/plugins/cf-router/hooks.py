@@ -2013,6 +2013,23 @@ def _send_flyer_finalization_failed_ack(
     )
 
 
+def _send_flyer_final_delivery_failed_ack(
+    chat_id: str,
+    project_id: str,
+    *,
+    action_context: ActionExecutionContext,
+) -> tuple[bool, str, str]:
+    return actions.send_flyer_text(
+        chat_id,
+        (
+            "Flyer Studio\n"
+            "------------\n"
+            "I hit an issue sending the final files. I'll review it and send an update here."
+        ),
+        action_context=action_context,
+    )
+
+
 def _try_flyer_account_intercept(text: str, chat_id: str, event: Any) -> Optional[dict]:
     if not actions.is_flyer_account_command(text):
         return None
@@ -3513,6 +3530,45 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
     # finalize-flyer-assets contract. The FLYER_TRANSITIONS edge
     # delivered_with_warning → awaiting_final_approval (Commit 1) is what
     # makes the transition at line ~3354 below succeed.
+    final_delivery_retry_intent = (
+        actions.is_flyer_approval_text(body)
+        or actions.is_flyer_send_now_intent(body)
+        or actions.is_flyer_delivery_state_intent(body)
+    )
+    if final_delivery_retry_intent and status == "finalizing_assets":
+        ok, detail = actions.retry_send_flyer_package(chat_id, project_id, message_id)
+        actions.audit_intercepted(
+            reason="flyer_primary_project_created" if ok else "flyer_primary_failed",
+            chat_id=chat_id,
+            subprocess_rc=0 if ok else 2,
+            detail=(
+                f"project_id={project_id}; retry_finalizing_assets=true; "
+                f"sender_role={role}; message_id={message_id}; {detail[:500]}"
+            ),
+        )
+        if ok:
+            return {"action": "skip",
+                    "reason": f"cf-router flyer active: retried final delivery for {project_id}"}
+        fail_ack_ok, fail_mid, fail_err = _send_flyer_final_delivery_failed_ack(
+            chat_id, project_id,
+            action_context=build_action_context_for_command(
+                PROJECT_ACTIONS, "finalization.failed_ack",
+                is_regulated_action=False,
+            ),
+        )
+        actions.audit_intercepted(
+            reason="flyer_primary_failed",
+            chat_id=chat_id,
+            subprocess_rc=0 if fail_ack_ok else 3,
+            detail=(
+                f"project_id={project_id}; retry_finalizing_assets_ack=true; "
+                f"sender_role={role}; retry_detail={detail[:300]}; "
+                f"ack_message_id={fail_mid}; ack_error={fail_err[:300]}"
+            ),
+        )
+        return {"action": "skip",
+                "reason": f"cf-router flyer active: final delivery retry failed for {project_id}"}
+
     if (actions.is_flyer_approval_text(body) or actions.is_flyer_send_now_intent(body)) and status in {"revising_design", "awaiting_final_approval", "delivered_with_warning"}:
         if status == "revising_design" and not active_project.get("concepts"):
             gen_ok, gen_detail = actions.trigger_generate_flyer_concepts(project_id)
