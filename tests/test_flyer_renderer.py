@@ -853,9 +853,130 @@ def test_image_prompt_for_indochinese_menu_uses_structured_item_cards_not_raw_re
     assert "Menu item cards:" in prompt
     assert "- Veg Manchurian - $9.99" in prompt
     assert "- Spring Rolls - $9.99" in prompt
+    assert "Campaign scene direction (menu product close-up)" in prompt
+    assert "family discovery" not in prompt.lower()
     assert "Use product-specific close-up food imagery based on the listed menu items" in prompt
     assert "Avoid generic buffet, dining-family, or unrelated stock-food scenes" in prompt
     assert raw not in prompt
+
+
+def test_image_prompt_for_south_indian_snacks_rejects_family_scene_collision():
+    now = datetime(2026, 5, 31, tzinfo=timezone.utc)
+    raw = (
+        "Create a flyer for south indian snacks.Include these items. "
+        "Gavvalu 1 Lb $8.99, Chekkalu 1 lb $8.99 and Arisalu 1 Lb $10.99"
+    )
+    project = FlyerProject(
+        project_id="F0122",
+        status="generating_concepts",
+        customer_phone="+17329837841",
+        created_at=now,
+        updated_at=now,
+        original_message_id="m-snacks",
+        raw_request=raw,
+        fields=FlyerRequestFields(
+            event_or_business_name="South Indian Snacks",
+            venue_or_location="90 Brybar Dr St Johns FL",
+            contact_info="+17329837841",
+            notes=raw,
+            style_preference=(
+                "professional local food menu flyer with appetizing photography, "
+                "strong price readability, and brand-forward retail design"
+            ),
+        ),
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="South Indian Snacks", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="item:0:name", label="Item", value="Gavvalu 1 Lb", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:0:price", label="Price", value="$8.99", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:1:name", label="Item", value="Chekkalu 1 lb", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:1:price", label="Price", value="$8.99", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:2:name", label="Item", value="Arisalu 1 Lb", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:2:price", label="Price", value="$10.99", source="customer_text", required=True),
+        ],
+    )
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+
+    assert "Campaign scene direction (menu product close-up)" in prompt
+    assert "Gavvalu 1 Lb - $8.99" in prompt
+    assert "Chekkalu 1 lb - $8.99" in prompt
+    assert "Arisalu 1 Lb - $10.99" in prompt
+    assert "generic family" in prompt
+    assert "family discovery" not in prompt.lower()
+    assert "happy local family or community" not in prompt.lower()
+
+
+def test_image_prompt_preserves_explicit_family_festival_menu_scene():
+    now = datetime(2026, 5, 31, tzinfo=timezone.utc)
+    raw = "Create a Diwali family festival flyer for South Indian snacks. Include Gavvalu 1 Lb $8.99."
+    project = FlyerProject(
+        project_id="F0123",
+        status="generating_concepts",
+        customer_phone="+17329837841",
+        created_at=now,
+        updated_at=now,
+        original_message_id="m-festival-snacks",
+        raw_request=raw,
+        fields=FlyerRequestFields(
+            event_or_business_name="Diwali Family Snacks",
+            venue_or_location="90 Brybar Dr St Johns FL",
+            contact_info="+17329837841",
+            notes=raw,
+            style_preference="Diwali festival theme for families with appetizing snacks",
+        ),
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Diwali Family Snacks", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:0:name", label="Item", value="Gavvalu 1 Lb", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:0:price", label="Price", value="$8.99", source="customer_text", required=True),
+        ],
+    )
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+
+    assert "Campaign scene direction (family discovery)" in prompt
+    assert "happy local family or community" in prompt
+    assert "Campaign scene direction (menu product close-up)" not in prompt
+    assert "Gavvalu 1 Lb - $8.99" in prompt
+
+
+def test_image_prompt_service_menu_does_not_get_food_product_scene():
+    now = datetime(2026, 5, 31, tzinfo=timezone.utc)
+    raw = "Create a flyer for Chloe Hair Studio service menu. Haircut $20, Perms $80."
+    project = FlyerProject(
+        project_id="F0124",
+        status="generating_concepts",
+        customer_phone="+19045550123",
+        created_at=now,
+        updated_at=now,
+        original_message_id="m-service-menu",
+        raw_request=raw,
+        fields=FlyerRequestFields(
+            event_or_business_name="Chloe Hair Studio",
+            contact_info="+1 904 555 0123",
+            notes=raw,
+            style_preference="modern salon service menu with clean premium styling",
+        ),
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Chloe Hair Studio", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Service Menu", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:0:name", label="Item", value="Haircut", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:0:price", label="Price", value="$20", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:1:name", label="Item", value="Perms", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:1:price", label="Price", value="$80", source="customer_text", required=True),
+        ],
+    )
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+
+    assert "modern US salon" in prompt
+    assert "Campaign scene direction (menu product close-up)" not in prompt
+    assert "food/snacks as the hero background" not in prompt
+    assert "premium restaurant ambiance" not in prompt
+    assert "polished, category-appropriate service imagery" in prompt
 
 
 def test_image_prompt_skips_blank_optional_fields_for_price_list():

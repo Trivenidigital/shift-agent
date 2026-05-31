@@ -59,9 +59,11 @@ def test_selection_is_deterministic_and_maps_expected_templates():
     festival = "diwali festival dinner for families at our restaurant"
     sale = "grand opening sale 50% off at our salon, limited time"
     plain = "we provide professional help"
+    restaurant_menu = "indian restaurant south indian snacks professional local food menu flyer"
     assert select_campaign_scene(festival).key == "family_discovery"
     assert select_campaign_scene(sale).key == "human_billboard"
     assert select_campaign_scene(plain).key == "storefront_service"
+    assert select_campaign_scene(restaurant_menu).key != "family_discovery"
     # deterministic: same input → same output, repeatedly
     assert {select_campaign_scene(festival).key for _ in range(5)} == {"family_discovery"}
     assert {select_campaign_scene(plain).key for _ in range(5)} == {"storefront_service"}
