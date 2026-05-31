@@ -114,6 +114,7 @@ def test_recovery_watchdog_installed_but_not_enabled_by_default():
     watchdog = (SCRIPTS / "flyer-recovery-watchdog").read_text(encoding="utf-8")
     preflight = (SCRIPTS / "flyer-recovery-preflight").read_text(encoding="utf-8")
     service = (REPO / "src" / "agents" / "flyer" / "systemd" / "flyer-recovery-watchdog.service").read_text(encoding="utf-8")
+    failure_service = (REPO / "src" / "agents" / "flyer" / "systemd" / "flyer-recovery-watchdog-failure.service").read_text(encoding="utf-8")
     smoke = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-smoke-test.sh").read_text(encoding="utf-8")
 
     assert "flyer-recovery-watchdog" in deploy
@@ -124,9 +125,14 @@ def test_recovery_watchdog_installed_but_not_enabled_by_default():
     assert "systemctl daemon-reload" in deploy
     assert "systemctl is-active --quiet flyer-recovery-watchdog.timer" in deploy
     assert "mode != \"off\"" in deploy or 'mode != "off"' in deploy
+    assert "OnFailure=flyer-recovery-watchdog-failure.service" in service
+    assert "ExecStartPre=/usr/bin/test -x /usr/local/bin/shift-agent-notify-owner" in failure_service
+    assert "SuccessExitStatus=5 6" in failure_service
     assert "/usr/local/lib/hermes-agent/venv/bin/python /usr/local/bin/flyer-recovery-watchdog" in service
     assert "/etc/systemd/system/flyer-recovery-watchdog.service" in smoke
     assert "/etc/systemd/system/flyer-recovery-watchdog.timer" in smoke
+    assert "/etc/systemd/system/flyer-recovery-watchdog-failure.service" in smoke
+    assert "if [ -f /etc/systemd/system/flyer-recovery-watchdog-failure.service ]" not in smoke
     assert "--write-repair-bundle" in watchdog
     assert "flyer-codex-recovery-runner" not in deploy
     assert "FLYER_RECOVERY_NO_LIVE_SEND" in preflight

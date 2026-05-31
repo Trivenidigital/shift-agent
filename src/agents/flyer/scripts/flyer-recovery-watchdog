@@ -23,7 +23,7 @@ sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(SRC_ROOT))
 sys.path.insert(0, str(SRC_ROOT / "platform"))
 
-from schemas import Config  # noqa: E402
+from schemas import ActionExecutionContext, Config  # noqa: E402
 from schemas import (  # noqa: E402
     FlyerRecoveryCustomerAckAttempted,
     FlyerRecoveryCustomerAckFailed,
@@ -317,12 +317,49 @@ def _incident_common(incident: dict) -> dict:
     }
 
 
-def _send_ack(chat_id: str, message: str) -> tuple[bool, str, str]:
-    actions = _load_cf_router_actions()
+def _recovery_action_context(action_id: str) -> ActionExecutionContext:
+    return ActionExecutionContext(
+        action_id=action_id,
+        is_regulated_action=False,
+        verified_action_result=False,
+        audit_row_id=None,
+        mutation_class=None,
+    )
+
+
+def _send_flyer_text_via_actions(actions, chat_id: str, message: str, *, action_id: str) -> tuple[bool, str, str]:
+    context = _recovery_action_context(action_id)
+    try:
+        return actions.send_flyer_text(chat_id, message, action_context=context)
+    except TypeError as exc:
+        # Test fakes and older rollback code may not accept the keyword yet.
+        # Current production sends require it; only fall back for that narrow
+        # compatibility shape.
+        if "action_context" not in str(exc):
+            return False, "", f"TypeError: {exc}"
+        try:
+            return actions.send_flyer_text(chat_id, message)
+        except Exception as inner:
+            return False, "", f"{type(inner).__name__}: {inner}"
+    except Exception as exc:
+        return False, "", f"{type(exc).__name__}: {exc}"
+
+
+def _send_ack(chat_id: str, message: str, *, actions_path: str = "") -> tuple[bool, str, str]:
+    actions = _load_cf_router_actions(actions_path)
     if actions is not None and hasattr(actions, "send_flyer_text"):
-        return actions.send_flyer_text(chat_id, message)
+        return _send_flyer_text_via_actions(
+            actions,
+            chat_id,
+            message,
+            action_id="flyer.recovery.customer_ack",
+        )
     from safe_io import bridge_post  # type: ignore
-    ok, mid, err, status = bridge_post(chat_id, message)
+    ok, mid, err, status = bridge_post(
+        chat_id,
+        message,
+        action_context=_recovery_action_context("flyer.recovery.customer_ack"),
+    )
     return ok, mid, "" if ok else f"{status}: {err}"
 
 
@@ -440,7 +477,12 @@ def _process_reference_scope_outcome_repairs(
                 repaired += 1
                 kept.append(item)
                 continue
-            ok, outbound_message_id, err = actions.send_flyer_text(chat_id, message)
+            ok, outbound_message_id, err = _send_flyer_text_via_actions(
+                actions,
+                chat_id,
+                message,
+                action_id="flyer.recovery.reference_scope_repair",
+            )
             _append_raw_audit(log_path, {
                 "type": "flyer_recovery_outcome_repaired",
                 "ts": now.isoformat(),
@@ -639,7 +681,16 @@ def _process_repair_queue(
     return {"queued": queued, "worker_runs": worker_runs}
 
 
-def _process_customer_acks(state_path: Path, log_path: Path, cfg: Config, mode: str, now: datetime, *, dry_run: bool = False) -> int:
+def _process_customer_acks(
+    state_path: Path,
+    log_path: Path,
+    cfg: Config,
+    mode: str,
+    now: datetime,
+    *,
+    actions_path: str = "",
+    dry_run: bool = False,
+) -> int:
     sent_count = 0
     considered = 0
     terminal_no_send_prefixes = (
@@ -763,7 +814,7 @@ def _process_customer_acks(state_path: Path, log_path: Path, cfg: Config, mode: 
                 copy_policy_template_id=template_id,
                 message_sha256=recovery.sha256_text(message),
             ))
-        ok, mid, err = _send_ack(str(current.get("chat_id") or ""), message)
+        ok, mid, err = _send_ack(str(current.get("chat_id") or ""), message, actions_path=actions_path)
         with recovery.recovery_state_lock(state_path):
             state = recovery.load_recovery_state(state_path)
             current = next((item for item in state.get("incidents", []) if item.get("incident_id") == incident.get("incident_id")), None)
@@ -1074,7 +1125,15 @@ def main() -> int:
         dry_run=args.dry_run,
     )
     if mode == "customer_ack":
-        ack_sent = _process_customer_acks(state_path, Path(args.log_path), cfg, mode, now, dry_run=args.dry_run)
+        ack_sent = _process_customer_acks(
+            state_path,
+            Path(args.log_path),
+            cfg,
+            mode,
+            now,
+            actions_path=args.cf_actions_path,
+            dry_run=args.dry_run,
+        )
     owner_alert_retries = _retry_failed_owner_alerts(
         state_path,
         Path(args.log_path),

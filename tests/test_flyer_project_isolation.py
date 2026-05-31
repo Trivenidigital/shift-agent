@@ -422,6 +422,7 @@ def test_stale_guard_does_not_drop_concept_selection_after_threshold(monkeypatch
         status="awaiting_concept_selection",
         hours_old=10,
     )
+    stale_awaiting_selection["concepts"] = [{"concept_id": "C1"}]
     _patch_basic_lookups(hooks, actions, monkeypatch, stale_awaiting_selection)
     # Downstream selection handler invokes update-flyer-project + sends a confirmation.
     monkeypatch.setattr(actions, "invoke_update_flyer_project", lambda *_a, **_kw: (True, ""))

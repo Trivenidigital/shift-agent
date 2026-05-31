@@ -1888,11 +1888,21 @@ def _release_flyer_access(access: str, chat_id: str, phone: str, project_id: str
 def _finalize_flyer_access_checked(access: str, chat_id: str, phone: str, project_id: str, message_id: str) -> tuple[bool, str]:
     if access == "quota":
         ok, detail, _result = actions.trigger_flyer_finalize_usage(customer_phone=phone, project_id=project_id, message_id=message_id)
-        return ok, detail
     if access == "guest":
         ok, detail, _result = actions.trigger_consume_flyer_guest_order(sender_phone=phone, chat_id=chat_id, project_id=project_id)
-        return ok, detail
-    return True, "no_access_to_finalize"
+    if access not in {"quota", "guest"}:
+        return True, "no_access_to_finalize"
+    if not ok:
+        actions.audit_intercepted(
+            reason="flyer_access_finalize_failed",
+            chat_id=chat_id,
+            subprocess_rc=2,
+            detail=(
+                f"project_id={project_id}; access={access}; message_id={message_id}; "
+                f"finalize_detail={detail[:400]}"
+            ),
+        )
+    return ok, detail
 
 
 def _send_preview_then_finalize_access(
@@ -1923,7 +1933,7 @@ def _send_preview_then_finalize_access(
         return False, outbound_message_id, ack_err
     access_ok, access_detail = _finalize_flyer_access_checked(access, chat_id, phone, project_id, message_id)
     if not access_ok:
-        return False, outbound_message_id, f"{ack_err}; access_finalize_failed={access_detail[:250]}"
+        return proc_ok and preview_ok, outbound_message_id, f"{ack_err}; access_finalize_failed={access_detail[:250]}"
     return proc_ok and preview_ok and access_ok, outbound_message_id, ack_err
 
 
@@ -2230,6 +2240,75 @@ def _resolve_status_project_for_reply(*, active_project: dict, body: str, phone:
     if latest is not None and str(latest.get("updated_at") or "") > str(active_project.get("updated_at") or ""):
         return latest, None
     return active_project, None
+
+
+_CONCEPT_SELECTION_PHRASES = {
+    "1": "C1", "option 1": "C1", "concept 1": "C1", "c1": "C1",
+    "first": "C1", "first one": "C1", "first option": "C1", "first concept": "C1", "first design": "C1", "1st": "C1",
+    "2": "C2", "option 2": "C2", "concept 2": "C2", "c2": "C2",
+    "second": "C2", "second one": "C2", "second option": "C2", "second concept": "C2", "second design": "C2", "2nd": "C2",
+    "3": "C3", "option 3": "C3", "concept 3": "C3", "c3": "C3",
+    "third": "C3", "third one": "C3", "third option": "C3", "third concept": "C3", "third design": "C3", "3rd": "C3",
+}
+_CONCEPT_SELECTION_PATTERNS = (
+    ("C1", re.compile(r"^(?:(?:i\s+)?(?:like|prefer|choose|select|pick|use|take|want)\s+|go\s+with\s+)?(?:the\s+)?(?:c\s*1|concept\s*1|option\s*1|1|first|1st)(?:\s+(?:one|option|concept|design))?(?:\s+(?:please|pls))?$", re.IGNORECASE)),
+    ("C2", re.compile(r"^(?:(?:i\s+)?(?:like|prefer|choose|select|pick|use|take|want)\s+|go\s+with\s+)?(?:the\s+)?(?:c\s*2|concept\s*2|option\s*2|2|second|2nd)(?:\s+(?:one|option|concept|design))?(?:\s+(?:please|pls))?$", re.IGNORECASE)),
+    ("C3", re.compile(r"^(?:(?:i\s+)?(?:like|prefer|choose|select|pick|use|take|want)\s+|go\s+with\s+)?(?:the\s+)?(?:c\s*3|concept\s*3|option\s*3|3|third|3rd)(?:\s+(?:one|option|concept|design))?(?:\s+(?:please|pls))?$", re.IGNORECASE)),
+)
+_CONCEPT_TITLE_SELECTION_PREFIX = re.compile(
+    r"^(?:(?:i\s+)?(?:like|prefer|choose|select|pick|use|take|want)\s+|go\s+with\s+)(?:the\s+)?",
+    re.IGNORECASE,
+)
+_CONCEPT_TITLE_SELECTION_SUFFIX = re.compile(r"\s+(?:please|pls)$", re.IGNORECASE)
+_FLYER_ACTIVE_REVISION_HINT_PATTERN = re.compile(
+    r"\b(?:make|resize|enlarge|shrink|smaller|bigger|larger|bold|brighter|darker|"
+    r"change|edit|fix|correct|replace|remove|add|swap|update)\b",
+    re.IGNORECASE,
+)
+
+
+def _concept_title_key(value: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", (value or "").lower()))
+
+
+def _concept_title_selection_key(normalized: str) -> str:
+    target = _CONCEPT_TITLE_SELECTION_PREFIX.sub("", normalized, count=1).strip()
+    target = _CONCEPT_TITLE_SELECTION_SUFFIX.sub("", target).strip()
+    return _concept_title_key(target)
+
+
+def _looks_like_active_flyer_revision(body: str) -> bool:
+    normalized = " ".join(actions.flyer_visible_message_text(body).split())
+    return (
+        actions.is_flyer_revision_intent(normalized)
+        or actions.flyer_text_targets_revision_field(normalized)
+        or bool(_FLYER_ACTIVE_REVISION_HINT_PATTERN.search(normalized))
+    )
+
+
+def _resolve_flyer_concept_selection(body: str, project: dict) -> str:
+    """Resolve bounded selection-only concept replies without using the LLM."""
+    concepts = project.get("concepts") if isinstance(project.get("concepts"), list) else []
+    concept_ids = {str(concept.get("concept_id") or "") for concept in concepts if isinstance(concept, dict)}
+    if not concept_ids:
+        return ""
+    normalized = " ".join(actions.flyer_visible_message_text(body).split()).lower().strip(" .!,:;")
+    candidates: set[str] = set()
+    if normalized in _CONCEPT_SELECTION_PHRASES:
+        candidates.add(_CONCEPT_SELECTION_PHRASES[normalized])
+    for concept_id, pattern in _CONCEPT_SELECTION_PATTERNS:
+        if pattern.search(normalized):
+            candidates.add(concept_id)
+    body_key = _concept_title_selection_key(normalized)
+    if body_key:
+        for concept in concepts:
+            if not isinstance(concept, dict):
+                continue
+            title_key = _concept_title_key(str(concept.get("title") or ""))
+            if title_key and title_key == body_key:
+                candidates.add(str(concept.get("concept_id") or ""))
+    candidates = {candidate for candidate in candidates if candidate in concept_ids}
+    return next(iter(candidates)) if len(candidates) == 1 else ""
 
 
 def _try_flyer_delivery_state_guard(text: str, chat_id: str, event: Any) -> Optional[dict]:
@@ -3087,8 +3166,14 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
     # don't classify — all of which should continue to attach so the
     # downstream handlers (selection_map, approval flow, manual-review
     # forwarding) run normally.
+    concept_selection_for_stale_guard = (
+        _resolve_flyer_concept_selection(body, active_project)
+        if status == "awaiting_concept_selection"
+        else ""
+    )
     if (
         not revision_on_delivered
+        and not concept_selection_for_stale_guard
         and actions.is_stale_for_new_request(active_project)
         and actions.should_start_new_flyer_over_active(body, has_media=bool(media_path))
     ):
@@ -3153,12 +3238,6 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
                 f"cf-router flyer status for {status_project_id}"
             ),
         }
-    selection_map = {
-        "1": "C1", "option 1": "C1", "concept 1": "C1", "c1": "C1",
-        "2": "C2", "option 2": "C2", "concept 2": "C2", "c2": "C2",
-        "3": "C3", "option 3": "C3", "concept 3": "C3", "c3": "C3",
-    }
-
     if (
         status in {"intake_started", "collecting_required_info", "awaiting_assets"}
         and actions.flyer_project_has_required_fields(active_project)
@@ -3217,8 +3296,26 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         return {"action": "skip",
                 "reason": f"cf-router flyer active: generated {project_id}"}
 
-    if status == "awaiting_concept_selection" and lower in selection_map:
-        concept_id = selection_map[lower]
+    concept_selection = _resolve_flyer_concept_selection(body, active_project)
+    if status == "awaiting_final_approval" and concept_selection:
+        if concept_selection == str(active_project.get("selected_concept_id") or "") or len(active_project.get("concepts") or []) == 1:
+            ack_ok, mid, err = actions.send_flyer_text(
+                chat_id,
+                f"{concept_selection} is selected. Reply APPROVE to receive final files, or reply with changes.",
+                action_context=build_action_context_for_command(
+                    PROJECT_ACTIONS, "concept_preview.cta_text",
+                ),
+            )
+            actions.audit_intercepted(
+                reason="flyer_primary_project_created" if ack_ok else "flyer_primary_failed",
+                chat_id=chat_id,
+                subprocess_rc=0 if ack_ok else 3,
+                detail=f"project_id={project_id}; selected_reminder={concept_selection}; sender_role={role}; ack_message_id={mid}; ack_error={err}",
+            )
+            return {"action": "skip",
+                    "reason": f"cf-router flyer active: selected concept reminder for {project_id}"}
+    if status == "awaiting_concept_selection" and concept_selection:
+        concept_id = concept_selection
         ok, detail = actions.invoke_update_flyer_project(project_id, "--select-concept", concept_id)
         if ok:
             ok, detail2 = actions.invoke_update_flyer_project(project_id, "--status", "awaiting_final_approval")
@@ -3489,7 +3586,6 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         if ok and manual_completed:
             access_ok, access_detail = _finalize_flyer_access_checked(manual_access, chat_id, phone, project_id, message_id)
             if not access_ok:
-                ok = False
                 detail = f"{detail}; manual_access_finalize_failed={access_detail[:250]}"
         elif manual_completed:
             release_ok, release_detail = _release_flyer_access(manual_access, chat_id, phone, project_id, message_id)
@@ -3537,7 +3633,14 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
     # are revision instructions; route via invoke_update_flyer_project to
     # capture them. FLYER_TRANSITIONS edge delivered_with_warning →
     # revising_design (Commit 1) takes effect downstream of this capture.
-    if status in {"revising_design", "awaiting_final_approval", "delivered", "delivered_with_warning"} and body and not actions.is_flyer_send_now_intent(body):
+    if (
+        (
+            status in {"revising_design", "awaiting_final_approval", "delivered", "delivered_with_warning"}
+            or (status == "awaiting_concept_selection" and _looks_like_active_flyer_revision(body))
+        )
+        and body
+        and not actions.is_flyer_send_now_intent(body)
+    ):
         ok, detail = actions.invoke_update_flyer_project(
             project_id,
             "--revision-text", body,

@@ -4853,6 +4853,7 @@ class CfRouterIntercepted(_BaseEntry):
         "flyer_trial_link_recovery",
         "flyer_guest_order_started",
         "flyer_guest_order_failed",
+        "flyer_access_finalize_failed",
         "flyer_access_release_failed",
         "flyer_pending_revision_confirmation_reminder",
         "error",

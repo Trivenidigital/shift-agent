@@ -639,6 +639,7 @@ sd_verify_units=(
     /etc/systemd/system/send-routing-accuracy-summary-failure.service
     /etc/systemd/system/flyer-recovery-watchdog.service
     /etc/systemd/system/flyer-recovery-watchdog.timer
+    /etc/systemd/system/flyer-recovery-watchdog-failure.service
 )
 if [ -f /etc/systemd/system/flyer-source-edit-sla-watchdog.service ]; then
     sd_verify_units+=( /etc/systemd/system/flyer-source-edit-sla-watchdog.service )
