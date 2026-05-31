@@ -470,6 +470,112 @@ flyer:
     assert incident["ack"]["status_detail"] == "missing_chat_id"
 
 
+def test_watchdog_customer_ack_passes_action_context_to_current_flyer_sender(tmp_path):
+    config = tmp_path / "config.yaml"
+    log = tmp_path / "decisions.log"
+    projects = tmp_path / "projects.json"
+    customers = tmp_path / "customers.json"
+    recovery_state = tmp_path / "recovery.json"
+    fake_actions = tmp_path / "fake_actions.py"
+    sent_path = tmp_path / "sent.json"
+    fake_actions.write_text(
+        f'''
+import json
+from pathlib import Path
+
+SENT_PATH = Path({str(sent_path)!r})
+
+def send_flyer_text(chat_id, text, *, action_context):
+    rows = json.loads(SENT_PATH.read_text(encoding="utf-8")) if SENT_PATH.exists() else []
+    rows.append({{
+        "chat_id": chat_id,
+        "text": text,
+        "action_id": action_context.action_id,
+        "is_regulated_action": action_context.is_regulated_action,
+    }})
+    SENT_PATH.write_text(json.dumps(rows), encoding="utf-8")
+    return True, "mid-recovery", ""
+'''.strip(),
+        encoding="utf-8",
+    )
+    config.write_text(
+        """
+schema_version: 1
+customer: {name: Triveni, location_id: loc_pineville_01, timezone: America/New_York}
+owner: {name: Owner, phone: '+19045550000'}
+limits: {}
+alerting: {pushover_user_key: k, pushover_app_token: t}
+backup: {gpg_recipient_email: owner@example.com}
+flyer:
+  enabled: true
+  recovery:
+    mode: customer_ack
+    enable_timer: true
+    scan_window_minutes: 240
+    ack_cooldown_minutes: 30
+""".strip(),
+        encoding="utf-8",
+    )
+    log.write_text("", encoding="utf-8")
+    projects.write_text('{"projects":[]}', encoding="utf-8")
+    customers.write_text('{"customers":[],"onboarding_sessions":[],"intake_sessions":[]}', encoding="utf-8")
+    now_ts = datetime.now(timezone.utc).isoformat()
+    recovery_state.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "incidents": [
+                    {
+                        "incident_id": "FRI20260525-ACTIONCTX",
+                        "status": "open",
+                        "failure_class": "concept_generation_failed",
+                        "severity": "warning",
+                        "source_fingerprint": "fp-actionctx",
+                        "ack_dedupe_key": "ack-actionctx",
+                        "project_id": "F1236",
+                        "chat_id": "17329837841@s.whatsapp.net",
+                        "chat_id_hash": "sha256:chat",
+                        "sender_phone_hash": "",
+                        "root_message_id": "wamid.actionctx",
+                        "provider_message_id_hash": "sha256:msg",
+                        "evidence_quality": "strong",
+                        "first_seen": now_ts,
+                        "last_seen": now_ts,
+                        "ack": {"status": "none"},
+                        "codex": {"status": "none", "bundle_path": ""},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--config-path", str(config),
+            "--log-path", str(log),
+            "--project-state-path", str(projects),
+            "--customer-state-path", str(customers),
+            "--recovery-state-path", str(recovery_state),
+            "--cf-actions-path", str(fake_actions),
+            "--text",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "ack_sent=1" in result.stdout
+    sent = json.loads(sent_path.read_text(encoding="utf-8"))
+    assert sent[0]["action_id"] == "flyer.recovery.customer_ack"
+    assert sent[0]["is_regulated_action"] is False
+    state = json.loads(recovery_state.read_text(encoding="utf-8"))
+    assert state["incidents"][0]["ack"]["status"] == "sent"
+
+
 def test_watchdog_repairs_reference_scope_false_positive_customer_outcome(tmp_path):
     config = tmp_path / "config.yaml"
     log = tmp_path / "decisions.log"

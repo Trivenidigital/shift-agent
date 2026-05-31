@@ -3162,6 +3162,157 @@ def test_manual_completed_guest_order_uses_existing_reserved_order(monkeypatch):
     assert calls["consume"]["project_id"] == "F7777"
 
 
+def test_manual_completed_finalization_does_not_send_failure_after_media_sent_when_access_finalize_fails(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    active_project = {
+        "project_id": "F7778",
+        "status": "awaiting_final_approval",
+        "customer_phone": "+17329837841",
+        "raw_request": "Edit uploaded flyer/source artwork.",
+        "concepts": [{"concept_id": "C1"}],
+        "manual_review": {"status": "completed"},
+    }
+    sent: list[str] = []
+    audits: list[dict] = []
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
+    monkeypatch.setattr(actions, "find_reserved_flyer_guest_order", lambda _phone, _chat_id, _project_id: {"reserved_order": True})
+    monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda *_args: (_ for _ in ()).throw(AssertionError("held guest order should be reused")))
+    monkeypatch.setattr(actions, "trigger_flyer_reserve_quota", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("guest manual order must not fall through to quota")))
+    monkeypatch.setattr(actions, "finalize_and_send_flyer", lambda *_args: (True, '{"sent": 1, "message_ids": ["wamid.final"]}'))
+    monkeypatch.setattr(actions, "trigger_consume_flyer_guest_order", lambda **_kwargs: (False, "guest order write failed", {}))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
+
+    result = hooks._try_flyer_active_project_intercept(
+        "APPROVE",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "manual-approve"},
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer active: finalized F7778"}
+    assert sent == []
+    assert "flyer_access_finalize_failed" in [row.get("reason") for row in audits]
+    assert audits[-1]["reason"] == "flyer_primary_project_created"
+
+
+def test_natural_concept_selection_selects_without_revision_fallback(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    active_project = {
+        "project_id": "F7780",
+        "status": "awaiting_concept_selection",
+        "customer_phone": "+17329837841",
+        "concepts": [{"concept_id": "C1", "title": "Dosa Night"}],
+    }
+    calls: list[tuple[str, tuple[str, ...]]] = []
+    sent: list[str] = []
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+
+    def fake_update(project_id, *args):
+        calls.append((project_id, args))
+        if "--revision-text" in args:
+            raise AssertionError("natural concept selection must not route as revision")
+        return True, "ok"
+
+    monkeypatch.setattr(actions, "invoke_update_flyer_project", fake_update)
+
+    result = hooks._try_flyer_active_project_intercept(
+        "first one please",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "select-natural"},
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer active: selected C1 for F7780"}
+    assert calls == [
+        ("F7780", ("--select-concept", "C1")),
+        ("F7780", ("--status", "awaiting_final_approval")),
+    ]
+    assert sent and "Selected C1" in sent[0]
+
+
+def test_final_stage_concept_reference_reminds_without_clearing_assets(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    active_project = {
+        "project_id": "F7781",
+        "status": "awaiting_final_approval",
+        "customer_phone": "+17329837841",
+        "selected_concept_id": "C1",
+        "concepts": [{"concept_id": "C1", "title": "Dosa Night"}],
+        "final_asset_ids": ["A0001"],
+    }
+    sent: list[str] = []
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+    monkeypatch.setattr(actions, "invoke_update_flyer_project", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("selected concept reminder must not mutate project")))
+
+    result = hooks._try_flyer_active_project_intercept(
+        "I like C1",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "select-final-stage"},
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer active: selected concept reminder for F7781"}
+    assert sent == ["C1 is selected. Reply APPROVE to receive final files, or reply with changes."]
+
+
+@pytest.mark.parametrize(
+    "status, body",
+    [
+        ("awaiting_final_approval", "I like C1 but change the price to $9.99"),
+        ("awaiting_final_approval", "make Dosa Night bigger"),
+        ("awaiting_concept_selection", "make the first line bigger"),
+    ],
+)
+def test_concept_selection_fragments_inside_revisions_route_as_revision(monkeypatch, status, body):
+    hooks, actions = _load_plugin_modules()
+    active_project = {
+        "project_id": "F7782",
+        "status": status,
+        "customer_phone": "+17329837841",
+        "selected_concept_id": "C1" if status == "awaiting_final_approval" else None,
+        "concepts": [{"concept_id": "C1", "title": "Dosa Night"}],
+        "final_asset_ids": ["A0001"],
+        "revisions": [],
+    }
+    calls: list[tuple[str, tuple[str, ...]]] = []
+    sent: list[str] = []
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+
+    def fake_update(project_id, *args):
+        calls.append((project_id, args))
+        if "--select-concept" in args:
+            raise AssertionError("revision text must not be swallowed as concept selection")
+        return True, "{}"
+
+    monkeypatch.setattr(actions, "invoke_update_flyer_project", fake_update)
+
+    result = hooks._try_flyer_active_project_intercept(
+        body,
+        "17329837841@s.whatsapp.net",
+        {"message_id": "revision-with-concept-fragment"},
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer active: revision captured for F7782"}
+    assert calls == [("F7782", ("--revision-text", body, "--message-id", "revision-with-concept-fragment"))]
+    assert sent and "Revision noted" in sent[0]
+
+
 @pytest.mark.parametrize("text, expected", [
     (
         "CONFIRM. Create a flyer for weekend sale with 20% off.",
