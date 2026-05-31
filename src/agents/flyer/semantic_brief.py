@@ -528,13 +528,16 @@ def visible_wrong_brand_blockers(project: FlyerProject, extracted_text: str) -> 
             continue
         if any(ch.isdigit() for ch in candidate) or "$" in candidate:
             continue
-        if len(re.findall(r"[A-Za-z][A-Za-z'&.-]*", candidate)) > 6:
+        words = re.findall(r"[A-Za-z][A-Za-z'&.-]*", candidate)
+        if len(words) > 6:
             continue
         letters = [ch for ch in candidate if ch.isalpha()]
         if len(letters) < 4:
             continue
         uppercase_ratio = sum(1 for ch in letters if ch.isupper()) / len(letters)
-        if uppercase_ratio < 0.8 and not candidate.istitle():
+        suffix_final = bool(2 <= len(words) <= 3 and _ORG_SUFFIX_RE.search(words[-1]))
+        mixed_org_masthead = suffix_final and any(ch.isupper() for ch in candidate) and any(ch.islower() for ch in candidate)
+        if uppercase_ratio < 0.8 and not candidate.istitle() and not mixed_org_masthead:
             continue
         if not _ORG_SUFFIX_RE.search(candidate):
             continue
