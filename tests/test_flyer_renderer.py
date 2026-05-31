@@ -804,6 +804,60 @@ def test_image_prompt_uses_clean_biryani_copy_without_price_instruction_leak():
     assert not any("add price" in text.lower() for text in facts.values())
 
 
+def test_image_prompt_for_indochinese_menu_uses_structured_item_cards_not_raw_request():
+    now = datetime(2026, 5, 31, tzinfo=timezone.utc)
+    names = [
+        "Veg Manchurian",
+        "Gobi Manchurian",
+        "Chili Paneer",
+        "Hakka Noodles",
+        "Schezwan Fried Rice",
+        "Chili Garlic Noodles",
+        "Manchow Soup",
+        "Spring Rolls",
+    ]
+    locked = [
+        FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Indo-Chinese Specials", source="customer_text", required=True),
+        FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="schedule", label="Schedule", value="Wednesday", source="customer_text", required=True),
+    ]
+    for idx, name in enumerate(names):
+        locked.append(FlyerLockedFact(fact_id=f"item:{idx}:name", label="Item", value=name, source="customer_text", required=True))
+        locked.append(FlyerLockedFact(fact_id=f"item:{idx}:price", label="Price", value="$9.99", source="customer_text", required=True))
+    raw = (
+        "Create a flyer for Indo-Chinese specials on Wednesday. Include 8 famous "
+        "Indo-Chinese items. Any item priced at $9.99. Use Address and phone number stored."
+    )
+    project = FlyerProject(
+        project_id="F0120",
+        status="generating_concepts",
+        customer_phone="+17329837841",
+        created_at=now,
+        updated_at=now,
+        original_message_id="m-indochinese",
+        raw_request=raw,
+        fields=FlyerRequestFields(
+            event_or_business_name="Indo-Chinese Specials",
+            venue_or_location="90 Brybar Dr St Johns FL",
+            contact_info="+17329837841",
+            notes=raw,
+            style_preference="professional local food menu flyer",
+        ),
+        locked_facts=locked,
+    )
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+
+    assert "Menu item cards:" in prompt
+    assert "- Veg Manchurian - $9.99" in prompt
+    assert "- Spring Rolls - $9.99" in prompt
+    assert "Use product-specific close-up food imagery based on the listed menu items" in prompt
+    assert "Avoid generic buffet, dining-family, or unrelated stock-food scenes" in prompt
+    assert raw not in prompt
+
+
 def test_image_prompt_skips_blank_optional_fields_for_price_list():
     project = _complete_project()
     fields = FlyerRequestFields(

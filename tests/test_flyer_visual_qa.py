@@ -46,6 +46,23 @@ def test_visual_qa_blocks_placeholders_even_when_facts_present(tmp_path):
     assert any("placeholder" in blocker for blocker in report.blockers)
 
 
+def test_visual_qa_blocks_raw_request_instruction_text_even_when_facts_present(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    artifact = tmp_path / "flyer.png"
+    artifact.write_bytes(b"not really an image but has bytes")
+    (tmp_path / "flyer.png.ocr.txt").write_text(
+        "Fresh Meats Premium Clean Chicken Clean bird. Strong life. $13.99 "
+        "Create a flyer for Premium Clean Chicken",
+        encoding="utf-8",
+    )
+
+    report = run_visual_qa(_project(), artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert report.status == "failed"
+    assert "raw request instruction text is visible in generated flyer" in report.blockers
+
+
 def test_visual_qa_requires_real_ocr_or_explicit_test_sidecar(tmp_path):
     from agents.flyer.visual_qa import run_visual_qa
 

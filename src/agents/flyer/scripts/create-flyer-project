@@ -206,6 +206,11 @@ def _invalid_venue(value: str) -> bool:
     clean = re.sub(r"\s+", " ", value or "").strip(" .,:;").lower()
     return (
         not clean
+        or "$" in clean
+        or (
+            re.search(r"\b\d+(?:\.\d{1,2})?\b", clean)
+            and re.search(r"\b(?:and|or|item|items?|price|priced|include)\b", clean)
+        )
         or clean in {"and", "or", "the bottom", "bottom", "top", "end", "customer profile"}
         or clean.startswith(("phone ", "phone number", "contact ", "address and phone"))
     )
@@ -451,6 +456,12 @@ def _normalize_event_name(event_name: str, text: str) -> str:
         name = help_match.group(1).strip(" .")
     name = re.sub(
         r"^(?:i[?'’]?d\s+like\s+you\s+to\s+)?(?:help\s+me\s+with\s+)?",
+        "",
+        name,
+        flags=re.IGNORECASE,
+    ).strip(" .")
+    name = re.sub(
+        r"\s+\bon\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b$",
         "",
         name,
         flags=re.IGNORECASE,

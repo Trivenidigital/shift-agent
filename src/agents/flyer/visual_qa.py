@@ -36,6 +36,15 @@ PLACEHOLDER_RE = re.compile(
     r"|\bsample\s+text\b",
     re.IGNORECASE,
 )
+RAW_REQUEST_INSTRUCTION_RE = re.compile(
+    r"\b(?:create|make|generate|design)\s+(?:a\s+)?(?:flyer|flier|poster|banner)\b"
+    r"|\b(?:flyer|flier|poster|banner)\s+for\b"
+    r"|\bitems?\s+to\s+include\b"
+    r"|\b(?:customer\s+request(?:ed)?|user\s+request(?:ed)?)\b"
+    r"|\b(?:extract|take)\s+(?:item|items|prices?)\b"
+    r"|\battaching\s+(?:a\s+)?(?:flyer|flier|poster|banner)\b",
+    re.IGNORECASE,
+)
 
 
 _PHONE_DIGITS_RE = re.compile(r"\D+")
@@ -783,6 +792,8 @@ def run_visual_qa(
     normalized = _normalize_text_for_match(extracted_text)
     if PLACEHOLDER_RE.search(extracted_text):
         blockers.append("placeholder text is visible in generated flyer")
+    if RAW_REQUEST_INSTRUCTION_RE.search(extracted_text):
+        blockers.append("raw request instruction text is visible in generated flyer")
     if _requires_english_only(project) and REGIONAL_SCRIPT_RE.search(extracted_text):
         blockers.append("English-only flyer contains regional/non-English script")
     blockers.extend(_unrequested_operational_claim_blockers(project, extracted_text))
