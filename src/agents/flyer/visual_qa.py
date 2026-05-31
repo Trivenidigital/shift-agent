@@ -540,6 +540,8 @@ def classify_qa_severity(
         return "block"
     if warn_specs:
         return "warn"
+    if blockers:
+        return "block"
     return "pass"
 
 

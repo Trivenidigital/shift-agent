@@ -1545,7 +1545,7 @@ def should_bypass_active_flyer_project_for_fresh_request(
 
 
 def _media_revision_targets_delivered_active_project(text: str, *, status: str, has_media: bool) -> bool:
-    if status != "delivered" or not has_media:
+    if status not in {"revising_design", "delivered", "delivered_with_warning"} or not has_media:
         return False
     body = " ".join(flyer_visible_message_text(text).split())
     if not body:

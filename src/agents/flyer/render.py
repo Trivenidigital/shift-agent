@@ -1056,7 +1056,13 @@ def write_text_manifest(
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     sidecar = _text_manifest_path(artifact)
-    sidecar.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    manifest_payload = json.dumps(manifest, indent=2, ensure_ascii=False)
+    try:
+        from safe_io import atomic_write_text  # type: ignore
+    except Exception:
+        sidecar.write_text(manifest_payload, encoding="utf-8")
+    else:
+        atomic_write_text(sidecar, manifest_payload)
     result = validate_text_manifest_file(
         artifact,
         project_id=project.project_id,
@@ -1726,8 +1732,8 @@ def _decode_data_url(data_url: str) -> bytes:
 
 def _openrouter_image_bytes(project: FlyerProject, *, concept_id: str, output_format: str, size: tuple[int, int] | None, model: str, quality: str, repair_instruction: str = "") -> bytes:
     api_key = _read_env_value("OPENROUTER_API_KEY")
-    if not api_key:
-        raise FlyerRenderError("OPENROUTER_API_KEY is missing")
+    if not api_key or "PLACEHOLDER" in api_key.upper():
+        raise FlyerRenderError("OPENROUTER_API_KEY is missing or placeholder")
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": _image_message_content(project, concept_id=concept_id, output_format=output_format, size=size, repair_instruction=repair_instruction)}],

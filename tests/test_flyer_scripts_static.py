@@ -92,6 +92,8 @@ def test_delivery_script_can_send_by_project_id():
     smoke = (SCRIPTS / "smoke-flyer-quality").read_text(encoding="utf-8")
     assert "write_visual_qa_report" in smoke
     assert "--allow-sidecar-visual-qa" in smoke
+    assert "allow_sidecar=False" in smoke
+    assert "if not args.real_model:" in smoke
 
 
 def test_delivery_report_installed_and_smoked_for_operator_visibility():

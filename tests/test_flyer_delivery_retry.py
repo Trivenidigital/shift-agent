@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import importlib.machinery
 import json
 import sys
+import threading
+import time
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -329,6 +332,110 @@ def test_record_asset_delivery_persists_success_immediately(tmp_path, monkeypatc
     assert asset.delivery_attempt_count == 1
     persisted = FlyerProjectStore.model_validate_json(state_path.read_text(encoding="utf-8")).projects[0]
     assert next(a for a in persisted.assets if a.asset_id == "A0001").delivery_status == "sent"
+
+
+def test_record_asset_delivery_holds_state_file_lock(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    mod = _load_script()
+    project = _project(tmp_path)
+    state_path = tmp_path / "projects.json"
+    state_path.write_text(FlyerProjectStore(projects=[project]).model_dump_json(indent=2), encoding="utf-8")
+    lock_paths: list[Path] = []
+
+    class RecordingLock:
+        def __init__(self, path):
+            self.path = Path(path)
+
+        def __enter__(self):
+            lock_paths.append(self.path)
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    mod._record_asset_delivery(
+        state_path,
+        project.project_id,
+        "A0001",
+        status="sent",
+        outbound_message_id="wamid.1",
+        FileLock=RecordingLock,
+    )
+
+    assert lock_paths == [Path(str(state_path) + ".lock")]
+
+
+def test_project_delivery_serializes_pending_selection_through_send(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    mod = _load_script()
+    project = _project(tmp_path)
+    project = project.model_copy(update={
+        "assets": [project.assets[0]],
+        "final_asset_ids": ["A0001"],
+    })
+    state_path = tmp_path / "projects.json"
+    log_path = tmp_path / "decisions.log"
+    state_path.write_text(FlyerProjectStore(projects=[project]).model_dump_json(indent=2), encoding="utf-8")
+    monkeypatch.setattr(mod, "validate_text_manifest_file", lambda *_args, **_kwargs: type("Result", (), {"ok": True, "blockers": []})())
+    monkeypatch.setattr(mod, "validate_visual_qa_report", lambda *_args, **_kwargs: type("Result", (), {"ok": True, "blockers": []})())
+
+    locks: dict[str, threading.Lock] = {}
+    sent_assets: list[str] = []
+    sent_lock = threading.Lock()
+
+    class BlockingFileLock:
+        def __init__(self, path):
+            self.path = str(path)
+            self._lock = locks.setdefault(self.path, threading.Lock())
+
+        def __enter__(self):
+            self._lock.acquire()
+            return self
+
+        def __exit__(self, *_args):
+            self._lock.release()
+            return False
+
+    def fake_send_media(_jid, asset, *, caption=""):
+        time.sleep(0.05)
+        with sent_lock:
+            sent_assets.append(Path(asset).name)
+            mid = f"wamid.{len(sent_assets)}"
+        return True, mid, "", 200
+
+    def fake_ndjson_append(path, line):
+        with Path(path).open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+
+    monkeypatch.setattr(mod, "_load_runtime_io", lambda: (
+        BlockingFileLock,
+        lambda path, text: Path(path).write_text(text, encoding="utf-8"),
+        lambda *_args, **_kwargs: (True, "wamid.text", "", 200),
+        fake_send_media,
+        fake_ndjson_append,
+    ))
+    monkeypatch.setattr(sys, "argv", [
+        "send-flyer-package",
+        "--jid", "15551234567@c.us",
+        "--project-id", project.project_id,
+        "--state-path", str(state_path),
+        "--log-path", str(log_path),
+    ])
+
+    def run_main():
+        try:
+            return mod.main()
+        except SystemExit as exc:
+            return exc.code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _idx: run_main(), range(2)))
+
+    assert sent_assets == ["wa.png"]
+    assert 0 in results
+    persisted = FlyerProjectStore.model_validate_json(state_path.read_text(encoding="utf-8")).projects[0]
+    assert persisted.status == "delivered"
+    assert persisted.assets[0].delivery_status == "sent"
 
 
 def test_uncertain_delivery_blocks_blind_retry(tmp_path, monkeypatch):

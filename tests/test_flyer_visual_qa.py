@@ -1591,6 +1591,12 @@ def test_classify_qa_severity_single_missing_location_returns_warn():
     assert classify_qa_severity(blockers, project=_classifier_project()) == "warn"
 
 
+def test_classify_qa_severity_unknown_blocker_fails_closed():
+    from agents.flyer.visual_qa import classify_qa_severity
+    blockers = ["missing required visible fact: replacement:0:new"]
+    assert classify_qa_severity(blockers, project=_classifier_project()) == "block"
+
+
 def test_classify_qa_severity_f0108_brand_typo_returns_warn():
     """F0108 reproduction: 'Laksmi'S Kitchen' (typo) vs 'Lakshmi's Kitchen'
     (project brand). Passes all 3 gates -> warn."""

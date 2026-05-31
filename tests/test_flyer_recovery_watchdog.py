@@ -1158,6 +1158,36 @@ def test_stale_manual_project_signal_uses_persisted_project_origin():
     assert signal.provider_message_id == "wamid.f0105"
 
 
+def test_stale_claimed_manual_project_signal_includes_claim_owner():
+    now = datetime(2026, 5, 27, 4, 0, tzinfo=timezone.utc)
+    queued_at = (now - timedelta(hours=2)).isoformat()
+    claimed_at = (now - timedelta(hours=2)).isoformat()
+    signal = recovery.classify_stale_manual_project(
+        {
+            "project_id": "F0106",
+            "status": "manual_edit_required",
+            "chat_id": "201975216009469@lid",
+            "original_message_id": "wamid.f0106",
+            "manual_review": {
+                "status": "in_progress",
+                "reason_code": "visual_qa_failed",
+                "detail": "QA blocked missing required visible facts",
+                "queued_at": queued_at,
+                "claimed_by": "admin-a",
+                "claimed_at": claimed_at,
+            },
+        },
+        now=now,
+        stale_after=timedelta(minutes=30),
+    )
+
+    assert signal is not None
+    assert signal.failure_class == "concept_generation_failed"
+    assert "manual_status=in_progress" in signal.detail
+    assert "claimed_by=admin-a" in signal.detail
+    assert "claimed_at=" in signal.detail
+
+
 def _watchdog_env(tmp_path):
     env = os.environ.copy()
     env["SHIFT_AGENT_NOTIFY_OWNER_BIN"] = str(tmp_path / "missing-notify-owner")

@@ -231,13 +231,14 @@ def _load_cf_router_actions(actions_path: str = ""):
 
 def _append_audit(log_path: Path, entry) -> None:
     try:
-        from safe_io import ndjson_append  # type: ignore
+        from safe_io import FileLock, ndjson_append  # type: ignore
     except Exception:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a", encoding="utf-8") as fh:
             fh.write(entry.model_dump_json() + "\n")
         return
-    ndjson_append(log_path, entry.model_dump_json())
+    with FileLock(Path(str(log_path) + ".lock")):
+        ndjson_append(log_path, entry.model_dump_json())
 
 
 def _notify_owner(title: str, message: str, *, source: str = "flyer-recovery-watchdog") -> bool:
@@ -359,12 +360,13 @@ def _append_raw_audit(log_path: Path, entry: dict) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(entry, separators=(",", ":"), sort_keys=True)
     try:
-        from safe_io import ndjson_append  # type: ignore
+        from safe_io import FileLock, ndjson_append  # type: ignore
     except Exception:
         with log_path.open("a", encoding="utf-8") as fh:
             fh.write(payload + "\n")
         return
-    ndjson_append(log_path, payload)
+    with FileLock(Path(str(log_path) + ".lock")):
+        ndjson_append(log_path, payload)
 
 
 def _reference_scope_repair_text(business_name: str) -> str:

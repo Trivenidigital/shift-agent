@@ -4053,6 +4053,19 @@ class FlyerStatusResent(_BaseEntry):
     error: str = Field(default="", max_length=500)
 
 
+class FlyerManualQueueCustomerUpdate(_BaseEntry):
+    """SLA watchdog's proactive status update to customers with stale manual rows."""
+    type: Literal["flyer_manual_queue_customer_update"] = "flyer_manual_queue_customer_update"
+    project_id: str = Field(pattern=r"^F\d{4,}$")
+    reason_code: str = Field(default="", max_length=80)
+    manual_status: str = Field(default="", max_length=40)
+    age_minutes: float = Field(ge=0.0)
+    outcome: Literal["sent", "failed", "skipped_no_chat_id", "suppressed_same_chat_update"]
+    chat_id_source: str = Field(default="", max_length=120)
+    outbound_message_id: str = Field(default="", max_length=200)
+    error: str = Field(default="", max_length=500)
+
+
 class FlyerSourceContractExtracted(_BaseEntry):
     """Audit row emitted once per source-contract extraction attempt.
 
@@ -5604,6 +5617,7 @@ LogEntry = Annotated[
         Annotated[FlyerRecoveryOwnerAlert, Tag("flyer_recovery_owner_alert")],
         Annotated[FlyerClosureCustomerNotified, Tag("flyer_closure_customer_notified")],
         Annotated[FlyerStatusResent, Tag("flyer_status_resent")],
+        Annotated[FlyerManualQueueCustomerUpdate, Tag("flyer_manual_queue_customer_update")],
         # NEW — source-contract observability (2026-05-20 flyer source-contract-first)
         Annotated[FlyerSourceContractExtracted, Tag("flyer_source_contract_extracted")],
         Annotated[FlyerSourceVsNewChosen, Tag("flyer_source_vs_new_chosen")],
@@ -5757,7 +5771,7 @@ __all__ = [
     "FlyerRecoveryRepairBundleWritten", "FlyerRecoveryOutcomeRepaired", "FlyerRecoveryDeployGate", "FlyerRecoveryResolved",
     "FlyerRecoveryOperatorActionRequired", "FlyerRecoveryOwnerAlert",
     "FlyerUsageRecorded", "FlyerQuotaBlocked", "FlyerClosureCustomerNotified",
-    "FlyerStatusResent",
+    "FlyerStatusResent", "FlyerManualQueueCustomerUpdate",
     "Proposal", "ProposalId", "ProposalCode",
     "AwaitingProposal", "ApprovedProposal", "ReconcilingProposal", "SentProposal",
     "SendFailedProposal", "AcceptedProposal", "DeclinedProposal", "DeniedByOwnerProposal",
