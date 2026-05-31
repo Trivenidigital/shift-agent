@@ -381,6 +381,53 @@ def test_audit_bug3_lead_original_message_id_control_chars_rejected(bad_value):
         ExpenseLead.model_validate(base)
 
 
+@pytest.mark.parametrize("field_name", ["sender_lid", "qbo_account", "rejection_reason"])
+@pytest.mark.parametrize(
+    "bad_value,match",
+    [
+        ("", "empty or whitespace"),
+        ("  ", "empty or whitespace"),
+        ("value\0null", "null byte or control"),
+        ("value\rbreak", "null byte or control"),
+        ("value\nbreak", "null byte or control"),
+        ("value\tbreak", "null byte or control"),
+    ],
+)
+def test_v02_1_optional_lead_string_fields_reject_blank_and_control_chars(
+    field_name, bad_value, match,
+):
+    """V02-1: optional ExpenseLead string fields are optional, but when present
+    they share the same whitespace/control-char boundary as sender_phone and
+    original_message_id."""
+    base = _base_lead()
+    base[field_name] = bad_value
+    with pytest.raises(Exception, match=match):
+        ExpenseLead.model_validate(base)
+
+
+def test_v02_1_optional_lead_string_fields_accept_none_or_clean_values():
+    base = _base_lead()
+    base.update({
+        "sender_lid": None,
+        "qbo_account": None,
+        "rejection_reason": None,
+    })
+    lead = ExpenseLead.model_validate(base)
+    assert lead.sender_lid is None
+    assert lead.qbo_account is None
+    assert lead.rejection_reason is None
+
+    base.update({
+        "sender_lid": "123456789@lid",
+        "qbo_account": "COGS - Groceries",
+        "rejection_reason": "owner rejected duplicate receipt",
+    })
+    lead = ExpenseLead.model_validate(base)
+    assert lead.sender_lid == "123456789@lid"
+    assert lead.qbo_account == "COGS - Groceries"
+    assert lead.rejection_reason == "owner rejected duplicate receipt"
+
+
 _TEMPLATE_DIR = (
     Path(__file__).resolve().parent.parent
     / "src" / "agents" / "expense_bookkeeper" / "templates"

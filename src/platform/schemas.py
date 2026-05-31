@@ -2905,9 +2905,15 @@ class ExpenseLead(BaseModel):
     duplicate_of: Optional[str] = None
     reconcile_required: bool = False  # set by orphan detection; blocks new owner actions until cleared
 
-    @field_validator("sender_phone", "original_message_id")
+    @field_validator(
+        "sender_phone",
+        "original_message_id",
+        "sender_lid",
+        "qbo_account",
+        "rejection_reason",
+    )
     @classmethod
-    def _validate_required_no_whitespace_no_nullbyte(cls, v: str) -> str:
+    def _validate_required_no_whitespace_no_nullbyte(cls, v: Optional[str]) -> Optional[str]:
         """Audit-bug v1.1 fix: addresses BUGs 2 + 3 together.
 
         - sender_phone (BUG-2 audit): reject empty / whitespace-only.
@@ -2918,7 +2924,12 @@ class ExpenseLead(BaseModel):
           char. NDJSON audit-log safety; Pydantic `model_dump_json`
           escapes these but defence-in-depth keeps log-corruption surface
           zero.
+        - Optional v0.2 fields (`sender_lid`, `qbo_account`,
+          `rejection_reason`) remain nullable, but when present they share
+          the same blank/control-char boundary.
         """
+        if v is None:
+            return v
         if not v.strip():
             raise ValueError("must not be empty or whitespace-only")
         if any(c in v for c in ("\0", "\r", "\n", "\t")):
