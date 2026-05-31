@@ -485,24 +485,123 @@ def parse_language_choice(text: str) -> str:
     for code, _label, aliases in LANGUAGES:
         if choice in aliases:
             return code
+    tokens = choice.split()
+    matched_codes = {
+        code
+        for code, _label, aliases in LANGUAGES
+        if any(alias in tokens for alias in aliases if not alias.isdigit())
+    }
+    filler = {
+        "please", "pls", "plz", "use", "choose", "select", "pick", "i", "want",
+        "prefer", "preferred", "language", "my", "would", "like", "to", "as",
+        "in", "send",
+    }
+    if any(token.isdigit() for token in tokens):
+        filler.update({"option", "choice", "reply", "number"})
+    language_aliases = {
+        alias
+        for _code, _label, aliases in LANGUAGES
+        for alias in aliases
+        if not alias.isdigit()
+    }
+    numeric = _single_option_number(tokens)
+    if numeric:
+        for code, _label, aliases in LANGUAGES:
+            if numeric in aliases:
+                if matched_codes and matched_codes != {code}:
+                    return ""
+                allowed = set(filler) | language_aliases | {numeric}
+                if all(token in allowed or token.isdigit() for token in tokens):
+                    return code
+                return ""
+    if len(matched_codes) != 1:
+        return ""
+    if all(token in filler or token in language_aliases for token in tokens):
+        return next(iter(matched_codes))
     return ""
 
 
 def parse_mode_choice(text: str, *, prompt_version: str = "brief_builder_v1") -> str:
     choice = " ".join((text or "").lower().split())
+    normalized = re.sub(r"[^a-z0-9]+", " ", choice).strip()
     if prompt_version != "brief_builder_v1":
-        if choice in {"1", "guide", "guided", "guide me", "agent", "agent mode", "guided mode", "step by step", "self guided", "self-guided"}:
-            return "guided"
-        if choice in {"2", "text", "text mode", "type", "i'll type", "ill type", "i will type", "manual"}:
-            return "text"
+        mode_aliases = {
+            "guided": {"1", "guide", "guided", "guide me", "agent", "agent mode", "guided mode", "step by step", "self guided", "self-guided"},
+            "text": {"2", "text", "text mode", "type", "i'll type", "ill type", "i will type", "manual"},
+        }
+    else:
+        mode_aliases = {
+            "sample": {"1", "sample", "samples", "idea", "ideas", "pick an idea", "starter", "starter idea"},
+            "guided": {"2", "guide", "guided", "guide me", "agent", "agent mode", "guided mode", "step by step", "self guided", "self-guided"},
+            "text": {"3", "text", "text mode", "type", "i'll type", "ill type", "i will type", "manual"},
+        }
+    for mode, aliases in mode_aliases.items():
+        if choice in aliases or normalized in {re.sub(r"[^a-z0-9]+", " ", alias).strip() for alias in aliases}:
+            return mode
+    tokens = normalized.split()
+    normalized_aliases = {
+        mode: {
+            re.sub(r"[^a-z0-9]+", " ", alias).strip()
+            for alias in aliases
+            if not alias.isdigit()
+        }
+        for mode, aliases in mode_aliases.items()
+    }
+    matched_modes = {
+        mode
+        for mode, aliases in normalized_aliases.items()
+        if any(_contains_phrase(normalized, alias) for alias in aliases)
+    }
+    filler = {
+        "please", "pls", "plz", "i", "want", "would", "like", "to", "use",
+        "choose", "select", "pick", "option", "choice", "reply", "number",
+        "mode", "it", "myself", "me", "for", "with", "go", "let", "do",
+    }
+    all_alias_tokens = {
+        token
+        for aliases in normalized_aliases.values()
+        for alias in aliases
+        for token in alias.split()
+    }
+    numeric = _single_option_number(tokens)
+    if numeric:
+        for mode, aliases in mode_aliases.items():
+            if numeric in aliases:
+                if matched_modes and matched_modes != {mode}:
+                    return ""
+                allowed = set(filler) | all_alias_tokens | {numeric}
+                if all(token in allowed or token.isdigit() for token in tokens):
+                    return mode
+                return ""
+    if len(matched_modes) != 1:
         return ""
-    if choice in {"1", "sample", "samples", "idea", "ideas", "pick an idea", "starter", "starter idea"}:
-        return "sample"
-    if choice in {"2", "guide", "guided", "guide me", "agent", "agent mode", "guided mode", "step by step", "self guided", "self-guided"}:
-        return "guided"
-    if choice in {"3", "text", "text mode", "type", "i'll type", "ill type", "i will type", "manual"}:
-        return "text"
+    matched_mode = next(iter(matched_modes))
+    alias_tokens = {
+        token
+        for alias in normalized_aliases[matched_mode]
+        for token in alias.split()
+    }
+    if all(token in filler or token in alias_tokens or token.isdigit() for token in tokens):
+        return matched_mode
     return ""
+
+
+def _single_option_number(tokens: list[str]) -> str:
+    numbers = [token for token in tokens if token.isdigit()]
+    if len(numbers) != 1:
+        return ""
+    if len(tokens) == 1 or any(token in {"option", "choice", "reply", "number"} for token in tokens):
+        return numbers[0]
+    return ""
+
+
+def _contains_phrase(normalized_text: str, normalized_phrase: str) -> bool:
+    if not normalized_phrase:
+        return False
+    return bool(re.search(
+        rf"(?<![a-z0-9]){re.escape(normalized_phrase)}(?![a-z0-9])",
+        normalized_text,
+    ))
 
 
 def language_label(code: str) -> str:

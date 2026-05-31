@@ -629,6 +629,49 @@ def test_language_menu_pins_deployed_order_at_positions_4_through_6():
     assert "6. Kannada" in prompt
 
 
+def test_intake_language_choice_accepts_normal_whatsapp_replies():
+    from agents.flyer.intake import parse_language_choice
+
+    assert parse_language_choice("English please") == "en"
+    assert parse_language_choice("in English please") == "en"
+    assert parse_language_choice("send in Telugu") == "te"
+    assert parse_language_choice("option 2 please") == "te"
+    assert parse_language_choice("I want Hindi") == "hi"
+    assert parse_language_choice("choice 10 - Spanish") == "es"
+    assert parse_language_choice("please use mixed / other") == "mixed"
+    assert parse_language_choice("English or Telugu is fine") == ""
+    assert parse_language_choice("create a flyer in English for dosa") == ""
+    assert parse_language_choice("choice 10 Telugu") == ""
+    assert parse_language_choice("option 2 create flyer for dosa") == ""
+    assert parse_language_choice("I want option 2 for my Diwali sale flyer") == ""
+
+
+def test_intake_mode_choice_accepts_normal_whatsapp_replies():
+    from agents.flyer.intake import parse_mode_choice
+
+    assert parse_mode_choice("option 1 please") == "sample"
+    assert parse_mode_choice("I want option 2") == "guided"
+    assert parse_mode_choice("go with option 2") == "guided"
+    assert parse_mode_choice("option 2 for guided mode") == "guided"
+    assert parse_mode_choice("guide me please") == "guided"
+    assert parse_mode_choice("option 3 - text mode") == "text"
+    assert parse_mode_choice("I'll type it myself") == "text"
+    assert parse_mode_choice("let me type it") == "text"
+    assert parse_mode_choice("I'll do text mode") == "text"
+    assert parse_mode_choice("I can either pick sample or type") == ""
+    assert parse_mode_choice("option 2 text mode") == ""
+    assert parse_mode_choice("option 2 create flyer for dosa") == ""
+    assert parse_mode_choice("choice 3 make a menu flyer") == ""
+    assert parse_mode_choice("I want option 2 for my Diwali sale flyer") == ""
+
+
+def test_legacy_intake_mode_choice_accepts_option_wrappers():
+    from agents.flyer.intake import parse_mode_choice
+
+    assert parse_mode_choice("option 1 please", prompt_version="legacy_v0") == "guided"
+    assert parse_mode_choice("option 2 please", prompt_version="legacy_v0") == "text"
+
+
 def test_trial_back_from_confirming_summary_skips_choosing_plan(tmp_path):
     """BUG-FLYER-QA-2026-05-19-001: trial sessions skip `choosing_plan` on
     the forward path. BACK from `confirming_summary` must mirror that skip,
