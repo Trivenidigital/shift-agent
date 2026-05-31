@@ -2656,6 +2656,7 @@ def render_source_edit_preview(project: FlyerProject, output_dir: Path | str, *,
 def render_final_package(project: FlyerProject, output_dir: Path | str, *, model: str = "deterministic-renderer", quality: str = "medium") -> list[RenderedAssetSpec]:
     output_dir = Path(output_dir)
     concept_id = project.selected_concept_id or "C1"
+    source_edit_project = _is_source_edit_project(project)
     selected_preview: Path | None = None
     if project.selected_concept_id:
         concept = next((c for c in project.concepts if c.concept_id == project.selected_concept_id), None)
@@ -2666,6 +2667,8 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
                 quality_report = inspect_rendered_asset(candidate, expected_width=1080, expected_height=1350, mime_type="image/png")
                 if quality_report.ok:
                     selected_preview = candidate
+    if source_edit_project and selected_preview is None:
+        raise FlyerRenderError("source edit final package requires an approved preview")
     formats: list[tuple[FlyerOutputFormat, str, tuple[int, int] | None]] = [
         ("whatsapp_image", "final_whatsapp_image", FINAL_FORMAT_PIXEL_SHAPES["whatsapp_image"]),
         ("instagram_post", "final_instagram_post", FINAL_FORMAT_PIXEL_SHAPES["instagram_post"]),
@@ -2687,16 +2690,22 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
             #   raw at each output size is correct and never drops an edit — there
             #   are no edits, the overlay IS the text. This avoids cropping the 4:5
             #   preview (which under the no-text contract would drop required copy).
-            # - Non-eligible (reference-extraction / source-edit / operator-upload):
+            # - Non-eligible (reference-extraction / operator-upload):
             #   the preview is the authoritative artifact (its text is model- or
             #   operator-produced) and there is no matched raw, so use it directly
             #   and never composite the overlay on top.
+            # - Source-edit previews produced by this renderer are a separate case:
+            #   the generative edit is stored as raw and the deterministic overlay
+            #   owns the text. If the raw sidecar is missing, fail closed instead of
+            #   claiming a recomposed text guarantee over an old pre-overlay preview.
+            if source_edit_project and not source.exists():
+                raise FlyerRenderError("source edit final package requires raw edited background sidecar")
             direct_poster_source = (
                 not source.exists()
                 # Source-edits with a preserved raw model edit re-apply the
                 # deterministic overlay per format (below) — new-flyer parity — so
                 # they are NOT forced down the direct/no-re-overlay path here.
-                or (not _background_only_eligible(project) and not _is_source_edit_project(project))
+                or (not _background_only_eligible(project) and not source_edit_project)
                 # Defensive stale-raw guard: a generated background-only composite
                 # writes its raw and overlaid preview together (within ~1s), so a
                 # preview MEANINGFULLY newer than its raw means the preview was
@@ -2704,8 +2713,12 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
                 # preview directly instead of rebuilding from a possibly-stale raw.
                 # The tight window cleanly separates composites (sub-second) from
                 # any later edit (seconds-to-minutes).
+                # Source-edits are excluded from this guard: if their raw sidecar
+                # exists, the source-edit contract is to re-apply the deterministic
+                # overlay per final format rather than resize the 4:5 preview.
                 or (
-                    selected_preview.exists()
+                    not source_edit_project
+                    and selected_preview.exists()
                     and selected_preview.stat().st_mtime - source.stat().st_mtime > _RAW_COMPOSITE_FRESH_SECONDS
                 )
             )
@@ -2718,7 +2731,7 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
                 else:
                     temp_png = path.with_suffix(".overlay-source.png")
                     overlaid_png = path.with_suffix(".overlaid.png")
-                    if _is_source_edit_project(project):
+                    if source_edit_project:
                         # Preserve the uploaded flyer's aspect (letterbox); fill/crop
                         # would cut off the customer's own artwork.
                         _export_from_source_image_contained(source, temp_png, size=(1275, 1650))
@@ -2730,13 +2743,13 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
                     overlaid_png.unlink(missing_ok=True)
             else:
                 if direct_poster_source:
-                    if _is_source_edit_project(project):
+                    if source_edit_project:
                         _export_from_source_image_contained(source, path, size=size)
                     else:
                         _export_from_source_image(source, path, size=size)
                 else:
                     temp_png = path.with_suffix(".overlay-source.png")
-                    if _is_source_edit_project(project):
+                    if source_edit_project:
                         # Preserve the uploaded flyer's aspect (letterbox); fill/crop
                         # would cut off the customer's own artwork.
                         _export_from_source_image_contained(source, temp_png, size=size)
@@ -2750,7 +2763,7 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
         quality_report = inspect_rendered_asset(path, expected_width=width, expected_height=height, mime_type="application/pdf" if size is None else "image/png")
         if not quality_report.ok:
             raise FlyerRenderError(f"rendered final failed quality check: {quality_report.blockers}")
-        if _is_source_edit_project(project):
+        if source_edit_project:
             write_text_manifest(
                 project,
                 path,
