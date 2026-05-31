@@ -5707,6 +5707,177 @@ def test_final_visual_qa_failure_after_approve_gets_review_ack(monkeypatch):
     assert "flyer_reference_exact_edit_queued" not in audit_reasons
 
 
+@pytest.mark.parametrize("body", ["send now", "APPROVE", "send my flyer", "please send my flyer"])
+def test_finalizing_assets_send_now_retries_package_delivery(monkeypatch, body):
+    hooks, actions = _load_plugin_modules()
+    active_project = {
+        "project_id": "F7790",
+        "customer_phone": "+17329837841",
+        "status": "finalizing_assets",
+        "fields": {"event_or_business_name": "Weekend Specials", "contact_info": "+17329837841"},
+        "concepts": [{"concept_id": "C1"}],
+        "final_asset_ids": ["A0001"],
+    }
+    retries: list[tuple[str, str, str]] = []
+    sent: list[str] = []
+    audits: list[dict] = []
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
+
+    def fake_retry(chat_id, project_id, message_id):
+        retries.append((chat_id, project_id, message_id))
+        return True, "sent pending final assets"
+
+    monkeypatch.setattr(actions, "retry_send_flyer_package", fake_retry)
+    monkeypatch.setattr(actions, "finalize_and_send_flyer", lambda *_args: (_ for _ in ()).throw(AssertionError("finalizing_assets must skip full finalize pipeline")))
+
+    result = hooks._try_flyer_active_project_intercept(
+        body,
+        "17329837841@s.whatsapp.net",
+        {"message_id": "retry-final-package"},
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer active: retried final delivery for F7790"}
+    assert retries == [("17329837841@s.whatsapp.net", "F7790", "retry-final-package")]
+    assert sent == []
+    assert audits[-1]["reason"] == "flyer_primary_project_created"
+    assert "retry_finalizing_assets=true" in audits[-1]["detail"]
+
+
+def test_retry_send_flyer_package_treats_completed_duplicate_as_success(monkeypatch, tmp_path):
+    actions = _load_actions()
+    state_path = tmp_path / "projects.json"
+    state_path.write_text(json.dumps({
+        "projects": [{
+            "project_id": "F7792",
+            "status": "delivered",
+            "final_asset_ids": ["A0001"],
+            "assets": [{
+                "asset_id": "A0001",
+                "delivery_status": "sent",
+                "outbound_message_id": "wamid.sent",
+            }],
+        }]
+    }), encoding="utf-8")
+    monkeypatch.setattr(actions, "FLYER_PROJECTS_PATH", state_path)
+
+    def fake_run(*_args, **_kwargs):
+        return SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="project must be finalizing_assets before delivery, got delivered",
+        )
+
+    monkeypatch.setattr(actions.subprocess, "run", fake_run)
+
+    ok, detail = actions.retry_send_flyer_package(
+        "17329837841@s.whatsapp.net",
+        "F7792",
+        "duplicate-approve",
+    )
+
+    assert ok is True
+    assert "already_delivered=true" in detail
+
+
+@pytest.mark.parametrize(
+    "delivery_status, outbound_message_id",
+    [
+        ("delivered", "wamid.invalid-status"),
+        ("failed", "wamid.failed"),
+        ("uncertain", "wamid.uncertain"),
+        ("sent", ""),
+    ],
+)
+def test_retry_send_flyer_package_does_not_treat_incomplete_delivered_row_as_success(
+    monkeypatch, tmp_path, delivery_status, outbound_message_id,
+):
+    actions = _load_actions()
+    state_path = tmp_path / "projects.json"
+    state_path.write_text(json.dumps({
+        "projects": [{
+            "project_id": "F7793",
+            "status": "delivered",
+            "final_asset_ids": ["A0001"],
+            "assets": [{
+                "asset_id": "A0001",
+                "delivery_status": delivery_status,
+                "outbound_message_id": outbound_message_id,
+            }],
+        }]
+    }), encoding="utf-8")
+    monkeypatch.setattr(actions, "FLYER_PROJECTS_PATH", state_path)
+
+    def fake_run(*_args, **_kwargs):
+        return SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="project must be finalizing_assets before delivery, got delivered",
+        )
+
+    monkeypatch.setattr(actions.subprocess, "run", fake_run)
+
+    ok, detail = actions.retry_send_flyer_package(
+        "17329837841@s.whatsapp.net",
+        "F7793",
+        "duplicate-approve",
+    )
+
+    assert ok is False
+    assert "already_delivered=true" not in detail
+
+
+def test_routing_preview_matches_finalizing_assets_retry_branch():
+    hooks, actions = _load_plugin_modules()
+    active = {"project_id": "F7794", "status": "finalizing_assets"}
+
+    assert actions.flyer_routing_decision_preview("send now", active_project=active)["route"] == "approval"
+    assert actions.flyer_routing_decision_preview("send my flyer", active_project=active)["reason"] == "finalizing_assets_retry"
+    assert actions.flyer_routing_decision_preview("send my flyer for Diwali sale", active_project=active)["reason"] == "fresh_new_request"
+
+
+def test_finalizing_assets_retry_failure_sends_delivery_failure_ack(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    active_project = {
+        "project_id": "F7791",
+        "customer_phone": "+17329837841",
+        "status": "finalizing_assets",
+        "fields": {"event_or_business_name": "Weekend Specials", "contact_info": "+17329837841"},
+        "concepts": [{"concept_id": "C1"}],
+        "final_asset_ids": ["A0001"],
+    }
+    sent: list[str] = []
+    audits: list[dict] = []
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
+    monkeypatch.setattr(actions, "retry_send_flyer_package", lambda *_args: (False, "uncertain delivery requires operator reconciliation before retry: A0001"))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "failure-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
+
+    result = hooks._try_flyer_active_project_intercept(
+        "send now",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "retry-final-package-fail"},
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer active: final delivery retry failed for F7791"}
+    assert sent == [
+        "Flyer Studio\n"
+        "------------\n"
+        "I hit an issue sending the final files. I'll review it and send an update here."
+    ]
+    assert audits[-2]["reason"] == "flyer_primary_failed"
+    assert "retry_finalizing_assets=true" in audits[-2]["detail"]
+    assert audits[-1]["reason"] == "flyer_primary_failed"
+    assert "retry_finalizing_assets_ack=true" in audits[-1]["detail"]
+
+
 def test_pending_confirmation_message_is_sent_verbatim(monkeypatch):
     hooks, actions = _load_plugin_modules()
     active_project = {

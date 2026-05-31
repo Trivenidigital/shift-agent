@@ -660,6 +660,237 @@ def test_project_delivery_sends_partial_core_final_package(tmp_path, monkeypatch
     assert delivered["asset_ids"] == ["A0001"]
 
 
+def test_delivery_failure_audit_uses_asset_id_not_filename(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    mod = _load_script()
+    project = _project(tmp_path).model_copy(update={"final_asset_ids": ["A0001"]})
+    state_path = tmp_path / "projects.json"
+    log_path = tmp_path / "decisions.log"
+    state_path.write_text(FlyerProjectStore(projects=[project]).model_dump_json(indent=2), encoding="utf-8")
+
+    class DummyLock:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def fake_ndjson_append(path: Path, line: str) -> None:
+        with Path(path).open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+
+    monkeypatch.setattr(
+        mod,
+        "_load_runtime_io",
+        lambda: (
+            DummyLock,
+            lambda path, text: Path(path).write_text(text, encoding="utf-8"),
+            lambda *_args, **_kwargs: (True, "text-mid", "", 200),
+            lambda *_args, **_kwargs: (False, "", "bridge down", 503),
+            fake_ndjson_append,
+        ),
+    )
+    monkeypatch.setattr(mod, "validate_text_manifest_file", lambda *_args, **_kwargs: type("Result", (), {"ok": True, "blockers": []})())
+    monkeypatch.setattr(mod, "validate_visual_qa_report", lambda *_args, **_kwargs: type("Result", (), {"ok": True, "blockers": []})())
+    monkeypatch.setattr(sys, "argv", [
+        "send-flyer-package",
+        "--jid", "15551234567@c.us",
+        "--project-id", project.project_id,
+        "--state-path", str(state_path),
+        "--log-path", str(log_path),
+    ])
+
+    assert mod.main() == 2
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    failed = next(row for row in rows if row["type"] == "flyer_delivery_failed")
+    assert failed["asset_id"] == "A0001"
+    assert failed["asset_id"] != "wa.png"
+
+
+def test_text_qa_block_audit_uses_asset_id_not_filename(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    mod = _load_script()
+    project = _project(tmp_path).model_copy(update={"final_asset_ids": ["A0001"]})
+    state_path = tmp_path / "projects.json"
+    log_path = tmp_path / "decisions.log"
+    state_path.write_text(FlyerProjectStore(projects=[project]).model_dump_json(indent=2), encoding="utf-8")
+
+    monkeypatch.setattr(mod, "validate_text_manifest_file", lambda *_args, **_kwargs: type("Result", (), {"ok": False, "blockers": ["missing required text"]})())
+    monkeypatch.setattr(sys, "argv", [
+        "send-flyer-package",
+        "--jid", "15551234567@c.us",
+        "--project-id", project.project_id,
+        "--state-path", str(state_path),
+        "--log-path", str(log_path),
+    ])
+
+    assert mod.main() == 2
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert rows[0]["asset_id"] == "A0001"
+    assert rows[0]["asset_id"] != "wa.png"
+
+
+def test_partial_retry_delivered_audit_pairs_asset_ids_with_persisted_outbound_ids(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    mod = _load_script()
+    project = _project(tmp_path)
+    assets = [
+        project.assets[0].model_copy(update={
+            "delivery_status": "sent",
+            "outbound_message_id": "wamid.old",
+            "delivered_at": datetime.now(timezone.utc),
+            "delivery_attempt_count": 1,
+        }),
+        project.assets[1],
+    ]
+    project = project.model_copy(update={"assets": assets, "final_asset_ids": ["A0001", "A0002"]})
+    state_path = tmp_path / "projects.json"
+    log_path = tmp_path / "decisions.log"
+    state_path.write_text(FlyerProjectStore(projects=[project]).model_dump_json(indent=2), encoding="utf-8")
+
+    monkeypatch.setattr(mod, "validate_text_manifest_file", lambda *_args, **_kwargs: type("Result", (), {"ok": True, "blockers": []})())
+    monkeypatch.setattr(mod, "validate_visual_qa_report", lambda *_args, **_kwargs: type("Result", (), {"ok": True, "blockers": []})())
+    monkeypatch.setattr(sys, "argv", [
+        "send-flyer-package",
+        "--jid", "15551234567@c.us",
+        "--project-id", project.project_id,
+        "--state-path", str(state_path),
+        "--log-path", str(log_path),
+        "--dry-run-bridge",
+    ])
+
+    assert mod.main() == 0
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    delivered = next(row for row in rows if row["type"] == "flyer_assets_delivered")
+    assert delivered["asset_ids"] == ["A0001", "A0002"]
+    assert delivered["outbound_message_ids"] == ["wamid.old", "dry-run:post.png"]
+
+
+def test_partial_retry_blocks_delivered_transition_when_prior_sent_asset_has_no_outbound_id(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    mod = _load_script()
+    project = _project(tmp_path)
+    assets = [
+        project.assets[0].model_copy(update={
+            "delivery_status": "sent",
+            "outbound_message_id": "",
+            "delivered_at": datetime.now(timezone.utc),
+            "delivery_attempt_count": 1,
+        }),
+        project.assets[1],
+    ]
+    project = project.model_copy(update={"assets": assets, "final_asset_ids": ["A0001", "A0002"]})
+    state_path = tmp_path / "projects.json"
+    log_path = tmp_path / "decisions.log"
+    state_path.write_text(FlyerProjectStore(projects=[project]).model_dump_json(indent=2), encoding="utf-8")
+
+    monkeypatch.setattr(mod, "validate_text_manifest_file", lambda *_args, **_kwargs: type("Result", (), {"ok": True, "blockers": []})())
+    monkeypatch.setattr(mod, "validate_visual_qa_report", lambda *_args, **_kwargs: type("Result", (), {"ok": True, "blockers": []})())
+    monkeypatch.setattr(sys, "argv", [
+        "send-flyer-package",
+        "--jid", "15551234567@c.us",
+        "--project-id", project.project_id,
+        "--state-path", str(state_path),
+        "--log-path", str(log_path),
+        "--dry-run-bridge",
+    ])
+
+    assert mod.main() == 2
+
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"failure": "final_delivery_incomplete", "asset_ids": "A0001"}
+    persisted = FlyerProjectStore.model_validate_json(state_path.read_text(encoding="utf-8")).projects[0]
+    assert persisted.status == "finalizing_assets"
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    failed = next(row for row in rows if row["type"] == "flyer_delivery_failed")
+    assert failed["asset_id"] == "A0001"
+
+
+def test_all_sent_finalizing_assets_retry_blocks_when_outbound_id_missing(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    mod = _load_script()
+    project = _project(tmp_path)
+    sent_assets = [
+        asset.model_copy(update={
+            "delivery_status": "sent",
+            "outbound_message_id": "" if asset.asset_id == "A0001" else f"wamid.{asset.asset_id}",
+            "delivered_at": datetime.now(timezone.utc),
+            "delivery_attempt_count": 1,
+        })
+        for asset in project.assets
+    ]
+    project = project.model_copy(update={"assets": sent_assets})
+    state_path = tmp_path / "projects.json"
+    log_path = tmp_path / "decisions.log"
+    state_path.write_text(FlyerProjectStore(projects=[project]).model_dump_json(indent=2), encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", [
+        "send-flyer-package",
+        "--jid", "15551234567@c.us",
+        "--project-id", project.project_id,
+        "--state-path", str(state_path),
+        "--log-path", str(log_path),
+    ])
+
+    assert mod.main() == 2
+
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"failure": "final_delivery_incomplete", "asset_ids": "A0001"}
+    persisted = FlyerProjectStore.model_validate_json(state_path.read_text(encoding="utf-8")).projects[0]
+    assert persisted.status == "finalizing_assets"
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    failed = next(row for row in rows if row["type"] == "flyer_delivery_failed")
+    assert failed["asset_id"] == "A0001"
+
+
+def test_all_sent_finalizing_assets_retry_marks_project_delivered_without_resending(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    mod = _load_script()
+    project = _project(tmp_path)
+    sent_assets = [
+        asset.model_copy(update={
+            "delivery_status": "sent",
+            "outbound_message_id": f"wamid.{asset.asset_id}",
+            "delivered_at": datetime.now(timezone.utc),
+            "delivery_attempt_count": 1,
+        })
+        for asset in project.assets
+    ]
+    project = project.model_copy(update={"assets": sent_assets})
+    state_path = tmp_path / "projects.json"
+    log_path = tmp_path / "decisions.log"
+    state_path.write_text(FlyerProjectStore(projects=[project]).model_dump_json(indent=2), encoding="utf-8")
+
+    def fail_send(*_args, **_kwargs):
+        raise AssertionError("all-sent finalizing_assets retry must not resend media")
+
+    monkeypatch.setattr(mod, "bridge_send_media", fail_send, raising=False)
+    monkeypatch.setattr(sys, "argv", [
+        "send-flyer-package",
+        "--jid", "15551234567@c.us",
+        "--project-id", project.project_id,
+        "--state-path", str(state_path),
+        "--log-path", str(log_path),
+    ])
+
+    assert mod.main() == 0
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["sent"] == 0
+    persisted = FlyerProjectStore.model_validate_json(state_path.read_text(encoding="utf-8")).projects[0]
+    assert persisted.status == "delivered"
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    delivered = next(row for row in rows if row["type"] == "flyer_assets_delivered")
+    assert delivered["asset_ids"] == ["A0001", "A0002", "A0003", "A0004"]
+    assert delivered["outbound_message_ids"] == ["wamid.A0001", "wamid.A0002", "wamid.A0003", "wamid.A0004"]
+
+
 def test_project_delivery_rejects_sidecar_visual_qa_even_when_env_allows_sidecar(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     monkeypatch.setenv("FLYER_QA_ALLOW_SIDECAR", "1")
