@@ -1893,16 +1893,25 @@ def _openrouter_source_edit_bytes(
         },
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=OPENROUTER_TIMEOUT_SEC) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as e:
-        err = e.read().decode("utf-8", errors="replace")[:1000]
-        raise FlyerRenderError(f"OpenRouter source edit HTTP {e.code}: {err}") from e
-    except (urllib.error.URLError, http.client.IncompleteRead, TimeoutError) as e:
-        if isinstance(e, urllib.error.URLError):
-            raise FlyerRenderError(f"OpenRouter source edit connection failed: {e.reason}") from e
-        raise FlyerRenderError(f"OpenRouter source edit response failed: {type(e).__name__}: {e}") from e
+    body = ""
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=OPENROUTER_TIMEOUT_SEC) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+            break
+        except urllib.error.HTTPError as e:
+            err = e.read().decode("utf-8", errors="replace")[:1000]
+            raise FlyerRenderError(f"OpenRouter source edit HTTP {e.code}: {err}") from e
+        except (urllib.error.URLError, http.client.IncompleteRead, TimeoutError) as e:
+            last_error = e
+            if attempt == 2:
+                if isinstance(e, urllib.error.URLError):
+                    raise FlyerRenderError(f"OpenRouter source edit connection failed: {e.reason}") from e
+                raise FlyerRenderError(f"OpenRouter source edit response failed: {type(e).__name__}: {e}") from e
+            time.sleep(2 * (attempt + 1))
+    if not body and last_error is not None:
+        raise FlyerRenderError(f"OpenRouter source edit response failed: {type(last_error).__name__}: {last_error}") from last_error
     try:
         doc = json.loads(body)
     except json.JSONDecodeError as e:

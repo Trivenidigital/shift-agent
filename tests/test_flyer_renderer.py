@@ -10,6 +10,7 @@ import io
 import json
 import subprocess
 import sys
+import urllib.error
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src" / "platform"))
@@ -1587,6 +1588,172 @@ def test_source_edit_preview_calls_openrouter_with_reference_image(tmp_path, mon
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
     manifest = json.loads(Path(f"{spec.path}.text.json").read_text(encoding="utf-8"))
     assert manifest["verification_mode"] == "source_edit_overlay_recomposed"
+
+
+def test_openrouter_source_edit_retries_incomplete_chunk_read(tmp_path, monkeypatch):
+    reference = tmp_path / "reference.png"
+    reference.write_bytes(_png_bytes())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    project = _complete_project().model_copy(update={
+        "status": "manual_edit_required",
+        "raw_request": "Edit uploaded flyer/source artwork. Customer requested: Remove extra 08:00.",
+        "assets": [
+            FlyerAsset(
+                asset_id="A0001",
+                kind="reference_image",
+                source="whatsapp",
+                path=str(reference),
+                mime_type="image/png",
+                sha256="a" * 64,
+                original_message_id="wamid.reference",
+                received_at=datetime.now(timezone.utc),
+            )
+        ],
+    })
+    calls = {"count": 0}
+
+    class _Resp:
+        def __init__(self, fail: bool):
+            self.fail = fail
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            if self.fail:
+                raise http.client.IncompleteRead(b'{"choices":')
+            data_url = "data:image/png;base64," + base64.b64encode(_png_bytes(color=(40, 90, 50))).decode("ascii")
+            return json.dumps({
+                "choices": [{"message": {"images": [{"image_url": {"url": data_url}}]}}],
+            }).encode("utf-8")
+
+    def _fake_urlopen(_req, timeout):
+        calls["count"] += 1
+        return _Resp(fail=calls["count"] == 1)
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", _fake_urlopen)
+    monkeypatch.setattr("agents.flyer.render.time.sleep", lambda _seconds: None)
+
+    spec = render_source_edit_preview(
+        project,
+        tmp_path,
+        provider="openrouter",
+        model="openai/gpt-5.4-image-2",
+        quality="high",
+    )
+
+    assert calls["count"] == 2
+    assert spec.path.read_bytes().startswith(b"\x89PNG")
+
+
+def test_openrouter_source_edit_retries_connection_error(tmp_path, monkeypatch):
+    reference = tmp_path / "reference.png"
+    reference.write_bytes(_png_bytes())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    project = _complete_project().model_copy(update={
+        "status": "manual_edit_required",
+        "raw_request": "Edit uploaded flyer/source artwork. Customer requested: Remove extra 08:00.",
+        "assets": [
+            FlyerAsset(
+                asset_id="A0001",
+                kind="reference_image",
+                source="whatsapp",
+                path=str(reference),
+                mime_type="image/png",
+                sha256="a" * 64,
+                original_message_id="wamid.reference",
+                received_at=datetime.now(timezone.utc),
+            )
+        ],
+    })
+    calls = {"count": 0}
+
+    class _Resp:
+        def __enter__(self):
+            data_url = "data:image/png;base64," + base64.b64encode(_png_bytes(color=(40, 90, 50))).decode("ascii")
+            self._body = json.dumps({
+                "choices": [{"message": {"images": [{"image_url": {"url": data_url}}]}}],
+            }).encode("utf-8")
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return self._body
+
+    def _fake_urlopen(_req, timeout):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise urllib.error.URLError("temporary DNS failure")
+        return _Resp()
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", _fake_urlopen)
+    monkeypatch.setattr("agents.flyer.render.time.sleep", lambda _seconds: None)
+
+    spec = render_source_edit_preview(
+        project,
+        tmp_path,
+        provider="openrouter",
+        model="openai/gpt-5.4-image-2",
+        quality="high",
+    )
+
+    assert calls["count"] == 2
+    assert spec.path.read_bytes().startswith(b"\x89PNG")
+
+
+def test_openrouter_source_edit_does_not_retry_http_400(tmp_path, monkeypatch):
+    import pytest as _pytest
+    reference = tmp_path / "reference.png"
+    reference.write_bytes(_png_bytes())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    project = _complete_project().model_copy(update={
+        "status": "manual_edit_required",
+        "raw_request": "Edit uploaded flyer/source artwork. Customer requested: Remove extra 08:00.",
+        "assets": [
+            FlyerAsset(
+                asset_id="A0001",
+                kind="reference_image",
+                source="whatsapp",
+                path=str(reference),
+                mime_type="image/png",
+                sha256="a" * 64,
+                original_message_id="wamid.reference",
+                received_at=datetime.now(timezone.utc),
+            )
+        ],
+    })
+    calls = {"count": 0}
+
+    def _fake_urlopen(_req, timeout):
+        calls["count"] += 1
+        raise urllib.error.HTTPError(
+            "https://openrouter.ai/api/v1/chat/completions",
+            400,
+            "bad request",
+            {},
+            io.BytesIO(b"invalid payload"),
+        )
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", _fake_urlopen)
+
+    with _pytest.raises(FlyerRenderError, match="OpenRouter source edit HTTP 400"):
+        render_source_edit_preview(
+            project,
+            tmp_path,
+            provider="openrouter",
+            model="openai/gpt-5.4-image-2",
+            quality="high",
+        )
+
+    assert calls["count"] == 1
 
 
 def test_source_edit_preview_omitted_provider_fails_closed_to_manual_review(tmp_path, monkeypatch):
