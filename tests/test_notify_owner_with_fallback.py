@@ -9,12 +9,17 @@ Linux-only: safe_io transitively imports fcntl.
 """
 from __future__ import annotations
 
+import os
 import json
 from pathlib import Path
 
 import pytest
 
 pytest.importorskip("fcntl")
+pytestmark = pytest.mark.skipif(
+    os.name == "nt",
+    reason="notify-owner subprocess tests build POSIX executable scripts",
+)
 
 from safe_io import notify_owner_with_fallback
 
