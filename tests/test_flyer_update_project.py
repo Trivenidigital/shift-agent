@@ -250,6 +250,114 @@ def test_offer_text_revision_with_price_delta_rerenders_generated_project(tmp_pa
     assert persisted["revisions"][0]["request_text"] == "Pick any 3 Dosa -> Pick Any 4 Dosa, increase price by $1."
 
 
+def test_contact_and_location_revision_updates_render_locked_facts(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    module = _load_script(monkeypatch)
+    state_path = tmp_path / "projects.json"
+    store = json.loads(_project_store_json(
+        tmp_path,
+        status="awaiting_final_approval",
+        raw_request="Create a flyer for Dosa specials. Use saved contact and address.",
+    ))
+    store["projects"][0]["locked_facts"] = [
+        {"fact_id": "business_name", "label": "Business", "value": "Lakshmis Kitchen", "source": "customer_profile", "required": True},
+        {"fact_id": "contact_phone", "label": "Contact", "value": "+1 732 983 7841", "source": "customer_profile", "required": True},
+        {"fact_id": "location", "label": "Location", "value": "90 Brybar Dr", "source": "customer_profile", "required": True},
+    ]
+    state_path.write_text(json.dumps(store), encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", [
+        "update-flyer-project",
+        "--project-id", "F9001",
+        "--revision-text", "Change phone number to +1 980 200 5022. Change location to Lakshmi Hall.",
+        "--message-id", "m-contact-location-edit",
+        "--state-path", str(state_path),
+    ])
+
+    assert module.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["revision_requires_clarification"] is False
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["fields"]["contact_info"] == "+1 980 200 5022"
+    assert persisted["fields"]["venue_or_location"] == "Lakshmi Hall"
+    facts = {fact["fact_id"]: fact for fact in persisted["locked_facts"]}
+    assert facts["contact_phone"]["value"] == "+1 980 200 5022"
+    assert facts["contact_phone"]["source"] == "customer_text"
+    assert facts["contact_phone"]["source_message_id"] == "m-contact-location-edit"
+    assert facts["location"]["value"] == "Lakshmi Hall"
+    assert facts["location"]["source"] == "customer_text"
+    assert facts["location"]["source_message_id"] == "m-contact-location-edit"
+    from schemas import FlyerProject
+    from agents.flyer.render import collect_text_facts
+    rendered_facts = {fact.fact_id: fact.text for fact in collect_text_facts(FlyerProject.model_validate(persisted))}
+    assert rendered_facts["contact"] == "+1 980 200 5022"
+    assert rendered_facts["location"] == "Lakshmi Hall"
+    assert persisted["status"] == "revising_design"
+    assert persisted["concepts"] == []
+
+
+def test_pending_contact_revision_apply_updates_render_locked_fact(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    module = _load_script(monkeypatch)
+    state_path = tmp_path / "projects.json"
+    store = json.loads(_project_store_json(
+        tmp_path,
+        status="awaiting_final_approval",
+        raw_request="Create a flyer for Dosa specials. Use saved contact.",
+    ))
+    now = "2026-05-18T12:00:00Z"
+    store["projects"][0]["locked_facts"] = [
+        {"fact_id": "business_name", "label": "Business", "value": "Lakshmis Kitchen", "source": "customer_profile", "required": True},
+        {"fact_id": "contact_phone", "label": "Contact", "value": "+1 732 983 7841", "source": "customer_profile", "required": True},
+    ]
+    store["projects"][0]["revisions"] = [{
+        "revision_id": "R001",
+        "message_id": "m-pending-contact",
+        "requested_at": now,
+        "request_text": "Change phone number to +1 980 200 5022.",
+        "applied": False,
+    }]
+    store["projects"][0]["pending_revision_confirmation"] = {
+        "revision_id": "R001",
+        "created_at": now,
+        "expires_at": "2026-12-31T16:00:00Z",
+        "request_message_id": "m-pending-contact",
+        "request_text": "Change phone number to +1 980 200 5022.",
+        "proposal_summary": "Applied: Contact '+1 732 983 7841' -> '+1 980 200 5022'.",
+        "patch": {
+            "field_updates": {"contact_info": "+1 980 200 5022"},
+            "changed": True,
+        },
+    }
+    state_path.write_text(json.dumps(store), encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", [
+        "update-flyer-project",
+        "--project-id", "F9001",
+        "--revision-text", "APPLY R001",
+        "--message-id", "m-apply-contact",
+        "--state-path", str(state_path),
+    ])
+
+    assert module.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["revision_requires_clarification"] is False
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["fields"]["contact_info"] == "+1 980 200 5022"
+    facts = {fact["fact_id"]: fact for fact in persisted["locked_facts"]}
+    assert facts["contact_phone"]["value"] == "+1 980 200 5022"
+    assert facts["contact_phone"]["source"] == "customer_text"
+    assert facts["contact_phone"]["source_message_id"] == "m-pending-contact"
+    from schemas import FlyerProject
+    from agents.flyer.render import collect_text_facts
+    rendered_facts = {fact.fact_id: fact.text for fact in collect_text_facts(FlyerProject.model_validate(persisted))}
+    assert rendered_facts["contact"] == "+1 980 200 5022"
+    assert persisted["pending_revision_confirmation"] is None
+    assert persisted["revisions"][0]["applied"] is True
+
+
 def test_offer_text_revision_updates_locked_offer_without_embedded_price(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     module = _load_script(monkeypatch)
