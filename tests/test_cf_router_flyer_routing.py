@@ -4974,6 +4974,111 @@ def test_source_vs_new_new_choice_creates_project_without_manual_edit(monkeypatc
     )
 
 
+def test_source_vs_new_new_choice_generates_when_project_is_ready(monkeypatch):
+    """After SOURCE/NEW clarification, a complete `NEW` choice should follow the
+    same autonomous generation path as the primary create flow, not stall after
+    only sending an intake ack."""
+    hooks, actions = _load_plugin_modules()
+    calls: list[str] = []
+
+    def fake_consume_source_vs_new(choice_token, trailing, *, chat_id, sender_phone):
+        if choice_token == "new":
+            return {
+                "chat_id": chat_id,
+                "sender_phone": sender_phone,
+                "customer": {"business_name": "Lakshmis Kitchen", "customer_id": "CUST0001"},
+                "raw_request": "I'd like you use this flyer for Lakshmi's Kitchen.",
+                "media_path": "/tmp/ref.jpg",
+                "source_organization": "Triveni Express",
+                "original_intent": "exact_source_edit",
+                "customer_followup_instruction": trailing,
+                "choice": "new",
+            }
+        return None
+
+    monkeypatch.setattr(actions, "consume_flyer_source_vs_new_choice", fake_consume_source_vs_new)
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+17329837841", "customer"))
+    monkeypatch.setattr(
+        actions,
+        "trigger_create_flyer_project",
+        lambda **_kw: (True, "", {"project_id": "F0063", "status": "intake_started", "manual_review": {}}),
+    )
+    monkeypatch.setattr(actions, "flyer_project_has_required_fields", lambda *_a, **_kw: True)
+    monkeypatch.setattr(actions, "flyer_project_has_manual_review_queued", lambda *_a, **_kw: False)
+    monkeypatch.setattr(actions, "send_flyer_intake_ack", lambda *_a, **_kw: pytest.fail("ready NEW branch must not stop at intake ack"))
+    monkeypatch.setattr(actions, "send_flyer_processing_ack", lambda *_a, **_kw: (calls.append("processing") or (True, "processing-mid", "")))
+    monkeypatch.setattr(actions, "trigger_generate_flyer_concepts", lambda project_id: (calls.append(f"generate:{project_id}") or (True, "")))
+    monkeypatch.setattr(hooks, "_reserve_flyer_access_or_reply", lambda *_a, **_kw: ("quota:CUST0001", None))
+    monkeypatch.setattr(hooks, "_send_preview_then_finalize_access", lambda *_a, **_kw: (calls.append("preview") or (True, "preview-mid", "")))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kw: None)
+    if hasattr(actions, "audit_source_vs_new"):
+        monkeypatch.setattr(actions, "audit_source_vs_new", lambda **_kw: None)
+
+    result = hooks._try_flyer_source_vs_new_choice_intercept(
+        "NEW",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "m-new-ready"},
+    )
+
+    assert result is not None and result.get("action") == "skip"
+    assert calls == ["processing", "generate:F0063", "preview"]
+
+
+def test_source_vs_new_new_choice_generation_failure_releases_access(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    calls: list[str] = []
+    audits: list[dict] = []
+
+    def fake_consume_source_vs_new(choice_token, trailing, *, chat_id, sender_phone):
+        if choice_token == "new":
+            return {
+                "chat_id": chat_id,
+                "sender_phone": sender_phone,
+                "customer": {"business_name": "Lakshmis Kitchen", "customer_id": "CUST0001"},
+                "raw_request": "I'd like you use this flyer for Lakshmi's Kitchen.",
+                "media_path": "/tmp/ref.jpg",
+                "source_organization": "Triveni Express",
+                "original_intent": "exact_source_edit",
+                "customer_followup_instruction": trailing,
+                "choice": "new",
+            }
+        return None
+
+    monkeypatch.setattr(actions, "consume_flyer_source_vs_new_choice", fake_consume_source_vs_new)
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+17329837841", "customer"))
+    monkeypatch.setattr(
+        actions,
+        "trigger_create_flyer_project",
+        lambda **_kw: (True, "", {"project_id": "F0064", "status": "intake_started", "manual_review": {}}),
+    )
+    monkeypatch.setattr(actions, "flyer_project_has_required_fields", lambda *_a, **_kw: True)
+    monkeypatch.setattr(actions, "flyer_project_has_manual_review_queued", lambda *_a, **_kw: False)
+    monkeypatch.setattr(actions, "send_flyer_processing_ack", lambda *_a, **_kw: (calls.append("processing") or (True, "processing-mid", "")))
+    monkeypatch.setattr(actions, "trigger_generate_flyer_concepts", lambda project_id: (calls.append(f"generate:{project_id}") or (False, "visual_qa_failed")))
+    monkeypatch.setattr(hooks, "_reserve_flyer_access_or_reply", lambda *_a, **_kw: ("quota:CUST0001", None))
+    monkeypatch.setattr(hooks, "_release_flyer_access", lambda *_a, **_kw: (calls.append("release") or (True, "released")))
+    monkeypatch.setattr(
+        hooks,
+        "_send_generation_failure_customer_update",
+        lambda *_a, **_kw: (calls.append("failure-update") or (True, "failure-mid", "")),
+    )
+    monkeypatch.setattr(hooks, "_send_preview_then_finalize_access", lambda *_a, **_kw: pytest.fail("failed generation must not send preview"))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kw: audits.append(kw) or None)
+    if hasattr(actions, "audit_source_vs_new"):
+        monkeypatch.setattr(actions, "audit_source_vs_new", lambda **_kw: None)
+
+    result = hooks._try_flyer_source_vs_new_choice_intercept(
+        "NEW",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "m-new-fail"},
+    )
+
+    assert result is not None and result.get("action") == "skip"
+    assert calls == ["processing", "generate:F0064", "release", "failure-update"]
+    assert audits[-1]["reason"] == "flyer_primary_failed"
+    assert audits[-1]["subprocess_rc"] == 2
+
+
 def test_active_intake_generation_failure_does_not_send_duplicate_initial_ack(monkeypatch):
     hooks, actions = _load_plugin_modules()
     calls = {"processing": 0, "intake": 0}

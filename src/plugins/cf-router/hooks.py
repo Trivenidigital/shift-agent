@@ -1568,6 +1568,47 @@ def _try_flyer_source_vs_new_choice_intercept(text: str, chat_id: str, event: An
                     is_regulated_action=False,
                 ),
             )
+        elif actions.flyer_project_has_required_fields(project or {}):
+            access, quota_result = _reserve_flyer_access_or_reply(
+                chat_id, phone, project_id, message_id, consume_quota=True,
+            )
+            if quota_result is not None:
+                return quota_result
+            proc_ok, proc_mid, proc_err = actions.send_flyer_processing_ack(
+                chat_id,
+                project_id,
+                action_context=build_action_context_for_command(
+                    PROJECT_ACTIONS, "intake.processing",
+                    is_regulated_action=False,
+                ),
+            )
+            gen_ok, gen_detail = actions.trigger_generate_flyer_concepts(project_id)
+            if gen_ok:
+                ack_ok, outbound_message_id, ack_err = _send_preview_then_finalize_access(
+                    access,
+                    chat_id,
+                    phone,
+                    project_id,
+                    message_id,
+                    proc_ok=proc_ok,
+                    proc_mid=proc_mid,
+                    proc_err=proc_err,
+                )
+            else:
+                _release_flyer_access(access, chat_id, phone, project_id, message_id)
+                ack_ok, outbound_message_id, ack_err = _send_generation_failure_customer_update(
+                    chat_id,
+                    project_id,
+                    new_raw_request,
+                    gen_detail,
+                    proc_ok=proc_ok,
+                    action_context=build_action_context_for_command(
+                        PROJECT_ACTIONS, "generation.failed_ack",
+                        is_regulated_action=False,
+                    ),
+                )
+                outbound_message_id = ",".join(x for x in [proc_mid, outbound_message_id] if x)
+                ack_err = f"concept_generation_failed: {gen_detail}; ack_error={ack_err}"
         else:
             ack_ok, outbound_message_id, ack_err = actions.send_flyer_intake_ack(
                 chat_id, project_id,
@@ -1576,10 +1617,11 @@ def _try_flyer_source_vs_new_choice_intercept(text: str, chat_id: str, event: An
                     is_regulated_action=False,
                 ),
             )
+        generation_failed = str(ack_err or "").startswith("concept_generation_failed:")
         actions.audit_intercepted(
-            reason="flyer_primary_project_created",
+            reason="flyer_primary_failed" if generation_failed or not ack_ok else "flyer_primary_project_created",
             chat_id=chat_id,
-            subprocess_rc=0 if ack_ok else 3,
+            subprocess_rc=0 if ack_ok and not generation_failed else (2 if generation_failed else 3),
             detail=(
                 f"source_vs_new_new; project_id={project_id}; sender_role={role}; "
                 f"ack_message_id={outbound_message_id}; ack_error={ack_err[:300]}"
