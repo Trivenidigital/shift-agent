@@ -620,6 +620,53 @@ def test_guest_order_duplicate_reference_is_provider_scoped(tmp_path):
     assert second.ok is True
 
 
+def test_guest_order_duplicate_reference_compares_normalized_values(tmp_path):
+    state = tmp_path / "guest_orders.json"
+    now = datetime(2026, 5, 24, tzinfo=timezone.utc)
+
+    start_guest_order(
+        state_path=state,
+        sender_phone="+17329837841",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="cta-1",
+        unit_price_cents=4999,
+        currency="USD",
+        now=now,
+    )
+    start_guest_order(
+        state_path=state,
+        sender_phone="+17329837842",
+        chat_id="17329837842@s.whatsapp.net",
+        message_id="cta-2",
+        unit_price_cents=4999,
+        currency="USD",
+        now=now,
+    )
+
+    first = activate_guest_order(
+        state_path=state,
+        order_id="GUEST0001",
+        provider="  STRIPE  ",
+        payment_reference="  pi_dupe  ",
+        amount_cents=4999,
+        currency="USD",
+        now=now,
+    )
+    duplicate = activate_guest_order(
+        state_path=state,
+        order_id="GUEST0002",
+        provider="stripe",
+        payment_reference="pi_dupe",
+        amount_cents=4999,
+        currency="USD",
+        now=now,
+    )
+
+    assert first.ok is True
+    assert duplicate.ok is False
+    assert duplicate.detail == "payment_reference_already_used"
+
+
 def test_guest_order_paid_replay_requires_matching_payment_reference(tmp_path):
     state = tmp_path / "guest_orders.json"
     now = datetime(2026, 5, 24, tzinfo=timezone.utc)
@@ -739,6 +786,36 @@ def test_guest_order_activation_rejects_invalid_provider(tmp_path):
 
     assert active.ok is False
     assert active.detail == "invalid_provider"
+
+
+def test_guest_order_activation_normalizes_provider_and_payment_reference(tmp_path):
+    state = tmp_path / "guest_orders.json"
+    now = datetime(2026, 5, 24, tzinfo=timezone.utc)
+
+    start_guest_order(
+        state_path=state,
+        sender_phone="+17329837841",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="cta-1",
+        unit_price_cents=4999,
+        currency="USD",
+        now=now,
+    )
+
+    active = activate_guest_order(
+        state_path=state,
+        order_id="GUEST0001",
+        provider="  STRIPE ",
+        payment_reference="  pi_norm_1 ",
+        amount_cents=4999,
+        currency="USD",
+        now=now,
+    )
+
+    assert active.ok is True
+    store = load_guest_order_store(state)
+    assert store.orders[0].payment_provider == "stripe"
+    assert store.orders[0].payment_reference == "pi_norm_1"
 
 
 def test_guest_order_cli_rejects_activation_amount_mismatch(tmp_path):

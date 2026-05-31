@@ -29,14 +29,24 @@ try:
         get_account_action_definition,
         normalize_account_command_text,
     )
-    from agents.flyer.payment_state import activation_event_state, build_plan_payment_request
+    from agents.flyer.payment_state import (
+        activation_event_state,
+        build_plan_payment_request,
+        normalize_payment_provider,
+        normalize_payment_reference,
+    )
 except ModuleNotFoundError:
     from flyer_action_registry import (  # type: ignore
         action_requires_confirmation,
         get_account_action_definition,
         normalize_account_command_text,
     )
-    from flyer_payment_state import activation_event_state, build_plan_payment_request  # type: ignore
+    from flyer_payment_state import (  # type: ignore
+        activation_event_state,
+        build_plan_payment_request,
+        normalize_payment_provider,
+        normalize_payment_reference,
+    )
 
 try:
     from safe_io import atomic_write_text  # type: ignore
@@ -359,10 +369,12 @@ def activate_customer(
 ) -> AccountResult:
     now = now or datetime.now(timezone.utc)
     tiers = plan_tiers or FlyerPlanTier.default_tiers()
-    if provider not in {"manual", "stripe", "razorpay", "other"}:
+    provider = normalize_payment_provider(provider)
+    if not provider:
         return AccountResult(False, True, "", customer_id, detail="invalid_provider")
-    currency = (currency or "USD").upper()
-    if not payment_reference.strip():
+    payment_reference = normalize_payment_reference(payment_reference)
+    currency = (currency or "USD").strip().upper()
+    if not payment_reference:
         return AccountResult(False, True, "", customer_id, detail="payment_reference_required")
     if provider != "manual" and amount_cents is None:
         return AccountResult(False, True, "", customer_id, detail="amount_cents_required")

@@ -11,9 +11,17 @@ from typing import Optional
 from schemas import E164Phone, FlyerGuestOrder, FlyerGuestOrderStore
 
 try:
-    from agents.flyer.payment_state import activation_event_state
+    from agents.flyer.payment_state import (
+        activation_event_state,
+        normalize_payment_provider,
+        normalize_payment_reference,
+    )
 except ModuleNotFoundError:
-    from flyer_payment_state import activation_event_state  # type: ignore
+    from flyer_payment_state import (  # type: ignore
+        activation_event_state,
+        normalize_payment_provider,
+        normalize_payment_reference,
+    )
 
 try:
     if os.name == "nt":
@@ -108,7 +116,8 @@ def activate_guest_order(
     now: Optional[datetime] = None,
 ) -> GuestOrderResult:
     now = now or datetime.now(timezone.utc)
-    if provider not in {"manual", "stripe", "razorpay", "other"}:
+    provider = normalize_payment_provider(provider)
+    if not provider:
         return GuestOrderResult(False, True, "", detail="invalid_provider")
     store = load_guest_order_store(state_path)
     order = store.find_order_by_id(order_id) if order_id else store.find_open_order_by_sender(sender_phone)
@@ -123,7 +132,7 @@ def activate_guest_order(
         return GuestOrderResult(False, True, "", order.order_id, order.status, detail="amount_mismatch")
     if provider != "manual" and amount_cents is None:
         return GuestOrderResult(False, True, "", order.order_id, order.status, detail="amount_cents_required")
-    payment_reference = " ".join((payment_reference or "").split())
+    payment_reference = normalize_payment_reference(payment_reference)
     if not payment_reference:
         return GuestOrderResult(False, True, "", order.order_id, order.status, detail="payment_reference_required")
     event_state = activation_event_state(
