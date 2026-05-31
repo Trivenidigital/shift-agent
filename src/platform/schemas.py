@@ -1840,6 +1840,10 @@ class FlyerRevisionPatchPayload(BaseModel):
     unresolved_reason: str = ""
     requires_confirmation: bool = False
     confirmation_reason: str = ""
+    replace_old_text: str = Field(default="", max_length=500)
+    replace_new_text: str = Field(default="", max_length=500)
+    price_delta_cents: int = 0
+    already_applied: bool = False
     pending_confirmation_message: str = Field(default="", max_length=2000)
 
 

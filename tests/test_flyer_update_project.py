@@ -175,6 +175,263 @@ def test_visible_time_text_revision_does_not_request_clarification(tmp_path, mon
     assert persisted["revisions"][0]["request_text"] == "Time: 16:00 is duplicated. I'd like you to remove this."
 
 
+def test_offer_text_revision_with_price_delta_rerenders_generated_project(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    module = _load_script(monkeypatch)
+    state_path = tmp_path / "projects.json"
+    store = json.loads(_project_store_json(
+        tmp_path,
+        status="awaiting_final_approval",
+        raw_request="Create a flyer for Dosa specials. Pick Any 3    Dosa for $20.",
+    ))
+    store["projects"][0]["fields"]["notes"] = (
+        "Pick Any 3 Dosa for $20. "
+        "Items: Masala Dosa $8.99, Onion Dosa $8.99, Rava Dosa $8.99."
+    )
+    store["projects"][0]["locked_facts"] = [
+        {"fact_id": "business_name", "label": "Business", "value": "Lakshmis Kitchen", "source": "customer_profile", "required": True},
+        {"fact_id": "contact_phone", "label": "Contact", "value": "+17329837841", "source": "customer_profile", "required": True},
+        {"fact_id": "location", "label": "Location", "value": "90 Brybar Dr", "source": "customer_profile", "required": True},
+        {"fact_id": "offer:0", "label": "Offer", "value": "Pick Any 3 Dosa for $20", "source": "customer_text", "required": True},
+    ]
+    state_path.write_text(json.dumps(store), encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", [
+        "update-flyer-project",
+        "--project-id", "F9001",
+        "--revision-text", "Pick any 3 Dosa -> Pick Any 4 Dosa, increase price by $1.",
+        "--message-id", "m-offer-price-edit",
+        "--state-path", str(state_path),
+    ])
+
+    assert module.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["revision_requires_clarification"] is False
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "revising_design"
+    assert persisted["concepts"] == []
+    assert persisted["selected_concept_id"] is None
+    assert persisted["final_asset_ids"] == []
+    assert "Pick Any 4 Dosa for $21" in persisted["fields"]["notes"]
+    assert "Pick Any 3 Dosa" not in persisted["fields"]["notes"]
+    assert "Pick Any 4 Dosa for $21" in persisted["raw_request"]
+    assert "Pick Any 3 Dosa" not in persisted["raw_request"]
+    locked_values = [fact["value"] for fact in persisted["locked_facts"]]
+    assert "Pick Any 4 Dosa for $21" in locked_values
+    assert "Pick Any 3 Dosa for $20" not in locked_values
+    assert persisted["revisions"][0]["request_text"] == "Pick any 3 Dosa -> Pick Any 4 Dosa, increase price by $1."
+
+
+def test_offer_text_revision_updates_locked_offer_without_embedded_price(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    module = _load_script(monkeypatch)
+    state_path = tmp_path / "projects.json"
+    store = json.loads(_project_store_json(
+        tmp_path,
+        status="awaiting_final_approval",
+        raw_request="Create a flyer for Dosa specials. Pick Any 3 Dosa for $20.",
+    ))
+    store["projects"][0]["fields"]["notes"] = "Pick Any 3 Dosa for $20."
+    store["projects"][0]["locked_facts"] = [
+        {"fact_id": "business_name", "label": "Business", "value": "Lakshmis Kitchen", "source": "customer_profile", "required": True},
+        {"fact_id": "offer:0", "label": "Offer", "value": "Pick Any 3 Dosa", "source": "customer_text", "required": True},
+    ]
+    state_path.write_text(json.dumps(store), encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", [
+        "update-flyer-project",
+        "--project-id", "F9001",
+        "--revision-text", "Pick any 3 Dosa -> Pick Any 4 Dosa, increase price by $1.",
+        "--message-id", "m-offer-no-price-edit",
+        "--state-path", str(state_path),
+    ])
+
+    assert module.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["revision_requires_clarification"] is False
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    locked_values = [fact["value"] for fact in persisted["locked_facts"]]
+    assert "Pick Any 4 Dosa" in locked_values
+    assert "Pick Any 3 Dosa" not in locked_values
+    assert "Pick Any 4 Dosa for $21" in persisted["fields"]["notes"]
+
+
+def test_offer_text_revision_updates_whitespace_variant_locked_offer(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    module = _load_script(monkeypatch)
+    state_path = tmp_path / "projects.json"
+    store = json.loads(_project_store_json(
+        tmp_path,
+        status="awaiting_final_approval",
+        raw_request="Create a flyer for Dosa specials. Pick Any 3 Dosa for $20.",
+    ))
+    store["projects"][0]["fields"]["notes"] = "Pick Any 3 Dosa for $20."
+    store["projects"][0]["locked_facts"] = [
+        {"fact_id": "business_name", "label": "Business", "value": "Lakshmis Kitchen", "source": "customer_profile", "required": True},
+        {"fact_id": "offer:0", "label": "Offer", "value": "Pick Any 3    Dosa for $20", "source": "customer_text", "required": True},
+    ]
+    state_path.write_text(json.dumps(store), encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", [
+        "update-flyer-project",
+        "--project-id", "F9001",
+        "--revision-text", "Pick any 3 Dosa -> Pick Any 4 Dosa, increase price by $1.",
+        "--message-id", "m-offer-space-edit",
+        "--state-path", str(state_path),
+    ])
+
+    assert module.main() == 0
+    capsys.readouterr()
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    locked_values = [fact["value"] for fact in persisted["locked_facts"]]
+    assert "Pick Any 4 Dosa for $21" in locked_values
+    assert "Pick Any 3    Dosa for $20" not in locked_values
+
+
+def test_text_revision_updates_short_whitespace_locked_fact_when_new_contains_old_wording(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    module = _load_script(monkeypatch)
+    state_path = tmp_path / "projects.json"
+    store = json.loads(_project_store_json(
+        tmp_path,
+        status="awaiting_final_approval",
+        raw_request="Create a flyer for Happy Hour.",
+    ))
+    store["projects"][0]["fields"]["notes"] = "Happy Hour."
+    store["projects"][0]["locked_facts"] = [
+        {"fact_id": "business_name", "label": "Business", "value": "Lakshmis Kitchen", "source": "customer_profile", "required": True},
+        {"fact_id": "offer:0", "label": "Offer", "value": "Happy    Hour", "source": "customer_text", "required": True},
+    ]
+    state_path.write_text(json.dumps(store), encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", [
+        "update-flyer-project",
+        "--project-id", "F9001",
+        "--revision-text", 'Replace "Happy Hour" with "Happy Hour Special".',
+        "--message-id", "m-happy-hour-edit",
+        "--state-path", str(state_path),
+    ])
+
+    assert module.main() == 0
+    capsys.readouterr()
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    locked_values = [fact["value"] for fact in persisted["locked_facts"]]
+    assert "Happy Hour Special" in locked_values
+    assert "Happy    Hour" not in locked_values
+
+
+def test_text_revision_fails_closed_when_locked_fact_has_repeated_old_text(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    module = _load_script(monkeypatch)
+    state_path = tmp_path / "projects.json"
+    store = json.loads(_project_store_json(
+        tmp_path,
+        status="awaiting_final_approval",
+        raw_request="Create a flyer for Happy Hour.",
+    ))
+    store["projects"][0]["fields"]["notes"] = "Happy Hour."
+    store["projects"][0]["locked_facts"] = [
+        {"fact_id": "business_name", "label": "Business", "value": "Lakshmis Kitchen", "source": "customer_profile", "required": True},
+        {"fact_id": "offer:0", "label": "Offer", "value": "Happy    Hour and Happy    Hour", "source": "customer_text", "required": True},
+    ]
+    original = json.dumps(store)
+    state_path.write_text(original, encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", [
+        "update-flyer-project",
+        "--project-id", "F9001",
+        "--revision-text", 'Replace "Happy Hour" with "Happy Hour Special".',
+        "--message-id", "m-happy-hour-repeat-edit",
+        "--state-path", str(state_path),
+    ])
+
+    with pytest.raises(SystemExit, match="stale locked fact"):
+        module.main()
+    capsys.readouterr()
+
+    assert json.loads(state_path.read_text(encoding="utf-8")) == json.loads(original)
+
+
+def test_already_applied_text_revision_refreshes_stale_locked_fact_without_regeneration(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    module = _load_script(monkeypatch)
+    state_path = tmp_path / "projects.json"
+    store = json.loads(_project_store_json(
+        tmp_path,
+        status="awaiting_final_approval",
+        raw_request="Create a flyer for Happy Hour Special.",
+    ))
+    store["projects"][0]["fields"]["notes"] = "Happy Hour Special."
+    store["projects"][0]["locked_facts"] = [
+        {"fact_id": "business_name", "label": "Business", "value": "Lakshmis Kitchen", "source": "customer_profile", "required": True},
+        {"fact_id": "offer:0", "label": "Offer", "value": "Happy Hour", "source": "customer_text", "required": True},
+    ]
+    state_path.write_text(json.dumps(store), encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", [
+        "update-flyer-project",
+        "--project-id", "F9001",
+        "--revision-text", 'Replace "Happy Hour" with "Happy Hour Special".',
+        "--message-id", "m-happy-hour-idempotent",
+        "--state-path", str(state_path),
+    ])
+
+    assert module.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["revision_requires_clarification"] is False
+    assert payload["revision_patch"]["already_applied"] is True
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "awaiting_final_approval"
+    assert persisted["concepts"][0]["concept_id"] == "C1"
+    assert persisted["selected_concept_id"] == "C1"
+    assert persisted["final_asset_ids"] == ["A0003"]
+    locked_values = [fact["value"] for fact in persisted["locked_facts"]]
+    assert "Happy Hour Special" in locked_values
+    assert "Happy Hour" not in locked_values
+
+
+def test_already_applied_text_revision_keeps_current_locked_fact_without_crash(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    module = _load_script(monkeypatch)
+    state_path = tmp_path / "projects.json"
+    store = json.loads(_project_store_json(
+        tmp_path,
+        status="awaiting_final_approval",
+        raw_request="Create a flyer for Happy Hour Special.",
+    ))
+    store["projects"][0]["fields"]["notes"] = "Happy Hour Special."
+    store["projects"][0]["locked_facts"] = [
+        {"fact_id": "business_name", "label": "Business", "value": "Lakshmis Kitchen", "source": "customer_profile", "required": True},
+        {"fact_id": "offer:0", "label": "Offer", "value": "Happy Hour Special", "source": "customer_text", "required": True},
+    ]
+    state_path.write_text(json.dumps(store), encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", [
+        "update-flyer-project",
+        "--project-id", "F9001",
+        "--revision-text", 'Replace "Happy Hour" with "Happy Hour Special".',
+        "--message-id", "m-happy-hour-idempotent-current",
+        "--state-path", str(state_path),
+    ])
+
+    assert module.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["revision_requires_clarification"] is False
+    assert payload["revision_patch"]["already_applied"] is True
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "awaiting_final_approval"
+    assert persisted["concepts"][0]["concept_id"] == "C1"
+    locked_values = [fact["value"] for fact in persisted["locked_facts"]]
+    assert locked_values.count("Happy Hour Special") == 1
+    assert "Happy Hour" not in locked_values
+
+
 def test_day_range_revision_does_not_corrupt_existing_notes(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     module = _load_script(monkeypatch)
@@ -247,6 +504,40 @@ def test_source_artwork_followup_stays_in_manual_edit_queue(tmp_path, monkeypatc
     assert persisted["final_asset_ids"] == ["A0003"]
     assert "Remove extra 08:00" in persisted["raw_request"]
     assert persisted["revisions"][0]["request_text"] == "Remove extra 08:00 and add Any Item for $9.99."
+
+
+def test_offer_text_revision_on_manual_source_edit_stays_in_manual_queue(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    module = _load_script(monkeypatch)
+    state_path = tmp_path / "projects.json"
+    store = json.loads(_project_store_json(
+        tmp_path,
+        status="manual_edit_required",
+        raw_request="Edit uploaded flyer/source artwork. Preserve the source flyer.",
+    ))
+    store["projects"][0]["fields"]["notes"] = "Pick Any 3 Dosa for $20."
+    state_path.write_text(json.dumps(store), encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", [
+        "update-flyer-project",
+        "--project-id", "F9001",
+        "--revision-text", "Pick any 3 Dosa -> Pick Any 4 Dosa, increase price by $1.",
+        "--message-id", "m-source-offer-price-edit",
+        "--state-path", str(state_path),
+    ])
+
+    assert module.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["revision_requires_clarification"] is False
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "manual_edit_required"
+    assert persisted["selected_concept_id"] == "C1"
+    assert persisted["concepts"][0]["concept_id"] == "C1"
+    assert persisted["final_asset_ids"] == ["A0003"]
+    assert persisted["fields"]["notes"] == "Pick Any 3 Dosa for $20."
+    assert "Pick any 3 Dosa -> Pick Any 4 Dosa" in persisted["raw_request"]
+    assert persisted["revisions"][0]["request_text"] == "Pick any 3 Dosa -> Pick Any 4 Dosa, increase price by $1."
 
 
 def test_queue_manual_review_marks_manual_project_completable(tmp_path, monkeypatch, capsys):

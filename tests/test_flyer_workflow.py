@@ -470,6 +470,231 @@ def test_extract_revision_patch_parses_replace_without_quotes_confirmation_gated
     assert "Replace visible text" in (patch.notes_update or "")
 
 
+def test_extract_revision_patch_handles_offer_arrow_with_price_delta():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Dosa Specials",
+        contact_info="+17329837841",
+        notes=(
+            "Pick Any 3 Dosa for $20. "
+            "Items: Masala Dosa $8.99, Onion Dosa $8.99, Rava Dosa $8.99."
+        ),
+    ))
+
+    patch = extract_revision_patch(
+        project,
+        "Pick any 3 Dosa -> Pick Any 4 Dosa, increase price by $1.",
+    )
+
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert "Pick Any 4 Dosa for $21" in (patch.notes_update or "")
+    assert "Pick Any 3 Dosa" not in (patch.notes_update or "")
+    assert "increase price" not in (patch.notes_update or "").lower()
+
+
+def test_extract_revision_patch_handles_change_offer_with_price_delta_without_leaking_instruction():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Dosa Specials",
+        contact_info="+17329837841",
+        notes=(
+            "Pick Any 3 Dosa for $20. "
+            "Items: Masala Dosa $8.99, Onion Dosa $8.99, Rava Dosa $8.99."
+        ),
+    ))
+
+    patch = extract_revision_patch(
+        project,
+        "Change Pick Any 3 Dosa to Pick Any 4 Dosa and increase price by $1.",
+    )
+
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert "Pick Any 4 Dosa for $21" in (patch.notes_update or "")
+    assert "Pick Any 4 Dosa and increase price" not in (patch.notes_update or "")
+    assert "Pick Any 3 Dosa" not in (patch.notes_update or "")
+
+
+def test_extract_revision_patch_handles_prefixed_offer_arrow_with_price_delta():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Dosa Specials",
+        contact_info="+17329837841",
+        notes="Pick Any 3 Dosa for $20. Items: Masala Dosa $8.99.",
+    ))
+
+    patch = extract_revision_patch(
+        project,
+        "Please change Pick any 3 Dosa -> Pick Any 4 Dosa, increase price by $1.",
+    )
+
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert "Pick Any 4 Dosa for $21" in (patch.notes_update or "")
+    assert "Pick Any 3 Dosa" not in (patch.notes_update or "")
+
+
+def test_extract_revision_patch_handles_colon_prefixed_offer_arrow_with_price_delta():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Dosa Specials",
+        contact_info="+17329837841",
+        notes="Pick Any 3 Dosa for $20. Items: Masala Dosa $8.99.",
+    ))
+
+    patch = extract_revision_patch(
+        project,
+        "Can you update this: Pick any 3 Dosa -> Pick Any 4 Dosa, increase price by $1.",
+    )
+
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert "Pick Any 4 Dosa for $21" in (patch.notes_update or "")
+
+
+def test_extract_revision_patch_handles_do_this_prefixed_offer_arrow_with_price_delta():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Dosa Specials",
+        contact_info="+17329837841",
+        notes="Pick Any 3 Dosa for $20. Items: Masala Dosa $8.99.",
+    ))
+
+    patch = extract_revision_patch(
+        project,
+        "Can you do this: Pick any 3 Dosa -> Pick Any 4 Dosa, increase price by $1.",
+    )
+
+    assert patch.changed is True
+    assert patch.ambiguous is False
+    assert "Pick Any 4 Dosa for $21" in (patch.notes_update or "")
+
+
+def test_extract_revision_patch_applies_price_delta_after_fuzzy_offer_match():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Dosa Specials",
+        contact_info="+17329837841",
+        notes="Pick Any 3    Dosa for $20. Items: Masala Dosa $8.99.",
+    ))
+
+    patch = extract_revision_patch(
+        project,
+        "Pick any 3 Dosa -> Pick Any 4 Dosa, increase price by $1.",
+    )
+
+    assert patch.changed is True
+    assert patch.requires_confirmation is True
+    assert patch.ambiguous is False
+    assert "Pick Any 4 Dosa for $21" in (patch.notes_update or "")
+    assert "Pick Any 3    Dosa" not in (patch.notes_update or "")
+
+
+def test_extract_revision_patch_fails_closed_when_offer_price_delta_has_no_nearby_price():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Dosa Specials",
+        contact_info="+17329837841",
+        notes="Pick Any 3 Dosa. Items: Masala Dosa $8.99, Onion Dosa $8.99.",
+    ))
+
+    patch = extract_revision_patch(
+        project,
+        "Pick any 3 Dosa -> Pick Any 4 Dosa, increase price by $1.",
+    )
+
+    assert patch.changed is False
+    assert patch.ambiguous is True
+    assert "price not found near edited text" in patch.unresolved_reason
+
+
+def test_extract_revision_patch_fails_closed_when_notes_have_repeated_offer_text():
+    project = _project(
+        FlyerRequestFields(
+            event_or_business_name="Dosa Specials",
+            contact_info="+17329837841",
+            notes="Pick Any 3 Dosa for $20. Pick Any 3 Dosa for $20.",
+        )
+    ).model_copy(update={"raw_request": "Pick Any 3 Dosa for $20."})
+
+    patch = extract_revision_patch(
+        project,
+        "Pick any 3 Dosa -> Pick Any 4 Dosa, increase price by $1.",
+    )
+
+    assert patch.changed is False
+    assert patch.ambiguous is True
+    assert "appears multiple times in flyer details" in patch.unresolved_reason
+
+
+def test_extract_revision_patch_fails_closed_on_multiple_price_deltas():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Dosa Specials",
+        contact_info="+17329837841",
+        notes="Pick Any 3 Dosa for $20. Drink Special for $5.",
+    ))
+
+    patch = extract_revision_patch(
+        project,
+        "Pick any 3 Dosa -> Pick Any 4 Dosa, increase price by $1 and decrease drink price by $1.",
+    )
+
+    assert patch.changed is False
+    assert patch.ambiguous is True
+    assert "multiple price deltas not supported" in patch.unresolved_reason
+
+
+def test_extract_revision_patch_does_not_double_apply_when_new_contains_old():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Happy Hour",
+        contact_info="+17329837841",
+        notes="Happy Hour Special.",
+    )).model_copy(update={"raw_request": "Happy Hour Special."})
+
+    patch = extract_revision_patch(
+        project,
+        'Replace "Happy Hour" with "Happy Hour Special".',
+    )
+
+    assert patch.changed is False
+    assert patch.ambiguous is False
+    assert patch.already_applied is True
+    assert patch.notes_update is None
+    assert patch.raw_request_update is None
+
+
+def test_extract_revision_patch_does_not_double_apply_whitespace_variant_when_new_contains_old():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Happy Hour",
+        contact_info="+17329837841",
+        notes="Happy   Hour Special.",
+    )).model_copy(update={"raw_request": "Happy Hour   Special."})
+
+    patch = extract_revision_patch(
+        project,
+        'Replace "Happy Hour" with "Happy Hour Special".',
+    )
+
+    assert patch.changed is False
+    assert patch.ambiguous is False
+    assert patch.already_applied is True
+    assert patch.notes_update is None
+    assert patch.raw_request_update is None
+
+
+def test_extract_revision_patch_fails_closed_on_whitespace_ambiguous_old_and_new():
+    project = _project(FlyerRequestFields(
+        event_or_business_name="Happy Hour",
+        contact_info="+17329837841",
+        notes="Happy   Hour and Happy    Hour Special.",
+    )).model_copy(update={"raw_request": "Happy   Hour and Happy    Hour Special."})
+
+    patch = extract_revision_patch(
+        project,
+        'Replace "Happy Hour" with "Happy Hour Special".',
+    )
+
+    assert patch.changed is False
+    assert patch.ambiguous is True
+    assert "appears multiple times in flyer details" in patch.unresolved_reason
+    assert patch.notes_update is None
+    assert patch.raw_request_update is None
+
+
 def test_extract_revision_patch_handles_menu_item_swap_without_clarification():
     project = _project(FlyerRequestFields(
         event_or_business_name="Weekend Breakfast Specials",

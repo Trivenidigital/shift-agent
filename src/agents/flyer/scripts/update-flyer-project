@@ -24,14 +24,13 @@ from schemas import (  # noqa: E402
 )
 from safe_io import FileLock, atomic_write_text  # noqa: E402
 try:
-    from flyer_workflow import extract_revision_patch  # type: ignore  # noqa: E402
+    from flyer_workflow import apply_revision_text_edit_to_value, extract_revision_patch, revision_text_value_contains  # type: ignore  # noqa: E402
 except ImportError:
-    from agents.flyer.workflow import extract_revision_patch  # noqa: E402
+    from agents.flyer.workflow import apply_revision_text_edit_to_value, extract_revision_patch, revision_text_value_contains  # noqa: E402
 try:
     from flyer_manual_queue import make_manual_review  # type: ignore  # noqa: E402
 except ImportError:
     from agents.flyer.manual_queue import make_manual_review  # noqa: E402
-
 
 STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
 RAW_REQUEST_MAX_LEN = 2000
@@ -102,6 +101,62 @@ def _append_source_edit_correction(raw_request: str, correction: str) -> str:
     addition = f"\nLatest correction: {correction_trimmed}"
     base_budget = max(0, RAW_REQUEST_MAX_LEN - len(addition))
     return f"{base[:base_budget].rstrip()}{addition}"
+
+
+def _refresh_customer_text_locked_facts(project, *, message_id: str, patch=None):
+    if not getattr(project, "locked_facts", None):
+        return []
+    old_text = str(getattr(patch, "replace_old_text", "") or "")
+    new_text = str(getattr(patch, "replace_new_text", "") or "")
+    price_delta_cents = int(getattr(patch, "price_delta_cents", 0) or 0)
+    old_allowed_in_new = revision_text_value_contains(new_text, old_text)
+    if old_text and new_text:
+        updated_facts = []
+        match_count = 0
+        updated_match = False
+        for fact in project.locked_facts:
+            if (
+                getattr(fact, "source", "") == "customer_text"
+                and revision_text_value_contains(str(getattr(fact, "value", "")), old_text)
+            ):
+                match_count += 1
+                value, reason = apply_revision_text_edit_to_value(
+                    str(fact.value),
+                    old_text,
+                    new_text,
+                    price_delta_cents,
+                )
+                if reason == "already applied":
+                    updated_facts.append(fact.model_copy(update={"source_message_id": message_id}))
+                    updated_match = True
+                    continue
+                if not reason or not revision_text_value_contains(value, old_text):
+                    updated_facts.append(fact.model_copy(update={
+                        "value": value,
+                        "source_message_id": message_id,
+                    }))
+                    updated_match = True
+                    continue
+            updated_facts.append(fact)
+        if match_count and not updated_match:
+            raise SystemExit("stale locked fact after deterministic text edit")
+        if match_count > 1:
+            raise SystemExit("ambiguous locked facts for deterministic text edit")
+        if match_count == 1 and updated_match:
+            if not old_allowed_in_new and any(
+                getattr(fact, "source", "") == "customer_text"
+                and revision_text_value_contains(str(getattr(fact, "value", "")), old_text)
+                for fact in updated_facts
+            ):
+                raise SystemExit("stale locked fact after deterministic text edit")
+            return updated_facts
+    if old_text and not old_allowed_in_new and any(
+        getattr(fact, "source", "") == "customer_text"
+        and revision_text_value_contains(str(getattr(fact, "value", "")), old_text)
+        for fact in project.locked_facts
+    ):
+        raise SystemExit("stale locked fact after deterministic text edit")
+    return list(project.locked_facts)
 
 
 def main() -> int:
@@ -277,6 +332,14 @@ def main() -> int:
                             updated = updated.model_copy(update={"fields": fields})
                         if patch.raw_request_update is not None:
                             updated = updated.model_copy(update={"raw_request": patch.raw_request_update})
+                        if patch.changed:
+                            updated = updated.model_copy(update={
+                                "locked_facts": _refresh_customer_text_locked_facts(
+                                    updated,
+                                    message_id=pending.request_message_id,
+                                    patch=patch,
+                                )
+                            })
                         revisions = []
                         applied_revision = False
                         for rev in updated.revisions:
@@ -319,7 +382,32 @@ def main() -> int:
                         pending = None
 
                 patch = extract_revision_patch(updated, args.revision_text)
-                revision_requires_clarification = patch.ambiguous or (not patch.changed and not patch.visual_only)
+                revision_already_applied = bool(getattr(patch, "already_applied", False))
+                revision_requires_clarification = patch.ambiguous or (
+                    not patch.changed
+                    and not patch.visual_only
+                    and not revision_already_applied
+                )
+                if revision_already_applied and not revision_requires_clarification:
+                    refreshed_facts = _refresh_customer_text_locked_facts(
+                        updated,
+                        message_id=args.message_id,
+                        patch=patch,
+                    )
+                    if refreshed_facts != updated.locked_facts:
+                        updated = updated.model_copy(update={
+                            "locked_facts": refreshed_facts,
+                            "updated_at": now,
+                        })
+                        store.projects[idx] = updated
+                        atomic_write_text(state_path, store.model_dump_json(indent=2))
+                    print(json.dumps({
+                        "project_id": updated.project_id,
+                        "version": updated.version,
+                        "revision_patch": patch.to_dict(),
+                        "revision_requires_clarification": False,
+                    }))
+                    return 0
                 revision_requires_confirmation = bool(getattr(patch, "requires_confirmation", False))
                 if revision_requires_confirmation and not revision_requires_clarification:
                     revision = FlyerRevision(
@@ -417,6 +505,14 @@ def main() -> int:
                         })
                     if patch.raw_request_update is not None:
                         updated = updated.model_copy(update={"raw_request": patch.raw_request_update})
+                    if patch.changed:
+                        updated = updated.model_copy(update={
+                            "locked_facts": _refresh_customer_text_locked_facts(
+                                updated,
+                                message_id=args.message_id,
+                                patch=patch,
+                            )
+                        })
                     if patch.changed or patch.visual_only:
                         revision = revision.model_copy(update={"resulting_version": updated.version + 1})
                     updated = updated.model_copy(update={

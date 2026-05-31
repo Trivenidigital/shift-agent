@@ -1544,3 +1544,17 @@ Filed during F0105 incident response (deploy `deploy-20260527-134933-affe3c0a` +
 **Out of scope:** changing the recovery heuristic itself. The heuristic stays as a defense against future projects that genuinely lack origin evidence. This entry is the targeted backfill for pre-cutover stuck rows.
 
 **Source incident:** F0105 (Lakshmi's Kitchen). Cutover commit: PR #298 (`87db715`). Affected project count: TBD (survey first).
+
+## Flyer Typed Text-Edit Follow-Through - 2026-05-31
+
+- Drift-check tag: extends-Hermes
+- Hermes-first analysis: Hermes/cf-router already owns WhatsApp ingress, sender identity, active-project routing, action audit, and dispatch to `update-flyer-project`. Flyer code already owns deterministic revision parsing and overlay rendering. This slice extends only the business-specific revision parser for clear offer-text edits and keeps the existing Hermes/Flyer substrate.
+- [x] Ground current `origin/main` routing and confirm our-generated active flyer revisions already skip the raster source-edit model.
+- [x] Add failing parser regressions for "Pick Any 3 Dosa -> Pick Any 4 Dosa, increase price by $1".
+- [x] Implement minimal deterministic parser fix with fail-closed ambiguity behavior.
+- [x] Verify workflow/update/router suites and run Claude multi-vector review.
+- [ ] Merge/deploy if review and tests are clean.
+
+Review/verification:
+- Claude multi-vector review: structural, safety, Hermes/drift, and product strategy completed. Structural/safety blockers were fixed through repeated focused re-review; final focused passes reported no remaining blockers or important findings.
+- Local gates: workflow/update/router 376 passed; broader Flyer slice 722 passed; py_compile and diff whitespace checks clean.

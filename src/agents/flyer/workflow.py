@@ -204,6 +204,10 @@ class RevisionPatchResult:
     unresolved_reason: str = ""
     requires_confirmation: bool = False
     confirmation_reason: str = ""
+    replace_old_text: str = ""
+    replace_new_text: str = ""
+    price_delta_cents: int = 0
+    already_applied: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -216,6 +220,10 @@ class RevisionPatchResult:
             "unresolved_reason": self.unresolved_reason,
             "requires_confirmation": self.requires_confirmation,
             "confirmation_reason": self.confirmation_reason,
+            "replace_old_text": self.replace_old_text,
+            "replace_new_text": self.replace_new_text,
+            "price_delta_cents": self.price_delta_cents,
+            "already_applied": self.already_applied,
         }
 
 
@@ -223,6 +231,34 @@ def _extract_replace_text(body: str) -> tuple[str, str]:
     """Return (old_text, new_text) for simple replace-text instructions."""
     if not body:
         return "", ""
+
+    def clean_new(value: str) -> str:
+        value = value.strip(" .,\"'“”`")
+        value = re.sub(
+            r"\s*(?:,?\s*(?:and\s+)?)?"
+            r"(?:increase|raise|bump|decrease|lower|reduce)\s+"
+            r"(?:the\s+)?(?:[a-z][a-z0-9 '&/-]{0,40}\s+)?(?:price|cost|amount)\s+"
+            r"(?:by\s+)?\$?\d+(?:\.\d{1,2})?\b.*$",
+            "",
+            value,
+            flags=re.IGNORECASE,
+        )
+        return value.strip(" .,\"'“”`")
+
+    def safe_unquoted(old: str, new: str) -> bool:
+        old_lower = old.lower()
+        if (
+            ("$" in new or re.search(r"\b\d+(?:\.\d{2})?\b", new))
+            and ("price" in old_lower)
+            and ("price any event" not in old_lower)
+        ):
+            return False
+        if any(tok in old_lower for tok in ("date", "time", "phone", "contact", "location", "venue", "address")):
+            return False
+        if old_lower in {"it", "this", "that"}:
+            return False
+        return bool(old and new and old.lower() != new.lower())
+
     patterns = [
         r"\b(?:replace|change)\b[^\"'\n]{0,120}[\"'](?P<old>[^\"']{1,160})[\"']\s*[-–—:|]*\s*(?:with|to|->)\s*[\"'](?P<new>[^\"']{1,160})[\"']",
         # Curly quotes are often pasted inconsistently on WhatsApp (left/left or right/right).
@@ -235,8 +271,36 @@ def _extract_replace_text(body: str) -> tuple[str, str]:
         if not match:
             continue
         old = match.group("old").strip(" .,\"'“”`")
-        new = match.group("new").strip(" .,\"'“”`")
+        new = clean_new(match.group("new"))
         if old and new and old.lower() != new.lower():
+            return old, new
+
+    arrow_body = re.sub(
+        r"^\s*(?:please\s+)?(?:(?:can|could|would)\s+you\s+)?(?:please\s+)?"
+        r"(?:(?:change|replace|update|edit)\b\s*(?:this|it|the\s+flyer)?|do\s+this|make\s+this\s+change)\s*[:,-]?\s*",
+        "",
+        body,
+        flags=re.IGNORECASE,
+    )
+    for arrow_source in (arrow_body, body):
+        arrow = re.search(
+            r"(?P<old>[A-Za-z][^.?!\n]{2,100}?)\s*(?:->|=>)\s*"
+            r"(?P<new>[A-Za-z][^.?!\n]{2,100}?)"
+            r"(?=\s*(?:[,;]\s*(?:and\s+)?(?:increase|raise|bump|decrease|lower|reduce)\b|[.!?]|$))",
+            arrow_source,
+            flags=re.IGNORECASE,
+        )
+        if not arrow:
+            continue
+        old = arrow.group("old").strip(" .,:;\"'“”`-–—")
+        new = clean_new(arrow.group("new"))
+        if (
+            safe_unquoted(old, new)
+            and re.search(r"[A-Za-z]", old)
+            and re.search(r"[A-Za-z]", new)
+            and len(re.findall(r"[A-Za-z0-9]+", old)) >= 2
+            and len(re.findall(r"[A-Za-z0-9]+", new)) >= 2
+        ):
             return old, new
     fallback = re.search(
         r"\b(?:replace|change)\s+(?P<old>[^.?!\n]{1,80}?)\s+(?:with|to|->)\s+(?P<new>[^.?!\n]{1,80}?)(?:[.!?]|$)",
@@ -245,23 +309,122 @@ def _extract_replace_text(body: str) -> tuple[str, str]:
     )
     if fallback:
         old = fallback.group("old").strip(" .,:;\"'“”`-–—")
-        new = fallback.group("new").strip(" .,:;\"'“”`-–—")
+        new = clean_new(fallback.group("new").strip(" .,:;\"'“”`-–—"))
         # Avoid stealing structured field edits ("Change X price to $9.99", etc.).
         # Keep a single exception for the common badge phrase "Price any event".
-        old_lower = old.lower()
-        if (
-            ("$" in new or re.search(r"\b\d+(?:\.\d{2})?\b", new))
-            and ("price" in old_lower)
-            and ("price any event" not in old_lower)
-        ):
-            return "", ""
-        if any(tok in old_lower for tok in ("date", "time", "phone", "contact", "location", "venue", "address")):
-            return "", ""
-        if old_lower in {"it", "this", "that"}:
-            return "", ""
-        if old and new and old.lower() != new.lower():
+        if safe_unquoted(old, new):
             return old, new
     return "", ""
+
+
+def _parse_price_cents(raw: str) -> int:
+    value = raw.strip().replace(",", "")
+    if "." in value:
+        dollars, cents = value.split(".", 1)
+        cents = cents.ljust(2, "0")[:2]
+    else:
+        dollars, cents = value, "00"
+    return int(dollars) * 100 + int(cents)
+
+
+def _format_price_cents(cents: int, *, force_cents: bool) -> str:
+    dollars, remainder = divmod(cents, 100)
+    if force_cents or remainder:
+        return f"${dollars}.{remainder:02d}"
+    return f"${dollars}"
+
+
+def _extract_price_delta_cents(text: str) -> int:
+    match = next(_iter_price_delta_matches(text), None)
+    if not match:
+        return 0
+    amount = _parse_price_cents(match.group("amount"))
+    direction = match.group("dir").lower()
+    if direction in {"decrease", "lower", "reduce"}:
+        amount *= -1
+    return amount
+
+
+def _iter_price_delta_matches(text: str):
+    return re.finditer(
+        r"\b(?P<dir>increase|raise|bump|decrease|lower|reduce)\s+"
+        r"(?:the\s+)?(?:[a-z][a-z0-9 '&/-]{0,40}\s+)?(?:price|cost|amount)\s+"
+        r"(?:by\s+)?\$?(?P<amount>\d+(?:\.\d{1,2})?)\b",
+        text or "",
+        flags=re.IGNORECASE,
+    )
+
+
+def _apply_price_delta_near_text(source: str, anchor: str, delta_cents: int) -> tuple[str, str]:
+    if not source or not anchor or not delta_cents:
+        return source, ""
+    matches = list(re.finditer(re.escape(anchor), source, flags=re.IGNORECASE))
+    if not matches:
+        return source, "anchor not found"
+    if len(matches) > 1:
+        return source, "anchor appears multiple times"
+    match = matches[0]
+    tail = source[match.end():]
+    delimiter = re.search(r";|\n|\.(?!\d)", tail)
+    segment_end = delimiter.start() if delimiter else min(len(tail), 120)
+    segment = tail[:segment_end]
+    prices = list(re.finditer(r"\$\s*(?P<amount>\d+(?:\.\d{1,2})?)", segment))
+    if not prices:
+        return source, "price not found near edited text"
+    if len(prices) > 1:
+        return source, "multiple prices found near edited text"
+    price = prices[0]
+    old_raw = price.group("amount")
+    old_cents = _parse_price_cents(old_raw)
+    new_cents = old_cents + delta_cents
+    if new_cents < 0:
+        return source, "price delta would make price negative"
+    replacement = _format_price_cents(new_cents, force_cents="." in old_raw)
+    start = match.end() + price.start()
+    end = match.end() + price.end()
+    return f"{source[:start]}{replacement}{source[end:]}", ""
+
+
+def _replace_once_whitespace_collapsed_or_flag(source: str, old: str, new: str) -> tuple[str, str]:
+    if not source:
+        return source, "not found"
+    tokens = [tok for tok in re.split(r"\s+", old.strip()) if tok]
+    if len(tokens) < 2:
+        return source, "too short for whitespace match"
+    pattern = r"(?<!\w)" + r"\s+".join(re.escape(tok) for tok in tokens) + r"(?!\w)"
+    matches = list(re.finditer(pattern, source, flags=re.IGNORECASE))
+    if not matches:
+        return source, "not found"
+    if len(matches) > 1:
+        return source, "appears multiple times"
+    match = matches[0]
+    return f"{source[:match.start()]}{new}{source[match.end():]}", ""
+
+
+def apply_revision_text_edit_to_value(value: str, old_text: str, new_text: str, price_delta_cents: int = 0) -> tuple[str, str]:
+    replaced, reason = _replace_once_or_flag(value, old_text, new_text)
+    if reason == "not found":
+        replaced, reason = _replace_once_whitespace_collapsed_or_flag(value, old_text, new_text)
+    if reason == "not found":
+        replaced, reason = _replace_once_normalized_or_flag(value, old_text, new_text)
+    if reason:
+        return value, reason
+    if price_delta_cents:
+        return _apply_price_delta_near_text(replaced, new_text, price_delta_cents)
+    return replaced, ""
+
+
+def revision_text_value_contains(value: str, old_text: str) -> bool:
+    if not value or not old_text:
+        return False
+    if old_text.lower() in value.lower():
+        return True
+    collapsed_value = re.sub(r"\s+", " ", value).strip().lower()
+    collapsed_old = re.sub(r"\s+", " ", old_text).strip().lower()
+    if collapsed_old and collapsed_old in collapsed_value:
+        return True
+    _replaced, reason = _replace_once_normalized_or_flag(value, old_text, old_text)
+    return not reason
 
 
 def _extract_remove_time_instruction(text: str) -> str:
@@ -529,6 +692,18 @@ DAY_PATTERN = r"(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
 def _replace_once_or_flag(source: str, old: str, new: str) -> tuple[str, str]:
     if not source:
         return source, "not found"
+    normalized_old, _old_map = _normalized_text_and_map(old)
+    normalized_new, _new_map = _normalized_text_and_map(new)
+    if normalized_old and normalized_old in normalized_new:
+        normalized_source, _source_map = _normalized_text_and_map(source)
+        if normalized_new and normalized_new in normalized_source:
+            without_new = normalized_source.replace(normalized_new, " ")
+            if normalized_old not in without_new:
+                return source, "already applied"
+    elif old.lower() in new.lower() and new.lower() in source.lower():
+        without_new = re.sub(re.escape(new), "", source, flags=re.IGNORECASE)
+        if old.lower() not in without_new.lower():
+            return source, "already applied"
     count = source.lower().count(old.lower())
     if count == 0:
         return source, "not found"
@@ -843,6 +1018,10 @@ def extract_revision_patch(project: FlyerProject, text: str) -> RevisionPatchRes
     raw_request_update: str | None = None
     unresolved: list[str] = []
     fuzzy_confirmation_required = False
+    replace_old_text = ""
+    replace_new_text = ""
+    replace_price_delta_cents = 0
+    already_applied = False
 
     month_day = re.search(
         r"\b(?:change|move|set|update)?\s*(?:the\s*)?date\s*(?:from\s+[a-z]+\s+\d{1,2}\s+)?(?:to|as|=|:)?\s*"
@@ -980,38 +1159,149 @@ def extract_revision_patch(project: FlyerProject, text: str) -> RevisionPatchRes
 
     old_text, new_text = _extract_replace_text(body)
     if old_text and new_text:
+        price_delta_matches = list(_iter_price_delta_matches(body))
+        price_delta_cents = _extract_price_delta_cents(body)
+        notes_already_applied = False
+        locked_matches = [
+            fact
+            for fact in getattr(project, "locked_facts", []) or []
+            if getattr(fact, "source", "") == "customer_text"
+            and revision_text_value_contains(str(getattr(fact, "value", "")), old_text)
+        ]
+        if len(locked_matches) > 1:
+            unresolved.append(f"text {old_text!r} appears multiple times in locked facts")
         candidate_notes = project.fields.notes or ""
+        if len(price_delta_matches) > 1:
+            unresolved.append("multiple price deltas not supported")
         replaced_notes, reason = _replace_once_or_flag(candidate_notes, old_text, new_text)
-        if reason:
-            candidate_raw = project.raw_request or ""
-            replaced_raw, raw_reason = _replace_once_or_flag(candidate_raw, old_text, new_text)
-            if raw_reason:
-                fuzzy_notes, fuzzy_reason = _replace_once_normalized_or_flag(candidate_notes, old_text, new_text)
-                if not fuzzy_reason:
-                    notes_update = fuzzy_notes
-                    fuzzy_confirmation_required = True
-                else:
-                    fuzzy_raw, fuzzy_raw_reason = _replace_once_normalized_or_flag(candidate_raw, old_text, new_text)
-                    if not fuzzy_raw_reason:
-                        raw_request_update = fuzzy_raw
-                        fuzzy_confirmation_required = True
+        if unresolved:
+            pass
+        elif reason == "already applied":
+            notes_already_applied = True
+        elif reason:
+            if candidate_notes and reason == "not found" and revision_text_value_contains(candidate_notes, old_text):
+                collapsed_notes, collapsed_reason = _replace_once_whitespace_collapsed_or_flag(candidate_notes, old_text, new_text)
+                if not collapsed_reason:
+                    if price_delta_cents:
+                        collapsed_notes, delta_reason = _apply_price_delta_near_text(collapsed_notes, new_text, price_delta_cents)
+                        if delta_reason:
+                            unresolved.append(f"price delta {delta_reason}")
+                        else:
+                            notes_update = collapsed_notes
+                            fuzzy_confirmation_required = True
                     else:
-                        unresolved.append(
-                            f"text {old_text!r} {raw_reason if raw_reason != 'not found' else 'not found in flyer details'}"
-                        )
+                        notes_update = collapsed_notes
+                        fuzzy_confirmation_required = True
+                else:
+                    unresolved.append(f"text {old_text!r} {collapsed_reason} in flyer details")
+            elif candidate_notes and reason != "not found":
+                unresolved.append(f"text {old_text!r} {reason} in flyer details")
             else:
-                raw_request_update = replaced_raw
+                candidate_raw = project.raw_request or ""
+                replaced_raw, raw_reason = _replace_once_or_flag(candidate_raw, old_text, new_text)
+                if raw_reason:
+                    if raw_reason == "not found" and revision_text_value_contains(candidate_raw, old_text):
+                        collapsed_raw, collapsed_raw_reason = _replace_once_whitespace_collapsed_or_flag(candidate_raw, old_text, new_text)
+                        if not collapsed_raw_reason:
+                            if price_delta_cents:
+                                collapsed_raw, delta_reason = _apply_price_delta_near_text(collapsed_raw, new_text, price_delta_cents)
+                                if delta_reason:
+                                    unresolved.append(f"price delta {delta_reason}")
+                                else:
+                                    raw_request_update = collapsed_raw
+                                    fuzzy_confirmation_required = True
+                            else:
+                                raw_request_update = collapsed_raw
+                                fuzzy_confirmation_required = True
+                        else:
+                            unresolved.append(f"text {old_text!r} {collapsed_raw_reason} in raw request")
+                        raw_reason = ""
+                    if not raw_reason:
+                        pass
+                    elif raw_reason == "already applied":
+                        pass
+                    else:
+                        fuzzy_notes, fuzzy_reason = _replace_once_normalized_or_flag(candidate_notes, old_text, new_text)
+                        if not fuzzy_reason:
+                            if price_delta_cents:
+                                fuzzy_notes, delta_reason = _apply_price_delta_near_text(fuzzy_notes, new_text, price_delta_cents)
+                                if delta_reason:
+                                    unresolved.append(f"price delta {delta_reason}")
+                                else:
+                                    notes_update = fuzzy_notes
+                                    fuzzy_confirmation_required = True
+                            else:
+                                notes_update = fuzzy_notes
+                                fuzzy_confirmation_required = True
+                        else:
+                            fuzzy_raw, fuzzy_raw_reason = _replace_once_normalized_or_flag(candidate_raw, old_text, new_text)
+                            if not fuzzy_raw_reason:
+                                if price_delta_cents:
+                                    fuzzy_raw, delta_reason = _apply_price_delta_near_text(fuzzy_raw, new_text, price_delta_cents)
+                                    if delta_reason:
+                                        unresolved.append(f"price delta {delta_reason}")
+                                    else:
+                                        raw_request_update = fuzzy_raw
+                                        fuzzy_confirmation_required = True
+                                else:
+                                    raw_request_update = fuzzy_raw
+                                    fuzzy_confirmation_required = True
+                            else:
+                                unresolved.append(
+                                    f"text {old_text!r} {raw_reason if raw_reason != 'not found' else 'not found in flyer details'}"
+                                )
+                else:
+                    if price_delta_cents:
+                        replaced_raw, delta_reason = _apply_price_delta_near_text(replaced_raw, new_text, price_delta_cents)
+                        if delta_reason:
+                            unresolved.append(f"price delta {delta_reason}")
+                        else:
+                            raw_request_update = replaced_raw
+                    else:
+                        raw_request_update = replaced_raw
         else:
-            notes_update = replaced_notes
+            if price_delta_cents:
+                replaced_notes, delta_reason = _apply_price_delta_near_text(replaced_notes, new_text, price_delta_cents)
+                if delta_reason:
+                    unresolved.append(f"price delta {delta_reason}")
+                else:
+                    notes_update = replaced_notes
+            else:
+                notes_update = replaced_notes
+        if (notes_update is not None or notes_already_applied) and raw_request_update is None and not unresolved:
+            candidate_raw = project.raw_request or ""
+            if revision_text_value_contains(candidate_raw, old_text):
+                replaced_raw, raw_reason = apply_revision_text_edit_to_value(candidate_raw, old_text, new_text, price_delta_cents)
+                if raw_reason == "already applied":
+                    pass
+                elif raw_reason and revision_text_value_contains(replaced_raw, old_text):
+                    unresolved.append(f"text {old_text!r} {raw_reason} in raw request")
+                else:
+                    raw_request_update = replaced_raw
         # If we couldn't match the exact text anywhere, fall back to an explicit
         # instruction append. This handles template-origin visible text that
         # doesn't exist in `notes`/`raw_request` yet.
-        if notes_update is None and raw_request_update is None and unresolved:
+        if (
+            notes_update is None
+            and raw_request_update is None
+            and unresolved
+            and not price_delta_matches
+            and all("not found" in reason for reason in unresolved)
+        ):
             replace_instruction = f"Replace visible text {old_text!r} with {new_text!r} on the flyer. Do not keep {old_text!r} anywhere in the artwork."
             notes_update, raw_request_update = _append_instruction(notes_update, raw_request_update, project, replace_instruction)
             # Require confirmation because this is not a precise field edit.
             fuzzy_confirmation_required = True
             unresolved.clear()
+        if (notes_update is not None or raw_request_update is not None) and not unresolved:
+            replace_old_text = old_text
+            replace_new_text = new_text
+            replace_price_delta_cents = price_delta_cents
+        elif notes_already_applied and not unresolved:
+            replace_old_text = old_text
+            replace_new_text = new_text
+            replace_price_delta_cents = price_delta_cents
+            already_applied = True
 
     changed = bool(updates) or notes_update is not None or raw_request_update is not None
     visual_only = _is_visual_only_revision(body)
@@ -1031,6 +1321,10 @@ def extract_revision_patch(project: FlyerProject, text: str) -> RevisionPatchRes
         unresolved_reason="; ".join(unresolved_clean),
         requires_confirmation=requires_confirmation,
         confirmation_reason=confirmation_reason,
+        replace_old_text=replace_old_text,
+        replace_new_text=replace_new_text,
+        price_delta_cents=replace_price_delta_cents,
+        already_applied=already_applied,
     )
 
 
