@@ -364,6 +364,104 @@ def test_warn_tier_formatters_do_not_mutate_inputs():
     assert [dict(f) for f in project["locked_facts"]] == project_before["locked_facts"]
 
 
+def test_build_preview_approval_checklist_summarizes_customer_facts_lint_clean():
+    project = {
+        "project_id": "F9001",
+        "locked_facts": [
+            {"fact_id": "business_name", "value": "Lakshmi's Kitchen"},
+            {"fact_id": "campaign_title", "value": "Indo-Chinese Specials on Wednesday"},
+            {"fact_id": "offer:0", "value": "Any item $9.99"},
+            {"fact_id": "item:0:name", "value": "Veg Fried Rice"},
+            {"fact_id": "item:0:price", "value": "$9.99"},
+            {"fact_id": "item:1:name", "value": "Gobi Manchurian"},
+            {"fact_id": "item:1:price", "value": "$9.99"},
+            {"fact_id": "schedule", "value": "Wednesday"},
+            {"fact_id": "location", "value": "90 Brybar Dr"},
+            {"fact_id": "contact_phone", "value": "+1 980-200-5022"},
+        ],
+    }
+
+    checklist = policy.build_preview_approval_checklist(project)
+
+    _assert_lint_clean(checklist)
+    assert checklist.startswith("Please check these details before approving:")
+    assert "Business: Lakshmi's Kitchen" in checklist
+    assert "Title: Indo-Chinese Specials on Wednesday" in checklist
+    assert "Offer: Any item $9.99" in checklist
+    assert "Items: Veg Fried Rice - $9.99; Gobi Manchurian - $9.99" in checklist
+    assert "Schedule: Wednesday" in checklist
+    assert "Contact: 90 Brybar Dr; +1 980-200-5022" in checklist
+    assert "F9001" not in checklist
+
+
+def test_build_preview_approval_checklist_clamps_items_and_length():
+    project = {
+        "locked_facts": [
+            {"fact_id": "business_name", "value": "Lakshmi's Kitchen"},
+            {"fact_id": "campaign_title", "value": "Weekend Menu " + ("with family specials " * 20)},
+            {"fact_id": "offer:0", "value": "Grand opening offer " + ("all day savings " * 18)},
+            {"fact_id": "promotion_end", "value": "June 30"},
+            *[
+                {"fact_id": f"item:{idx}:name", "value": f"Item {idx} " + ("special combo " * 8)}
+                for idx in range(1, 9)
+            ],
+        ],
+    }
+
+    checklist = policy.build_preview_approval_checklist(project)
+
+    assert "Item 1" in checklist
+    assert "Item 4" in checklist
+    assert "Item 5" not in checklist
+    assert "+4 more" in checklist
+    assert "Ends: June 30" in checklist
+    assert len(checklist) <= 700
+
+
+def test_build_preview_approval_checklist_preserves_ends_at_hard_budget():
+    project = {
+        "locked_facts": [
+            {"fact_id": "business_name", "value": "B" * 200},
+            {"fact_id": "campaign_title", "value": "T" * 200},
+            {"fact_id": "offer:0", "value": "O" * 200},
+            {"fact_id": "promotion_end", "value": "June 30"},
+            {"fact_id": "location", "value": "L" * 200},
+            {"fact_id": "contact_phone", "value": "+1 980-200-5022"},
+            *[
+                {"fact_id": f"item:{idx}:name", "value": f"Item {idx} " + ("X" * 180)}
+                for idx in range(1, 9)
+            ],
+        ],
+    }
+
+    checklist = policy.build_preview_approval_checklist(project)
+
+    assert len(checklist) <= 700
+    assert "Items:" in checklist
+    assert "Ends: June 30" in checklist
+
+
+def test_build_preview_approval_checklist_includes_detail_and_offer_price_shapes():
+    project = {
+        "locked_facts": [
+            {"fact_id": "business_name", "value": "Lakshmi's Kitchen"},
+            {"fact_id": "campaign_title", "value": "Mid-night Biryani"},
+            {"fact_id": "offer_price", "value": "$25.99"},
+            {"fact_id": "detail_001", "label": "Item 1", "value": "Chicken biryani - $12.99"},
+            {"fact_id": "detail_002", "label": "Item 2", "value": "Goat biryani - $14.99"},
+        ],
+    }
+
+    checklist = policy.build_preview_approval_checklist(project)
+
+    assert "Offer: $25.99" in checklist
+    assert "Items: Chicken biryani - $12.99; Goat biryani - $14.99" in checklist
+
+
+def test_build_preview_approval_checklist_returns_empty_without_customer_facts():
+    assert policy.build_preview_approval_checklist({"project_id": "F9001"}) == ""
+
+
 def test_format_warn_tier_correction_summary_accepts_pydantic_project_shape():
     """The formatter accepts BOTH dict-shape (cf-router runtime via
     projects.json) AND Pydantic FlyerProject-shape (generate-flyer-concepts

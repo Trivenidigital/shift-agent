@@ -367,6 +367,190 @@ def _resolve_brand(project: Any) -> str:
     return ""
 
 
+_PREVIEW_CHECKLIST_MAX_ITEMS = 4
+_PREVIEW_CHECKLIST_MAX_CHARS = 700
+_PREVIEW_CHECKLIST_VALUE_MAX_CHARS = 120
+
+
+def _project_facts(project: Any) -> list[Any]:
+    if isinstance(project, dict):
+        facts = project.get("locked_facts") or []
+        return list(facts) if isinstance(facts, list) else []
+    facts = getattr(project, "locked_facts", None) or []
+    return list(facts)
+
+
+def _project_fields(project: Any) -> Any:
+    if isinstance(project, dict):
+        return project.get("fields") or {}
+    return getattr(project, "fields", None)
+
+
+def _fact_id(fact: Any) -> str:
+    if isinstance(fact, dict):
+        return str(fact.get("fact_id") or "")
+    return str(getattr(fact, "fact_id", "") or "")
+
+
+def _fact_value_text(fact: Any) -> str:
+    if isinstance(fact, dict):
+        return " ".join(str(fact.get("value") or "").split())
+    return " ".join(str(getattr(fact, "value", "") or "").split())
+
+
+def _field_value(project: Any, name: str) -> str:
+    fields = _project_fields(project)
+    if isinstance(fields, dict):
+        return " ".join(str(fields.get(name) or "").split())
+    return " ".join(str(getattr(fields, name, "") or "").split())
+
+
+def _first_fact_value(project: Any, *fact_ids: str, fallback_field: str = "") -> str:
+    wanted = set(fact_ids)
+    for fact in _project_facts(project):
+        if _fact_id(fact) in wanted:
+            value = _fact_value_text(fact)
+            if value:
+                return value
+    if fallback_field:
+        return _field_value(project, fallback_field)
+    return ""
+
+
+def _offer_fact_values(project: Any) -> list[str]:
+    out: list[str] = []
+    for fact in _project_facts(project):
+        fact_id = _fact_id(fact)
+        if fact_id.startswith("offer:") or fact_id in {"pricing_structure", "offer_price"}:
+            value = _fact_value_text(fact)
+            if value and value not in out:
+                out.append(value)
+    return out[:2]
+
+
+def _item_fact_values(project: Any) -> list[str]:
+    names: dict[int, str] = {}
+    prices: dict[int, str] = {}
+    for fact in _project_facts(project):
+        match = re.fullmatch(r"item:(\d+):(name|price)", _fact_id(fact))
+        if not match:
+            continue
+        value = _fact_value_text(fact)
+        if not value:
+            continue
+        index = int(match.group(1))
+        if match.group(2) == "name":
+            names[index] = value
+        else:
+            prices[index] = value
+    items = []
+    for index in sorted(names):
+        name = names[index]
+        price = prices.get(index, "")
+        items.append(f"{name} - {price}" if price else name)
+    for fact in _project_facts(project):
+        fact_id = _fact_id(fact)
+        if not re.fullmatch(r"detail_\d+", fact_id):
+            continue
+        value = _fact_value_text(fact)
+        if value and value not in items:
+            items.append(value)
+    return items
+
+
+def _preview_line(label: str, value: str) -> str:
+    clean = " ".join(str(value or "").split())
+    return f"{label}: {clean}" if clean else ""
+
+
+def _shorten_preview_value(value: str, limit: int = _PREVIEW_CHECKLIST_VALUE_MAX_CHARS) -> str:
+    clean = " ".join(str(value or "").split())
+    if len(clean) <= limit:
+        return clean
+    return clean[: max(0, limit - 1)].rstrip(" ;,.") + "..."
+
+
+def build_preview_approval_checklist(project: Any) -> str:
+    """Build the compact fact checklist shown before preview approval.
+
+    Hermes/Flyer already decided and validated the project facts; this helper
+    only formats those facts so the customer can check what they are approving.
+    It accepts dict-shaped projects from cf-router and Pydantic projects from
+    tests/scripts, and intentionally omits project ids and operational state.
+    """
+    lines: list[str] = []
+    business = _shorten_preview_value(_first_fact_value(project, "business_name", fallback_field="business_name"))
+    title = _shorten_preview_value(
+        _first_fact_value(
+            project,
+            "campaign_title",
+            "headline",
+            fallback_field="event_or_business_name",
+        )
+    )
+    offer_text = _shorten_preview_value("; ".join(_offer_fact_values(project)))
+    items = _item_fact_values(project)
+    item_text = ""
+    if items:
+        visible_items = [_shorten_preview_value(item, 72) for item in items[:_PREVIEW_CHECKLIST_MAX_ITEMS]]
+        remaining = len(items) - len(visible_items)
+        item_text = "; ".join(visible_items)
+        if remaining > 0:
+            item_text = f"{item_text}; +{remaining} more"
+    schedule = _first_fact_value(project, "schedule", fallback_field="event_date")
+    time_value = _field_value(project, "event_time")
+    if time_value and time_value not in schedule:
+        schedule = f"{schedule}; {time_value}" if schedule else time_value
+    schedule = _shorten_preview_value(schedule)
+    location = _first_fact_value(project, "location", fallback_field="venue_or_location")
+    contact = _first_fact_value(project, "contact_phone", fallback_field="contact_info")
+    contact = _shorten_preview_value("; ".join(part for part in (location, contact) if part))
+    promotion_end = _shorten_preview_value(_first_fact_value(project, "promotion_end"))
+
+    for line in (
+        _preview_line("Business", business),
+        _preview_line("Title", title),
+        _preview_line("Offer", offer_text),
+        _preview_line("Items", item_text),
+        _preview_line("Schedule", schedule),
+        _preview_line("Contact", contact),
+        _preview_line("Ends", promotion_end),
+    ):
+        if line:
+            lines.append(line)
+
+    if not lines:
+        return ""
+    prefix = "Please check these details before approving:"
+    required_suffixes = [
+        line for line in lines
+        if line.startswith(("Items:", "Ends:"))
+    ]
+    selected: list[str] = []
+
+    def candidate_length(next_lines: list[str]) -> int:
+        return len(prefix + "\n" + "\n".join(next_lines))
+
+    for line in required_suffixes:
+        if line not in selected:
+            selected.append(line)
+    for line in lines:
+        if line in selected:
+            continue
+        if candidate_length([*selected, line]) <= _PREVIEW_CHECKLIST_MAX_CHARS:
+            selected.append(line)
+    # Present in the normal human scan order after budget selection.
+    ordered = [line for line in lines if line in selected]
+    text = prefix + "\n" + "\n".join(ordered)
+    if len(text) <= _PREVIEW_CHECKLIST_MAX_CHARS:
+        return text
+    # Hard fallback: preserve customer-checkable required facts before optional
+    # context. Values are already shortened, so this should only trigger for
+    # pathological data.
+    text = prefix + "\n" + "\n".join(required_suffixes)
+    return text if len(text) <= _PREVIEW_CHECKLIST_MAX_CHARS else prefix
+
+
 def _translate_warn_blockers(
     blockers: list[str],
     *,
