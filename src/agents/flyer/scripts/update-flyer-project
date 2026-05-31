@@ -14,6 +14,7 @@ sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(SRC_ROOT / "platform"))
 
 from schemas import (  # noqa: E402
+    FlyerLockedFact,
     FlyerManualReview,
     FlyerPendingRevisionConfirmation,
     FlyerProjectStore,
@@ -232,6 +233,51 @@ def _refresh_customer_text_locked_facts(project, *, message_id: str, patch=None)
     return list(project.locked_facts)
 
 
+def _sync_render_field_locked_facts(project, field_updates: dict[str, str], *, message_id: str):
+    mapping = {
+        "contact_info": ("contact_phone", "Contact"),
+        "venue_or_location": ("location", "Location"),
+    }
+    desired = {
+        fact_id: (label, " ".join(str(field_updates[field]).strip(" .,:;").split()))
+        for field, (fact_id, label) in mapping.items()
+        if str(field_updates.get(field) or "").strip(" .,:;")
+    }
+    if not desired:
+        return list(getattr(project, "locked_facts", []) or [])
+
+    updated = []
+    seen: set[str] = set()
+    for fact in getattr(project, "locked_facts", []) or []:
+        target = desired.get(fact.fact_id)
+        if target is None:
+            updated.append(fact)
+            continue
+        label, value = target
+        updated.append(fact.model_copy(update={
+            "label": label,
+            "value": value,
+            "source": "customer_text",
+            "source_message_id": message_id,
+            "confidence": 1.0,
+        }))
+        seen.add(fact.fact_id)
+
+    for fact_id, (label, value) in desired.items():
+        if fact_id in seen:
+            continue
+        updated.append(FlyerLockedFact(
+            fact_id=fact_id,
+            label=label,
+            value=value,
+            source="customer_text",
+            required=True,
+            confidence=1.0,
+            source_message_id=message_id,
+        ))
+    return updated
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--project-id", required=True)
@@ -401,14 +447,20 @@ def main() -> int:
                             updated = updated.model_copy(update={"fields": fields})
                         if patch.raw_request_update is not None:
                             updated = updated.model_copy(update={"raw_request": patch.raw_request_update})
+                        locked_facts = list(updated.locked_facts)
                         if patch.changed:
-                            updated = updated.model_copy(update={
-                                "locked_facts": _refresh_customer_text_locked_facts(
-                                    updated,
-                                    message_id=pending.request_message_id,
-                                    patch=patch,
-                                )
-                            })
+                            locked_facts = _refresh_customer_text_locked_facts(
+                                updated,
+                                message_id=pending.request_message_id,
+                                patch=patch,
+                            )
+                        locked_facts = _sync_render_field_locked_facts(
+                            updated.model_copy(update={"locked_facts": locked_facts}),
+                            patch.field_updates,
+                            message_id=pending.request_message_id,
+                        )
+                        if locked_facts != updated.locked_facts:
+                            updated = updated.model_copy(update={"locked_facts": locked_facts})
                         revisions = []
                         applied_revision = False
                         for rev in updated.revisions:
@@ -578,14 +630,20 @@ def main() -> int:
                         })
                     if patch.raw_request_update is not None:
                         updated = updated.model_copy(update={"raw_request": patch.raw_request_update})
+                    locked_facts = list(updated.locked_facts)
                     if patch.changed:
-                        updated = updated.model_copy(update={
-                            "locked_facts": _refresh_customer_text_locked_facts(
-                                updated,
-                                message_id=args.message_id,
-                                patch=patch,
-                            )
-                        })
+                        locked_facts = _refresh_customer_text_locked_facts(
+                            updated,
+                            message_id=args.message_id,
+                            patch=patch,
+                        )
+                    locked_facts = _sync_render_field_locked_facts(
+                        updated.model_copy(update={"locked_facts": locked_facts}),
+                        patch.field_updates,
+                        message_id=args.message_id,
+                    )
+                    if locked_facts != updated.locked_facts:
+                        updated = updated.model_copy(update={"locked_facts": locked_facts})
                     if patch.changed or patch.visual_only or revision_already_applied:
                         revision = revision.model_copy(update={"resulting_version": updated.version + 1})
                     updated = updated.model_copy(update={

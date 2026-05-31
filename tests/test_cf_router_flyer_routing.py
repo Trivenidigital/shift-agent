@@ -6062,6 +6062,68 @@ def test_same_business_layout_revision_does_not_bypass_but_new_campaign_does():
     assert actions.should_bypass_active_flyer_project_for_fresh_request(layout_revision, active, has_media=True) is True
 
 
+def test_contact_location_revision_routes_to_update_project_and_regenerates(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    active_project = {
+        "project_id": "F7788",
+        "customer_phone": "+17329837841",
+        "status": "awaiting_final_approval",
+        "fields": {"event_or_business_name": "Lakshmis Kitchen", "contact_info": "+1 732 983 7841"},
+        "concepts": [{"concept_id": "C1"}],
+        "revisions": [],
+    }
+    after_update = {**active_project, "status": "revising_design", "concepts": []}
+    active_projects = [active_project, after_update]
+    update_calls: list[tuple] = []
+    sent: list[str] = []
+    previews: list[str] = []
+    audits: list[dict] = []
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_projects.pop(0) if active_projects else after_update)
+
+    def fake_update(*args):
+        update_calls.append(args)
+        assert args == (
+            "F7788",
+            "--revision-text", "Change phone number to +1 980 200 5022. Change location to Lakshmi Hall.",
+            "--message-id", "contact-location-revision",
+        )
+        return True, json.dumps({
+            "project_id": "F7788",
+            "version": 2,
+            "revision_requires_clarification": False,
+            "revision_patch": {
+                "changed": True,
+                "visual_only": False,
+                "ambiguous": False,
+                "field_updates": {
+                    "contact_info": "+1 980 200 5022",
+                    "venue_or_location": "Lakshmi Hall",
+                },
+            },
+        })
+
+    monkeypatch.setattr(actions, "invoke_update_flyer_project", fake_update)
+    monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: sent.append(text) or (True, "ack-mid", ""))
+    monkeypatch.setattr(actions, "trigger_generate_flyer_concepts", lambda project_id: (True, f"generated {project_id}"))
+    monkeypatch.setattr(actions, "send_flyer_concept_previews", lambda _chat_id, project_id: previews.append(project_id) or (True, "preview-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
+
+    result = hooks._try_flyer_active_project_intercept(
+        "Change phone number to +1 980 200 5022. Change location to Lakshmi Hall.",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "contact-location-revision"},
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer active: revision captured for F7788"}
+    assert update_calls
+    assert previews == ["F7788"]
+    assert any("Revision applied to the flyer details" in text for text in sent)
+    assert audits[-1]["reason"] == "flyer_primary_project_created"
+
+
 def test_schedule_named_business_revision_attaches_not_bypassed():
     """A business whose name contains a schedule/occasion word (e.g. 'Sunday
     Salon', 'Eid Market') must still get its layout revisions attached. The
