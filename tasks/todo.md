@@ -33,7 +33,12 @@ probes / required deploy-smoke, no customer sends, no speculative agents, no PR-
   - [x] Verified on VPS: full file 43/43 (32 existing + 11 new), new class 11/11, no regressions.
   - [ ] push → Codex review (test-specific prompt) → merge if clean
 - [ ] Item 10+ — remaining dormant-safe thinning out: runbook fixes; any other shipped-script error-path test gaps. NOTE most remaining pipeline agents (P&L #22, Tier-2 stubs, commerce) need operator activation (real blocker to dormant-safe "finishing every agent") — worth surfacing to operator as the run continues.
-
+- [ ] **Item 10 - Shift `shift-agent-fsck.py` invariant coverage** (branch `codex/builder-backlog-20260531`)
+  - 2026-05-31 drift-check: Items 7 and 9 are already present on `origin/main` via `e0ce7d9`/`fb2d869` and `e97dcf3`; the real remaining no-operator test-only gap is fsck coverage.
+  - [x] Add send-safe tests for clean state, duplicate active codes, stuck reconciling proposals, malformed audit rows, orphan audit references, send-counter mismatches, seen-offset drift, and config-load failure. (`tests/test_shift_fsck.py`, 8 cases.)
+  - [x] Run focused Shift fsck/reconcile tests and relevant existing P5 suites. (`test_shift_fsck.py` 8/8 + `test_shift_reconcile.py` 10/10 = 18 passed locally; in-test Windows `fcntl` stub keeps it cross-platform.)
+  - [x] Claude Code read-only review of the final diff.
+  - Review (Claude Code, read-only): test-only + doc-only diff; no source/script/schema change, no new writer, no deploy wiring, no customer-facing behavior → dormant-safe. The new cases cover clean state plus deployed checks for code_uniqueness, reconciling_stuck, orphan_log_entry/orphan_proposal, counter_mismatch, seen_offset_past_eof, decisions_log_malformed, and config-load `EXIT_SCHEMA_VIOLATION`. Send-safety boundary correct: `_alert` replaced with a recorder (no notify-owner subprocess), all `/opt`+`/root` paths redirected to tmp, `customer_now`/`customer_today_str` pinned. Script's check 4 (roster resolution) is intentionally non-enforced and correctly untested. Note (pre-existing, NOT in this diff — future cleanup): `shift-agent-fsck.py:141` has a dead `if False else ({}, "missing")` no-op + unused `counter` var. No-merge / no-push per Item 10 scope + no-auto-commit rule.
 
 
 ## Flyer Hermes Semantic Brief Reliability - 2026-05-27
