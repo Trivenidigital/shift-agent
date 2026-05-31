@@ -3451,6 +3451,68 @@ def test_active_project_lookup_uses_latest_project_across_account_numbers(tmp_pa
     )
 
 
+def test_lid_only_project_lookup_uses_primary_chat_id_account_numbers(tmp_path):
+    actions = _load_actions()
+    customer_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    actions.FLYER_CUSTOMERS_PATH = customer_path
+    actions.FLYER_PROJECTS_PATH = projects_path
+    lid_chat_id = "201975216009469@lid"
+    customer_path.write_text(
+        """
+{
+  "schema_version": 1,
+  "next_customer_sequence": 2,
+  "next_brand_asset_sequence": 1,
+  "customers": [
+    {
+      "customer_id": "CUST0001",
+      "business_name": "Lakshmis Kitchen",
+      "business_address": "90 Brybar Dr St Johns FL",
+      "primary_chat_id": "201975216009469@lid",
+      "onboarded_by_phone": "+17329837841",
+      "public_phone": "+19045550104",
+      "business_whatsapp_number": "+19045550104",
+      "authorized_request_numbers": ["+19045550105"],
+      "business_category": "Indian Restaurant",
+      "preferred_language": "en",
+      "plan_id": "trial",
+      "status": "trial",
+      "created_at": "2026-05-17T03:06:00Z",
+      "updated_at": "2026-05-17T03:06:00Z"
+    }
+  ],
+  "onboarding_sessions": []
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    projects_path.write_text(
+        """
+{
+  "schema_version": 1,
+  "next_sequence": 61,
+  "projects": [
+    {"project_id": "F0058", "customer_phone": "+19045550104", "status": "awaiting_final_approval", "updated_at": "2026-05-30T20:18:00Z", "created_at": "2026-05-30T20:15:00Z"},
+    {"project_id": "F0059", "customer_phone": "+19045550105", "status": "closed_no_send", "updated_at": "2026-05-30T20:28:00Z", "created_at": "2026-05-30T20:22:00Z"},
+    {"project_id": "F0060", "customer_phone": "+19048626362", "status": "awaiting_final_approval", "updated_at": "2026-05-30T20:40:00Z", "created_at": "2026-05-30T20:35:00Z"}
+  ]
+}
+""".strip(),
+        encoding="utf-8",
+    )
+
+    active = actions.find_active_flyer_project_by_sender(None, lid_chat_id)
+    latest = actions.find_latest_flyer_project_for_status_by_sender(None, lid_chat_id)
+    exact = actions.find_flyer_project_by_id_for_sender(None, lid_chat_id, "F0058")
+    leak = actions.find_flyer_project_by_id_for_sender(None, lid_chat_id, "F0060")
+
+    assert active is not None and active["project_id"] == "F0058"
+    assert latest is not None and latest["project_id"] == "F0059"
+    assert exact is not None and exact["project_id"] == "F0058"
+    assert leak is None
+
+
 def test_account_commands_are_detected_before_revision_routing_static_contract():
     actions = _load_actions()
     hooks = (PLUGIN_DIR / "hooks.py").read_text(encoding="utf-8")

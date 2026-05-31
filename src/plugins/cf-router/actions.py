@@ -2270,7 +2270,7 @@ def find_active_flyer_project_by_sender(phone: Optional[str], chat_id: str) -> O
     `find_latest_flyer_project_for_status_by_sender` for status replies,
     which DOES need to surface closures.
     """
-    if not phone or not FLYER_PROJECTS_PATH.exists():
+    if not FLYER_PROJECTS_PATH.exists():
         return None
     terminal = {"completed", "closed_no_send"}
     try:
@@ -2313,7 +2313,7 @@ def find_flyer_project_by_id_for_sender(
     account (any phone in `_flyer_account_phones`). Returns None otherwise —
     we do NOT leak project state across customers.
     """
-    if not phone or not project_id or not FLYER_PROJECTS_PATH.exists():
+    if not project_id or not FLYER_PROJECTS_PATH.exists():
         return None
     try:
         account_phones = _flyer_account_phones(phone, chat_id)
@@ -2343,7 +2343,7 @@ def find_latest_flyer_project_for_status_by_sender(
     "any update?" replies but MUST stay out of new-request / revision /
     approval routing.
     """
-    if not phone or not FLYER_PROJECTS_PATH.exists():
+    if not FLYER_PROJECTS_PATH.exists():
         return None
     try:
         account_phones = _flyer_account_phones(phone, chat_id)
