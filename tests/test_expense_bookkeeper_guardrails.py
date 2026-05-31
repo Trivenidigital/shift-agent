@@ -20,6 +20,11 @@ from __future__ import annotations
 import os
 os.environ.setdefault("EXPENSE_RECEIPTS_DIR", "/tmp/test/")
 
+import json
+import platform
+import shlex
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src" / "platform"))
@@ -524,4 +529,53 @@ def test_audit_bug1_dispatcher_skill_includes_expense_jq_lookup():
         assert closed in expense_line, (
             f"BUG-1: expense jq filter missing exclusion for status {closed} "
             f"in line: {expense_line!r}"
+        )
+
+
+@pytest.mark.skipif(platform.system() == "Windows", reason="jq syntax smoke is Linux-only")
+def test_v02_8_dispatcher_step3_jq_filters_are_syntax_valid():
+    """V02-8: compile/run each dispatcher Step-3 jq filter against a minimal
+    matching JSON document. The existing BUG-1 test proves presence and order;
+    this catches subtle jq typos such as a missing parenthesis."""
+    jq = shutil.which("jq")
+    if jq is None:
+        pytest.skip("jq is not installed")
+
+    raw = _DISPATCHER_SKILL.read_text(encoding="utf-8")
+    start = raw.find("# Look up across the")
+    assert start != -1, "could not find Step-3 grep block"
+    end = raw.find("\n```", start)
+    assert end != -1, "could not find end of Step-3 grep block"
+    block = raw[start:end]
+
+    fixtures = {
+        "catering-menu-pending.json": {"confirmation_code": "#A3F2X"},
+        "catering-leads.json": {
+            "leads": [{"owner_approval_code": "#A3F2X", "status": "AWAITING_OWNER_APPROVAL"}],
+        },
+        "expense-bookkeeper/leads.json": {
+            "leads": [{"owner_approval_code": "#A3F2X", "status": "AWAITING_OWNER_APPROVAL"}],
+        },
+        "/state/pending.json": {"proposals": [{"code": "#A3F2X"}]},
+    }
+
+    jq_lines = [line.strip() for line in block.splitlines() if line.strip().startswith("jq ")]
+    assert jq_lines, "no jq lines found in Step-3 block"
+    for line in jq_lines:
+        tokens = shlex.split(line, comments=True, posix=True)
+        assert tokens[0] == "jq"
+        filter_expr = tokens[-2]
+        target_path = tokens[-1]
+        fixture = next((payload for marker, payload in fixtures.items() if marker in target_path), None)
+        assert fixture is not None, f"no test fixture for jq target path: {target_path!r}"
+        result = subprocess.run(
+            [jq, "--arg", "c", "#A3F2X", filter_expr],
+            input=json.dumps(fixture),
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+        assert result.returncode == 0, (
+            f"jq filter failed for line {line!r}\n"
+            f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
         )

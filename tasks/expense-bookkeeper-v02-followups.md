@@ -9,6 +9,8 @@ None are blockers for the v0.1 ship; each has a stated rationale for deferral.
 
 ### V02-1 — Generic null-byte / control-char defense across `ExpenseLead` string fields
 
+**Status:** done in PR #393. `ExpenseLead` now applies the shared blank/control-char validator to `sender_lid`, `qbo_account`, and `rejection_reason` when present, while preserving `None`.
+
 **From:** reviewer-b MED (Stage 2 plan review of audit-bug fix)
 **Currently defended:** `original_message_id`, `sender_phone` (BUG-3 + BUG-2 v1.1 shared validator)
 **Currently UNdefended:** `sender_lid`, `qbo_account`, `rejection_reason`
@@ -75,6 +77,8 @@ re.compile(r'\bcode_verifier=[A-Za-z0-9_\-\.]{16,}', re.IGNORECASE),
 **Action for v0.2:** unify to canonical regex everywhere; one PR, ~5 file edits, mostly tests.
 
 ### V02-8 — jq syntax-validity assertion in audit test
+
+**Status:** done. `tests/test_expense_bookkeeper_guardrails.py` now extracts each dispatcher Step-3 jq lookup and runs it against a minimal matching JSON fixture on Linux, skipping when `jq` is unavailable.
 
 **From:** reviewer-e LOW (Stage 2 audit-fix plan review)
 **Current:** `test_audit_bug1_dispatcher_skill_includes_expense_jq_lookup` is a string-presence + ordering test. A subtle filter typo (missing paren) would pass the test but fail at runtime.
