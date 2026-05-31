@@ -10,6 +10,7 @@ commits.
 from __future__ import annotations
 
 import json
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -433,17 +434,16 @@ def test_close_action_uses_audit_chat_id_at_notify_time(tmp_path, monkeypatch):
     # mock bridge so we can assert which chat_id it was called with.
     sent: list[tuple[str, str]] = []
     from agents.flyer import manual_queue as mq
-    def fake_bridge(chat_id, text):
+    def fake_bridge(chat_id, text, **_kwargs):
         sent.append((chat_id, text))
         return (True, "mid-real-test", "", "sent")
     monkeypatch.setattr(mq, "bridge_post", fake_bridge, raising=False)
     # Also need to bypass the lazy safe_io import path inside notify_customer_of_closure:
     import importlib
-    import sys as _sys
     safe_io_stub = importlib.util.module_from_spec(importlib.util.spec_from_loader("safe_io", loader=None))
     safe_io_stub.bridge_post = fake_bridge  # type: ignore[attr-defined]
     safe_io_stub.ndjson_append = lambda *_a, **_kw: None  # type: ignore[attr-defined]
-    _sys.modules["safe_io"] = safe_io_stub
+    monkeypatch.setitem(sys.modules, "safe_io", safe_io_stub)
 
     result = flyer.manual_queue_close_no_send_action(
         "F0058", reason="operator_burndown_duplicate", force=False,

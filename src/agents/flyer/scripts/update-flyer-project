@@ -103,6 +103,79 @@ def _append_source_edit_correction(raw_request: str, correction: str) -> str:
     return f"{base[:base_budget].rstrip()}{addition}"
 
 
+def _is_source_edit_revision_target(project) -> bool:
+    raw_request = (getattr(project, "raw_request", "") or "").lower()
+    if "edit uploaded flyer/source artwork" in raw_request or "authorized flyer/source artwork update" in raw_request:
+        return True
+    manual = getattr(project, "manual_review", None)
+    reason_code = str(getattr(manual, "reason_code", "") or "").strip().lower()
+    return reason_code == "source_edit_provider_unavailable"
+
+
+def _normalized_text(value: str) -> str:
+    return " ".join((value or "").casefold().split())
+
+
+def _selected_preview_asset_id(project) -> str:
+    selected = getattr(project, "selected_concept_id", None)
+    if not selected:
+        return ""
+    for concept in getattr(project, "concepts", []) or []:
+        if getattr(concept, "concept_id", "") == selected:
+            return str(getattr(concept, "preview_asset_id", "") or "")
+    return ""
+
+
+def _selected_preview_asset(project):
+    preview_asset_id = _selected_preview_asset_id(project)
+    if not preview_asset_id:
+        return None
+    for asset in getattr(project, "assets", []) or []:
+        if getattr(asset, "asset_id", "") == preview_asset_id:
+            return asset
+    return None
+
+
+def _already_applied_visible_in_current_preview(project, patch) -> bool:
+    old_text = str(getattr(patch, "replace_old_text", "") or "")
+    new_text = str(getattr(patch, "replace_new_text", "") or "")
+    if not old_text or not new_text:
+        return False
+    preview_asset = _selected_preview_asset(project)
+    if preview_asset is None:
+        return False
+    preview_asset_id = str(getattr(preview_asset, "asset_id", "") or "")
+    preview_asset_sha = str(getattr(preview_asset, "sha256", "") or "").strip().lower()
+    if not preview_asset_id or not preview_asset_sha:
+        return False
+    expected_version = int(getattr(project, "version", 0) or 0)
+    normalized_old = _normalized_text(old_text)
+    normalized_new = _normalized_text(new_text)
+    old_allowed_in_new = revision_text_value_contains(new_text, old_text)
+    for report in getattr(project, "qa_reports", []) or []:
+        if str(getattr(report, "asset_id", "") or "") != preview_asset_id:
+            continue
+        if int(getattr(report, "project_version", 0) or 0) != expected_version:
+            continue
+        if str(getattr(report, "status", "") or "") != "passed":
+            continue
+        if str(getattr(report, "output_format", "") or "") != "concept_preview":
+            continue
+        if str(getattr(report, "qa_source", "") or "") == "sidecar_test":
+            continue
+        if str(getattr(report, "artifact_sha256", "") or "").strip().lower() != preview_asset_sha:
+            continue
+        visible = _normalized_text(str(getattr(report, "extracted_text", "") or ""))
+        if not visible or normalized_new not in visible:
+            continue
+        if normalized_old:
+            residual = visible.replace(normalized_new, " ") if old_allowed_in_new else visible
+            if normalized_old in _normalized_text(residual):
+                continue
+        return True
+    return False
+
+
 def _refresh_customer_text_locked_facts(project, *, message_id: str, patch=None):
     if not getattr(project, "locked_facts", None):
         return []
@@ -231,11 +304,7 @@ def main() -> int:
             if args.revision_text:
                 if not args.message_id:
                     raise SystemExit("--message-id is required with --revision-text")
-                source_edit_request = (
-                    updated.status == "manual_edit_required"
-                    or "edit uploaded flyer/source artwork" in (updated.raw_request or "").lower()
-                    or "authorized flyer/source artwork update" in (updated.raw_request or "").lower()
-                )
+                source_edit_request = _is_source_edit_revision_target(updated)
                 now = datetime.now(timezone.utc)
                 pending = getattr(updated, "pending_revision_confirmation", None)
                 cmd, cmd_revision_id = _parse_pending_confirmation_command(args.revision_text)
@@ -394,20 +463,24 @@ def main() -> int:
                         message_id=args.message_id,
                         patch=patch,
                     )
-                    if refreshed_facts != updated.locked_facts:
+                    already_visible = _already_applied_visible_in_current_preview(updated, patch)
+                    if already_visible and refreshed_facts != updated.locked_facts:
                         updated = updated.model_copy(update={
                             "locked_facts": refreshed_facts,
                             "updated_at": now,
                         })
                         store.projects[idx] = updated
                         atomic_write_text(state_path, store.model_dump_json(indent=2))
-                    print(json.dumps({
-                        "project_id": updated.project_id,
-                        "version": updated.version,
-                        "revision_patch": patch.to_dict(),
-                        "revision_requires_clarification": False,
-                    }))
-                    return 0
+                    if already_visible:
+                        print(json.dumps({
+                            "project_id": updated.project_id,
+                            "version": updated.version,
+                            "revision_patch": patch.to_dict(),
+                            "revision_requires_clarification": False,
+                        }))
+                        return 0
+                    if refreshed_facts != updated.locked_facts:
+                        updated = updated.model_copy(update={"locked_facts": refreshed_facts})
                 revision_requires_confirmation = bool(getattr(patch, "requires_confirmation", False))
                 if revision_requires_confirmation and not revision_requires_clarification:
                     revision = FlyerRevision(
@@ -513,7 +586,7 @@ def main() -> int:
                                 patch=patch,
                             )
                         })
-                    if patch.changed or patch.visual_only:
+                    if patch.changed or patch.visual_only or revision_already_applied:
                         revision = revision.model_copy(update={"resulting_version": updated.version + 1})
                     updated = updated.model_copy(update={
                         "concepts": [],

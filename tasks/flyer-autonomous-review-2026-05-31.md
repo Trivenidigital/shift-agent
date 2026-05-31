@@ -55,9 +55,9 @@ Batch 1 is the current implementation scope. Batches 2-4 are backlog-only follow
   - [x] Make text-manifest sidecar writes atomic.
   - [x] Preserve stale-active-project bypass for pre-delivery media-backed new work while keeping delivered/revising media edits on the active project.
 - [ ] Batch 2 - edit/autonomy hardening:
-  - [ ] Split source-edit manual rows from non-source manual rows in `update-flyer-project`.
-  - [ ] Tighten `already_applied` regeneration suppression using visible/manifest evidence.
-  - [ ] Pass source-edit generation failure reason codes consistently.
+  - [x] Split source-edit manual rows from non-source manual rows in `update-flyer-project`.
+  - [x] Tighten `already_applied` regeneration suppression using current selected-preview visual-QA evidence.
+  - [ ] Pass source-edit generation failure reason codes consistently. Deferred to a separate reason-code PR because this slice is the customer-visible revision-routing lever.
 - [ ] Batch 3 - product-depth improvements:
   - [ ] Expand starter prompts and campaign scene library.
   - [ ] Add preview fact checklist.
@@ -83,3 +83,19 @@ Batch 1 is the current implementation scope. Batches 2-4 are backlog-only follow
   - Adjacent Flyer generation/manual/update suites: `172 passed`.
   - Full Flyer-focused gate: `1539 passed, 1 skipped`.
   - Full repository gate: `2765 passed, 867 skipped`.
+
+## Batch 2 Review And Verification
+
+- Review pass 1:
+  - Customer-safety reviewer found `already_applied` proof could still use a stale QA row because it matched only asset id/version/status/text. Fixed by requiring the selected preview asset SHA, `output_format="concept_preview"`, and non-sidecar QA before suppressing regeneration.
+  - Hermes/drift reviewer found the same local visual-QA-contract bypass and a misleading noncanonical `source_edit_generation_failed` reason-code predicate. Fixed the proof contract and removed that reason-code predicate from this slice.
+- Review pass 2:
+  - Customer-safety reviewer: no findings; confirmed manual-row routing and current-preview QA proof are scoped correctly.
+  - Hermes/drift reviewer: no findings; confirmed the slice stays inside existing Flyer state/QA primitives and the deferred reason-code cleanup is separate scope.
+- Verification:
+  - Focused RED/GREEN proof tests: invalid hash, final-format QA, and sidecar QA all failed before the fix and pass after the fix.
+  - Focused update/workflow suite: `74 passed`.
+  - cf-router/status adjacent suite: `372 passed`.
+  - Flyer-focused gate: `1544 passed, 1 skipped`.
+  - Full repository gate: `2770 passed, 867 skipped`.
+  - During the Flyer-focused gate, a pre-existing test-isolation leak was reproduced and fixed: a cockpit test now stubs `safe_io` via `monkeypatch` and accepts bridge kwargs so later cf-router tests do not inherit a stale bridge stub.
