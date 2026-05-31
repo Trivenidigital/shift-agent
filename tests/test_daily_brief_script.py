@@ -430,3 +430,23 @@ def test_quiet_day_brief_says_quiet(fixture_dir, bridge_server):
     port, _ = bridge_server
     r = _run(fixture_dir, bridge_port=port, args=("--force", "--dry-run"))
     assert "Quiet day" in r.stdout or "0 sick calls" in r.stdout
+
+
+def test_today_aggregation_honors_now_override(fixture_dir):
+    """Regression: _aggregate_today must derive today's date from the
+    override-aware clock. A shift scheduled on the OVERRIDE date (not the wall-
+    clock date) must appear in the brief — proving the content date honors
+    SHIFT_AGENT_NOW_OVERRIDE and stays in sync with the send/idempotency date.
+
+    Before the fix, _aggregate_today used raw customer_today_str() (wall clock),
+    so roster.schedule.get(today) missed the overridden date and rendered
+    'No shifts scheduled'."""
+    roster = json.loads((fixture_dir / "roster.json").read_text())
+    roster["schedule"] = {
+        "2026-04-28": [{"employee_id": "e001", "shift": "09:00-17:00", "role": "cashier"}]
+    }
+    (fixture_dir / "roster.json").write_text(json.dumps(roster), encoding="utf-8")
+    r = _run(fixture_dir, args=("--force", "--dry-run"),
+             now_override="2026-04-28T07:05:00-04:00")
+    assert r.returncode == 0, r.stderr
+    assert "1 scheduled shift" in r.stdout  # used override date 2026-04-28, not wall clock
