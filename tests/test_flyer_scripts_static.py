@@ -497,6 +497,7 @@ def test_source_edit_generation_failure_does_not_overwrite_script_manual_review_
 
     assert "if not actions.flyer_generation_queued_manual_review(gen_detail):" in hooks
     assert '"--manual-reason", "source_edit_generation_failed"' in hooks
+    assert '"--manual-reason-code", "provider_timeout"' in hooks
 
 
 def test_production_readiness_modules_installed_and_smoked():

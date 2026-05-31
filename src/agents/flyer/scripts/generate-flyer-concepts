@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -117,6 +118,9 @@ _VISUAL_QA_ERROR_TOKENS = (
     "quality check",
     "failed quality",
     "critical text facts do not fit",
+    "text manifest validation failed",
+    "missing critical text facts",
+    "missing required flyer fields",
 )
 
 _DEPENDENCY_MISSING_ERROR_TOKENS = (
@@ -137,7 +141,26 @@ def _draft_error_is_dependency_missing(detail_lower: str) -> bool:
 
 
 def _draft_error_retryable(detail_lower: str) -> bool:
-    return any(tok in detail_lower for tok in _DRAFT_RETRYABLE_TOKENS)
+    return any(tok in detail_lower for tok in _DRAFT_RETRYABLE_TOKENS) or bool(
+        re.search(r"\bhttp\s+5\d{2}\b|\b5\d{2}\b", detail_lower)
+    )
+
+
+def _source_edit_error_is_provider_unavailable(detail_lower: str) -> bool:
+    key_or_config_tokens = (
+        "api_key is missing",
+        "api key is missing",
+        "api_key missing",
+        "api key missing",
+        "missing api_key",
+        "missing api key",
+        "missing or placeholder",
+        "placeholder api",
+        "not configured",
+        "manual review",
+        "unsupported source edit provider",
+    )
+    return any(tok in detail_lower for tok in key_or_config_tokens)
 
 
 def _mentions_saved_brand_assets(project) -> bool:
@@ -461,13 +484,16 @@ def main() -> int:
                 # mime / corrupt bytes) â€” not transient. Map to
                 # `visual_qa_failed` so operator triage doesn't waste time on
                 # provider retries. Provider key / endpoint failures map to
-                # `source_edit_provider_unavailable`. Everything else falls to
-                # `provider_timeout` for transient network/5xx issues.
+                # `source_edit_provider_unavailable`. Transient HTTP/5xx and
+                # timeout-shaped errors stay in `provider_timeout` even when
+                # the provider name appears in the error text.
                 if _draft_error_is_visual_qa(lower):
                     reason_code = "visual_qa_failed"
                 elif _draft_error_is_dependency_missing(lower):
                     reason_code = "dependency_missing"
-                elif "openai" in lower or "openrouter" in lower or "api_key" in lower or "provider" in lower or "manual review" in lower:
+                elif _draft_error_retryable(lower):
+                    reason_code = "provider_timeout"
+                elif _source_edit_error_is_provider_unavailable(lower):
                     reason_code = "source_edit_provider_unavailable"
                 else:
                     reason_code = "provider_timeout"
