@@ -1,7 +1,7 @@
 """Retry-safety contracts for Flyer final package delivery."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import importlib.machinery
 import json
@@ -685,7 +685,9 @@ def test_trial_delivery_upsell_message_tracks_remaining_samples(tmp_path, monkey
     ).model_copy(update={
         "status": "trial",
         "current_period_start": now.replace(day=1),
-        "current_period_end": now.replace(month=now.month + 1 if now.month < 12 else 12),
+        # robust ~1-month period end: naive now.replace(month=now.month+1) builds an
+        # invalid date on month-ends (e.g. May 31 -> June 31) and on December.
+        "current_period_end": now + timedelta(days=31),
         "usage_events": [FlyerUsageEvent(
             reservation_id="CUST0001:F0001",
             project_id="F0001",
