@@ -274,7 +274,7 @@ def assert_expected_route(
     if route == "new_project":
         assert "trigger_create_flyer_project" in calls
         assert "flyer_active_project_bypassed" in audit_reasons
-        assert "flyer_primary_project_created" in audit_reasons
+        assert expect.get("primary_audit_reason", "flyer_primary_project_created") in audit_reasons
     elif route == "source_new_clarification":
         assert "source-vs-new clarification" in reason
     elif route == "source_new_status":

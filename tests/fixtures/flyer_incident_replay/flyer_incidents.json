@@ -7,7 +7,7 @@
     "resolved_identity": {"phone": "+17329837841", "role": "customer"},
     "customer": {"customer_id": "CUST0001", "status": "trial", "business_name": "Lakshmis Kitchn", "business_address": "90 Brybar Dr St Johns FL", "phone": "+17329837841", "primary_chat_id": "17329837841@lid"},
     "active_project": {"project_id": "F0064", "customer_phone": "+17329837841", "status": "awaiting_final_approval", "raw_request": "Create old breakfast dosa flyer", "fields": {"event_or_business_name": "Old Breakfast Special", "contact_info": "+17329837841"}, "concepts": [{"concept_id": "C1"}], "revisions": []},
-    "expect": {"route": "new_project", "business_name": "Lakshmis Kitchn", "campaign_title": "Evening Snacks", "must_audit": ["flyer_active_project_bypassed", "flyer_primary_project_created"], "forbidden_calls": ["invoke_update_flyer_project"], "duplicate_initial_ack": false}
+    "expect": {"route": "new_project", "business_name": "Lakshmis Kitchn", "campaign_title": "Evening Snacks", "primary_audit_reason": "flyer_primary_failed", "must_audit": ["flyer_active_project_bypassed", "flyer_primary_failed"], "forbidden_calls": ["invoke_update_flyer_project"], "duplicate_initial_ack": false}
   },
   {
     "id": "F0063-source-reference-co-owner-asks-source-new",

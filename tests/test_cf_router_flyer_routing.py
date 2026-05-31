@@ -4917,6 +4917,61 @@ def test_exact_edit_request_use_as_reference_does_not_downgrade(monkeypatch):
     )
 
 
+def test_reference_scope_use_reference_generation_failure_audits_failed(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    calls: list[str] = []
+    audits: list[dict] = []
+
+    def fake_consume(text, *, chat_id, sender_phone, transition_to_status=None):
+        assert transition_to_status == "awaiting_source_vs_new_choice"
+        if text.strip().lower() == "use as reference":
+            return {
+                "chat_id": chat_id,
+                "sender_phone": sender_phone,
+                "customer": {"business_name": "Lakshmis Kitchen", "customer_id": "CUST0001"},
+                "raw_request": "Use this flyer as inspiration for Lakshmi's Kitchen.",
+                "media_path": "/tmp/ref.jpg",
+                "source_organization": "Triveni Express",
+                "status": "awaiting_choice",
+                "original_intent": "generic_reference",
+                "created_at": 0,
+                "choice": "use_reference",
+            }
+        return None
+
+    monkeypatch.setattr(actions, "consume_flyer_reference_scope_choice", fake_consume)
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+17329837841", "customer"))
+    monkeypatch.setattr(
+        actions,
+        "trigger_create_flyer_project",
+        lambda **_kw: (True, "", {"project_id": "F0067", "status": "intake_started", "manual_review": {}}),
+    )
+    monkeypatch.setattr(actions, "flyer_project_has_required_fields", lambda *_a, **_kw: True)
+    monkeypatch.setattr(actions, "flyer_project_has_manual_review_queued", lambda *_a, **_kw: False)
+    monkeypatch.setattr(actions, "send_flyer_processing_ack", lambda *_a, **_kw: (calls.append("processing") or (True, "processing-mid", "")))
+    monkeypatch.setattr(actions, "trigger_generate_flyer_concepts", lambda project_id: (calls.append(f"generate:{project_id}") or (False, "visual_qa_failed")))
+    monkeypatch.setattr(hooks, "_reserve_flyer_access_or_reply", lambda *_a, **_kw: ("quota:CUST0001", None))
+    monkeypatch.setattr(hooks, "_release_flyer_access", lambda *_a, **_kw: (calls.append("release") or (True, "released")))
+    monkeypatch.setattr(
+        hooks,
+        "_send_generation_failure_customer_update",
+        lambda *_a, **_kw: (calls.append("failure-update") or (True, "failure-mid", "")),
+    )
+    monkeypatch.setattr(hooks, "_send_preview_then_finalize_access", lambda *_a, **_kw: pytest.fail("failed generation must not send preview"))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kw: audits.append(kw) or None)
+
+    result = hooks._try_flyer_reference_scope_choice_intercept(
+        "use as reference",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "m-use-ref-fail"},
+    )
+
+    assert result is not None and result.get("action") == "skip"
+    assert calls == ["processing", "generate:F0067", "release", "failure-update"]
+    assert audits[-1]["reason"] == "flyer_primary_failed"
+    assert audits[-1]["subprocess_rc"] == 2
+
+
 def test_source_vs_new_new_choice_creates_project_without_manual_edit(monkeypatch):
     """After SOURCE/NEW clarification, customer reply `NEW` must call
     trigger_create_flyer_project WITHOUT manual_edit_required and with
@@ -5082,6 +5137,7 @@ def test_source_vs_new_new_choice_generation_failure_releases_access(monkeypatch
 def test_active_intake_generation_failure_does_not_send_duplicate_initial_ack(monkeypatch):
     hooks, actions = _load_plugin_modules()
     calls = {"processing": 0, "intake": 0}
+    audits: list[dict] = []
     active_project = {
         "project_id": "F0065",
         "customer_phone": "+17329837841",
@@ -5099,7 +5155,7 @@ def test_active_intake_generation_failure_does_not_send_duplicate_initial_ack(mo
     monkeypatch.setattr(actions, "send_flyer_intake_ack", lambda *_a, **_kw: (calls.__setitem__("intake", calls["intake"] + 1) or True, "intake-mid", ""))
     monkeypatch.setattr(actions, "trigger_generate_flyer_concepts", lambda *_a, **_kw: (False, "exit=1 transient provider error"))
     monkeypatch.setattr(actions, "flyer_generation_queued_manual_review", lambda _detail, **_kwargs: False)
-    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kw: None)
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kw: audits.append(kw) or None)
     monkeypatch.setattr(hooks, "_reserve_flyer_access_or_reply", lambda *_a, **_kw: ("quota:CUST0001", None))
     monkeypatch.setattr(hooks, "_release_flyer_access", lambda *_a, **_kw: (True, "released"))
 
@@ -5112,6 +5168,85 @@ def test_active_intake_generation_failure_does_not_send_duplicate_initial_ack(mo
     assert result is not None and result.get("action") == "skip"
     assert calls["processing"] == 1
     assert calls["intake"] == 0
+    assert audits[-1]["reason"] == "flyer_primary_failed"
+    assert audits[-1]["subprocess_rc"] == 2
+
+
+def test_active_intake_preview_delivery_failure_audits_send_failure_rc(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    audits: list[dict] = []
+    active_project = {
+        "project_id": "F0068",
+        "customer_phone": "+17329837841",
+        "status": "intake_started",
+        "fields": {"event_or_business_name": "Evening Snacks", "contact_info": "+17329837841"},
+        "concepts": [],
+        "revisions": [],
+    }
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
+    monkeypatch.setattr(actions, "flyer_project_has_required_fields", lambda *_a, **_kw: True)
+    monkeypatch.setattr(actions, "send_flyer_processing_ack", lambda *_a, **_kw: (True, "processing-mid", ""))
+    monkeypatch.setattr(actions, "trigger_generate_flyer_concepts", lambda *_a, **_kw: (True, "generated"))
+    monkeypatch.setattr(hooks, "_reserve_flyer_access_or_reply", lambda *_a, **_kw: ("quota:CUST0001", None))
+    monkeypatch.setattr(
+        hooks,
+        "_send_preview_then_finalize_access",
+        lambda *_a, **_kw: (False, "preview-mid", "preview delivery failed"),
+    )
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kw: audits.append(kw) or None)
+
+    result = hooks._try_flyer_active_project_intercept(
+        "continue",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "m-active-preview-fail"},
+    )
+
+    assert result is not None and result.get("action") == "skip"
+    assert audits[-1]["reason"] == "flyer_primary_failed"
+    assert audits[-1]["subprocess_rc"] == 3
+
+
+def test_primary_create_generation_failure_audits_failed_even_when_customer_update_sent(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    calls: list[str] = []
+    audits: list[dict] = []
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: None)
+    monkeypatch.setattr(actions, "flyer_location_block_message", lambda *_a, **_kw: "")
+    monkeypatch.setattr(actions, "trigger_create_flyer_project", lambda **_kw: (True, "", {
+        "project_id": "F0066",
+        "status": "intake_started",
+        "manual_review": {},
+    }))
+    monkeypatch.setattr(actions, "flyer_project_has_required_fields", lambda *_a, **_kw: True)
+    monkeypatch.setattr(actions, "flyer_project_has_manual_review_queued", lambda *_a, **_kw: False)
+    monkeypatch.setattr(actions, "send_flyer_processing_ack", lambda *_a, **_kw: (calls.append("processing") or (True, "processing-mid", "")))
+    monkeypatch.setattr(actions, "trigger_generate_flyer_concepts", lambda project_id: (calls.append(f"generate:{project_id}") or (False, "visual_qa_failed")))
+    monkeypatch.setattr(hooks, "_reserve_flyer_access_or_reply", lambda *_a, **_kw: ("quota:CUST0001", None))
+    monkeypatch.setattr(hooks, "_release_flyer_access", lambda *_a, **_kw: (calls.append("release") or (True, "released")))
+    monkeypatch.setattr(
+        hooks,
+        "_send_generation_failure_customer_update",
+        lambda *_a, **_kw: (calls.append("failure-update") or (True, "failure-mid", "")),
+    )
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kw: audits.append(kw) or None)
+
+    result = hooks._try_flyer_primary_intercept(
+        "Create a flyer for weekend dosa specials. Any item $9.99. Contact +17329837841.",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "m-primary-fail"},
+    )
+
+    assert result is not None and result.get("action") == "skip"
+    assert calls == ["processing", "generate:F0066", "release", "failure-update"]
+    assert audits[-1]["reason"] == "flyer_primary_failed"
+    assert audits[-1]["subprocess_rc"] == 2
 
 
 def test_active_intake_visual_qa_failure_sends_manual_review_fallback_after_processing(monkeypatch):
