@@ -198,11 +198,15 @@ def test_change_plan_callsite_now_passes_context():
     Verifies F8 commit 5 landed."""
     hooks_path = REPO / "src" / "plugins" / "cf-router" / "hooks.py"
     text = hooks_path.read_text(encoding="utf-8")
-    assert "ActionExecutionContext(" in text, (
-        "hooks.py must construct ActionExecutionContext for the change_plan path"
+    assert 'build_action_context_for_command(ACCOUNT_ACTIONS, "change_plan")' in text, (
+        "hooks.py must construct the registry-backed ActionExecutionContext "
+        "for the change_plan path"
     )
-    assert "flyer.billing.request_plan_change" in text, (
-        "hooks.py must reference the flyer.billing.request_plan_change action_id"
+    registry_text = (REPO / "src" / "agents" / "flyer" / "action_registry.py").read_text(
+        encoding="utf-8"
+    )
+    assert "flyer.billing.request_plan_change" in registry_text, (
+        "ACCOUNT_ACTIONS must define the flyer.billing.request_plan_change action_id"
     )
     assert "plan_change_requested" in text, (
         "hooks.py must check result.detail for plan_change_requested signal"

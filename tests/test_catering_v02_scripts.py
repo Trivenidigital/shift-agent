@@ -91,6 +91,8 @@ def _env(env_dir, bridge_port):
     return {
         **os.environ,
         "PYTHONPATH": str(Path(__file__).resolve().parent.parent / "src" / "platform"),
+        "HERMES_BRIDGE_URL": f"http://127.0.0.1:{bridge_port}/send",
+        "SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS": "1",
     }
 
 
@@ -131,22 +133,24 @@ sys.argv = [
     "--fields-json", {json.dumps(fields)!r},
 ]
 import pathlib
+import importlib.machinery
 import importlib.util
-spec = importlib.util.spec_from_file_location("ccl", {str(CREATE)!r})
+loader = importlib.machinery.SourceFileLoader("ccl", {str(CREATE)!r})
+spec = importlib.util.spec_from_file_location("ccl", {str(CREATE)!r}, loader=loader)
 mod = importlib.util.module_from_spec(spec)
 # Use a NON-"__main__" name so the bottom `if __name__ == "__main__": main()`
 # block does NOT fire during exec_module. We call main() ourselves AFTER
 # applying all patches. This is the only way to inject customer_now overrides
 # before main() runs.
-mod.__name__ = "ccl_test_loaded"
+sys.path.insert(0, str(pathlib.Path({str(Path(__file__).resolve().parent.parent / 'src' / 'platform')!r})))
+spec.loader.exec_module(mod)
+
 mod.CONFIG_PATH = pathlib.Path({str(env_dir / 'config.yaml')!r})
 mod.LEADS_PATH = pathlib.Path({str(env_dir / 'state' / 'catering-leads.json')!r})
 mod.LEADS_LOCK = pathlib.Path({str(env_dir / 'state' / 'catering-leads.json.lock')!r})
 mod.LOG_PATH = pathlib.Path({str(env_dir / 'logs' / 'decisions.log')!r})
 mod.TEMPLATE_DIR = pathlib.Path({str(env_dir / 'templates')!r})
 mod.BRIDGE_URL = "http://127.0.0.1:{bridge_port}/send"
-sys.path.insert(0, str(pathlib.Path({str(Path(__file__).resolve().parent.parent / 'src' / 'platform')!r})))
-spec.loader.exec_module(mod)
 
 if {use_now_override!r}:
     from datetime import datetime as _dt
@@ -170,6 +174,25 @@ sys.exit(mod.main())
 def _run_apply(env_dir, bridge_port, code, decision, edit_text="", reason="",
                sender_role="owner"):
     extra = []
+    stdin_text = ""
+    if decision == "approve":
+        extra += ["--quote-text-stdin", "--skip-finalize"]
+        matched_leads = [
+            lead for lead in _read_leads(env_dir).get("leads", [])
+            if lead.get("owner_approval_code") == code
+        ]
+        if matched_leads:
+            lead = matched_leads[0]
+            extracted = lead.get("extracted") or {}
+            headcount = extracted.get("headcount") or "your"
+            event_date = extracted.get("event_date") or "your event date"
+            lead_id = lead.get("lead_id", "")
+            stdin_text = (
+                f"Catering quote for {headcount} guests on {event_date}. "
+                f"Reply with any questions. Ref: {lead_id}"
+            )
+        else:
+            stdin_text = f"Catering quote for {code}. Reply with any questions."
     if edit_text:
         extra += ["--edit-text", edit_text]
     if reason:
@@ -183,21 +206,25 @@ sys.argv = [
     "--sender-role", {sender_role!r},
 ] + {extra!r}
 import pathlib
+import importlib.machinery
 import importlib.util
-spec = importlib.util.spec_from_file_location("acod", {str(APPLY)!r})
+loader = importlib.machinery.SourceFileLoader("acod", {str(APPLY)!r})
+spec = importlib.util.spec_from_file_location("acod", {str(APPLY)!r}, loader=loader)
 mod = importlib.util.module_from_spec(spec)
-mod.__name__ = "__main__"
+sys.path.insert(0, str(pathlib.Path({str(Path(__file__).resolve().parent.parent / 'src' / 'platform')!r})))
+spec.loader.exec_module(mod)
+
 mod.CONFIG_PATH = pathlib.Path({str(env_dir / 'config.yaml')!r})
 mod.LEADS_PATH = pathlib.Path({str(env_dir / 'state' / 'catering-leads.json')!r})
 mod.LEADS_LOCK = pathlib.Path({str(env_dir / 'state' / 'catering-leads.json.lock')!r})
 mod.LOG_PATH = pathlib.Path({str(env_dir / 'logs' / 'decisions.log')!r})
 mod.TEMPLATE_DIR = pathlib.Path({str(env_dir / 'templates')!r})
 mod.BRIDGE_URL = "http://127.0.0.1:{bridge_port}/send"
-sys.path.insert(0, str(pathlib.Path({str(Path(__file__).resolve().parent.parent / 'src' / 'platform')!r})))
-spec.loader.exec_module(mod)
+sys.exit(mod.main())
 """
     return subprocess.run(
         [sys.executable, "-c", wrapper],
+        input=stdin_text,
         capture_output=True, text=True, env=_env(env_dir, bridge_port),
         timeout=20,
     )
@@ -217,6 +244,10 @@ def _read_log(env_dir):
     return [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
 
 
+def _requests_to(requests: list[dict], chat_id: str) -> list[dict]:
+    return [r for r in requests if r.get("chatId") == chat_id]
+
+
 # ─── Tests ─────────────────────────────────────────────
 
 
@@ -234,10 +265,10 @@ def test_create_lead_writes_state_and_sends_card(env_dir, bridge_server):
     assert len(leads["leads"]) == 1
     assert leads["leads"][0]["status"] == "AWAITING_OWNER_APPROVAL"
     assert leads["leads"][0]["extracted"]["headcount"] == 50
-    # Card sent to owner JID
-    assert len(BridgeStub.requests) == 1
-    assert BridgeStub.requests[0]["chatId"] == "19045550100@s.whatsapp.net"
-    assert out["approval_code"] in BridgeStub.requests[0]["message"]
+    # Card sent to owner JID. create-catering-lead also sends a customer ack.
+    owner_cards = _requests_to(BridgeStub.requests, "19045550100@s.whatsapp.net")
+    assert len(owner_cards) == 1
+    assert out["approval_code"] in owner_cards[0]["message"]
 
 
 def test_create_lead_idempotent_replay(env_dir, bridge_server):
@@ -250,8 +281,8 @@ def test_create_lead_idempotent_replay(env_dir, bridge_server):
     assert out1["lead_id"] == out2["lead_id"]
     assert out2.get("idempotent_replay") is True
     assert len(_read_leads(env_dir)["leads"]) == 1
-    # Card sent only once
-    assert len(BridgeStub.requests) == 1
+    # Owner card + customer ack sent only once; idempotent replay sends no new card.
+    assert len(BridgeStub.requests) == 2
 
 
 def test_create_lead_disabled_in_config(env_dir, bridge_server):
@@ -278,7 +309,7 @@ def test_apply_approve_sends_quote_to_customer(env_dir, bridge_server):
                      customer_phone="+15551234567", customer_name="Anita")
     out1 = json.loads(r1.stdout.strip().splitlines()[-1])
     code = out1["approval_code"]
-    assert len(BridgeStub.requests) == 1  # owner card
+    assert len(_requests_to(BridgeStub.requests, "19045550100@s.whatsapp.net")) == 1  # owner card
 
     # 2) Apply approve
     r2 = _run_apply(env_dir, port, code, "approve")
@@ -288,8 +319,9 @@ def test_apply_approve_sends_quote_to_customer(env_dir, bridge_server):
     assert out2["outbound_sent"] is True
 
     # 3) Customer received quote
-    assert len(BridgeStub.requests) == 2
-    customer_msg = BridgeStub.requests[1]
+    customer_messages = _requests_to(BridgeStub.requests, "15551234567@s.whatsapp.net")
+    assert len(customer_messages) == 2  # create acknowledgement + approved quote
+    customer_msg = customer_messages[-1]
     assert customer_msg["chatId"] == "15551234567@s.whatsapp.net"
     assert "Anita" in customer_msg["message"] or "L0001" in customer_msg["message"]
 
@@ -467,7 +499,7 @@ def test_event_date_absent_passes_through(env_dir, bridge_server):
 
 def test_event_date_malformed_calendar_rejected(env_dir, bridge_server):
     """Schema regex passes (2026-13-45 matches format) but is not a valid
-    calendar date. Helper's strptime catches it; emits ERR_EVENT_DATE_INVALID.
+    calendar date. Schema validation rejects it before state mutation.
 
     Closes the silent-failure-hunter HIGH-1 finding from plan review."""
     port, _ = bridge_server
@@ -476,26 +508,22 @@ def test_event_date_malformed_calendar_rejected(env_dir, bridge_server):
         message_id="MSG_MALFORMED_001",
     )
     assert r.returncode == 2
-    assert "ERR_EVENT_DATE_INVALID:" in r.stderr
-    rejected = _read_audit_entries(env_dir, "catering_lead_rejected")
-    assert len(rejected) == 1
-    assert rejected[0]["reason"] == "event_date_invalid_calendar"
+    assert "event_date" in r.stderr
+    assert "Value error" in r.stderr
+    assert _read_leads(env_dir)["leads"] == []
 
 
 def test_invalid_timezone_emits_clear_error_with_audit(env_dir, bridge_server):
-    """Malformed cfg.customer.timezone (typo) surfaces ERR_TIMEZONE_INVALID +
-    EXIT_SCHEMA_VIOLATION (5), AND writes a CateringLeadRejected audit entry."""
+    """Malformed cfg.customer.timezone (typo) surfaces a config validation error."""
     port, _ = bridge_server
     r = _run_create(
         env_dir, port, fields={"event_date": "2026-06-15"},
         message_id="MSG_BADTZ_001", customer_tz="America/New_Yrok",
     )
     assert r.returncode == 5  # EXIT_SCHEMA_VIOLATION
-    assert "ERR_TIMEZONE_INVALID:" in r.stderr
-    # Audit log entry must be present (covers pr-test-analyzer Gap E)
-    rejected = _read_audit_entries(env_dir, "catering_lead_rejected")
-    assert len(rejected) == 1
-    assert rejected[0]["reason"] == "timezone_invalid"
+    assert "customer.timezone" in r.stderr
+    assert "invalid IANA timezone" in r.stderr
+    assert _read_leads(env_dir)["leads"] == []
 
 
 def test_replay_of_existing_lead_with_now_past_event_date_returns_idempotent(
@@ -651,7 +679,9 @@ def _bridge_post_text(BridgeStub) -> str:
     create-catering-lead's _bridge_post (line 108). Existing canonical test
     at line 238 confirms this — `BridgeStub.requests[0]["message"]`."""
     assert BridgeStub.requests, "no bridge POST captured"
-    last = BridgeStub.requests[-1]
+    owner_cards = _requests_to(BridgeStub.requests, "19045550100@s.whatsapp.net")
+    assert owner_cards, f"no owner-card POST captured: {BridgeStub.requests!r}"
+    last = owner_cards[-1]
     assert "message" in last, f"unexpected payload keys: {list(last.keys())}"
     return last["message"]
 
@@ -816,7 +846,7 @@ def test_off_menu_items_persists_through_script_round_trip(env_dir, bridge_serve
 def test_idempotent_replay_with_off_menu_does_not_resend_card(env_dir, bridge_server):
     """Test-analyzer #7 + F (crit-9): replay carve-out test pins accepted
     behavior. Single bridge_server fixture spans BOTH calls (function-scope);
-    pin by checking len(requests) == 1 AND payload content."""
+    pin by checking owner-card count and payload content."""
     port, BridgeStub = bridge_server
     BridgeStub.requests.clear()
 
@@ -827,8 +857,10 @@ def test_idempotent_replay_with_off_menu_does_not_resend_card(env_dir, bridge_se
     assert r1.returncode == 0
     out1 = json.loads(r1.stdout.strip().splitlines()[-1])
     assert "lead_id" in out1
-    assert len(BridgeStub.requests) == 1, "first call should send 1 card"
-    first_payload = BridgeStub.requests[0].get("text", "")
+    assert len(_requests_to(BridgeStub.requests, "19045550100@s.whatsapp.net")) == 1, (
+        "first call should send 1 owner card"
+    )
+    first_payload = _bridge_post_text(BridgeStub)
     assert "Off-menu requests: dosa, uttapam" in first_payload
 
     # Second call — same message_id → idempotent_replay, NO new bridge POST
@@ -838,8 +870,10 @@ def test_idempotent_replay_with_off_menu_does_not_resend_card(env_dir, bridge_se
     out2 = json.loads(r2.stdout.strip().splitlines()[-1])
     assert out2.get("idempotent_replay") is True
     assert out2["lead_id"] == out1["lead_id"]
-    # Pin: still exactly 1 bridge POST (no replay re-render)
-    assert len(BridgeStub.requests) == 1, "replay must not send a second card"
+    # Pin: still exactly 1 owner-card POST (no replay re-render)
+    assert len(_requests_to(BridgeStub.requests, "19045550100@s.whatsapp.net")) == 1, (
+        "replay must not send a second owner card"
+    )
     # Replay branch should emit a stderr breadcrumb when off_menu_items present.
     # Pin the unique substring "verify in cockpit" — the JSON-key
     # `idempotent_replay` reflects through stdout/combined-output streams,

@@ -511,6 +511,12 @@ def _reference_failure_requires_manual_review(extraction) -> bool:
     return extraction.role in {"menu_reference", "old_flyer_reference", "source_edit_template", "unsupported"}
 
 
+def _manual_reason_for_reference_failure(extraction) -> str:
+    if extraction.role == "source_edit_template" and extraction.status == "provider_unavailable":
+        return "source_edit_provider_unavailable"
+    return f"reference_{extraction.status}"
+
+
 def _initial_reference_extraction(asset: FlyerAsset, *, raw_request: str, now: datetime) -> FlyerReferenceExtraction:
     role = classify_reference_role(raw_request, asset)
     mime = (asset.mime_type or "").lower()
@@ -730,15 +736,8 @@ def main() -> int:
             }
             if _reference_failure_requires_manual_review(extraction):
                 updates["status"] = "manual_edit_required"
-                # Source-edit role uses the source_edit-prefixed reason code
-                # so the cockpit triage view groups exact-edit provider gaps
-                # under their own bucket instead of the generic reference_* one.
-                if extraction.role == "source_edit_template":
-                    reason_code = "source_edit_provider_unavailable"
-                else:
-                    reason_code = f"reference_{extraction.status}"
                 updates["manual_review"] = make_manual_review(
-                    reason_code=reason_code,
+                    reason_code=_manual_reason_for_reference_failure(extraction),
                     detail=extraction.detail,
                     queued_at=now,
                 )

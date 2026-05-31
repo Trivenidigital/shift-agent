@@ -3472,6 +3472,9 @@ def trigger_flyer_onboarding(
             "--chat-id", chat_id,
             "--message-id", message_id,
             "--text", text,
+            "--state-path", str(FLYER_CUSTOMERS_PATH),
+            "--config-path", str(CONFIG_PATH),
+            "--audit-log-path", str(LOG_PATH),
         ]
         if sender_phone:
             cmd.extend(["--sender-phone", sender_phone])
@@ -3509,6 +3512,7 @@ def trigger_flyer_intake(
             "--chat-id", chat_id,
             "--message-id", message_id,
             "--text", text or "",
+            "--state-path", str(FLYER_CUSTOMERS_PATH),
         ]
         if sender_phone:
             cmd.extend(["--sender-phone", sender_phone])

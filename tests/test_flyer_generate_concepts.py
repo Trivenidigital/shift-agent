@@ -204,6 +204,242 @@ def test_generate_extracts_pending_reference_facts_before_render(monkeypatch, tm
     assert persisted["status"] == "awaiting_final_approval"
 
 
+def test_generate_deferred_source_edit_template_extracts_source_contract_before_render(monkeypatch, tmp_path, capsys):
+    module = _load_script(monkeypatch)
+    from schemas import (  # noqa: E402
+        FlyerReferenceExtraction,
+        FlyerSourceContract,
+        FlyerSourceContractSection,
+        FlyerVisualQAReport,
+    )
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    state_path = tmp_path / "projects.json"
+    audit_log_path = tmp_path / "decisions-source-contract.log"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    reference = asset_dir / "F0001-reference.png"
+    reference.write_bytes(b"fake image bytes")
+    rendered = asset_dir / "F0001-C1.png"
+    project = _project_with_pending_reference(reference)
+    project["raw_request"] = "Remove extra 08:00 from this uploaded flyer. Change Lunch Combo to Dinner Combo."
+    project["reference_extractions"][0]["role"] = "source_edit_template"
+    project["locked_facts"] = [
+        {"fact_id": "business_name", "label": "Business", "value": "Lakshmi's Kitchen", "source": "customer_profile", "required": True},
+        {"fact_id": "contact_phone", "label": "Contact", "value": "+17329837841", "source": "customer_profile", "required": True},
+    ]
+    state_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_sequence": 2,
+        "projects": [project],
+    }), encoding="utf-8")
+
+    def fake_extract_reference(asset, *, raw_request, provider):
+        return FlyerReferenceExtraction(
+            asset_id=asset.asset_id,
+            role="source_edit_template",
+            provider="fake_vision",
+            status="ok",
+            detail="source contract extracted",
+            extracted_at=datetime(2026, 5, 19, tzinfo=timezone.utc),
+            source_contract=FlyerSourceContract(
+                source_business_names=["Lakshmi's Kitchen"],
+                target_business_name="Lakshmi's Kitchen",
+                required_headings=["Lunch Menu"],
+                sections=[FlyerSourceContractSection(heading="Combos", items=["Lunch Combo $9.99"])],
+                requested_replacements={"Lunch Combo": "Dinner Combo"},
+                preserve_layout=True,
+                preserve_unmentioned_text=True,
+                confidence=0.96,
+            ),
+        )
+
+    def fake_render_source_edit(project, _asset_dir, **_kwargs):
+        assert project.reference_extractions[0].source_contract is not None
+        values = {fact.value for fact in project.locked_facts}
+        assert "Lunch Menu" in values
+        assert "Lunch Combo $9.99" in values
+        assert "Dinner Combo" in values
+        assert "Lunch Combo" in project.reference_extractions[0].source_contract.forbidden_substrings
+        rendered.write_bytes(b"source edit rendered")
+        return types.SimpleNamespace(
+            path=rendered,
+            kind="concept_preview",
+            output_format="concept_preview",
+            width=1080,
+            height=1350,
+            concept_id="C1",
+        )
+
+    def explode_normal_render(*_args, **_kwargs):
+        raise AssertionError("source_edit_template projects must use source-edit rendering")
+
+    def fake_qa(project, path, *, output_format, asset_id):
+        return FlyerVisualQAReport(
+            project_id=project.project_id,
+            asset_id=asset_id,
+            artifact_path=str(path),
+            artifact_sha256="b" * 64,
+            project_version=project.version,
+            output_format=output_format,
+            provider="test",
+            qa_source="sidecar_test",
+            status="passed",
+            checked_at=datetime(2026, 5, 19, tzinfo=timezone.utc),
+        )
+
+    monkeypatch.setattr(module, "build_reference_extraction_provider", lambda: object())
+    monkeypatch.setattr(module, "extract_reference", fake_extract_reference)
+    monkeypatch.setattr(module, "render_source_edit_preview", fake_render_source_edit)
+    monkeypatch.setattr(module, "render_concept_previews", explode_normal_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts",
+        "--project-id", "F0001",
+        "--state-path", str(state_path),
+        "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--audit-log-path", str(audit_log_path),
+    ])
+
+    assert module.main() == 0
+    out = json.loads(capsys.readouterr().out)
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    values = {fact["value"] for fact in persisted["locked_facts"]}
+
+    assert out["project_id"] == "F0001"
+    assert persisted["reference_extractions"][0]["status"] == "ok"
+    assert persisted["reference_extractions"][0]["source_contract"]["required_headings"] == ["Lunch Menu"]
+    assert "Lunch Menu" in values
+    assert "Dinner Combo" in values
+    assert persisted["status"] == "awaiting_final_approval"
+    audit_rows = [json.loads(line) for line in audit_log_path.read_text(encoding="utf-8").splitlines()]
+    assert audit_rows[0]["type"] == "flyer_source_contract_extracted"
+    assert audit_rows[0]["role"] == "source_edit_template"
+    assert audit_rows[0]["status"] == "ok"
+    assert audit_rows[0]["headings_count"] == 1
+
+
+def test_generate_deferred_source_edit_template_provider_failure_queues_manual_review(monkeypatch, tmp_path, capsys):
+    module = _load_script(monkeypatch)
+    from schemas import FlyerReferenceExtraction  # noqa: E402
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    state_path = tmp_path / "projects.json"
+    audit_log_path = tmp_path / "decisions-source-contract-failure.log"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    reference = asset_dir / "F0001-reference.png"
+    reference.write_bytes(b"fake image bytes")
+    project = _project_with_pending_reference(reference)
+    project["raw_request"] = "edit uploaded flyer/source artwork: replace headline"
+    project["reference_extractions"][0]["role"] = "source_edit_template"
+    state_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_sequence": 2,
+        "projects": [project],
+    }), encoding="utf-8")
+
+    def fake_extract_reference(asset, *, raw_request, provider):
+        return FlyerReferenceExtraction(
+            asset_id=asset.asset_id,
+            role="source_edit_template",
+            provider="fake_vision",
+            status="provider_unavailable",
+            detail="vision provider unavailable",
+            extracted_at=datetime(2026, 5, 19, tzinfo=timezone.utc),
+        )
+
+    monkeypatch.setattr(module, "build_reference_extraction_provider", lambda: object())
+    monkeypatch.setattr(module, "extract_reference", fake_extract_reference)
+    monkeypatch.setattr(module, "render_source_edit_preview", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("render must wait for source contract")))
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts",
+        "--project-id", "F0001",
+        "--state-path", str(state_path),
+        "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--audit-log-path", str(audit_log_path),
+    ])
+
+    assert module.main() == 2
+    out = json.loads(capsys.readouterr().out)
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+
+    assert out["reference_extraction_failed"][0]["role"] == "source_edit_template"
+    assert persisted["status"] == "manual_edit_required"
+    assert persisted["manual_review"]["status"] == "queued"
+    assert persisted["manual_review"]["reason_code"] == "source_edit_provider_unavailable"
+    assert persisted["manual_review"]["detail"] == "vision provider unavailable"
+    audit_rows = [json.loads(line) for line in audit_log_path.read_text(encoding="utf-8").splitlines()]
+    assert audit_rows[0]["type"] == "flyer_source_contract_extracted"
+    assert audit_rows[0]["role"] == "source_edit_template"
+    assert audit_rows[0]["status"] == "provider_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_reason_code"),
+    [
+        ("low_confidence", "reference_low_confidence"),
+        ("unsupported", "reference_unsupported"),
+    ],
+)
+def test_generate_deferred_source_edit_template_non_provider_failure_keeps_reference_reason(
+    monkeypatch, tmp_path, capsys, status, expected_reason_code,
+):
+    module = _load_script(monkeypatch)
+    from schemas import FlyerReferenceExtraction  # noqa: E402
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    state_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    reference = asset_dir / "F0001-reference.png"
+    reference.write_bytes(b"fake image bytes")
+    project = _project_with_pending_reference(reference)
+    project["raw_request"] = "edit uploaded flyer/source artwork: replace headline"
+    project["reference_extractions"][0]["role"] = "source_edit_template"
+    state_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_sequence": 2,
+        "projects": [project],
+    }), encoding="utf-8")
+
+    def fake_extract_reference(asset, *, raw_request, provider):
+        return FlyerReferenceExtraction(
+            asset_id=asset.asset_id,
+            role="source_edit_template",
+            provider="fake_vision",
+            status=status,
+            detail=f"source contract extraction {status}",
+            extracted_at=datetime(2026, 5, 19, tzinfo=timezone.utc),
+        )
+
+    monkeypatch.setattr(module, "build_reference_extraction_provider", lambda: object())
+    monkeypatch.setattr(module, "extract_reference", fake_extract_reference)
+    monkeypatch.setattr(
+        module,
+        "render_source_edit_preview",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("render must wait for source contract")
+        ),
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts",
+        "--project-id", "F0001",
+        "--state-path", str(state_path),
+        "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+    ])
+
+    assert module.main() == 2
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "manual_edit_required"
+    assert persisted["manual_review"]["reason_code"] == expected_reason_code
+    assert persisted["manual_review"]["detail"] == f"source contract extraction {status}"
+
+
 def test_generate_deferred_reference_smoke_can_use_sidecar_visual_qa(monkeypatch, tmp_path, capsys):
     module = _load_script(monkeypatch)
 

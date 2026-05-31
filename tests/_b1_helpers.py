@@ -96,10 +96,16 @@ def make_env_dir(tmp_path: Path, *, customer_tz: str = "America/New_York") -> Pa
     return tmp_path
 
 
-def _env_for_subprocess() -> dict:
-    return {
+def _env_for_subprocess(bridge_port: int | None = None) -> dict:
+    env = {
         **os.environ,
         "PYTHONPATH": str(PLATFORM_DIR),
+    }
+    if bridge_port is not None:
+        env["HERMES_BRIDGE_URL"] = f"http://127.0.0.1:{bridge_port}/send"
+        env["SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS"] = "1"
+    return {
+        **env,
     }
 
 
@@ -164,7 +170,7 @@ sys.exit(mod.main())
 """
     return subprocess.run(
         [sys.executable, "-c", wrapper],
-        capture_output=True, text=True, env=_env_for_subprocess(),
+        capture_output=True, text=True, env=_env_for_subprocess(bridge_port),
         timeout=20,
     )
 
@@ -179,6 +185,8 @@ def run_apply(
     reason: str = "",
     menu_path: Optional[Path] = None,
     sender_role: str = "owner",
+    quote_from_lead_state: bool = False,
+    skip_finalize: bool = False,
 ):
     """Invoke apply-catering-owner-decision via importlib wrapper.
 
@@ -195,6 +203,10 @@ def run_apply(
         extra += ["--edit-text", edit_text]
     if reason:
         extra += ["--reason", reason]
+    if quote_from_lead_state:
+        extra += ["--quote-from-lead-state"]
+    if skip_finalize:
+        extra += ["--skip-finalize"]
     menu_override = ""
     if menu_path is not None:
         menu_override = f"mod.MENU_PATH = pathlib.Path({str(menu_path)!r})"
@@ -229,7 +241,7 @@ sys.exit(mod.main())
 """
     return subprocess.run(
         [sys.executable, "-c", wrapper],
-        capture_output=True, text=True, env=_env_for_subprocess(),
+        capture_output=True, text=True, env=_env_for_subprocess(bridge_port),
         timeout=20,
     )
 

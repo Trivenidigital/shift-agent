@@ -89,7 +89,10 @@ def test_try_acquire_raises_on_exhaustion(tmp_path):
     assert holder_holding.wait(2.0)
 
     try:
-        with pytest.raises(LockUnavailable):
+        # Broader CI reloads safe_io in other tests; bind to the exception
+        # class the helper currently raises instead of a stale import alias.
+        lock_unavailable = try_acquire_filelock_with_retry.__wrapped__.__globals__["LockUnavailable"]
+        with pytest.raises(lock_unavailable):
             with try_acquire_filelock_with_retry(lock_path, attempts=2, sleep_sec=0.05):
                 body_entered.append(True)
         assert body_entered == [], (

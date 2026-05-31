@@ -984,6 +984,63 @@ def test_create_project_can_queue_exact_reference_edit_without_template_title(tm
     assert project["manual_review"]["queued_at"] is not None
 
 
+@pytest.mark.parametrize(
+    ("status", "expected_reason_code"),
+    [
+        ("low_confidence", "reference_low_confidence"),
+        ("unsupported", "reference_unsupported"),
+    ],
+)
+def test_source_edit_template_reference_failure_keeps_non_provider_reason(
+    tmp_path, monkeypatch, capsys, status, expected_reason_code,
+):
+    module = _load_script(monkeypatch)
+    from schemas import FlyerReferenceExtraction
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    reference = tmp_path / "source.jpg"
+    reference.write_bytes(b"fake image bytes")
+    _write_customer(
+        customers_path,
+        category="Indian restaurant",
+        phone="+19045550104",
+        business_name="Lakshmi's Kitchen",
+        primary_chat_id="19045550104@s.whatsapp.net",
+    )
+
+    def fake_extract_reference(asset, *, raw_request, provider):
+        return FlyerReferenceExtraction(
+            asset_id=asset.asset_id,
+            role="source_edit_template",
+            provider="fake_vision",
+            status=status,
+            detail=f"source contract extraction {status}",
+            extracted_at=datetime(2026, 5, 19, tzinfo=timezone.utc),
+        )
+
+    monkeypatch.setattr(module, "build_reference_extraction_provider", lambda: object())
+    monkeypatch.setattr(module, "extract_reference", fake_extract_reference)
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+19045550104",
+        "--chat-id", "19045550104@s.whatsapp.net",
+        "--message-id", "m-source-edit-reference-failure",
+        "--raw-request", "Edit uploaded flyer/source artwork. Change Lunch Combo to Dinner Combo.",
+        "--reference-media-path", str(reference),
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+        "--asset-dir", str(tmp_path / "assets"),
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+    assert project["status"] == "manual_edit_required"
+    assert project["manual_review"]["reason_code"] == expected_reason_code
+    assert project["manual_review"]["detail"] == f"source contract extraction {status}"
+
+
 def test_create_flyer_project_queues_manual_review_on_missing_required_facts(tmp_path, monkeypatch, capsys):
     """P0-2: when extraction does not surface every required fact slot
     (business_name + contact_phone by default), the project must be queued for

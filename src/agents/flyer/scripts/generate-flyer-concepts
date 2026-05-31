@@ -28,6 +28,7 @@ from schemas import (  # noqa: E402
     FlyerProjectStore,
     FlyerReferenceExtraction,
     FlyerRepairAttempt,
+    FlyerSourceContractExtracted,
     FlyerWarningSummary,
     FlyerWarnTierDelivered,
     is_flyer_transition_allowed,
@@ -42,9 +43,9 @@ try:
 except ImportError:
     from agents.flyer.manual_queue import make_manual_review  # noqa: E402
 try:
-    from flyer_facts import merge_locked_facts  # type: ignore  # noqa: E402
+    from flyer_facts import merge_locked_facts, source_contract_locked_facts, _populate_forbidden_substrings  # type: ignore  # noqa: E402
 except ImportError:
-    from agents.flyer.facts import merge_locked_facts  # noqa: E402
+    from agents.flyer.facts import merge_locked_facts, source_contract_locked_facts, _populate_forbidden_substrings  # noqa: E402
 try:
     from flyer_reference_extract import build_reference_extraction_provider, extract_reference  # type: ignore  # noqa: E402
 except ImportError:
@@ -70,7 +71,7 @@ AUDIT_LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
 AUTOREPAIR_STATE_PATH = Path("/opt/shift-agent/state/flyer/autorepair_attempts.json")
 REFERENCE_BLOCKING_ROLES = {"menu_reference", "old_flyer_reference", "source_edit_template", "unsupported"}
 REFERENCE_BLOCKING_STATUSES = {"provider_unavailable", "unsupported", "low_confidence"}
-REFERENCE_PENDING_ROLES = {"menu_reference", "old_flyer_reference"}
+REFERENCE_PENDING_ROLES = {"menu_reference", "old_flyer_reference", "source_edit_template"}
 
 
 def _failed_required_reference_extractions(project) -> list:
@@ -87,6 +88,13 @@ def _pending_required_reference_extractions(project) -> list:
         for extraction in project.reference_extractions
         if extraction.role in REFERENCE_PENDING_ROLES and extraction.status == "not_run"
     ]
+
+
+def _has_source_edit_template(project) -> bool:
+    return any(
+        extraction.role == "source_edit_template" and extraction.status == "ok"
+        for extraction in project.reference_extractions
+    )
 
 
 def _asset_for_extraction(project, extraction):
@@ -315,7 +323,53 @@ def _write_sidecar_visual_qa_fixture(project, artifact_path: Path) -> None:
         atomic_write_text(sidecar, "\n".join(lines) + "\n")
 
 
-def _persist_reference_extraction_results(state_path: Path, project_id: str, extractions: list[FlyerReferenceExtraction]):
+def _manual_reason_for_reference_failure(extraction: FlyerReferenceExtraction) -> str:
+    if extraction.role == "source_edit_template" and extraction.status == "provider_unavailable":
+        return "source_edit_provider_unavailable"
+    return f"reference_{extraction.status}"
+
+
+def _emit_source_contract_extracted_audit(
+    audit_log_path: Path,
+    *,
+    extraction: FlyerReferenceExtraction,
+    project_id: str,
+    asset_sha256: str,
+    now: datetime,
+) -> None:
+    if extraction.role != "source_edit_template":
+        return
+    try:
+        contract = extraction.source_contract
+        entry = FlyerSourceContractExtracted(
+            ts=now,
+            project_id=project_id,
+            asset_id=extraction.asset_id,
+            asset_sha256=asset_sha256,
+            role=extraction.role,
+            status=extraction.status,
+            headings_count=len(contract.required_headings) if contract else 0,
+            sections_count=len(contract.sections) if contract else 0,
+            replacements_count=len(contract.requested_replacements) if contract else 0,
+            forbidden_substrings_count=len(contract.forbidden_substrings) if contract else 0,
+            confidence=float(contract.confidence) if contract else 0.0,
+            provider=extraction.provider,
+        )
+        audit_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with FileLock(Path(str(audit_log_path) + ".lock")):
+            ndjson_append(audit_log_path, entry.model_dump_json())
+    except Exception:
+        # Audit is observability-only; do not block customer work on log I/O.
+        pass
+
+
+def _persist_reference_extraction_results(
+    state_path: Path,
+    project_id: str,
+    extractions: list[FlyerReferenceExtraction],
+    *,
+    audit_log_path: Path,
+):
     now = datetime.now(timezone.utc)
     with FileLock(Path(str(state_path) + ".lock")):
         store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
@@ -327,9 +381,27 @@ def _persist_reference_extraction_results(state_path: Path, project_id: str, ext
                 replacements.get(item.asset_id, item)
                 for item in current.reference_extractions
             ]
+            source_fact_lists = []
+            for extraction in extractions:
+                asset = _asset_for_extraction(current, extraction)
+                if extraction.source_contract is not None and asset is not None:
+                    _populate_forbidden_substrings(extraction.source_contract)
+                    source_fact_lists.append(source_contract_locked_facts(
+                        extraction.source_contract,
+                        asset=asset,
+                        message_id=current.original_message_id,
+                    ))
+                _emit_source_contract_extracted_audit(
+                    audit_log_path,
+                    extraction=extraction,
+                    project_id=project_id,
+                    asset_sha256=str(getattr(asset, "sha256", "") or "") if asset is not None else "",
+                    now=now,
+                )
             locked_facts = merge_locked_facts(
                 current.locked_facts,
                 *(extraction.extracted_facts for extraction in extractions),
+                *source_fact_lists,
             )
             failed = [
                 extraction
@@ -345,7 +417,7 @@ def _persist_reference_extraction_results(state_path: Path, project_id: str, ext
                 first = failed[0]
                 updates["status"] = "manual_edit_required"
                 updates["manual_review"] = make_manual_review(
-                    reason_code=f"reference_{first.status}",
+                    reason_code=_manual_reason_for_reference_failure(first),
                     detail=first.detail,
                     queued_at=now,
                 )
@@ -401,7 +473,12 @@ def main() -> int:
                 ))
                 continue
             extracted.append(extract_reference(asset, raw_request=project.raw_request, provider=provider))
-        project, failed = _persist_reference_extraction_results(state_path, args.project_id, extracted)
+        project, failed = _persist_reference_extraction_results(
+            state_path,
+            args.project_id,
+            extracted,
+            audit_log_path=audit_log_path,
+        )
         if failed:
             print(json.dumps({
                 "project_id": args.project_id,
@@ -414,7 +491,7 @@ def main() -> int:
         now = datetime.now(timezone.utc)
         first = failed_reference_extractions[0]
         manual = make_manual_review(
-            reason_code=f"reference_{first.status}",
+            reason_code=_manual_reason_for_reference_failure(first),
             detail=first.detail,
             queued_at=now,
         )
@@ -455,6 +532,7 @@ def main() -> int:
         )
         source_edit_requested = (
             has_source_edit_marker
+            or _has_source_edit_template(project)
             or (project.status == "manual_edit_required" and has_reference_image)
         )
         if source_edit_requested:

@@ -145,7 +145,12 @@ def _read_audit_rows(log_path: Path) -> list[dict]:
     ]
 
 
-def _run_apply_script(env: dict, code: str = "#A3F2X") -> subprocess.CompletedProcess:
+def _run_apply_script(
+    env: dict,
+    code: str = "#A3F2X",
+    *,
+    quote: bytes | None = None,
+) -> subprocess.CompletedProcess:
     """Subprocess-invoke apply-catering-owner-decision with the approve flow.
     Uses the same bridge-stub shim as the deposit-script test."""
     shim_dir = Path(env["SHIFT_AGENT_CONFIG_PATH"]).parent / "shim"
@@ -172,8 +177,13 @@ _patch_bridge()
 ''',
         encoding="utf-8",
     )
-    env = {**env, "PYTHONPATH": f"{shim_dir}{os.pathsep}{env.get('PYTHONPATH', '')}"}
-    quote = b"Hi Lakshmi! Quote for 100 guests on 2026-06-15: $600.00 (Ref: L0007)"
+    platform_path = APPLY_SCRIPT.parents[4] / "src" / "platform"
+    env = {
+        **env,
+        "PYTHONPATH": f"{shim_dir}{os.pathsep}{platform_path}{os.pathsep}{env.get('PYTHONPATH', '')}",
+    }
+    if quote is None:
+        quote = b"Hi Lakshmi! Quote for 100 guests on 2026-06-15: $600.00 (Ref: L0007)"
     return subprocess.run(
         [sys.executable, str(APPLY_SCRIPT),
          "--code", code, "--decision", "approve", "--quote-text-stdin",
@@ -214,7 +224,10 @@ def test_approve_below_threshold_no_deposit_hook(isolated_state):
     _write_config(isolated_state["config_path"])
     _write_lead_awaiting_approval(isolated_state["leads_path"], headcount=10, quote_total_usd=100)
 
-    result = _run_apply_script(isolated_state["env"])
+    result = _run_apply_script(
+        isolated_state["env"],
+        quote=b"Hi Lakshmi! Quote for 10 guests on 2026-06-15: $100.00 (Ref: L0007)",
+    )
     assert result.returncode == 0, f"stderr={result.stderr.decode('utf-8')!r}"
 
     leads = json.loads(isolated_state["leads_path"].read_text(encoding="utf-8"))

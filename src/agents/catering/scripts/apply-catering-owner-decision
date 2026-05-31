@@ -40,7 +40,7 @@ import os
 import re
 import sys
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -76,9 +76,9 @@ from pydantic import TypeAdapter, ValidationError  # noqa: E402
 # defaults to deployed location). Hides the override from operator-typo
 # risk in normal usage; tests use monkeypatch.setenv.
 CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
-LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
-LEADS_LOCK = Path("/opt/shift-agent/state/catering-leads.json.lock")
-LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+LEADS_PATH = Path(os.environ.get("SHIFT_AGENT_LEADS_PATH", "/opt/shift-agent/state/catering-leads.json"))
+LEADS_LOCK = Path(os.environ.get("SHIFT_AGENT_LEADS_LOCK", str(LEADS_PATH) + ".lock"))
+LOG_PATH = Path(os.environ.get("SHIFT_AGENT_LOG_PATH", "/opt/shift-agent/logs/decisions.log"))
 
 # PR-B v3 — drafted-quote stdin caps and Unicode strip categories.
 # 8KB stdin read cap is generous (LLM drafts run ~300-500 chars in practice);
@@ -103,15 +103,16 @@ def _normalize_quote_text(s: str) -> str:
     - LLM emitting markdown when prompted for plain prose
     - Runaway output exceeding WhatsApp message limits
     """
+    normalized = unicodedata.normalize("NFC", s).replace("\r\n", "\n").replace("\r", "\n")
     chars = []
-    for ch in unicodedata.normalize("NFC", s):
+    for ch in normalized:
         if ch == "\n":
             chars.append(ch)
             continue
         if unicodedata.category(ch) in _STRIP_UNICODE_CATEGORIES:
             continue
         chars.append(ch)
-    out = "".join(chars).replace("\r\n", "\n").replace("\r", "\n")
+    out = "".join(chars)
     out = _MARKDOWN_DELIM_RE.sub("", out)
     return out[:_QUOTE_OUTPUT_CAP_CHARS]
 
@@ -190,7 +191,7 @@ def _emit_quote_skill_failed_best_effort(lead_id: str, code: str,
     LOG_PATH writer holds it; deployed-pattern drift caught at PR review.
     """
     try:
-        ts = customer_now().isoformat()
+        ts = datetime.now(timezone.utc).isoformat()
         entry = CateringQuoteSkillFailed(
             type="catering_quote_skill_failed", ts=ts,
             lead_id=lead_id, code=code, reason=reason, detail=detail[:2000],
@@ -385,7 +386,7 @@ def main() -> int:
     try:
         cfg = load_yaml_model(CONFIG_PATH, Config)
     except (FileNotFoundError, RuntimeError, ValidationError) as e:
-        log_config_load_failed_best_effort(CONFIG_PATH, e)
+        log_config_load_failed_best_effort(CONFIG_PATH, e, log_path=LOG_PATH)
         sys.stderr.write(f"config load failed: {type(e).__name__}: {e}\n")
         return EXIT_SCHEMA_VIOLATION
 
@@ -808,6 +809,7 @@ def main() -> int:
                 customer_phone_at_approve=customer_phone_pre_bridge or "",
                 outbound_message_id=mid_or_err,
                 detail=divergence_msg[:500],
+                log_path=LOG_PATH,
             )
             try:
                 import subprocess as _sp
