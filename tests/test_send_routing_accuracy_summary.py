@@ -4,6 +4,7 @@ Linux-only (depends on safe_io.atomic_write_json which uses fcntl).
 """
 from __future__ import annotations
 
+import importlib.machinery
 import importlib.util
 import json
 import platform
@@ -28,7 +29,8 @@ FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures"
 def _load_script():
     """Load the script as a module. Conftest.py has src/platform on sys.path so
     the script's `from safe_io import atomic_write_json` resolves."""
-    spec = importlib.util.spec_from_file_location("sras", SCRIPT_PATH)
+    loader = importlib.machinery.SourceFileLoader("sras", str(SCRIPT_PATH))
+    spec = importlib.util.spec_from_file_location("sras", str(SCRIPT_PATH), loader=loader)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -168,7 +170,7 @@ def test_boundary_one_inbound_renders_correctly(boundary_report, tmp_path, healt
         if args[0] == sras.REPORT_BIN:
             return MagicMock(returncode=0, stdout=json.dumps(boundary_report), stderr="")
         captured.append(tuple(args))
-        return MagicMock(returncode=0)
+        return MagicMock(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert sras.main() == 0

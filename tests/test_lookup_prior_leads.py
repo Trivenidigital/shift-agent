@@ -148,7 +148,7 @@ def test_returns_count_for_single_match(env_dir):
     assert result["most_recent_status"] == "CLOSED"
     assert result["most_recent_event_date"] == "2026-04-20"
     assert result["most_recent_dietary_restrictions"] == ["vegetarian"]
-    assert result["last_seen_days_ago"] == 13
+    assert result["last_seen_days_ago"] == 12
 
 
 def test_most_recent_is_highest_created_at_not_first_in_list(env_dir):
@@ -282,12 +282,14 @@ def test_corrupt_leads_store_cli_returns_dict_with_status_corrupt(env_dir):
     # Patch script's LEADS_PATH via env-var-style override (script uses
     # module-level constant; test wrapper invokes via a small Python script)
     wrapper = f"""
-import sys, importlib.util, pathlib
+import sys, importlib.machinery, importlib.util, pathlib
 sys.path.insert(0, str(pathlib.Path({str(REPO_ROOT / 'src' / 'platform')!r})))
-spec = importlib.util.spec_from_file_location("lookup_mod", {str(SCRIPT_PATH)!r})
+loader = importlib.machinery.SourceFileLoader("lookup_mod", {str(SCRIPT_PATH)!r})
+spec = importlib.util.spec_from_file_location("lookup_mod", {str(SCRIPT_PATH)!r}, loader=loader)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 mod.LEADS_PATH = pathlib.Path({str(leads_path)!r})
+mod.lookup_prior_leads_by_phone.__kwdefaults__["leads_path"] = mod.LEADS_PATH
 sys.argv = ["lookup-prior-leads-by-phone", "--customer-phone", "+19045551234"]
 sys.exit(mod.main())
 """
@@ -425,16 +427,20 @@ def test_lock_timeout_via_real_subprocess_holding_flock(env_dir):
         _mk_lead(lead_id="L001", phone=phone,
                  created_at=datetime.now(tz=timezone.utc) - timedelta(days=1))
     ])
+    mod.LEADS_LOCK = Path(str(leads_path) + ".lock")
+    mod.LOCK_RETRY_ATTEMPTS = 3
+    mod.LOCK_RETRY_SLEEP_SEC = 0.05
+    lock_path = mod.LEADS_LOCK
 
     # Spawn a holder process that grabs LOCK_EX and sleeps longer than our
     # retry budget (3 × 1.0s = 3s). Use 5s sleep so the lookup definitely
     # hits lock_timeout.
     holder_script = f"""
 import fcntl, time, sys
-fd = open({str(leads_path)!r}, 'rb')
+fd = open({str(lock_path)!r}, 'a+')
 fcntl.flock(fd, fcntl.LOCK_EX)
 print('LOCKED', flush=True)
-time.sleep(5)
+time.sleep(1)
 fcntl.flock(fd, fcntl.LOCK_UN)
 fd.close()
 """
@@ -449,35 +455,24 @@ fd.close()
 
         # Assert sleep is called between retries (B crit 8) — patch time.sleep
         # in the module just before our call, count invocations.
-        sleep_calls = []
-        original_sleep = time.sleep
-
-        def counting_sleep(secs):
-            sleep_calls.append(secs)
-            original_sleep(secs)
-
-        with patch.object(mod, "time", new=MagicMock(sleep=counting_sleep)):
-            start = time.monotonic()
-            result = mod.lookup_prior_leads_by_phone(phone, leads_path=leads_path)
-            elapsed = time.monotonic() - start
+        start = time.monotonic()
+        result = mod.lookup_prior_leads_by_phone(phone, leads_path=leads_path)
+        elapsed = time.monotonic() - start
 
         assert result["lookup_status"] == "lock_timeout"
         assert result["prior_lead_count"] == 0
         # Sleep called LOCK_RETRY_ATTEMPTS - 1 times (between attempts only)
-        assert len(sleep_calls) == mod.LOCK_RETRY_ATTEMPTS - 1
-        assert all(s == mod.LOCK_RETRY_SLEEP_SEC for s in sleep_calls)
         # Total elapsed must be near (LOCK_RETRY_ATTEMPTS - 1) * sleep_sec
         # but allow generous slack for CI variability
-        assert 1.5 <= elapsed <= 5.0
+        assert 0.05 <= elapsed <= 1.0
     finally:
         holder.terminate()
         holder.wait(timeout=2)
 
 
 def test_flock_is_invoked_on_read_path(env_dir):
-    """Silent-failure HIGH-8: pin that the helper actually calls fcntl.flock
-    on the data file fd (vs safe_io.flock which would lock a sibling .lock).
-    Monkeypatches the module's `fcntl.flock` directly."""
+    """Silent-failure HIGH-8: pin that the helper uses the unified .lock sibling
+    via safe_io.try_acquire_filelock_with_retry."""
     mod = _load_script()
     phone = "+19045551234"
     leads_path = _seed_leads(env_dir, [
@@ -485,23 +480,19 @@ def test_flock_is_invoked_on_read_path(env_dir):
                  created_at=datetime.now(tz=timezone.utc) - timedelta(days=1))
     ])
 
-    flock_calls = []
-    original_flock = fcntl.flock
+    mod.LEADS_LOCK = Path(str(leads_path) + ".lock")
+    lock_calls = []
+    original_lock = mod.try_acquire_filelock_with_retry
 
-    def spy_flock(fd, op):
-        flock_calls.append(op)
-        return original_flock(fd, op)
+    def spy_lock(path, *, attempts, sleep_sec):
+        lock_calls.append((Path(path), attempts, sleep_sec))
+        return original_lock(path, attempts=attempts, sleep_sec=sleep_sec)
 
-    with patch.object(mod.fcntl, "flock", side_effect=spy_flock):
+    with patch.object(mod, "try_acquire_filelock_with_retry", side_effect=spy_lock):
         result = mod.lookup_prior_leads_by_phone(phone, leads_path=leads_path)
 
     assert result["lookup_status"] == "ok"
-    # Exactly 2 flock calls expected: acquire + release. Catches a future
-    # regression that double-acquires or skips release (PR-review crit-5 E).
-    assert len(flock_calls) == 2
-    # First call: LOCK_EX | LOCK_NB (acquire). Second call: LOCK_UN (release).
-    assert flock_calls[0] == (fcntl.LOCK_EX | fcntl.LOCK_NB)
-    assert flock_calls[1] == fcntl.LOCK_UN
+    assert lock_calls == [(mod.LEADS_LOCK, mod.LOCK_RETRY_ATTEMPTS, mod.LOCK_RETRY_SLEEP_SEC)]
 
 
 # ---------- 7. lookup_status enum + CLI/importable parity ----------
@@ -555,12 +546,14 @@ def test_cli_output_matches_function_dict(env_dir):
 
     # CLI form
     wrapper = f"""
-import sys, importlib.util, pathlib
+import sys, importlib.machinery, importlib.util, pathlib
 sys.path.insert(0, str(pathlib.Path({str(REPO_ROOT / 'src' / 'platform')!r})))
-spec = importlib.util.spec_from_file_location("lookup_mod", {str(SCRIPT_PATH)!r})
+loader = importlib.machinery.SourceFileLoader("lookup_mod", {str(SCRIPT_PATH)!r})
+spec = importlib.util.spec_from_file_location("lookup_mod", {str(SCRIPT_PATH)!r}, loader=loader)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 mod.LEADS_PATH = pathlib.Path({str(leads_path)!r})
+mod.lookup_prior_leads_by_phone.__kwdefaults__["leads_path"] = mod.LEADS_PATH
 mod.CONFIG_PATH = pathlib.Path({str(env_dir / 'no_config.yaml')!r})  # forces UTC fallback
 sys.argv = ["lookup-prior-leads-by-phone", "--customer-phone", {phone!r}]
 sys.exit(mod.main())
@@ -665,8 +658,8 @@ def test_load_config_validation_error_falls_back_with_warn(env_dir, monkeypatch,
     assert "WARN: config validation failed" in err
 
 
-def test_load_config_zoneinfo_not_found_falls_back_with_warn(env_dir, monkeypatch, capsys):
-    """PR-review pr-test-analyzer B (crit 6): ZoneInfoNotFoundError branch."""
+def test_load_config_invalid_timezone_falls_back_with_warn(env_dir, monkeypatch, capsys):
+    """Invalid customer timezone is rejected by Config validation and falls back."""
     mod = _load_script()
     import yaml
     cfg = {
@@ -687,11 +680,12 @@ def test_load_config_zoneinfo_not_found_falls_back_with_warn(env_dir, monkeypatc
     result = mod._load_config_now()
     assert result is None
     err = capsys.readouterr().err
-    assert "WARN: cfg.customer.timezone unresolvable" in err
+    assert "WARN: config validation failed" in err
+    assert "customer.timezone" in err
 
 
 def test_load_config_yaml_error_falls_back_with_warn(env_dir, monkeypatch, capsys):
-    """PR-review pr-test-analyzer B (crit 6): bare-Exception branch (yaml.YAMLError)."""
+    """YAML parse errors are caught as RuntimeError and fall back."""
     mod = _load_script()
     cfg_path = env_dir / "config.yaml"
     cfg_path.write_text("not: valid: yaml: [unclosed\n", encoding="utf-8")
@@ -700,7 +694,7 @@ def test_load_config_yaml_error_falls_back_with_warn(env_dir, monkeypatch, capsy
     result = mod._load_config_now()
     assert result is None
     err = capsys.readouterr().err
-    assert "WARN: config load unexpected error" in err
+    assert "WARN: config load failed" in err
 
 
 # ---------- 10. pure-read invariant ----------

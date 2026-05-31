@@ -24,6 +24,12 @@ if platform.system() != "Windows":
     from safe_io import LoadStatusError, assert_load_status_clean  # noqa: E402
 
 
+def _current_load_status_error_type():
+    # Broader CI reloads safe_io in other tests; bind to the exception class
+    # the helper currently raises instead of a stale import alias.
+    return assert_load_status_clean.__globals__["LoadStatusError"]
+
+
 def test_assert_clean_status_ok_returns_silently():
     assert_load_status_clean(Path("/x/y.json"), "ok", context="t")
 
@@ -38,7 +44,7 @@ def test_assert_clean_status_empty_passes():
 
 
 def test_assert_clean_corrupt_raises():
-    with pytest.raises(LoadStatusError) as exc:
+    with pytest.raises(_current_load_status_error_type()) as exc:
         assert_load_status_clean(Path("/x/y.json"), "corrupt:bad json", context="my-ctx")
     msg = str(exc.value)
     assert "corrupt" in msg.lower()
@@ -46,14 +52,14 @@ def test_assert_clean_corrupt_raises():
 
 
 def test_assert_clean_corrupt_unrenamed_raises():
-    with pytest.raises(LoadStatusError):
+    with pytest.raises(_current_load_status_error_type()):
         assert_load_status_clean(
             Path("/x/y.json"), "corrupt_unrenamed:eperm", context="t"
         )
 
 
 def test_assert_clean_oserror_raises():
-    with pytest.raises(LoadStatusError) as exc:
+    with pytest.raises(_current_load_status_error_type()) as exc:
         assert_load_status_clean(
             Path("/x/y.json"), "oserror:permission denied", context="my-ctx"
         )
@@ -66,7 +72,7 @@ def test_assert_clean_unknown_status_raises():
     """Future-proofing: novel statuses propagate as errors so future
     safe_load_json additions force a callsite review rather than silently
     passing through three different scripts."""
-    with pytest.raises(LoadStatusError):
+    with pytest.raises(_current_load_status_error_type()):
         assert_load_status_clean(Path("/x"), "future_status:weird", context="t")
 
 

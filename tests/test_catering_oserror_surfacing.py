@@ -11,6 +11,7 @@ returning EXIT_NOT_FOUND with confused operator stderr).
 """
 from __future__ import annotations
 
+import os
 import platform
 import pytest
 
@@ -55,6 +56,11 @@ def _seed_basic_lead(env_dir, port):
     return _j.loads(r.stdout)["approval_code"]
 
 
+def _skip_root_permission_probe() -> None:
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("chmod(000) permission-denied probes are not valid when pytest runs as root")
+
+
 def test_apply_decision_surfaces_oserror_on_unreadable_leads_file(tmp_path, bridge_server):
     """Unreadable leads.json (PermissionError) → EXIT_SCHEMA_VIOLATION (5),
     not the silent EXIT_NOT_FOUND fall-through that would happen if the
@@ -62,11 +68,12 @@ def test_apply_decision_surfaces_oserror_on_unreadable_leads_file(tmp_path, brid
     env_dir = make_env_dir(tmp_path)
     port, _ = bridge_server
     code = _seed_basic_lead(env_dir, port)
+    _skip_root_permission_probe()
 
     leads = env_dir / "state" / "catering-leads.json"
     leads.chmod(0o000)
     try:
-        result = run_apply(env_dir, port, code, "approve")
+        result = run_apply(env_dir, port, code, "reject", reason="permission probe")
         assert result.returncode == 5, (result.returncode, result.stderr)
         s = result.stderr.lower()
         assert any(k in s for k in ("oserror", "permission", "unhealthy")), s
@@ -79,7 +86,7 @@ def test_apply_decision_normal_path_unchanged(tmp_path, bridge_server):
     env_dir = make_env_dir(tmp_path)
     port, _ = bridge_server
     code = _seed_basic_lead(env_dir, port)
-    result = run_apply(env_dir, port, code, "approve")
+    result = run_apply(env_dir, port, code, "reject", reason="sanity")
     assert result.returncode == 0, result.stderr
 
 
@@ -90,6 +97,7 @@ def test_create_lead_surfaces_oserror_on_unreadable_leads_file(tmp_path, bridge_
     readable again."""
     env_dir = make_env_dir(tmp_path)
     port, _ = bridge_server
+    _skip_root_permission_probe()
     leads = env_dir / "state" / "catering-leads.json"
     leads.parent.mkdir(parents=True, exist_ok=True)
     leads.write_text('{"schema_version": 1, "leads": []}', encoding="utf-8")

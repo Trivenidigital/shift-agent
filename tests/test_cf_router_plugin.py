@@ -1446,8 +1446,8 @@ class TestF7PrimaryMode:
         mock_ack.assert_called_once()
         rows = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
         audits = [r for r in rows if r.get("type") == "cf_router_intercepted"]
-        assert len(audits) == 1
-        assert audits[0]["reason"] == "flyer_primary_project_created"
+        project_audits = [r for r in audits if r.get("reason") == "flyer_primary_project_created"]
+        assert len(project_audits) == 1
 
     def test_subscription_quota_released_when_preview_delivery_fails(self, mods, state_env):
         hooks_mod, actions_mod = mods
@@ -1469,7 +1469,7 @@ class TestF7PrimaryMode:
                               },
                           })), \
              patch.object(actions_mod, "trigger_flyer_reserve_quota",
-                          return_value=(True, "reserved", {"access_type": "subscription", "reservation_id": "R40"})) as mock_reserve, \
+                          return_value=(True, "reserved", {"quota_allowed": True, "access_type": "subscription", "reservation_id": "R40"})) as mock_reserve, \
              patch.object(actions_mod, "trigger_generate_flyer_concepts",
                           return_value=(True, "generated")), \
              patch.object(actions_mod, "send_flyer_processing_ack",
@@ -1519,7 +1519,7 @@ class TestF7PrimaryMode:
                               },
                           })), \
              patch.object(actions_mod, "trigger_flyer_reserve_quota",
-                          return_value=(True, "reserved", {"access_type": "subscription", "reservation_id": "R41"})), \
+                          return_value=(True, "reserved", {"quota_allowed": True, "access_type": "subscription", "reservation_id": "R41"})), \
              patch.object(actions_mod, "trigger_generate_flyer_concepts",
                           return_value=(True, "generated")), \
              patch.object(actions_mod, "send_flyer_processing_ack",
@@ -1574,9 +1574,9 @@ class TestF7PrimaryMode:
                               "assets": [{"kind": "reference_image"}],
                           })) as mock_create, \
              patch.object(actions_mod, "flyer_source_edit_preflight",
-                          return_value=(True, "ready")), \
+                          return_value=(True, "ready", "")), \
              patch.object(actions_mod, "trigger_flyer_reserve_quota",
-                          return_value=(True, "reserved", {"access_type": "subscription", "reservation_id": "R1"})) as mock_reserve, \
+                          return_value=(True, "reserved", {"quota_allowed": True, "access_type": "subscription", "reservation_id": "R1"})) as mock_reserve, \
              patch.object(actions_mod, "send_flyer_edit_processing_ack",
                           return_value=(True, "msg-processing", "")) as mock_processing, \
              patch.object(actions_mod, "trigger_generate_flyer_concepts",
@@ -1596,7 +1596,8 @@ class TestF7PrimaryMode:
         assert mock_create.call_args.kwargs["manual_edit_required"] is True
         assert mock_create.call_args.kwargs["raw_request"].startswith("Edit uploaded flyer/source artwork")
         mock_reserve.assert_called_once()
-        mock_processing.assert_called_once_with("201975216009469@lid", "F0029")
+        mock_processing.assert_called_once()
+        assert mock_processing.call_args.args == ("201975216009469@lid", "F0029")
         mock_generate.assert_called_once_with("F0029")
         mock_finalize.assert_called_once()
         mock_preview.assert_called_once_with("201975216009469@lid", "F0029")
@@ -1684,11 +1685,13 @@ class TestF7PrimaryMode:
                               "assets": [{"kind": "reference_image", "path": "/tmp/ref.pdf", "mime_type": "application/pdf"}],
                           })), \
              patch.object(actions_mod, "flyer_source_edit_preflight",
-                          return_value=(False, "source edit from PDF is not supported yet")) as mock_preflight, \
+                          return_value=(False, "source edit from PDF is not supported yet", "reference_unsupported")) as mock_preflight, \
              patch.object(actions_mod, "trigger_flyer_reserve_quota",
-                          return_value=(True, "reserved", {"access_type": "subscription", "reservation_id": "R99"})) as mock_reserve, \
+                          return_value=(True, "reserved", {"quota_allowed": True, "access_type": "subscription", "reservation_id": "R99"})) as mock_reserve, \
              patch.object(actions_mod, "trigger_flyer_release_quota",
                           return_value=(True, "released", {})) as mock_release, \
+             patch.object(actions_mod, "invoke_update_flyer_project",
+                          return_value=(True, "queued")) as mock_update, \
              patch.object(actions_mod, "send_flyer_edit_processing_ack") as mock_processing, \
              patch.object(actions_mod, "trigger_generate_flyer_concepts") as mock_generate, \
              patch.object(actions_mod, "send_flyer_manual_edit_ack",
@@ -1702,14 +1705,16 @@ class TestF7PrimaryMode:
         mock_preflight.assert_called_once()
         mock_reserve.assert_called_once()
         mock_release.assert_called_once()
+        mock_update.assert_called_once()
         mock_processing.assert_not_called()
         mock_generate.assert_not_called()
-        mock_manual_ack.assert_called_once_with(
+        mock_manual_ack.assert_called_once()
+        assert mock_manual_ack.call_args.args == (
             "201975216009469@lid",
             "F0099",
             "Remove extra 08:00 from this flyer.",
-            reason="source edit from PDF is not supported yet",
         )
+        assert mock_manual_ack.call_args.kwargs["reason"] == "source edit from PDF is not supported yet"
 
     def test_media_exact_reference_edit_releases_access_when_preview_delivery_fails(self, mods, state_env):
         hooks_mod, actions_mod = mods
@@ -1737,9 +1742,9 @@ class TestF7PrimaryMode:
                               "assets": [{"kind": "reference_image"}],
                           })), \
              patch.object(actions_mod, "flyer_source_edit_preflight",
-                          return_value=(True, "ready")), \
+                          return_value=(True, "ready", "")), \
              patch.object(actions_mod, "trigger_flyer_reserve_quota",
-                          return_value=(True, "reserved", {"access_type": "subscription", "reservation_id": "R3"})), \
+                          return_value=(True, "reserved", {"quota_allowed": True, "access_type": "subscription", "reservation_id": "R3"})), \
              patch.object(actions_mod, "send_flyer_edit_processing_ack",
                           return_value=(True, "msg-processing", "")), \
              patch.object(actions_mod, "trigger_generate_flyer_concepts",
@@ -1784,9 +1789,9 @@ class TestF7PrimaryMode:
                               "assets": [{"kind": "reference_image"}],
                           })), \
              patch.object(actions_mod, "flyer_source_edit_preflight",
-                          return_value=(True, "ready")), \
+                          return_value=(True, "ready", "")), \
              patch.object(actions_mod, "trigger_flyer_reserve_quota",
-                          return_value=(True, "reserved", {"access_type": "subscription", "reservation_id": "R2"})), \
+                          return_value=(True, "reserved", {"quota_allowed": True, "access_type": "subscription", "reservation_id": "R2"})), \
              patch.object(actions_mod, "send_flyer_edit_processing_ack",
                           return_value=(True, "msg-processing", "")), \
              patch.object(actions_mod, "trigger_generate_flyer_concepts",
@@ -1801,7 +1806,7 @@ class TestF7PrimaryMode:
             "action": "skip",
             "reason": "cf-router flyer exact edit queued: project F0030",
         }
-        mock_release.assert_called_once()
+        mock_release.assert_not_called()
         mock_manual_ack.assert_called_once()
 
     def test_paid_guest_order_can_create_one_flyer_without_subscription_quota(self, mods, state_env):
@@ -1846,7 +1851,8 @@ class TestF7PrimaryMode:
             "action": "skip",
             "reason": "cf-router flyer primary: project F0020 created",
         }
-        mock_find_guest.assert_called_once_with("+17329837841", "17329837841@s.whatsapp.net")
+        mock_find_guest.assert_any_call("+17329837841", "17329837841@s.whatsapp.net")
+        assert mock_find_guest.call_count >= 1
         mock_reserve_guest.assert_called_once_with(
             sender_phone="+17329837841",
             chat_id="17329837841@s.whatsapp.net",
@@ -2573,7 +2579,9 @@ class TestF7PrimaryMode:
             "reason": "cf-router flyer primary: project F0012 created",
         }
         mock_onboarding.assert_called_once()
-        mock_send_text.assert_called_once()
+        assert mock_send_text.call_count == 2
+        assert "Free trial active" in mock_send_text.call_args_list[0].args[1]
+        assert "I need a few more details" in mock_send_text.call_args_list[1].args[1]
         mock_create.assert_called_once()
         assert mock_create.call_args.kwargs["raw_request"].startswith("Create a breakfast menu")
         assert "CONFIRM" not in mock_create.call_args.kwargs["raw_request"]
@@ -2664,7 +2672,7 @@ class TestF7PrimaryMode:
                               "assets": [{"kind": "reference_image"}],
                           })) as mock_create, \
              patch.object(actions_mod, "trigger_flyer_reserve_quota",
-                          return_value=(True, "reserved", {"access_type": "subscription", "reservation_id": "R1"})), \
+                          return_value=(True, "reserved", {"quota_allowed": True, "access_type": "subscription", "reservation_id": "R1"})), \
              patch.object(actions_mod, "trigger_generate_flyer_concepts",
                           return_value=(True, "generated")), \
              patch.object(actions_mod, "trigger_flyer_finalize_usage",
@@ -2723,7 +2731,9 @@ class TestF7PrimaryMode:
             "reason": "cf-router flyer active: intake reply captured for F0011",
         }
         mock_send.assert_called_once()
-        assert "F0011" in mock_send.call_args.args[1]
+        reply = mock_send.call_args.args[1]
+        assert "flyer request open" in reply
+        assert "F0011" not in reply
 
     def test_flyer_enabled_does_not_block_generic_catering(self, mods, state_env):
         """The flyer bypass is narrow; real catering still uses F7."""

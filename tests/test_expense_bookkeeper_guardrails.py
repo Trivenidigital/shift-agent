@@ -40,6 +40,13 @@ from schemas import (
 )
 
 
+def _managed_receipt_path(filename: str = "E0001.jpg") -> str:
+    managed = os.environ.get("EXPENSE_RECEIPTS_DIR", "/tmp/test/")
+    if not managed.endswith("/"):
+        managed += "/"
+    return managed + filename
+
+
 # ───────────────────────────────────────────────────
 # Edge case #1 — wrong-amount approval
 # ───────────────────────────────────────────────────
@@ -184,7 +191,7 @@ def test_lead_original_message_id_required():
         "expense_id": "E0001",
         "sender_phone": "+19045550000",
         "received_at": "2026-04-29T12:00:00+00:00",
-        "image_path": "/tmp/test/E0001.jpg",
+        "image_path": _managed_receipt_path(),
         "image_phash": "a3f2c19d8b5e4067",
         "image_byte_hash": "a" * 64,
     }
@@ -198,7 +205,7 @@ def test_lead_original_message_id_empty_rejected():
         "original_message_id": "",  # empty
         "sender_phone": "+19045550000",
         "received_at": "2026-04-29T12:00:00+00:00",
-        "image_path": "/tmp/test/E0001.jpg",
+        "image_path": _managed_receipt_path(),
         "image_phash": "a3f2c19d8b5e4067",
         "image_byte_hash": "a" * 64,
     }
@@ -340,7 +347,7 @@ def _base_lead():
         "original_message_id": "wa_msg_xyz123",
         "sender_phone": "+19045550000",
         "received_at": "2026-04-29T12:00:00+00:00",
-        "image_path": "/tmp/test/E0001.jpg",
+        "image_path": _managed_receipt_path(),
         "image_phash": "a3f2c19d8b5e4067",
         "image_byte_hash": "a" * 64,
     }

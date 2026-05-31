@@ -194,7 +194,11 @@ _patch_bridge()
 ''',
         encoding="utf-8",
     )
-    env = {**env, "PYTHONPATH": f"{shim_dir}{os.pathsep}{env.get('PYTHONPATH', '')}"}
+    platform_path = SCRIPT_PATH.parents[4] / "src" / "platform"
+    env = {
+        **env,
+        "PYTHONPATH": f"{shim_dir}{os.pathsep}{platform_path}{os.pathsep}{env.get('PYTHONPATH', '')}",
+    }
 
     return subprocess.run(
         [sys.executable, str(SCRIPT_PATH), "--lead-id", lead_id],
@@ -296,7 +300,7 @@ def test_below_threshold_no_op(isolated_state):
     assert "threshold_not_met" in result.stdout
 
     leads = json.loads(isolated_state["leads_path"].read_text(encoding="utf-8"))
-    assert leads["leads"][0]["deposit_status"] == "none"
+    assert leads["leads"][0].get("deposit_status", "none") == "none"
 
     # No commerce primitive state was touched
     assert not (isolated_state["commerce_state"] / "carts.json").exists()
@@ -420,7 +424,14 @@ _patch_payment_link()
 ''',
         encoding="utf-8",
     )
-    env = {**isolated_state["env"], "PYTHONPATH": f"{shim_dir}{os.pathsep}{isolated_state['env'].get('PYTHONPATH', '')}"}
+    platform_path = SCRIPT_PATH.parents[4] / "src" / "platform"
+    env = {
+        **isolated_state["env"],
+        "PYTHONPATH": (
+            f"{shim_dir}{os.pathsep}{platform_path}{os.pathsep}"
+            f"{isolated_state['env'].get('PYTHONPATH', '')}"
+        ),
+    }
 
     result = subprocess.run(
         [sys.executable, str(SCRIPT_PATH), "--lead-id", lead_id],
@@ -463,8 +474,8 @@ def test_deposit_failure_does_NOT_roll_back_quote_send(isolated_state, monkeypat
     assert result.returncode == 0  # no-op
     # Lead state — deposit fields all empty
     leads = json.loads(isolated_state["leads_path"].read_text(encoding="utf-8"))
-    assert leads["leads"][0]["deposit_status"] == "none"
-    assert leads["leads"][0]["deposit_payment_intent_id"] == ""
+    assert leads["leads"][0].get("deposit_status", "none") == "none"
+    assert leads["leads"][0].get("deposit_payment_intent_id", "") == ""
 
 
 def test_below_minimum_deposit(isolated_state):
@@ -538,5 +549,5 @@ def test_bridge_send_failed_voids_intent_and_audits(isolated_state):
 
     # Lead state — deposit fields NOT populated (bridge fail rolled them back via early return)
     leads = json.loads(isolated_state["leads_path"].read_text(encoding="utf-8"))
-    assert leads["leads"][0]["deposit_status"] == "none"
-    assert leads["leads"][0]["deposit_payment_intent_id"] == ""
+    assert leads["leads"][0].get("deposit_status", "none") == "none"
+    assert leads["leads"][0].get("deposit_payment_intent_id", "") == ""

@@ -378,6 +378,68 @@ def test_generate_deferred_source_edit_template_provider_failure_queues_manual_r
     assert audit_rows[0]["status"] == "provider_unavailable"
 
 
+@pytest.mark.parametrize(
+    ("status", "expected_reason_code"),
+    [
+        ("low_confidence", "reference_low_confidence"),
+        ("unsupported", "reference_unsupported"),
+    ],
+)
+def test_generate_deferred_source_edit_template_non_provider_failure_keeps_reference_reason(
+    monkeypatch, tmp_path, capsys, status, expected_reason_code,
+):
+    module = _load_script(monkeypatch)
+    from schemas import FlyerReferenceExtraction  # noqa: E402
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    state_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    reference = asset_dir / "F0001-reference.png"
+    reference.write_bytes(b"fake image bytes")
+    project = _project_with_pending_reference(reference)
+    project["raw_request"] = "edit uploaded flyer/source artwork: replace headline"
+    project["reference_extractions"][0]["role"] = "source_edit_template"
+    state_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_sequence": 2,
+        "projects": [project],
+    }), encoding="utf-8")
+
+    def fake_extract_reference(asset, *, raw_request, provider):
+        return FlyerReferenceExtraction(
+            asset_id=asset.asset_id,
+            role="source_edit_template",
+            provider="fake_vision",
+            status=status,
+            detail=f"source contract extraction {status}",
+            extracted_at=datetime(2026, 5, 19, tzinfo=timezone.utc),
+        )
+
+    monkeypatch.setattr(module, "build_reference_extraction_provider", lambda: object())
+    monkeypatch.setattr(module, "extract_reference", fake_extract_reference)
+    monkeypatch.setattr(
+        module,
+        "render_source_edit_preview",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("render must wait for source contract")
+        ),
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts",
+        "--project-id", "F0001",
+        "--state-path", str(state_path),
+        "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+    ])
+
+    assert module.main() == 2
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "manual_edit_required"
+    assert persisted["manual_review"]["reason_code"] == expected_reason_code
+    assert persisted["manual_review"]["detail"] == f"source contract extraction {status}"
+
+
 def test_generate_deferred_reference_smoke_can_use_sidecar_visual_qa(monkeypatch, tmp_path, capsys):
     module = _load_script(monkeypatch)
 

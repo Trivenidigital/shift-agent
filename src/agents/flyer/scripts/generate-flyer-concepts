@@ -324,7 +324,7 @@ def _write_sidecar_visual_qa_fixture(project, artifact_path: Path) -> None:
 
 
 def _manual_reason_for_reference_failure(extraction: FlyerReferenceExtraction) -> str:
-    if extraction.role == "source_edit_template":
+    if extraction.role == "source_edit_template" and extraction.status == "provider_unavailable":
         return "source_edit_provider_unavailable"
     return f"reference_{extraction.status}"
 

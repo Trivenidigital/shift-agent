@@ -43,6 +43,13 @@ from schemas import (
 )
 
 
+def _managed_receipt_path(filename: str = "E0001.jpg") -> str:
+    managed = os.environ.get("EXPENSE_RECEIPTS_DIR", "/tmp/test/")
+    if not managed.endswith("/"):
+        managed += "/"
+    return managed + filename
+
+
 def test_config_defaults():
     cfg = ExpenseBookkeeperConfig()
     assert cfg.enabled is False
@@ -86,7 +93,7 @@ def base_lead_dict():
         "original_message_id": "wa_msg_xyz123",
         "sender_phone": "+19045550000",
         "received_at": "2026-04-29T12:00:00+00:00",
-        "image_path": "/tmp/test/E0001.jpg",
+        "image_path": _managed_receipt_path(),
         "image_phash": "a3f2c19d8b5e4067",
         "image_byte_hash": "a" * 64,
     }
@@ -100,7 +107,7 @@ def test_lead_validates(base_lead_dict):
 
 
 def test_lead_path_traversal_rejected(base_lead_dict):
-    base_lead_dict["image_path"] = "/tmp/test/../../etc/passwd"
+    base_lead_dict["image_path"] = _managed_receipt_path("../../etc/passwd")
     with pytest.raises(Exception, match="invalid image_path"):
         ExpenseLead.model_validate(base_lead_dict)
 
