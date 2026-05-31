@@ -269,7 +269,12 @@ def _aggregate_yesterday(cfg: Config) -> tuple[dict, bool]:
 
 def _aggregate_today(cfg: Config) -> tuple[dict, bool]:
     """Return (today_dict, degraded_mode)."""
-    today_str = customer_today_str(cfg.customer.timezone)
+    # Use the override-aware wrapper (not raw customer_today_str): the content
+    # date must match the send/idempotency date, which derives from
+    # _customer_now() and honors SHIFT_AGENT_NOW_OVERRIDE. The raw version reads
+    # the wall clock and ignored the override, desyncing today_date + the
+    # "shifts today" roster lookup from the rest of the brief under override.
+    today_str = _customer_today_str(cfg.customer.timezone)
     out = {
         "today_date": today_str,
         "shifts_today": [],
