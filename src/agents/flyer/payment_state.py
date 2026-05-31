@@ -32,6 +32,17 @@ class PlanPaymentRequest:
     provider: str
 
 
+def normalize_payment_provider(provider: str) -> str:
+    value = (provider or "").strip().lower()
+    if value in {"manual", "stripe", "razorpay", "other"}:
+        return value
+    return ""
+
+
+def normalize_payment_reference(payment_reference: str) -> str:
+    return " ".join((payment_reference or "").split())
+
+
 def build_plan_payment_request(
     *,
     plan_id: str,
@@ -49,7 +60,7 @@ def build_plan_payment_request(
         checkout_url=checkout_url,
         amount_cents=tier.price_cents(),
         currency=tier.currency,
-        provider=provider if provider in {"manual", "stripe", "razorpay", "other"} else "manual",
+        provider=normalize_payment_provider(provider) or "manual",
     )
 
 
@@ -85,11 +96,21 @@ def activation_event_state(
     expected_amount_cents: int,
     expected_currency: str,
 ) -> FlyerPaymentState:
-    if not payment_reference.strip():
+    normalized_provider = normalize_payment_provider(provider)
+    normalized_reference = normalize_payment_reference(payment_reference)
+    normalized_currency = (currency or "").strip().upper()
+    normalized_expected_currency = (expected_currency or "").strip().upper()
+    if not normalized_provider:
         return "none"
-    if provider != "manual" and amount_cents is None:
+    if not normalized_reference:
+        return "none"
+    if normalized_provider != "manual" and amount_cents is None:
         return "payment_pending"
-    if (currency or expected_currency).upper() != expected_currency.upper():
+    if not normalized_expected_currency:
+        return "payment_pending"
+    if normalized_provider != "manual" and not normalized_currency:
+        return "payment_pending"
+    if normalized_currency != normalized_expected_currency:
         return "payment_pending"
     if amount_cents is not None and amount_cents != expected_amount_cents:
         return "payment_pending"
