@@ -54,10 +54,10 @@ Batch 1 is the current implementation scope. Batches 2-4 are backlog-only follow
   - [x] Reject placeholder OpenRouter image keys.
   - [x] Make text-manifest sidecar writes atomic.
   - [x] Preserve stale-active-project bypass for pre-delivery media-backed new work while keeping delivered/revising media edits on the active project.
-- [ ] Batch 2 - edit/autonomy hardening:
+- [x] Batch 2 - edit/autonomy hardening:
   - [x] Split source-edit manual rows from non-source manual rows in `update-flyer-project`.
   - [x] Tighten `already_applied` regeneration suppression using current selected-preview visual-QA evidence.
-  - [ ] Pass source-edit generation failure reason codes consistently. Deferred to a separate reason-code PR because this slice is the customer-visible revision-routing lever.
+  - [x] Pass source-edit generation failure reason codes consistently.
 - [ ] Batch 3 - product-depth improvements:
   - [ ] Expand starter prompts and campaign scene library.
   - [ ] Add preview fact checklist.
@@ -99,3 +99,18 @@ Batch 1 is the current implementation scope. Batches 2-4 are backlog-only follow
   - Flyer-focused gate: `1544 passed, 1 skipped`.
   - Full repository gate: `2770 passed, 867 skipped`.
   - During the Flyer-focused gate, a pre-existing test-isolation leak was reproduced and fixed: a cockpit test now stubs `safe_io` via `monkeypatch` and accepts bridge kwargs so later cf-router tests do not inherit a stale bridge stub.
+
+## Batch 2b Reason-Code Review And Verification
+
+- Review pass 1:
+  - Customer-safety reviewer found HTTP 500 was only landing in `provider_timeout` by fallthrough; fixed with explicit 5xx retry matching and a `HTTP 500: missing upstream resource` regression.
+  - Hermes/drift reviewer found broad `"missing"` matching could misclassify text-manifest/fact failures as provider-unavailable; fixed by narrowing provider-unavailable tokens and routing missing text-manifest/fact failures to `visual_qa_failed`.
+  - Both reviewers asked for dynamic coverage of the exact-reference primary fallback; added route-level test alongside the source-vs-new fallback test.
+- Review pass 2:
+  - Customer-safety reviewer: no findings; noted 401/403 auth/billing classification as a possible future refinement outside this 5xx/config slice.
+  - Hermes/drift reviewer: no findings; confirmed the slice uses existing Flyer manual-review reason primitives and no new substrate.
+- Verification:
+  - Focused source-edit reason-code tests and route fallback tests: green.
+  - Relevant touched files together: `374 passed`.
+  - Flyer-focused gate: `1549 passed, 1 skipped`.
+  - Full repository gate: `2775 passed, 867 skipped`.

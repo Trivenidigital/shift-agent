@@ -326,6 +326,128 @@ def test_generate_source_edit_provider_unavailable_queues_manual_review(monkeypa
     assert "OPENAI_API_KEY" in persisted["manual_review"]["detail"]
 
 
+def test_generate_source_edit_provider_http_error_queues_provider_timeout(monkeypatch, tmp_path, capsys):
+    """Source-edit provider HTTP/5xx errors are transient provider failures,
+    not missing-provider configuration. They should land in the retry/provider
+    bucket instead of telling operators to provision credentials."""
+    module = _load_script(monkeypatch)
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    state_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    reference = asset_dir / "F0001-reference.png"
+    reference.write_bytes(b"fake image bytes")
+    project = _project_with_pending_reference(reference)
+    project["raw_request"] = "edit uploaded flyer/source artwork: replace headline"
+    project["reference_extractions"][0]["provider"] = "openai"
+    project["reference_extractions"][0]["status"] = "ok"
+    project["reference_extractions"][0]["detail"] = "extracted"
+    state_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_sequence": 2,
+        "projects": [project],
+    }), encoding="utf-8")
+
+    def fake_render_source_edit(*_args, **_kwargs):
+        raise module.FlyerRenderError("OpenRouter source edit HTTP 500: upstream provider error")
+
+    monkeypatch.setattr(module, "render_source_edit_preview", fake_render_source_edit)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts",
+        "--project-id", "F0001",
+        "--state-path", str(state_path),
+        "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+    ])
+
+    assert module.main() == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["manual_review_reason_code"] == "provider_timeout"
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "manual_edit_required"
+    assert persisted["manual_review"]["reason_code"] == "provider_timeout"
+    assert "HTTP 500" in persisted["manual_review"]["detail"]
+
+
+def test_generate_source_edit_http_500_with_missing_text_still_queues_provider_timeout(monkeypatch, tmp_path, capsys):
+    module = _load_script(monkeypatch)
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    state_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    reference = asset_dir / "F0001-reference.png"
+    reference.write_bytes(b"fake image bytes")
+    project = _project_with_pending_reference(reference)
+    project["raw_request"] = "edit uploaded flyer/source artwork: replace headline"
+    project["reference_extractions"][0]["provider"] = "openai"
+    project["reference_extractions"][0]["status"] = "ok"
+    project["reference_extractions"][0]["detail"] = "extracted"
+    state_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_sequence": 2,
+        "projects": [project],
+    }), encoding="utf-8")
+
+    def fake_render_source_edit(*_args, **_kwargs):
+        raise module.FlyerRenderError("OpenRouter source edit HTTP 500: missing upstream resource")
+
+    monkeypatch.setattr(module, "render_source_edit_preview", fake_render_source_edit)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts",
+        "--project-id", "F0001",
+        "--state-path", str(state_path),
+        "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+    ])
+
+    assert module.main() == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["manual_review_reason_code"] == "provider_timeout"
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["manual_review"]["reason_code"] == "provider_timeout"
+
+
+def test_generate_source_edit_missing_text_manifest_queues_visual_qa_failed(monkeypatch, tmp_path, capsys):
+    module = _load_script(monkeypatch)
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    state_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    reference = asset_dir / "F0001-reference.png"
+    reference.write_bytes(b"fake image bytes")
+    project = _project_with_pending_reference(reference)
+    project["raw_request"] = "edit uploaded flyer/source artwork: replace headline"
+    project["reference_extractions"][0]["provider"] = "openai"
+    project["reference_extractions"][0]["status"] = "ok"
+    project["reference_extractions"][0]["detail"] = "extracted"
+    state_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_sequence": 2,
+        "projects": [project],
+    }), encoding="utf-8")
+
+    def fake_render_source_edit(*_args, **_kwargs):
+        raise module.FlyerRenderError("text manifest validation failed: missing critical text facts")
+
+    monkeypatch.setattr(module, "render_source_edit_preview", fake_render_source_edit)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts",
+        "--project-id", "F0001",
+        "--state-path", str(state_path),
+        "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+    ])
+
+    assert module.main() == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["manual_review_reason_code"] == "visual_qa_failed"
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["manual_review"]["reason_code"] == "visual_qa_failed"
+
+
 def test_generate_source_edit_dependency_missing_queues_manual_review(monkeypatch, tmp_path, capsys):
     module = _load_script(monkeypatch)
 

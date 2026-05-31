@@ -1004,6 +1004,7 @@ def _try_flyer_primary_intercept(
                     project_id,
                     "--queue-manual-review",
                     "--manual-reason", "source_edit_generation_failed",
+                    "--manual-reason-code", "provider_timeout",
                     "--manual-detail", gen_detail[:500],
                 )
             ack_ok, manual_mid, ack_err = actions.send_flyer_manual_edit_ack(
@@ -1486,6 +1487,7 @@ def _try_flyer_source_vs_new_choice_intercept(text: str, chat_id: str, event: An
                     project_id,
                     "--queue-manual-review",
                     "--manual-reason", "source_edit_generation_failed",
+                    "--manual-reason-code", "provider_timeout",
                     "--manual-detail", gen_detail[:500],
                 )
             ack_ok, manual_mid, ack_err = actions.send_flyer_manual_edit_ack(
