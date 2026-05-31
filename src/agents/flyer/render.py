@@ -2428,6 +2428,17 @@ def _is_source_edit_project(project: FlyerProject) -> bool:
     return any(asset.kind == "reference_image" for asset in (project.assets or []))
 
 
+def _is_manual_completed_operator_preview(project: FlyerProject, asset: FlyerAsset | None) -> bool:
+    if asset is None:
+        return False
+    if project.manual_review.status != "completed":
+        return False
+    if asset.kind != "concept_preview" or asset.source != "uploaded":
+        return False
+    operator_ids = set(project.manual_review.operator_asset_ids or [])
+    return asset.asset_id in operator_ids
+
+
 def _draw_flyer_pil(project: FlyerProject, *, concept_id: str, size: tuple[int, int], pil_modules):
     Image, ImageDraw, ImageFont = pil_modules
     _require_ready(project)
@@ -2726,6 +2737,7 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
     concept_id = project.selected_concept_id or "C1"
     source_edit_project = _is_source_edit_project(project)
     selected_preview: Path | None = None
+    selected_preview_asset: FlyerAsset | None = None
     if project.selected_concept_id:
         concept = next((c for c in project.concepts if c.concept_id == project.selected_concept_id), None)
         if concept is not None:
@@ -2735,6 +2747,7 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
                 quality_report = inspect_rendered_asset(candidate, expected_width=1080, expected_height=1350, mime_type="image/png")
                 if quality_report.ok:
                     selected_preview = candidate
+                    selected_preview_asset = asset
     if selected_preview is None and (project.selected_concept_id or source_edit_project):
         if source_edit_project:
             raise FlyerRenderError("source edit final package requires an approved preview")
@@ -2750,8 +2763,13 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
         suffix = "pdf" if size is None else "png"
         path = output_dir / f"{project.project_id}-{output_format}.{suffix}"
         source_for_manifest: Path | None = None
+        verification_mode = "source_edit_overlay_recomposed"
+        manifest_warnings = [
+            "Source edit: customer artwork with the deterministic text overlay re-composed on top; final files derive from the approved preview. Required facts are declared and visual-QA-checked."
+        ]
         if selected_preview is not None:
             source = _raw_background_path(selected_preview)
+            manual_completed_operator_preview = _is_manual_completed_operator_preview(project, selected_preview_asset)
             # Provenance, not mtime: eligibility itself is the signal.
             # - Background-only-eligible projects: the preview is a generated
             #   composite (raw background + overlay), and the raw is ALWAYS written
@@ -2768,10 +2786,11 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
             #   the generative edit is stored as raw and the deterministic overlay
             #   owns the text. If the raw sidecar is missing, fail closed instead of
             #   claiming a recomposed text guarantee over an old pre-overlay preview.
-            if source_edit_project and not source.exists():
+            if source_edit_project and not manual_completed_operator_preview and not source.exists():
                 raise FlyerRenderError("source edit final package requires raw edited background sidecar")
             direct_poster_source = (
-                not source.exists()
+                manual_completed_operator_preview
+                or not source.exists()
                 # Source-edits with a preserved raw model edit re-apply the
                 # deterministic overlay per format (below) — new-flyer parity — so
                 # they are NOT forced down the direct/no-re-overlay path here.
@@ -2794,6 +2813,11 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
             )
             if direct_poster_source:
                 source = selected_preview
+            if manual_completed_operator_preview:
+                verification_mode = "source_edit_integrity_only"
+                manifest_warnings = [
+                    "Source edit: final files derive from the operator-approved manual asset; customer approval remains the visual/text QA gate."
+                ]
             source_for_manifest = source
             if size is None:
                 if direct_poster_source:
@@ -2840,10 +2864,8 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
                 output_format=output_format,
                 selected_concept_id=concept_id,
                 source_path=source_for_manifest,
-                verification_mode="source_edit_overlay_recomposed",
-                warnings=[
-                    "Source edit: customer artwork with the deterministic text overlay re-composed on top; final files derive from the approved preview. Required facts are declared and visual-QA-checked."
-                ],
+                verification_mode=verification_mode,
+                warnings=manifest_warnings,
             )
         else:
             write_text_manifest(project, path, output_format=output_format, selected_concept_id=concept_id, source_path=source_for_manifest)

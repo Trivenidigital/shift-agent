@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 import base64
+import hashlib
 import http.client
 import io
 import json
@@ -30,7 +31,7 @@ from agents.flyer.render import (  # noqa: E402
     write_text_manifest,
 )
 import agents.flyer.render as render_module  # noqa: E402
-from schemas import FlyerAsset, FlyerConcept, FlyerLockedFact, FlyerProject, FlyerRequestFields, FlyerRevision  # noqa: E402
+from schemas import FlyerAsset, FlyerConcept, FlyerLockedFact, FlyerManualReview, FlyerProject, FlyerRequestFields, FlyerRevision  # noqa: E402
 
 
 def _complete_project() -> FlyerProject:
@@ -2749,6 +2750,101 @@ def test_source_edit_final_package_without_raw_sidecar_fails_closed(tmp_path, mo
                 concept_id="C1",
                 title="Edited Flyer",
                 style_summary="Source-preserving edit",
+                preview_asset_id="A0001",
+                prompt="",
+                created_at=datetime.now(timezone.utc),
+                selected_at=datetime.now(timezone.utc),
+            )
+        ],
+        "selected_concept_id": "C1",
+    })
+
+    with _pytest.raises(FlyerRenderError, match="source edit final package requires raw edited background sidecar"):
+        render_final_package(project, tmp_path / "finals", model="deterministic-renderer", quality="medium")
+
+
+def test_manual_completed_source_edit_final_package_uses_operator_preview_without_raw_sidecar(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    approved = tmp_path / "manual" / "F0001" / "F0001-A0001.png"
+    approved.parent.mkdir(parents=True)
+    approved.write_bytes(_png_bytes(size=(1080, 1350), color=(20, 120, 40)))
+    asset = FlyerAsset(
+        asset_id="A0001",
+        kind="concept_preview",
+        source="uploaded",
+        path=str(approved),
+        mime_type="image/png",
+        sha256="a" * 64,
+        original_message_id="wamid.flyer.1",
+        received_at=datetime.now(timezone.utc),
+    )
+    project = _complete_project().model_copy(update={
+        "status": "awaiting_final_approval",
+        "raw_request": "Edit uploaded flyer/source artwork. Customer requested: Remove extra 08:00.",
+        "manual_review": FlyerManualReview(
+            status="completed",
+            reason="operator completed source edit",
+            reason_code="source_edit_provider_unavailable",
+            completed_at=datetime.now(timezone.utc),
+            operator_asset_ids=["A0001"],
+        ),
+        "assets": [asset],
+        "concepts": [
+            FlyerConcept(
+                concept_id="C1",
+                title="Designer Approved",
+                style_summary="Operator-approved manual review asset",
+                preview_asset_id="A0001",
+                prompt="",
+                created_at=datetime.now(timezone.utc),
+                selected_at=datetime.now(timezone.utc),
+            )
+        ],
+        "selected_concept_id": "C1",
+    })
+
+    specs = render_final_package(project, tmp_path / "finals", model="deterministic-renderer", quality="medium")
+
+    assert {s.output_format for s in specs} == {"whatsapp_image", "instagram_post", "instagram_story", "printable_pdf"}
+    whatsapp = next(spec for spec in specs if spec.output_format == "whatsapp_image")
+    manifest = json.loads(Path(f"{whatsapp.path}.text.json").read_text(encoding="utf-8"))
+    assert manifest["verification_mode"] == "source_edit_integrity_only"
+    assert manifest["expected_facts"] == []
+    assert manifest["source_sha256"] == hashlib.sha256(approved.read_bytes()).hexdigest()
+
+
+def test_manual_completed_source_edit_requires_selected_operator_asset_id_for_raw_sidecar_bypass(tmp_path, monkeypatch):
+    import pytest as _pytest
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    approved = tmp_path / "manual" / "F0001" / "F0001-A0001.png"
+    approved.parent.mkdir(parents=True)
+    approved.write_bytes(_png_bytes(size=(1080, 1350), color=(20, 120, 40)))
+    asset = FlyerAsset(
+        asset_id="A0001",
+        kind="concept_preview",
+        source="uploaded",
+        path=str(approved),
+        mime_type="image/png",
+        sha256="a" * 64,
+        original_message_id="wamid.flyer.1",
+        received_at=datetime.now(timezone.utc),
+    )
+    project = _complete_project().model_copy(update={
+        "status": "awaiting_final_approval",
+        "raw_request": "Edit uploaded flyer/source artwork. Customer requested: Remove extra 08:00.",
+        "manual_review": FlyerManualReview(
+            status="completed",
+            reason="operator completed source edit",
+            reason_code="source_edit_provider_unavailable",
+            completed_at=datetime.now(timezone.utc),
+            operator_asset_ids=[],
+        ),
+        "assets": [asset],
+        "concepts": [
+            FlyerConcept(
+                concept_id="C1",
+                title="Designer Approved",
+                style_summary="Operator-approved manual review asset",
                 preview_asset_id="A0001",
                 prompt="",
                 created_at=datetime.now(timezone.utc),
