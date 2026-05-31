@@ -573,7 +573,7 @@ def test_apply_critical_text_overlay_changes_model_background_pixels(tmp_path):
 
 
 def test_render_final_package_creates_expected_formats(tmp_path):
-    project = _complete_project().model_copy(update={"selected_concept_id": "C1"})
+    project = _complete_project()
     specs = render_final_package(project, tmp_path)
     by_format = {spec.output_format: spec for spec in specs}
     assert set(by_format) == {
@@ -2646,6 +2646,83 @@ def test_final_package_reuses_selected_concept_with_deterministic_model(tmp_path
     whatsapp = next(spec for spec in specs if spec.output_format == "whatsapp_image")
     with Image.open(whatsapp.path) as final_img, Image.open(approved) as approved_img:
         assert final_img.getpixel((20, 20)) == approved_img.getpixel((20, 20))
+
+
+def test_final_package_with_selected_concept_missing_preview_fails_closed(tmp_path, monkeypatch):
+    import pytest as _pytest
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    project = _complete_project().model_copy(update={
+        "status": "awaiting_final_approval",
+        "assets": [],
+        "concepts": [
+            FlyerConcept(
+                concept_id="C1",
+                title="Approved Flyer",
+                style_summary="Approved preview",
+                preview_asset_id="A0001",
+                prompt="",
+                created_at=datetime.now(timezone.utc),
+                selected_at=datetime.now(timezone.utc),
+            )
+        ],
+        "selected_concept_id": "C1",
+    })
+
+    with _pytest.raises(FlyerRenderError, match=r"^final package requires an approved preview$"):
+        render_final_package(project, tmp_path / "finals", model="deterministic-renderer", quality="medium")
+
+    assert not (tmp_path / "finals" / "F0001-whatsapp_image.png").exists()
+
+
+def test_final_package_with_selected_concept_invalid_preview_fails_closed(tmp_path, monkeypatch):
+    import pytest as _pytest
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    invalid_preview = tmp_path / "F0001-C1-preview.png"
+    invalid_preview.write_bytes(_png_bytes(size=(100, 100), color=(60, 20, 160)))
+    asset = FlyerAsset(
+        asset_id="A0001",
+        kind="concept_preview",
+        source="rendered",
+        path=str(invalid_preview),
+        mime_type="image/png",
+        sha256="a" * 64,
+        original_message_id="wamid.flyer.1",
+        received_at=datetime.now(timezone.utc),
+    )
+    project = _complete_project().model_copy(update={
+        "status": "awaiting_final_approval",
+        "assets": [asset],
+        "concepts": [
+            FlyerConcept(
+                concept_id="C1",
+                title="Approved Flyer",
+                style_summary="Approved preview",
+                preview_asset_id="A0001",
+                prompt="",
+                created_at=datetime.now(timezone.utc),
+                selected_at=datetime.now(timezone.utc),
+            )
+        ],
+        "selected_concept_id": "C1",
+    })
+
+    with _pytest.raises(FlyerRenderError, match=r"^final package requires an approved preview$"):
+        render_final_package(project, tmp_path / "finals", model="deterministic-renderer", quality="medium")
+
+
+def test_source_edit_final_package_without_selection_fails_closed(tmp_path, monkeypatch):
+    import pytest as _pytest
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    project = _complete_project().model_copy(update={
+        "status": "manual_edit_required",
+        "raw_request": "Edit uploaded flyer/source artwork. Customer requested: Remove extra 08:00.",
+        "assets": [],
+        "concepts": [],
+        "selected_concept_id": None,
+    })
+
+    with _pytest.raises(FlyerRenderError, match=r"^source edit final package requires an approved preview$"):
+        render_final_package(project, tmp_path / "finals", model="deterministic-renderer", quality="medium")
 
 
 def test_source_edit_final_package_without_raw_sidecar_fails_closed(tmp_path, monkeypatch):

@@ -2735,8 +2735,10 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
                 quality_report = inspect_rendered_asset(candidate, expected_width=1080, expected_height=1350, mime_type="image/png")
                 if quality_report.ok:
                     selected_preview = candidate
-    if source_edit_project and selected_preview is None:
-        raise FlyerRenderError("source edit final package requires an approved preview")
+    if selected_preview is None and (project.selected_concept_id or source_edit_project):
+        if source_edit_project:
+            raise FlyerRenderError("source edit final package requires an approved preview")
+        raise FlyerRenderError("final package requires an approved preview")
     formats: list[tuple[FlyerOutputFormat, str, tuple[int, int] | None]] = [
         ("whatsapp_image", "final_whatsapp_image", FINAL_FORMAT_PIXEL_SHAPES["whatsapp_image"]),
         ("instagram_post", "final_instagram_post", FINAL_FORMAT_PIXEL_SHAPES["instagram_post"]),
