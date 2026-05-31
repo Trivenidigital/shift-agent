@@ -120,6 +120,101 @@ def test_visual_qa_fails_when_required_price_missing(tmp_path):
     assert any("item:0:price" in b for b in report.blockers)
 
 
+def test_visual_qa_fails_when_item_prices_are_swapped(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    project = _project().model_copy(update={
+        "locked_facts": [
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Fresh Meats", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:0:name", label="Item", value="Dosa", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:0:price", label="Price", value="$5", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:1:name", label="Item", value="Idli", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:1:price", label="Price", value="$6", source="customer_text", required=True),
+        ]
+    })
+    artifact = _write_sidecar(tmp_path, "Fresh Meats menu\nDosa $6\nIdli $5")
+
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert report.status == "failed"
+    assert any("item price mismatch: item:0 expected Dosa $5" in b for b in report.blockers)
+    assert any("item price mismatch: item:1 expected Idli $6" in b for b in report.blockers)
+
+
+def test_visual_qa_price_match_does_not_accept_prefix_price(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    project = _project().model_copy(update={
+        "locked_facts": [
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Fresh Meats", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:0:name", label="Item", value="Dosa", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:0:price", label="Price", value="$5", source="customer_text", required=True),
+        ]
+    })
+    artifact = _write_sidecar(tmp_path, "Fresh Meats menu\nDosa $5.99")
+
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert report.status == "failed"
+    assert "missing required visible fact: item:0:price" in report.blockers
+    assert any("item price mismatch: item:0 expected Dosa $5" in b for b in report.blockers)
+
+
+def test_visual_qa_price_match_requires_currency_for_currency_fact(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    project = _project().model_copy(update={
+        "locked_facts": [
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Fresh Meats", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:0:name", label="Item", value="Dosa", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:0:price", label="Price", value="$5", source="customer_text", required=True),
+        ]
+    })
+    artifact = _write_sidecar(tmp_path, "Fresh Meats menu\nDosa - 5 pieces")
+
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert report.status == "failed"
+    assert "missing required visible fact: item:0:price" in report.blockers
+    assert any("item price mismatch: item:0 expected Dosa $5" in b for b in report.blockers)
+
+
+def test_visual_qa_accepts_item_price_below_item_name(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    project = _project().model_copy(update={
+        "locked_facts": [
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Fresh Meats", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:0:name", label="Item", value="Dosa", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:0:price", label="Price", value="$5", source="customer_text", required=True),
+        ]
+    })
+    artifact = _write_sidecar(tmp_path, "Fresh Meats menu\nDosa\n$5")
+
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert report.status == "passed"
+    assert report.blockers == []
+
+
+def test_visual_qa_accepts_same_line_price_before_item_name(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    project = _project().model_copy(update={
+        "locked_facts": [
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Fresh Meats", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:0:name", label="Item", value="Dosa", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:0:price", label="Price", value="$5", source="customer_text", required=True),
+        ]
+    })
+    artifact = _write_sidecar(tmp_path, "Fresh Meats menu\n$5 Dosa")
+
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert report.status == "passed"
+    assert report.blockers == []
+
+
 def test_visual_qa_fails_when_required_schedule_missing(tmp_path):
     from agents.flyer.visual_qa import run_visual_qa
 

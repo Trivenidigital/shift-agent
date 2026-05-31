@@ -1355,10 +1355,26 @@ def flyer_campaign_source(text: str) -> str:
     return "new_flyer"
 
 
+_FLYER_APPROVAL_ALIASES = {
+    "approve",
+    "approved",
+    "ok",
+    "yes",
+    "looks good",
+    "go ahead",
+    "send it",
+    "finalize",
+    "finalise",
+}
+_FLYER_DELIVERY_STATE_APPROVAL_ALIASES = _FLYER_APPROVAL_ALIASES - {"ok", "yes"}
+_FLYER_FINAL_APPROVAL_STATUSES = {"revising_design", "awaiting_final_approval", "delivered_with_warning"}
+
+
 def is_flyer_approval_text(text: str) -> bool:
-    """Return True for the exact Flyer Studio final-approval reply."""
+    """Return True for exact Flyer Studio final-approval replies."""
     body = " ".join(flyer_visible_message_text(text).split())
-    return body.lower().strip(" .!,:;") == "approve"
+    normalized = body.lower().strip(" .!,:;")
+    return normalized in _FLYER_APPROVAL_ALIASES
 
 
 def flyer_routing_decision_preview(
@@ -1377,7 +1393,8 @@ def flyer_routing_decision_preview(
         active_project,
         has_media=has_media,
     )
-    if is_flyer_approval_text(body):
+    active_status = str((active_project or {}).get("status") or "")
+    if is_flyer_approval_text(body) and active_status in _FLYER_FINAL_APPROVAL_STATUSES:
         route = "approval"
         reason = "approval_text"
     elif fresh_bypasses_active:
@@ -1389,7 +1406,7 @@ def flyer_routing_decision_preview(
     elif is_flyer_project_status_request(body):
         route = "status_reply"
         reason = "status_request"
-    elif active_project and str(active_project.get("status") or "") == "manual_edit_required":
+    elif active_project and active_status == "manual_edit_required":
         route = "manual_queue"
         reason = "active_manual_review_project"
     elif active_project and is_flyer_revision_intent(body):
@@ -3206,9 +3223,9 @@ def is_flyer_delivery_state_intent(text: str) -> bool:
         return True
     if is_flyer_send_now_intent(text):
         return True
-    # Bare "approve" / "approve." — match is_flyer_approval_text semantics
-    # so the two checks stay consistent.
-    return lowered.strip(" .!,:;") == "approve"
+    # Exact non-generic approval aliases. Bare "ok" / "yes" are meaningful
+    # only when an active finalizable project already gates the approval path.
+    return lowered.strip(" .!,:;") in _FLYER_DELIVERY_STATE_APPROVAL_ALIASES
 
 
 def is_flyer_account_command(text: str) -> bool:

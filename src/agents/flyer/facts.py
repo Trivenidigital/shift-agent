@@ -186,6 +186,11 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
         r"(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,60}?)\s*(?:-|:)?\s*\$\s*(?P<price>\d+(?:\.\d{2})?)",
         flags=re.IGNORECASE,
     )
+    compact_name_before_price = re.compile(
+        r"(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,60}?)\s*[-:]\s*\$?(?P<price>\d+(?:\.\d{1,2})?)\s*"
+        r"(?:each|plate|per\s+plate)\b",
+        flags=re.IGNORECASE,
+    )
     price_before_name = re.compile(
         r"\$\s*(?P<price>\d+(?:\.\d{2})?)\s*(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,50})",
         flags=re.IGNORECASE,
@@ -203,6 +208,9 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
             name,
             flags=re.IGNORECASE,
         ).strip()
+        name = re.sub(r"^.*\b[a-z][a-z0-9 '&/-]*-\s*\d+\s*(?:pcs?|pieces?)\s+", "", name, flags=re.IGNORECASE).strip()
+        name = re.sub(r"^.*\b(?:menu|items?|include|including)\s+", "", name, flags=re.IGNORECASE).strip()
+        name = re.sub(r"^(?:each|plate|per\s+plate|pc|piece)\s+", "", name, flags=re.IGNORECASE).strip()
         name = re.sub(r"^(?:and|with|include|includes|feature|features|featuring)\s+", "", name, flags=re.IGNORECASE)
         if not name or name.lower() in seen:
             return
@@ -217,11 +225,17 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
             return
         if category_suffix and category_suffix.lower() not in lowered:
             name = f"{name.title()} {category_suffix}"
-        if name.lower() in {"and", "with", "include", "includes", "for", "on", "at"}:
+        if name.lower() in {"a", "an", "the", "and", "with", "include", "includes", "for", "on", "at", "each", "plate", "pc", "pcs", "piece", "pieces"}:
             return
         if name.lower() in {"any item", "all item", "all items", "every item", "each item"}:
             return
         if promo_name.search(name) or bad_context.search(name):
+            return
+        if re.search(
+            r"\b(?:morning|evening|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b.*\b\d{1,2}\s*(?:am|pm)\b"
+            r"|\b\d{1,2}\s*(?:am|pm)\b",
+            lowered,
+        ):
             return
         if len(name.split()) > 5:
             return
@@ -235,6 +249,8 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
 
     for segment in re.split(r"[\n\r,;]+", text or ""):
         for match in price_for_name.finditer(segment):
+            add_item(match.group("name"), f"${match.group('price')}")
+        for match in compact_name_before_price.finditer(segment):
             add_item(match.group("name"), f"${match.group('price')}")
         for match in name_before_price.finditer(segment):
             add_item(match.group("name"), f"${match.group('price')}")

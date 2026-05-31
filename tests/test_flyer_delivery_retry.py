@@ -759,6 +759,47 @@ def test_delivery_report_summarizes_actionable_project_status(tmp_path, monkeypa
     assert report["issues"][0]["pending_asset_ids"] == ["A0004"]
 
 
+def test_delivery_report_ignores_optional_final_assets_not_in_manifest(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    mod = _load_report_script()
+    project = _project(tmp_path).model_copy(update={
+        "status": "finalizing_assets",
+        "final_asset_ids": ["A0001"],
+        "assets": [
+            _asset("A0001", "final_whatsapp_image", str(tmp_path / "wa.png"), status="sent", mid="wamid.1"),
+            _asset("A0002", "final_instagram_post", str(tmp_path / "post.png"), status="pending"),
+            _asset("A0003", "final_instagram_story", str(tmp_path / "story.png"), status="pending"),
+            _asset("A0004", "final_printable_pdf", str(tmp_path / "print.pdf"), status="pending"),
+        ],
+    })
+
+    report = mod.build_delivery_report(FlyerProjectStore(projects=[project]))
+
+    assert report["ok"] is True
+    assert report["issues_total"] == 0
+    assert report["pending_assets"] == 0
+
+
+def test_delivery_report_flags_missing_final_asset_manifest_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    mod = _load_report_script()
+    project = _project(tmp_path).model_copy(update={
+        "status": "finalizing_assets",
+        "final_asset_ids": ["A9999"],
+        "assets": [
+            _asset("A0001", "final_whatsapp_image", str(tmp_path / "wa.png"), status="sent", mid="wamid.1"),
+        ],
+    })
+
+    report = mod.build_delivery_report(FlyerProjectStore(projects=[project]))
+
+    assert report["ok"] is False
+    assert report["issues_total"] == 1
+    assert report["pending_assets"] == 1
+    assert report["issues"][0]["pending_asset_ids"] == ["A9999"]
+    assert report["issues"][0]["action"] == "retry_send_flyer_package"
+
+
 def test_delivery_report_ignores_legacy_delivered_assets_without_delivery_fields(tmp_path, monkeypatch):
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     mod = _load_report_script()

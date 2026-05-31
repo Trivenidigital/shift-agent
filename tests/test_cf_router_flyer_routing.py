@@ -78,6 +78,54 @@ def test_explicit_new_flyer_request_should_not_attach_to_active_project():
     )
 
 
+def test_flyer_final_approval_accepts_normal_whatsapp_confirmations():
+    actions = _load_actions()
+
+    for text in [
+        "APPROVE",
+        "Approve.",
+        "approved",
+        "OK",
+        "ok.",
+        "yes",
+        "looks good",
+        "go ahead",
+        "send it",
+        "finalize",
+    ]:
+        assert actions.is_flyer_approval_text(text), text
+
+    for text in [
+        "approve if you can change the price",
+        "ok change dosa to idli",
+        "looks good but make phone smaller",
+        "yes add more items",
+    ]:
+        assert not actions.is_flyer_approval_text(text), text
+
+
+def test_flyer_routing_preview_approval_aliases_are_status_gated():
+    actions = _load_actions()
+
+    finalizable = {"project_id": "F0062", "status": "awaiting_final_approval"}
+    intake = {"project_id": "F0063", "status": "collecting_required_info"}
+
+    assert actions.flyer_routing_decision_preview("ok", active_project=finalizable)["route"] == "approval"
+    assert actions.flyer_routing_decision_preview("ok", active_project=intake)["route"] != "approval"
+
+
+def test_flyer_delivery_state_intent_tracks_final_approval_aliases():
+    actions = _load_actions()
+
+    assert actions.is_flyer_delivery_state_intent("approved")
+    assert actions.is_flyer_delivery_state_intent("looks good")
+
+    assert not actions.is_flyer_delivery_state_intent("ok")
+    assert not actions.is_flyer_delivery_state_intent("yes")
+    assert not actions.is_flyer_delivery_state_intent("ok change dosa to idli")
+    assert not actions.is_flyer_delivery_state_intent("looks good but make phone smaller")
+
+
 def test_media_price_change_is_new_template_work_not_logo_upload():
     actions = _load_actions()
 
