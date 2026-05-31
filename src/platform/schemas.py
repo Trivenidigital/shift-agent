@@ -4566,8 +4566,8 @@ class CateringQuoteSkillFailed(_BaseEntry):
         # used by generate_unique_code (no visually-ambiguous chars).
         # Without the pattern, a future external caller could land malformed
         # rows in decisions.log; min_length alone wouldn't catch "ABCDEF".
-        pattern=r"^#[A-HJ-NP-Z2-9]{5}$",
-        description="Owner approval code, format #XXXXX (no I/O/0/1)",
+        pattern=r"^#[A-HJKMNPQR-Z2-9]{5}$",
+        description="Owner approval code, format #XXXXX (no I/O/0/1/L)",
     )
     reason: Literal[
         "missing_quote_text",       # --quote-text-stdin not provided OR empty

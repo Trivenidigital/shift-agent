@@ -172,7 +172,7 @@ The `fromMe` flag in the block is **informational only**. Owner routing is gated
 
 Inspect the inbound and pick exactly one shape:
 
-- `approval_code` — message body matches `#[A-HJ-NP-Z2-9]{5}` regex (with or without trailing verb like `yes`/`no`/`approve`/`deny`/`retry`/`cancel`).
+- `approval_code` — message body matches `#[A-HJKMNPQR-Z2-9]{5}` regex (with or without trailing verb like `yes`/`no`/`approve`/`deny`/`retry`/`cancel`).
 - `image_with_caption` — Hermes image-cache marker visible (`[The user sent an image but I couldn't quite see it...]` or `mediaType=image` indicator) AND caption text exists.
 - `image_only` — image marker visible, caption empty.
 - `media_other` — audio / document / video / sticker (use this for documents too unless the caption says "menu").
@@ -181,7 +181,7 @@ Inspect the inbound and pick exactly one shape:
 When the message is a code, decide which state file to look it up in by running these greps in this order:
 
 ```bash
-grep -oE '#[A-HJ-NP-Z2-9]{5}' <<<"<message_text>" | head -1   # extract first code
+grep -oE '#[A-HJKMNPQR-Z2-9]{5}' <<<"<message_text>" | head -1   # extract first code
 # Look up across the four pools, in this priority:
 jq --arg c "$CODE" '.confirmation_code == $c' /opt/shift-agent/state/catering-menu-pending.json   # menu pending → apply_catering_menu_decision
 jq --arg c "$CODE" '.leads[] | select(.owner_approval_code == $c) | select(.status != "CLOSED" and .status != "OWNER_REJECTED" and .status != "STALE")' /opt/shift-agent/state/catering-leads.json   # catering lead → handle_catering_owner_approval

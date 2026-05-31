@@ -64,7 +64,7 @@ NO_HANDLER_FOUND = "<no-handler-found>"
 #   2. Update fixtures + mock to reflect any new priority rules
 #   3. Update SKILL_MD_KNOWN_SHA256 below to the new hash
 #   4. Document the change in the commit message
-SKILL_MD_KNOWN_SHA256 = "337f791eaae5229a0dcb875dafecd83967f2fe6d7700acbdc78ab8d0fcdf71c0"
+SKILL_MD_KNOWN_SHA256 = "a658a26c01c401463948b4ec0f719c76f16efcfe634f80aaf4b6066da0a8d3e7"
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -315,7 +315,7 @@ def mock_llm_priority_order(skill_md: str, input_payload: dict) -> tuple[str, st
 
     # Extract code if present.
     import re
-    code_match = re.search(r"#[A-HJ-NP-Z2-9]{5}", body)
+    code_match = re.search(r"#[A-HJKMNPQR-Z2-9]{5}", body)
     code = code_match.group(0) if code_match else None
 
     # Priority 1: code matches catering-menu-pending — owner-only since

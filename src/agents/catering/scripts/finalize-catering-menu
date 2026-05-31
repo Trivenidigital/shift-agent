@@ -100,7 +100,7 @@ OWNER_CARD_RESEND_COOLDOWN_SECS = 60
 # legitimately resubmit a message that old.
 REPLAY_WINDOW_HOURS = 24
 
-CODE_PATTERN = r"^#[A-HJ-NP-Z2-9]{5}$"
+CODE_PATTERN = r"^#[A-HJKMNPQR-Z2-9]{5}$"
 
 
 def _validate_inputs(args) -> tuple[list[CateringSelectedItem], int]:

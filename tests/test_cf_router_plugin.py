@@ -511,6 +511,7 @@ class TestF8ParserEdgeCases:
             "#A1CDE approve",   # contains 1
             "#ABCD0 approve",   # contains 0
             "#ABCIE approve",   # contains I
+            "#ABCLE approve",   # contains L
             "#ABCOE approve",   # contains O
         ):
             with patch.object(actions_mod, "invoke_apply_owner_decision") as mock:

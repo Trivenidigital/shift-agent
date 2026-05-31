@@ -94,11 +94,11 @@ F7_PROPOSAL_BRANCH_ENABLED = True
 # follow-up PR after F7 primary-mode soaks in production.
 F7_WATCHDOG_TIMEOUT_SEC = 30
 
-# Owner-approval code regex — same alphabet as the deployed dispatcher
-# (`#[A-HJ-NP-Z2-9]{5}`, 28.6M-entry alphabet excluding I/O/0/1/L).
+# Owner-approval code regex — same alphabet as ProposalCode
+# (`#[A-HJKMNPQR-Z2-9]{5}`, excluding I/O/0/1/L).
 # No IGNORECASE: codes are emitted uppercase by generate_unique_code; the
 # dispatcher rejects lowercase, so matching lowercase here just adds surface.
-_CODE_PATTERN = re.compile(r"#([A-HJ-NP-Z2-9]{5})")
+_CODE_PATTERN = re.compile(r"#([A-HJKMNPQR-Z2-9]{5})")
 _SAMPLE_PROMPT_REQUEST = re.compile(
     r"\b(?:sample|example|starter)\s+(?:prompt|prompts|idea|ideas)\b"
     r"|\b(?:prompt|prompts)\s+(?:example|examples)\b"

@@ -1102,7 +1102,7 @@ See `docs/hermes-alignment.md` Part 2 for the silent-failure-ranked operational 
 
 ### Cross-cutting (not strictly v0.2 but surfaced in audit-fix review)
 
-- [ ] **V02-7 — Pre-existing dispatcher regex inconsistency** — `dispatch_shift_agent/SKILL.md:79` uses `#[A-HJ-NP-Z2-9]{5}` while canonical alphabet in `schemas.py:843` is `#[A-HJKMNPQR-Z2-9]{5}`. Both are functionally restrictive enough; the dispatcher's regex is stricter near the seam (excludes `K`/`M`). Unify to canonical regex everywhere — one PR, ~5 file edits, mostly tests. ~1 hour.
+- [x] **V02-7 — Pre-existing dispatcher regex inconsistency** — unified dispatcher, cf-router, catering apply/finalize, audit schema, and replay-helper approval-code regex surfaces to canonical `#[A-HJKMNPQR-Z2-9]{5}`. Added static parity test in `tests/test_schemas.py`, including generator `_CODE_ALPHA` literals.
 - [x] **V02-8 — jq syntax-validity assertion in audit test** — added Linux-only `test_v02_8_dispatcher_step3_jq_filters_are_syntax_valid`, which extracts each dispatcher Step-3 jq lookup and runs it against a minimal matching JSON fixture; skips cleanly when `jq` is unavailable. Claude Code review: CLEAN.
 
 ### From original v0.1 PR review (overnight-report carry-forward)
