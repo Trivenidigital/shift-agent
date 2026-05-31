@@ -430,6 +430,54 @@ def test_generation_detail_with_json_manual_review_status_counts_as_manual_revie
     )
 
 
+def test_generation_detail_with_json_provider_timeout_reason_counts_as_manual_review():
+    actions = _load_actions_module()
+    assert actions.flyer_generation_queued_manual_review(
+        '{"project_id":"F0064","manual_review_reason_code":"provider_timeout"}'
+    )
+
+
+def test_generation_detail_with_exit_wrapped_dependency_reason_counts_as_manual_review():
+    actions = _load_actions_module()
+    assert actions.flyer_generation_queued_manual_review(
+        'exit=2 {"project_id":"F0064","manual_review_reason_code":"dependency_missing"}'
+    )
+
+
+def test_generation_detail_with_unrelated_json_does_not_count_as_manual_review():
+    actions = _load_actions_module()
+    assert not actions.flyer_generation_queued_manual_review(
+        '{"project_id":"F0064","status":"generating_concepts","detail":"model running"}'
+    )
+
+
+def test_generation_detail_with_terminal_manual_status_reason_does_not_count_as_queued():
+    actions = _load_actions_module()
+    assert not actions.flyer_generation_queued_manual_review(
+        '{"project_id":"F0064","manual_review":{"status":"completed","reason_code":"visual_qa_failed"}}'
+    )
+
+
+def test_generation_detail_with_terminal_manual_status_overrides_top_level_reason_code():
+    actions = _load_actions_module()
+    assert not actions.flyer_generation_queued_manual_review(
+        '{"project_id":"F0064",'
+        '"manual_review":{"status":"closed_no_send","reason_code":"visual_qa_failed"},'
+        '"manual_review_reason_code":"visual_qa_failed"}'
+    )
+
+
+def test_manual_review_detection_reason_codes_stay_in_sync_with_schema():
+    actions = _load_actions_module()
+    from schemas import FlyerManualReviewReason
+    from typing import get_args
+
+    schema_reasons = {str(value) for value in get_args(FlyerManualReviewReason)}
+    queued_reasons = actions._manual_review_queued_reason_codes()
+
+    assert queued_reasons == schema_reasons - {"unclassified", "legacy_unknown"}
+
+
 def test_project_has_manual_review_queued_normalizes_status_and_accepts_in_progress():
     actions = _load_actions_module()
     assert actions.flyer_project_has_manual_review_queued(
