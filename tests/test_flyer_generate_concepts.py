@@ -404,6 +404,8 @@ def test_generate_deferred_source_edit_template_extracts_source_contract_before_
     assert "Lunch Menu" in values
     assert "Dinner Combo" in values
     assert persisted["status"] == "awaiting_final_approval"
+    assert "Edit the attached flyer image" in persisted["concepts"][0]["prompt"]
+    assert "Create a complete, finished customer-ready poster flyer" not in persisted["concepts"][0]["prompt"]
     audit_rows = [json.loads(line) for line in audit_log_path.read_text(encoding="utf-8").splitlines()]
     assert audit_rows[0]["type"] == "flyer_source_contract_extracted"
     assert audit_rows[0]["role"] == "source_edit_template"

@@ -38,9 +38,11 @@ PLACEHOLDER_RE = re.compile(
 )
 RAW_REQUEST_INSTRUCTION_RE = re.compile(
     r"\b(?:create|make|generate|design)\s+(?:a\s+)?(?:flyer|flier|poster|banner)\b"
-    r"|\b(?:flyer|flier|poster|banner)\s+for\b"
     r"|\bitems?\s+to\s+include\b"
     r"|\b(?:customer\s+request(?:ed)?|user\s+request(?:ed)?)\b"
+    r"|\brequested\s+edits?\s*:"
+    r"|\buse\s+(?:saved|stored|registered|account)?\s*(?:address|phone|contact|logo|business\s+name)\b"
+    r"|\b(?:saved|stored|registered|account)\s+(?:address|phone|contact|logo|business\s+name)\b"
     r"|\b(?:extract|take)\s+(?:item|items|prices?)\b"
     r"|\battaching\s+(?:a\s+)?(?:flyer|flier|poster|banner)\b",
     re.IGNORECASE,

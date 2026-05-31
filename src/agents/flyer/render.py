@@ -1996,6 +1996,10 @@ Rules:
 """
 
 
+def build_source_edit_generation_prompt(project: FlyerProject) -> str:
+    return _source_edit_prompt(project)
+
+
 def _openai_edit_size(size: tuple[int, int] | None) -> str:
     if size is None:
         return "1024x1536"
