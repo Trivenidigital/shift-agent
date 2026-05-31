@@ -1,7 +1,7 @@
 """WhatsApp-native onboarding contracts for Hermes Flyer Studio."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
 import subprocess
@@ -39,7 +39,9 @@ def _trial_customer(*, customer_id: str, business_name: str, phone: str, now: da
         "activated_at": now,
         "plan_started_at": now,
         "current_period_start": now,
-        "current_period_end": now.replace(month=now.month + 1),
+        # robust ~1-month period end: naive now.replace(month=now.month+1) builds an
+        # invalid date on month-ends (e.g. May 31 -> June 31) and on December.
+        "current_period_end": now + timedelta(days=31),
     })
 
 

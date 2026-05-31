@@ -1396,8 +1396,8 @@ def test_source_edit_preview_calls_openai_edit_api_with_reference_image(tmp_path
     assert b"Remove extra 08:00" in body
     assert b'name="image"; filename="reference.png"' in body
     manifest = json.loads(Path(f"{spec.path}.text.json").read_text(encoding="utf-8"))
-    assert manifest["verification_mode"] == "source_edit_integrity_only"
-    assert "inspect the preview visually" in " ".join(manifest["warnings"])
+    assert manifest["verification_mode"] == "source_edit_overlay_recomposed"
+    assert "re-composed" in " ".join(manifest["warnings"])
     qa = validate_text_manifest_file(
         spec.path,
         project_id=project.project_id,
@@ -1405,8 +1405,71 @@ def test_source_edit_preview_calls_openai_edit_api_with_reference_image(tmp_path
         output_format="concept_preview",
     )
     assert qa.ok is True
-    assert any("integrity only" in warning for warning in qa.warnings)
+    assert any("re-composed" in warning for warning in qa.warnings)
 
+
+def test_source_edit_preview_applies_deterministic_overlay(tmp_path, monkeypatch):
+    """Render-side robustness: source-edit output must carry the deterministic
+    critical-text overlay (new-flyer parity), so the generative-edit model's
+    omissions/garbles don't ship to QA. The raw model edit is preserved separately
+    so the final package can re-apply the overlay per format."""
+    reference = tmp_path / "reference.png"
+    reference.write_bytes(_png_bytes())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    project = _complete_project().model_copy(update={
+        "status": "manual_edit_required",
+        "raw_request": "Edit uploaded flyer/source artwork. Customer requested: Remove extra 08:00.",
+        "assets": [
+            FlyerAsset(
+                asset_id="A0001",
+                kind="reference_image",
+                source="whatsapp",
+                path=str(reference),
+                mime_type="image/png",
+                sha256="a" * 64,
+                original_message_id="wamid.reference",
+                received_at=datetime.now(timezone.utc),
+            )
+        ],
+    })
+
+    overlay_calls = []
+
+    def _record_overlay(proj, source, target, *, size, output_format):
+        overlay_calls.append({"size": size, "output_format": output_format})
+        Path(target).write_bytes(Path(source).read_bytes())  # passthrough so inspect finds a file
+
+    monkeypatch.setattr(render_module, "apply_critical_text_overlay", _record_overlay)
+
+    class _Resp:
+        def __enter__(self):
+            png = base64.b64encode(_png_bytes(color=(40, 90, 50))).decode("ascii")
+            self._body = json.dumps({"data": [{"b64_json": png}]}).encode("utf-8")
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return self._body
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", lambda req, timeout: _Resp())
+
+    spec = render_source_edit_preview(project, tmp_path, provider="openai", model="gpt-image-1", quality="medium")
+
+    assert overlay_calls, "source-edit preview must apply the deterministic critical-text overlay"
+    assert overlay_calls[0]["output_format"] == "concept_preview"
+    assert overlay_calls[0]["size"] == (1080, 1350)
+    # raw model edit preserved separately for final-package re-overlay
+    assert render_module._raw_background_path(spec.path).exists()
+    assert spec.path.read_bytes().startswith(b"\x89PNG")
+    # #5 manifest truthfulness: the output is re-composed (deterministic overlay),
+    # so the manifest DECLARES the facts and must NOT claim pixel-preserving
+    # "source_edit_integrity_only".
+    manifest = json.loads(Path(f"{spec.path}.text.json").read_text(encoding="utf-8"))
+    assert manifest["verification_mode"] == "source_edit_overlay_recomposed"
+    assert manifest["expected_facts"], "source-edit manifest must declare the overlaid facts, not empty"
 
 
 def test_source_edit_integrity_manifest_allows_long_edit_instruction(tmp_path, monkeypatch):
@@ -1522,7 +1585,7 @@ def test_source_edit_preview_calls_openrouter_with_reference_image(tmp_path, mon
     assert content[1]["type"] == "image_url"
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
     manifest = json.loads(Path(f"{spec.path}.text.json").read_text(encoding="utf-8"))
-    assert manifest["verification_mode"] == "source_edit_integrity_only"
+    assert manifest["verification_mode"] == "source_edit_overlay_recomposed"
 
 
 def test_source_edit_preview_omitted_provider_fails_closed_to_manual_review(tmp_path, monkeypatch):
@@ -2221,6 +2284,193 @@ def test_non_eligible_final_package_uses_preview_directly_not_raw(tmp_path, monk
         assert final_img.getpixel((20, 20)) != raw_img.getpixel((20, 20))
 
 
+def test_source_edit_final_package_reapplies_overlay_per_format(tmp_path, monkeypatch):
+    """Render-side robustness (item 2): a SOURCE-EDIT final package re-applies the
+    deterministic overlay PER FORMAT from the raw model edit (contained, preserve
+    aspect) — new-flyer parity — instead of resizing one 4:5 composite. The raw is
+    written alongside the overlaid preview by render_source_edit_preview."""
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    approved = tmp_path / "F0001-C1-preview.png"
+    raw_bg = tmp_path / "F0001-C1-preview.raw.png"  # _raw_background_path(approved)
+    ref = tmp_path / "ref.png"
+    approved.write_bytes(_png_bytes(color=(20, 120, 40)))
+    raw_bg.write_bytes(_png_bytes(color=(140, 20, 20)))
+    ref.write_bytes(_png_bytes(color=(10, 10, 10)))
+    project = _complete_project().model_copy(update={
+        "status": "manual_edit_required",
+        "raw_request": "Edit uploaded flyer/source artwork. Customer requested: Remove extra 08:00.",
+        "assets": [
+            FlyerAsset(
+                asset_id="A0001", kind="concept_preview", source="rendered", path=str(approved),
+                mime_type="image/png", sha256="a" * 64, original_message_id="wamid.flyer.1",
+                received_at=datetime.now(timezone.utc),
+            ),
+            FlyerAsset(
+                asset_id="A0002", kind="reference_image", source="whatsapp", path=str(ref),
+                mime_type="image/png", sha256="b" * 64, original_message_id="wamid.flyer.1",
+                received_at=datetime.now(timezone.utc),
+            ),
+        ],
+        "concepts": [
+            FlyerConcept(
+                concept_id="C1", title="Edited", style_summary="Source edit",
+                preview_asset_id="A0001", prompt="", created_at=datetime.now(timezone.utc),
+            )
+        ],
+        "selected_concept_id": "C1",
+    })
+
+    overlay_calls = []
+
+    def _record_overlay(proj, source, target, *, size, output_format):
+        overlay_calls.append({"output_format": output_format, "size": size})
+        Path(target).write_bytes(Path(source).read_bytes())  # passthrough
+
+    monkeypatch.setattr(render_module, "apply_critical_text_overlay", _record_overlay)
+
+    render_final_package(project, tmp_path / "finals", model="openai/gpt-5.4-image-2", quality="high")
+
+    formats_overlaid = {c["output_format"] for c in overlay_calls}
+    assert {"whatsapp_image", "instagram_post", "instagram_story", "printable_pdf"} <= formats_overlaid, (
+        f"source-edit final package must re-apply the overlay per format; got {formats_overlaid}"
+    )
+
+
+def test_source_edit_final_package_ignores_stale_raw_guard_and_reapplies_overlay(tmp_path, monkeypatch):
+    """Source-edit finals must not resize the 4:5 approved preview just because the
+    raw sidecar mtime looks old. If raw exists, the source-edit contract is to
+    re-apply the deterministic overlay per output format."""
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    approved = tmp_path / "F0001-C1-preview.png"
+    raw_bg = tmp_path / "F0001-C1-preview.raw.png"
+    ref = tmp_path / "ref.png"
+    approved.write_bytes(_png_bytes(color=(20, 120, 40)))
+    raw_bg.write_bytes(_png_bytes(color=(140, 20, 20)))
+    ref.write_bytes(_png_bytes(color=(10, 10, 10)))
+    stale = datetime.now().timestamp() - 120
+    current = datetime.now().timestamp()
+    import os
+    os.utime(raw_bg, (stale, stale))
+    os.utime(approved, (current, current))
+    project = _complete_project().model_copy(update={
+        "status": "manual_edit_required",
+        "raw_request": "Edit uploaded flyer/source artwork. Customer requested: Remove extra 08:00.",
+        "assets": [
+            FlyerAsset(
+                asset_id="A0001", kind="concept_preview", source="rendered", path=str(approved),
+                mime_type="image/png", sha256="a" * 64, original_message_id="wamid.flyer.1",
+                received_at=datetime.now(timezone.utc),
+            ),
+            FlyerAsset(
+                asset_id="A0002", kind="reference_image", source="whatsapp", path=str(ref),
+                mime_type="image/png", sha256="b" * 64, original_message_id="wamid.flyer.1",
+                received_at=datetime.now(timezone.utc),
+            ),
+        ],
+        "concepts": [
+            FlyerConcept(
+                concept_id="C1", title="Edited", style_summary="Source edit",
+                preview_asset_id="A0001", prompt="", created_at=datetime.now(timezone.utc),
+            )
+        ],
+        "selected_concept_id": "C1",
+    })
+
+    overlay_calls = []
+    contained_sources = []
+
+    def _record_contained(source, target, *, size):
+        contained_sources.append(str(source))
+        Path(target).parent.mkdir(parents=True, exist_ok=True)
+        render_module._export_from_source_image(source, target, size=size)
+
+    def _record_overlay(proj, source, target, *, size, output_format):
+        overlay_calls.append({"output_format": output_format, "source": str(source)})
+        Path(target).write_bytes(Path(source).read_bytes())
+
+    monkeypatch.setattr(render_module, "_export_from_source_image_contained", _record_contained)
+    monkeypatch.setattr(render_module, "apply_critical_text_overlay", _record_overlay)
+
+    render_final_package(project, tmp_path / "finals", model="openai/gpt-5.4-image-2", quality="high")
+
+    formats_overlaid = {c["output_format"] for c in overlay_calls}
+    assert {"whatsapp_image", "instagram_post", "instagram_story", "printable_pdf"} <= formats_overlaid
+    assert contained_sources == [str(raw_bg), str(raw_bg), str(raw_bg), str(raw_bg)]
+
+
+def test_source_edit_final_package_without_selected_preview_fails_closed(tmp_path, monkeypatch):
+    import pytest as _pytest
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    ref = tmp_path / "ref.png"
+    ref.write_bytes(_png_bytes(color=(10, 10, 10)))
+    project = _complete_project().model_copy(update={
+        "status": "manual_edit_required",
+        "raw_request": "Edit uploaded flyer/source artwork. Customer requested: Remove extra 08:00.",
+        "assets": [
+            FlyerAsset(
+                asset_id="A0002", kind="reference_image", source="whatsapp", path=str(ref),
+                mime_type="image/png", sha256="b" * 64, original_message_id="wamid.flyer.1",
+                received_at=datetime.now(timezone.utc),
+            ),
+        ],
+        "concepts": [],
+        "selected_concept_id": "C1",
+    })
+
+    with _pytest.raises(FlyerRenderError, match="source edit final package requires an approved preview"):
+        render_final_package(project, tmp_path / "finals", model="openai/gpt-5.4-image-2", quality="high")
+
+
+def test_not_background_eligible_source_edit_final_still_reapplies_overlay(tmp_path, monkeypatch):
+    """A source-edit that ALSO requests reference extraction is NOT
+    background-only-eligible, so pre-fix it took the direct/no-overlay branch.
+    It must still re-apply the deterministic overlay per format (item 2 / Edit A)."""
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    approved = tmp_path / "F0001-C1-preview.png"
+    raw_bg = tmp_path / "F0001-C1-preview.raw.png"
+    ref = tmp_path / "ref.png"
+    approved.write_bytes(_png_bytes(color=(20, 120, 40)))
+    raw_bg.write_bytes(_png_bytes(color=(140, 20, 20)))
+    ref.write_bytes(_png_bytes(color=(10, 10, 10)))
+    project = _complete_project().model_copy(update={
+        "status": "manual_edit_required",
+        # source-edit marker AND an extract request -> NOT background-only eligible.
+        "raw_request": "Edit uploaded flyer/source artwork. Customer requested: extract the items and prices from the attached sample and refresh them.",
+        "assets": [
+            FlyerAsset(
+                asset_id="A0001", kind="concept_preview", source="rendered", path=str(approved),
+                mime_type="image/png", sha256="a" * 64, original_message_id="wamid.flyer.1",
+                received_at=datetime.now(timezone.utc),
+            ),
+            FlyerAsset(
+                asset_id="A0002", kind="reference_image", source="whatsapp", path=str(ref),
+                mime_type="image/png", sha256="b" * 64, original_message_id="wamid.flyer.1",
+                received_at=datetime.now(timezone.utc),
+            ),
+        ],
+        "concepts": [
+            FlyerConcept(
+                concept_id="C1", title="Edited", style_summary="Source edit",
+                preview_asset_id="A0001", prompt="", created_at=datetime.now(timezone.utc),
+            )
+        ],
+        "selected_concept_id": "C1",
+    })
+
+    overlay_calls = []
+
+    def _record_overlay(proj, source, target, *, size, output_format):
+        overlay_calls.append(output_format)
+        Path(target).write_bytes(Path(source).read_bytes())
+
+    monkeypatch.setattr(render_module, "apply_critical_text_overlay", _record_overlay)
+    render_final_package(project, tmp_path / "finals", model="openai/gpt-5.4-image-2", quality="high")
+
+    assert {"whatsapp_image", "instagram_post", "instagram_story", "printable_pdf"} <= set(overlay_calls), (
+        f"not-eligible source-edit final must still re-apply overlay per format; got {set(overlay_calls)}"
+    )
+
+
 def test_breakfast_menu_facts_are_customer_flyer_copy_not_raw_prompt():
     project = _complete_project().model_copy(update={
         "fields": FlyerRequestFields(
@@ -2379,7 +2629,8 @@ def test_final_package_reuses_selected_concept_with_deterministic_model(tmp_path
         assert final_img.getpixel((20, 20)) == approved_img.getpixel((20, 20))
 
 
-def test_source_edit_final_package_reuses_approved_preview_even_with_deterministic_model(tmp_path, monkeypatch):
+def test_source_edit_final_package_without_raw_sidecar_fails_closed(tmp_path, monkeypatch):
+    import pytest as _pytest
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     approved = tmp_path / "F0001-C1-preview.png"
     approved.write_bytes(_png_bytes(size=(1080, 1350), color=(20, 120, 40)))
@@ -2411,18 +2662,16 @@ def test_source_edit_final_package_reuses_approved_preview_even_with_determinist
         "selected_concept_id": "C1",
     })
 
-    specs = render_final_package(project, tmp_path / "finals", model="deterministic-renderer", quality="medium")
-
-    from PIL import Image
-    whatsapp = next(spec for spec in specs if spec.output_format == "whatsapp_image")
-    with Image.open(whatsapp.path) as img:
-        assert img.getpixel((540, 675)) == (20, 120, 40)
+    with _pytest.raises(FlyerRenderError, match="source edit final package requires raw edited background sidecar"):
+        render_final_package(project, tmp_path / "finals", model="deterministic-renderer", quality="medium")
 
 
 def test_authorized_source_artwork_update_is_treated_as_source_edit_for_finals(tmp_path, monkeypatch):
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     approved = tmp_path / "F0001-C1-preview.png"
+    raw_bg = tmp_path / "F0001-C1-preview.raw.png"
     approved.write_bytes(_png_bytes(size=(1080, 1350), color=(40, 30, 150)))
+    raw_bg.write_bytes(_png_bytes(size=(1080, 1350), color=(90, 90, 90)))
     asset = FlyerAsset(
         asset_id="A0001",
         kind="concept_preview",
@@ -2455,7 +2704,7 @@ def test_authorized_source_artwork_update_is_treated_as_source_edit_for_finals(t
 
     whatsapp = next(spec for spec in specs if spec.output_format == "whatsapp_image")
     manifest = json.loads(Path(f"{whatsapp.path}.text.json").read_text(encoding="utf-8"))
-    assert manifest["verification_mode"] == "source_edit_integrity_only"
+    assert manifest["verification_mode"] == "source_edit_overlay_recomposed"
 
 
 def test_is_source_edit_project_requires_marker_or_reference_image(tmp_path, monkeypatch):
