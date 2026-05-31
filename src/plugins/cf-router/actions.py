@@ -23,7 +23,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional, get_args
 
 # Deployed-system paths (mutable for tests)
 CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
@@ -4239,8 +4239,74 @@ def flyer_project_has_manual_review_queued(project: Optional[dict]) -> bool:
     )
 
 
+_FALLBACK_MANUAL_REVIEW_REASON_CODES = {
+    "reference_low_confidence",
+    "reference_provider_unavailable",
+    "reference_unsupported",
+    "reference_not_run",
+    "visual_qa_failed",
+    "source_edit_provider_unavailable",
+    "operator_request",
+    "policy_block",
+    "provider_timeout",
+    "dependency_missing",
+    "missing_required_facts",
+}
+
+
+def _manual_review_queued_reason_codes() -> set[str]:
+    try:
+        _ensure_platform_path()
+        from schemas import FlyerManualReviewReason  # type: ignore
+        reason_codes = {str(value) for value in get_args(FlyerManualReviewReason)}
+    except Exception:
+        reason_codes = set(_FALLBACK_MANUAL_REVIEW_REASON_CODES)
+    return reason_codes - {"unclassified", "legacy_unknown"}
+
+
+def _iter_generation_detail_json_objects(detail: str) -> Iterator[dict[str, Any]]:
+    decoder = json.JSONDecoder()
+    text = str(detail or "")
+    for idx, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            obj, _end = decoder.raw_decode(text[idx:])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(obj, dict):
+            yield obj
+
+
+def _generation_payload_has_manual_review(payload: dict[str, Any]) -> bool:
+    queued_reason_codes = _manual_review_queued_reason_codes()
+    manual = payload.get("manual_review")
+    if isinstance(manual, dict):
+        manual_status = str(manual.get("status") or "").strip().lower()
+        if manual_status in {"queued", "in_progress"}:
+            return True
+        if manual_status:
+            return False
+        reason_code = str(manual.get("reason_code") or "").strip().lower()
+        if reason_code in queued_reason_codes:
+            return True
+    reason_code = str(payload.get("manual_review_reason_code") or "").strip().lower()
+    return reason_code in queued_reason_codes
+
+
 def flyer_generation_queued_manual_review(detail: str) -> bool:
-    detail_lower = str(detail or "").lower()
+    detail_text = str(detail or "")
+    payloads = list(_iter_generation_detail_json_objects(detail_text))
+    saw_structured_manual_signal = False
+    for payload in payloads:
+        if "manual_review_reason_code" in payload or isinstance(payload.get("manual_review"), dict):
+            saw_structured_manual_signal = True
+        if _generation_payload_has_manual_review(payload):
+            return True
+    if saw_structured_manual_signal:
+        return False
+
+    detail_lower = detail_text.lower()
     if "reference_extraction_failed" in detail_lower:
         return True
     if "source_edit_failed" in detail_lower:
