@@ -43,6 +43,7 @@ _PHONE_DIGITS_RE = re.compile(r"\D+")
 # Anchors the digit-only comparison to a contiguous visual phone block so a
 # stray "17" elsewhere in the OCR doesn't glue onto the locked phone's digits.
 _PHONE_RUN_RE = re.compile(r"[\d\s\-().+/]{8,}")
+_PRICE_AMOUNT_RE = re.compile(r"(?<![a-z0-9.])(?P<currency>[$₹])?\s*(?P<amount>\d+(?:[.,]\d{1,2})?)(?![a-z0-9.]|[.,]\d)")
 REGIONAL_SCRIPT_RE = re.compile(r"[\u0900-\u097F\u0A00-\u0A7F\u0A80-\u0AFF\u0B80-\u0BFF\u0C00-\u0C7F\u0C80-\u0CFF\u0D00-\u0D7F]")
 OPERATIONAL_CLAIM_PATTERNS = (
     ("delivery", re.compile(r"\b(?:whats\s*app|whatsapp)?\s*delivery\b|\bwe\s+deliver\b", re.IGNORECASE)),
@@ -84,6 +85,32 @@ def _phone_value_present_in(text: str, fact_value: str) -> bool:
     for run in _PHONE_RUN_RE.findall(text):
         run_digits = _PHONE_DIGITS_RE.sub("", run)
         if value_digits in run_digits:
+            return True
+    return False
+
+
+def _price_cents(value: str) -> int | None:
+    match = re.search(r"\d+(?:[.,]\d{1,2})?", value or "")
+    if not match:
+        return None
+    raw = match.group(0).replace(",", ".")
+    whole, dot, cents = raw.partition(".")
+    cents = (cents + "00")[:2] if dot else "00"
+    try:
+        return int(whole) * 100 + int(cents)
+    except ValueError:
+        return None
+
+
+def _price_value_present_in(text: str, fact_value: str) -> bool:
+    expected = _price_cents(fact_value)
+    if expected is None:
+        return False
+    requires_currency = bool(re.search(r"[$₹]", fact_value or ""))
+    for match in _PRICE_AMOUNT_RE.finditer(text or ""):
+        if requires_currency and not match.group("currency"):
+            continue
+        if _price_cents(match.group("amount")) == expected:
             return True
     return False
 
@@ -166,6 +193,7 @@ def _value_present_in(
     phone_match: bool = False,
     address_match: bool = False,
     schedule_match: bool = False,
+    price_match: bool = False,
 ) -> bool:
     """Smart presence check for a locked-fact value in the OCR'd text.
 
@@ -185,6 +213,8 @@ def _value_present_in(
         return _address_value_present_in(normalized_text, fact_value)
     if schedule_match:
         return _schedule_value_present_in(normalized_text, fact_value)
+    if price_match:
+        return _price_value_present_in(normalized_text, fact_value)
     normalized_value = _normalize_text_for_match(fact_value)
     return _text_value_present_in(normalized_text, normalized_value)
 
@@ -228,6 +258,73 @@ def _item_name_present(raw_text: str, value: str) -> bool:
     return False
 
 
+def _name_pattern(value: str) -> re.Pattern[str] | None:
+    tokens = re.findall(r"[a-z0-9]+", _normalize_text_for_match(value))
+    if not tokens:
+        return None
+    return re.compile(r"(?<![a-z0-9])" + r"[^a-z0-9]+".join(re.escape(token) for token in tokens) + r"(?![a-z0-9])", re.IGNORECASE)
+
+
+def _item_price_pair_present(raw_text: str, name: str, price: str, *, all_item_names: list[str]) -> bool:
+    name_re = _name_pattern(name)
+    if name_re is None:
+        return False
+    other_name_patterns = [
+        pattern
+        for other in all_item_names
+        if _normalize_text_for_match(other) != _normalize_text_for_match(name)
+        for pattern in [_name_pattern(other)]
+        if pattern is not None
+    ]
+    lines = [line for line in (raw_text or "").splitlines() if line.strip()]
+    for line_index, line in enumerate(lines):
+        for match in name_re.finditer(line):
+            previous_start = 0
+            end = len(line)
+            for other_re in other_name_patterns:
+                previous_match = None
+                for candidate in other_re.finditer(line[:match.start()]):
+                    previous_match = candidate
+                if previous_match:
+                    previous_start = max(previous_start, previous_match.end())
+                other_match = other_re.search(line, match.end())
+                if other_match:
+                    end = min(end, other_match.start())
+            same_item_segment = f"{line[previous_start:match.start()]} {line[match.start():end]}"
+            candidate_segments = [same_item_segment]
+            for adjacent_index in (line_index - 1, line_index + 1):
+                if 0 <= adjacent_index < len(lines):
+                    adjacent = lines[adjacent_index]
+                    if not any(other_re.search(adjacent) for other_re in other_name_patterns):
+                        candidate_segments.append(adjacent)
+            if any(_price_value_present_in(segment, price) for segment in candidate_segments):
+                return True
+    return False
+
+
+def _item_price_pair_blockers(project: FlyerProject, raw_text: str) -> list[str]:
+    item_re = re.compile(r"^item:(?P<index>\d+):(?P<kind>name|price)$")
+    records: dict[int, dict[str, str]] = {}
+    for fact in project.locked_facts:
+        if not fact.required:
+            continue
+        match = item_re.match(fact.fact_id)
+        if not match:
+            continue
+        index = int(match.group("index"))
+        records.setdefault(index, {})[match.group("kind")] = str(fact.value or "")
+    all_names = [record["name"] for _index, record in sorted(records.items()) if record.get("name")]
+    blockers: list[str] = []
+    for index, record in sorted(records.items()):
+        name = record.get("name", "").strip()
+        price = record.get("price", "").strip()
+        if not name or not price:
+            continue
+        if not _item_price_pair_present(raw_text, name, price, all_item_names=all_names):
+            blockers.append(f"item price mismatch: item:{index} expected {name} {price}")
+    return blockers
+
+
 def _campaign_title_present(normalized_text: str, value: str) -> bool:
     normalized_value = _normalize_text_for_match(value)
     if _text_value_present_in(normalized_text, normalized_value):
@@ -248,6 +345,8 @@ def _semantic_visible_fact_present(fact_id: str, label: str, value: str, normali
     normalized_value = _normalize_text_for_match(value)
     if fact_id.startswith("item:") and fact_id.endswith(":name"):
         return _item_name_present(raw_text, value)
+    if fact_id.startswith("item:") and fact_id.endswith(":price"):
+        return _price_value_present_in(raw_text, value)
     if fact_id in {"campaign_title", "headline"}:
         return _campaign_title_present(normalized_text, value)
     if fact_id == "pricing_structure" or "pricing" in context:
@@ -713,8 +812,10 @@ def run_visual_qa(
             ),
             address_match=fact.fact_id == "location" or "address" in fact.label.casefold() or "location" in fact.label.casefold(),
             schedule_match=fact.fact_id == "schedule" or "schedule" in fact.label.casefold(),
+            price_match=fact.fact_id.endswith(":price") or "price" in fact.label.casefold(),
         ):
             blockers.append(f"missing required visible fact: {fact.fact_id}")
+    blockers.extend(_item_price_pair_blockers(project, extracted_text))
     # Source-contract negative-assertion gate: any value in
     # forbidden_substrings (populated upstream from brand/phone/address
     # replacements) must NOT appear in the OCR text. Reuses the same

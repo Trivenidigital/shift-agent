@@ -169,6 +169,56 @@ def test_extract_text_facts_applies_generic_any_item_price_to_all_included_items
     assert all("price any" not in fact.value.lower() for fact in facts)
 
 
+def test_extract_text_facts_handles_compact_menu_price_shorthand():
+    from agents.flyer.facts import extract_text_facts, facts_by_id
+
+    raw_request = (
+        "Create a flyer for breakfast menu Idli-$1each Dosa-$2each "
+        "Upma-5plate Gaarelu-$1each Morning 8am to 10am, Monday to Friday"
+    )
+    fields = FlyerRequestFields(
+        event_or_business_name="Breakfast Menu",
+        contact_info="+19802005022",
+        notes=raw_request,
+    )
+
+    facts = extract_text_facts(fields, raw_request, message_id="m-breakfast")
+    by_id = facts_by_id(type("P", (), {"locked_facts": facts})())
+
+    assert [by_id[f"item:{idx}:name"].value for idx in range(4)] == [
+        "Idli",
+        "Dosa",
+        "Upma",
+        "Gaarelu",
+    ]
+    assert [by_id[f"item:{idx}:price"].value for idx in range(4)] == ["$1", "$2", "$5", "$1"]
+    poisoned = " ".join(fact.value.lower() for fact in facts)
+    assert "each dosa" not in poisoned
+    assert "each upma" not in poisoned
+    assert "morning 8am" not in poisoned
+
+
+def test_extract_text_facts_does_not_treat_quantity_pieces_as_price():
+    from agents.flyer.facts import extract_text_facts, facts_by_id
+
+    raw_request = "Create a snacks flyer with Samosa-6pcs Chai-$2each Coffee-$3each"
+    fields = FlyerRequestFields(
+        event_or_business_name="Snack Menu",
+        contact_info="+19802005022",
+        notes=raw_request,
+    )
+
+    facts = extract_text_facts(fields, raw_request, message_id="m-snacks")
+    by_id = facts_by_id(type("P", (), {"locked_facts": facts})())
+
+    assert by_id["item:0:name"].value == "Chai"
+    assert by_id["item:0:price"].value == "$2"
+    assert by_id["item:1:name"].value == "Coffee"
+    assert by_id["item:1:price"].value == "$3"
+    assert "item:2:name" not in by_id
+    assert "samosa" not in " ".join(fact.value.lower() for fact in facts)
+
+
 def test_extract_text_facts_locks_all_you_can_eat_offer_price():
     from agents.flyer.facts import extract_text_facts, facts_by_id
 
