@@ -6581,7 +6581,12 @@ def _sample_project_dict(status: str = "awaiting_concept_selection",
             "style_summary": "warm tones", "preview_asset_id": "A0001",
         }],
         "assets": [{"asset_id": "A0001", "path": "/tmp/preview.png"}],
-        "locked_facts": [{"fact_id": "business_name", "value": "Lakshmi's Kitchen"}],
+        "locked_facts": [
+            {"fact_id": "business_name", "value": "Lakshmi's Kitchen"},
+            {"fact_id": "campaign_title", "value": "Dosa Night"},
+            {"fact_id": "offer:0", "value": "Pick Any 4 Dosa for $20"},
+            {"fact_id": "contact_phone", "value": "+1 980-200-5022"},
+        ],
     }
     if with_warning:
         project["warning"] = {
@@ -6676,7 +6681,7 @@ def test_send_concept_preview_media_pin_c_customer_text_replaces_trailing_cta(mo
 
 
 def test_send_concept_preview_media_default_cta_when_customer_text_none(monkeypatch):
-    """qa_policy='strict' with no customer_text uses the pre-PR CTA verbatim."""
+    """qa_policy='strict' with no customer_text sends a fact checklist before APPROVE."""
     actions = _load_actions()
     bridge_calls = _install_send_media_fakes(monkeypatch, actions)
     project = _sample_project_dict()
@@ -6685,7 +6690,11 @@ def test_send_concept_preview_media_default_cta_when_customer_text_none(monkeypa
     )
     assert ok is True
     cta_call = next(c for c in bridge_calls if c[0] == "bridge_post")
-    assert cta_call[1][1] == "Reply APPROVE to receive final files, or reply with changes."
+    assert "Please check these details before approving:" in cta_call[1][1]
+    assert "Business: Lakshmi's Kitchen" in cta_call[1][1]
+    assert "Title: Dosa Night" in cta_call[1][1]
+    assert "Offer: Pick Any 4 Dosa for $20" in cta_call[1][1]
+    assert cta_call[1][1].endswith("Reply APPROVE to receive final files, or reply with changes.")
 
 
 def test_dispatch_concept_preview_send_routes_warn_tier_to_warn_wrapper(monkeypatch, tmp_path):

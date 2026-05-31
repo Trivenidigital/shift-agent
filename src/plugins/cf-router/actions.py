@@ -4526,9 +4526,16 @@ def _send_concept_preview_media(
             PROJECT_ACTIONS as _PA_CTA, build_action_context_for_command as _bac_cta,
         )
     # Pin C — customer_text override replaces ONLY the trailing CTA.
-    cta_text = customer_text if customer_text is not None else (
-        "Reply APPROVE to receive final files, or reply with changes."
-    )
+    approval_cta = "Reply APPROVE to receive final files, or reply with changes."
+    if customer_text is None:
+        try:
+            from agents.flyer.customer_copy_policy import build_preview_approval_checklist  # type: ignore
+        except ImportError:  # pragma: no cover - deployed flat-module fallback
+            from flyer_customer_copy_policy import build_preview_approval_checklist  # type: ignore
+        checklist = build_preview_approval_checklist(project)
+        cta_text = f"{checklist}\n\n{approval_cta}" if checklist else approval_cta
+    else:
+        cta_text = customer_text
     ok, mid, err, bridge_status = bridge_post(
         chat_id, cta_text,
         action_context=_bac_cta(_PA_CTA, "concept_preview.cta_text"),
