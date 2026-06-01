@@ -408,6 +408,8 @@ def _can_skip_exact_business_name(project: FlyerProject, normalized_text: str, r
     policy = semantic_visibility_policy(project)
     if policy.brand_visibility_required_exact:
         return False
+    if _requires_exact_business_name_for_menu_poster(project):
+        return False
     if not policy.effective_business_name or not policy.campaign_title:
         return False
     if not _locked_fact_present_in_ocr(project, "campaign_title", normalized_text, raw_text):
@@ -429,6 +431,48 @@ def _can_skip_exact_business_name(project: FlyerProject, normalized_text: str, r
     ):
         return False
     return True
+
+
+def _requires_exact_business_name_for_menu_poster(project: FlyerProject) -> bool:
+    """Full-poster menu generations must carry the actual business masthead.
+
+    The deterministic overlay path can stamp identity. Integrated menu posters
+    cannot, so OCR/vision QA must not use the looser campaign/contact/location
+    anchor exception for itemized menu flyers.
+    """
+    has_item = any(
+        str(getattr(fact, "fact_id", "")).startswith("item:")
+        for fact in getattr(project, "locked_facts", []) or []
+    )
+    if not has_item:
+        return False
+    return any(
+        getattr(fact, "fact_id", "") == "business_name"
+        and bool(str(getattr(fact, "value", "") or "").strip())
+        and bool(getattr(fact, "required", False))
+        for fact in getattr(project, "locked_facts", []) or []
+    )
+
+
+def _requires_english_only_menu_poster_contract(project: FlyerProject) -> bool:
+    if not _requires_exact_business_name_for_menu_poster(project):
+        return False
+    source_text = " ".join(
+        str(value or "")
+        for value in (
+            project.raw_request,
+            getattr(project.fields, "notes", ""),
+            *(fact.value for fact in getattr(project, "locked_facts", []) or []),
+        )
+    )
+    if REGIONAL_SCRIPT_RE.search(source_text):
+        return False
+    return not bool(
+        re.search(
+            r"\b(?:in|use|using|language\s*:?)\s+(?:telugu|hindi|tamil|malayalam|kannada|gujarati|marathi|punjabi)\b",
+            source_text.casefold(),
+        )
+    )
 
 
 def _requires_english_only(project: FlyerProject) -> bool:
@@ -796,7 +840,7 @@ def run_visual_qa(
         blockers.append("placeholder text is visible in generated flyer")
     if RAW_REQUEST_INSTRUCTION_RE.search(extracted_text):
         blockers.append("raw request instruction text is visible in generated flyer")
-    if _requires_english_only(project) and REGIONAL_SCRIPT_RE.search(extracted_text):
+    if (_requires_english_only(project) or _requires_english_only_menu_poster_contract(project)) and REGIONAL_SCRIPT_RE.search(extracted_text):
         blockers.append("English-only flyer contains regional/non-English script")
     blockers.extend(_unrequested_operational_claim_blockers(project, extracted_text))
     blockers.extend(note for note in provider_notes if "placeholder" in note.lower() or "unreadable" in note.lower() or "garbled" in note.lower())

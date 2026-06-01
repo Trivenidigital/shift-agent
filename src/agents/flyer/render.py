@@ -204,6 +204,14 @@ def _has_telugu(text: str) -> bool:
     return any("\u0c00" <= ch <= "\u0c7f" for ch in text or "")
 
 
+def _has_regional_script(text: str) -> bool:
+    return any(
+        ("\u0900" <= ch <= "\u0d7f")
+        or ("\u0a00" <= ch <= "\u0a7f")
+        for ch in text or ""
+    )
+
+
 def _font(ImageFont, size: int, *, bold: bool = False, text: str = ""):
     candidates = list(FONT_CANDIDATES)
     if _has_telugu(text):
@@ -819,7 +827,7 @@ def _poster_copy_block(project: FlyerProject) -> str:
         # text, so the model must render it exactly.
         lines = [
             "Render the following text exactly. Do not summarize, paraphrase, invent, or omit these customer facts.",
-            "Title is the campaign/product/service headline; Business/brand is the account identity or footer brand.",
+            "Title is the campaign/product/service headline; Business/brand is the account identity.",
             "Do not add delivery, catering, payment, ordering-channel, or service-availability claims unless they appear below.",
         ]
     business_name = _display_business_name(project)
@@ -879,6 +887,46 @@ def _needs_reference_extraction(project: FlyerProject) -> bool:
     return has_reference_image and _request_asks_reference_extraction(project)
 
 
+def _integrated_poster_eligible(project: FlyerProject) -> bool:
+    """Low-risk cases where the image model should compose the full poster.
+
+    This is intentionally narrower than "all English flyers": it targets the
+    typed simple menu flyer failure mode where model-painted hierarchy matters
+    more than deterministic overlay safety. Localized text and reference-image
+    extraction stay on the existing safer paths.
+    """
+    if _needs_reference_extraction(project):
+        return False
+    language = (project.fields.preferred_language or "en").strip().lower()
+    text = " ".join(
+        str(value or "")
+        for value in (
+            project.raw_request,
+            getattr(project.fields, "notes", ""),
+            *(fact.value for fact in project.locked_facts),
+        )
+    )
+    if language != "en" and (
+        _has_regional_script(text)
+        or re.search(r"\b(?:in|use|using|language\s*:?)\s+(?:telugu|hindi|tamil|malayalam|kannada|gujarati|marathi|punjabi)\b", text.casefold())
+    ):
+        return False
+    if _is_source_edit_project(project):
+        return False
+    if not _is_food_or_grocery_project(project):
+        return False
+    items = _menu_item_lines(project)
+    if not items or len(items) > 10:
+        return False
+    has_reference_image = any(
+        getattr(asset, "kind", "") == "reference_image"
+        for asset in _project_reference_assets(project)
+    )
+    if has_reference_image:
+        return False
+    return True
+
+
 def _background_only_eligible(project: FlyerProject) -> bool:
     """Whether the model should render a TEXTLESS background (the deterministic
     overlay owns ALL customer-facing text).
@@ -892,12 +940,14 @@ def _background_only_eligible(project: FlyerProject) -> bool:
     target language; the overlay then draws them) — NOT a reason to let the model
     paint text. So language does NOT gate eligibility.
 
-    The only flow the overlay genuinely cannot cover is reference-extraction:
-    items/prices that live in an attached reference IMAGE and aren't in
-    `collect_text_facts()` yet, which only the model can read. A logo/brand asset
-    alone does NOT disqualify (visual identity, not a text source).
+    Reference-extraction is still excluded because items/prices live in an
+    attached reference IMAGE and aren't in `collect_text_facts()` yet. Simple
+    English typed menu flyers are also excluded by product policy: those are
+    now direct integrated posters, with factual QA after generation, because
+    the customer-quality baseline is full poster composition rather than
+    background art plus pasted menu cards.
     """
-    return not _needs_reference_extraction(project)
+    return not _needs_reference_extraction(project) and not _integrated_poster_eligible(project)
 
 
 def _poster_layout_requirements(project: FlyerProject) -> str:
@@ -947,6 +997,7 @@ def _poster_layout_requirements(project: FlyerProject) -> str:
             )
         return (
             "- Build a full restaurant/menu poster, not a background template.\n"
+            "- Use product-specific close-up food imagery based on the listed menu items.\n"
             "- Use a brand masthead at the top, a large high-impact promo title, item cards with food imagery and prices, and a footer for location/contact.\n"
             "- Item cards must look like designed menu tiles, with each item name and price paired together.\n"
             "- Match the attached reference flyer's dense premium retail hierarchy when a reference is provided: bold headline, food photography, gold/green/red accents, ornamental separators, and phone-readable cards.\n"
@@ -1397,15 +1448,25 @@ def _campaign_scene_block_for_project(project: FlyerProject, *, context: str, bu
     plan = _poster_copy_plan(project)
     selected_scene = select_campaign_scene(context)
     explicit_family_scene = selected_scene.key == "family_discovery"
-    if _background_only_eligible(project) and plan.items and _is_food_or_grocery_project(project) and not explicit_family_scene:
+    if (
+        (_background_only_eligible(project) or _integrated_poster_eligible(project))
+        and plan.items
+        and _is_food_or_grocery_project(project)
+        and not explicit_family_scene
+    ):
+        reserved_zone = (
+            " while preserving calm reserved zones for the system-composited copy"
+            if _background_only_eligible(project)
+            else " as part of a complete integrated poster layout"
+        )
         return (
             "Campaign scene direction (menu product close-up):\n"
             f"- Show appetizing close-up product photography for {business or 'the business'}'s listed menu items, "
-            "with the food/snacks as the hero background.\n"
+            "with the food/snacks as the hero visual.\n"
             "- Do not show a generic family, community dining table, buffet spread, or unrelated restaurant scene; "
             "the listed items must drive the visual.\n"
-            f"- The scene supports the offer ({offer or 'the featured menu offer'}) while preserving calm reserved zones "
-            "for the system-composited copy."
+            "- Avoid generic buffet, dining-family, or unrelated stock-food scenes.\n"
+            f"- The scene supports the offer ({offer or 'the featured menu offer'}){reserved_zone}."
         )
     return campaign_scene_prompt_block(
         context=context,
@@ -1489,7 +1550,13 @@ Autonomous repair instruction:
             "- The final image must already contain the finished flyer text, menu item cards, prices, "
             "schedule, location, and contact when those facts are provided."
         )
-        language_block = _language_constraint_hint(project)
+        if _integrated_poster_eligible(project):
+            language_block = (
+                "- Use English text only for this typed menu poster. Do not add Telugu, Hindi, "
+                "or other regional-language text unless the customer explicitly requested it."
+            )
+        else:
+            language_block = _language_constraint_hint(project)
     return f"""Create a complete, finished customer-ready poster flyer for WhatsApp delivery.
 
 Design direction: {_design_direction(project, concept_id)}.
@@ -2770,6 +2837,9 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
     raw = _openrouter_image_bytes(project, concept_id=concept_id, output_format=output_format, size=size, model=model, quality=quality, repair_instruction=repair_instruction)
     raw_path = _raw_background_path(path)
     raw_path.unlink(missing_ok=True)
+    if _integrated_poster_eligible(project):
+        _write_generated_image(raw, path, size=size)
+        return
     # The prompt and the overlay MUST agree (same gate). For non-eligible flows
     # (localized / reference-extraction) the model renders the text itself, so we
     # must NOT composite the deterministic critical overlay on top — that would

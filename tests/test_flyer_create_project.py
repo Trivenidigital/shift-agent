@@ -321,6 +321,56 @@ def test_indochinese_famous_items_request_expands_menu_and_uses_profile_location
     assert "$9" not in project["fields"]["venue_or_location"]
 
 
+def test_lakshmi_south_indian_snack_request_reaches_integrated_menu_path(tmp_path, monkeypatch, capsys):
+    module = _load_script(monkeypatch)
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    _write_customer(
+        customers_path,
+        category="Indian Restaurant",
+        phone="+17329837841",
+        business_name="Lakshmi's Kitchen",
+        business_address="90 Brybar Dr St Johns FL",
+        primary_chat_id="201975216009469@lid",
+    )
+
+    raw_request = (
+        "Create a flyer for south indian snacks.Include these items. "
+        "Gavvalu 1 Lb $8.99, Chekkalu 1 lb $8.99 and Arisalu 1 Lb $10.99"
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+17329837841",
+        "--chat-id", "201975216009469@lid",
+        "--message-id", "m-lakshmi-snacks",
+        "--raw-request", raw_request,
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+    ])
+
+    assert module.main() == 0
+    project_doc = json.loads(capsys.readouterr().out)
+    facts = {fact["fact_id"]: fact for fact in project_doc["locked_facts"]}
+
+    assert facts["business_name"]["value"] == "Lakshmi's Kitchen"
+    assert facts["campaign_title"]["value"] == "South Indian Snacks"
+    assert facts["item:0:name"]["value"] == "Gavvalu 1 Lb"
+    assert facts["item:0:price"]["value"] == "$8.99"
+    assert facts["item:1:name"]["value"] == "Chekkalu 1 lb"
+    assert facts["item:1:price"]["value"] == "$8.99"
+    assert facts["item:2:name"]["value"] == "Arisalu 1 Lb"
+    assert facts["item:2:price"]["value"] == "$10.99"
+
+    from schemas import FlyerProject  # noqa: E402
+    from agents.flyer.render import _image_prompt, _integrated_poster_eligible  # noqa: E402
+
+    project = FlyerProject.model_validate(project_doc)
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+    assert _integrated_poster_eligible(project) is True
+    assert "Build a full restaurant/menu poster" in prompt
+    assert "decorative BACKGROUND image only" not in prompt
+
+
 def test_discount_offer_does_not_become_menu_item_prices(tmp_path, monkeypatch, capsys):
     module = _load_script(monkeypatch)
     customers_path = tmp_path / "customers.json"
