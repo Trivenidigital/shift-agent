@@ -56,6 +56,12 @@ def test_legitimate_item_names_pass():
     "Special 2026-06-01",     # ISO numeric date (Codex r4)
     "Sale 06/01/2026",        # slash numeric date (Codex r4)
     "Brunch 6/1",             # short slash date (Codex r4)
+    "Order Online",           # service-assertion claim (Codex r5)
+    "Pickup Available",       # service-assertion claim (Codex r5)
+    "Dine-In Only",           # service-assertion claim (Codex r5)
+    "Takeout Combo",          # service-assertion claim (Codex r5)
+    "Catering Available",     # service-assertion claim (Codex r5)
+    "Reservations Welcome",   # service-assertion claim (Codex r5)
     "",                       # empty
     "   ",                    # whitespace
 ])

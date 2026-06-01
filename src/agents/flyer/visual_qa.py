@@ -769,6 +769,9 @@ _BLOCK_TIER_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"^ocr/vision text unavailable for generated artifact"), "ocr_unavailable"),
     (re.compile(r"^replaced source text still visible: "), "source_text_visible"),
     (re.compile(r"^missing required visible fact: business_name$"), "missing_business_name"),
+    # bounded-creative-planner: a committed inferred item that did not render is a
+    # block-tier intent failure (explicit, not implicit-via-default; Codex r5 #2).
+    (re.compile(r"^inferred item not rendered: "), "inferred_item_not_rendered"),
     (re.compile(r"placeholder|unreadable|garbled", re.IGNORECASE), "quality_note_corruption"),
 )
 

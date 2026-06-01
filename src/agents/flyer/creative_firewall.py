@@ -53,6 +53,8 @@ _CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\b(?:best|low|great)\s+prices?\b",           # "best price(s)", "low prices" (Codex r2)
         # service / legal / delivery claims
         r"\b(?:delivery|shipping|no\s+charge|certified|licensed|insured|warranty|refund|cashback|free\s+(?:trial|delivery|shipping))\b",
+        # service-assertion claims (Codex r5): availability/fulfillment offers
+        r"\b(?:order\s+(?:online|now|here)|pickup|take[\s-]?out|dine[\s-]?in|curbside|drive[\s-]?thru|catering|reservations?|book\s+(?:now|online)|walk[\s-]?ins?)\b",
         # payment claims (Codex r1: "Cash Only", "Card Accepted", "UPI Accepted")
         r"\b(?:cash|card|upi|paytm|venmo|zelle|payment|payments|accepted|checkout)\b",
         r"\b(?:we\s+accept|pay\s+(?:by|with|here|now))\b",
