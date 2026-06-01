@@ -263,20 +263,30 @@ of `validate_flyer_intent_decision` (`intent.py:246`) — returns ok + reasons, 
 (`item:*:name`, `headline`, `tagline`, `section:*`, `style`, layout hints). Any attempt to
 emit a hard-fact fact_id (`*:price`, `schedule`, `promotion_end`, `contact_phone`,
 `location`, `business_name`, `offer_price`, discount) from the creative path → **rejected**.
+**Being a safe-axis field permits the field to *exist*; it does NOT exempt its text from the
+§6b claim scan** — every inferred string is scanned regardless of which safe-axis field holds it.
 
 **6b. Free-text claim scanner (the #1 risk).** The dangerous leak is not a structured price
-field — it's a hard-fact-class *claim smuggled into creative prose*: a headline "**Lowest
+field — it's a hard-fact-class *claim smuggled into creative free text*: a headline "**Lowest
 prices in town!**" (superlative/price claim), section label "**Weekend Special**" (date/
-availability), tagline "**Now open daily 8–11**" (schedule), "**Free delivery**"
-(service claim). Creative text (`campaign_title`, `headline`, `tagline`, section labels,
-supporting copy) is scanned for hard-fact-class patterns:
-- currency / price / "from $" / "%"/ "off" / "discount"
-- date / day-of-week / "today"/"tonight"/"this weekend"/"daily"/time ranges
+availability), tagline "**Now open daily 8–11**" (schedule), "**Free delivery**" (service
+claim) — **or, most insidiously, an inferred `item:*:name` that is actually a claim** ("Free
+Delivery", "Open Daily", "20% Off" rendered as a "menu item"). Item names are the planner's
+*primary* output and render directly to the customer (`render.py:674-699`,`:1832`) with no
+other scrub, so they are the **highest-priority smuggling vector** and MUST be scanned.
+
+**Scanned surface (every inferred string):** `item:*:name` **(critical)**, `campaign_title`,
+`headline`, `tagline`, `section:*` labels, and supporting copy — scanned for hard-fact-class
+patterns:
+- currency / price / "from $" / "%" / "off" / "discount"
+- date / day-of-week / "today"/"tonight"/"this weekend"/"daily" / time ranges
 - superlatives implying a claim ("lowest", "cheapest", "best price", "guaranteed")
 - service/legal/payment/delivery claims ("free delivery", "no charge", "certified", "licensed")
 
-On match → strip the offending span or reject the creative field (fail-closed; never ship a
-claim the business didn't make). A claim is only allowed if it traces to a `customer_text`/
+On match → strip the offending span or **reject the inferred value before fact
+materialization** (fail-closed; never ship a claim the business didn't make). For
+`item:*:name` specifically, a rejected name is dropped (and the planner re-asked for a real
+dish/service), never rendered. A claim is only allowed if it traces to a `customer_text`/
 `customer_profile` fact (i.e., the customer actually said it).
 
 **6c. Failure mode:** firewall violation never silently passes. Either the creative field is
@@ -349,19 +359,37 @@ off, the existing hardcoded path (`FAMOUS_ITEM_SETS`/`_requested_famous_item_fac
 the producer and the planner is a no-op ⇒ **byte-identical to today**. The hardcoded path is
 removed only in slice 5, and only for the category the planner has proven it covers.
 
+**Safety interlock — structural, not procedural (F2-rollout / BLOCKING fix).** Sequencing by
+convention ("don't flip the flag until slice 3") is *insufficient* — an operator could enable
+the slice-2 flag before the firewall exists. So the interlock is **enforced in code**:
+inferred content can become a `hermes_inferred` fact **only by passing through the firewall
+gate** (`firewall.clear()` is the sole materialization path for planner output). Therefore:
+- **Slice 2 is inert by construction.** It ships the planner + the *materialization-through-
+  firewall seam*, but the firewall (slice 3) does not exist yet, so the seam **fail-closes
+  (rejects all inferred content) ⇒ zero `hermes_inferred` facts emitted**, even if the flag is
+  flipped on. The flag cannot expose inferred content before slice 3.
+- **Activation is capability-AND-gated.** The planner only *materializes* when
+  `creative_planner AND firewall_present AND intent_qa_present` all hold (a capability/version
+  guard, not a lone boolean). Missing either safety capability ⇒ planner output is dropped,
+  fail-closed.
+- A **deterministic test** asserts this directly: with the planner flag ON but the firewall
+  absent/disabled, no `hermes_inferred` fact reaches the project (proves safety-before-exposure
+  technically, not by policy).
+
 | Slice | Scope | Risk | Behavior change |
 |---|---|---|---|
 | **1 — Provenance type (inert)** | Add `hermes_inferred`/`customer_confirmed` source values; **add both to the `merge_locked_facts` priority dict** (`hermes_inferred`→lowest 7, `customer_confirmed`→top tier 0); plumb `source` through facts/render/QA/copy; **no new producers** | low | none (no facts use the new values yet) |
-| **2 — Creative planner (flag-gated, alternate producer)** | Add planner mode to `semantic_brief`; emit `assumed_items` tagged `hermes_inferred`; wire as an **alternate producer gated by the flag** — **`FAMOUS_ITEM_SETS`/`_requested_famous_item_facts` stay untouched while flag off** | medium | **none when flag off** (byte-identical); behind flag, vague prompts get inferred items |
-| **3 — Firewall + intent-QA** | Hard-fact firewall (6a field-rule + 6b free-text claim scanner) + QA count/pricing/reconciliation/no-fabricated (7) | medium-high (truth) | enforcement only fires on inferred content |
+| **2 — Creative planner (flag-gated, inert by construction)** | Add planner mode to `semantic_brief`; emit `assumed_items` tagged `hermes_inferred`; wire the planner output through the **firewall-gated materialization seam** (alternate producer); **`FAMOUS_ITEM_SETS`/`_requested_famous_item_facts` stay untouched while flag off** | medium | **none** — flag off is byte-identical; **and flag ON is still inert until slice 3** because the firewall gate is absent ⇒ zero inferred facts (structural interlock above) |
+| **3 — Firewall + intent-QA (unlocks the planner)** | Hard-fact firewall (6a field-rule + 6b free-text claim scanner **incl. `item:*:name`**) + QA count/pricing/reconciliation/no-fabricated (7). This is what makes the slice-2 planner able to emit anything | medium-high (truth) | enforcement (and first possible inferred output) only after this lands |
 | **4 — Assumption-aware copy + revision + lifecycle** | Customer copy surfaces assumptions; one-tap revision handles; `inferred→confirmed` transitions; **extend `_refresh_customer_text_locked_facts` to treat `customer_confirmed` as editable (F2)**; confirmation is **project-scoped only — no durable menu/profile write (F3)** | medium | customer-visible copy change (behind flag) |
 | **5 — Category gate + per-category enablement + retire hardcoded path** | Wire clarification gate (§8); flip flag **per supported category** after eval; **remove `FAMOUS_ITEM_SETS`/`_requested_famous_item_facts` once the planner covers their category (`indo-chinese`)** — the only slice that touches the old path | gated | turns the loop on, one category at a time |
 
-**Sequencing rationale:** provenance + planner land *inert/flag-gated* first so the
-firewall+QA (the safety half) are merged **before** any inferred content can reach a
-customer, and the hardcoded path is retired **last** (slice 5) so the kill switch holds
-throughout. No slice ships inferred content to a customer until §3 firewall + §7 QA are
-merged and the per-category flag is flipped (slice 5).
+**Sequencing rationale:** the safety-before-exposure ordering is enforced *structurally* (the
+interlock above), not by policy — the planner physically cannot materialize inferred content
+until slice 3's firewall+QA exist, so even an early flag flip is safe. The hardcoded path is
+retired **last** (slice 5) so the kill switch holds throughout. No inferred content reaches a
+customer until firewall (§6) + intent-QA (§7) are merged **and** the per-category flag is
+flipped (slice 5).
 
 ---
 
@@ -394,9 +422,10 @@ merged and the per-category flag is flipped (slice 5).
 ## 12. Tests planned (deterministic; no live bridge)
 
 - **Provenance:** lifecycle transitions (`inferred→confirmed/edited/rejected`); source plumbs through render/QA/copy.
-- **Firewall (the critical suite):** field-rule rejections; free-text claim cases incl. the §6b leak examples ("Lowest prices in town", "Weekend Special", "Open daily 8–11", "Free delivery") → stripped/rejected; allowed when traceable to a customer fact.
+- **Firewall (the critical suite):** field-rule rejections; free-text claim cases incl. the §6b leak examples ("Lowest prices in town", "Weekend Special", "Open daily 8–11", "Free delivery") → stripped/rejected; allowed when traceable to a customer fact. **`item:*:name`-as-claim cases (F-truthguard):** an inferred item name of "Free Delivery"/"Open Daily"/"20% Off" → rejected + dropped, never rendered.
+- **Safety interlock (F-rollout):** planner flag ON **but firewall absent/disabled** → **zero `hermes_inferred` facts** reach the project (proves safety-before-exposure structurally).
 - **Intent-QA:** count/coverage; the three pricing types (flat/per-item/range); hard+creative reconciliation; no-fabricated-hard-fact backstop.
-- **Planner contract:** `assumed_items` always tagged `hermes_inferred`, never populate hard-fact fact_ids; category-appropriate selection (golden, spend-gated for real-model).
+- **Planner contract:** `assumed_items` always tagged `hermes_inferred`, never populate hard-fact fact_ids; materialize ONLY through the firewall gate; category-appropriate selection (golden, spend-gated for real-model).
 - **Clarification gate:** ambiguous/missing hard fact → clarify; unsupported category → clarify/decline.
 - **Golden — F0130 class:** "8 famous South Indian breakfast items, any item $8.99, Sat/Sun 8–11" → 8 inferred items rendered, each paired $8.99, hard facts (name/phone/address/schedule) grounded, assumptions surfaced. (real-model variant spend-gated.)
 - **No-regression:** existing locked-fact path + golden suite unchanged when flag off.
@@ -416,11 +445,11 @@ merged and the per-category flag is flipped (slice 5).
 
 Codex review (main-vps), **no code until CLEAN + operator approval of scope + slice 1**:
 
-1. **Hermes/drift** — is this `extends-Hermes`? Does the planner reuse the existing provider call + delete the hardcoded dict (no parallel substrate)?
-2. **Product/scope** — is the safe/unsafe axis split (§5) correct? Is anything mis-classified (e.g. is a "section label" ever a claim)? Is the supported-category list right?
-3. **Truth-guard (the heavy lens)** — is the firewall (§6) *complete*, especially the free-text claim scanner? Can any hard-fact-class claim reach a customer? Does §7d backstop hold?
+1. **Hermes/drift** — is this `extends-Hermes`? Does the planner reuse the existing provider call + supersede the hardcoded dict (no parallel substrate)?
+2. **Product/scope** — is the safe/unsafe axis split (§5) correct? Is anything mis-classified (e.g. is a "section label" ever a claim)? Is the supported-category list right? Is §8's refined clarify rule sound?
+3. **Truth-guard (BLOCKING)** — is the firewall (§6) *complete*, especially the free-text claim scanner **covering `item:*:name`** (the primary smuggling vector)? Can any hard-fact-class claim reach a customer via any inferred string? Does §7d backstop hold? Is `customer_confirmed` project-scoped (no durable menu/profile write)?
 4. **QA-correctness** — are the intent-QA rules (§7: count, pricing types, reconciliation) sound and non-tautological?
-5. **Rollout-safety** — does the flag/kill-switch (§9) guarantee byte-identical current behavior when off? Does the slice order put the safety half before any customer-visible inference?
+5. **Rollout-safety (BLOCKING)** — does the flag/kill-switch (§9) guarantee byte-identical behavior when off, AND is safety-before-exposure enforced **structurally** (planner inert until firewall+QA present), not just by sequencing convention? Is the hardcoded-path retirement correctly deferred to slice 5?
 
 ---
 
