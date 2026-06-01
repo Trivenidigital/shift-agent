@@ -274,6 +274,7 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
 def _generic_item_price(text: str) -> str:
     patterns = (
         r"\bprice\s+(?:any|every|each|all)\s+(?:item|items?)\s*\$?\s*(?P<price>\d+(?:\.\d{2})?)(?!\s*[%\-])\b",
+        r"\b(?:any|every|each|all)\s+(?:item|items?)\s+price\s+(?:is\s+)?(?:at|for|=|:)\s*\$?\s*(?P<price>\d+(?:\.\d{2})?)(?!\s*[%\-])\b",
         r"\b(?:any|every|each|all)\s+(?:item|items?)\s+(?:priced\s+)?(?:at|for|is|=|:)\s*\$\s*(?P<price>\d+(?:\.\d{2})?)(?!\s*[%\-])\b",
     )
     for pattern in patterns:
