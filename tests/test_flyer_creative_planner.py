@@ -219,3 +219,37 @@ def test_planner_does_not_fire_when_request_category_not_enabled(monkeypatch):
     assert all(src == "customer_text" for _v, src in names)  # NOT the planner
     assert not any(f.source == "hermes_inferred" for f in facts)
     assert "should not be used" not in [v for v, _s in names]
+
+
+# ── slice 5b: flat-price reconciliation (planner names + customer's flat price) ─
+
+def test_planner_items_get_customer_flat_price(monkeypatch):
+    """Slice 5b: when the customer states a FLAT price and the planner supplies item
+    NAMES, each inferred item is paired with that flat price — name=hermes_inferred
+    (the planner's assumption), price=customer_text (the customer's stated fact)."""
+    monkeypatch.setattr(
+        cp, "build_creative_planner_provider",
+        lambda: (lambda _f, _r: ["Veg Manchurian", "Hakka Noodles"]),
+    )
+    cfg = FlyerConfig(creative_planner=FlyerCreativePlannerConfig(
+        enabled=True, enabled_categories=["indo-chinese"]))
+    raw = "Flyer for Dragon Bowl, include 6 famous indo-chinese items, any item at $8.99"
+    facts = extract_text_facts(FlyerRequestFields(event_or_business_name="Dragon Bowl"), raw, cfg=cfg)
+    by_id = {f.fact_id: f for f in facts}
+    assert by_id["item:0:name"].source == "hermes_inferred"
+    assert by_id["item:0:price"].value == "$8.99" and by_id["item:0:price"].source == "customer_text"
+    assert by_id["item:1:price"].value == "$8.99" and by_id["item:1:price"].source == "customer_text"
+
+
+def test_planner_items_no_price_when_no_flat_price_stated(monkeypatch):
+    """No flat price stated ⇒ planner items carry NAMES only (no fabricated price)."""
+    monkeypatch.setattr(
+        cp, "build_creative_planner_provider",
+        lambda: (lambda _f, _r: ["Veg Manchurian"]),
+    )
+    cfg = FlyerConfig(creative_planner=FlyerCreativePlannerConfig(
+        enabled=True, enabled_categories=["indo-chinese"]))
+    raw = "Flyer for Dragon Bowl, include 6 famous indo-chinese items"
+    facts = extract_text_facts(FlyerRequestFields(), raw, cfg=cfg)
+    assert any(f.fact_id == "item:0:name" for f in facts)
+    assert not any(f.fact_id == "item:0:price" for f in facts)

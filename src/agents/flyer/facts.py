@@ -582,9 +582,30 @@ def extract_text_facts(
             )
             if price_fact:
                 item_price_facts.append(price_fact)
+    # Slice 5b — flat-price reconciliation for planner items: when the customer stated
+    # a FLAT price ("any item $8.99" — a hard customer_text fact) and the planner produced
+    # inferred item names, pair that flat price with each inferred item. The NAME is
+    # hermes_inferred (the planner's assumption); the PRICE is customer_text (the
+    # customer's stated fact). Dormant default ⇒ inferred_facts == [] ⇒ no-op.
+    inferred_price_facts: list[FlyerLockedFact] = []
+    if inferred_facts and generic_price:
+        for name_fact in inferred_facts:
+            match = re.match(r"^item:(?P<index>\d+):name$", name_fact.fact_id)
+            if not match:
+                continue
+            price_fact = _fact(
+                f"item:{match.group('index')}:price",
+                "Price",
+                generic_price,
+                "customer_text",
+                message_id=message_id,
+            )
+            if price_fact:
+                inferred_price_facts.append(price_fact)
     facts.extend(item_price_facts)
     facts.extend(item_name_facts)
     facts.extend(inferred_facts)  # superseding/grounded merge handled by merge_locked_facts
+    facts.extend(inferred_price_facts)  # slice 5b: customer's flat price paired to planner items
     return merge_locked_facts(facts)
 
 

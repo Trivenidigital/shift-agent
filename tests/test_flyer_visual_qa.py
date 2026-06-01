@@ -2345,3 +2345,63 @@ def test_intent_qa_inert_without_inferred_items(tmp_path):
     report = _qa_with_ocr(tmp_path, _project(),
                           "Fresh Meats Premium Clean Chicken Clean bird. Strong life. $13.99")
     assert not any("inferred item not rendered" in b for b in report.blockers)
+
+
+# ── intent-aware QA: requested item count (bounded-creative-planner slice 5b) ──
+
+def _project_inferred_count(items, raw_request):
+    now = datetime(2026, 5, 19, tzinfo=timezone.utc)
+    facts = [FlyerLockedFact(fact_id="business_name", label="Business", value="Dragon Bowl",
+                             source="customer_text", required=True)]
+    for i, name in enumerate(items):
+        facts.append(FlyerLockedFact(fact_id=f"item:{i}:name", label="Item", value=name,
+                                     source="hermes_inferred"))
+    return FlyerProject(
+        project_id="F9004", status="awaiting_final_approval", customer_phone="+17329837841",
+        created_at=now, updated_at=now, original_message_id="m-qa",
+        raw_request=raw_request, locked_facts=facts,
+    )
+
+
+def test_requested_item_count_parses_count_or_none():
+    from agents.flyer.visual_qa import _requested_item_count
+    assert _requested_item_count("include 8 famous South Indian breakfast items") == 8
+    assert _requested_item_count("6 items, any item at $8.99") == 6
+    assert _requested_item_count("any item at $8.99") is None  # a price, not an item count
+    assert _requested_item_count("open 8 AM to 11 AM") is None  # a time, not an item count
+    assert _requested_item_count("a great summer sale flyer") is None
+
+
+def test_intent_count_qa_passes_when_committed_count_matches():
+    from agents.flyer.visual_qa import _inferred_intent_count_blockers
+    project = _project_inferred_count(["Idli", "Vada", "Dosa"], "include 3 famous south indian items")
+    assert _inferred_intent_count_blockers(project) == []
+
+
+def test_intent_count_qa_blocks_when_short_of_requested():
+    from agents.flyer.visual_qa import _inferred_intent_count_blockers
+    project = _project_inferred_count(["Idli", "Vada"], "include 3 famous south indian items")
+    blockers = _inferred_intent_count_blockers(project)
+    assert any("requested item count not satisfied: asked 3, have 2" in b for b in blockers)
+
+
+def test_intent_count_qa_inert_without_inferred_items():
+    """Hard items only (no hermes_inferred) + a stated count ⇒ no assertion. The count
+    QA is gated on planner contribution, so dormant flyers are unaffected."""
+    from agents.flyer.visual_qa import _inferred_intent_count_blockers
+    now = datetime(2026, 5, 19, tzinfo=timezone.utc)
+    project = FlyerProject(
+        project_id="F9005", status="awaiting_final_approval", customer_phone="+17329837841",
+        created_at=now, updated_at=now, original_message_id="m-qa",
+        raw_request="include 3 famous south indian items",
+        locked_facts=[FlyerLockedFact(fact_id="item:0:name", label="Item", value="Idli",
+                                       source="customer_text")],
+    )
+    assert _inferred_intent_count_blockers(project) == []
+
+
+def test_intent_count_blocker_is_block_tier():
+    from agents.flyer.visual_qa import classify_qa_severity
+    project = _project_inferred_count(["Idli", "Vada"], "include 3 famous south indian items")
+    sev = classify_qa_severity(["requested item count not satisfied: asked 3, have 2"], project=project)
+    assert sev == "block"
