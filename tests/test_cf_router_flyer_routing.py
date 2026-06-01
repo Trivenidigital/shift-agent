@@ -1601,7 +1601,8 @@ def test_pr_alpha_flyer_text_targets_revision_field_helper():
     assert not actions.flyer_text_targets_revision_field("show plans")
 
 
-def test_media_edit_to_delivered_project_stays_on_active_project():
+@pytest.mark.parametrize("active_cue", ["existing", "current", "same"])
+def test_media_edit_to_delivered_project_stays_on_active_project(active_cue):
     _, actions = _load_plugin_modules()
     active_project = {
         "project_id": "F0120",
@@ -1614,10 +1615,34 @@ def test_media_edit_to_delivered_project_stays_on_active_project():
     }
 
     assert actions.should_bypass_active_flyer_project_for_fresh_request(
-        "change this attached flyer price to $9.99",
+        f"change the {active_cue} flyer price to $9.99",
         active_project,
         has_media=True,
     ) is False
+
+
+def test_attached_source_edit_bypasses_unrelated_delivered_project():
+    _, actions = _load_plugin_modules()
+    active_project = {
+        "project_id": "F0128",
+        "status": "delivered",
+        "raw_request": "Create a flyer for south indian snacks. Include Gavvalu, Chekkalu, and Arisalu.",
+        "fields": {
+            "event_or_business_name": "South Indian Snacks",
+            "contact_info": "+1 732 983 7841",
+        },
+        "concepts": [{"concept_id": "C1", "preview_asset_id": "A0001"}],
+    }
+
+    assert actions.should_bypass_active_flyer_project_for_fresh_request(
+        (
+            "I'd like you to make few changes to this flyer. "
+            "Pick Any 3 Dosa replace with Pick Any 4 Dosa. "
+            "Increase price of Mixed dosa Combo to $15.99."
+        ),
+        active_project,
+        has_media=True,
+    ) is True
 
 
 def test_pr_alpha_lid_only_active_project_revision_phrase_yields_from_regulated_guard(monkeypatch):
@@ -4584,6 +4609,125 @@ def test_media_backed_new_work_escapes_stale_active_project(monkeypatch):
     )
 
     assert result is None
+
+
+@pytest.mark.parametrize("source_cue", ["this", "attached", "uploaded"])
+def test_media_source_edit_with_this_flyer_bypasses_unrelated_delivered_project(monkeypatch, source_cue):
+    hooks, actions = _load_plugin_modules()
+    active_project = {
+        "project_id": "F0128",
+        "customer_phone": "+17329837841",
+        "status": "delivered",
+        "raw_request": "Create a flyer for south indian snacks. Include Gavvalu, Chekkalu, and Arisalu.",
+        "fields": {
+            "event_or_business_name": "South Indian Snacks",
+            "contact_info": "+1 732 983 7841",
+        },
+        "concepts": [{"concept_id": "C1", "preview_asset_id": "A0001"}],
+        "revisions": [],
+    }
+    text = (
+        f"I'd like you to make few changes to {source_cue} flyer. "
+        "Pick Any 3 Dosa replace with Pick Any 4 Dosa. "
+        "Increase price of Mixed dosa Combo to $15.99."
+    )
+    audits: list[dict] = []
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
+    monkeypatch.setattr(actions, "send_flyer_text", lambda *_args, **_kwargs: pytest.fail("attached source edit must not send active-project revision copy"))
+    monkeypatch.setattr(actions, "invoke_update_flyer_project", lambda *_args, **_kwargs: pytest.fail("attached source edit must not revise unrelated delivered project"))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
+
+    result = hooks._try_flyer_active_project_intercept(
+        text,
+        "17329837841@s.whatsapp.net",
+        {"message_id": "m-dosa-source-edit"},
+        media_path="C:/tmp/dosa-source.png",
+    )
+
+    assert result is None
+    assert any(
+        row.get("reason") == "flyer_active_project_bypassed"
+        and "fresh_flyer_intent=true" in row.get("detail", "")
+        and "project_id=F0128" in row.get("detail", "")
+        and "has_media=1" in row.get("detail", "")
+        for row in audits
+    )
+
+
+def test_attached_source_edit_after_delivered_project_creates_source_edit_project(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    delivered_project = {
+        "project_id": "F0128",
+        "customer_phone": "+17329837841",
+        "status": "delivered",
+        "raw_request": "Create a flyer for south indian snacks. Include Gavvalu, Chekkalu, and Arisalu.",
+        "fields": {
+            "event_or_business_name": "South Indian Snacks",
+            "contact_info": "+1 732 983 7841",
+        },
+        "concepts": [{"concept_id": "C1", "preview_asset_id": "A0001"}],
+        "revisions": [],
+    }
+    text = (
+        "I'd like you to make few changes to this flyer. "
+        "Pick Any 3 Dosa replace with Pick Any 4 Dosa. "
+        "Increase price of Mixed dosa Combo to $15.99."
+    )
+    created: dict = {}
+    update_calls: list[tuple] = []
+
+    monkeypatch.setattr(actions, "is_flyer_enabled", lambda: True)
+    monkeypatch.setattr(actions, "flyer_campaign_cta_text", lambda _text: "")
+    monkeypatch.setattr(hooks, "_try_flyer_account_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_sample_prompt_request_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_regulated_account_guard", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_intake_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_reference_scope_choice_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_source_vs_new_choice_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_reference_scope_authorization_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_brand_asset_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_existing_onboarding_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_delivery_state_guard", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: delivered_project)
+    monkeypatch.setattr(actions, "trigger_check_flyer_reference_scope", lambda **_kwargs: (True, "allow", {"decision": "allow"}))
+
+    def fake_create(**kwargs):
+        created.update(kwargs)
+        return True, "created", {
+            "project_id": "F0130",
+            "status": "manual_edit_required",
+            "manual_review": {"status": "queued", "reason_code": "source_edit_provider_unavailable"},
+            "assets": [{"kind": "reference_image", "path": "C:/tmp/dosa-source.png", "mime_type": "image/png"}],
+        }
+
+    monkeypatch.setattr(actions, "trigger_create_flyer_project", fake_create)
+    monkeypatch.setattr(hooks, "_reserve_flyer_access_or_reply", lambda *_args, **_kwargs: ({"reservation_id": "R1"}, None))
+    monkeypatch.setattr(actions, "flyer_source_edit_preflight", lambda _project: (False, "source edit provider disabled", "source_edit_provider_unavailable"))
+    monkeypatch.setattr(actions, "invoke_update_flyer_project", lambda *args, **_kwargs: update_calls.append(args) or (True, "{}"))
+    monkeypatch.setattr(hooks, "_release_flyer_access", lambda *_args, **_kwargs: (True, "released"))
+    monkeypatch.setattr(actions, "send_flyer_manual_edit_ack", lambda *_args, **_kwargs: (True, "manual-mid", ""))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda *_args, **_kwargs: (True, "text-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+
+    result = hooks.pre_gateway_dispatch(SimpleNamespace(
+        text=text,
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="m-dosa-source-edit",
+        media_path="C:/tmp/dosa-source.png",
+    ))
+
+    assert result == {"action": "skip", "reason": "cf-router flyer exact edit queued: project F0130"}
+    assert created.get("manual_edit_required") is True
+    assert created.get("reference_media_path") == "C:/tmp/dosa-source.png"
+    assert created.get("raw_request", "").startswith("Edit uploaded flyer/source artwork")
+    assert not any(call and call[0] == "F0128" for call in update_calls)
+    assert any(call and call[0] == "F0130" and "--queue-manual-review" in call for call in update_calls)
 
 
 def test_evening_snacks_fresh_request_bypasses_old_active_project(monkeypatch):
