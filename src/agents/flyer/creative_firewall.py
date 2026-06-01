@@ -38,6 +38,13 @@ _CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\bfrom\s*\$?\s*\d",                          # "Gluten Free" passes; "Free Delivery"
         r"^\s*free\s*$",                               # lone "Free" is a claim (Codex r2); compounds pass
         r"\b(?:rs\.?|inr|usd|cad|gbp|eur)\s*\d",       # is still caught via "delivery" below
+        # context-token price claims (Codex r6). NB: we do NOT reject a bare
+        # trailing number ("Idli 8") — it is indistinguishable from a real dish
+        # ("Chicken 65") or brand ("7 Up"); the planner prompt forbids prices, and
+        # a price needs a context token / currency word to be a claim here.
+        r"\b(?:price|priced|only|just|starting\s+at)\s*:?\s*\$?\s*\d",  # "Price 8", "Only 10"
+        r"\b\d+\s+for\s+\d+\b",                         # "2 for 1" (BOGO/offer)
+        r"\b\d+\s*(?:usd|inr|rs|rupees?|dollars?|bucks?|cents?)\b",     # "8 dollars", "8 USD"
         # date / day / time / schedule
         r"\b(?:mon|tue|wed|thu|fri|sat|sun)(?:day|s)?\b",
         r"\b(?:today|tonight|tomorrow|daily|weekend|this\s+week|every\s+day)\b",

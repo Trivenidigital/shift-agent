@@ -20,7 +20,8 @@ def test_legitimate_item_names_pass():
     fw = CreativeFirewall()
     names = ["Idli", "Masala Dosa", "Veg Manchurian", "Plain Dosa", "Medu Vada",
              "Uttapam", "Pongal", "Filter Coffee", "7 Up", "Item 65",
-             "Gluten Free Dosa", "Sugar Free Sweet"]  # compound "free" must PASS (not lone)
+             "Gluten Free Dosa", "Sugar Free Sweet",  # compound "free" must PASS (not lone)
+             "Chicken 65", "Mysore 65", "Idli 8"]  # bare trailing number is NOT a claim (Codex r6)
     cleared = fw.clear(_items(*names))
     assert [c.value for c in cleared] == names  # all pass; incidental digits OK
 
@@ -62,6 +63,12 @@ def test_legitimate_item_names_pass():
     "Takeout Combo",          # service-assertion claim (Codex r5)
     "Catering Available",     # service-assertion claim (Codex r5)
     "Reservations Welcome",   # service-assertion claim (Codex r5)
+    "Price 8",                # context-token price claim (Codex r6)
+    "Only 10",                # context-token price claim (Codex r6)
+    "Just $5",                # context-token price claim (Codex r6)
+    "Starting at 8",          # context-token price claim (Codex r6)
+    "2 for 1",                # BOGO/offer (Codex r6)
+    "8 Dollars",              # currency-word price (Codex r6)
     "",                       # empty
     "   ",                    # whitespace
 ])
