@@ -1,0 +1,15 @@
+{
+  "topic": "flyer-item-index-reconciliation",
+  "task_text": "flyer-creative-planner-item-index-reconciliation — extract_text_facts merge invariant so planner-inferred item facts never overwrite customer-grounded item facts (offset inferred past grounded, drop junk count-phrase items, flat customer price onto inferred with customer-grounded provenance, mixed-count fill); facts.py only, dormant-gated, no flag flip / no clarification / no §7d",
+  "completed_at": "2026-06-01T21:30:00Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 11,
+  "hermes_step_count": 1,
+  "files_to_read_first": [
+    "src/agents/flyer/facts.py",
+    "src/agents/flyer/creative_planner.py",
+    "src/agents/flyer/visual_qa.py",
+    "tests/test_flyer_creative_planner.py",
+    "tests/test_flyer_facts.py"
+  ]
+}
