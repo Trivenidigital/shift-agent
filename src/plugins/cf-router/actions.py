@@ -1579,7 +1579,7 @@ def _media_revision_targets_delivered_active_project(text: str, *, status: str, 
     if not is_flyer_revision_intent(body):
         return False
     return bool(re.search(
-        r"\b(?:existing|current|same|this|attached|uploaded)\s+"
+        r"\b(?:existing|current|same)\s+"
         r"(?:flyer|flier|poster|banner|image|artwork|creative|graphic)\b",
         body,
         flags=re.IGNORECASE,

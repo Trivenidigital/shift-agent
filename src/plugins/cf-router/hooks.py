@@ -3154,14 +3154,19 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         return None
     if customer and customer.get("status") in {"trial", "active"} and actions.is_flyer_legacy_trial_link_followup(body):
         return None
-    revision_on_delivered = status == "delivered" and actions.is_flyer_revision_intent(body)
+    active_project_fresh_bypass = actions.should_bypass_active_flyer_project_for_fresh_request(
+        body,
+        active_project,
+        has_media=bool(media_path),
+    )
+    revision_on_delivered = (
+        status == "delivered"
+        and actions.is_flyer_revision_intent(body)
+        and not active_project_fresh_bypass
+    )
     if (
         not revision_on_delivered
-        and actions.should_bypass_active_flyer_project_for_fresh_request(
-            body,
-            active_project,
-            has_media=bool(media_path),
-        )
+        and active_project_fresh_bypass
     ):
         actions.audit_intercepted(
             reason="flyer_active_project_bypassed",
