@@ -494,3 +494,32 @@ def test_format_warn_tier_correction_summary_accepts_pydantic_project_shape():
     )
     assert "Lakshmi's Kitchen" in full
     assert "spelling" in short
+
+
+def test_assumption_summary_line_surfaces_inferred_item_names():
+    """Slice 4: the assumption line lists hermes_inferred item NAMES so the customer
+    can revise them in one reply. Non-inferred facts and non-item-name facts are
+    ignored; it is read-only (surfaces, never invents)."""
+    from schemas import FlyerLockedFact
+    facts = [
+        FlyerLockedFact(fact_id="item:0:name", label="Item", value="Masala Dosa", source="hermes_inferred"),
+        FlyerLockedFact(fact_id="item:1:name", label="Item", value="Idli", source="hermes_inferred"),
+        FlyerLockedFact(fact_id="title", label="Title", value="Weekend Specials", source="customer_text"),
+        FlyerLockedFact(fact_id="item:9:price", label="Price", value="$8.99", source="hermes_inferred"),
+    ]
+    line = policy.assumption_summary_line(facts)
+    assert "Masala Dosa" in line and "Idli" in line
+    assert "Weekend Specials" not in line  # not inferred
+    assert "8.99" not in line  # inferred but not an item NAME
+    assert "Reply to swap" in line
+
+
+def test_assumption_summary_line_empty_when_no_inferred():
+    """Dormant/default state and fully customer-specified or already-confirmed
+    flyers ⇒ no line (empty string)."""
+    from schemas import FlyerLockedFact
+    assert policy.assumption_summary_line([]) == ""
+    assert policy.assumption_summary_line([
+        FlyerLockedFact(fact_id="title", label="Title", value="Specials", source="customer_text"),
+        FlyerLockedFact(fact_id="item:0:name", label="Item", value="Dosa", source="customer_confirmed"),
+    ]) == ""

@@ -133,3 +133,34 @@ def test_extract_text_facts_cfg_none_equals_flag_off():
     def norm(facts):
         return sorted((f.fact_id, f.value, f.source) for f in facts)
     assert norm(base) == norm(flag_off), "cfg=None and flag-off must be byte-identical"
+
+
+# ── slice 4: provenance lifecycle (inferred -> confirmed on customer approval) ─
+
+def test_promote_inferred_to_confirmed_flips_only_inferred():
+    """Customer approval promotes hermes_inferred items to customer_confirmed (now
+    customer-truthful FOR THIS PROJECT); the value is unchanged and every other
+    source is left untouched."""
+    facts = [
+        FlyerLockedFact(fact_id="item:0:name", label="Item", value="Idli", source="hermes_inferred"),
+        FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmis Kitchen", source="customer_profile"),
+        FlyerLockedFact(fact_id="title", label="Title", value="Weekend Specials", source="customer_text"),
+    ]
+    by_id = {f.fact_id: f for f in cp.promote_inferred_to_confirmed(facts)}
+    assert by_id["item:0:name"].source == "customer_confirmed"
+    assert by_id["item:0:name"].value == "Idli"  # only provenance flips, never the value
+    assert by_id["business_name"].source == "customer_profile"  # untouched
+    assert by_id["title"].source == "customer_text"  # untouched
+
+
+def test_promote_inferred_to_confirmed_noop_without_inferred():
+    """No inferred facts (the dormant default) or empty input ⇒ identity — no
+    spurious provenance flips, and customer_confirmed is NOT re-flipped."""
+    facts = [
+        FlyerLockedFact(fact_id="title", label="Title", value="Specials", source="customer_text"),
+        FlyerLockedFact(fact_id="item:0:name", label="Item", value="Dosa", source="customer_confirmed"),
+    ]
+    promoted = cp.promote_inferred_to_confirmed(facts)
+    assert [(f.fact_id, f.source) for f in promoted] == [
+        ("title", "customer_text"), ("item:0:name", "customer_confirmed")]
+    assert cp.promote_inferred_to_confirmed([]) == []

@@ -1019,3 +1019,35 @@ def test_source_artwork_followup_keeps_raw_request_within_schema_limit(tmp_path,
     reloaded = module.FlyerProjectStore.model_validate_json(state_path.read_text(encoding="utf-8"))
     assert len(reloaded.projects[0].raw_request) <= 2000
     assert "Latest correction:" in reloaded.projects[0].raw_request
+
+
+def test_customer_confirmed_locked_fact_is_revisable_inferred_is_not(monkeypatch):
+    """Slice 4 provenance lifecycle: a customer_confirmed fact (an inferred item the
+    customer approved) is editable by a deterministic revision text-edit, exactly
+    like customer_text. A still-inferred (hermes_inferred) fact is NOT text-patched —
+    it must be confirmed (customer approval) first."""
+    from types import SimpleNamespace
+    from schemas import FlyerLockedFact
+    module = _load_script(monkeypatch)
+
+    confirmed = FlyerLockedFact(fact_id="item:0:name", label="Item", value="Masala Dosa", source="customer_confirmed")
+    inferred = FlyerLockedFact(fact_id="item:1:name", label="Item", value="Idli", source="hermes_inferred")
+
+    # Editing the confirmed item applies the edit and stamps the message id;
+    # the still-inferred item alongside it is left untouched.
+    project = SimpleNamespace(locked_facts=[confirmed, inferred])
+    patch = SimpleNamespace(replace_old_text="Masala Dosa", replace_new_text="Plain Dosa", price_delta_cents=0)
+    refreshed = module._refresh_customer_text_locked_facts(project, message_id="m-edit", patch=patch)
+    by_id = {f.fact_id: f for f in refreshed}
+    assert by_id["item:0:name"].value == "Plain Dosa"
+    assert by_id["item:0:name"].source == "customer_confirmed"  # provenance preserved, not reset
+    assert by_id["item:0:name"].source_message_id == "m-edit"
+    assert by_id["item:1:name"].value == "Idli"
+    assert by_id["item:1:name"].source == "hermes_inferred"
+
+    # A still-inferred item is not text-patchable: no match, no edit, no error.
+    inferred_only = SimpleNamespace(locked_facts=[inferred])
+    patch2 = SimpleNamespace(replace_old_text="Idli", replace_new_text="Vada", price_delta_cents=0)
+    out = module._refresh_customer_text_locked_facts(inferred_only, message_id="m-x", patch=patch2)
+    assert out[0].value == "Idli"
+    assert out[0].source == "hermes_inferred"
