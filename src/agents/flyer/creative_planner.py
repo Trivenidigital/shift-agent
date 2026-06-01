@@ -92,6 +92,32 @@ def is_active(flyer_cfg: FlyerConfig) -> bool:
     return load_firewall() is not None
 
 
+def request_matches_enabled_category(raw_request: str, flyer_cfg: FlyerConfig) -> bool:
+    """Slice 5 PER-REQUEST category gate. `is_active` answers "armed at all" (flag +
+    >=1 category opened + firewall present); this answers "armed FOR THIS request" —
+    the planner fires only when the request mentions one of the operator-enabled
+    categories.
+
+    `enabled_categories` is a curated keyword allowlist the operator opens ONE category
+    at a time after the spend-gated eval (design §9 slice 5). The match is a bounded,
+    normalized substring test (hyphen/underscore/space-insensitive, case-insensitive),
+    so an operator entry like "indo-chinese" fires on "indo chinese"/"Indo-Chinese". It
+    returns False when no category is enabled — the dormant default — so the planner is
+    inert by construction until the operator opens a category."""
+    planner_cfg = getattr(flyer_cfg, "creative_planner", None)
+    cats = list(getattr(planner_cfg, "enabled_categories", None) or [])
+    if not cats:
+        return False
+    haystack = " ".join((raw_request or "").replace("-", " ").replace("_", " ").lower().split())
+    if not haystack:
+        return False
+    for cat in cats:
+        key = " ".join(str(cat).replace("-", " ").replace("_", " ").lower().split())
+        if key and key in haystack:
+            return True
+    return False
+
+
 def build_creative_planner_provider() -> Optional[CreativePlannerProvider]:
     """OpenRouter creative-suggestion provider (temp > 0). Mirrors the deployed
     semantic-brief provider shape. Returns None if no key (then the planner is a

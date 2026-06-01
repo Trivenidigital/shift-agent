@@ -535,7 +535,29 @@ def extract_text_facts(
     if parsed_schedule:
         facts.append(parsed_schedule)
     item_name_facts = _item_name_facts(text, message_id=message_id)
-    famous_item_facts = _requested_famous_item_facts(text, message_id=message_id)
+    # Bounded creative planner (slice 2 producer; slice 5 per-request category gate).
+    # Fires ONLY when armed (flag + firewall + >=1 category opened, is_active) AND THIS
+    # request's category is operator-enabled. When it produces inferred items it
+    # SUPERSEDES the hardcoded famous-item fallback (the planner covers ANY enabled
+    # category, fixing the one-category FAMOUS_ITEM_SETS brittleness). Materialization
+    # is firewall-gated (the structural interlock). Dormant default (flag off / category
+    # not enabled / not matched) ⇒ inferred_facts == [] ⇒ byte-identical to the hardcoded
+    # path below. FAMOUS_ITEM_SETS is physically removed only at operator per-category
+    # enablement (design §9 slice 5), never while dormant.
+    inferred_facts: list[FlyerLockedFact] = []
+    if (
+        cfg is not None
+        and _creative_planner.is_active(cfg)
+        and _creative_planner.request_matches_enabled_category(raw_request, cfg)
+    ):
+        inferred_facts = _creative_planner.materialize_inferred(
+            _creative_planner.plan_creative_items(fields, raw_request),
+            firewall=_creative_planner.load_firewall(),
+        )
+    famous_item_facts = (
+        [] if inferred_facts
+        else _requested_famous_item_facts(text, message_id=message_id)
+    )
     generic_price = _generic_item_price(text)
     paired_item_price_facts = _item_price_facts(text, message_id=message_id)
     item_price_facts = paired_item_price_facts
@@ -562,17 +584,7 @@ def extract_text_facts(
                 item_price_facts.append(price_fact)
     facts.extend(item_price_facts)
     facts.extend(item_name_facts)
-    # Bounded creative planner (slice 2) — alternate producer, flag-gated and
-    # INERT BY CONSTRUCTION: is_active() is False until a firewall exists
-    # (load_firewall() is None in slice 2), so this never runs / emits a fact yet.
-    # The grounded hardcoded path above is untouched (kill-switch byte-identity).
-    if cfg is not None and _creative_planner.is_active(cfg):
-        facts.extend(
-            _creative_planner.materialize_inferred(
-                _creative_planner.plan_creative_items(fields, raw_request),
-                firewall=_creative_planner.load_firewall(),
-            )
-        )
+    facts.extend(inferred_facts)  # superseding/grounded merge handled by merge_locked_facts
     return merge_locked_facts(facts)
 
 

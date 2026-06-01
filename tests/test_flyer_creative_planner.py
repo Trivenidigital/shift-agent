@@ -112,13 +112,14 @@ def test_extract_text_facts_armed_materializes_firewall_cleared_items(monkeypatc
     """Slice 3 end-to-end: fully ARMED (flag ON + ≥1 category opened + real
     firewall), the planner's safe item candidates materialize as hermes_inferred
     facts, while a claim smuggled as an 'item name' ('Free Delivery') is dropped
-    by the firewall."""
+    by the firewall. (Slice 5 added a per-request category gate, so the enabled
+    category must also match the request — _RAW mentions "South Indian".)"""
     monkeypatch.setattr(
         cp, "build_creative_planner_provider",
         lambda: (lambda _f, _r: ["Idli", "Free Delivery", "Masala Dosa"]),
     )
     cfg = FlyerConfig(creative_planner=FlyerCreativePlannerConfig(
-        enabled=True, enabled_categories=["restaurant"]))
+        enabled=True, enabled_categories=["south indian"]))
     facts = extract_text_facts(_fields(), _RAW, cfg=cfg)
     inferred = [f.value for f in facts if f.source == "hermes_inferred"]
     assert "Idli" in inferred and "Masala Dosa" in inferred
@@ -164,3 +165,57 @@ def test_promote_inferred_to_confirmed_noop_without_inferred():
     assert [(f.fact_id, f.source) for f in promoted] == [
         ("title", "customer_text"), ("item:0:name", "customer_confirmed")]
     assert cp.promote_inferred_to_confirmed([]) == []
+
+
+# ── slice 5: per-request category gate + planner supersedes hardcoded path ─────
+
+def test_request_matches_enabled_category_dormant_and_matching():
+    """The per-request gate: inert when no category is enabled; a normalized
+    (hyphen/space/case-insensitive) substring match when one is."""
+    dormant = FlyerConfig()  # no categories ⇒ never matches
+    assert cp.request_matches_enabled_category("include 6 famous indo-chinese items", dormant) is False
+    armed = FlyerConfig(creative_planner=FlyerCreativePlannerConfig(
+        enabled=True, enabled_categories=["indo-chinese"]))
+    assert cp.request_matches_enabled_category("include 6 famous Indo Chinese items", armed) is True  # normalized
+    assert cp.request_matches_enabled_category("include 6 famous south indian items", armed) is False  # not enabled
+    assert cp.request_matches_enabled_category("", armed) is False
+
+
+def test_planner_supersedes_hardcoded_famous_path_for_enabled_category(monkeypatch):
+    """Slice 5: when the planner is armed AND the request's category is enabled, the
+    planner produces hermes_inferred items and SUPERSEDES the hardcoded famous-item
+    fallback (no customer_text famous items remain)."""
+    monkeypatch.setattr(
+        cp, "build_creative_planner_provider",
+        lambda: (lambda _f, _r: ["Veg Manchurian", "Hakka Noodles", "Chili Paneer"]),
+    )
+    cfg = FlyerConfig(creative_planner=FlyerCreativePlannerConfig(
+        enabled=True, enabled_categories=["indo-chinese"]))
+    raw = "Flyer for Dragon Bowl, include 6 famous indo-chinese items"
+    facts = extract_text_facts(FlyerRequestFields(event_or_business_name="Dragon Bowl"), raw, cfg=cfg)
+    item_names = [(f.value, f.source) for f in facts
+                  if f.fact_id.startswith("item:") and f.fact_id.endswith(":name")]
+    assert item_names, "planner should have produced items"
+    assert all(src == "hermes_inferred" for _v, src in item_names)  # planner produced them
+    assert any(v == "Veg Manchurian" for v, _s in item_names)
+    assert not any(src == "customer_text" for _v, src in item_names)  # famous fallback superseded
+
+
+def test_planner_does_not_fire_when_request_category_not_enabled(monkeypatch):
+    """Slice 5: armed (flag on + a category opened + firewall) but the request's
+    category is NOT the enabled one ⇒ the planner does not fire; the hardcoded
+    famous path still produces its customer_text items (no supersede, no inferred)."""
+    monkeypatch.setattr(
+        cp, "build_creative_planner_provider",
+        lambda: (lambda _f, _r: ["should not be used"]),
+    )
+    cfg = FlyerConfig(creative_planner=FlyerCreativePlannerConfig(
+        enabled=True, enabled_categories=["south indian"]))
+    raw = "Flyer, include 5 famous indo-chinese items"  # indo-chinese ∉ enabled
+    facts = extract_text_facts(FlyerRequestFields(), raw, cfg=cfg)
+    names = [(f.value, f.source) for f in facts
+             if f.fact_id.startswith("item:") and f.fact_id.endswith(":name")]
+    assert names, "hardcoded famous path should still produce items"
+    assert all(src == "customer_text" for _v, src in names)  # NOT the planner
+    assert not any(f.source == "hermes_inferred" for f in facts)
+    assert "should not be used" not in [v for v, _s in names]
