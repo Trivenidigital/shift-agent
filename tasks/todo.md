@@ -1584,3 +1584,21 @@ Filed during F0105 incident response (deploy `deploy-20260527-134933-affe3c0a` +
 Review/verification:
 - Claude multi-vector review: structural, safety, Hermes/drift, and product strategy completed. Structural/safety blockers were fixed through repeated focused re-review; final focused passes reported no remaining blockers or important findings.
 - Local gates: workflow/update/router 376 passed; broader Flyer slice 722 passed; py_compile and diff whitespace checks clean.
+
+## Flyer Integrated Simple Menu Posters - 2026-06-01
+
+- Drift-check tag: extends-Hermes
+- Hermes-first analysis: Hermes/OpenRouter already owns image-model access, WhatsApp ingress, identity, audit, and delivery. Flyer owns the render contract, factual QA, and final asset packaging. This change extends only the render contract for low-risk simple English typed menu flyers so the image model can compose the whole poster instead of receiving a background-only prompt followed by deterministic menu-card compositing.
+- [x] Ground current render/prompt/finalization paths and preserve source-edit/localized/reference safety gates.
+- [x] Add failing renderer tests for integrated poster eligibility, prompt copy, and no deterministic overlay compositing on the integrated path.
+- [x] Implement integrated direct poster generation for simple English typed menu flyers.
+- [x] Run focused renderer/generation/QA tests and py_compile/diff checks.
+- [x] Run multi-vector review and fix findings.
+- [ ] Merge, deploy, and run live spend-gated smoke.
+
+Review/verification:
+- Red/green: new integrated-poster renderer tests first failed on missing `_integrated_poster_eligible` and raw sidecar/overlay behavior; after implementation they passed.
+- Focused local gate: `tests/test_flyer_renderer.py tests/test_flyer_generate_concepts.py tests/test_flyer_visual_qa.py tests/test_flyer_create_project.py tests/test_flyer_workflow.py` -> 329 passed; touched-script `py_compile` passed; `git diff --check` clean.
+- Review fixes: menu-poster QA now requires exact business identity; English typed integrated menu posters block unexpected regional script; explicit localized menu requests with regional script still pass. Lakshmi raw-request create-project coverage proves the incident-shaped request reaches integrated mode.
+- Multi-vector review: structural/code and product/quality reviewers both cleared after fixes; deploy acceptable pending live smoke.
+- Known unrelated local static failures: `tests/test_flyer_scripts_static.py` currently fails two cf-router hook ordering assertions on `origin/main`-equivalent code; no cf-router files changed in this slice.

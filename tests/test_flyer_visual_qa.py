@@ -6,6 +6,7 @@ from schemas import (
     FlyerLockedFact,
     FlyerProject,
     FlyerReferenceExtraction,
+    FlyerRequestFields,
     FlyerSourceContract,
     FlyerVisualQAReport,
 )
@@ -551,6 +552,114 @@ def test_visual_qa_does_not_skip_business_name_with_customer_text_anchors(tmp_pa
 
     assert report.status == "failed"
     assert "missing required visible fact: business_name" in report.blockers
+
+
+def test_visual_qa_requires_exact_business_name_for_integrated_menu_candidate(tmp_path):
+    """Integrated menu posters do not get a deterministic masthead overlay, so
+    QA must require the real business name even when campaign/location/contact
+    anchors are visible.
+    """
+    from agents.flyer.visual_qa import run_visual_qa
+
+    project = FlyerProject(
+        project_id="F9100",
+        status="generating_concepts",
+        customer_phone="+17329837841",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        original_message_id="m-integrated-menu",
+        raw_request=(
+            "Create a flyer for south indian snacks. Include Gavvalu 1 Lb $8.99, "
+            "Chekkalu 1 lb $8.99 and Arisalu 1 Lb $10.99"
+        ),
+        fields=FlyerRequestFields(preferred_language="en"),
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="South Indian Snacks", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="item:0:name", label="Item", value="Gavvalu 1 Lb", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:0:price", label="Price", value="$8.99", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:1:name", label="Item", value="Chekkalu 1 lb", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:1:price", label="Price", value="$8.99", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:2:name", label="Item", value="Arisalu 1 Lb", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:2:price", label="Price", value="$10.99", source="customer_text", required=True),
+        ],
+    )
+    artifact = _write_sidecar(
+        tmp_path,
+        "South Indian Snacks\nGavvalu 1 Lb $8.99\nChekkalu 1 lb $8.99\n"
+        "Arisalu 1 Lb $10.99\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
+    )
+
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert "missing required visible fact: business_name" in report.blockers
+
+
+def test_visual_qa_blocks_regional_script_for_integrated_english_menu_candidate(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    project = FlyerProject(
+        project_id="F9101",
+        status="generating_concepts",
+        customer_phone="+17329837841",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        original_message_id="m-integrated-menu-profile-language",
+        raw_request="Create a flyer for south indian snacks. Include Gavvalu 1 Lb $8.99.",
+        fields=FlyerRequestFields(preferred_language="te"),
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="South Indian Snacks", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="item:0:name", label="Item", value="Gavvalu 1 Lb", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:0:price", label="Price", value="$8.99", source="customer_text", required=True),
+        ],
+    )
+    artifact = _write_sidecar(
+        tmp_path,
+        "Lakshmi's Kitchen\nSouth Indian Snacks\nGavvalu 1 Lb $8.99\n"
+        "90 Brybar Dr St Johns FL\n+1 732 983 7841\nతెలుగు",
+    )
+
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert "English-only flyer contains regional/non-English script" in report.blockers
+
+
+def test_visual_qa_allows_regional_script_for_explicit_localized_menu(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    project = FlyerProject(
+        project_id="F9102",
+        status="generating_concepts",
+        customer_phone="+17329837841",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        original_message_id="m-localized-menu",
+        raw_request="Create a flyer for south indian snacks. Use Telugu language.",
+        fields=FlyerRequestFields(preferred_language="te"),
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="South Indian Snacks", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="item:0:name", label="Item", value="Gavvalu 1 Lb", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:0:price", label="Price", value="$8.99", source="customer_text", required=True),
+        ],
+    )
+    artifact = _write_sidecar(
+        tmp_path,
+        "Lakshmi's Kitchen\nSouth Indian Snacks\nతెలుగు\nGavvalu 1 Lb $8.99\n"
+        "90 Brybar Dr St Johns FL\n+1 732 983 7841",
+    )
+
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+
+    assert "English-only flyer contains regional/non-English script" not in report.blockers
+    assert report.status == "passed"
 
 
 def test_visual_qa_requires_exact_business_name_for_saved_brand_requests(tmp_path):

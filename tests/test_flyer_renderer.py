@@ -57,8 +57,7 @@ def _complete_project() -> FlyerProject:
 
 
 def _english_project() -> FlyerProject:
-    """English, no reference → background-only eligible, so the model-branch
-    render composites the full deterministic critical overlay (the P1 fix)."""
+    """Simple English typed menu project eligible for integrated poster mode."""
     return _complete_project().model_copy(update={"fields": FlyerRequestFields(
         event_or_business_name="Lakshmi's Kitchen",
         contact_info="+1 732 983 7841",
@@ -508,7 +507,7 @@ def test_concept_preview_model_branch_applies_critical_text_overlay(tmp_path, mo
     deterministic text, not the image model's garbled rendering. Regression for the
     100% `visual_qa_failed` incident (F0113 = missing campaign_title/offer/items).
     """
-    project = _english_project()  # background-only eligible → critical overlay applies
+    project = _complete_project()  # non-integrated → critical overlay applies
     monkeypatch.setattr(render_module, "_openrouter_image_bytes", lambda *a, **k: _png_bytes())
     overlay_targets: list[str] = []
     real_overlay = render_module._apply_critical_text_overlay
@@ -532,7 +531,7 @@ def test_render_model_pdf_fallback_applies_critical_overlay(tmp_path, monkeypatc
     deterministic overlay too — otherwise the slice-2 background-only prompt
     ships a printable PDF with no copy/prices/contact.
     """
-    project = _english_project()  # background-only eligible → overlay composited
+    project = _complete_project()  # non-integrated → overlay composited
     monkeypatch.setattr(render_module, "_openrouter_image_bytes", lambda *a, **k: _png_bytes())
     overlay_targets: list[str] = []
     real_overlay = render_module._apply_critical_text_overlay
@@ -605,7 +604,7 @@ def test_background_only_final_package_reapplies_overlay_per_format(tmp_path, mo
     """
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     monkeypatch.setattr(render_module, "_openrouter_image_bytes", lambda *a, **k: _png_bytes())
-    project = _english_project()
+    project = _complete_project()
     specs = render_concept_previews(project, tmp_path, model="google/gemini-2.5-flash-image")
     preview_path = specs[0].path
     asset = FlyerAsset(
@@ -651,7 +650,7 @@ def test_background_only_final_honors_edited_preview_over_stale_raw(tmp_path, mo
     new = datetime(2026, 5, 17, 13, 0, tzinfo=timezone.utc).timestamp()  # 1h newer → edited
     os.utime(stale_raw, (old, old))
     os.utime(approved, (new, new))
-    project = _english_project().model_copy(update={
+    project = _complete_project().model_copy(update={
         "assets": [FlyerAsset(asset_id="A0001", kind="concept_preview", source="rendered",
                               path=str(approved), mime_type="image/png", sha256="a" * 64,
                               original_message_id="m1", received_at=datetime.now(timezone.utc))],
@@ -1570,13 +1569,13 @@ def test_telugu_poster_prompt_is_background_only_overlay_owns_text():
             notes=(
                 'Create a breakfast flyer with these items "Poori with Chicken $14.99, '
                 'Kheema Dosa $12.99, Pesarattu with Upma $11.99, Vada with Sambar $12.99, '
-                'Mysore Masala Dosa $11.99". Timings 8 AM to 11 AM. Thursday to Sunday.'
+                'Mysore Masala Dosa $11.99". Timings 8 AM to 11 AM. Thursday to Sunday. Use Telugu language.'
             ),
         ),
         "raw_request": (
             'Create a breakfast flyer with these items "Poori with Chicken $14.99, '
             'Kheema Dosa $12.99, Pesarattu with Upma $11.99, Vada with Sambar $12.99, '
-            'Mysore Masala Dosa $11.99". Timings 8 AM to 11 AM. Thursday to Sunday.'
+            'Mysore Masala Dosa $11.99". Timings 8 AM to 11 AM. Thursday to Sunday. Use Telugu language.'
         ),
     })
 
@@ -1600,27 +1599,35 @@ def test_telugu_poster_prompt_is_background_only_overlay_owns_text():
     assert "Use Telugu as the primary flyer language" not in prompt
 
 
-def test_background_only_contract_is_gated_only_by_reference_extraction(tmp_path, monkeypatch):
-    """Background-only (model emits no text) applies whenever the overlay can
-    produce every required fact — which is everything EXCEPT reference-extraction
-    (items live in an attached reference image, not in facts). Language does NOT
-    gate (the overlay renders any script; the model garbles non-English). A
-    logo/brand asset alone does NOT disqualify (common branded flyer)."""
+def test_background_only_contract_stays_for_non_integrated_paths(tmp_path, monkeypatch):
+    """Background-only stays for localized/non-menu cases and for style-only
+    references. Simple English typed menus now use the integrated-poster path.
+    """
     from PIL import Image as _Image
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
 
-    english = _complete_project().model_copy(update={"fields": FlyerRequestFields(
+    english_service = _complete_project().model_copy(update={"fields": FlyerRequestFields(
         event_or_business_name="Lakshmi's Kitchen", contact_info="+1 732 983 7841",
-        preferred_language="en", notes="Dosa $6.99; Idli $5.99")})
-    p_en = _image_prompt(english, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+        preferred_language="en", notes="Grand opening this week")})
+    p_en = _image_prompt(english_service, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
     assert "decorative BACKGROUND image only" in p_en
     assert "do NOT render them as text" in p_en
-    assert render_module._background_only_eligible(english) is True
+    assert render_module._background_only_eligible(english_service) is True
+
+    english_menu = _english_project()
+    assert render_module._integrated_poster_eligible(english_menu) is True
+    assert render_module._background_only_eligible(english_menu) is False
 
     # Language no longer gates: the overlay renders facts in their own script
     # (Telugu via _font), and the model garbles non-English, so Telugu is ALSO
     # background-only eligible (the model stops painting garbled/hallucinated text).
-    telugu = english.model_copy(update={"fields": english.fields.model_copy(update={"preferred_language": "te"})})
+    telugu = english_menu.model_copy(update={
+        "raw_request": english_menu.raw_request + " Use Telugu language.",
+        "fields": english_menu.fields.model_copy(update={
+            "preferred_language": "te",
+            "notes": english_menu.fields.notes + "; Use Telugu language.",
+        }),
+    })
     p_te = _image_prompt(telugu, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
     assert "decorative BACKGROUND image only" in p_te
     assert render_module._background_only_eligible(telugu) is True
@@ -1635,20 +1642,117 @@ def test_background_only_contract_is_gated_only_by_reference_extraction(tmp_path
                           received_at=datetime.now(timezone.utc))
 
     # A logo/brand asset alone stays eligible (it's visual identity, not text).
-    assert render_module._background_only_eligible(
-        english.model_copy(update={"assets": [_asset("logo")]})) is True
+    assert render_module._integrated_poster_eligible(
+        english_menu.model_copy(update={"assets": [_asset("logo")]})) is True
     # A reference IMAGE attached only as a STYLE template (the request does not ask
     # to read items out of it; copy is in fields) stays eligible — the overlay
     # owns the known text.
     assert render_module._background_only_eligible(
-        english.model_copy(update={"assets": [_asset("reference_image")]})) is True
+        english_menu.model_copy(update={"assets": [_asset("reference_image")]})) is True
     # A reference IMAGE the request asks to EXTRACT items from → not eligible
     # (those items live in the image, only the model can read them).
-    extract_req = english.model_copy(update={
+    extract_req = english_menu.model_copy(update={
         "assets": [_asset("reference_image")],
         "raw_request": "Create a flyer and extract items and prices from this sample flyer.",
     })
     assert render_module._background_only_eligible(extract_req) is False
+
+
+def test_simple_english_typed_menu_uses_integrated_poster_prompt():
+    project = _english_project()
+
+    assert render_module._integrated_poster_eligible(project) is True
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+
+    assert "complete, finished customer-ready poster flyer" in prompt
+    assert "Build a full restaurant/menu poster" in prompt
+    assert "Item cards must look like designed menu tiles" in prompt
+    assert "Render the following text exactly" in prompt
+    assert "Dosa - $6.99" in prompt
+    assert "Idli - $5.99" in prompt
+    assert "decorative BACKGROUND image only" not in prompt
+    assert "do NOT render them as text" not in prompt
+
+
+def test_integrated_poster_is_not_used_for_telugu_or_reference_extraction(tmp_path, monkeypatch):
+    from PIL import Image as _Image
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    english = _english_project()
+
+    telugu = english.model_copy(update={
+        "raw_request": english.raw_request + " Use Telugu language.",
+        "fields": english.fields.model_copy(update={
+            "preferred_language": "te",
+            "notes": english.fields.notes + "; Use Telugu language.",
+        }),
+    })
+    assert render_module._integrated_poster_eligible(telugu) is False
+    assert render_module._background_only_eligible(telugu) is True
+
+    img = tmp_path / "assets" / "ref.png"
+    img.parent.mkdir(parents=True, exist_ok=True)
+    _Image.new("RGB", (10, 10), (1, 2, 3)).save(img)
+    asset = FlyerAsset(
+        asset_id="A0001",
+        kind="reference_image",
+        source="whatsapp",
+        path=str(img),
+        mime_type="image/png",
+        sha256="b" * 64,
+        original_message_id="m1",
+        received_at=datetime.now(timezone.utc),
+    )
+    extract_req = english.model_copy(update={
+        "assets": [asset],
+        "raw_request": "Create a flyer and extract items and prices from this sample flyer.",
+    })
+    assert render_module._integrated_poster_eligible(extract_req) is False
+    assert render_module._background_only_eligible(extract_req) is False
+
+
+def test_integrated_poster_allows_english_typed_menu_even_with_localized_profile_language():
+    project = _english_project().model_copy(update={
+        "fields": _english_project().fields.model_copy(update={"preferred_language": "te"})
+    })
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+
+    assert render_module._integrated_poster_eligible(project) is True
+    assert "Build a full restaurant/menu poster" in prompt
+    assert "Use English text only for this typed menu poster" in prompt
+    assert "Reflect Telugu / South-Indian cultural styling in the imagery" not in prompt
+
+
+def test_integrated_poster_concept_keeps_model_image_without_overlay(tmp_path, monkeypatch):
+    raw_png = _png_bytes(size=(1792, 2240), color=(24, 70, 38))
+
+    class _Resp:
+        def __enter__(self):
+            png = base64.b64encode(raw_png).decode("ascii")
+            body = {"choices": [{"message": {"images": [{"image_url": {"url": f"data:image/png;base64,{png}"}}]}}]}
+            self._body = json.dumps(body).encode("utf-8")
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return self._body
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", lambda *_args, **_kwargs: _Resp())
+
+    spec = render_concept_previews(
+        _english_project(),
+        tmp_path,
+        model="openai/gpt-5.4-image-2",
+        quality="high",
+    )[0]
+
+    raw_path = spec.path.with_name(f"{spec.path.stem}.raw.png")
+    assert not raw_path.exists()
+    assert inspect_rendered_asset(spec.path, expected_width=1080, expected_height=1350, mime_type="image/png").ok is True
 
 
 def test_direct_poster_prompt_does_not_make_request_sentence_flyer_copy(monkeypatch):
@@ -2663,7 +2767,7 @@ def test_real_image_model_concept_applies_deterministic_text_overlay(tmp_path, m
     monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", lambda *_args, **_kwargs: _Resp())
 
     specs = render_concept_previews(
-        _english_project(),
+        _complete_project(),
         tmp_path,
         model="openai/gpt-5.4-image-2",
         quality="high",
