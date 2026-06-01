@@ -121,6 +121,43 @@ def test_planner_items_get_customer_flat_price(monkeypatch):
         assert price is not None and price.value == "$8.99" and price.source == "customer_text"
 
 
+def test_any_item_flat_price_does_not_create_junk_menu_item(monkeypatch):
+    """A flat-price clause ("Any item at $14.99") is pricing, not an item named
+    "At Biryani"; inferred menu names keep their own indices and receive the price."""
+    monkeypatch.setattr(
+        cp, "build_creative_planner_provider",
+        _provider("Chicken Biryani", "Mutton Biryani", "Veg Biryani", "Egg Biryani"),
+    )
+    raw = "Biryani specials flyer. Include 7 popular Indian biryani items. Any item at $14.99."
+    facts = extract_text_facts(FlyerRequestFields(), raw, cfg=_armed("biryani"))
+    names = _item_names(facts)
+    assert "at biryani" not in names
+    assert {f.value for f in names.values()} == {
+        "Chicken Biryani", "Mutton Biryani", "Veg Biryani", "Egg Biryani"
+    }
+    by_id = {f.fact_id: f for f in facts}
+    for name_fact in names.values():
+        price = by_id.get(f"item:{name_fact.fact_id.split(':')[1]}:price")
+        assert price is not None and price.value == "$14.99" and price.source == "customer_text"
+
+
+def test_category_item_flat_price_applies_to_inferred_items(monkeypatch):
+    """A category-scoped flat price ("Every dosa item at $10.99") applies to each
+    planner-inferred item without requiring the generic word "item" alone."""
+    monkeypatch.setattr(
+        cp, "build_creative_planner_provider",
+        _provider("Masala Dosa", "Plain Dosa", "Rava Dosa", "Mysore Dosa", "Onion Dosa", "Podi Dosa"),
+    )
+    raw = "Dosa Night flyer. Include 6 dosa varieties. Every dosa item at $10.99."
+    facts = extract_text_facts(FlyerRequestFields(), raw, cfg=_armed("dosa"))
+    inferred = [f for f in facts if f.fact_id.endswith(":name") and f.source == "hermes_inferred"]
+    assert len(inferred) == 6
+    by_id = {f.fact_id: f for f in facts}
+    for name_fact in inferred:
+        price = by_id.get(f"item:{name_fact.fact_id.split(':')[1]}:price")
+        assert price is not None and price.value == "$10.99" and price.source == "customer_text"
+
+
 def test_pure_vague_inferred_start_at_zero(monkeypatch):
     """No grounded items ⇒ inferred occupy item:0+ (offset base 0)."""
     monkeypatch.setattr(cp, "build_creative_planner_provider", _provider("Veg Manchurian", "Hakka Noodles"))
