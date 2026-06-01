@@ -55,6 +55,34 @@ _PHONE_DIGITS_RE = re.compile(r"\D+")
 # stray "17" elsewhere in the OCR doesn't glue onto the locked phone's digits.
 _PHONE_RUN_RE = re.compile(r"[\d\s\-().+/]{8,}")
 _PRICE_AMOUNT_RE = re.compile(r"(?<![a-z0-9.])(?P<currency>[$₹])?\s*(?P<amount>\d+(?:[.,]\d{1,2})?)(?![a-z0-9.]|[.,]\d)")
+_UNIT_OR_QUANTITY_TOKENS = {
+    "lb",
+    "lbs",
+    "pound",
+    "pounds",
+    "oz",
+    "ounce",
+    "ounces",
+    "kg",
+    "g",
+    "gram",
+    "grams",
+    "ml",
+    "l",
+    "liter",
+    "litre",
+    "pack",
+    "pc",
+    "pcs",
+    "piece",
+    "pieces",
+    "dozen",
+    "half",
+    "full",
+    "small",
+    "medium",
+    "large",
+}
 REGIONAL_SCRIPT_RE = re.compile(r"[\u0900-\u097F\u0A00-\u0A7F\u0A80-\u0AFF\u0B80-\u0BFF\u0C00-\u0C7F\u0C80-\u0CFF\u0D00-\u0D7F]")
 OPERATIONAL_CLAIM_PATTERNS = (
     ("delivery", re.compile(r"\b(?:whats\s*app|whatsapp)?\s*delivery\b|\bwe\s+deliver\b", re.IGNORECASE)),
@@ -124,6 +152,22 @@ def _price_value_present_in(text: str, fact_value: str) -> bool:
         if _price_cents(match.group("amount")) == expected:
             return True
     return False
+
+
+def _first_price_cents(text: str, *, requires_currency: bool) -> int | None:
+    for match in _PRICE_AMOUNT_RE.finditer(text or ""):
+        if requires_currency and not match.group("currency"):
+            continue
+        return _price_cents(match.group("amount"))
+    return None
+
+
+def _first_price_match(text: str, *, requires_currency: bool) -> re.Match[str] | None:
+    for match in _PRICE_AMOUNT_RE.finditer(text or ""):
+        if requires_currency and not match.group("currency"):
+            continue
+        return match
+    return None
 
 
 def _text_value_present_in(normalized_text: str, normalized_value: str) -> bool:
@@ -266,6 +310,8 @@ def _item_name_present(raw_text: str, value: str) -> bool:
         # notes like "ask about goat catering options".
         if len(re.findall(r"[A-Za-z][A-Za-z'&.-]*", line)) <= 3:
             return True
+    if _item_name_present_in_rowwise_layout(raw_text, value):
+        return True
     return False
 
 
@@ -274,6 +320,124 @@ def _name_pattern(value: str) -> re.Pattern[str] | None:
     if not tokens:
         return None
     return re.compile(r"(?<![a-z0-9])" + r"[^a-z0-9]+".join(re.escape(token) for token in tokens) + r"(?![a-z0-9])", re.IGNORECASE)
+
+
+def _only_unit_or_quantity_text(text: str) -> bool:
+    normalized = _normalize_text_for_match(text)
+    tokens = re.findall(r"[a-z0-9]+", normalized)
+    if not tokens:
+        return True
+    has_unit = any(token in _UNIT_OR_QUANTITY_TOKENS for token in tokens)
+    return has_unit and all(token.isdigit() or token in _UNIT_OR_QUANTITY_TOKENS for token in tokens)
+
+
+def _item_core_tokens(value: str) -> list[str]:
+    core, _quantity = _item_core_and_quantity_tokens(value)
+    return core
+
+
+def _item_core_and_quantity_tokens(value: str) -> tuple[list[str], list[str]]:
+    tokens = re.findall(r"[a-z0-9]+", _normalize_text_for_match(value))
+    if len(tokens) >= 2 and tokens[-1] in _UNIT_OR_QUANTITY_TOKENS and tokens[-2].isdigit():
+        return tokens[:-2], tokens[-2:]
+    if tokens and tokens[-1] in {"small", "medium", "large", "half", "full"}:
+        return tokens[:-1], tokens[-1:]
+    return tokens, []
+
+
+def _tokens_pattern(tokens: list[str]) -> re.Pattern[str] | None:
+    if not tokens:
+        return None
+    return re.compile(r"(?<![a-z0-9])" + r"[^a-z0-9]+".join(re.escape(token) for token in tokens) + r"(?![a-z0-9])", re.IGNORECASE)
+
+
+def _item_name_present_in_rowwise_layout(raw_text: str, value: str) -> bool:
+    core_pattern = _tokens_pattern(_item_core_tokens(value))
+    if core_pattern is None:
+        return False
+    lines = [line for line in (raw_text or "").splitlines() if line.strip()]
+    for line_index, line in enumerate(lines):
+        if not core_pattern.search(line):
+            continue
+        for adjacent_index in (line_index + 1, line_index + 2):
+            if adjacent_index < len(lines) and _only_unit_or_quantity_text(lines[adjacent_index]):
+                return True
+    return False
+
+
+def _stacked_item_segment(lines: list[str], start_index: int, name_re: re.Pattern[str], other_name_patterns: list[re.Pattern[str]]) -> str:
+    max_window = 5
+    end_index = min(len(lines), start_index + max_window)
+    for candidate_index in range(start_index + 1, end_index):
+        for other_re in other_name_patterns:
+            other_window = "\n".join(lines[candidate_index : min(len(lines), candidate_index + max_window)])
+            other_match = other_re.search(other_window)
+            if other_match and other_match.start() <= len(lines[candidate_index]):
+                end_index = candidate_index
+                break
+        if end_index == candidate_index:
+            break
+    segment = "\n".join(lines[start_index:end_index])
+    if name_re.search(segment):
+        return segment
+    return ""
+
+
+def _stacked_item_price_present(
+    segment: str,
+    name_re: re.Pattern[str],
+    price: str,
+    *,
+    other_core_patterns: list[re.Pattern[str]],
+) -> bool:
+    match = name_re.search(segment)
+    if not match:
+        return False
+    if any(other_re.search(segment[: match.start()]) for other_re in other_core_patterns):
+        return False
+    expected = _price_cents(price)
+    if expected is None:
+        return False
+    tail = segment[match.end() :]
+    price_match = _first_price_match(tail, requires_currency=bool(re.search(r"[$₹]", price or "")))
+    if price_match is None:
+        return False
+    if not _only_unit_or_quantity_text(tail[: price_match.start()]):
+        return False
+    return _price_cents(price_match.group("amount")) == expected
+
+
+def _adjacent_line_price_belongs_to_item(line: str, price: str) -> bool:
+    price_match = _first_price_match(line, requires_currency=bool(re.search(r"[$₹]", price or "")))
+    if price_match is None:
+        return False
+    if not _only_unit_or_quantity_text(line[: price_match.start()]):
+        return False
+    return _price_cents(price_match.group("amount")) == _price_cents(price)
+
+
+def _same_line_item_price_present(segment: str, name_re: re.Pattern[str], price: str) -> bool:
+    name_match = name_re.search(segment)
+    if name_match is None:
+        return False
+    requires_currency = bool(re.search(r"[$₹]", price or ""))
+    expected = _price_cents(price)
+    previous_price: re.Match[str] | None = None
+    for price_match in _PRICE_AMOUNT_RE.finditer(segment[: name_match.start()]):
+        if requires_currency and not price_match.group("currency"):
+            continue
+        previous_price = price_match
+    if previous_price is not None:
+        between = segment[previous_price.end() : name_match.start()]
+        if _only_unit_or_quantity_text(between) and _price_cents(previous_price.group("amount")) == expected:
+            return True
+    next_price = _first_price_match(segment[name_match.end() :], requires_currency=requires_currency)
+    if next_price is None:
+        return False
+    between = segment[name_match.end() : name_match.end() + next_price.start()]
+    if not _only_unit_or_quantity_text(between):
+        return False
+    return _price_cents(next_price.group("amount")) == expected
 
 
 def _item_price_pair_present(raw_text: str, name: str, price: str, *, all_item_names: list[str]) -> bool:
@@ -285,6 +449,13 @@ def _item_price_pair_present(raw_text: str, name: str, price: str, *, all_item_n
         for other in all_item_names
         if _normalize_text_for_match(other) != _normalize_text_for_match(name)
         for pattern in [_name_pattern(other)]
+        if pattern is not None
+    ]
+    other_core_patterns = [
+        pattern
+        for other in all_item_names
+        if _normalize_text_for_match(other) != _normalize_text_for_match(name)
+        for pattern in [_tokens_pattern(_item_core_tokens(other))]
         if pattern is not None
     ]
     lines = [line for line in (raw_text or "").splitlines() if line.strip()]
@@ -302,14 +473,61 @@ def _item_price_pair_present(raw_text: str, name: str, price: str, *, all_item_n
                 if other_match:
                     end = min(end, other_match.start())
             same_item_segment = f"{line[previous_start:match.start()]} {line[match.start():end]}"
-            candidate_segments = [same_item_segment]
+            if _same_line_item_price_present(same_item_segment, name_re, price):
+                return True
+            candidate_segments = []
             for adjacent_index in (line_index - 1, line_index + 1):
                 if 0 <= adjacent_index < len(lines):
                     adjacent = lines[adjacent_index]
-                    if not any(other_re.search(adjacent) for other_re in other_name_patterns):
+                    if not any(other_re.search(adjacent) for other_re in other_name_patterns) and _adjacent_line_price_belongs_to_item(adjacent, price):
                         candidate_segments.append(adjacent)
             if any(_price_value_present_in(segment, price) for segment in candidate_segments):
                 return True
+    for line_index in range(len(lines)):
+        if any(other_re.search(lines[line_index]) for other_re in other_core_patterns):
+            continue
+        segment = _stacked_item_segment(lines, line_index, name_re, other_name_patterns)
+        if segment and _stacked_item_price_present(segment, name_re, price, other_core_patterns=other_core_patterns):
+            return True
+    return False
+
+
+def _rowwise_item_price_pair_present(raw_text: str, records: dict[int, dict[str, str]], target_index: int) -> bool:
+    sorted_records = [(index, record) for index, record in sorted(records.items()) if record.get("name") and record.get("price")]
+    if len(sorted_records) < 2:
+        return False
+    lines = [line for line in (raw_text or "").splitlines() if line.strip()]
+    for line_index in range(0, max(0, len(lines) - 2)):
+        name_line = lines[line_index]
+        qty_line = lines[line_index + 1]
+        price_line = lines[line_index + 2]
+        core_groups: list[list[str]] = []
+        quantity_groups: list[list[str]] = []
+        for _index, record in sorted_records:
+            core, quantity = _item_core_and_quantity_tokens(record["name"])
+            pattern = _tokens_pattern(core)
+            if pattern is None:
+                break
+            match = pattern.search(name_line)
+            if match is None:
+                break
+            core_groups.append(core)
+            quantity_groups.append(quantity)
+        else:
+            expected_name_tokens = [token for group in core_groups for token in group]
+            if re.findall(r"[a-z0-9]+", _normalize_text_for_match(name_line)) != expected_name_tokens:
+                continue
+            expected_quantity_tokens = [token for group in quantity_groups for token in group]
+            actual_quantity_tokens = re.findall(r"[a-z0-9]+", _normalize_text_for_match(qty_line))
+            if actual_quantity_tokens != expected_quantity_tokens:
+                continue
+            price_matches = [match for match in _PRICE_AMOUNT_RE.finditer(price_line) if match.group("currency")]
+            if len(price_matches) < len(sorted_records):
+                continue
+            for ordinal, (index, record) in enumerate(sorted_records):
+                if index != target_index:
+                    continue
+                return _price_cents(price_matches[ordinal].group("amount")) == _price_cents(record["price"])
     return False
 
 
@@ -331,7 +549,7 @@ def _item_price_pair_blockers(project: FlyerProject, raw_text: str) -> list[str]
         price = record.get("price", "").strip()
         if not name or not price:
             continue
-        if not _item_price_pair_present(raw_text, name, price, all_item_names=all_names):
+        if not _item_price_pair_present(raw_text, name, price, all_item_names=all_names) and not _rowwise_item_price_pair_present(raw_text, records, index):
             blockers.append(f"item price mismatch: item:{index} expected {name} {price}")
     return blockers
 
