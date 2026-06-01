@@ -521,6 +521,8 @@ def test_production_readiness_modules_installed_and_smoked():
 
     for module in [
         "flyer_facts",
+        "flyer_creative_planner",
+        "flyer_creative_firewall",
         "flyer_reference_extract",
         "flyer_semantic_brief",
         "flyer_visual_qa",
