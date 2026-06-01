@@ -58,23 +58,37 @@ CreativePlannerProvider = Callable[[FlyerRequestFields, str], Optional[Sequence[
 
 
 def load_firewall():
-    """Return the hard-fact firewall, or None if it does not exist yet.
+    """Return the hard-fact firewall, or None if unavailable.
 
-    SLICE 2: always None — the firewall lands in slice 3. This is the single
-    capability probe behind the structural interlock: no firewall ⇒ the planner
-    never activates and nothing materializes."""
-    return None
+    SLICE 3: returns a CreativeFirewall — the planner is now CAPABLE. It still
+    only runs when the flag is enabled (default-off), so the system stays dormant
+    until an operator enables it per category (slice 5). The firewall is the sole
+    materialization gate: it drops any candidate carrying a hard-fact-class claim
+    before it can become a fact."""
+    try:
+        from flyer_creative_firewall import CreativeFirewall  # type: ignore
+    except ImportError:
+        from agents.flyer.creative_firewall import CreativeFirewall
+    return CreativeFirewall()
 
 
 def is_active(flyer_cfg: FlyerConfig) -> bool:
-    """The planner runs only when the flag is enabled AND a firewall exists to
-    clear its output. In slice 2 `load_firewall()` is None ⇒ always False, so
-    flipping the flag early cannot run the planner or emit any fact.
+    """The planner runs only when ALL hold:
+      1. the flag is enabled,
+      2. a firewall exists to clear its output (slice 3), AND
+      3. at least one category is enabled (the per-category rollout gate the
+         operator opens in slice 5 after the spend-gated eval).
+
+    So flipping `enabled` alone — before slice 5 configures `enabled_categories`
+    — does NOT activate the planner (structural readiness gate, Codex r2). The
+    per-request category MATCH lands in slice 5; here we gate on "armed at all".
 
     Takes the FlyerConfig (the caller passes `config.flyer`)."""
     planner_cfg = getattr(flyer_cfg, "creative_planner", None)
     if planner_cfg is None or not getattr(planner_cfg, "enabled", False):
         return False
+    if not getattr(planner_cfg, "enabled_categories", None):
+        return False  # no category opened yet ⇒ inert (slice-5 operator action)
     return load_firewall() is not None
 
 

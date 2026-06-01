@@ -554,6 +554,27 @@ def _item_price_pair_blockers(project: FlyerProject, raw_text: str) -> list[str]
     return blockers
 
 
+def _inferred_item_coverage_blockers(project: FlyerProject, raw_text: str) -> list[str]:
+    """Intent-aware QA (bounded-creative-planner slice 3): every planner-inferred
+    item (source='hermes_inferred') that the project committed to MUST be rendered.
+    The planner promised these items; a draft that silently drops them does not
+    satisfy the customer's request. This is coverage of committed inferred items;
+    the requested-count + pricing-type reconciliation lands with the live planner
+    wiring (slice 5). Inert today — no fact carries source='hermes_inferred' until
+    the planner is enabled, so this contributes no blocker in the default state."""
+    item_re = re.compile(r"^item:(?P<index>\d+):name$")
+    blockers: list[str] = []
+    for fact in project.locked_facts:
+        if getattr(fact, "source", "") != "hermes_inferred":
+            continue
+        if not item_re.match(fact.fact_id):
+            continue
+        value = str(fact.value or "").strip()
+        if value and not _item_name_present(raw_text, value):
+            blockers.append(f"inferred item not rendered: {value}")
+    return blockers
+
+
 def _campaign_title_present(normalized_text: str, value: str) -> bool:
     normalized_value = _normalize_text_for_match(value)
     if _text_value_present_in(normalized_text, normalized_value):
@@ -748,6 +769,9 @@ _BLOCK_TIER_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"^ocr/vision text unavailable for generated artifact"), "ocr_unavailable"),
     (re.compile(r"^replaced source text still visible: "), "source_text_visible"),
     (re.compile(r"^missing required visible fact: business_name$"), "missing_business_name"),
+    # bounded-creative-planner: a committed inferred item that did not render is a
+    # block-tier intent failure (explicit, not implicit-via-default; Codex r5 #2).
+    (re.compile(r"^inferred item not rendered: "), "inferred_item_not_rendered"),
     (re.compile(r"placeholder|unreadable|garbled", re.IGNORECASE), "quality_note_corruption"),
 )
 
@@ -1061,6 +1085,7 @@ def run_visual_qa(
     if (_requires_english_only(project) or _requires_english_only_menu_poster_contract(project)) and REGIONAL_SCRIPT_RE.search(extracted_text):
         blockers.append("English-only flyer contains regional/non-English script")
     blockers.extend(_unrequested_operational_claim_blockers(project, extracted_text))
+    blockers.extend(_inferred_item_coverage_blockers(project, extracted_text))
     blockers.extend(note for note in provider_notes if "placeholder" in note.lower() or "unreadable" in note.lower() or "garbled" in note.lower())
     blockers.extend(visible_wrong_brand_blockers(project, extracted_text))
     skip_business_name_exact = _can_skip_exact_business_name(project, normalized, extracted_text)
