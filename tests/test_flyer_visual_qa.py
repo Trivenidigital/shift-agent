@@ -2301,3 +2301,47 @@ def test_run_visual_qa_sets_severity_field_on_block_path(tmp_path):
     assert report.status == "failed"
     # placeholder blocker is block-tier
     assert report.severity == "block"
+
+
+# ── intent-aware QA: inferred-item coverage (bounded-creative-planner slice 3) ──
+
+def _project_with_inferred(items):
+    now = datetime(2026, 5, 19, tzinfo=timezone.utc)
+    facts = [FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmis Kitchen",
+                             source="customer_text", required=True)]
+    for i, name in enumerate(items):
+        facts.append(FlyerLockedFact(fact_id=f"item:{i}:name", label="Item", value=name,
+                                     source="hermes_inferred"))
+    return FlyerProject(
+        project_id="F9003", status="awaiting_final_approval", customer_phone="+17329837841",
+        created_at=now, updated_at=now, original_message_id="m-qa",
+        raw_request="Flyer for Lakshmis Kitchen with breakfast items",
+        locked_facts=facts,
+    )
+
+
+def _qa_with_ocr(tmp_path, project, ocr_text):
+    from agents.flyer.visual_qa import run_visual_qa
+    artifact = tmp_path / "flyer.png"
+    artifact.write_bytes(b"bytes for the artifact")
+    (tmp_path / "flyer.png.ocr.txt").write_text(ocr_text, encoding="utf-8")
+    return run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+
+
+def test_intent_qa_passes_when_all_inferred_items_rendered(tmp_path):
+    report = _qa_with_ocr(tmp_path, _project_with_inferred(["Idli", "Masala Dosa"]),
+                          "Lakshmis Kitchen Idli Masala Dosa Breakfast Specials")
+    assert not any("inferred item not rendered" in b for b in report.blockers)
+
+
+def test_intent_qa_blocks_when_an_inferred_item_is_missing(tmp_path):
+    report = _qa_with_ocr(tmp_path, _project_with_inferred(["Idli", "Masala Dosa"]),
+                          "Lakshmis Kitchen Idli Breakfast Specials")  # Masala Dosa absent
+    assert any("inferred item not rendered: Masala Dosa" in b for b in report.blockers)
+
+
+def test_intent_qa_inert_without_inferred_items(tmp_path):
+    # No hermes_inferred facts (default/dormant state) → coverage check is a no-op.
+    report = _qa_with_ocr(tmp_path, _project(),
+                          "Fresh Meats Premium Clean Chicken Clean bird. Strong life. $13.99")
+    assert not any("inferred item not rendered" in b for b in report.blockers)

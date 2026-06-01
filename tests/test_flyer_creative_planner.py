@@ -41,8 +41,10 @@ def test_materialize_inferred_without_firewall_is_empty():
     assert cp.materialize_inferred(cands) == []
 
 
-def test_load_firewall_is_none_in_slice2():
-    assert cp.load_firewall() is None
+def test_load_firewall_returns_firewall_in_slice3():
+    """Slice 3 supplies the firewall — the planner is now CAPABLE (still flag-gated)."""
+    fw = cp.load_firewall()
+    assert fw is not None and hasattr(fw, "clear")
 
 
 def test_materialize_inferred_with_firewall_tags_hermes_inferred():
@@ -56,16 +58,19 @@ def test_materialize_inferred_with_firewall_tags_hermes_inferred():
     assert [f.fact_id for f in facts] == ["item:0:name", "item:1:name"]
 
 
-# ── doubly inert (flag + firewall capability) ───────────────────────────────
+# ── activation gate (flag AND firewall) ─────────────────────────────────────
 
 def test_is_active_false_when_flag_disabled():
+    # firewall now exists, but the flag is the gate; default-off ⇒ dormant
     assert cp.is_active(FlyerConfig()) is False
 
 
-def test_is_active_false_in_slice2_even_when_flag_enabled():
+def test_is_active_true_when_flag_enabled_and_firewall_present():
+    """Slice 3: with the firewall present, the flag is the only remaining gate.
+    Capable ≠ enabled-in-prod: the flag is default-off and only flipped per
+    category by an operator (slice 5)."""
     cfg = FlyerConfig(creative_planner=FlyerCreativePlannerConfig(enabled=True))
-    # flag on, but no firewall yet (load_firewall None) ⇒ still inert
-    assert cp.is_active(cfg) is False
+    assert cp.is_active(cfg) is True
 
 
 # ── planner candidate production ────────────────────────────────────────────
@@ -88,13 +93,30 @@ def test_plan_creative_items_empty_without_provider(monkeypatch):
     assert cp.plan_creative_items(_fields(), _RAW) == []
 
 
-# ── end-to-end inert + no-regression ────────────────────────────────────────
+# ── end-to-end: dormant by default; materializes (firewall-cleared) when on ──
 
-def test_extract_text_facts_inert_with_flag_on():
+def test_extract_text_facts_flag_off_no_inferred():
+    """Default state (flag off) emits NO inferred fact — the dormancy guarantee
+    that holds regardless of firewall presence."""
+    facts = extract_text_facts(_fields(), _RAW, cfg=FlyerConfig())
+    assert not any(f.source == "hermes_inferred" for f in facts)
+
+
+def test_extract_text_facts_flag_on_materializes_firewall_cleared_items(monkeypatch):
+    """Slice 3 end-to-end: with the flag ON and the (real) firewall present, the
+    planner's safe item candidates materialize as hermes_inferred facts, while a
+    claim smuggled as an 'item name' ('Free Delivery') is dropped by the firewall."""
+    monkeypatch.setattr(
+        cp, "build_creative_planner_provider",
+        lambda: (lambda _f, _r: ["Idli", "Free Delivery", "Masala Dosa"]),
+    )
     cfg = FlyerConfig(creative_planner=FlyerCreativePlannerConfig(enabled=True))
     facts = extract_text_facts(_fields(), _RAW, cfg=cfg)
-    assert not any(f.source == "hermes_inferred" for f in facts), \
-        "slice 2 must emit NO inferred fact even with the flag on (firewall absent)"
+    inferred = [f.value for f in facts if f.source == "hermes_inferred"]
+    assert "Idli" in inferred and "Masala Dosa" in inferred
+    assert "Free Delivery" not in inferred  # firewall dropped the claim-as-item
+    assert all(f.fact_id.startswith("item:") and f.fact_id.endswith(":name")
+               for f in facts if f.source == "hermes_inferred")
 
 
 def test_extract_text_facts_cfg_none_equals_flag_off():

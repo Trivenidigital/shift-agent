@@ -58,12 +58,18 @@ CreativePlannerProvider = Callable[[FlyerRequestFields, str], Optional[Sequence[
 
 
 def load_firewall():
-    """Return the hard-fact firewall, or None if it does not exist yet.
+    """Return the hard-fact firewall, or None if unavailable.
 
-    SLICE 2: always None — the firewall lands in slice 3. This is the single
-    capability probe behind the structural interlock: no firewall ⇒ the planner
-    never activates and nothing materializes."""
-    return None
+    SLICE 3: returns a CreativeFirewall — the planner is now CAPABLE. It still
+    only runs when the flag is enabled (default-off), so the system stays dormant
+    until an operator enables it per category (slice 5). The firewall is the sole
+    materialization gate: it drops any candidate carrying a hard-fact-class claim
+    before it can become a fact."""
+    try:
+        from flyer_creative_firewall import CreativeFirewall  # type: ignore
+    except ImportError:
+        from agents.flyer.creative_firewall import CreativeFirewall
+    return CreativeFirewall()
 
 
 def is_active(flyer_cfg: FlyerConfig) -> bool:
