@@ -608,8 +608,27 @@ def test_no_production_producer_of_new_provenance_sources():
     def _is_new(node) -> bool:
         return isinstance(node, ast.Constant) and node.value in _NEW_SOURCES
 
+    def _python_sources():
+        """All production Python under the flyer agent: every *.py (recursive)
+        PLUS extensionless shebang-python scripts in scripts/ — the latter are the
+        actual fact producers (e.g. create-flyer-project, generate-flyer-concepts),
+        which a plain glob('*.py') would miss (Codex round-2 finding)."""
+        seen = set()
+        for p in flyer_dir.rglob("*.py"):
+            seen.add(p.resolve())
+            yield p
+        for p in flyer_dir.rglob("*"):
+            if not p.is_file() or p.suffix == ".py" or p.resolve() in seen:
+                continue
+            try:
+                first = (p.read_text(encoding="utf-8", errors="ignore").splitlines() or [""])[0]
+            except OSError:
+                continue
+            if first.startswith("#!") and "python" in first:
+                yield p
+
     offenders = []
-    for py in sorted(flyer_dir.glob("*.py")):
+    for py in sorted(_python_sources()):
         tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
         for node in ast.walk(tree):
             # 1) _fact(...) / FlyerLockedFact(...) with a new-source string arg
@@ -631,4 +650,9 @@ def test_no_production_producer_of_new_provenance_sources():
                 for k, v in zip(node.keys, node.values):
                     if isinstance(k, ast.Constant) and k.value == "source" and _is_new(v):
                         offenders.append(f"{py.name}:{node.lineno}: {{'source': new value}}")
+    # Self-check: prove the scan actually reached the real fact-producing scripts
+    # (extensionless), so the guard can't silently pass by scanning nothing.
+    scanned_names = {p.name for p in _python_sources()}
+    for must in ("create-flyer-project", "generate-flyer-concepts", "facts.py"):
+        assert must in scanned_names, f"producer-guard did not scan {must} (scan scope regressed)"
     assert offenders == [], f"slice 1 must have NO producer; found emissions: {offenders}"
