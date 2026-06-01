@@ -54,8 +54,12 @@ _CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\b(?:cash|card|upi|paytm|venmo|zelle|payment|payments|accepted|checkout)\b",
         r"\b(?:we\s+accept|pay\s+(?:by|with|here|now))\b",
         # contact-ish
-        r"\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b",          # US phone
+        r"\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b",          # US 10-digit phone
+        r"\(\d{3}\)[\s.-]*\d{3,4}",                    # "(555) 1212" / "(555) 123-4567"
+        r"\b\d{3}[-.\s]\d{4}\b",                        # 7-digit local "555-1212" / "555 1212" (Codex r3)
+        r"\b\d{7,}\b",                                  # bare long digit run "5551212" (phone-shape)
         r"\+\d[\d\s().-]{6,}\d",                       # international phone (Codex r1: "+91 ...")
+        r"\b(?:tel|call\s+us|call\s+now|contact\s+us|whatsapp|dm\s+us|text\s+us)\b",  # contact keywords (Codex r3)
         r"\b[\w-]+\.(?:com|net|org|io|co|in|shop|store|biz|info|app|us|uk)\b",  # bare domain "shop.com"
         r"www\.|https?://|@\w",                        # url / email-ish
     )

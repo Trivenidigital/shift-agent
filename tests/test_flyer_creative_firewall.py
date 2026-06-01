@@ -50,6 +50,9 @@ def test_legitimate_item_names_pass():
     "Brunch 8 to 11",         # "to" time range (Codex r2)
     "Best Prices Here",       # plural superlative (Codex r2)
     "Free",                   # lone "Free" claim (Codex r2)
+    "Call 555-1212",          # 7-digit local phone (Codex r3)
+    "(555) 1212",             # paren phone (Codex r3)
+    "Tel 5551212",            # bare 7-digit run (Codex r3)
     "",                       # empty
     "   ",                    # whitespace
 ])
