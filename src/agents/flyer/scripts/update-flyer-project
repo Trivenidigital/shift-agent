@@ -339,14 +339,6 @@ def main() -> int:
                 if not is_flyer_transition_allowed(updated.status, args.status):
                     raise SystemExit(f"invalid transition {updated.status}->{args.status}")
                 updated = updated.model_copy(update={"status": args.status})
-                if args.status == "finalizing_assets":
-                    # Customer approved the final draft → inferred assumptions they
-                    # signed off on become customer_confirmed FOR THIS PROJECT
-                    # (creative-planner slice 4 lifecycle). No-op when there are no
-                    # inferred facts (dormant default).
-                    updated = updated.model_copy(update={
-                        "locked_facts": _promote_inferred_to_confirmed(updated.locked_facts),
-                    })
                 should_write = True
             if args.select_concept:
                 concept_ids = {c.concept_id for c in updated.concepts}
@@ -695,6 +687,14 @@ def main() -> int:
                 updated = updated.model_copy(update={
                     "status": "finalizing_assets",
                     "approved_message_id": args.approve_message_id,
+                    # Customer approved the final draft. This is the ONLY genuine
+                    # approval gate — cf-router invokes it with --approve-message-id
+                    # after the customer's exact `APPROVE` reply (actions.py). The
+                    # inferred assumptions they signed off on become customer_confirmed
+                    # FOR THIS PROJECT (creative-planner slice 4 lifecycle); no-op when
+                    # there are no inferred facts (dormant default). The generic
+                    # --status path is operator/system mutation and must NOT promote.
+                    "locked_facts": _promote_inferred_to_confirmed(updated.locked_facts),
                 })
                 should_write = True
             if args.queue_manual_review:
