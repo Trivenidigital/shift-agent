@@ -914,6 +914,15 @@ class FlyerRecoveryConfig(BaseModel):
         return v
 
 
+class FlyerCreativePlannerConfig(BaseModel):
+    """Bounded creative-planner settings (design: tasks/flyer-bounded-creative-
+    planner-contract-design.md). Default OFF. Even when enabled, the planner is
+    inert until the firewall + intent-QA capabilities exist (structural interlock,
+    slice 3) — see src/agents/flyer/creative_planner.py."""
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+
+
 class FlyerConfig(BaseModel):
     """Hermes Flyer Studio settings. Default off; opt-in per customer."""
     model_config = ConfigDict(extra="forbid")
@@ -947,6 +956,7 @@ class FlyerConfig(BaseModel):
         max_length=4,
     )
     recovery: FlyerRecoveryConfig = Field(default_factory=FlyerRecoveryConfig)
+    creative_planner: FlyerCreativePlannerConfig = Field(default_factory=FlyerCreativePlannerConfig)
 
     @staticmethod
     def _legacy_provider_for_model(model: str) -> FlyerModelProviderName:
