@@ -508,3 +508,105 @@ def test_typed_phone_overrides_profile_phone_in_merge():
     by_id = {fact.fact_id: fact for fact in merged}
     assert by_id["contact_phone"].value == "+17329837841"
     assert by_id["contact_phone"].source == "customer_text"
+
+
+# ---------- Slice 1: bounded-creative-planner provenance type (inert) ----------
+# These prove the two new provenance values are ACCEPTED by the type system + ranked
+# correctly in the merge, while existing behavior is unchanged and NO producer exists.
+
+import pathlib  # noqa: E402
+
+_NEW_SOURCES = ("hermes_inferred", "customer_confirmed")
+
+
+def test_new_provenance_sources_are_valid_fact_sources():
+    """hermes_inferred / customer_confirmed are now valid FlyerFactSource values
+    (an unknown source still raises — no widening beyond the two)."""
+    for src in _NEW_SOURCES:
+        fact = FlyerLockedFact.model_validate(
+            {"fact_id": "headline", "label": "Headline", "value": "X", "source": src}
+        )
+        assert fact.source == src
+    with pytest.raises(Exception):
+        FlyerLockedFact.model_validate(
+            {"fact_id": "headline", "label": "Headline", "value": "X", "source": "previous_project"}
+        )
+
+
+def test_context_isolation_accepts_new_provenance_sources():
+    """A project carrying hermes_inferred / customer_confirmed facts is NOT flagged
+    for an invalid source (they are in ALLOWED_NEW_PROJECT_FACT_SOURCES)."""
+    from agents.flyer.facts import context_isolation_blockers
+
+    project = _project(locked_facts=[
+        {"fact_id": "item:0:name", "label": "Item", "value": "Idly", "source": "hermes_inferred"},
+        {"fact_id": "headline", "label": "Headline", "value": "Fresh", "source": "customer_confirmed"},
+    ])
+    assert context_isolation_blockers(project) == []
+
+
+def test_merge_priority_hermes_inferred_never_shadows_a_real_fact():
+    """hermes_inferred is the lowest priority — it loses to every real source,
+    including the previously-lowest (system)."""
+    from agents.flyer.facts import merge_locked_facts
+
+    for real in ("customer_text", "customer_confirmed", "operator", "customer_profile",
+                 "reference_ocr", "reference_vision", "uploaded_asset", "system"):
+        inferred = [FlyerLockedFact(fact_id="headline", label="Headline", value="GUESS", source="hermes_inferred")]
+        grounded = [FlyerLockedFact(fact_id="headline", label="Headline", value="REAL", source=real)]
+        # order-independent: real wins whether seen first or second
+        assert {f.fact_id: f.value for f in merge_locked_facts(inferred, grounded)}["headline"] == "REAL"
+        assert {f.fact_id: f.value for f in merge_locked_facts(grounded, inferred)}["headline"] == "REAL"
+
+
+def test_merge_priority_customer_confirmed_below_text_above_others():
+    """customer_confirmed loses to literal customer_text but beats operator/profile/
+    reference/system (it is customer-validated truth for the project)."""
+    from agents.flyer.facts import merge_locked_facts
+
+    confirmed = [FlyerLockedFact(fact_id="headline", label="Headline", value="CONFIRMED", source="customer_confirmed")]
+    text = [FlyerLockedFact(fact_id="headline", label="Headline", value="TEXT", source="customer_text")]
+    assert {f.fact_id: f.value for f in merge_locked_facts(confirmed, text)}["headline"] == "TEXT"
+
+    for lower in ("operator", "customer_profile", "reference_ocr", "reference_vision", "uploaded_asset", "system"):
+        other = [FlyerLockedFact(fact_id="headline", label="Headline", value="OTHER", source=lower)]
+        assert {f.fact_id: f.value for f in merge_locked_facts(other, confirmed)}["headline"] == "CONFIRMED"
+
+
+def test_existing_seven_source_relative_order_unchanged():
+    """No-regression: the original sources keep their relative precedence
+    (customer_text > operator > customer_profile > reference_ocr > reference_vision
+    > uploaded_asset > system) after the Option-B renumber."""
+    from agents.flyer.facts import merge_locked_facts
+
+    chain = ["customer_text", "operator", "customer_profile", "reference_ocr",
+             "reference_vision", "uploaded_asset", "system"]
+    for higher, lower in zip(chain, chain[1:]):
+        hi = [FlyerLockedFact(fact_id="headline", label="Headline", value="HI", source=higher)]
+        lo = [FlyerLockedFact(fact_id="headline", label="Headline", value="LO", source=lower)]
+        assert {f.fact_id: f.value for f in merge_locked_facts(lo, hi)}["headline"] == "HI"
+
+
+def test_no_production_producer_of_new_provenance_sources():
+    """Slice-1 guard: NO production logic emits the new sources. Per operator
+    refinement, occurrences in type/Literal definitions, allowlists, priority
+    dicts, docs and tests are allowed; this fails only if production code actually
+    EMITS source="hermes_inferred"/"customer_confirmed" (a _fact(...) /
+    FlyerLockedFact(...) call or a source= assignment)."""
+    import re
+
+    flyer_dir = pathlib.Path(__file__).resolve().parents[1] / "src" / "agents" / "flyer"
+    emit_re = re.compile(
+        r'(?:_fact\([^\n]*|FlyerLockedFact\([^\n]*|source\s*=\s*["\'])'
+        r'(?:hermes_inferred|customer_confirmed)'
+    )
+    offenders = []
+    for py in flyer_dir.glob("*.py"):
+        for i, line in enumerate(py.read_text(encoding="utf-8").splitlines(), 1):
+            # skip the inert allowlist/priority lines (bare string entries)
+            stripped = line.strip()
+            if stripped.startswith('"hermes_inferred"') or stripped.startswith('"customer_confirmed"'):
+                continue
+            if emit_re.search(line):
+                offenders.append(f"{py.name}:{i}: {stripped}")
+    assert offenders == [], f"slice 1 must have NO producer; found emissions: {offenders}"
