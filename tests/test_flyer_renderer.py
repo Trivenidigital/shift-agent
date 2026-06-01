@@ -1079,6 +1079,16 @@ def test_menu_overlay_fits_many_item_final_formats(tmp_path, monkeypatch):
     }
 
 
+def test_system_overlay_fallback_contains_menu_card_renderer():
+    src = Path("src/agents/flyer/render.py").read_text(encoding="utf-8")
+
+    assert '"menu_payload": _menu_overlay_payload(project)' in src
+    assert 'menu=spec.get("menu_payload") or {}' in src
+    assert 'if menu.get("items"):' in src
+    assert 'fill=(255,253,244,245)' in src
+    assert 'menu overlay cannot fit all' in src
+
+
 def test_menu_overlay_uses_large_lightweight_poster_panels(tmp_path):
     from PIL import Image
 
