@@ -53,6 +53,9 @@ def test_legitimate_item_names_pass():
     "Call 555-1212",          # 7-digit local phone (Codex r3)
     "(555) 1212",             # paren phone (Codex r3)
     "Tel 5551212",            # bare 7-digit run (Codex r3)
+    "Special 2026-06-01",     # ISO numeric date (Codex r4)
+    "Sale 06/01/2026",        # slash numeric date (Codex r4)
+    "Brunch 6/1",             # short slash date (Codex r4)
     "",                       # empty
     "   ",                    # whitespace
 ])

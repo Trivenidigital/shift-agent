@@ -43,6 +43,9 @@ _CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\b(?:today|tonight|tomorrow|daily|weekend|this\s+week|every\s+day)\b",
         r"\b\d{1,2}\s*(?:am|pm)\b",                    # "8 am"
         r"\b\d{1,2}\s*(?:to|[:.–—-])\s*\d{1,2}\b",     # "8-11", "8:30", "8 to 11" (Codex r2)
+        r"\b\d{4}-\d{1,2}-\d{1,2}\b",                  # ISO date "2026-06-01" (Codex r3/r4)
+        r"\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b",           # slash date "6/1", "06/01/2026" (Codex r4)
+        r"\b\d{1,2}\.\d{1,2}\.\d{2,4}\b",              # dotted date "01.06.2026" (Codex r4)
         r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b",
         r"\b(?:open|opens|opening|closes|closing|hours)\b",
         # superlative / guarantee price claims
