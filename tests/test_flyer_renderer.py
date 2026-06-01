@@ -909,6 +909,211 @@ def test_image_prompt_for_south_indian_snacks_rejects_family_scene_collision():
     assert "happy local family or community" not in prompt.lower()
 
 
+def test_menu_overlay_payload_drops_aggregate_raw_item_sentence():
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    raw = (
+        "Create a flyer for south indian snacks.Include these items. "
+        "Gavvalu 1 Lb $8.99, Chekkalu 1 lb $8.99 and Arisalu 1 Lb $10.99"
+    )
+    project = FlyerProject(
+        project_id="F0123",
+        status="generating_concepts",
+        customer_phone="+17329837841",
+        created_at=now,
+        updated_at=now,
+        original_message_id="m-snacks",
+        raw_request=raw,
+        fields=FlyerRequestFields(
+            event_or_business_name="South Indian Snacks",
+            venue_or_location="90 Brybar Dr St Johns FL",
+            contact_info="+17329837841",
+            notes=raw,
+        ),
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="South Indian Snacks", source="customer_text", required=True),
+            FlyerLockedFact(
+                fact_id="offer:0",
+                label="Offer",
+                value="Gavvalu 1 Lb $8.99, Chekkalu 1 lb $8.99, Arisalu 1 Lb $10.99",
+                source="customer_text",
+                required=True,
+            ),
+            FlyerLockedFact(fact_id="item:0:name", label="Item", value="Gavvalu 1 Lb", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:0:price", label="Price", value="$8.99", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:1:name", label="Item", value="Chekkalu 1 lb", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:1:price", label="Price", value="$8.99", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:2:name", label="Item", value="Arisalu 1 Lb", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:2:price", label="Price", value="$10.99", source="customer_text", required=True),
+        ],
+    )
+
+    payload = _menu_overlay_payload(project)
+
+    assert payload["items"] == [
+        "Gavvalu 1 Lb $8.99",
+        "Chekkalu 1 lb $8.99",
+        "Arisalu 1 Lb $10.99",
+    ]
+    assert payload["extras"] == []
+
+
+def test_menu_overlay_payload_drops_same_price_aggregate_item_sentence():
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    raw = "Veg Manchurian $9.99, Spring Rolls $9.99, Hakka Noodles $9.99"
+    project = FlyerProject(
+        project_id="F0125",
+        status="generating_concepts",
+        customer_phone="+17329837841",
+        created_at=now,
+        updated_at=now,
+        original_message_id="m-same-price",
+        raw_request=raw,
+        fields=FlyerRequestFields(event_or_business_name="Indo-Chinese Snacks", notes=raw),
+        locked_facts=[
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Indo-Chinese Snacks", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="offer:0", label="Offer", value=raw, source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:0:name", label="Item", value="Veg Manchurian", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:0:price", label="Price", value="$9.99", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:1:name", label="Item", value="Spring Rolls", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:1:price", label="Price", value="$9.99", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:2:name", label="Item", value="Hakka Noodles", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:2:price", label="Price", value="$9.99", source="customer_text", required=True),
+        ],
+    )
+
+    payload = _menu_overlay_payload(project)
+
+    assert payload["items"] == [
+        "Veg Manchurian $9.99",
+        "Spring Rolls $9.99",
+        "Hakka Noodles $9.99",
+    ]
+    assert payload["extras"] == []
+
+
+def test_menu_overlay_fits_ten_item_phone_preview(tmp_path):
+    from PIL import Image
+
+    source = tmp_path / "background.png"
+    target = tmp_path / "overlay.png"
+    Image.new("RGB", (1080, 1350), (120, 70, 40)).save(source)
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    locked = [
+        FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Indo-Chinese Specials", source="customer_text", required=True),
+    ]
+    for idx in range(10):
+        locked.append(FlyerLockedFact(fact_id=f"item:{idx}:name", label="Item", value=f"Item {idx + 1}", source="customer_text", required=True))
+        locked.append(FlyerLockedFact(fact_id=f"item:{idx}:price", label="Price", value="$9.99", source="customer_text", required=True))
+    project = FlyerProject(
+        project_id="F0126",
+        status="generating_concepts",
+        customer_phone="+17329837841",
+        created_at=now,
+        updated_at=now,
+        original_message_id="m-ten-items",
+        raw_request="Create a flyer with 10 snacks, all $9.99",
+        fields=FlyerRequestFields(event_or_business_name="Indo-Chinese Specials", contact_info="+17329837841"),
+        locked_facts=locked,
+    )
+
+    apply_critical_text_overlay(project, source, target, size=(1080, 1350), output_format="concept_preview")
+
+    assert inspect_rendered_asset(target, expected_width=1080, expected_height=1350, mime_type="image/png").ok is True
+
+
+def test_menu_overlay_fits_many_item_final_formats(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setattr(render_module, "_openrouter_image_bytes", lambda *a, **k: _png_bytes())
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    locked = [
+        FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Snack Specials", source="customer_text", required=True),
+    ]
+    for idx in range(8):
+        locked.append(FlyerLockedFact(fact_id=f"item:{idx}:name", label="Item", value=f"Snack {idx + 1}", source="customer_text", required=True))
+        locked.append(FlyerLockedFact(fact_id=f"item:{idx}:price", label="Price", value=f"${idx + 5}.99", source="customer_text", required=True))
+    project = FlyerProject(
+        project_id="F0127",
+        status="generating_concepts",
+        customer_phone="+17329837841",
+        created_at=now,
+        updated_at=now,
+        original_message_id="m-eight-items",
+        raw_request="Create a flyer with eight snack specials",
+        fields=FlyerRequestFields(event_or_business_name="Snack Specials", contact_info="+17329837841"),
+        locked_facts=locked,
+    )
+    preview = render_concept_previews(project, tmp_path, model="google/gemini-2.5-flash-image")[0]
+    selected = project.model_copy(update={
+        "status": "awaiting_final_approval",
+        "selected_concept_id": "C1",
+        "concepts": [FlyerConcept(
+            concept_id="C1",
+            title="Best",
+            style_summary="Generated",
+            preview_asset_id="A0001",
+            prompt="",
+            created_at=now,
+        )],
+        "assets": [FlyerAsset(
+            asset_id="A0001",
+            kind="concept_preview",
+            source="rendered",
+            path=str(preview.path),
+            mime_type="image/png",
+            sha256="a" * 64,
+            original_message_id="m-eight-items",
+            received_at=now,
+        )],
+    })
+
+    specs = render_final_package(selected, tmp_path / "finals")
+
+    assert {spec.output_format for spec in specs} == {
+        "whatsapp_image",
+        "instagram_post",
+        "instagram_story",
+        "printable_pdf",
+    }
+
+
+def test_menu_overlay_uses_large_lightweight_poster_panels(tmp_path):
+    from PIL import Image
+
+    source = tmp_path / "background.png"
+    target = tmp_path / "overlay.png"
+    Image.new("RGB", (1080, 1350), (120, 70, 40)).save(source)
+    project = _english_project().model_copy(update={
+        "fields": FlyerRequestFields(
+            event_or_business_name="South Indian Snacks",
+            contact_info="+17329837841",
+            venue_or_location="90 Brybar Dr St Johns FL",
+            preferred_language="en",
+            notes="Gavvalu 1 Lb $8.99, Chekkalu 1 lb $8.99 and Arisalu 1 Lb $10.99",
+            style_preference="professional local food menu flyer",
+        ),
+        "locked_facts": [
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="South Indian Snacks", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:0:name", label="Item", value="Gavvalu 1 Lb", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:0:price", label="Price", value="$8.99", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:1:name", label="Item", value="Chekkalu 1 lb", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:1:price", label="Price", value="$8.99", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:2:name", label="Item", value="Arisalu 1 Lb", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:2:price", label="Price", value="$10.99", source="customer_text", required=True),
+        ],
+    })
+
+    apply_critical_text_overlay(project, source, target, size=(1080, 1350), output_format="concept_preview")
+
+    img = Image.open(target).convert("RGB")
+    bottom_panel_sample = img.getpixel((540, 1080))
+    assert sum(bottom_panel_sample) > 420
+    assert inspect_rendered_asset(target, expected_width=1080, expected_height=1350, mime_type="image/png").ok is True
+
+
 def test_image_prompt_preserves_explicit_family_festival_menu_scene():
     now = datetime(2026, 5, 31, tzinfo=timezone.utc)
     raw = "Create a Diwali family festival flyer for South Indian snacks. Include Gavvalu 1 Lb $8.99."
