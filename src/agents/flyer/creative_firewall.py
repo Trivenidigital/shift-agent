@@ -29,6 +29,7 @@ _CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     for p in (
         # money / price / discount
         r"\$\s*\d",                                   # "$8", "$ 8.99"
+        r"[₹€£¥]\s*\d",                                # non-$ currency symbols (Codex r1: "₹8.99")
         r"%",                                         # any percent sign → discount claim
         r"\bpercent\b",
         r"\b(?:off|discount|save|deal|sale|flat|bogo)\b",   # NB: bare "free" excluded so
@@ -43,10 +44,15 @@ _CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\b(?:open|opens|opening|closes|closing|hours)\b",
         # superlative / guarantee price claims
         r"\b(?:lowest|cheapest|best\s+price|unbeatable|guaranteed?|#\s*1|number\s+one)\b",
-        # service / legal / payment / delivery claims
+        # service / legal / delivery claims
         r"\b(?:delivery|shipping|no\s+charge|certified|licensed|insured|warranty|refund|cashback|free\s+(?:trial|delivery|shipping))\b",
+        # payment claims (Codex r1: "Cash Only", "Card Accepted", "UPI Accepted")
+        r"\b(?:cash|card|upi|paytm|venmo|zelle|payment|payments|accepted|checkout)\b",
+        r"\b(?:we\s+accept|pay\s+(?:by|with|here|now))\b",
         # contact-ish
-        r"\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b",          # phone
+        r"\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b",          # US phone
+        r"\+\d[\d\s().-]{6,}\d",                       # international phone (Codex r1: "+91 ...")
+        r"\b[\w-]+\.(?:com|net|org|io|co|in|shop|store|biz|info|app|us|uk)\b",  # bare domain "shop.com"
         r"www\.|https?://|@\w",                        # url / email-ish
     )
 )

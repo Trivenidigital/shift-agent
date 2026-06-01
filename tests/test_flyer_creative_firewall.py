@@ -37,6 +37,13 @@ def test_legitimate_item_names_pass():
     "Weekend Combo Deal",     # weekend + deal
     "From $5",                # from-price
     "Certified Organic",      # legal/cert claim
+    "Cash Only",              # payment claim (Codex r1)
+    "Card Accepted",          # payment claim (Codex r1)
+    "UPI Accepted",           # payment claim (Codex r1)
+    "Order at shop.com",      # bare domain (Codex r1)
+    "+1 732 555 1212",        # international phone (Codex r1)
+    "₹8.99 Thali",            # non-$ currency (Codex r1)
+    "We Accept Venmo",        # payment claim
     "",                       # empty
     "   ",                    # whitespace
 ])
