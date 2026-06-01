@@ -575,6 +575,57 @@ def _inferred_item_coverage_blockers(project: FlyerProject, raw_text: str) -> li
     return blockers
 
 
+_REQUESTED_ITEM_COUNT_RE = re.compile(
+    r"\b(?P<count>\d{1,2})\s+(?:[A-Za-z][\w'-]*\s+){0,6}?items?\b",
+    re.IGNORECASE,
+)
+
+
+def _requested_item_count(raw_request: str) -> int | None:
+    """Slice 5b intent-QA: the explicit item count the customer asked for, e.g.
+    "include 8 famous South Indian breakfast items" → 8. None when no count is stated.
+    Requires the word "items" within a few words of the number so prices/times/dates
+    (e.g. "$8.99", "8 AM") are not mistaken for an item count."""
+    match = _REQUESTED_ITEM_COUNT_RE.search(raw_request or "")
+    if not match:
+        return None
+    count = int(match.group("count"))
+    return count if 1 <= count <= 30 else None
+
+
+def _inferred_intent_count_blockers(project: FlyerProject) -> list[str]:
+    """Intent-aware QA (slice 5b, design §7a count + §7b hard+creative reconciliation):
+    when the planner contributed inferred items AND the customer asked for a specific
+    count N, the project must commit to exactly N distinct item names — customer-named
+    ("hard") items + planner-inferred items combined. Catches the planner/firewall
+    producing fewer (or more) than requested. Fact-level + deterministic; that each
+    committed item actually renders is covered by _inferred_item_coverage_blockers +
+    the per-fact visibility checks.
+
+    Inert in the dormant default: gated on >=1 hermes_inferred item, and no fact carries
+    source='hermes_inferred' until the planner is enabled, so this adds no blocker."""
+    name_re = re.compile(r"^item:(?P<index>\d+):name$")
+    inferred_names: set[str] = set()
+    all_names: set[str] = set()
+    for fact in project.locked_facts:
+        if not name_re.match(fact.fact_id):
+            continue
+        value = str(fact.value or "").strip()
+        if not value:
+            continue
+        all_names.add(value.casefold())
+        if getattr(fact, "source", "") == "hermes_inferred":
+            inferred_names.add(value.casefold())
+    if not inferred_names:
+        return []  # dormant / no planner contribution ⇒ no intent-count assertion
+    requested = _requested_item_count(project.raw_request)
+    if requested is None:
+        return []
+    if len(all_names) != requested:
+        return [f"requested item count not satisfied: asked {requested}, have {len(all_names)}"]
+    return []
+
+
 def _campaign_title_present(normalized_text: str, value: str) -> bool:
     normalized_value = _normalize_text_for_match(value)
     if _text_value_present_in(normalized_text, normalized_value):
@@ -772,6 +823,9 @@ _BLOCK_TIER_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # bounded-creative-planner: a committed inferred item that did not render is a
     # block-tier intent failure (explicit, not implicit-via-default; Codex r5 #2).
     (re.compile(r"^inferred item not rendered: "), "inferred_item_not_rendered"),
+    # bounded-creative-planner slice 5b: the customer asked for N items but the planner
+    # contribution leaves the project short of N — the literal request is not satisfied.
+    (re.compile(r"^requested item count not satisfied: "), "intent_count_unsatisfied"),
     (re.compile(r"placeholder|unreadable|garbled", re.IGNORECASE), "quality_note_corruption"),
 )
 
@@ -1086,6 +1140,7 @@ def run_visual_qa(
         blockers.append("English-only flyer contains regional/non-English script")
     blockers.extend(_unrequested_operational_claim_blockers(project, extracted_text))
     blockers.extend(_inferred_item_coverage_blockers(project, extracted_text))
+    blockers.extend(_inferred_intent_count_blockers(project))
     blockers.extend(note for note in provider_notes if "placeholder" in note.lower() or "unreadable" in note.lower() or "garbled" in note.lower())
     blockers.extend(visible_wrong_brand_blockers(project, extracted_text))
     skip_business_name_exact = _can_skip_exact_business_name(project, normalized, extracted_text)
