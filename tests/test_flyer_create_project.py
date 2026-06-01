@@ -362,13 +362,20 @@ def test_lakshmi_south_indian_snack_request_reaches_integrated_menu_path(tmp_pat
     assert facts["item:2:price"]["value"] == "$10.99"
 
     from schemas import FlyerProject  # noqa: E402
-    from agents.flyer.render import _image_prompt, _integrated_poster_eligible  # noqa: E402
+    from agents.flyer.render import _background_only_eligible, _image_prompt, _integrated_poster_eligible  # noqa: E402
 
     project = FlyerProject.model_validate(project_doc)
     prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+    assert _integrated_poster_eligible(project) is False
+    assert _background_only_eligible(project) is True
+    assert "decorative BACKGROUND image only" in prompt
+    assert "Build a full restaurant/menu poster" not in prompt
+
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
     assert _integrated_poster_eligible(project) is True
-    assert "Build a full restaurant/menu poster" in prompt
-    assert "decorative BACKGROUND image only" not in prompt
+    integrated_prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+    assert "Build a full restaurant/menu poster" in integrated_prompt
+    assert "decorative BACKGROUND image only" not in integrated_prompt
 
 
 def test_discount_offer_does_not_become_menu_item_prices(tmp_path, monkeypatch, capsys):

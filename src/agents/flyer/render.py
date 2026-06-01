@@ -896,6 +896,8 @@ def _integrated_poster_eligible(project: FlyerProject) -> bool:
     more than deterministic overlay safety. Localized text and reference-image
     extraction stay on the existing safer paths.
     """
+    if os.environ.get("FLYER_ALLOW_INTEGRATED_POSTER", "").strip() != "1":
+        return False
     if _needs_reference_extraction(project):
         return False
     language = (project.fields.preferred_language or "en").strip().lower()
