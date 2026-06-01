@@ -1510,6 +1510,7 @@ def test_openrouter_image_renderer_posts_modalities_and_writes_data_url(tmp_path
     )
     assert len(requests) == 1
     assert requests[0][2]["modalities"] == ["image", "text"]
+    assert requests[0][2]["max_tokens"] == 4096
     assert requests[0][2]["image_config"]["aspect_ratio"] == "4:5"
     prompt = requests[0][2]["messages"][0]["content"]
     assert "Controlled customer copy" in prompt
@@ -2075,6 +2076,7 @@ def test_source_edit_preview_calls_openrouter_with_reference_image(tmp_path, mon
     assert req.headers["Authorization"] == "Bearer sk-or-test"
     assert payload["model"] == "openai/gpt-5.4-image-2"
     assert payload["modalities"] == ["image", "text"]
+    assert payload["max_tokens"] == 4096
     content = payload["messages"][0]["content"]
     assert content[0]["type"] == "text"
     assert "Remove extra 08:00" in content[0]["text"]

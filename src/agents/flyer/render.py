@@ -124,6 +124,7 @@ FONT_CANDIDATES = [
 
 OPENROUTER_IMAGE_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_TIMEOUT_SEC = 180
+OPENROUTER_IMAGE_MAX_TOKENS = 4096
 OPENAI_IMAGE_EDIT_URL = "https://api.openai.com/v1/images/edits"
 OPENAI_IMAGE_EDIT_TIMEOUT_SEC = 180
 def _flyer_state_root() -> Path:
@@ -2004,6 +2005,7 @@ def _openrouter_image_bytes(project: FlyerProject, *, concept_id: str, output_fo
         "model": model,
         "messages": [{"role": "user", "content": _image_message_content(project, concept_id=concept_id, output_format=output_format, size=size, repair_instruction=repair_instruction)}],
         "modalities": ["image", "text"],
+        "max_tokens": OPENROUTER_IMAGE_MAX_TOKENS,
         "stream": False,
         "image_config": {
             "aspect_ratio": _aspect_ratio(size),
@@ -2080,6 +2082,7 @@ def _openrouter_source_edit_bytes(
             ],
         }],
         "modalities": ["image", "text"],
+        "max_tokens": OPENROUTER_IMAGE_MAX_TOKENS,
         "stream": False,
         "image_config": {
             "aspect_ratio": _aspect_ratio(size),
