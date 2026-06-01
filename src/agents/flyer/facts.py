@@ -478,6 +478,74 @@ def _offset_standalone_item_names(
     return offset
 
 
+# ── item-index reconciliation (planner truth contract) ──────────────────────
+# The bounded creative planner contributes inferred item facts. These helpers keep
+# them in an index block strictly ABOVE customer-grounded items so merge_locked_facts
+# is never handed a same-index grounded/inferred collision — it groups item facts by
+# index with LAST-SEEN winning (`grouped[index][kind] = fact`) BEFORE source-priority
+# reconciliation, so a shared index would silently drop the grounded customer fact.
+# Design: tasks/flyer-item-index-reconciliation-design.md.
+_REQUESTED_ITEM_COUNT_RE = re.compile(
+    r"\b(?P<count>\d{1,2})\s+(?:[A-Za-z][\w'-]*\s+){0,6}?items?\b",
+    re.IGNORECASE,
+)
+
+
+def _requested_item_count_and_phrase(text: str) -> tuple[int | None, str | None]:
+    """The customer's stated item count and the EXACT phrase it matched, e.g.
+    "6 famous indo-chinese items" -> (6, "6 famous indo-chinese items"). Drives (a) the
+    remainder-fill cap and (b) the junk-drop (we remove only the item whose value equals
+    this phrase — never a coincidental real name). Tight: number + nearby "items",
+    bounded 1..30 so prices/times are not mistaken."""
+    match = _REQUESTED_ITEM_COUNT_RE.search(text or "")
+    if not match:
+        return (None, None)
+    count = int(match.group("count"))
+    if not (1 <= count <= 30):
+        return (None, None)
+    return (count, match.group(0))
+
+
+def _max_item_index(*fact_lists: Iterable[FlyerLockedFact]) -> int:
+    """Highest item:N:* index across the lists, or -1 if there are none."""
+    highest = -1
+    for facts in fact_lists:
+        for fact in facts or []:
+            match = re.match(r"^item:(?P<index>\d+):(?:name|price)$", getattr(fact, "fact_id", ""))
+            if match:
+                highest = max(highest, int(match.group("index")))
+    return highest
+
+
+def _distinct_grounded_item_count(*fact_lists: Iterable[FlyerLockedFact]) -> int:
+    """Count of distinct grounded item NAMES across the lists — the K in "customer named
+    K items and asked for N total" (used to cap the planner's fill to N-K)."""
+    names: set[str] = set()
+    for facts in fact_lists:
+        for fact in facts or []:
+            if re.match(r"^item:\d+:name$", getattr(fact, "fact_id", "")):
+                key = _norm(fact.value)
+                if key:
+                    names.add(key)
+    return len(names)
+
+
+def _reindex_item_facts(facts: list[FlyerLockedFact], base: int) -> list[FlyerLockedFact]:
+    """Shift every item:N:* fact_id by `base` so a producer's items occupy a
+    non-colliding index range. base <= 0 (no grounded items) is a no-op."""
+    if base <= 0:
+        return facts
+    shifted: list[FlyerLockedFact] = []
+    for fact in facts:
+        match = re.match(r"^item:(?P<index>\d+):(?P<kind>name|price)$", fact.fact_id)
+        if match:
+            new_id = f"item:{base + int(match.group('index'))}:{match.group('kind')}"
+            shifted.append(fact.model_copy(update={"fact_id": new_id}))
+        else:
+            shifted.append(fact)
+    return shifted
+
+
 def extract_text_facts(
     fields: FlyerRequestFields,
     raw_request: str,
@@ -554,6 +622,16 @@ def extract_text_facts(
             _creative_planner.plan_creative_items(fields, raw_request),
             firewall=_creative_planner.load_firewall(),
         )
+    requested_item_count: int | None = None
+    if inferred_facts:
+        # The request's own count clause ("6 famous indo-chinese items") is mis-parsed by
+        # _item_name_facts into a junk item. Drop it — keyed off the count phrase itself,
+        # so a coincidental real name ("5 piece items combo") is never dropped. The
+        # planner owns the items for this request; the count drives the remainder cap below.
+        requested_item_count, count_phrase = _requested_item_count_and_phrase(text)
+        if count_phrase:
+            phrase_key = _norm(count_phrase)
+            item_name_facts = [f for f in item_name_facts if _norm(f.value) != phrase_key]
     famous_item_facts = (
         [] if inferred_facts
         else _requested_famous_item_facts(text, message_id=message_id)
@@ -582,9 +660,42 @@ def extract_text_facts(
             )
             if price_fact:
                 item_price_facts.append(price_fact)
+    inferred_price_facts: list[FlyerLockedFact] = []
+    if inferred_facts:
+        # Remainder-fill cap (mixed case): customer named K items + asked for N total ⇒
+        # the planner fills only N-K so the project commits to exactly N.
+        if requested_item_count is not None:
+            grounded_k = _distinct_grounded_item_count(item_name_facts, item_price_facts)
+            inferred_facts = inferred_facts[: max(0, requested_item_count - grounded_k)]
+        # Offset the planner's items into an index block strictly ABOVE the grounded
+        # items, so merge_locked_facts is never handed a same-index grounded/inferred
+        # collision (it would resolve by last-seen and drop the grounded customer fact
+        # before source priority). Grounded items keep item:0..M and their values;
+        # inferred take item:M+1..  base==0 (pure-vague, no grounded items) is a no-op.
+        inferred_facts = _reindex_item_facts(
+            inferred_facts, _max_item_index(item_name_facts, item_price_facts) + 1
+        )
+        # Flat-price reconciliation: a flat customer price ("any item at $8.99") applies
+        # to each planner item. The NAME stays hermes_inferred (the planner's assumption);
+        # the PRICE is customer_text (the customer's stated fact).
+        if generic_price:
+            for name_fact in inferred_facts:
+                match = re.match(r"^item:(?P<index>\d+):name$", name_fact.fact_id)
+                if not match:
+                    continue
+                price_fact = _fact(
+                    f"item:{match.group('index')}:price",
+                    "Price",
+                    generic_price,
+                    "customer_text",
+                    message_id=message_id,
+                )
+                if price_fact:
+                    inferred_price_facts.append(price_fact)
     facts.extend(item_price_facts)
     facts.extend(item_name_facts)
-    facts.extend(inferred_facts)  # superseding/grounded merge handled by merge_locked_facts
+    facts.extend(inferred_facts)  # offset above grounded ⇒ no same-index collision in merge
+    facts.extend(inferred_price_facts)  # customer's flat price paired onto planner items
     return merge_locked_facts(facts)
 
 
