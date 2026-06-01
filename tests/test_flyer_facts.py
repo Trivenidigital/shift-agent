@@ -590,23 +590,45 @@ def test_existing_seven_source_relative_order_unchanged():
 def test_no_production_producer_of_new_provenance_sources():
     """Slice-1 guard: NO production logic emits the new sources. Per operator
     refinement, occurrences in type/Literal definitions, allowlists, priority
-    dicts, docs and tests are allowed; this fails only if production code actually
-    EMITS source="hermes_inferred"/"customer_confirmed" (a _fact(...) /
-    FlyerLockedFact(...) call or a source= assignment)."""
-    import re
+    dicts, docs and tests are allowed; this fails ONLY if production code actually
+    EMITS a fact with source="hermes_inferred"/"customer_confirmed".
+
+    AST-based (multiline-proof, addressing the line-scan false-negative): flags a
+    `_fact(...)` / `FlyerLockedFact(...)` call carrying a new-source string
+    (positional or `source=` kwarg), a `source = "..."` assignment, or a fact-dict
+    literal `{"source": "..."}`. The inert plumbing (FlyerFactSource Literal,
+    ALLOWED_NEW_PROJECT_FACT_SOURCES set, merge priority dict) is NOT such a call/
+    assignment, so it is naturally ignored. (This guard is a slice-1 invariant — it
+    will be removed in slice 2 when the planner becomes a legitimate producer.)"""
+    import ast
 
     flyer_dir = pathlib.Path(__file__).resolve().parents[1] / "src" / "agents" / "flyer"
-    emit_re = re.compile(
-        r'(?:_fact\([^\n]*|FlyerLockedFact\([^\n]*|source\s*=\s*["\'])'
-        r'(?:hermes_inferred|customer_confirmed)'
-    )
+    EMIT_FUNCS = {"_fact", "FlyerLockedFact"}
+
+    def _is_new(node) -> bool:
+        return isinstance(node, ast.Constant) and node.value in _NEW_SOURCES
+
     offenders = []
-    for py in flyer_dir.glob("*.py"):
-        for i, line in enumerate(py.read_text(encoding="utf-8").splitlines(), 1):
-            # skip the inert allowlist/priority lines (bare string entries)
-            stripped = line.strip()
-            if stripped.startswith('"hermes_inferred"') or stripped.startswith('"customer_confirmed"'):
-                continue
-            if emit_re.search(line):
-                offenders.append(f"{py.name}:{i}: {stripped}")
+    for py in sorted(flyer_dir.glob("*.py")):
+        tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
+        for node in ast.walk(tree):
+            # 1) _fact(...) / FlyerLockedFact(...) with a new-source string arg
+            if isinstance(node, ast.Call):
+                fn = node.func
+                fname = getattr(fn, "id", None) or getattr(fn, "attr", None)
+                if fname in EMIT_FUNCS:
+                    args = list(node.args) + [kw.value for kw in node.keywords]
+                    if any(_is_new(a) for a in args):
+                        offenders.append(f"{py.name}:{node.lineno}: {fname}(... new source ...)")
+            # 2) source = "hermes_inferred" / source = "customer_confirmed"
+            elif isinstance(node, ast.Assign):
+                for tgt in node.targets:
+                    if getattr(tgt, "id", None) == "source" or getattr(tgt, "attr", None) == "source":
+                        if _is_new(node.value):
+                            offenders.append(f"{py.name}:{node.lineno}: source = new value")
+            # 3) fact-dict literal {"source": "<new>"}
+            elif isinstance(node, ast.Dict):
+                for k, v in zip(node.keys, node.values):
+                    if isinstance(k, ast.Constant) and k.value == "source" and _is_new(v):
+                        offenders.append(f"{py.name}:{node.lineno}: {{'source': new value}}")
     assert offenders == [], f"slice 1 must have NO producer; found emissions: {offenders}"
