@@ -81,7 +81,7 @@ This is enforced **entirely in `extract_text_facts`** (offset + drop + cap + pri
 
 ## 4. The fix (all in `extract_text_facts`, all dormant-gated on `inferred_facts`)
 
-1. **Drop junk count-phrase item names.** Add `_is_count_phrase_item(value)` → true for values matching `^\d{1,2}\s+.*\bitems?$` (e.g. "6 famous indo-chinese items"). When the planner produced `inferred_facts`, filter these out of `item_name_facts` (and any paired entry whose name is a count-phrase). Surgical — keeps real customer items (Example A's "Paneer Tikka", Example B's "Samosa"); drops only the request-phrase artifact.
+1. **Drop the junk count-phrase item name — keyed off the REQUEST, not a broad value regex (Codex r1).** The artifact is the request's own count clause ("6 famous indo-chinese items") that `_item_name_facts` mis-parses into an item. Detect it by the request phrase: reuse the count-phrase matcher (the `_requested_famous_item_facts` "N (famous|popular|top|…) … items" shape / the shared count parser) to extract the request's count clause, and drop **only** the `item_name_fact` whose normalized value equals that extracted phrase. This guarantees a coincidental real name (e.g. "5 piece items", "10 items combo") is NEVER dropped. A broad `^\d{1,2}\s+.*\bitems?$` regex is explicitly rejected for this reason. Gated on `inferred_facts`; covered by the false-positive guard test (§6 test 4b). Note: paired names from `_item_price_facts` (Example B's "Samosa") are REAL items — they are kept and handled by the offset (step 2), not dropped here.
 2. **Offset inferred indices past grounded.** Compute `base = max grounded item index + 1` across `item_name_facts ∪ item_price_facts`; re-index `inferred_facts` (and their paired prices) to start at `base`. `base == 0` (pure-vague, no grounded items) ⇒ no-op.
 3. **Remainder-fill cap (mixed case).** When a total count N is requested (reuse the count parser, §6) and K grounded items exist, cap inferred to the first `max(0, N − K)` items so the project commits to exactly N.
 4. **Flat-price pairing.** For each (capped, offset) inferred item, if a flat `generic_price` was extracted from customer text, emit `item:{base+i}:price = generic_price` with `source="customer_text"`.
@@ -109,20 +109,21 @@ Count-parse sharing: `_requested_item_count` currently lives in `visual_qa.py` (
 2. **Paired collision (Example B):** grounded `item:0:name "Samosa" + item:0:price "$5"` + inferred → "Samosa"/"$5" survive unchanged; inferred coexist.
 3. **Mixed 2 + 6 = 8:** customer names 2, requests 8 total, planner offers ≥6 → exactly 8 distinct items; the 2 named are `customer_text` with original values; 6 are `hermes_inferred`.
 4. **Junk-drop (Example C):** "include 6 famous indo-chinese items" → "6 famous indo-chinese items" is NOT among rendered item names; only planner items.
+4b. **Junk-drop false-positive guard (Codex r1):** a real standalone item name that merely *looks* count-shaped but is NOT the request's count clause (e.g. "5 piece items", "10 items combo") is preserved as a `customer_text` item — never dropped.
 5. **Flat-price provenance:** planner item names `hermes_inferred`; their paired prices `customer_text` == the stated flat price.
 6. **Pure-vague:** no grounded items ⇒ inferred at `item:0+` (offset 0), unchanged from slice-5a behavior.
 7. **Dormant byte-identity:** planner off ⇒ `extract_text_facts` output identical to `origin/main` (no junk-drop, no offset, no flat-price).
-8. **`merge_locked_facts` invariant unit test:** a single list with a grounded + a higher-priority inferred at the SAME index — assert the grounded (higher-priority) survives. (Locks the latent footgun as a regression even though the offset means production never feeds it a collision.)
+8. **Offset prevents same-index collision UPSTREAM (Codex r1, corrected):** unit-test the offset helpers — given grounded item facts occupying `item:0..M` and inferred facts at `item:0..K`, `_reindex_item_facts(inferred, _max_item_index(grounded ∪ paired) + 1)` yields indices strictly `> M`, so no `(index, kind)` is ever shared between a grounded and an inferred fact in the list handed to `merge_locked_facts`. **We do NOT assert `merge_locked_facts` preserves grounded on a same-index collision** — current merge last-seen-overwrites at `:651`, by design unchanged; the offset's contract is that merge is *never handed* such a collision. (This corrects the original test #8, which wrongly assumed a merge guarantee that does not exist.)
 
 ---
 
 ## 7. One PR or split?
 
-**Recommendation: ONE PR.** The entire change is confined to `extract_text_facts` and is dormant-gated on `inferred_facts` — there is no portion that alters shared behavior for current (planner-off) callers, so an "inert refactor" PR would have an empty behavior delta and create an artificial seam. `merge_locked_facts` is deliberately untouched, so there is no risky shared-logic refactor to isolate.
+**Recommendation: ONE PR.** The entire change is confined to `extract_text_facts` and is dormant-gated on `inferred_facts` — there is no portion that alters shared behavior for current (planner-off) callers, so an "inert refactor" PR would have an empty behavior delta and create an artificial seam. `merge_locked_facts` is deliberately untouched (Codex confirmed merge-untouched is the right low-blast-radius call), so there is no risky shared-logic refactor to isolate.
 
-The one nuance worth a possible split is **test #8** (the `merge_locked_facts` same-index invariant lock): it documents/guards the latent footgun independent of the planner. It can ship in the same PR as a pure test addition (no logic change). If review prefers, it can be a tiny precursor test-only PR — but that is optional, not load-bearing.
+**Hardening `merge_locked_facts` is explicitly OUT of scope.** The current last-seen-overwrite at `:651` is a latent footgun, but the offset invariant means production never feeds merge a same-index grounded+inferred collision, so a merge rewrite is unnecessary blast radius here. If we later want defense-in-depth (make merge itself refuse to drop a higher-priority fact on a same-index collision), that is a SEPARATE future hardening PR with its own review — not part of this slice.
 
-So: **single PR** = `facts.py` behavior (junk-drop + offset + cap + flat-price) + the full test set above, all dormant. Codex 5-lens (truth-guard + rollout-safety blocking) before merge.
+So: **single PR** = `facts.py` behavior (junk-drop + offset + cap + flat-price) + the full test set above (incl. test #8, which asserts the offset prevents collisions upstream — NOT a merge guarantee), all dormant. Codex 5-lens (truth-guard + rollout-safety blocking) before merge.
 
 ---
 
