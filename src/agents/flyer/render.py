@@ -1808,6 +1808,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 spec=json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 src=Path(spec["source"]); target=Path(spec["target"]); size=tuple(spec["size"]); lines=spec["lines"]
+menu=spec.get("menu_payload") or {}
 def has_telugu(text):
     return any("\\u0c00" <= ch <= "\\u0c7f" for ch in text or "")
 def font(sz,bold=False,text=""):
@@ -1831,6 +1832,51 @@ with Image.open(src) as img:
     img=img.convert("RGB")
     if img.size != size: img=img.resize(size)
     draw=ImageDraw.Draw(img,"RGBA"); width,height=size; margin=max(24,int(width*.035))
+    if menu.get("items"):
+        biz=str(menu.get("business") or "").strip(); title=str(menu.get("title") or "").strip()
+        items=list(menu.get("items") or []); footer=" | ".join(str(v) for v in (menu.get("location"),menu.get("contact")) if v)
+        tf=font(max(46,int(width*.062)),True,title); bf=font(max(24,int(width*.030)),True,biz)
+        sf=font(max(19,int(width*.021)),False); itemf=font(max(28,int(width*.034)),True); pricef=font(max(30,int(width*.038)),True)
+        bx0,by0,bx1=margin,int(height*.026),int(width*.68); inner=bx1-bx0-44
+        card=[]
+        if biz and biz.lower()!=title.lower():
+            for ln in wrap(draw,biz,bf,inner): card.append((bf,(50,66,42,255),ln))
+        for ln in wrap(draw,title,tf,inner): card.append((tf,(128,22,34,255),ln))
+        for extra in menu.get("extras") or []:
+            for ln in wrap(draw,str(extra),sf,inner): card.append((sf,(50,66,42,255),ln))
+        bh=sum(int(getattr(f,"size",18)*1.2) for f,_c,_t in card)+34; by1=by0+bh
+        if by1 > int(height*.50): raise SystemExit("critical text overlay does not fit")
+        draw.rounded_rectangle((bx0+7,by0+7,bx1+7,by1+7), radius=24, fill=(0,0,0,70))
+        draw.rounded_rectangle((bx0,by0,bx1,by1), radius=24, fill=(255,248,224,248), outline=(179,37,47,235), width=3)
+        y=by0+18
+        for f,c,ln in card:
+            draw.text((bx0+22,y), ln, font=f, fill=c); y += int(getattr(f,"size",18)*1.2)
+        panel=(margin,int(height*.56),width-margin,height-margin)
+        draw.rounded_rectangle((panel[0]+8,panel[1]+8,panel[2]+8,panel[3]+8), radius=28, fill=(0,0,0,75))
+        draw.rounded_rectangle(panel, radius=28, fill=(255,247,222,246), outline=(179,37,47,238), width=4)
+        px0,py0,px1,py1=panel; cols=2 if width>=900 and len(items)>3 else 1; gap=16
+        cardw=(px1-px0-56-gap*(cols-1))//cols; rows=(len(items)+cols-1)//cols
+        rawh=((py1-py0-116)-12*(rows-1))//max(1,rows); cardh=max(86 if rows<=3 else 58,min(128,rawh))
+        if rows>=5:
+            itemf=font(max(21,int(width*.026)),True); pricef=font(max(22,int(width*.028)),True)
+        elif rows>=4:
+            itemf=font(max(23,int(width*.029)),True); pricef=font(max(24,int(width*.031)),True)
+        def split_price(item):
+            m=re.search(r"(.+?)\\s+(\\$\\s*\\d+(?:\\.\\d{1,2})?)$", str(item).strip())
+            return (str(item).strip(),"") if not m else (re.sub(r"\\bfor$","",m.group(1).strip(),flags=re.I).strip(), m.group(2).replace(" ",""))
+        start=py0+34
+        for idx,item in enumerate(items):
+            col=idx%cols; row=idx//cols; x=px0+28+col*(cardw+gap); cy=start+row*(cardh+12)
+            if cy+cardh > py1-62: raise SystemExit(f"menu overlay cannot fit all {len(items)} items (drew {idx})")
+            draw.rounded_rectangle((x+5,cy+5,x+cardw+5,cy+cardh+5), radius=18, fill=(0,0,0,45))
+            draw.rounded_rectangle((x,cy,x+cardw,cy+cardh), radius=18, fill=(255,253,244,245), outline=(223,176,72,235), width=3)
+            name,price=split_price(item); pbox=draw.textbbox((0,0),price,font=pricef); pw=pbox[2]-pbox[0]
+            name_lines=wrap(draw,name,itemf,max(160,cardw-pw-56)); ny=cy+max(10,(cardh-len(name_lines)*int(itemf.size*1.05))//2)
+            for ln in name_lines:
+                draw.text((x+22,ny),ln,font=itemf,fill=(64,42,32,255)); ny += int(itemf.size*1.05)
+            draw.text((x+cardw-22-pw,cy+(cardh-pricef.size)//2),price,font=pricef,fill=(150,24,38,255))
+        if footer: draw.text((px0+28,py1-44),footer,font=sf,fill=(54,65,48,255))
+        target.parent.mkdir(parents=True, exist_ok=True); img.save(target, format="PNG", optimize=True); raise SystemExit(0)
     panel_h=min(int(height*.60),max(int(height*.24),58+len(lines)*max(30,int(width*.032))))
     y0=height-panel_h-margin
     draw.rounded_rectangle((margin,y0,width-margin,height-margin), radius=18, fill=(12,16,24,218), outline=(255,196,58,240), width=3)
@@ -1860,6 +1906,7 @@ def _apply_critical_text_overlay(project: FlyerProject, source: Path | str, targ
         "size": list(size),
         "output_format": output_format,
         "lines": _critical_lines(project),
+        "menu_payload": _menu_overlay_payload(project),
     }
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False) as fh:
         json.dump(spec, fh)
