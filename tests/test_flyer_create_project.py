@@ -362,13 +362,20 @@ def test_lakshmi_south_indian_snack_request_reaches_integrated_menu_path(tmp_pat
     assert facts["item:2:price"]["value"] == "$10.99"
 
     from schemas import FlyerProject  # noqa: E402
-    from agents.flyer.render import _image_prompt, _integrated_poster_eligible  # noqa: E402
+    from agents.flyer.render import _background_only_eligible, _image_prompt, _integrated_poster_eligible  # noqa: E402
 
     project = FlyerProject.model_validate(project_doc)
     prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+    assert _integrated_poster_eligible(project) is False
+    assert _background_only_eligible(project) is True
+    assert "decorative BACKGROUND image only" in prompt
+    assert "Build a full restaurant/menu poster" not in prompt
+
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
     assert _integrated_poster_eligible(project) is True
-    assert "Build a full restaurant/menu poster" in prompt
-    assert "decorative BACKGROUND image only" not in prompt
+    integrated_prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+    assert "Build a full restaurant/menu poster" in integrated_prompt
+    assert "decorative BACKGROUND image only" not in integrated_prompt
 
 
 def test_discount_offer_does_not_become_menu_item_prices(tmp_path, monkeypatch, capsys):
@@ -480,6 +487,86 @@ def test_indochinese_famous_item_expansion_supports_ten_items(tmp_path, monkeypa
     assert facts["item:8:name"]["value"] == "American Chopsuey"
     assert facts["item:9:name"]["value"] == "Chili Chicken"
     assert facts["item:9:price"]["value"] == "$9.99"
+
+
+def test_create_project_passes_config_to_creative_planner(tmp_path, monkeypatch, capsys):
+    module = _load_script(monkeypatch)
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    config_path = tmp_path / "config.yaml"
+    _write_customer(
+        customers_path,
+        category="Indian Restaurant",
+        phone="+17329837841",
+        business_name="Lakshmi's Kitchen",
+        business_address="90 Brybar Dr St Johns FL",
+        primary_chat_id="201975216009469@lid",
+    )
+    config_path.write_text(json.dumps({
+        "schema_version": 1,
+        "customer": {"name": "Triveni", "location_id": "loc_pineville_01", "timezone": "America/New_York"},
+        "owner": {"name": "Owner", "phone": "+19045550000"},
+        "limits": {},
+        "alerting": {"pushover_user_key": "k", "pushover_app_token": "t"},
+        "backup": {"gpg_recipient_email": "owner@example.com"},
+        "flyer": {
+            "enabled": True,
+            "creative_planner": {
+                "enabled": True,
+                "enabled_categories": ["south indian"],
+            },
+        },
+    }), encoding="utf-8")
+
+    from agents.flyer import creative_planner as cp  # noqa: E402
+
+    monkeypatch.setattr(
+        cp,
+        "build_creative_planner_provider",
+        lambda: (lambda _fields, _raw: [
+            "Idly",
+            "Medu Vada",
+            "Masala Dosa",
+            "Mysore Bonda",
+            "Upma",
+            "Poori Bhaji",
+            "Pongal",
+            "Rava Dosa",
+        ]),
+    )
+    raw_request = (
+        "Create a weekend breakfast specials flyer for Lakshmi's Kitchen. "
+        "Include 8 famous South Indian breakfast items. Any item price is at $8.99. "
+        "Only available on Saturday and Sunday from 8 AM to 11 AM."
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+17329837841",
+        "--chat-id", "201975216009469@lid",
+        "--message-id", "m-south-indian-planner",
+        "--raw-request", raw_request,
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+        "--config-path", str(config_path),
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+    facts = {fact["fact_id"]: fact for fact in project["locked_facts"]}
+
+    assert [facts[f"item:{idx}:name"]["value"] for idx in range(8)] == [
+        "Idly",
+        "Medu Vada",
+        "Masala Dosa",
+        "Mysore Bonda",
+        "Upma",
+        "Poori Bhaji",
+        "Pongal",
+        "Rava Dosa",
+    ]
+    assert [facts[f"item:{idx}:name"]["source"] for idx in range(8)] == ["hermes_inferred"] * 8
+    assert [facts[f"item:{idx}:price"]["value"] for idx in range(8)] == ["$8.99"] * 8
+    assert [facts[f"item:{idx}:price"]["source"] for idx in range(8)] == ["customer_text"] * 8
 
 
 def test_profile_hydration_uses_chat_id_when_phone_does_not_match(tmp_path, monkeypatch, capsys):

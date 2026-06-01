@@ -1594,7 +1594,8 @@ Review/verification:
 - [x] Implement integrated direct poster generation for simple English typed menu flyers.
 - [x] Run focused renderer/generation/QA tests and py_compile/diff checks.
 - [x] Run multi-vector review and fix findings.
-- [ ] Merge, deploy, and run live spend-gated smoke.
+- [x] Merge/deploy safety follow-up and run live spend-gated smoke/eval.
+- [x] Gate direct integrated poster rendering behind explicit `FLYER_ALLOW_INTEGRATED_POSTER=1` after eval showed model-rendered text is not customer-safe.
 
 Review/verification:
 - Red/green: new integrated-poster renderer tests first failed on missing `_integrated_poster_eligible` and raw sidecar/overlay behavior; after implementation they passed.
@@ -1602,3 +1603,4 @@ Review/verification:
 - Review fixes: menu-poster QA now requires exact business identity; English typed integrated menu posters block unexpected regional script; explicit localized menu requests with regional script still pass. Lakshmi raw-request create-project coverage proves the incident-shaped request reaches integrated mode.
 - Multi-vector review: structural/code and product/quality reviewers both cleared after fixes; deploy acceptable pending live smoke.
 - Known unrelated local static failures: `tests/test_flyer_scripts_static.py` currently fails two cf-router hook ordering assertions on `origin/main`-equivalent code; no cf-router files changed in this slice.
+- Live eval result (2026-06-01): 7 real OpenRouter/Gemini image generations produced visually attractive but truth-unsafe posters: hallucinated address/phone, corrupted item names, and incomplete item counts. Decision: do NOT enable direct integrated rendering for customer traffic. Deployed safety follow-up defaults back to background-only + deterministic overlay; integrated path remains available only with explicit eval env flag.

@@ -231,6 +231,13 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
             or re.search(r"\bprice\s+(?:any|every|each|all)\s+items?\b", lowered)
         ):
             return
+        if lowered in {
+            "any item", "all item", "all items", "every item", "each item",
+            "any items", "every items", "each items", "priced at",
+            "a", "an", "the", "and", "with", "include", "includes", "for", "on",
+            "at", "each", "plate", "pc", "pcs", "piece", "pieces",
+        }:
+            return
         if category_suffix and category_suffix.lower() not in lowered:
             name = f"{name.title()} {category_suffix}"
         if name.lower() in {"a", "an", "the", "and", "with", "include", "includes", "for", "on", "at", "each", "plate", "pc", "pcs", "piece", "pieces"}:
@@ -274,6 +281,8 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
 def _generic_item_price(text: str) -> str:
     patterns = (
         r"\bprice\s+(?:any|every|each|all)\s+(?:item|items?)\s*\$?\s*(?P<price>\d+(?:\.\d{2})?)(?!\s*[%\-])\b",
+        r"\b(?:any|every|each|all)\s+(?:item|items?)\s+price\s+(?:is\s+)?(?:at|for|=|:)\s*\$?\s*(?P<price>\d+(?:\.\d{2})?)(?!\s*[%\-])\b",
+        r"\b(?:any|every|each|all)\s+(?:[A-Za-z][A-Za-z0-9'&/-]*\s+){0,3}items?\s+(?:priced\s+)?(?:at|for|is|=|:)\s*\$\s*(?P<price>\d+(?:\.\d{2})?)(?!\s*[%\-])\b",
         r"\b(?:any|every|each|all)\s+(?:item|items?)\s+(?:priced\s+)?(?:at|for|is|=|:)\s*\$\s*(?P<price>\d+(?:\.\d{2})?)(?!\s*[%\-])\b",
     )
     for pattern in patterns:

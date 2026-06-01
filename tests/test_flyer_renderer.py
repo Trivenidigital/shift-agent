@@ -1602,7 +1602,7 @@ def test_telugu_poster_prompt_is_background_only_overlay_owns_text():
 
 def test_background_only_contract_stays_for_non_integrated_paths(tmp_path, monkeypatch):
     """Background-only stays for localized/non-menu cases and for style-only
-    references. Simple English typed menus now use the integrated-poster path.
+    references. Integrated typed menus are opt-in only after eval.
     """
     from PIL import Image as _Image
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
@@ -1616,8 +1616,8 @@ def test_background_only_contract_stays_for_non_integrated_paths(tmp_path, monke
     assert render_module._background_only_eligible(english_service) is True
 
     english_menu = _english_project()
-    assert render_module._integrated_poster_eligible(english_menu) is True
-    assert render_module._background_only_eligible(english_menu) is False
+    assert render_module._integrated_poster_eligible(english_menu) is False
+    assert render_module._background_only_eligible(english_menu) is True
 
     # Language no longer gates: the overlay renders facts in their own script
     # (Telugu via _font), and the model garbles non-English, so Telugu is ALSO
@@ -1643,8 +1643,10 @@ def test_background_only_contract_stays_for_non_integrated_paths(tmp_path, monke
                           received_at=datetime.now(timezone.utc))
 
     # A logo/brand asset alone stays eligible (it's visual identity, not text).
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
     assert render_module._integrated_poster_eligible(
         english_menu.model_copy(update={"assets": [_asset("logo")]})) is True
+    monkeypatch.delenv("FLYER_ALLOW_INTEGRATED_POSTER")
     # A reference IMAGE attached only as a STYLE template (the request does not ask
     # to read items out of it; copy is in fields) stays eligible — the overlay
     # owns the known text.
@@ -1659,7 +1661,20 @@ def test_background_only_contract_stays_for_non_integrated_paths(tmp_path, monke
     assert render_module._background_only_eligible(extract_req) is False
 
 
-def test_simple_english_typed_menu_uses_integrated_poster_prompt():
+def test_simple_english_typed_menu_defaults_to_background_overlay():
+    project = _english_project()
+
+    assert render_module._integrated_poster_eligible(project) is False
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+
+    assert "decorative BACKGROUND image only" in prompt
+    assert "Do NOT draw any text" in prompt
+    assert "Build a full restaurant/menu poster" not in prompt
+
+
+def test_simple_english_typed_menu_can_opt_into_integrated_poster_prompt(monkeypatch):
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
     project = _english_project()
 
     assert render_module._integrated_poster_eligible(project) is True
@@ -1712,7 +1727,8 @@ def test_integrated_poster_is_not_used_for_telugu_or_reference_extraction(tmp_pa
     assert render_module._background_only_eligible(extract_req) is False
 
 
-def test_integrated_poster_allows_english_typed_menu_even_with_localized_profile_language():
+def test_integrated_poster_allows_english_typed_menu_even_with_localized_profile_language(monkeypatch):
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
     project = _english_project().model_copy(update={
         "fields": _english_project().fields.model_copy(update={"preferred_language": "te"})
     })
@@ -1742,6 +1758,7 @@ def test_integrated_poster_concept_keeps_model_image_without_overlay(tmp_path, m
             return self._body
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
     monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", lambda *_args, **_kwargs: _Resp())
 
     spec = render_concept_previews(

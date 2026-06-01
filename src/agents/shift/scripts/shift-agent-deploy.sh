@@ -372,6 +372,16 @@ PY
     else
         rm -f /opt/shift-agent/flyer_facts.py
     fi
+    if [ -f src/agents/flyer/creative_planner.py ]; then
+        install -m 644 src/agents/flyer/creative_planner.py /opt/shift-agent/flyer_creative_planner.py
+    else
+        rm -f /opt/shift-agent/flyer_creative_planner.py
+    fi
+    if [ -f src/agents/flyer/creative_firewall.py ]; then
+        install -m 644 src/agents/flyer/creative_firewall.py /opt/shift-agent/flyer_creative_firewall.py
+    else
+        rm -f /opt/shift-agent/flyer_creative_firewall.py
+    fi
     if [ -f src/agents/flyer/reference_extract.py ]; then
         install -m 644 src/agents/flyer/reference_extract.py /opt/shift-agent/flyer_reference_extract.py
     else

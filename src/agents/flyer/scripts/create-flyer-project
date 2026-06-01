@@ -17,8 +17,12 @@ sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(SRC_ROOT / "platform"))
 sys.path.insert(0, str(SRC_ROOT))
 
-from schemas import FlyerAsset, FlyerCustomerStore, FlyerManualReview, FlyerProject, FlyerProjectStore, FlyerProjectCreated, FlyerReferenceExtraction, FlyerRequestFields, FlyerSourceContractExtracted  # noqa: E402
+from schemas import Config, FlyerAsset, FlyerConfig, FlyerCustomerStore, FlyerManualReview, FlyerProject, FlyerProjectStore, FlyerProjectCreated, FlyerReferenceExtraction, FlyerRequestFields, FlyerSourceContractExtracted  # noqa: E402
 from safe_io import FileLock, atomic_write_text  # noqa: E402
+try:
+    from safe_io import load_yaml_model as _load_yaml_model  # type: ignore  # noqa: E402
+except Exception:
+    _load_yaml_model = None  # type: ignore
 try:
     # Audit emission for FlyerSourceContractExtracted uses ndjson_append + flock
     # the same way parse-menu-photo does. Tests stub safe_io down to FileLock +
@@ -63,6 +67,7 @@ STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
 CUSTOMERS_PATH = Path("/opt/shift-agent/state/flyer/customers.json")
 ASSET_DIR = Path("/opt/shift-agent/state/flyer/assets")
 LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
 
 
 def _emit_source_contract_extracted_audit(
@@ -234,6 +239,23 @@ def _load_store(path: Path) -> FlyerProjectStore:
 
 def _write_store(path: Path, store: FlyerProjectStore) -> None:
     atomic_write_text(path, store.model_dump_json(indent=2))
+
+
+def _load_flyer_config(path: Path) -> FlyerConfig | None:
+    """Best-effort config load for config-gated extraction features.
+
+    Local/unit invocations often do not have /opt/shift-agent/config.yaml; in
+    that case project creation stays byte-identical to the pre-config path.
+    Production has the config, and explicit --config-path failures should surface
+    through the normal Config validation path rather than silently disabling a
+    feature the operator enabled.
+    """
+    if not path.exists():
+        return None
+    if _load_yaml_model is not None:
+        return _load_yaml_model(path, Config).flyer
+    import yaml
+    return Config.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")) or {}).flyer
 
 
 def _load_customer_store(path: Path) -> FlyerCustomerStore:
@@ -578,9 +600,11 @@ def main() -> int:
     p.add_argument("--state-path", default=str(STATE_PATH))
     p.add_argument("--customer-state-path", default=str(CUSTOMERS_PATH))
     p.add_argument("--asset-dir", default=str(ASSET_DIR))
+    p.add_argument("--config-path", default=str(CONFIG_PATH))
     args = p.parse_args()
 
     state_path = Path(args.state_path)
+    flyer_cfg = _load_flyer_config(Path(args.config_path))
     project: FlyerProject | None = None
     pending_reference_asset: FlyerAsset | None = None
     should_extract_reference = False
@@ -638,6 +662,7 @@ def main() -> int:
                 message_id=args.message_id,
                 profile_business_name=(customer.business_name if customer is not None else ""),
                 allow_text_identity=not bool(profile_facts),
+                cfg=flyer_cfg,
             ),
         )
         # P0-2 missing-required-fact gate: if extraction (customer text + profile +
