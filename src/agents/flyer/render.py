@@ -471,10 +471,34 @@ def _instruction_leak_blockers(facts: list[FlyerTextFact]) -> list[str]:
 def _detail_clauses(project: FlyerProject) -> list[str]:
     selected: list[str] = []
     seen: set[str] = set()
+    menu_items = _menu_item_lines(project)
+    menu_prices = {
+        re.sub(r"\s+", "", price)
+        for item in menu_items
+        for _, price in [_split_item_price(item)]
+        if price
+    }
+
+    def is_menu_item_aggregate(value: str) -> bool:
+        if not menu_items:
+            return False
+        price_occurrences = [
+            re.sub(r"\s+", "", match.group(0))
+            for match in re.finditer(r"\$\s*\d+(?:\.\d{1,2})?", value or "")
+        ]
+        if len(price_occurrences) < 2 or not set(price_occurrences).issubset(menu_prices):
+            return False
+        normalized = _normalize_fact_text(value)
+        return any(
+            _normalize_fact_text(_split_item_price(item)[0]) in normalized
+            for item in menu_items
+        )
 
     def add_detail(value: str) -> None:
         value = _clean_fact_text(value)
         if not value:
+            return
+        if is_menu_item_aggregate(value):
             return
         normalized = _normalize_fact_text(value)
         if normalized in seen:
@@ -493,13 +517,6 @@ def _detail_clauses(project: FlyerProject) -> list[str]:
     details = (project.fields.notes or project.raw_request or "").strip()
     if not details:
         return selected
-    menu_items = _menu_item_lines(project)
-    menu_prices = {
-        re.sub(r"\s+", "", price)
-        for item in menu_items
-        for _, price in [_split_item_price(item)]
-        if price
-    }
     compact = re.sub(r"\s+", " ", details)
     clauses = [part.strip(" .") for part in re.split(r";|\n|•|-{2,}|(?<=\.)\s+", compact) if part.strip(" .")]
     current_contact_digits = _digits(project.fields.contact_info or "")
@@ -527,7 +544,11 @@ def _detail_clauses(project: FlyerProject) -> list[str]:
             menu_items
             and clause_prices
             and clause_prices.issubset(menu_prices)
-            and re.search(r"\b(?:add|set|use)\s+price\s+as\b|\bprice\s+as\b", clause, flags=re.IGNORECASE)
+            and (
+                re.search(r"\b(?:add|set|use)\s+price\s+as\b|\bprice\s+as\b", clause, flags=re.IGNORECASE)
+                or is_menu_item_aggregate(clause)
+                or re.search(r"\b(?:all|any|every|each)\b[^.;,\n]{0,40}\$\s*\d", clause, flags=re.IGNORECASE)
+            )
         ):
             continue
         if phones and current_contact_digits and current_contact_digits in phones and not has_offer_or_price:
@@ -1636,20 +1657,20 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
         menu_payload = _menu_overlay_payload(project)
         if menu_payload["items"]:
             margin = max(28, int(width * 0.038))
-            title_font = _font(ImageFont, max(32, int(width * 0.046)), bold=True, text=str(menu_payload["title"]))
-            sub_font = _font(ImageFont, max(18, int(width * 0.023)), bold=True)
-            item_font = _font(ImageFont, max(18, int(width * 0.023)), bold=True)
-            small_font = _font(ImageFont, max(15, int(width * 0.018)))
+            title_font = _font(ImageFont, max(46, int(width * 0.062)), bold=True, text=str(menu_payload["title"]))
+            item_font = _font(ImageFont, max(28, int(width * 0.034)), bold=True)
+            price_font = _font(ImageFont, max(30, int(width * 0.038)), bold=True)
+            small_font = _font(ImageFont, max(19, int(width * 0.021)))
 
             # Title card (top-left): brand + full campaign title + schedule +
             # promo/offer facts. Content-adaptive height so no required visible
             # fact is truncated — the card grows downward (capped above the menu
             # panel). `extras` carries the offer/promotion/pricing facts the menu
             # item cards don't show, so visual QA finds every required fact.
-            biz_font = _font(ImageFont, max(19, int(width * 0.025)), bold=True)
+            biz_font = _font(ImageFont, max(24, int(width * 0.030)), bold=True)
             business = str(menu_payload.get("business") or "").strip()
             title_text = str(menu_payload["title"]).strip()
-            box_x0, box_y0, box_x1 = margin, int(height * 0.055), int(width * 0.58)
+            box_x0, box_y0, box_x1 = margin, int(height * 0.026), int(width * 0.68)
             inner_w = box_x1 - box_x0 - 44
             card_lines: list[tuple[object, tuple[int, int, int, int], str]] = []
             # Every required visible fact is fully wrapped — NO silent line caps
@@ -1682,16 +1703,22 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
                     card_lines.append((small_font, (255, 236, 205, 250), ln))
             content_h = sum(int(getattr(f, "size", 18) * 1.2) for f, _c, _t in card_lines)
             box_y1 = box_y0 + content_h + 34
-            if box_y1 > int(height * 0.60):
+            if box_y1 > int(height * 0.50):
                 raise FlyerRenderError("critical text overlay does not fit")
-            draw.rounded_rectangle((box_x0, box_y0, box_x1, box_y1), radius=22, fill=(42, 86, 42, 232), outline=(255, 205, 74, 245), width=3)
+            draw.rounded_rectangle((box_x0 + 7, box_y0 + 7, box_x1 + 7, box_y1 + 7), radius=24, fill=(0, 0, 0, 70))
+            draw.rounded_rectangle((box_x0, box_y0, box_x1, box_y1), radius=24, fill=(255, 248, 224, 248), outline=(179, 37, 47, 235), width=3)
             y = box_y0 + 18
             for f, color, ln in card_lines:
+                if color[0] > 240 and color[1] > 200:
+                    color = (128, 22, 34, 255)
+                elif color[0] > 240:
+                    color = (50, 66, 42, 255)
                 draw.text((box_x0 + 22, y), ln, font=f, fill=color)
                 y += int(getattr(f, "size", 18) * 1.2)
 
-            panel = (margin, int(height * 0.64), width - margin, height - margin)
-            draw.rounded_rectangle(panel, radius=24, fill=(18, 54, 34, 236), outline=(255, 205, 74, 245), width=3)
+            panel = (margin, int(height * 0.56), width - margin, height - margin)
+            draw.rounded_rectangle((panel[0] + 8, panel[1] + 8, panel[2] + 8, panel[3] + 8), radius=28, fill=(0, 0, 0, 75))
+            draw.rounded_rectangle(panel, radius=28, fill=(255, 247, 222, 246), outline=(179, 37, 47, 238), width=4)
             px0, py0, px1, py1 = panel
             # No hardcoded English "MENU" label — keeps the overlay language-neutral
             # (item cards are self-evidently a menu). `_font` already renders the
@@ -1699,21 +1726,29 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
             # Localizing facts captured in the wrong language is an intake concern.
             items = list(menu_payload["items"])
             cols = 2 if width >= 900 and len(items) > 3 else 1
-            gap = 14
-            card_w = (px1 - px0 - 48 - gap * (cols - 1)) // cols
+            gap = 16
+            card_w = (px1 - px0 - 56 - gap * (cols - 1)) // cols
             # Size cards so the full allowed item count (MAX_DETAIL_FACTS = 10, i.e.
             # up to 5 two-column rows) fits the panel: subtract the start offset
             # (66), the footer reserve (58), and the 10px inter-row gaps from the
             # available height before dividing by rows. Min 50 lets 5 rows fit.
             rows = (len(items) + cols - 1) // cols
-            card_h = max(50, min(84, ((py1 - py0 - 124) - 10 * (rows - 1)) // max(1, rows)))
-            start_y = py0 + 66
+            card_h_raw = ((py1 - py0 - 116) - 12 * (rows - 1)) // max(1, rows)
+            min_card_h = 86 if rows <= 3 else 58
+            card_h = max(min_card_h, min(128, card_h_raw))
+            if rows >= 5:
+                item_font = _font(ImageFont, max(21, int(width * 0.026)), bold=True)
+                price_font = _font(ImageFont, max(22, int(width * 0.028)), bold=True)
+            elif rows >= 4:
+                item_font = _font(ImageFont, max(23, int(width * 0.029)), bold=True)
+                price_font = _font(ImageFont, max(24, int(width * 0.031)), bold=True)
+            start_y = py0 + 34
             for idx, item in enumerate(items):
                 col = idx % cols
                 row = idx // cols
-                x = px0 + 24 + col * (card_w + gap)
-                cy = start_y + row * (card_h + 10)
-                if cy + card_h > py1 - 58:
+                x = px0 + 28 + col * (card_w + gap)
+                cy = start_y + row * (card_h + 12)
+                if cy + card_h > py1 - 62:
                     # Fail closed instead of silently dropping items. Under the
                     # background-only contract the overlay is the SOLE source of
                     # item facts (the model draws none), and `write_text_manifest`
@@ -1724,14 +1759,21 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
                     raise FlyerRenderError(
                         f"menu overlay cannot fit all {len(items)} items (drew {idx})"
                     )
-                draw.rounded_rectangle((x, cy, x + card_w, cy + card_h), radius=14, fill=(116, 18, 30, 238), outline=(255, 190, 58, 230), width=2)
+                draw.rounded_rectangle((x + 5, cy + 5, x + card_w + 5, cy + card_h + 5), radius=18, fill=(0, 0, 0, 45))
+                draw.rounded_rectangle((x, cy, x + card_w, cy + card_h), radius=18, fill=(255, 253, 244, 245), outline=(223, 176, 72, 235), width=3)
                 name, price = _split_item_price(item)
-                draw.text((x + 16, cy + 12), name, font=item_font, fill=(255, 255, 245, 255))
-                price_bbox = draw.textbbox((0, 0), price, font=item_font)
-                draw.text((x + card_w - 16 - (price_bbox[2] - price_bbox[0]), cy + 12), price, font=item_font, fill=(255, 218, 85, 255))
+                price_bbox = draw.textbbox((0, 0), price, font=price_font)
+                price_w = price_bbox[2] - price_bbox[0]
+                text_w = max(160, card_w - price_w - 56)
+                name_lines = _wrap(draw, name, item_font, text_w)
+                name_y = cy + max(18, (card_h - len(name_lines) * int(item_font.size * 1.05)) // 2)
+                for ln in name_lines:
+                    draw.text((x + 22, name_y), ln, font=item_font, fill=(64, 42, 32, 255))
+                    name_y += int(item_font.size * 1.05)
+                draw.text((x + card_w - 22 - price_w, cy + (card_h - price_font.size) // 2), price, font=price_font, fill=(150, 24, 38, 255))
             footer = " | ".join(str(v) for v in (menu_payload["location"], menu_payload["contact"]) if v)
             if footer:
-                draw.text((px0 + 24, py1 - 42), footer, font=small_font, fill=(255, 255, 240, 245))
+                draw.text((px0 + 28, py1 - 44), footer, font=small_font, fill=(54, 65, 48, 255))
             img.save(target, format="PNG", optimize=True)
             return
         margin = max(24, int(width * 0.035))
