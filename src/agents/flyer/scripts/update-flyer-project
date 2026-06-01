@@ -32,6 +32,10 @@ try:
     from flyer_manual_queue import make_manual_review  # type: ignore  # noqa: E402
 except ImportError:
     from agents.flyer.manual_queue import make_manual_review  # noqa: E402
+try:
+    from flyer_creative_planner import promote_inferred_to_confirmed as _promote_inferred_to_confirmed  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.creative_planner import promote_inferred_to_confirmed as _promote_inferred_to_confirmed  # noqa: E402
 
 STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
 RAW_REQUEST_MAX_LEN = 2000
@@ -177,6 +181,12 @@ def _already_applied_visible_in_current_preview(project, patch) -> bool:
     return False
 
 
+# Sources a customer text-revision may edit. `customer_confirmed` (an inferred
+# assumption the customer approved for this project) is customer-truthful, so a
+# later correction must be able to update it too (bounded-creative-planner slice 4).
+_REVISABLE_SOURCES = ("customer_text", "customer_confirmed")
+
+
 def _refresh_customer_text_locked_facts(project, *, message_id: str, patch=None):
     if not getattr(project, "locked_facts", None):
         return []
@@ -190,7 +200,7 @@ def _refresh_customer_text_locked_facts(project, *, message_id: str, patch=None)
         updated_match = False
         for fact in project.locked_facts:
             if (
-                getattr(fact, "source", "") == "customer_text"
+                getattr(fact, "source", "") in _REVISABLE_SOURCES
                 and revision_text_value_contains(str(getattr(fact, "value", "")), old_text)
             ):
                 match_count += 1
@@ -218,14 +228,14 @@ def _refresh_customer_text_locked_facts(project, *, message_id: str, patch=None)
             raise SystemExit("ambiguous locked facts for deterministic text edit")
         if match_count == 1 and updated_match:
             if not old_allowed_in_new and any(
-                getattr(fact, "source", "") == "customer_text"
+                getattr(fact, "source", "") in _REVISABLE_SOURCES
                 and revision_text_value_contains(str(getattr(fact, "value", "")), old_text)
                 for fact in updated_facts
             ):
                 raise SystemExit("stale locked fact after deterministic text edit")
             return updated_facts
     if old_text and not old_allowed_in_new and any(
-        getattr(fact, "source", "") == "customer_text"
+        getattr(fact, "source", "") in _REVISABLE_SOURCES
         and revision_text_value_contains(str(getattr(fact, "value", "")), old_text)
         for fact in project.locked_facts
     ):
@@ -677,6 +687,14 @@ def main() -> int:
                 updated = updated.model_copy(update={
                     "status": "finalizing_assets",
                     "approved_message_id": args.approve_message_id,
+                    # Customer approved the final draft. This is the ONLY genuine
+                    # approval gate — cf-router invokes it with --approve-message-id
+                    # after the customer's exact `APPROVE` reply (actions.py). The
+                    # inferred assumptions they signed off on become customer_confirmed
+                    # FOR THIS PROJECT (creative-planner slice 4 lifecycle); no-op when
+                    # there are no inferred facts (dormant default). The generic
+                    # --status path is operator/system mutation and must NOT promote.
+                    "locked_facts": _promote_inferred_to_confirmed(updated.locked_facts),
                 })
                 should_write = True
             if args.queue_manual_review:

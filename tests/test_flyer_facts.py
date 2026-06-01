@@ -606,8 +606,16 @@ def test_no_production_producer_of_new_provenance_sources():
 
     flyer_dir = pathlib.Path(__file__).resolve().parents[1] / "src" / "agents" / "flyer"
     EMIT_FUNCS = {"_fact", "FlyerLockedFact"}
-    # source -> set of filenames permitted to emit it
-    SANCTIONED = {"hermes_inferred": {"creative_planner.py"}, "customer_confirmed": set()}
+    # source -> set of filenames permitted to emit it. creative_planner.py is the
+    # SOLE sanctioned emitter of both new sources: it produces hermes_inferred
+    # candidates (materialize_inferred) and performs the slice-4 provenance-lifecycle
+    # promotion hermes_inferred -> customer_confirmed (promote_inferred_to_confirmed,
+    # on customer approval). No other production module may emit either source — the
+    # consuming script only CALLS the promotion helper, it never sets the source.
+    SANCTIONED = {
+        "hermes_inferred": {"creative_planner.py"},
+        "customer_confirmed": {"creative_planner.py"},
+    }
 
     def _new_source(node):
         if isinstance(node, ast.Constant) and node.value in _NEW_SOURCES:
@@ -669,4 +677,6 @@ def test_no_production_producer_of_new_provenance_sources():
     scanned_names = {p.name for p in _python_sources()}
     for must in ("create-flyer-project", "generate-flyer-concepts", "facts.py", "creative_planner.py"):
         assert must in scanned_names, f"producer-guard did not scan {must} (scan scope regressed)"
-    assert offenders == [], f"only creative_planner may emit hermes_inferred; found: {offenders}"
+    assert offenders == [], (
+        f"only creative_planner may emit hermes_inferred/customer_confirmed; found: {offenders}"
+    )

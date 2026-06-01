@@ -642,3 +642,30 @@ def format_warn_recovery_revision_ack(
         "Got your update — I'm redrawing the flyer with this fix "
         "and will share the new draft here."
     )
+
+
+_INFERRED_ITEM_RE = re.compile(r"^item:\d+:name$")
+
+
+def assumption_summary_line(facts: Any) -> str:
+    """Customer-facing line surfacing the planner's ASSUMPTIONS (bounded-creative-
+    planner slice 4) so the customer can revise them in one reply. Lists the
+    inferred (`source == "hermes_inferred"`) item names. Returns "" when there are
+    none — i.e. nothing in the default/dormant state, and nothing for a fully
+    customer-specified flyer. Read-only; surfaces, never invents."""
+    items: list[str] = []
+    for fact in facts or []:
+        if getattr(fact, "source", "") != "hermes_inferred":
+            continue
+        if not _INFERRED_ITEM_RE.match(str(getattr(fact, "fact_id", ""))):
+            continue
+        value = str(getattr(fact, "value", "")).strip()
+        if value:
+            items.append(value)
+    if not items:
+        return ""
+    shown = ", ".join(items[:8])
+    return (
+        f"I picked these items as suggestions: {shown}. "
+        "Reply to swap any or tell me what to change."
+    )

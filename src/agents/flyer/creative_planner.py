@@ -193,3 +193,20 @@ def materialize_inferred(
             )
         )
     return facts
+
+
+def promote_inferred_to_confirmed(facts: Sequence[FlyerLockedFact]) -> list[FlyerLockedFact]:
+    """Provenance lifecycle (slice 4): on customer approval, the inferred items the
+    customer signed off on become customer-truthful FOR THIS PROJECT — source
+    `hermes_inferred` → `customer_confirmed`. Other sources untouched.
+
+    PROJECT-SCOPED ONLY: never writes durable business menu/profile memory.
+    Persisting assumptions into a saved menu is a separate, owner-approved
+    menu-learning path (out of scope here)."""
+    promoted: list[FlyerLockedFact] = []
+    for fact in facts or []:
+        if getattr(fact, "source", "") == "hermes_inferred":
+            promoted.append(fact.model_copy(update={"source": "customer_confirmed"}))
+        else:
+            promoted.append(fact)
+    return promoted
