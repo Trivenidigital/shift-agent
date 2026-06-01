@@ -6,6 +6,7 @@ from typing import Iterable
 
 from schemas import (
     FlyerAsset,
+    FlyerConfig,
     FlyerCustomerProfile,
     FlyerLockedFact,
     FlyerProject,
@@ -16,6 +17,10 @@ try:
     from flyer_semantic_brief import build_hermes_semantic_brief_provider, build_semantic_flyer_brief  # type: ignore
 except ImportError:
     from agents.flyer.semantic_brief import build_hermes_semantic_brief_provider, build_semantic_flyer_brief
+try:
+    import flyer_creative_planner as _creative_planner  # type: ignore
+except ImportError:
+    from agents.flyer import creative_planner as _creative_planner
 
 
 ALLOWED_NEW_PROJECT_FACT_SOURCES = {
@@ -480,6 +485,7 @@ def extract_text_facts(
     message_id: str = "",
     profile_business_name: str = "",
     allow_text_identity: bool = True,
+    cfg: "FlyerConfig | None" = None,
 ) -> list[FlyerLockedFact]:
     text = f"{raw_request or ''} {fields.notes or ''}"
     semantic_brief = build_semantic_flyer_brief(
@@ -556,6 +562,17 @@ def extract_text_facts(
                 item_price_facts.append(price_fact)
     facts.extend(item_price_facts)
     facts.extend(item_name_facts)
+    # Bounded creative planner (slice 2) — alternate producer, flag-gated and
+    # INERT BY CONSTRUCTION: is_active() is False until a firewall exists
+    # (load_firewall() is None in slice 2), so this never runs / emits a fact yet.
+    # The grounded hardcoded path above is untouched (kill-switch byte-identity).
+    if cfg is not None and _creative_planner.is_active(cfg):
+        facts.extend(
+            _creative_planner.materialize_inferred(
+                _creative_planner.plan_creative_items(fields, raw_request),
+                firewall=_creative_planner.load_firewall(),
+            )
+        )
     return merge_locked_facts(facts)
 
 

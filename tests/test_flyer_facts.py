@@ -588,25 +588,31 @@ def test_existing_seven_source_relative_order_unchanged():
 
 
 def test_no_production_producer_of_new_provenance_sources():
-    """Slice-1 guard: NO production logic emits the new sources. Per operator
-    refinement, occurrences in type/Literal definitions, allowlists, priority
-    dicts, docs and tests are allowed; this fails ONLY if production code actually
-    EMITS a fact with source="hermes_inferred"/"customer_confirmed".
+    """Provenance producer invariant (evolved at slice 2).
 
-    AST-based (multiline-proof, addressing the line-scan false-negative): flags a
-    `_fact(...)` / `FlyerLockedFact(...)` call carrying a new-source string
-    (positional or `source=` kwarg), a `source = "..."` assignment, or a fact-dict
-    literal `{"source": "..."}`. The inert plumbing (FlyerFactSource Literal,
-    ALLOWED_NEW_PROJECT_FACT_SOURCES set, merge priority dict) is NOT such a call/
-    assignment, so it is naturally ignored. (This guard is a slice-1 invariant — it
-    will be removed in slice 2 when the planner becomes a legitimate producer.)"""
+    Slice 1 had NO producer. Slice 2 introduces ONE sanctioned, firewall-gated
+    producer of `hermes_inferred`: `creative_planner.materialize_inferred`. So:
+      - `hermes_inferred` may be emitted ONLY in creative_planner.py.
+      - `customer_confirmed` may be emitted NOWHERE yet (that producer lands with
+        the revision lifecycle in slice 4).
+    Any other production emission of either source fails.
+
+    AST-based (multiline-proof): flags a `_fact(...)` / `FlyerLockedFact(...)` call
+    carrying a new-source string (positional or `source=` kwarg), a
+    `source = "..."` assignment, or a fact-dict `{"source": "..."}`. The inert
+    plumbing (Literal, allowlist set, priority dict) is not such a call/assignment,
+    so it is naturally ignored."""
     import ast
 
     flyer_dir = pathlib.Path(__file__).resolve().parents[1] / "src" / "agents" / "flyer"
     EMIT_FUNCS = {"_fact", "FlyerLockedFact"}
+    # source -> set of filenames permitted to emit it
+    SANCTIONED = {"hermes_inferred": {"creative_planner.py"}, "customer_confirmed": set()}
 
-    def _is_new(node) -> bool:
-        return isinstance(node, ast.Constant) and node.value in _NEW_SOURCES
+    def _new_source(node):
+        if isinstance(node, ast.Constant) and node.value in _NEW_SOURCES:
+            return node.value
+        return None
 
     def _python_sources():
         """All production Python under the flyer agent: every *.py (recursive)
@@ -627,6 +633,10 @@ def test_no_production_producer_of_new_provenance_sources():
             if first.startswith("#!") and "python" in first:
                 yield p
 
+    def _record(offenders, py, lineno, src):
+        if py.name not in SANCTIONED.get(src, set()):
+            offenders.append(f"{py.name}:{lineno}: emits source={src!r}")
+
     offenders = []
     for py in sorted(_python_sources()):
         tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
@@ -636,23 +646,27 @@ def test_no_production_producer_of_new_provenance_sources():
                 fn = node.func
                 fname = getattr(fn, "id", None) or getattr(fn, "attr", None)
                 if fname in EMIT_FUNCS:
-                    args = list(node.args) + [kw.value for kw in node.keywords]
-                    if any(_is_new(a) for a in args):
-                        offenders.append(f"{py.name}:{node.lineno}: {fname}(... new source ...)")
+                    for a in list(node.args) + [kw.value for kw in node.keywords]:
+                        src = _new_source(a)
+                        if src:
+                            _record(offenders, py, node.lineno, src)
             # 2) source = "hermes_inferred" / source = "customer_confirmed"
             elif isinstance(node, ast.Assign):
                 for tgt in node.targets:
                     if getattr(tgt, "id", None) == "source" or getattr(tgt, "attr", None) == "source":
-                        if _is_new(node.value):
-                            offenders.append(f"{py.name}:{node.lineno}: source = new value")
+                        src = _new_source(node.value)
+                        if src:
+                            _record(offenders, py, node.lineno, src)
             # 3) fact-dict literal {"source": "<new>"}
             elif isinstance(node, ast.Dict):
                 for k, v in zip(node.keys, node.values):
-                    if isinstance(k, ast.Constant) and k.value == "source" and _is_new(v):
-                        offenders.append(f"{py.name}:{node.lineno}: {{'source': new value}}")
+                    if isinstance(k, ast.Constant) and k.value == "source":
+                        src = _new_source(v)
+                        if src:
+                            _record(offenders, py, node.lineno, src)
     # Self-check: prove the scan actually reached the real fact-producing scripts
     # (extensionless), so the guard can't silently pass by scanning nothing.
     scanned_names = {p.name for p in _python_sources()}
-    for must in ("create-flyer-project", "generate-flyer-concepts", "facts.py"):
+    for must in ("create-flyer-project", "generate-flyer-concepts", "facts.py", "creative_planner.py"):
         assert must in scanned_names, f"producer-guard did not scan {must} (scan scope regressed)"
-    assert offenders == [], f"slice 1 must have NO producer; found emissions: {offenders}"
+    assert offenders == [], f"only creative_planner may emit hermes_inferred; found: {offenders}"
