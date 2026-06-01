@@ -58,18 +58,24 @@ def test_materialize_inferred_with_firewall_tags_hermes_inferred():
     assert [f.fact_id for f in facts] == ["item:0:name", "item:1:name"]
 
 
-# ── activation gate (flag AND firewall) ─────────────────────────────────────
+# ── activation gate (flag AND firewall AND a category opened) ───────────────
 
 def test_is_active_false_when_flag_disabled():
-    # firewall now exists, but the flag is the gate; default-off ⇒ dormant
     assert cp.is_active(FlyerConfig()) is False
 
 
-def test_is_active_true_when_flag_enabled_and_firewall_present():
-    """Slice 3: with the firewall present, the flag is the only remaining gate.
-    Capable ≠ enabled-in-prod: the flag is default-off and only flipped per
-    category by an operator (slice 5)."""
+def test_is_active_false_when_flag_on_but_no_category_enabled():
+    """Codex r2 readiness gate: enabling the flag alone — before slice 5 opens a
+    category — does NOT activate the planner (structural, not operator-discipline)."""
     cfg = FlyerConfig(creative_planner=FlyerCreativePlannerConfig(enabled=True))
+    assert cp.is_active(cfg) is False  # enabled_categories empty ⇒ inert
+
+
+def test_is_active_true_only_when_flag_on_and_category_enabled():
+    """Fully armed = flag on + firewall present + ≥1 category opened (the slice-5
+    operator action). Only then is the planner active."""
+    cfg = FlyerConfig(creative_planner=FlyerCreativePlannerConfig(
+        enabled=True, enabled_categories=["restaurant"]))
     assert cp.is_active(cfg) is True
 
 
@@ -102,15 +108,17 @@ def test_extract_text_facts_flag_off_no_inferred():
     assert not any(f.source == "hermes_inferred" for f in facts)
 
 
-def test_extract_text_facts_flag_on_materializes_firewall_cleared_items(monkeypatch):
-    """Slice 3 end-to-end: with the flag ON and the (real) firewall present, the
-    planner's safe item candidates materialize as hermes_inferred facts, while a
-    claim smuggled as an 'item name' ('Free Delivery') is dropped by the firewall."""
+def test_extract_text_facts_armed_materializes_firewall_cleared_items(monkeypatch):
+    """Slice 3 end-to-end: fully ARMED (flag ON + ≥1 category opened + real
+    firewall), the planner's safe item candidates materialize as hermes_inferred
+    facts, while a claim smuggled as an 'item name' ('Free Delivery') is dropped
+    by the firewall."""
     monkeypatch.setattr(
         cp, "build_creative_planner_provider",
         lambda: (lambda _f, _r: ["Idli", "Free Delivery", "Masala Dosa"]),
     )
-    cfg = FlyerConfig(creative_planner=FlyerCreativePlannerConfig(enabled=True))
+    cfg = FlyerConfig(creative_planner=FlyerCreativePlannerConfig(
+        enabled=True, enabled_categories=["restaurant"]))
     facts = extract_text_facts(_fields(), _RAW, cfg=cfg)
     inferred = [f.value for f in facts if f.source == "hermes_inferred"]
     assert "Idli" in inferred and "Masala Dosa" in inferred

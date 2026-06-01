@@ -916,11 +916,15 @@ class FlyerRecoveryConfig(BaseModel):
 
 class FlyerCreativePlannerConfig(BaseModel):
     """Bounded creative-planner settings (design: tasks/flyer-bounded-creative-
-    planner-contract-design.md). Default OFF. Even when enabled, the planner is
-    inert until the firewall + intent-QA capabilities exist (structural interlock,
-    slice 3) — see src/agents/flyer/creative_planner.py."""
+    planner-contract-design.md). Default OFF. Even when enabled, the planner stays
+    inert until BOTH the firewall exists (slice 3) AND at least one category is
+    enabled here — the per-category readiness gate an operator opens in slice 5
+    after the spend-gated eval. See src/agents/flyer/creative_planner.py."""
     model_config = ConfigDict(extra="forbid")
     enabled: bool = False
+    # Per-category rollout gate (slice 5). Empty ⇒ planner inert even if enabled.
+    # The operator opens categories one at a time after the creative-quality eval.
+    enabled_categories: list[str] = Field(default_factory=list)
 
 
 class FlyerConfig(BaseModel):

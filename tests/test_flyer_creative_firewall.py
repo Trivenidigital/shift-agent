@@ -19,7 +19,8 @@ def _items(*names):
 def test_legitimate_item_names_pass():
     fw = CreativeFirewall()
     names = ["Idli", "Masala Dosa", "Veg Manchurian", "Plain Dosa", "Medu Vada",
-             "Uttapam", "Pongal", "Filter Coffee", "7 Up", "Item 65"]
+             "Uttapam", "Pongal", "Filter Coffee", "7 Up", "Item 65",
+             "Gluten Free Dosa", "Sugar Free Sweet"]  # compound "free" must PASS (not lone)
     cleared = fw.clear(_items(*names))
     assert [c.value for c in cleared] == names  # all pass; incidental digits OK
 
@@ -44,6 +45,11 @@ def test_legitimate_item_names_pass():
     "+1 732 555 1212",        # international phone (Codex r1)
     "₹8.99 Thali",            # non-$ currency (Codex r1)
     "We Accept Venmo",        # payment claim
+    "Thali 8.99",             # plain decimal price-shape (Codex r2)
+    "Combo 12/99",            # slash price-shape (Codex r2)
+    "Brunch 8 to 11",         # "to" time range (Codex r2)
+    "Best Prices Here",       # plural superlative (Codex r2)
+    "Free",                   # lone "Free" claim (Codex r2)
     "",                       # empty
     "   ",                    # whitespace
 ])

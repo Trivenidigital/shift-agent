@@ -30,20 +30,24 @@ _CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         # money / price / discount
         r"\$\s*\d",                                   # "$8", "$ 8.99"
         r"[₹€£¥]\s*\d",                                # non-$ currency symbols (Codex r1: "₹8.99")
+        r"\b\d{1,3}\.\d{2}\b",                         # plain decimal price-shape "8.99" (Codex r2)
+        r"\b\d{1,3}/\d{2}\b",                          # slash price-shape "12/99" (Codex r2)
         r"%",                                         # any percent sign → discount claim
         r"\bpercent\b",
         r"\b(?:off|discount|save|deal|sale|flat|bogo)\b",   # NB: bare "free" excluded so
         r"\bfrom\s*\$?\s*\d",                          # "Gluten Free" passes; "Free Delivery"
+        r"^\s*free\s*$",                               # lone "Free" is a claim (Codex r2); compounds pass
         r"\b(?:rs\.?|inr|usd|cad|gbp|eur)\s*\d",       # is still caught via "delivery" below
         # date / day / time / schedule
         r"\b(?:mon|tue|wed|thu|fri|sat|sun)(?:day|s)?\b",
         r"\b(?:today|tonight|tomorrow|daily|weekend|this\s+week|every\s+day)\b",
         r"\b\d{1,2}\s*(?:am|pm)\b",                    # "8 am"
-        r"\b\d{1,2}\s*[:.–-]\s*\d{1,2}\b",             # "8-11", "8:30"
+        r"\b\d{1,2}\s*(?:to|[:.–—-])\s*\d{1,2}\b",     # "8-11", "8:30", "8 to 11" (Codex r2)
         r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b",
         r"\b(?:open|opens|opening|closes|closing|hours)\b",
         # superlative / guarantee price claims
-        r"\b(?:lowest|cheapest|best\s+price|unbeatable|guaranteed?|#\s*1|number\s+one)\b",
+        r"\b(?:lowest|cheapest|unbeatable|guaranteed?|#\s*1|number\s+one)\b",
+        r"\b(?:best|low|great)\s+prices?\b",           # "best price(s)", "low prices" (Codex r2)
         # service / legal / delivery claims
         r"\b(?:delivery|shipping|no\s+charge|certified|licensed|insured|warranty|refund|cashback|free\s+(?:trial|delivery|shipping))\b",
         # payment claims (Codex r1: "Cash Only", "Card Accepted", "UPI Accepted")
