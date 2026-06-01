@@ -717,12 +717,19 @@ FlyerProviderQuality = Literal["low", "medium", "high", "balanced"]
 FlyerModelProviderName = Literal["openrouter", "openai", "local", "manual_review"]
 FlyerFactSource = Literal[
     "customer_text",
+    # customer_confirmed: an inferred assumption the customer approved/edited for
+    # THIS flyer/project (bounded-creative-planner contract). Project-scoped only.
+    "customer_confirmed",
     "customer_profile",
     "reference_ocr",
     "reference_vision",
     "uploaded_asset",
     "operator",
     "system",
+    # hermes_inferred: a planner assumption (item/headline/section). Lowest merge
+    # priority — must never shadow a real fact. Surfaced to the customer as an
+    # assumption; only materializes through the firewall gate (slice 3+).
+    "hermes_inferred",
 ]
 FlyerReferenceRole = Literal[
     "logo",

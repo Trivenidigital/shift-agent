@@ -20,12 +20,14 @@ except ImportError:
 
 ALLOWED_NEW_PROJECT_FACT_SOURCES = {
     "customer_text",
+    "customer_confirmed",
     "customer_profile",
     "reference_ocr",
     "reference_vision",
     "uploaded_asset",
     "operator",
     "system",
+    "hermes_inferred",
 }
 
 
@@ -558,14 +560,22 @@ def extract_text_facts(
 
 
 def merge_locked_facts(*fact_lists: Iterable[FlyerLockedFact]) -> list[FlyerLockedFact]:
+    # Lower number wins (strict `<`; first-seen wins on a tie). Option B ordering
+    # (operator-approved): literal customer text wins; customer_confirmed (an
+    # assumption the customer approved for this project) is customer-truthful and
+    # ranks just below it; the existing sources keep their RELATIVE order (so
+    # behavior for the original 7 is unchanged); hermes_inferred is last so an
+    # inferred assumption can never shadow a real fact.
     priority = {
         "customer_text": 0,
-        "operator": 1,
-        "customer_profile": 2,
-        "reference_ocr": 3,
-        "reference_vision": 4,
-        "uploaded_asset": 5,
-        "system": 6,
+        "customer_confirmed": 1,
+        "operator": 2,
+        "customer_profile": 3,
+        "reference_ocr": 4,
+        "reference_vision": 5,
+        "uploaded_asset": 6,
+        "system": 7,
+        "hermes_inferred": 8,
     }
     item_pattern = re.compile(r"^item:(?P<index>\d+):(?P<kind>name|price)$")
     materialized = [list(facts) for facts in fact_lists]
