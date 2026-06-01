@@ -1,0 +1,16 @@
+{
+  "topic": "flyer-bounded-creative-planner-contract-design",
+  "task_text": "Design doc (no code): turn Flyer Studio from extractor-only into extractor + bounded Hermes creative planner. Define the product contract — Hermes-first split (grounded extractor vs bounded creative planner), [Hermes]/[net-new] step table, provenance lifecycle (customer_text/customer_profile/hermes_inferred/customer_confirmed), hard-fact firewall (including free-text creative claims), intent-aware QA (count/pricing-model/item-price reconciliation), category/clarification gate, flag rollout plan, review gates before build. Replaces the brittle hardcoded FAMOUS_ITEM_SETS creative-fill and fixes its provenance mislabeling.",
+  "completed_at": "2026-06-01T17:33:00Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 4,
+  "hermes_step_count": 7,
+  "files_to_read_first": [
+    "src/agents/flyer/semantic_brief.py",
+    "src/agents/flyer/facts.py",
+    "src/agents/flyer/render.py",
+    "src/agents/flyer/visual_qa.py",
+    "src/agents/flyer/intent.py",
+    "src/platform/schemas.py"
+  ]
+}
