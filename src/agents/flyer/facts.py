@@ -554,14 +554,6 @@ def extract_text_facts(
             _creative_planner.plan_creative_items(fields, raw_request),
             firewall=_creative_planner.load_firewall(),
         )
-    if inferred_facts:
-        # The planner supersedes grounded item-name extraction for this request, exactly
-        # as the famous-items fallback does (it also clears item_name_facts below). For a
-        # vague "N <category> items" request the grounded extractor only mis-parses the
-        # request phrase as a junk item name; the planner owns the items here, so its
-        # items never collide with a mis-parsed grounded one. (Mixed "customer-named +
-        # planner-filled" — design §7b — is deferred.)
-        item_name_facts = []
     famous_item_facts = (
         [] if inferred_facts
         else _requested_famous_item_facts(text, message_id=message_id)
@@ -590,30 +582,9 @@ def extract_text_facts(
             )
             if price_fact:
                 item_price_facts.append(price_fact)
-    # Slice 5b — flat-price reconciliation: when the customer stated a FLAT price
-    # ("any item at $8.99" — a hard customer_text fact) and the planner supplied item
-    # NAMES, pair that flat price with each planner item. The NAME is hermes_inferred
-    # (the planner's assumption); the PRICE is customer_text (the customer's stated
-    # fact). Dormant default ⇒ inferred_facts == [] ⇒ no-op.
-    inferred_price_facts: list[FlyerLockedFact] = []
-    if inferred_facts and generic_price:
-        for name_fact in inferred_facts:
-            match = re.match(r"^item:(?P<index>\d+):name$", name_fact.fact_id)
-            if not match:
-                continue
-            price_fact = _fact(
-                f"item:{match.group('index')}:price",
-                "Price",
-                generic_price,
-                "customer_text",
-                message_id=message_id,
-            )
-            if price_fact:
-                inferred_price_facts.append(price_fact)
     facts.extend(item_price_facts)
     facts.extend(item_name_facts)
     facts.extend(inferred_facts)  # superseding/grounded merge handled by merge_locked_facts
-    facts.extend(inferred_price_facts)  # slice 5b: customer's flat price paired to planner items
     return merge_locked_facts(facts)
 
 
