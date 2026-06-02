@@ -105,6 +105,31 @@ def gate_planner(case, facts) -> GateResult:
     return GateResult(case["id"], "planner", "truth", ok, "ok" if ok else "; ".join(detail))
 
 
+def gate_item_count(case, facts) -> GateResult:
+    """Truth: the project commits to EXACTLY the expected number of distinct item names
+    (catches junk count-phrase extras and under/over-fill in mixed cases)."""
+    want = case.get("expect", {}).get("expected_total_items")
+    if want is None:
+        return GateResult(case["id"], "item_count", "truth", True, "n/a")
+    names = sorted({f.value.casefold() for f in facts if re.match(r"^item:\d+:name$", f.fact_id)})
+    ok = len(names) == want
+    return GateResult(case["id"], "item_count", "truth", ok,
+                      "ok" if ok else f"distinct items {len(names)} != expected {want}: {names}")
+
+
+_JUNK_ITEM_RE = re.compile(r"^\d+\s+(?:[\w'&/-]+\s+){0,6}items?\b", re.IGNORECASE)
+
+
+def gate_no_junk_items(case, facts) -> GateResult:
+    """Truth (universal): no item NAME is a mis-parsed request count-phrase, e.g.
+    "8 items total" / "12 famous south indian items". A real dish is never shaped
+    '<number> ... items'."""
+    junk = [f.value for f in facts
+            if re.match(r"^item:\d+:name$", f.fact_id) and _JUNK_ITEM_RE.match(f.value or "")]
+    return GateResult(case["id"], "no_junk_items", "truth", not junk,
+                      "ok" if not junk else f"junk count-phrase item(s): {junk}")
+
+
 def gate_flat_price(case, facts) -> GateResult:
     exp = case.get("expect", {})
     if exp.get("pricing_model") != "flat":
@@ -174,7 +199,7 @@ def gate_render_fit(case, facts) -> GateResult:
     return GateResult(case["id"], "render_fit", "delivery", True, "fits all sizes")
 
 
-GATES = [gate_extraction, gate_planner, gate_flat_price, gate_disallowed, gate_render_fit]
+GATES = [gate_extraction, gate_planner, gate_item_count, gate_no_junk_items, gate_flat_price, gate_disallowed, gate_render_fit]
 
 
 def run_all() -> list[GateResult]:
