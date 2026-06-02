@@ -158,6 +158,30 @@ def test_category_item_flat_price_applies_to_inferred_items(monkeypatch):
         assert price is not None and price.value == "$10.99" and price.source == "customer_text"
 
 
+def test_explicit_customer_items_do_not_get_unrequested_planner_extras(monkeypatch):
+    """If the customer lists the menu items and does not ask for a larger total count,
+    the planner must not append creative extras that can overflow the overlay."""
+    def fail_if_called():
+        raise AssertionError("planner provider should not be built for an explicit item list")
+
+    monkeypatch.setattr(cp, "build_creative_planner_provider", fail_if_called)
+    raw = (
+        "Create a weekend breakfast specials flyer for Lakshmi's Kitchen. "
+        "Include Idlie, Medhu Vada, Kheema Dosa, Mysore Masala Dosa, Poori, Onion Dosa. "
+        "Any item price is at $8.99. Only available on Saturday and Sunday from 8 AM to 11 AM."
+    )
+    facts = extract_text_facts(FlyerRequestFields(), raw, cfg=_armed("south indian", "breakfast", "dosa"))
+    names = _item_names(facts)
+    assert set(names) == {
+        "idlie", "medhu vada", "kheema dosa", "mysore masala dosa", "poori", "onion dosa"
+    }
+    assert all(f.source == "customer_text" for f in names.values())
+    by_id = {f.fact_id: f for f in facts}
+    for name_fact in names.values():
+        price = by_id.get(f"item:{name_fact.fact_id.split(':')[1]}:price")
+        assert price is not None and price.value == "$8.99" and price.source == "customer_text"
+
+
 def test_pure_vague_inferred_start_at_zero(monkeypatch):
     """No grounded items ⇒ inferred occupy item:0+ (offset base 0)."""
     monkeypatch.setattr(cp, "build_creative_planner_provider", _provider("Veg Manchurian", "Hakka Noodles"))

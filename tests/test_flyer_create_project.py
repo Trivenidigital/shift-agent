@@ -569,6 +569,68 @@ def test_create_project_passes_config_to_creative_planner(tmp_path, monkeypatch,
     assert [facts[f"item:{idx}:price"]["source"] for idx in range(8)] == ["customer_text"] * 8
 
 
+def test_deferred_reference_does_not_run_creative_planner_before_ocr(tmp_path, monkeypatch, capsys):
+    module = _load_script(monkeypatch)
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    config_path = tmp_path / "config.yaml"
+    reference = tmp_path / "menu.png"
+    reference.write_bytes(b"fake image bytes")
+    _write_customer(customers_path, category="Indian restaurant", phone="+17329837841")
+    config_path.write_text(
+        """
+customer:
+  name: Test
+  location_id: loc
+  timezone: America/New_York
+owner:
+  name: Owner
+  phone: "+17329837841"
+limits: {}
+alerting:
+  pushover_user_key: k
+  pushover_app_token: t
+backup:
+  gpg_recipient_email: owner@example.com
+flyer:
+  enabled: true
+  creative_planner:
+    enabled: true
+    enabled_categories: ["menu", "restaurant", "smoke"]
+""",
+        encoding="utf-8",
+    )
+
+    from agents.flyer import creative_planner as cp  # noqa: E402
+
+    monkeypatch.setattr(
+        cp,
+        "build_creative_planner_provider",
+        lambda: (lambda _fields, _raw: ["Smoked Brisket Sandwich", "BBQ Pulled Pork Platter"]),
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+17329837841",
+        "--message-id", "m-deferred-reference-planner",
+        "--raw-request", "Create a flyer for Smoke Menu. Create a flyer from this attached menu.",
+        "--reference-media-path", str(reference),
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+        "--asset-dir", str(asset_dir),
+        "--config-path", str(config_path),
+        "--defer-reference-extraction",
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+
+    assert project["reference_extractions"][0]["status"] == "not_run"
+    assert not any(fact["source"] == "hermes_inferred" for fact in project["locked_facts"])
+    assert not any(str(fact["fact_id"]).startswith("item:") for fact in project["locked_facts"])
+
+
 def test_profile_hydration_uses_chat_id_when_phone_does_not_match(tmp_path, monkeypatch, capsys):
     module = _load_script(monkeypatch)
     customers_path = tmp_path / "customers.json"

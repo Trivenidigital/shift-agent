@@ -515,6 +515,15 @@ def _requested_item_count_and_phrase(text: str) -> tuple[int | None, str | None]
     return (count, match.group(0))
 
 
+def _requests_more_item_suggestions(text: str) -> bool:
+    return bool(re.search(
+        r"\b(?:add|include|suggest|recommend|give)\s+(?:some\s+)?(?:more|additional|extra)\s+"
+        r"(?:items?|suggestions?|recommendations?|options?)\b",
+        text or "",
+        flags=re.IGNORECASE,
+    ))
+
+
 def _max_item_index(*fact_lists: Iterable[FlyerLockedFact]) -> int:
     """Highest item:N:* index across the lists, or -1 if there are none."""
     highest = -1
@@ -612,6 +621,7 @@ def extract_text_facts(
     if parsed_schedule:
         facts.append(parsed_schedule)
     item_name_facts = _item_name_facts(text, message_id=message_id)
+    pre_requested_item_count, _pre_count_phrase = _requested_item_count_and_phrase(text)
     # Bounded creative planner (slice 2 producer; slice 5 per-request category gate).
     # Fires ONLY when armed (flag + firewall + >=1 category opened, is_active) AND THIS
     # request's category is operator-enabled. When it produces inferred items it
@@ -626,6 +636,11 @@ def extract_text_facts(
         cfg is not None
         and _creative_planner.is_active(cfg)
         and _creative_planner.request_matches_enabled_category(raw_request, cfg)
+        and not (
+            pre_requested_item_count is None
+            and item_name_facts
+            and not _requests_more_item_suggestions(text)
+        )
     ):
         inferred_facts = _creative_planner.materialize_inferred(
             _creative_planner.plan_creative_items(fields, raw_request),
@@ -670,6 +685,13 @@ def extract_text_facts(
             if price_fact:
                 item_price_facts.append(price_fact)
     inferred_price_facts: list[FlyerLockedFact] = []
+    if (
+        inferred_facts
+        and requested_item_count is None
+        and not _requests_more_item_suggestions(text)
+        and _distinct_grounded_item_count(item_name_facts, item_price_facts) > 0
+    ):
+        inferred_facts = []
     if inferred_facts:
         # Remainder-fill cap (mixed case): customer named K items + asked for N total ⇒
         # the planner fills only N-K so the project commits to exactly N.

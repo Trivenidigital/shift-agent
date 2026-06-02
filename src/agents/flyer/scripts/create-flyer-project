@@ -654,6 +654,8 @@ def main() -> int:
         profile_facts = []
         if customer is not None and customer.status in {"trial", "active"}:
             profile_facts = profile_locked_facts(customer, raw_request=args.raw_request, message_id=args.message_id)
+        reference_owns_items = any(_needs_reference_extraction(extraction) for extraction in reference_extractions)
+        text_fact_cfg = None if reference_owns_items else flyer_cfg
         locked_facts = merge_locked_facts(
             profile_facts,
             extract_text_facts(
@@ -662,7 +664,7 @@ def main() -> int:
                 message_id=args.message_id,
                 profile_business_name=(customer.business_name if customer is not None else ""),
                 allow_text_identity=not bool(profile_facts),
-                cfg=flyer_cfg,
+                cfg=text_fact_cfg,
             ),
         )
         # P0-2 missing-required-fact gate: if extraction (customer text + profile +
