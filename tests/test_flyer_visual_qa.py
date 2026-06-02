@@ -154,7 +154,7 @@ def test_qa_report_rejects_artifact_mutation(tmp_path):
 
 # ---------- S5 P0-4: 7+ canonical scenarios ----------
 
-def _write_sidecar(tmp_path, text: str, *, filename: str = "flyer.png") -> "Path":
+def _write_sidecar(tmp_path, text: str, *, filename: str = "flyer.png"):
     artifact = tmp_path / filename
     artifact.write_bytes(b"image bytes")
     (tmp_path / f"{filename}.ocr.txt").write_text(text, encoding="utf-8")
@@ -2405,3 +2405,161 @@ def test_intent_count_blocker_is_block_tier():
     project = _project_inferred_count(["Idli", "Vada"], "include 3 famous south indian items")
     sev = classify_qa_severity(["requested item count not satisfied: asked 3, have 2"], project=project)
     assert sev == "block"
+
+
+def _phone_project(extra_facts=()):
+    now = datetime(2026, 5, 19, tzinfo=timezone.utc)
+    return FlyerProject(
+        project_id="F9050",
+        status="awaiting_final_approval",
+        customer_phone="+17329837841",
+        created_at=now,
+        updated_at=now,
+        original_message_id="m-qa",
+        raw_request="Lunch combo flyer.",
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmis Kitchen", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact phone", value="+1 732 983 7841", source="customer_profile", required=True),
+            *extra_facts,
+        ],
+    )
+
+
+def test_unexpected_phone_blocked_when_extra_wrong_number_present():
+    # P1-1: the correct phone present AND an extra/corrupted one — flag only the wrong one.
+    from agents.flyer.visual_qa import _unexpected_phone_blockers
+    blockers = _unexpected_phone_blockers(_phone_project(), "Call +1 732 983 7841 or +1 732 983 7899")
+    assert blockers and any("7899" in b for b in blockers)
+    assert not any("7841" in b for b in blockers)
+
+
+def test_unexpected_phone_no_false_positive_for_correct_phone_variants():
+    # The locked phone rendered in any legitimate format (country code, separators,
+    # repeated header/footer) must never be flagged.
+    from agents.flyer.visual_qa import _unexpected_phone_blockers
+    project = _phone_project()
+    for ocr in [
+        "Call 732-983-7841 today",
+        "Call +1 (732) 983-7841",
+        "Header +1 732 983 7841 ... Footer 732.983.7841",
+        "WhatsApp 17329837841",
+    ]:
+        assert _unexpected_phone_blockers(project, ocr) == [], ocr
+
+
+def test_unexpected_phone_not_flagged_for_menu_prices():
+    # A price-dense menu must not synthesize a false phone-shaped run.
+    from agents.flyer.visual_qa import _unexpected_phone_blockers
+    ocr = "Idli $2 Vada $3 Dosa $4 Pongal $5 Upma $6 Poori $7 Call +1 732 983 7841"
+    assert _unexpected_phone_blockers(_phone_project(), ocr) == []
+
+
+def test_unexpected_phone_skipped_when_no_locked_phone():
+    # No locked phone to compare against -> cannot verify, must not false-alarm.
+    from agents.flyer.visual_qa import _unexpected_phone_blockers
+    now = datetime(2026, 5, 19, tzinfo=timezone.utc)
+    project = FlyerProject(
+        project_id="F9051", status="awaiting_final_approval", customer_phone="+17329837841",
+        created_at=now, updated_at=now, original_message_id="m-qa", raw_request="x",
+        locked_facts=[FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmis Kitchen", source="customer_text", required=True)],
+    )
+    assert _unexpected_phone_blockers(project, "Call 1 222 333 4444 or 9 888 777 6666") == []
+
+
+def test_unexpected_phone_blocker_is_block_tier():
+    from agents.flyer.visual_qa import classify_qa_severity
+    sev = classify_qa_severity(["unverified phone number visible: +1 732 983 7899"], project=_phone_project())
+    assert sev == "block"
+
+
+def test_unexpected_phone_integration_via_run_visual_qa(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+    artifact = tmp_path / "flyer.png"
+    artifact.write_bytes(b"bytes")
+    (tmp_path / "flyer.png.ocr.txt").write_text(
+        "Lakshmis Kitchen Lunch Combo Idli $8.99 Call +1 732 983 7841 or +1 732 983 7899",
+        encoding="utf-8",
+    )
+    project = _phone_project([
+        FlyerLockedFact(fact_id="item:0:name", label="Item", value="Idli", source="customer_text", required=True),
+        FlyerLockedFact(fact_id="item:0:price", label="Price", value="$8.99", source="customer_text", required=True),
+    ])
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+    assert report.status == "failed"
+    assert any("unverified phone number visible" in b for b in report.blockers)
+
+
+def test_unexpected_phone_blocked_when_glob_adjacent_to_correct_phone():
+    # Codex HIGH-1: two numbers joined by " / " must not glob into one >15-digit run
+    # that escapes the length check — the wrong one is still flagged.
+    from agents.flyer.visual_qa import _unexpected_phone_blockers
+    blockers = _unexpected_phone_blockers(_phone_project(), "Call +1 732 983 7841 / +1 732 983 7899")
+    assert any("7899" in b for b in blockers)
+
+
+def test_unexpected_phone_blocked_for_suffix_digit_corruption():
+    # Codex HIGH-2: a number that CONTAINS the locked digits plus an extra digit is
+    # NOT the registered phone — national-number compare (not substring) flags it.
+    from agents.flyer.visual_qa import _unexpected_phone_blockers
+    blockers = _unexpected_phone_blockers(_phone_project(), "Call +1 732 983 7841 then +1 732 983 78410")
+    assert any("78410" in b for b in blockers)
+
+
+def test_unexpected_phone_not_flagged_for_bare_price_column():
+    # Codex MEDIUM: a bare decimal/price column must not be read as a phone.
+    from agents.flyer.visual_qa import _unexpected_phone_blockers
+    ocr = "Weekend specials 12.99 8.99 5.49 6.49 9.99 Call +1 732 983 7841"
+    assert _unexpected_phone_blockers(_phone_project(), ocr) == []
+
+
+def test_unexpected_phone_blocked_for_wrong_country_code():
+    # Codex HIGH-3: same national digits under a DIFFERENT country code (+91 vs the
+    # registered +1) is a wrong number — calling it reaches a different country.
+    from agents.flyer.visual_qa import _unexpected_phone_blockers
+    blockers = _unexpected_phone_blockers(_phone_project(), "Call +91 732 983 7841")
+    assert any("+91" in b for b in blockers)
+
+
+def test_unexpected_phone_allows_correct_number_with_or_without_plus_one():
+    # +1 and bare 10-digit are the same NANP domestic line — never flagged.
+    from agents.flyer.visual_qa import _unexpected_phone_blockers
+    assert _unexpected_phone_blockers(_phone_project(), "Call +1 732 983 7841") == []
+    assert _unexpected_phone_blockers(_phone_project(), "Call 732 983 7841") == []
+
+
+def test_unexpected_phone_blocked_for_country_code_split_from_national_digits():
+    # Codex round-3: a wrong country code separated from the national digits by a wide
+    # gap, a newline, or a leading paren must still be caught (independent cc scan).
+    from agents.flyer.visual_qa import _unexpected_phone_blockers
+    for ocr in [
+        "Call +91   732 983 7841",
+        "Call +91\n732 983 7841",
+        "Call +91 (732) 983-7841",
+    ]:
+        blockers = _unexpected_phone_blockers(_phone_project(), ocr)
+        assert any("+91" in b for b in blockers), ocr
+
+
+def test_unexpected_phone_no_false_positive_for_math_or_promo_plus():
+    # A "+N" used for math/promotions (not a country code prefixing a phone) must not flag.
+    from agents.flyer.visual_qa import _unexpected_phone_blockers
+    ocr = "Mix 2 + 3 toppings free, spend $50+ for delivery. Call +1 732 983 7841"
+    assert _unexpected_phone_blockers(_phone_project(), ocr) == []
+
+
+def test_unexpected_phone_no_false_positive_for_address_or_price_adjacent_to_phone():
+    # Codex round-4: a ZIP/price next to the phone (same line or the line above) must not
+    # glob into it and be misread as a country code — the correct phone still passes.
+    from agents.flyer.visual_qa import _unexpected_phone_blockers
+    for ocr in [
+        "90 Brybar Dr St Johns FL 32259\n(732) 983-7841",
+        "90 Brybar Dr St Johns FL 32259 (732) 983-7841",
+        "Lunch special $9\n732 983 7841",
+    ]:
+        assert _unexpected_phone_blockers(_phone_project(), ocr) == [], ocr
+
+
+def test_unexpected_phone_still_blocked_when_adjacent_to_address_digits():
+    # Globbing an adjacent ZIP must NOT hide a genuinely wrong phone (its national differs).
+    from agents.flyer.visual_qa import _unexpected_phone_blockers
+    assert _unexpected_phone_blockers(_phone_project(), "Visit FL 32259 (999) 888-7777")
