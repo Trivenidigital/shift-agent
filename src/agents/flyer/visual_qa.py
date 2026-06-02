@@ -216,6 +216,24 @@ def _unexpected_phone_blockers(project: FlyerProject, extracted_text: str) -> li
     return blockers
 
 
+def _past_event_date_blockers(project: FlyerProject) -> list[str]:
+    """P1-2: a flyer must not advertise an event date that has already passed. The locked
+    event_date drives the rendered date; if it is before the flyer's creation date the
+    event is stale (a flyer advertises a future or same-day event), so fail closed ->
+    manual review. Compared against created_at (a stable, fast-flow proxy for "now");
+    a flyer that goes stale while queued for weeks is the recovery watchdog's concern."""
+    event_date = (project.fields.event_date or "").strip()
+    if not event_date:
+        return []
+    try:
+        event = datetime.strptime(event_date, "%Y-%m-%d").date()
+    except ValueError:
+        return []  # malformed dates are not this gate's concern
+    if event < project.created_at.date():
+        return [f"event date is in the past: {event_date}"]
+    return []
+
+
 def _price_cents(value: str) -> int | None:
     match = re.search(r"\d+(?:[.,]\d{1,2})?", value or "")
     if not match:
@@ -911,6 +929,9 @@ _BLOCK_TIER_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # registered phone is a corrupted/hallucinated contact detail — customer-harmful,
     # fail closed to manual. Covers both "...number visible" and "...country code visible".
     (re.compile(r"^unverified phone "), "unverified_phone"),
+    # P1-2: a flyer advertising an already-passed event date is customer-harmful — fail
+    # closed to manual.
+    (re.compile(r"^event date is in the past: "), "past_event_date"),
     (re.compile(r"^missing required visible fact: business_name$"), "missing_business_name"),
     # bounded-creative-planner: a committed inferred item that did not render is a
     # block-tier intent failure (explicit, not implicit-via-default; Codex r5 #2).
@@ -1231,6 +1252,7 @@ def run_visual_qa(
     if (_requires_english_only(project) or _requires_english_only_menu_poster_contract(project)) and REGIONAL_SCRIPT_RE.search(extracted_text):
         blockers.append("English-only flyer contains regional/non-English script")
     blockers.extend(_unrequested_operational_claim_blockers(project, extracted_text))
+    blockers.extend(_past_event_date_blockers(project))
     blockers.extend(_inferred_item_coverage_blockers(project, extracted_text))
     blockers.extend(_inferred_intent_count_blockers(project))
     blockers.extend(note for note in provider_notes if "placeholder" in note.lower() or "unreadable" in note.lower() or "garbled" in note.lower())

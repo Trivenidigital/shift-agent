@@ -2563,3 +2563,36 @@ def test_unexpected_phone_still_blocked_when_adjacent_to_address_digits():
     # Globbing an adjacent ZIP must NOT hide a genuinely wrong phone (its national differs).
     from agents.flyer.visual_qa import _unexpected_phone_blockers
     assert _unexpected_phone_blockers(_phone_project(), "Visit FL 32259 (999) 888-7777")
+
+
+def _date_project(event_date, created=datetime(2026, 6, 2, tzinfo=timezone.utc)):
+    return FlyerProject(
+        project_id="F9052", status="awaiting_final_approval", customer_phone="+10000000000",
+        created_at=created, updated_at=created, original_message_id="m-qa", raw_request="flyer",
+        locked_facts=[FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmis Kitchen", source="customer_text", required=True)],
+        fields=FlyerRequestFields(event_or_business_name="Lakshmis Kitchen", event_date=event_date),
+    )
+
+
+def test_past_event_date_blocked():
+    # P1-2: an event date before the flyer's creation date is stale -> fail closed.
+    from agents.flyer.visual_qa import _past_event_date_blockers
+    blockers = _past_event_date_blockers(_date_project("2026-05-01"))
+    assert blockers and "2026-05-01" in blockers[0]
+
+
+def test_today_and_future_event_dates_not_blocked():
+    from agents.flyer.visual_qa import _past_event_date_blockers
+    assert _past_event_date_blockers(_date_project("2026-06-02")) == []  # same day is valid
+    assert _past_event_date_blockers(_date_project("2026-12-25")) == []  # future is valid
+
+
+def test_missing_event_date_not_blocked():
+    from agents.flyer.visual_qa import _past_event_date_blockers
+    assert _past_event_date_blockers(_date_project(None)) == []
+
+
+def test_past_event_date_blocker_is_block_tier():
+    from agents.flyer.visual_qa import classify_qa_severity
+    sev = classify_qa_severity(["event date is in the past: 2026-05-01"], project=_date_project("2026-05-01"))
+    assert sev == "block"
