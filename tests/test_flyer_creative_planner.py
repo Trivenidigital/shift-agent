@@ -219,3 +219,20 @@ def test_planner_does_not_fire_when_request_category_not_enabled(monkeypatch):
     assert all(src == "customer_text" for _v, src in names)  # NOT the planner
     assert not any(f.source == "hermes_inferred" for f in facts)
     assert "should not be used" not in [v for v, _s in names]
+
+
+def test_count_clause_not_rendered_as_junk_item(monkeypatch):
+    """Oracle F0141 regression: the request's count clause ("8 items total") must not be
+    mis-parsed into a junk item when the planner fills the menu; real named items survive."""
+    monkeypatch.setattr(
+        cp, "build_creative_planner_provider",
+        lambda: (lambda _f, _r: ["Masala Dosa", "Pongal", "Upma", "Poori", "Kesari Bath", "Pesarattu"]),
+    )
+    cfg = FlyerConfig(creative_planner=FlyerCreativePlannerConfig(
+        enabled=True, enabled_categories=["south indian"]))
+    raw = "weekend South Indian flyer, include Idli and Vada, 8 items total, any item at $8.99"
+    facts = extract_text_facts(FlyerRequestFields(), raw, cfg=cfg)
+    names = {f.value.casefold() for f in facts
+             if f.fact_id.startswith("item:") and f.fact_id.endswith(":name")}
+    assert "8 items total" not in names           # the count clause is not an item
+    assert {"idli", "vada"} <= names               # real named items preserved
