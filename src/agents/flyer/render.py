@@ -18,7 +18,6 @@ import mimetypes
 import os
 import re
 import subprocess
-import sys
 import tempfile
 import textwrap
 import time
@@ -138,6 +137,10 @@ def _customers_path() -> Path:
 CUSTOMERS_PATH = Path("/opt/shift-agent/state/flyer/customers.json")
 DETERMINISTIC_MODEL_NAMES = {"", "deterministic-renderer", "pillow", "local-pillow"}
 TEXT_MANIFEST_SCHEMA_VERSION = 1
+# Total critical text facts (menu items + offer/pricing/promo clauses) that fit one
+# flyer legibly. The binding output is the square 1080x1080 Instagram post in the final
+# package, which holds ~10 menu rows; the taller preview/PDF fit more, but a flyer that
+# can't render at every delivered size must route to manual, not ship a partial set.
 MAX_DETAIL_FACTS = 10
 MAX_TEXT_FACTS = 16
 # A generated background-only composite writes its raw background and overlaid
@@ -567,6 +570,9 @@ def _detail_clauses(project: FlyerProject) -> list[str]:
         add_detail(clause)
     for item in menu_items:
         add_detail(item)
+    # Fail closed when the combined critical facts exceed one flyer's legible capacity.
+    # The menu-line helpers deliberately do NOT truncate, so an over-long menu reaches
+    # this guard and routes to manual instead of silently dropping items 11+.
     if len(selected) > MAX_DETAIL_FACTS:
         raise FlyerRenderError("critical text facts do not fit")
     return selected
@@ -668,7 +674,10 @@ def _menu_item_lines(project: FlyerProject) -> list[str]:
         if key not in seen:
             seen.add(key)
             items.append(line)
-    return items[:MAX_DETAIL_FACTS]
+    # Return every parsed item — do NOT truncate. An over-long menu must reach the
+    # fail-closed cap in _detail_clauses (or the overlay draw guard) and route to
+    # manual, never silently drop the items past the cap.
+    return items
 
 
 def _locked_menu_item_lines(project: FlyerProject) -> list[str]:
@@ -696,7 +705,9 @@ def _locked_menu_item_lines(project: FlyerProject) -> list[str]:
             continue
         seen.add(key)
         items.append(line)
-    return items[:MAX_DETAIL_FACTS]
+    # Return every locked item — do NOT truncate (see _menu_item_lines): overflow must
+    # fail closed downstream and route to manual, never silently drop locked items.
+    return items
 
 
 def _same_text(left: str, right: str) -> bool:

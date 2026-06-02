@@ -3804,3 +3804,35 @@ def test_context_has_multi_word_term_keeps_substring_semantics():
     # because regex word boundaries don't help with embedded punctuation.
     assert render_mod._context_has("our deep clean service", {"deep clean"}) is True
     assert render_mod._context_has("hand-made noodles", {"hand-made"}) is True
+
+
+def test_twelve_item_menu_fails_closed_not_silently_dropped():
+    """Oracle F0140 regression: a 12-item menu exceeds one flyer's legible capacity
+    (the binding 1080x1080 square holds ~MAX_DETAIL_FACTS rows). The menu helpers must
+    return ALL parsed items (no truncation) and `_detail_clauses` must FAIL CLOSED →
+    route to manual, never silently drop items past the cap. A small menu still renders."""
+    import pytest as _pytest
+    from agents.flyer.render import _detail_clauses, _locked_menu_item_lines
+
+    now = datetime(2026, 6, 2, tzinfo=timezone.utc)
+
+    def _project(n):
+        facts = [FlyerLockedFact(fact_id="pricing_structure", label="Pricing", value="Any item $8.99", source="customer_text")]
+        for i in range(n):
+            facts.append(FlyerLockedFact(fact_id=f"item:{i}:name", label="Item", value=f"Dish Number {i + 1}", source="hermes_inferred"))
+            facts.append(FlyerLockedFact(fact_id=f"item:{i}:price", label="Price", value="$8.99", source="customer_text"))
+        return FlyerProject(
+            project_id="F0140", status="awaiting_final_approval", customer_phone="+10000000000",
+            created_at=now, updated_at=now, original_message_id="m",
+            raw_request="south indian items any item at $8.99", locked_facts=facts,
+            fields=FlyerRequestFields(event_or_business_name="Lakshmis Kitchen"),
+        )
+
+    # Helper returns ALL 12 items — overflow is never hidden by truncation.
+    assert len(_locked_menu_item_lines(_project(12))) == 12
+    # 12 items > capacity → fail closed (manual), not a partial render.
+    with _pytest.raises(FlyerRenderError, match="do not fit"):
+        _detail_clauses(_project(12))
+    # A small menu still renders all its items (no false overflow).
+    clauses = _detail_clauses(_project(6))
+    assert sum(1 for c in clauses if "Dish Number" in c) == 6
