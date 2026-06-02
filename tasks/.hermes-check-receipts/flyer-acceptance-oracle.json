@@ -1,0 +1,18 @@
+{
+  "topic": "flyer-acceptance-oracle",
+  "task_text": "flyer-acceptance-oracle — labeled product-contract corpus + offline gate harness (extraction/planner/render-fit/visual-QA/preview-final-equivalence/delivery) + 3 scoreboards (truth/delivery/commercial) + paid human-rubric tier + §7d integrated-rendering interlock + improve-or-preserve promotion rule; design-only, test/eval infra, no renderer change",
+  "completed_at": "2026-06-02T14:00:00Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 10,
+  "hermes_step_count": 1,
+  "files_to_read_first": [
+    "src/agents/flyer/facts.py",
+    "src/agents/flyer/visual_qa.py",
+    "src/agents/flyer/creative_planner.py",
+    "src/agents/flyer/render.py",
+    "src/agents/flyer/reference_extract.py",
+    "src/agents/flyer/scripts/update-flyer-project",
+    "src/agents/flyer/scripts/send-flyer-package",
+    "src/platform/schemas.py"
+  ]
+}
