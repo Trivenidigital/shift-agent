@@ -1008,6 +1008,41 @@ def _is_visual_only_revision(text: str) -> bool:
     return any(marker in lower for marker in visual_markers) and not any(marker in lower for marker in critical_markers)
 
 
+def _roll_event_date_forward(year: int, month: int, day: int, *, by: str, not_before) -> str | None:
+    """P1-2 roll-forward: a flyer advertises a future or same-day event, so an explicit date
+    edit that lands BEFORE the flyer's creation date is rolled to its next occurrence.
+    month-day edits advance the YEAR (keep the named month); day-only edits advance the
+    MONTH (skipping months that lack that day, e.g. the 31st). Crash-safe: an invalid edit
+    (e.g. the 30th of February) rolls to the next valid month instead of raising as the bare
+    datetime() previously did. Returns the soonest valid ISO date >= not_before, or None when
+    no valid calendar date exists for the request (e.g. day 32/00/99) — the caller then leaves
+    event_date unset and records an unresolved edit rather than emitting an invalid date that
+    would fail schema validation downstream (Codex review)."""
+    def _mk(y: int, m: int, d: int):
+        try:
+            return datetime(y, m, d).date()
+        except ValueError:
+            return None
+
+    original = _mk(year, month, day)
+    if original is not None and original >= not_before:
+        return original.isoformat()
+    for _ in range(24):
+        if by == "year":
+            year += 1
+        else:
+            month += 1
+            if month > 12:
+                month, year = 1, year + 1
+        candidate = _mk(year, month, day)
+        if candidate is not None and candidate >= not_before:
+            return candidate.isoformat()
+    # A valid day always finds a future occurrence within the bound; reaching here means the
+    # day itself is not a valid calendar day (e.g. 32/00/99). Signal None so the caller skips
+    # the update — never emit an invalid date string.
+    return original.isoformat() if original is not None else None
+
+
 def extract_revision_patch(project: FlyerProject, text: str) -> RevisionPatchResult:
     """Extract high-confidence structured field edits from revision text."""
     updates: dict[str, str] = {}
@@ -1036,11 +1071,19 @@ def extract_revision_patch(project: FlyerProject, text: str) -> RevisionPatchRes
         year = int(current_date[:4])
         month = MONTHS[month_day.group("month")]
         day = int(month_day.group("day"))
-        updates["event_date"] = datetime(year, month, day).date().isoformat()
+        rolled = _roll_event_date_forward(year, month, day, by="year", not_before=project.created_at.date())
+        if rolled is not None:
+            updates["event_date"] = rolled
+        else:
+            unresolved.append(f"requested event date (day {day}) is not a valid calendar date")
     elif day_only and current_date:
         year, month, _old_day = [int(part) for part in current_date.split("-")]
         day = int(day_only.group("day"))
-        updates["event_date"] = datetime(year, month, day).date().isoformat()
+        rolled = _roll_event_date_forward(year, month, day, by="month", not_before=project.created_at.date())
+        if rolled is not None:
+            updates["event_date"] = rolled
+        else:
+            unresolved.append(f"requested event date (day {day}) is not a valid calendar date")
 
     time_match = re.search(
         r"\b(?:time\s*)?(?:from\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s+)?(?:to|as|=|:)\s*"
