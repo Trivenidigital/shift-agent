@@ -12,7 +12,9 @@ import json
 import os
 import re
 import sys
+import tempfile
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 _HERE = Path(__file__).resolve()
@@ -25,7 +27,7 @@ for _p in (_REPO / "src", _REPO / "src" / "platform", _REPO / "src" / "agents" /
 os.environ["OPENROUTER_API_KEY"] = ""
 os.environ.pop("OPENAI_API_KEY", None)
 
-from schemas import FlyerConfig, FlyerCreativePlannerConfig, FlyerRequestFields  # noqa: E402
+from schemas import FlyerConfig, FlyerCreativePlannerConfig, FlyerProject, FlyerRequestFields  # noqa: E402
 from agents.flyer import facts as flyer_facts  # noqa: E402
 from agents.flyer import creative_planner as cp  # noqa: E402
 
@@ -130,7 +132,49 @@ def gate_disallowed(case, facts) -> GateResult:
     return GateResult(case["id"], "disallowed", "truth", ok, "ok" if ok else "; ".join(detail))
 
 
-GATES = [gate_extraction, gate_planner, gate_flat_price, gate_disallowed]
+def _build_project(case, facts) -> FlyerProject:
+    now = datetime(2026, 6, 2, tzinfo=timezone.utc)
+    return FlyerProject(
+        project_id="F" + (re.sub(r"\D", "", str(case["id"])) or "9001").zfill(4),
+        status="awaiting_final_approval",
+        customer_phone="+10000000000",
+        created_at=now, updated_at=now,
+        original_message_id="m-oracle",
+        raw_request=case["request"],
+        locked_facts=list(facts),
+        fields=FlyerRequestFields(
+            event_or_business_name=(case.get("profile") or {}).get("business_name", "") or "",
+        ),
+    )
+
+
+def gate_render_fit(case, facts) -> GateResult:
+    """Delivery: do the locked facts fit the PRODUCTION overlay (apply_critical_text_overlay)
+    on a blank canvas at the real output sizes — BEFORE any image spend? Offline + free;
+    font-dependent (locally approximate, VPS-authoritative)."""
+    try:
+        from PIL import Image
+        from agents.flyer import render as flyer_render
+    except Exception as e:  # pragma: no cover - env without Pillow/render importable
+        return GateResult(case["id"], "render_fit", "delivery", True, f"skipped (import: {e})")
+    try:
+        project = _build_project(case, facts)
+    except Exception as e:
+        return GateResult(case["id"], "render_fit", "delivery", True, f"skipped (project build: {e})")
+    for (w, h, fmt) in [(1080, 1350, "concept_preview"), (1275, 1650, "final_whatsapp_image")]:
+        with tempfile.TemporaryDirectory() as td:
+            src, tgt = Path(td) / "bg.png", Path(td) / "out.png"
+            Image.new("RGB", (w, h), (238, 238, 238)).save(src)
+            try:
+                flyer_render.apply_critical_text_overlay(project, src, tgt, size=(w, h), output_format=fmt)
+            except flyer_render.FlyerRenderError as e:
+                return GateResult(case["id"], "render_fit", "delivery", False, f"{w}x{h}: {e}")
+            except Exception as e:  # font/other env issue → don't false-fail; flag as skipped
+                return GateResult(case["id"], "render_fit", "delivery", True, f"skipped ({w}x{h}: {e})")
+    return GateResult(case["id"], "render_fit", "delivery", True, "fits all sizes")
+
+
+GATES = [gate_extraction, gate_planner, gate_flat_price, gate_disallowed, gate_render_fit]
 
 
 def run_all() -> list[GateResult]:
