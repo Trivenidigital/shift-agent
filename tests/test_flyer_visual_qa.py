@@ -2596,3 +2596,40 @@ def test_past_event_date_blocker_is_block_tier():
     from agents.flyer.visual_qa import classify_qa_severity
     sev = classify_qa_severity(["event date is in the past: 2026-05-01"], project=_date_project("2026-05-01"))
     assert sev == "block"
+
+
+def test_text_defect_note_blockers_flag_duplication_and_misspelling():
+    # P1-4: vision-QA notes reporting duplicated or misspelled text become blockers.
+    from agents.flyer.visual_qa import _text_defect_note_blockers
+    notes = ["business name appears duplicated at top and middle", "THURSDAY is misspelled as THURRSDAY", "colors look vibrant"]
+    blockers = _text_defect_note_blockers(notes)
+    assert len(blockers) == 2 and all(b.startswith("visible text defect reported by QA:") for b in blockers)
+
+
+def test_text_defect_note_blockers_ignore_clean_notes():
+    from agents.flyer.visual_qa import _text_defect_note_blockers
+    assert _text_defect_note_blockers(["all text legible", "good contrast"]) == []
+    assert _text_defect_note_blockers([]) == []
+
+
+def test_text_defect_note_blocker_is_block_tier():
+    from agents.flyer.visual_qa import classify_qa_severity
+    sev = classify_qa_severity(["visible text defect reported by QA: brand duplicated"], project=_date_project(None))
+    assert sev == "block"
+
+
+def test_run_visual_qa_blocks_on_duplicate_text_note(tmp_path, monkeypatch):
+    # Integration: a duplicate-text quality note from the vision path fails QA closed.
+    from agents.flyer import visual_qa as vq
+    monkeypatch.setattr(vq, "_vision_text", lambda artifact: (
+        "Lakshmis Kitchen Lakshmis Kitchen Idli $8.99 Call +1 732 983 7841", "openrouter", "ocr_vision",
+        ["business name appears duplicated"]))
+    artifact = tmp_path / "flyer.png"
+    artifact.write_bytes(b"bytes")
+    project = _phone_project([
+        FlyerLockedFact(fact_id="item:0:name", label="Item", value="Idli", source="customer_text", required=True),
+        FlyerLockedFact(fact_id="item:0:price", label="Price", value="$8.99", source="customer_text", required=True),
+    ])
+    report = vq.run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=False)
+    assert report.status == "failed"
+    assert any("visible text defect reported by QA" in b for b in report.blockers)

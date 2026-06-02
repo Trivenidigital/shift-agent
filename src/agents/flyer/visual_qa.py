@@ -234,6 +234,22 @@ def _past_event_date_blockers(project: FlyerProject) -> list[str]:
     return []
 
 
+_TEXT_DEFECT_NOTE_RE = re.compile(r"duplicat|misspell|mispell|repeated", re.IGNORECASE)
+
+
+def _text_defect_note_blockers(provider_notes: list[str]) -> list[str]:
+    """P1-4: a vision-QA note reporting DUPLICATED or MISSPELLED visible text is a
+    looks-broken defect (e.g. a brand header baked into the generated background AND drawn
+    again by the overlay, or a 'THURRSDAY'-style typo). Map it to a block-tier blocker ->
+    manual review. Distinct from the existing garbled/placeholder notes, which stay warn-
+    tier; over-reporting here only costs a manual review, never ships a worse flyer."""
+    return [
+        f"visible text defect reported by QA: {note}"
+        for note in provider_notes
+        if _TEXT_DEFECT_NOTE_RE.search(note)
+    ]
+
+
 def _price_cents(value: str) -> int | None:
     match = re.search(r"\d+(?:[.,]\d{1,2})?", value or "")
     if not match:
@@ -932,6 +948,9 @@ _BLOCK_TIER_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # P1-2: a flyer advertising an already-passed event date is customer-harmful — fail
     # closed to manual.
     (re.compile(r"^event date is in the past: "), "past_event_date"),
+    # P1-4: vision-QA-reported duplicated/misspelled visible text (looks-broken) — fail
+    # closed to manual.
+    (re.compile(r"^visible text defect reported by QA: "), "text_defect"),
     (re.compile(r"^missing required visible fact: business_name$"), "missing_business_name"),
     # bounded-creative-planner: a committed inferred item that did not render is a
     # block-tier intent failure (explicit, not implicit-via-default; Codex r5 #2).
@@ -1116,7 +1135,7 @@ VISION_QA_PROMPT = """Read this generated flyer/poster image as OCR/vision QA.
 Return STRICT JSON only:
 {
   "extracted_text": "all visible flyer text you can read, preserving names, prices, dates, phones, addresses, badges, and placeholders",
-  "quality_notes": ["short factual notes about unreadable/garbled text or visible placeholders"]
+  "quality_notes": ["short factual notes about unreadable/garbled text, visible placeholders, any text that appears duplicated, or any clearly misspelled word"]
 }
 
 Do not invent missing text. If no readable text exists, return an empty extracted_text string.
@@ -1256,6 +1275,7 @@ def run_visual_qa(
     blockers.extend(_inferred_item_coverage_blockers(project, extracted_text))
     blockers.extend(_inferred_intent_count_blockers(project))
     blockers.extend(note for note in provider_notes if "placeholder" in note.lower() or "unreadable" in note.lower() or "garbled" in note.lower())
+    blockers.extend(_text_defect_note_blockers(provider_notes))
     blockers.extend(visible_wrong_brand_blockers(project, extracted_text))
     skip_business_name_exact = _can_skip_exact_business_name(project, normalized, extracted_text)
     for fact in project.locked_facts:
