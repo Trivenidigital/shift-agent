@@ -680,3 +680,14 @@ def test_no_production_producer_of_new_provenance_sources():
     assert offenders == [], (
         f"only creative_planner may emit hermes_inferred/customer_confirmed; found: {offenders}"
     )
+
+
+def test_generic_item_price_captures_connector_less_flat_price():
+    """Oracle F0130b regression: a bare flat price 'any item $8.99' (no at/for/priced)
+    must be captured, like the connector forms; a % discount must NOT be."""
+    from agents.flyer.facts import _generic_item_price
+    assert _generic_item_price("8 famous items, any item $8.99") == "$8.99"          # bare (the fix)
+    assert _generic_item_price("every breakfast item $7.50") == "$7.50"              # bare + word
+    assert _generic_item_price("any item at $8.99") == "$8.99"                       # connector form still works
+    assert _generic_item_price("all items 10% off") == ""                           # discount, not a flat price
+    assert _generic_item_price("weekend special flyer") == ""                        # no price
