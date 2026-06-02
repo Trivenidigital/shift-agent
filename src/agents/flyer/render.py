@@ -1903,7 +1903,7 @@ with Image.open(src) as img:
     if img.size != size: img=img.resize(size)
     draw=ImageDraw.Draw(img,"RGBA"); width,height=size; margin=max(24,int(width*.035))
     if menu.get("items"):
-        biz=str(menu.get("business") or "").strip(); title=str(menu.get("title") or "").strip()
+        biz=str(menu.get("business") or "").strip(); title=str(menu.get("title") or "").strip(); schedule=str(menu.get("schedule") or "").strip()
         items=list(menu.get("items") or []); footer=" | ".join(str(v) for v in (menu.get("location"),menu.get("contact")) if v)
         tf=font(max(46,int(width*.062)),True,title); bf=font(max(24,int(width*.030)),True,biz)
         sf=font(max(19,int(width*.021)),False); itemf=font(max(28,int(width*.034)),True); pricef=font(max(30,int(width*.038)),True)
@@ -1912,6 +1912,8 @@ with Image.open(src) as img:
         if biz and biz.lower()!=title.lower():
             for ln in wrap(draw,biz,bf,inner): card.append((bf,(50,66,42,255),ln))
         for ln in wrap(draw,title,tf,inner): card.append((tf,(128,22,34,255),ln))
+        if schedule:
+            for ln in wrap(draw,schedule,sf,inner): card.append((sf,(128,22,34,255),ln))
         for extra in menu.get("extras") or []:
             for ln in wrap(draw,str(extra),sf,inner): card.append((sf,(50,66,42,255),ln))
         bh=sum(int(getattr(f,"size",18)*1.2) for f,_c,_t in card)+34; by1=by0+bh
