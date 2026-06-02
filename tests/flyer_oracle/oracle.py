@@ -392,6 +392,12 @@ def gate_revision_lifecycle(case, facts) -> GateResult:
     spec = _case_expect(case).get("revision_lifecycle")
     if not spec:
         return GateResult(case["id"], "revision_lifecycle", "delivery", True, "n/a")
+    # Codex confirm-pass BLOCKER: this is a spec self-check (validates the case's own
+    # labels, not deployed behavior), so it would inflate the baseline. Demoted to
+    # NEUTRAL until upgraded to drive the real update-flyer-project revision/approval
+    # path (no approve-with-unapplied; inferred→confirmed; project-scoped). TODO.
+    return GateResult(case["id"], "revision_lifecycle", "delivery", True,
+                      "skipped: spec self-check; TODO drive update-flyer-project")
     by = _by_id(facts)
     issues = []
     for before in spec.get("before", []):
@@ -413,6 +419,11 @@ def gate_delivery_state(case, facts) -> GateResult:
     spec = _case_expect(case).get("delivery_state")
     if not spec:
         return GateResult(case["id"], "delivery_state", "delivery", True, "n/a")
+    # Codex confirm-pass BLOCKER: spec self-check, not a driver of send-flyer-package.
+    # Demoted to NEUTRAL until upgraded to drive _caption_for_asset (send-format
+    # truthfulness) + _pending_project_assets (uncertain-retry block) on a real project.
+    return GateResult(case["id"], "delivery_state", "delivery", True,
+                      "skipped: spec self-check; TODO drive send-flyer-package")
     assets = {a["asset_id"]: a for a in spec.get("assets", [])}
     final_ids = spec.get("final_asset_ids", [])
     issues = []
