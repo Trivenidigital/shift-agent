@@ -310,6 +310,7 @@ def _build_project(case, facts) -> FlyerProject:
         locked_facts=locked,
         fields=FlyerRequestFields(
             event_or_business_name=profile.get("business_name", "") or "",
+            event_date=(profile.get("event_date") or None),
         ),
     )
 
