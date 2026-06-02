@@ -925,3 +925,52 @@ def test_extract_revision_patch_updates_day_range_without_corrupting_business_na
     assert "Do not use Wednesday to Saturday" in (patch.notes_update or "")
     assert "MK kitchen" in (patch.notes_update or "")
     assert "kTuesday to Sundaychen" not in (patch.notes_update or "")
+
+
+def _rev_project(event_date: str, created: str = "2026-06-02") -> FlyerProject:
+    now = datetime.fromisoformat(created + "T00:00:00+00:00")
+    return FlyerProject(
+        project_id="F9060", status="awaiting_final_approval", customer_phone="+10000000000",
+        created_at=now, updated_at=now, original_message_id="m", raw_request="flyer",
+        locked_facts=[],
+        fields=FlyerRequestFields(event_or_business_name="Lakshmis Kitchen", event_date=event_date),
+    )
+
+
+def test_month_day_edit_rolls_past_date_forward_to_next_year():
+    # P1-2 roll-forward: created 2026-06-02; "March 15" this year is past -> next year.
+    patch = extract_revision_patch(_rev_project("2026-06-10"), "change the date to March 15")
+    assert patch.field_updates["event_date"] == "2027-03-15"
+
+
+def test_month_day_edit_keeps_future_date_unchanged():
+    patch = extract_revision_patch(_rev_project("2026-06-10"), "change the date to December 25")
+    assert patch.field_updates["event_date"] == "2026-12-25"
+
+
+def test_day_only_edit_rolls_past_day_forward_to_next_month():
+    # created 2026-06-02, current month June; "the 1st" (June 1) is past -> July 1.
+    patch = extract_revision_patch(_rev_project("2026-06-20"), "change the date to 1st")
+    assert patch.field_updates["event_date"] == "2026-07-01"
+
+
+def test_day_only_edit_keeps_future_day_unchanged():
+    patch = extract_revision_patch(_rev_project("2026-06-10"), "change the date to 25th")
+    assert patch.field_updates["event_date"] == "2026-06-25"
+
+
+def test_day_only_edit_skips_month_without_that_day_and_rolls_to_future():
+    # current month Feb; "the 30th" is invalid in Feb -> roll forward; Feb/Mar/Apr/May are
+    # all before created 2026-06-02 -> first valid future occurrence is June 30 (crash-safe).
+    patch = extract_revision_patch(_rev_project("2026-02-10"), "change the date to 30th")
+    assert patch.field_updates["event_date"] == "2026-06-30"
+
+
+def test_invalid_day_edit_records_unresolved_without_emitting_invalid_date():
+    # Codex must-fix: "March 32" / "99th" are not valid calendar days -> never emit an invalid
+    # date string (which would crash schema validation downstream); skip the event_date update
+    # and record an unresolved edit so the customer is asked to clarify.
+    for text in ("change the date to March 32", "change the date to 99th"):
+        patch = extract_revision_patch(_rev_project("2026-06-10"), text)
+        assert "event_date" not in patch.field_updates, text
+        assert "not a valid calendar date" in patch.unresolved_reason, text
