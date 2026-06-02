@@ -11,6 +11,6 @@
     "pricing_model": "flat",
     "flat_price": "$8.99",
     "flat_price_source": "customer_text",
-    "delivery": {"render_fit": "must_fit"}
+    "delivery": {"render_fit": "must_not_fit"}
   }
 }

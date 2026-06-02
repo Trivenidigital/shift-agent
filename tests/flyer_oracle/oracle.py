@@ -307,7 +307,14 @@ def gate_render_fit(case, facts) -> GateResult:
         project = _build_project(case, facts)
     except Exception as e:
         return GateResult(case["id"], "render_fit", "delivery", True, f"skipped (project build: {e})")
-    for (w, h, fmt) in [(1080, 1350, "concept_preview"), (1275, 1650, "final_whatsapp_image")]:
+    # The square 1080x1080 Instagram post in the final package is the binding size
+    # (holds the fewest menu rows), so it leads the list — a flyer that can't render
+    # at every delivered size must fail closed, not ship the larger sizes only.
+    for (w, h, fmt) in [
+        (1080, 1080, "concept_preview"),
+        (1080, 1350, "concept_preview"),
+        (1275, 1650, "final_whatsapp_image"),
+    ]:
         with tempfile.TemporaryDirectory() as td:
             src, tgt = Path(td) / "bg.png", Path(td) / "out.png"
             Image.new("RGB", (w, h), (238, 238, 238)).save(src)
