@@ -1,0 +1,15 @@
+{
+  "id": "F0130b",
+  "title": "vague + BARE flat price ('any item $8.99', no 'at') — must still apply $8.99",
+  "request": "8 famous South Indian breakfast items, any item $8.99",
+  "profile": {"business_name": "Lakshmis Kitchen", "public_phone": "+1 732 983 7841", "business_address": "90 Brybar Dr"},
+  "config": {"creative_planner": {"enabled": true, "enabled_categories": ["restaurant", "menu", "breakfast", "south indian"]}},
+  "planner_offers": ["Idli", "Medu Vada", "Masala Dosa", "Pongal", "Upma", "Poori", "Kesari Bath", "Pesarattu"],
+  "expect": {
+    "allowed_inferred": 8,
+    "inferred_item_names": ["Idli", "Medu Vada", "Masala Dosa", "Pongal", "Upma", "Poori", "Kesari Bath", "Pesarattu"],
+    "pricing_model": "flat",
+    "flat_price": "$8.99",
+    "flat_price_source": "customer_text"
+  }
+}

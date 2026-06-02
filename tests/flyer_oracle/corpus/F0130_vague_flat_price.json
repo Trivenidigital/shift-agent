@@ -1,0 +1,18 @@
+{
+  "id": "F0130",
+  "title": "vague famous-items request + flat price — planner infers, flat price applied",
+  "request": "8 famous South Indian breakfast items, any item at $8.99",
+  "profile": {"business_name": "Lakshmis Kitchen", "public_phone": "+1 732 983 7841", "business_address": "90 Brybar Dr"},
+  "config": {"creative_planner": {"enabled": true, "enabled_categories": ["restaurant", "menu", "breakfast", "south indian"]}},
+  "planner_offers": ["Idli", "Medu Vada", "Masala Dosa", "Pongal", "Upma", "Poori", "Kesari Bath", "Pesarattu"],
+  "expect": {
+    "allowed_inferred": 8,
+    "inferred_item_names": ["Idli", "Medu Vada", "Masala Dosa", "Pongal", "Upma", "Poori", "Kesari Bath", "Pesarattu"],
+    "pricing_model": "flat",
+    "flat_price": "$8.99",
+    "flat_price_source": "customer_text",
+    "disallowed_facts": [
+      {"forbidden_visible_text_regex": "\\b\\d{3}[-.\\s]\\d{4}\\b", "note": "no invented phone (unless grounded in profile)"}
+    ]
+  }
+}

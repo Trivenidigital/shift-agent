@@ -50,10 +50,14 @@ id: F0132
 request: "weekend breakfast flyer, include Idli, Vada, Dosa, Pongal, Upma, Poori"
 profile: {business_name: "Lakshmi's Kitchen", public_phone: "+1 732 ...", business_address: "90 Brybar Dr"}
 config: {creative_planner: {enabled: true, enabled_categories: [restaurant, menu, ...]}}
-reference_assets:                       # review fix: role + expectations
-  - {path: fixtures/menu_a.png, role: menu_image,
-     expected_reference_extractions: [{fact_id: "item:0:name", value: "Idli"}],
-     expected_source_contract: {origin: reference_ocr|reference_vision}}
+reference_assets:                       # review r2: use real schema fields
+  - path: fixtures/menu_a.png
+    role: menu_image
+    expected_provider: sidecar          # SidecarReferenceExtractionProvider
+    expected_status: ok
+    expected_extractions:               # fact.source set per reference_extract.py:501
+      - {fact_id: "item:0:name", value: "Idli", source: reference_ocr}
+    # FlyerSourceContract fields per schemas.py:1706 (provider/status/...), NOT a made-up "origin"
 expect:
   locked_facts:
     - {fact_id: "item:0:name", value: "Idli", source: customer_text}
@@ -77,8 +81,8 @@ Writing `allowed_inferred: 0` for F0132 *is* the policy decision "if the custome
 |---|---|---|---|
 | 0 | **Routing (scope note, not built)** | The oracle begins AFTER cf-router routing; routing-correctness is a separate existing concern (`dispatcher-accuracy-report`; reaching the SKILL directly is a routing miss, `flyer_dispatcher/SKILL.md:38-44`). Out of oracle scope. | — |
 | 1 | **Extraction** | drive `extract_text_facts`; **monkeypatch `build_hermes_semantic_brief_provider`** (facts.py:577-583) for determinism (tests do this, test_flyer_facts.py:77-91) — NOT a public param | offline, free |
-| 2 | **Reference-extraction** | drive `reference_extract` **sidecar provider** (reference_extract.py:248-255) + assert `expected_reference_extractions` + `source_contract` (:359-434) | offline, free |
-| 3 | **Planner (when-to-infer)** | **monkeypatch `build_creative_planner_provider`** OR call `plan_creative_items(..., provider=...)` directly (creative_planner.py:178-186) — NOT via `extract_text_facts` (it calls the planner without a provider, facts.py:645-647). Assert: inferred only when `allowed_inferred>0`; count == requested; never overwrites/appends a grounded item (the reconciliation invariant) | offline, free |
+| 2 | **Reference-extraction** | drive `reference_extract` **sidecar provider** (`FLYER_REFERENCE_ALLOW_SIDECAR=1`, reference_extract.py:248-255); assert `extracted_facts[].source` (:501) AND (review r2) that they **propagate/merge into the project `locked_facts`** through the create/generate path (create persists :729; generate persists :474; merge into locked_facts :417) — not just `extract_reference` in isolation | offline, free |
+| 3 | **Planner (when-to-infer)** | Two layers (review r2): (a) candidate generation `plan_creative_items(..., provider=...)` (creative_planner.py:178-186); (b) the POLICY invariants — count cap, no-overwrite, merge — live INSIDE `extract_text_facts` (facts.py:645/695/730), so drive the **full `extract_text_facts`** with `build_creative_planner_provider` **monkeypatched** (+ firewall + config). Assert: inferred only when `allowed_inferred>0`; count ≤ requested; never overwrites/appends a grounded item (the reconciliation invariant) | offline, free |
 | 4 | **Render-fit** (BLOCKER fix) | call the **production overlay** `apply_critical_text_overlay` / `_apply_critical_text_overlay` on a **blank generated canvas** at the real output sizes; catch `"critical text overlay does not fit"` (render.py:1776-1777) / `"menu overlay cannot fit all N items"` (:1821-1831, :1860-1861). `_draw_flyer_pil` ("critical text facts do not fit" :2693-2721) is a SECONDARY deterministic-renderer check | offline, **free**; **production fonts** (Linux Noto/DejaVu) to be authoritative |
 | 5 | **Visual-QA** | reuse `run_visual_qa` with `allow_sidecar=True` (:1094-1115); supply a fake artifact file (`sha256_file` needs it, :1122-1124) + `.ocr.txt` sidecar (tests do this, test_flyer_visual_qa.py:37-44) | offline against fixture; paid only for a real sample |
 | 6 | **Preview/final equivalence** | facts that passed preview survive to final (e.g. schedule — the #440 class) | offline |
