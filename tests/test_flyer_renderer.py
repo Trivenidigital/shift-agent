@@ -1084,8 +1084,85 @@ def test_system_overlay_fallback_contains_menu_card_renderer():
     assert '"menu_payload": _menu_overlay_payload(project)' in src
     assert 'menu=spec.get("menu_payload") or {}' in src
     assert 'if menu.get("items"):' in src
+    assert 'menu.get("schedule")' in src
     assert 'fill=(255,253,244,245)' in src
     assert 'menu overlay cannot fit all' in src
+
+
+def test_system_overlay_fallback_draws_menu_schedule(tmp_path, monkeypatch):
+    from PIL import Image
+
+    source = tmp_path / "background.png"
+    target = tmp_path / "overlay.png"
+    Image.new("RGB", (1080, 1350), (120, 70, 40)).save(source)
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    project = FlyerProject(
+        project_id="F0132",
+        status="generating_concepts",
+        customer_phone="+17329837841",
+        created_at=now,
+        updated_at=now,
+        original_message_id="m-breakfast",
+        raw_request=(
+            "Create a weekend breakfast specials flyer for Lakshmi's Kitchen. "
+            "Include Idlie, Medhu Vada. Any item price is at $8.99. "
+            "Only available on Saturday and Sunday from 8 AM to 11 AM."
+        ),
+        fields=FlyerRequestFields(
+            event_or_business_name="Weekend Breakfast Specials",
+            contact_info="+17329837841",
+            venue_or_location="90 Brybar Dr St Johns FL",
+            preferred_language="en",
+        ),
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Weekend Breakfast Specials", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="schedule", label="Schedule", value="Saturday and Sunday from 8 AM to 11 AM", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:0:name", label="Item", value="Idlie", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:0:price", label="Price", value="$8.99", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:1:name", label="Item", value="Medhu Vada", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:1:price", label="Price", value="$8.99", source="customer_text", required=True),
+        ],
+    )
+
+    real_exists = render_module.Path.exists
+    real_run = render_module.subprocess.run
+
+    def fake_exists(path):
+        if path.as_posix().endswith("/usr/bin/python3"):
+            return True
+        return real_exists(path)
+
+    def run_with_current_python(args, **kwargs):
+        if args[:2] == ["/usr/bin/python3", "-c"]:
+            args = [sys.executable, "-c", args[2], args[3]]
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(render_module, "_load_pillow", lambda: None)
+    monkeypatch.setattr(render_module.Path, "exists", fake_exists)
+    monkeypatch.setattr(render_module.subprocess, "run", run_with_current_python)
+
+    render_module._apply_critical_text_overlay(
+        project,
+        source,
+        target,
+        size=(1080, 1350),
+        output_format="whatsapp_image",
+    )
+
+    with Image.open(target).convert("RGB") as img:
+        schedule_region = img.crop((55, 350, 540, 392))
+        pixels = schedule_region.load()
+        region_w, region_h = schedule_region.size
+        dark_pixels = sum(
+            1
+            for y in range(region_h)
+            for x in range(region_w)
+            for r, g, b in [pixels[x, y]]
+            if r < 170 and g < 95 and b < 105
+        )
+
+    assert dark_pixels > 80
 
 
 def test_menu_overlay_uses_large_lightweight_poster_panels(tmp_path):
