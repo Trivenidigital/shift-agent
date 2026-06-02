@@ -1,0 +1,19 @@
+{
+  "id": "F0147",
+  "title": "visual QA negative - placeholder text blocks delivery",
+  "request": "Lunch combo flyer: Idli $8.99.",
+  "profile": {"business_name": "Lakshmis Kitchen", "public_phone": "+1 732 983 7841", "business_address": "90 Brybar Dr"},
+  "config": {"creative_planner": {"enabled": false, "enabled_categories": []}},
+  "expect": {
+    "locked_facts": [
+      {"fact_id": "item:0:name", "value": "Idli", "source": "customer_text"},
+      {"fact_id": "item:0:price", "value": "$8.99", "source": "customer_text"}
+    ],
+    "expected_total_items": 1,
+    "visual_qa": {
+      "status": "failed",
+      "ocr_text": "Lakshmis Kitchen Lunch Combo Idli [price]",
+      "must_include_blockers": ["placeholder"]
+    }
+  }
+}

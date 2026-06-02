@@ -1,16 +1,17 @@
 {
   "id": "FRANGE",
-  "title": "range/discount ('10% off') — infer items but fabricate NO per-item price",
+  "title": "range/discount ('10% off') - infer items but fabricate no per-item price",
   "request": "south indian breakfast flyer, all items 10% off",
   "profile": {"business_name": "Lakshmis Kitchen", "public_phone": "+1 732 983 7841", "business_address": "90 Brybar Dr"},
   "config": {"creative_planner": {"enabled": true, "enabled_categories": ["restaurant", "menu", "breakfast", "south indian"]}},
   "planner_offers": ["Idli", "Medu Vada", "Masala Dosa", "Pongal"],
   "expect": {
     "allowed_inferred": 4,
+    "expected_total_items": 4,
     "inferred_item_names": ["Idli", "Medu Vada", "Masala Dosa", "Pongal"],
     "pricing_model": "range",
     "disallowed_facts": [
-      {"hard_fact_class": "price", "max_count_not_grounded": 0, "note": "a % discount must NOT fabricate per-item $ prices"}
+      {"hard_fact_class": "price", "max_count_not_grounded": 0, "note": "a percent discount must not fabricate per-item dollar prices"}
     ]
   }
 }

@@ -1,6 +1,6 @@
 {
   "id": "F0132",
-  "title": "explicit six-item breakfast list — planner must NOT add more",
+  "title": "explicit six-item breakfast list - planner must not add more",
   "request": "weekend breakfast flyer, include Idli, Vada, Dosa, Pongal, Upma, Poori",
   "profile": {"business_name": "Lakshmis Kitchen", "public_phone": "+1 732 983 7841", "business_address": "90 Brybar Dr"},
   "config": {"creative_planner": {"enabled": true, "enabled_categories": ["restaurant", "menu", "breakfast", "south indian"]}},
@@ -15,6 +15,7 @@
       {"fact_id": "item:5:name", "value": "Poori", "source": "customer_text"}
     ],
     "allowed_inferred": 0,
+    "expected_total_items": 6,
     "disallowed_facts": [
       {"hard_fact_class": "price", "max_count_not_grounded": 0}
     ]
