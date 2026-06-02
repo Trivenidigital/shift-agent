@@ -284,6 +284,10 @@ def _generic_item_price(text: str) -> str:
         r"\b(?:any|every|each|all)\s+(?:item|items?)\s+price\s+(?:is\s+)?(?:at|for|=|:)\s*\$?\s*(?P<price>\d+(?:\.\d{2})?)(?!\s*[%\-])\b",
         r"\b(?:any|every|each|all)\s+(?:[A-Za-z][A-Za-z0-9'&/-]*\s+){0,3}items?\s+(?:priced\s+)?(?:at|for|is|=|:)\s*\$\s*(?P<price>\d+(?:\.\d{2})?)(?!\s*[%\-])\b",
         r"\b(?:any|every|each|all)\s+(?:item|items?)\s+(?:priced\s+)?(?:at|for|is|=|:)\s*\$\s*(?P<price>\d+(?:\.\d{2})?)(?!\s*[%\-])\b",
+        # Connector-less flat price: "any item $8.99", "every breakfast item $8.99"
+        # (no at/for/priced). The $ must follow the item phrase directly, and the
+        # (?!\s*[%\-]) guard keeps a plain "$8.99" (not "$8-99" / a "%" discount).
+        r"\b(?:any|every|each|all)\s+(?:[A-Za-z][A-Za-z0-9'&/-]*\s+){0,3}items?\s*\$\s*(?P<price>\d+(?:\.\d{2})?)(?!\s*[%\-])\b",
     )
     for pattern in patterns:
         match = re.search(pattern, text or "", flags=re.IGNORECASE)
