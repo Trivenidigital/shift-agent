@@ -655,7 +655,22 @@ def extract_text_facts(
         requested_item_count, count_phrase = _requested_item_count_and_phrase(text)
         if count_phrase:
             phrase_key = _norm(count_phrase)
-            item_name_facts = [f for f in item_name_facts if _norm(f.value) != phrase_key]
+            # Drop the count clause AND the count-clause + a trailing count-MODIFIER
+            # ("8 items total", "8 items in all") — the count parser matches only the
+            # "8 items" head, so the exact-equality check missed the "total" suffix
+            # (oracle F0141). A real dish name keeps a non-modifier word after "items"
+            # ("10 items combo"), so it is preserved.
+            _count_modifiers = {"total", "in", "all", "altogether", "overall", "please", "menu", "items"}
+
+            def _is_count_clause_junk(value: str) -> bool:
+                nv = _norm(value)
+                if nv == phrase_key:
+                    return True
+                if nv.startswith(phrase_key + " "):
+                    return all(w in _count_modifiers for w in nv[len(phrase_key):].split())
+                return False
+
+            item_name_facts = [f for f in item_name_facts if not _is_count_clause_junk(f.value)]
     famous_item_facts = (
         [] if inferred_facts
         else _requested_famous_item_facts(text, message_id=message_id)
