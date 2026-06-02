@@ -128,6 +128,94 @@ def _phone_value_present_in(text: str, fact_value: str) -> bool:
     return False
 
 
+# A single phone-number candidate, captured in two named groups:
+#   cc       — ONLY an explicit "+" country code ("+" + 1-4 digits), optionally split from
+#              the national digits by up to 6 gap chars (incl. newline / "(") so a country
+#              code on its own visual line still attaches (Codex HIGH-3 gap/newline/paren).
+#              A preceding bare number (ZIP/price) has no "+" so it is NOT read as a country
+#              code (Codex round-4 false positive) — at worst it is absorbed into `national`,
+#              whose LAST 10 digits remain the real phone.
+#   national — a 10-15 digit number on ONE line (internal separators are space/tab/().-, NOT
+#              newline) so a ZIP/price on the line above does not glob into the phone.
+# "+digit" is adjacent (no space) so a math/promo "+ 2 deals" is not read as a phone; the
+# national excludes "/" so two numbers joined by " / "/" or " stay SEPARATE (Codex HIGH-1).
+_PHONE_CANDIDATE_RE = re.compile(
+    r"(?:\+(?P<cc>\d{1,4})[\s.\-(]{0,6})?(?P<national>\d(?:[ \t().\-]{0,2}\d){9,14})"
+)
+
+
+def _phone_parts(value: str) -> tuple[str, str]:
+    """(country_code, national) — national is the last 10 digits; country_code is
+    whatever precedes them ("" for an exactly-10-digit number). The national-number scan
+    compares `national` (so a suffix-corrupted ...78410 differs from the locked number,
+    Codex HIGH-2) and the country-code scan compares `country_code` (so +91 vs the
+    registered +1 is caught, Codex HIGH-3)."""
+    digits = _PHONE_DIGITS_RE.sub("", value)
+    return (digits[:-10], digits[-10:]) if len(digits) > 10 else ("", digits)
+
+
+def _phone_cc_compatible(candidate_cc: str, locked_cc: str) -> bool:
+    """A candidate's country code is compatible with the registered phone's when it is
+    absent, identical, or both are NANP-domestic — a bare 10-digit number and a +1
+    number are the same line, but +91/+44/etc. on a +1 customer's flyer is wrong."""
+    if candidate_cc in ("", locked_cc):
+        return True
+    return {candidate_cc, locked_cc} <= {"", "1"}
+
+
+def _max_consecutive_digits(value: str) -> int:
+    """Longest run of consecutive digits — a real phone groups digits 3-4 at a time,
+    while price columns ('12.99 8.99 5.49') and decimals top out at 1-2 (Codex MEDIUM)."""
+    return max((len(group) for group in re.findall(r"\d+", value)), default=0)
+
+
+def _unexpected_phone_blockers(project: FlyerProject, extracted_text: str) -> list[str]:
+    """P1-1: flag any phone-shaped number in the OCR that is NOT the customer's
+    registered phone.
+
+    The positive fact loop only checks each locked phone is PRESENT — it is blind to an
+    EXTRA / corrupted / hallucinated / duplicated phone rendered alongside the correct
+    one. A flyer that shows the customer's real phone AND a wrong one is a wrong-fact
+    ship; fail closed -> manual review.
+
+    A candidate is "explained" (not flagged) only when its NATIONAL number (last 10
+    digits of the `national` group) matches a locked phone AND its explicit "+" country
+    code is compatible (`_phone_cc_compatible`: absent, identical, or both NANP-domestic).
+    So a different number, a suffix/middle corruption (different national), and a wrong
+    "+" country code (+91 on a +1 customer) all fail closed, while +1 / bare / formatting
+    variants of the registered phone pass — and a ZIP/price adjacent to the phone is
+    absorbed into `national` (last 10 still the real phone) rather than mistaken for a
+    country code. Guards: runs only with a locked phone; a candidate whose longest digit
+    group is < 3 is treated as decimals/prices.
+    """
+    locked = [
+        _phone_parts(fact.value)
+        for fact in project.locked_facts
+        if _locked_fact_uses_phone_match(fact_id=fact.fact_id, label=fact.label, value=fact.value)
+    ]
+    locked = [(cc, national) for cc, national in locked if national]
+    if not locked:
+        return []
+    blockers: list[str] = []
+    seen: set[str] = set()
+    for match in _PHONE_CANDIDATE_RE.finditer(extracted_text or ""):
+        national_part = match.group("national")
+        national_digits = _PHONE_DIGITS_RE.sub("", national_part)
+        if not (10 <= len(national_digits) <= 15) or _max_consecutive_digits(national_part) < 3:
+            continue
+        cand_national = national_digits[-10:]
+        cand_cc = match.group("cc") or ""
+        explained = any(
+            cand_national == national and _phone_cc_compatible(cand_cc, cc)
+            for cc, national in locked
+        )
+        if explained or cand_national in seen:
+            continue
+        seen.add(cand_national)
+        blockers.append(f"unverified phone number visible: {match.group(0).strip()}")
+    return blockers
+
+
 def _price_cents(value: str) -> int | None:
     match = re.search(r"\d+(?:[.,]\d{1,2})?", value or "")
     if not match:
@@ -819,6 +907,10 @@ _BLOCK_TIER_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"^unrequested operational claim visible: "), "unrequested_claim"),
     (re.compile(r"^ocr/vision text unavailable for generated artifact"), "ocr_unavailable"),
     (re.compile(r"^replaced source text still visible: "), "source_text_visible"),
+    # P1-1: a phone-shaped number, or a foreign country code, that does not match the
+    # registered phone is a corrupted/hallucinated contact detail — customer-harmful,
+    # fail closed to manual. Covers both "...number visible" and "...country code visible".
+    (re.compile(r"^unverified phone "), "unverified_phone"),
     (re.compile(r"^missing required visible fact: business_name$"), "missing_business_name"),
     # bounded-creative-planner: a committed inferred item that did not render is a
     # block-tier intent failure (explicit, not implicit-via-default; Codex r5 #2).
@@ -1171,6 +1263,7 @@ def run_visual_qa(
         ):
             blockers.append(f"missing required visible fact: {fact.fact_id}")
     blockers.extend(_item_price_pair_blockers(project, extracted_text))
+    blockers.extend(_unexpected_phone_blockers(project, extracted_text))
     # Source-contract negative-assertion gate: any value in
     # forbidden_substrings (populated upstream from brand/phone/address
     # replacements) must NOT appear in the OCR text. Reuses the same

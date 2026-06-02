@@ -27,7 +27,7 @@ for _p in (_REPO / "src", _REPO / "src" / "platform", _REPO / "src" / "agents" /
 os.environ["OPENROUTER_API_KEY"] = ""
 os.environ.pop("OPENAI_API_KEY", None)
 
-from schemas import FlyerAsset, FlyerConfig, FlyerCreativePlannerConfig, FlyerProject, FlyerRequestFields  # noqa: E402
+from schemas import FlyerAsset, FlyerConfig, FlyerCreativePlannerConfig, FlyerLockedFact, FlyerProject, FlyerRequestFields  # noqa: E402
 from agents.flyer import creative_planner as cp  # noqa: E402
 from agents.flyer import facts as flyer_facts  # noqa: E402
 
@@ -279,6 +279,26 @@ def gate_disallowed(case, facts) -> GateResult:
 
 def _build_project(case, facts) -> FlyerProject:
     now = datetime(2026, 6, 2, tzinfo=timezone.utc)
+    profile = case.get("profile") or {}
+    locked = list(facts)
+    # Model the registered customer profile: in production contact_phone is locked
+    # from the customer record (customers.json), not only parsed from the request
+    # text. The oracle must carry it so phone-fidelity gates (P1-1: unverified/extra
+    # phone) have the customer's real number to compare the rendered flyer against.
+    phone = str(profile.get("public_phone") or "").strip()
+    if phone and not any(
+        fact.fact_id == "contact_phone" or "phone" in (fact.label or "").casefold()
+        for fact in locked
+    ):
+        locked.append(
+            FlyerLockedFact(
+                fact_id="contact_phone",
+                label="Contact phone",
+                value=phone,
+                source="customer_profile",
+                required=True,
+            )
+        )
     return FlyerProject(
         project_id="F" + (re.sub(r"\D", "", str(case["id"])) or "9001").zfill(4),
         status="awaiting_final_approval",
@@ -287,9 +307,9 @@ def _build_project(case, facts) -> FlyerProject:
         updated_at=now,
         original_message_id="m-oracle",
         raw_request=case["request"],
-        locked_facts=list(facts),
+        locked_facts=locked,
         fields=FlyerRequestFields(
-            event_or_business_name=(case.get("profile") or {}).get("business_name", "") or "",
+            event_or_business_name=profile.get("business_name", "") or "",
         ),
     )
 
