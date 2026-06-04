@@ -1,5 +1,10 @@
 # Lessons
 
+## 2026-06-04 - Clean deploys must not drop live-only flyer routing
+
+- If a live flyer route works only because of an uncommitted/hotpatched cf-router block, the next clean tarball deploy can silently remove it and re-expose stale catering lead hijacks. Before deploy, diff the active VPS tarball/source against the branch for cf-router Flyer intercepts and commit the live routing block to source.
+- When `flyer.enabled=false` is used to disable the legacy generator, keep a separate committed bare/workflow route ahead of Catering F7. Otherwise explicit flyer briefs with food words can attach to old active catering leads.
+
 ## 2026-05-27 - Flyer autonomous repair must keep Hermes as the brain
 
 - Do not ship "autonomous repair" as deterministic Python text/image patching. Python may classify hard stops, persist retry ledgers, and enforce no-send safety, but the repair instruction itself must come from Hermes/LLM planning or the path must write a skipped audit row and fall back to manual review.
