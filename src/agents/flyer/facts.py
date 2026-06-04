@@ -528,6 +528,55 @@ def _requests_more_item_suggestions(text: str) -> bool:
     ))
 
 
+_GENERATED_ITEM_SUGGESTION_RE = re.compile(
+    r"\b(?:include|add|suggest|recommend|give|show|feature)\s+"
+    r"(?:me\s+|us\s+)?"
+    r"(?:(?:\d{1,2}|some|more|additional|extra)\s+)?"
+    r"(?:(?:famous|popular|top|best|signature|recommended|suggested)\s+)?"
+    r"(?:[A-Za-z][\w'/-]*\s+){0,6}items?\b",
+    re.IGNORECASE,
+)
+_GENERATED_VARIETY_SUGGESTION_RE = re.compile(
+    r"\b(?:include|add|suggest|recommend|give|show|feature)\s+"
+    r"(?:me\s+|us\s+)?"
+    r"\d{1,2}\s+(?:[A-Za-z][\w'/-]*\s+){0,6}"
+    r"(?:varieties|dishes|options|specials)\b",
+    re.IGNORECASE,
+)
+_GENERATED_ITEM_TOTAL_RE = re.compile(
+    r"\b\d{1,2}\s+(?:[A-Za-z][\w'/-]*\s+){0,6}items?\s+"
+    r"(?:total|in\s+all|altogether|overall)\b",
+    re.IGNORECASE,
+)
+_PACKAGE_CONTEXT_RE = re.compile(
+    r"\b(?:combo|package|meal\s+deal|meal\s+combo|family\s+pack|pick\s+any|bundle)\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_SUGGESTION_VERB_RE = re.compile(
+    r"\b(?:suggest|recommend|give)\s+(?:me\s+|us\s+)?"
+    r"(?:(?:\d{1,2}|some|more|additional|extra)\s+)?"
+    r"(?:[A-Za-z][\w'/-]*\s+){0,6}(?:items?|suggestions?|recommendations?|options?)\b",
+    re.IGNORECASE,
+)
+
+
+def requests_generated_item_suggestions(text: str) -> bool:
+    """True only when the customer explicitly asks us to invent menu items.
+
+    Ambiguous wording must stay faithful: a plainer correct flyer is safer
+    than silently expanding a combo/package request into an unrequested menu.
+    """
+    source = text or ""
+    if _PACKAGE_CONTEXT_RE.search(source):
+        return bool(_EXPLICIT_SUGGESTION_VERB_RE.search(source) or _requests_more_item_suggestions(source))
+    return bool(
+        _GENERATED_ITEM_SUGGESTION_RE.search(source)
+        or _GENERATED_VARIETY_SUGGESTION_RE.search(source)
+        or _GENERATED_ITEM_TOTAL_RE.search(source)
+        or _requests_more_item_suggestions(source)
+    )
+
+
 def _max_item_index(*fact_lists: Iterable[FlyerLockedFact]) -> int:
     """Highest item:N:* index across the lists, or -1 if there are none."""
     highest = -1
@@ -640,6 +689,7 @@ def extract_text_facts(
         cfg is not None
         and _creative_planner.is_active(cfg)
         and _creative_planner.request_matches_enabled_category(raw_request, cfg)
+        and requests_generated_item_suggestions(text)
         and not (
             pre_requested_item_count is None
             and item_name_facts

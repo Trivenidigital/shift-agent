@@ -160,6 +160,72 @@ def test_collect_text_facts_keeps_revised_price_phone_location_and_schedule():
     assert "$12.99" in facts["detail_002"]
 
 
+def test_collect_text_facts_ignores_unrequested_hermes_inferred_items():
+    raw_request = (
+        "Can we do meal combo flyer for veg and non veg with prices 49.99 for non veg combo "
+        "includes 2 non veg curries, 1 chicken pulav or chicken Biryani and 1 dessert. "
+        "And a veg combo 39.99 includes 2 veg curries, 1 dessert on the occasion of Memorial Day weekend"
+    )
+    inferred_items = [
+        "Spicy Chicken Curry",
+        "Butter Chicken",
+        "Chicken Biryani",
+        "Chicken Pulav",
+        "Tandoori Chicken",
+        "Paneer Butter Masala",
+        "Chana Masala",
+        "Vegetable Korma",
+        "Dal Makhani",
+        "Aloo Gobi",
+        "Gulab Jamun",
+        "Rasgulla",
+    ]
+    locked_facts = [
+        FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Memorial Day Weekend Meal Combos", source="customer_text", required=True),
+        FlyerLockedFact(
+            fact_id="offer:0",
+            label="Offer",
+            value="Non Veg Combo: $49.99 includes 2 non veg curries, 1 chicken pulav or chicken Biryani, and 1 dessert",
+            source="customer_text",
+            required=True,
+        ),
+        FlyerLockedFact(
+            fact_id="offer:1",
+            label="Offer",
+            value="Veg Combo: $39.99 includes 2 veg curries and 1 dessert",
+            source="customer_text",
+            required=True,
+        ),
+    ]
+    locked_facts.extend(
+        FlyerLockedFact(fact_id=f"item:{index}:name", label="Item", value=item, source="hermes_inferred")
+        for index, item in enumerate(inferred_items)
+    )
+    project = _complete_project().model_copy(update={
+        "raw_request": raw_request,
+        "fields": FlyerRequestFields(
+            event_or_business_name="Memorial Day Weekend Meal Combos",
+            venue_or_location="90 Brybar Dr St Johns FL",
+            contact_info="+17329837841",
+            notes=raw_request,
+            preferred_language="en",
+        ),
+        "locked_facts": locked_facts,
+    })
+
+    facts = {fact.fact_id: fact.text for fact in collect_text_facts(project)}
+    rendered = "\n".join(facts.values())
+
+    assert facts["detail_001"].startswith("Non Veg Combo: $49.99")
+    assert facts["detail_002"].startswith("Veg Combo: $39.99")
+    assert "Spicy Chicken Curry" not in rendered
+    assert "Paneer Butter Masala" not in rendered
+    assert "Rasgulla" not in rendered
+
+
 def test_semantic_offer_facts_feed_text_manifest_and_generation_prompt():
     project = _complete_project().model_copy(update={
         "raw_request": (
@@ -3824,7 +3890,7 @@ def test_twelve_item_menu_fails_closed_not_silently_dropped():
         return FlyerProject(
             project_id="F0140", status="awaiting_final_approval", customer_phone="+10000000000",
             created_at=now, updated_at=now, original_message_id="m",
-            raw_request="south indian items any item at $8.99", locked_facts=facts,
+            raw_request="include 12 South Indian items, any item at $8.99", locked_facts=facts,
             fields=FlyerRequestFields(event_or_business_name="Lakshmis Kitchen"),
         )
 

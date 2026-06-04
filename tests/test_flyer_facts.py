@@ -51,6 +51,24 @@ def test_flyer_project_accepts_locked_facts_with_provenance():
     assert project.locked_facts[0].source_message_id == "m-1"
 
 
+def test_generated_item_suggestion_gate_biases_to_faithful_mode():
+    from agents.flyer.facts import requests_generated_item_suggestions
+
+    assert requests_generated_item_suggestions("Include 8 famous South Indian breakfast items")
+    assert requests_generated_item_suggestions("weekend flyer, include Idli and Vada, 8 items total")
+    assert requests_generated_item_suggestions("Dosa Night flyer. Include 6 dosa varieties.")
+    assert not requests_generated_item_suggestions(
+        "Can we do meal combo flyer with prices 49.99 for non veg combo includes "
+        "2 non veg curries, 1 chicken pulav or chicken biryani and 1 dessert"
+    )
+    assert not requests_generated_item_suggestions(
+        "Meal combo flyer: non veg combo includes 2 items total and dessert"
+    )
+    assert not requests_generated_item_suggestions(
+        "Pick any 4 dosa combo, all items $15.99"
+    )
+
+
 def test_extract_text_facts_splits_visible_copy_from_style_instructions():
     from agents.flyer.facts import extract_text_facts, facts_by_id
 

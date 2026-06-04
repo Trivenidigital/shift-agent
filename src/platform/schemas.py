@@ -1696,6 +1696,18 @@ class FlyerLockedFact(BaseModel):
     source_message_id: str = Field(default="", max_length=200)
     source_sha256: str = Field(default="", max_length=64)
 
+    @model_validator(mode="after")
+    def _hermes_inferred_facts_are_advisory(self) -> "FlyerLockedFact":
+        if self.source == "hermes_inferred" and self.required:
+            raise ValueError("hermes_inferred facts cannot be required")
+        return self
+
+    def model_copy(self, *, update: dict[str, Any] | None = None, deep: bool = False) -> "FlyerLockedFact":
+        # Pydantic's model_copy(update=...) does not validate update data. Keep
+        # the source/required invariant enforced even across in-memory edits.
+        copied = super().model_copy(update=update, deep=deep)
+        return type(self).model_validate(copied.model_dump())
+
 
 class FlyerSourceContractSection(BaseModel):
     model_config = ConfigDict(extra="forbid")

@@ -28,9 +28,9 @@ import uuid
 from schemas import FlyerAsset, FlyerCustomerStore, FlyerOutputFormat, FlyerProject
 
 try:
-    from flyer_facts import fact_value  # type: ignore
+    from flyer_facts import fact_value, requests_generated_item_suggestions  # type: ignore
 except ImportError:  # pragma: no cover - src layout fallback
-    from agents.flyer.facts import fact_value
+    from agents.flyer.facts import fact_value, requests_generated_item_suggestions
 try:
     from flyer_campaign_scene_prompts import campaign_scene_prompt_block, select_campaign_scene  # type: ignore
 except ImportError:  # pragma: no cover - src layout fallback
@@ -683,9 +683,14 @@ def _menu_item_lines(project: FlyerProject) -> list[str]:
 def _locked_menu_item_lines(project: FlyerProject) -> list[str]:
     grouped: dict[int, dict[str, str]] = {}
     order: list[int] = []
+    allow_inferred_items = requests_generated_item_suggestions(
+        " ".join(str(value or "") for value in (project.raw_request, project.fields.notes))
+    )
     for fact in project.locked_facts:
         match = re.match(r"^item:(\d+):(name|price)$", fact.fact_id)
         if not match:
+            continue
+        if getattr(fact, "source", "") == "hermes_inferred" and not allow_inferred_items:
             continue
         index = int(match.group(1))
         if index not in grouped:

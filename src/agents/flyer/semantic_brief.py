@@ -160,6 +160,40 @@ def _offers_from_source(text: str) -> list[FlyerSemanticOffer]:
     )
     if free:
         offers.append(FlyerSemanticOffer(f"Free {_title_case(free.group('item'))} with any purchase above ${free.group('amount')}"))
+    combo_end = (
+        r"(?=(?:\.\s*)?(?:and\s+)?(?:a\s+)?(?:non\s*-?\s*veg|veg)\s+combo\b"
+        r"|\bon\s+the\s+occasion\b|[.!?]|$)"
+    )
+    combo_patterns = [
+        re.compile(
+            r"\b(?:prices?\s*)?\$?(?P<price>\d+(?:\.\d{1,2})?)\s+for\s+"
+            r"(?P<label>non\s*-?\s*veg|veg)\s+combo\s+"
+            r"(?:includes?|including)\s+(?P<items>.+?)" + combo_end,
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(?P<label>non\s*-?\s*veg|veg)\s+combo\s+"
+            r"(?:priced\s+)?(?:at|for)?\s*\$?(?P<price>\d+(?:\.\d{1,2})?)\s+"
+            r"(?:includes?|including)\s+(?P<items>.+?)" + combo_end,
+            re.IGNORECASE,
+        ),
+    ]
+    seen_combo_keys: set[str] = set()
+    for pattern in combo_patterns:
+        for combo in pattern.finditer(text or ""):
+            label_raw = combo.group("label")
+            label = "Non Veg Combo" if re.search(r"\bnon\s*-?\s*veg\b", label_raw, re.IGNORECASE) else "Veg Combo"
+            price = combo.group("price")
+            items = _clean(combo.group("items"))
+            items = re.sub(r"\s+\bon\s+the\s+occasion\b.*$", "", items, flags=re.IGNORECASE).strip(" .,")
+            parts = [part.strip(" .,") for part in items.split(",") if part.strip(" .,")]
+            if len(parts) == 2 and not re.search(r"\band\b", parts[1], flags=re.IGNORECASE):
+                items = f"{parts[0]} and {parts[1]}"
+            key = _norm(f"{label} {price} {items}")
+            if not items or key in seen_combo_keys:
+                continue
+            seen_combo_keys.add(key)
+            offers.append(FlyerSemanticOffer(f"{label}: ${price} includes {items}"))
     return offers
 
 
