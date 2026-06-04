@@ -1537,6 +1537,14 @@ Review: `tests/test_flyer_renderer.py` -> `67 passed`; `tests/test_flyer_visual_
 
 Follow-up verification after reviewer fixes: `tests/test_flyer_facts.py tests/test_flyer_renderer.py tests/test_flyer_visual_qa.py tests/test_flyer_scripts_static.py` -> `167 passed`; `tests/test_flyer_generate_concepts.py tests/test_flyer_create_project.py` -> `47 passed`; touched-file `py_compile` passed; `git diff --check` clean.
 
+## Flyer Graduation Promo Ack-Only / Text-Fit Failure - 2026-06-04
+
+- [x] Add regression for the MK Kitchen graduation-party WhatsApp transcript shape.
+- [x] Fix renderer detail extraction so valid multi-line promo copy does not become one oversized critical fact.
+- [x] Add deploy/runtime smoke for bare flyer module imports so ack-only crashes are caught.
+- [x] Verify focused tests and compile checks.
+- [ ] Deploy to the VPS and run post-deploy smoke.
+
 ## Flyer Invented Operational Claims Guard - 2026-05-27
 
 - [x] Visually inspected regenerated F0104 and found an unrequested `WhatsApp Delivery` claim despite passing locked-fact QA.

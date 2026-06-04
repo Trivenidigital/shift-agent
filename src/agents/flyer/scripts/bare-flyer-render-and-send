@@ -127,8 +127,8 @@ def main(argv=None) -> int:
         # FLYER_BARE_REVISION_APPLY opt-out and degrades to REVISION_NEEDED (resend) when off /
         # no session / non-uniform prices. If a raw background exists it re-overlays; otherwise it
         # regenerates from stored structured facts.
-        B = _bare()
         try:
+            B = _bare()
             status, payload = B.render_revision_apply(chat_id, args.brief)
         except Exception as e:  # noqa: BLE001
             log(f"OUTCOME=revision_apply_error {type(e).__name__}: {e}")
@@ -160,8 +160,8 @@ def main(argv=None) -> int:
     if not args.no_ack:
         send_text(chat_id, "Got it - creating your flyer now, this takes a few seconds...", "flyer.bare.ack")
 
-    B = _bare()
     try:
+        B = _bare()
         status, payload = B.render_grounded(
             chat_id, args.brief, message_id=args.message_id, sender_phone=args.sender_phone,
         )

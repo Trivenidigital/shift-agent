@@ -149,6 +149,13 @@ def test_campaign_scene_prompts_module_is_deployed():
     assert "/opt/shift-agent/flyer_campaign_scene_prompts.py" in deploy
 
 
+def test_bare_flyer_runner_catches_render_import_failures_after_ack():
+    runner = (SCRIPTS / "bare-flyer-render-and-send").read_text(encoding="utf-8")
+
+    assert "try:\n        B = _bare()\n        status, payload = B.render_grounded" in runner
+    assert "B = _bare()\n    try:\n        status, payload = B.render_grounded" not in runner
+
+
 def test_guest_order_script_installed_for_quick_flyer_path():
     deploy = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh").read_text(encoding="utf-8")
     smoke = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-smoke-test.sh").read_text(encoding="utf-8")
@@ -530,6 +537,8 @@ def test_production_readiness_modules_installed_and_smoked():
         "flyer_intent",
         "flyer_intent_training",
         "flyer_customer_copy_policy",
+        "flyer_intake_fields",
+        "flyer_bare_render",
     ]:
         assert f"/opt/shift-agent/{module}.py" in deploy
         assert f"import {module}" in smoke

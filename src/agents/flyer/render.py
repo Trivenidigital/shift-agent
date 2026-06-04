@@ -468,6 +468,43 @@ def _strip_request_instruction_prefix(text: str) -> str:
     return clean.strip(" .")
 
 
+def _request_asks_to_include_line_copy(text: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(?:include|show|mention|add)\s+(?:the\s+)?(?:below|following|details?)\b",
+            text or "",
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _instruction_only_clause(text: str) -> bool:
+    return bool(
+        re.search(r"\b(?:flyer|flier|poster|banner)\b", text or "", flags=re.IGNORECASE)
+        and re.search(
+            r"\b(?:theme|reflect|include|below|following|details?)\b",
+            text or "",
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _matches_project_primary_fact(project: FlyerProject, text: str) -> bool:
+    candidates = [
+        _display_title(project),
+        fact_value(project, "business_name", fallback=project.fields.event_or_business_name) or "",
+        fact_value(project, "location", fallback=project.fields.venue_or_location) or "",
+        fact_value(project, "contact_phone", fallback=project.fields.contact_info) or "",
+        fact_value(project, "promotion_end", fallback="") or "",
+    ]
+    if project.fields.event_date:
+        candidates.append(_display_date_text(project))
+    schedule = _display_schedule(project)
+    if schedule:
+        candidates.append(schedule)
+    return any(_same_text(text, candidate) for candidate in candidates if candidate)
+
+
 def _instruction_leak_blockers(facts: list[FlyerTextFact]) -> list[str]:
     blockers: list[str] = []
     for fact in facts:
@@ -529,14 +566,19 @@ def _detail_clauses(project: FlyerProject) -> list[str]:
     details = (project.fields.notes or project.raw_request or "").strip()
     if not details:
         return selected
-    compact = re.sub(r"\s+", " ", details)
-    clauses = [part.strip(" .") for part in re.split(r";|\n|•|-{2,}|(?<=\.)\s+", compact) if part.strip(" .")]
+    line_copy_requested = _request_asks_to_include_line_copy(details)
+    compact = re.sub(r"[ \t\r\f\v]+", " ", details)
+    clauses = [part.strip(" .") for part in re.split(r";|\n+|\u2022|-{2,}|(?<=\.)\s+", compact) if part.strip(" .")]
     current_contact_digits = _digits(project.fields.contact_info or "")
     for clause in clauses:
         clause = _strip_request_instruction_prefix(clause)
         if not clause:
             continue
-        if not _price_or_phone_clause(clause):
+        if _instruction_only_clause(clause):
+            continue
+        if _matches_project_primary_fact(project, clause):
+            continue
+        if not (_price_or_phone_clause(clause) or line_copy_requested):
             continue
         phones = _phones_in_text(clause)
         has_offer_or_price = bool(

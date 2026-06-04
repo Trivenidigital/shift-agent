@@ -3902,3 +3902,56 @@ def test_twelve_item_menu_fails_closed_not_silently_dropped():
     # A small menu still renders all its items (no false overflow).
     clauses = _detail_clauses(_project(6))
     assert sum(1 for c in clauses if "Dish Number" in c) == 6
+
+
+def test_multiline_promo_brief_keeps_discount_line_separate_from_long_service_copy():
+    """A short discount plus long descriptive service copy is a valid promo flyer.
+
+    Regression for MK Kitchen 2026 graduation-party request: newlines were compacted
+    before clause splitting, so "10% off..." and the long catering sentence became
+    one required critical fact and failed before image generation.
+    """
+    from agents.flyer.render import _detail_clauses, _poster_copy_plan
+
+    now = datetime(2026, 6, 4, tzinfo=timezone.utc)
+    raw = (
+        "Flyer theme to reflect the graduation and include the below\n\n"
+        "2026 graduation parties\n"
+        "10% off on entire order\n"
+        "We cater both veg and anin-veg items with delicious dessert to make your celebration effortless"
+    )
+    project = FlyerProject(
+        project_id="F0066",
+        status="generating_concepts",
+        customer_phone="+15713830763",
+        created_at=now,
+        updated_at=now,
+        original_message_id="wamid.66",
+        raw_request=raw,
+        fields=FlyerRequestFields(
+            event_or_business_name="MK kitchen",
+            contact_info="+15713830763",
+            venue_or_location="23596 prosperity ridge pl Ashburn Va 20148",
+            notes=raw,
+        ),
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="MK kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15713830763", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="location", label="Location", value="23596 prosperity ridge pl Ashburn Va 20148", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="2026 Graduation Parties", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="pricing_structure", label="Pricing", value="10% off on entire order", source="customer_text", required=True),
+        ],
+    )
+
+    clauses = _detail_clauses(project)
+
+    assert clauses == [
+        "10% off on entire order",
+        "We cater both veg and anin-veg items with delicious dessert to make your celebration effortless",
+    ]
+    plan = _poster_copy_plan(project)
+    assert plan.title == "2026 Graduation Parties"
+    assert plan.detail_lines == [
+        "10% off on entire order",
+        "We cater both veg and anin-veg items with delicious dessert to make your celebration effortless",
+    ]

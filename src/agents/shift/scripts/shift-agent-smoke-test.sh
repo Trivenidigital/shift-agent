@@ -95,6 +95,8 @@ import flyer_onboarding
 import flyer_account
 import flyer_starter_briefs
 import flyer_recovery
+import flyer_intake_fields
+import flyer_bare_render
 assert callable(flyer_recovery.classify_flyer_qa_for_autorepair), \
     'flyer autorepair classifier missing'
 assert callable(flyer_recovery.plan_flyer_autorepair), \
