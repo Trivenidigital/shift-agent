@@ -68,6 +68,15 @@ _COMBO_REQUEST = (
 )
 
 
+def _combo_offer_groups() -> list[fb.OfferGroup]:
+    # One OfferGroup per locked combo (item:0 / item:1) — the structural pairing the
+    # firewall now requires so two combos cannot collapse into one card.
+    return [
+        fb.OfferGroup(kind="combo", title_ref="item:0:name", price_ref="item:0:price"),
+        fb.OfferGroup(kind="combo", title_ref="item:1:name", price_ref="item:1:price"),
+    ]
+
+
 def _combo_brief(**overrides) -> fb.FlyerBrief:
     data = dict(
         request_intent="combo_offer",
@@ -87,6 +96,7 @@ def _combo_brief(**overrides) -> fb.FlyerBrief:
             fb.FactRef(fact_id="item:1:name", provenance="locked"),
             fb.FactRef(fact_id="item:1:price", provenance="locked"),
         ],
+        offer_groups=_combo_offer_groups(),
     )
     data.update(overrides)
     return fb.FlyerBrief(**data)
@@ -189,13 +199,15 @@ def test_intent_new_still_requires_locked_item_facts():
     facts = _combo_facts()
     for dodge_intent in ("new", "event"):
         # brief references identity only, omits the locked items, claims a
-        # non-itemized intent to try to dodge the item requirement.
+        # non-itemized intent to try to dodge the item requirement. (offer_groups
+        # dropped too — the coverage check (e) is what must still catch the omission.)
         brief = _combo_brief(
             request_intent=dodge_intent,
             fact_refs=[
                 fb.FactRef(fact_id="business_name", provenance="locked"),
                 fb.FactRef(fact_id="contact_phone", provenance="locked"),
             ],
+            offer_groups=[],
         )
         result = fbv.validate(brief, facts, _COMBO_REQUEST)
         assert result.ok is False, dodge_intent
@@ -213,13 +225,14 @@ def test_validate_rejects_omitting_a_required_flagged_fact():
         FlyerLockedFact(fact_id="tagline", label="Tagline",
                         value="Fresh and festive", source="customer_text", required=True),
     ]
-    # reference identity only — tagline omitted
+    # reference identity only — tagline omitted (no item facts here ⇒ no offer_groups)
     brief = _combo_brief(
         request_intent="new",
         fact_refs=[
             fb.FactRef(fact_id="business_name", provenance="locked"),
             fb.FactRef(fact_id="contact_phone", provenance="locked"),
         ],
+        offer_groups=[],
     )
     result = fbv.validate(brief, facts, _COMBO_REQUEST)
     assert result.ok is False
@@ -386,7 +399,7 @@ def test_materialize_spans_skips_invented_spans():
 # ── (f) build_flyer_brief dormancy + enabled paths (gateway mocked) ─────────
 
 
-def test_build_flyer_brief_returns_none_when_flag_unset(monkeypatch):
+def test_build_flyer_brief_disabled_when_flag_unset(monkeypatch):
     monkeypatch.delenv(fcb.CREATIVE_DIRECTOR_ENABLED_ENV, raising=False)
 
     # Tripwire: if dormancy is broken, the gateway would be called → fail loudly.
@@ -394,16 +407,22 @@ def test_build_flyer_brief_returns_none_when_flag_unset(monkeypatch):
         raise AssertionError("gateway must not be called when the flag is unset")
 
     monkeypatch.setattr(fcb, "_call_gateway", _boom)
-    assert fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None) is None
+    result = fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None)
+    # flag off ⇒ "disabled" — the ONLY status on which a caller may use the old path.
+    assert result.status == "disabled"
+    assert result.brief is None
+    assert result.errors == []
 
 
-def test_build_flyer_brief_returns_none_when_flag_not_one(monkeypatch):
+def test_build_flyer_brief_disabled_when_flag_not_one(monkeypatch):
     monkeypatch.setenv(fcb.CREATIVE_DIRECTOR_ENABLED_ENV, "0")
     monkeypatch.setattr(
         fcb, "_call_gateway",
         lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("must not call")),
     )
-    assert fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None) is None
+    result = fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None)
+    assert result.status == "disabled"
+    assert result.brief is None
 
 
 def _brief_json() -> dict:
@@ -429,6 +448,10 @@ def _brief_json() -> dict:
             {"fact_id": "item:1:price", "provenance": "locked"},
             {"raw_span": "Non Veg Combo", "provenance": "customer_text"},
         ],
+        "offer_groups": [
+            {"kind": "combo", "title_ref": "item:0:name", "price_ref": "item:0:price"},
+            {"kind": "combo", "title_ref": "item:1:name", "price_ref": "item:1:price"},
+        ],
     }
 
 
@@ -438,8 +461,11 @@ def test_build_flyer_brief_enabled_parses_validates_and_materializes(monkeypatch
 
     facts = _combo_facts()
     before = len(facts)
-    brief = fcb.build_flyer_brief(_COMBO_REQUEST, facts, None)
+    result = fcb.build_flyer_brief(_COMBO_REQUEST, facts, None)
 
+    assert result.status == "ok"
+    assert result.errors == []
+    brief = result.brief
     assert brief is not None
     assert brief.request_intent == "combo_offer"
     assert brief.visual_direction.theme_family == "Memorial Day patriotic Americana"
@@ -465,8 +491,9 @@ def test_build_flyer_brief_sends_skill_md_body_as_system_prompt(monkeypatch):
         return _brief_json()
 
     monkeypatch.setattr(fcb, "_call_gateway", _capture)
-    brief = fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None)
-    assert brief is not None
+    result = fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None)
+    assert result.status == "ok"
+    assert result.brief is not None
 
     # the actual SKILL.md body content is present in the system prompt
     skill_body = fcb._skill_body()
@@ -482,19 +509,21 @@ def test_build_flyer_brief_sends_skill_md_body_as_system_prompt(monkeypatch):
     assert "available_fact_ids" in captured["user"]
 
 
-def test_build_flyer_brief_returns_none_when_skill_body_unreadable(monkeypatch):
-    """No brain (SKILL.md unreadable) ⇒ fail safe (never Python-authored
-    creativity). The gateway must not even be called."""
+def test_build_flyer_brief_unavailable_when_skill_body_unreadable(monkeypatch):
+    """No brain (SKILL.md unreadable) ⇒ "unavailable" (fail safe / retry — NEVER the
+    legacy path, since the firewall is armed). The gateway must not even be called."""
     monkeypatch.setenv(fcb.CREATIVE_DIRECTOR_ENABLED_ENV, "1")
     monkeypatch.setattr(fcb, "_skill_body", lambda: "")
     monkeypatch.setattr(
         fcb, "_call_gateway",
         lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("must not call")),
     )
-    assert fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None) is None
+    result = fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None)
+    assert result.status == "unavailable"
+    assert result.brief is None
 
 
-def test_build_flyer_brief_enabled_returns_none_on_validation_failure(monkeypatch):
+def test_build_flyer_brief_enabled_invalid_on_validation_failure(monkeypatch):
     monkeypatch.setenv(fcb.CREATIVE_DIRECTOR_ENABLED_ENV, "1")
     bad = _brief_json()
     bad["fact_refs"].append({"raw_span": "FREE drinks for everyone", "provenance": "customer_text"})
@@ -502,19 +531,216 @@ def test_build_flyer_brief_enabled_returns_none_on_validation_failure(monkeypatc
 
     facts = _combo_facts()
     before = len(facts)
-    assert fcb.build_flyer_brief(_COMBO_REQUEST, facts, None) is None
+    result = fcb.build_flyer_brief(_COMBO_REQUEST, facts, None)
+    # validator REJECTED ⇒ "invalid" with errors populated, brief None — the caller
+    # MUST block/clarify/manual-route, never the old path.
+    assert result.status == "invalid"
+    assert result.brief is None
+    assert result.errors  # non-empty
+    assert any("invented span" in e for e in result.errors)
     # fail-safe: nothing materialized on rejection
     assert len(facts) == before
 
 
-def test_build_flyer_brief_enabled_returns_none_when_gateway_empty(monkeypatch):
+def test_build_flyer_brief_enabled_unavailable_when_gateway_empty(monkeypatch):
     monkeypatch.setenv(fcb.CREATIVE_DIRECTOR_ENABLED_ENV, "1")
     monkeypatch.setattr(fcb, "_call_gateway", lambda _system, _user: None)
-    assert fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None) is None
+    result = fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None)
+    # gateway empty / key missing ⇒ "unavailable" (fail-safe/retry, not the old path).
+    assert result.status == "unavailable"
+    assert result.brief is None
+    assert result.errors == []
 
 
-def test_build_flyer_brief_enabled_returns_none_on_unparseable_response(monkeypatch):
+def test_build_flyer_brief_enabled_unavailable_on_unparseable_response(monkeypatch):
     monkeypatch.setenv(fcb.CREATIVE_DIRECTOR_ENABLED_ENV, "1")
-    # missing required visual_direction → FlyerBrief.model_validate raises → None
+    # missing required visual_direction → FlyerBrief.model_validate raises →
+    # unparseable brain ⇒ "unavailable" (NOT "invalid": the firewall never ran).
     monkeypatch.setattr(fcb, "_call_gateway", lambda _system, _user: {"request_intent": "new"})
-    assert fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None) is None
+    result = fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None)
+    assert result.status == "unavailable"
+    assert result.brief is None
+
+
+# ── Finding 2 (Codex P1) — typed offer structure: distinct OfferGroup per offer ──
+
+
+def test_offer_group_forbids_extra_fields():
+    with pytest.raises(ValidationError):
+        fb.OfferGroup(kind="combo", title_ref="item:0:name", surprise="nope")
+
+
+def test_expected_offer_keys_from_locked_facts():
+    # two combos (item:0:*, item:1:*) ⇒ two distinct offers; identity adds none.
+    keys = fbv.expected_offer_keys(_combo_facts())
+    assert keys == {"item:0", "item:1"}
+    assert fbv.expected_offer_keys(_identity_facts()) == set()
+
+
+def test_validate_rejects_two_combos_collapsed_into_one_group():
+    """The firewall's core P1 case: a brief that references BOTH locked combos
+    (coverage passes) but merges them into ONE offer_group — collapsing combo
+    structure — must be REJECTED."""
+    merged = fb.OfferGroup(
+        kind="combo",
+        title_ref="item:0:name",
+        price_ref="item:0:price",
+        inclusion_refs=["item:1:name", "item:1:price"],  # second combo folded in
+    )
+    brief = _combo_brief(offer_groups=[merged])
+    result = fbv.validate(brief, _combo_facts(), _COMBO_REQUEST)
+    assert result.ok is False
+    assert any(e.startswith("combo structure collapsed: offers item:0 and item:1")
+               for e in result.errors)
+
+
+def test_validate_rejects_missing_distinct_card_for_a_locked_offer():
+    # only ONE group, for item:0 — item:1 has no card of its own.
+    brief = _combo_brief(
+        offer_groups=[fb.OfferGroup(kind="combo", title_ref="item:0:name",
+                                    price_ref="item:0:price")],
+    )
+    result = fbv.validate(brief, _combo_facts(), _COMBO_REQUEST)
+    assert result.ok is False
+    assert any(e == "offer item:1 is not grouped into a distinct card"
+               for e in result.errors)
+
+
+def test_validate_passes_correctly_grouped_two_combo_brief():
+    # one distinct OfferGroup per locked combo ⇒ structure preserved ⇒ passes.
+    result = fbv.validate(_combo_brief(), _combo_facts(), _COMBO_REQUEST)
+    assert result.ok is True, result.errors
+
+
+def test_validate_rejects_unknown_offer_group_ref():
+    # a ref inside offer_groups that is not a locked fact id is an invention vector.
+    brief = _combo_brief(
+        offer_groups=_combo_offer_groups()
+        + [fb.OfferGroup(kind="combo", title_ref="item:9:name", price_ref="item:9:price")],
+    )
+    result = fbv.validate(brief, _combo_facts(), _COMBO_REQUEST)
+    assert result.ok is False
+    assert any(e == "unknown offer_group ref item:9:name" for e in result.errors)
+
+
+def test_validate_passes_offer_id_grouping():
+    # offer:N ids (not item:N) are also distinct offers; each needs its own card.
+    facts = _identity_facts() + [
+        FlyerLockedFact(fact_id="offer:0", label="Offer",
+                        value="Buy one get one", source="customer_text", required=True),
+        FlyerLockedFact(fact_id="offer:1", label="Offer",
+                        value="Free delivery over $30", source="customer_text", required=True),
+    ]
+    brief = _combo_brief(
+        fact_refs=[
+            fb.FactRef(fact_id="business_name", provenance="locked"),
+            fb.FactRef(fact_id="contact_phone", provenance="locked"),
+            fb.FactRef(fact_id="offer:0", provenance="locked"),
+            fb.FactRef(fact_id="offer:1", provenance="locked"),
+        ],
+        offer_groups=[
+            fb.OfferGroup(kind="offer", title_ref="offer:0"),
+            fb.OfferGroup(kind="offer", title_ref="offer:1"),
+        ],
+    )
+    result = fbv.validate(brief, facts, _COMBO_REQUEST)
+    assert result.ok is True, result.errors
+
+    # collapsing the two offers into one group is rejected.
+    collapsed = _combo_brief(
+        fact_refs=brief.fact_refs,
+        offer_groups=[fb.OfferGroup(kind="offer", title_ref="offer:0",
+                                    inclusion_refs=["offer:1"])],
+    )
+    bad = fbv.validate(collapsed, facts, _COMBO_REQUEST)
+    assert bad.ok is False
+    assert any("combo structure collapsed: offers offer:0 and offer:1" in e
+               for e in bad.errors)
+
+
+# ── Finding 3 (Codex P2) — occasion/theme fact values allowed in visual fields ──
+
+
+def _occasion_facts() -> list[FlyerLockedFact]:
+    # campaign_title is an OCCASION fact in facts.py (extract_text_facts) — its value
+    # "Memorial Day" legitimately appears in visual_direction.
+    return _combo_facts() + [
+        FlyerLockedFact(fact_id="campaign_title", label="Campaign",
+                        value="Memorial Day", source="customer_text", required=True),
+    ]
+
+
+def _occasion_brief(**overrides) -> fb.FlyerBrief:
+    # cover campaign_title too so coverage(e) passes; structure unchanged.
+    refs = _combo_brief().fact_refs + [fb.FactRef(fact_id="campaign_title", provenance="locked")]
+    data = dict(fact_refs=refs)
+    data.update(overrides)
+    return _combo_brief(**data)
+
+
+def test_validate_allows_occasion_value_in_visual_direction():
+    """Codex P2: an occasion fact value ("Memorial Day") in theme_family is the
+    SKILL's own example and MUST pass — it is a theme, not identity/commercial."""
+    brief = _occasion_brief(
+        visual_direction=fb.VisualDirection(
+            theme_family="Memorial Day patriotic Americana",
+            palette=["deep red", "navy blue", "white"],
+            motifs=["stars", "bunting"], visual_subjects=["festive cookout spread"],
+        ),
+    )
+    result = fbv.validate(brief, _occasion_facts(), _COMBO_REQUEST)
+    assert result.ok is True, result.errors
+
+
+def test_validate_allows_occasion_value_in_background_brief():
+    brief = _occasion_brief(
+        background_brief="A Memorial Day cookout scene, central area left clear. No text.",
+    )
+    result = fbv.validate(brief, _occasion_facts(), _COMBO_REQUEST)
+    assert result.ok is True, result.errors
+
+
+def test_validate_still_blocks_business_name_in_background_brief_with_occasion_facts():
+    # the identity scope still fires: business name in background is rejected even
+    # when occasion facts are present.
+    brief = _occasion_brief(
+        background_brief="A Memorial Day cookout poster for Lakshmi's Kitchen, center clear.",
+    )
+    result = fbv.validate(brief, _occasion_facts(), _COMBO_REQUEST)
+    assert result.ok is False
+    assert any("locked value outside fact_refs" in e and "lakshmi's kitchen" in e.lower()
+               for e in result.errors)
+
+
+def test_validate_still_blocks_item_name_in_background_brief_with_occasion_facts():
+    brief = _occasion_brief(
+        background_brief="A Memorial Day scene featuring the Non Veg Combo platter, center clear.",
+    )
+    result = fbv.validate(brief, _occasion_facts(), _COMBO_REQUEST)
+    assert result.ok is False
+    assert any("locked value outside fact_refs" in e and "non veg combo" in e.lower()
+               for e in result.errors)
+
+
+def test_validate_still_blocks_bare_price_in_background_brief_with_occasion_facts():
+    # commercial SHAPE is unconditional — a bare "$49.99" still fails even though
+    # occasion values are now allowed.
+    brief = _occasion_brief(
+        background_brief="A Memorial Day cookout with a $49.99 banner, center clear.",
+    )
+    result = fbv.validate(brief, _occasion_facts(), _COMBO_REQUEST)
+    assert result.ok is False
+    assert any(e.startswith("commercial value outside fact_refs: background_brief:")
+               for e in result.errors)
+
+
+def test_is_occasion_theme_fact_id_classification():
+    # occasion/theme/seasonal ids are exempt from the identity-value scan…
+    assert fbv._is_occasion_theme_fact_id("campaign_title")
+    assert fbv._is_occasion_theme_fact_id("schedule")
+    assert fbv._is_occasion_theme_fact_id("theme_family")
+    assert fbv._is_occasion_theme_fact_id("occasion")
+    # …identity/commercial ids are NOT exempt (their values stay blocked).
+    for fid in ("business_name", "contact_phone", "location", "item:0:name",
+                "item:0:price", "offer:0", "pricing_structure", "tagline", "headline"):
+        assert not fbv._is_occasion_theme_fact_id(fid), fid

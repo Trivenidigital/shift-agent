@@ -29,8 +29,9 @@ import json
 import os
 import urllib.error
 import urllib.request
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Literal, Mapping, Optional, Sequence
 
 from pydantic import ValidationError
 
@@ -64,6 +65,43 @@ CREATIVE_DIRECTOR_TIMEOUT_SEC = 30
 
 # The Creative-Director SKILL.md body is the governing system instruction (#5).
 SKILL_MD_PATH = Path(__file__).resolve().parent / "skills" / "flyer_generation" / "SKILL.md"
+
+
+# A four-state outcome (Codex P1 — typed status). The old contract returned a bare
+# Optional[FlyerBrief], conflating "flag disabled" with "validation rejected": a PR3
+# caller doing ``if brief is None: <old Python path>`` would BYPASS this firewall
+# exactly when it REJECTS an unsafe brief. The status disambiguates the four cases
+# so the caller can apply the fallback rule below — and ONLY that rule.
+#
+#   THE FALLBACK RULE: only ``status == "disabled"`` may fall back to the legacy
+#   Python creative path. Every other status came from an ARMED firewall and must
+#   be honored:
+#     - "disabled"    → flag off: byte-identical legacy path (the ONLY fall-back).
+#     - "unavailable" → the firewall is armed but the brain could not be reached
+#                       (missing/placeholder gateway key, the call threw, or the
+#                       response was empty/unparseable). The caller must fail-safe /
+#                       retry — NEVER silently use the old creative path (that would
+#                       route around the armed firewall on a transient outage).
+#     - "invalid"     → the deterministic validator REJECTED the brief (``errors``
+#                       populated, ``brief`` None). The caller MUST block / clarify /
+#                       manual-route — NEVER the old path (this is the firewall doing
+#                       its job; falling back here defeats it).
+#     - "ok"          → validated ``brief`` + materialized spans; render it.
+BriefStatus = Literal["disabled", "unavailable", "invalid", "ok"]
+
+
+@dataclass
+class BriefResult:
+    """Typed outcome of ``build_flyer_brief`` (Codex P1).
+
+    ``brief`` is set only when ``status == "ok"``; ``errors`` is populated only when
+    ``status == "invalid"``. See ``BriefStatus`` for the per-status fallback rule —
+    in short, only ``status == "disabled"`` permits the legacy Python path.
+    """
+
+    status: BriefStatus
+    brief: Optional[FlyerBrief] = None
+    errors: list[str] = field(default_factory=list)
 
 
 def _is_enabled() -> bool:
@@ -180,45 +218,60 @@ def build_flyer_brief(
     business_profile: Mapping[str, Any] | object | None,
     source_summary: Optional[str] = None,
     project_context: Optional[str] = None,
-) -> Optional[FlyerBrief]:
-    """Build ONE validated ``FlyerBrief`` for the request, or ``None``.
+) -> BriefResult:
+    """Build ONE validated ``FlyerBrief`` for the request, as a typed ``BriefResult``.
 
-    Returns ``None`` (caller falls back to the current Python prompt path) when:
-      - the flag is unset (DORMANCY GUARANTEE — no network, no behavior change);
-      - the SKILL.md body is unreadable (no brain → fail safe);
-      - the gateway call fails / returns nothing;
-      - the response does not parse into a ``FlyerBrief``;
-      - the deterministic validator rejects the brief (caller fails safe).
+    The status disambiguates the four outcomes so a caller never confuses "flag off"
+    with "firewall rejected" (Codex P1). ONLY ``status == "disabled"`` permits the
+    legacy Python creative path — see ``BriefStatus`` for the full rule:
 
-    On success the returned brief has been validated and its customer-text spans
-    materialized into the caller's locked-fact set by ``materialize_spans`` (the
-    materialized facts are appended to the list passed in, so the overlay later
-    renders ``required_fact_ids ∩ locked_facts``).
+      - ``"disabled"``    — flag unset (DORMANCY GUARANTEE: no network, no behavior
+                            change). The ONLY status on which the caller may fall back
+                            to the current Python prompt path.
+      - ``"unavailable"`` — the firewall is armed but the brain could not be reached:
+                            the SKILL.md body is unreadable, the gateway key is
+                            missing/placeholder, the call threw, or the response was
+                            empty / unparseable into a ``FlyerBrief``. The caller must
+                            fail-safe / retry — NEVER silently use the old path.
+      - ``"invalid"``     — the deterministic validator rejected the brief; ``errors``
+                            is populated and ``brief`` is None. The caller MUST
+                            block / clarify / manual-route — NEVER the old path.
+      - ``"ok"``          — ``brief`` is the validated brief; its customer-text spans
+                            have been materialized into the caller's locked-fact set
+                            by ``materialize_spans`` (appended in place, so the overlay
+                            later renders ``required_fact_ids ∩ locked_facts``).
     """
     if not _is_enabled():
-        return None
+        return BriefResult(status="disabled")
 
     # The SKILL.md body is the governing system instruction (the brain). If it is
-    # unreadable, fail safe rather than fall back to Python-authored creativity.
+    # unreadable the firewall is armed but the brain is unreachable → unavailable
+    # (fail safe), NEVER a fall-back to Python-authored creativity.
     system_prompt = _skill_body()
     if not system_prompt:
-        return None
+        return BriefResult(status="unavailable")
 
     user_message = _build_user_message(
         raw_request, locked_facts, business_profile, source_summary, project_context
     )
+    # _call_gateway returns None for ALL "brain unreachable" cases (missing/placeholder
+    # key, the call threw, or the response was empty/unparseable JSON) → unavailable.
     raw = _call_gateway(system_prompt, user_message)
     if not raw:
-        return None
+        return BriefResult(status="unavailable")
 
     try:
         brief = FlyerBrief.model_validate(dict(raw))
     except (ValidationError, TypeError, ValueError):
-        return None
+        # A response that does not shape into a FlyerBrief is an unreachable/garbled
+        # brain, not a firewall rejection → unavailable (fail safe), not invalid.
+        return BriefResult(status="unavailable")
 
     result = _validator.validate(brief, locked_facts, raw_request)
     if not result.ok:
-        return None
+        # The firewall REJECTED the brief. Surface the errors so the caller can
+        # block / clarify / manual-route. This must NEVER fall back to the old path.
+        return BriefResult(status="invalid", errors=list(result.errors))
 
     # Materialize validated customer-text spans into real locked facts so the
     # overlay can render required_fact_ids ∩ locked_facts. Append in place so the
@@ -227,4 +280,4 @@ def build_flyer_brief(
     if materialized and isinstance(locked_facts, list):
         locked_facts.extend(materialized)
 
-    return brief
+    return BriefResult(status="ok", brief=brief)

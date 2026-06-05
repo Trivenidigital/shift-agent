@@ -35,9 +35,9 @@ from typing import Iterable, Sequence
 from schemas import FlyerLockedFact
 
 try:  # sibling FlyerBrief — flat on the VPS, package-style in the repo tree
-    from flyer_brief import FactRef, FlyerBrief  # type: ignore
+    from flyer_brief import FactRef, FlyerBrief, OfferGroup  # type: ignore
 except ImportError:  # pragma: no cover - import-path shim
-    from agents.flyer.flyer_brief import FactRef, FlyerBrief
+    from agents.flyer.flyer_brief import FactRef, FlyerBrief, OfferGroup
 
 
 # Required-fact authority is each fact's OWN ``.required`` flag (facts.py sets it
@@ -111,6 +111,145 @@ def required_fact_ids(locked_facts: Sequence[FlyerLockedFact]) -> set[str]:
         if getattr(fact, "required", False):
             required.add(fid)
     return required
+
+
+# ── fact_id taxonomy classification (Codex P2 — occasion/theme over-block) ──
+# The free-text locked-value scan must block IDENTITY/COMMERCIAL fact values (a
+# business name / item name / price / claim leaking into the textless background or
+# the structure fields), but must NOT block OCCASION/THEME/SEASONAL fact values —
+# "Memorial Day" legitimately belongs in visual_direction ("Memorial Day patriotic
+# Americana"), and that value can be a locked fact (facts.py `campaign_title`). The
+# classification below is derived from the fact_id taxonomy in facts.py.
+#
+#   OCCASION / THEME / SEASONAL (allowed in visual_direction / background_brief):
+#     - campaign_title  (facts.py:600 — the occasion/campaign, e.g. "Memorial Day")
+#     - schedule        (facts.py:_schedule_fact — e.g. "Every Friday"; a timing
+#                        theme, NOT a commercial value; commercial-SHAPE scan still
+#                        catches any price/phone/discount text unconditionally)
+#   Everything else a fact_id can be (business_name, contact_phone, location,
+#   headline, tagline, pricing_structure, item:N:name, item:N:price, offer:N,
+#   offer_price, promotion_end, replacement:*, source_*) is IDENTITY/COMMERCIAL and
+#   its locked value is blocked from the free-text fields.
+_OCCASION_THEME_FACT_IDS = frozenset({"campaign_title", "schedule"})
+_OCCASION_THEME_FACT_PREFIXES = ("theme_", "occasion")
+
+
+def _is_occasion_theme_fact_id(fact_id: str) -> bool:
+    """True iff ``fact_id`` is an occasion/theme/seasonal fact whose locked value may
+    appear in the free-text visual fields (its value is a *theme*, not identity or a
+    commercial value). Derived from the facts.py fact_id taxonomy. The exact ids
+    cover today's producers; the prefixes future-proof any theme_*/occasion* id."""
+    if fact_id in _OCCASION_THEME_FACT_IDS:
+        return True
+    return any(fact_id.startswith(p) for p in _OCCASION_THEME_FACT_PREFIXES)
+
+
+# ── expected offer structure, DERIVED FROM LOCKED FACTS (Codex P1) ──────────
+_ITEM_REF_RE = re.compile(r"^item:(?P<index>\d+):(?P<kind>name|price)$")
+_OFFER_REF_RE = re.compile(r"^offer:(?P<index>\d+)$")
+
+
+def expected_offer_keys(locked_facts: Sequence[FlyerLockedFact]) -> set[str]:
+    """The set of DISTINCT offers the locked facts imply — each must own a distinct
+    OfferGroup. Derived from the LOCKED FACTS ONLY (never request_intent / any brief
+    field): each distinct ``item:N:*`` index is one offer ("item:N"), and each
+    ``offer:N`` id is one offer ("offer:N"). The Memorial-Day two-combo set
+    (item:0:*, item:1:*) therefore implies {"item:0", "item:1"} → two cards."""
+    keys: set[str] = set()
+    for fact in locked_facts or []:
+        fid = getattr(fact, "fact_id", "") or ""
+        m_item = _ITEM_REF_RE.match(fid)
+        if m_item:
+            keys.add(f"item:{m_item.group('index')}")
+            continue
+        if _OFFER_REF_RE.match(fid):
+            keys.add(fid)
+    return keys
+
+
+def _offer_key_for_ref(fact_id: str) -> str:
+    """Map a single fact_id to the offer-key it belongs to (item:N for an
+    ``item:N:name|price``, offer:N for an ``offer:N``), or "" if it is neither."""
+    m_item = _ITEM_REF_RE.match(fact_id or "")
+    if m_item:
+        return f"item:{m_item.group('index')}"
+    if _OFFER_REF_RE.match(fact_id or ""):
+        return fact_id
+    return ""
+
+
+def _group_offer_keys(group: OfferGroup) -> set[str]:
+    """The distinct offer-keys an OfferGroup's refs touch. A group that references
+    both item:0:* and item:1:* touches two offer-keys → it collapsed two offers."""
+    keys: set[str] = set()
+    for ref in (group.title_ref, group.price_ref, *group.inclusion_refs):
+        key = _offer_key_for_ref(ref or "")
+        if key:
+            keys.add(key)
+    return keys
+
+
+def _validate_offer_structure(
+    brief: FlyerBrief,
+    locked_ids: set[str],
+    locked_facts: Sequence[FlyerLockedFact],
+) -> list[str]:
+    """Deterministic structural-pairing enforcement (Codex P1), derived from LOCKED
+    FACTS (never request_intent). Fails closed:
+
+      - every ref inside ``offer_groups`` must be a real locked fact id (no new
+        invention vector — same authority as ``fact_refs``);
+      - NO single OfferGroup may span two distinct locked offers ("combo structure
+        collapsed: offers X and Y share one group");
+      - each expected locked offer (each distinct item:N / offer:N) must map to a
+        DISTINCT OfferGroup, and its name+price refs grouped into that one card —
+        else "offer X is not grouped into a distinct card".
+    """
+    errors: list[str] = []
+    expected = expected_offer_keys(locked_facts)
+
+    # (1) every ref in offer_groups resolves to a real locked fact id.
+    for group in brief.offer_groups:
+        for ref in (group.title_ref, group.price_ref, *group.inclusion_refs):
+            rid = (ref or "").strip()
+            if rid and rid not in locked_ids:
+                errors.append(f"unknown offer_group ref {rid}")
+
+    # If there is nothing structural to enforce (no locked offers), stop here: a
+    # non-itemized flyer (pure identity) has no combo structure to preserve.
+    if not expected:
+        return errors
+
+    # (2) no single group may collapse two distinct locked offers into one card.
+    for group in brief.offer_groups:
+        touched = _group_offer_keys(group)
+        if len(touched) > 1:
+            a, b = sorted(touched)[:2]
+            errors.append(f"combo structure collapsed: offers {a} and {b} share one group")
+
+    # (3) each expected locked offer maps to a DISTINCT group that carries its refs.
+    # Build offer-key -> set of group indices that reference it.
+    key_to_groups: dict[str, set[int]] = {k: set() for k in expected}
+    for gi, group in enumerate(brief.offer_groups):
+        for key in _group_offer_keys(group):
+            if key in key_to_groups:
+                key_to_groups[key].add(gi)
+    used_group_indices: set[int] = set()
+    for key in sorted(expected):
+        groups_for_key = key_to_groups.get(key, set())
+        if not groups_for_key:
+            errors.append(f"offer {key} is not grouped into a distinct card")
+            continue
+        # Pick a group dedicated to this key that is not already claimed by another
+        # offer; if the only group(s) for this key are shared, the collapse error in
+        # (2) already fired, but flag the missing distinct card too.
+        dedicated = sorted(g for g in groups_for_key if g not in used_group_indices)
+        if not dedicated:
+            errors.append(f"offer {key} is not grouped into a distinct card")
+            continue
+        used_group_indices.add(dedicated[0])
+
+    return errors
 
 
 @dataclass
@@ -192,13 +331,22 @@ def validate(
             [vd.theme_family, *vd.palette, *vd.motifs, *vd.visual_subjects]
         ),
     }
-    # Locked TEXTUAL values (business/item/tagline) must not appear in a free-text
-    # field either — they would render into the background OUTSIDE the overlay
-    # (Codex NEW-BYPASS). Boundary-aware; length>=4 skips trivial common words.
+    # Locked IDENTITY/COMMERCIAL textual values (business/item name/tagline/claim)
+    # must not appear in a free-text field — they would render into the background
+    # OUTSIDE the overlay (Codex NEW-BYPASS). OCCASION/THEME/SEASONAL fact values
+    # (campaign_title="Memorial Day", schedule) are EXCLUDED (Codex P2): they
+    # legitimately belong in visual_direction ("Memorial Day patriotic Americana"),
+    # and the commercial-SHAPE scan below still catches any price/phone/discount text
+    # in those fields unconditionally. Boundary-aware; length>=4 skips trivial words.
     locked_text_values = [
-        v for v in (_norm_ws(f.value) for f in locked_facts or []) if len(v) >= 4
+        _norm_ws(f.value)
+        for f in locked_facts or []
+        if not _is_occasion_theme_fact_id(getattr(f, "fact_id", "") or "")
     ]
+    locked_text_values = [v for v in locked_text_values if len(v) >= 4]
     for field_name, text in free_text_fields.items():
+        # Commercial SHAPE (price/phone/discount) is ALWAYS rejected in every
+        # free-text field — unconditional, regardless of fact-id classification.
         hit = _commercial_value_hit(text)
         if hit:
             errors.append(f"commercial value outside fact_refs: {field_name}: {hit}")
@@ -222,6 +370,13 @@ def validate(
             if lv and re.search(r"(?<![a-z0-9])" + re.escape(lv) + r"(?![a-z0-9])", norm_entry):
                 errors.append(f"must_not_add contains locked value: {entry}")
                 break
+
+    # (d2) structural pairing (Codex P1): coverage in (e) proves every required fact
+    # is REFERENCED, but not that combo STRUCTURE is preserved — a brief that refs
+    # both combos yet groups them into one card passes (e) while collapsing the
+    # offer structure (invariant #4). Enforce one DISTINCT OfferGroup per locked
+    # offer, derived from the locked facts alone (never request_intent).
+    errors.extend(_validate_offer_structure(brief, locked_ids, locked_facts))
 
     # (e) coverage: referenced locked ids + the ids the validated spans will
     # materialize into must cover the required set. The required set is derived

@@ -82,6 +82,29 @@ class FactRef(BaseModel):
         return self
 
 
+class OfferGroup(BaseModel):
+    """ONE distinct offer/combo/item card — its structure, by locked-fact id.
+
+    Free-text ``offer_structure`` + ``grouping`` strings let a brief reference all
+    required facts yet still say "merge all offers into one panel", silently
+    collapsing combo structure (invariant #4 — a wrong customer-facing structure).
+    ``offer_groups`` makes the structure TYPED so the deterministic firewall can
+    enforce that each locked offer maps to its OWN card.
+
+    Every ``*_ref`` is a LOCKED FACT ID (never an inline value — no new invention
+    vector); the validator rejects any ref that is not a real locked fact id. ``kind``
+    is advisory ("combo" | "item" | "offer"); the firewall's pairing check is derived
+    from the LOCKED FACTS, never from ``kind``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: str = Field(default="", max_length=40)
+    title_ref: Optional[str] = Field(default=None, max_length=120)
+    price_ref: Optional[str] = Field(default=None, max_length=120)
+    inclusion_refs: list[str] = Field(default_factory=list, max_length=50)
+
+
 class FlyerBrief(BaseModel):
     """The single structured Creative-Director output for one flyer request.
 
@@ -102,3 +125,6 @@ class FlyerBrief(BaseModel):
     # The TEXTLESS-background image prompt — no words/text instructions.
     background_brief: str = Field(default="", max_length=4000)
     fact_refs: list[FactRef] = Field(default_factory=list, max_length=200)
+    # Typed offer structure (Codex P1): one OfferGroup per distinct combo/offer/item
+    # so the firewall can reject a brief that collapses two locked offers into one card.
+    offer_groups: list[OfferGroup] = Field(default_factory=list, max_length=50)

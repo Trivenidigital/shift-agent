@@ -36,6 +36,9 @@ Return JSON only, matching this schema:
   "fact_refs": [
     {"fact_id": "<one of the available fact ids>", "provenance": "locked"},
     {"raw_span": "<verbatim substring of the customer request>", "provenance": "customer_text"}
+  ],
+  "offer_groups": [
+    {"kind": "combo | item | offer", "title_ref": "<locked fact id>", "price_ref": "<locked fact id>", "inclusion_refs": ["<locked fact id>"]}
   ]
 }
 ```
@@ -61,6 +64,13 @@ Return JSON only, matching this schema:
   menu; event → event layout; `source_edit` → preserve the uploaded source
   hierarchy. **Never expand** a stated offer into extra items unless the customer
   explicitly asks for suggestions.
+- **Emit one `offer_group` per distinct combo / offer / item.** Each distinct
+  combo or priced item gets its OWN `offer_group` with its `title_ref` (the
+  item/offer name fact id), `price_ref` (its price fact id), and any
+  `inclusion_refs` (fact ids of included items). **Never merge two combos/offers
+  into a single group** — that collapses the structure and the firewall will
+  reject it. Two combos → two `offer_groups`. Every ref is a locked fact id, never
+  an inline value.
 - **`must_not_add` is a suppression list, not a fact list.** Put only things to
   *omit* (e.g. "no extra dishes", "no stock photos of people"). Never put a real
   fact value here — that would suppress a fact the overlay must show.
@@ -126,13 +136,19 @@ Desired `FlyerBrief`:
     {"fact_id": "item:0:price", "provenance": "locked"},
     {"fact_id": "item:1:name", "provenance": "locked"},
     {"fact_id": "item:1:price", "provenance": "locked"}
+  ],
+  "offer_groups": [
+    {"kind": "combo", "title_ref": "item:0:name", "price_ref": "item:0:price", "inclusion_refs": []},
+    {"kind": "combo", "title_ref": "item:1:name", "price_ref": "item:1:price", "inclusion_refs": []}
   ]
 }
 ```
 
 Note: the prices `$49.99` / `$39.99` and the combo names appear **only** as
 `fact_refs` — never inline. The background is fully textless. The two combos are
-preserved exactly; no third combo is added.
+preserved exactly; no third combo is added. The **two** `offer_groups` — Non Veg
+Combo (`item:0:*`) and Veg Combo (`item:1:*`) — keep each combo in its OWN card;
+merging them into one group would collapse the structure and be rejected.
 
 ## Language
 

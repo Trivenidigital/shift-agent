@@ -11,7 +11,7 @@
 3. **Components** (operator-specified):
    - `flyer_generation/SKILL.md` = **Creative Director** (all creative judgment: intent/occasion/theme/layout/structure/what-not-to-add).
    - `flyer_context_builder` = **callable tool/plugin** (Python) that invokes the skill via the Hermes gateway (structured-LLM) and returns **one `FlyerBrief`**.
-   - `FlyerBriefValidator` = **deterministic Python**: computes the required-fact set from locked facts + `request_intent`; validates every `FactRef` maps to a `FlyerLockedFact` ID **or** a verified `raw_span` of the customer request; enforces `must_not_add`; **materializes** validated spans → `FlyerLockedFact(source="customer_text")`. Overlay renders `required_fact_ids ∩ locked_facts` only.
+   - `FlyerBriefValidator` = **deterministic Python**: computes the required-fact set from locked facts ONLY (never the model-authored `request_intent`); validates every `FactRef` maps to a `FlyerLockedFact` ID **or** a verified `raw_span` of the customer request; enforces `must_not_add`; **materializes** validated spans → `FlyerLockedFact(source="customer_text")`. Overlay renders `required_fact_ids ∩ locked_facts` only.
    - **Stay Python:** identity/sender resolution, state transitions, audit, delivery, retries, danger gates, deterministic overlay.
 4. **Flags** — `FLYER_CREATIVE_DIRECTOR_ENABLED` (default `0`); `FLYER_INTENT_ROUTING_SHADOW` (default shadow). **Flag-OFF = byte-identical current behavior** (gate every new branch).
 5. **Send-rate metric** — numerator = golden cases **not** danger-blocked AND passing truth+commercial gates; denominator = all cases; danger-blocks and dense-layout failures accounted **separately**; promote threshold ≥ 0.90 send-rate with **0** truth-gate failures.
