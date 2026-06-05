@@ -965,3 +965,210 @@ def test_validate_reuses_creative_firewall_claim_detector():
     same callable the validator imported (defense-in-depth, not a private fork)."""
     import creative_firewall as cfw
     assert fbv._is_hard_fact_claim is cfw.is_hard_fact_claim
+
+
+# ── "open" precision (false positive 2026-06-05) ────────────────────────────
+# A textless-background brief said "an OPEN central area left clear for text" and
+# the firewall rejected the whole brief as an operational claim. "open" here is a
+# LAYOUT instruction (leave negative space for the deterministic overlay), not a
+# "now open" business claim. The fix makes the "open" detector context-aware:
+# compositional uses pass, genuine operational claims stay caught.
+
+
+def test_validate_passes_compositional_open_in_background_brief():
+    """The exact live false-positive case: an "open central area left clear for
+    text" must validate (no operational-claim rejection from "open")."""
+    brief = _occasion_brief(
+        background_brief=(
+            "A festive Memorial Day cookout background with an open central area "
+            "left clear for text. No words anywhere."
+        ),
+    )
+    result = fbv.validate(brief, _occasion_facts(), _COMBO_REQUEST)
+    assert result.ok is True, result.errors
+
+
+def test_operational_claim_hit_passes_compositional_open():
+    # unit-level: the validator's detector returns "" for compositional "open".
+    assert fbv._operational_claim_hit("an open central area left clear for text") == ""
+    assert fbv._operational_claim_hit("open layout with a wide open background") == ""
+
+
+def test_operational_claim_hit_still_flags_operational_open():
+    # genuine business claims still trip (non-empty hit string).
+    assert fbv._operational_claim_hit("we are now open daily 9am-9pm")
+    assert fbv._operational_claim_hit("grand opening this weekend")
+    assert fbv._operational_claim_hit("now open")
+    assert fbv._operational_claim_hit("open for business")
+
+
+def test_validate_still_rejects_operational_open_in_background_brief():
+    """A genuine "now open daily" operational claim in the textless background must
+    STILL be rejected after the precision fix (the firewall is not weakened)."""
+    brief = _occasion_brief(
+        background_brief="A Memorial Day scene, we are now open daily, center clear.",
+    )
+    result = fbv.validate(brief, _occasion_facts(), _COMBO_REQUEST)
+    assert result.ok is False
+    assert any(e.startswith("invented operational claim in textless background: background_brief:")
+               for e in result.errors), result.errors
+
+
+def test_validate_still_rejects_grand_opening_in_background_brief():
+    brief = _occasion_brief(
+        background_brief="A Memorial Day cookout celebrating our grand opening, center clear.",
+    )
+    result = fbv.validate(brief, _occasion_facts(), _COMBO_REQUEST)
+    assert result.ok is False
+    assert any(e.startswith("invented operational claim in textless background: background_brief:")
+               for e in result.errors), result.errors
+
+
+@pytest.mark.parametrize("masking_text", [
+    # Codex BLOCKER 2026-06-05: a compositional "open" must not mask a co-occurring
+    # operational "open". The anchored-phrase / time-signal scan is whole-text (no
+    # window), so the validator catches the operational "open" even when a benign
+    # "open" appears first. Memorial Day stays allowed (campaign_title occasion fact).
+    "A Memorial Day scene, an open central area, open until 10, center clear.",
+    "A Memorial Day cookout, open layout, opened for business, center clear.",
+    "A Memorial Day scene, open layout, store open until 10pm, center clear.",
+])
+def test_validate_rejects_open_co_occurrence_in_background_brief(masking_text):
+    brief = _occasion_brief(background_brief=masking_text)
+    result = fbv.validate(brief, _occasion_facts(), _COMBO_REQUEST)
+    assert result.ok is False
+    assert any("invented operational claim in textless background" in e
+               for e in result.errors), result.errors
+
+
+def test_operational_claim_hit_rejects_masked_operational_open():
+    # unit-level: a benign "open" before an operational "open" no longer hides it.
+    assert fbv._operational_claim_hit("an open central area, open until 10")
+    assert fbv._operational_claim_hit("open layout, opened for business")
+
+
+def test_validate_passes_open_layout_with_memorial_day():
+    """Codex MAJOR over-block regression (live-breaking): "open layout for Memorial
+    Day" must validate. The old broad markers matched "day"/"Memorial Day" and
+    wrongly flagged the real combo brief; the anchored-phrase design does not."""
+    brief = _occasion_brief(
+        background_brief=(
+            "A festive Memorial Day cookout with an open layout, central area left "
+            "clear for text. No words anywhere."
+        ),
+    )
+    result = fbv.validate(brief, _occasion_facts(), _COMBO_REQUEST)
+    assert result.ok is True, result.errors
+
+
+def test_open_claim_hit_fail_closed_when_classifier_unavailable(monkeypatch):
+    """If creative_firewall._open_is_operational is unavailable, the validator must
+    fail closed — treat any "open" token as a claim (never weaken the textless rule
+    by silently passing "open" when the classifier is missing)."""
+    monkeypatch.setattr(fbv, "_cf_open_is_operational", None)
+    # compositional "open" is now treated as a claim (fail-closed) — non-empty hit.
+    assert fbv._open_claim_hit("an open central area left clear for text")
+    # operational "open" likewise flagged.
+    assert fbv._open_claim_hit("now open daily")
+
+
+# ── round-4: expanded operational tails + reopen at the validator level ──────
+
+
+@pytest.mark.parametrize("op_text", [
+    "store open weekends, center clear",
+    "open weekdays, center clear",
+    "open seven days a week, center clear",
+    "open for lunch, center clear",
+    "open for dinner, center clear",
+    "open 24/7, center clear",
+    "open until midnight, center clear",
+    "opens at noon, center clear",
+    "open at 9, center clear",
+    "open from noon, center clear",
+    "opening soon, center clear",
+    "opening day, center clear",
+    # reopen variants
+    "grand reopening, center clear",
+    "newly reopened, center clear",
+    "reopened for business, center clear",
+    "reopens monday, center clear",
+    # round-5 day-tail recall (optional preposition + full/plural weekday forms)
+    "open on weekends, center clear",
+    "open on weekdays, center clear",
+    "opens on Saturday, center clear",
+    "open Saturdays, center clear",
+    "open on monday, center clear",
+    "open during the weekend, center clear",
+    # round-5 final: bare reopen* is operational on its own (no anchor needed).
+    "we reopen, center clear",
+    "reopened, center clear",
+    "re-open, center clear",
+])
+def test_validate_rejects_expanded_open_claims_in_background(op_text):
+    brief = _occasion_brief(background_brief="A Memorial Day scene, " + op_text + ".")
+    result = fbv.validate(brief, _occasion_facts(), _COMBO_REQUEST)
+    assert result.ok is False
+    assert any("invented operational claim in textless background" in e
+               for e in result.errors), result.errors
+
+
+@pytest.mark.parametrize("benign_text", [
+    # open + a NON-operational (layout) tail stays benign; no new over-block.
+    "an open layout, area at the center kept open, central area left clear for text",
+    "an open layout for Memorial Day, center clear, with a soft background",
+    "an open layout, open for seating arrangement of the spread, center clear",
+    "an open space for plating the cookout spread, center clear",
+    "a clear 24 inch wide open background, central area left clear for text",
+    # round-5: a NON-ADJACENT day after "open" stays benign (open+layout, not
+    # open [on|during]? <day>) — the live "Saturday market" theme must validate.
+    "an open layout for the Saturday market scene, central area left clear for text",
+    # round-5 final \b guard: "re" inside store/more does NOT trigger the reopen
+    # branch — bare non-re "open" stays benign.
+    "a store open layout with more open space, central area left clear for text",
+])
+def test_validate_passes_benign_open_tails_in_background(benign_text):
+    brief = _occasion_brief(background_brief=benign_text + ".")
+    result = fbv.validate(brief, _occasion_facts(), _COMBO_REQUEST)
+    assert result.ok is True, result.errors
+
+
+def test_operational_claim_hit_fail_closed_when_broad_classifier_none(monkeypatch):
+    """Codex round-4 MAJOR: if the BROAD claim classifier is unavailable (None),
+    _operational_claim_hit must FAIL CLOSED — return the non-empty sentinel so the
+    field is treated as carrying a claim, not silently accepted. The text used here
+    has no _OPERATIONAL_CLAIM_RE / open-token match, so the broad fallback is the
+    only remaining gate."""
+    monkeypatch.setattr(fbv, "_is_hard_fact_claim", None)
+    hit = fbv._operational_claim_hit("a perfectly clean cookout background")
+    assert hit == fbv._CLAIM_CLASSIFIER_UNAVAILABLE
+    assert hit  # non-empty
+
+
+def test_operational_claim_hit_fail_closed_when_broad_classifier_raises(monkeypatch):
+    """Codex round-4 MAJOR: if the broad classifier RAISES, fail closed (sentinel),
+    never swallow the error into an accept ("")."""
+    def _boom(_text):
+        raise RuntimeError("classifier exploded")
+
+    monkeypatch.setattr(fbv, "_is_hard_fact_claim", _boom)
+    hit = fbv._operational_claim_hit("a perfectly clean cookout background")
+    assert hit == fbv._CLAIM_CLASSIFIER_UNAVAILABLE
+    assert hit  # non-empty
+
+
+def test_validate_fail_closed_rejects_when_broad_classifier_unavailable(monkeypatch):
+    """End-to-end: with the broad classifier unavailable, an otherwise-clean brief is
+    REJECTED (the textless rule treats the field as carrying a claim) — proving the
+    fail-closed posture reaches validate()."""
+    monkeypatch.setattr(fbv, "_is_hard_fact_claim", None)
+    result = fbv.validate(_combo_brief(), _combo_facts(), _COMBO_REQUEST)
+    assert result.ok is False
+    assert any(fbv._CLAIM_CLASSIFIER_UNAVAILABLE in e for e in result.errors), result.errors
+
+
+def test_validate_clean_brief_still_passes_with_real_broad_classifier():
+    """Guard: the fail-closed change must NOT reject clean briefs in the normal case
+    (the broad classifier is importable) — only when it is unavailable/raising."""
+    result = fbv.validate(_combo_brief(), _combo_facts(), _COMBO_REQUEST)
+    assert result.ok is True, result.errors

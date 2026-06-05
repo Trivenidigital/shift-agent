@@ -129,14 +129,58 @@ _QUOTED_LITERAL_RE = re.compile(r"""['"‘’“”]\s*([^'"‘’“”]{3,})\s
 # Invented operational/service claims (mirror of creative_firewall's claim classes,
 # used only if that module is not importable — kept small + fail-closed). These are
 # NON-price claims; the commercial-shape scan already covers price/phone/discount.
+# NB: bare open/opens/opening are intentionally NOT in this blanket list — "open"
+# is context-dependent ("an open central area" is a LAYOUT instruction, not a
+# business-hours claim; live false positive 2026-06-05). It is classified by
+# creative_firewall's context-aware `_open_is_operational` via `_open_claim_hit`
+# below, so "now open"/"open daily"/"grand opening" stay caught while compositional
+# uses pass. closed/closes/closing/hours remain unconditional (no layout sense).
 _OPERATIONAL_CLAIM_RE = re.compile(
-    r"\b(?:open|opens|opening|closed|closes|closing|hours|daily|"
+    r"\b(?:closed|closes|closing|hours|daily|"
     r"delivery|takeout|take[\s-]?out|takeaway|dine[\s-]?in|curbside|pickup|"
     r"hiring|now\s+hiring|fresh|freshly|guarantee|guaranteed|best|#\s*1|"
     r"number\s+one|award|award[\s-]?winning|certified|licensed|insured|"
     r"voted|family[\s-]?owned|since\s+\d{4})\b",
     re.IGNORECASE,
 )
+
+# Context-aware "open" claim detector (reuses creative_firewall's classifier so
+# the brief firewall and planner item-name firewall agree on what "open" means).
+# Flat-on-VPS first, package-style fallback, then a small inline mirror so the
+# textless rule never silently loses "open" coverage if the module is absent.
+try:  # pragma: no cover - import-path shim (mirrors _is_hard_fact_claim above)
+    from creative_firewall import _open_is_operational as _cf_open_is_operational  # type: ignore
+    from creative_firewall import _OPEN_TOKEN_RE as _cf_open_token_re  # type: ignore
+except ImportError:  # pragma: no cover
+    try:
+        from agents.flyer.creative_firewall import (  # type: ignore
+            _open_is_operational as _cf_open_is_operational,
+            _OPEN_TOKEN_RE as _cf_open_token_re,
+        )
+    except ImportError:  # pragma: no cover - firewall unavailable ⇒ fail-closed mirror
+        _cf_open_token_re = re.compile(r"\b(?:re[- ]?)?open(?:ing|ed|s)?\b", re.IGNORECASE)
+        _cf_open_is_operational = None  # type: ignore
+
+
+# Sentinel returned when the broad claim classifier is unavailable/raising — a
+# non-empty hit so the textless-background field is treated as carrying a claim
+# (fail-closed), never silently accepted (Codex round-4 MAJOR).
+_CLAIM_CLASSIFIER_UNAVAILABLE = "operational_claim_classifier_unavailable"
+
+
+def _open_claim_hit(text: str) -> str:
+    """First operational "open" claim in ``text`` (context-aware), or "" if the
+    only "open" uses are compositional ("open central area", "left open"). Defers
+    to creative_firewall._open_is_operational; if that is unavailable, fail closed
+    (treat any "open" token as a claim) so the textless rule never weakens."""
+    if not text:
+        return ""
+    m = _cf_open_token_re.search(text)
+    if not m:
+        return ""
+    if _cf_open_is_operational is None:
+        return m.group(0).strip()  # fail-closed: no classifier ⇒ block any "open"
+    return m.group(0).strip() if _cf_open_is_operational(text) else ""
 
 
 def _text_render_instruction_hit(text: str) -> str:
@@ -165,14 +209,26 @@ def _operational_claim_hit(text: str) -> str:
     m = _OPERATIONAL_CLAIM_RE.search(text)
     if m:
         return m.group(0).strip()
-    # Defense-in-depth: reuse the planner firewall's broader claim taxonomy when
-    # available (service/legal/payment/availability claims not in the small list).
-    if _is_hard_fact_claim is not None:
-        try:
-            if _is_hard_fact_claim(text):
-                return text.strip()[:60]
-        except Exception:  # pragma: no cover - never let the firewall crash validation
-            return ""
+    # "open" is classified by context (compositional "open central area" passes;
+    # operational "now open"/"open daily"/"grand opening" is flagged). Done before
+    # the broad fallback so a compositional "open" is not re-flagged by it.
+    open_hit = _open_claim_hit(text)
+    if open_hit:
+        return open_hit
+    # Defense-in-depth: reuse the planner firewall's broader claim taxonomy
+    # (service/legal/payment/availability claims not in the small list). This is
+    # FAIL-CLOSED (Codex round-4 MAJOR): if the broad classifier is unavailable
+    # (import missing) OR raises, we cannot prove the text is claim-free, so we
+    # return a non-empty sentinel — the textless-background field is treated as
+    # carrying a claim (reject + retry) rather than silently accepted. Mirrors the
+    # fail-closed posture of `_open_claim_hit` when its classifier is missing.
+    if _is_hard_fact_claim is None:
+        return _CLAIM_CLASSIFIER_UNAVAILABLE
+    try:
+        if _is_hard_fact_claim(text):
+            return text.strip()[:60]
+    except Exception:  # the firewall must never crash validation — fail closed.
+        return _CLAIM_CLASSIFIER_UNAVAILABLE
     return ""
 
 
