@@ -317,6 +317,31 @@ def _offer_key_for_ref(fact_id: str) -> str:
     return ""
 
 
+def _has_item_level_facts(locked_facts: Sequence[FlyerLockedFact]) -> bool:
+    """True iff the LOCKED FACTS contain at least one fine-grained ``item:N:name`` /
+    ``item:N:price`` fact (B2 advisory split, operator-approved Option 1).
+
+    This is the switch between two regimes for ``offer_groups`` enforcement:
+
+      - **item-level facts EXIST** → the brief is grouping real fine-grained
+        item/price slots, so a true item-level collapse / wrong-slot / unknown-ref
+        is still a STRUCTURAL bug the firewall hard-rejects (the prior P1 invariant
+        is fully preserved).
+      - **NO item-level facts** (production extracts each combo as ONE COARSE
+        ``offer:N`` locked fact, or a pure-identity flyer) → there are no fine
+        item/price slots to collapse; ``offer_groups`` only guides layout. Its
+        findings are downgraded to advisory (non-blocking) warnings so a model that
+        references non-existent ``item:N:price`` slots cannot fail-close a flyer
+        whose required facts are fully covered by ``fact_refs``.
+
+    Derived from the LOCKED FACTS ALONE (never any brief field) — same authority
+    discipline as ``required_fact_ids`` / ``expected_offer_keys``."""
+    for fact in locked_facts or []:
+        if _ITEM_REF_RE.match(getattr(fact, "fact_id", "") or ""):
+            return True
+    return False
+
+
 def _required_slot_refs_for_offer(
     offer_key: str, locked_ids: set[str]
 ) -> tuple[str, str]:
@@ -355,42 +380,67 @@ def _validate_offer_structure(
     brief: FlyerBrief,
     locked_ids: set[str],
     locked_facts: Sequence[FlyerLockedFact],
-) -> list[str]:
-    """Deterministic structural-pairing enforcement (Codex P1), derived from LOCKED
-    FACTS (never request_intent). Fails closed:
+) -> tuple[list[str], list[str]]:
+    """Deterministic offer-structure check, derived from LOCKED FACTS (never
+    request_intent). Returns ``(errors, warnings)`` — B2 advisory split, operator-
+    approved Option 1.
 
-      - every ref inside ``offer_groups`` must be a real locked fact id (no new
-        invention vector — same authority as ``fact_refs``);
-      - NO single OfferGroup may span two distinct locked offers ("combo structure
-        collapsed: offers X and Y share one group");
-      - each expected locked offer (each distinct item:N / offer:N) must map to a
-        DISTINCT OfferGroup that actually SLOTS that offer's required refs (Codex
-        Finding 1): the NAME fact in ``title_ref``/``inclusion_refs`` and the PRICE
-        fact in ``price_ref`` — touching the offer via the wrong slot (or omitting
-        the price ref) is structurally incomplete ⇒
-        "offer X missing price_ref/title_ref in its card".
+    The SAME structural findings are computed in both regimes; the only thing the
+    regime decides is whether a finding is BLOCKING (``errors``) or ADVISORY
+    (``warnings``):
+
+      - **item-level facts EXIST** (``_has_item_level_facts``): the brief groups
+        real fine-grained ``item:N:name``/``item:N:price`` slots, so the prior
+        Codex-P1 invariant is fully preserved — every finding is a BLOCKING error:
+          - every ``offer_groups`` ref must be a real locked fact id (no new
+            invention vector — same authority as ``fact_refs``);
+          - NO single OfferGroup may span two distinct locked offers ("combo
+            structure collapsed: offers X and Y share one group");
+          - each expected locked offer maps to a DISTINCT OfferGroup that SLOTS its
+            required refs (NAME in ``title_ref``/``inclusion_refs``, PRICE in
+            ``price_ref``) ⇒ "offer X missing price_ref/title_ref in its card".
+
+      - **NO item-level facts** (production extracts each combo as ONE COARSE
+        ``offer:N`` fact, or a pure-identity flyer): there are no fine item/price
+        slots to collapse and a model may reference non-existent ``item:N:price``
+        slots. ``offer_groups`` then only guides layout, so ALL of the above findings
+        are ADVISORY warnings — never blocking. Required-fact coverage via
+        ``fact_refs`` (check (e) in ``validate``) stays the SOLE blocking authority
+        for facts; ``offer_groups`` can neither suppress nor replace it.
+
+    A group that references a coarse ``offer:N`` fact DIRECTLY (no item-level
+    name/price slots) is structurally complete in both regimes — ``offer:N`` is its
+    own name and the taxonomy has no separate price fact, so it raises no finding.
     """
-    errors: list[str] = []
+    findings: list[str] = []
     expected = expected_offer_keys(locked_facts)
+    # Regime switch: blocking when the locked facts carry fine item:N:* slots,
+    # advisory when they are coarse offer:N (or pure identity). Computed from the
+    # LOCKED FACTS alone — no brief field may flip a finding from blocking to advisory.
+    blocking = _has_item_level_facts(locked_facts)
+
+    def _split() -> tuple[list[str], list[str]]:
+        """Route the accumulated structural findings into (errors, warnings)."""
+        return (findings, []) if blocking else ([], findings)
 
     # (1) every ref in offer_groups resolves to a real locked fact id.
     for group in brief.offer_groups:
         for ref in (group.title_ref, group.price_ref, *group.inclusion_refs):
             rid = (ref or "").strip()
             if rid and rid not in locked_ids:
-                errors.append(f"unknown offer_group ref {rid}")
+                findings.append(f"unknown offer_group ref {rid}")
 
     # If there is nothing structural to enforce (no locked offers), stop here: a
     # non-itemized flyer (pure identity) has no combo structure to preserve.
     if not expected:
-        return errors
+        return _split()
 
     # (2) no single group may collapse two distinct locked offers into one card.
     for group in brief.offer_groups:
         touched = _group_offer_keys(group)
         if len(touched) > 1:
             a, b = sorted(touched)[:2]
-            errors.append(f"combo structure collapsed: offers {a} and {b} share one group")
+            findings.append(f"combo structure collapsed: offers {a} and {b} share one group")
 
     # (3) each expected locked offer maps to a DISTINCT group that SLOTS its required
     # refs in the right slots (Codex Finding 1). A group merely TOUCHING the offer is
@@ -419,7 +469,7 @@ def _validate_offer_structure(
         name_ref, price_ref = _required_slot_refs_for_offer(key, locked_ids)
         groups_for_key = key_to_groups.get(key, [])
         if not groups_for_key:
-            errors.append(f"offer {key} is not grouped into a distinct card")
+            findings.append(f"offer {key} is not grouped into a distinct card")
             continue
         # A distinct, not-yet-claimed group that ALSO slots the required refs.
         slotted = [
@@ -436,7 +486,7 @@ def _validate_offer_structure(
         # shared-only card (collapse already flagged in step 2) from a wrong-slot card.
         unclaimed = [gi for gi in groups_for_key if gi not in used_group_indices]
         if not unclaimed:
-            errors.append(f"offer {key} is not grouped into a distinct card")
+            findings.append(f"offer {key} is not grouped into a distinct card")
             continue
         missing = []
         if price_ref and not any(
@@ -452,15 +502,19 @@ def _validate_offer_structure(
             missing.append("title_ref")
         # Claim the card so a sibling offer isn't double-counted against it.
         used_group_indices.add(unclaimed[0])
-        errors.append(f"offer {key} missing {'/'.join(missing)} in its card")
+        findings.append(f"offer {key} missing {'/'.join(missing)} in its card")
 
-    return errors
+    return _split()
 
 
 @dataclass
 class ValidationResult:
     ok: bool
     errors: list[str] = field(default_factory=list)
+    # Non-blocking advisory findings (B2 advisory split): unknown / mis-slotted
+    # ``offer_groups`` refs in the coarse ``offer:N`` regime are logged here, NOT in
+    # ``errors``. ``ok`` is derived from ``errors`` ALONE — warnings never fail-close.
+    warnings: list[str] = field(default_factory=list)
 
 
 def _materialized_span_id(index: int) -> str:
@@ -500,8 +554,15 @@ def validate(
           exact-match — "omit Non Veg Combo" suppresses the locked value; #4);
       (e) referenced fact_ids ∪ materialized-span ids failing to cover
           required_fact_ids(locked_facts) — "omits required fact <id>".
+
+    ``offer_groups`` structure is NON-AUTHORITATIVE for facts (B2 advisory split):
+    it is enforced as a BLOCKING error ONLY when fine ``item:N:*`` facts exist; for
+    the coarse ``offer:N`` (or pure-identity) case its findings are downgraded to
+    non-blocking ``warnings``. ``offer_groups`` can never suppress or replace required
+    rendering — check (e) above is the SOLE blocking authority for facts.
     """
     errors: list[str] = []
+    warnings: list[str] = []
     locked_by_id = {f.fact_id: f for f in locked_facts or []}
     locked_ids = set(locked_by_id)
 
@@ -612,12 +673,19 @@ def validate(
                 errors.append(f"must_not_add contains locked value: {entry}")
                 break
 
-    # (d2) structural pairing (Codex P1): coverage in (e) proves every required fact
-    # is REFERENCED, but not that combo STRUCTURE is preserved — a brief that refs
-    # both combos yet groups them into one card passes (e) while collapsing the
-    # offer structure (invariant #4). Enforce one DISTINCT OfferGroup per locked
-    # offer, derived from the locked facts alone (never request_intent).
-    errors.extend(_validate_offer_structure(brief, locked_ids, locked_facts))
+    # (d2) structural pairing (Codex P1) — B2 advisory split. When fine item:N:*
+    # facts exist, coverage in (e) proves every required fact is REFERENCED but not
+    # that combo STRUCTURE is preserved, so the offer-structure findings are BLOCKING
+    # (a brief that refs both combos yet groups them into one card collapses invariant
+    # #4). When the locked facts are coarse offer:N (or pure identity) there are no
+    # fine slots to collapse and the model may reference non-existent item:N slots, so
+    # the SAME findings are returned as non-blocking warnings. Derived from the locked
+    # facts alone (never request_intent); (e) below stays the sole blocking authority.
+    structural_errors, structural_warnings = _validate_offer_structure(
+        brief, locked_ids, locked_facts
+    )
+    errors.extend(structural_errors)
+    warnings.extend(structural_warnings)
 
     # (e) coverage: referenced locked ids + the ids the validated spans will
     # materialize into must cover the required set. The required set is derived
@@ -632,7 +700,9 @@ def validate(
         if fid not in covered:
             errors.append(f"omits required fact {fid}")
 
-    return ValidationResult(ok=not errors, errors=errors)
+    # ``ok`` is derived from ``errors`` ALONE — advisory ``warnings`` (downgraded
+    # coarse-offer offer_groups findings) NEVER fail-close the brief.
+    return ValidationResult(ok=not errors, errors=errors, warnings=warnings)
 
 
 def materialize_spans(

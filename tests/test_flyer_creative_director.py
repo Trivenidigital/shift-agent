@@ -646,16 +646,159 @@ def test_validate_passes_offer_id_grouping():
     result = fbv.validate(brief, facts, _COMBO_REQUEST)
     assert result.ok is True, result.errors
 
-    # collapsing the two offers into one group is rejected.
+    # B2 advisory split (operator-approved Option 1): these are COARSE offer:N facts
+    # (NO item:N:* slots), so offer_groups is non-authoritative. Collapsing the two
+    # offers into one group is now an ADVISORY warning, NOT a blocking error — required
+    # coverage via fact_refs still holds, so the brief stays ok=True.
     collapsed = _combo_brief(
         fact_refs=brief.fact_refs,
         offer_groups=[fb.OfferGroup(kind="offer", title_ref="offer:0",
                                     inclusion_refs=["offer:1"])],
     )
-    bad = fbv.validate(collapsed, facts, _COMBO_REQUEST)
-    assert bad.ok is False
-    assert any("combo structure collapsed: offers offer:0 and offer:1" in e
-               for e in bad.errors)
+    advisory = fbv.validate(collapsed, facts, _COMBO_REQUEST)
+    assert advisory.ok is True, advisory.errors
+    assert advisory.errors == []
+    assert any("combo structure collapsed: offers offer:0 and offer:1" in w
+               for w in advisory.warnings)
+
+
+# ── B2 advisory split (operator-approved Option 1) — offer_groups NON-authoritative
+#    for the COARSE offer:N case; required-coverage stays the SOLE blocking authority,
+#    item-level collapse stays HARD-rejected. Production extracts each combo as ONE
+#    coarse offer:N fact (no item:N:* split); the model's offer_groups may reference
+#    fine item:N:price slots that don't exist as facts. ──────────────────────────
+
+
+def _coarse_offer_facts() -> list[FlyerLockedFact]:
+    """Production-faithful COARSE locked facts: each combo is ONE offer:N fact (the
+    whole combo description), NOT split into item:N:name / item:N:price. Plus the
+    identity/title facts the overlay must render. NO item:N:* facts exist."""
+    return [
+        FlyerLockedFact(fact_id="business_name", label="Business",
+                        value="Lakshmi's Kitchen", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="contact_phone", label="Contact",
+                        value="+1 732 555 0104", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="location", label="Location",
+                        value="90 Brybar Dr", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="campaign_title", label="Campaign",
+                        value="Memorial Day", source="customer_text", required=True),
+        FlyerLockedFact(fact_id="offer:0", label="Offer",
+                        value="Non Veg Combo for $49.99", source="customer_text", required=True),
+        FlyerLockedFact(fact_id="offer:1", label="Offer",
+                        value="Veg Combo for $39.99", source="customer_text", required=True),
+    ]
+
+
+def _coarse_offer_fact_refs() -> list[fb.FactRef]:
+    # fact_refs correctly reference the COARSE offer:N facts (so required coverage is
+    # satisfiable) — exactly what production emits.
+    return [
+        fb.FactRef(fact_id="business_name", provenance="locked"),
+        fb.FactRef(fact_id="contact_phone", provenance="locked"),
+        fb.FactRef(fact_id="location", provenance="locked"),
+        fb.FactRef(fact_id="campaign_title", provenance="locked"),
+        fb.FactRef(fact_id="offer:0", provenance="locked"),
+        fb.FactRef(fact_id="offer:1", provenance="locked"),
+    ]
+
+
+def test_b2_live_combo_unknown_item_refs_are_advisory_not_blocking():
+    """LIVE COMBO CASE (was rejected, must now pass): coarse offer:0/offer:1 facts,
+    fact_refs cover all required facts, but offer_groups reference fine item:N:price
+    slots that DON'T exist as facts. The unknown refs become advisory warnings; the
+    brief validates ok=True (required coverage holds)."""
+    brief = _combo_brief(
+        request_intent="combo_offer",
+        fact_refs=_coarse_offer_fact_refs(),
+        offer_groups=[
+            # model referenced fine item:N:price slots that don't exist as facts.
+            fb.OfferGroup(kind="combo", title_ref="offer:0", price_ref="item:0:price"),
+            fb.OfferGroup(kind="combo", title_ref="offer:1", price_ref="item:1:price"),
+        ],
+    )
+    result = fbv.validate(brief, _coarse_offer_facts(), _COMBO_REQUEST)
+    assert result.ok is True, result.errors
+    assert result.errors == []
+    # the unknown item:N:price refs surfaced as advisory warnings, NOT errors.
+    assert any("unknown offer_group ref item:0:price" in w for w in result.warnings), result.warnings
+    assert any("unknown offer_group ref item:1:price" in w for w in result.warnings), result.warnings
+
+
+def test_b2_group_referencing_coarse_offer_directly_is_valid():
+    """A group referencing offer:N DIRECTLY (coarse) validates WITHOUT item-level
+    name/price slots — offer:N is its own name and the taxonomy has no separate price
+    fact, so no finding is raised at all (errors AND warnings empty)."""
+    brief = _combo_brief(
+        request_intent="combo_offer",
+        fact_refs=_coarse_offer_fact_refs(),
+        offer_groups=[
+            fb.OfferGroup(kind="offer", title_ref="offer:0"),
+            fb.OfferGroup(kind="offer", title_ref="offer:1"),
+        ],
+    )
+    result = fbv.validate(brief, _coarse_offer_facts(), _COMBO_REQUEST)
+    assert result.ok is True, result.errors
+    assert result.errors == []
+    assert result.warnings == []
+
+
+def test_b2_coarse_offer_groups_never_mask_a_missing_required_fact():
+    """REQUIRED COVERAGE STILL AUTHORITATIVE: even in the coarse regime where
+    offer_groups is advisory, a brief whose fact_refs do NOT cover a required fact is
+    STILL rejected — offer_groups being advisory must not mask a missing required
+    fact. Here offer:1 is required but never referenced."""
+    refs = [r for r in _coarse_offer_fact_refs() if r.fact_id != "offer:1"]
+    brief = _combo_brief(
+        request_intent="combo_offer",
+        fact_refs=refs,
+        offer_groups=[
+            fb.OfferGroup(kind="combo", title_ref="offer:0", price_ref="item:0:price"),
+            fb.OfferGroup(kind="combo", title_ref="offer:1", price_ref="item:1:price"),
+        ],
+    )
+    result = fbv.validate(brief, _coarse_offer_facts(), _COMBO_REQUEST)
+    assert result.ok is False
+    assert any(e == "omits required fact offer:1" for e in result.errors), result.errors
+
+
+def test_b2_item_level_collapse_still_hard_rejected():
+    """ITEM-LEVEL COLLAPSE PRESERVED: when locked_facts DO contain item:N:name /
+    item:N:price facts, a brief whose offer_groups collapse two distinct items into
+    one group is STILL hard-rejected (ok=False with the collapse ERROR — not a
+    warning). Only the coarse offer:N case is relaxed."""
+    merged = fb.OfferGroup(
+        kind="combo",
+        title_ref="item:0:name",
+        price_ref="item:0:price",
+        inclusion_refs=["item:1:name", "item:1:price"],  # second item folded in
+    )
+    brief = _combo_brief(offer_groups=[merged])
+    result = fbv.validate(brief, _combo_facts(), _COMBO_REQUEST)
+    assert result.ok is False
+    assert any(e.startswith("combo structure collapsed: offers item:0 and item:1")
+               for e in result.errors), result.errors
+    # the collapse is a blocking ERROR, never a downgraded warning, in the item regime.
+    assert not any("combo structure collapsed" in w for w in result.warnings)
+
+
+def test_b2_item_level_unknown_ref_still_hard_rejected():
+    """When item:N:* facts exist, an unknown offer_group ref is STILL a blocking error
+    (the item-level invention vector is preserved) — only the coarse case downgrades."""
+    brief = _combo_brief(
+        offer_groups=_combo_offer_groups()
+        + [fb.OfferGroup(kind="combo", title_ref="item:9:name", price_ref="item:9:price")],
+    )
+    result = fbv.validate(brief, _combo_facts(), _COMBO_REQUEST)
+    assert result.ok is False
+    assert any(e == "unknown offer_group ref item:9:name" for e in result.errors), result.errors
+
+
+def test_has_item_level_facts_detector():
+    """The regime switch: item:N:name / item:N:price ⇒ True; coarse offer:N and pure
+    identity ⇒ False (offer_groups advisory)."""
+    assert fbv._has_item_level_facts(_combo_facts()) is True
+    assert fbv._has_item_level_facts(_coarse_offer_facts()) is False
+    assert fbv._has_item_level_facts(_identity_facts()) is False
 
 
 # ── Finding 3 (Codex P2) — occasion/theme fact values allowed in visual fields ──
