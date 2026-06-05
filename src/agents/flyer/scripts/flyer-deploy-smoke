@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+"""flyer-deploy-smoke (RC4): assert the live flyer runtime resolves modules ONLY
+from flat /opt/shift-agent/*.py — never a staging/src/_archive subtree.
+
+Mirrors the live scripts (e.g. /usr/local/bin/bare-flyer-render-and-send), which do
+``sys.path.insert(0, "/opt/shift-agent")`` then import flat names. ``find_spec``
+resolves the module location WITHOUT executing it (no side effects / heavy deps).
+
+Exit 0 = clean flat runtime; exit 1 = drift (a flyer/platform module resolved from
+outside flat /opt/shift-agent/*.py). Run BEFORE and AFTER any deploy or cleanup —
+the runtime module set must be identical and flat. Deployed to
+/usr/local/bin/flyer-deploy-smoke. See /opt/shift-agent/DEPLOY_RECEIPT.json.
+
+Lesson (tasks/lessons.md): duplicate trees on disk are NOT automatically runtime
+ambiguity — trace gateway -> script -> sys.path -> module file first, then this
+gate keeps it honest.
+"""
+import sys, os, importlib.util, json
+
+ROOT = "/opt/shift-agent"
+MODULES = ["flyer_bare_render", "flyer_facts", "flyer_render", "flyer_visual_qa",
+           "flyer_creative_planner", "schemas", "safe_io"]
+sys.path.insert(0, ROOT)
+
+resolved, errors = {}, []
+for m in MODULES:
+    try:
+        spec = importlib.util.find_spec(m)
+    except Exception as e:  # noqa: BLE001
+        errors.append("RESOLVE-FAIL %s: %s" % (m, type(e).__name__)); continue
+    if not spec or not spec.origin:
+        errors.append("MISSING %s on sys.path" % m); continue
+    f = os.path.realpath(spec.origin); resolved[m] = f
+    if os.path.dirname(f) != ROOT or "staging" in f or "_archive" in f:
+        errors.append("DRIFT %s -> %s" % (m, f))
+
+print(json.dumps({"ok": not errors, "root": ROOT, "resolved": resolved, "errors": errors}, indent=2))
+sys.exit(0 if not errors else 1)
