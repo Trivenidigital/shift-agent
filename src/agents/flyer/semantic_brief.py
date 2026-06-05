@@ -111,6 +111,18 @@ def _title_case(value: str) -> str:
 
 
 def _campaign_from_source(text: str) -> str:
+    occasion = re.search(
+        r"\bon\s+the\s+occasion\s+of\s+(?P<occasion>.+?)(?=\s+(?:can\s+we\s+do|create|make|generate|design|build|need)\b|[.!?]|$)",
+        text or "",
+        flags=re.IGNORECASE,
+    )
+    if occasion and re.search(r"\b(?:meal\s+)?combo(?:s)?\b|\bpackage(?:s)?\b", text or "", flags=re.IGNORECASE):
+        occasion_text = _title_case(_clean(occasion.group("occasion")).strip(" .,"))
+        occasion_text = re.sub(r"\b(?:Veg\s+and\s+Non\s+Veg|Non\s+Veg\s+and\s+Veg)\b", "", occasion_text)
+        occasion_text = _clean(occasion_text)
+        if occasion_text:
+            suffix = "Meal Combos" if re.search(r"\bmeal\s+combo", text or "", flags=re.IGNORECASE) else "Combos"
+            return f"{occasion_text} {suffix}"
     patterns = [
         r"\b(?:create|make|generate|design|build|need)\s+(?:a\s+|an\s+)?(?:new\s+)?(?:flyer|flier|poster|banner|creative|graphic)\s+for\s+(.+?)(?=\s*(?:[.!?]|,|\b(?:all items?|any item|free|lucky draw|monday|tuesday|wednesday|thursday|friday|saturday|sunday|with|include|featuring)\b|$))",
         r"\b(?:flyer|flier|poster|banner|creative|graphic)\s+for\s+(.+?)(?=\s*(?:[.!?]|,|\b(?:all items?|any item|free|lucky draw|monday|tuesday|wednesday|thursday|friday|saturday|sunday|with|include|featuring)\b|$))",
@@ -337,8 +349,15 @@ def _fallback_brief(fields: FlyerRequestFields, raw_request: str, *, allow_text_
 
 
 def _merge_briefs(primary: FlyerSemanticBrief, fallback: FlyerSemanticBrief) -> FlyerSemanticBrief:
+    campaign_title = primary.campaign_title or fallback.campaign_title
+    if (
+        fallback.campaign_title
+        and re.search(r"\b(?:meal\s+)?combos?\b", fallback.campaign_title, flags=re.IGNORECASE)
+        and re.search(r"\b(?:veg\s+and\s+non\s+veg|non\s+veg\s+and\s+veg)\b", campaign_title, flags=re.IGNORECASE)
+    ):
+        campaign_title = fallback.campaign_title
     return FlyerSemanticBrief(
-        campaign_title=primary.campaign_title or fallback.campaign_title,
+        campaign_title=campaign_title,
         account_business=primary.account_business or fallback.account_business,
         display_brand=primary.display_brand or fallback.display_brand,
         pricing_structure=primary.pricing_structure or fallback.pricing_structure,

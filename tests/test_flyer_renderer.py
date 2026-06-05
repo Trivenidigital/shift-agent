@@ -1834,6 +1834,66 @@ def test_simple_english_typed_menu_can_opt_into_integrated_poster_prompt(monkeyp
     assert "do NOT render them as text" not in prompt
 
 
+def test_english_combo_offer_can_opt_into_integrated_poster_prompt(monkeypatch):
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    now = datetime(2026, 6, 5, tzinfo=timezone.utc)
+    raw = (
+        "Can we do meal combo flyer for veg and non veg with prices 49.99 for non veg combo "
+        "includes 2 non veg curries, 1 chicken pulav or chicken Biryani and 1 dessert. "
+        "And a veg combo 39.99 includes 2 veg curries, 1 dessert on the occasion of "
+        "Memorial Day weekend"
+    )
+    project = FlyerProject(
+        project_id="F0067",
+        status="generating_concepts",
+        customer_phone="+17329837841",
+        created_at=now,
+        updated_at=now,
+        original_message_id="wamid.combo",
+        raw_request=raw,
+        fields=FlyerRequestFields(
+            event_or_business_name="Veg And Non Veg",
+            contact_info="+17329837841",
+            venue_or_location="90 Brybar Dr St Johns FL",
+            preferred_language="en",
+            notes=raw,
+        ),
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Memorial Day Weekend Meal Combos", source="customer_text", required=True),
+            FlyerLockedFact(
+                fact_id="offer:0",
+                label="Offer",
+                value="Non Veg Combo: $49.99 includes 2 non veg curries, 1 chicken pulav or chicken Biryani, and 1 dessert",
+                source="customer_text",
+                required=True,
+            ),
+            FlyerLockedFact(
+                fact_id="offer:1",
+                label="Offer",
+                value="Veg Combo: $39.99 includes 2 veg curries and 1 dessert",
+                source="customer_text",
+                required=True,
+            ),
+        ],
+    )
+
+    assert render_module._integrated_poster_eligible(project) is True
+    assert render_module._background_only_eligible(project) is False
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+
+    assert "Build a complete finished poster flyer" in prompt
+    assert "Render the following text exactly" in prompt
+    assert "Memorial Day Weekend Meal Combos" in prompt
+    assert "Non Veg Combo: $49.99" in prompt
+    assert "Veg Combo: $39.99" in prompt
+    assert "decorative BACKGROUND image only" not in prompt
+    assert "do NOT render them as text" not in prompt
+
+
 def test_integrated_poster_is_not_used_for_telugu_or_reference_extraction(tmp_path, monkeypatch):
     from PIL import Image as _Image
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))

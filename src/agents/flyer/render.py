@@ -947,12 +947,12 @@ def _needs_reference_extraction(project: FlyerProject) -> bool:
 
 
 def _integrated_poster_eligible(project: FlyerProject) -> bool:
-    """Low-risk cases where the image model should compose the full poster.
+    """Cases where the image model should compose the full poster.
 
-    This is intentionally narrower than "all English flyers": it targets the
-    typed simple menu flyer failure mode where model-painted hierarchy matters
-    more than deterministic overlay safety. Localized text and reference-image
-    extraction stay on the existing safer paths.
+    Bare Flyer Studio opts into this for normal typed English food/grocery
+    flyers because the customer-quality baseline is a designed poster, not a
+    textless image plus pasted lower-third copy. Localized text and reference-
+    image extraction stay on the safer non-integrated paths.
     """
     if os.environ.get("FLYER_ALLOW_INTEGRATED_POSTER", "").strip() != "1":
         return False
@@ -976,14 +976,17 @@ def _integrated_poster_eligible(project: FlyerProject) -> bool:
         return False
     if not _is_food_or_grocery_project(project):
         return False
-    items = _menu_item_lines(project)
-    if not items or len(items) > 10:
-        return False
     has_reference_image = any(
         getattr(asset, "kind", "") == "reference_image"
         for asset in _project_reference_assets(project)
     )
     if has_reference_image:
+        return False
+    items = _menu_item_lines(project)
+    if len(items) > 10:
+        return False
+    plan = _poster_copy_plan(project)
+    if not (plan.items or plan.detail_lines or plan.title):
         return False
     return True
 

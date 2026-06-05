@@ -369,6 +369,28 @@ def test_campaign_title_strips_trailing_medium_word():
     assert by_id["campaign_title"].value == "Weekend Combo"
 
 
+def test_combo_occasion_becomes_campaign_title_not_generic_combo_labels():
+    from agents.flyer.facts import extract_text_facts, facts_by_id
+
+    raw_request = (
+        "Can we do meal combo flyer for veg and non veg with prices 49.99 for non veg combo "
+        "includes 2 non veg curries, 1 chicken pulav or chicken Biryani and 1 dessert. "
+        "And a veg combo 39.99 includes 2 veg curries, 1 dessert on the occasion of "
+        "Memorial Day weekend"
+    )
+    fields = FlyerRequestFields(
+        event_or_business_name="Veg And Non Veg",
+        notes=raw_request,
+    )
+
+    facts = extract_text_facts(fields, raw_request, message_id="m-combo-occasion")
+    by_id = facts_by_id(type("P", (), {"locked_facts": facts})())
+
+    assert by_id["campaign_title"].value == "Memorial Day Weekend Meal Combos"
+    assert by_id["offer:0"].value.startswith("Non Veg Combo: $49.99")
+    assert by_id["offer:1"].value.startswith("Veg Combo: $39.99")
+
+
 def test_context_isolation_blocks_stale_project_provenance():
     from agents.flyer.facts import context_isolation_blockers
 
