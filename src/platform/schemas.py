@@ -1139,6 +1139,23 @@ class FlyerGuestOrder(BaseModel):
 FLYER_AUTHORIZED_REQUESTER_LIMIT = 2
 
 
+class FlyerCatalogItem(BaseModel):
+    """Dormant commerce seam (slice-3 backing). Catalog item identity + optional CTA /
+    order-link binding to the src/platform/commerce primitives. Additive and
+    default-empty in slice 1 — nothing reads it until the commerce loop ships, so it
+    cannot change current behavior. See tasks/flyer-marketing-agent-design-2026-06-05.md."""
+    model_config = ConfigDict(extra="forbid")
+    item_id: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=200)
+    price_text: str = Field(default="", max_length=40)
+    price_cents: Optional[int] = Field(default=None, ge=0)
+    currency: str = Field(default="USD", min_length=3, max_length=3)
+    commerce_payment_link_id: str = Field(default="", max_length=120)
+    order_url: str = Field(default="", max_length=1000)
+    category: str = Field(default="", max_length=120)
+    is_featured: bool = False
+
+
 class FlyerCustomerProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
     customer_id: str = Field(pattern=r"^CUST\d{4,}$")
@@ -1186,6 +1203,7 @@ class FlyerCustomerProfile(BaseModel):
     brand_assets: list[FlyerBrandAsset] = Field(default_factory=list, max_length=50)
     payment_records: list[FlyerPaymentRecord] = Field(default_factory=list, max_length=500)
     usage_events: list[FlyerUsageEvent] = Field(default_factory=list, max_length=5000)
+    catalog: list[FlyerCatalogItem] = Field(default_factory=list, max_length=500)
 
     def is_authorized_sender(self, phone: Optional[str]) -> bool:
         if not phone:

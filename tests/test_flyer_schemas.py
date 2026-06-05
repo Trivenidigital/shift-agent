@@ -15,6 +15,7 @@ from schemas import (  # noqa: E402
     FlyerAsset,
     FlyerAutoRepairAttemptStore,
     FlyerBrandKit,
+    FlyerCatalogItem,
     FlyerCustomerActivated,
     FlyerCustomerProfile,
     FlyerConcept,
@@ -601,6 +602,50 @@ def test_flyer_audit_entry_is_part_of_log_union():
     )
     parsed_activation = TypeAdapter(LogEntry).validate_python(activation.model_dump())
     assert parsed_activation.type == "flyer_customer_activated"
+
+
+def test_flyer_catalog_item_seam_is_additive_and_dormant():
+    # Identity required; commerce binding optional + dormant (defaults inert).
+    item = FlyerCatalogItem(item_id="i1", name="Chicken Biryani")
+    assert item.price_text == "" and item.price_cents is None
+    assert item.commerce_payment_link_id == "" and item.order_url == ""
+    # extra="forbid" — unknown fields rejected.
+    with pytest.raises(ValidationError):
+        FlyerCatalogItem(item_id="i1", name="x", unknown_field="y")
+    # item_id + name required.
+    with pytest.raises(ValidationError):
+        FlyerCatalogItem(name="no id")
+
+
+def test_customer_profile_catalog_is_additive_backward_compatible():
+    import json
+    now = datetime.now(timezone.utc)
+    base = dict(
+        customer_id="CUST0001",
+        business_name="Triveni",
+        business_address="300 S Polk",
+        public_phone="+17043243322",
+        business_whatsapp_number="+17043243322",
+        authorized_request_numbers=["+19045550104"],
+        plan_id="starter",
+        status="active",
+        created_at=now,
+        updated_at=now,
+    )
+    p = FlyerCustomerProfile(**base)
+    assert p.catalog == []  # default-empty: dormant
+    # Backward-compat: an OLD payload with no `catalog` key still validates.
+    d = json.loads(p.model_dump_json())
+    d.pop("catalog", None)
+    reloaded = FlyerCustomerProfile.model_validate(d)
+    assert reloaded.catalog == []
+    # With items, round-trips intact.
+    p2 = FlyerCustomerProfile(
+        **base,
+        catalog=[FlyerCatalogItem(item_id="i1", name="Veg Combo", price_text="$39.99")],
+    )
+    p2b = FlyerCustomerProfile.model_validate_json(p2.model_dump_json())
+    assert p2b.catalog[0].name == "Veg Combo" and p2b.catalog[0].price_text == "$39.99"
 
 
 def test_customer_profile_defaults_and_quota_latest_state():
