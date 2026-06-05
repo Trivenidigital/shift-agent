@@ -737,13 +737,41 @@ def test_validate_still_blocks_bare_price_in_background_brief_with_occasion_fact
 def test_is_occasion_theme_fact_id_classification():
     # occasion/theme/seasonal ids are exempt from the identity-value scan…
     assert fbv._is_occasion_theme_fact_id("campaign_title")
-    assert fbv._is_occasion_theme_fact_id("schedule")
     assert fbv._is_occasion_theme_fact_id("theme_family")
     assert fbv._is_occasion_theme_fact_id("occasion")
-    # …identity/commercial ids are NOT exempt (their values stay blocked).
+    # …identity/commercial AND date/time ids are NOT exempt (values stay blocked).
+    # `schedule`/`promotion_end` are DATE/TIME hard facts (Codex P1) — the overlay
+    # renders them, so their values must not leak into model-authored background text.
     for fid in ("business_name", "contact_phone", "location", "item:0:name",
-                "item:0:price", "offer:0", "pricing_structure", "tagline", "headline"):
+                "item:0:price", "offer:0", "pricing_structure", "tagline", "headline",
+                "schedule", "promotion_end"):
         assert not fbv._is_occasion_theme_fact_id(fid), fid
+
+
+def test_validate_rejects_schedule_datetime_in_textless_background():
+    # Codex P1: `schedule` is a DATE/TIME hard fact (overlay-rendered), not a theme —
+    # its value must not leak into model-authored background text. campaign_title
+    # ("Memorial Day", the occasion) stays allowed in visual_direction.
+    facts = _combo_facts() + [
+        FlyerLockedFact(fact_id="schedule", label="When", value="Saturday evening",
+                        source="customer_text", required=True),
+        FlyerLockedFact(fact_id="campaign_title", label="Occasion", value="Memorial Day",
+                        source="customer_text", required=True),
+    ]
+    refs = _combo_brief().fact_refs + [
+        fb.FactRef(fact_id="schedule", provenance="locked"),
+        fb.FactRef(fact_id="campaign_title", provenance="locked"),
+    ]
+    leaked = _combo_brief(
+        fact_refs=refs,
+        background_brief="A patriotic dinner scene for Saturday evening, center clear.",
+    )
+    res = fbv.validate(leaked, facts, _COMBO_REQUEST)
+    assert not res.ok
+    assert any("saturday evening" in e.lower() or "schedule" in e.lower() for e in res.errors)
+    # campaign_title ("Memorial Day") in theme_family is still fine.
+    clean = _combo_brief(fact_refs=refs)
+    assert fbv.validate(clean, facts, _COMBO_REQUEST).ok, fbv.validate(clean, facts, _COMBO_REQUEST).errors
 
 
 # ── Codex Finding 1 — offer_groups must SLOT each offer's required refs ──────

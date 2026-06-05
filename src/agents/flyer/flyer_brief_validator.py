@@ -206,14 +206,14 @@ def required_fact_ids(locked_facts: Sequence[FlyerLockedFact]) -> set[str]:
 #
 #   OCCASION / THEME / SEASONAL (allowed in visual_direction / background_brief):
 #     - campaign_title  (facts.py:600 — the occasion/campaign, e.g. "Memorial Day")
-#     - schedule        (facts.py:_schedule_fact — e.g. "Every Friday"; a timing
-#                        theme, NOT a commercial value; commercial-SHAPE scan still
-#                        catches any price/phone/discount text unconditionally)
-#   Everything else a fact_id can be (business_name, contact_phone, location,
-#   headline, tagline, pricing_structure, item:N:name, item:N:price, offer:N,
-#   offer_price, promotion_end, replacement:*, source_*) is IDENTITY/COMMERCIAL and
-#   its locked value is blocked from the free-text fields.
-_OCCASION_THEME_FACT_IDS = frozenset({"campaign_title", "schedule"})
+#   NOT exempt — `schedule` is a DATE/TIME hard fact (the real promotion timing the
+#   OVERLAY must render); letting "Saturday evening" ride into model-authored
+#   background text would duplicate/garble it (Codex P1). Everything else a fact_id
+#   can be (business_name, contact_phone, location, headline, tagline, schedule,
+#   promotion_end, pricing_structure, item:N:name, item:N:price, offer:N, offer_price,
+#   replacement:*, source_*) is IDENTITY/COMMERCIAL/DATE and its locked value is
+#   blocked from the free-text fields.
+_OCCASION_THEME_FACT_IDS = frozenset({"campaign_title"})
 _OCCASION_THEME_FACT_PREFIXES = ("theme_", "occasion")
 
 
