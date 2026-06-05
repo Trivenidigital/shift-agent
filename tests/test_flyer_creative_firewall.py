@@ -90,3 +90,142 @@ def test_non_item_kind_candidates_are_dropped():
     cands = [CreativeCandidate(kind="headline", value="Tasty!"),
              CreativeCandidate(kind="item", value="Dosa")]
     assert [c.value for c in fw.clear(cands)] == ["Dosa"]  # only item-kind passes
+
+
+# ── "open" precision (false positive 2026-06-05) ────────────────────────────
+# "open" has both an operational sense ("now open", "open daily", "grand opening")
+# and a benign compositional sense ("open central area left clear for text"). The
+# detector is ANCHORED-PHRASE with a default-BENIGN posture: "open" is operational
+# ONLY via a SPECIFIC anchored open-phrase (incl. reopen variants + meal-service /
+# hours / launch tails) or a co-occurring unambiguous clock-time signal; everything
+# else (incl. bare "open", "open layout for Memorial Day", "open for seating",
+# "24 inch margin") is benign. Only the "open" handling changed — every other
+# operational/claim token (incl. "hours", "closes", "closing") is untouched.
+
+
+@pytest.mark.parametrize("operational", [
+    # anchored open-phrase (A) — launch / hours / meal-service word adjacent.
+    "now open",
+    "open daily",
+    "open until 10",
+    "open 9am-9pm",
+    "grand opening",
+    "open weekends",
+    "open weekdays",
+    "open all week",
+    "open seven days a week",
+    "open for lunch",
+    "open for dinner",
+    "open 24hrs",
+    "open 24/7",
+    "open until midnight",
+    "opens at noon",
+    "open at 9",
+    "open from noon",
+    "opening soon",
+    "opening day",
+    # reopen variants (round-4 MAJOR) — token matches re/re- + open.
+    "grand reopening",
+    "newly reopened",
+    "reopened for business",
+    "reopens monday",
+    # co-occurrence: a benign "open" must not mask an operational one.
+    "an open central area, open until 10",
+    "store open with clean seating, open 9am-9pm",
+    # also still caught from earlier rounds + via the existing "hours" token.
+    "open today",
+    "open late",
+    "open for business",
+    "newly opened location",
+    "open monday",
+    "we are now open daily 9am-9pm",
+    "opening hours",
+])
+def test_open_operational_claims_still_rejected(operational):
+    # genuine business-hours / launch / meal-service claims must STILL be caught.
+    assert is_hard_fact_claim(operational) is True
+
+
+@pytest.mark.parametrize("compositional", [
+    # layout / negative-space uses of "open" are NOT operational claims.
+    "an open central area left clear for text",
+    "open space",
+    "leave open",
+    "open layout with a wide open background",
+    # MAJOR over-block regression guards: "Memorial Day" must NOT trip an "open"
+    # claim (live combo brief); bare "soft"/"24"/"to N"/incidental numbers must not.
+    "open layout for Memorial Day",
+    "soft background",
+    "24 inch margin",
+    "to 3 inch margin",
+    "3 inch margin",
+    # round-4 BENIGN guards: open + a NON-operational tail (a layout word, not a
+    # meal / clock / launch word) stays benign — the anchored tails are specific.
+    "open area at the center",
+    "open at the top edge",
+    "open for seating",
+    "open space for plating",
+    "leave 2 inches open until the margin",
+    "a clear 24 inch wide open background",
+    "opening of the composition",
+    # earlier-round compositional set (still benign).
+    "open central area",
+    "central area left open",
+    "open space for the overlay",
+    "kept open in the middle",
+    "open composition",
+    "wide open background",
+    "leave the center open",
+    "an open central area with a clear 3 inch margin",
+])
+def test_open_compositional_uses_pass(compositional):
+    assert is_hard_fact_claim(compositional) is False
+
+
+def test_open_is_operational_classifier_directly():
+    from agents.flyer.creative_firewall import _open_is_operational
+    # the exact live false-positive string classifies as compositional (False).
+    assert _open_is_operational(
+        "A festive Memorial Day cookout background with an open central area "
+        "left clear for text. No words anywhere."
+    ) is False
+    # an anchored operational phrase anywhere flags the text…
+    assert _open_is_operational("open central area, now open daily") is True
+    assert _open_is_operational("grand opening") is True
+    assert _open_is_operational("grand reopening") is True       # reopen variant
+    # …but a bare "open" with no operational anchor is BENIGN (default benign).
+    assert _open_is_operational("Open") is False
+    # the Memorial-Day over-block is gone; benign open-tails stay benign.
+    assert _open_is_operational("open layout for Memorial Day") is False
+    assert _open_is_operational("open for seating") is False
+
+
+@pytest.mark.parametrize("co_occurring", [
+    # a compositional "open" must NOT mask a co-occurring operational "open" — the
+    # anchored-phrase / time-signal scan is whole-text, no window.
+    "an open central area, open until 10",
+    "open layout, opened for business",
+    "open layout, store open until 10pm",
+    "store open with clean bright seating, open 9am-9pm",
+])
+def test_open_co_occurrence_operational_is_not_masked(co_occurring):
+    assert is_hard_fact_claim(co_occurring) is True
+
+
+def test_open_token_matches_reopen():
+    # round-4 MAJOR: the open TOKEN must match reopen variants (with/without hyphen).
+    from agents.flyer.creative_firewall import _OPEN_TOKEN_RE
+    for t in ("reopen", "reopening", "reopened", "reopens", "re-open", "re-opening"):
+        assert _OPEN_TOKEN_RE.search(t), t
+
+
+def test_open_compositional_item_does_not_regress_legit_names():
+    # the new open logic must not start passing a smuggled "Open Daily" item nor
+    # start failing a legitimate dish.
+    fw = CreativeFirewall()
+    cands = _items("Masala Dosa", "Open Daily", "open central area", "Idli")
+    # "open central area" is not a real dish but is compositional → it would pass
+    # the claim gate; the legitimate dishes pass; only "Open Daily" is dropped.
+    assert "Open Daily" not in [c.value for c in fw.clear(cands)]
+    assert is_hard_fact_claim("Masala Dosa") is False
+    assert is_hard_fact_claim("Idli") is False
