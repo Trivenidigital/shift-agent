@@ -1,0 +1,17 @@
+{
+  "topic": "flyer-marketing-agent-slice1",
+  "task_text": "Slice-1 implementation plan (PR #449 review fixes): typed BriefResult status (only disabled may fall back; invalid blocks); typed offer_groups structural enforcement (combos cannot collapse); scope the free-text locked-value scan to identity/commercial facts (allow occasion/theme art direction); plan-doc correction that required facts derive from locked facts only (never model-authored request_intent). Dormant/flag-gated.",
+  "completed_at": "2026-06-05T04:05:00Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 9,
+  "hermes_step_count": 7,
+  "files_to_read_first": [
+    "src/agents/flyer/flyer_brief.py",
+    "src/agents/flyer/flyer_brief_validator.py",
+    "src/agents/flyer/flyer_context_builder.py",
+    "src/agents/flyer/skills/flyer_generation/SKILL.md",
+    "src/agents/flyer/facts.py (fact_id taxonomy: identity/commercial vs occasion/theme)",
+    "tests/test_flyer_creative_director.py",
+    "tests/flyer_oracle/oracle.py"
+  ]
+}

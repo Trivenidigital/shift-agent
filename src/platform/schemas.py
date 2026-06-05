@@ -1139,6 +1139,23 @@ class FlyerGuestOrder(BaseModel):
 FLYER_AUTHORIZED_REQUESTER_LIMIT = 2
 
 
+class FlyerCatalogItem(BaseModel):
+    """Dormant commerce seam (slice-3 backing). Catalog item identity + optional CTA /
+    order-link binding to the src/platform/commerce primitives. Additive and
+    default-empty in slice 1 — nothing reads it until the commerce loop ships, so it
+    cannot change current behavior. See tasks/flyer-marketing-agent-design-2026-06-05.md."""
+    model_config = ConfigDict(extra="forbid")
+    item_id: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=200)
+    price_text: str = Field(default="", max_length=40)
+    price_cents: Optional[int] = Field(default=None, ge=0)
+    currency: str = Field(default="USD", min_length=3, max_length=3)
+    commerce_payment_link_id: str = Field(default="", max_length=120)
+    order_url: str = Field(default="", max_length=1000)
+    category: str = Field(default="", max_length=120)
+    is_featured: bool = False
+
+
 class FlyerCustomerProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
     customer_id: str = Field(pattern=r"^CUST\d{4,}$")
@@ -1186,6 +1203,7 @@ class FlyerCustomerProfile(BaseModel):
     brand_assets: list[FlyerBrandAsset] = Field(default_factory=list, max_length=50)
     payment_records: list[FlyerPaymentRecord] = Field(default_factory=list, max_length=500)
     usage_events: list[FlyerUsageEvent] = Field(default_factory=list, max_length=5000)
+    catalog: list[FlyerCatalogItem] = Field(default_factory=list, max_length=500)
 
     def is_authorized_sender(self, phone: Optional[str]) -> bool:
         if not phone:
@@ -4317,6 +4335,29 @@ class FlyerOperatorFlaggedWarnTier(_BaseEntry):
     note: str = Field(default="", max_length=500)
 
 
+class FlyerCreativeDirectorRouted(_BaseEntry):
+    """Records, on EVERY new-flyer bare render, whether the Creative-Director path
+    was taken (PR3 wiring). Emitted whether or not the flag is on, so the operator
+    can PROVE the caller from the audit log BEFORE enabling the feature:
+
+      - flag off / sender not allowlisted ⇒ creative_director_reached=False,
+        status="disabled" (flag off) or "not_allowlisted" (allowlist miss);
+      - enabled-for-sender ⇒ creative_director_reached=True and status mirrors the
+        BriefResult ("ok" | "invalid" | "unavailable").
+
+    ``module_version`` + ``module_file`` pin EXACTLY which code emitted the row so a
+    stale deployed copy is detectable. ``resolved_sender`` is the trusted phone/LID
+    bare_render resolves (never message content); ``allowlisted`` is the gate result."""
+    type: Literal["flyer_creative_director_routed"] = "flyer_creative_director_routed"
+    creative_director_reached: bool
+    creative_director_status: Literal["disabled", "ok", "invalid", "unavailable", "not_allowlisted"]
+    module_version: str = Field(min_length=1, max_length=120)
+    module_file: str = Field(default="", max_length=500)
+    resolved_sender: str = Field(default="", max_length=200)
+    allowlisted: bool = False
+    chat_id: str = Field(default="", max_length=200)
+
+
 class CateringLeadCreated(_BaseEntry):
     type: Literal["catering_lead_created"]
     lead_id: str = Field(min_length=1)
@@ -5652,6 +5693,8 @@ LogEntry = Annotated[
         Annotated[FlyerQASeverityClassified, Tag("flyer_qa_severity_classified")],
         Annotated[FlyerWarnTierDelivered, Tag("flyer_warn_tier_delivered")],
         Annotated[FlyerOperatorFlaggedWarnTier, Tag("flyer_operator_flagged_warn_tier")],
+        # PR3 2026-06-05 — Creative-Director wiring caller-provenance audit
+        Annotated[FlyerCreativeDirectorRouted, Tag("flyer_creative_director_routed")],
         # PR-ζ 2026-05-26 — chokepoint refusal audit variants
         Annotated[_RegulatedSendMissingActionContext, Tag("regulated_send_missing_action_context")],
         Annotated[_RegulatedSendLintViolation, Tag("regulated_send_lint_violation")],
@@ -5754,6 +5797,7 @@ __all__ = [
     "FlyerSourceContractExtracted", "FlyerSourceVsNewChosen", "FlyerHermesIntentDecision",
     "FlyerIntakeBypassed", "FlyerIntakeBypassOutcome",
     "FlyerQASeverityClassified", "FlyerWarnTierDelivered", "FlyerOperatorFlaggedWarnTier",
+    "FlyerCreativeDirectorRouted",
     # PR-ζ 2026-05-26 — regulated-intent runtime context + chokepoint audit variants
     "ActionExecutionContext",
     "FlyerVisualQAReport", "FlyerWarningSummary", "FlyerManualReview", "FlyerAsset", "FlyerConcept", "FlyerRevision",
