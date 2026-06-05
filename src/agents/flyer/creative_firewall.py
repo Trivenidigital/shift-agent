@@ -121,16 +121,26 @@ _OPEN_TOKEN_RE = re.compile(r"\b(?:re[- ]?)?open(?:ing|ed|s)?\b", re.IGNORECASE)
 _OPEN = r"(?:re[- ]?)?open(?:ing|ed|s)?"
 _OPEN_ANCHORED_RE = re.compile(
     # launch / status word immediately before "open": "now open", "grand opening",
-    # "we are open", "newly opened", "grand reopening", "newly reopened".
-    r"\b(?:now|currently|we\s+are|we['’]re|grand|soft|newly|re)\s*[- ]?\s*"
+    # "we are open", "newly opened", "grand reopening", "newly reopened". The
+    # separator is LINEAR — \s*(?:-\s*)? : the leading \s* greedily eats spaces and
+    # the optional group only adds a literal hyphen + trailing spaces, so there is
+    # no overlapping-whitespace backtracking (round-5 ReDoS fix). "re" is NOT a
+    # prefix marker here — _OPEN already matches re[- ]?open..., so "reopen" /
+    # "grand reopening" are covered without the redundant (and overlap-prone) branch.
+    r"\b(?:now|currently|we\s+are|we['’]re|grand|soft|newly)\s*(?:-\s*)?"
     + _OPEN + r"\b"
     # "open" immediately followed by a hours/day/launch word: "open daily",
     # "open now", "open for business", "open every day", "open monday", …
+    # The day tail allows an optional preposition ("open on weekends", "opens on
+    # Saturday", "open during the weekend") and full + plural weekday forms, with
+    # STRICT adjacency (open [on|during]? <day>) so a non-adjacent day stays benign.
     r"|\b" + _OPEN + r"\s+(?:now|today|tonight|daily|late|"
-    r"every\s+day|all\s+day|all\s+week|"
-    r"weekends?|weekdays?|seven\s+days|7\s+days|"
-    r"mon|tue|wed|thu|fri|sat|sun|"
-    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"
+    r"every\s+day|all\s+day|all\s+week|seven\s+days|7\s+days|"
+    r"(?:(?:on|during)\s+)?(?:"
+    r"weekends?|weekdays?|"
+    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+    r"mondays|tuesdays|wednesdays|thursdays|fridays|saturdays|sundays|"
+    r"mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun))\b"
     # "open for breakfast/brunch/lunch/dinner/business" — meal-service / business
     # availability. NB: "open for seating/text/plating" is NOT here ⇒ stays benign.
     r"|\b" + _OPEN + r"\s+for\s+(?:breakfast|brunch|lunch|dinner|business)\b"
@@ -162,21 +172,37 @@ _TIME_SIGNAL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A bare "reopen" token is ALWAYS operational (round-5 MAJOR): unlike "open"
+# (which has a benign compositional sense — "open area/space"), "reopen" has NO
+# compositional meaning — it is always a launch/availability claim ("reopened",
+# "grand reopening", "reopens"). So we flag it directly, with no anchor required;
+# this cannot over-block. The leading \b prevents matching "re" inside more/store/
+# are/here/genre (those have a word char before "re" ⇒ no boundary), so
+# "store open"/"more open space"/"are open" stay benign (bare non-re "open").
+_REOPEN_TOKEN_RE = re.compile(r"\bre[- ]?open(?:ing|ed|s)?\b", re.IGNORECASE)
+
 
 def _open_is_operational(text: str) -> bool:
     """Decide whether `text` uses "open" as a business-operational claim.
 
-    Operational (→ flag) ONLY if BOTH:
-      - the text contains an "open" token, AND
-      - (A) an anchored open-phrase ("now open", "open daily", "grand opening",
-        "open until 10", "open 9am") OR (B) a standalone clock-time / hours signal
-        anywhere ("9am-9pm", "until 10") co-occurs with that token.
+    Operational (→ flag) if:
+      - a bare "reopen" token is present (reopen* has no benign sense — always a
+        launch/availability claim), OR
+      - the text contains an "open" token AND (A) an anchored open-phrase
+        ("now open", "open daily", "grand opening", "open until 10", "open 9am")
+        OR (B) a standalone clock-time signal anywhere ("9am-9pm") co-occurs.
 
-    Everything else is BENIGN (default): bare "open", "open central area",
-    "open layout for Memorial Day", "soft background", "24 inch margin", etc. No
-    compositional-marker list and no window are needed — only explicit operational
-    shapes flag, so compositional phrasing can never be mistaken for a claim."""
-    if not text or not _OPEN_TOKEN_RE.search(text):
+    Everything else is BENIGN (default): bare non-re "open", "open central area",
+    "open layout for Memorial Day", "store open", "are open", "soft background",
+    "24 inch margin", etc. No compositional-marker list and no window are needed —
+    only explicit operational shapes flag, so compositional phrasing (and bare
+    "open" with no operational signal) can never be mistaken for a claim."""
+    if not text:
+        return False
+    # reopen* is operational on its own — no open-token gate, no anchor needed.
+    if _REOPEN_TOKEN_RE.search(text):
+        return True
+    if not _OPEN_TOKEN_RE.search(text):
         return False
     if _OPEN_ANCHORED_RE.search(text):
         return True

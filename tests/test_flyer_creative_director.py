@@ -1325,6 +1325,17 @@ def test_open_claim_hit_fail_closed_when_classifier_unavailable(monkeypatch):
     "newly reopened, center clear",
     "reopened for business, center clear",
     "reopens monday, center clear",
+    # round-5 day-tail recall (optional preposition + full/plural weekday forms)
+    "open on weekends, center clear",
+    "open on weekdays, center clear",
+    "opens on Saturday, center clear",
+    "open Saturdays, center clear",
+    "open on monday, center clear",
+    "open during the weekend, center clear",
+    # round-5 final: bare reopen* is operational on its own (no anchor needed).
+    "we reopen, center clear",
+    "reopened, center clear",
+    "re-open, center clear",
 ])
 def test_validate_rejects_expanded_open_claims_in_background(op_text):
     brief = _occasion_brief(background_brief="A Memorial Day scene, " + op_text + ".")
@@ -1341,6 +1352,12 @@ def test_validate_rejects_expanded_open_claims_in_background(op_text):
     "an open layout, open for seating arrangement of the spread, center clear",
     "an open space for plating the cookout spread, center clear",
     "a clear 24 inch wide open background, central area left clear for text",
+    # round-5: a NON-ADJACENT day after "open" stays benign (open+layout, not
+    # open [on|during]? <day>) — the live "Saturday market" theme must validate.
+    "an open layout for the Saturday market scene, central area left clear for text",
+    # round-5 final \b guard: "re" inside store/more does NOT trigger the reopen
+    # branch — bare non-re "open" stays benign.
+    "a store open layout with more open space, central area left clear for text",
 ])
 def test_validate_passes_benign_open_tails_in_background(benign_text):
     brief = _occasion_brief(background_brief=benign_text + ".")
