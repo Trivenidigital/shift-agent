@@ -1728,9 +1728,10 @@ def is_vague_flyer_start(text: str, *, has_media: bool = False) -> bool:
         return False
     has_detail = (
         "$" in lower
+        or bool(re.search(r"\b\d{1,3}\s*%\s*(?:off|discount)?\b", lower))
         or ":" in body
         or bool(re.search(r"\b\d{1,2}\s*(?:am|pm)\b", lower))
-        or bool(re.search(r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|today|weekend|special|menu|sale|offer|discount|grand opening|class|event|seo|aeo|geo|paid ads|content creation|combo|combos|banner|visual pictures?|photos?|pictures?)\b", lower))
+        or bool(re.search(r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|today|weekend|special|menu|sale|offer|discount|grand opening|graduation|party|parties|celebration|class|event|seo|aeo|geo|paid ads|content creation|combo|combos|banner|visual pictures?|photos?|pictures?)\b", lower))
     )
     if has_detail:
         return False
