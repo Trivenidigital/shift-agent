@@ -1,0 +1,20 @@
+{
+  "topic": "flyer-marketing-agent-slice1",
+  "task_text": "Slice-1 implementation plan for the Flyer Marketing Agent. Build order + concrete components: flyer_generation skill rewritten as Creative Director; flyer_context_builder callable tool/plugin returning one structured FlyerBrief; deterministic FlyerBriefValidator (fact IDs/spans, required-fact authority, must_not_add); identity/state/audit/delivery/retries/danger gates stay Python. Resolves open decisions (spine storage, FlyerBrief schema, send-rate metric, flag names). Dormant/flag-gated rollout (FLYER_CREATIVE_DIRECTOR_ENABLED=0, routing shadow). Tests + offline oracle; reversible deploy; live-flip held for operator.",
+  "completed_at": "2026-06-05T02:30:00Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 9,
+  "hermes_step_count": 7,
+  "files_to_read_first": [
+    "src/agents/flyer/skills/flyer_generation/SKILL.md",
+    "src/agents/flyer/skills/flyer_dispatcher/SKILL.md",
+    "src/agents/flyer/render.py (_image_prompt, apply_critical_text_overlay, render_source_edit_preview)",
+    "src/agents/flyer/scripts/generate-flyer-concepts (run_visual_qa blocking; source-edit lane)",
+    "src/agents/flyer/campaign_scene_prompts.py",
+    "src/agents/flyer/creative_planner.py (materialize_inferred, promote_inferred_to_confirmed)",
+    "src/agents/flyer/facts.py (profile_locked_facts, FlyerLockedFact source=customer_text)",
+    "src/platform/schemas.py (FlyerCustomerStore, FlyerLockedFact, FlyerBrandKit)",
+    "src/platform/commerce/ (cart/order_state/payment_link)",
+    "tests/flyer_oracle/oracle.py (GateResult truth|delivery|commercial)"
+  ]
+}
