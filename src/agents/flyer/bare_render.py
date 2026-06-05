@@ -590,10 +590,12 @@ def _render_creative_director(project, background_brief: str) -> bytes:
     spans build_flyer_brief materialized), NEVER from the model — the core invariant.
 
     Mirrors render.render_source_edit_preview's "raw bytes → write as background →
-    apply_critical_text_overlay → fail-closed" shape, reusing the deployed
-    apply_critical_text_overlay (with its system-python3 Pillow fallback). Any overlay
-    failure propagates so render_grounded fails safe (manual route), never ships an
-    incomplete flyer."""
+    overlay → fail-closed" shape, reusing the deployed ``_apply_critical_text_overlay``
+    WRAPPER — Pillow when present in the service venv, else the ``/usr/bin/python3``
+    system-Pillow fallback (the SAME wrapper existing overlay paths use; the public
+    ``apply_critical_text_overlay`` is Pillow-only, Codex PR3 P2). Any overlay failure
+    propagates so render_grounded fails safe (manual route), never ships an incomplete
+    flyer."""
     import tempfile
     from pathlib import Path as _Path
 
@@ -603,8 +605,8 @@ def _render_creative_director(project, background_brief: str) -> bytes:
         bg = _Path(_td) / "cd_background.png"
         out = _Path(_td) / "cd_final.png"
         bg.write_bytes(raw)
-        rmod.apply_critical_text_overlay(project, str(bg), str(out),
-                                         size=(1080, 1350), output_format="concept_preview")
+        rmod._apply_critical_text_overlay(project, str(bg), str(out),
+                                          size=(1080, 1350), output_format="concept_preview")
         return out.read_bytes()
 
 

@@ -18,8 +18,15 @@ gate keeps it honest.
 import sys, os, importlib.util, json
 
 ROOT = "/opt/shift-agent"
+# Base flat runtime (RC4) + the PR3 Creative-Director deps the ARMED path imports flat.
+# Without the CD deps a phantom-green gate is possible: bare_render resolves, but
+# enabling the allowlisted path returns "unavailable" because flyer_context_builder /
+# flyer_brief / flyer_brief_validator / flyer_semantic_brief / creative_firewall (or the
+# SKILL.md) aren't deployed. Check them too — the gate must reflect the ARMED runtime.
 MODULES = ["flyer_bare_render", "flyer_facts", "flyer_render", "flyer_visual_qa",
-           "flyer_creative_planner", "schemas", "safe_io"]
+           "flyer_creative_planner", "schemas", "safe_io",
+           "flyer_context_builder", "flyer_brief", "flyer_brief_validator",
+           "flyer_semantic_brief", "creative_firewall"]
 sys.path.insert(0, ROOT)
 
 resolved, errors = {}, []
@@ -33,6 +40,17 @@ for m in MODULES:
     f = os.path.realpath(spec.origin); resolved[m] = f
     if os.path.dirname(f) != ROOT or "staging" in f or "_archive" in f:
         errors.append("DRIFT %s -> %s" % (m, f))
+
+# PR3: the Creative-Director SKILL.md body is read at runtime relative to
+# flyer_context_builder.py (SKILL_MD_PATH = <its dir>/skills/flyer_generation/SKILL.md).
+# A missing skill file => the armed path returns "unavailable", so assert it exists at the
+# SAME path the runtime computes — the gate must not go green without the brain's body.
+_cb = resolved.get("flyer_context_builder")
+if _cb:
+    _skill = os.path.join(os.path.dirname(_cb), "skills", "flyer_generation", "SKILL.md")
+    resolved["flyer_generation_skill_md"] = _skill
+    if not os.path.isfile(_skill):
+        errors.append("MISSING flyer_generation SKILL.md at %s" % _skill)
 
 print(json.dumps({"ok": not errors, "root": ROOT, "resolved": resolved, "errors": errors}, indent=2))
 sys.exit(0 if not errors else 1)

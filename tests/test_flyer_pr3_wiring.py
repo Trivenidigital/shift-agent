@@ -208,6 +208,38 @@ def test_allowlisted_context_builder_failure_fails_safe_and_audits(monkeypatch):
     assert a["allowlisted"] is True
 
 
+# ── (P2) CD render uses the overlay WRAPPER (fallback), not Pillow-only public ──
+
+
+def test_cd_render_uses_overlay_wrapper_not_pillow_only(monkeypatch):
+    # Codex PR3 P2: _render_creative_director must call render._apply_critical_text_overlay
+    # (the wrapper with the /usr/bin/python3 system-Pillow fallback), NOT the public
+    # apply_critical_text_overlay (Pillow-only) — else an armed render fails closed on a
+    # venv without Pillow even though the deployed fallback would have worked.
+    from pathlib import Path as _P
+    monkeypatch.setattr(br, "_generate_image", lambda prompt, *, model: b"RAWBG")
+    calls = {"wrapper": 0, "public": 0}
+
+    def _wrapper(project, source, target, *, size, output_format):
+        calls["wrapper"] += 1
+        _P(target).write_bytes(b"CDPNG")
+
+    def _public(*a, **k):
+        calls["public"] += 1
+
+    fake_rmod = types.SimpleNamespace(
+        _apply_critical_text_overlay=_wrapper,
+        apply_critical_text_overlay=_public,
+    )
+    monkeypatch.setattr(br, "_render_mod", lambda: fake_rmod)
+
+    out = br._render_creative_director(object(), "a textless patriotic cookout background")
+
+    assert out == b"CDPNG"
+    assert calls["wrapper"] == 1   # fallback-capable wrapper used
+    assert calls["public"] == 0    # Pillow-only public NOT used
+
+
 # ── (d) allowlisted + status="invalid" ⇒ fail-safe, legacy poster NOT called ──
 
 
