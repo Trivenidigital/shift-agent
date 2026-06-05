@@ -1,11 +1,17 @@
-"""Creative-Director gateway retry — bounded retry on TRANSIENT failures only.
+"""Creative-Director gateway retry — bounded retry on FAST transients only.
 
 Root cause (live test 2026-06-05): ``flyer_context_builder._call_gateway`` made
 the OpenRouter call exactly ONCE and returned ``None`` on ANY failure, so a single
 transient gateway blip fail-closed the whole request — the identical call
 succeeded ~4s later. The fix adds a bounded retry (3 total attempts, short
-backoff) that retries ONLY transient failures (network/timeout/HTTP 5xx) and
-NOT deterministic ones (HTTP 4xx, or a 200-but-unparseable response).
+backoff) that retries ONLY *fast* transients — HTTP 5xx + connection-level errors
+(DNS / connection reset) that fail in milliseconds.
+
+The retry deliberately does NOT cover everything: a TIMEOUT is terminal (the call
+already burned the full 30s timeout, so retrying it would stack the tail to
+~91s — the long-tail latency the operator's acceptance criteria forbid), and a
+deterministic failure (HTTP 4xx, or a 200-but-unparseable response) is also not
+retried (retrying cannot fix it).
 
 These tests prove the retry contract OFFLINE — they monkeypatch
 ``urllib.request.urlopen`` (the network) and ``time.sleep`` (so backoff is
@@ -16,6 +22,7 @@ on sys.path, the way the flat VPS modules import).
 from __future__ import annotations
 
 import io
+import socket
 import urllib.error
 from pathlib import Path
 import sys
@@ -146,12 +153,14 @@ def _armed_no_sleep(monkeypatch):
     monkeypatch.setattr(fcb.time, "sleep", lambda *_a, **_k: None)
 
 
-# ── transient-then-success: a retry recovers the request ─────────────────────
+# ── fast-transient-then-success: a retry recovers the request ────────────────
 
 
 def test_transient_urlerror_then_success_recovers(monkeypatch):
-    """First attempt raises a network error, second returns a valid body →
-    build_flyer_brief reaches the validator and returns "ok" (retry worked)."""
+    """First attempt raises a FAST connection-level error (non-timeout URLError),
+    second returns a valid body → build_flyer_brief reaches the validator and
+    returns "ok" (retry worked). A non-timeout URLError fails in ms, so retrying
+    stays bounded."""
     fake = _Urlopen([urllib.error.URLError("connection reset"), _valid_brief_body()])
     monkeypatch.setattr(fcb.urllib.request, "urlopen", fake)
 
@@ -159,11 +168,24 @@ def test_transient_urlerror_then_success_recovers(monkeypatch):
 
     assert result.status == "ok", result.errors
     assert result.brief is not None
-    assert fake.calls == 2  # one transient failure, one success
+    assert fake.calls == 2  # one fast transient failure, one success
+
+
+def test_transient_oserror_then_success_recovers(monkeypatch):
+    """A bare connection-level OSError (e.g. ECONNRESET) is a fast transient:
+    retried, then succeeds."""
+    fake = _Urlopen([ConnectionResetError("reset by peer"), _valid_brief_body()])
+    monkeypatch.setattr(fcb.urllib.request, "urlopen", fake)
+
+    result = fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None)
+
+    assert result.status == "ok", result.errors
+    assert result.brief is not None
+    assert fake.calls == 2
 
 
 def test_transient_5xx_then_success_recovers(monkeypatch):
-    """An HTTP 5xx is transient (server-side blip): retried, and the second
+    """An HTTP 5xx is a fast transient (server-side blip): retried, and the second
     attempt's valid body yields "ok"."""
     fake = _Urlopen([_http_error(503), _valid_brief_body()])
     monkeypatch.setattr(fcb.urllib.request, "urlopen", fake)
@@ -175,23 +197,13 @@ def test_transient_5xx_then_success_recovers(monkeypatch):
     assert fake.calls == 2
 
 
-def test_transient_timeout_then_success_recovers(monkeypatch):
-    """A socket TimeoutError is transient: retried, then succeeds."""
-    fake = _Urlopen([TimeoutError("timed out"), _valid_brief_body()])
-    monkeypatch.setattr(fcb.urllib.request, "urlopen", fake)
-
-    result = fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None)
-
-    assert result.status == "ok", result.errors
-    assert fake.calls == 2
-
-
-# ── persistent transient: all attempts fail → unavailable, no exception leak ─
+# ── persistent fast transient: all attempts fail → unavailable, no leak ──────
 
 
 def test_persistent_transient_exhausts_retries_then_unavailable(monkeypatch):
-    """All 3 attempts raise a transient error → status "unavailable" (fail-safe),
-    no exception leaks, and exactly 3 attempts were made (no infinite retry)."""
+    """All 3 attempts raise a FAST transient (non-timeout URLError) → status
+    "unavailable" (fail-safe), no exception leaks, and exactly 3 attempts were made
+    (no infinite retry)."""
     fake = _Urlopen([
         urllib.error.URLError("down"),
         urllib.error.URLError("down"),
@@ -208,7 +220,7 @@ def test_persistent_transient_exhausts_retries_then_unavailable(monkeypatch):
 
 
 def test_persistent_5xx_exhausts_retries_then_unavailable(monkeypatch):
-    """Persistent HTTP 5xx is transient and exhausts the 3 attempts → unavailable."""
+    """Persistent HTTP 5xx is a fast transient and exhausts the 3 attempts → unavailable."""
     fake = _Urlopen([_http_error(500), _http_error(502), _http_error(503)])
     monkeypatch.setattr(fcb.urllib.request, "urlopen", fake)
 
@@ -232,6 +244,55 @@ def test_backoff_sleeps_between_transient_attempts(monkeypatch):
     assert result.status == "unavailable"
     assert fake.calls == 3
     assert slept == list(fcb.CREATIVE_DIRECTOR_RETRY_BACKOFFS_SEC) == [0.4, 1.0]
+
+
+# ── TIMEOUT is terminal: NO retry (no long-tail latency) ─────────────────────
+
+
+def test_persistent_timeout_is_terminal_single_attempt(monkeypatch):
+    """A socket timeout is TERMINAL: a stuck call already burned the full 30s
+    timeout, so retrying it would stack the tail (3 × 30s ≈ 91s). Exactly ONE
+    attempt, status "unavailable" — the second scripted action is never consumed.
+    This is the operator's "bounded, no long-tail latency" acceptance criterion."""
+    fake = _Urlopen([socket.timeout("timed out"), _valid_brief_body()])
+    monkeypatch.setattr(fcb.urllib.request, "urlopen", fake)
+    slept: list[float] = []
+    monkeypatch.setattr(fcb.time, "sleep", lambda s: slept.append(s))
+
+    result = fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None)
+
+    assert result.status == "unavailable"
+    assert result.brief is None
+    assert fake.calls == 1   # NOT retried — no stacked 30s tail
+    assert slept == []       # no backoff because there was no retry
+
+
+def test_timeouterror_is_terminal_single_attempt(monkeypatch):
+    """``TimeoutError`` (the builtin socket.timeout alias on 3.10+) is terminal too."""
+    fake = _Urlopen([TimeoutError("timed out"), _valid_brief_body()])
+    monkeypatch.setattr(fcb.urllib.request, "urlopen", fake)
+
+    result = fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None)
+
+    assert result.status == "unavailable"
+    assert fake.calls == 1
+
+
+def test_urlerror_wrapping_timeout_is_terminal_single_attempt(monkeypatch):
+    """A timeout can surface wrapped as ``URLError(reason=timeout)`` (urllib does
+    this for socket timeouts during connect). That is ALSO terminal — 1 attempt —
+    even though a non-timeout URLError would be retried."""
+    fake = _Urlopen([
+        urllib.error.URLError(socket.timeout("timed out")),
+        _valid_brief_body(),
+    ])
+    monkeypatch.setattr(fcb.urllib.request, "urlopen", fake)
+
+    result = fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None)
+
+    assert result.status == "unavailable"
+    assert result.brief is None
+    assert fake.calls == 1   # timeout-in-URLError is terminal, not retried
 
 
 # ── deterministic 4xx: NOT retried (call count is 1) ─────────────────────────
