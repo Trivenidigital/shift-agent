@@ -744,3 +744,196 @@ def test_is_occasion_theme_fact_id_classification():
     for fid in ("business_name", "contact_phone", "location", "item:0:name",
                 "item:0:price", "offer:0", "pricing_structure", "tagline", "headline"):
         assert not fbv._is_occasion_theme_fact_id(fid), fid
+
+
+# ── Codex Finding 1 — offer_groups must SLOT each offer's required refs ──────
+
+
+def test_validate_rejects_two_combo_groups_missing_a_price_ref():
+    """A two-combo brief whose OfferGroups omit a price_ref (item:1's card carries the
+    name but no price) is structurally incomplete and must be REJECTED — touching the
+    offer is not enough; the price fact must be slotted into its own card."""
+    groups = [
+        fb.OfferGroup(kind="combo", title_ref="item:0:name", price_ref="item:0:price"),
+        # item:1 card: name present, price_ref MISSING.
+        fb.OfferGroup(kind="combo", title_ref="item:1:name"),
+    ]
+    brief = _combo_brief(offer_groups=groups)
+    result = fbv.validate(brief, _combo_facts(), _COMBO_REQUEST)
+    assert result.ok is False
+    assert any(e == "offer item:1 missing price_ref in its card" for e in result.errors), result.errors
+
+
+def test_validate_rejects_offer_price_slotted_in_wrong_card():
+    """The price ref must be in the OFFER'S OWN card. Putting item:1's price into
+    item:0's card (and leaving item:1 price-less) is mis-slotting — rejected."""
+    groups = [
+        # item:0 card also (wrongly) carries item:1's price in inclusion_refs — so
+        # item:1's price ref is NOT in item:1's own price_ref slot.
+        fb.OfferGroup(kind="combo", title_ref="item:0:name", price_ref="item:0:price",
+                      inclusion_refs=["item:1:price"]),
+        fb.OfferGroup(kind="combo", title_ref="item:1:name"),
+    ]
+    brief = _combo_brief(offer_groups=groups)
+    result = fbv.validate(brief, _combo_facts(), _COMBO_REQUEST)
+    assert result.ok is False
+    # item:0's group spans item:1 too ⇒ collapse fires; item:1 still lacks its price.
+    assert any("missing price_ref" in e for e in result.errors), result.errors
+
+
+def test_validate_rejects_offer_name_not_in_title_or_inclusion_slot():
+    """The NAME fact must be in title_ref OR inclusion_refs. A group that only carries
+    the offer's PRICE (price_ref set, name nowhere) does not slot the name."""
+    groups = [
+        fb.OfferGroup(kind="combo", title_ref="item:0:name", price_ref="item:0:price"),
+        # item:1 card: price slotted but the NAME ref is absent entirely.
+        fb.OfferGroup(kind="combo", price_ref="item:1:price"),
+    ]
+    brief = _combo_brief(offer_groups=groups)
+    result = fbv.validate(brief, _combo_facts(), _COMBO_REQUEST)
+    assert result.ok is False
+    assert any(e == "offer item:1 missing title_ref in its card" for e in result.errors), result.errors
+
+
+def test_validate_passes_fully_slotted_two_combo_brief():
+    """A fully-slotted brief — each combo's NAME in title_ref and PRICE in price_ref of
+    its OWN distinct card — PASSES (Codex Finding 1 happy path)."""
+    result = fbv.validate(_combo_brief(), _combo_facts(), _COMBO_REQUEST)
+    assert result.ok is True, result.errors
+
+
+def test_validate_passes_name_in_inclusion_ref_slot():
+    """The name may legitimately live in inclusion_refs (e.g. title is a banner and
+    the item name is an inclusion line). Price still in price_ref ⇒ passes."""
+    groups = [
+        fb.OfferGroup(kind="combo", inclusion_refs=["item:0:name"], price_ref="item:0:price"),
+        fb.OfferGroup(kind="combo", inclusion_refs=["item:1:name"], price_ref="item:1:price"),
+    ]
+    brief = _combo_brief(offer_groups=groups)
+    result = fbv.validate(brief, _combo_facts(), _COMBO_REQUEST)
+    assert result.ok is True, result.errors
+
+
+def test_validate_passes_offer_id_grouping_has_no_price_slot_requirement():
+    """An offer:N offer has no separate price fact in the taxonomy, so a card with
+    only title_ref=offer:N (no price_ref) is complete — the slot check must not
+    demand a non-existent price ref."""
+    facts = _identity_facts() + [
+        FlyerLockedFact(fact_id="offer:0", label="Offer",
+                        value="Buy one get one", source="customer_text", required=True),
+        FlyerLockedFact(fact_id="offer:1", label="Offer",
+                        value="Free delivery over thirty", source="customer_text", required=True),
+    ]
+    brief = _combo_brief(
+        fact_refs=[
+            fb.FactRef(fact_id="business_name", provenance="locked"),
+            fb.FactRef(fact_id="contact_phone", provenance="locked"),
+            fb.FactRef(fact_id="offer:0", provenance="locked"),
+            fb.FactRef(fact_id="offer:1", provenance="locked"),
+        ],
+        offer_groups=[
+            fb.OfferGroup(kind="offer", title_ref="offer:0"),
+            fb.OfferGroup(kind="offer", title_ref="offer:1"),
+        ],
+    )
+    result = fbv.validate(brief, facts, _COMBO_REQUEST)
+    assert result.ok is True, result.errors
+
+
+# ── Codex Finding 2 — must_not_add cannot smuggle an invented commercial value ──
+
+
+def test_validate_rejects_must_not_add_inventing_a_price():
+    """'no $19.99 price badge' injects a price that is NOT a locked value — a
+    commercial value smuggled via the suppression list. Must be REJECTED."""
+    brief = _combo_brief(must_not_add=["no $19.99 price badge"])
+    result = fbv.validate(brief, _combo_facts(), _COMBO_REQUEST)
+    assert result.ok is False
+    assert any("must_not_add invents commercial value" in e for e in result.errors), result.errors
+
+
+def test_validate_allows_must_not_add_non_commercial_suppression():
+    """'do not add extra items' carries no commercial shape ⇒ PASSES."""
+    brief = _combo_brief(must_not_add=["do not add extra items"])
+    result = fbv.validate(brief, _combo_facts(), _COMBO_REQUEST)
+    assert result.ok is True, result.errors
+
+
+def test_validate_must_not_add_real_locked_price_is_containment_not_invention():
+    """A must_not_add naming a REAL locked price ($49.99) is the containment case
+    (#4), NOT the invention case — it must trip 'contains locked value', and must
+    NOT be mislabeled as an invented commercial value."""
+    brief = _combo_brief(must_not_add=["$49.99"])
+    result = fbv.validate(brief, _combo_facts(), _COMBO_REQUEST)
+    assert result.ok is False
+    assert any("must_not_add contains locked value" in e for e in result.errors), result.errors
+    assert not any("invents commercial value" in e for e in result.errors), result.errors
+
+
+# ── Codex Finding 3 — textless background cannot render text / invent claims ─
+
+
+def test_validate_rejects_text_render_instruction_in_background():
+    """'a sign reading "Open Daily"' instructs the textless background to render
+    words — must be REJECTED (the text-rendering instruction detector)."""
+    brief = _combo_brief(
+        background_brief="A cookout scene with a sign reading 'Open Daily' on the wall.",
+    )
+    result = fbv.validate(brief, _combo_facts(), _COMBO_REQUEST)
+    assert result.ok is False
+    assert any(e.startswith("text rendering instruction in textless background: background_brief:")
+               for e in result.errors), result.errors
+
+
+def test_validate_rejects_quoted_literal_in_background():
+    """Any quoted literal (length>=3) in the textless prompt is a verbatim string the
+    model is told to render — rejected even without a 'sign/banner' lead word."""
+    brief = _combo_brief(
+        background_brief="A festive scene, banner that says 'Grand Opening' across the top.",
+    )
+    result = fbv.validate(brief, _combo_facts(), _COMBO_REQUEST)
+    assert result.ok is False
+    assert any("text rendering instruction in textless background" in e for e in result.errors), result.errors
+
+
+def test_validate_rejects_operational_claim_in_background():
+    """An invented non-price operational claim ('open daily') in the textless
+    background must be REJECTED (the claim detector)."""
+    brief = _combo_brief(
+        background_brief="A patriotic cookout, open daily vibe, central area clear.",
+    )
+    result = fbv.validate(brief, _combo_facts(), _COMBO_REQUEST)
+    assert result.ok is False
+    assert any(e.startswith("invented operational claim in textless background: background_brief:")
+               for e in result.errors), result.errors
+
+
+def test_validate_rejects_operational_claim_in_visual_direction():
+    """The claim scan also covers visual_direction free text."""
+    brief = _combo_brief(
+        visual_direction=fb.VisualDirection(
+            theme_family="bold now hiring energy",
+            palette=["red"], motifs=["stars"], visual_subjects=["cookout"],
+        ),
+    )
+    result = fbv.validate(brief, _combo_facts(), _COMBO_REQUEST)
+    assert result.ok is False
+    assert any(e.startswith("invented operational claim in textless background: visual_direction:")
+               for e in result.errors), result.errors
+
+
+def test_validate_passes_clean_textless_background():
+    """A clean textless background — visual subjects only, no words, no claims —
+    PASSES (Codex Finding 3 happy path)."""
+    brief = _combo_brief(
+        background_brief="A textless patriotic cookout spread with bunting, central area left clear.",
+    )
+    result = fbv.validate(brief, _combo_facts(), _COMBO_REQUEST)
+    assert result.ok is True, result.errors
+
+
+def test_validate_reuses_creative_firewall_claim_detector():
+    """Finding 3b reuses creative_firewall.is_hard_fact_claim — confirm it is the
+    same callable the validator imported (defense-in-depth, not a private fork)."""
+    import creative_firewall as cfw
+    assert fbv._is_hard_fact_claim is cfw.is_hard_fact_claim

@@ -39,6 +39,18 @@ try:  # sibling FlyerBrief — flat on the VPS, package-style in the repo tree
 except ImportError:  # pragma: no cover - import-path shim
     from agents.flyer.flyer_brief import FactRef, FlyerBrief, OfferGroup
 
+# Reuse the bounded-creative-planner hard-fact firewall's claim detector (Codex
+# Finding 3b): it already classifies service/operational/date/superlative claims
+# ("Open Daily", "Free Delivery", "#1") that a textless background must never
+# carry. Flat-on-VPS first, package-style fallback (mirrors the FlyerBrief import).
+try:
+    from creative_firewall import is_hard_fact_claim as _is_hard_fact_claim  # type: ignore
+except ImportError:  # pragma: no cover - import-path shim
+    try:
+        from agents.flyer.creative_firewall import is_hard_fact_claim as _is_hard_fact_claim
+    except ImportError:  # pragma: no cover - firewall unavailable ⇒ fail-closed mirror
+        _is_hard_fact_claim = None  # type: ignore
+
 
 # Required-fact authority is each fact's OWN ``.required`` flag (facts.py sets it
 # via _fact(), default required=True for customer-stated content). NO parallel id
@@ -90,6 +102,77 @@ def _commercial_value_hit(text: str) -> str:
     for run in _PHONE_RUN_RE.findall(text):
         if len(_DIGITS_RE.sub("", run)) >= 7:
             return run.strip()
+    return ""
+
+
+# ── textless-background firewall (Codex Finding 3) ──────────────────────────
+# background_brief / visual_direction are the TEXTLESS-background prompt: the model
+# must render NO words there (all visible text is overlaid deterministically from
+# locked facts). Two escape hatches the price/phone/identity scans miss:
+#   (a) an instruction to render arbitrary text ("a sign reading 'Open Daily'", "a
+#       banner that says ...", "text reading ...") + any quoted literal; and
+#   (b) an invented non-price operational CLAIM ("open daily", "delivery available",
+#       "now hiring", "fresh daily").
+# Both are deterministic + fail-closed; the textless rule is design-critical.
+_TEXT_RENDER_INSTRUCTION_RE = re.compile(
+    r"\b(?:sign|signs|banner|banners|text|texts|label|labels|caption|captions|"
+    r"word|words|letter|letters|message|writing|slogan|headline|title|placard|"
+    r"poster|billboard|menu\s*board|chalkboard|marquee|ticker|subtitle)\b"
+    r"\s+(?:that\s+)?(?:reading|read|reads|saying|say|says|that\s+says|spelling|"
+    r"spells|spelled|written|writes|displaying|displays|showing|shows|with\s+the\s+"
+    r"words?|with\s+text|containing\s+the\s+(?:words?|text))\b",
+    re.IGNORECASE,
+)
+# Any quoted literal of length>=3 (straight or curly quotes) is a verbatim string
+# the model is being told to render — never allowed in a textless prompt.
+_QUOTED_LITERAL_RE = re.compile(r"""['"‘’“”]\s*([^'"‘’“”]{3,})\s*['"‘’“”]""")
+# Invented operational/service claims (mirror of creative_firewall's claim classes,
+# used only if that module is not importable — kept small + fail-closed). These are
+# NON-price claims; the commercial-shape scan already covers price/phone/discount.
+_OPERATIONAL_CLAIM_RE = re.compile(
+    r"\b(?:open|opens|opening|closed|closes|closing|hours|daily|"
+    r"delivery|takeout|take[\s-]?out|takeaway|dine[\s-]?in|curbside|pickup|"
+    r"hiring|now\s+hiring|fresh|freshly|guarantee|guaranteed|best|#\s*1|"
+    r"number\s+one|award|award[\s-]?winning|certified|licensed|insured|"
+    r"voted|family[\s-]?owned|since\s+\d{4})\b",
+    re.IGNORECASE,
+)
+
+
+def _text_render_instruction_hit(text: str) -> str:
+    """First text-into-background-rendering instruction or quoted literal in ``text``
+    (Codex Finding 3a), or "" if clean. A textless-background prompt must never tell
+    the model to render words."""
+    if not text:
+        return ""
+    m = _TEXT_RENDER_INSTRUCTION_RE.search(text)
+    if m:
+        return m.group(0).strip()
+    q = _QUOTED_LITERAL_RE.search(text)
+    if q:
+        return q.group(0).strip()
+    return ""
+
+
+def _operational_claim_hit(text: str) -> str:
+    """First invented operational/service claim in ``text`` (Codex Finding 3b), or ""
+    if clean. Prefers creative_firewall.is_hard_fact_claim (already classifies these
+    claim classes); falls back to a small fail-closed list if that module is absent.
+    Commercial SHAPE (price/phone/discount) is owned by ``_commercial_value_hit`` —
+    this catches the NON-price claims a textless background must not assert."""
+    if not text:
+        return ""
+    m = _OPERATIONAL_CLAIM_RE.search(text)
+    if m:
+        return m.group(0).strip()
+    # Defense-in-depth: reuse the planner firewall's broader claim taxonomy when
+    # available (service/legal/payment/availability claims not in the small list).
+    if _is_hard_fact_claim is not None:
+        try:
+            if _is_hard_fact_claim(text):
+                return text.strip()[:60]
+        except Exception:  # pragma: no cover - never let the firewall crash validation
+            return ""
     return ""
 
 
@@ -178,6 +261,29 @@ def _offer_key_for_ref(fact_id: str) -> str:
     return ""
 
 
+def _required_slot_refs_for_offer(
+    offer_key: str, locked_ids: set[str]
+) -> tuple[str, str]:
+    """The (name_ref, price_ref) fact_ids an offer's OWN card must slot, derived
+    from the LOCKED FACTS only (never request_intent). For an ``item:N`` offer the
+    name is ``item:N:name`` and price is ``item:N:price`` — but only if that price
+    fact is actually locked (a name-only item has no price card slot). For an
+    ``offer:N`` offer the name IS ``offer:N`` and there is no separate price fact.
+    A "" slot means "no such locked fact ⇒ not required in this card"."""
+    if offer_key.startswith("item:"):
+        index = offer_key.split(":", 1)[1]
+        name_ref = f"item:{index}:name"
+        price_ref = f"item:{index}:price"
+        return (
+            name_ref if name_ref in locked_ids else "",
+            price_ref if price_ref in locked_ids else "",
+        )
+    if _OFFER_REF_RE.match(offer_key):
+        # offer:N is itself the name; no separate price fact in the taxonomy.
+        return (offer_key if offer_key in locked_ids else "", "")
+    return ("", "")
+
+
 def _group_offer_keys(group: OfferGroup) -> set[str]:
     """The distinct offer-keys an OfferGroup's refs touch. A group that references
     both item:0:* and item:1:* touches two offer-keys → it collapsed two offers."""
@@ -202,8 +308,11 @@ def _validate_offer_structure(
       - NO single OfferGroup may span two distinct locked offers ("combo structure
         collapsed: offers X and Y share one group");
       - each expected locked offer (each distinct item:N / offer:N) must map to a
-        DISTINCT OfferGroup, and its name+price refs grouped into that one card —
-        else "offer X is not grouped into a distinct card".
+        DISTINCT OfferGroup that actually SLOTS that offer's required refs (Codex
+        Finding 1): the NAME fact in ``title_ref``/``inclusion_refs`` and the PRICE
+        fact in ``price_ref`` — touching the offer via the wrong slot (or omitting
+        the price ref) is structurally incomplete ⇒
+        "offer X missing price_ref/title_ref in its card".
     """
     errors: list[str] = []
     expected = expected_offer_keys(locked_facts)
@@ -227,27 +336,67 @@ def _validate_offer_structure(
             a, b = sorted(touched)[:2]
             errors.append(f"combo structure collapsed: offers {a} and {b} share one group")
 
-    # (3) each expected locked offer maps to a DISTINCT group that carries its refs.
-    # Build offer-key -> set of group indices that reference it.
-    key_to_groups: dict[str, set[int]] = {k: set() for k in expected}
+    # (3) each expected locked offer maps to a DISTINCT group that SLOTS its required
+    # refs in the right slots (Codex Finding 1). A group merely TOUCHING the offer is
+    # not enough: a combo card is structurally incomplete unless its NAME fact is in
+    # title_ref/inclusion_refs AND its PRICE fact (when one is locked) is in price_ref.
+    # Build offer-key -> ordered list of group indices that carry that offer's refs
+    # ANYWHERE (so the distinct-card accounting matches step-2's collapse detection).
+    key_to_groups: dict[str, list[int]] = {k: [] for k in expected}
     for gi, group in enumerate(brief.offer_groups):
         for key in _group_offer_keys(group):
             if key in key_to_groups:
-                key_to_groups[key].add(gi)
+                key_to_groups[key].append(gi)
+
+    def _group_slots_offer(group: OfferGroup, name_ref: str, price_ref: str) -> bool:
+        """True iff this group slots the offer's required refs correctly — NAME in
+        title_ref/inclusion_refs and PRICE (when locked) in price_ref."""
+        name_slots = {group.title_ref or "", *group.inclusion_refs}
+        if name_ref and name_ref not in name_slots:
+            return False
+        if price_ref and (group.price_ref or "") != price_ref:
+            return False
+        return True
+
     used_group_indices: set[int] = set()
     for key in sorted(expected):
-        groups_for_key = key_to_groups.get(key, set())
+        name_ref, price_ref = _required_slot_refs_for_offer(key, locked_ids)
+        groups_for_key = key_to_groups.get(key, [])
         if not groups_for_key:
             errors.append(f"offer {key} is not grouped into a distinct card")
             continue
-        # Pick a group dedicated to this key that is not already claimed by another
-        # offer; if the only group(s) for this key are shared, the collapse error in
-        # (2) already fired, but flag the missing distinct card too.
-        dedicated = sorted(g for g in groups_for_key if g not in used_group_indices)
-        if not dedicated:
+        # A distinct, not-yet-claimed group that ALSO slots the required refs.
+        slotted = [
+            gi
+            for gi in groups_for_key
+            if gi not in used_group_indices
+            and _group_slots_offer(brief.offer_groups[gi], name_ref, price_ref)
+        ]
+        if slotted:
+            used_group_indices.add(slotted[0])
+            continue
+        # The offer has a (distinct) card but its required name/price ref is not
+        # slotted into it — structurally incomplete (Codex Finding 1). Distinguish a
+        # shared-only card (collapse already flagged in step 2) from a wrong-slot card.
+        unclaimed = [gi for gi in groups_for_key if gi not in used_group_indices]
+        if not unclaimed:
             errors.append(f"offer {key} is not grouped into a distinct card")
             continue
-        used_group_indices.add(dedicated[0])
+        missing = []
+        if price_ref and not any(
+            (brief.offer_groups[gi].price_ref or "") == price_ref for gi in unclaimed
+        ):
+            missing.append("price_ref")
+        if name_ref and not any(
+            name_ref in {brief.offer_groups[gi].title_ref or "", *brief.offer_groups[gi].inclusion_refs}
+            for gi in unclaimed
+        ):
+            missing.append("title_ref")
+        if not missing:  # defensive: should not happen given _group_slots_offer failed
+            missing.append("title_ref")
+        # Claim the card so a sibling offer isn't double-counted against it.
+        used_group_indices.add(unclaimed[0])
+        errors.append(f"offer {key} missing {'/'.join(missing)} in its card")
 
     return errors
 
@@ -356,16 +505,52 @@ def validate(
                 errors.append(f"locked value outside fact_refs: {field_name}: {lv}")
                 break
 
+    # (c-textless, Codex Finding 3) the TEXTLESS-background prompt fields
+    # (background_brief + visual_direction) must not (a) instruct the model to render
+    # words into the background, nor (b) invent a non-price operational claim. These
+    # ride OUTSIDE the overlay (no fact authority) and defeat the textless invariant.
+    textless_fields = {
+        "background_brief": brief.background_brief,
+        "visual_direction": " ".join(
+            [vd.theme_family, *vd.palette, *vd.motifs, *vd.visual_subjects]
+        ),
+    }
+    for field_name, text in textless_fields.items():
+        render_hit = _text_render_instruction_hit(text)
+        if render_hit:
+            errors.append(
+                f"text rendering instruction in textless background: {field_name}: {render_hit}"
+            )
+        claim_hit = _operational_claim_hit(text)
+        if claim_hit:
+            errors.append(
+                f"invented operational claim in textless background: {field_name}: {claim_hit}"
+            )
+
     # (d) must_not_add may not CONTAIN a locked-fact value (would suppress a real
     # fact). Containment as a UNIT (not exact-match): "omit Non Veg Combo" must be
     # caught. Boundaries are alphanumeric-aware (NOT \b, which fails on values that
     # start/end in punctuation like "$49.99") — so "Combos" does not match "Combo",
     # but "$49.99" still matches when flanked by space/start/end.
     locked_values = [_norm_ws(f.value) for f in locked_facts or [] if (f.value or "").strip()]
+    # (d-commercial, Codex Finding 2) must_not_add ALSO rides the commercial-value
+    # scan: an entry like "no $19.99 price badge" smuggles an INVENTED price (a
+    # commercial value that is NOT one of the locked values) into the brief via the
+    # suppression list, where checks (c)/(d) never looked. Reject any must_not_add
+    # whose commercial shape (currency/bare-price/percent/discount/phone-run) is not
+    # one of the locked-fact values. A suppression naming a REAL locked commercial
+    # value is already caught by the containment check below.
     for entry in brief.must_not_add:
         norm_entry = _norm_ws(entry)
         if not norm_entry:
             continue
+        hit = _commercial_value_hit(entry)
+        if hit:
+            norm_hit = _norm_ws(hit)
+            # Allowed only if the hit is part of a locked value (then containment
+            # below owns it); an invented commercial shape is rejected here.
+            if not any(norm_hit and norm_hit in lv for lv in locked_values):
+                errors.append(f"must_not_add invents commercial value: {hit}")
         for lv in locked_values:
             if lv and re.search(r"(?<![a-z0-9])" + re.escape(lv) + r"(?![a-z0-9])", norm_entry):
                 errors.append(f"must_not_add contains locked value: {entry}")
