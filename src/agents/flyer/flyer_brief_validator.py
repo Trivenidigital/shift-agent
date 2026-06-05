@@ -287,6 +287,15 @@ def _is_occasion_theme_fact_id(fact_id: str) -> bool:
 _ITEM_REF_RE = re.compile(r"^item:(?P<index>\d+):(?P<kind>name|price)$")
 _OFFER_REF_RE = re.compile(r"^offer:(?P<index>\d+)$")
 
+# The ONE non-grounded FlyerFactSource (schemas.FlyerFactSource): a planner
+# ASSUMPTION the model proposed, not a customer/operator/reference-grounded fact.
+# `creative_planner.materialize_inferred` stamps inferred item names with this
+# source (required=False). All other sources — customer_text / customer_confirmed /
+# customer_profile / reference_ocr / reference_vision / uploaded_asset / operator /
+# system — are GROUNDED. Excluding this single value (rather than allow-listing the
+# grounded set) future-proofs the regime switch against new grounded sources.
+_MODEL_INFERRED_SOURCE = "hermes_inferred"
+
 
 def expected_offer_keys(locked_facts: Sequence[FlyerLockedFact]) -> set[str]:
     """The set of DISTINCT offers the locked facts imply — each must own a distinct
@@ -318,27 +327,45 @@ def _offer_key_for_ref(fact_id: str) -> str:
 
 
 def _has_item_level_facts(locked_facts: Sequence[FlyerLockedFact]) -> bool:
-    """True iff the LOCKED FACTS contain at least one fine-grained ``item:N:name`` /
-    ``item:N:price`` fact (B2 advisory split, operator-approved Option 1).
+    """True iff the LOCKED FACTS contain at least one GROUNDED fine-grained
+    ``item:N:name`` / ``item:N:price`` fact (B2 advisory split, operator-approved
+    Option 1; Codex round-2 MAJOR fix).
 
     This is the switch between two regimes for ``offer_groups`` enforcement:
 
-      - **item-level facts EXIST** → the brief is grouping real fine-grained
-        item/price slots, so a true item-level collapse / wrong-slot / unknown-ref
-        is still a STRUCTURAL bug the firewall hard-rejects (the prior P1 invariant
-        is fully preserved).
-      - **NO item-level facts** (production extracts each combo as ONE COARSE
-        ``offer:N`` locked fact, or a pure-identity flyer) → there are no fine
+      - **grounded item-level facts EXIST** → the customer/operator/reference
+        ACTUALLY stated fine item/price slots, so a true item-level collapse /
+        wrong-slot / unknown-ref is still a STRUCTURAL bug the firewall hard-rejects
+        (the prior P1 invariant is fully preserved).
+      - **NO grounded item-level facts** (production extracts each combo as ONE
+        COARSE ``offer:N`` locked fact, or a pure-identity flyer) → there are no fine
         item/price slots to collapse; ``offer_groups`` only guides layout. Its
         findings are downgraded to advisory (non-blocking) warnings so a model that
         references non-existent ``item:N:price`` slots cannot fail-close a flyer
         whose required facts are fully covered by ``fact_refs``.
 
+    GROUNDED, not merely present (Codex round-2 MAJOR): the bounded creative planner
+    (`creative_planner.materialize_inferred`, enabled in cfg) can add
+    ``item:N:name`` facts with ``source="hermes_inferred"`` / ``required=False``
+    ALONGSIDE coarse ``offer:N`` facts. A MODEL-SUGGESTED item must NOT flip the
+    regime back to blocking (that would reintroduce the very fail-close B2 fixes —
+    the safe direction, but it defeats B2's purpose). An item fact counts as
+    item-level ONLY when it is genuinely grounded: its ``source`` is not the lone
+    non-grounded ``hermes_inferred`` AND it is ``required`` (every grounded
+    ``item:N:*`` fact from facts.py is ``required=True``; the inferred ones are
+    ``required=False``). The operator's contract is "hard-reject only when item-level
+    facts ACTUALLY exist" = genuine/grounded, not model-suggested.
+
     Derived from the LOCKED FACTS ALONE (never any brief field) — same authority
     discipline as ``required_fact_ids`` / ``expected_offer_keys``."""
     for fact in locked_facts or []:
-        if _ITEM_REF_RE.match(getattr(fact, "fact_id", "") or ""):
-            return True
+        if not _ITEM_REF_RE.match(getattr(fact, "fact_id", "") or ""):
+            continue
+        if getattr(fact, "source", "") == _MODEL_INFERRED_SOURCE:
+            continue  # a planner ASSUMPTION — must not flip the regime to blocking.
+        if not getattr(fact, "required", False):
+            continue  # an optional item is not a hard structural commitment.
+        return True
     return False
 
 

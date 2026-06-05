@@ -794,11 +794,100 @@ def test_b2_item_level_unknown_ref_still_hard_rejected():
 
 
 def test_has_item_level_facts_detector():
-    """The regime switch: item:N:name / item:N:price ⇒ True; coarse offer:N and pure
-    identity ⇒ False (offer_groups advisory)."""
+    """The regime switch: GROUNDED item:N:name / item:N:price ⇒ True; coarse offer:N
+    and pure identity ⇒ False (offer_groups advisory)."""
     assert fbv._has_item_level_facts(_combo_facts()) is True
     assert fbv._has_item_level_facts(_coarse_offer_facts()) is False
     assert fbv._has_item_level_facts(_identity_facts()) is False
+
+
+# ── Codex round-2 MAJOR — only GROUNDED item facts flip the regime to blocking; a
+#    hermes_inferred (planner-suggested) item:N:name must NOT re-fail-close. ───────
+
+
+def _inferred_item_name_fact(index: int = 0) -> FlyerLockedFact:
+    """Mirror creative_planner.materialize_inferred: a planner ASSUMPTION item name —
+    source="hermes_inferred", required=False (the schema default). This is what the
+    bounded creative planner adds when enabled in cfg."""
+    return FlyerLockedFact(
+        fact_id=f"item:{index}:name", label="Item",
+        value="Garlic Naan", source="hermes_inferred", required=False,
+    )
+
+
+def test_has_item_level_facts_ignores_hermes_inferred_item():
+    """A hermes_inferred item:N:name (planner assumption, required=False) does NOT
+    count as item-level — coarse offer:N + inferred item ⇒ still advisory regime."""
+    facts = _coarse_offer_facts() + [_inferred_item_name_fact(0)]
+    assert fbv._has_item_level_facts(facts) is False
+    # a bare inferred item with no offers is likewise not item-level.
+    assert fbv._has_item_level_facts([_inferred_item_name_fact(0)]) is False
+
+
+def test_has_item_level_facts_ignores_optional_item_fact():
+    """Defense-in-depth second signal: an item fact that is required=False is not a
+    hard structural commitment even if its source is grounded — does not flip the
+    regime. (Every grounded item:N:* fact from facts.py is required=True, so this
+    only guards a hypothetical future optional grounded item.)"""
+    optional_grounded = FlyerLockedFact(
+        fact_id="item:0:name", label="Item",
+        value="Side Salad", source="customer_text", required=False,
+    )
+    assert fbv._has_item_level_facts([optional_grounded]) is False
+
+
+def test_b2_hermes_inferred_item_does_not_flip_offer_groups_to_blocking():
+    """Codex round-2 MAJOR scenario: production extracts coarse offer:0/offer:1 facts;
+    the planner (enabled in cfg) ALSO adds a hermes_inferred item:0:name (required=
+    False). offer_groups reference fine item:0:price slots that don't exist as facts.
+    The inferred item must NOT flip the regime to blocking — the unknown refs stay
+    ADVISORY warnings and the brief validates ok=True (required coverage holds)."""
+    facts = _coarse_offer_facts() + [_inferred_item_name_fact(0)]
+    brief = _combo_brief(
+        request_intent="combo_offer",
+        fact_refs=_coarse_offer_fact_refs(),  # covers offer:0/offer:1 + identity/title
+        offer_groups=[
+            # model referenced fine item:N:price slots that don't exist as facts.
+            fb.OfferGroup(kind="combo", title_ref="offer:0", price_ref="item:0:price"),
+            fb.OfferGroup(kind="combo", title_ref="offer:1", price_ref="item:1:price"),
+        ],
+    )
+    result = fbv.validate(brief, facts, _COMBO_REQUEST)
+    assert result.ok is True, result.errors
+    assert result.errors == []
+    assert any("unknown offer_group ref item:0:price" in w for w in result.warnings), result.warnings
+    assert any("unknown offer_group ref item:1:price" in w for w in result.warnings), result.warnings
+
+
+def test_b2_grounded_item_alongside_coarse_offers_does_flip_to_blocking():
+    """Inverse guard: when a GROUNDED item:N:* fact (source=customer_text, required=
+    True) is present — even alongside coarse offer:N facts — the regime IS blocking,
+    so an unknown item-level offer_group ref is a hard error. This proves the fix
+    excludes ONLY hermes_inferred, not all item facts."""
+    facts = _coarse_offer_facts() + [
+        FlyerLockedFact(fact_id="item:0:name", label="Item",
+                        value="Mango Lassi", source="customer_text", required=True),
+        FlyerLockedFact(fact_id="item:0:price", label="Price",
+                        value="$4.99", source="customer_text", required=True),
+    ]
+    refs = _coarse_offer_fact_refs() + [
+        fb.FactRef(fact_id="item:0:name", provenance="locked"),
+        fb.FactRef(fact_id="item:0:price", provenance="locked"),
+    ]
+    brief = _combo_brief(
+        request_intent="combo_offer",
+        fact_refs=refs,
+        offer_groups=[
+            fb.OfferGroup(kind="offer", title_ref="offer:0"),
+            fb.OfferGroup(kind="offer", title_ref="offer:1"),
+            fb.OfferGroup(kind="combo", title_ref="item:0:name", price_ref="item:0:price"),
+            # unknown item-level ref — blocking because a grounded item fact exists.
+            fb.OfferGroup(kind="combo", title_ref="item:9:name", price_ref="item:9:price"),
+        ],
+    )
+    result = fbv.validate(brief, facts, _COMBO_REQUEST)
+    assert result.ok is False
+    assert any(e == "unknown offer_group ref item:9:name" for e in result.errors), result.errors
 
 
 # ── Finding 3 (Codex P2) — occasion/theme fact values allowed in visual fields ──
