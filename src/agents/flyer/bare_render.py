@@ -117,6 +117,19 @@ def _visual_qa_mod():
     return VQ
 
 
+def _context_builder():
+    """The Creative-Director brief builder (PR3). Flat on the VPS as
+    flyer_context_builder, package-style in the repo tree (mirrors facts/render).
+    build_flyer_brief internally reuses flyer_brief_validator.required_fact_ids to
+    enforce required-fact coverage, so a brief omitting a required fact returns
+    status="invalid" before this caller ever renders."""
+    try:
+        import flyer_context_builder as CB
+    except ImportError:
+        from agents.flyer import flyer_context_builder as CB
+    return CB
+
+
 # --- config -------------------------------------------------------------------
 import json
 import os
@@ -144,6 +157,97 @@ BG_DIR = Path(os.environ.get("FLYER_BARE_BG_DIR", "/opt/shift-agent/state/bare_f
 _FALSE_VALUES = {"0", "false", "no", "off"}
 REVISION_APPLY_ENABLED = (os.environ.get("FLYER_BARE_REVISION_APPLY", "1").strip().lower() not in _FALSE_VALUES)
 REVISION_CAPTURE_RAW_BG = os.environ.get("FLYER_BARE_REVISION_CAPTURE_RAW_BG") == "1"
+
+# --- PR3: Creative-Director render branch (flag + allowlist scoped) ------------
+# Caller-provenance pin so the operator can verify, from the audit log, EXACTLY
+# which deployed code emitted a row before enabling the feature.
+MODULE_VERSION = "pr3-creative-director"
+AUDIT_LOG_PATH = Path(os.environ.get("FLYER_DECISIONS_LOG", "/opt/shift-agent/logs/decisions.log"))
+# The gate env vars (read at call time, NOT import time, so tests + an operator
+# `export` take effect without a reimport). The flag MUST be exactly "1" AND the
+# resolved sender MUST be in the allowlist for the CD path to arm — anything else
+# is byte-identical legacy behavior.
+CREATIVE_DIRECTOR_ENABLED_ENV = "FLYER_CREATIVE_DIRECTOR_ENABLED"
+CREATIVE_DIRECTOR_ALLOWLIST_ENV = "FLYER_CREATIVE_DIRECTOR_ALLOWLIST"
+
+
+def _normalize_sender(value: str) -> str:
+    """Canonical comparison form for a phone/LID so the allowlist and the resolved
+    sender match across format variants. Strips a chat-JID suffix (``@s.whatsapp.net``
+    / ``@lid``), a leading ``+``, internal phone punctuation/whitespace, and
+    case-folds. Preserves alphanumeric LID bodies (LIDs are not purely numeric)."""
+    s = (value or "").strip()
+    if "@" in s:
+        s = s.split("@", 1)[0]
+    s = s.lstrip("+")
+    s = re.sub(r"[\s\-().]", "", s)
+    return s.casefold()
+
+
+def _creative_director_allowlist() -> set[str]:
+    """Parse FLYER_CREATIVE_DIRECTOR_ALLOWLIST (comma-separated phones/LIDs) into a
+    normalized set. Empty/unset ⇒ empty set ⇒ no sender is allowlisted."""
+    raw = os.environ.get(CREATIVE_DIRECTOR_ALLOWLIST_ENV, "") or ""
+    return {n for n in (_normalize_sender(p) for p in raw.split(",")) if n}
+
+
+def _resolved_sender(chat_id: str, sender_phone: str | None) -> str:
+    """The trusted resolved sender bare_render already uses (resolve_customer's
+    identifier): the passed sender phone/LID, else the phone embedded in a
+    WhatsApp chat JID, else the chat_id itself (a LID JID). NEVER message content."""
+    if sender_phone:
+        return sender_phone
+    if chat_id and chat_id.endswith("@s.whatsapp.net"):
+        return chat_id.split("@", 1)[0]
+    return chat_id or ""
+
+
+def _creative_director_armed(resolved_sender: str) -> bool:
+    """The PR3 gate: flag == "1" AND the normalized resolved sender is allowlisted."""
+    if os.environ.get(CREATIVE_DIRECTOR_ENABLED_ENV) != "1":
+        return False
+    return _normalize_sender(resolved_sender) in _creative_director_allowlist()
+
+
+def _emit_creative_director_audit(*, chat_id: str, resolved_sender: str, reached: bool,
+                                  status: str, allowlisted: bool) -> None:
+    """Emit the FlyerCreativeDirectorRouted row on EVERY new-flyer render via the
+    canonical decisions.log chokepoint (ndjson_append + flock), mirroring
+    generate-flyer-concepts:_audit_append. Emitted whether or not the flag is on, so
+    "flag off ⇒ reached=False, status=disabled/not_allowlisted" is provable from
+    logs. Best-effort: an audit failure must never block (or alter) the render."""
+    try:
+        schemas = _schemas()
+        try:
+            from safe_io import flock as _flock, ndjson_append as _ndjson_append  # type: ignore
+        except Exception:  # noqa: BLE001 — tests / non-VPS layouts may lack safe_io helpers (fcntl)
+            _flock = None  # type: ignore
+            _ndjson_append = None  # type: ignore
+        entry = schemas.FlyerCreativeDirectorRouted(
+            type="flyer_creative_director_routed",
+            ts=datetime.now(timezone.utc),
+            creative_director_reached=bool(reached),
+            creative_director_status=status,
+            module_version=MODULE_VERSION,
+            module_file=str(__file__),
+            resolved_sender=(resolved_sender or "")[:200],
+            allowlisted=bool(allowlisted),
+            chat_id=(chat_id or "")[:200],
+        )
+        line = entry.model_dump_json()
+        AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        if _flock is not None and _ndjson_append is not None:
+            # VPS path: the canonical flock + ndjson_append chokepoint (same as
+            # generate-flyer-concepts:_audit_append).
+            with _flock(AUDIT_LOG_PATH):
+                _ndjson_append(AUDIT_LOG_PATH, line)
+        else:
+            # Non-VPS / fcntl-less env (e.g. tests): plain open-append-close so the
+            # row is still emitted. Logrotate uses `create` mode → never cache the fd.
+            with open(AUDIT_LOG_PATH, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+    except Exception:  # noqa: BLE001
+        return
 
 
 def _sanitize_chat(chat_id: str) -> str:
@@ -478,6 +582,32 @@ def _generate_poster(project, *, strict_note: str = "", raw_bg_dest=None) -> byt
             _os.environ.pop("FLYER_ALLOW_INTEGRATED_POSTER", None)
 
 
+# --- PR3: Creative-Director render (textless background + deterministic overlay) ---
+def _render_creative_director(project, background_brief: str) -> bytes:
+    """Render the CD path: generate a TEXTLESS background from ``background_brief``,
+    then composite the deterministic critical-text overlay on top. The visible facts
+    come ONLY from the overlay (project.locked_facts — including the customer_text
+    spans build_flyer_brief materialized), NEVER from the model — the core invariant.
+
+    Mirrors render.render_source_edit_preview's "raw bytes → write as background →
+    apply_critical_text_overlay → fail-closed" shape, reusing the deployed
+    apply_critical_text_overlay (with its system-python3 Pillow fallback). Any overlay
+    failure propagates so render_grounded fails safe (manual route), never ships an
+    incomplete flyer."""
+    import tempfile
+    from pathlib import Path as _Path
+
+    raw = _generate_image(background_brief, model=GEN_MODEL)
+    rmod = _render_mod()
+    with tempfile.TemporaryDirectory() as _td:
+        bg = _Path(_td) / "cd_background.png"
+        out = _Path(_td) / "cd_final.png"
+        bg.write_bytes(raw)
+        rmod.apply_critical_text_overlay(project, str(bg), str(out),
+                                         size=(1080, 1350), output_format="concept_preview")
+        return out.read_bytes()
+
+
 # --- QA gate (visual_qa.run_visual_qa) ----------------------------------------
 def _qa_allows_send(report) -> bool:
     """Send only when the existing visual QA passes (or warn-tier). Block/provider-unavailable -> hold."""
@@ -540,6 +670,24 @@ def render_grounded(chat_id: str, raw_text: str, *, message_id: str | None = Non
 
     flyer_cfg = _load_flyer_cfg()
     locked_facts = _build_locked_facts(customer, fields, raw_text, message_id or "", flyer_cfg)
+
+    # PR3: Creative-Director branch — armed ONLY when the flag is "1" AND this trusted
+    # resolved sender is allowlisted. The audit row is emitted on EVERY new-flyer render
+    # (armed or not) so the caller is provable from logs BEFORE the operator enables it.
+    resolved_sender = _resolved_sender(chat_id, sender_phone)
+    allowlisted = _normalize_sender(resolved_sender) in _creative_director_allowlist()
+    if _creative_director_armed(resolved_sender):
+        return _render_creative_director_grounded(
+            chat_id, raw_text, customer, fields, locked_facts,
+            message_id=message_id, resolved_sender=resolved_sender,
+        )
+    # Flag off OR sender not allowlisted ⇒ byte-identical legacy path below. Audit it.
+    _emit_creative_director_audit(
+        chat_id=chat_id, resolved_sender=resolved_sender, reached=False,
+        status=("not_allowlisted" if os.environ.get(CREATIVE_DIRECTOR_ENABLED_ENV) == "1" else "disabled"),
+        allowlisted=allowlisted,
+    )
+
     project = _build_transient_project(customer, fields, locked_facts, raw_text, message_id, chat_id)
 
     # Session persistence is enabled by default for customer follow-up edits. Raw-background capture is
@@ -566,6 +714,66 @@ def render_grounded(chat_id: str, raw_text: str, *, message_id: str | None = Non
             return (SEND, png)
         last_blockers = blockers
     return (FAILCLOSED, last_blockers)
+
+
+def _render_creative_director_grounded(chat_id, raw_text, customer, fields, locked_facts, *,
+                                       message_id=None, resolved_sender=""):
+    """PR3 Creative-Director branch (reached ONLY when the flag + allowlist gate armed).
+
+    Calls build_flyer_brief, then handles its typed status STRICTLY — only "ok" renders
+    (via the textless-background + deterministic-overlay CD path), and EVERY other armed
+    status fails safe to the existing fail-closed return; it NEVER falls back to the legacy
+    integrated poster. Emits the FlyerCreativeDirectorRouted audit (reached=True) with the
+    BriefResult status on every outcome."""
+    def _audit(status: str) -> None:
+        _emit_creative_director_audit(
+            chat_id=chat_id, resolved_sender=resolved_sender, reached=True,
+            status=status, allowlisted=True,
+        )
+
+    # build_flyer_brief materializes validated customer_text spans INTO locked_facts in
+    # place (list mutation), so the project built AFTER it carries those spans for the
+    # overlay. The brief itself is structure only — the visible facts are the overlay's.
+    # _context_builder() is resolved INSIDE the try so an import/resolution failure on the
+    # live (flat) deploy fails safe — audit "unavailable" + FAILCLOSED — and NEVER raises
+    # uncaught out of render_grounded. (Codex PR3 BLOCKER: an armed render must ALWAYS
+    # emit the routing audit + fail closed, never propagate.)
+    try:
+        CB = _context_builder()
+        result = CB.build_flyer_brief(raw_text, locked_facts, customer)
+    except Exception as e:  # noqa: BLE001 — armed-but-unresolvable/throwing brain is unavailable, fail safe
+        _audit("unavailable")
+        return (FAILCLOSED, [f"creative_director_error:{type(e).__name__}"])
+
+    status = getattr(result, "status", "unavailable")
+    if status != "ok" or result.brief is None:
+        # "invalid" (firewall rejected) or "unavailable" (brain unreachable): fail safe to
+        # the existing fail-closed path → manual / honest reply. NEVER the legacy poster.
+        # ("disabled" cannot occur here — the gate already proved the flag is "1".)
+        _audit(status if status in {"invalid", "unavailable"} else "unavailable")
+        return (FAILCLOSED, [f"creative_director_{status}"] + list(getattr(result, "errors", []) or []))
+
+    # status == "ok": build the project from the (now span-augmented) locked facts and
+    # render via the CD path. The deterministic overlay places the required visible facts
+    # — required_fact_ids(locked_facts) ∩ locked_facts — from project.locked_facts (see
+    # render.collect_text_facts / _menu_overlay_payload) and fails closed if any required
+    # fact can't fit. Coverage of required_fact_ids was ALREADY enforced inside
+    # build_flyer_brief's validator (status would be "invalid" otherwise). Facts come from
+    # the overlay, never the model — the invariant.
+    project = _build_transient_project(customer, fields, locked_facts, raw_text, message_id, chat_id)
+    try:
+        png = _render_creative_director(project, result.brief.background_brief)
+    except Exception as e:  # noqa: BLE001 — overlay/background failure ⇒ fail safe, never legacy
+        _audit("ok")
+        return (FAILCLOSED, [f"creative_director_render_error:{type(e).__name__}"])
+
+    ok, blockers = run_visual_qa(png, project)
+    _audit("ok")
+    if ok:
+        if REVISION_APPLY_ENABLED:
+            _write_session(chat_id, project, "", raw_text, model=GEN_MODEL, pending=True)
+        return (SEND, png)
+    return (FAILCLOSED, blockers)
 
 
 # --- slice 2c: uniform-price-header revision-apply ----------------------------

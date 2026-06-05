@@ -4335,6 +4335,29 @@ class FlyerOperatorFlaggedWarnTier(_BaseEntry):
     note: str = Field(default="", max_length=500)
 
 
+class FlyerCreativeDirectorRouted(_BaseEntry):
+    """Records, on EVERY new-flyer bare render, whether the Creative-Director path
+    was taken (PR3 wiring). Emitted whether or not the flag is on, so the operator
+    can PROVE the caller from the audit log BEFORE enabling the feature:
+
+      - flag off / sender not allowlisted ⇒ creative_director_reached=False,
+        status="disabled" (flag off) or "not_allowlisted" (allowlist miss);
+      - enabled-for-sender ⇒ creative_director_reached=True and status mirrors the
+        BriefResult ("ok" | "invalid" | "unavailable").
+
+    ``module_version`` + ``module_file`` pin EXACTLY which code emitted the row so a
+    stale deployed copy is detectable. ``resolved_sender`` is the trusted phone/LID
+    bare_render resolves (never message content); ``allowlisted`` is the gate result."""
+    type: Literal["flyer_creative_director_routed"] = "flyer_creative_director_routed"
+    creative_director_reached: bool
+    creative_director_status: Literal["disabled", "ok", "invalid", "unavailable", "not_allowlisted"]
+    module_version: str = Field(min_length=1, max_length=120)
+    module_file: str = Field(default="", max_length=500)
+    resolved_sender: str = Field(default="", max_length=200)
+    allowlisted: bool = False
+    chat_id: str = Field(default="", max_length=200)
+
+
 class CateringLeadCreated(_BaseEntry):
     type: Literal["catering_lead_created"]
     lead_id: str = Field(min_length=1)
@@ -5670,6 +5693,8 @@ LogEntry = Annotated[
         Annotated[FlyerQASeverityClassified, Tag("flyer_qa_severity_classified")],
         Annotated[FlyerWarnTierDelivered, Tag("flyer_warn_tier_delivered")],
         Annotated[FlyerOperatorFlaggedWarnTier, Tag("flyer_operator_flagged_warn_tier")],
+        # PR3 2026-06-05 — Creative-Director wiring caller-provenance audit
+        Annotated[FlyerCreativeDirectorRouted, Tag("flyer_creative_director_routed")],
         # PR-ζ 2026-05-26 — chokepoint refusal audit variants
         Annotated[_RegulatedSendMissingActionContext, Tag("regulated_send_missing_action_context")],
         Annotated[_RegulatedSendLintViolation, Tag("regulated_send_lint_violation")],
@@ -5772,6 +5797,7 @@ __all__ = [
     "FlyerSourceContractExtracted", "FlyerSourceVsNewChosen", "FlyerHermesIntentDecision",
     "FlyerIntakeBypassed", "FlyerIntakeBypassOutcome",
     "FlyerQASeverityClassified", "FlyerWarnTierDelivered", "FlyerOperatorFlaggedWarnTier",
+    "FlyerCreativeDirectorRouted",
     # PR-ζ 2026-05-26 — regulated-intent runtime context + chokepoint audit variants
     "ActionExecutionContext",
     "FlyerVisualQAReport", "FlyerWarningSummary", "FlyerManualReview", "FlyerAsset", "FlyerConcept", "FlyerRevision",
