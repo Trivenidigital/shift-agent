@@ -54,7 +54,13 @@ _CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b",           # slash date "6/1", "06/01/2026" (Codex r4)
         r"\b\d{1,2}\.\d{1,2}\.\d{2,4}\b",              # dotted date "01.06.2026" (Codex r4)
         r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b",
-        r"\b(?:open|opens|opening|closes|closing|hours)\b",
+        # NB: bare open/opens/opening are intentionally NOT here — "open" is
+        # context-dependent (an "open central area" is a LAYOUT instruction, not a
+        # business-hours claim). It is classified separately by `_open_is_operational`
+        # and folded into `is_hard_fact_claim` below, so compositional uses pass while
+        # "now open" / "open daily" / "grand opening" stay caught. closes/closing/hours
+        # remain unconditional — they have no compositional sense.
+        r"\b(?:closes|closing|hours)\b",
         # superlative / guarantee price claims
         r"\b(?:lowest|cheapest|unbeatable|guaranteed?|#\s*1|number\s+one)\b",
         r"\b(?:best|low|great)\s+prices?\b",           # "best price(s)", "low prices" (Codex r2)
@@ -82,13 +88,141 @@ _CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
 # only when a digit co-occurs with a currency/percent/price token (covered
 # above), not for incidental digits.
 
+# ── context-aware "open" classification ─────────────────────────────────────
+# "open" is the one claim token that has both a business-operational sense
+# ("now open", "open daily", "grand opening") AND a benign compositional sense
+# ("an open central area left clear for text", "open layout"). A bare \bopen\b
+# regex over-blocked the compositional use (live false positive 2026-06-05:
+# the textless-background brief said "an open central area left clear for text"
+# and the firewall rejected it as an operational claim). We therefore classify
+# "open"/"opens"/"opening" by adjacent context instead of flagging the bare word.
+#
+# Classification is ANCHORED-PHRASE, default BENIGN (Codex round-3 redesign
+# 2026-06-05). The earlier window + broad-marker + default-operational design
+# over-blocked compositional text: bare "day"/"days" matched "Memorial Day" (so
+# "open layout for Memorial Day" — the real combo brief — was wrongly rejected),
+# and bare "soft"/"24"/"to N" matched "soft background"/"24 inch margin"/"to 3
+# inch margin". The fixed window could also miss a far operational marker. We now
+# detect operational "open" EXPLICITLY; everything else (incl. bare "open" and
+# every compositional phrase) is benign — no compositional-marker list, no window.
+#
+# Round-4 (Codex 2026-06-05): the token matches an optional "re"/"re-" prefix so
+# "reopen(ing|ed|s)" is an open token ("grand reopening", "newly reopened"); the
+# anchored tails were broadened to more genuine availability claims (weekends/
+# weekdays/all week/seven days, for breakfast|brunch|lunch|dinner, at|from|until
+# + clock|noon|midnight, 24/7|24 hours, opening soon, opening day) — each tail is
+# SPECIFIC so no new over-block appears; and the bare "until N" clause was removed
+# from (B) (it over-blocked "until 2 inches" and is redundant with the open tails).
+_OPEN_TOKEN_RE = re.compile(r"\b(?:re[- ]?)?open(?:ing|ed|s)?\b", re.IGNORECASE)
+
+# (A) Anchored open-phrase: an operational marker DIRECTLY adjacent to the open
+# token. These are launch / business-hours assertions that only read one way.
+# `_OPEN` is the open token (with optional re/re- prefix) reused in every tail.
+_OPEN = r"(?:re[- ]?)?open(?:ing|ed|s)?"
+_OPEN_ANCHORED_RE = re.compile(
+    # launch / status word immediately before "open": "now open", "grand opening",
+    # "we are open", "newly opened", "grand reopening", "newly reopened". The
+    # separator is LINEAR — \s*(?:-\s*)? : the leading \s* greedily eats spaces and
+    # the optional group only adds a literal hyphen + trailing spaces, so there is
+    # no overlapping-whitespace backtracking (round-5 ReDoS fix). "re" is NOT a
+    # prefix marker here — _OPEN already matches re[- ]?open..., so "reopen" /
+    # "grand reopening" are covered without the redundant (and overlap-prone) branch.
+    r"\b(?:now|currently|we\s+are|we['’]re|grand|soft|newly)\s*(?:-\s*)?"
+    + _OPEN + r"\b"
+    # "open" immediately followed by a hours/day/launch word: "open daily",
+    # "open now", "open for business", "open every day", "open monday", …
+    # The day tail allows an optional preposition ("open on weekends", "opens on
+    # Saturday", "open during the weekend") and full + plural weekday forms, with
+    # STRICT adjacency (open [on|during]? <day>) so a non-adjacent day stays benign.
+    r"|\b" + _OPEN + r"\s+(?:now|today|tonight|daily|late|"
+    r"every\s+day|all\s+day|all\s+week|seven\s+days|7\s+days|"
+    r"(?:(?:on|during)\s+)?(?:"
+    r"weekends?|weekdays?|"
+    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+    r"mondays|tuesdays|wednesdays|thursdays|fridays|saturdays|sundays|"
+    r"mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun))\b"
+    # "open for breakfast/brunch/lunch/dinner/business" — meal-service / business
+    # availability. NB: "open for seating/text/plating" is NOT here ⇒ stays benign.
+    r"|\b" + _OPEN + r"\s+for\s+(?:breakfast|brunch|lunch|dinner|business)\b"
+    # "open at/from/until/till 9 | noon | midnight": a service-hours assertion.
+    # "open at the center", "open until the margin" do NOT match (need a clock /
+    # noon / midnight tail, not a word).
+    r"|\b" + _OPEN + r"\s+(?:at|from|until|till|til)\s+(?:\d{1,2}\b|noon\b|midnight\b)"
+    # "open 9am" / "open 9:00": a clock time right after the token.
+    r"|\b" + _OPEN + r"\s+\d{1,2}\s*(?:am|pm|:\d{2})"
+    # "open 24/7" / "open 24 hours" / "open 24 hrs". NB: "open ... 24 inch" never
+    # matches (the tail requires /7 or hour(s)/hr(s), not a unit word).
+    r"|\b" + _OPEN + r"\s+(?:24\s*/\s*7|24\s*hours?|24\s*hrs?)\b"
+    # launch announcements: "opening soon", "opening day", "grand opening day".
+    r"|\b(?:grand\s+)?" + _OPEN + r"\s+soon\b"
+    r"|\b(?:grand\s+)?" + _OPEN + r"\s+day\b",
+    re.IGNORECASE,
+)
+
+# (B) A standalone business-hours / time signal ANYWHERE in the text. Combined
+# with the presence of any open token, this catches operational uses where the
+# time sits a few words away from "open" ("store open with clean seating, open
+# 9am-9pm") WITHOUT a fragile fixed window. ONLY unambiguous CLOCK shapes remain
+# (round-4): a layout margin like "3 inch"/"24 inch" or "until 2 inches" never
+# matches (no am/pm/colon, and the bare "until N" clause was removed).
+_TIME_SIGNAL_RE = re.compile(
+    r"\b\d{1,2}\s*(?:am|pm)\b"                       # "9am", "10 pm"
+    r"|\b\d{1,2}:\d{2}\b"                            # "9:00"
+    r"|\b\d{1,2}\s*(?:am|pm)\s*[-–—]\s*\d{1,2}\s*(?:am|pm)\b",  # "9am-9pm"
+    re.IGNORECASE,
+)
+
+# A bare "reopen" token is ALWAYS operational (round-5 MAJOR): unlike "open"
+# (which has a benign compositional sense — "open area/space"), "reopen" has NO
+# compositional meaning — it is always a launch/availability claim ("reopened",
+# "grand reopening", "reopens"). So we flag it directly, with no anchor required;
+# this cannot over-block. The leading \b prevents matching "re" inside more/store/
+# are/here/genre (those have a word char before "re" ⇒ no boundary), so
+# "store open"/"more open space"/"are open" stay benign (bare non-re "open").
+_REOPEN_TOKEN_RE = re.compile(r"\bre[- ]?open(?:ing|ed|s)?\b", re.IGNORECASE)
+
+
+def _open_is_operational(text: str) -> bool:
+    """Decide whether `text` uses "open" as a business-operational claim.
+
+    Operational (→ flag) if:
+      - a bare "reopen" token is present (reopen* has no benign sense — always a
+        launch/availability claim), OR
+      - the text contains an "open" token AND (A) an anchored open-phrase
+        ("now open", "open daily", "grand opening", "open until 10", "open 9am")
+        OR (B) a standalone clock-time signal anywhere ("9am-9pm") co-occurs.
+
+    Everything else is BENIGN (default): bare non-re "open", "open central area",
+    "open layout for Memorial Day", "store open", "are open", "soft background",
+    "24 inch margin", etc. No compositional-marker list and no window are needed —
+    only explicit operational shapes flag, so compositional phrasing (and bare
+    "open" with no operational signal) can never be mistaken for a claim."""
+    if not text:
+        return False
+    # reopen* is operational on its own — no open-token gate, no anchor needed.
+    if _REOPEN_TOKEN_RE.search(text):
+        return True
+    if not _OPEN_TOKEN_RE.search(text):
+        return False
+    if _OPEN_ANCHORED_RE.search(text):
+        return True
+    if _TIME_SIGNAL_RE.search(text):
+        return True
+    return False
+
 
 def is_hard_fact_claim(text: str) -> bool:
     """True if `text` smuggles a hard-fact-class claim (→ must be rejected)."""
     t = (text or "").strip()
     if not t:
         return True  # empty is not a usable item name → drop
-    return any(p.search(t) for p in _CLAIM_PATTERNS)
+    if any(p.search(t) for p in _CLAIM_PATTERNS):
+        return True
+    # "open" is handled separately (anchored-phrase) because it has a benign
+    # compositional sense the blanket patterns must not over-block.
+    if _open_is_operational(t):
+        return True
+    return False
 
 
 class CreativeFirewall:
