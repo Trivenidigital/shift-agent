@@ -2980,12 +2980,21 @@ def test_date_time_shape_hit_ignores_clear_ratios_n_gt_12(ratio):
 # ── clear-ratio operational pre-strip: EXPLICIT allowlist {16/9, 21/9} (no class rule) ──
 
 
-@pytest.mark.parametrize("ratio", ["16/9", "21/9", "16-9", "21-9"])
+@pytest.mark.parametrize("ratio", ["16/9", "21/9"])
 def test_strip_clear_ratios_neutralizes_allowlisted_widescreen(ratio):
-    """Round-4: the operational pre-strip neutralizes ONLY the explicitly-allowlisted
-    widescreen ratios (16/9, 21/9, "/" or "-") so they pass the operational scan."""
+    """Round-5 (BLOCKER 3, SLASH-ONLY): the operational pre-strip neutralizes ONLY the
+    explicitly-allowlisted SLASH widescreen ratios (16/9, 21/9) so they pass the operational
+    scan."""
     assert "ratio" in fbv._strip_clear_ratios(f"a {ratio} aspect").lower()
     assert ratio not in fbv._strip_clear_ratios(f"a {ratio} aspect")
+
+
+@pytest.mark.parametrize("hyphen", ["16-9", "21-9"])
+def test_strip_clear_ratios_does_not_exempt_hyphen_forms(hyphen):
+    """Round-5 (BLOCKER 3): the HYPHEN forms "16-9"/"21-9" are NOT exempt (a hyphen reads as
+    a range/time) — they are left intact and reject via the broad scan; only the slash forms
+    pass."""
+    assert fbv._strip_clear_ratios(f"a {hyphen} aspect") == f"a {hyphen} aspect", hyphen
 
 
 @pytest.mark.parametrize("tok", ["4/5", "6/15", "9/16", "16/10", "16/99", "12/25", "24/7"])
@@ -3112,4 +3121,137 @@ def test_validate_round4_combo_and_graduation_production_faithful_still_ok():
             "left clear. No words or lettering anywhere."
         ),
     ), _mdw_facts(), _COMBO_REQUEST).ok, "combo"
+    assert fbv.validate(_grad_brief(), _grad_facts(), _GRAD_REQUEST).ok, "graduation"
+
+
+# ── round-5 BLOCKER 1: scheduling/availability detector is AUTHORITATIVE (rejects) ──
+# The detector previously only GATED occasion stripping; a bare availability claim then
+# passed because ``_operational_claim_hit`` does not catch "available". Now a hit REJECTS
+# the field directly. CRITICAL: these tests use NO occasion token (the round-4 availability
+# tests passed for the wrong reason — they also contained "weekend").
+
+
+def _plain_facts_no_occasion() -> list[FlyerLockedFact]:
+    """Combo facts with NO campaign_title / occasion fact — so the only thing that can reject
+    an availability claim is the authoritative scheduling detector (not a stripped token)."""
+    return _combo_facts()
+
+
+def _plain_brief_no_occasion(**overrides) -> fb.FlyerBrief:
+    return _combo_brief(**overrides)
+
+
+@pytest.mark.parametrize("bg, why", [
+    ("A cookout scene, spots available, center clear", "spots available"),
+    ("A cookout scene, tables available, center clear", "tables available"),
+    ("A cookout scene, available now, center clear", "available now"),
+    ("A cookout scene, book a table, center clear", "book a table"),
+    ("A cookout scene, reserve a spot, center clear", "reserve a spot"),
+])
+def test_validate_scheduling_claim_rejects_without_occasion_token(bg, why):
+    """BLOCKER 1: an availability/booking claim with NO occasion token in background_brief →
+    ok=False via the AUTHORITATIVE scheduling rejection (it does not rely on stripping a
+    grounded token and does not rely on ``_operational_claim_hit`` catching "available")."""
+    brief = _plain_brief_no_occasion(background_brief=bg)
+    result = fbv.validate(brief, _plain_facts_no_occasion(), _COMBO_REQUEST)
+    assert result.ok is False, f"{why}: expected rejection, got ok"
+    assert any(e.startswith("scheduling/availability claim in textless background: background_brief:")
+               for e in result.errors), result.errors
+
+
+def test_scheduling_claim_hit_returns_substring_and_empty():
+    """BLOCKER 1 unit: ``_scheduling_claim_hit`` returns the matched claim substring (for the
+    error) and "" on clean text."""
+    assert fbv._scheduling_claim_hit("spots available") == "available"
+    assert fbv._scheduling_claim_hit("book a table") == "book"
+    assert fbv._scheduling_claim_hit("a warm cookout scene, center clear") == ""
+
+
+# ── round-5 BLOCKER 2: "open <date/occasion token>" rejects even with grounded occasion ──
+
+
+@pytest.mark.parametrize("bg, why", [
+    ("A Memorial Day weekend scene, open weekend, center clear", "open weekend"),
+    ("A Memorial Day weekend scene, open Saturday, center clear", "open Saturday"),
+    ("A scene, open Memorial Day weekend, center clear", "open Memorial Day weekend"),
+    ("A Memorial Day weekend scene, opens Saturday, center clear", "opens Saturday"),
+    ("A Memorial Day weekend scene, open this weekend, center clear", "open this weekend"),
+    ("A Memorial Day weekend scene, open for the weekend, center clear", "open for the weekend"),
+])
+def test_validate_open_date_occasion_rejects_even_when_grounded(bg, why):
+    """BLOCKER 2: "open <date/occasion token>" rejects EVEN with the grounded campaign_title
+    "Memorial Day Weekend" — caught on the ORIGINAL before stripping (stripping "weekend"
+    would else leave a benign-looking "open Memorial Day")."""
+    brief = _mdw_brief(background_brief=bg)
+    result = fbv.validate(brief, _mdw_facts(), _COMBO_REQUEST)
+    assert result.ok is False, f"{why}: expected rejection, got ok"
+    assert any("background_brief" in e for e in result.errors), result.errors
+
+
+@pytest.mark.parametrize("phrase, hit", [
+    ("open weekend", True),
+    ("open Saturday", True),
+    ("open Memorial Day weekend", True),
+    ("opens Saturday", True),
+    ("open this weekend", True),
+    ("re-open Monday", True),
+    # benign: not a date/occasion token directly after open (tight adjacency).
+    ("open central area", False),
+    ("open layout for Memorial Day", False),
+    ("an open background with negative space", False),
+    ("open space for plating", False),
+])
+def test_open_date_occasion_re_unit(phrase, hit):
+    """BLOCKER 2 unit: the open-<occasion> detector fires on a date/occasion token tightly
+    after "open" and stays benign for a layout word ("central"/"layout"/"space")."""
+    assert bool(fbv._OPEN_DATE_OCCASION_RE.search(phrase)) is hit, phrase
+
+
+def test_open_date_occasion_uses_same_vocab_as_exemption_allowlist():
+    """BLOCKER 2 guard: the open-<occasion> detector and the exemption allowlist share ONE
+    token vocabulary (``_DATE_OCCASION_TOKEN_ALT``) so they cannot drift — a token exempted
+    as an occasion theme is exactly a token that "open <token>" rejects."""
+    for tok in ("weekend", "saturday", "december", "memorial"):
+        assert fbv._DATE_OCCASION_CLASS_RE.match(tok), tok
+        assert fbv._OPEN_DATE_OCCASION_RE.search(f"open {tok}"), tok
+
+
+# ── round-5 BLOCKER 3: clear-ratio exemption is SLASH-ONLY end-to-end ──
+
+
+@pytest.mark.parametrize("bg, why", [
+    ("A Memorial Day weekend scene, 16-9 aspect, center clear", "16-9 hyphen"),
+    ("A Memorial Day weekend scene, 21-9 aspect, center clear", "21-9 hyphen"),
+])
+def test_validate_hyphen_ratio_rejects(bg, why):
+    """BLOCKER 3 end-to-end: the HYPHEN ratio forms "16-9"/"21-9" in background_brief →
+    ok=False (a hyphen reads as a range/time; only the slash forms are exempt)."""
+    brief = _mdw_brief(background_brief=bg)
+    result = fbv.validate(brief, _mdw_facts(), _COMBO_REQUEST)
+    assert result.ok is False, f"{why}: expected rejection, got ok"
+    assert any("background_brief" in e for e in result.errors), result.errors
+
+
+@pytest.mark.parametrize("bg", [
+    "A Memorial Day weekend cookout scene, 16/9 aspect, center clear, no words",
+    "A Memorial Day weekend cookout scene, 21/9 aspect, center clear, no words",
+])
+def test_validate_slash_ratio_still_passes(bg):
+    """BLOCKER 3 guard: the SLASH ratio forms "16/9"/"21/9" still pass end-to-end (the
+    slash-only narrowing did not break the clear-ratio exemption)."""
+    brief = _mdw_brief(background_brief=bg)
+    result = fbv.validate(brief, _mdw_facts(), _COMBO_REQUEST)
+    assert result.ok is True, (bg, result.errors)
+
+
+# ── round-5 KEEP green: no allow-leak, pure theme + clear ratios still pass ──
+
+
+def test_validate_round5_keep_green_theme_and_production_faithful():
+    """KEEP: the pure occasion theme (no scheduling verb, no open-<occasion>, no ambiguous
+    slash) + combo/graduation production-faithful still validate; round-1 BLOCKERs closed."""
+    assert fbv.validate(_mdw_brief(
+        background_brief="Memorial Day weekend cookout scene, open central area, no words anywhere",
+    ), _mdw_facts(), _COMBO_REQUEST).ok, "theme"
+    assert fbv.validate(_combo_brief(), _combo_facts(), _COMBO_REQUEST).ok, "combo"
     assert fbv.validate(_grad_brief(), _grad_facts(), _GRAD_REQUEST).ok, "graduation"
