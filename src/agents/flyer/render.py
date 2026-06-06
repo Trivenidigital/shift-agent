@@ -609,7 +609,17 @@ def _detail_clauses(project: FlyerProject) -> list[str]:
             continue
         if phones and current_contact_digits and all(phone != current_contact_digits for phone in phones):
             continue
-        add_detail(clause)
+        # A run-on free-text clause with no sentence breaks can exceed one detail line's
+        # legible capacity (`_clean_fact_text`'s limit). The 2026-06-06 graduation request
+        # arrived as one 197-char clause because `fields.notes` is newline-flattened, so the
+        # newline split above could not separate it. Its offer/price content is already locked
+        # as structured offer:/pricing_structure facts (added at the top of this function), so
+        # skip the redundant over-long *supplementary* clause instead of failing the whole
+        # render. Structured facts (above) and menu items (below) keep their hard fail-closed.
+        try:
+            add_detail(clause)
+        except FlyerRenderError:
+            continue
     for item in menu_items:
         add_detail(item)
     # Fail closed when the combined critical facts exceed one flyer's legible capacity.
