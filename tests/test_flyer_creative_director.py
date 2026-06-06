@@ -704,6 +704,103 @@ def test_validate_must_not_add_invented_offer_phrase_not_grounded_by_different_o
                for e in result.errors), result.errors
 
 
+# ── (c) round-5 BLOCKER: residual invented-offer words ALL-HITS (unconditional) ─
+
+
+def test_validate_rejects_grounded_percent_then_invented_cashback_residual():
+    """ALL-HITS residual (round-5 BLOCKER): a GROUNDED "20% off" FOLLOWED by an
+    INVENTED residual word "cashback" → ok=False. The residual scan is UNCONDITIONAL
+    (no longer gated behind "no numeric token"), so the grounded "20% off" no longer
+    lets "cashback" ride."""
+    brief = _grad_brief(
+        offer_structure="Lead with 20% off, and cashback on top.",
+    )
+    result = fbv.validate(brief, _grad_facts(), _GRAD_REQUEST)
+    assert result.ok is False
+    assert any(e.startswith("invented commercial value in offer_structure:")
+               and "cashback" in e for e in result.errors), result.errors
+
+
+def test_validate_rejects_grounded_phrase_then_invented_cashback_residual():
+    """ALL-HITS residual: a GROUNDED offer phrase "free delivery" FOLLOWED by an
+    INVENTED "cashback" → ok=False (rejected on cashback)."""
+    brief = _grad_brief_with_service(
+        offer_structure="Mention free delivery, and cashback too.",
+    )
+    result = fbv.validate(brief, _grad_facts_with_service(), _GRAD_REQUEST)
+    assert result.ok is False
+    assert any(e.startswith("invented commercial value in offer_structure:")
+               and "cashback" in e for e in result.errors), result.errors
+
+
+def test_validate_must_not_add_invented_residual_after_grounded_percent():
+    """ALL-HITS residual in must_not_add (round-5 BLOCKER): "no 20% off and cashback
+    badge" → ok=False (rejected on the invented "cashback", which previously rode the
+    grounded "20% off")."""
+    brief = _grad_brief(must_not_add=["no 20% off and cashback badge"])
+    result = fbv.validate(brief, _grad_facts(), _GRAD_REQUEST)
+    assert result.ok is False
+    assert any("must_not_add invents commercial value" in e and "cashback" in e
+               for e in result.errors), result.errors
+
+
+def test_validate_allows_grounded_residual_word_in_non_rendering():
+    """OVER-BLOCK GUARD: a residual word that IS grounded — "discount" backed by a
+    referenced+required locked tagline "Member discount for all guests" — passes."""
+    facts = _grad_facts() + [
+        FlyerLockedFact(fact_id="tagline", label="Tagline",
+                        value="Member discount for all guests",
+                        source="customer_text", required=True),
+    ]
+    brief = _grad_brief(
+        offer_structure="Highlight the discount on the headline card.",
+        fact_refs=list(_grad_brief().fact_refs)
+        + [fb.FactRef(fact_id="tagline", provenance="locked")],
+    )
+    result = fbv.validate(brief, facts, _GRAD_REQUEST)
+    assert result.ok is True, result.errors
+
+
+def test_validate_rejects_invented_residual_word_no_fact():
+    """An invented residual word with NO locked fact (a "voucher" nobody locked) →
+    ok=False."""
+    brief = _grad_brief(
+        offer_structure="Add a mystery voucher to each order.",
+    )
+    result = fbv.validate(brief, _grad_facts(), _GRAD_REQUEST)
+    assert result.ok is False
+    assert any(e.startswith("invented commercial value in offer_structure:")
+               and "voucher" in e for e in result.errors), result.errors
+
+
+# ── (c) round-5 PRECISION GUARD: structural combo words NOT over-blocked ──────
+
+
+def test_validate_production_combo_still_ok_after_residual_change():
+    """OVER-BLOCK GUARD (round-5): the production-faithful combo brief still validates
+    — structural "combo"/"price" words are NOT in the residual invented-offer set."""
+    result = fbv.validate(_combo_brief(), _combo_facts(), _COMBO_REQUEST)
+    assert result.ok is True, result.errors
+
+
+def test_validate_combo_price_structural_words_not_overblocked():
+    """A combo offer_structure that literally says "combo price" is NOT flagged — it
+    is a STRUCTURAL phrase (the real price is a grounded overlay fact), excluded from
+    ``_RESIDUAL_DISCOUNT_WORD_RE`` (kept aggressive only on the background hard line)."""
+    brief = _combo_brief(
+        offer_structure="Two combo cards; combo price shown large on each card.",
+    )
+    result = fbv.validate(brief, _combo_facts(), _COMBO_REQUEST)
+    assert result.ok is True, result.errors
+    assert not any("invented commercial value" in e for e in result.errors), result.errors
+
+
+def test_validate_graduation_still_ok_after_residual_change():
+    """OVER-BLOCK GUARD (round-5): the graduation/discount brief still validates."""
+    result = fbv.validate(_grad_brief(), _grad_facts(), _GRAD_REQUEST)
+    assert result.ok is True, result.errors
+
+
 # ── (c) round-4 MAJOR: open-claims all-hits ──────────────────────────────────
 
 
@@ -1137,6 +1234,35 @@ def test_first_ungrounded_commercial_offer_phrase_all_hits_and_grounding():
     pct_allowed = [fbv._norm_ws("20% off all catering orders")]
     out = fbv._first_ungrounded_commercial("20% off and BOGO free", pct_allowed)
     assert out and "bogo" in out.lower()
+
+
+def test_first_ungrounded_commercial_residual_words_all_hits_unconditional():
+    """ROUND-5 BLOCKER: residual invented-offer words (cashback/discount/voucher/...)
+    are ALL-HITS and UNCONDITIONAL — a grounded numeric token does NOT skip them."""
+    pct_allowed = [fbv._norm_ws("20% off all catering orders")]
+    # grounded "20% off" + invented "cashback" → returns "cashback" (not skipped).
+    # (use "rewards" not an offer-word like "bonus", which scan-2 would catch first.)
+    out = fbv._first_ungrounded_commercial("20% off and cashback rewards", pct_allowed)
+    assert out and "cashback" in out.lower()
+    # grounded "20% off" alone → "".
+    assert fbv._first_ungrounded_commercial("just 20% off", pct_allowed) == ""
+    # a residual word grounded in a locked value → "".
+    disc_allowed = [fbv._norm_ws("Member discount for all guests")]
+    assert fbv._first_ungrounded_commercial("the discount card", disc_allowed) == ""
+    # invented residual word, no fact → returned.
+    assert fbv._first_ungrounded_commercial("a voucher giveaway", []) == "voucher"
+
+
+def test_residual_discount_word_re_excludes_structural_combo_words():
+    """ROUND-5 PRECISION: structural words ("combo price"/"price"/"combo") are NOT in
+    the residual invented-offer set (so the combo is not over-blocked); genuine
+    invented-offer words ARE."""
+    assert fbv._RESIDUAL_DISCOUNT_WORD_RE.search("combo price layout") is None
+    assert fbv._RESIDUAL_DISCOUNT_WORD_RE.search("two combo cards") is None
+    assert fbv._RESIDUAL_DISCOUNT_WORD_RE.search("price shown large") is None
+    assert fbv._RESIDUAL_DISCOUNT_WORD_RE.search("cashback offer") is not None
+    assert fbv._RESIDUAL_DISCOUNT_WORD_RE.search("a discount") is not None
+    assert fbv._RESIDUAL_DISCOUNT_WORD_RE.search("voucher code") is not None
 
 
 def test_strict_operational_hits_bare_service_words():

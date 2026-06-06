@@ -82,10 +82,29 @@ _DISCOUNT_CLAIM_RE = re.compile(
 # non-rendering / must_not_add commercial scan; each phrase is grounded as a WHOLE via
 # ``_phrase_is_grounded`` so an invented "free dessert" cannot ride a locked "free
 # delivery". (currency/percent/price/phone shapes are handled by the numeric token
-# path; bare "discount"/"cashback"/"combo price" by the _commercial_value_hit residual.)
+# path; standalone invented-offer WORDS by ``_RESIDUAL_DISCOUNT_WORD_RE`` below.)
 _DISCOUNT_OFFER_PHRASE_RE = re.compile(
     r"\b(?:bogo|buy\s+one\s+get(?:\s+one)?(?:\s+free)?)\b"
     r"|\b(?:free|complimentary|gift|bonus)(?:\s+[a-z][a-z'-]+)?",
+    re.IGNORECASE,
+)
+# Residual standalone invented-offer WORDS — GENUINE discount signals not already
+# covered by the numeric-token / offer-phrase scans (operator round-5 BLOCKER). Each
+# is matched ALL-HITS and grounded as a whole word via ``_phrase_is_grounded`` (a
+# locked value containing "discount" grounds a planning "discount"; an invented
+# "cashback" with no fact rejects). PRECISION (operator round-5 guard): "combo
+# price" / "price" / "combo" are STRUCTURAL words (the real price is a grounded
+# overlay fact), NOT discount CLAIMS — they are DELIBERATELY EXCLUDED here so the
+# combo's offer_structure ("two combo cards", "combo price layout") is not over-
+# blocked. Kept aggressive in ``_DISCOUNT_CLAIM_RE`` for the render-reaching
+# background_brief HARD LINE (where "combo price" reaching pixels is a price claim).
+# Operator's explicit genuine-invented-offer set (cashback, rebate, discount,
+# voucher, coupon) + the "cash back" spaced variant. BOGO / "buy one get one" are
+# already all-hits via ``_DISCOUNT_OFFER_PHRASE_RE`` (scan 2). Intentionally NARROW —
+# no "promo"/"promotion"/"deal"/"clearance" (those have benign creative/structural
+# uses and are not in the operator's list).
+_RESIDUAL_DISCOUNT_WORD_RE = re.compile(
+    r"\b(?:cashback|cash\s+back|rebate|discount(?:ed)?|voucher|coupon)\b",
     re.IGNORECASE,
 )
 # Phone-like contiguous digit run (mirror visual_qa._PHONE_RUN_RE shape): 8+ chars
@@ -255,23 +274,26 @@ def _first_ungrounded_commercial(text: str, allowed_values: Sequence[str]) -> st
     commercial value is grounded in an OVERLAY-RENDERED locked value. "" is also
     returned for text with NO commercial content (clean).
 
-    ALL-HITS (Codex BLOCKERs + operator round-4): a field/entry passes ONLY when
+    ALL-HITS (Codex BLOCKERs + operator rounds 4-5): a field/entry passes ONLY when
     EVERY commercial value it carries is grounded — a grounded value FOLLOWED by an
-    invented one (e.g. "20% off and $5 off", or "20% off and BOGO free") is rejected
-    on the invented one. Three independent ALL-HITS scans:
-      - whole digit-bearing tokens (full percentage / currency / bare price / phone
-        digit-run) each grounded via ``_token_is_grounded`` (NOT a loose substring —
-        "30%" does not ground against a locked "20%");
-      - non-numeric discount/offer PHRASES (free X / complimentary X / gift X / bonus
-        X / BOGO / "buy one get one") each grounded as a WHOLE PHRASE via
-        ``_phrase_is_grounded`` (operator round-4 BLOCKER 2) — so an invented "free
-        dessert" does NOT ride a locked "free delivery", and a grounded "free
-        delivery" is not double-rejected by the commercial path; scanned regardless of
-        whether numeric tokens are also present;
-      - any RESIDUAL non-numeric commercial hit (bare "discount"/"cashback"/"combo
-        price") from ``_commercial_value_hit`` not already covered above, grounded as
-        a whole word.
-    The first ungrounded value found (in that order) is returned. Used by BOTH the
+    invented one (e.g. "20% off and $5 off", "20% off and BOGO free", "20% off and
+    cashback") is rejected on the invented one. THREE INDEPENDENT, UNCONDITIONAL,
+    ALL-HITS scans (each its own ``finditer``, each grounded via ``_phrase_is_grounded``
+    / ``_token_is_grounded``, NONE gated behind the others — operator round-5):
+      - (1) whole digit-bearing tokens (full percentage / currency / bare price /
+        phone digit-run) each grounded via ``_token_is_grounded`` (NOT a loose
+        substring — "30%" does not ground against a locked "20%");
+      - (2) non-numeric discount/offer PHRASES (free X / complimentary X / gift X /
+        bonus X / BOGO / "buy one get one") each grounded as a WHOLE PHRASE — so an
+        invented "free dessert" does NOT ride a locked "free delivery", and a grounded
+        "free delivery" is not double-rejected;
+      - (3) residual standalone invented-offer WORDS (cashback / rebate / discount /
+        voucher / coupon — ``_RESIDUAL_DISCOUNT_WORD_RE``) each grounded as a whole
+        word; UNCONDITIONAL (not gated behind a "no numeric token" guard), so
+        "20% off and cashback" rejects on "cashback" even though "20% off" grounds.
+        Structural words ("combo price"/"price"/"combo") are EXCLUDED from this set so
+        the combo is not over-blocked.
+    The first ungrounded value across the three scans is returned. Used by BOTH the
     non-rendering free-text scan AND the must_not_add invented-commercial check so the
     two agree on grounding; the strict render-reaching path and the must_not_add
     locked-value containment check are unaffected."""
@@ -286,16 +308,12 @@ def _first_ungrounded_commercial(text: str, allowed_values: Sequence[str]) -> st
                    for m in _DISCOUNT_OFFER_PHRASE_RE.finditer(text)):
         if phrase and not _phrase_is_grounded(phrase, allowed_values):
             return phrase
-    # (3) residual non-numeric commercial shape (discount/cashback/combo price) not
-    # already covered by (1)/(2) — grounded as a whole word.
-    if not _commercial_grounding_tokens(text):
-        hit = _commercial_value_hit(text)
-        if (
-            hit
-            and not _DISCOUNT_OFFER_PHRASE_RE.search(hit)
-            and not _phrase_is_grounded(hit, allowed_values)
-        ):
-            return hit
+    # (3) residual standalone invented-offer words — all-hits, UNCONDITIONAL, whole-
+    # word grounded (operator round-5: no "no numeric token" gate, no first-hit).
+    for word in (" ".join(m.group(0).split())
+                 for m in _RESIDUAL_DISCOUNT_WORD_RE.finditer(text)):
+        if word and not _phrase_is_grounded(word, allowed_values):
+            return word
     return ""
 
 
@@ -1068,12 +1086,13 @@ def validate(
     # scan: an entry like "no $19.99 price badge" smuggles an INVENTED price (a
     # commercial value that is NOT one of the locked values) into the brief via the
     # suppression list, where checks (c)/(d) never looked. Reject any must_not_add
-    # whose commercial shape (currency/bare-price/percent/discount/phone-run) is not
-    # one of the locked-fact values — TOKEN-ANCHORED, ALL-HITS (Codex BLOCKER 2): the
-    # same grounding as the non-rendering free-text scan, so "no 30% off badge" is NOT
-    # falsely grounded by a locked "20% off ..." (the truncated "0%" substring would
-    # have been). A suppression naming a REAL locked commercial value is already
-    # caught by the containment check below (unchanged).
+    # whose commercial value (numeric token / offer phrase / residual offer word) is
+    # not grounded in a locked-fact value — the SAME three-scan ALL-HITS grounding as
+    # the non-rendering free-text scan (``_first_ungrounded_commercial``). So "no 30%
+    # off badge" is not falsely grounded by a locked "20% off ..." and "no 20% off and
+    # cashback badge" rejects on the invented "cashback" (operator round-5). A
+    # suppression naming a REAL locked commercial value is already caught by the
+    # containment check below (unchanged).
     for entry in brief.must_not_add:
         norm_entry = _norm_ws(entry)
         if not norm_entry:
