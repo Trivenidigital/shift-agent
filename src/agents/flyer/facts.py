@@ -14,9 +14,17 @@ from schemas import (
     FlyerSourceContract,
 )
 try:
-    from flyer_semantic_brief import build_hermes_semantic_brief_provider, build_semantic_flyer_brief  # type: ignore
+    from flyer_semantic_brief import (  # type: ignore
+        _offer_is_faithful as _semantic_offer_is_faithful,
+        build_hermes_semantic_brief_provider,
+        build_semantic_flyer_brief,
+    )
 except ImportError:
-    from agents.flyer.semantic_brief import build_hermes_semantic_brief_provider, build_semantic_flyer_brief
+    from agents.flyer.semantic_brief import (
+        _offer_is_faithful as _semantic_offer_is_faithful,
+        build_hermes_semantic_brief_provider,
+        build_semantic_flyer_brief,
+    )
 try:
     import flyer_creative_planner as _creative_planner  # type: ignore
 except ImportError:
@@ -606,10 +614,19 @@ def extract_text_facts(
     ]:
         if item:
             facts.append(item)
-    for index, offer in enumerate(semantic_brief.offers):
-        item = _fact(f"offer:{index}", "Offer", offer.text, "customer_text", message_id=message_id)
+    # An `offer:N` fact is REQUIRED and customer-visible. `build_semantic_flyer_brief`
+    # already bounds provider offers to faithful spans; this re-checks at the fact
+    # boundary so NO offer source (provider, deterministic fallback, or any future
+    # producer) can lock a request-tail echo / over-captured paragraph as a required
+    # fact. Faithful offers are unchanged; only unbounded/echo values are dropped.
+    offer_index = 0
+    for offer in semantic_brief.offers:
+        if not _semantic_offer_is_faithful(offer.text):
+            continue
+        item = _fact(f"offer:{offer_index}", "Offer", offer.text, "customer_text", message_id=message_id)
         if item:
             facts.append(item)
+            offer_index += 1
     parsed_schedule = _schedule_fact(text, message_id=message_id)
     if semantic_brief.schedule and not parsed_schedule:
         item = _fact("schedule", "Schedule", semantic_brief.schedule, "customer_text", message_id=message_id)
