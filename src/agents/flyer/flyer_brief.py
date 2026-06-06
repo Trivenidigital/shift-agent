@@ -53,9 +53,17 @@ class VisualDirection(BaseModel):
 class FactRef(BaseModel):
     """A reference to a commercial/visible fact — never the fact's value inline.
 
-    EXACTLY ONE of ``fact_id`` / ``raw_span`` is set, and provenance must match:
-      - ``fact_id`` set  ⇒ ``provenance == "locked"``      (an existing locked fact)
-      - ``raw_span`` set ⇒ ``provenance == "customer_text"`` (a verbatim request span)
+    EXACTLY ONE of ``fact_id`` / ``raw_span`` is set; ``provenance`` is DERIVED
+    deterministically from which form is present (never trusted from the model):
+      - ``fact_id`` set  ⇒ ``provenance = "locked"``        (an existing locked fact)
+      - ``raw_span`` set ⇒ ``provenance = "customer_text"`` (a verbatim request span)
+
+    The form (which field is populated) is the authority; ``provenance`` is a
+    convenience label the firewall computes. A model that mislabels provenance
+    (e.g. ``fact_id`` + ``provenance="customer_text"``) must NOT fail the brief —
+    the value is COERCED to the form-derived provenance, and ``provenance`` may be
+    omitted entirely (it is then derived). Only an ambiguous reference (both forms
+    set, or neither) is rejected.
 
     A ``raw_span`` is *validation evidence only*; deterministic code materializes
     it into a ``FlyerLockedFact(source="customer_text")`` before render. The skill
@@ -66,19 +74,20 @@ class FactRef(BaseModel):
 
     fact_id: Optional[str] = Field(default=None, max_length=120)
     raw_span: Optional[str] = Field(default=None, max_length=500)
-    provenance: FactProvenance
+    # Optional + derived: a model mislabel (or omission) must not fail the brief;
+    # ``_derive_provenance`` overrides whatever (if anything) the model supplied.
+    provenance: Optional[FactProvenance] = None
 
     @model_validator(mode="after")
-    def _exactly_one_form(self) -> "FactRef":
+    def _derive_provenance(self) -> "FactRef":
         has_id = bool((self.fact_id or "").strip())
         has_span = bool((self.raw_span or "").strip())
         if has_id == has_span:
-            # both set OR neither set — ambiguous / empty reference
+            # both set OR neither set — ambiguous / empty reference (still rejected)
             raise ValueError("FactRef requires exactly one of fact_id or raw_span")
-        if has_id and self.provenance != "locked":
-            raise ValueError("fact_id requires provenance='locked'")
-        if has_span and self.provenance != "customer_text":
-            raise ValueError("raw_span requires provenance='customer_text'")
+        # The form is the sole authority: COERCE provenance to match it, overriding
+        # any model-supplied (or omitted) value so a mislabel never fails the brief.
+        self.provenance = "locked" if has_id else "customer_text"
         return self
 
 

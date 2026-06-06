@@ -117,12 +117,30 @@ def test_factref_requires_exactly_one_form():
     # invalid: neither set
     with pytest.raises(ValidationError):
         fb.FactRef(provenance="locked")
-    # invalid: provenance/form mismatch (fact_id with customer_text)
+    # invalid: neither set, no provenance either
     with pytest.raises(ValidationError):
-        fb.FactRef(fact_id="business_name", provenance="customer_text")
-    # invalid: provenance/form mismatch (raw_span with locked)
-    with pytest.raises(ValidationError):
-        fb.FactRef(raw_span="x", provenance="locked")
+        fb.FactRef()
+
+
+def test_factref_provenance_is_derived_not_trusted():
+    """A model MISLABEL of provenance must NOT fail the brief — the form
+    (fact_id vs raw_span) is the sole authority and provenance is COERCED to it
+    (firewall contract: a mislabel makes the model more compliant, never fails)."""
+    # fact_id + WRONG provenance="customer_text" ⇒ coerced to "locked" (not rejected).
+    ref = fb.FactRef(fact_id="offer:0", provenance="customer_text")
+    assert ref.provenance == "locked"
+    assert ref.fact_id == "offer:0"
+    # raw_span + WRONG provenance="locked" ⇒ coerced to "customer_text" (not rejected).
+    ref = fb.FactRef(raw_span="Non Veg Combo", provenance="locked")
+    assert ref.provenance == "customer_text"
+    assert ref.raw_span == "Non Veg Combo"
+
+
+def test_factref_provenance_optional_and_derived_when_omitted():
+    """provenance may be OMITTED entirely (the model need not supply it) — it is
+    then derived from the form."""
+    assert fb.FactRef(fact_id="business_name").provenance == "locked"
+    assert fb.FactRef(raw_span="Veg Combo").provenance == "customer_text"
 
 
 def test_flyer_brief_forbids_extra_fields():
@@ -740,6 +758,58 @@ def test_b2_group_referencing_coarse_offer_directly_is_valid():
     assert result.ok is True, result.errors
     assert result.errors == []
     assert result.warnings == []
+
+
+def test_representative_combo_brief_validates_ok_true():
+    """Deliverable contract: the representative live combo request — coarse
+    offer:0 / offer:1 + campaign_title + identity facts, ALL fact_refs by fact_id,
+    NO commercial values in any free-text field — validates ok=True. This is the
+    shape the SKILL.md HARD OUTPUT RULES steer the model toward (the previously
+    failing combo case)."""
+    facts = _coarse_offer_facts()
+    # sanity: the fixture is exactly that fact set (coarse offers + occasion + identity)
+    assert {f.fact_id for f in facts} == {
+        "business_name", "contact_phone", "location",
+        "campaign_title", "offer:0", "offer:1",
+    }
+    brief = _combo_brief(
+        request_intent="combo_offer",
+        offer_structure="Two combo cards side by side, each with its own name and price.",
+        layout_strategy="Headline band on top, two equal cards below, contact footer.",
+        grouping=["combo one card", "combo two card"],
+        background_brief="A textless patriotic cookout spread with bunting, central area left clear.",
+        fact_refs=_coarse_offer_fact_refs(),  # every required fact, all by fact_id
+        offer_groups=[
+            fb.OfferGroup(kind="combo", title_ref="offer:0"),
+            fb.OfferGroup(kind="combo", title_ref="offer:1"),
+        ],
+    )
+    result = fbv.validate(brief, facts, _COMBO_REQUEST)
+    assert result.ok is True, result.errors
+    assert result.errors == []
+
+
+def test_representative_combo_brief_validates_even_with_mislabeled_provenance():
+    """The same representative combo with the model MISLABELING provenance on every
+    fact_id ref (provenance="customer_text") still validates ok=True — the coerce
+    in FactRef makes the brief satisfiable instead of raising at model_validate."""
+    facts = _coarse_offer_facts()
+    mislabeled_refs = [
+        fb.FactRef(fact_id=r.fact_id, provenance="customer_text")  # WRONG label
+        for r in _coarse_offer_fact_refs()
+    ]
+    # every ref got coerced back to "locked" (the form is authoritative).
+    assert all(r.provenance == "locked" for r in mislabeled_refs)
+    brief = _combo_brief(
+        request_intent="combo_offer",
+        fact_refs=mislabeled_refs,
+        offer_groups=[
+            fb.OfferGroup(kind="combo", title_ref="offer:0"),
+            fb.OfferGroup(kind="combo", title_ref="offer:1"),
+        ],
+    )
+    result = fbv.validate(brief, facts, _COMBO_REQUEST)
+    assert result.ok is True, result.errors
 
 
 def test_b2_coarse_offer_groups_never_mask_a_missing_required_fact():
