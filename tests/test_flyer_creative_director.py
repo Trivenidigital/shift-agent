@@ -801,6 +801,181 @@ def test_validate_graduation_still_ok_after_residual_change():
     assert result.ok is True, result.errors
 
 
+# ── (c) 2026-06-06 PRECISION FIX: generic "discount" dropped from residual scan ─
+# The live graduation/discount fail-close: the model's must_not_add carried "no prices
+# other than the stated discount" — a LEGITIMATE suppression referring to the grounded
+# pricing_structure ("20% off entire order") — yet the residual scan flagged the GENERIC
+# word "discount" as an invented commercial value, fail-closing a valid flyer. Fix:
+# remove generic "discount"/"discounted" from the NON-rendering ``_RESIDUAL_DISCOUNT_WORD_RE``
+# residual scan ONLY. The background_brief HARD LINE (``_DISCOUNT_CLAIM_RE``) is untouched,
+# and specific invented discounts (numeric / named offer-type / BOGO) are still caught.
+
+
+def _grad_facts_entire_order() -> list[FlyerLockedFact]:
+    """Production-faithful graduation facts mirroring the LIVE 2026-06-06 case:
+    identity (customer_profile, required) + campaign_title "Graduation Parties 2026"
+    + pricing_structure "20% off entire order" (customer_text, required). Values match
+    the live model output that fail-closed (the only locked offer is the 20% discount)."""
+    return [
+        FlyerLockedFact(fact_id="business_name", label="Business",
+                        value="Lakshmi's Kitchen", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="contact_phone", label="Contact",
+                        value="+1 732 555 0104", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="location", label="Location",
+                        value="90 Brybar Dr", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="campaign_title", label="Campaign",
+                        value="Graduation Parties 2026", source="customer_text", required=True),
+        FlyerLockedFact(fact_id="pricing_structure", label="Pricing",
+                        value="20% off entire order", source="customer_text", required=True),
+    ]
+
+
+_GRAD_ENTIRE_ORDER_REQUEST = (
+    "Make a Graduation Parties 2026 flyer for Lakshmi's Kitchen — 20% off entire order."
+)
+
+
+def _grad_brief_entire_order(**overrides) -> fb.FlyerBrief:
+    """A representative graduation brief whose locked offer is the 20% discount, with
+    fact_refs covering all required facts (coverage(e) passes). Clean planning defaults
+    so the only value under test is what a case injects."""
+    data = dict(
+        request_intent="new",
+        visual_direction=fb.VisualDirection(
+            theme_family="Graduation celebration",
+            palette=["gold", "navy", "white"],
+            motifs=["graduation caps"],
+            visual_subjects=["celebration table spread"],
+        ),
+        offer_structure="One headline card with the 20% off entire order callout.",
+        layout_strategy="Headline band on top, callout in the middle, contact footer.",
+        background_brief="A textless graduation celebration background, central area clear.",
+        fact_refs=[
+            fb.FactRef(fact_id="business_name", provenance="locked"),
+            fb.FactRef(fact_id="contact_phone", provenance="locked"),
+            fb.FactRef(fact_id="location", provenance="locked"),
+            fb.FactRef(fact_id="campaign_title", provenance="locked"),
+            fb.FactRef(fact_id="pricing_structure", provenance="locked"),
+        ],
+        offer_groups=[],
+    )
+    data.update(overrides)
+    return fb.FlyerBrief(**data)
+
+
+def test_validate_must_not_add_stated_discount_reference_is_grounded():
+    """LIVE REGRESSION (2026-06-06): must_not_add=["no prices other than the stated
+    discount"] with locked pricing_structure="20% off entire order" (required) →
+    ok=True. The entry is a LEGITIMATE suppression referring to the grounded offer; the
+    generic word "discount" must NOT be flagged as an invented commercial value."""
+    brief = _grad_brief_entire_order(
+        must_not_add=["no prices other than the stated discount"],
+    )
+    result = fbv.validate(brief, _grad_facts_entire_order(), _GRAD_ENTIRE_ORDER_REQUEST)
+    assert result.ok is True, result.errors
+    assert not any("invents commercial value" in e for e in result.errors), result.errors
+
+
+def test_validate_production_graduation_must_not_add_stated_discount_ok():
+    """PRODUCTION-FAITHFUL graduation (campaign_title "Graduation Parties 2026" +
+    pricing_structure "20% off entire order", required): a representative brief whose
+    must_not_add includes the live "no prices other than the stated discount" entry
+    alongside other plausible suppressions → ok=True."""
+    brief = _grad_brief_entire_order(
+        must_not_add=[
+            "no unrelated events",
+            "no extra offers",
+            "no prices other than the stated discount",
+        ],
+    )
+    result = fbv.validate(brief, _grad_facts_entire_order(), _GRAD_ENTIRE_ORDER_REQUEST)
+    assert result.ok is True, result.errors
+
+
+def test_validate_bare_generic_discount_in_non_rendering_field_ok():
+    """A bare generic "discount" in a NON-rendering planning field (offer_structure),
+    backed by the grounded pricing_structure, → ok=True (generic category word dropped
+    from the residual scan; it refers to the stated offer)."""
+    brief = _grad_brief_entire_order(
+        offer_structure="Highlight the discount prominently on the headline card.",
+    )
+    result = fbv.validate(brief, _grad_facts_entire_order(), _GRAD_ENTIRE_ORDER_REQUEST)
+    assert result.ok is True, result.errors
+
+
+# ── bypass NOT reopened: specific invented offers still fail-close ────────────
+
+
+def test_validate_must_not_add_invented_cashback_still_closed():
+    """BYPASS GUARD: must_not_add=["no cashback badge"] with NO locked cashback fact →
+    ok=False. The SPECIFIC named offer type "cashback" is still in the residual scan."""
+    brief = _grad_brief_entire_order(must_not_add=["no cashback badge"])
+    result = fbv.validate(brief, _grad_facts_entire_order(), _GRAD_ENTIRE_ORDER_REQUEST)
+    assert result.ok is False
+    assert any("must_not_add invents commercial value" in e and "cashback" in e
+               for e in result.errors), result.errors
+
+
+def test_validate_offer_structure_invented_cashback_still_closed():
+    """BYPASS GUARD: offer_structure mentioning an invented "cashback" alongside the
+    grounded "20% off" → ok=False (residual scan is ALL-HITS + unconditional)."""
+    brief = _grad_brief_entire_order(
+        offer_structure="20% off entire order and cashback on top.",
+    )
+    result = fbv.validate(brief, _grad_facts_entire_order(), _GRAD_ENTIRE_ORDER_REQUEST)
+    assert result.ok is False
+    assert any(e.startswith("invented commercial value in offer_structure:")
+               and "cashback" in e for e in result.errors), result.errors
+
+
+def test_validate_invented_numeric_discount_still_closed():
+    """BYPASS GUARD: an INVENTED numeric "30% off" (only locked "20% off entire order")
+    in the non-rendering offer_structure → ok=False (numeric-token scan, token-anchored
+    so "30%" does not ground against the locked "20%")."""
+    brief = _grad_brief_entire_order(
+        offer_structure="Lead with a bold 30% off headline card.",
+    )
+    result = fbv.validate(brief, _grad_facts_entire_order(), _GRAD_ENTIRE_ORDER_REQUEST)
+    assert result.ok is False
+    assert any(e.startswith("invented commercial value in offer_structure:")
+               and "30%" in e for e in result.errors), result.errors
+
+
+# ── background_brief HARD LINE unchanged: "discount" still rejected there ─────
+
+
+def test_validate_background_brief_discount_word_still_rejected():
+    """HARD LINE UNCHANGED: a bare "discount" in the render-reaching background_brief →
+    ok=False via ``_DISCOUNT_CLAIM_RE`` (a "discount" reaching pixels IS a price claim;
+    the precision fix touches ONLY the non-rendering residual scan)."""
+    brief = _grad_brief_entire_order(
+        background_brief="A graduation celebration scene with a discount vibe, center clear.",
+    )
+    result = fbv.validate(brief, _grad_facts_entire_order(), _GRAD_ENTIRE_ORDER_REQUEST)
+    assert result.ok is False
+    assert any(e.startswith("commercial value outside fact_refs: background_brief:")
+               for e in result.errors), result.errors
+
+
+def test_validate_background_brief_percent_discount_phrase_still_rejected():
+    """HARD LINE UNCHANGED: "20% discount" in background_brief → ok=False (the percent
+    shape AND the discount claim both reach pixels)."""
+    brief = _grad_brief_entire_order(
+        background_brief="A graduation scene with a 20% discount banner, center clear.",
+    )
+    result = fbv.validate(brief, _grad_facts_entire_order(), _GRAD_ENTIRE_ORDER_REQUEST)
+    assert result.ok is False
+    assert any(e.startswith("commercial value outside fact_refs: background_brief:")
+               for e in result.errors), result.errors
+
+
+def test_validate_combo_still_ok_after_discount_precision_fix():
+    """COMBO REGRESSION (unchanged): the production-faithful combo brief still validates
+    after the discount-precision fix (structural combo/price words untouched)."""
+    result = fbv.validate(_combo_brief(), _combo_facts(), _COMBO_REQUEST)
+    assert result.ok is True, result.errors
+
+
 # ── (c) round-4 MAJOR: open-claims all-hits ──────────────────────────────────
 
 
@@ -1237,8 +1412,9 @@ def test_first_ungrounded_commercial_offer_phrase_all_hits_and_grounding():
 
 
 def test_first_ungrounded_commercial_residual_words_all_hits_unconditional():
-    """ROUND-5 BLOCKER: residual invented-offer words (cashback/discount/voucher/...)
-    are ALL-HITS and UNCONDITIONAL — a grounded numeric token does NOT skip them."""
+    """ROUND-5 BLOCKER: residual invented-offer-TYPE words (cashback/voucher/rebate/
+    coupon/...) are ALL-HITS and UNCONDITIONAL — a grounded numeric token does NOT skip
+    them. GENERIC "discount" is EXCLUDED from this scan (2026-06-06 precision fix)."""
     pct_allowed = [fbv._norm_ws("20% off all catering orders")]
     # grounded "20% off" + invented "cashback" → returns "cashback" (not skipped).
     # (use "rewards" not an offer-word like "bonus", which scan-2 would catch first.)
@@ -1247,22 +1423,34 @@ def test_first_ungrounded_commercial_residual_words_all_hits_unconditional():
     # grounded "20% off" alone → "".
     assert fbv._first_ungrounded_commercial("just 20% off", pct_allowed) == ""
     # a residual word grounded in a locked value → "".
-    disc_allowed = [fbv._norm_ws("Member discount for all guests")]
-    assert fbv._first_ungrounded_commercial("the discount card", disc_allowed) == ""
+    coupon_allowed = [fbv._norm_ws("Member coupon for all guests")]
+    assert fbv._first_ungrounded_commercial("the coupon card", coupon_allowed) == ""
     # invented residual word, no fact → returned.
     assert fbv._first_ungrounded_commercial("a voucher giveaway", []) == "voucher"
+    # PRECISION FIX (2026-06-06): a bare generic "discount" with NO locked fact is NOT
+    # flagged by the residual scan — it is a generic category word, not an invented
+    # offer type (numeric/named-type/BOGO invented discounts are still caught).
+    assert fbv._first_ungrounded_commercial("the discount card", []) == ""
 
 
 def test_residual_discount_word_re_excludes_structural_combo_words():
     """ROUND-5 PRECISION: structural words ("combo price"/"price"/"combo") are NOT in
     the residual invented-offer set (so the combo is not over-blocked); genuine
-    invented-offer words ARE."""
+    invented-offer-TYPE words ARE. GENERIC "discount"/"discounted" is ALSO excluded
+    (2026-06-06 precision fix): it is a generic category word that legitimately refers
+    to a stated/grounded offer, so the non-rendering residual scan does NOT flag it
+    (specific invented discounts are still caught numerically, as named types, or as
+    BOGO)."""
     assert fbv._RESIDUAL_DISCOUNT_WORD_RE.search("combo price layout") is None
     assert fbv._RESIDUAL_DISCOUNT_WORD_RE.search("two combo cards") is None
     assert fbv._RESIDUAL_DISCOUNT_WORD_RE.search("price shown large") is None
     assert fbv._RESIDUAL_DISCOUNT_WORD_RE.search("cashback offer") is not None
-    assert fbv._RESIDUAL_DISCOUNT_WORD_RE.search("a discount") is not None
     assert fbv._RESIDUAL_DISCOUNT_WORD_RE.search("voucher code") is not None
+    assert fbv._RESIDUAL_DISCOUNT_WORD_RE.search("rebate today") is not None
+    assert fbv._RESIDUAL_DISCOUNT_WORD_RE.search("coupon inside") is not None
+    # GENERIC discount/discounted dropped from the residual scan (precision fix).
+    assert fbv._RESIDUAL_DISCOUNT_WORD_RE.search("a discount") is None
+    assert fbv._RESIDUAL_DISCOUNT_WORD_RE.search("discounted bundle") is None
 
 
 def test_strict_operational_hits_bare_service_words():

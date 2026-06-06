@@ -88,23 +88,38 @@ _DISCOUNT_OFFER_PHRASE_RE = re.compile(
     r"|\b(?:free|complimentary|gift|bonus)(?:\s+[a-z][a-z'-]+)?",
     re.IGNORECASE,
 )
-# Residual standalone invented-offer WORDS — GENUINE discount signals not already
+# Residual standalone invented-offer-TYPE WORDS — GENUINE discount signals not already
 # covered by the numeric-token / offer-phrase scans (operator round-5 BLOCKER). Each
 # is matched ALL-HITS and grounded as a whole word via ``_phrase_is_grounded`` (a
-# locked value containing "discount" grounds a planning "discount"; an invented
+# locked value containing the offer type grounds a planning mention of it; an invented
 # "cashback" with no fact rejects). PRECISION (operator round-5 guard): "combo
 # price" / "price" / "combo" are STRUCTURAL words (the real price is a grounded
 # overlay fact), NOT discount CLAIMS — they are DELIBERATELY EXCLUDED here so the
 # combo's offer_structure ("two combo cards", "combo price layout") is not over-
 # blocked. Kept aggressive in ``_DISCOUNT_CLAIM_RE`` for the render-reaching
 # background_brief HARD LINE (where "combo price" reaching pixels is a price claim).
-# Operator's explicit genuine-invented-offer set (cashback, rebate, discount,
-# voucher, coupon) + the "cash back" spaced variant. BOGO / "buy one get one" are
-# already all-hits via ``_DISCOUNT_OFFER_PHRASE_RE`` (scan 2). Intentionally NARROW —
-# no "promo"/"promotion"/"deal"/"clearance" (those have benign creative/structural
-# uses and are not in the operator's list).
+#
+# GENERIC "discount"/"discounted" is DELIBERATELY EXCLUDED from this NON-rendering
+# residual scan (operator 2026-06-06 graduation fail-close): "discount" is a generic
+# CATEGORY word that legitimately REFERS to a stated/grounded offer — a must_not_add
+# entry "no prices other than the stated discount" against a locked
+# pricing_structure="20% off entire order" is a valid suppression, NOT a smuggled
+# commercial value, yet "discount" never appears verbatim in the locked value so the
+# whole-word grounding can never clear it. Specific INVENTED discounts are still
+# caught: numeric ones ("30% off", "$5") by the numeric-token scan, NAMED offer types
+# (cashback / cash back / rebate / voucher / coupon) by this residual scan, and BOGO /
+# "buy one get one" by the offer-phrase scan. The render-reaching background_brief
+# HARD LINE keeps "discount" via ``_DISCOUNT_CLAIM_RE`` (a "discount" reaching pixels
+# IS a price claim) — only this non-rendering residual detector drops the generic word.
+#
+# Operator's specific invented-offer-TYPE set (cashback, rebate, voucher, coupon) +
+# the "cash back" spaced variant. BOGO / "buy one get one" are already all-hits via
+# ``_DISCOUNT_OFFER_PHRASE_RE`` (scan 2). Intentionally NARROW — no generic "discount"/
+# "discounted" (generic category word, handled above) and no "promo"/"promotion"/
+# "deal"/"clearance" (those have benign creative/structural uses and are not invented
+# offer types).
 _RESIDUAL_DISCOUNT_WORD_RE = re.compile(
-    r"\b(?:cashback|cash\s+back|rebate|discount(?:ed)?|voucher|coupon)\b",
+    r"\b(?:cashback|cash\s+back|rebate|voucher|coupon)\b",
     re.IGNORECASE,
 )
 # Phone-like contiguous digit run (mirror visual_qa._PHONE_RUN_RE shape): 8+ chars
@@ -287,11 +302,15 @@ def _first_ungrounded_commercial(text: str, allowed_values: Sequence[str]) -> st
         bonus X / BOGO / "buy one get one") each grounded as a WHOLE PHRASE — so an
         invented "free dessert" does NOT ride a locked "free delivery", and a grounded
         "free delivery" is not double-rejected;
-      - (3) residual standalone invented-offer WORDS (cashback / rebate / discount /
-        voucher / coupon — ``_RESIDUAL_DISCOUNT_WORD_RE``) each grounded as a whole
-        word; UNCONDITIONAL (not gated behind a "no numeric token" guard), so
+      - (3) residual standalone invented-offer-TYPE WORDS (cashback / cash back /
+        rebate / voucher / coupon — ``_RESIDUAL_DISCOUNT_WORD_RE``) each grounded as a
+        whole word; UNCONDITIONAL (not gated behind a "no numeric token" guard), so
         "20% off and cashback" rejects on "cashback" even though "20% off" grounds.
-        Structural words ("combo price"/"price"/"combo") are EXCLUDED from this set so
+        GENERIC "discount"/"discounted" is EXCLUDED (it refers to a stated/grounded
+        offer, not a smuggled value — see ``_RESIDUAL_DISCOUNT_WORD_RE``); specific
+        invented discounts are still caught numerically (scan 1), as named types here,
+        or as BOGO (scan 2). Structural words ("combo price"/"price"/"combo") are
+        EXCLUDED from this set so
         the combo is not over-blocked.
     The first ungrounded value across the three scans is returned. Used by BOTH the
     non-rendering free-text scan AND the must_not_add invented-commercial check so the
