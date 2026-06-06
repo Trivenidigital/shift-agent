@@ -56,11 +56,13 @@ fail the deterministic firewall and the flyer cannot be produced:
 2. **For a `fact_id` reference, `provenance` is `"locked"`** (the system derives
    it; if you set it, set `"locked"`). Use `"customer_text"` ONLY together with a
    `raw_span` (never with a `fact_id`).
-3. **NEVER write any price, number, percentage, `"%"`, `"$"`, the word
-   `"discount"`, or any offer amount in ANY free-text field** (`offer_structure`,
-   `layout_strategy`, `grouping`, `visual_direction`, `background_brief`). Those
-   fields describe ONLY composition / theme / structure. Every commercial value is
-   rendered deterministically from facts via `fact_refs` — never typed by you.
+3. **NEVER write a commercial VALUE — any price, percentage, `"%"`, `"$"`, the
+   word `"discount"`, or offer / price amount — in ANY free-text field**
+   (`offer_structure`, `layout_strategy`, `grouping`, `visual_direction`,
+   `background_brief`). Those fields describe ONLY composition / theme / structure.
+   (A structural count like "two combo cards" is fine — only commercial VALUES are
+   forbidden.) Every commercial value is rendered deterministically from facts via
+   `fact_refs` — never typed by you.
 
 ## Hard rules (the invariant — a wrong customer-facing fact must be impossible)
 
