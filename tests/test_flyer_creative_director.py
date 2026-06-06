@@ -2800,23 +2800,150 @@ def test_occasion_aware_operational_claim_hit_is_identity_without_tokens():
     assert fbv._occasion_aware_operational_claim_hit("we are now open daily", {"weekend"})
 
 
-def test_strip_grounded_occasion_claims_per_occurrence_context():
-    """Per-occurrence: a non-scheduling "weekend" is neutralized while a scheduling-context
-    "weekend" in the SAME text is kept (so the scan still fires on it)."""
+def test_strip_grounded_occasion_claims_neutralizes_all_classed_occurrences():
+    """After the field-level veto has cleared, EVERY grounded date/occasion token
+    occurrence is neutralized (no per-occurrence window): both "weekend" uses below are
+    gone (the field has no scheduling verb — a bare layout "open" is not one)."""
     out = fbv._strip_grounded_occasion_claims(
-        "a Memorial Day weekend scene, open this weekend", {"weekend"}
+        "a Memorial Day weekend scene, open central area, weekend cookout vibes", {"weekend"}
     )
-    # the first (occasion-theme) "weekend" is gone; the scheduling "this weekend" remains.
-    assert "this weekend" in out.lower()
-    assert out.lower().count("weekend") == 1
+    assert "weekend" not in out.lower()
 
 
-def test_occurrence_in_scheduling_context_window():
-    """The scheduling-context detector flags an adjacent scheduling word and ignores a
-    distant layout "open" buffered by the occasion phrase."""
-    sched = "open this weekend"
-    i = sched.index("weekend")
-    assert fbv._occurrence_in_scheduling_context(sched, i, i + len("weekend"))
-    clean = "Memorial Day weekend cookout scene, warm light, open central area"
-    j = clean.index("weekend")
-    assert not fbv._occurrence_in_scheduling_context(clean, j, j + len("weekend"))
+# ── round-2 BLOCKER 1: date/occasion-class allowlist (operational words never exempt) ──
+
+
+def test_occasion_claim_tokens_excludes_operational_words_in_campaign_title():
+    """BLOCKER 1: a campaign_title word is exemptable ONLY if it is a DATE/OCCASION-CLASS
+    token. "Free Delivery Weekend" exempts ONLY "weekend" — "free"/"delivery" are flagged
+    by the operational scan but are NOT date/occasion-class, so they are never exempted."""
+    assert fbv._occasion_claim_tokens(["free delivery weekend"]) == {"weekend"}
+    # a purely-operational occasion title contributes NOTHING (no date/occasion token).
+    assert fbv._occasion_claim_tokens(["delivery weekend sale"]) == {"weekend"}
+    assert fbv._occasion_claim_tokens(["best fresh award"]) == set()
+
+
+@pytest.mark.parametrize("word", [
+    "weekend", "weekends", "holiday", "saturday", "sun", "december", "dec", "may",
+])
+def test_date_occasion_class_allowlist_accepts_date_tokens(word):
+    assert fbv._DATE_OCCASION_CLASS_RE.match(word), word
+
+
+@pytest.mark.parametrize("word", [
+    "delivery", "sale", "best", "award", "fresh", "free", "open", "now", "hours",
+    "cashback", "catering",
+])
+def test_date_occasion_class_allowlist_rejects_operational_words(word):
+    assert fbv._DATE_OCCASION_CLASS_RE.match(word) is None, word
+
+
+def test_validate_free_delivery_weekend_still_rejects_operational_words():
+    """BLOCKER 1 end-to-end: campaign_title="Free Delivery Weekend"; background_brief that
+    says "free" and "delivery" → ok=False (only "weekend" would exempt, "delivery"/"free"
+    still trip the scan)."""
+    facts = _combo_facts() + [
+        FlyerLockedFact(fact_id="campaign_title", label="Campaign",
+                        value="Free Delivery Weekend", source="customer_text", required=True),
+    ]
+    refs = _combo_brief().fact_refs + [fb.FactRef(fact_id="campaign_title", provenance="locked")]
+    brief = _combo_brief(
+        background_brief="A free delivery weekend cookout scene, center clear, no words",
+        fact_refs=refs,
+    )
+    result = fbv.validate(brief, facts, _COMBO_REQUEST)
+    assert result.ok is False
+    assert any("invented operational claim in textless background: background_brief" in e
+               for e in result.errors), result.errors
+
+
+def test_validate_delivery_weekend_theme_word_delivery_rejects():
+    """BLOCKER 1: even the bare word "delivery" used as a theme (campaign_title="Delivery
+    Weekend") rejects in background_brief — "delivery" is operational, never exempt."""
+    facts = _combo_facts() + [
+        FlyerLockedFact(fact_id="campaign_title", label="Campaign",
+                        value="Delivery Weekend", source="customer_text", required=True),
+    ]
+    refs = _combo_brief().fact_refs + [fb.FactRef(fact_id="campaign_title", provenance="locked")]
+    brief = _combo_brief(
+        background_brief="A delivery weekend scene, center clear, no words",
+        fact_refs=refs,
+    )
+    result = fbv.validate(brief, facts, _COMBO_REQUEST)
+    assert result.ok is False
+    assert any("background_brief" in e for e in result.errors), result.errors
+
+
+# ── round-2 BLOCKER 2: field-level scheduling/availability laundering closed ──
+
+
+@pytest.mark.parametrize("bg, why", [
+    ("A scene available for Memorial Day weekend, center clear", "available for"),
+    ("A scene, book a table for Memorial Day weekend, center clear", "book a table"),
+    ("A scene, reserve a spot for Memorial Day weekend, center clear", "reserve a spot"),
+    ("A Memorial Day weekend scene, weekend availability is open, center clear", "weekend availability"),
+    ("A Memorial Day scene, weekend is available, center clear", "weekend is available"),
+    ("A Memorial Day weekend scene, sale ends this weekend, center clear", "sale ends"),
+    ("A Memorial Day weekend scene, open until late, center clear", "until"),
+    ("A Memorial Day weekend scene, hours posted, center clear", "hours"),
+])
+def test_validate_scheduling_claim_laundering_rejected_with_grounded_occasion(bg, why):
+    """BLOCKER 2: a grounded "Memorial Day Weekend" occasion can NOT launder a scheduling/
+    availability/booking claim — the field-level detector vetoes the exemption and the
+    UNCHANGED scan rejects on the ORIGINAL text. All of Codex's bypass cases → ok=False."""
+    brief = _mdw_brief(background_brief=bg)
+    result = fbv.validate(brief, _mdw_facts(), _COMBO_REQUEST)
+    assert result.ok is False, f"{why}: expected rejection, got ok"
+    assert any("background_brief" in e for e in result.errors), result.errors
+
+
+def test_has_scheduling_claim_detector_unit():
+    """The field detector flags scheduling/availability/booking verbs but NOT a bare
+    layout "open" (B1 owns "open" contextually)."""
+    assert fbv._has_scheduling_claim("available for Memorial Day weekend")
+    assert fbv._has_scheduling_claim("book a table this weekend")
+    assert fbv._has_scheduling_claim("reserve a spot")
+    assert fbv._has_scheduling_claim("weekend availability is open")
+    assert fbv._has_scheduling_claim("sale ends this weekend")
+    assert fbv._has_scheduling_claim("open until late")
+    assert fbv._has_scheduling_claim("hours posted")
+    assert fbv._has_scheduling_claim("all weekend long")
+    # bare layout "open" / clean occasion theme are NOT scheduling claims.
+    assert not fbv._has_scheduling_claim("Memorial Day weekend cookout scene, open central area")
+    assert not fbv._has_scheduling_claim("a festive weekend cookout, no words anywhere")
+
+
+def test_validate_grounded_occasion_no_scheduling_verb_still_passes():
+    """REGRESSION (must stay green): the grounded occasion theme with NO scheduling verb —
+    bare layout "open central area" — still validates ok=True after the field veto added."""
+    brief = _mdw_brief(
+        background_brief="Memorial Day weekend cookout scene, open central area, no words anywhere",
+    )
+    result = fbv.validate(brief, _mdw_facts(), _COMBO_REQUEST)
+    assert result.ok is True, result.errors
+
+
+# ── round-2 MINOR: year-less numeric date shapes reject in background_brief ───
+
+
+@pytest.mark.parametrize("dt", ["6/15", "6-15", "06/15", "12/25", "06-15"])
+def test_date_time_shape_hit_flags_yearless_numeric_dates(dt):
+    """MINOR: a numeric date WITHOUT a year ("6/15", "6-15", "06/15") is a date shape."""
+    assert fbv._date_time_shape_hit(f"a scene on {dt}, center clear"), dt
+
+
+@pytest.mark.parametrize("notdate", ["16/9", "21/9", "99/99", "0/0"])
+def test_date_time_shape_hit_ignores_non_calendar_ratios(notdate):
+    """The year-less date shape is BOUNDED (month 1-12, day 1-31) so an aspect ratio
+    ("16/9") or an out-of-range fraction is NOT a false date."""
+    assert fbv._date_time_shape_hit(f"a {notdate} aspect background, center clear") == "", notdate
+
+
+def test_validate_yearless_date_in_background_brief_rejects():
+    """MINOR end-to-end: "6/15" in background_brief → ok=False via the date-shape layer
+    (overlay owns the promotion date), even with the grounded occasion present."""
+    brief = _mdw_brief(background_brief="A Memorial Day weekend cookout on 6/15, center clear")
+    result = fbv.validate(brief, _mdw_facts(), _COMBO_REQUEST)
+    assert result.ok is False
+    assert any(e.startswith("date/time shape outside fact_refs: background_brief:")
+               for e in result.errors), result.errors

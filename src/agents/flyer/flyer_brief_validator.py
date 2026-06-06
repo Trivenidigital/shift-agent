@@ -149,7 +149,11 @@ _ADDRESS_SHAPE_RE = re.compile(
 )
 # Date / clock-time shapes the overlay owns (the schedule/promotion_end facts):
 #   - month name + optional day + year ("June 15 2026", "Dec 2026", "December 1st");
-#   - numeric date ("6/15/2026", "06-15-26", "2026-06-15");
+#   - numeric date WITH year ("6/15/2026", "06-15-26", "2026-06-15");
+#   - numeric date WITHOUT year ("6/15", "6-15", "06/15") — operator round-2 MINOR: the
+#     overlay owns the promotion date, so a bare month/day shape must reject too. Bounded
+#     (month 1-12, day 1-31) so an aspect ratio ("16/9") or unrelated fraction is NOT a
+#     false date; the year-bearing alternatives precede it so the longer match wins;
 #   - clock time ("9:00", "9:00 pm", "9 am").
 _MONTH_RE = (
     r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
@@ -160,6 +164,7 @@ _DATE_TIME_SHAPE_RE = re.compile(
     r"|\b" + _MONTH_RE + r"\s+(?:19|20)\d{2}\b"
     r"|\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b"
     r"|\b(?:19|20)\d{2}[/-]\d{1,2}[/-]\d{1,2}\b"
+    r"|\b(?:0?[1-9]|1[0-2])[/-](?:0?[1-9]|[12]\d|3[01])\b"
     r"|\b\d{1,2}:\d{2}(?:\s*(?:am|pm))?\b"
     r"|\b\d{1,2}\s*(?:am|pm)\b",
     re.IGNORECASE,
@@ -490,124 +495,133 @@ def _operational_claim_hit(text: str) -> str:
 
 
 # ── occasion-aware exemption for the background_brief HARD LINE (operator 2026-06-06) ─
-# NARROW fix (Option A): the render-reaching ``background_brief`` operational/date-claim
-# scan over-flags the GROUNDED OCCASION THEME. A campaign whose occasion is literally
-# "Memorial Day Weekend" (the grounded ``campaign_title``) cannot describe its own theme
-# in the textless background prompt, because the date/schedule class in
-# ``creative_firewall._CLAIM_PATTERNS`` matches the token "weekend" (and weekday / month
-# / "daily" / "every day" / "this week" tokens) regardless of whether it is the grounded
-# occasion. Describing the occasion theme is legitimate creative direction — the image
-# renders a textless scene; "No words/lettering anywhere" keeps it textless — so a
-# GROUNDED occasion token in a NON-scheduling context is exempted from the operational
-# claim scan, and ONLY there.
+# NARROW fix (Option A, round 2): the render-reaching ``background_brief`` operational/
+# date-claim scan over-flags the GROUNDED OCCASION THEME. A campaign whose occasion is
+# literally "Memorial Day Weekend" (the grounded ``campaign_title``) cannot describe its
+# own theme in the textless background prompt, because the date/schedule class in
+# ``creative_firewall._CLAIM_PATTERNS`` matches the token "weekend" (weekday / month
+# tokens too) regardless of whether it is the grounded occasion. Describing the occasion
+# theme is legitimate creative direction — the image renders a textless scene; "No words/
+# lettering anywhere" keeps it textless — so a GROUNDED DATE/OCCASION-CLASS token is
+# exempted from the operational claim scan, and ONLY there.
 #
-# The exemption is GROUNDED-OCCASION-ONLY and CONTEXT-AWARE. It does NOT weaken any other
-# fact authority:
+# The exemption is GROUNDED-OCCASION-ONLY and TIGHTLY CLASSED. It does NOT weaken any
+# other fact authority:
 #   - the exempt token set is derived ONLY from facts whose fact_id is an occasion/theme
 #     id (``_is_occasion_theme_fact_id`` → campaign_title + theme_*/occasion*); schedule,
 #     promotion_end, prices, discounts, phones, addresses, items/offers are NEVER a source;
-#   - only the date/schedule TOKENS that the operational scan would independently flag
-#     INSIDE a grounded occasion phrase become exempt (so "Memorial Day Weekend" yields
-#     {"weekend"}, never "memorial"/"day"); an occasion phrase with no claim-shaped token
-#     contributes nothing;
-#   - a token occurrence is exempted ONLY when it is NOT in a scheduling/availability
-#     context (see ``_SCHEDULING_CONTEXT_WORDS``): "open this weekend", "sale ends this
-#     weekend", "available all weekend", "this weekend", "all weekend" are real claims and
-#     STILL reject even though "weekend" is grounded;
-#   - explicit date/time SHAPES ("June 15", "6/15", "Friday 6 PM", "9:00") are NOT touched
-#     here — they stay strict via the separate ``_date_time_shape_hit`` render-block scan
-#     (which runs on the ORIGINAL text), and the month/clock patterns also still fire on
-#     the un-neutralized shape;
+#   - a campaign_title word is exemptable ONLY if it is a DATE/OCCASION-CLASS token
+#     (``_DATE_OCCASION_CLASS_RE``: weekend(s)/holiday(s)/eve/season(al), weekday names,
+#     month names, occasion proper-nouns). Operational/service/commercial words
+#     (delivery/sale/best/award/fresh/free/open/now/hours/…) are NEVER exempted even when
+#     they appear in campaign_title (round-2 BLOCKER 1): "Free Delivery Weekend" exempts
+#     ONLY "weekend"; "free"/"delivery" still reject;
+#   - if the field carries ANY scheduling/availability/booking claim (``_FIELD_SCHEDULING
+#     _CLAIM_RE``, run on the ORIGINAL text) — "available …", "book …", "reserve …",
+#     "weekend availability", "sale ends … weekend", "this/all/every/each weekend",
+#     "until/till …", "hours" — NOTHING is stripped: the UNCHANGED detector runs on the
+#     original and rejects (round-2 BLOCKER 2). A bare layout "open central area" is NOT a
+#     scheduling claim (B1 classifies "open" contextually), so it does not field-veto;
+#   - explicit date/time SHAPES ("June 15", "6/15", "Friday 6 PM", "9:00") stay strict via
+#     the separate ``_date_time_shape_hit`` render-block scan (ORIGINAL text), and the
+#     month/clock patterns also still fire on the un-neutralized shape;
 #   - the commercial scan, locked-value (non-occasion) scan, address-shape, phone, and
 #     text-render scans on background_brief are all untouched; the non-rendering scan,
 #     fact_refs coverage, offer_groups, must_not_add, and the fail-closed posture are all
 #     untouched.
-# Mechanism: per-occurrence (mirrors the B1 "open" per-occurrence style) — neutralize each
-# GROUNDED, NON-scheduling occasion-claim-token occurrence, then run the UNCHANGED
-# ``_operational_claim_hit`` on the residual. If anything else (a real claim, an invented
-# date token, a scheduling-context occasion token) remains, the scan still fires and the
-# brief still rejects. The exemption can never turn a real claim into a pass.
-#
-# Scheduling / availability words that VETO the exemption even for a grounded occasion
-# token (operator-specified). Whitespace-/case-normalized whole-word match in a tight
-# window around the occurrence.
-_SCHEDULING_CONTEXT_WORDS = frozenset(
-    {
-        "open", "opens", "available", "closes", "hours",
-        "sale", "ends", "until", "till", "this", "all", "every", "each",
-        "book", "reserve",
-    }
+# Mechanism: field-gate then per-occurrence — if the ORIGINAL field carries a scheduling
+# claim, do not exempt at all; otherwise neutralize each grounded DATE/OCCASION-CLASS token
+# occurrence and run the UNCHANGED ``_operational_claim_hit`` on the residual. Anything
+# else (a real claim, an invented date token, a non-classed word) still fires. The
+# exemption can never turn a real claim into a pass.
+
+# Word tokenizer for occasion-phrase splitting (apostrophe/hyphen-aware so "memorial day"
+# splits cleanly and "we're" / "new year's" stay coherent tokens).
+_CONTEXT_WORD_RE = re.compile(r"[a-z0-9]+(?:['’-][a-z0-9]+)*", re.IGNORECASE)
+
+# DATE/OCCASION-CLASS allowlist (round-2 BLOCKER 1) — the ONLY token class an occasion fact
+# may contribute to the exemption set. Strictly date/calendar + occasion proper-nouns;
+# NO operational/service/commercial words. A campaign_title word that is flagged by the
+# operational scan but is NOT in this class (delivery/sale/best/award/fresh/free/open/now/
+# hours/…) is therefore NEVER exempted.
+_DATE_OCCASION_CLASS_RE = re.compile(
+    r"^(?:"
+    # generic date/occasion category words
+    r"weekend|weekends|holiday|holidays|eve|season|seasonal|"
+    # days of week (full + common abbreviations)
+    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+    r"mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun|"
+    # months (full + abbreviations)
+    r"january|february|march|april|may|june|july|august|september|october|november|december|"
+    r"jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec|"
+    # occasion proper-noun words (the named-holiday vocabulary)
+    r"memorial|independence|labor|labour|thanksgiving|christmas|halloween|easter|"
+    r"diwali|hanukkah|chanukah|kwanzaa|ramadan|eid|lunar|valentine|valentines|"
+    r"mother|mothers|father|fathers|patriot|patriots|veterans|presidents|"
+    r"cinco|mayo|juneteenth|oktoberfest|new|years|year"
+    r")$",
+    re.IGNORECASE,
 )
 
-# Word tokenizer for context windows + occasion-phrase splitting (apostrophe/hyphen-aware
-# so "memorial day" / "every day" split cleanly and "we're" stays one token).
-_CONTEXT_WORD_RE = re.compile(r"[a-z0-9]+(?:['’-][a-z0-9]+)*", re.IGNORECASE)
+# FIELD-LEVEL scheduling/availability/booking-claim detector (round-2 BLOCKER 2). Run on
+# the ORIGINAL background_brief text: a hit VETOES the whole exemption for the field (so a
+# grounded occasion token cannot launder a scheduling claim like "available for Memorial
+# Day weekend"). Operator-specified vocabulary; precise — bare "open" is NOT here (B1
+# classifies "open" contextually) so a layout "open central area" does not field-veto.
+_FIELD_SCHEDULING_CLAIM_RE = re.compile(
+    r"\b(?:available|availability|book|booking|reserve|reservation)\b"
+    r"|\bsale\s+ends\b"
+    r"|\bends?\b.{0,15}\bweekend\b"
+    r"|\b(?:until|till)\b"
+    r"|\bhours\b"
+    r"|\b(?:this|all|every|each)\s+weekend\b",
+    re.IGNORECASE,
+)
+
+
+def _has_scheduling_claim(text: str) -> bool:
+    """True iff the field text carries a scheduling/availability/booking claim that VETOES
+    the occasion exemption entirely (round-2 BLOCKER 2). Scanned on the ORIGINAL text."""
+    return bool(text) and bool(_FIELD_SCHEDULING_CLAIM_RE.search(text))
 
 
 def _occasion_claim_tokens(occasion_phrases: Sequence[str]) -> set[str]:
-    """The date/schedule claim-tokens that live INSIDE grounded occasion phrases — the
-    ONLY tokens the background_brief operational scan will exempt.
+    """The DATE/OCCASION-CLASS claim-tokens that live INSIDE grounded occasion phrases —
+    the ONLY tokens the background_brief operational scan will exempt.
 
     Derived from the grounded occasion phrases ALONE (campaign_title + theme_*/occasion*
-    values). For each phrase we add (a) each single word that the operational/date scan
-    would independently flag, and (b) an adjacent bigram that is flagged when NEITHER of
-    its words is already flagged (to capture multi-word claim phrases like "every day" /
-    "this week"). For "memorial day weekend" this is exactly {"weekend"} — "memorial",
-    "day", "memorial day", "day weekend" are not added (day-weekend is skipped because
-    "weekend" is already a flagged word). A phrase with no claim-shaped token yields {}."""
+    values). A word is exempt ONLY when it is BOTH (a) flagged by the operational/date scan
+    AND (b) a DATE/OCCASION-CLASS token (``_DATE_OCCASION_CLASS_RE``). For "memorial day
+    weekend" this is exactly {"weekend"}. For "free delivery weekend" it is STILL exactly
+    {"weekend"} — "free"/"delivery" are flagged but not date/occasion-class, so they are
+    never exempted (round-2 BLOCKER 1). A phrase with no flagged date/occasion word
+    yields {}."""
     tokens: set[str] = set()
     for phrase in occasion_phrases:
         norm = _norm_ws(phrase)
         if not norm:
             continue
-        words = _CONTEXT_WORD_RE.findall(norm)
-        flagged_words = {w for w in words if _operational_claim_hit(w)}
-        tokens |= flagged_words
-        for a, b in zip(words, words[1:]):
-            if a in flagged_words or b in flagged_words:
-                continue
-            bigram = f"{a} {b}"
-            if _operational_claim_hit(bigram):
-                tokens.add(bigram)
+        for word in _CONTEXT_WORD_RE.findall(norm):
+            if _DATE_OCCASION_CLASS_RE.match(word) and _operational_claim_hit(word):
+                tokens.add(word)
     return tokens
 
 
-def _occurrence_in_scheduling_context(text: str, start: int, end: int) -> bool:
-    """True iff a scheduling/availability word sits in the tight window around the
-    [start, end) occurrence (3 words before OR 1 word after). Tight + before-weighted on
-    purpose: the operator's scheduling forms ("this weekend", "all weekend", "open this
-    weekend", "sale ends this weekend", "available all weekend") all carry a scheduling
-    word immediately before the occasion token, so 3-before catches them while a legitimate
-    occasion theme ("Memorial Day weekend cookout scene … open central area …") keeps any
-    layout "open" far AFTER the grounded token. The 1-word-after window catches only a
-    directly-adjacent promo word ("weekend sale", "weekend hours") without reaching a
-    distant layout word that merely follows the theme."""
-    before = _CONTEXT_WORD_RE.findall(text[:start].casefold())[-3:]
-    after = _CONTEXT_WORD_RE.findall(text[end:].casefold())[:1]
-    return any(w in _SCHEDULING_CONTEXT_WORDS for w in (*before, *after))
-
-
 def _strip_grounded_occasion_claims(text: str, exempt_tokens: set[str]) -> str:
-    """Replace each GROUNDED, NON-scheduling occasion-claim-token occurrence in ``text``
-    with a neutral placeholder; leave scheduling-context occurrences intact so they still
-    reject. Returns ``text`` unchanged when there is nothing to exempt. The result is fed
-    ONLY to ``_operational_claim_hit`` for the background_brief field — never rendered, and
-    never used by the date-shape / commercial / locked-value / text-render scans."""
+    """Replace each grounded DATE/OCCASION-CLASS token occurrence in ``text`` with a
+    neutral placeholder. Returns ``text`` unchanged when there is nothing to exempt. Called
+    ONLY after the field-level scheduling veto has cleared (``_has_scheduling_claim`` is
+    False), so every occurrence here is a legitimate occasion-theme use. The result is fed
+    ONLY to ``_operational_claim_hit`` for background_brief — never rendered, and never used
+    by the date-shape / commercial / locked-value / text-render scans."""
     if not text or not exempt_tokens:
         return text
     result = text
-    # Longest token first so a bigram ("every day") is consumed before its words.
     for tok in sorted(exempt_tokens, key=len, reverse=True):
         pattern = re.compile(
             r"(?<![a-z0-9])" + re.escape(tok) + r"(?![a-z0-9])", re.IGNORECASE
         )
-
-        def _maybe(m: "re.Match[str]") -> str:
-            if _occurrence_in_scheduling_context(m.string, m.start(), m.end()):
-                return m.group(0)  # scheduling claim — keep it so the scan still fires.
-            return " occasion "  # grounded, non-scheduling occasion theme — neutralize.
-
-        result = pattern.sub(_maybe, result)
+        result = pattern.sub(" occasion ", result)
     return result
 
 
@@ -615,10 +629,13 @@ def _occasion_aware_operational_claim_hit(
     text: str, occasion_claim_tokens: set[str]
 ) -> str:
     """``_operational_claim_hit`` for the render-reaching background_brief, with the NARROW
-    grounded-occasion exemption applied. Identical to ``_operational_claim_hit`` when
-    there are no grounded occasion claim-tokens (e.g. no campaign_title) — so the
-    fail-closed posture and every other claim class are preserved verbatim."""
-    if not occasion_claim_tokens:
+    grounded-occasion exemption applied. Two gates precede any stripping:
+      1. no grounded date/occasion tokens (e.g. no campaign_title) ⇒ byte-for-byte
+         ``_operational_claim_hit`` (fail-closed posture + every claim class verbatim);
+      2. the field carries a scheduling/availability/booking claim ⇒ NO stripping; run the
+         UNCHANGED detector on the ORIGINAL so the claim rejects (round-2 BLOCKER 2).
+    Only when both gates pass is each grounded date/occasion token neutralized."""
+    if not occasion_claim_tokens or _has_scheduling_claim(text):
         return _operational_claim_hit(text)
     return _operational_claim_hit(
         _strip_grounded_occasion_claims(text, occasion_claim_tokens)
