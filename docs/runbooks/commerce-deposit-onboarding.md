@@ -4,6 +4,17 @@
 **Scope:** What an operator needs to do before the catering deposit caller starts sending real payment links to customers.
 **Audience:** SMB-Agents operator (founder + on-call).
 
+## Windows SSH capture convention
+
+When running these commands from Codex on Windows, never rely on inline SSH stdout and never chain `&& cat` after SSH. Use the two-step pattern:
+
+```bash
+ssh main-vps 'remote command' > .ssh_output.txt 2>&1
+# Then read .ssh_output.txt locally.
+```
+
+The `.ssh_*.txt` files are local operator scratch files. Do not commit them, and delete files containing secrets after use.
+
 ---
 
 ## Why this runbook exists
@@ -137,7 +148,8 @@ COMMERCE_INTENTS_PATH=\$(pwd)/state/commerce/payment_intents.json \
 COMMERCE_REFERENCES_PATH=\$(pwd)/state/commerce/payment_references.json \
 PYTEST_CURRENT_TEST=smoke \
 python3 /usr/local/bin/catering-mint-deposit --lead-id LSMOKE
-"'
+"' > .ssh_commerce_deposit_smoke.txt 2>&1
+# Then read .ssh_commerce_deposit_smoke.txt locally.
 ```
 
 **Expected outcome (template configured):**
@@ -152,7 +164,8 @@ If exit code is something other than 6 (e.g., 2 = invalid input, 5 = schema viol
 
 **Cleanup:**
 ```bash
-ssh main-vps 'rm -rf /tmp/commerce-deposit-runbook-smoke'
+ssh main-vps 'rm -rf /tmp/commerce-deposit-runbook-smoke' > .ssh_commerce_deposit_cleanup.txt 2>&1
+# Then read .ssh_commerce_deposit_cleanup.txt locally.
 ```
 
 ---
@@ -165,7 +178,8 @@ After Steps 1-4, the next qualifying owner-approved catering lead will trigger a
 
 ```bash
 # Operator's daily audit-log query
-ssh main-vps 'grep -E "catering_deposit_link_(sent|failed)" /opt/shift-agent/logs/decisions.log | tail -20'
+ssh main-vps 'grep -E "catering_deposit_link_(sent|failed)" /opt/shift-agent/logs/decisions.log | tail -20' > .ssh_commerce_deposit_audit.txt 2>&1
+# Then read .ssh_commerce_deposit_audit.txt locally.
 ```
 
 - **`catering_deposit_link_sent` with `url_status="configured"`** → happy path; customer received the link
@@ -183,7 +197,8 @@ ssh main-vps 'grep -E "catering_deposit_link_(sent|failed)" /opt/shift-agent/log
 If a deposit-mint failed and the operator wants to retry:
 
 ```bash
-ssh main-vps '/usr/local/bin/catering-mint-deposit --lead-id L0007'
+ssh main-vps '/usr/local/bin/catering-mint-deposit --lead-id L0007' > .ssh_commerce_deposit_retry.txt 2>&1
+# Then read .ssh_commerce_deposit_retry.txt locally.
 ```
 
 The script is **idempotent on `lead.deposit_payment_intent_id`**: if a prior attempt already minted (rare — only happens if the bridge POST succeeded after a prior failure mid-flight), re-invocation is a no-op and reports `noop_already_minted`. Otherwise it mints a fresh intent against a new `order_id`.
