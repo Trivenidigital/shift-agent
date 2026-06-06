@@ -4957,8 +4957,10 @@ class CfRouterIntercepted(_BaseEntry):
         "flyer_access_release_failed",
         "flyer_pending_revision_confirmation_reminder",
         # cf-router/hooks.py bare-flyer dispatch path (reconciled from the deployed
-        # fix/flyer-customer-qa-cleanup branch into main 2026-06-06).
+        # fix/flyer-customer-qa-cleanup branch into main 2026-06-06). Both ternary
+        # branches of the spawn audit (dispatched on success, failed otherwise).
         "flyer_bare_brief_generation_dispatched",
+        "flyer_bare_brief_generation_failed",
         "error",
     ]
     chat_id: str = Field(min_length=1, max_length=200)

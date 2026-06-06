@@ -245,6 +245,9 @@ def test_cf_router_flyer_reason_literals_match_schema():
         for pattern in (
             r'reason\s*=\s*"((?:flyer_)[^"]+)"',
             r'reason\s*=\s*\(\s*"((?:flyer_)[^"]+)"',
+            # ternary `reason=("X" if c else "Y")` — the else-branch literal would
+            # otherwise be missed (2026-06-06: flyer_bare_brief_generation_failed).
+            r'\belse\s+"((?:flyer_)[^"]+)"',
         )
         for match in re.finditer(pattern, source)
     }
