@@ -75,10 +75,79 @@ _DISCOUNT_CLAIM_RE = re.compile(
     r"\b(?:bogo|buy\s+one\s+get|free\b|discount|% ?off|flat\s+\d|save\s+\$?\d|cashback|combo\s+price)\b",
     re.IGNORECASE,
 )
+# Non-numeric discount/offer PHRASES — the offer word + its IMMEDIATE object word
+# (capped at one, the discriminating head noun) so "free dessert" and "free delivery"
+# are DISTINCT phrases that ground independently (operator round-4 BLOCKER 2). BOGO /
+# "buy one get one [free]" are standalone multi-word offers. Used by the all-hits
+# non-rendering / must_not_add commercial scan; each phrase is grounded as a WHOLE via
+# ``_phrase_is_grounded`` so an invented "free dessert" cannot ride a locked "free
+# delivery". (currency/percent/price/phone shapes are handled by the numeric token
+# path; bare "discount"/"cashback"/"combo price" by the _commercial_value_hit residual.)
+_DISCOUNT_OFFER_PHRASE_RE = re.compile(
+    r"\b(?:bogo|buy\s+one\s+get(?:\s+one)?(?:\s+free)?)\b"
+    r"|\b(?:free|complimentary|gift|bonus)(?:\s+[a-z][a-z'-]+)?",
+    re.IGNORECASE,
+)
 # Phone-like contiguous digit run (mirror visual_qa._PHONE_RUN_RE shape): 8+ chars
 # of digits + common separators with at least 7 actual digits.
 _PHONE_RUN_RE = re.compile(r"[\d\s\-().+/]{8,}")
 _DIGITS_RE = re.compile(r"\D+")
+
+# ── address + date/time shape detectors (operator round-4 BLOCKER 1) ─────────
+# The textless render-reaching background_brief is the HARD LINE for ALL fact shapes
+# the overlay owns (contact/date/address reject grounded OR not — they must never be
+# model-rendered into pixels). Commercial / locked-value / phone scans miss an
+# INVENTED address ("123 Main St") and some invented date/time forms, so add explicit
+# shape detectors used ONLY on the render-reaching path (NOT non-rendering fields —
+# there a grounded contact/date resolves via fact_refs and never reaches pixels).
+# Street-address shape: a street number + words + a street-type suffix; OR a unit
+# designator + number ("Suite 200", "#42"). (No bare 5-digit ZIP rule — a lone
+# number is too prone to creative false positives; the overlay owns the ZIP via the
+# locked location fact, and the locked-value scan catches the real one.)
+_ADDRESS_SHAPE_RE = re.compile(
+    r"\b\d{1,6}\s+(?:[A-Za-z0-9.'-]+\s+){0,4}"
+    r"(?:st|street|ave|avenue|rd|road|blvd|boulevard|dr|drive|ln|lane|way|ct|court|"
+    r"pl|place|hwy|highway|pkwy|parkway|ter|terrace|cir|circle|sq|square|"
+    r"suite|ste|unit|apt|fl|floor)\b\.?"
+    r"|\b(?:suite|ste|unit|apt|fl|floor)\s+\d{1,6}\b"
+    r"|#\s*\d{1,6}\b",
+    re.IGNORECASE,
+)
+# Date / clock-time shapes the overlay owns (the schedule/promotion_end facts):
+#   - month name + optional day + year ("June 15 2026", "Dec 2026", "December 1st");
+#   - numeric date ("6/15/2026", "06-15-26", "2026-06-15");
+#   - clock time ("9:00", "9:00 pm", "9 am").
+_MONTH_RE = (
+    r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
+    r"aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+)
+_DATE_TIME_SHAPE_RE = re.compile(
+    r"\b" + _MONTH_RE + r"\s+\d{1,2}(?:st|nd|rd|th)?(?:\s*,?\s*(?:19|20)\d{2})?\b"
+    r"|\b" + _MONTH_RE + r"\s+(?:19|20)\d{2}\b"
+    r"|\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b"
+    r"|\b(?:19|20)\d{2}[/-]\d{1,2}[/-]\d{1,2}\b"
+    r"|\b\d{1,2}:\d{2}(?:\s*(?:am|pm))?\b"
+    r"|\b\d{1,2}\s*(?:am|pm)\b",
+    re.IGNORECASE,
+)
+
+
+def _address_shape_hit(text: str) -> str:
+    """First street-address-shaped substring in ``text`` (number + words + street
+    suffix, or a unit "#N"), or "" if none. Render-reaching HARD LINE only."""
+    if not text:
+        return ""
+    m = _ADDRESS_SHAPE_RE.search(text)
+    return m.group(0).strip() if m else ""
+
+
+def _date_time_shape_hit(text: str) -> str:
+    """First date/clock-time-shaped substring in ``text`` (month-day-year, numeric
+    date, or clock time), or "" if none. Render-reaching HARD LINE only."""
+    if not text:
+        return ""
+    m = _DATE_TIME_SHAPE_RE.search(text)
+    return m.group(0).strip() if m else ""
 
 
 def _norm_ws(value: str) -> str:
@@ -186,34 +255,46 @@ def _first_ungrounded_commercial(text: str, allowed_values: Sequence[str]) -> st
     commercial value is grounded in an OVERLAY-RENDERED locked value. "" is also
     returned for text with NO commercial content (clean).
 
-    ALL-HITS, token-anchored (Codex BLOCKERs): a field/entry passes ONLY when EVERY
-    commercial value it carries is grounded — a grounded value FOLLOWED by an invented
-    one (e.g. "20% off and $5 off") is rejected on the invented "$5". Two cases:
+    ALL-HITS (Codex BLOCKERs + operator round-4): a field/entry passes ONLY when
+    EVERY commercial value it carries is grounded — a grounded value FOLLOWED by an
+    invented one (e.g. "20% off and $5 off", or "20% off and BOGO free") is rejected
+    on the invented one. Three independent ALL-HITS scans:
       - whole digit-bearing tokens (full percentage / currency / bare price / phone
-        digit-run) are each grounded via ``_token_is_grounded`` (NOT a loose substring
-        — "30%" does not ground against a locked "20%"); the first ungrounded token is
-        returned;
-      - a NON-numeric commercial hit (a discount word like "BOGO"/"free" that
-        ``_commercial_value_hit`` flags but that yields NO digit token) is grounded
-        only if it appears as a WHOLE word in an OVERLAY-RENDERED locked value
-        (``_phrase_is_grounded``) — so a bare "free" rides a grounded locked "free
-        delivery on all orders" but an invented "BOGO" (no fact) is returned. This
-        keeps a GROUNDED operational/discount phrase from being double-rejected by the
-        commercial path (operator round-3).
-    Used by BOTH the non-rendering free-text scan AND the must_not_add invented-
-    commercial check so the two agree on grounding; the strict render-reaching path
-    and the must_not_add locked-value containment check are unaffected."""
+        digit-run) each grounded via ``_token_is_grounded`` (NOT a loose substring —
+        "30%" does not ground against a locked "20%");
+      - non-numeric discount/offer PHRASES (free X / complimentary X / gift X / bonus
+        X / BOGO / "buy one get one") each grounded as a WHOLE PHRASE via
+        ``_phrase_is_grounded`` (operator round-4 BLOCKER 2) — so an invented "free
+        dessert" does NOT ride a locked "free delivery", and a grounded "free
+        delivery" is not double-rejected by the commercial path; scanned regardless of
+        whether numeric tokens are also present;
+      - any RESIDUAL non-numeric commercial hit (bare "discount"/"cashback"/"combo
+        price") from ``_commercial_value_hit`` not already covered above, grounded as
+        a whole word.
+    The first ungrounded value found (in that order) is returned. Used by BOTH the
+    non-rendering free-text scan AND the must_not_add invented-commercial check so the
+    two agree on grounding; the strict render-reaching path and the must_not_add
+    locked-value containment check are unaffected."""
     if not text:
         return ""
+    # (1) numeric commercial tokens — all-hits, token-anchored.
     for tok in _commercial_grounding_tokens(text):
         if not _token_is_grounded(tok, allowed_values):
             return tok
-    # No ungrounded digit token. If a commercial SHAPE is still present it is a
-    # non-numeric discount word (no digit token) — grounded only if it appears as a
-    # whole word in a rendered locked value (else invented).
+    # (2) non-numeric discount/offer phrases — all-hits, whole-phrase grounded.
+    for phrase in (" ".join(m.group(0).split())
+                   for m in _DISCOUNT_OFFER_PHRASE_RE.finditer(text)):
+        if phrase and not _phrase_is_grounded(phrase, allowed_values):
+            return phrase
+    # (3) residual non-numeric commercial shape (discount/cashback/combo price) not
+    # already covered by (1)/(2) — grounded as a whole word.
     if not _commercial_grounding_tokens(text):
         hit = _commercial_value_hit(text)
-        if hit and not _phrase_is_grounded(hit, allowed_values):
+        if (
+            hit
+            and not _DISCOUNT_OFFER_PHRASE_RE.search(hit)
+            and not _phrase_is_grounded(hit, allowed_values)
+        ):
             return hit
     return ""
 
@@ -296,6 +377,32 @@ def _open_claim_hit(text: str) -> str:
     return m.group(0).strip() if _cf_open_is_operational(text) else ""
 
 
+def _all_open_claim_hits(text: str) -> list[str]:
+    """ALL operational "open" claims in ``text`` (context-aware), in order — the
+    all-hits sibling of ``_open_claim_hit`` (operator round-4 MAJOR). Each "open"
+    token is classified on its OWN LOCAL window (the open word + a few following
+    words), so "open daily and open until 10" yields BOTH "open daily" and "open
+    until 10" rather than folding to the first. A compositional "open" ("open central
+    area") in the same text contributes nothing. If the context classifier is
+    unavailable, fail closed: every "open" token is returned (the textless rule never
+    weakens)."""
+    if not text:
+        return []
+    hits: list[str] = []
+    for m in _cf_open_token_re.finditer(text):
+        # local window: from this open token to the end of the next ~3 tokens, which
+        # is enough to carry an anchored open-phrase ("open daily", "open until 10",
+        # "open 9am") or a co-occurring clock time.
+        tail = text[m.start():]
+        window = " ".join(tail.split()[:4])
+        if _cf_open_is_operational is None:
+            hits.append(m.group(0).strip())  # fail-closed
+            continue
+        if _cf_open_is_operational(window):
+            hits.append(window)
+    return hits
+
+
 def _text_render_instruction_hit(text: str) -> str:
     """First text-into-background-rendering instruction or quoted literal in ``text``
     (Codex Finding 3a), or "" if clean. A textless-background prompt must never tell
@@ -363,15 +470,22 @@ def _operational_claim_hit(text: str) -> str:
 _STRICT_OPERATIONAL_CLAIM_RE = re.compile(
     r"\b(?:"
     # availability / service claims (multi-word or unambiguous)
-    r"free\s+delivery|delivery\s+available|home\s+delivery|"
-    r"takeout|take[\s-]?out|takeaway|dine[\s-]?in|curbside|drive[\s-]?thru|"
-    r"pick[\s-]?up\s+available|order\s+online|online\s+order(?:ing|s)?|"
+    r"free\s+delivery|delivery\s+available|home\s+delivery|delivery\s+service|"
+    r"we\s+deliver|"
+    r"takeout|take[\s-]?out|takeaway|dine[\s-]?in|drive[\s-]?thru|"
+    # bare service terms (operator round-4 MINOR) — genuine service words. A small
+    # guard skips the obvious creative motif "pickup truck"; the grounded-or-rejected
+    # rule covers any other compositional use.
+    r"curbside|pick[\s-]?up(?!\s+truck)|delivery|"
+    r"order\s+online|online\s+order(?:ing|s)?|"
     r"reservations?|book\s+(?:now|a\s+table)|walk[\s-]?ins?\s+welcome|"
     r"catering\s+available|catering\s+service|now\s+catering|"
     # hiring
     r"now\s+hiring|hiring\s+now|help\s+wanted|join\s+our\s+team|"
-    # hours / open-close (genuine business hours, not a layout "open")
-    r"open\s+(?:daily|\d|today|now|late|24[\s/]?7|mon|tue|wed|thu|fri|sat|sun)|"
+    # hours / open-close (genuine business hours, not a layout "open"). The "until/
+    # till" + clock forms are anchored open-phrases (operator round-4 MAJOR all-hits).
+    r"open\s+(?:daily|\d|today|now|late|until|till|til|24[\s/]?7|"
+    r"mon|tue|wed|thu|fri|sat|sun)|"
     r"open\s+for\s+business|grand\s+opening|now\s+open|re[\s-]?open(?:ing|ed)?|"
     r"closed\s+(?:on|mon|tue|wed|thu|fri|sat|sun|today)|"
     r"closes?\s+at|hours\s*:|business\s+hours|store\s+hours|"
@@ -402,10 +516,11 @@ def _strict_operational_hits(text: str) -> list[str]:
         tok = m.group(0).strip()
         if tok:
             hits.append(tok)
-    # context-aware operational "open" not already covered by the regex's open-forms.
-    open_hit = _open_claim_hit(text)
-    if open_hit and not any(open_hit.casefold() in h.casefold() for h in hits):
-        hits.append(open_hit)
+    # ALL context-aware operational "open" claims (all-hits — operator round-4 MAJOR),
+    # for any open-phrase not already captured by the regex's open-forms above.
+    for open_hit in _all_open_claim_hits(text):
+        if open_hit and not any(open_hit.casefold() in h.casefold() for h in hits):
+            hits.append(open_hit)
     return hits
 
 
@@ -875,12 +990,20 @@ def validate(
     locked_text_values = [v for v in locked_text_values if len(v) >= 4]
     for field_name, text in free_text_fields.items():
         if field_name in _RENDER_REACHING_FIELDS:
-            # STRICT: any commercial SHAPE is rejected (it can reach pixels), and the
-            # locked identity/commercial textual scan runs (would render outside the
-            # overlay).
+            # STRICT (HARD LINE): any commercial SHAPE is rejected (it can reach
+            # pixels), the locked identity/commercial textual scan runs (would render
+            # outside the overlay), AND invented address / date-time shapes reject —
+            # contact/date/address are overlay-owned facts that must never be model-
+            # rendered into the background, grounded OR not (operator round-4 BLOCKER 1).
             hit = _commercial_value_hit(text)
             if hit:
                 errors.append(f"commercial value outside fact_refs: {field_name}: {hit}")
+            addr_hit = _address_shape_hit(text)
+            if addr_hit:
+                errors.append(f"address shape outside fact_refs: {field_name}: {addr_hit}")
+            date_hit = _date_time_shape_hit(text)
+            if date_hit:
+                errors.append(f"date/time shape outside fact_refs: {field_name}: {date_hit}")
             norm_text = _norm_ws(text)
             for lv in locked_text_values:
                 if re.search(r"(?<![a-z0-9])" + re.escape(lv) + r"(?![a-z0-9])", norm_text):
