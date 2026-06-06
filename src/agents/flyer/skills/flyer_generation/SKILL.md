@@ -43,6 +43,27 @@ Return JSON only, matching this schema:
 }
 ```
 
+## HARD OUTPUT RULES (a violation makes the flyer unusable)
+
+These three rules are non-negotiable. Breaking any one of them makes the brief
+fail the deterministic firewall and the flyer cannot be produced:
+
+1. **`fact_refs` MUST contain one entry for EVERY fact_id listed in
+   `available_fact_ids` — reference all of them by `fact_id`.** Never omit one,
+   including the occasion / `campaign_title` and every offer / price fact. (The
+   occasion is also a referenced fact, not just a theme — reference it AND use it
+   for art direction.)
+2. **For a `fact_id` reference, `provenance` is `"locked"`** (the system derives
+   it; if you set it, set `"locked"`). Use `"customer_text"` ONLY together with a
+   `raw_span` (never with a `fact_id`).
+3. **NEVER write a commercial VALUE — any price, percentage, `"%"`, `"$"`, the
+   word `"discount"`, or offer / price amount — in ANY free-text field**
+   (`offer_structure`, `layout_strategy`, `grouping`, `visual_direction`,
+   `background_brief`). Those fields describe ONLY composition / theme / structure.
+   (A structural count like "two combo cards" is fine — only commercial VALUES are
+   forbidden.) Every commercial value is rendered deterministically from facts via
+   `fact_refs` — never typed by you.
+
 ## Hard rules (the invariant — a wrong customer-facing fact must be impossible)
 
 - **Reference commercial facts ONLY by `fact_id` or `raw_span`.** Item names,
