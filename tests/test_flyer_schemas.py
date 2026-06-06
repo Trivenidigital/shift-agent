@@ -29,6 +29,7 @@ from schemas import (  # noqa: E402
     FlyerGuestOrder,
     FlyerGuestOrderStore,
     FlyerIntakeSession,
+    FlyerLockedFact,
     FlyerProject,
     FlyerProjectCreated,
     FlyerProjectStore,
@@ -176,6 +177,41 @@ def test_flyer_config_legacy_model_fields_still_resolve_when_policy_absent():
     assert final.provider == "openrouter"
     assert final.model == "openai/gpt-5.4-image-2"
     assert final.quality == "high"
+
+
+def test_flyer_locked_fact_rejects_required_hermes_inferred_facts():
+    with pytest.raises(ValidationError, match="hermes_inferred facts cannot be required"):
+        FlyerLockedFact(
+            fact_id="item:0:name",
+            label="Item",
+            value="Masala Dosa",
+            source="hermes_inferred",
+            required=True,
+        )
+
+    project_payload = _base_project_dict()
+    project_payload["locked_facts"] = [{
+        "fact_id": "item:0:name",
+        "label": "Item",
+        "value": "Masala Dosa",
+        "source": "hermes_inferred",
+        "required": True,
+    }]
+    with pytest.raises(ValidationError, match="hermes_inferred facts cannot be required"):
+        FlyerProject.model_validate(project_payload)
+
+
+def test_flyer_locked_fact_model_copy_revalidates_inferred_required_invariant():
+    fact = FlyerLockedFact(
+        fact_id="item:0:name",
+        label="Item",
+        value="Masala Dosa",
+        source="hermes_inferred",
+    )
+
+    assert fact.required is False
+    with pytest.raises(ValidationError, match="hermes_inferred facts cannot be required"):
+        fact.model_copy(update={"required": True})
 
 
 def test_flyer_config_provider_policy_overrides_legacy_model_fields():

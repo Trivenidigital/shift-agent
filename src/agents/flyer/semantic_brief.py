@@ -111,6 +111,18 @@ def _title_case(value: str) -> str:
 
 
 def _campaign_from_source(text: str) -> str:
+    occasion = re.search(
+        r"\bon\s+the\s+occasion\s+of\s+(?P<occasion>.+?)(?=\s+(?:can\s+we\s+do|create|make|generate|design|build|need)\b|[.!?]|$)",
+        text or "",
+        flags=re.IGNORECASE,
+    )
+    if occasion and re.search(r"\b(?:meal\s+)?combo(?:s)?\b|\bpackage(?:s)?\b", text or "", flags=re.IGNORECASE):
+        occasion_text = _title_case(_clean(occasion.group("occasion")).strip(" .,"))
+        occasion_text = re.sub(r"\b(?:Veg\s+and\s+Non\s+Veg|Non\s+Veg\s+and\s+Veg)\b", "", occasion_text)
+        occasion_text = _clean(occasion_text)
+        if occasion_text:
+            suffix = "Meal Combos" if re.search(r"\bmeal\s+combo", text or "", flags=re.IGNORECASE) else "Combos"
+            return f"{occasion_text} {suffix}"
     patterns = [
         r"\b(?:create|make|generate|design|build|need)\s+(?:a\s+|an\s+)?(?:new\s+)?(?:flyer|flier|poster|banner|creative|graphic)\s+for\s+(.+?)(?=\s*(?:[.!?]|,|\b(?:all items?|any item|free|lucky draw|monday|tuesday|wednesday|thursday|friday|saturday|sunday|with|include|featuring)\b|$))",
         r"\b(?:flyer|flier|poster|banner|creative|graphic)\s+for\s+(.+?)(?=\s*(?:[.!?]|,|\b(?:all items?|any item|free|lucky draw|monday|tuesday|wednesday|thursday|friday|saturday|sunday|with|include|featuring)\b|$))",
@@ -160,6 +172,40 @@ def _offers_from_source(text: str) -> list[FlyerSemanticOffer]:
     )
     if free:
         offers.append(FlyerSemanticOffer(f"Free {_title_case(free.group('item'))} with any purchase above ${free.group('amount')}"))
+    combo_end = (
+        r"(?=(?:\.\s*)?(?:and\s+)?(?:a\s+)?(?:non\s*-?\s*veg|veg)\s+combo\b"
+        r"|\bon\s+the\s+occasion\b|[.!?]|$)"
+    )
+    combo_patterns = [
+        re.compile(
+            r"\b(?:prices?\s*)?\$?(?P<price>\d+(?:\.\d{1,2})?)\s+for\s+"
+            r"(?P<label>non\s*-?\s*veg|veg)\s+combo\s+"
+            r"(?:includes?|including)\s+(?P<items>.+?)" + combo_end,
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(?P<label>non\s*-?\s*veg|veg)\s+combo\s+"
+            r"(?:priced\s+)?(?:at|for)?\s*\$?(?P<price>\d+(?:\.\d{1,2})?)\s+"
+            r"(?:includes?|including)\s+(?P<items>.+?)" + combo_end,
+            re.IGNORECASE,
+        ),
+    ]
+    seen_combo_keys: set[str] = set()
+    for pattern in combo_patterns:
+        for combo in pattern.finditer(text or ""):
+            label_raw = combo.group("label")
+            label = "Non Veg Combo" if re.search(r"\bnon\s*-?\s*veg\b", label_raw, re.IGNORECASE) else "Veg Combo"
+            price = combo.group("price")
+            items = _clean(combo.group("items"))
+            items = re.sub(r"\s+\bon\s+the\s+occasion\b.*$", "", items, flags=re.IGNORECASE).strip(" .,")
+            parts = [part.strip(" .,") for part in items.split(",") if part.strip(" .,")]
+            if len(parts) == 2 and not re.search(r"\band\b", parts[1], flags=re.IGNORECASE):
+                items = f"{parts[0]} and {parts[1]}"
+            key = _norm(f"{label} {price} {items}")
+            if not items or key in seen_combo_keys:
+                continue
+            seen_combo_keys.add(key)
+            offers.append(FlyerSemanticOffer(f"{label}: ${price} includes {items}"))
     return offers
 
 
@@ -368,7 +414,11 @@ def _fallback_brief(fields: FlyerRequestFields, raw_request: str, *, allow_text_
         campaign_title=campaign,
         account_business=_clean(fields.venue_or_location or "") if allow_text_identity else "",
         pricing_structure=_pricing_from_source(source),
-        offers=_offers_from_source(source),
+        # The deterministic combo/offer parser can over-capture a request tail the same
+        # way the provider can (e.g. "Non Veg Combo: $X includes Can we do … flyer for …").
+        # Gate it through the SAME faithfulness primitive used for provider offers so no
+        # offer source — provider or fallback parser — locks an echo as a customer fact.
+        offers=[offer for offer in _offers_from_source(source) if _offer_is_faithful(offer.text)],
         schedule=_schedule_from_source(source),
         promotion_end=_promotion_end_from_source(source),
         style=_clean(fields.style_preference or ""),
@@ -377,8 +427,15 @@ def _fallback_brief(fields: FlyerRequestFields, raw_request: str, *, allow_text_
 
 
 def _merge_briefs(primary: FlyerSemanticBrief, fallback: FlyerSemanticBrief) -> FlyerSemanticBrief:
+    campaign_title = primary.campaign_title or fallback.campaign_title
+    if (
+        fallback.campaign_title
+        and re.search(r"\b(?:meal\s+)?combos?\b", fallback.campaign_title, flags=re.IGNORECASE)
+        and re.search(r"\b(?:veg\s+and\s+non\s+veg|non\s+veg\s+and\s+veg)\b", campaign_title, flags=re.IGNORECASE)
+    ):
+        campaign_title = fallback.campaign_title
     return FlyerSemanticBrief(
-        campaign_title=primary.campaign_title or fallback.campaign_title,
+        campaign_title=campaign_title,
         account_business=primary.account_business or fallback.account_business,
         display_brand=primary.display_brand or fallback.display_brand,
         pricing_structure=primary.pricing_structure or fallback.pricing_structure,

@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+"""bare-flyer-render-and-send -- Slice 1 grounded async render + WhatsApp delivery.
+
+Spawned DETACHED by cf-router (gateway never blocks on the render). Resolves the sender's
+registered business, generates an integrated Hermes+OpenRouter poster grounded in VERIFIED
+identity/contact facts, gates on hard-fact vision QA, and delivers -- or fails closed with an
+honest reply. Unregistered senders get a stated-facts-only flyer. Every outcome is audited to
+state/bare_flyer/send.log. The old flyer route is reused only as contracts/safety, never the generator.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, "/opt/shift-agent")
+_HERE = Path(__file__).resolve()
+try:  # repo/src layout fallback (tests / non-deployed runs)
+    _SRC = _HERE.parents[3]
+    sys.path.insert(0, str(_SRC / "platform"))
+    sys.path.insert(0, str(_SRC))
+except IndexError:
+    pass
+
+OUT_DIR = Path("/opt/shift-agent/state/bare_flyer/out")
+LOG_PATH = Path("/opt/shift-agent/state/bare_flyer/send.log")
+RECENT_DIR = Path("/opt/shift-agent/state/bare_flyer/recent")
+# Fast, honest reply for a flyer revision/feedback follow-up. cf-router routes these here
+# (instead of the toolless LLM, which loops ~21 min in bare mode) once a recent bare flyer
+# exists for the chat. Bounded revision-apply covers supported item/price layout edits.
+REVISION_REPLY = (
+    "I couldn't apply that edit automatically yet. Please resend the full updated details "
+    "(business name, items, prices, dates/times) and I'll make a new version."
+)
+
+
+def _sanitize_chat(chat_id: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.@-]", "_", chat_id or "")[:80]
+
+
+def mark_recent_flyer(chat_id: str, brief: str) -> None:
+    """Record that a bare flyer was just sent to this chat so cf-router can route a follow-up
+    revision message here (fast deterministic reply) instead of to the LLM. Best-effort."""
+    try:
+        RECENT_DIR.mkdir(parents=True, exist_ok=True)
+        (RECENT_DIR / f"{_sanitize_chat(chat_id)}.json").write_text(
+            json.dumps({"sent_at": datetime.now(timezone.utc).isoformat(),
+                        "brief": (brief or "")[:500], "chat_id": chat_id}),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def _bare():
+    try:
+        import flyer_bare_render as B  # deployed flat
+    except ImportError:
+        from agents.flyer import bare_render as B  # repo src
+    return B
+
+
+def _ctx(action_id: str):
+    try:
+        from flyer_action_registry import build_action_context
+    except ImportError:
+        from agents.flyer.action_registry import build_action_context
+    return build_action_context(action_id=action_id, is_regulated_action=False)
+
+
+def log(msg: str) -> None:
+    line = f"{datetime.now(timezone.utc).isoformat()} {msg}"
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with LOG_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except OSError:
+        pass
+
+
+def send_text(chat_id: str, text: str, action_id: str) -> bool:
+    try:
+        from safe_io import bridge_post
+        ok, mid, err, status = bridge_post(chat_id, text, action_context=_ctx(action_id))
+        log(f"TEXT[{action_id}] ok={ok} {mid if ok else str(status) + ':' + str(err)}")
+        return ok
+    except Exception as e:  # noqa: BLE001
+        log(f"TEXT[{action_id}] exception {type(e).__name__}: {e}")
+        return False
+
+
+def send_image(chat_id: str, image_bytes: bytes, caption: str, action_id: str) -> bool:
+    try:
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        path = OUT_DIR / f"bare-flyer-{ts}.png"
+        path.write_bytes(image_bytes)
+        from safe_io import bridge_send_media
+        ok, mid, err, status = bridge_send_media(chat_id, str(path), caption=caption, action_context=_ctx(action_id))
+        log(f"IMAGE[{action_id}] ok={ok} path={path.name} {mid if ok else str(status) + ':' + str(err)}")
+        return ok
+    except Exception as e:  # noqa: BLE001
+        log(f"IMAGE[{action_id}] exception {type(e).__name__}: {e}")
+        return False
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--chat-id", required=True)
+    ap.add_argument("--brief", required=True)
+    ap.add_argument("--sender-phone", default=None)
+    ap.add_argument("--message-id", default=None)
+    ap.add_argument("--no-ack", action="store_true")
+    ap.add_argument("--revision", action="store_true",
+                    help="flyer revision/feedback follow-up: reply deterministically, do not render")
+    ap.add_argument("--revision-apply", action="store_true",
+                    help="supported uniform-price-header edit (slice 2c): apply to the persisted session")
+    args = ap.parse_args(argv)
+    chat_id = args.chat_id
+    log(f"START chat={chat_id} brief={args.brief[:90]!r} revision={args.revision} apply={args.revision_apply}")
+
+    if args.revision_apply:
+        # Supported uniform-price-header edit (slice 2c). render_revision_apply respects the
+        # FLYER_BARE_REVISION_APPLY opt-out and degrades to REVISION_NEEDED (resend) when off /
+        # no session / non-uniform prices. If a raw background exists it re-overlays; otherwise it
+        # regenerates from stored structured facts.
+        try:
+            B = _bare()
+            status, payload = B.render_revision_apply(chat_id, args.brief)
+        except Exception as e:  # noqa: BLE001
+            log(f"OUTCOME=revision_apply_error {type(e).__name__}: {e}")
+            send_text(chat_id, REVISION_REPLY, "flyer.bare.revision_needed")
+            return 0
+        if status == B.SEND:
+            ok = send_image(chat_id, payload, "Here's your updated flyer - reply with any changes.",
+                            "flyer.bare.image_send")
+            if ok:
+                mark_recent_flyer(chat_id, args.brief)
+                B.commit_session(chat_id)  # commit the revised session only after delivery (F3)
+            log(f"OUTCOME=revision_applied chat={chat_id} ok={ok}")
+            return 0 if ok else 1
+        if status == B.FAILCLOSED:
+            send_text(chat_id, "I couldn't apply that change just now (I'd rather not show wrong "
+                      "info). Please resend the full details you'd like.", "flyer.bare.failclosed")
+            log(f"OUTCOME=revision_apply_failclosed chat={chat_id}")
+            return 0
+        send_text(chat_id, REVISION_REPLY, "flyer.bare.revision_needed")  # REVISION_NEEDED (degraded)
+        log(f"OUTCOME=revision_needed chat={chat_id} apply_degraded=1")
+        return 0
+
+    if args.revision:
+        # Broad revision/feedback follow-up -> deterministic "resend full details" (no render, no LLM loop).
+        send_text(chat_id, REVISION_REPLY, "flyer.bare.revision_needed")
+        log(f"OUTCOME=revision_needed chat={chat_id}")
+        return 0
+
+    if not args.no_ack:
+        send_text(chat_id, "Got it - creating your flyer now, this takes a few seconds...", "flyer.bare.ack")
+
+    try:
+        B = _bare()
+        status, payload = B.render_grounded(
+            chat_id, args.brief, message_id=args.message_id, sender_phone=args.sender_phone,
+        )
+    except Exception as e:  # noqa: BLE001
+        log(f"OUTCOME=render_error {type(e).__name__}: {e}")
+        send_text(chat_id, "Sorry, I couldn't create the flyer right now. Please try again shortly.", "flyer.bare.error")
+        return 1
+
+    if status == B.SEND:
+        ok = send_image(chat_id, payload, "Here's your flyer - reply with any changes.", "flyer.bare.image_send")
+        if ok:
+            mark_recent_flyer(chat_id, args.brief)
+            B.commit_session(chat_id)  # commit the pending session only after delivery (F3)
+        log(f"OUTCOME=sent chat={chat_id} ok={ok}")
+        return 0 if ok else 1
+
+    if status == B.CONFLICT:
+        stated = (payload or {}).get("stated") or "a different business"
+        registered = (payload or {}).get("registered") or "your registered business"
+        send_text(
+            chat_id,
+            f'This looks like a flyer for "{stated}", but your number is registered to "{registered}". '
+            "I can only make flyers for your registered business. If this is for a different business, "
+            "please register it first.",
+            "flyer.bare.scope_mismatch",
+        )
+        log(f"OUTCOME=conflict chat={chat_id} stated={stated!r} registered={registered!r}")
+        return 0
+
+    if status == B.FAILCLOSED:
+        failures = ", ".join(payload or []) or "some details"
+        send_text(
+            chat_id,
+            "I couldn't render your flyer with all the correct details just now (I'd rather not show "
+            "wrong info). Please try again in a moment, or tell me the exact details to include.",
+            "flyer.bare.failclosed",
+        )
+        log(f"OUTCOME=failclosed chat={chat_id} failures={failures}")
+        return 0
+
+    if status == B.REVISION_NEEDED:
+        send_text(
+            chat_id,
+            "To update your flyer, please resend the full details you'd like on it (business name, items, "
+            "prices, dates/times) and I'll make an updated version. (Editing your previous flyer directly "
+            "is coming soon.)",
+            "flyer.bare.revision_needed",
+        )
+        log(f"OUTCOME=revision_needed chat={chat_id}")
+        return 0
+
+    if status == B.UNREGISTERED:
+        try:
+            png = B.render_unregistered(args.brief)
+        except Exception as e:  # noqa: BLE001
+            log(f"OUTCOME=unregistered_render_error {type(e).__name__}: {e}")
+            send_text(chat_id, "Sorry, I couldn't create the flyer right now. Please try again shortly.", "flyer.bare.error")
+            return 1
+        ok = send_image(chat_id, png, "Here's your flyer - reply with any changes.", "flyer.bare.image_send")
+        if ok:
+            mark_recent_flyer(chat_id, args.brief)
+        log(f"OUTCOME=unregistered_sent chat={chat_id} ok={ok}")
+        return 0 if ok else 1
+
+    log(f"OUTCOME=unknown_status status={status!r}")
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

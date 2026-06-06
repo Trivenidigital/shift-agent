@@ -2315,7 +2315,7 @@ def _project_with_inferred(items):
     return FlyerProject(
         project_id="F9003", status="awaiting_final_approval", customer_phone="+17329837841",
         created_at=now, updated_at=now, original_message_id="m-qa",
-        raw_request="Flyer for Lakshmis Kitchen with breakfast items",
+        raw_request="Flyer for Lakshmis Kitchen, include breakfast items",
         locked_facts=facts,
     )
 

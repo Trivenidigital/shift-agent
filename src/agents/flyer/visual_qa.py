@@ -15,6 +15,10 @@ import urllib.request
 
 from schemas import FlyerProject, FlyerVisualQAReport
 try:
+    from flyer_facts import requests_generated_item_suggestions  # type: ignore
+except ImportError:
+    from agents.flyer.facts import requests_generated_item_suggestions
+try:
     from flyer_semantic_brief import semantic_visibility_policy, visible_wrong_brand_blockers  # type: ignore
 except ImportError:
     from agents.flyer.semantic_brief import semantic_visibility_policy, visible_wrong_brand_blockers
@@ -684,6 +688,10 @@ def _inferred_item_coverage_blockers(project: FlyerProject, raw_text: str) -> li
     the requested-count + pricing-type reconciliation lands with the live planner
     wiring (slice 5). Inert today — no fact carries source='hermes_inferred' until
     the planner is enabled, so this contributes no blocker in the default state."""
+    if not requests_generated_item_suggestions(
+        " ".join(str(value or "") for value in (project.raw_request, project.fields.notes))
+    ):
+        return []
     item_re = re.compile(r"^item:(?P<index>\d+):name$")
     blockers: list[str] = []
     for fact in project.locked_facts:
@@ -726,6 +734,10 @@ def _inferred_intent_count_blockers(project: FlyerProject) -> list[str]:
 
     Inert in the dormant default: gated on >=1 hermes_inferred item, and no fact carries
     source='hermes_inferred' until the planner is enabled, so this adds no blocker."""
+    if not requests_generated_item_suggestions(
+        " ".join(str(value or "") for value in (project.raw_request, project.fields.notes))
+    ):
+        return []
     name_re = re.compile(r"^item:(?P<index>\d+):name$")
     inferred_names: set[str] = set()
     all_names: set[str] = set()

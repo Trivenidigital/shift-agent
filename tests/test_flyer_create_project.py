@@ -569,6 +569,88 @@ def test_create_project_passes_config_to_creative_planner(tmp_path, monkeypatch,
     assert [facts[f"item:{idx}:price"]["source"] for idx in range(8)] == ["customer_text"] * 8
 
 
+def test_meal_combo_request_does_not_materialize_unrequested_planner_items(tmp_path, monkeypatch, capsys):
+    module = _load_script(monkeypatch)
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    config_path = tmp_path / "config.yaml"
+    _write_customer(
+        customers_path,
+        category="Indian Restaurant",
+        phone="+17329837841",
+        business_name="Lakshmi's Kitchen",
+        business_address="90 Brybar Dr St Johns FL",
+        primary_chat_id="201975216009469@lid",
+    )
+    config_path.write_text(json.dumps({
+        "schema_version": 1,
+        "customer": {"name": "Triveni", "location_id": "loc_pineville_01", "timezone": "America/New_York"},
+        "owner": {"name": "Owner", "phone": "+19045550000"},
+        "limits": {},
+        "alerting": {"pushover_user_key": "k", "pushover_app_token": "t"},
+        "backup": {"gpg_recipient_email": "owner@example.com"},
+        "flyer": {
+            "enabled": True,
+            "creative_planner": {
+                "enabled": True,
+                "enabled_categories": ["restaurant", "meal", "combo", "veg", "non veg"],
+            },
+        },
+    }), encoding="utf-8")
+
+    from agents.flyer import creative_planner as cp  # noqa: E402
+
+    monkeypatch.setattr(
+        cp,
+        "build_creative_planner_provider",
+        lambda: (lambda _fields, _raw: [
+            "Spicy Chicken Curry",
+            "Butter Chicken",
+            "Chicken Biryani",
+            "Chicken Pulav",
+            "Tandoori Chicken",
+            "Paneer Butter Masala",
+            "Chana Masala",
+            "Vegetable Korma",
+            "Dal Makhani",
+            "Aloo Gobi",
+            "Gulab Jamun",
+            "Rasgulla",
+        ]),
+    )
+    raw_request = (
+        "Can we do meal combo flyer for veg and non veg with prices 49.99 for non veg combo "
+        "includes 2 non veg curries, 1 chicken pulav or chicken Biryani and 1 dessert. "
+        "And a veg combo 39.99 includes 2 veg curries, 1 dessert on the occasion of Memorial Day weekend"
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+17329837841",
+        "--chat-id", "201975216009469@lid",
+        "--message-id", "m-memorial-combo",
+        "--raw-request", raw_request,
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+        "--config-path", str(config_path),
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+    fact_values = " ".join(fact["value"] for fact in project["locked_facts"])
+
+    assert all(
+        not (fact["source"] == "hermes_inferred" and fact["required"])
+        for fact in project["locked_facts"]
+    )
+    assert [fact["value"] for fact in project["locked_facts"] if fact["fact_id"].startswith("offer:")] == [
+        "Non Veg Combo: $49.99 includes 2 non veg curries, 1 chicken pulav or chicken Biryani and 1 dessert",
+        "Veg Combo: $39.99 includes 2 veg curries and 1 dessert",
+    ]
+    assert "Spicy Chicken Curry" not in fact_values
+    assert "Paneer Butter Masala" not in fact_values
+    assert "Rasgulla" not in fact_values
+
+
 def test_deferred_reference_does_not_run_creative_planner_before_ocr(tmp_path, monkeypatch, capsys):
     module = _load_script(monkeypatch)
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))

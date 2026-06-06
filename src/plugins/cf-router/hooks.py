@@ -174,7 +174,9 @@ def pre_gateway_dispatch(event: Any, gateway: Any = None, session_store: Any = N
         text = _extract_text(event) or ""
         media_path = _extract_media_path(event)
         chat_id = _extract_chat_id(event)
-        if chat_id and (text or media_path) and actions.is_flyer_enabled():
+        if chat_id and (text or media_path) and (
+            actions.is_flyer_enabled() or actions.is_flyer_workflow_enabled()
+        ):
             message_id = _extract_message_id(event, chat_id, text)
             token = actions.begin_flyer_intent_shadow(
                 text=text,
@@ -233,6 +235,8 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
         message_id = native_message_id or _extract_message_id(event, chat_id, text)
         if native_message_id and actions.mark_cf_router_inbound_seen(chat_id, native_message_id, text):
             return {"action": "skip", "reason": "cf-router duplicate inbound"}
+        flyer_generation_enabled = actions.is_flyer_enabled()
+        flyer_workflow_enabled = flyer_generation_enabled or actions.is_flyer_workflow_enabled()
 
         # F8 path — owner self-chat + #XXXXX code → bypass LLM
         if actions.is_owner_chat(chat_id):
@@ -265,7 +269,7 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
         # F7_WATCHDOG_TIMEOUT_SEC) remain in this module for backwards-compat
         # with the TestF7DispatcherWatchdog suite; they are NO LONGER wired
         # into pre_gateway_dispatch. Cleanup deferred to a follow-up PR.
-        if actions.is_flyer_enabled():
+        if flyer_workflow_enabled:
             campaign_cta_text = actions.flyer_campaign_cta_text(text)
             if campaign_cta_text:
                 cta_result = _try_flyer_campaign_cta_intercept(campaign_cta_text, chat_id, event)
@@ -281,7 +285,9 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
             regulated_account_result = _try_flyer_regulated_account_guard(text, chat_id, event)
             if regulated_account_result is not None:
                 return regulated_account_result
-            if actions.is_flyer_approval_text(text) or actions.is_flyer_send_now_intent(text):
+            if flyer_generation_enabled and (
+                actions.is_flyer_approval_text(text) or actions.is_flyer_send_now_intent(text)
+            ):
                 flyer_result = _try_flyer_active_project_intercept(text, chat_id, event, media_path)
                 if flyer_result is not None:
                     return flyer_result
@@ -310,15 +316,20 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
             if onboarding_reply_result is not None:
                 return onboarding_reply_result
             guest_phone, guest_role = actions.lid_to_phone_via_identify_sender(chat_id)
-            if guest_role != "owner" and actions.find_paid_flyer_guest_order(guest_phone, chat_id):
+            if (
+                flyer_generation_enabled
+                and guest_role != "owner"
+                and actions.find_paid_flyer_guest_order(guest_phone, chat_id)
+            ):
                 flyer_result = _try_flyer_primary_intercept(
                     text, chat_id, event, force_new=True, media_path=media_path,
                 )
                 if flyer_result is not None:
                     return flyer_result
-            flyer_result = _try_flyer_active_project_intercept(text, chat_id, event, media_path)
-            if flyer_result is not None:
-                return flyer_result
+            if flyer_generation_enabled:
+                flyer_result = _try_flyer_active_project_intercept(text, chat_id, event, media_path)
+                if flyer_result is not None:
+                    return flyer_result
             # PR-β 2026-05-26 — delivery-state guard for when no active or
             # recent flyer project resolves. Placed AFTER active-project
             # intercept so the guard only sees the no-project-resolves case.
@@ -332,6 +343,7 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
                 if (
                     context_customer
                     and context_customer.get("status") in {"trial", "active"}
+                    and flyer_generation_enabled
                     and actions.is_registered_customer_contextual_flyer_brief(text)
                 ):
                     flyer_result = _try_flyer_primary_intercept(
@@ -339,7 +351,10 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
                     )
                     if flyer_result is not None:
                         return flyer_result
-            if actions.should_start_new_flyer_over_active(text, has_media=bool(media_path)):
+            if (
+                flyer_generation_enabled
+                and actions.should_start_new_flyer_over_active(text, has_media=bool(media_path))
+            ):
                 flyer_result = _try_flyer_primary_intercept(
                     text, chat_id, event, force_new=True, media_path=media_path,
                 )
@@ -381,6 +396,7 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
                                 action_context=build_action_context_for_command(
                                     PROJECT_ACTIONS, "intake.acknowledged",
                                 ),
+                                allow_duplicate=True,
                             )
                             if not ack_ok and not mid:
                                 actions.release_flyer_starter_prompt_claim(str(customer.get("customer_id") or ""))
@@ -453,8 +469,53 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
                 if onboarding_result is not None:
                     return onboarding_result
 
+        # Bare-flyer mode (Approach B): deterministic async intercept, ORDERED so a follow-up
+        # resolves correctly (slice 2c routing). cf-router does NOT block on the ~30s render and
+        # does NOT rely on the LLM. Inert when flyer.enabled=true. The recent-gated arms (a)/(c)
+        # only fire for a chat that just received a bare flyer, so they never hijack catering/other
+        # messages, and the whole chain sits before F7 so a recent customer's revision/new-flyer
+        # wins over catering.
+        if flyer_workflow_enabled and not flyer_generation_enabled:
+            recent = actions.recent_bare_flyer_for_chat(chat_id)
+            # Attached flyer + exact edit OR concept/reference-adaptation text needs the
+            # primary media path even while flyer.enabled=false. Exact edits use source-
+            # preserving generation/manual queue; concept references use the existing
+            # authorization gate and new-poster path while preserving the attachment as
+            # visual inspiration.
+            if media_path and (
+                actions.is_exact_reference_edit_request(text, has_media=True)
+                or actions.is_reference_concept_adaptation_request(text, has_media=True)
+            ):
+                source_edit_result = _try_flyer_primary_intercept(
+                    text, chat_id, event, force_new=True, media_path=media_path)
+                if source_edit_result is not None:
+                    return source_edit_result
+            # (a) supported price edits -> apply (re-overlay/regenerate from persisted facts)
+            if recent and actions.detect_bare_price_revision_apply(text):
+                actions.spawn_bare_flyer_render_and_send(
+                    chat_id, text, message_id=message_id, is_revision_apply=True)
+                return {"action": "skip", "reason": "cf-router bare flyer revision-apply dispatched"}
+            # (b) a genuine NEW-flyer request wins over the broad revision route
+            if actions.is_strong_new_flyer_request(text):
+                actions.spawn_bare_flyer_render_and_send(chat_id, text, message_id=message_id)
+                return {"action": "skip", "reason": "cf-router bare flyer dispatched"}
+            flyer_intent = actions.classify_flyer_intent(text)[0]
+            existing_flyer_edit = actions.is_flyer_edit_of_existing(text)
+            # (c) explicit edits of an existing flyer must stay in Flyer before F7. The bounded
+            #     apply arm above handles the supported price-layout edit; everything else gets the
+            #     flyer-scoped revision fallback instead of being suppressed as an active catering
+            #     lead follow-up.
+            if existing_flyer_edit and (recent or flyer_intent):
+                actions.spawn_bare_flyer_render_and_send(
+                    chat_id, text, message_id=message_id, is_revision=True)
+                return {"action": "skip", "reason": "cf-router bare flyer revision dispatched"}
+            # (d) other explicit flyer intent -> fresh render.
+            if flyer_intent:
+                actions.spawn_bare_flyer_render_and_send(chat_id, text, message_id=message_id)
+                return {"action": "skip", "reason": "cf-router bare flyer dispatched"}
+
         if F7_ENABLED:
-            if actions.is_flyer_enabled():
+            if flyer_generation_enabled:
                 is_flyer, _flyer_signals = actions.classify_flyer_intent(text)
                 if is_flyer:
                     flyer_result = _try_flyer_primary_intercept(text, chat_id, event)
@@ -468,7 +529,7 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
                 or actions.is_proposal_request(text)
             )
             if is_catering or _has_f7_followup_signal(signals) or proposal_workflow:
-                if actions.is_flyer_enabled():
+                if flyer_generation_enabled:
                     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
                     if role != "owner" and actions.has_non_delivered_flyer_project_by_sender(phone, chat_id):
                         return None
@@ -478,6 +539,17 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
                 )
                 if f7_result is not None:
                     return f7_result
+
+        # (e) recent customer + broad non-object revision feedback -> deterministic "resend full
+        # details" (no toolless-LLM loop). Placed AFTER the F7 catering block so catering ALWAYS
+        # wins first for messages that do not name a flyer object: a follow-up like "add 20
+        # vegetarian meals for the party" is handled by F7 and never reaches this flyer arm.
+        if (flyer_workflow_enabled
+                and not flyer_generation_enabled
+                and actions.recent_bare_flyer_for_chat(chat_id)
+                and actions.is_flyer_revision_intent(text)):
+            actions.spawn_bare_flyer_render_and_send(chat_id, text, message_id=message_id, is_revision=True)
+            return {"action": "skip", "reason": "cf-router bare flyer revision dispatched"}
 
         return None
 
@@ -598,6 +670,7 @@ def _try_flyer_sample_prompt_request_intercept(text: str, chat_id: str, event: A
             action_context=build_action_context_for_command(
                 PROJECT_ACTIONS, "intake.acknowledged",
             ),
+            allow_duplicate=True,
         )
         actions.audit_intercepted(
             reason="flyer_sample_prompt_requested",
@@ -652,6 +725,7 @@ def _try_flyer_sample_prompt_request_intercept(text: str, chat_id: str, event: A
         action_context=build_action_context_for_command(
             PROJECT_ACTIONS, "intake.acknowledged",
         ),
+        allow_duplicate=True,
     )
     actions.audit_intercepted(
         reason="flyer_sample_prompt_requested",
@@ -1655,6 +1729,110 @@ def _try_flyer_reference_scope_authorization_intercept(text: str, chat_id: str, 
 
     if choice == "use_account_details":
         message_id = _extract_message_id(event, chat_id, text)
+        original_raw_request = str(pending.get("raw_request") or "").strip()
+        original_intent = str(pending.get("original_intent") or "unknown")
+        if (
+            original_intent == "generic_reference"
+            or actions.is_reference_concept_adaptation_request(original_raw_request, has_media=True)
+        ):
+            auth_note = str(pending.get("authorization_note") or "Customer confirmed authorization").strip()
+            raw_request = (
+                f"{original_raw_request}\n\n"
+                f"Customer authorization note for using the attached reference: {auth_note}.\n"
+                f"Use saved {business_name} account details.\n"
+                f"Use {source} only as a reference/inspiration. "
+                f"Create a new original {business_name} flyer with a similar menu/content structure. "
+                f"Do not copy {source} branding/layout exactly."
+            ).strip()
+            ok, detail, project = actions.trigger_create_flyer_project(
+                customer_phone=phone,
+                chat_id=chat_id,
+                raw_request=raw_request,
+                message_id=message_id,
+                reference_media_path=str(pending.get("media_path") or ""),
+            )
+            project_id = str((project or {}).get("project_id") or "")
+            if not ok or not project_id:
+                actions.audit_intercepted(
+                    reason="flyer_primary_failed", chat_id=chat_id,
+                    subprocess_rc=2, detail=f"authorized_reference_concept=true; {detail[:450]}",
+                )
+                return None
+            if actions.flyer_project_has_manual_review_queued(project or {}):
+                manual = (project or {}).get("manual_review") or {}
+                ack_ok, outbound_message_id, ack_err = actions.send_flyer_manual_review_ack(
+                    chat_id,
+                    project_id,
+                    raw_request,
+                    reason=str(manual.get("detail") or manual.get("reason") or ""),
+                    action_context=build_action_context_for_command(
+                        PROJECT_ACTIONS, "manual_review.queued",
+                        is_regulated_action=False,
+                    ),
+                )
+            elif actions.flyer_project_has_required_fields(project or {}):
+                access, quota_result = _reserve_flyer_access_or_reply(
+                    chat_id, phone, project_id, message_id, consume_quota=True,
+                )
+                if quota_result is not None:
+                    return quota_result
+                proc_ok, proc_mid, proc_err = actions.send_flyer_processing_ack(
+                    chat_id,
+                    project_id,
+                    action_context=build_action_context_for_command(
+                        PROJECT_ACTIONS, "intake.processing",
+                        is_regulated_action=False,
+                    ),
+                )
+                gen_ok, gen_detail = actions.trigger_generate_flyer_concepts(project_id)
+                if gen_ok:
+                    ack_ok, outbound_message_id, ack_err = _send_preview_then_finalize_access(
+                        access,
+                        chat_id,
+                        phone,
+                        project_id,
+                        message_id,
+                        proc_ok=proc_ok,
+                        proc_mid=proc_mid,
+                        proc_err=proc_err,
+                    )
+                else:
+                    _release_flyer_access(access, chat_id, phone, project_id, message_id)
+                    ack_ok, outbound_message_id, ack_err = _send_generation_failure_customer_update(
+                        chat_id,
+                        project_id,
+                        raw_request,
+                        gen_detail,
+                        proc_ok=proc_ok,
+                        action_context=build_action_context_for_command(
+                            PROJECT_ACTIONS, "generation.failed_ack",
+                            is_regulated_action=False,
+                        ),
+                    )
+                    outbound_message_id = ",".join(x for x in [proc_mid, outbound_message_id] if x)
+                    ack_err = f"concept_generation_failed: {gen_detail}; ack_error={ack_err}"
+            else:
+                ack_ok, outbound_message_id, ack_err = actions.send_flyer_text(
+                    chat_id,
+                    actions.flyer_project_missing_info_reply(project or {}),
+                    action_context=build_action_context_for_command(
+                        PROJECT_ACTIONS, "clarification.request",
+                    ),
+                )
+            generation_failed = str(ack_err or "").startswith("concept_generation_failed:")
+            actions.audit_intercepted(
+                reason="flyer_primary_failed" if generation_failed or not ack_ok else "flyer_primary_project_created",
+                chat_id=chat_id,
+                subprocess_rc=0 if ack_ok and not generation_failed else (2 if generation_failed else 3),
+                detail=(
+                    f"authorized_reference_concept; project_id={project_id}; sender_role={role}; "
+                    f"source={source}; ack_message_id={outbound_message_id}; ack_error={ack_err[:300]}"
+                ),
+            )
+            return {
+                "action": "skip",
+                "reason": f"cf-router flyer reference scope authorized concept: project {project_id}",
+            }
         raw_request = (
             "Authorized flyer/source artwork update.\n"
             f"Authorized relationship note: {pending.get('authorization_note') or 'Customer confirmed authorization'}.\n"
@@ -2625,18 +2803,50 @@ def _try_flyer_intake_intercept(
                     f"approved_at={result.get('brief_approved_at') or ''}; sender_role={role}"
                 ),
             )
-            project_result = _try_flyer_primary_intercept(
-                raw_request,
-                chat_id,
-                event,
-                force_new=True,
-                media_path=reference_media_path or media_path,
-                brief_audit_detail=(
-                    f"brief_source={result.get('brief_source') or ''}; "
-                    f"brief_approved_message_id={result.get('brief_approved_message_id') or ''}; "
-                    f"brief_approved_at={result.get('brief_approved_at') or ''}"
-                ),
-            )
+            project_result = None
+            if not actions.is_flyer_enabled() and not (reference_media_path or media_path):
+                spawn_ok = actions.spawn_bare_flyer_render_and_send(
+                    chat_id, raw_request, message_id=message_id,
+                )
+                actions.audit_intercepted(
+                    reason=(
+                        "flyer_bare_brief_generation_dispatched"
+                        if spawn_ok
+                        else "flyer_bare_brief_generation_failed"
+                    ),
+                    chat_id=chat_id,
+                    subprocess_rc=0 if spawn_ok else 3,
+                    detail=(
+                        f"message_id={message_id}; source={result.get('brief_source') or ''}; "
+                        f"approved_message_id={result.get('brief_approved_message_id') or ''}; "
+                        f"approved_at={result.get('brief_approved_at') or ''}; sender_role={role}"
+                    ),
+                )
+                if spawn_ok:
+                    if not actions.discard_flyer_intake_session_by_sender(phone, chat_id):
+                        actions.audit_intercepted(
+                            reason="flyer_intake_cleanup_failed",
+                            chat_id=chat_id,
+                            subprocess_rc=3,
+                            detail=(
+                                f"message_id={message_id}; source={result.get('brief_source') or ''}; "
+                                f"approved_message_id={result.get('brief_approved_message_id') or ''}; sender_role={role}"
+                            ),
+                        )
+                    return {"action": "skip", "reason": "cf-router bare flyer dispatched from approved brief"}
+            else:
+                project_result = _try_flyer_primary_intercept(
+                    raw_request,
+                    chat_id,
+                    event,
+                    force_new=True,
+                    media_path=reference_media_path or media_path,
+                    brief_audit_detail=(
+                        f"brief_source={result.get('brief_source') or ''}; "
+                        f"brief_approved_message_id={result.get('brief_approved_message_id') or ''}; "
+                        f"brief_approved_at={result.get('brief_approved_at') or ''}"
+                    ),
+                )
             if project_result is not None:
                 if not actions.discard_flyer_intake_session_by_sender(phone, chat_id):
                     actions.audit_intercepted(
