@@ -363,3 +363,82 @@ def test_call_gateway_missing_key_returns_none_without_network(monkeypatch):
 
     monkeypatch.setattr(fcb.urllib.request, "urlopen", _boom)
     assert fcb._call_gateway("system", "user") is None
+
+
+# ── observability (2026-06-06): build_flyer_brief classifies the unavailable reason ──
+# Proves the audit row's ``unavailable_reason`` is diagnosable: each distinct brain/
+# gateway failure maps to a stable BriefResult.reason (the caller copies it verbatim).
+
+
+def _not_a_brief_body() -> str:
+    """A 200 body whose embedded content is valid JSON but NOT a FlyerBrief shape —
+    _attempt_gateway returns the Mapping, then FlyerBrief.model_validate rejects it."""
+    import json
+    return json.dumps({"choices": [{"message": {"content": json.dumps({"not": "a brief"})}}]})
+
+
+def test_unavailable_reason_timeout(monkeypatch):
+    fake = _Urlopen([socket.timeout()])
+    monkeypatch.setattr(fcb.urllib.request, "urlopen", fake)
+    result = fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None)
+    assert result.status == "unavailable"
+    assert result.reason == "timeout"
+    assert fake.calls == 1  # terminal — never retried
+
+
+def test_unavailable_reason_http_4xx(monkeypatch):
+    fake = _Urlopen([_http_error(400)])
+    monkeypatch.setattr(fcb.urllib.request, "urlopen", fake)
+    result = fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None)
+    assert result.status == "unavailable"
+    assert result.reason == "http_400"
+    assert fake.calls == 1  # deterministic client error — never retried
+
+
+def test_unavailable_reason_5xx_exhausted(monkeypatch):
+    fake = _Urlopen([_http_error(503), _http_error(503), _http_error(503)])
+    monkeypatch.setattr(fcb.urllib.request, "urlopen", fake)
+    result = fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None)
+    assert result.status == "unavailable"
+    assert result.reason.startswith("transient_exhausted")
+    assert "HTTP 503" in result.reason
+    assert fake.calls >= 2  # retried, then gave up
+
+
+def test_unavailable_reason_parse_failure(monkeypatch):
+    fake = _Urlopen(["this is not json at all"])  # 200 OK, garbage body
+    monkeypatch.setattr(fcb.urllib.request, "urlopen", fake)
+    result = fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None)
+    assert result.status == "unavailable"
+    assert result.reason == "parse_failure"
+
+
+def test_unavailable_reason_brief_unparseable(monkeypatch):
+    fake = _Urlopen([_not_a_brief_body()])  # parses to a Mapping, fails FlyerBrief
+    monkeypatch.setattr(fcb.urllib.request, "urlopen", fake)
+    result = fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None)
+    assert result.status == "unavailable"
+    assert result.reason == "brief_unparseable"
+
+
+def test_unavailable_reason_missing_key(monkeypatch):
+    monkeypatch.setattr(fcb, "_openrouter_key", lambda: "")
+    result = fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None)
+    assert result.status == "unavailable"
+    assert result.reason == "missing_key"
+
+
+def test_unavailable_reason_skill_body_unreadable(monkeypatch):
+    monkeypatch.setattr(fcb, "_skill_body", lambda: "")
+    result = fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None)
+    assert result.status == "unavailable"
+    assert result.reason == "skill_body_unreadable"
+
+
+def test_ok_result_carries_no_reason(monkeypatch):
+    """A clean success leaves reason empty (the field is unavailable-only)."""
+    fake = _Urlopen([_valid_brief_body()])
+    monkeypatch.setattr(fcb.urllib.request, "urlopen", fake)
+    result = fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None)
+    assert result.status == "ok"
+    assert result.reason == ""

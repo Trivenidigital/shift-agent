@@ -51,10 +51,11 @@ class _FakeCustomer:
 
 
 class _FakeBriefResult:
-    def __init__(self, status, brief=None, errors=None):
+    def __init__(self, status, brief=None, errors=None, reason=""):
         self.status = status
         self.brief = brief
         self.errors = errors or []
+        self.reason = reason
 
 
 class _FakeBrief:
@@ -338,3 +339,148 @@ def test_audit_emitter_builds_valid_logentry(monkeypatch, tmp_path):
     schemas = br._schemas()
     back = TypeAdapter(schemas.LogEntry).validate_json(log.read_text(encoding="utf-8").strip())
     assert type(back).__name__ == "FlyerCreativeDirectorRouted"
+
+
+# ── observability (2026-06-06): the audit row persists status + WHY ──────────────
+# Proves a failed live retest is diagnosable from the row alone: invalid carries the
+# validator errors, unavailable carries the classified reason, and a brief that
+# validated "ok" but failed to RENDER is distinguishable from a clean ship.
+
+
+def test_invalid_audit_carries_validator_errors(monkeypatch):
+    monkeypatch.setenv(br.CREATIVE_DIRECTOR_ENABLED_ENV, "1")
+    monkeypatch.setenv(br.CREATIVE_DIRECTOR_ALLOWLIST_ENV, SENDER)
+    errs = ["omits required fact item:0:name", "unknown fact id zzz"]
+    rec = _install_common(monkeypatch, brief_result=_FakeBriefResult("invalid", errors=errs))
+
+    br.render_grounded(CHAT_ID, RAW, message_id="mi", sender_phone=SENDER)
+
+    a = rec["audits"][-1]
+    assert a["status"] == "invalid"
+    assert a["errors"] == errs                       # full validator detail persisted
+    assert a["error_summary"].startswith("invalid: omits required fact")
+
+
+def test_unavailable_audit_carries_classified_reason(monkeypatch):
+    monkeypatch.setenv(br.CREATIVE_DIRECTOR_ENABLED_ENV, "1")
+    monkeypatch.setenv(br.CREATIVE_DIRECTOR_ALLOWLIST_ENV, SENDER)
+    rec = _install_common(monkeypatch,
+                          brief_result=_FakeBriefResult("unavailable", reason="timeout"))
+
+    br.render_grounded(CHAT_ID, RAW, message_id="mu", sender_phone=SENDER)
+
+    a = rec["audits"][-1]
+    assert a["status"] == "unavailable"
+    assert a["unavailable_reason"] == "timeout"
+    assert a["error_summary"] == "unavailable:timeout"
+
+
+def test_render_error_audit_status_ok_but_render_error_set(monkeypatch):
+    """The brief validated (status stays "ok") but the render threw → the row must
+    reveal the render failure so it is NOT mistaken for a shipped flyer (the exact
+    live 2026-06-06 failure: status=ok, nothing shipped)."""
+    monkeypatch.setenv(br.CREATIVE_DIRECTOR_ENABLED_ENV, "1")
+    monkeypatch.setenv(br.CREATIVE_DIRECTOR_ALLOWLIST_ENV, SENDER)
+    rec = _install_common(monkeypatch, brief_result=_FakeBriefResult("ok", brief=_FakeBrief()))
+
+    def _boom_render(project, background_brief):
+        raise RuntimeError("overlay blew up")
+    monkeypatch.setattr(br, "_render_creative_director", _boom_render)
+
+    status, payload = br.render_grounded(CHAT_ID, RAW, message_id="mr", sender_phone=SENDER)
+
+    assert status == br.FAILCLOSED
+    a = rec["audits"][-1]
+    assert a["status"] == "ok"                       # brief WAS ok
+    assert a["render_error"] == "RuntimeError"
+    assert a["error_summary"] == "render_error:RuntimeError"
+
+
+def test_clean_ship_audit_has_empty_error_summary(monkeypatch):
+    """A flyer that actually ships leaves error_summary "" — the grep-able signal
+    that separates a real send from a status=ok-but-not-shipped row."""
+    monkeypatch.setenv(br.CREATIVE_DIRECTOR_ENABLED_ENV, "1")
+    monkeypatch.setenv(br.CREATIVE_DIRECTOR_ALLOWLIST_ENV, SENDER)
+    rec = _install_common(monkeypatch, brief_result=_FakeBriefResult("ok", brief=_FakeBrief()))
+
+    status, payload = br.render_grounded(CHAT_ID, RAW, message_id="ms", sender_phone=SENDER)
+
+    assert status == br.SEND
+    a = rec["audits"][-1]
+    assert a["status"] == "ok"
+    assert a["error_summary"] == ""
+    assert a["render_error"] == ""
+
+
+def test_qa_fail_audit_marks_qa_failed(monkeypatch):
+    monkeypatch.setenv(br.CREATIVE_DIRECTOR_ENABLED_ENV, "1")
+    monkeypatch.setenv(br.CREATIVE_DIRECTOR_ALLOWLIST_ENV, SENDER)
+    rec = _install_common(monkeypatch, brief_result=_FakeBriefResult("ok", brief=_FakeBrief()))
+    monkeypatch.setattr(br, "run_visual_qa", lambda png, project: (False, ["THURRSDAY typo"]))
+
+    status, payload = br.render_grounded(CHAT_ID, RAW, message_id="mq", sender_phone=SENDER)
+
+    assert status == br.FAILCLOSED
+    a = rec["audits"][-1]
+    assert a["status"] == "ok"
+    assert a["error_summary"] == "qa_failed"
+    assert a["errors"] == ["THURRSDAY typo"]
+
+
+def test_audit_emitter_persists_observability_fields(monkeypatch, tmp_path):
+    """The REAL emitter serializes + persists the new fields and the row still
+    round-trips through the LogEntry discriminated union."""
+    log = tmp_path / "decisions.log"
+    monkeypatch.setattr(br, "AUDIT_LOG_PATH", log)
+    br._emit_creative_director_audit(
+        chat_id=CHAT_ID, resolved_sender=SENDER, reached=True, status="unavailable",
+        allowlisted=True, error_summary="unavailable:timeout",
+        errors=["x" * 999], unavailable_reason="timeout", render_error="",
+    )
+    import json
+    row = json.loads(log.read_text(encoding="utf-8").strip())
+    assert row["unavailable_reason"] == "timeout"
+    assert row["error_summary"] == "unavailable:timeout"
+    assert len(row["errors"][0]) == 200              # per-entry truncation applied
+    from pydantic import TypeAdapter
+    schemas = br._schemas()
+    TypeAdapter(schemas.LogEntry).validate_json(log.read_text(encoding="utf-8").strip())
+
+
+def _run_grounded_with_real_emit(monkeypatch, tmp_path, brief_result, msg_id):
+    """Drive render_grounded with the REAL _emit_creative_director_audit (not the spy)
+    writing to a tmp decisions.log → returns the single persisted row (a dict)."""
+    monkeypatch.setenv(br.CREATIVE_DIRECTOR_ENABLED_ENV, "1")
+    monkeypatch.setenv(br.CREATIVE_DIRECTOR_ALLOWLIST_ENV, SENDER)
+    real_emit = br._emit_creative_director_audit  # capture BEFORE _install_common spies it
+    _install_common(monkeypatch, brief_result=brief_result)
+    log = tmp_path / "decisions.log"
+    monkeypatch.setattr(br, "AUDIT_LOG_PATH", log)
+    monkeypatch.setattr(br, "_emit_creative_director_audit", real_emit)  # restore real emitter
+    br.render_grounded(CHAT_ID, RAW, message_id=msg_id, sender_phone=SENDER)
+    import json
+    return json.loads(log.read_text(encoding="utf-8").strip())
+
+
+def test_end_to_end_invalid_persists_real_row_with_errors(monkeypatch, tmp_path):
+    """render_grounded → REAL emitter → a persisted decisions.log row carries
+    status="invalid" + the validator errors, and round-trips through LogEntry."""
+    row = _run_grounded_with_real_emit(
+        monkeypatch, tmp_path,
+        _FakeBriefResult("invalid", errors=["omits required fact item:0:name"]), "me2e_inv")
+    assert row["creative_director_status"] == "invalid"
+    assert row["errors"] == ["omits required fact item:0:name"]
+    assert row["error_summary"].startswith("invalid: omits required fact")
+    from pydantic import TypeAdapter
+    back = TypeAdapter(br._schemas().LogEntry).validate_json(__import__("json").dumps(row))
+    assert type(back).__name__ == "FlyerCreativeDirectorRouted"
+
+
+def test_end_to_end_unavailable_persists_real_row_with_reason(monkeypatch, tmp_path):
+    """render_grounded → REAL emitter → a persisted row carries status="unavailable"
+    + the classified unavailable_reason (proves the reason survives the full chain)."""
+    row = _run_grounded_with_real_emit(
+        monkeypatch, tmp_path, _FakeBriefResult("unavailable", reason="timeout"), "me2e_un")
+    assert row["creative_director_status"] == "unavailable"
+    assert row["unavailable_reason"] == "timeout"
+    assert row["error_summary"] == "unavailable:timeout"

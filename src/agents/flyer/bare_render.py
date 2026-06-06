@@ -10,6 +10,7 @@ Pure identity logic lives at module top (unit-tested). Heavy deps are lazy-impor
 """
 from __future__ import annotations
 
+import itertools
 import re
 
 # --- identity conflict pre-check (cross-business safety) -----------------------
@@ -210,12 +211,19 @@ def _creative_director_armed(resolved_sender: str) -> bool:
 
 
 def _emit_creative_director_audit(*, chat_id: str, resolved_sender: str, reached: bool,
-                                  status: str, allowlisted: bool) -> None:
+                                  status: str, allowlisted: bool,
+                                  error_summary: str = "", errors: list[str] | None = None,
+                                  unavailable_reason: str = "", render_error: str = "") -> None:
     """Emit the FlyerCreativeDirectorRouted row on EVERY new-flyer render via the
     canonical decisions.log chokepoint (ndjson_append + flock), mirroring
     generate-flyer-concepts:_audit_append. Emitted whether or not the flag is on, so
     "flag off ⇒ reached=False, status=disabled/not_allowlisted" is provable from
-    logs. Best-effort: an audit failure must never block (or alter) the render."""
+    logs. Best-effort: an audit failure must never block (or alter) the render.
+
+    Observability (2026-06-06): ``error_summary`` / ``errors`` / ``unavailable_reason`` /
+    ``render_error`` record WHY a non-shipping outcome happened so a failed live retest is
+    diagnosable from the row alone (e.g. status="ok" + render_error reveals a brief that
+    validated but failed to render). All optional + LOG-ONLY; never alters the render."""
     try:
         schemas = _schemas()
         try:
@@ -233,6 +241,12 @@ def _emit_creative_director_audit(*, chat_id: str, resolved_sender: str, reached
             resolved_sender=(resolved_sender or "")[:200],
             allowlisted=bool(allowlisted),
             chat_id=(chat_id or "")[:200],
+            error_summary=(error_summary or "")[:200],
+            # islice caps to the first 20 BEFORE str()-ing each — a huge/lazy iterable is
+            # never fully consumed and a bad entry past index 20 can't drop the audit row.
+            errors=[str(e)[:200] for e in itertools.islice(errors or [], 20)],
+            unavailable_reason=(unavailable_reason or "")[:80],
+            render_error=(render_error or "")[:120],
         )
         line = entry.model_dump_json()
         AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -727,10 +741,12 @@ def _render_creative_director_grounded(chat_id, raw_text, customer, fields, lock
     status fails safe to the existing fail-closed return; it NEVER falls back to the legacy
     integrated poster. Emits the FlyerCreativeDirectorRouted audit (reached=True) with the
     BriefResult status on every outcome."""
-    def _audit(status: str) -> None:
+    def _audit(status: str, *, error_summary: str = "", errors: list[str] | None = None,
+               unavailable_reason: str = "", render_error: str = "") -> None:
         _emit_creative_director_audit(
             chat_id=chat_id, resolved_sender=resolved_sender, reached=True,
-            status=status, allowlisted=True,
+            status=status, allowlisted=True, error_summary=error_summary, errors=errors,
+            unavailable_reason=unavailable_reason, render_error=render_error,
         )
 
     # build_flyer_brief materializes validated customer_text spans INTO locked_facts in
@@ -744,7 +760,8 @@ def _render_creative_director_grounded(chat_id, raw_text, customer, fields, lock
         CB = _context_builder()
         result = CB.build_flyer_brief(raw_text, locked_facts, customer)
     except Exception as e:  # noqa: BLE001 — armed-but-unresolvable/throwing brain is unavailable, fail safe
-        _audit("unavailable")
+        _audit("unavailable", unavailable_reason=f"brief_exception:{type(e).__name__}",
+               error_summary=f"brief_exception:{type(e).__name__}")
         return (FAILCLOSED, [f"creative_director_error:{type(e).__name__}"])
 
     status = getattr(result, "status", "unavailable")
@@ -752,8 +769,15 @@ def _render_creative_director_grounded(chat_id, raw_text, customer, fields, lock
         # "invalid" (firewall rejected) or "unavailable" (brain unreachable): fail safe to
         # the existing fail-closed path → manual / honest reply. NEVER the legacy poster.
         # ("disabled" cannot occur here — the gate already proved the flag is "1".)
-        _audit(status if status in {"invalid", "unavailable"} else "unavailable")
-        return (FAILCLOSED, [f"creative_director_{status}"] + list(getattr(result, "errors", []) or []))
+        norm_status = status if status in {"invalid", "unavailable"} else "unavailable"
+        result_errors = list(getattr(result, "errors", []) or [])
+        if norm_status == "invalid":
+            _audit("invalid", errors=result_errors,
+                   error_summary="invalid: " + (result_errors[0] if result_errors else "validator_rejected"))
+        else:
+            ureason = getattr(result, "reason", "") or "gateway_unreachable"
+            _audit("unavailable", unavailable_reason=ureason, error_summary=f"unavailable:{ureason}")
+        return (FAILCLOSED, [f"creative_director_{status}"] + result_errors)
 
     # status == "ok": build the project from the (now span-augmented) locked facts and
     # render via the CD path. The deterministic overlay places the required visible facts
@@ -766,15 +790,20 @@ def _render_creative_director_grounded(chat_id, raw_text, customer, fields, lock
     try:
         png = _render_creative_director(project, result.brief.background_brief)
     except Exception as e:  # noqa: BLE001 — overlay/background failure ⇒ fail safe, never legacy
-        _audit("ok")
+        # The BRIEF validated (status stays "ok") but the textless-bg / overlay render
+        # threw → the flyer did NOT ship. ``render_error`` + ``error_summary`` make this
+        # outcome distinguishable in the audit from a clean ship (which leaves them "").
+        _audit("ok", render_error=type(e).__name__,
+               error_summary=f"render_error:{type(e).__name__}", errors=[str(e)[:200]])
         return (FAILCLOSED, [f"creative_director_render_error:{type(e).__name__}"])
 
     ok, blockers = run_visual_qa(png, project)
-    _audit("ok")
     if ok:
+        _audit("ok")  # clean ship → error_summary stays "" (the grep-able "did it ship?" signal)
         if REVISION_APPLY_ENABLED:
             _write_session(chat_id, project, "", raw_text, model=GEN_MODEL, pending=True)
         return (SEND, png)
+    _audit("ok", error_summary="qa_failed", errors=list(blockers or []))
     return (FAILCLOSED, blockers)
 
 

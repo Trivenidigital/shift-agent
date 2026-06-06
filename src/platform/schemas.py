@@ -4168,7 +4168,13 @@ class FlyerHermesIntentDecision(_BaseEntry):
     """
     type: Literal["flyer_hermes_intent_decision"] = "flyer_hermes_intent_decision"
     schema_version: Literal[1] = 1
-    mode: Literal["off", "shadow", "unsupported_active_mode"]
+    # "active" added 2026-06-06: FLYER_HERMES_INTENT_CLASSIFIER/MODE=active is a real
+    # deployed runtime mode (intent.FlyerIntentMode.ACTIVE), so the shadow-audit must
+    # be able to RECORD it. Previously mode_from_value("active")→ACTIVE("active") was
+    # emitted but the Literal omitted it → the audit row was REJECTED on every request
+    # (non-fatal, but the route decision was silently lost). "unsupported_active_mode"
+    # stays for the distinct case where an active-mode request hits an unsupported path.
+    mode: Literal["off", "shadow", "active", "unsupported_active_mode"]
     decision_source: Literal["none", "fixture", "deterministic_baseline", "hermes_gateway_future"]
     classifier_status: Literal[
         "off",
@@ -4356,6 +4362,26 @@ class FlyerCreativeDirectorRouted(_BaseEntry):
     resolved_sender: str = Field(default="", max_length=200)
     allowlisted: bool = False
     chat_id: str = Field(default="", max_length=200)
+    # ── Observability (2026-06-06): WHY a non-shipping outcome happened ──────────
+    # Added so a failed live retest is diagnosable from the audit row ALONE. Before
+    # this, the row carried only ``creative_director_status``, which could NOT (a)
+    # distinguish a SHIPPED flyer from a brief-ok-but-render-failed one (both emit
+    # status="ok"), nor (b) say WHY a brief was "invalid" / "unavailable". All
+    # additive + defaulted (old rows + readers unaffected); these are LOG-ONLY and
+    # NEVER alter customer-facing behavior (still fail-closed, no legacy fallback).
+    #   - error_summary: one compact human-readable reason for ANY non-shipping
+    #     outcome ("" on a clean ship → the single grep-able "did it ship?" field).
+    #   - errors: structured detail (validator errors for "invalid"; the render/QA
+    #     blocker strings otherwise). Each entry truncated at the emit site.
+    #   - unavailable_reason: the classified brain/gateway failure for "unavailable"
+    #     (missing_key | timeout | http_4xx | transient_exhausted:* | parse_failure |
+    #     skill_body_unreadable | brief_unparseable | brief_exception:* | gateway_unreachable).
+    #   - render_error: the exception type when status="ok" but the textless-bg /
+    #     overlay render threw (the brief validated, the flyer did NOT ship).
+    error_summary: str = Field(default="", max_length=200)
+    errors: list[str] = Field(default_factory=list, max_length=20)
+    unavailable_reason: str = Field(default="", max_length=80)
+    render_error: str = Field(default="", max_length=120)
 
 
 class CateringLeadCreated(_BaseEntry):
