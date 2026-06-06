@@ -48,6 +48,7 @@ CREATE_LEAD_BIN = Path("/usr/local/bin/create-catering-lead")  # F7 path
 CREATE_CATERING_PROPOSALS_BIN = Path("/usr/local/bin/create-catering-proposal-options")
 SELECT_CATERING_PROPOSAL_BIN = Path("/usr/local/bin/select-catering-proposal")
 CREATE_FLYER_PROJECT_BIN = Path("/usr/local/bin/create-flyer-project")
+BARE_FLYER_SEND_BIN = Path("/usr/local/bin/bare-flyer-render-and-send")  # Approach B async render+send
 HANDLE_FLYER_ONBOARDING_BIN = Path("/usr/local/bin/handle-flyer-onboarding")
 HANDLE_FLYER_INTAKE_BIN = Path("/usr/local/bin/handle-flyer-intake")
 STORE_FLYER_BRAND_ASSET_BIN = Path("/usr/local/bin/store-flyer-brand-asset")
@@ -1586,6 +1587,33 @@ def _media_revision_targets_delivered_active_project(text: str, *, status: str, 
     ))
 
 
+_REFERENCE_CONCEPT_ADAPTATION_RE = re.compile(
+    r"\b(?:adopt|use|follow|borrow|take|match)\s+"
+    r"(?:this|the|attached|uploaded)?\s*"
+    r"(?:flyer|flier|poster|banner|image|artwork|creative|graphic)\s+"
+    r"(?:concept|style|idea|look|theme|design|inspiration)\b"
+    r"|"
+    r"\b(?:use|treat)\s+(?:this|the|attached|uploaded)\s+"
+    r"(?:flyer|flier|poster|banner|image|artwork|creative|graphic)\s+"
+    r"as\s+(?:a\s+)?(?:reference|inspiration|concept)\b"
+    r"|"
+    r"\b(?:make|create|design|generate)\s+(?:a\s+)?(?:new\s+)?"
+    r"(?:flyer|flier|poster|banner|creative|graphic)\s+"
+    r"(?:similar\s+to|inspired\s+by)\s+(?:this|the|attached|uploaded)\b",
+    re.IGNORECASE,
+)
+
+
+def is_reference_concept_adaptation_request(text: str, *, has_media: bool = False) -> bool:
+    """Return True for attached-reference requests that want inspiration, not source preservation."""
+    if not has_media:
+        return False
+    body = " ".join(flyer_visible_message_text(text).split())
+    if not body:
+        return False
+    return bool(_REFERENCE_CONCEPT_ADAPTATION_RE.search(body))
+
+
 def should_start_new_flyer_over_active(text: str, *, has_media: bool = False) -> bool:
     """Return True when inbound content should not attach to old flyer state.
 
@@ -1640,6 +1668,8 @@ def is_exact_reference_edit_request(text: str, *, has_media: bool = False) -> bo
         lower,
         flags=re.IGNORECASE,
     ):
+        return False
+    if is_reference_concept_adaptation_request(body, has_media=has_media):
         return False
     edit_verb = re.search(
         r"\b(?:remove|delete|change|replace|swap|fix|correct|update|edit|modify|revise|add|make|set|put|say)\b",
@@ -1698,9 +1728,10 @@ def is_vague_flyer_start(text: str, *, has_media: bool = False) -> bool:
         return False
     has_detail = (
         "$" in lower
+        or bool(re.search(r"\b\d{1,3}\s*%\s*(?:off|discount)?\b", lower))
         or ":" in body
         or bool(re.search(r"\b\d{1,2}\s*(?:am|pm)\b", lower))
-        or bool(re.search(r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|today|weekend|special|menu|sale|offer|discount|grand opening|class|event|seo|aeo|geo|paid ads|content creation|combo|combos|banner|visual pictures?|photos?|pictures?)\b", lower))
+        or bool(re.search(r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|today|weekend|special|menu|sale|offer|discount|grand opening|graduation|party|parties|celebration|class|event|seo|aeo|geo|paid ads|content creation|combo|combos|banner|visual pictures?|photos?|pictures?)\b", lower))
     )
     if has_detail:
         return False
@@ -2248,6 +2279,29 @@ def is_flyer_enabled() -> bool:
         return False
 
 
+def is_flyer_workflow_enabled() -> bool:
+    """Return whether Flyer workflow routing should stay wired.
+
+    `flyer.enabled` controls the legacy primary generation path. During the
+    Hermes/OpenRouter bare-render rollout we still need the product workflow
+    front door (sample ideas, intake, account commands, source gates). If a
+    `flyer:` block exists, default workflow routing on unless explicitly
+    disabled with `workflow_enabled: false`.
+    """
+    try:
+        import yaml  # type: ignore
+        with CONFIG_PATH.open(encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        flyer_cfg = cfg.get("flyer")
+        if not isinstance(flyer_cfg, dict):
+            return False
+        if "workflow_enabled" in flyer_cfg:
+            return bool(flyer_cfg.get("workflow_enabled"))
+        return True
+    except Exception:
+        return False
+
+
 def _flyer_account_phones(phone: Optional[str], chat_id: str) -> set[str]:
     """All canonical phone identifiers tied to the sender's flyer account.
 
@@ -2448,11 +2502,123 @@ def is_stale_for_new_request(
 
 def is_flyer_revision_intent(text: str) -> bool:
     body = flyer_visible_message_text(text).lower()
+    # "update" is intentionally EXCLUDED (origin/main golden-pinned): a terse "any update?"
+    # is a STATUS check-in, not a revision — a separate status detector handles it. Keeping
+    # "update" here mis-routes status check-ins as revisions (golden live_status_any_update).
     return bool(re.search(
-        r"\b(apply|change|replace|swap|remove|exclude|add|fix|correct|problem|wrong|still|instead|not\s+in|looks?\s+great|design)\b",
+        r"\b(apply|edit|modify|change|replace|swap|remove|exclude|add|fix|correct|problem|wrong|still|instead|not\s+in|looks?\s+great|design)\b",
         body,
         flags=re.IGNORECASE,
     ))
+
+
+# --- Revision-apply routing recognizers (slice 2c) ----------------------------
+# These run in the bare-flyer routing chain (hooks.py) so a follow-up resolves correctly:
+#   (a) detect_uniform_price_toggle  -> --revision-apply  (the one supported 2c edit)
+#   (b) is_strong_new_flyer_request  -> fresh render       (genuine new request wins)
+#   (c) is_flyer_revision_intent     -> --revision         (broad feedback => "resend full details")
+# Both are deterministic + bounded (no LLM). The toggle is also recent-session-gated at the call site,
+# so it never matches a brand-new customer's fresh brief.
+
+_STRONG_NEW_FLYER_RE = re.compile(
+    r"\b(make|create|build|generate|start|design|need|want)\b[^.\n]{0,30}?\b(a|an|new|another)\b"
+    r"[^.\n]{0,20}?\b(flyer|flier|poster|banner)\b",
+    re.IGNORECASE,
+)
+# A prior-object reference means this is an edit of an existing flyer, NOT a new request.
+_PRIOR_FLYER_OBJECT_RE = re.compile(
+    r"\b(this|that|the|my|our|current|existing)\b[^.\n]{0,20}?\b(flyer|flier|poster|banner|design|image|one)\b",
+    re.IGNORECASE,
+)
+
+
+def is_strong_new_flyer_request(text: str) -> bool:
+    """True only for an unambiguous NEW-flyer request (e.g. 'design a flyer for Diwali', 'make a new
+    poster'). Returns False when the message references a prior object ('change this flyer's design',
+    'design the current flyer') so genuine revisions are not stolen into a fresh render."""
+    body = flyer_visible_message_text(text)
+    if _PRIOR_FLYER_OBJECT_RE.search(body):
+        return False
+    return bool(_STRONG_NEW_FLYER_RE.search(body))
+
+
+def is_flyer_edit_of_existing(text: str) -> bool:
+    """A revision that explicitly references a prior flyer object ("remove the prices from this
+    flyer", "change my poster"). Used to stop the bare new-flyer intercept from stealing a recent
+    customer's edit-of-an-existing-flyer into a fresh render — the broad resend arm (after the F7
+    catering block) handles it instead, so catering is never hijacked."""
+    body = flyer_visible_message_text(text)
+    return bool(_PRIOR_FLYER_OBJECT_RE.search(body)) and is_flyer_revision_intent(text)
+
+
+def detect_uniform_price_toggle(text: str) -> Optional[str]:
+    """Bounded recognizer for the one supported 2c edit: 'every item is $X — put it in a header
+    instead of per-item prices.' Returns the single price string (e.g. '$9.99') or None. Requires a
+    header/common-price cue AND a per-item-price reference AND exactly one distinct price. Recent-
+    session-gated at the call site, so a fresh 'make a flyer, all items $9.99' (no per-item-price
+    reference) returns None and a new customer never reaches it."""
+    body = flyer_visible_message_text(text).lower()
+    prices = {re.sub(r"\s+", "", p) for p in re.findall(r"\$\s?\d+(?:\.\d{1,2})?", text or "")}
+    if len(prices) != 1:
+        return None
+    header_cue = (
+        re.search(r"\b(header|common|uniform|single|one|same)\b[^.\n]{0,25}?\bprices?\b", body)
+        or re.search(r"\bprices?\b[^.\n]{0,25}?\b(header|banner|at\s+the\s+top|on\s+top|top)\b", body)
+        or re.search(r"\b(any|every|all)\s+items?\b[^.\n]{0,15}?\$\s?\d", body)
+        or re.search(r"\bheader\b[^.\n]{0,40}?\$\s?\d", body)
+    )
+    per_item_ref = (
+        re.search(r"\b(per[-\s]?item|each\s+item|against\s+each|on\s+each|individual)\b[^.\n]{0,20}?\bprices?\b", body)
+        or re.search(r"\bprices?\b[^.\n]{0,20}?\b(per[-\s]?item|each\s+item|against\s+each|on\s+each|individual)\b", body)
+        or re.search(r"\bper[-\s]?item\s+prices?\b", body)
+        or re.search(r"\bprice\b[^.\n]{0,20}?\beach\b", body)
+    )
+    if header_cue and per_item_ref:
+        return next(iter(prices))
+    return None
+
+
+def detect_per_item_price_update(text: str) -> Optional[str]:
+    """Bounded recognizer for recent-flyer edits that update item-card prices.
+
+    This is intentionally recent-session-gated at the hook call site. It catches the
+    customer patterns seen live:
+      - "replace PENDING with item price ... every item is priced at $8.99"
+      - "update price of each item in the generated flyer. Samosa $6.99, Tea $2.99"
+    It does not classify new "all items $X" briefs by itself.
+    """
+    body = flyer_visible_message_text(text).lower()
+    prices = re.findall(r"\$\s?\d+(?:\.\d{1,2})?", text or "")
+    if not prices:
+        return None
+    if detect_uniform_price_toggle(text):
+        return None
+    placeholder_ref = re.search(r"\b(?:pending|tbd|placeholder|\[\s*price\s*\]|price\s+missing)\b", body)
+    per_item_ref = (
+        re.search(r"\b(per[-\s]?item|each\s+item|every\s+item|all\s+items?|item\s+price|item-card|card)\b", body)
+        or re.search(r"\bprices?\b[^.\n]{0,35}?\b(each|every|all|item|items)\b", body)
+    )
+    update_ref = re.search(r"\b(update|edit|modify|change|replace|set|fix|correct)\b", body)
+    if placeholder_ref and per_item_ref and update_ref:
+        return "per_item_prices"
+    if len({re.sub(r"\s+", "", p) for p in prices}) == 1 and per_item_ref and update_ref:
+        return "per_item_prices"
+    # Two or more explicit item-price pairs in a recent flyer edit are actionable.
+    pairs = re.findall(
+        r"[A-Za-z][A-Za-z0-9 '&/-]{1,60}?\s*(?:-|:)?\s*\$\s?\d+(?:\.\d{1,2})?",
+        text or "",
+        flags=re.IGNORECASE,
+    )
+    if len(pairs) >= 2 and (per_item_ref or update_ref or _PRIOR_FLYER_OBJECT_RE.search(flyer_visible_message_text(text))):
+        return "per_item_prices"
+    return None
+
+
+def detect_bare_price_revision_apply(text: str) -> Optional[str]:
+    """Return the bounded bare revision-apply mode for a recent flyer follow-up."""
+    if detect_uniform_price_toggle(text):
+        return "uniform_header"
+    return detect_per_item_price_update(text)
 
 
 def is_flyer_project_status_request(text: str) -> bool:
@@ -3703,25 +3869,10 @@ def trigger_check_flyer_reference_scope(
     if os.environ.get("FLYER_REFERENCE_SCOPE_ALLOW_SPEND") != "1":
         lower = " ".join((raw_request or "").lower().split())
         if _looks_like_exact_source_edit_request(lower):
-            return True, "scope_check_skipped_no_spend", {
-                "decision": "allow",
-                "reason": "no_spend_exact_source_edit_known_account",
-            }
+            return True, "scope_check_deferred_no_spend", _reference_scope_clarification_payload(business_name)
         if re.search(r"\b(?:logo|menu|price\s*list|items?|prices?)\b", lower):
             return True, "scope_check_skipped_no_spend", {"decision": "allow", "reason": "no_spend_menu_or_logo"}
-        return True, "scope_check_deferred_no_spend", {
-            "decision": "clarify",
-            "reason": "scope_check_requires_provider_after_quota",
-            "reply_text": (
-                "Flyer Studio\n"
-                "------------\n"
-                f"I need to confirm whether the attached flyer belongs to {business_name}.\n\n"
-                f"If you own or are authorized to use this flyer, reply with how it is connected to {business_name}, "
-                f"and send the {business_name} logo/details to use.\n"
-                f"If this is only a reference, reply \"use as reference\" and Flyer Studio can create a new original "
-                f"{business_name} flyer using it as inspiration without copying another business's branding/layout exactly."
-            ),
-        }
+        return True, "scope_check_deferred_no_spend", _reference_scope_clarification_payload(business_name)
     cmd = [
         str(PYTHON_BIN),
         str(CHECK_FLYER_REFERENCE_SCOPE_BIN),
@@ -3752,6 +3903,22 @@ def trigger_check_flyer_reference_scope(
     except json.JSONDecodeError:
         return False, f"scope_check_json_parse_failed: {detail[:500]}", None
     return True, detail[:500], doc
+
+
+def _reference_scope_clarification_payload(business_name: str) -> dict:
+    return {
+        "decision": "clarify",
+        "reason": "scope_check_requires_provider_after_quota",
+        "reply_text": (
+            "Flyer Studio\n"
+            "------------\n"
+            f"I need to confirm whether the attached flyer belongs to {business_name}.\n\n"
+            f"If you own or are authorized to use this flyer, reply with how it is connected to {business_name}, "
+            f"and send the {business_name} logo/details to use.\n"
+            f"If this is only a reference, reply \"use as reference\" and Flyer Studio can create a new original "
+            f"{business_name} flyer using it as inspiration without copying another business's branding/layout exactly."
+        ),
+    }
 
 
 def _looks_like_exact_source_edit_request(text: str) -> bool:
@@ -3912,6 +4079,7 @@ def save_flyer_reference_authorization_pending(pending: dict, authorization_note
         scope=scope,
         status="awaiting_authorization_details",
         authorization_note=authorization_note,
+        original_intent=str(pending.get("original_intent") or "unknown"),
     )
 
 
@@ -4835,6 +5003,7 @@ def send_flyer_text(
     message: str,
     *,
     action_context: ActionExecutionContext,
+    allow_duplicate: bool = False,
 ) -> tuple[bool, str, str]:
     """Send a customer-facing Flyer Studio text reply via the bridge chokepoint.
 
@@ -4853,10 +5022,11 @@ def send_flyer_text(
     dedupe_key = _flyer_outbound_dedupe_key(chat_id, message)
     with _dedupe_file_lock(FLYER_OUTBOUND_DEDUPE_PATH):
         dedupe_entries = _load_flyer_outbound_dedupe(now)
-        existing = dedupe_entries.get(dedupe_key)
-        if existing:
-            mid = str(existing.get("mid") or "recent")
-            return True, f"deduped:{mid}", ""
+        if not allow_duplicate:
+            existing = dedupe_entries.get(dedupe_key)
+            if existing:
+                mid = str(existing.get("mid") or "recent")
+                return True, f"deduped:{mid}", ""
         ok, mid, err, status = bridge_post(chat_id, message, action_context=action_context)
         if ok:
             dedupe_entries[dedupe_key] = {"ts": now, "mid": mid}
@@ -5032,6 +5202,69 @@ def lid_to_phone_via_identify_sender(lid_or_jid: str) -> tuple[Optional[str], st
         return doc.get("phone_normalized"), doc.get("role", "unknown")
     except (subprocess.SubprocessError, json.JSONDecodeError, OSError):
         return None, "unknown"
+
+
+BARE_FLYER_RECENT_DIR = Path("/opt/shift-agent/state/bare_flyer/recent")
+
+
+def _sanitize_bare_chat(chat_id: str) -> str:
+    # MUST match bare-flyer-render-and-send's _sanitize_chat so the marker is found.
+    return re.sub(r"[^A-Za-z0-9_.@-]", "_", chat_id or "")[:80]
+
+
+def recent_bare_flyer_for_chat(chat_id: str, *, within_hours: float = 6.0) -> bool:
+    """True if a bare flyer was delivered to this chat within the window. The bare trunk is
+    stateless (no projects.json row), so it drops a per-chat marker on send; this is the
+    flyer-context gate that lets a follow-up revision route to the bare trunk WITHOUT hijacking
+    catering/other messages (which have no such marker)."""
+    try:
+        marker = BARE_FLYER_RECENT_DIR / f"{_sanitize_bare_chat(chat_id)}.json"
+        if not marker.exists():
+            return False
+        doc = json.loads(marker.read_text(encoding="utf-8"))
+        ts = datetime.fromisoformat(str(doc.get("sent_at") or ""))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - ts).total_seconds() <= within_hours * 3600.0
+    except Exception:
+        return False
+
+
+def spawn_bare_flyer_render_and_send(chat_id: str, text: str, message_id: Optional[str] = None,
+                                     is_revision: bool = False, is_revision_apply: bool = False) -> bool:
+    """Detached async render+send for the bare-flyer path (Approach B).
+
+    cf-router calls this and returns immediately so the gateway never blocks on
+    the ~20-30s render. The spawned script sends an ack, renders one OpenRouter
+    flyer image, and delivers it via bridge_send_media (or an honest error).
+    - is_revision: a broad revision/feedback follow-up -> the script replies deterministically
+      ("resend full details") instead of looping in the toolless LLM.
+    - is_revision_apply: the supported uniform-price-header edit -> the script applies it to the
+      persisted session and re-overlays (slice 2c). When the apply feature flag is off, the script
+      degrades to the same "resend full details" reply, so this is safe to route before 2c ships."""
+    cmd = [str(BARE_FLYER_SEND_BIN), "--chat-id", chat_id, "--brief", text[:2000]]
+    if message_id:
+        cmd += ["--message-id", message_id]
+    if is_revision_apply:
+        cmd += ["--revision-apply"]
+    elif is_revision:
+        cmd += ["--revision"]
+    try:
+        phone, _role = lid_to_phone_via_identify_sender(chat_id)
+        if phone:
+            cmd += ["--sender-phone", phone]
+    except Exception:
+        pass
+    try:
+        subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return True
+    except (OSError, ValueError) as e:
+        print("cf-router: bare_flyer spawn failed:", type(e).__name__, e, file=sys.stderr)
+        return False
 
 
 def trigger_create_catering_lead(

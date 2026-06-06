@@ -1160,6 +1160,168 @@ def test_registered_customer_menu_combo_detail_routes_to_flyer_project(monkeypat
     assert routed["force_new"] == "True"
 
 
+def test_bare_flyer_intent_outranks_stale_catering_lead_when_legacy_generation_off(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    text = (
+        "Can we do meal combo flyer for veg and non veg with prices 49.99 for non veg combo "
+        "includes 2 non veg curries, 1 chicken pulav or chicken Biryani and 1 dessert. "
+        "And a veg combo 39.99 includes 2 veg curries, 1 dessert on the occasion of Memorial Day weekend"
+    )
+    spawned: list[dict[str, object]] = []
+    catering_replies: list[str] = []
+
+    monkeypatch.setattr(actions, "is_flyer_enabled", lambda: False)
+    monkeypatch.setattr(actions, "is_flyer_workflow_enabled", lambda: True, raising=False)
+    monkeypatch.setattr(actions, "begin_flyer_intent_shadow", lambda **_kwargs: None)
+    monkeypatch.setattr(actions, "finalize_flyer_intent_shadow", lambda **_kwargs: None)
+    monkeypatch.setattr(actions, "reset_flyer_intent_shadow", lambda _token: None)
+    monkeypatch.setattr(actions, "finalize_flyer_intake_bypass_shadow", lambda **_kwargs: None)
+    monkeypatch.setattr(actions, "consume_pending_flyer_intake_bypass_token", lambda: None)
+    monkeypatch.setattr(actions, "reset_flyer_intake_bypass_shadow", lambda _token: None)
+    monkeypatch.setattr(actions, "mark_cf_router_inbound_seen", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(actions, "is_owner_chat", lambda _chat_id: False)
+    monkeypatch.setattr(actions, "is_employee_chat", lambda _chat_id: False)
+    monkeypatch.setattr(actions, "flyer_campaign_cta_text", lambda _text: "")
+    monkeypatch.setattr(hooks, "_try_flyer_account_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_sample_prompt_request_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_regulated_account_guard", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_intake_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_reference_scope_choice_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_source_vs_new_choice_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_reference_scope_authorization_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_existing_onboarding_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_active_project_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_delivery_state_guard", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_onboarding_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {
+        "customer_id": "CUST0001",
+        "status": "trial",
+        "business_name": "Lakshmi's Kitchen",
+    })
+    monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
+    monkeypatch.setattr(actions, "is_registered_customer_contextual_flyer_brief", lambda _text: True)
+    monkeypatch.setattr(actions, "should_start_new_flyer_over_active", lambda _text, *, has_media=False: True)
+    monkeypatch.setattr(actions, "is_vague_flyer_start", lambda _text, *, has_media=False: False)
+    monkeypatch.setattr(actions, "is_flyer_onboarding_intent", lambda _text: False)
+    monkeypatch.setattr(actions, "recent_bare_flyer_for_chat", lambda _chat_id: False, raising=False)
+    monkeypatch.setattr(actions, "is_exact_reference_edit_request", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(actions, "is_reference_concept_adaptation_request", lambda *_args, **_kwargs: False, raising=False)
+    monkeypatch.setattr(actions, "detect_bare_price_revision_apply", lambda _text: None, raising=False)
+    monkeypatch.setattr(actions, "is_flyer_edit_of_existing", lambda _text: False, raising=False)
+    monkeypatch.setattr(actions, "classify_catering", lambda _text: (False, ["food_keyword"]))
+    monkeypatch.setattr(hooks, "_has_f7_followup_signal", lambda _signals: True)
+    monkeypatch.setattr(actions, "find_active_catering_lead_by_sender", lambda _phone, _chat_id: {
+        "lead_id": "L0001",
+        "owner_approval_code": "#GAJSA",
+        "status": "AWAITING_OWNER_APPROVAL",
+    })
+    monkeypatch.setattr(actions, "send_canonical_followup_reply", lambda _chat_id, lead_id: catering_replies.append(lead_id) or True)
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+
+    def fake_spawn(chat_id, brief, **kwargs):
+        spawned.append({"chat_id": chat_id, "brief": brief, **kwargs})
+        return True
+
+    monkeypatch.setattr(actions, "spawn_bare_flyer_render_and_send", fake_spawn, raising=False)
+
+    assert actions.is_strong_new_flyer_request(text) is False
+    assert actions.classify_flyer_intent(text)[0] is True
+
+    result = hooks.pre_gateway_dispatch(SimpleNamespace(
+        text=text,
+        chat_id="201975216009469@lid",
+        message_id="live-combo-after-clean-deploy",
+    ))
+
+    assert result == {"action": "skip", "reason": "cf-router bare flyer dispatched"}
+    assert spawned == [{
+        "chat_id": "201975216009469@lid",
+        "brief": text,
+        "message_id": "live-combo-after-clean-deploy",
+    }]
+    assert catering_replies == []
+
+
+def test_graduation_discount_service_brief_dispatches_bare_not_starter(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    text = (
+        "Create a flyer with theme to reflect the graduation and include the below\n\n"
+        "2026 graduation parties\n"
+        "10% off on entire order\n"
+        "We cater both veg and Non-veg items with delicious dessert to make your celebration effortless"
+    )
+    customer = {
+        "customer_id": "CUST0001",
+        "status": "trial",
+        "business_name": "Lakshmi's Kitchen",
+        "_starter_prompt_mode": "auto",
+        "_starter_prompt_sent_count": 1,
+    }
+    spawned: list[dict[str, object]] = []
+
+    assert actions.classify_flyer_intent(text)[0] is True
+    assert actions.is_strong_new_flyer_request(text) is True
+    assert actions.is_vague_flyer_start(text, has_media=False) is False
+
+    monkeypatch.setattr(actions, "is_flyer_enabled", lambda: False)
+    monkeypatch.setattr(actions, "is_flyer_workflow_enabled", lambda: True, raising=False)
+    monkeypatch.setattr(actions, "begin_flyer_intent_shadow", lambda **_kwargs: None)
+    monkeypatch.setattr(actions, "finalize_flyer_intent_shadow", lambda **_kwargs: None)
+    monkeypatch.setattr(actions, "reset_flyer_intent_shadow", lambda _token: None)
+    monkeypatch.setattr(actions, "finalize_flyer_intake_bypass_shadow", lambda **_kwargs: None)
+    monkeypatch.setattr(actions, "consume_pending_flyer_intake_bypass_token", lambda: None)
+    monkeypatch.setattr(actions, "reset_flyer_intake_bypass_shadow", lambda _token: None)
+    monkeypatch.setattr(actions, "mark_cf_router_inbound_seen", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(actions, "is_owner_chat", lambda _chat_id: False)
+    monkeypatch.setattr(actions, "is_employee_chat", lambda _chat_id: False)
+    monkeypatch.setattr(actions, "flyer_campaign_cta_text", lambda _text: "")
+    monkeypatch.setattr(hooks, "_try_flyer_account_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_sample_prompt_request_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_regulated_account_guard", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_intake_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_reference_scope_choice_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_source_vs_new_choice_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_reference_scope_authorization_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_existing_onboarding_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_active_project_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_delivery_state_guard", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_onboarding_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
+    monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
+    monkeypatch.setattr(actions, "recent_bare_flyer_for_chat", lambda _chat_id: False, raising=False)
+    monkeypatch.setattr(actions, "is_exact_reference_edit_request", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(actions, "is_reference_concept_adaptation_request", lambda *_args, **_kwargs: False, raising=False)
+    monkeypatch.setattr(actions, "detect_bare_price_revision_apply", lambda _text: None, raising=False)
+    monkeypatch.setattr(actions, "is_flyer_edit_of_existing", lambda _text: False, raising=False)
+    monkeypatch.setattr(
+        actions,
+        "send_flyer_text",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not ask starter clarification")),
+    )
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+
+    def fake_spawn(chat_id, brief, **kwargs):
+        spawned.append({"chat_id": chat_id, "brief": brief, **kwargs})
+        return True
+
+    monkeypatch.setattr(actions, "spawn_bare_flyer_render_and_send", fake_spawn, raising=False)
+
+    result = hooks.pre_gateway_dispatch(SimpleNamespace(
+        text=text,
+        chat_id="201975216009469@lid",
+        message_id="live-graduation-discount-service",
+    ))
+
+    assert result == {"action": "skip", "reason": "cf-router bare flyer dispatched"}
+    assert spawned == [{
+        "chat_id": "201975216009469@lid",
+        "brief": text,
+        "message_id": "live-graduation-discount-service",
+    }]
+
+
 def test_registered_customer_get_flyer_ready_with_banner_is_not_vague_loop(monkeypatch):
     hooks, actions = _load_plugin_modules()
     sent: list[str] = []
@@ -4481,6 +4643,7 @@ def test_approved_brief_intake_routes_to_project_creation_with_audit(monkeypatch
     audits = []
     created = {}
 
+    monkeypatch.setattr(actions, "is_flyer_enabled", lambda: True)
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {
         "customer_id": "CUST0001",
@@ -4527,6 +4690,7 @@ def test_approved_brief_project_creation_failure_keeps_pending_brief(monkeypatch
     sent = []
     audits = []
 
+    monkeypatch.setattr(actions, "is_flyer_enabled", lambda: True)
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {
         "customer_id": "CUST0001",

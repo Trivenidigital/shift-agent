@@ -160,6 +160,72 @@ def test_collect_text_facts_keeps_revised_price_phone_location_and_schedule():
     assert "$12.99" in facts["detail_002"]
 
 
+def test_collect_text_facts_ignores_unrequested_hermes_inferred_items():
+    raw_request = (
+        "Can we do meal combo flyer for veg and non veg with prices 49.99 for non veg combo "
+        "includes 2 non veg curries, 1 chicken pulav or chicken Biryani and 1 dessert. "
+        "And a veg combo 39.99 includes 2 veg curries, 1 dessert on the occasion of Memorial Day weekend"
+    )
+    inferred_items = [
+        "Spicy Chicken Curry",
+        "Butter Chicken",
+        "Chicken Biryani",
+        "Chicken Pulav",
+        "Tandoori Chicken",
+        "Paneer Butter Masala",
+        "Chana Masala",
+        "Vegetable Korma",
+        "Dal Makhani",
+        "Aloo Gobi",
+        "Gulab Jamun",
+        "Rasgulla",
+    ]
+    locked_facts = [
+        FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Memorial Day Weekend Meal Combos", source="customer_text", required=True),
+        FlyerLockedFact(
+            fact_id="offer:0",
+            label="Offer",
+            value="Non Veg Combo: $49.99 includes 2 non veg curries, 1 chicken pulav or chicken Biryani, and 1 dessert",
+            source="customer_text",
+            required=True,
+        ),
+        FlyerLockedFact(
+            fact_id="offer:1",
+            label="Offer",
+            value="Veg Combo: $39.99 includes 2 veg curries and 1 dessert",
+            source="customer_text",
+            required=True,
+        ),
+    ]
+    locked_facts.extend(
+        FlyerLockedFact(fact_id=f"item:{index}:name", label="Item", value=item, source="hermes_inferred")
+        for index, item in enumerate(inferred_items)
+    )
+    project = _complete_project().model_copy(update={
+        "raw_request": raw_request,
+        "fields": FlyerRequestFields(
+            event_or_business_name="Memorial Day Weekend Meal Combos",
+            venue_or_location="90 Brybar Dr St Johns FL",
+            contact_info="+17329837841",
+            notes=raw_request,
+            preferred_language="en",
+        ),
+        "locked_facts": locked_facts,
+    })
+
+    facts = {fact.fact_id: fact.text for fact in collect_text_facts(project)}
+    rendered = "\n".join(facts.values())
+
+    assert facts["detail_001"].startswith("Non Veg Combo: $49.99")
+    assert facts["detail_002"].startswith("Veg Combo: $39.99")
+    assert "Spicy Chicken Curry" not in rendered
+    assert "Paneer Butter Masala" not in rendered
+    assert "Rasgulla" not in rendered
+
+
 def test_semantic_offer_facts_feed_text_manifest_and_generation_prompt():
     project = _complete_project().model_copy(update={
         "raw_request": (
@@ -1764,6 +1830,66 @@ def test_simple_english_typed_menu_can_opt_into_integrated_poster_prompt(monkeyp
     assert "Render the following text exactly" in prompt
     assert "Dosa - $6.99" in prompt
     assert "Idli - $5.99" in prompt
+    assert "decorative BACKGROUND image only" not in prompt
+    assert "do NOT render them as text" not in prompt
+
+
+def test_english_combo_offer_can_opt_into_integrated_poster_prompt(monkeypatch):
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    now = datetime(2026, 6, 5, tzinfo=timezone.utc)
+    raw = (
+        "Can we do meal combo flyer for veg and non veg with prices 49.99 for non veg combo "
+        "includes 2 non veg curries, 1 chicken pulav or chicken Biryani and 1 dessert. "
+        "And a veg combo 39.99 includes 2 veg curries, 1 dessert on the occasion of "
+        "Memorial Day weekend"
+    )
+    project = FlyerProject(
+        project_id="F0067",
+        status="generating_concepts",
+        customer_phone="+17329837841",
+        created_at=now,
+        updated_at=now,
+        original_message_id="wamid.combo",
+        raw_request=raw,
+        fields=FlyerRequestFields(
+            event_or_business_name="Veg And Non Veg",
+            contact_info="+17329837841",
+            venue_or_location="90 Brybar Dr St Johns FL",
+            preferred_language="en",
+            notes=raw,
+        ),
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Memorial Day Weekend Meal Combos", source="customer_text", required=True),
+            FlyerLockedFact(
+                fact_id="offer:0",
+                label="Offer",
+                value="Non Veg Combo: $49.99 includes 2 non veg curries, 1 chicken pulav or chicken Biryani, and 1 dessert",
+                source="customer_text",
+                required=True,
+            ),
+            FlyerLockedFact(
+                fact_id="offer:1",
+                label="Offer",
+                value="Veg Combo: $39.99 includes 2 veg curries and 1 dessert",
+                source="customer_text",
+                required=True,
+            ),
+        ],
+    )
+
+    assert render_module._integrated_poster_eligible(project) is True
+    assert render_module._background_only_eligible(project) is False
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+
+    assert "Build a complete finished poster flyer" in prompt
+    assert "Render the following text exactly" in prompt
+    assert "Memorial Day Weekend Meal Combos" in prompt
+    assert "Non Veg Combo: $49.99" in prompt
+    assert "Veg Combo: $39.99" in prompt
     assert "decorative BACKGROUND image only" not in prompt
     assert "do NOT render them as text" not in prompt
 
@@ -3824,7 +3950,7 @@ def test_twelve_item_menu_fails_closed_not_silently_dropped():
         return FlyerProject(
             project_id="F0140", status="awaiting_final_approval", customer_phone="+10000000000",
             created_at=now, updated_at=now, original_message_id="m",
-            raw_request="south indian items any item at $8.99", locked_facts=facts,
+            raw_request="include 12 South Indian items, any item at $8.99", locked_facts=facts,
             fields=FlyerRequestFields(event_or_business_name="Lakshmis Kitchen"),
         )
 
@@ -3836,3 +3962,56 @@ def test_twelve_item_menu_fails_closed_not_silently_dropped():
     # A small menu still renders all its items (no false overflow).
     clauses = _detail_clauses(_project(6))
     assert sum(1 for c in clauses if "Dish Number" in c) == 6
+
+
+def test_multiline_promo_brief_keeps_discount_line_separate_from_long_service_copy():
+    """A short discount plus long descriptive service copy is a valid promo flyer.
+
+    Regression for MK Kitchen 2026 graduation-party request: newlines were compacted
+    before clause splitting, so "10% off..." and the long catering sentence became
+    one required critical fact and failed before image generation.
+    """
+    from agents.flyer.render import _detail_clauses, _poster_copy_plan
+
+    now = datetime(2026, 6, 4, tzinfo=timezone.utc)
+    raw = (
+        "Flyer theme to reflect the graduation and include the below\n\n"
+        "2026 graduation parties\n"
+        "10% off on entire order\n"
+        "We cater both veg and anin-veg items with delicious dessert to make your celebration effortless"
+    )
+    project = FlyerProject(
+        project_id="F0066",
+        status="generating_concepts",
+        customer_phone="+15713830763",
+        created_at=now,
+        updated_at=now,
+        original_message_id="wamid.66",
+        raw_request=raw,
+        fields=FlyerRequestFields(
+            event_or_business_name="MK kitchen",
+            contact_info="+15713830763",
+            venue_or_location="23596 prosperity ridge pl Ashburn Va 20148",
+            notes=raw,
+        ),
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="MK kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15713830763", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="location", label="Location", value="23596 prosperity ridge pl Ashburn Va 20148", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="2026 Graduation Parties", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="pricing_structure", label="Pricing", value="10% off on entire order", source="customer_text", required=True),
+        ],
+    )
+
+    clauses = _detail_clauses(project)
+
+    assert clauses == [
+        "10% off on entire order",
+        "We cater both veg and anin-veg items with delicious dessert to make your celebration effortless",
+    ]
+    plan = _poster_copy_plan(project)
+    assert plan.title == "2026 Graduation Parties"
+    assert plan.detail_lines == [
+        "10% off on entire order",
+        "We cater both veg and anin-veg items with delicious dessert to make your celebration effortless",
+    ]

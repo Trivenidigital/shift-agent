@@ -302,6 +302,16 @@ PY
     else
         rm -f /opt/shift-agent/flyer_render.py
     fi
+    if [ -f src/agents/flyer/intake_fields.py ]; then
+        install -m 644 src/agents/flyer/intake_fields.py /opt/shift-agent/flyer_intake_fields.py
+    else
+        rm -f /opt/shift-agent/flyer_intake_fields.py
+    fi
+    if [ -f src/agents/flyer/bare_render.py ]; then
+        install -m 644 src/agents/flyer/bare_render.py /opt/shift-agent/flyer_bare_render.py
+    else
+        rm -f /opt/shift-agent/flyer_bare_render.py
+    fi
     if [ -f src/agents/flyer/campaign_scene_prompts.py ]; then
         install -m 644 src/agents/flyer/campaign_scene_prompts.py /opt/shift-agent/flyer_campaign_scene_prompts.py
     else
@@ -423,6 +433,7 @@ PY
             flyer-manual-queue \
             flyer-source-edit-sla-watchdog \
             flyer-intent-training-export \
+            bare-flyer-render-and-send \
             smoke-flyer-quality; do
             if [ ! -f "src/agents/flyer/scripts/${flyer_binary}" ]; then
                 rm -f "/usr/local/bin/${flyer_binary}"
@@ -451,6 +462,7 @@ PY
             /usr/local/bin/flyer-intent-training-export \
             /usr/local/bin/send-flyer-campaign \
             /usr/local/bin/send-flyer-package \
+            /usr/local/bin/bare-flyer-render-and-send \
             /usr/local/bin/smoke-flyer-quality
     fi
     if compgen -G "src/agents/flyer/systemd/*.service" > /dev/null; then
