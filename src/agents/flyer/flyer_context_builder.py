@@ -115,6 +115,12 @@ class BriefResult:
     status: BriefStatus
     brief: Optional[FlyerBrief] = None
     errors: list[str] = field(default_factory=list)
+    # Observability (2026-06-06): a SHORT classified reason for ``status=="unavailable"``
+    # so the caller's audit row can say WHY the brain was unreachable (missing_key |
+    # timeout | http_4xx | transient_exhausted:* | parse_failure | skill_body_unreadable
+    # | brief_unparseable). Empty for "ok"/"invalid"/"disabled" (for "invalid" the
+    # detail lives in ``errors``). LOG-ONLY — never changes the four-state contract.
+    reason: str = ""
 
 
 def _is_enabled() -> bool:
@@ -187,6 +193,20 @@ def _build_user_message(
     )
 
 
+# Single-slot mailbox for the most recent gateway-failure CLASS, written by
+# ``_attempt_gateway`` / ``_call_gateway`` and read by ``build_flyer_brief`` right after
+# a ``None`` return (observability 2026-06-06). Safe WITHOUT locking: each inbound flyer
+# runs in its OWN cf-router Popen subprocess (one per message) — no in-process concurrency.
+# ``build_flyer_brief`` RESETS it before the call, so a monkeypatched ``_call_gateway``
+# (which won't write it) yields "" → the caller falls back to "gateway_unreachable", never
+# a stale value. LOG-ONLY: it never influences the return value or the four-state contract.
+_GATEWAY_FAILURE: dict[str, str] = {"reason": ""}
+
+
+def _set_gateway_reason(reason: str) -> None:
+    _GATEWAY_FAILURE["reason"] = reason
+
+
 class _TransientGatewayError(Exception):
     """Internal marker: a FAST transient gateway failure worth retrying — HTTP 5xx
     or a connection-level error (DNS / connection reset) that fails in milliseconds.
@@ -212,16 +232,19 @@ def _attempt_gateway(req: urllib.request.Request) -> Optional[Mapping[str, Any]]
         # a deterministic client error (do NOT retry — the same request will 4xx).
         if e.code >= 500:
             raise _TransientGatewayError(f"HTTP {e.code}") from e
+        _set_gateway_reason(f"http_{e.code}")
         return None
     except (socket.timeout, TimeoutError):
         # A TIMEOUT is terminal: the call already burned the full 30s timeout, so
         # retrying it would stack the tail (3 × 30s ≈ 91s). socket.timeout/TimeoutError
         # are OSError subclasses, so this MUST precede the OSError clause below.
+        _set_gateway_reason("timeout")
         return None
     except urllib.error.URLError as e:
         # A timeout can also surface wrapped as URLError(reason=timeout) — also
         # terminal. Any OTHER URLError (DNS / connection reset) fails fast → retry.
         if isinstance(getattr(e, "reason", None), (socket.timeout, TimeoutError)):
+            _set_gateway_reason("timeout")
             return None
         raise _TransientGatewayError(str(e)) from e
     except OSError as e:
@@ -234,8 +257,12 @@ def _attempt_gateway(req: urllib.request.Request) -> Optional[Mapping[str, Any]]
         content = doc["choices"][0]["message"]["content"]
         parsed = json.loads(content)
     except (KeyError, IndexError, TypeError, json.JSONDecodeError):
+        _set_gateway_reason("parse_failure")
         return None
-    return parsed if isinstance(parsed, Mapping) else None
+    if not isinstance(parsed, Mapping):
+        _set_gateway_reason("parse_failure")
+        return None
+    return parsed
 
 
 def _call_gateway(system_prompt: str, user_message: str) -> Optional[Mapping[str, Any]]:
@@ -261,6 +288,7 @@ def _call_gateway(system_prompt: str, user_message: str) -> Optional[Mapping[str
     """
     key = _openrouter_key()
     if not key or "PLACEHOLDER" in key:
+        _set_gateway_reason("missing_key")
         return None
     payload = {
         "model": CREATIVE_DIRECTOR_MODEL,
@@ -281,8 +309,9 @@ def _call_gateway(system_prompt: str, user_message: str) -> Optional[Mapping[str
     for backoff in (*CREATIVE_DIRECTOR_RETRY_BACKOFFS_SEC, None):
         try:
             return _attempt_gateway(req)
-        except _TransientGatewayError:
+        except _TransientGatewayError as exc:
             if backoff is None:  # transient failure on the final attempt → give up
+                _set_gateway_reason(f"transient_exhausted:{str(exc)[:40]}")
                 return None
             time.sleep(backoff)
     return None  # pragma: no cover - loop always returns on the final iteration
@@ -325,23 +354,28 @@ def build_flyer_brief(
     # (fail safe), NEVER a fall-back to Python-authored creativity.
     system_prompt = _skill_body()
     if not system_prompt:
-        return BriefResult(status="unavailable")
+        return BriefResult(status="unavailable", reason="skill_body_unreadable")
 
     user_message = _build_user_message(
         raw_request, locked_facts, business_profile, source_summary, project_context
     )
     # _call_gateway returns None for ALL "brain unreachable" cases (missing/placeholder
     # key, the call threw, or the response was empty/unparseable JSON) → unavailable.
+    # Reset the reason mailbox first so we read THIS call's classification (or "" →
+    # "gateway_unreachable" when _call_gateway is monkeypatched and writes nothing).
+    _set_gateway_reason("")
     raw = _call_gateway(system_prompt, user_message)
     if not raw:
-        return BriefResult(status="unavailable")
+        return BriefResult(
+            status="unavailable", reason=_GATEWAY_FAILURE["reason"] or "gateway_unreachable"
+        )
 
     try:
         brief = FlyerBrief.model_validate(dict(raw))
     except (ValidationError, TypeError, ValueError):
         # A response that does not shape into a FlyerBrief is an unreachable/garbled
         # brain, not a firewall rejection → unavailable (fail safe), not invalid.
-        return BriefResult(status="unavailable")
+        return BriefResult(status="unavailable", reason="brief_unparseable")
 
     result = _validator.validate(brief, locked_facts, raw_request)
     if not result.ok:

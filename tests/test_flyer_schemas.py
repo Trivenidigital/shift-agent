@@ -1656,3 +1656,49 @@ def test_flyer_operator_flagged_warn_tier_routes_via_log_entry_discriminator():
 def test_flyer_operator_flagged_warn_tier_in_schemas_all():
     import schemas  # noqa: E402
     assert "FlyerOperatorFlaggedWarnTier" in schemas.__all__
+
+
+# ── audit-drift fix (2026-06-06): "active" is a real deployed FLYER_HERMES_INTENT mode ──
+
+
+def test_flyer_hermes_intent_decision_accepts_active_mode():
+    """FLYER_HERMES_INTENT_MODE=active is live in prod (intent.FlyerIntentMode.ACTIVE);
+    the shadow audit must RECORD it instead of failing model-validation every request."""
+    import schemas  # noqa: E402
+    entry = schemas.FlyerHermesIntentDecision(
+        ts=datetime.now(timezone.utc),
+        mode="active",
+        decision_source="none",
+        message_id_hash="abc123",
+        validator_ok=True,
+        actual_action="passthrough",
+    )
+    assert entry.mode == "active"
+    back = TypeAdapter(LogEntry).validate_json(entry.model_dump_json())
+    assert type(back).__name__ == "FlyerHermesIntentDecision"
+    assert back.mode == "active"
+
+
+# ── CD observability fields (2026-06-06): additive + round-trip ──────────────────
+
+
+def test_flyer_creative_director_routed_observability_fields_default_and_roundtrip():
+    """The new observability fields are additive: a row built WITHOUT them validates
+    (back-compat), and one WITH them round-trips through the LogEntry union."""
+    import schemas  # noqa: E402
+    bare = schemas.FlyerCreativeDirectorRouted(
+        ts=datetime.now(timezone.utc), creative_director_reached=True,
+        creative_director_status="ok", module_version="pr3-creative-director",
+    )
+    assert bare.error_summary == "" and bare.errors == [] and bare.unavailable_reason == ""
+    assert bare.render_error == ""
+    full = schemas.FlyerCreativeDirectorRouted(
+        ts=datetime.now(timezone.utc), creative_director_reached=True,
+        creative_director_status="ok", module_version="pr3-creative-director",
+        error_summary="render_error:FlyerRenderError", errors=["overlay blew up"],
+        render_error="FlyerRenderError",
+    )
+    back = TypeAdapter(LogEntry).validate_json(full.model_dump_json())
+    assert type(back).__name__ == "FlyerCreativeDirectorRouted"
+    assert back.render_error == "FlyerRenderError"
+    assert back.error_summary == "render_error:FlyerRenderError"
