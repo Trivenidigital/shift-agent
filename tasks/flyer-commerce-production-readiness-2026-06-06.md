@@ -17,12 +17,17 @@ Awesome-Hermes-Agent ecosystem check: no turnkey Flyer/Commerce production bundl
 
 ## Current result
 
-Flyer/Commerce source checks are green, but live runtime is not enabled for customer production traffic:
+Updated after deploy `deploy-20260606-182517-076c9d48`
+(`076c9d48719df4fd3f2a709f20a4592fcfd4a089`): Flyer smoke checks pass, but
+live runtime is not enabled for broad customer production traffic or live
+payments:
 
 - `flyer.enabled: false`
-- `OPENAI_API_KEY: unset`
+- `OPENROUTER_API_KEY: present`; the configured Flyer draft/source provider
+  policies point at OpenRouter-backed models
 - `STRIPE_SECRET_KEY: unset` in credential-minimized readiness; Stripe Commerce activation itself uses `STRIPE_API_KEY` per `docs/runbooks/commerce-stripe-onboarding.md`
-- Commerce defaults to `enabled=False`, `provider=placeholder`
+- Commerce config is absent/empty on this VPS, so schema defaults apply:
+  `enabled=False`, `provider=placeholder`
 - Commerce webhook/livemode gates skip safely because Commerce is dormant
 
 ## Evidence
@@ -74,6 +79,7 @@ flyer:
     default:
       provider: openrouter
       model: openai/gpt-5.4-image-2
+commerce: {}
 ```
 
 Live Commerce gates:
@@ -104,7 +110,8 @@ Before Flyer customer production:
 
 1. Decide whether this VPS should enable Flyer customer traffic now.
 2. Set `flyer.enabled: true` only after confirming the current customer pilot scope.
-3. Provision/verify the source-edit provider path if automated source-preserving edits should be customer-grade. Current evidence has `OPENAI_API_KEY` unset.
+3. Provision/verify the configured OpenRouter source-edit provider path if
+   automated source-preserving edits should be customer-grade.
 4. Run spend-gated real-model Flyer golden/source-edit smoke before broad launch.
 
 Before Commerce/Stripe production:

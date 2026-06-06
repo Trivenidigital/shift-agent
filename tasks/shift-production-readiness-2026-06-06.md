@@ -17,7 +17,12 @@ Awesome-Hermes-Agent ecosystem check: no turnkey Shift production bundle replace
 
 ## Current result
 
-Shift/Daily Brief code and runtime health passed. The customer pilot gate is still blocked by operator-owned Pushover credentials:
+Updated after deploy `deploy-20260606-182517-076c9d48`
+(`076c9d48719df4fd3f2a709f20a4592fcfd4a089`): Shift/Daily Brief code and
+runtime health passed. `hermes-gateway` and `shift-agent-cockpit` are active,
+`/opt/shift-agent/.env` is the expected symlink to `/root/.hermes/.env`, and
+the state-file migration check returns `0`. The customer pilot gate is still
+blocked by operator-owned Pushover credentials:
 
 ```text
 Production pilot readiness: BLOCKED
@@ -62,7 +67,8 @@ Pushover credentials muted - smoke skipped channel probe as dev/rehearsal
 
 ## Required operator action
 
-Provision real Pushover credentials in `/root/.hermes/.env` or the configured alerting source:
+Provision real Pushover credentials in `/root/.hermes/.env` or the configured
+alerting source. Current config has both Pushover values present but muted:
 
 - `pushover_user_key`
 - `pushover_app_token`
