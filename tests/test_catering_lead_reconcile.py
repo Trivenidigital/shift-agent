@@ -12,6 +12,8 @@ Subprocess integration tests (actual reconcile against a tmp leads.json)
 defer to Linux CI — needs fcntl.
 """
 from __future__ import annotations
+import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -46,10 +48,30 @@ def test_no_deleted_status_target(script_text: str):
 def test_safe_from_statuses_defined(script_text: str):
     """Reconcile refuses from terminal/unsafe statuses (NEW, EXTRACTING,
     NOT_CATERING, STALE — these are not safe operator-recoverable starts)."""
-    assert "SAFE_FROM_STATUSES" in script_text
-    # AWAITING_OWNER_APPROVAL + OWNER_APPROVED + OWNER_EDITED + OWNER_REJECTED + SENT_TO_CUSTOMER
-    assert "AWAITING_OWNER_APPROVAL" in script_text
-    assert "OWNER_APPROVED" in script_text
+    match = re.search(r"SAFE_FROM_STATUSES\s*=\s*(\([^)]+\))", script_text, re.DOTALL)
+    assert match, "SAFE_FROM_STATUSES tuple missing"
+    safe_from = ast.literal_eval(match.group(1))
+    assert safe_from == (
+        "AWAITING_OWNER_APPROVAL",
+        "OWNER_APPROVED",
+        "OWNER_EDITED",
+        "OWNER_REJECTED",
+        "SENT_TO_CUSTOMER",
+    )
+
+
+def test_customer_finalized_reconcile_is_closed_only(script_text: str):
+    """CUSTOMER_FINALIZED cleanup must not widen to SENT_TO_CUSTOMER/OWNER_REJECTED."""
+    match = re.search(
+        r"CUSTOMER_FINALIZED_ALLOWED_TARGETS\s*=\s*(\([^)]+\))",
+        script_text,
+        re.DOTALL,
+    )
+    assert match, "CUSTOMER_FINALIZED_ALLOWED_TARGETS tuple missing"
+    allowed_targets = ast.literal_eval(match.group(1))
+    assert allowed_targets == ("CLOSED",)
+    assert 'from_status == "CUSTOMER_FINALIZED"' in script_text
+    assert "args.target_status not in CUSTOMER_FINALIZED_ALLOWED_TARGETS" in script_text
 
 
 def test_same_state_refusal_present(script_text: str):
