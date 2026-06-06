@@ -152,19 +152,33 @@ _ADDRESS_SHAPE_RE = re.compile(
 #   - numeric date WITH year ("6/15/2026", "06-15-26", "2026-06-15");
 #   - numeric date WITHOUT year ("6/15", "6-15", "06/15") — operator round-2 MINOR: the
 #     overlay owns the promotion date, so a bare month/day shape must reject too. Bounded
-#     (month 1-12, day 1-31) so an aspect ratio ("16/9") or unrelated fraction is NOT a
-#     false date; the year-bearing alternatives precede it so the longer match wins;
+#     (month 1-12, day 1-31) so a large fraction ("16/9","21/9") is NOT a false date; AND
+#     (round-3 MINOR 1) a small common ASPECT-RATIO denylist {1/1,2/3,3/2,3/4,4/3,4/5,5/4,
+#     9/16} is excluded via a leading negative lookahead so "4/5 framing"/"3/4 crop" pass.
+#     The year-bearing alternatives precede it so the longer match wins;
 #   - clock time ("9:00", "9:00 pm", "9 am").
 _MONTH_RE = (
     r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
     r"aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
 )
+# Common photo/screen aspect ratios that are NOT dates (round-3 MINOR 1). The operator's
+# denylist {1/1,2/3,3/2,3/4,4/3,4/5,5/4,9/16} PLUS the two widescreen forms the operator
+# named as must-not-flag (16/9, 21/9). Matched with the SAME [/-] separator class and word
+# boundaries as the year-less date alternative. Used (a) as a negative lookahead so they
+# never match the date-shape detector, and (b) to neutralize them before the operational
+# claim scan on background_brief (the firewall's broad slash pattern would else flag them).
+# None of these is a plausible slash-PRICE (no NN-cents denominator), so neutralizing the
+# exact literals is safe and does not hide a price/date claim.
+_ASPECT_RATIO_RE = (
+    r"(?:1[/-]1|2[/-]3|3[/-]2|3[/-]4|4[/-]3|4[/-]5|5[/-]4|9[/-]16|16[/-]9|21[/-]9)"
+)
+_ASPECT_RATIO_TOKEN_RE = re.compile(r"\b" + _ASPECT_RATIO_RE + r"\b")
 _DATE_TIME_SHAPE_RE = re.compile(
     r"\b" + _MONTH_RE + r"\s+\d{1,2}(?:st|nd|rd|th)?(?:\s*,?\s*(?:19|20)\d{2})?\b"
     r"|\b" + _MONTH_RE + r"\s+(?:19|20)\d{2}\b"
     r"|\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b"
     r"|\b(?:19|20)\d{2}[/-]\d{1,2}[/-]\d{1,2}\b"
-    r"|\b(?:0?[1-9]|1[0-2])[/-](?:0?[1-9]|[12]\d|3[01])\b"
+    r"|\b(?!" + _ASPECT_RATIO_RE + r"\b)(?:0?[1-9]|1[0-2])[/-](?:0?[1-9]|[12]\d|3[01])\b"
     r"|\b\d{1,2}:\d{2}(?:\s*(?:am|pm))?\b"
     r"|\b\d{1,2}\s*(?:am|pm)\b",
     re.IGNORECASE,
@@ -568,8 +582,16 @@ _DATE_OCCASION_CLASS_RE = re.compile(
 # grounded occasion token cannot launder a scheduling claim like "available for Memorial
 # Day weekend"). Operator-specified vocabulary; precise — bare "open" is NOT here (B1
 # classifies "open" contextually) so a layout "open central area" does not field-veto.
+# The "available" arm is NARROWED to scheduling forms only (round-3 MINOR 2): the noun
+# "availability", "available for|on|during|this|all|every|each|to|by|now|today|daily|24",
+# and "is|are|now available". Bare standalone "available" is dropped so the creative
+# "available warm light" (available + a non-scheduling word) no longer field-vetoes, while
+# "available for … weekend" / "weekend availability" / "weekend is available" still do.
 _FIELD_SCHEDULING_CLAIM_RE = re.compile(
-    r"\b(?:available|availability|book|booking|reserve|reservation)\b"
+    r"\bavailability\b"
+    r"|\bavailable\s+(?:for|on|during|this|all|every|each|to|by|now|today|daily|24)\b"
+    r"|\b(?:is|are|now)\s+available\b"
+    r"|\b(?:book|booking|reserve|reservation)\b"
     r"|\bsale\s+ends\b"
     r"|\bends?\b.{0,15}\bweekend\b"
     r"|\b(?:until|till)\b"
@@ -625,21 +647,43 @@ def _strip_grounded_occasion_claims(text: str, exempt_tokens: set[str]) -> str:
     return result
 
 
+def _strip_aspect_ratios(text: str) -> str:
+    """Replace each common ASPECT-RATIO token ("4/5", "3/4", "16/9", …) with a neutral
+    placeholder (round-3 MINOR 1). An aspect ratio is a framing instruction for the image
+    generator — never a date, price, or claim — yet the firewall's broad slash pattern
+    flags it. Applied ONLY before the background_brief operational scan; unconditional (an
+    aspect ratio is never a fact, so no grounding is required). The exact denylisted
+    literals carry no NN-cents denominator, so this cannot hide a slash-price. The date-
+    shape scan independently excludes the same literals via the ``_ASPECT_RATIO_RE``
+    lookahead, so a genuine year-less date ("6/15") is unaffected and still rejects."""
+    if not text:
+        return text
+    return _ASPECT_RATIO_TOKEN_RE.sub(" ratio ", text)
+
+
 def _occasion_aware_operational_claim_hit(
     text: str, occasion_claim_tokens: set[str]
 ) -> str:
-    """``_operational_claim_hit`` for the render-reaching background_brief, with the NARROW
-    grounded-occasion exemption applied. Two gates precede any stripping:
-      1. no grounded date/occasion tokens (e.g. no campaign_title) ⇒ byte-for-byte
-         ``_operational_claim_hit`` (fail-closed posture + every claim class verbatim);
-      2. the field carries a scheduling/availability/booking claim ⇒ NO stripping; run the
-         UNCHANGED detector on the ORIGINAL so the claim rejects (round-2 BLOCKER 2).
-    Only when both gates pass is each grounded date/occasion token neutralized."""
-    if not occasion_claim_tokens or _has_scheduling_claim(text):
-        return _operational_claim_hit(text)
-    return _operational_claim_hit(
-        _strip_grounded_occasion_claims(text, occasion_claim_tokens)
-    )
+    """``_operational_claim_hit`` for the render-reaching background_brief, with two NARROW,
+    scoped relaxations layered on top — applied ONLY to background_brief, never to the
+    shared ``_operational_claim_hit`` or any other field:
+
+      A. ASPECT RATIOS (round-3 MINOR 1): common ratio literals ("4/5","3/4","16/9",…) are
+         neutralized FIRST, unconditionally — they are framing instructions, never claims.
+      B. GROUNDED OCCASION THEME: then, IFF there are grounded date/occasion tokens AND the
+         field carries no scheduling/availability/booking claim (``_has_scheduling_claim``
+         on the ORIGINAL text — round-2 BLOCKER 2), each grounded date/occasion token is
+         neutralized.
+
+    With no aspect ratios AND no grounded occasion tokens this is byte-for-byte
+    ``_operational_claim_hit`` (fail-closed posture + every other claim class verbatim).
+    A scheduling claim still vetoes the occasion exemption (B), and EVERY other class
+    (invented dates incl. "6/15", prices, phones, addresses, service/credential claims)
+    still fires — neither relaxation can turn a real claim into a pass."""
+    scan_text = _strip_aspect_ratios(text)
+    if occasion_claim_tokens and not _has_scheduling_claim(text):
+        scan_text = _strip_grounded_occasion_claims(scan_text, occasion_claim_tokens)
+    return _operational_claim_hit(scan_text)
 
 
 # ── STRICT operational detector for NON-RENDERING fields (operator round-3) ──

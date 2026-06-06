@@ -2947,3 +2947,102 @@ def test_validate_yearless_date_in_background_brief_rejects():
     assert result.ok is False
     assert any(e.startswith("date/time shape outside fact_refs: background_brief:")
                for e in result.errors), result.errors
+
+
+# ── round-3 MINOR 1: aspect-ratio denylist excluded from the year-less date shape ─
+
+
+@pytest.mark.parametrize("ratio", ["1/1", "2/3", "3/2", "3/4", "4/3", "4/5", "5/4", "9/16",
+                                   "1-1", "3-4", "4-5"])
+def test_date_time_shape_hit_ignores_common_aspect_ratios(ratio):
+    """MINOR 1: a common photo/screen aspect ratio (1/1, 2/3, 3/2, 3/4, 4/3, 4/5, 5/4,
+    9/16 — with "/" or "-") shares the bounded month/day shape but is NOT a date and must
+    NOT flag (the negative-lookahead denylist)."""
+    assert fbv._date_time_shape_hit(f"a {ratio} framing, center clear") == "", ratio
+
+
+@pytest.mark.parametrize("dt", ["6/15", "6-15", "06/15", "12/25", "1/15", "10/31"])
+def test_date_time_shape_hit_still_flags_real_yearless_dates(dt):
+    """MINOR 1 guard: real year-less dates still flag (the denylist removes ONLY the eight
+    common ratios, not genuine month/day dates)."""
+    assert fbv._date_time_shape_hit(f"a scene on {dt}, center clear"), dt
+
+
+def test_validate_aspect_ratio_in_background_brief_passes():
+    """MINOR 1 end-to-end: "4/5 framing" / "3/4 crop" in background_brief → ok=True (not a
+    date shape), with the grounded occasion present."""
+    for bg in (
+        "A Memorial Day weekend cookout scene, 4/5 framing, center clear, no words",
+        "A Memorial Day weekend cookout scene, 3/4 crop, center clear, no words",
+    ):
+        brief = _mdw_brief(background_brief=bg)
+        result = fbv.validate(brief, _mdw_facts(), _COMBO_REQUEST)
+        assert result.ok is True, (bg, result.errors)
+
+
+def test_validate_yearless_date_still_rejects_after_ratio_denylist():
+    """MINOR 1 guard end-to-end: "6/15" in background_brief still rejects (the ratio
+    denylist did not weaken the year-less date layer)."""
+    brief = _mdw_brief(background_brief="A Memorial Day weekend cookout on 6/15, center clear")
+    result = fbv.validate(brief, _mdw_facts(), _COMBO_REQUEST)
+    assert result.ok is False
+    assert any(e.startswith("date/time shape outside fact_refs: background_brief:")
+               for e in result.errors), result.errors
+
+
+# ── round-3 MINOR 2: narrowed "available" arm of the field scheduling detector ─
+
+
+def test_validate_available_creative_phrasing_passes():
+    """MINOR 2: a creative "available warm light" (bare "available" + a non-scheduling
+    word) with the grounded "Memorial Day Weekend" occasion no longer field-vetoes →
+    ok=True (the exemption applies; "weekend" is the grounded occasion theme)."""
+    brief = _mdw_brief(
+        background_brief="A Memorial Day weekend cookout scene, available warm light, no words anywhere",
+    )
+    result = fbv.validate(brief, _mdw_facts(), _COMBO_REQUEST)
+    assert result.ok is True, result.errors
+
+
+@pytest.mark.parametrize("phrase", [
+    "available warm light",
+    "available soft glow",
+    "an available open central area",
+])
+def test_has_scheduling_claim_bare_available_not_flagged(phrase):
+    """MINOR 2 unit: bare standalone "available" + a non-scheduling word is NOT a
+    scheduling claim (dropped from the detector)."""
+    assert not fbv._has_scheduling_claim(phrase), phrase
+
+
+@pytest.mark.parametrize("phrase", [
+    "available for Memorial Day weekend",   # available for
+    "available on Saturday",                # available on
+    "available this weekend",               # available this
+    "available all weekend",                # available all
+    "available now",                        # available now
+    "available 24/7",                       # available 24
+    "weekend availability is open",         # availability (noun)
+    "weekend is available",                 # is available
+    "tables are available",                 # are available
+    "now available for booking",            # now available
+])
+def test_has_scheduling_claim_narrowed_available_still_flags(phrase):
+    """MINOR 2 unit: every genuine scheduling form of "available/availability/is available"
+    still flags after the narrowing."""
+    assert fbv._has_scheduling_claim(phrase), phrase
+
+
+@pytest.mark.parametrize("bg, why", [
+    ("A scene available for Memorial Day weekend, center clear", "available for"),
+    ("A Memorial Day weekend scene, weekend availability is open, center clear", "availability"),
+    ("A Memorial Day scene, weekend is available, center clear", "is available"),
+])
+def test_validate_available_scheduling_forms_still_reject_after_narrowing(bg, why):
+    """MINOR 2 end-to-end guard: the three BLOCKER-2 "available/availability/is available"
+    laundering cases STILL reject with the grounded occasion present (narrowing did not
+    reopen BLOCKER 2)."""
+    brief = _mdw_brief(background_brief=bg)
+    result = fbv.validate(brief, _mdw_facts(), _COMBO_REQUEST)
+    assert result.ok is False, f"{why}: expected rejection, got ok"
+    assert any("background_brief" in e for e in result.errors), result.errors
