@@ -1606,7 +1606,7 @@ class TestF7PrimaryMode:
         mock_preview.assert_called_once_with("201975216009469@lid", "F0029")
         mock_manual_ack.assert_not_called()
 
-    def test_reference_scope_no_spend_allows_exact_source_edit_without_confirmation(self, mods, monkeypatch):
+    def test_reference_scope_no_spend_defers_exact_source_edit_without_scope_spend(self, mods, monkeypatch):
         _, actions_mod = mods
         monkeypatch.delenv("FLYER_REFERENCE_SCOPE_ALLOW_SPEND", raising=False)
 
@@ -1618,14 +1618,14 @@ class TestF7PrimaryMode:
             )
 
         assert ok is True
-        assert detail == "scope_check_skipped_no_spend"
-        assert scope == {
-            "decision": "allow",
-            "reason": "no_spend_exact_source_edit_known_account",
-        }
+        assert detail == "scope_check_deferred_no_spend"
+        assert scope is not None
+        assert scope["decision"] == "clarify"
+        assert scope["reason"] == "scope_check_requires_provider_after_quota"
+        assert "Lakshmis Kitchen" in scope["reply_text"]
         mock_run.assert_not_called()
 
-    def test_reference_scope_no_spend_allows_existing_flyer_add_change_typo(self, mods, monkeypatch):
+    def test_reference_scope_no_spend_defers_existing_flyer_add_change_typo(self, mods, monkeypatch):
         _, actions_mod = mods
         monkeypatch.delenv("FLYER_REFERENCE_SCOPE_ALLOW_SPEND", raising=False)
 
@@ -1637,11 +1637,11 @@ class TestF7PrimaryMode:
             )
 
         assert ok is True
-        assert detail == "scope_check_skipped_no_spend"
-        assert scope == {
-            "decision": "allow",
-            "reason": "no_spend_exact_source_edit_known_account",
-        }
+        assert detail == "scope_check_deferred_no_spend"
+        assert scope is not None
+        assert scope["decision"] == "clarify"
+        assert scope["reason"] == "scope_check_requires_provider_after_quota"
+        assert "Chloe hair studio" in scope["reply_text"]
         mock_run.assert_not_called()
 
     def test_reference_scope_no_spend_still_clarifies_generic_reference(self, mods, monkeypatch):

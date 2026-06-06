@@ -3924,11 +3924,11 @@ def _reference_scope_clarification_payload(business_name: str) -> dict:
 def _looks_like_exact_source_edit_request(text: str) -> bool:
     """Return true for edit-this-uploaded-flyer requests from a known account.
 
-    The no-spend fallback cannot run vision/OCR. For exact edits ("remove the
-    extra 16:00 from this flyer"), asking the customer to prove ownership makes
-    Flyer Studio look blind when the flyer itself already carries the account
-    masthead. Keep the bypass narrow: it must be an edit verb plus source-flyer
-    language or a concrete text/date/time/extra correction.
+    The no-spend fallback cannot run vision/OCR, so exact edits ("remove the
+    extra 16:00 from this flyer") defer to the source-vs-new clarification path
+    instead of auto-copying attached artwork. Keep detection narrow: it must be
+    an edit verb plus source-flyer language or a concrete text/date/time/extra
+    correction.
     """
     body = " ".join((text or "").lower().split())
     has_edit_verb = bool(re.search(r"\b(?:remove|delete|change|replace|fix|correct|edit|update|add|modify|revise)\b", body))
