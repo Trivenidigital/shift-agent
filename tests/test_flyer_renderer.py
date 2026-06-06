@@ -4015,3 +4015,66 @@ def test_multiline_promo_brief_keeps_discount_line_separate_from_long_service_co
         "10% off on entire order",
         "We cater both veg and anin-veg items with delicious dessert to make your celebration effortless",
     ]
+
+
+def test_flattened_runon_request_does_not_fail_render_graduation_live_2026_06_06():
+    """Production-faithful graduation regression (live fail-close 2026-06-06 22:41).
+
+    `_extract_fields` newline-flattens the request into `fields.notes`, so a run-on request
+    with NO sentence-ending periods reaches `_detail_clauses` as ONE clause that exceeds
+    `_clean_fact_text`'s per-clause limit. That raised "critical text facts do not fit" and
+    failed the whole render BEFORE image generation (the model never ran). The prior MK-kitchen
+    test above masked this by keeping newlines in `notes`; production flattens them.
+
+    `fields.notes` below is the EXACT flattened shape the live extractor emitted (verified on
+    the box). The offer/price are already locked as structured facts, so the over-long
+    *supplementary* run-on clause is skipped and the render proceeds with structured facts
+    intact — no crash, no duplicate offer line, no invented/truncated prose.
+    """
+    from agents.flyer.render import _detail_clauses, _poster_copy_plan
+
+    now = datetime(2026, 6, 6, tzinfo=timezone.utc)
+    raw = (
+        "Create a flyer with theme to reflect the graduation and include the below\n\n"
+        "2026 graduation party special: get 10 percent off on your entire catering order "
+        "when you book before June 30 2026 we cater veg and non-veg"
+    )
+    flattened_notes = (
+        "Create a flyer with theme to reflect the graduation and include the below "
+        "2026 graduation party special: get 10 percent off on your entire catering order "
+        "when you book before June 30 2026 we cater veg and non-veg"
+    )
+    assert "\n" not in flattened_notes  # the production shape that defeats the newline split
+    assert len(flattened_notes) > 180   # one run-on clause exceeds the per-clause limit
+
+    project = FlyerProject(
+        project_id="F0145", status="generating_concepts", customer_phone="+17329837841",
+        created_at=now, updated_at=now, original_message_id="wamid.145",
+        raw_request=raw,
+        fields=FlyerRequestFields(
+            event_or_business_name="MK kitchen",
+            contact_info="+17329837841",
+            venue_or_location="90 Brybar Dr",
+            notes=flattened_notes,
+        ),
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="MK kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="2026 Graduation Party Special", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="pricing_structure", label="Pricing", value="10% off entire catering order", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="offer:0", label="Offer", value="Get 10% off on your entire catering order when you book before June 30", source="customer_text", required=True),
+        ],
+    )
+
+    # Must NOT raise — the over-long supplementary run-on clause is skipped, not fatal.
+    clauses = _detail_clauses(project)
+    # The structured offer/pricing facts still render (the real content is preserved)...
+    assert "10% off entire catering order" in clauses
+    assert any("Get 10% off" in c for c in clauses)
+    # ...the over-long run-on instruction/offer prose is NOT added as a detail line...
+    assert all(len(c) <= 180 for c in clauses)
+    assert not any("reflect the graduation" in c for c in clauses)
+    # ...and the next layer up (image-prompt copy plan) also no longer raises.
+    plan = _poster_copy_plan(project)
+    assert plan.title == "2026 Graduation Party Special"
