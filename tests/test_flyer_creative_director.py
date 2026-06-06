@@ -304,36 +304,66 @@ def test_validate_rejects_invented_price_in_background_brief():
 
 
 def test_validate_rejects_invented_price_in_offer_structure():
+    # offer_structure is NON-RENDERING (never sent to image gen), so only an INVENTED
+    # commercial value is blocked. "19.99" is NOT part of any locked value ($49.99 /
+    # $39.99) ⇒ invented ⇒ rejected.
     brief = _combo_brief(
-        offer_structure="Two combo cards, plus a hidden 49.99 upsell line.",
+        offer_structure="Two combo cards, plus a hidden 19.99 upsell line.",
     )
     result = fbv.validate(brief, _combo_facts(), _COMBO_REQUEST)
     assert result.ok is False
-    assert any(e.startswith("commercial value outside fact_refs: offer_structure:")
+    assert any(e.startswith("invented commercial value in offer_structure:")
                for e in result.errors)
 
 
+def test_validate_allows_grounded_price_in_offer_structure():
+    # A GROUNDED price (substring of locked $49.99) in the NON-RENDERING
+    # offer_structure planning text passes — it cannot reach pixels.
+    brief = _combo_brief(
+        offer_structure="Two combo cards; the 49.99 combo leads.",
+    )
+    result = fbv.validate(brief, _combo_facts(), _COMBO_REQUEST)
+    assert result.ok is True, result.errors
+
+
 def test_validate_rejects_discount_claim_in_layout_strategy():
+    # layout_strategy is NON-RENDERING; an INVENTED discount claim (no locked fact
+    # covers "BOGO free") is still rejected.
     brief = _combo_brief(
         layout_strategy="Headline band, two cards, and a BOGO free banner footer.",
     )
     result = fbv.validate(brief, _combo_facts(), _COMBO_REQUEST)
     assert result.ok is False
-    assert any(e.startswith("commercial value outside fact_refs: layout_strategy:")
+    assert any(e.startswith("invented commercial value in layout_strategy:")
                for e in result.errors)
 
 
-def test_validate_rejects_phone_run_in_grouping():
+def test_validate_allows_grounded_phone_in_grouping():
+    # grouping is NON-RENDERING; the locked contact phone (+1 732 555 0104) written
+    # into the planning text is GROUNDED ⇒ passes (cannot reach pixels).
     brief = _combo_brief(
         grouping=["combo 1", "call +1 732 555 0104 now"],
     )
     result = fbv.validate(brief, _combo_facts(), _COMBO_REQUEST)
+    assert result.ok is True, result.errors
+
+
+def test_validate_rejects_invented_phone_in_grouping():
+    # An INVENTED phone run (NOT the locked number) in the non-rendering grouping
+    # field is still rejected — the commercial-shape detector fires, the value is
+    # not grounded.
+    brief = _combo_brief(
+        grouping=["combo 1", "call +1 999 888 7777 now"],
+    )
+    result = fbv.validate(brief, _combo_facts(), _COMBO_REQUEST)
     assert result.ok is False
-    assert any(e.startswith("commercial value outside fact_refs: grouping:")
+    assert any(e.startswith("invented commercial value in grouping:")
                for e in result.errors)
 
 
 def test_validate_rejects_percent_off_in_visual_direction():
+    # visual_direction is NON-RENDERING; an INVENTED discount ("50% off", no locked
+    # fact covers it) is still rejected as an invented commercial value.
     brief = _combo_brief(
         visual_direction=fb.VisualDirection(
             theme_family="Memorial Day 50% off blowout",
@@ -342,7 +372,7 @@ def test_validate_rejects_percent_off_in_visual_direction():
     )
     result = fbv.validate(brief, _combo_facts(), _COMBO_REQUEST)
     assert result.ok is False
-    assert any(e.startswith("commercial value outside fact_refs: visual_direction:")
+    assert any(e.startswith("invented commercial value in visual_direction:")
                for e in result.errors)
 
 
@@ -350,6 +380,253 @@ def test_validate_allows_clean_free_text():
     # "two combos" mentions a count but no price/percent/phone — must NOT trip.
     result = fbv.validate(_combo_brief(), _combo_facts(), _COMBO_REQUEST)
     assert result.ok is True, result.errors
+
+
+# ── (c) SCOPE: render-reaching strictness vs non-rendering relaxation ─────────
+# Operator decision 2026-06-06 (live retest) + merge-blockers: only background_brief
+# is passed to the image model (can reach pixels). The structure/planning fields
+# (offer_structure/layout_strategy/grouping/visual_direction) are never sent to image
+# gen, so a GROUNDED commercial value there cannot render and is allowed; an INVENTED
+# one (not contained in an OVERLAY-RENDERED locked fact — referenced or required) is
+# still rejected. background_brief stays FULLY strict.
+
+
+def _grad_facts() -> list[FlyerLockedFact]:
+    """Production-faithful locked facts for the graduation/discount request, mirroring
+    bare_render._build_locked_facts shape:
+      - business_name / contact_phone / location  → source=customer_profile, required
+        (facts.profile_locked_facts via _fact default required=True);
+      - campaign_title / pricing_structure         → source=customer_text, required
+        (facts.extract_text_facts via _fact default required=True).
+    Constructed (not built via the real path) because extract_text_facts calls the
+    Hermes gateway (build_hermes_semantic_brief_provider) — these tests are offline."""
+    return [
+        FlyerLockedFact(fact_id="business_name", label="Business",
+                        value="Lakshmi's Kitchen", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="contact_phone", label="Contact",
+                        value="+1 732 555 0104", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="location", label="Location",
+                        value="90 Brybar Dr", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="campaign_title", label="Campaign",
+                        value="Graduation Celebration", source="customer_text", required=True),
+        FlyerLockedFact(fact_id="pricing_structure", label="Pricing",
+                        value="20% off all catering orders", source="customer_text", required=True),
+    ]
+
+
+_GRAD_REQUEST = "Make a graduation flyer for Lakshmi's Kitchen — 20% off all catering orders."
+
+
+def _grad_brief(**overrides) -> fb.FlyerBrief:
+    # CLEAN planning defaults (no price/discount/phone words of their own) so the only
+    # commercial value under test is the one an individual case injects. fact_refs
+    # cover ALL required facts so coverage(e) passes.
+    data = dict(
+        request_intent="new",
+        visual_direction=fb.VisualDirection(
+            theme_family="Graduation celebration",
+            palette=["gold", "navy", "white"],
+            motifs=["graduation caps"],
+            visual_subjects=["celebration table spread"],
+        ),
+        offer_structure="One headline card with a celebratory callout.",
+        layout_strategy="Headline band on top, callout in the middle, contact footer.",
+        background_brief="A textless graduation celebration background, central area clear.",
+        fact_refs=[
+            fb.FactRef(fact_id="business_name", provenance="locked"),
+            fb.FactRef(fact_id="contact_phone", provenance="locked"),
+            fb.FactRef(fact_id="location", provenance="locked"),
+            fb.FactRef(fact_id="campaign_title", provenance="locked"),
+            fb.FactRef(fact_id="pricing_structure", provenance="locked"),
+        ],
+        offer_groups=[],
+    )
+    data.update(overrides)
+    return fb.FlyerBrief(**data)
+
+
+def test_grad_baseline_clean_brief_passes():
+    # Sanity: the clean graduation brief (no injected commercial value) validates.
+    result = fbv.validate(_grad_brief(), _grad_facts(), _GRAD_REQUEST)
+    assert result.ok is True, result.errors
+
+
+def test_validate_allows_grounded_discount_in_non_rendering_fields():
+    """OPERATOR REGRESSION: the (grounded) discount is locked as pricing_structure
+    "20% off ..."; the model writes "20% off" into the NON-RENDERING planning fields
+    offer_structure AND layout_strategy → ok=True (cannot reach pixels)."""
+    brief = _grad_brief(
+        offer_structure="Lead with the 20% off headline card.",
+        layout_strategy="Headline band, then a 20% off callout, contact footer.",
+    )
+    result = fbv.validate(brief, _grad_facts(), _GRAD_REQUEST)
+    assert result.ok is True, result.errors
+
+
+def test_validate_rejects_grounded_discount_in_background_brief():
+    """The SAME grounded "20% off" in background_brief (render-reaching) → ok=False:
+    a commercial value can reach pixels there even though it is grounded."""
+    brief = _grad_brief(
+        background_brief="A graduation celebration scene with a 20% off vibe, center clear.",
+    )
+    result = fbv.validate(brief, _grad_facts(), _GRAD_REQUEST)
+    assert result.ok is False
+    assert any(e.startswith("commercial value outside fact_refs: background_brief:")
+               for e in result.errors), result.errors
+
+
+def test_validate_rejects_invented_discount_in_non_rendering_field():
+    """INVENTED still blocks: "30% off" with NO locked fact covering it, written into
+    the non-rendering offer_structure → ok=False (invented commercial value)."""
+    brief = _grad_brief(
+        offer_structure="Lead with a bold 30% off headline card.",
+    )
+    result = fbv.validate(brief, _grad_facts(), _GRAD_REQUEST)
+    assert result.ok is False
+    assert any(e.startswith("invented commercial value in offer_structure:")
+               for e in result.errors), result.errors
+
+
+def test_validate_rejects_commercial_value_matching_unreferenced_nonrequired_fact():
+    """TIGHT GROUNDING (merge-blocker #1): a commercial value passes in a
+    non-rendering field ONLY when it resolves through a fact that ACTUALLY renders
+    (referenced by fact_refs OR required). If the only locked fact carrying "20% off"
+    is BOTH unreferenced AND non-required, the planning-field "20% off" is NOT
+    anchored to a rendered fact → STILL rejects."""
+    facts = _grad_facts()
+    # make pricing_structure unreferenced AND non-required (would never render).
+    facts[-1] = FlyerLockedFact(
+        fact_id="pricing_structure", label="Pricing",
+        value="20% off all catering orders", source="customer_text", required=False,
+    )
+    brief = _grad_brief(
+        offer_structure="Lead with the 20% off headline card.",
+        # drop the pricing_structure ref so it is neither referenced nor required.
+        fact_refs=[
+            fb.FactRef(fact_id="business_name", provenance="locked"),
+            fb.FactRef(fact_id="contact_phone", provenance="locked"),
+            fb.FactRef(fact_id="location", provenance="locked"),
+            fb.FactRef(fact_id="campaign_title", provenance="locked"),
+        ],
+    )
+    result = fbv.validate(brief, facts, _GRAD_REQUEST)
+    assert result.ok is False
+    assert any(e.startswith("invented commercial value in offer_structure:")
+               for e in result.errors), result.errors
+
+
+def test_validate_allows_grounded_commercial_value_via_referenced_only_fact():
+    """The render-test is referenced-OR-required: a referenced but non-required fact
+    still renders, so a planning-field value contained in it is grounded → passes."""
+    facts = _grad_facts()
+    facts[-1] = FlyerLockedFact(
+        fact_id="pricing_structure", label="Pricing",
+        value="20% off all catering orders", source="customer_text", required=False,
+    )
+    # pricing_structure IS referenced (default _grad_brief fact_refs include it).
+    brief = _grad_brief(offer_structure="Lead with the 20% off headline card.")
+    result = fbv.validate(brief, facts, _GRAD_REQUEST)
+    assert result.ok is True, result.errors
+
+
+def test_validate_visual_direction_benign_creative_passes():
+    """visual_direction is no longer operational-over-scanned: a benign creative
+    direction validates (the spec's exact example)."""
+    brief = _grad_brief(
+        visual_direction=fb.VisualDirection(
+            theme_family="Graduation celebration",
+            palette=["gold", "navy", "white"],
+            motifs=["graduation caps"],
+            visual_subjects=["confetti", "diplomas"],
+        ),
+    )
+    result = fbv.validate(brief, _grad_facts(), _GRAD_REQUEST)
+    assert result.ok is True, result.errors
+
+
+@pytest.mark.parametrize(
+    "bg, why",
+    [
+        ("A graduation scene with a 20% off vibe, center clear.", "percent-discount"),
+        ("A graduation scene with a 19.99 banner, center clear.", "bare-price"),
+        ("A graduation scene, call 732 555 0104, center clear.", "phone"),
+        ("A graduation scene at 90 Brybar Dr on the wall, center clear.", "address"),
+        ("A graduation scene happening this Saturday at 5pm, center clear.", "date-time"),
+        ("A graduation scene, we are now open, center clear.", "now-open claim"),
+        ("A graduation scene, open daily, center clear.", "open-daily claim"),
+        ("A graduation scene with a sign reading 'Congrats', center clear.", "text-render"),
+    ],
+)
+def test_validate_background_brief_stays_fully_strict(bg, why):
+    """background_brief (render-reaching) REJECTS every class — commercial values,
+    locked identity (address), date-time, operational claims, text-render
+    instructions — all stay ok=False (the firewall is NOT weakened by the scope
+    change)."""
+    brief = _grad_brief(background_brief=bg)
+    result = fbv.validate(brief, _grad_facts(), _GRAD_REQUEST)
+    assert result.ok is False, f"{why}: expected rejection, got {result.errors}"
+
+
+def test_validate_must_not_add_unchanged_strict_invented_commercial():
+    """UNCHANGED (merge-blocker #2): must_not_add is suppressive, NOT a non-rendering
+    planning field — it stays STRICT. An INVENTED commercial value in must_not_add is
+    still rejected via the existing d-commercial block (distinct message)."""
+    brief = _grad_brief(must_not_add=["no $19.99 price badge"])
+    result = fbv.validate(brief, _grad_facts(), _GRAD_REQUEST)
+    assert result.ok is False
+    assert any("must_not_add invents commercial value" in e for e in result.errors), result.errors
+
+
+def test_validate_must_not_add_unchanged_strict_locked_value():
+    """UNCHANGED (merge-blocker #2): a must_not_add entry CONTAINING a locked value is
+    still rejected via the existing containment block."""
+    brief = _grad_brief(must_not_add=["please omit Lakshmi's Kitchen from the art"])
+    result = fbv.validate(brief, _grad_facts(), _GRAD_REQUEST)
+    assert result.ok is False
+    assert any("must_not_add contains locked value" in e for e in result.errors), result.errors
+
+
+def test_validate_omits_required_fact_still_blocks_with_scope_change():
+    """UNCHANGED: dropping a required fact from fact_refs still fails coverage(e)
+    regardless of the (c) scope change."""
+    brief = _grad_brief(
+        fact_refs=[
+            fb.FactRef(fact_id="business_name", provenance="locked"),
+            fb.FactRef(fact_id="contact_phone", provenance="locked"),
+            # location, campaign_title, pricing_structure dropped.
+        ],
+    )
+    result = fbv.validate(brief, _grad_facts(), _GRAD_REQUEST)
+    assert result.ok is False
+    assert any(e == "omits required fact pricing_structure" for e in result.errors), result.errors
+
+
+def test_commercial_value_is_grounded_full_token_discriminates_percentages():
+    """The grounded test uses WHOLE tokens, not a loose substring: "30% off" must NOT
+    ground against a locked "20% off ..." (both contain "0%"). This is the operator
+    merge-blocker the truncated _commercial_value_hit alone would have missed."""
+    allowed = [fbv._norm_ws("20% off all catering orders")]
+    assert fbv._commercial_value_is_grounded("Lead with 20% off card.", allowed) is True
+    assert fbv._commercial_value_is_grounded("Lead with 30% off card.", allowed) is False
+    assert fbv._commercial_value_is_grounded("Lead with 25% off card.", allowed) is False
+    # whitespace-insensitive ("20 %" == "20%").
+    assert fbv._commercial_value_is_grounded("Lead with 20 % off card.", allowed) is True
+
+
+def test_commercial_value_is_grounded_prices_and_phones():
+    allowed = [fbv._norm_ws("$49.99"), fbv._norm_ws("+1 732 555 0104")]
+    assert fbv._commercial_value_is_grounded("the 49.99 combo", allowed) is True
+    assert fbv._commercial_value_is_grounded("the 19.99 combo", allowed) is False
+    # phone grounds on digits regardless of separators.
+    assert fbv._commercial_value_is_grounded("call +1 732 555 0104 now", allowed) is True
+    assert fbv._commercial_value_is_grounded("call +1 999 888 7777 now", allowed) is False
+
+
+def test_commercial_value_is_grounded_nonnumeric_discount_word_never_grounds():
+    """A non-numeric discount word ("BOGO"/"free") has no digit token to anchor to a
+    rendered fact ⇒ never grounded ⇒ rejected as invented."""
+    allowed = [fbv._norm_ws("20% off all catering orders")]
+    assert fbv._commercial_value_is_grounded("a BOGO free banner", allowed) is False
 
 
 # ── (d/MAJOR #4) must_not_add containment (not exact-match) ─────────────────
@@ -1238,8 +1515,12 @@ def test_validate_rejects_operational_claim_in_background():
                for e in result.errors), result.errors
 
 
-def test_validate_rejects_operational_claim_in_visual_direction():
-    """The claim scan also covers visual_direction free text."""
+def test_validate_no_longer_operational_scans_visual_direction():
+    """SCOPE change (operator decision 2026-06-06): visual_direction is NON-RENDERING
+    (its text is never passed to image gen), so the textless operational-claim scan
+    no longer covers it — an operational word there cannot reach pixels. The prior
+    over-scan that rejected the whole brief for a planning-only claim is removed.
+    (background_brief operational claims stay strict — see the tests above.)"""
     brief = _combo_brief(
         visual_direction=fb.VisualDirection(
             theme_family="bold now hiring energy",
@@ -1247,9 +1528,7 @@ def test_validate_rejects_operational_claim_in_visual_direction():
         ),
     )
     result = fbv.validate(brief, _combo_facts(), _COMBO_REQUEST)
-    assert result.ok is False
-    assert any(e.startswith("invented operational claim in textless background: visual_direction:")
-               for e in result.errors), result.errors
+    assert result.ok is True, result.errors
 
 
 def test_validate_passes_clean_textless_background():

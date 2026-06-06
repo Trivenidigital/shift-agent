@@ -105,6 +105,79 @@ def _commercial_value_hit(text: str) -> str:
     return ""
 
 
+# free-text fields whose text is passed to image generation (can reach pixels).
+# Only ``background_brief`` is sent to the image model — ``_render_creative_director``
+# calls ``_generate_image(background_brief)`` then overlays ONLY locked facts
+# (bare_render.py ~586/602/608/767); ``offer_structure``/``layout_strategy``/
+# ``grouping``/``visual_direction`` are planning metadata the renderer NEVER passes
+# to image gen, so a value there cannot reach pixels. The commercial/textless scans
+# stay STRICT for the fields in this set; for non-rendering fields only an INVENTED
+# commercial value is blocked (a grounded one cannot reach pixels). Add any future
+# field that is sent to the image model here.
+_RENDER_REACHING_FIELDS = frozenset({"background_brief"})
+
+
+# Full-token forms for the GROUNDED test only (non-rendering fields). The minimal
+# ``_commercial_value_hit`` regexes truncate a percentage to the LAST digit ("30%"
+# → "0%"), which would falsely ground a "30% off" hit against a locked "20% off ..."
+# (both contain "0%"). For the grounded comparison we instead extract the FULL
+# digit-bearing commercial tokens (whole percentage / currency-amount / bare price /
+# phone digit-run) and require each to be contained in an OVERLAY-RENDERED locked
+# value — so "30%" ≠ "20%" but "20% off" matches "20% off all catering orders". This
+# does NOT alter ``_commercial_value_hit`` (the strict render-reaching + must_not_add
+# paths keep their exact behavior/messages).
+_FULL_PERCENT_RE = re.compile(r"\d+(?:\.\d+)?\s*%")
+_FULL_CURRENCY_RE = re.compile(r"[$₹€£]\s*\d+(?:\.\d{1,2})?")
+_FULL_BARE_PRICE_RE = re.compile(r"(?<![\w.])\d{1,4}\.\d{2}(?![\w.])")
+
+
+def _commercial_grounding_tokens(text: str) -> list[str]:
+    """Whole digit-bearing commercial tokens in ``text`` (normalized) used ONLY by the
+    non-rendering grounded test: full percentages, currency amounts, bare prices, and
+    phone-like digit runs (>=7 digits). Whitespace-normalized so "20 %" == "20%"."""
+    if not text:
+        return []
+    tokens: list[str] = []
+    for rx in (_FULL_PERCENT_RE, _FULL_CURRENCY_RE, _FULL_BARE_PRICE_RE):
+        for m in rx.finditer(text):
+            tok = _norm_ws(m.group(0)).replace(" ", "")
+            if tok:
+                tokens.append(tok)
+    for run in _PHONE_RUN_RE.findall(text):
+        digits = _DIGITS_RE.sub("", run)
+        if len(digits) >= 7:
+            tokens.append(digits)
+    return tokens
+
+
+def _commercial_value_is_grounded(text: str, allowed_values: Sequence[str]) -> bool:
+    """True iff EVERY whole commercial token in ``text`` is contained in some
+    OVERLAY-RENDERED locked value (``allowed_values`` are pre-normalized). An empty
+    token set (a non-numeric discount word like a bare "BOGO"/"free" that
+    ``_commercial_value_hit`` flagged) is NEVER grounded — there is no digit token to
+    anchor, so it cannot be tied to a rendered fact and must be rejected as invented.
+    Used ONLY for the non-rendering relaxation; the strict path is unaffected."""
+    tokens = _commercial_grounding_tokens(text)
+    if not tokens:
+        return False
+    for tok in tokens:
+        # match the token's digits against each allowed value's digit forms too, so
+        # "+1 732 555 0104" (token "17325550104") grounds against the locked phone
+        # whatever its separators. Currency/percent/price tokens keep their symbol.
+        digit_tok = _DIGITS_RE.sub("", tok)
+        grounded = False
+        for lv in allowed_values:
+            if tok in lv:
+                grounded = True
+                break
+            if len(digit_tok) >= 7 and digit_tok in _DIGITS_RE.sub("", lv):
+                grounded = True
+                break
+        if not grounded:
+            return False
+    return True
+
+
 # ── textless-background firewall (Codex Finding 3) ──────────────────────────
 # background_brief / visual_direction are the TEXTLESS-background prompt: the model
 # must render NO words there (all visible text is overlaid deterministically from
@@ -576,7 +649,13 @@ def validate(
       (b) a FactRef.raw_span that is not a verified substring of raw_request
           (an invented commercial value);
       (c) a commercial value (currency/price/percent-discount/phone-run) in a
-          model-authored free-text field — it bypassed fact_refs (BLOCKER #3);
+          model-authored free-text field — it bypassed fact_refs (BLOCKER #3).
+          STRICT for the render-reaching field (``background_brief``: any commercial
+          value); for non-rendering planning fields only an INVENTED commercial
+          value is rejected — "grounded" requires the value to be contained in a
+          locked fact that ACTUALLY renders via the overlay (referenced by fact_refs
+          OR required); a value matching an unreferenced, non-required fact still
+          rejects (operator scope decision 2026-06-06 + merge-blocker #1);
       (d) must_not_add whose entry CONTAINS a locked-fact value (containment, not
           exact-match — "omit Non Veg Combo" suppresses the locked value; #4);
       (e) referenced fact_ids ∪ materialized-span ids failing to cover
@@ -614,6 +693,23 @@ def validate(
     # (c) no commercial value may ride in the model-authored free-text fields —
     # facts belong in fact_refs (overlay-rendered), the background is textless, and
     # the structure fields are not content. Scan each field; first hit per field.
+    #
+    # SCOPE (operator decision 2026-06-06, live retest): the strictness depends on
+    # whether the field's text can reach pixels. Only ``background_brief`` is passed
+    # to the image model (``_RENDER_REACHING_FIELDS``); the structure/planning fields
+    # are NEVER sent to image gen, so a value there cannot render. Therefore:
+    #   - RENDER-REACHING field (background_brief): STRICT — ANY commercial SHAPE
+    #     rejects, AND a locked identity/commercial textual value rejects (it would
+    #     render into the background OUTSIDE the overlay).
+    #   - NON-RENDERING field (offer_structure/layout_strategy/grouping/
+    #     visual_direction): reject ONLY an INVENTED commercial value. "Grounded" is
+    #     TIGHT (operator merge-blocker): the value must resolve through a fact that
+    #     ACTUALLY renders via the overlay — i.e. it is contained in a locked fact
+    #     that is either REFERENCED by ``fact_refs`` OR ``required``. A commercial
+    #     value matching an UNreferenced, non-required locked fact STILL rejects (it
+    #     would never render, so the planning mention is not anchored to a real
+    #     overlay fact). The locked-text identity scan is SKIPPED for these fields
+    #     (grounded + non-rendering = harmless).
     vd = brief.visual_direction
     free_text_fields = {
         "background_brief": brief.background_brief,
@@ -624,13 +720,28 @@ def validate(
             [vd.theme_family, *vd.palette, *vd.motifs, *vd.visual_subjects]
         ),
     }
+    # Values that ACTUALLY render via the overlay — a locked fact is rendered iff it
+    # is REFERENCED by fact_refs OR is required. A non-rendering commercial hit is
+    # "grounded" (allowed) ONLY when it is contained in one of these (operator
+    # merge-blocker #1: ties the planning-field mention to a fact that renders).
+    referenced_ids = {
+        (r.fact_id or "").strip() for r in brief.fact_refs if (r.fact_id or "").strip()
+    }
+    allowed_values = [
+        _norm_ws(f.value)
+        for f in (locked_facts or [])
+        if (f.value or "").strip()
+        and (
+            ((getattr(f, "fact_id", "") or "") in referenced_ids)
+            or getattr(f, "required", False)
+        )
+    ]
     # Locked IDENTITY/COMMERCIAL textual values (business/item name/tagline/claim)
-    # must not appear in a free-text field — they would render into the background
-    # OUTSIDE the overlay (Codex NEW-BYPASS). OCCASION/THEME/SEASONAL fact values
-    # (campaign_title="Memorial Day", schedule) are EXCLUDED (Codex P2): they
-    # legitimately belong in visual_direction ("Memorial Day patriotic Americana"),
-    # and the commercial-SHAPE scan below still catches any price/phone/discount text
-    # in those fields unconditionally. Boundary-aware; length>=4 skips trivial words.
+    # must not appear in a RENDER-REACHING free-text field — they would render into
+    # the background OUTSIDE the overlay (Codex NEW-BYPASS). OCCASION/THEME/SEASONAL
+    # fact values (campaign_title="Memorial Day", schedule) are EXCLUDED (Codex P2):
+    # they legitimately belong in visual_direction ("Memorial Day patriotic
+    # Americana"). Boundary-aware; length>=4 skips trivial words.
     locked_text_values = [
         _norm_ws(f.value)
         for f in locked_facts or []
@@ -638,26 +749,45 @@ def validate(
     ]
     locked_text_values = [v for v in locked_text_values if len(v) >= 4]
     for field_name, text in free_text_fields.items():
-        # Commercial SHAPE (price/phone/discount) is ALWAYS rejected in every
-        # free-text field — unconditional, regardless of fact-id classification.
         hit = _commercial_value_hit(text)
-        if hit:
-            errors.append(f"commercial value outside fact_refs: {field_name}: {hit}")
-        norm_text = _norm_ws(text)
-        for lv in locked_text_values:
-            if re.search(r"(?<![a-z0-9])" + re.escape(lv) + r"(?![a-z0-9])", norm_text):
-                errors.append(f"locked value outside fact_refs: {field_name}: {lv}")
-                break
+        if field_name in _RENDER_REACHING_FIELDS:
+            # STRICT: any commercial SHAPE is rejected (it can reach pixels), and the
+            # locked identity/commercial textual scan runs (would render outside the
+            # overlay).
+            if hit:
+                errors.append(f"commercial value outside fact_refs: {field_name}: {hit}")
+            norm_text = _norm_ws(text)
+            for lv in locked_text_values:
+                if re.search(r"(?<![a-z0-9])" + re.escape(lv) + r"(?![a-z0-9])", norm_text):
+                    errors.append(f"locked value outside fact_refs: {field_name}: {lv}")
+                    break
+        else:
+            # NON-RENDERING: reject only an INVENTED commercial value — one whose
+            # whole digit-bearing token is NOT contained in any OVERLAY-RENDERED
+            # locked value (referenced or required). A grounded commercial value
+            # passes — it cannot reach pixels. Full-token anchoring (not a loose
+            # substring) so "30% off" is not falsely grounded by a locked "20% off"
+            # (both contain "0%"). SKIP the locked-text identity scan (grounded +
+            # non-rendering = harmless).
+            if hit and not _commercial_value_is_grounded(text, allowed_values):
+                errors.append(f"invented commercial value in {field_name}: {hit}")
 
-    # (c-textless, Codex Finding 3) the TEXTLESS-background prompt fields
-    # (background_brief + visual_direction) must not (a) instruct the model to render
-    # words into the background, nor (b) invent a non-price operational claim. These
-    # ride OUTSIDE the overlay (no fact authority) and defeat the textless invariant.
+    # (c-textless, Codex Finding 3) the TEXTLESS-background prompt — scan ONLY the
+    # render-reaching fields (``background_brief``). They must not (a) instruct the
+    # model to render words into the background, nor (b) invent a non-price
+    # operational claim. These ride OUTSIDE the overlay (no fact authority) and defeat
+    # the textless invariant. ``visual_direction`` is NOT render-reaching — its text
+    # never goes to image gen — so its operational/text-render content cannot reach
+    # pixels and is NOT scanned here (removes the prior visual_direction over-scan).
     textless_fields = {
-        "background_brief": brief.background_brief,
-        "visual_direction": " ".join(
-            [vd.theme_family, *vd.palette, *vd.motifs, *vd.visual_subjects]
-        ),
+        k: v
+        for k, v in {
+            "background_brief": brief.background_brief,
+            "visual_direction": " ".join(
+                [vd.theme_family, *vd.palette, *vd.motifs, *vd.visual_subjects]
+            ),
+        }.items()
+        if k in _RENDER_REACHING_FIELDS
     }
     for field_name, text in textless_fields.items():
         render_hit = _text_render_instruction_hit(text)
