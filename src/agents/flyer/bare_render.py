@@ -664,6 +664,35 @@ def run_visual_qa(image_bytes: bytes, project):
     return (_qa_allows_send(report), list(getattr(report, "blockers", []) or []) or [getattr(report, "status", "qa_failed")])
 
 
+def _render_error_detail(e: Exception, project, stage: str) -> str:
+    """LOG-ONLY diagnostic for a bare-path render failure: names the exact cause + the
+    render stage + a fact id/length summary, so a fail-closed `render_error:FlyerRenderError`
+    is not opaque in send.log. The descriptive FlyerRenderError message (e.g. "OpenRouter
+    image HTTP 402: requires more credits, or fewer max_tokens", "critical text facts do not
+    fit", "missing required flyer fields: ...") already lives in the exception — the bare
+    loop just dropped it. Returned ONLY in the final fail-closed blockers (logged); never fed
+    to the retry strict-note, so render/send behavior is unchanged. The ENTIRE body is
+    guarded — diagnostics must NEVER raise into the render path (the caller's except runs
+    unguarded), even for a pathological exception ``__str__`` (Codex 2026-06-06)."""
+    try:
+        msg = " ".join(str(e).split())[:200]
+        parts = [f"render_detail[stage={stage}]: {type(e).__name__}: {msg}" if msg
+                 else f"render_detail[stage={stage}]: {type(e).__name__}"]
+        facts = list(getattr(project, "locked_facts", []) or [])
+        lens = ",".join(
+            f"{getattr(f, 'fact_id', '?')}={len(str(getattr(f, 'value', '') or ''))}" for f in facts
+        )
+        over = [getattr(f, "fact_id", "?") for f in facts
+                if len(str(getattr(f, "value", "") or "")) > 180]
+        parts.append(f"facts[{lens}]" + (f" over180={over}" if over else ""))
+        return " | ".join(parts)
+    except Exception:  # noqa: BLE001 — diagnostics must NEVER raise into the render path
+        try:
+            return f"render_detail[stage={stage}]: {type(e).__name__}"
+        except Exception:  # noqa: BLE001 — even type/repr is pathological; degrade gracefully
+            return "render_detail: unavailable"
+
+
 # --- orchestration ------------------------------------------------------------
 def render_grounded(chat_id: str, raw_text: str, *, message_id: str | None = None,
                     sender_phone: str | None = None):
@@ -710,7 +739,9 @@ def render_grounded(chat_id: str, raw_text: str, *, message_id: str | None = Non
     # separately opt-in so the first flyer can keep the direct integrated-poster path.
     raw_bg_dest = _unique_bg_path(chat_id) if (REVISION_APPLY_ENABLED and REVISION_CAPTURE_RAW_BG) else None
     last_blockers: list[str] = []
+    last_render_detail = ""
     for attempt in range(2):
+        last_render_detail = ""  # reset per attempt so a stale detail never rides a later QA-fail
         strict = "" if attempt == 0 else (
             "CRITICAL: the previous render had these problems: " + "; ".join(last_blockers)
             + ". Fix them — render every listed fact exactly, include every listed item, and add "
@@ -719,7 +750,12 @@ def render_grounded(chat_id: str, raw_text: str, *, message_id: str | None = Non
         try:
             png = _generate_poster(project, strict_note=strict, raw_bg_dest=raw_bg_dest)
         except Exception as e:  # noqa: BLE001
+            # last_blockers (the retry strict-note input) keeps the SAME generic shape — no
+            # behavior change. The descriptive cause is captured LOG-ONLY in last_render_detail
+            # and surfaced only in the FINAL fail-closed blockers (→ send.log), so a bare-path
+            # FlyerRenderError is diagnosable instead of opaque (operator obs request 2026-06-06).
             last_blockers = [f"render_error:{type(e).__name__}"]
+            last_render_detail = _render_error_detail(e, project, "generate_poster")
             continue
         ok, blockers = run_visual_qa(png, project)
         if ok:
@@ -729,7 +765,7 @@ def render_grounded(chat_id: str, raw_text: str, *, message_id: str | None = Non
                 _write_session(chat_id, project, raw_bg_dest or "", raw_text, model=GEN_MODEL, pending=True)
             return (SEND, png)
         last_blockers = blockers
-    return (FAILCLOSED, last_blockers)
+    return (FAILCLOSED, last_blockers + ([last_render_detail] if last_render_detail else []))
 
 
 def _render_creative_director_grounded(chat_id, raw_text, customer, fields, locked_facts, *,

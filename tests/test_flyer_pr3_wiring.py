@@ -140,6 +140,62 @@ def test_flag_off_uses_legacy_and_does_not_call_brief(monkeypatch):
     assert a["resolved_sender"] == SENDER
 
 
+# ── (a2) flag off + bare render error ⇒ fail-closed with a DIAGNOSABLE blocker ─
+
+
+def test_flag_off_render_error_blocker_is_diagnosable(monkeypatch):
+    """A bare/integrated render failure (CD off) fails closed AND the blockers name the
+    exact cause + stage + fact id/lengths (→ send.log), instead of an opaque
+    render_error:FlyerRenderError. Operator obs request 2026-06-06. Behavior unchanged:
+    still FAILCLOSED, and the generic retry-shape blocker is still present."""
+    monkeypatch.delenv(br.CREATIVE_DIRECTOR_ENABLED_ENV, raising=False)
+    monkeypatch.delenv(br.CREATIVE_DIRECTOR_ALLOWLIST_ENV, raising=False)
+    rec = _install_common(monkeypatch)
+    FRE = br._render_mod().FlyerRenderError
+
+    def _boom(project, *, strict_note="", raw_bg_dest=None):
+        raise FRE("OpenRouter image HTTP 402: requires more credits, or fewer max_tokens")
+    monkeypatch.setattr(br, "_generate_poster", _boom)
+
+    status, payload = br.render_grounded(CHAT_ID, RAW, message_id="mre", sender_phone=SENDER)
+
+    assert status == br.FAILCLOSED
+    blob = " | ".join(payload)
+    assert "render_error:FlyerRenderError" in blob                 # generic retry-shape blocker kept
+    assert "402" in blob and "requires more credits" in blob       # DESCRIPTIVE cause surfaced
+    assert "render_detail" in blob and "stage=generate_poster" in blob
+    assert "facts[" in blob                                        # fact id/length summary
+    assert rec["cd_render"] == [] and rec["brief_calls"] == []     # no CD path with flag off
+
+
+def test_flag_off_clean_render_has_no_render_detail(monkeypatch):
+    """A successful bare render (CD off) sends and carries NO render_detail noise."""
+    monkeypatch.delenv(br.CREATIVE_DIRECTOR_ENABLED_ENV, raising=False)
+    monkeypatch.delenv(br.CREATIVE_DIRECTOR_ALLOWLIST_ENV, raising=False)
+    rec = _install_common(monkeypatch)
+    status, payload = br.render_grounded(CHAT_ID, RAW, message_id="mok", sender_phone=SENDER)
+    assert status == br.SEND and payload == b"LEGACY_PNG"
+
+
+def test_render_error_detail_never_raises_into_render_path(monkeypatch):
+    """Diagnostics must NEVER raise into the render path — even a render exception with a
+    pathological __str__ still fails closed, not uncaught (Codex 2026-06-06)."""
+    monkeypatch.delenv(br.CREATIVE_DIRECTOR_ENABLED_ENV, raising=False)
+    monkeypatch.delenv(br.CREATIVE_DIRECTOR_ALLOWLIST_ENV, raising=False)
+    _install_common(monkeypatch)
+
+    class _BadExc(Exception):
+        def __str__(self):  # noqa: D401
+            raise RuntimeError("boom in __str__")
+
+    def _boom(project, *, strict_note="", raw_bg_dest=None):
+        raise _BadExc()
+    monkeypatch.setattr(br, "_generate_poster", _boom)
+
+    status, payload = br.render_grounded(CHAT_ID, RAW, message_id="mbad", sender_phone=SENDER)
+    assert status == br.FAILCLOSED  # diagnostics swallowed the bad __str__; no propagation
+
+
 # ── (b) flag on + sender NOT allowlisted ⇒ legacy, status=not_allowlisted ─────
 
 
