@@ -17,44 +17,25 @@ Awesome-Hermes-Agent ecosystem check: no turnkey Catering lead-cleanup capabilit
 
 ## Current result
 
-Catering runtime is mostly healthy, but live state still has one stale active pilot/test lead:
+Updated after deploy `deploy-20260606-182517-076c9d48`
+(`076c9d48719df4fd3f2a709f20a4592fcfd4a089`): Catering runtime state is
+clean. The stale pilot/test leads were closed through the audited reconcile
+path, and the pattern report now shows no active missing-info backlog:
 
 ```text
 catering-pattern-report: 0 findings in last 1d. No-op.
 proposal_health: sent=3 selected=1 send_failed=0 select_failed=0
-active_missing_info_count: 1
+active_missing_info_count: 0
 menu_freshness_days: 31
 degraded_sources: []
 ```
 
-State summary:
+Final stale-lead cleanup:
 
 ```text
-menu_items: 78
-menu_available: 78
-menu_updated_at: 2026-05-05T20:36:25.980731-04:00
-leads: 15
-lead_status_counts:
-  1 CUSTOMER_FINALIZED
-  3 SENT_TO_CUSTOMER
-  3 CLOSED
-  8 OWNER_REJECTED
-```
-
-The remaining stale active row is from roster employee `e004` (`+19045550104`, Anjali Iyer) and old cf-router F7 rescue data:
-
-```text
-L0014 CUSTOMER_FINALIZED created 2026-05-13 updated 2026-05-14
-notes: cf-router F7 rescue from missed-dispatch; LLM bypassed parse_catering_inquiry SKILL
-event_date: null
-```
-
-`L0015` was safely closed through the deployed audited reconcile script on 2026-06-06:
-
-```text
-catering-lead-status: L0015 AWAITING_OWNER_APPROVAL -> CLOSED
+L0015 AWAITING_OWNER_APPROVAL -> CLOSED
+L0014 CUSTOMER_FINALIZED -> CLOSED
 audit rows: catering_lead_status_change + catering_lead_manually_reconciled
-active_missing_info_count: 2 -> 1
 ```
 
 ## Finding
@@ -89,15 +70,10 @@ py_compile: src/agents/catering/scripts/catering-lead-reconcile passed.
 
 ## Required next actions
 
-1. Review and merge the Catering branch patch.
-2. Deploy the merged patch to `main-vps`.
-3. Close the remaining stale active lead through the standard audited script:
-
-```bash
-ssh main-vps 'sudo -u shift-agent /usr/local/lib/hermes-agent/venv/bin/python /usr/local/bin/catering-lead-reconcile --lead-id L0014 --target-status CLOSED --reason stale_pre_pilot_cleanup' > .ssh_close_L0014.txt 2>&1
-```
-
-4. Rerun `catering-pattern-report --dry-run --learning-days 30` and confirm `active_missing_info_count` is zero or only contains real in-progress customer work.
+No Catering-owned code or state cleanup remains from this evidence. Catering is
+still covered by the overall customer-pilot blocker in
+`pilot-readiness-check --text`: real Pushover credentials must replace the
+`MUTED_` values before owner alerts can be considered production-ready.
 
 ## Code decision
 
