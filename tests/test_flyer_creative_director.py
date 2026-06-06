@@ -2587,3 +2587,236 @@ def test_validate_clean_brief_still_passes_with_real_broad_classifier():
     (the broad classifier is importable) — only when it is unavailable/raising."""
     result = fbv.validate(_combo_brief(), _combo_facts(), _COMBO_REQUEST)
     assert result.ok is True, result.errors
+
+
+# ── occasion-aware background_brief exemption (operator 2026-06-06, Option A NARROW) ──
+# Live combo ~50% fail-close: the model wrote "Memorial Day weekend" in background_brief
+# and the date/schedule class in creative_firewall._CLAIM_PATTERNS flagged the GROUNDED
+# occasion token "weekend" on the render-reaching HARD LINE. The fix exempts a grounded
+# occasion token (campaign_title="Memorial Day Weekend") in a NON-scheduling context from
+# the operational scan on background_brief ONLY; every other class stays strict, and the
+# exemption is grounded-occasion-only (no other fact authority is weakened).
+
+
+def _mdw_facts() -> list[FlyerLockedFact]:
+    """Combo facts + campaign_title="Memorial Day Weekend" (the GROUNDED occasion, the
+    exemption's only source). Mirrors facts.py: campaign_title is customer_text, required."""
+    return _combo_facts() + [
+        FlyerLockedFact(fact_id="campaign_title", label="Campaign",
+                        value="Memorial Day Weekend", source="customer_text", required=True),
+    ]
+
+
+def _mdw_brief(**overrides) -> fb.FlyerBrief:
+    # cover campaign_title so coverage(e) passes; otherwise the combo brief unchanged.
+    refs = _combo_brief().fact_refs + [fb.FactRef(fact_id="campaign_title", provenance="locked")]
+    data = dict(fact_refs=refs)
+    data.update(overrides)
+    return _combo_brief(**data)
+
+
+_MDW_BG_OK = (
+    "A festive Memorial Day weekend cookout scene, warm light, open central area, "
+    "no words anywhere"
+)
+
+
+def test_mdw_grounded_occasion_weekend_in_background_brief_passes():
+    """OPERATOR side 1: bg "...Memorial Day weekend cookout … open central area, no words
+    anywhere" WITH grounded campaign_title="Memorial Day Weekend" → ok=True (the grounded
+    occasion theme token is exempted; the layout "open central area" stays compositional)."""
+    brief = _mdw_brief(background_brief=_MDW_BG_OK)
+    result = fbv.validate(brief, _mdw_facts(), _COMBO_REQUEST)
+    assert result.ok is True, result.errors
+
+
+def test_mdw_weekend_in_background_brief_without_grounded_occasion_rejects():
+    """OPERATOR side 2a: the SAME bg WITHOUT any grounded occasion (campaign_title absent)
+    → ok=False — "weekend" is not grounded, so it stays a date claim."""
+    brief = _combo_brief(background_brief=_MDW_BG_OK)
+    result = fbv.validate(brief, _combo_facts(), _COMBO_REQUEST)
+    assert result.ok is False
+    assert any("invented operational claim in textless background: background_brief" in e
+               for e in result.errors), result.errors
+
+
+def test_mdw_weekend_in_background_brief_with_unrelated_occasion_rejects():
+    """OPERATOR side 2b: the SAME bg with a DIFFERENT grounded occasion
+    (campaign_title="Graduation Parties 2026", no "weekend") → ok=False — "weekend" is not
+    grounded by that occasion, so it stays a date claim."""
+    facts = _combo_facts() + [
+        FlyerLockedFact(fact_id="campaign_title", label="Campaign",
+                        value="Graduation Parties 2026", source="customer_text", required=True),
+    ]
+    refs = _combo_brief().fact_refs + [fb.FactRef(fact_id="campaign_title", provenance="locked")]
+    brief = _combo_brief(background_brief=_MDW_BG_OK, fact_refs=refs)
+    result = fbv.validate(brief, facts, _COMBO_REQUEST)
+    assert result.ok is False
+    assert any("invented operational claim in textless background: background_brief" in e
+               for e in result.errors), result.errors
+
+
+@pytest.mark.parametrize(
+    "bg, why",
+    [
+        ("A Memorial Day weekend scene, open this weekend, center clear",
+         "open this weekend"),
+        ("A Memorial Day weekend scene, sale ends this weekend, center clear",
+         "sale ends this weekend"),
+        ("A Memorial Day weekend scene, available all weekend, center clear",
+         "available all weekend"),
+        ("A Memorial Day scene happening this weekend, center clear",
+         "this weekend"),
+        ("A Memorial Day scene, all weekend long, center clear",
+         "all weekend"),
+    ],
+)
+def test_mdw_scheduling_context_weekend_still_rejects_even_when_grounded(bg, why):
+    """OPERATOR side 3: a scheduling/availability context is NEVER exempted, even with the
+    grounded "Memorial Day Weekend" occasion — "open this weekend", "sale ends this
+    weekend", "available all weekend", "this weekend", "all weekend" stay ok=False."""
+    brief = _mdw_brief(background_brief=bg)
+    result = fbv.validate(brief, _mdw_facts(), _COMBO_REQUEST)
+    assert result.ok is False, f"{why}: expected rejection, got ok"
+    assert any("background_brief" in e for e in result.errors), result.errors
+
+
+@pytest.mark.parametrize(
+    "bg, why",
+    [
+        ("A Memorial Day weekend scene on June 15, center clear", "month-day shape"),
+        ("A Memorial Day weekend scene on 6/15, center clear", "numeric date shape"),
+        ("A Memorial Day weekend scene, Friday 6 PM, center clear", "weekday + clock"),
+        ("A Memorial Day weekend cookout at 9:00, center clear", "clock shape"),
+    ],
+)
+def test_mdw_explicit_date_time_shapes_still_reject_even_with_grounded_occasion(bg, why):
+    """OPERATOR side 4: explicit date/time SHAPES ("June 15", "6/15", "Friday 6 PM",
+    "9:00") in background_brief stay STRICT even with the grounded occasion — the exemption
+    covers ONLY the occasion token, not date shapes (which the date-shape scan owns)."""
+    brief = _mdw_brief(background_brief=bg)
+    result = fbv.validate(brief, _mdw_facts(), _COMBO_REQUEST)
+    assert result.ok is False, f"{why}: expected rejection, got ok"
+    assert any("background_brief" in e for e in result.errors), result.errors
+
+
+@pytest.mark.parametrize(
+    "bg, why",
+    [
+        ("A Memorial Day weekend cookout with a $49.99 banner, center clear", "price"),
+        ("A Memorial Day weekend scene, call 732 555 0104, center clear", "phone"),
+        ("A Memorial Day weekend scene at 123 Main St, center clear", "address"),
+        ("A Memorial Day weekend scene with a 30% off vibe, center clear", "discount"),
+    ],
+)
+def test_mdw_other_claim_classes_still_reject_in_background_brief(bg, why):
+    """OPERATOR do-not-exempt guard: a price / discount / phone / address in
+    background_brief still rejects with the grounded occasion present — the exemption is
+    occasion-token-only and does not touch the commercial / address / phone scans."""
+    brief = _mdw_brief(background_brief=bg)
+    result = fbv.validate(brief, _mdw_facts(), _COMBO_REQUEST)
+    assert result.ok is False, f"{why}: expected rejection, got ok"
+    assert any("background_brief" in e for e in result.errors), result.errors
+
+
+def test_mdw_real_operational_claim_still_rejects_with_grounded_occasion():
+    """The exemption must not let a real operational claim ride alongside the occasion: a
+    grounded "Memorial Day weekend" theme PLUS an invented "now open daily" → ok=False
+    (the occasion token is neutralized, "now open daily" still fires)."""
+    brief = _mdw_brief(
+        background_brief="A Memorial Day weekend cookout, we are now open daily, center clear",
+    )
+    result = fbv.validate(brief, _mdw_facts(), _COMBO_REQUEST)
+    assert result.ok is False
+    assert any("invented operational claim in textless background: background_brief" in e
+               for e in result.errors), result.errors
+
+
+def test_mdw_occasion_token_not_exempted_on_non_rendering_field_unchanged():
+    """Scope guard: the exemption is background_brief-only. A scheduling claim on a
+    non-rendering field follows the UNCHANGED non-rendering rule. Here an invented
+    "now hiring" in offer_structure (with the grounded occasion) still rejects via the
+    non-rendering operational scan — proving the occasion exemption did not leak there."""
+    brief = _mdw_brief(
+        offer_structure="Two combo cards, plus a now hiring banner.",
+    )
+    result = fbv.validate(brief, _mdw_facts(), _COMBO_REQUEST)
+    assert result.ok is False
+    assert any(e.startswith("invented operational claim in offer_structure:")
+               for e in result.errors), result.errors
+
+
+def test_mdw_combo_production_faithful_brief_passes():
+    """OPERATOR combo production-faithful: the full combo brief with bg
+    "...Memorial Day weekend..." + grounded campaign_title="Memorial Day Weekend"
+    validates ok=True (the previously ~50%-failing live combo case)."""
+    brief = _mdw_brief(
+        offer_structure="Two combo cards, one per combo.",
+        layout_strategy="Headline band on top, two equal cards below, contact footer.",
+        grouping=["combo one card", "combo two card"],
+        background_brief=(
+            "A festive Memorial Day weekend cookout spread with bunting, central area "
+            "left clear. No words or lettering anywhere."
+        ),
+    )
+    result = fbv.validate(brief, _mdw_facts(), _COMBO_REQUEST)
+    assert result.ok is True, result.errors
+    assert result.errors == []
+
+
+def test_graduation_discount_production_faithful_brief_still_ok():
+    """OPERATOR graduation/discount production-faithful (unchanged): the grounded-discount
+    graduation brief still validates after the occasion change (no occasion "weekend"
+    token; the exemption is inert here)."""
+    result = fbv.validate(_grad_brief(), _grad_facts(), _GRAD_REQUEST)
+    assert result.ok is True, result.errors
+
+
+# ── occasion-aware exemption: unit-level helpers ─────────────────────────────
+
+
+def test_occasion_claim_tokens_minimal_from_memorial_day_weekend():
+    """The exempt set derived from "Memorial Day Weekend" is exactly {"weekend"} — the
+    only date/schedule token inside the phrase; "memorial"/"day"/"memorial day" are not
+    claim-shaped, so they are never exempted."""
+    assert fbv._occasion_claim_tokens(["memorial day weekend"]) == {"weekend"}
+
+
+def test_occasion_claim_tokens_empty_for_non_claim_occasion():
+    """An occasion phrase with no claim-shaped token (e.g. "Graduation Celebration",
+    "Graduation Parties 2026") yields {} — nothing is exempted."""
+    assert fbv._occasion_claim_tokens(["graduation celebration"]) == set()
+    assert fbv._occasion_claim_tokens(["graduation parties 2026"]) == set()
+    assert fbv._occasion_claim_tokens([]) == set()
+
+
+def test_occasion_aware_operational_claim_hit_is_identity_without_tokens():
+    """With NO occasion claim-tokens, the occasion-aware wrapper is byte-for-byte
+    ``_operational_claim_hit`` — the fail-closed posture and all claim classes intact."""
+    text = "a Memorial Day weekend cookout, no words"
+    assert (fbv._occasion_aware_operational_claim_hit(text, set())
+            == fbv._operational_claim_hit(text))
+    # and a real claim still fires through the wrapper even with tokens present.
+    assert fbv._occasion_aware_operational_claim_hit("we are now open daily", {"weekend"})
+
+
+def test_strip_grounded_occasion_claims_per_occurrence_context():
+    """Per-occurrence: a non-scheduling "weekend" is neutralized while a scheduling-context
+    "weekend" in the SAME text is kept (so the scan still fires on it)."""
+    out = fbv._strip_grounded_occasion_claims(
+        "a Memorial Day weekend scene, open this weekend", {"weekend"}
+    )
+    # the first (occasion-theme) "weekend" is gone; the scheduling "this weekend" remains.
+    assert "this weekend" in out.lower()
+    assert out.lower().count("weekend") == 1
+
+
+def test_occurrence_in_scheduling_context_window():
+    """The scheduling-context detector flags an adjacent scheduling word and ignores a
+    distant layout "open" buffered by the occasion phrase."""
+    sched = "open this weekend"
+    i = sched.index("weekend")
+    assert fbv._occurrence_in_scheduling_context(sched, i, i + len("weekend"))
+    clean = "Memorial Day weekend cookout scene, warm light, open central area"
+    j = clean.index("weekend")
+    assert not fbv._occurrence_in_scheduling_context(clean, j, j + len("weekend"))
