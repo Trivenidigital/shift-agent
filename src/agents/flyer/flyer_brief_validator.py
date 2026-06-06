@@ -117,15 +117,17 @@ def _commercial_value_hit(text: str) -> str:
 _RENDER_REACHING_FIELDS = frozenset({"background_brief"})
 
 
-# Full-token forms for the GROUNDED test only (non-rendering fields). The minimal
-# ``_commercial_value_hit`` regexes truncate a percentage to the LAST digit ("30%"
-# → "0%"), which would falsely ground a "30% off" hit against a locked "20% off ..."
-# (both contain "0%"). For the grounded comparison we instead extract the FULL
-# digit-bearing commercial tokens (whole percentage / currency-amount / bare price /
-# phone digit-run) and require each to be contained in an OVERLAY-RENDERED locked
-# value — so "30%" ≠ "20%" but "20% off" matches "20% off all catering orders". This
-# does NOT alter ``_commercial_value_hit`` (the strict render-reaching + must_not_add
-# paths keep their exact behavior/messages).
+# Full-token forms for the GROUNDED test (non-rendering free-text fields +
+# must_not_add invented-commercial). The minimal ``_commercial_value_hit`` returns
+# only the FIRST hit and truncates a percentage to the LAST digit ("30%" → "0%"),
+# which (a) misses a SECOND commercial value after a grounded one, and (b) would
+# falsely ground "30% off" against a locked "20% off ..." (both contain "0%"). For
+# the grounded comparison we instead extract ALL FULL digit-bearing commercial tokens
+# (whole percentage / currency-amount / bare price / phone digit-run) and require
+# EACH to be contained in an OVERLAY-RENDERED locked value — so "30%" ≠ "20%", and a
+# grounded value followed by an invented one is still rejected. This does NOT alter
+# ``_commercial_value_hit`` (the strict render-reaching path keeps its exact
+# behavior/messages; the must_not_add locked-value containment check is unchanged).
 _FULL_PERCENT_RE = re.compile(r"\d+(?:\.\d+)?\s*%")
 _FULL_CURRENCY_RE = re.compile(r"[$₹€£]\s*\d+(?:\.\d{1,2})?")
 _FULL_BARE_PRICE_RE = re.compile(r"(?<![\w.])\d{1,4}\.\d{2}(?![\w.])")
@@ -150,32 +152,50 @@ def _commercial_grounding_tokens(text: str) -> list[str]:
     return tokens
 
 
-def _commercial_value_is_grounded(text: str, allowed_values: Sequence[str]) -> bool:
-    """True iff EVERY whole commercial token in ``text`` is contained in some
-    OVERLAY-RENDERED locked value (``allowed_values`` are pre-normalized). An empty
-    token set (a non-numeric discount word like a bare "BOGO"/"free" that
-    ``_commercial_value_hit`` flagged) is NEVER grounded — there is no digit token to
-    anchor, so it cannot be tied to a rendered fact and must be rejected as invented.
-    Used ONLY for the non-rendering relaxation; the strict path is unaffected."""
-    tokens = _commercial_grounding_tokens(text)
-    if not tokens:
-        return False
-    for tok in tokens:
-        # match the token's digits against each allowed value's digit forms too, so
-        # "+1 732 555 0104" (token "17325550104") grounds against the locked phone
-        # whatever its separators. Currency/percent/price tokens keep their symbol.
-        digit_tok = _DIGITS_RE.sub("", tok)
-        grounded = False
-        for lv in allowed_values:
-            if tok in lv:
-                grounded = True
-                break
-            if len(digit_tok) >= 7 and digit_tok in _DIGITS_RE.sub("", lv):
-                grounded = True
-                break
-        if not grounded:
-            return False
-    return True
+def _token_is_grounded(token: str, allowed_values: Sequence[str]) -> bool:
+    """True iff a single whole commercial ``token`` (normalized) is contained in some
+    OVERLAY-RENDERED locked value. Digit-runs (phone) also match on bare digits so a
+    phone grounds against the locked number whatever its separators; currency / full-
+    percent / bare-price tokens keep their symbol (so "30%" ≠ "20%")."""
+    digit_tok = _DIGITS_RE.sub("", token)
+    for lv in allowed_values:
+        if token in lv:
+            return True
+        if len(digit_tok) >= 7 and digit_tok in _DIGITS_RE.sub("", lv):
+            return True
+    return False
+
+
+def _first_ungrounded_commercial(text: str, allowed_values: Sequence[str]) -> str:
+    """The first INVENTED (ungrounded) commercial value in ``text``, or "" if every
+    commercial value is grounded in an OVERLAY-RENDERED locked value. "" is also
+    returned for text with NO commercial content (clean).
+
+    ALL-HITS, token-anchored (Codex BLOCKERs): a field/entry passes ONLY when EVERY
+    commercial value it carries is grounded — a grounded value FOLLOWED by an invented
+    one (e.g. "20% off and $5 off") is rejected on the invented "$5". Two cases:
+      - whole digit-bearing tokens (full percentage / currency / bare price / phone
+        digit-run) are each grounded via ``_token_is_grounded`` (NOT a loose substring
+        — "30%" does not ground against a locked "20%"); the first ungrounded token is
+        returned;
+      - a NON-numeric commercial hit (a discount word like "BOGO"/"free" that
+        ``_commercial_value_hit`` flags but that yields NO digit token) has nothing to
+        anchor to a rendered fact ⇒ it is invented; the hit string is returned.
+    Used by BOTH the non-rendering free-text scan AND the must_not_add invented-
+    commercial check so the two agree on grounding; the strict render-reaching path
+    and the must_not_add locked-value containment check are unaffected."""
+    if not text:
+        return ""
+    for tok in _commercial_grounding_tokens(text):
+        if not _token_is_grounded(tok, allowed_values):
+            return tok
+    # No ungrounded digit token. If a commercial SHAPE is still present it must be a
+    # non-numeric discount word (no digit token) — invented (cannot be grounded).
+    if not _commercial_grounding_tokens(text):
+        hit = _commercial_value_hit(text)
+        if hit:
+            return hit
+    return ""
 
 
 # ── textless-background firewall (Codex Finding 3) ──────────────────────────
@@ -749,11 +769,11 @@ def validate(
     ]
     locked_text_values = [v for v in locked_text_values if len(v) >= 4]
     for field_name, text in free_text_fields.items():
-        hit = _commercial_value_hit(text)
         if field_name in _RENDER_REACHING_FIELDS:
             # STRICT: any commercial SHAPE is rejected (it can reach pixels), and the
             # locked identity/commercial textual scan runs (would render outside the
             # overlay).
+            hit = _commercial_value_hit(text)
             if hit:
                 errors.append(f"commercial value outside fact_refs: {field_name}: {hit}")
             norm_text = _norm_ws(text)
@@ -762,15 +782,16 @@ def validate(
                     errors.append(f"locked value outside fact_refs: {field_name}: {lv}")
                     break
         else:
-            # NON-RENDERING: reject only an INVENTED commercial value — one whose
-            # whole digit-bearing token is NOT contained in any OVERLAY-RENDERED
-            # locked value (referenced or required). A grounded commercial value
-            # passes — it cannot reach pixels. Full-token anchoring (not a loose
-            # substring) so "30% off" is not falsely grounded by a locked "20% off"
-            # (both contain "0%"). SKIP the locked-text identity scan (grounded +
-            # non-rendering = harmless).
-            if hit and not _commercial_value_is_grounded(text, allowed_values):
-                errors.append(f"invented commercial value in {field_name}: {hit}")
+            # NON-RENDERING: reject only an INVENTED commercial value — the field
+            # passes ONLY IF EVERY commercial value/token in it is grounded (contained
+            # in an OVERLAY-RENDERED locked value — referenced or required). ALL-HITS,
+            # token-anchored (Codex BLOCKER 1): a grounded value followed by an
+            # invented one (e.g. "20% off and $5 off") still rejects on the "$5", and
+            # "30% off" is not falsely grounded by a locked "20% off". SKIP the
+            # locked-text identity scan (grounded + non-rendering = harmless).
+            ungrounded = _first_ungrounded_commercial(text, allowed_values)
+            if ungrounded:
+                errors.append(f"invented commercial value in {field_name}: {ungrounded}")
 
     # (c-textless, Codex Finding 3) the TEXTLESS-background prompt — scan ONLY the
     # render-reaching fields (``background_brief``). They must not (a) instruct the
@@ -812,19 +833,18 @@ def validate(
     # commercial value that is NOT one of the locked values) into the brief via the
     # suppression list, where checks (c)/(d) never looked. Reject any must_not_add
     # whose commercial shape (currency/bare-price/percent/discount/phone-run) is not
-    # one of the locked-fact values. A suppression naming a REAL locked commercial
-    # value is already caught by the containment check below.
+    # one of the locked-fact values — TOKEN-ANCHORED, ALL-HITS (Codex BLOCKER 2): the
+    # same grounding as the non-rendering free-text scan, so "no 30% off badge" is NOT
+    # falsely grounded by a locked "20% off ..." (the truncated "0%" substring would
+    # have been). A suppression naming a REAL locked commercial value is already
+    # caught by the containment check below (unchanged).
     for entry in brief.must_not_add:
         norm_entry = _norm_ws(entry)
         if not norm_entry:
             continue
-        hit = _commercial_value_hit(entry)
-        if hit:
-            norm_hit = _norm_ws(hit)
-            # Allowed only if the hit is part of a locked value (then containment
-            # below owns it); an invented commercial shape is rejected here.
-            if not any(norm_hit and norm_hit in lv for lv in locked_values):
-                errors.append(f"must_not_add invents commercial value: {hit}")
+        ungrounded = _first_ungrounded_commercial(entry, locked_values)
+        if ungrounded:
+            errors.append(f"must_not_add invents commercial value: {ungrounded}")
         for lv in locked_values:
             if lv and re.search(r"(?<![a-z0-9])" + re.escape(lv) + r"(?![a-z0-9])", norm_entry):
                 errors.append(f"must_not_add contains locked value: {entry}")

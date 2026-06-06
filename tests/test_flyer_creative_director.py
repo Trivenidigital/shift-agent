@@ -487,6 +487,44 @@ def test_validate_rejects_invented_discount_in_non_rendering_field():
                for e in result.errors), result.errors
 
 
+def test_validate_rejects_grounded_then_invented_currency_in_non_rendering(  # Codex BLOCKER 1
+):
+    """ALL-HITS: a GROUNDED "20% off" FOLLOWED by an INVENTED "$5 off" in the same
+    non-rendering offer_structure → ok=False (the scan does not stop at the grounded
+    first hit)."""
+    brief = _grad_brief(
+        offer_structure="Lead with the 20% off card and a $5 off add-on.",
+    )
+    result = fbv.validate(brief, _grad_facts(), _GRAD_REQUEST)
+    assert result.ok is False
+    assert any(e.startswith("invented commercial value in offer_structure:")
+               and "$5" in e for e in result.errors), result.errors
+
+
+def test_validate_rejects_grounded_then_invented_percent_in_non_rendering(  # Codex BLOCKER 1
+):
+    """ALL-HITS: grounded "20% off" + invented "30% off" in one non-rendering field →
+    ok=False (rejected on the invented "30%")."""
+    brief = _grad_brief(
+        offer_structure="Lead with the 20% off card, then a 30% off blowout.",
+    )
+    result = fbv.validate(brief, _grad_facts(), _GRAD_REQUEST)
+    assert result.ok is False
+    assert any(e.startswith("invented commercial value in offer_structure:")
+               and "30%" in e for e in result.errors), result.errors
+
+
+def test_validate_allows_all_grounded_commercial_values_in_non_rendering():
+    """ALL-grounded: both locked combo prices ($49.99 from item:0:price, $39.99 from
+    item:1:price — both required) written into the non-rendering offer_structure →
+    ok=True (every commercial value is grounded)."""
+    brief = _combo_brief(
+        offer_structure="Two cards: the $49.99 combo and the $39.99 combo.",
+    )
+    result = fbv.validate(brief, _combo_facts(), _COMBO_REQUEST)
+    assert result.ok is True, result.errors
+
+
 def test_validate_rejects_commercial_value_matching_unreferenced_nonrequired_fact():
     """TIGHT GROUNDING (merge-blocker #1): a commercial value passes in a
     non-rendering field ONLY when it resolves through a fact that ACTUALLY renders
@@ -577,6 +615,42 @@ def test_validate_must_not_add_unchanged_strict_invented_commercial():
     assert any("must_not_add invents commercial value" in e for e in result.errors), result.errors
 
 
+def test_validate_must_not_add_invented_percent_not_grounded_by_locked(  # Codex BLOCKER 2
+):
+    """TOKEN-ANCHORED: must_not_add=["no 30% off badge"] with locked "20% off ..." →
+    ok=False. The truncated-substring grounding would have falsely grounded the "0%"
+    of "30%" against the "20%" of the locked value and let the invented 30% pass."""
+    brief = _grad_brief(must_not_add=["no 30% off badge"])
+    result = fbv.validate(brief, _grad_facts(), _GRAD_REQUEST)
+    assert result.ok is False
+    assert any("must_not_add invents commercial value" in e and "30%" in e
+               for e in result.errors), result.errors
+
+
+def test_validate_must_not_add_grounded_partial_discount_not_invented():
+    """A must_not_add carrying a GROUNDED commercial token ("20% off", contained in the
+    locked "20% off all catering orders") is NOT a FALSE-POSITIVE invented-commercial
+    rejection — token-anchored grounding recognizes it (so the fix does not over-block
+    a legitimately-grounded value). (Whether a *partial* of a locked value should also
+    trip the full-value CONTAINMENT check is a pre-existing, out-of-scope concern; this
+    asserts only that the BLOCKER-2 fix does not newly flag a grounded value.)"""
+    brief = _grad_brief(must_not_add=["no 20% off badge"])
+    result = fbv.validate(brief, _grad_facts(), _GRAD_REQUEST)
+    assert not any("must_not_add invents commercial value" in e for e in result.errors), result.errors
+
+
+def test_validate_must_not_add_full_locked_commercial_value_containment():
+    """A must_not_add naming a COMPLETE locked commercial value ("$49.99") is rejected
+    by the unchanged CONTAINMENT check (not the invented-commercial check) — proving
+    the locked-value containment path is intact after the BLOCKER-2 grounding change."""
+    brief = _combo_brief(must_not_add=["no $49.99 price badge"])
+    result = fbv.validate(brief, _combo_facts(), _COMBO_REQUEST)
+    assert result.ok is False
+    assert any("must_not_add contains locked value" in e for e in result.errors), result.errors
+    # $49.99 is a full locked value ⇒ grounded ⇒ NOT flagged as invented.
+    assert not any("must_not_add invents commercial value" in e for e in result.errors), result.errors
+
+
 def test_validate_must_not_add_unchanged_strict_locked_value():
     """UNCHANGED (merge-blocker #2): a must_not_add entry CONTAINING a locked value is
     still rejected via the existing containment block."""
@@ -601,32 +675,51 @@ def test_validate_omits_required_fact_still_blocks_with_scope_change():
     assert any(e == "omits required fact pricing_structure" for e in result.errors), result.errors
 
 
-def test_commercial_value_is_grounded_full_token_discriminates_percentages():
-    """The grounded test uses WHOLE tokens, not a loose substring: "30% off" must NOT
-    ground against a locked "20% off ..." (both contain "0%"). This is the operator
-    merge-blocker the truncated _commercial_value_hit alone would have missed."""
+def test_first_ungrounded_commercial_full_token_discriminates_percentages():
+    """Token-anchored grounding uses WHOLE tokens, not a loose substring: "30% off"
+    must NOT ground against a locked "20% off ..." (both contain "0%"). Returns "" iff
+    grounded, else the offending token (the operator merge-blocker the truncated
+    _commercial_value_hit alone would have missed)."""
     allowed = [fbv._norm_ws("20% off all catering orders")]
-    assert fbv._commercial_value_is_grounded("Lead with 20% off card.", allowed) is True
-    assert fbv._commercial_value_is_grounded("Lead with 30% off card.", allowed) is False
-    assert fbv._commercial_value_is_grounded("Lead with 25% off card.", allowed) is False
+    assert fbv._first_ungrounded_commercial("Lead with 20% off card.", allowed) == ""
+    assert fbv._first_ungrounded_commercial("Lead with 30% off card.", allowed) == "30%"
+    assert fbv._first_ungrounded_commercial("Lead with 25% off card.", allowed) == "25%"
     # whitespace-insensitive ("20 %" == "20%").
-    assert fbv._commercial_value_is_grounded("Lead with 20 % off card.", allowed) is True
+    assert fbv._first_ungrounded_commercial("Lead with 20 % off card.", allowed) == ""
 
 
-def test_commercial_value_is_grounded_prices_and_phones():
+def test_first_ungrounded_commercial_prices_and_phones():
     allowed = [fbv._norm_ws("$49.99"), fbv._norm_ws("+1 732 555 0104")]
-    assert fbv._commercial_value_is_grounded("the 49.99 combo", allowed) is True
-    assert fbv._commercial_value_is_grounded("the 19.99 combo", allowed) is False
+    assert fbv._first_ungrounded_commercial("the 49.99 combo", allowed) == ""
+    assert fbv._first_ungrounded_commercial("the 19.99 combo", allowed) == "19.99"
     # phone grounds on digits regardless of separators.
-    assert fbv._commercial_value_is_grounded("call +1 732 555 0104 now", allowed) is True
-    assert fbv._commercial_value_is_grounded("call +1 999 888 7777 now", allowed) is False
+    assert fbv._first_ungrounded_commercial("call +1 732 555 0104 now", allowed) == ""
+    assert fbv._first_ungrounded_commercial("call +1 999 888 7777 now", allowed) != ""
 
 
-def test_commercial_value_is_grounded_nonnumeric_discount_word_never_grounds():
-    """A non-numeric discount word ("BOGO"/"free") has no digit token to anchor to a
-    rendered fact ⇒ never grounded ⇒ rejected as invented."""
+def test_first_ungrounded_commercial_all_hits_not_just_first():
+    """ALL-HITS (Codex BLOCKER 1): a GROUNDED value FOLLOWED by an invented one is
+    rejected on the invented one — the scan does not stop at the first hit."""
     allowed = [fbv._norm_ws("20% off all catering orders")]
-    assert fbv._commercial_value_is_grounded("a BOGO free banner", allowed) is False
+    # "20%" grounds, "$5" does not → returns the ungrounded "$5".
+    assert fbv._first_ungrounded_commercial("20% off and $5 off card", allowed) == "$5"
+    # "20%" grounds, "30%" does not → returns the ungrounded "30%".
+    assert fbv._first_ungrounded_commercial("20% off and also 30% off", allowed) == "30%"
+    # both grounded → "".
+    both = [fbv._norm_ws("$49.99"), fbv._norm_ws("$39.99")]
+    assert fbv._first_ungrounded_commercial("the $49.99 and $39.99 combos", both) == ""
+
+
+def test_first_ungrounded_commercial_nonnumeric_discount_word_never_grounds():
+    """A non-numeric discount word ("BOGO"/"free") has no digit token to anchor to a
+    rendered fact ⇒ never grounded ⇒ returned as invented."""
+    allowed = [fbv._norm_ws("20% off all catering orders")]
+    assert fbv._first_ungrounded_commercial("a BOGO free banner", allowed) != ""
+
+
+def test_first_ungrounded_commercial_clean_text_returns_empty():
+    # no commercial content at all ⇒ "".
+    assert fbv._first_ungrounded_commercial("two combo cards side by side", []) == ""
 
 
 # ── (d/MAJOR #4) must_not_add containment (not exact-match) ─────────────────
