@@ -691,3 +691,90 @@ def test_generic_item_price_captures_connector_less_flat_price():
     assert _generic_item_price("any item at $8.99") == "$8.99"                       # connector form still works
     assert _generic_item_price("all items 10% off") == ""                           # discount, not a flat price
     assert _generic_item_price("weekend special flyer") == ""                        # no price
+
+
+# ── extractor truth fix: garbage offers never become required offer:N facts ──
+# Live combo incident (2026-06-06): facts.extract_text_facts locked two oversized
+# REQUIRED offer:N customer_text facts (a request echo + an invented $99 + prose),
+# which the firewall rejected or render overflowed. The provider-grounded brief
+# must yield only bounded faithful offers; nothing > 180 chars (render's
+# _clean_fact_text hard-fail boundary), no invented $99, no generated prose.
+
+def test_extract_text_facts_combo_drops_garbage_offer_facts(monkeypatch):
+    from agents.flyer import facts as facts_module
+    from agents.flyer.semantic_brief import FlyerSemanticBrief, FlyerSemanticOffer
+
+    raw = (
+        "Can we do meal combo flyer for veg and non veg with prices 49.99 "
+        "for non veg combo include"
+    )
+    echo_offer = (
+        "Non Veg Combo: $49.99 includes Veg And Non Veg Can we do meal combo flyer "
+        "for veg and non veg with prices 49.99 for non veg combo include"
+    )
+    invented_offer = (
+        "Non Veg Combo: $99 includes professional local food menu flyer with "
+        "appetizing photography, strong promotional"
+    )
+
+    def provider(_fields, _raw_request):
+        return FlyerSemanticBrief(
+            offers=[FlyerSemanticOffer(echo_offer), FlyerSemanticOffer(invented_offer)]
+        )
+
+    monkeypatch.setattr(facts_module, "build_hermes_semantic_brief_provider", lambda: provider)
+
+    facts = facts_module.extract_text_facts(
+        FlyerRequestFields(notes=raw), raw, message_id="m-combo"
+    )
+
+    offer_facts = [f for f in facts if f.fact_id.startswith("offer:")]
+    assert offer_facts == []  # both garbage offers dropped — no offer:N locked
+    blob = " ".join(f.value for f in facts)
+    assert "$99" not in blob                       # invented price never enters facts
+    assert "appetizing photography" not in blob    # generated prose never enters facts
+    # No REQUIRED fact exceeds the render's 180-char _clean_fact_text limit.
+    assert all(len(f.value) <= 180 for f in facts if f.required)
+
+
+def test_extract_text_facts_keeps_faithful_offer_fact(monkeypatch):
+    """A short, grounded, faithful offer is still locked as offer:0 (no over-rejection)."""
+    from agents.flyer import facts as facts_module
+    from agents.flyer.semantic_brief import FlyerSemanticBrief, FlyerSemanticOffer
+
+    raw = (
+        "Create a flyer for evening snacks sale, any item $7.99. "
+        "Free Masala Chai with any purchase above $12."
+    )
+
+    def provider(_fields, _raw_request):
+        return FlyerSemanticBrief(
+            offers=[FlyerSemanticOffer("Free Masala Chai with any purchase above $12")]
+        )
+
+    monkeypatch.setattr(facts_module, "build_hermes_semantic_brief_provider", lambda: provider)
+
+    facts = facts_module.extract_text_facts(FlyerRequestFields(notes=raw), raw, message_id="m-snack")
+    by_id = facts_module.facts_by_id(type("P", (), {"locked_facts": facts})())
+
+    assert by_id["offer:0"].value == "Free Masala Chai with any purchase above $12"
+
+
+def test_creative_planner_hallucinated_item_is_not_required():
+    """Requirement #2: an inferred/ungrounded planner item that survives the firewall is
+    materialized as ADVISORY (required=False) and source=hermes_inferred — never a
+    required customer-visible truth. A claim-bearing candidate is rejected outright."""
+    from agents.flyer.creative_planner import CreativeCandidate, materialize_inferred
+    from agents.flyer.creative_firewall import CreativeFirewall
+
+    candidates = [
+        CreativeCandidate(kind="item", value="Veg Manchurian"),   # benign inferred item
+        CreativeCandidate(kind="item", value="Free Delivery"),    # claim disguised as item
+    ]
+
+    facts = materialize_inferred(candidates, firewall=CreativeFirewall())
+
+    # The claim is dropped by the firewall; the benign item survives but is advisory.
+    assert [f.value for f in facts] == ["Veg Manchurian"]
+    assert all(f.required is False for f in facts)
+    assert all(f.source == "hermes_inferred" for f in facts)

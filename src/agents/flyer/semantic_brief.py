@@ -270,8 +270,82 @@ def _coerce_brief(value: FlyerSemanticBrief | Mapping[str, object] | None) -> Fl
     )
 
 
+# A grounded offer becomes a REQUIRED, customer-visible `offer:N` locked fact
+# (facts.py). Token-level grounding (`_grounded`) is necessary but NOT sufficient:
+# an LLM can echo the request back verbatim — every token is "in source", so it
+# passes grounding — yet the result is a request-tail paragraph or the customer
+# describing/instructing the flyer, not a faithful offer span. So an offer must
+# ALSO be faithful. This is an ADDITIONAL gate on top of grounding (strengthening,
+# never weakening it). Two checks, content-based (not a length proxy):
+#
+# 1. AGENT-ASK: the value addresses the AGENT ("can we / could you / would you …")
+#    — that's a request, not an offer FOR customers.
+# 2. FLYER-MEDIUM DESCRIPTION: a faithful offer is a DEAL, never a description of
+#    the flyer medium itself. So after removing any legitimate REDEMPTION phrase
+#    (a redemption verb acting on the physical flyer/coupon — "bring this flyer for
+#    10% off"), ANY remaining flyer/poster/banner NOUN means the value is describing
+#    or instructing the flyer (the live "...meal combo flyer for veg and non veg..."
+#    echo, or "make our new meal combo flyer") ⇒ drop. Doing it per-residual (strip
+#    redemption, then scan) means a legit redemption sentence cannot launder a second
+#    echo sentence in the same value (Codex round-2/3).
+# Plus a RENDER-SAFETY length backstop UNDER render's 180-char `_clean_fact_text`
+# hard-fail (NOT a faithfulness proxy — a legit ~100-char enumerated offer survives).
+_OFFER_MAX_LEN = 160
+
+# The customer addressing the AGENT (a request, not an offer). NOT creation verbs on
+# their own ("we make combos for $20" is a legit offer) — flyer-medium description is
+# handled separately below, so bare make/create are not instruction markers here.
+_OFFER_AGENT_ASK_RE = re.compile(r"\b(?:can\s+(?:we|you|i)|could\s+(?:we|you)|would\s+you)\b", re.IGNORECASE)
+
+# Any flyer-medium noun. A faithful offer is a deal; it does not name the flyer medium.
+_OFFER_FLYER_NOUN_RE = re.compile(r"\b(?:flyer|flier|poster|banner)\b", re.IGNORECASE)
+
+# A legitimate REDEMPTION phrase: a redemption verb acting on the physical flyer/coupon
+# token ("Bring this flyer for 10% off", "Mention our poster for free dessert"). These
+# are stripped before the flyer-noun scan so they don't trip it; everything else that
+# names the flyer medium is an echo/instruction.
+#
+# The discriminator is the PAYOFF: a redemption REWARDS the customer (a discount/freebie),
+# whereas an echo merely DESCRIBES the flyer's content ("show this flyer with veg combo
+# prices"). So the strip fires ONLY for <verb> <flyer/coupon> for/to-get <PAYOFF> — a
+# verb+medium WITHOUT a payoff is NOT redemption, is not stripped, and its flyer noun
+# still trips the echo scan (Codex round-4). Determiner broad (a/an/our) since the
+# verb+payoff carry the signal.
+_OFFER_PAYOFF_RE = r"(?:\d+\s*%|\bfree\b|\$\s*\d|\bdiscount\b|\boff\b|\bbogo\b|\bcomplimentary\b)"
+_OFFER_REDEMPTION_RE = re.compile(
+    r"\b(?:bring|show|present|mention|redeem|scan)\s+(?:(?:a|an|the|this|that|your|our)\s+){0,2}"
+    r"(?:flyer|flier|poster|banner|coupon|voucher)\s+(?:for|to\s+(?:get|claim|redeem))\s+"
+    r"(?:\w+[\s,]+){0,4}?" + _OFFER_PAYOFF_RE,
+    re.IGNORECASE,
+)
+
+
+def _offer_is_faithful(value: str) -> bool:
+    """True when `value` is a faithful, render-safe offer span (safe to lock as a
+    REQUIRED customer-visible fact); False when it addresses the agent, describes /
+    instructs the flyer medium, or over-runs the render-safety length cap. Applied
+    AFTER `_grounded`, so it only ever removes grounded-but-unfaithful values — it
+    cannot admit anything ungrounded."""
+    cleaned = _clean(value)
+    if not cleaned or len(cleaned) > _OFFER_MAX_LEN:
+        return False
+    if _OFFER_AGENT_ASK_RE.search(cleaned):
+        return False
+    # Strip legit redemption phrases, then ANY remaining flyer-medium noun ⇒ the value
+    # describes/instructs the flyer (an echo), not an offer. Per-residual, so a legit
+    # redemption sentence can't launder a second echo sentence in the same value.
+    residual = _OFFER_REDEMPTION_RE.sub(" ", cleaned)
+    if _OFFER_FLYER_NOUN_RE.search(residual):
+        return False
+    return True
+
+
 def _source_ground_brief(brief: FlyerSemanticBrief, source: str, *, allow_text_identity: bool) -> FlyerSemanticBrief:
-    offers = [FlyerSemanticOffer(text=_clean(offer.text)) for offer in brief.offers if _grounded(source, offer.text)]
+    offers = [
+        FlyerSemanticOffer(text=_clean(offer.text))
+        for offer in brief.offers
+        if _grounded(source, offer.text) and _offer_is_faithful(offer.text)
+    ]
     return FlyerSemanticBrief(
         campaign_title=_clean(brief.campaign_title) if _grounded(source, brief.campaign_title) else "",
         account_business=_clean(brief.account_business) if allow_text_identity and _grounded(source, brief.account_business) else "",
