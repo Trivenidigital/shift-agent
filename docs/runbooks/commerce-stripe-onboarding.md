@@ -4,6 +4,17 @@
 **Audience:** SMB-Agents operator (founder + on-call).
 **Prerequisites:** slice-2.5 baseline live (per `docs/runbooks/commerce-deposit-onboarding.md`); operator has a Stripe account (test mode is free + recommended for first customer).
 
+## Windows SSH capture convention
+
+When running these commands from Codex on Windows, never rely on inline SSH stdout and never chain `&& cat` after SSH. Use the two-step pattern:
+
+```bash
+ssh main-vps 'remote command' > .ssh_output.txt 2>&1
+# Then read .ssh_output.txt locally.
+```
+
+The `.ssh_*.txt` files are local operator scratch files. Do not commit them, and delete files containing secrets after use.
+
 ---
 
 ## What this runbook covers
@@ -37,21 +48,22 @@ If you have a Stripe account already:
 The slice-1 `commerce_payment_link.mint()` lazy-imports `stripe`; it's not a hard dependency. Install it now:
 
 ```bash
-ssh main-vps 'pip install stripe' > /tmp/install.txt 2>&1
-cat /tmp/install.txt
+ssh main-vps 'pip install stripe' > .ssh_commerce_stripe_install.txt 2>&1
+# Then read .ssh_commerce_stripe_install.txt locally.
 ```
 
 Or if there's a dedicated venv:
 
 ```bash
-ssh main-vps '/opt/shift-agent/venv/bin/pip install stripe' > /tmp/install.txt 2>&1
+ssh main-vps '/opt/shift-agent/venv/bin/pip install stripe' > .ssh_commerce_stripe_install.txt 2>&1
+# Then read .ssh_commerce_stripe_install.txt locally.
 ```
 
 Verify:
 
 ```bash
-ssh main-vps 'python3 -c "import stripe; print(stripe.VERSION)"' > /tmp/check.txt 2>&1
-cat /tmp/check.txt
+ssh main-vps 'python3 -c "import stripe; print(stripe.VERSION)"' > .ssh_commerce_stripe_import.txt 2>&1
+# Then read .ssh_commerce_stripe_import.txt locally.
 ```
 
 Expected: a version number like `5.x.x`. If you see `ModuleNotFoundError`, the install went to the wrong Python — check `which python3` and adjust.
@@ -73,7 +85,8 @@ WEBHOOK_SECRET=GENERATE_A_32-BYTE_HEX_SECRET_HERE
 Generate the global webhook secret with:
 
 ```bash
-ssh main-vps 'openssl rand -hex 32'
+ssh main-vps 'openssl rand -hex 32' > .ssh_commerce_webhook_secret.txt 2>&1
+# Then read .ssh_commerce_webhook_secret.txt locally and delete it after storing the secret.
 ```
 
 (The global `WEBHOOK_SECRET` is the Hermes-level HMAC; the per-subscription Stripe webhook secret is separate, see Step 5.)
@@ -81,14 +94,15 @@ ssh main-vps 'openssl rand -hex 32'
 Restart Hermes gateway:
 
 ```bash
-ssh main-vps 'systemctl restart hermes-gateway'
+ssh main-vps 'systemctl restart hermes-gateway' > .ssh_commerce_restart_webhook_env.txt 2>&1
+# Then read .ssh_commerce_restart_webhook_env.txt locally.
 ```
 
 Verify webhook platform is up:
 
 ```bash
-ssh main-vps 'curl -sf http://localhost:8644/health' > /tmp/webhook-health.txt 2>&1
-cat /tmp/webhook-health.txt
+ssh main-vps 'curl -sf http://localhost:8644/health' > .ssh_commerce_webhook_health.txt 2>&1
+# Then read .ssh_commerce_webhook_health.txt locally.
 ```
 
 Expected: `{"status":"ok"}`.
@@ -98,8 +112,8 @@ Expected: `{"status":"ok"}`.
 ## Step 4 — Verify the deployed reconciler
 
 ```bash
-ssh main-vps 'ls -la /usr/local/bin/commerce-payment-confirm /usr/local/bin/commerce-list-active-stripe-links' > /tmp/check-bin.txt 2>&1
-cat /tmp/check-bin.txt
+ssh main-vps 'ls -la /usr/local/bin/commerce-payment-confirm /usr/local/bin/commerce-list-active-stripe-links' > .ssh_commerce_reconciler_bins.txt 2>&1
+# Then read .ssh_commerce_reconciler_bins.txt locally.
 ```
 
 Both should be executable. If not, re-run the most recent deploy.
@@ -116,8 +130,8 @@ ssh main-vps 'hermes webhook subscribe stripe-commerce-payments \
   --skills "commerce_payment_confirmed" \
   --prompt "Stripe payment succeeded for {data.object.metadata.commerce_order_id}: amount={data.object.amount} reference={data.object.id}" \
   --secret "PASTE_STRIPE_WEBHOOK_SECRET_HERE" \
-  --deliver log' > /tmp/sub.txt 2>&1
-cat /tmp/sub.txt
+  --deliver log' > .ssh_commerce_webhook_subscribe.txt 2>&1
+# Then read .ssh_commerce_webhook_subscribe.txt locally and delete it after storing the secret-bearing output.
 ```
 
 This returns:
@@ -129,8 +143,8 @@ This returns:
 Verify the subscription is registered:
 
 ```bash
-ssh main-vps 'hermes webhook list' > /tmp/list.txt 2>&1
-cat /tmp/list.txt
+ssh main-vps 'hermes webhook list' > .ssh_commerce_webhook_list.txt 2>&1
+# Then read .ssh_commerce_webhook_list.txt locally; delete it after use if the CLI lists secrets.
 ```
 
 You should see `stripe-commerce-payments` in the output.
@@ -153,7 +167,8 @@ If the Hermes-side and Stripe-side secrets don't match, every webhook fails sign
 Restart Hermes one more time to pick up the new env var:
 
 ```bash
-ssh main-vps 'systemctl restart hermes-gateway'
+ssh main-vps 'systemctl restart hermes-gateway' > .ssh_commerce_restart_stripe_secret.txt 2>&1
+# Then read .ssh_commerce_restart_stripe_secret.txt locally.
 ```
 
 ---
@@ -166,8 +181,8 @@ ssh main-vps 'systemctl restart hermes-gateway'
 2. Trigger a deposit-mint manually:
 
 ```bash
-ssh main-vps '/usr/local/bin/catering-mint-deposit --lead-id LSMOKE_S3 2>&1' > /tmp/mint.txt 2>&1
-cat /tmp/mint.txt
+ssh main-vps '/usr/local/bin/catering-mint-deposit --lead-id LSMOKE_S3' > .ssh_commerce_mint_smoke.txt 2>&1
+# Then read .ssh_commerce_mint_smoke.txt locally.
 ```
 
 3. The audit log should show a `commerce_payment_intent_minted` row with `provider=stripe` and the lead's `deposit_payment_intent_id` populated.
@@ -177,8 +192,8 @@ cat /tmp/mint.txt
 7. Verify on the VPS:
 
 ```bash
-ssh main-vps 'tail -20 /opt/shift-agent/logs/decisions.log | grep -E "commerce_payment_confirmed|catering_deposit_paid"' > /tmp/audit.txt 2>&1
-cat /tmp/audit.txt
+ssh main-vps 'tail -20 /opt/shift-agent/logs/decisions.log | grep -E "commerce_payment_confirmed|catering_deposit_paid"' > .ssh_commerce_payment_audit.txt 2>&1
+# Then read .ssh_commerce_payment_audit.txt locally.
 ```
 
 Expected: a `commerce_payment_confirmed` row + a `catering_deposit_paid` row, both within seconds of the customer pressing "Pay".
@@ -186,8 +201,8 @@ Expected: a `commerce_payment_confirmed` row + a `catering_deposit_paid` row, bo
 8. Verify the lead state:
 
 ```bash
-ssh main-vps 'jq ".leads[] | select(.lead_id==\"LSMOKE_S3\") | {deposit_status, deposit_payment_reference}" /opt/shift-agent/state/catering-leads.json' > /tmp/lead.txt 2>&1
-cat /tmp/lead.txt
+ssh main-vps 'jq ".leads[] | select(.lead_id==\"LSMOKE_S3\") | {deposit_status, deposit_payment_reference}" /opt/shift-agent/state/catering-leads.json' > .ssh_commerce_lead_state.txt 2>&1
+# Then read .ssh_commerce_lead_state.txt locally.
 ```
 
 Expected: `deposit_status: "paid"`, `deposit_payment_reference: "pi_..."`.
@@ -201,7 +216,8 @@ If all 8 checks pass, you're ready for first customer.
 After Step 7 passes:
 
 ```bash
-ssh main-vps 'sed -i s/provider:.*placeholder/provider: stripe/ /opt/shift-agent/config.yaml'
+ssh main-vps 'sed -i s/provider:.*placeholder/provider: stripe/ /opt/shift-agent/config.yaml' > .ssh_commerce_provider_enable.txt 2>&1
+# Then read .ssh_commerce_provider_enable.txt locally.
 ```
 
 Or edit `/opt/shift-agent/config.yaml` manually:
@@ -280,7 +296,8 @@ The `stripe_livemode_expected` flag is a defense-in-depth check: the deployed `c
 **Immediate disable (any time, no redeploy):**
 
 ```bash
-ssh main-vps 'sed -i s/provider:.*stripe/provider: placeholder/ /opt/shift-agent/config.yaml'
+ssh main-vps 'sed -i s/provider:.*stripe/provider: placeholder/ /opt/shift-agent/config.yaml' > .ssh_commerce_provider_disable.txt 2>&1
+# Then read .ssh_commerce_provider_disable.txt locally.
 ```
 
 This flips back to slice-2.5 placeholder mode. New deposit mints will use the template substitution path; **already-minted Stripe Payment Links remain live** — customer can still pay them.
@@ -288,8 +305,8 @@ This flips back to slice-2.5 placeholder mode. New deposit mints will use the te
 To deactivate in-flight Stripe Payment Links so a flip-back is clean:
 
 ```bash
-ssh main-vps '/usr/local/bin/commerce-list-active-stripe-links --only-stripe --format table' > /tmp/active.txt 2>&1
-cat /tmp/active.txt
+ssh main-vps '/usr/local/bin/commerce-list-active-stripe-links --only-stripe --format table' > .ssh_commerce_active_stripe_links.txt 2>&1
+# Then read .ssh_commerce_active_stripe_links.txt locally.
 ```
 
 For each row, open the Stripe dashboard → Payment Links → that link → "Deactivate". This prevents the customer from completing payment on a stale link.
@@ -299,8 +316,8 @@ For each row, open the Stripe dashboard → Payment Links → that link → "Dea
 ## Failure-mode triage
 
 ```bash
-ssh main-vps 'grep -E "commerce_payment_(confirmed|confirmation_failed)|catering_deposit_(paid|link_(sent|failed))" /opt/shift-agent/logs/decisions.log | tail -30' > /tmp/audit.txt 2>&1
-cat /tmp/audit.txt
+ssh main-vps 'grep -E "commerce_payment_(confirmed|confirmation_failed)|catering_deposit_(paid|link_(sent|failed))" /opt/shift-agent/logs/decisions.log | tail -30' > .ssh_commerce_failure_audit.txt 2>&1
+# Then read .ssh_commerce_failure_audit.txt locally.
 ```
 
 | Audit row | Meaning |
