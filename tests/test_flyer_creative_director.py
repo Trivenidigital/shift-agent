@@ -525,6 +525,135 @@ def test_validate_allows_all_grounded_commercial_values_in_non_rendering():
     assert result.ok is True, result.errors
 
 
+# ── (c) OPERATIONAL all-hits, grounded-or-rejected on NON-RENDERING fields ────
+# Operator round-3: re-apply the operational-claim scan to non-rendering planning
+# fields with grounded-or-rejected semantics, using the PRECISE strict detector so
+# creative theme/color/motif text is never flagged (the earlier over-block class).
+
+
+def _grad_facts_with_service() -> list[FlyerLockedFact]:
+    """Graduation facts PLUS a locked tagline carrying a GENUINE service claim, so a
+    planning-field mention of "free delivery" is GROUNDED (referenced + required)."""
+    return _grad_facts() + [
+        FlyerLockedFact(fact_id="tagline", label="Tagline",
+                        value="Free delivery on all catering orders",
+                        source="customer_text", required=True),
+    ]
+
+
+def _grad_brief_with_service(**overrides) -> fb.FlyerBrief:
+    refs = list(_grad_brief().fact_refs) + [fb.FactRef(fact_id="tagline", provenance="locked")]
+    data = dict(fact_refs=refs)
+    data.update(overrides)
+    return _grad_brief(**data)
+
+
+def test_validate_visual_direction_exact_operator_creative_string_passes():
+    """The operator's EXACT prior false-positive string must NOT be rejected by the
+    re-applied operational scan — it is creative theme/color/motif text, not an
+    operational claim (detector-precision requirement)."""
+    brief = _grad_brief(
+        visual_direction=fb.VisualDirection(
+            theme_family="Graduation celebration",
+            palette=["gold", "navy", "white"],
+            motifs=["graduation caps"],
+            visual_subjects=["confetti"],
+        ),
+    )
+    result = fbv.validate(brief, _grad_facts(), _GRAD_REQUEST)
+    assert result.ok is True, result.errors
+
+
+@pytest.mark.parametrize(
+    "theme",
+    [
+        "Fresh spring blossoms",          # bare "fresh" — creative, not "fresh daily"
+        "Award-style gold trophy motif",  # bare "award" — creative, not "award-winning"
+        "Best-of-season harvest",         # bare "best" — creative, not "best in town"
+        "Grand celebration energy",       # "grand" without "opening"
+        "Family gathering warmth",        # "family" without "owned"
+    ],
+)
+def test_validate_visual_direction_creative_overlap_words_pass(theme):
+    """Creative words that the AGGRESSIVE background detector flags (fresh/award/best/
+    grand/family) must PASS in non-rendering visual_direction — the strict detector
+    requires genuine claim context."""
+    brief = _grad_brief(
+        visual_direction=fb.VisualDirection(
+            theme_family=theme, palette=["gold"], motifs=["pattern"],
+            visual_subjects=["scene"],
+        ),
+    )
+    result = fbv.validate(brief, _grad_facts(), _GRAD_REQUEST)
+    assert result.ok is True, f"{theme!r}: {result.errors}"
+
+
+def test_validate_rejects_invented_operational_claim_in_offer_structure():
+    """An INVENTED ungrounded operational claim ("free delivery", no locked fact) in
+    the non-rendering offer_structure → ok=False."""
+    brief = _grad_brief(
+        offer_structure="One headline card, plus free delivery on every order.",
+    )
+    result = fbv.validate(brief, _grad_facts(), _GRAD_REQUEST)
+    assert result.ok is False
+    assert any(e.startswith("invented operational claim in offer_structure:")
+               and "free delivery" in e for e in result.errors), result.errors
+
+
+def test_validate_allows_grounded_operational_claim_in_non_rendering():
+    """A GROUNDED operational claim — "free delivery" whose value resolves through the
+    referenced + required tagline "Free delivery on all catering orders" — passes in
+    the non-rendering offer_structure (it renders via the overlay)."""
+    brief = _grad_brief_with_service(
+        offer_structure="Headline card; mention free delivery prominently.",
+    )
+    result = fbv.validate(brief, _grad_facts_with_service(), _GRAD_REQUEST)
+    assert result.ok is True, result.errors
+
+
+def test_validate_rejects_grounded_op_followed_by_invented_op_all_hits():
+    """ALL-HITS (operational): a GROUNDED "free delivery" FOLLOWED by an INVENTED
+    "now hiring" in one non-rendering field → ok=False (rejected on "now hiring")."""
+    brief = _grad_brief_with_service(
+        offer_structure="Card with free delivery, and a now hiring banner.",
+    )
+    result = fbv.validate(brief, _grad_facts_with_service(), _GRAD_REQUEST)
+    assert result.ok is False
+    assert any(e.startswith("invented operational claim in offer_structure:")
+               and "now hiring" in e for e in result.errors), result.errors
+
+
+def test_validate_rejects_operational_claim_matching_unreferenced_nonrequired_fact():
+    """TIGHT GROUNDING for operational too: a "free delivery" tagline that is BOTH
+    unreferenced AND non-required would never render ⇒ a planning-field "free
+    delivery" is NOT grounded ⇒ rejects."""
+    facts = _grad_facts() + [
+        FlyerLockedFact(fact_id="tagline", label="Tagline",
+                        value="Free delivery on all catering orders",
+                        source="customer_text", required=False),
+    ]
+    brief = _grad_brief(  # tagline NOT referenced
+        offer_structure="Headline card; mention free delivery prominently.",
+    )
+    result = fbv.validate(brief, facts, _GRAD_REQUEST)
+    assert result.ok is False
+    assert any(e.startswith("invented operational claim in offer_structure:")
+               for e in result.errors), result.errors
+
+
+def test_validate_background_brief_operational_claim_hard_line_even_if_grounded():
+    """background_brief is the HARD LINE: an operational claim there rejects EVEN WHEN
+    grounded (it reaches pixels). "free delivery" is grounded via the referenced+
+    required tagline, yet background_brief still rejects it."""
+    brief = _grad_brief_with_service(
+        background_brief="A celebration scene with free delivery vibes, center clear.",
+    )
+    result = fbv.validate(brief, _grad_facts_with_service(), _GRAD_REQUEST)
+    assert result.ok is False
+    assert any("operational claim in textless background: background_brief" in e
+               for e in result.errors), result.errors
+
+
 def test_validate_rejects_commercial_value_matching_unreferenced_nonrequired_fact():
     """TIGHT GROUNDING (merge-blocker #1): a commercial value passes in a
     non-rendering field ONLY when it resolves through a fact that ACTUALLY renders
@@ -720,6 +849,71 @@ def test_first_ungrounded_commercial_nonnumeric_discount_word_never_grounds():
 def test_first_ungrounded_commercial_clean_text_returns_empty():
     # no commercial content at all ⇒ "".
     assert fbv._first_ungrounded_commercial("two combo cards side by side", []) == ""
+
+
+# ── strict operational detector (operator round-3 precision) ─────────────────
+
+
+@pytest.mark.parametrize(
+    "creative",
+    [
+        "Graduation celebration, gold navy white, graduation caps",
+        "Memorial Day patriotic Americana deep red navy blue white stars bunting",
+        "Fresh spring blossoms pastel pink cherry blossoms garden",
+        "Award-style gold trophy motif gold trophy stage",
+        "Best-of-season harvest amber wheat table",
+        "Grand celebration theme gold balloons party table",
+        "Family gathering warmth warm tones hearts shared meal",
+        "open central area left clear for text",
+        "a wide open background with negative space",
+        "vibrant Diwali rangoli marigold and crimson",
+        "elegant wedding florals blush and ivory",
+        "bold celebratory energy",
+    ],
+)
+def test_strict_operational_hits_ignores_creative_theme(creative):
+    """The strict detector flags NO creative theme/color/motif/celebration text — the
+    operator's exact false-positive class plus the fresh/best/award/open edge words."""
+    assert fbv._strict_operational_hits(creative) == [], creative
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "open daily", "now open", "free delivery", "delivery available",
+        "reservations", "catering available", "hours: 9am-9pm", "grand opening",
+        "now hiring", "dine-in available", "curbside pickup", "open today 9am",
+        "fresh daily", "best in town", "award-winning", "voted best",
+        "since 1998", "family-owned", "order online", "closes at 9",
+        "we are now open daily 9am-9pm",
+    ],
+)
+def test_strict_operational_hits_flags_genuine_claims(claim):
+    """Every genuine service/availability/hours/credential claim is detected."""
+    assert fbv._strict_operational_hits(claim), claim
+
+
+def test_strict_operational_hits_all_hits_in_order():
+    hits = fbv._strict_operational_hits("free delivery and now hiring and open daily")
+    # all three genuine claims captured (order preserved).
+    assert any("free delivery" in h for h in hits)
+    assert any("hiring" in h for h in hits)
+    assert any("open daily" in h or "daily" in h for h in hits)
+
+
+def test_first_ungrounded_operational_grounded_vs_invented():
+    allowed = [fbv._norm_ws("Free delivery on all catering orders")]
+    # grounded → "".
+    assert fbv._first_ungrounded_operational("mention free delivery here", allowed) == ""
+    # invented (no fact) → the claim string.
+    assert fbv._first_ungrounded_operational("a now hiring banner", allowed) != ""
+    # all-hits: grounded then invented → returns the invented one.
+    out = fbv._first_ungrounded_operational("free delivery and now hiring", allowed)
+    assert out and "hiring" in out.lower()
+
+
+def test_first_ungrounded_operational_clean_text_returns_empty():
+    assert fbv._first_ungrounded_operational("two cards side by side, gold theme", []) == ""
 
 
 # ── (d/MAJOR #4) must_not_add containment (not exact-match) ─────────────────
@@ -1608,12 +1802,11 @@ def test_validate_rejects_operational_claim_in_background():
                for e in result.errors), result.errors
 
 
-def test_validate_no_longer_operational_scans_visual_direction():
-    """SCOPE change (operator decision 2026-06-06): visual_direction is NON-RENDERING
-    (its text is never passed to image gen), so the textless operational-claim scan
-    no longer covers it — an operational word there cannot reach pixels. The prior
-    over-scan that rejected the whole brief for a planning-only claim is removed.
-    (background_brief operational claims stay strict — see the tests above.)"""
+def test_validate_rejects_invented_operational_claim_in_visual_direction():
+    """ROUND-3 (operator): non-rendering fields are GROUNDED-OR-REJECTED for genuine
+    operational claims too. An INVENTED "now hiring" in visual_direction (no locked
+    fact carries it) → ok=False — but via the PRECISE strict detector (NOT the old
+    over-scan), so creative theme text is unaffected (see the benign test below)."""
     brief = _combo_brief(
         visual_direction=fb.VisualDirection(
             theme_family="bold now hiring energy",
@@ -1621,7 +1814,9 @@ def test_validate_no_longer_operational_scans_visual_direction():
         ),
     )
     result = fbv.validate(brief, _combo_facts(), _COMBO_REQUEST)
-    assert result.ok is True, result.errors
+    assert result.ok is False
+    assert any(e.startswith("invented operational claim in visual_direction:")
+               and "now hiring" in e for e in result.errors), result.errors
 
 
 def test_validate_passes_clean_textless_background():

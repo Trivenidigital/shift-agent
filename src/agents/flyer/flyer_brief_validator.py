@@ -152,6 +152,21 @@ def _commercial_grounding_tokens(text: str) -> list[str]:
     return tokens
 
 
+def _phrase_is_grounded(phrase: str, allowed_values: Sequence[str]) -> bool:
+    """True iff ``phrase`` (a non-numeric word/phrase — a discount word like "free"
+    or an operational claim like "free delivery") appears as a WHOLE word/phrase in
+    some OVERLAY-RENDERED locked value. Boundary-aware (alphanumeric-aware, mirrors
+    the must_not_add containment guards) so a bare "free" grounds against a locked
+    "free delivery on all orders" but NOT against "Freedom Cafe". Used for the non-
+    rendering grounded-or-rejected scan (non-numeric commercial words + operational
+    claims); numeric commercial tokens use ``_token_is_grounded`` instead."""
+    norm = _norm_ws(phrase)
+    if not norm:
+        return False
+    pattern = r"(?<![a-z0-9])" + re.escape(norm) + r"(?![a-z0-9])"
+    return any(re.search(pattern, lv) for lv in allowed_values)
+
+
 def _token_is_grounded(token: str, allowed_values: Sequence[str]) -> bool:
     """True iff a single whole commercial ``token`` (normalized) is contained in some
     OVERLAY-RENDERED locked value. Digit-runs (phone) also match on bare digits so a
@@ -179,8 +194,12 @@ def _first_ungrounded_commercial(text: str, allowed_values: Sequence[str]) -> st
         — "30%" does not ground against a locked "20%"); the first ungrounded token is
         returned;
       - a NON-numeric commercial hit (a discount word like "BOGO"/"free" that
-        ``_commercial_value_hit`` flags but that yields NO digit token) has nothing to
-        anchor to a rendered fact ⇒ it is invented; the hit string is returned.
+        ``_commercial_value_hit`` flags but that yields NO digit token) is grounded
+        only if it appears as a WHOLE word in an OVERLAY-RENDERED locked value
+        (``_phrase_is_grounded``) — so a bare "free" rides a grounded locked "free
+        delivery on all orders" but an invented "BOGO" (no fact) is returned. This
+        keeps a GROUNDED operational/discount phrase from being double-rejected by the
+        commercial path (operator round-3).
     Used by BOTH the non-rendering free-text scan AND the must_not_add invented-
     commercial check so the two agree on grounding; the strict render-reaching path
     and the must_not_add locked-value containment check are unaffected."""
@@ -189,11 +208,12 @@ def _first_ungrounded_commercial(text: str, allowed_values: Sequence[str]) -> st
     for tok in _commercial_grounding_tokens(text):
         if not _token_is_grounded(tok, allowed_values):
             return tok
-    # No ungrounded digit token. If a commercial SHAPE is still present it must be a
-    # non-numeric discount word (no digit token) — invented (cannot be grounded).
+    # No ungrounded digit token. If a commercial SHAPE is still present it is a
+    # non-numeric discount word (no digit token) — grounded only if it appears as a
+    # whole word in a rendered locked value (else invented).
     if not _commercial_grounding_tokens(text):
         hit = _commercial_value_hit(text)
-        if hit:
+        if hit and not _phrase_is_grounded(hit, allowed_values):
             return hit
     return ""
 
@@ -322,6 +342,87 @@ def _operational_claim_hit(text: str) -> str:
             return text.strip()[:60]
     except Exception:  # the firewall must never crash validation — fail closed.
         return _CLAIM_CLASSIFIER_UNAVAILABLE
+    return ""
+
+
+# ── STRICT operational detector for NON-RENDERING fields (operator round-3) ──
+# The aggressive ``_operational_claim_hit`` above is the HARD LINE for the textless
+# render-reaching background_brief: it flags bare creative-overlap words ("fresh",
+# "best", "award", "daily") and fail-closes when the broad classifier is absent.
+# That precision is correct for the pixel-reaching prompt but OVER-BLOCKS creative
+# theme text ("Fresh spring blossoms", "Award-style trophy motif", "Best-of-season")
+# when re-applied to the NON-RENDERING planning fields (offer_structure /
+# layout_strategy / grouping / visual_direction). For those fields we need the
+# operational scan too (an INVENTED "free delivery" in offer_structure must reject),
+# but PRECISE: only GENUINE service / availability / hours / credential claims, NOT
+# theme / color / motif / celebration words. This detector is used ONLY for the
+# non-rendering grounded-or-rejected operational scan; background_brief keeps the
+# aggressive detector unchanged. Verified against the operator's exact false-positive
+# string ("Graduation celebration, gold navy white, graduation caps") + the fresh/
+# best/award/open creative edge cases — all clean — and 21 genuine claims — all flag.
+_STRICT_OPERATIONAL_CLAIM_RE = re.compile(
+    r"\b(?:"
+    # availability / service claims (multi-word or unambiguous)
+    r"free\s+delivery|delivery\s+available|home\s+delivery|"
+    r"takeout|take[\s-]?out|takeaway|dine[\s-]?in|curbside|drive[\s-]?thru|"
+    r"pick[\s-]?up\s+available|order\s+online|online\s+order(?:ing|s)?|"
+    r"reservations?|book\s+(?:now|a\s+table)|walk[\s-]?ins?\s+welcome|"
+    r"catering\s+available|catering\s+service|now\s+catering|"
+    # hiring
+    r"now\s+hiring|hiring\s+now|help\s+wanted|join\s+our\s+team|"
+    # hours / open-close (genuine business hours, not a layout "open")
+    r"open\s+(?:daily|\d|today|now|late|24[\s/]?7|mon|tue|wed|thu|fri|sat|sun)|"
+    r"open\s+for\s+business|grand\s+opening|now\s+open|re[\s-]?open(?:ing|ed)?|"
+    r"closed\s+(?:on|mon|tue|wed|thu|fri|sat|sun|today)|"
+    r"closes?\s+at|hours\s*:|business\s+hours|store\s+hours|"
+    r"\d\s*(?:am|pm)\b|"
+    # superiority / credential claims — REQUIRE the claim context (not the bare word)
+    r"fresh\s+daily|made\s+fresh|freshly\s+(?:made|baked|prepared)|"
+    r"best\s+(?:in\s+town|seller|price|deal|value|of\s+the)|voted\s+best|"
+    r"#\s*1\b|number\s+one\b|award[\s-]?winning|award[\s-]?winner|"
+    r"family[\s-]?owned|locally\s+owned|certified|licensed|insured|"
+    r"satisfaction\s+guaranteed|money[\s-]?back|100%\s+guarantee|"
+    r"since\s+(?:19|20)\d{2}"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _strict_operational_hits(text: str) -> list[str]:
+    """ALL genuine service/availability/hours/credential operational claims in
+    ``text`` (normalized strings), in order. PRECISE — creative theme/color/motif/
+    celebration words do NOT match. Used ONLY for the non-rendering grounded-or-
+    rejected operational scan (NOT the background_brief hard line). Also folds in the
+    context-aware operational "open" (so "we are now open" is caught while "open
+    central area" passes), de-duplicated."""
+    if not text:
+        return []
+    hits: list[str] = []
+    for m in _STRICT_OPERATIONAL_CLAIM_RE.finditer(text):
+        tok = m.group(0).strip()
+        if tok:
+            hits.append(tok)
+    # context-aware operational "open" not already covered by the regex's open-forms.
+    open_hit = _open_claim_hit(text)
+    if open_hit and not any(open_hit.casefold() in h.casefold() for h in hits):
+        hits.append(open_hit)
+    return hits
+
+
+def _first_ungrounded_operational(text: str, allowed_values: Sequence[str]) -> str:
+    """The first INVENTED (ungrounded) GENUINE operational claim in ``text``, or "" if
+    every strict operational claim is grounded in an OVERLAY-RENDERED locked value
+    (referenced or required) — or there are none. ALL-HITS: a grounded operational
+    claim followed by an invented one is rejected on the invented one. Grounding is
+    boundary-aware whole-phrase containment (``_phrase_is_grounded``): the claim must
+    appear as a whole phrase in some allowed fact value (e.g. a locked tagline "Free
+    delivery on all catering orders" grounds an offer_structure mention of "free
+    delivery"). PRECISE detector ⇒ creative theme text never reaches this check."""
+    if not text:
+        return ""
+    for hit in _strict_operational_hits(text):
+        if not _phrase_is_grounded(hit, allowed_values):
+            return hit
     return ""
 
 
@@ -668,14 +769,18 @@ def validate(
       (a) a FactRef.fact_id that matches no locked fact id;
       (b) a FactRef.raw_span that is not a verified substring of raw_request
           (an invented commercial value);
-      (c) a commercial value (currency/price/percent-discount/phone-run) in a
-          model-authored free-text field — it bypassed fact_refs (BLOCKER #3).
-          STRICT for the render-reaching field (``background_brief``: any commercial
-          value); for non-rendering planning fields only an INVENTED commercial
-          value is rejected — "grounded" requires the value to be contained in a
-          locked fact that ACTUALLY renders via the overlay (referenced by fact_refs
-          OR required); a value matching an unreferenced, non-required fact still
-          rejects (operator scope decision 2026-06-06 + merge-blocker #1);
+      (c) a commercial value (currency/price/percent-discount/phone-run) OR a genuine
+          operational claim (service/availability/hours/credential) in a model-
+          authored free-text field — it bypassed fact_refs (BLOCKER #3). RENDER-
+          REACHING ``background_brief`` is the HARD LINE: ANY commercial value, locked
+          identity value, text-render instruction, or operational claim rejects (even
+          if grounded — it reaches pixels). For non-rendering planning fields the rule
+          is GROUNDED-OR-REJECTED, ALL-HITS: EVERY commercial value AND EVERY genuine
+          operational claim must resolve through a locked fact that ACTUALLY renders
+          via the overlay (referenced by fact_refs OR required); an invented /
+          ungrounded one rejects (operator scope decisions 2026-06-06 + round-3).
+          Commercial grounding is token-anchored; operational uses a PRECISE detector
+          so creative theme/color/motif words are not flagged;
       (d) must_not_add whose entry CONTAINS a locked-fact value (containment, not
           exact-match — "omit Non Veg Combo" suppresses the locked value; #4);
       (e) referenced fact_ids ∪ materialized-span ids failing to cover
@@ -782,16 +887,24 @@ def validate(
                     errors.append(f"locked value outside fact_refs: {field_name}: {lv}")
                     break
         else:
-            # NON-RENDERING: reject only an INVENTED commercial value — the field
-            # passes ONLY IF EVERY commercial value/token in it is grounded (contained
-            # in an OVERLAY-RENDERED locked value — referenced or required). ALL-HITS,
-            # token-anchored (Codex BLOCKER 1): a grounded value followed by an
-            # invented one (e.g. "20% off and $5 off") still rejects on the "$5", and
-            # "30% off" is not falsely grounded by a locked "20% off". SKIP the
-            # locked-text identity scan (grounded + non-rendering = harmless).
+            # NON-RENDERING: GROUNDED-OR-REJECTED for BOTH commercial AND operational
+            # hits (operator round-3) — the field passes ONLY IF EVERY commercial
+            # value/token AND EVERY genuine operational claim in it is grounded
+            # (contained in an OVERLAY-RENDERED locked value — referenced or required).
+            # ALL-HITS: a grounded value followed by an invented one (e.g. "20% off and
+            # $5 off", or a grounded "free delivery" then an invented "now hiring") is
+            # still rejected on the invented one. Commercial is token-anchored
+            # ("30% off" is not falsely grounded by a locked "20% off"); operational
+            # uses the PRECISE strict detector so creative theme/color/motif words
+            # ("Graduation celebration", "Fresh spring blossoms") never reach this
+            # scan. SKIP the locked-text identity scan (grounded + non-rendering =
+            # harmless).
             ungrounded = _first_ungrounded_commercial(text, allowed_values)
             if ungrounded:
                 errors.append(f"invented commercial value in {field_name}: {ungrounded}")
+            ungrounded_op = _first_ungrounded_operational(text, allowed_values)
+            if ungrounded_op:
+                errors.append(f"invented operational claim in {field_name}: {ungrounded_op}")
 
     # (c-textless, Codex Finding 3) the TEXTLESS-background prompt — scan ONLY the
     # render-reaching fields (``background_brief``). They must not (a) instruct the
