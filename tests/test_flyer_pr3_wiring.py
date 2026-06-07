@@ -91,8 +91,9 @@ def _install_common(monkeypatch, *, brief_result=None, brief_spy=None):
         rec["cd_render"].append(background_brief)
         return b"CD_PNG"
 
-    def _fake_legacy_poster(project, *, strict_note="", raw_bg_dest=None):
+    def _fake_legacy_poster(project, *, strict_note="", raw_bg_dest=None, scene_direction=None):
         rec["legacy_poster"].append(strict_note)
+        rec.setdefault("scene_direction", []).append(scene_direction)
         return b"LEGACY_PNG"
 
     monkeypatch.setattr(br, "_render_creative_director", _fake_cd_render)
@@ -153,7 +154,7 @@ def test_flag_off_render_error_blocker_is_diagnosable(monkeypatch):
     rec = _install_common(monkeypatch)
     FRE = br._render_mod().FlyerRenderError
 
-    def _boom(project, *, strict_note="", raw_bg_dest=None):
+    def _boom(project, *, strict_note="", raw_bg_dest=None, scene_direction=None):
         raise FRE("OpenRouter image HTTP 402: requires more credits, or fewer max_tokens")
     monkeypatch.setattr(br, "_generate_poster", _boom)
 
@@ -188,7 +189,7 @@ def test_render_error_detail_never_raises_into_render_path(monkeypatch):
         def __str__(self):  # noqa: D401
             raise RuntimeError("boom in __str__")
 
-    def _boom(project, *, strict_note="", raw_bg_dest=None):
+    def _boom(project, *, strict_note="", raw_bg_dest=None, scene_direction=None):
         raise _BadExc()
     monkeypatch.setattr(br, "_generate_poster", _boom)
 
@@ -588,7 +589,7 @@ def _install_reroll(monkeypatch, *, session=..., poster=None):
     monkeypatch.setattr(br, "run_visual_qa", lambda png, project: (True, []))
     monkeypatch.setattr(br, "_write_session", lambda *a, **k: cap["wrote_session"].append((a, k)))
 
-    def _spy_poster(project, *, strict_note="", raw_bg_dest=None):
+    def _spy_poster(project, *, strict_note="", raw_bg_dest=None, scene_direction=None):
         cap["projects"].append(project)
         cap["stricts"].append(strict_note)
         if poster is not None:
@@ -775,3 +776,32 @@ def test_script_reroll_sends_invite_caption_and_audits_reroll_sent(monkeypatch):
     assert calls["images"] == [(br.REROLL_INVITE, "flyer.bare.image_send")]   # invite caption on the variant
     assert calls["committed"] == ["201975216009469@lid"]                       # session committed after delivery
     assert any("OUTCOME=reroll_sent" in m for m in calls["logs"])              # audited as a re-roll
+
+
+# ── skill-driven scene: gate threads scene_direction to the poster (Slice 1, 2026-06-07) ──
+
+
+def test_skill_driven_scene_flag_off_threads_none(monkeypatch):
+    """Flag off ⇒ render_grounded passes scene_direction=None to the poster (today's Python scene)."""
+    monkeypatch.delenv(br.CREATIVE_DIRECTOR_ENABLED_ENV, raising=False)
+    monkeypatch.delenv(br.SKILL_DRIVEN_SCENE_ENABLED_ENV, raising=False)
+    monkeypatch.delenv(br.SKILL_DRIVEN_SCENE_ALLOWLIST_ENV, raising=False)
+    rec = _install_common(monkeypatch)
+    status, payload = br.render_grounded(CHAT_ID, RAW, message_id="sds1", sender_phone=SENDER)
+    assert status == br.SEND and payload == b"LEGACY_PNG"
+    assert rec["scene_direction"] == [None]           # no skill scene when the flag is off
+    assert rec["cd_render"] == []                      # CD path untouched
+
+
+def test_skill_driven_scene_armed_threads_visual_direction(monkeypatch):
+    """Flag on + allowlisted + skill returns a VisualDirection ⇒ it is threaded to the poster."""
+    monkeypatch.delenv(br.CREATIVE_DIRECTOR_ENABLED_ENV, raising=False)
+    rec = _install_common(monkeypatch)
+    monkeypatch.setenv(br.SKILL_DRIVEN_SCENE_ENABLED_ENV, "1")
+    monkeypatch.setenv(br.SKILL_DRIVEN_SCENE_ALLOWLIST_ENV, SENDER)
+    sentinel = object()
+    monkeypatch.setattr(br, "_advisory_scene_direction", lambda *a, **k: sentinel)
+    status, payload = br.render_grounded(CHAT_ID, RAW, message_id="sds2", sender_phone=SENDER)
+    assert status == br.SEND and payload == b"LEGACY_PNG"
+    assert rec["scene_direction"] == [sentinel]        # advisory scene threaded to the integrated poster
+    assert rec["cd_render"] == []                      # still NOT the CD path

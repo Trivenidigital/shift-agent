@@ -1556,8 +1556,8 @@ def _project_reference_assets(project: FlyerProject):
     ]
 
 
-def _image_message_content(project: FlyerProject, *, concept_id: str, output_format: str, size: tuple[int, int] | None, repair_instruction: str = ""):
-    prompt = _image_prompt(project, concept_id=concept_id, output_format=output_format, size=size, repair_instruction=repair_instruction)
+def _image_message_content(project: FlyerProject, *, concept_id: str, output_format: str, size: tuple[int, int] | None, repair_instruction: str = "", scene_direction=None):
+    prompt = _image_prompt(project, concept_id=concept_id, output_format=output_format, size=size, repair_instruction=repair_instruction, scene_direction=scene_direction)
     parts: list[dict] = [{"type": "text", "text": prompt}]
     brand_assets = _active_brand_assets(project)
     refs = _project_reference_assets(project)
@@ -1579,19 +1579,67 @@ def _revision_notes_for_prompt(project: FlyerProject) -> str:
     return "\n".join(f"- {r}" for r in revisions) if revisions else "- none"
 
 
-def _image_prompt(project: FlyerProject, *, concept_id: str, output_format: str, size: tuple[int, int] | None, repair_instruction: str = "") -> str:
+def _scene_block_from_visual_direction(scene_direction) -> str:
+    """Compose the integrated-model scene/theme block from the skill's ADVISORY VisualDirection
+    (theme_family / palette / motifs / visual_subjects). The occasion visual language is the SKILL's
+    judgment — there is NO Python occasion/holiday keyword list here. This block carries ONLY visual
+    taste: no business name, prices, dates, or any fact — the exact facts are injected separately by
+    ``_poster_copy_block`` (Codex truth-safety). Duck-typed on the VisualDirection attributes so
+    render.py need not import the brief model."""
+    def _clean_list(values, limit):
+        out = []
+        for value in (values or []):
+            cleaned = _sanitize_visual_context(str(value).strip())
+            if cleaned:
+                out.append(cleaned)
+        return out[:limit]
+
+    theme = _sanitize_visual_context(str(getattr(scene_direction, "theme_family", "") or "").strip())
+    subjects = _clean_list(getattr(scene_direction, "visual_subjects", []), 12)
+    motifs = _clean_list(getattr(scene_direction, "motifs", []), 12)
+    palette = _clean_list(getattr(scene_direction, "palette", []), 8)
+    lines = ["Campaign scene direction (Hermes skill art direction):"]
+    if theme:
+        lines.append(f"- Build the scene around the {theme} occasion/theme.")
+    if subjects:
+        lines.append(
+            "- Make these visual subjects the hero of the composition, rendered with rich, appealing "
+            f"detail: {', '.join(subjects)}."
+        )
+    if motifs:
+        lines.append(f"- Decorate with these motifs/accents: {', '.join(motifs)}.")
+    if palette:
+        lines.append(f"- Lead with this color palette: {', '.join(palette)}.")
+    # General composition rule (NOT an occasion keyword list): the occasion/theme above drives the
+    # scene. Do not regress to the model's default food-table composition unless food is the subject.
+    lines.append(
+        "- Let the occasion/theme above drive the composition; do NOT fall back to a generic family "
+        "dinner, dining table, or buffet/food-table spread unless food items are the actual hero subject above."
+    )
+    return "\n".join(lines)
+
+
+def _image_prompt(project: FlyerProject, *, concept_id: str, output_format: str, size: tuple[int, int] | None, repair_instruction: str = "", scene_direction=None) -> str:
     revision_block = _revision_notes_for_prompt(project)
     reference_instruction = _reference_preservation_instruction(project)
     sanitized_style = _sanitize_visual_context(project.fields.style_preference or "festive, clean, professional")
     visual_context = _visual_prompt_context(project)
-    campaign_scene_block = _campaign_scene_block_for_project(
-        project,
-        context=visual_context,
-        business=_sanitize_visual_context(
-            fact_value(project, "business_name", fallback=project.fields.event_or_business_name) or ""
-        ),
-        offer=_sanitize_visual_context(fact_value(project, "campaign_title", fallback="") or ""),
+    _business = _sanitize_visual_context(
+        fact_value(project, "business_name", fallback=project.fields.event_or_business_name) or ""
     )
+    if scene_direction is not None:
+        # Advisory skill-driven scene (FLYER_SKILL_DRIVEN_SCENE). Falls back to the Python scene
+        # automatically because the caller passes scene_direction=None whenever the skill is
+        # disabled/unavailable/invalid — this branch only runs with a valid VisualDirection. The
+        # block carries NO facts (no business name); facts come from _poster_copy_block below.
+        campaign_scene_block = _scene_block_from_visual_direction(scene_direction)
+    else:
+        campaign_scene_block = _campaign_scene_block_for_project(
+            project,
+            context=visual_context,
+            business=_business,
+            offer=_sanitize_visual_context(fact_value(project, "campaign_title", fallback="") or ""),
+        )
     repair_block = ""
     if repair_instruction.strip():
         repair_block = f"""
@@ -2072,13 +2120,13 @@ def _decode_data_url(data_url: str) -> bytes:
         raise FlyerRenderError(f"image response base64 decode failed: {e}") from e
 
 
-def _openrouter_image_bytes(project: FlyerProject, *, concept_id: str, output_format: str, size: tuple[int, int] | None, model: str, quality: str, repair_instruction: str = "") -> bytes:
+def _openrouter_image_bytes(project: FlyerProject, *, concept_id: str, output_format: str, size: tuple[int, int] | None, model: str, quality: str, repair_instruction: str = "", scene_direction=None) -> bytes:
     api_key = _read_env_value("OPENROUTER_API_KEY")
     if not api_key or "PLACEHOLDER" in api_key.upper():
         raise FlyerRenderError("OPENROUTER_API_KEY is missing or placeholder")
     payload = {
         "model": model,
-        "messages": [{"role": "user", "content": _image_message_content(project, concept_id=concept_id, output_format=output_format, size=size, repair_instruction=repair_instruction)}],
+        "messages": [{"role": "user", "content": _image_message_content(project, concept_id=concept_id, output_format=output_format, size=size, repair_instruction=repair_instruction, scene_direction=scene_direction)}],
         "modalities": ["image", "text"],
         "max_tokens": OPENROUTER_IMAGE_MAX_TOKENS,
         "stream": False,
@@ -2908,11 +2956,11 @@ def _render(project: FlyerProject, path: Path, *, concept_id: str, size: tuple[i
         _render_with_system_pillow(project, path, concept_id=concept_id, size=size)
 
 
-def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_format: str, size: tuple[int, int] | None, model: str, quality: str, repair_instruction: str = "") -> None:
+def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_format: str, size: tuple[int, int] | None, model: str, quality: str, repair_instruction: str = "", scene_direction=None) -> None:
     if model.strip().lower() in DETERMINISTIC_MODEL_NAMES:
         _render(project, path, concept_id=concept_id, size=size)
         return
-    raw = _openrouter_image_bytes(project, concept_id=concept_id, output_format=output_format, size=size, model=model, quality=quality, repair_instruction=repair_instruction)
+    raw = _openrouter_image_bytes(project, concept_id=concept_id, output_format=output_format, size=size, model=model, quality=quality, repair_instruction=repair_instruction, scene_direction=scene_direction)
     raw_path = _raw_background_path(path)
     raw_path.unlink(missing_ok=True)
     if _integrated_poster_eligible(project):
@@ -2953,12 +3001,12 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
     _apply_critical_text_overlay(project, raw_path, path, size=size, output_format=output_format)
 
 
-def render_concept_previews(project: FlyerProject, output_dir: Path | str, *, model: str = "deterministic-renderer", quality: str = "low", concept_count: int = 1, repair_instruction: str = "") -> list[RenderedAssetSpec]:
+def render_concept_previews(project: FlyerProject, output_dir: Path | str, *, model: str = "deterministic-renderer", quality: str = "low", concept_count: int = 1, repair_instruction: str = "", scene_direction=None) -> list[RenderedAssetSpec]:
     output_dir = Path(output_dir)
     specs: list[RenderedAssetSpec] = []
     for concept_id in ("C1", "C2", "C3")[:concept_count]:
         path = output_dir / f"{project.project_id}-{concept_id}-preview.png"
-        _render_model(project, path, concept_id=concept_id, output_format="concept_preview", size=(1080, 1350), model=model, quality=quality, repair_instruction=repair_instruction)
+        _render_model(project, path, concept_id=concept_id, output_format="concept_preview", size=(1080, 1350), model=model, quality=quality, repair_instruction=repair_instruction, scene_direction=scene_direction)
         quality_report = inspect_rendered_asset(path, expected_width=1080, expected_height=1350, mime_type="image/png")
         if not quality_report.ok:
             raise FlyerRenderError(f"rendered concept failed quality check: {quality_report.blockers}")
