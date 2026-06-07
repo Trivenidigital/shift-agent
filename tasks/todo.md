@@ -1667,4 +1667,10 @@ Review/verification:
 - [x] Preserve negative/priority cases: plain graduation text no route, unknown sender no auto-Flyer, employee sick-call outranks revenue clarification.
 - [x] Implement the narrow `_REVENUE_PRICE_AMOUNT` regex fix only.
 - [x] Run focused cf-router tests and schema/static checks.
-- [ ] Run post-deploy exact-shape probe.
+- [x] Run post-deploy exact-shape probe.
+
+Review/verification:
+- Red test: Linux `TestRevenueRouteClarification` failed on `75$`, `75 $`, `75 dollars`, and suffix-price route start before the regex fix.
+- Green tests: Linux `tests/test_cf_router_plugin.py -q` -> 158 passed; schema/intent/report focused tests -> 82 passed; compile and `git diff --check` passed.
+- Deploy: `deploy-20260607-212926-1bd41784` via normal tarball path; deploy smoke and separate `shift-agent-smoke-test.sh` passed.
+- Post-deploy exact-shape probe: `$75`, `75$`, `75 $`, and `75 dollars` all produce `price_amount`; suffix-price dessert brief asks Flyer vs Catering; `flyer`/`catering` continuations consume the saved suffix-price brief; plain graduation text does not route; employee sick-call still routes Shift first.
