@@ -1579,12 +1579,13 @@ def _revision_notes_for_prompt(project: FlyerProject) -> str:
     return "\n".join(f"- {r}" for r in revisions) if revisions else "- none"
 
 
-def _scene_block_from_visual_direction(scene_direction, *, business: str) -> str:
+def _scene_block_from_visual_direction(scene_direction) -> str:
     """Compose the integrated-model scene/theme block from the skill's ADVISORY VisualDirection
     (theme_family / palette / motifs / visual_subjects). The occasion visual language is the SKILL's
-    judgment — there is NO Python occasion/holiday keyword list here. Exact facts are still injected
-    separately by ``_poster_copy_block``; this block carries no business names/prices/dates. Duck-typed
-    on the VisualDirection attributes so render.py need not import the brief model."""
+    judgment — there is NO Python occasion/holiday keyword list here. This block carries ONLY visual
+    taste: no business name, prices, dates, or any fact — the exact facts are injected separately by
+    ``_poster_copy_block`` (Codex truth-safety). Duck-typed on the VisualDirection attributes so
+    render.py need not import the brief model."""
     def _clean_list(values, limit):
         out = []
         for value in (values or []):
@@ -1599,7 +1600,7 @@ def _scene_block_from_visual_direction(scene_direction, *, business: str) -> str
     palette = _clean_list(getattr(scene_direction, "palette", []), 8)
     lines = ["Campaign scene direction (Hermes skill art direction):"]
     if theme:
-        lines.append(f"- Build the scene around the {theme} occasion/theme for {business or 'the business'}.")
+        lines.append(f"- Build the scene around the {theme} occasion/theme.")
     if subjects:
         lines.append(
             "- Make these visual subjects the hero of the composition, rendered with rich, appealing "
@@ -1629,8 +1630,9 @@ def _image_prompt(project: FlyerProject, *, concept_id: str, output_format: str,
     if scene_direction is not None:
         # Advisory skill-driven scene (FLYER_SKILL_DRIVEN_SCENE). Falls back to the Python scene
         # automatically because the caller passes scene_direction=None whenever the skill is
-        # disabled/unavailable/invalid — this branch only runs with a valid VisualDirection.
-        campaign_scene_block = _scene_block_from_visual_direction(scene_direction, business=_business)
+        # disabled/unavailable/invalid — this branch only runs with a valid VisualDirection. The
+        # block carries NO facts (no business name); facts come from _poster_copy_block below.
+        campaign_scene_block = _scene_block_from_visual_direction(scene_direction)
     else:
         campaign_scene_block = _campaign_scene_block_for_project(
             project,

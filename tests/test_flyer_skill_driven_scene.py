@@ -58,7 +58,7 @@ def _project(business="Lakshmi's Kitchen", title="2026 Graduation Parties"):
 
 # ── (1) graduation visual language ───────────────────────────────────────────
 def test_graduation_scene_block_has_graduation_visual_language():
-    block = render._scene_block_from_visual_direction(_GRAD_VD, business="Lakshmi's Kitchen").lower()
+    block = render._scene_block_from_visual_direction(_GRAD_VD).lower()
     assert "graduation" in block            # theme
     assert "cap" in block                   # mortarboard caps
     assert "diploma" in block               # diploma scrolls
@@ -68,7 +68,7 @@ def test_graduation_scene_block_has_graduation_visual_language():
 
 # ── (2) avoids family-dinner / food-table for an occasion ────────────────────
 def test_graduation_scene_block_steers_away_from_food_table():
-    block = render._scene_block_from_visual_direction(_GRAD_VD, business="Lakshmi's Kitchen").lower()
+    block = render._scene_block_from_visual_direction(_GRAD_VD).lower()
     # the prompt explicitly tells the model NOT to default to a family-dinner/food-table composition
     assert "do not fall back to a generic family dinner" in block
     assert "food-table" in block
@@ -79,7 +79,7 @@ def test_graduation_scene_block_steers_away_from_food_table():
 
 # ── (3) food intent keeps food/product-closeup composition ───────────────────
 def test_food_scene_block_makes_food_the_hero():
-    block = render._scene_block_from_visual_direction(_FOOD_VD, business="Lakshmi's Kitchen").lower()
+    block = render._scene_block_from_visual_direction(_FOOD_VD).lower()
     assert "idli" in block and "dosa" in block          # the food items
     assert "hero of the composition" in block            # food is the hero -> product-closeup
     assert "rich, appealing detail" in block             # appetizing rendering
@@ -98,6 +98,15 @@ def test_advise_scene_direction_returns_none_on_problems(monkeypatch):
     assert CB.advise_scene_direction("req", [], {}) is None
     # empty visual_direction (no actual direction) -> fall back
     monkeypatch.setattr(CB, "_call_gateway", lambda sp, um: {"visual_direction": {}})
+    assert CB.advise_scene_direction("req", [], {}) is None
+    # thin partial: a theme but NO concrete subject/motif -> fall back (Codex; a weak prompt is worse)
+    monkeypatch.setattr(CB, "_call_gateway", lambda sp, um: {"visual_direction": {"theme_family": "graduation"}})
+    assert CB.advise_scene_direction("req", [], {}) is None
+    # thin partial: a motif but NO theme -> fall back
+    monkeypatch.setattr(CB, "_call_gateway", lambda sp, um: {"visual_direction": {"motifs": ["balloons"]}})
+    assert CB.advise_scene_direction("req", [], {}) is None
+    # palette alone is not enough taste -> fall back
+    monkeypatch.setattr(CB, "_call_gateway", lambda sp, um: {"visual_direction": {"theme_family": "x", "palette": ["blue"]}})
     assert CB.advise_scene_direction("req", [], {}) is None
     # skill body unreadable
     monkeypatch.setattr(CB, "_call_gateway", lambda sp, um: {"visual_direction": {"theme_family": "x"}})

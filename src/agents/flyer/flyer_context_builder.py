@@ -430,8 +430,11 @@ def advise_scene_direction(
         if not isinstance(vd_raw, Mapping):
             return None
         vd = VisualDirection.model_validate(dict(vd_raw))
-        # An empty direction is no better than today's Python scene — fall back instead.
-        if not (vd.theme_family.strip() or vd.visual_subjects or vd.motifs):
+        # Require a SUBSTANTIVE direction — a theme AND at least one concrete subject/motif. A thin
+        # partial (e.g. only a vague theme, or only one motif) would replace the richer Python scene
+        # with a WEAKER prompt, so fall back to today's Python scene instead (Codex). palette alone is
+        # not enough taste to drive a composition.
+        if not vd.theme_family.strip() or not (vd.visual_subjects or vd.motifs):
             return None
         return vd
     except Exception:  # noqa: BLE001 — advisory only; ANY failure -> None -> Python scene fallback
