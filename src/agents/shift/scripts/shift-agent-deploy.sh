@@ -407,6 +407,11 @@ PY
     else
         rm -f /opt/shift-agent/flyer_visual_qa.py
     fi
+    if [ -f src/agents/flyer/visible_contract.py ]; then
+        install -m 644 src/agents/flyer/visible_contract.py /opt/shift-agent/flyer_visible_contract.py
+    else
+        rm -f /opt/shift-agent/flyer_visible_contract.py
+    fi
     if [ -f src/agents/flyer/manual_queue.py ]; then
         install -m 644 src/agents/flyer/manual_queue.py /opt/shift-agent/flyer_manual_queue.py
     else
