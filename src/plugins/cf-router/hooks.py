@@ -104,7 +104,7 @@ _SAMPLE_PROMPT_REQUEST = re.compile(
     r"|\b(?:prompt|prompts)\s+(?:example|examples)\b"
     r"|\b(?:template|templates)\s+(?:idea|ideas|example|examples)\b"
     r"|\b(?:example|sample)\s+(?:flyer|flier|poster|marketing|ad)\s+(?:text|copy|caption|captions|line|lines|template|templates)\b"
-    r"|\b(?:sample|example|starter|prompt|idea|ideas|inspiration)\b.{0,40}\b(?:for|of)\b.{0,20}\b(?:flyer|flier|poster|marketing)\b"
+    r"|\b(?:sample|example|starter|idea|ideas|inspiration)\b.{0,40}\b(?:for|of)\b.{0,20}\b(?:flyer|flier|poster|marketing)\b"
     r"|\b(?:give|send|show|share|suggest|provide|help|need)\b.{0,50}\b(?:flyer|flier|poster|marketing|ad|ads)\b.{0,30}\b(?:idea|ideas|prompt|prompts|examples|inspiration|hook|hooks|caption|captions|copy|copies|line|lines|text|template|templates|tagline|taglines|slogan|slogans|punchline|punchlines|option|options)\b"
     r"|\b(?:give|send|show|share|suggest|provide|help)\b.{0,60}"
     r"\b(?:sample|example|starter|inspiration)?\s*(?:prompt|prompts|idea|ideas|examples|inspiration|hook|hooks|caption|captions|copy|copies|line|lines|text|template|templates|tagline|taglines|slogan|slogans|punchline|punchlines|option|options)\b.{0,60}"
@@ -690,9 +690,20 @@ def _try_flyer_sample_prompt_request_intercept(text: str, chat_id: str, event: A
     body = " ".join(actions.flyer_visible_message_text(text).split())
     if not _SAMPLE_PROMPT_REQUEST.search(body):
         return None
+    # A real flyer brief / creation request outranks the sample-prompt menu, even when it says
+    # "prompt"/"improvise"/"improve" (operator 2026-06-07: "real flyer creation/intake must beat the
+    # sample-prompt menu"). Concrete brief content -> fall through to creation/intake, not the menu.
+    if actions.flyer_message_has_brief_detail(text):
+        return None
 
     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
     if role == "owner":
+        return None
+    # Priority #1 (operator 2026-06-07): an active saved flyer project means iteration / Slice 3
+    # outranks the sample-prompt menu. Decline so active-project + intake routing handles the
+    # follow-up (reroll / revision / style-reuse), even when the text reads like an idea/prompt
+    # request ("give me another flyer idea"). New senders / no active project still get the menu.
+    if actions.find_active_flyer_project_by_sender(phone, chat_id):
         return None
     customer = actions.find_flyer_customer_by_sender(phone, chat_id)
     if not customer:

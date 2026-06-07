@@ -2529,6 +2529,165 @@ def test_sample_prompt_variants_route_to_sample_idea_intake(monkeypatch, message
     assert sent["chat_id"] == "17329837841@s.whatsapp.net"
 
 
+def test_flyer_message_has_brief_detail_distinguishes_brief_from_idea_request():
+    # Pins the routing helper that lets a real brief outrank the sample-prompt menu
+    # (operator 2026-06-07). Concrete commercial signals ($ / N%) => brief; occasion/idea
+    # words alone => not a brief (the sample menu must stay reachable).
+    actions = _load_actions()
+    assert actions.flyer_message_has_brief_detail(
+        "improvise this prompt for flyer generation: 10% off entire order"
+    )
+    assert actions.flyer_message_has_brief_detail("improve this flyer prompt: combo for $9.99")
+    assert actions.flyer_message_has_brief_detail("graduation sale 20% discount")
+    assert not actions.flyer_message_has_brief_detail("show me flyer prompt ideas")
+    assert not actions.flyer_message_has_brief_detail("give me ideas for a flyer")
+    # occasion word with no concrete offer must NOT be read as a brief (no false bail)
+    assert not actions.flyer_message_has_brief_detail("give me weekend flyer ideas")
+    assert not actions.flyer_message_has_brief_detail("need inspiration for flyer design")
+
+
+@pytest.mark.parametrize(
+    "message_text",
+    [
+        # The live bug: a graduation brief wrapped in "improvise this prompt for flyer generation".
+        (
+            "I'd like you to improvise this prompt for flyer generation "
+            "'Create a flyer with theme to reflect the graduation and include the below "
+            "2026 graduation parties 10% off on entire order We cater both veg and Non-veg "
+            "items with delicious dessert to make your celebration effortless'"
+        ),
+        # A combo-offer brief wrapped in "improve this flyer prompt".
+        "improve this flyer prompt: weekend combo offer, 2 dosas + chutney for $9.99",
+        # _SAMPLE_PROMPT_REQUEST DOES match (show...flyer...idea) but a concrete discount must win.
+        "show me a flyer idea for my 10% off graduation sale",
+        # Slice 3 style-reuse iteration must reach intake, not the sample menu.
+        "use this design, create a weekend breakfast flyer",
+        # Slice 3 reroll iteration must reach intake, not the sample menu.
+        "I don't like this design, generate again",
+    ],
+)
+def test_real_brief_or_iteration_outranks_sample_prompt_menu(monkeypatch, message_text):
+    # operator 2026-06-07: "real flyer creation/intake must beat the sample-prompt menu."
+    hooks, actions = _load_plugin_modules()
+    intake_reached = {"called": False}
+
+    monkeypatch.setattr(actions, "is_flyer_enabled", lambda: True)
+    monkeypatch.setattr(actions, "flyer_campaign_cta_text", lambda _text: "")
+    monkeypatch.setattr(hooks, "_try_flyer_account_intercept", lambda *_a, **_k: None)
+    monkeypatch.setattr(hooks, "_try_flyer_regulated_account_guard", lambda *_a, **_k: None)
+    monkeypatch.setattr(actions, "is_flyer_approval_text", lambda _text: False)
+    monkeypatch.setattr(actions, "is_flyer_send_now_intent", lambda _text: False)
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    # Isolate Part A/B: no active project here, so the decline must come from the brief/no-match gate.
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: None)
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
+    # The sample-idea intake path must never run for a real brief / iteration.
+    monkeypatch.setattr(
+        actions,
+        "trigger_flyer_intake",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("brief/iteration must not trigger sample-idea intake")),
+    )
+
+    def _intake_sentinel(*_a, **_k):
+        intake_reached["called"] = True
+        return {"action": "skip", "reason": "intake-handled"}
+
+    monkeypatch.setattr(hooks, "_try_flyer_intake_intercept", _intake_sentinel)
+    monkeypatch.setattr(actions, "send_flyer_text", lambda *_a, **_k: (True, "mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+
+    result = hooks.pre_gateway_dispatch(SimpleNamespace(
+        text=message_text,
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="brief-beats-menu",
+    ))
+
+    assert intake_reached["called"] is True
+    assert result == {"action": "skip", "reason": "intake-handled"}
+
+
+def test_active_project_iteration_outranks_sample_prompt_menu(monkeypatch):
+    # operator 2026-06-07 priority #1: active saved-project iteration / Slice 3 beats the sample
+    # menu, even when the follow-up reads like an idea/prompt request ("give me another flyer idea").
+    hooks, actions = _load_plugin_modules()
+    intake_reached = {"called": False}
+
+    monkeypatch.setattr(actions, "is_flyer_enabled", lambda: True)
+    monkeypatch.setattr(actions, "flyer_campaign_cta_text", lambda _text: "")
+    monkeypatch.setattr(hooks, "_try_flyer_account_intercept", lambda *_a, **_k: None)
+    monkeypatch.setattr(hooks, "_try_flyer_regulated_account_guard", lambda *_a, **_k: None)
+    monkeypatch.setattr(actions, "is_flyer_approval_text", lambda _text: False)
+    monkeypatch.setattr(actions, "is_flyer_send_now_intent", lambda _text: False)
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    # An active (non-terminal) saved project exists for this sender.
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: {"project_id": "F0200", "status": "delivered"})
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(
+        actions,
+        "trigger_flyer_intake",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("active-project iteration must not trigger sample-idea intake")),
+    )
+
+    def _intake_sentinel(*_a, **_k):
+        intake_reached["called"] = True
+        return {"action": "skip", "reason": "intake-handled"}
+
+    monkeypatch.setattr(hooks, "_try_flyer_intake_intercept", _intake_sentinel)
+    monkeypatch.setattr(actions, "send_flyer_text", lambda *_a, **_k: (True, "mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+
+    result = hooks.pre_gateway_dispatch(SimpleNamespace(
+        text="give me another flyer idea",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="active-iter-beats-menu",
+    ))
+
+    assert intake_reached["called"] is True
+    assert result == {"action": "skip", "reason": "intake-handled"}
+
+
+@pytest.mark.parametrize(
+    "message_text",
+    [
+        "show me flyer prompt ideas",
+        "give me ideas for a flyer",
+        # No active project => even active-project-shaped idea language still gets the menu.
+        "give me another flyer idea",
+    ],
+)
+def test_idea_requests_without_brief_still_route_to_sample_menu(monkeypatch, message_text):
+    # operator 2026-06-07: preserve the sample menu for vague idea requests with no usable brief
+    # AND no active project to iterate on.
+    hooks, actions = _load_plugin_modules()
+    intake_calls = []
+
+    monkeypatch.setattr(actions, "is_flyer_enabled", lambda: True)
+    monkeypatch.setattr(actions, "flyer_campaign_cta_text", lambda _text: "")
+    monkeypatch.setattr(hooks, "_try_flyer_account_intercept", lambda *_a, **_k: None)
+    monkeypatch.setattr(hooks, "_try_flyer_intake_intercept", lambda *_a, **_k: None)
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: None)
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(
+        actions,
+        "trigger_flyer_intake",
+        lambda **kwargs: intake_calls.append(kwargs) or (True, "", {"reply_text": "Pick a sample idea to start:", "action": "choose_sample_idea"}),
+    )
+    monkeypatch.setattr(actions, "trigger_create_flyer_project", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("sample prompt path must not create project")))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda *_a, **_k: (True, "sample-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+
+    result = hooks.pre_gateway_dispatch(SimpleNamespace(
+        text=message_text,
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="idea-request-keeps-menu",
+    ))
+
+    assert result == {"action": "skip", "reason": "cf-router flyer sample prompts sent"}
+    assert intake_calls
+    assert intake_calls[0]["start_source"] == "sample_idea"
+
+
 def test_preference_command_with_polite_prefix_does_not_route_to_sample_ideas(monkeypatch):
     hooks, actions = _load_plugin_modules()
     account_calls = []

@@ -1853,6 +1853,25 @@ def is_vague_flyer_start(text: str, *, has_media: bool = False) -> bool:
     return bool(re.search(r"\b(?:create|make|need|help|start|try|get)\b.*\b(?:flyer|flier|poster|marketing|flyer studio)\b", lower))
 
 
+def flyer_message_has_brief_detail(text: str) -> bool:
+    """True when a flyer message carries a concrete commercial brief — a dollar amount or a percentage
+    discount — i.e. an actual offer to generate from, NOT a request for ideas.
+
+    Used so a real creation request like "improvise this prompt for flyer generation: <brief with 10%
+    off>" or "improve this flyer prompt: <combo for $9.99>" routes to generation/intake, not the
+    sample-prompt menu, even when it says "prompt"/"improvise"/"improve" (operator 2026-06-07: "real
+    flyer creation/intake must beat the sample-prompt menu").
+
+    Deliberately narrow: only "$" and "N%" — signals that never appear in a pure request-for-ideas. We
+    do NOT key off occasion/menu words (weekend, breakfast, graduation, ...): those occur in genuine
+    sample requests ("give me weekend flyer ideas") and would wrongly suppress the menu, and per the
+    operator's standing direction Python must not carry occasion keyword lists. This is ROUTING
+    detection only (Python owns routing); it is NOT the scene/theme wiring.
+    """
+    lower = " ".join(flyer_visible_message_text(text).split()).lower()
+    return "$" in lower or bool(re.search(r"\b\d{1,3}\s*%", lower))
+
+
 # ─────────────────────────────────────────────────────────────────
 # 2026-05-28 — intake-bypass helper + script detector.
 # See plan + design at tasks/flyer-intake-bypass-{plan,design}-2026-05-28.md.
