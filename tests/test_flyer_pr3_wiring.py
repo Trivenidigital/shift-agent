@@ -704,10 +704,11 @@ def test_negated_reroll_is_not_a_reroll(monkeypatch):
     NOT re-roll the saved flyer (Codex round-3). Routes to REVISION_NEEDED, never a render."""
     monkeypatch.delenv(br.CREATIVE_DIRECTOR_ENABLED_ENV, raising=False)
     cap = _install_reroll(monkeypatch)
-    for text in ("do not generate again", "please don't regenerate", "stop generating this flyer"):
+    for text in ("do not generate again", "please don't regenerate", "stop generating this flyer",
+                 "stop generating", "do not regenerate"):
         assert br._is_pure_reroll(text) is False, text
         status, _ = br.render_grounded(CHAT_ID, text, message_id="rrn", sender_phone=SENDER)
-        assert status == br.REVISION_NEEDED, text
+        assert status == br.REVISION_NEEDED, text   # handled, never a fresh render
     assert cap["projects"] == []   # never re-rendered on a negation
 
 

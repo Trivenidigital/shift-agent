@@ -389,8 +389,9 @@ _AGAIN_RE = re.compile(r"\bagain\b", re.IGNORECASE)
 # like ...", which negates the liking, not the render (so the operator's phrase stays a pure re-roll).
 _REROLL_NEGATION_RE = re.compile(
     r"\b(?:do\s*not|do\s*n['’]?t|don['’]?t|never|please\s+stop|stop|no\s+need\s+to)\b"
-    r"[^.!?]{0,15}\b(?:re-?generate|regenerate|re-?do|redo|re-?make|remake|generate|create|make|"
-    r"design|render|build|produce|try)\b",
+    # verb STEM (no trailing boundary) so "generating"/"making" are caught, not just "generate"/"make"
+    r"[^.!?]{0,15}\b(?:re-?generat|regenerat|generat|re-?creat|recreat|creat|re-?mak|remak|mak|"
+    r"design|render|build|produc|redo|retry|try)",
     re.IGNORECASE,
 )
 # Bare tokens that carry NO change content: filler + re-roll verbs/objects. A pure re-roll contains
@@ -778,7 +779,7 @@ def render_grounded(chat_id: str, raw_text: str, *, message_id: str | None = Non
     #     validated facts as a fresh variant (no re-extraction, no revision-merge);
     #   - ANYTHING else (a specific change, a negation, ambiguous, or no/stale session) -> the
     #     resend-full-details guidance. Never a fresh render, never a silently-dropped change.
-    if _has_reroll_signal(raw_text) or _looks_like_revision(raw_text):
+    if _has_reroll_signal(raw_text) or _looks_like_revision(raw_text) or _REROLL_NEGATION_RE.search(raw_text):
         if _is_pure_reroll(raw_text):
             status, payload = render_reroll(chat_id)
             if status != REVISION_NEEDED:  # REROLL (sent) or FAILCLOSED (render failed) -> return as-is
