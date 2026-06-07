@@ -338,6 +338,20 @@ CONFLICT = "conflict"
 FAILCLOSED = "failclosed"
 UNREGISTERED = "unregistered"
 REVISION_NEEDED = "revision_needed"
+REROLL = "reroll"  # no-change "generate again" -> re-render the saved validated project, fresh variant
+
+# Customer-facing copy attached to a re-roll's fresh variant (operator-approved 2026-06-07). It tells
+# the customer the same details were kept and invites a SPECIFIC change (which routes to the revision
+# path) rather than another vague re-roll.
+REROLL_INVITE = (
+    "I made a fresh version using the same details. If you want specific changes — "
+    "wording, items, prices, dates, colors, or layout — just tell me what to adjust."
+)
+
+# A saved session older than this is treated as stale: re-roll fails closed (asks for details) rather
+# than silently re-rendering an abandoned flyer. Generous default (7 days); real re-rolls happen within
+# minutes. Env-overridable for ops.
+_REROLL_MAX_AGE_HOURS = float(os.environ.get("FLYER_BARE_REROLL_MAX_AGE_HOURS", "168") or "168")
 
 # A follow-up that references a prior flyer / asks for a change. The stateless bare trunk has no prior
 # context to merge against (Rewire 2 / persistence), so rendering it as a fresh brief invents a flyer
@@ -354,6 +368,66 @@ _REVISION_RE = re.compile(
 
 def _looks_like_revision(text: str) -> bool:
     return bool(_REVISION_RE.search(text or ""))
+
+
+# A PURE re-roll = "make it again, same details" with NO specific change. We re-render the saved
+# project verbatim, so we must NOT treat a request that ALSO carries a change as a re-roll — even
+# when the change sits between the verb and "again" ("generate this flyer in blue again", "...no
+# Italian again", "...add phone again"). Detection is TOKEN-based, NOT span-removal: require a
+# re-roll signal AND that every word is a re-roll/filler token; any other word (a noun/adjective/
+# number/new value) is a specific change -> route to REVISION_NEEDED (Codex 2026-06-07).
+_REROLL_SIGNAL_RE = re.compile(
+    r"\b(?:re-?generate|regenerate|re-?do|redo|re-?create|recreate|re-?make|remake|"
+    r"do\s+it\s+again|do\s+over|try\s+again|start\s+over|once\s+more|make\s+another|"
+    r"another\s+(?:one|version|take|go)|new\s+version)\b",
+    re.IGNORECASE,
+)
+_REROLL_VERB_RE = re.compile(r"\b(?:generate|create|make|design|render|do|build|produce)\b", re.IGNORECASE)
+_AGAIN_RE = re.compile(r"\bagain\b", re.IGNORECASE)
+# A NEGATED re-roll ("do not generate again", "don't regenerate", "stop generating") must NOT re-roll.
+# Targets "do not"/"don't"/"never"/"stop"/"no need to" right before a re-roll verb — NOT "did not
+# like ...", which negates the liking, not the render (so the operator's phrase stays a pure re-roll).
+_REROLL_NEGATION_RE = re.compile(
+    r"\b(?:do\s*not|do\s*n['’]?t|don['’]?t|never|please\s+stop|stop|no\s+need\s+to)\b"
+    # verb STEM (no trailing boundary) so "generating"/"making" are caught, not just "generate"/"make"
+    r"[^.!?]{0,15}\b(?:re-?generat|regenerat|generat|re-?creat|recreat|creat|re-?mak|remak|mak|"
+    r"design|render|build|produc|redo|retry|try)",
+    re.IGNORECASE,
+)
+# Bare tokens that carry NO change content: filler + re-roll verbs/objects. A pure re-roll contains
+# ONLY these; any other token signals a specific change. (Not safety-critical: an unrecognized token
+# falls to REVISION_NEEDED via the follow-up gate, never to a fresh render.)
+_REROLL_OK_TOKENS = frozenset({
+    "i", "we", "you", "u", "please", "pls", "plz", "kindly", "can", "could", "would", "will",
+    "the", "this", "that", "it", "its", "flyer", "flier", "poster", "image", "picture", "pic",
+    "one", "again", "now", "just", "so", "did", "do", "does", "done", "not", "dont", "didnt",
+    "like", "liked", "love", "want", "wanted", "need", "a", "an", "of", "to", "for", "me", "my",
+    "with", "same", "fresh", "new", "version", "details", "but", "and", "ok", "okay", "hi", "hey",
+    "thanks", "thank", "too", "really", "very",
+    # re-roll verbs / phrase words as bare tokens
+    "generate", "regenerate", "create", "recreate", "make", "remake", "design", "render", "build",
+    "produce", "redo", "retry", "try", "over", "another", "once", "more", "start", "take", "go",
+})
+
+
+def _has_reroll_signal(text: str) -> bool:
+    """A re-roll intent is present: an explicit re-roll phrase, or a generate-verb with "again". Used
+    (with _looks_like_revision) to recognize a FOLLOW-UP about a prior flyer vs a fresh request."""
+    t = text or ""
+    return bool(_REROLL_SIGNAL_RE.search(t)) or (
+        bool(_REROLL_VERB_RE.search(t)) and bool(_AGAIN_RE.search(t))
+    )
+
+
+def _is_pure_reroll(text: str) -> bool:
+    """True only for a no-change, non-negated re-roll ("I didn't like it, generate again"). Requires
+    a re-roll signal, no negation of it, AND that EVERY word is a re-roll/filler token; any
+    substantive word (a noun/adjective/number/new value), even between the verb and "again", makes it
+    a specific change — routed to REVISION_NEEDED, not a re-roll."""
+    t = (text or "").strip()
+    if not _has_reroll_signal(t) or _REROLL_NEGATION_RE.search(t):
+        return False
+    return all(tok in _REROLL_OK_TOKENS for tok in re.findall(r"[a-z0-9]+", t.casefold()))
 
 
 def _api_key() -> str:
@@ -698,9 +772,18 @@ def render_grounded(chat_id: str, raw_text: str, *, message_id: str | None = Non
                     sender_phone: str | None = None):
     """Registered-path grounded render. (SEND, png) | (CONFLICT, {...}) | (FAILCLOSED, [blockers]) |
     (REVISION_NEEDED, None) | (UNREGISTERED, None)."""
-    if _looks_like_revision(raw_text):
-        # No prior-flyer context to merge against yet (Rewire 2) -> do NOT render the complaint as a
-        # fresh brief. Ask for the full request instead of inventing an unrelated flyer.
+    # A FOLLOW-UP about a prior flyer = a re-roll signal ("generate again", "regenerate", "redo") OR
+    # a revision reference ("this flyer", "change the ..."). Handle it BEFORE the new-flyer path so a
+    # follow-up can never be mis-rendered as a brand-new flyer (Codex 2026-06-07):
+    #   - a CLEAN pure re-roll (no change, not negated, saved same-chat session) re-renders the saved
+    #     validated facts as a fresh variant (no re-extraction, no revision-merge);
+    #   - ANYTHING else (a specific change, a negation, ambiguous, or no/stale session) -> the
+    #     resend-full-details guidance. Never a fresh render, never a silently-dropped change.
+    if _has_reroll_signal(raw_text) or _looks_like_revision(raw_text) or _REROLL_NEGATION_RE.search(raw_text):
+        if _is_pure_reroll(raw_text):
+            status, payload = render_reroll(chat_id)
+            if status != REVISION_NEEDED:  # REROLL (sent) or FAILCLOSED (render failed) -> return as-is
+                return (status, payload)
         return (REVISION_NEEDED, None)
     customer = resolve_customer(chat_id, sender_phone)
     if customer is None:
@@ -986,6 +1069,69 @@ def _reoverlay(project, raw_bg_path) -> bytes:
         rmod._apply_critical_text_overlay(project, str(raw_bg_path), str(out),
                                           size=(1080, 1350), output_format="concept_preview")
         return out.read_bytes()
+
+
+def _session_is_stale(sess) -> bool:
+    """True when the saved session is older than the re-roll TTL (re-roll then fails closed)."""
+    try:
+        sent_at = sess.get("sent_at")
+        if not sent_at:
+            return False  # legacy session without a timestamp -> treat as fresh
+        ts = datetime.fromisoformat(sent_at)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        age_hours = (datetime.now(timezone.utc) - ts).total_seconds() / 3600.0
+        return age_hours > _REROLL_MAX_AGE_HOURS
+    except Exception:  # noqa: BLE001
+        return False  # unparseable timestamp -> don't block a re-roll on it
+
+
+def render_reroll(chat_id: str):
+    """No-change re-roll ("generate again"): re-render the saved, already-validated project as a FRESH
+    variant — preserving every locked fact exactly, WITHOUT re-extracting the customer's text or
+    invoking revision-merge. Fails closed (never a wrong flyer):
+      (REROLL, png)            -> fresh variant rendered + QA-passed
+      (REVISION_NEEDED, None)  -> flag off / no session / stale session / project won't rebuild
+      (FAILCLOSED, [blockers]) -> the re-render itself failed (names the stage, like render_grounded)
+    """
+    import schemas
+
+    if not REVISION_APPLY_ENABLED:
+        return (REVISION_NEEDED, None)
+    sess = _load_session(chat_id)
+    if not sess or _session_is_stale(sess):
+        return (REVISION_NEEDED, None)
+    try:
+        project = schemas.FlyerProject.model_validate(sess["project"])
+    except Exception:  # noqa: BLE001
+        return (REVISION_NEEDED, None)
+
+    last_blockers: list[str] = []
+    last_render_detail = ""
+    for attempt in range(2):
+        last_render_detail = ""  # reset per attempt so a stale detail never rides a later QA-fail
+        # The retry note carries ONLY prior QA blockers — NEVER the customer's "generate again" text —
+        # so a re-roll can never inject new copy into the locked facts.
+        strict = "" if attempt == 0 else (
+            "CRITICAL: the previous render had these problems: " + "; ".join(last_blockers)
+            + ". Fix them — render every listed fact exactly, include every listed item, and add "
+              "nothing that is not listed."
+        )
+        try:
+            png = _generate_poster(project, strict_note=strict, raw_bg_dest=None)
+        except Exception as e:  # noqa: BLE001
+            last_blockers = [f"reroll_render_error:{type(e).__name__}"]
+            last_render_detail = _render_error_detail(e, project, "reroll_generate_poster")
+            continue
+        ok, blockers = run_visual_qa(png, project)
+        if ok:
+            # Re-persist the SAME project as pending; the orchestrator commits it after delivery so an
+            # undelivered re-roll never advances the saved session.
+            _write_session(chat_id, project, "", sess.get("brief", ""),
+                           model=sess.get("model") or GEN_MODEL, pending=True)
+            return (REROLL, png)
+        last_blockers = blockers
+    return (FAILCLOSED, last_blockers + ([last_render_detail] if last_render_detail else []))
 
 
 def render_revision_apply(chat_id: str, raw_text: str):

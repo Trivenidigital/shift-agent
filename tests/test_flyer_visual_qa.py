@@ -637,6 +637,59 @@ def test_visual_qa_blocks_unrequested_delivery_claim(tmp_path):
     assert "unrequested operational claim visible: delivery" in report.blockers
 
 
+def test_visual_qa_allows_customer_stated_we_cater_offer(tmp_path):
+    """Live graduation re-roll regression (2026-06-07): the customer's OWN offer fact
+    "We cater both veg and Non-veg" must NOT be flagged as an unrequested catering claim. The
+    detector pattern (\\bwe\\s+cater\\b) matches the locked source fact, so the claim is grounded.
+    Before the fix the allow-check looked for the bare keyword "catering", missed "we cater", and
+    flagged the customer's own offer."""
+    from agents.flyer.visual_qa import run_visual_qa
+    base = _project()
+    project = base.model_copy(update={
+        "locked_facts": list(base.locked_facts) + [
+            FlyerLockedFact(fact_id="offer:0", label="Offer", value="We cater both veg and Non-veg",
+                            source="customer_text", required=True),
+        ],
+    })
+    artifact = _write_sidecar(
+        tmp_path,
+        "Fresh Meats. Premium Clean Chicken. Clean bird. Strong life. We cater both veg and Non-veg. Kheema Dosa $13.99",
+    )
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+    assert "unrequested operational claim visible: catering" not in report.blockers
+    assert report.status == "passed", report.blockers
+
+
+def test_visual_qa_allows_customer_stated_we_deliver_offer(tmp_path):
+    """Symmetric to catering: a customer "we deliver" line is grounded in the source, so a rendered
+    delivery claim is allowed (the detector pattern matches the source)."""
+    from agents.flyer.visual_qa import run_visual_qa
+    project = _project().model_copy(update={
+        "raw_request": "Create flyer. We deliver to your door.",
+        "fields": _project().fields.model_copy(update={"notes": "We deliver to your door."}),
+    })
+    artifact = _write_sidecar(
+        tmp_path,
+        "Fresh Meats. Premium Clean Chicken. Clean bird. Strong life. We deliver to your door. Kheema Dosa $13.99",
+    )
+    report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
+    assert "unrequested operational claim visible: delivery" not in report.blockers
+    assert report.status == "passed", report.blockers
+
+
+def test_visual_qa_blocks_unrequested_catering_claim(tmp_path):
+    """The grounded-credit must stay strict: with NO catering anywhere in the customer source, a
+    rendered catering claim is still blocked (does not broadly allow operational claims)."""
+    from agents.flyer.visual_qa import run_visual_qa
+    artifact = _write_sidecar(
+        tmp_path,
+        "Fresh Meats. Premium Clean Chicken. Catering Service. Clean bird. Strong life. Kheema Dosa $13.99",
+    )
+    report = run_visual_qa(_project(), artifact, output_format="concept_preview", allow_sidecar=True)
+    assert report.status == "failed"
+    assert "unrequested operational claim visible: catering" in report.blockers
+
+
 def test_visual_qa_allows_requested_delivery_claim(tmp_path):
     from agents.flyer.visual_qa import run_visual_qa
 

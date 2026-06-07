@@ -178,6 +178,16 @@ def main(argv=None) -> int:
         log(f"OUTCOME=sent chat={chat_id} ok={ok}")
         return 0 if ok else 1
 
+    if status == B.REROLL:
+        # No-change re-roll ("generate again"): a fresh variant of the SAME saved flyer. Caption it
+        # with the invite-changes prompt so the customer can ask for a SPECIFIC edit next.
+        ok = send_image(chat_id, payload, B.REROLL_INVITE, "flyer.bare.image_send")
+        if ok:
+            mark_recent_flyer(chat_id, args.brief)
+            B.commit_session(chat_id)  # commit the re-rolled pending session only after delivery
+        log(f"OUTCOME=reroll_sent chat={chat_id} ok={ok}")
+        return 0 if ok else 1
+
     if status == B.CONFLICT:
         stated = (payload or {}).get("stated") or "a different business"
         registered = (payload or {}).get("registered") or "your registered business"
